@@ -6,6 +6,7 @@ import (
 )
 
 type Config struct {
+	Root        string
 	UploadsDir   string
 	SourcesDir   string
 	OutputDir    string
@@ -24,6 +25,7 @@ func Load() Config {
 	dbDir := getenv("BOSS_DATABASE_DIR", filepath.Join(root, "boss-data"))
 
 	return Config{
+		Root:         root,
 		UploadsDir:   uploads,
 		SourcesDir:   sources,
 		OutputDir:    output,

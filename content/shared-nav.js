@@ -38,8 +38,17 @@
         return urlParams.get('developer') === '1';
     }
 
+    function isExpertUrl() {
+        const urlParams = new URLSearchParams(window.location.search);
+        return urlParams.get('expert') === '1';
+    }
+
     // Get active page
     function getActivePage() {
+        const body = document.body;
+        if (body && body.dataset && body.dataset.bossActivePage) {
+            return body.dataset.bossActivePage;
+        }
         const path = window.location.pathname;
         const filename = path.split('/').pop() || 'dashboard.html';
         
@@ -118,6 +127,12 @@
         html += '<span class="nav-item-icon">ℹ️</span>';
         html += '<span class="nav-item-text">Server Info</span>';
         html += '</a>';
+        html += '<div class="nav-item nav-item-toggle">';
+        html += '<label class="nav-toggle">';
+        html += '<input type="checkbox" id="expertModeToggle">';
+        html += '<span>Expert Mode</span>';
+        html += '</label>';
+        html += '</div>';
         html += '</div>';
         
         html += '</div>';
@@ -212,6 +227,7 @@
         
         // Setup mobile menu
         setupMobileMenu();
+        attachExpertToggle();
 
         // Apply global selection state (codec/segment) across pages
         applyGlobalSelections();
@@ -225,10 +241,18 @@
         updateSelectedContentBadge();
         startSelectedContentWatcher();
         window.addEventListener('storage', (event) => {
+            if (event.key === 'bossExpertMode') {
+                renderPageHelp(getActivePage());
+                return;
+            }
             if (event.key && event.key.startsWith('bossSelected')) {
                 updateSelectedContentBadge();
             }
         });
+
+        initSetupExperience(activePage);
+
+        renderPageHelp(activePage);
     }
 
     const GLOBAL_SELECTIONS = {
@@ -636,6 +660,442 @@ Version: 2.0
             clearInterval(progressCheckInterval);
         }
     });
+
+    const SETUP_PAGES_REQUIRE_CONTENT = new Set([
+        'playback',
+        'testing',
+        'quartet',
+        'grid',
+        'segment-duration'
+    ]);
+
+    function initSetupExperience(activePage) {
+        fetchSetupStatus()
+            .then((status) => {
+                renderSetupBanner(status, activePage);
+                maybeShowSetupModal(status);
+            })
+            .catch((error) => {
+                console.warn('Setup check failed:', error);
+            });
+    }
+
+    async function fetchSetupStatus() {
+        const response = await fetch('/api/setup');
+        if (!response.ok) {
+            throw new Error(`Setup status failed: ${response.status}`);
+        }
+        return response.json();
+    }
+
+    function renderSetupBanner(status, activePage) {
+        const contentArea = document.querySelector('#boss-content');
+        if (!contentArea) return;
+
+        const existing = document.getElementById('setupBanner');
+        if (existing) {
+            existing.remove();
+        }
+
+        const hasIssues = status && Array.isArray(status.issues) && status.issues.length > 0;
+        if (!hasIssues) {
+            return;
+        }
+
+        const banner = document.createElement('div');
+        banner.id = 'setupBanner';
+        banner.className = 'alert alert-warning setup-banner';
+
+        const issueLines = status.issues.map((issue) => `<div class="setup-issue">${issue}</div>`).join('');
+        const recommendations = status.recommendations || [];
+        const recLines = recommendations.map((rec) => `<li>${rec}</li>`).join('');
+
+        const showContentActions = status.content_empty && SETUP_PAGES_REQUIRE_CONTENT.has(activePage);
+        const isUploadPage = activePage === 'upload';
+
+        const actions = [];
+        actions.push('<button class="btn btn-sm btn-secondary" id="setupRunDiagnostics">Run Diagnostics</button>');
+        actions.push('<button class="btn btn-sm btn-secondary" id="setupOpenGuide">Open Setup Guide</button>');
+        if (!status.initialized) {
+            actions.push('<button class="btn btn-sm btn-secondary" id="setupMarkInitialized">Mark Setup Complete</button>');
+        }
+        if (showContentActions && !isUploadPage) {
+            actions.push('<button class="btn btn-sm btn-primary" id="setupGoUpload">Go to Upload</button>');
+            actions.push('<button class="btn btn-sm btn-secondary" id="setupSeedSample">Seed Sample Content</button>');
+        }
+
+        banner.innerHTML = `
+            <div class="alert-icon">⚠️</div>
+            <div class="alert-content">
+                <div class="alert-title">Setup attention needed</div>
+                <div class="setup-issues">${issueLines}</div>
+                ${recLines ? `<ul class="setup-recommendations">${recLines}</ul>` : ''}
+                <div class="setup-actions">${actions.join('')}</div>
+                ${showContentActions && !isUploadPage ? '<div class="setup-redirect" id="setupRedirect"></div>' : ''}
+            </div>
+        `;
+
+        contentArea.prepend(banner);
+
+        const diagBtn = document.getElementById('setupRunDiagnostics');
+        if (diagBtn) {
+            diagBtn.addEventListener('click', async () => {
+                const updated = await fetchSetupStatus();
+                renderSetupBanner(updated, activePage);
+            });
+        }
+        const guideBtn = document.getElementById('setupOpenGuide');
+        if (guideBtn) {
+            guideBtn.addEventListener('click', () => showSetupModal(status));
+        }
+        const markBtn = document.getElementById('setupMarkInitialized');
+        if (markBtn) {
+            markBtn.addEventListener('click', async () => {
+                await fetch('/api/setup/initialize', { method: 'POST' });
+                const updated = await fetchSetupStatus();
+                renderSetupBanner(updated, activePage);
+            });
+        }
+        const uploadBtn = document.getElementById('setupGoUpload');
+        if (uploadBtn) {
+            uploadBtn.addEventListener('click', () => {
+                window.location.href = '/dashboard/upload.html';
+            });
+        }
+        const seedBtn = document.getElementById('setupSeedSample');
+        if (seedBtn) {
+            seedBtn.addEventListener('click', async () => {
+                seedBtn.disabled = true;
+                seedBtn.textContent = 'Seeding...';
+                try {
+                    await fetch('/api/setup/seed', { method: 'POST' });
+                    seedBtn.textContent = 'Seeded';
+                } catch (err) {
+                    seedBtn.textContent = 'Seed Failed';
+                }
+            });
+        }
+
+        if (showContentActions && !isUploadPage) {
+            setupAutoRedirect(status);
+        }
+    }
+
+    function setupAutoRedirect(status) {
+        if (!status || !status.content_empty) {
+            return;
+        }
+        if (sessionStorage.getItem('bossSkipUploadRedirect') === '1') {
+            return;
+        }
+        const redirectEl = document.getElementById('setupRedirect');
+        if (!redirectEl) {
+            return;
+        }
+        let seconds = 5;
+        const cancel = () => {
+            sessionStorage.setItem('bossSkipUploadRedirect', '1');
+            redirectEl.textContent = 'Auto-redirect canceled.';
+        };
+        const tick = () => {
+            if (seconds <= 0) {
+                window.location.href = '/dashboard/upload.html';
+                return;
+            }
+            redirectEl.innerHTML = `No content detected. Redirecting to Upload in ${seconds}s... <button class="btn btn-sm btn-secondary" id="setupCancelRedirect">Cancel</button>`;
+            const cancelBtn = document.getElementById('setupCancelRedirect');
+            if (cancelBtn) {
+                cancelBtn.addEventListener('click', (event) => {
+                    event.preventDefault();
+                    cancel();
+                });
+            }
+            seconds -= 1;
+            setTimeout(tick, 1000);
+        };
+        tick();
+    }
+
+    function maybeShowSetupModal(status) {
+        if (!status || status.initialized) {
+            return;
+        }
+        if (sessionStorage.getItem('bossSetupModalShown') === '1') {
+            return;
+        }
+        sessionStorage.setItem('bossSetupModalShown', '1');
+        showSetupModal(status);
+    }
+
+    function showSetupModal(status) {
+        const existing = document.getElementById('setupModalBackdrop');
+        if (existing) {
+            existing.remove();
+        }
+        const root = (status && status.root) ? status.root : '/boss';
+        const backdrop = document.createElement('div');
+        backdrop.className = 'setup-modal-backdrop';
+        backdrop.id = 'setupModalBackdrop';
+        backdrop.innerHTML = `
+            <div class="setup-modal">
+                <div class="setup-modal-header">
+                    <div class="setup-modal-title">First-Run Setup</div>
+                    <button class="setup-modal-close" id="setupModalClose">✕</button>
+                </div>
+                <div class="setup-modal-body">
+                    <ol class="setup-steps">
+                        <li><strong>Mount a host folder</strong> to <code>${root}</code>.</li>
+                        <li><strong>Upload content</strong> or seed a sample clip.</li>
+                        <li><strong>Open Mosaic</strong> to preview streams.</li>
+                    </ol>
+                    <div class="setup-snippet">
+                        <div class="setup-snippet-title">Docker Compose example</div>
+                        <pre>services:
+  boss:
+    volumes:
+      - /path/to/InfiniteStream:${root}</pre>
+                    </div>
+                    <div class="setup-diagnostics">
+                        <div class="setup-snippet-title">Diagnostics</div>
+                        <pre>${formatSetupStatus(status)}</pre>
+                    </div>
+                </div>
+                <div class="setup-modal-footer">
+                    <button class="btn btn-sm btn-secondary" id="setupSeedSampleModal">Seed Sample Content</button>
+                    <button class="btn btn-sm btn-secondary" id="setupOpenUploadModal">Open Upload</button>
+                    <button class="btn btn-sm btn-primary" id="setupDoneModal">Mark Setup Complete</button>
+                </div>
+            </div>
+        `;
+        document.body.appendChild(backdrop);
+
+        const closeBtn = document.getElementById('setupModalClose');
+        if (closeBtn) {
+            closeBtn.addEventListener('click', () => backdrop.remove());
+        }
+        const seedBtn = document.getElementById('setupSeedSampleModal');
+        if (seedBtn) {
+            seedBtn.addEventListener('click', async () => {
+                seedBtn.disabled = true;
+                seedBtn.textContent = 'Seeding...';
+                try {
+                    await fetch('/api/setup/seed', { method: 'POST' });
+                    seedBtn.textContent = 'Seeded';
+                } catch (err) {
+                    seedBtn.textContent = 'Seed Failed';
+                }
+            });
+        }
+        const uploadBtn = document.getElementById('setupOpenUploadModal');
+        if (uploadBtn) {
+            uploadBtn.addEventListener('click', () => {
+                window.location.href = '/dashboard/upload.html';
+            });
+        }
+        const doneBtn = document.getElementById('setupDoneModal');
+        if (doneBtn) {
+            doneBtn.addEventListener('click', async () => {
+                await fetch('/api/setup/initialize', { method: 'POST' });
+                backdrop.remove();
+            });
+        }
+    }
+
+    function formatSetupStatus(status) {
+        if (!status) {
+            return 'No diagnostics available.';
+        }
+        const lines = [];
+        lines.push(`Root: ${status.root}`);
+        lines.push(`Mounted: ${status.root_mounted ? 'yes' : 'no'}`);
+        lines.push(`Writable: ${status.root_writable ? 'yes' : 'no'}`);
+        lines.push(`Content items: ${status.content_count}`);
+        lines.push(`Source files: ${status.sources_count}`);
+        lines.push(`Output dirs: ${status.outputs_count}`);
+        if (status.issues && status.issues.length) {
+            lines.push(`Issues: ${status.issues.join(', ')}`);
+        }
+        return lines.join('\n');
+    }
+
+    const PANEL_HELP = {
+        dashboard: {
+            title: 'Getting Started',
+            purpose: 'Pick a workflow: compare players, compare encodings, or test errors.',
+            steps: [
+                'Use the sidebar to open Mosaic, Playback, Quartet, or Live Offset.',
+                'Start with Mosaic to preview available streams quickly.'
+            ]
+        },
+        grid: {
+            title: 'Mosaic',
+            purpose: 'Quickly preview all available streams and spot issues at a glance.',
+            steps: [
+                'Select content, codec, and segment length to filter tiles.',
+                'Right-click a tile to open testing tools.'
+            ],
+            needsContent: true
+        },
+        playback: {
+            title: 'Playback',
+            purpose: 'Deep-dive a single stream with player diagnostics and error injection.',
+            steps: [
+                'Choose content, codec, and segment length.',
+                'Use player controls and the testing menu to inject failures.'
+            ],
+            needsContent: true
+        },
+        quartet: {
+            title: 'Quartet',
+            purpose: 'Compare player implementations side-by-side on the same stream.',
+            steps: [
+                'Pick content, protocol, codec, and segment length.',
+                'Use tabs to switch between player, encoding, and variant views.'
+            ],
+            needsContent: true
+        },
+        'segment-duration': {
+            title: 'Live Offset',
+            purpose: 'See how segment duration affects live latency and stability.',
+            steps: [
+                'Choose content and codec.',
+                'Compare LL, 2s, and 6s streams in parallel.'
+            ],
+            needsContent: true
+        },
+        testing: {
+            title: 'Testing',
+            purpose: 'Create test sessions and inject failures into playback.',
+            steps: [
+                'Start a session and open a testing player.',
+                'Adjust failure controls while the stream plays.'
+            ],
+            needsContent: true
+        },
+        'testing-session': {
+            title: 'Testing Session',
+            purpose: 'Experiment with streaming failures and watch how players react in real time.',
+            steps: [
+                'Use Retry Fetch, Restart Playback, and Reload Page to force immediate player actions.',
+                'Select the player engine (Auto, HTML5, HLS.js, Shaka, Video.js) to compare behavior.',
+                'Configure Segment/Playlist/Manifest failures (type, frequency, consecutive, and variants) to simulate errors.',
+                'Adjust network shaping sliders (throughput, delay, loss) when supported to test bandwidth constraints.',
+                'Watch the bandwidth chart to compare selected limits vs actual throughput over time.',
+                'Use the right-click menu to open the stream in external test pages (e.g., HLS.js demo) for deeper logs.'
+            ],
+            needsContent: true
+        },
+        sources: {
+            title: 'Source Library',
+            purpose: 'Browse raw content and discover available assets.',
+            steps: [
+                'Search and filter to locate source clips.',
+                'Re-encode any item to generate new variants.'
+            ],
+            needsContent: true
+        },
+        upload: {
+            title: 'Upload Content',
+            purpose: 'Add content to generate HLS/DASH test streams.',
+            steps: [
+                'Upload an MP4, then watch encoding jobs.',
+                'Once complete, streams appear in Mosaic and Playback.'
+            ]
+        },
+        jobs: {
+            title: 'Encoding Jobs',
+            purpose: 'Track encoding progress and troubleshoot failures.',
+            steps: [
+                'Open a job to see logs and outputs.',
+                'Retry failed jobs after adjusting settings.'
+            ]
+        },
+        monitor: {
+            title: 'Monitor',
+            purpose: 'Watch live generation status and health in real time.',
+            steps: [
+                'Check health and active streams.',
+                'Use this when testing live workflows.'
+            ]
+        }
+    };
+
+    function isExpertMode() {
+        if (isExpertUrl()) {
+            return true;
+        }
+        return localStorage.getItem('bossExpertMode') === '1';
+    }
+
+    function attachExpertToggle() {
+        const toggle = document.getElementById('expertModeToggle');
+        if (!toggle) return;
+        const forced = isExpertUrl();
+        toggle.checked = forced || localStorage.getItem('bossExpertMode') === '1';
+        toggle.disabled = forced;
+        toggle.title = forced ? 'Disabled via ?expert=1 in the URL' : '';
+        toggle.addEventListener('change', () => {
+            localStorage.setItem('bossExpertMode', toggle.checked ? '1' : '0');
+            renderPageHelp(getActivePage());
+        });
+    }
+
+    function renderPageHelp(activePage) {
+        const contentArea = document.querySelector('#boss-content');
+        if (!contentArea) return;
+
+        const help = PANEL_HELP[activePage];
+        if (!help) return;
+
+        const existing = document.getElementById('panelHelp');
+        if (existing) {
+            existing.remove();
+        }
+
+        const expertMode = isExpertMode();
+        if (expertMode && activePage !== 'testing-session') {
+            return;
+        }
+
+        const helpContainer = document.querySelector('.boss-content-standard, .boss-content-narrow, .boss-content-wide') || contentArea;
+
+        const steps = help.steps
+            ? help.steps.map((step) => `<li>${step}</li>`).join('')
+            : '';
+
+        const needsContentNote = help.needsContent
+            ? `<div class="panel-help-note">If you don’t see any content, upload media first. <a href="/dashboard/upload.html">Go to Upload</a></div>`
+            : '';
+
+        const panel = document.createElement('div');
+        panel.id = 'panelHelp';
+        panel.className = 'panel-help';
+        panel.innerHTML = `
+            <div class="panel-help-title">${help.title}</div>
+            <label class="panel-help-expert">
+                <input type="checkbox" id="panelHelpExpertToggle">
+                Expert
+            </label>
+            <div class="panel-help-purpose">${help.purpose}</div>
+            ${steps ? `<ul class="panel-help-steps">${steps}</ul>` : ''}
+            ${needsContentNote}
+        `;
+
+        if (activePage === 'testing-session') {
+            helpContainer.appendChild(panel);
+        } else {
+            helpContainer.prepend(panel);
+        }
+
+        const toggle = document.getElementById('panelHelpExpertToggle');
+        if (toggle) {
+            toggle.checked = expertMode;
+            toggle.addEventListener('change', () => {
+                localStorage.setItem('bossExpertMode', toggle.checked ? '1' : '0');
+                renderPageHelp(activePage);
+            });
+        }
+    }
 
     // Public API
     window.BOSSNav = {

@@ -62,6 +62,10 @@ func main() {
 	// Utilities
 	r.HandleFunc("/api/content/{content_name}/generate-byteranges", h.GenerateByteranges).Methods(http.MethodPost)
 	r.HandleFunc("/api/content", h.ListContent).Methods(http.MethodGet)
+	// Setup
+	r.HandleFunc("/api/setup", h.SetupStatus).Methods(http.MethodGet)
+	r.HandleFunc("/api/setup/initialize", h.SetupInitialize).Methods(http.MethodPost)
+	r.HandleFunc("/api/setup/seed", h.SetupSeed).Methods(http.MethodPost)
 
 	srv := &http.Server{
 		Addr:              addr,
