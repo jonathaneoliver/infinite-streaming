@@ -1,0 +1,38 @@
+# Runtime-generated content list
+content/myshows
+
+# Skatedog test content
+content/skatedog/**
+content/skatedog_drm_fixed/**
+
+# generate_abr output files
+generate_abr/**/*.mp4
+generate_abr/**/*.log
+generate_abr/**/__pycache__/
+generate_abr/*_hevc/
+generate_abr/*_hevc_*/
+
+# hlstools
+hlstools/
+
+# Local TLS certs
+certs/
+
+# macOS system files
+.DS_Store
+**/.DS_Store
+
+# Python cache
+__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+
+# Backup files
+*.bak
+*~
+
+# macOS Internet Location shortcuts
+*.webloc
+
+.vscode/

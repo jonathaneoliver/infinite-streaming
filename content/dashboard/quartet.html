@@ -1,0 +1,1994 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+    <meta http-equiv="Pragma" content="no-cache">
+    <meta http-equiv="Expires" content="0">
+    <title>Quartet - InfiniteStream</title>
+    <link rel="stylesheet" href="/shared-styles.css">
+    <script src="https://cdn.jsdelivr.net/npm/shaka-player@4.15.0/dist/shaka-player.ui.min.js"></script>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/shaka-player@4.15.0/dist/controls.css">
+    <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.15"></script>
+        <link href="https://vjs.zencdn.net/8.21.1/video-js.css" rel="stylesheet" />
+    <script src="https://vjs.zencdn.net/8.21.1/video.min.js"></script>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            background: var(--bg-secondary);
+            color: var(--text-primary);
+        }
+
+        .page-header {
+            margin-bottom: 20px;
+        }
+
+        .page-title {
+            font-size: 32px;
+            font-weight: 400;
+            margin-bottom: 8px;
+            color: var(--text-primary);
+        }
+        .tabs {
+            display: flex;
+            justify-content: flex-start;
+            gap: 10px;
+            margin-bottom: 24px;
+        }
+        .tab {
+            padding: 12px 30px;
+            background: var(--bg-primary);
+            color: var(--text-secondary);
+            border: 2px solid var(--border-color);
+            border-radius: 8px;
+            cursor: pointer;
+            font-weight: 600;
+            font-size: 14px;
+            transition: all 0.15s;
+        }
+        .tab:hover {
+            border-color: var(--primary-blue);
+            color: var(--text-primary);
+        }
+        .tab.active {
+            background: var(--primary-blue);
+            color: white;
+            border-color: var(--primary-blue);
+        }
+        .view {
+            display: none;
+        }
+        .view.active {
+            display: block;
+        }
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 20px;
+            margin-bottom: 20px;
+        }
+        .grid-2x2 {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 20px;
+            margin-bottom: 20px;
+        }
+        .grid-2x3 {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 20px;
+            margin-bottom: 20px;
+        }
+        .grid-3x3 {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 15px;
+            margin-bottom: 20px;
+        }
+        @media (max-width: 1400px) {
+            .grid-3x3 {
+                grid-template-columns: repeat(2, 1fr);
+            }
+        }
+        .player-box {
+            background: var(--bg-primary);
+            border: 2px solid var(--border-color);
+            border-radius: 8px;
+            padding: 15px;
+            box-shadow: var(--shadow-sm);
+            position: relative;
+        }
+        .player-box h2 {
+            margin: 0 0 10px 0;
+            font-size: 16px;
+            color: var(--text-primary);
+            text-align: center;
+            word-wrap: break-word;
+            overflow-wrap: break-word;
+            line-height: 1.3;
+        }
+        .video-container {
+            background: #000;
+            position: relative;
+            width: 100%;
+            padding-top: 56.25%; /* 16:9 */
+            margin-bottom: 10px;
+        }
+
+        .engine-badge {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            background: rgba(0, 0, 0, 0.7);
+            color: var(--text-secondary);
+            border: 1px solid #333;
+            border-radius: 12px;
+            padding: 4px 10px;
+            font-size: 10px;
+            letter-spacing: 0.3px;
+            text-transform: uppercase;
+            z-index: 2;
+        }
+
+        .panel-note {
+            position: absolute;
+            inset: 0;
+            display: none;
+            align-items: center;
+            justify-content: center;
+            background: rgba(0, 0, 0, 0.7);
+            color: var(--text-secondary);
+            font-size: 12px;
+            text-align: center;
+            padding: 12px;
+        }
+
+        .panel-note.active {
+            display: flex;
+        }
+        video, .video-js {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+        }
+        .stats {
+            font-size: 12px;
+            line-height: 1.6;
+        }
+        .stats-row {
+            display: flex;
+            justify-content: space-between;
+            padding: 3px 0;
+            border-bottom: 1px solid #333;
+        }
+        .label {
+            color: #888;
+        }
+        .value {
+            color: #0f0;
+            font-weight: bold;
+        }
+
+        .context-menu {
+            position: fixed;
+            background: #0f172a;
+            border: 1px solid rgba(255,255,255,0.12);
+            box-shadow: 0 12px 30px rgba(0,0,0,0.35);
+            border-radius: 8px;
+            padding: 6px;
+            display: none;
+            z-index: 9999;
+            min-width: 200px;
+        }
+
+        .context-menu button {
+            width: 100%;
+            background: transparent;
+            border: none;
+            text-align: left;
+            padding: 8px 10px;
+            font-size: 12px;
+            color: #e5e7eb;
+            border-radius: 6px;
+            cursor: pointer;
+        }
+
+        .context-menu button:hover {
+            background: rgba(59, 130, 246, 0.2);
+        }
+        .value.warning {
+            color: #ff0;
+        }
+        .value.error {
+            color: #f00;
+        }
+        .comparison {
+            background: #1a1a1a;
+            border: 2px solid #0ff;
+            border-radius: 8px;
+            padding: 15px;
+            margin-top: 20px;
+        }
+        .comparison h2 {
+            color: #0ff;
+            margin-top: 0;
+        }
+        .comparison-grid {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 10px;
+            text-align: center;
+        }
+        .comparison-item {
+            background: #000;
+            padding: 10px;
+            border-radius: 4px;
+        }
+        .comparison-item .name {
+            color: #888;
+            font-size: 11px;
+        }
+        .comparison-item .time {
+            color: #0ff;
+            font-size: 16px;
+            font-weight: bold;
+        }
+        .controls {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            gap: 30px;
+            margin-bottom: 20px;
+            padding: 15px;
+            background: var(--bg-primary);
+            border: 2px solid var(--border-color);
+            border-radius: 8px;
+            box-shadow: var(--shadow-sm);
+        }
+        .control-group {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        .control-group label {
+            color: var(--text-primary);
+            font-weight: 600;
+            font-size: 14px;
+        }
+        .control-group select {
+            padding: 8px 15px;
+            background: var(--bg-secondary);
+            color: var(--text-primary);
+            border: 2px solid var(--border-color);
+            border-radius: 4px;
+            font-size: 14px;
+            cursor: pointer;
+            min-width: 150px;
+        }
+        .control-group select:hover {
+            border-color: var(--primary-blue);
+        }
+        .control-group select:focus {
+            outline: none;
+            border-color: var(--primary-blue);
+            box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
+        }
+        .control-group select option {
+            background: var(--bg-secondary);
+            color: var(--text-primary);
+        }
+
+        :root {
+            --content-control-bg: #f8fafc;
+            --content-control-border: #e2e8f0;
+            --content-control-title: #64748b;
+            --content-control-label: #475569;
+            --content-control-select-bg: #ffffff;
+            --content-control-select-text: #0f172a;
+        }
+    </style>
+    <link rel="stylesheet" href="/dashboard/content-control.css">
+</head>
+<body data-boss-active-page="quartet">
+    <div class="boss-content-wide">
+        <div class="page-header">
+            <h1 class="page-title">Quartet - Stream Comparison</h1>
+        </div>
+
+    <!-- Tabs -->
+    <div class="tabs">
+        <div class="tab active" onclick="switchTab('players')">4 Players</div>
+        <div class="tab" onclick="switchTab('encodings')">4 Encodings</div>
+        <div class="tab" onclick="switchTab('variants')">Variants</div>
+    </div>
+
+    <!-- View 1: 4 Different Players -->
+    <div id="view-players" class="view active">
+        <div class="content-control">
+            <div class="content-control-title">Content Control</div>
+            <div class="content-control-group">
+                <label class="content-control-label">Content</label>
+                <select id="view1-content" class="content-control-select" onchange="onGlobalContentChange(this.value)">
+                    <option value="fashion" selected>Fashion</option>
+                    <option value="redbull">RedBull</option>
+                    <option value="fine_grained_test">Fine Grained Test</option>
+                    <option value="progress_test">Progress Test</option>
+                    <option value="progress_test2">Progress Test 2</option>
+                </select>
+            </div>
+            <div class="content-control-group">
+                <label class="content-control-label">Protocol</label>
+                <select id="view1-protocol" class="content-control-select" onchange="onView1Change()">
+                    <option value="hls" selected>HLS</option>
+                    <option value="dash">DASH</option>
+                </select>
+            </div>
+            <div class="content-control-group">
+                <label class="content-control-label">Codec</label>
+                <select id="view1-codec" class="content-control-select" onchange="onView1Change()">
+                    <option value="h264" selected>H264</option>
+                    <option value="hevc">HEVC</option>
+                    <option value="av1">AV1</option>
+                </select>
+            </div>
+            <div class="content-control-group">
+                <label class="content-control-label">Segment</label>
+                <select id="view1-segment" class="content-control-select" onchange="onView1Change()">
+                    <option value="ll" selected>LL</option>
+                    <option value="2s">2s</option>
+                    <option value="6s">6s</option>
+                </select>
+            </div>
+        </div>
+        <div style="text-align: center; color: #0ff; margin-bottom: 15px; font-size: 13px;">
+            ℹ️ Videos start muted for autoplay. Click the speaker icon on any player to unmute.
+        </div>
+        <div class="grid">
+            <!-- HTML5 Native Player -->
+            <div class="player-box">
+                <h2 id="view1-title-1" style="color: #f0f;">Loading...</h2>
+                <div class="panel-badges" id="view1-badges-1"></div>
+                <div class="video-container">
+                    <div class="engine-badge" id="view1-engine-1">Native</div>
+                    <video id="native-video" controls muted></video>
+                    <div class="panel-note" id="view1-note-1">HTML5 playback is disabled for DASH in this panel.</div>
+                </div>
+                <div class="stats">
+                    <div class="stats-row">
+                        <span class="label">Current Time:</span>
+                        <span class="value" id="native-time">0.00s</span>
+                    </div>
+                    <div class="stats-row">
+                        <span class="label">Buffered:</span>
+                        <span class="value" id="native-buffered">0s</span>
+                    </div>
+                    <div class="stats-row">
+                        <span class="label">State:</span>
+                        <span class="value" id="native-state">IDLE</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Video.js Player -->
+            <div class="player-box">
+                <h2 id="view1-title-2" style="color: #09f;">Loading...</h2>
+                <div class="panel-badges" id="view1-badges-2"></div>
+                <div class="video-container">
+                    <div class="engine-badge" id="view1-engine-2">Video.js</div>
+                    <video id="videojs-video" class="video-js" controls muted></video>
+                </div>
+                <div class="stats">
+                    <div class="stats-row">
+                        <span class="label">Current Time:</span>
+                        <span class="value" id="videojs-time">0.00s</span>
+                    </div>
+                    <div class="stats-row">
+                        <span class="label">Buffered:</span>
+                        <span class="value" id="videojs-buffered">0s</span>
+                    </div>
+                    <div class="stats-row">
+                        <span class="label">State:</span>
+                        <span class="value" id="videojs-state">IDLE</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- HLS.js Player -->
+            <div class="player-box">
+                <h2 id="view1-title-3" style="color: #34d399;">Loading...</h2>
+                <div class="panel-badges" id="view1-badges-3"></div>
+                <div class="video-container">
+                    <div class="engine-badge" id="view1-engine-3">HLS.js</div>
+                    <video id="hls-video" controls muted></video>
+                </div>
+                <div class="stats">
+                    <div class="stats-row">
+                        <span class="label">Current Time:</span>
+                        <span class="value" id="hls-time">0.00s</span>
+                    </div>
+                    <div class="stats-row">
+                        <span class="label">Buffered:</span>
+                        <span class="value" id="hls-buffered">0s</span>
+                    </div>
+                    <div class="stats-row">
+                        <span class="label">State:</span>
+                        <span class="value" id="hls-state">IDLE</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Shaka Player -->
+            <div class="player-box">
+                <h2 id="view1-title-4" style="color: #0f0;">Loading...</h2>
+                <div class="panel-badges" id="view1-badges-4"></div>
+                <div class="video-container">
+                    <div class="engine-badge" id="view1-engine-4">Shaka</div>
+                    <video id="shaka-video" controls muted></video>
+                </div>
+                <div class="stats">
+                    <div class="stats-row">
+                        <span class="label">Current Time:</span>
+                        <span class="value" id="shaka-time">0.00s</span>
+                    </div>
+                    <div class="stats-row">
+                        <span class="label">Buffered:</span>
+                        <span class="value" id="shaka-buffered">0s</span>
+                    </div>
+                    <div class="stats-row">
+                        <span class="label">State:</span>
+                        <span class="value" id="shaka-state">IDLE</span>
+                    </div>
+                </div>
+            </div>
+
+        </div>
+
+    </div>
+
+    <!-- View 2: 4 Different Encodings -->
+    <div id="view-encodings" class="view">
+        <div class="content-control">
+            <div class="content-control-title">Content Control</div>
+            <div class="content-control-group">
+                <label class="content-control-label">Content</label>
+                <select class="content-control-select" onchange="onGlobalContentChange(this.value)" id="view2-content">
+                    <option value="fashion" selected>Fashion</option>
+                    <option value="redbull">RedBull</option>
+                    <option value="fine_grained_test">Fine Grained Test</option>
+                    <option value="progress_test">Progress Test</option>
+                    <option value="progress_test2">Progress Test 2</option>
+                </select>
+            </div>
+            <div class="content-control-group">
+                <label class="content-control-label">Segment</label>
+                <select id="view2-segment" class="content-control-select" onchange="onView2Change()">
+                    <option value="ll" selected>LL</option>
+                    <option value="2s">2s</option>
+                    <option value="6s">6s</option>
+                </select>
+            </div>
+            <div class="content-control-group">
+                <label class="content-control-label">Player</label>
+                <select id="view2-player" class="content-control-select" onchange="onView2Change()">
+                    <option value="HTML5" selected>HTML5</option>
+                    <option value="Video.js">Video.js</option>
+                    <option value="HLS.js">HLS.js</option>
+                    <option value="Shaka">Shaka</option>
+                </select>
+            </div>
+        </div>
+        <div style="text-align: center; color: #0ff; margin-bottom: 15px; font-size: 13px;">
+            ℹ️ Videos start muted for autoplay. Click the speaker icon on any player to unmute.
+        </div>
+        <div class="grid">
+            <!-- HLS H264 -->
+            <div class="player-box">
+                <h2 id="view2-title-1" style="color: #0ff;">Loading...</h2>
+                <div class="panel-badges" id="view2-badges-1"></div>
+                <div class="video-container">
+                    <video id="view2-video-1" controls muted></video>
+                </div>
+                <div class="stats">
+                    <div class="stats-row">
+                        <span class="label">Current Time:</span>
+                        <span class="value" id="view2-time-1">0.00s</span>
+                    </div>
+                    <div class="stats-row">
+                        <span class="label">State:</span>
+                        <span class="value" id="view2-state-1">IDLE</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- DASH H264 -->
+            <div class="player-box">
+                <h2 id="view2-title-2" style="color: #0ff;">Loading...</h2>
+                <div class="panel-badges" id="view2-badges-2"></div>
+                <div class="video-container">
+                    <video id="view2-video-2" controls muted></video>
+                </div>
+                <div class="stats">
+                    <div class="stats-row">
+                        <span class="label">Current Time:</span>
+                        <span class="value" id="view2-time-2">0.00s</span>
+                    </div>
+                    <div class="stats-row">
+                        <span class="label">State:</span>
+                        <span class="value" id="view2-state-2">IDLE</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- HLS HEVC -->
+            <div class="player-box">
+                <h2 id="view2-title-3" style="color: #0ff;">Loading...</h2>
+                <div class="panel-badges" id="view2-badges-3"></div>
+                <div class="video-container">
+                    <video id="view2-video-3" controls muted></video>
+                </div>
+                <div class="stats">
+                    <div class="stats-row">
+                        <span class="label">Current Time:</span>
+                        <span class="value" id="view2-time-3">0.00s</span>
+                    </div>
+                    <div class="stats-row">
+                        <span class="label">State:</span>
+                        <span class="value" id="view2-state-3">IDLE</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- DASH HEVC -->
+            <div class="player-box">
+                <h2 id="view2-title-4" style="color: #0ff;">Loading...</h2>
+                <div class="panel-badges" id="view2-badges-4"></div>
+                <div class="video-container">
+                    <video id="view2-video-4" controls muted></video>
+                </div>
+                <div class="stats">
+                    <div class="stats-row">
+                        <span class="label">Current Time:</span>
+                        <span class="value" id="view2-time-4">0.00s</span>
+                    </div>
+                    <div class="stats-row">
+                        <span class="label">State:</span>
+                        <span class="value" id="view2-state-4">IDLE</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- View 3: Dynamic Variants -->
+    <div id="view-variants" class="view">
+        <div class="content-control">
+            <div class="content-control-title">Content Control</div>
+            <div class="content-control-group">
+                <label class="content-control-label">Content</label>
+                <select class="content-control-select" onchange="onGlobalContentChange(this.value)" id="view3-content">
+                    <option value="fashion" selected>Fashion</option>
+                    <option value="redbull">RedBull</option>
+                    <option value="fine_grained_test">Fine Grained Test</option>
+                    <option value="progress_test">Progress Test</option>
+                    <option value="progress_test2">Progress Test 2</option>
+                </select>
+            </div>
+            <div class="content-control-group">
+                <label class="content-control-label">Protocol</label>
+                <select id="view3-protocol" class="content-control-select" onchange="onView3Change()">
+                    <option value="hls" selected>HLS</option>
+                    <option value="dash">DASH</option>
+                </select>
+            </div>
+            <div class="content-control-group">
+                <label class="content-control-label">Codec</label>
+                <select id="view3-codec" class="content-control-select" onchange="onView3Change()">
+                    <option value="h264" selected>H264</option>
+                    <option value="hevc">HEVC</option>
+                    <option value="av1">AV1</option>
+                </select>
+            </div>
+            <div class="content-control-group">
+                <label class="content-control-label">Segment</label>
+                <select id="view3-segment" class="content-control-select" onchange="onView3Change()">
+                    <option value="ll" selected>LL</option>
+                    <option value="2s">2s</option>
+                    <option value="6s">6s</option>
+                </select>
+            </div>
+            <div class="content-control-group">
+                <label class="content-control-label">Player</label>
+                <select id="view3-player" class="content-control-select" onchange="onView3Change()">
+                    <option value="HTML5">HTML5</option>
+                    <option value="Video.js">Video.js</option>
+                    <option value="HLS.js" selected>HLS.js</option>
+                    <option value="Shaka">Shaka</option>
+                </select>
+            </div>
+        </div>
+        <div style="text-align: center; color: #0ff; margin-bottom: 15px; font-size: 13px;">
+            ℹ️ Videos start muted for autoplay. Click the speaker icon on any player to unmute.
+        </div>
+        <!-- Dynamic grid container -->
+        <div id="view3-grid-container" class="grid-2x2">
+            <!-- Player boxes will be dynamically generated here -->
+        </div>
+    </div>
+
+    <script>
+        // VERSION CHECK - Dynamic Variant Discovery Implementation
+        console.log('==============================================');
+        console.log('QUARTET VERSION: v3.1');
+        console.log('Date: Jan 23, 2026');
+        console.log('==============================================');
+        
+        // Global Configuration
+        const CONFIG = {
+            contentOptions: [],
+            
+            encodingOptions: {
+                'hls_h264': { 
+                    label: 'HLS H264', 
+                    suffix: '_h264',
+                    protocol: 'hls'
+                },
+                'hls_hevc': { 
+                    label: 'HLS HEVC', 
+                    suffix: '_hevc',
+                    protocol: 'hls'
+                },
+                'hls_av1': {
+                    label: 'HLS AV1',
+                    suffix: '_av1',
+                    protocol: 'hls'
+                },
+                'dash_h264': { 
+                    label: 'DASH H264', 
+                    suffix: '_h264',
+                    protocol: 'dash'
+                },
+                'dash_hevc': { 
+                    label: 'DASH HEVC', 
+                    suffix: '_hevc',
+                    protocol: 'dash'
+                },
+                'dash_av1': {
+                    label: 'DASH AV1',
+                    suffix: '_av1',
+                    protocol: 'dash'
+                }
+            },
+            
+            playerOptions: ['HTML5', 'Video.js', 'HLS.js', 'Shaka'],
+            
+            // Player capabilities
+            playerCapabilities: {
+                'HTML5': ['hls'],  // HTML5 native is HLS-only
+                'Video.js': ['hls'],
+                'HLS.js': ['hls'],
+                'Shaka': ['hls', 'dash']
+            },
+            
+            view1: { content: 'fashion', encoding: 'hls_h264', segment: 'll' },
+            view2: { content: 'fashion', player: 'HTML5' },
+            view3: { content: 'fashion', player: 'HLS.js', encoding: 'hls_h264', segment: 'll' }
+        };
+        
+        // Helper function to build master playlist URL
+        function encodeContentName(name) {
+            return encodeURIComponent(name).replace(/%2F/g, '/');
+        }
+
+        function buildMasterUrl(content, encodingConfig, segment = 'll') {
+            const streamName = `${content}${encodingConfig.suffix}`;
+            const base = window.location.origin;
+            let filename;
+            if (encodingConfig.protocol === 'dash') {
+                filename = segment === '2s'
+                    ? 'manifest_2s.mpd'
+                    : (segment === '6s' ? 'manifest_6s.mpd' : 'manifest.mpd');
+            } else {
+                filename = segment === '2s'
+                    ? 'master_2s.m3u8'
+                    : (segment === '6s' ? 'master_6s.m3u8' : 'master.m3u8');
+            }
+            return `${base}/go-live/${encodeContentName(streamName)}/${filename}`;
+        }
+
+        function badgeSpan(text, klass) {
+            return `<span class="panel-badge ${klass}">${text}</span>`;
+        }
+
+        function segmentBadge(segment) {
+            if (segment === '2s') return { text: '2S', klass: 's2' };
+            if (segment === '6s') return { text: '6S', klass: 's6' };
+            return { text: 'LL', klass: 'll' };
+        }
+
+        function encodingKey(protocol, codec) {
+            return `${protocol}_${codec}`;
+        }
+
+        function syncEncodingControls(prefix, protocol, codec) {
+            const protocolSelect = document.getElementById(`${prefix}-protocol`);
+            const codecSelect = document.getElementById(`${prefix}-codec`);
+            if (protocolSelect) protocolSelect.value = protocol;
+            if (codecSelect) codecSelect.value = codec;
+        }
+
+        function syncSegmentControl(prefix, segment) {
+            const segmentSelect = document.getElementById(`${prefix}-segment`);
+            if (segmentSelect) segmentSelect.value = segment;
+        }
+
+        function codecBadgeFromSuffix(suffix) {
+            if (suffix.includes('av1')) {
+                return { label: 'AV1', klass: 'av1' };
+            }
+            if (suffix.includes('hevc')) {
+                return { label: 'HEVC', klass: 'hevc' };
+            }
+            return { label: 'H264', klass: 'h264' };
+        }
+
+        function setPanelBadges(containerId, badges) {
+            const el = document.getElementById(containerId);
+            if (!el) return;
+            el.innerHTML = badges.join('');
+        }
+
+        async function loadContentOptions() {
+            const view1Content = document.getElementById('view1-content');
+            if (!view1Content) {
+                return;
+            }
+
+            try {
+                const response = await fetch('/api/content');
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}`);
+                }
+                const content = await response.json();
+                const baseNames = new Set();
+                content.forEach((item) => {
+                    let name = item.name || '';
+                    let prev = '';
+                    while (name !== prev) {
+                        prev = name;
+                    name = name.replace(/_(h264|hevc|av1|dash|ts|hw)$/i, '');
+                    }
+                    if (name) {
+                        baseNames.add(name);
+                    }
+                });
+
+                const sorted = Array.from(baseNames).sort();
+                if (sorted.length === 0) {
+                    throw new Error('No content found');
+                }
+
+                CONFIG.contentOptions = sorted;
+                view1Content.innerHTML = '';
+                sorted.forEach((name, idx) => {
+                    const option = document.createElement('option');
+                    option.value = name;
+                    option.textContent = name;
+                    if (idx === 0) {
+                        option.selected = true;
+                    }
+                    view1Content.appendChild(option);
+                });
+
+                const stored = localStorage.getItem('bossSelectedContentBase') || localStorage.getItem('bossSelectedContent');
+                const normalized = stored
+                    ? stored.replace(/_(h264|hevc|av1|dash|ts|hw)$/i, '').replace(/_\d{8}_\d{6}$/i, '')
+                    : null;
+                const defaultContent = normalized && sorted.includes(normalized) ? normalized : sorted[0];
+                CONFIG.view1.content = defaultContent;
+                CONFIG.view2.content = defaultContent;
+                CONFIG.view3.content = defaultContent;
+                view1Content.value = defaultContent;
+                const view2Content = document.getElementById('view2-content');
+                if (view2Content) {
+                    view2Content.innerHTML = view1Content.innerHTML;
+                    view2Content.value = defaultContent;
+                }
+                const view3Content = document.getElementById('view3-content');
+                if (view3Content) {
+                    view3Content.innerHTML = view1Content.innerHTML;
+                    view3Content.value = defaultContent;
+                }
+
+                const storedProtocol = localStorage.getItem('bossSelectedProtocol') || '';
+                const storedCodec = localStorage.getItem('bossSelectedCodec') || '';
+                const storedSegment = localStorage.getItem('bossSelectedSegment') || '';
+                const preferredCodec = storedCodec || 'h264';
+                const preferredProtocol = storedProtocol || 'hls';
+                const preferredSegment = storedSegment || 'll';
+                const preferredEncodingKey = encodingKey(preferredProtocol, preferredCodec);
+                if (CONFIG.encodingOptions[preferredEncodingKey]) {
+                    CONFIG.view1.encoding = preferredEncodingKey;
+                    CONFIG.view3.encoding = preferredEncodingKey;
+                CONFIG.view1.segment = preferredSegment;
+                CONFIG.view3.segment = preferredSegment;
+                CONFIG.view2.segment = preferredSegment;
+                syncEncodingControls('view1', preferredProtocol, preferredCodec);
+                syncEncodingControls('view3', preferredProtocol, preferredCodec);
+                syncSegmentControl('view1', preferredSegment);
+                syncSegmentControl('view2', preferredSegment);
+                syncSegmentControl('view3', preferredSegment);
+            }
+            } catch (error) {
+                console.error('Failed to load content from /api/content:', error);
+            }
+        }
+        
+        // Helper function to check if player supports protocol
+        function playerSupportsProtocol(playerName, protocol) {
+            return CONFIG.playerCapabilities[playerName].includes(protocol);
+        }
+        
+        // Helper function to get vertical resolution from resolution string
+        function getVerticalResolution(resolution) {
+            const height = resolution.split('x')[1];
+            return `${height}p`;
+        }
+        
+        // Helper function to build consistent title
+        function buildTitle(playerName, variant, encodingLabel) {
+            const verticalRes = getVerticalResolution(variant.resolution);
+            const bwLabel = variant.bandwidthType === 'avg' ? 'avg' : 'peak';
+            return `${playerName} / ${variant.filename} - ${verticalRes} (${encodingLabel}) - ${variant.bandwidthMbps} Mbps ${bwLabel}`;
+        }
+
+        function buildVariantTitle(variant) {
+            const bwLabel = variant.bandwidthType === 'avg' ? 'avg' : 'peak';
+            const rawName = (variant.filename || '').trim();
+            const name = rawName && rawName !== '/' ? rawName : (variant.representationId || `${variant.height || '?'}p`);
+            return `${name} - ${variant.bandwidthMbps} Mbps ${bwLabel}`;
+        }
+
+        function buildAbrTitle(playerName, encodingLabel) {
+            return `${playerName} / ABR (${encodingLabel})`;
+        }
+        
+        // Discover variants from master playlist
+        async function discoverVariants(masterUrl) {
+            try {
+                const response = await fetch(masterUrl);
+                const text = await response.text();
+                
+                // Check if this is DASH (MPD) or HLS (m3u8)
+                if (masterUrl.endsWith('.mpd')) {
+                    return parseDASHVariants(text);
+                } else {
+                    return parseHLSVariants(text);
+                }
+                
+            } catch (error) {
+                console.error('Failed to fetch/parse master playlist:', masterUrl, error);
+                return [];
+            }
+        }
+        
+        // Parse HLS master playlist
+        function parseHLSVariants(text) {
+            const variants = [];
+            const lines = text.split('\n');
+            
+            for (let i = 0; i < lines.length; i++) {
+                const line = lines[i].trim();
+                
+                // Look for #EXT-X-STREAM-INF lines (video variants only)
+                if (line.startsWith('#EXT-X-STREAM-INF:')) {
+                    const bandwidthMatch = line.match(/BANDWIDTH=(\d+)/);
+                    const avgBandwidthMatch = line.match(/AVERAGE-BANDWIDTH=(\d+)/);
+                    const resolutionMatch = line.match(/RESOLUTION=(\d+x\d+)/);
+                    const codecsMatch = line.match(/CODECS="([^"]+)"/);
+                    
+                    // Next line should be the variant playlist filename
+                    const playlistLine = lines[i + 1]?.trim();
+                    
+                    if (bandwidthMatch && resolutionMatch && playlistLine && 
+                        !playlistLine.startsWith('#')) {
+                        
+                        const [width, height] = resolutionMatch[1].split('x').map(Number);
+                        // Prefer AVERAGE-BANDWIDTH if available, otherwise use BANDWIDTH
+                        const bandwidth = avgBandwidthMatch ? 
+                            parseInt(avgBandwidthMatch[1]) : 
+                            parseInt(bandwidthMatch[1]);
+                        const bandwidthType = avgBandwidthMatch ? 'avg' : 'peak';
+                        
+                        variants.push({
+                            filename: playlistLine,
+                            resolution: resolutionMatch[1],
+                            width: width,
+                            height: height,
+                            bandwidth: bandwidth,
+                            bandwidthMbps: (bandwidth / 1000000).toFixed(1),
+                            bandwidthType: bandwidthType,
+                            codecs: codecsMatch ? codecsMatch[1] : 'unknown'
+                        });
+                    }
+                }
+            }
+            
+            // Sort by resolution (highest first)
+            variants.sort((a, b) => (b.width * b.height) - (a.width * a.height));
+            
+            return variants;
+        }
+        
+        // Parse DASH MPD manifest
+        function parseDASHVariants(text) {
+            const variants = [];
+            const parser = new DOMParser();
+            const xmlDoc = parser.parseFromString(text, 'text/xml');
+            
+            // Find all video AdaptationSets
+            const adaptationSets = xmlDoc.querySelectorAll('AdaptationSet[contentType="video"], AdaptationSet[mimeType*="video"]');
+            
+            adaptationSets.forEach(adaptationSet => {
+                // Get representations (quality variants)
+                const representations = adaptationSet.querySelectorAll('Representation');
+                
+                representations.forEach(rep => {
+                    const id = rep.getAttribute('id');
+                    const bandwidth = parseInt(rep.getAttribute('bandwidth'));
+                    const width = parseInt(rep.getAttribute('width'));
+                    const height = parseInt(rep.getAttribute('height'));
+                    const codecs = rep.getAttribute('codecs');
+                    
+                    if (width && height && bandwidth) {
+                        // For DASH, the "filename" is just the representation ID or a path
+                        // We'll use the AdaptationSet/Representation structure
+                        const baseURL = rep.querySelector('BaseURL')?.textContent || `${id}/`;
+                        
+                        variants.push({
+                            filename: baseURL,
+                            resolution: `${width}x${height}`,
+                            width: width,
+                            height: height,
+                            bandwidth: bandwidth,
+                            bandwidthMbps: (bandwidth / 1000000).toFixed(1),
+                            bandwidthType: 'peak',  // DASH typically uses peak bandwidth
+                            codecs: codecs || 'unknown',
+                            representationId: id
+                        });
+                    }
+                });
+            });
+            
+            // Sort by resolution (highest first)
+            variants.sort((a, b) => (b.width * b.height) - (a.width * a.height));
+            
+            return variants;
+        }
+        
+        // Discover and select highest quality variant
+        async function discoverAndSelectHighestVariant(masterUrl) {
+            const variants = await discoverVariants(masterUrl);
+            
+            if (variants.length === 0) {
+                throw new Error('No variants found in master playlist');
+            }
+            
+            return variants[0];
+        }
+
+        function createPlayerId() {
+            if (window.BOSSNav && typeof window.BOSSNav.createPlayerId === 'function') {
+                return window.BOSSNav.createPlayerId();
+            }
+            return Math.random().toString(36).slice(2, 10);
+        }
+
+        function normalizeTestingBase(url) {
+            const parsed = new URL(url, window.location.origin);
+            parsed.hostname = parsed.hostname || window.location.hostname;
+            parsed.port = '20081';
+            return parsed.toString();
+        }
+
+        function buildTestingUrl(url, playerId) {
+            const base = normalizeTestingBase(url);
+            const separator = base.includes('?') ? '&' : '?';
+            return `${base}${separator}player_id=${playerId}`;
+        }
+
+        function copyTestingUrl(url) {
+            const playerId = createPlayerId();
+            const testingUrl = buildTestingUrl(url, playerId);
+            if (!navigator.clipboard) {
+                const input = document.createElement('input');
+                input.value = testingUrl;
+                document.body.appendChild(input);
+                input.select();
+                document.execCommand('copy');
+                document.body.removeChild(input);
+                return;
+            }
+            navigator.clipboard.writeText(testingUrl).catch(err => console.warn('Clipboard write failed', err));
+        }
+
+        function openTestingWindow(url) {
+            const playerId = createPlayerId();
+            const testingUrl = buildTestingUrl(url, playerId);
+            const pageUrl = `/dashboard/testing-session.html?player_id=${encodeURIComponent(playerId)}&url=${encodeURIComponent(testingUrl)}`;
+            const popup = window.open(pageUrl, '_blank');
+            if (!popup) {
+                alert('Popup blocked. Allow popups for this site.');
+            }
+        }
+
+        function openHlsjsDemo(url) {
+            if (!url || url.includes('.mpd')) {
+                alert('HLS.js demo only supports HLS (.m3u8).');
+                return;
+            }
+            const playerId = createPlayerId();
+            const testingUrl = buildTestingUrl(url, playerId);
+            const demoUrl = `https://hlsjs.video-dev.org/demo/?src=${encodeURIComponent(testingUrl)}`;
+            const popup = window.open(demoUrl, '_blank');
+            if (!popup) {
+                alert('Popup blocked. Allow popups for this site.');
+            }
+        }
+
+        function setVideoStreamUrl(videoId, url) {
+            const video = document.getElementById(videoId);
+            if (video) {
+                video.dataset.streamUrl = url;
+            }
+        }
+
+        function initContextMenu() {
+            const isDeveloperMode = new URLSearchParams(window.location.search).get('developer') === '1';
+            const menu = document.createElement('div');
+            menu.className = 'context-menu';
+            menu.id = 'quartetContextMenu';
+            menu.innerHTML = `
+                <button id="contextOpenTesting">Open in Testing Window</button>
+                <button id="contextCopyTesting">Copy Testing URL</button>
+                ${isDeveloperMode ? '<button id="contextOpenHlsjsDemo">Open in HLS.js Demo</button>' : ''}
+            `;
+            document.body.appendChild(menu);
+
+            document.getElementById('contextOpenTesting').addEventListener('click', () => {
+                const url = menu.dataset.url;
+                if (url) openTestingWindow(url);
+                menu.style.display = 'none';
+            });
+            document.getElementById('contextCopyTesting').addEventListener('click', () => {
+                const url = menu.dataset.url;
+                if (url) copyTestingUrl(url);
+                menu.style.display = 'none';
+            });
+            const hlsjsButton = document.getElementById('contextOpenHlsjsDemo');
+            if (hlsjsButton) {
+                hlsjsButton.addEventListener('click', () => {
+                    const url = menu.dataset.url;
+                    if (url) openHlsjsDemo(url);
+                    menu.style.display = 'none';
+                });
+            }
+
+            document.addEventListener('click', () => {
+                menu.style.display = 'none';
+            });
+
+            document.addEventListener('contextmenu', (event) => {
+                const video = event.target.closest('video');
+                if (!video) return;
+                const url = video.dataset.streamUrl;
+                if (!url) return;
+                event.preventDefault();
+                menu.dataset.url = url;
+                menu.style.left = `${event.clientX}px`;
+                menu.style.top = `${event.clientY}px`;
+                menu.style.display = 'block';
+            });
+        }
+
+        // Tab switching state
+        let currentTab = 'players';
+        let view1Loaded = false;
+        let view2Loaded = false;
+        let view3Loaded = false;
+
+        // Tab switching
+        function switchTab(tabName) {
+            // Clean up players from the current tab before switching
+            if (currentTab === 'players') {
+                cleanupView1Players();
+            } else if (currentTab === 'encodings') {
+                cleanupView2Players();
+            } else if (currentTab === 'variants') {
+                cleanupView3Players();
+            }
+            
+            document.querySelectorAll('.tab').forEach(tab => tab.classList.remove('active'));
+            event.target.classList.add('active');
+
+            document.querySelectorAll('.view').forEach(view => view.classList.remove('active'));
+            document.getElementById('view-' + tabName).classList.add('active');
+            
+            currentTab = tabName;
+            
+            // Always reload the view when switching tabs to honor content changes
+            if (tabName === 'players') {
+                loadPlayers();
+                view1Loaded = true;
+            } else if (tabName === 'encodings') {
+                loadEncodings();
+                view2Loaded = true;
+            } else if (tabName === 'variants') {
+                loadVariants();
+                view3Loaded = true;
+            }
+        }
+
+        // ========== PLAYER MANAGEMENT FUNCTIONS ==========
+        
+        async function initPlayer(videoId, playerType, streamUrl, protocol = 'hls', options = {}) {
+            const video = document.getElementById(videoId);
+            if (!video) {
+                console.error('Video element not found:', videoId);
+                return null;
+            }
+            setVideoStreamUrl(videoId, streamUrl);
+            
+            video.className = '';
+            video.removeAttribute('data-vjs-player');
+            video.pause();
+            video.src = '';
+            
+            let playerInstance;
+            
+            try {
+                switch(playerType) {
+                    case 'HTML5':
+                        video.src = streamUrl;
+                        await video.play();
+                        playerInstance = { type: 'native', element: video };
+                        break;
+                        
+                    case 'Shaka':
+                        const shakaInst = new shaka.Player(video);
+                        shakaInst.configure({
+                            streaming: {
+                                rebufferingGoal: 2,
+                                bufferingGoal: 10,
+                                bufferBehind: 30,
+                            },
+                            manifest: {
+                                defaultPresentationDelay: 12,
+                            },
+                            abr: { enabled: options.abrEnabled === true }
+                        });
+                        await shakaInst.load(streamUrl);
+                        if (options.shakaVariant && protocol === 'dash') {
+                            const tracks = shakaInst.getVariantTracks();
+                            const target = options.shakaVariant;
+                            let track = tracks.find((t) => t.originalId && `${t.originalId}` === `${target.representationId}`);
+                            if (!track) {
+                                track = tracks.find((t) => `${t.id}` === `${target.representationId}`);
+                            }
+                            if (!track && target.height && target.bandwidth) {
+                                track = tracks.find((t) => t.height === target.height && t.bandwidth === target.bandwidth);
+                            }
+                            if (!track && target.height) {
+                                track = tracks.find((t) => t.height === target.height);
+                            }
+                            if (track) {
+                                shakaInst.selectVariantTrack(track, true);
+                            } else {
+                                console.warn('Shaka: variant track not found for', target);
+                            }
+                        }
+                        await video.play();
+                        playerInstance = { type: 'shaka', player: shakaInst, element: video };
+                        break;
+                        
+                    case 'HLS.js':
+                        if (!Hls.isSupported()) {
+                            console.error('HLS.js not supported');
+                            return null;
+                        }
+                        const hlsInst = new Hls({
+                            debug: false,
+                            liveSyncDurationCount: 3,
+                            autoLevelEnabled: options.hlsAutoLevel === true
+                        });
+                        hlsInst.loadSource(streamUrl);
+                        hlsInst.attachMedia(video);
+                        await new Promise((resolve) => {
+                            hlsInst.on(Hls.Events.MANIFEST_PARSED, () => {
+                                video.play().then(resolve);
+                            });
+                        });
+                        playerInstance = { type: 'hls', player: hlsInst, element: video };
+                        break;
+                        
+                    case 'Video.js':
+                        video.className = 'video-js';
+                        const vjsInst = videojs(videoId, {
+                            liveui: true,
+                            liveTracker: {
+                                trackingThreshold: 20,
+                                liveTolerance: 15
+                            }
+                        });
+                        const mimeType = protocol === 'dash' ? 'application/dash+xml' : 'application/x-mpegURL';
+                        vjsInst.src({ src: streamUrl, type: mimeType });
+                        await new Promise((resolve) => {
+                            vjsInst.ready(() => {
+                                vjsInst.on('loadedmetadata', () => {
+                                    resolve();
+                                });
+                            });
+                        });
+                        vjsInst.play();
+                        playerInstance = { type: 'videojs', player: vjsInst, element: video };
+                        break;
+                        
+                    default:
+                        console.error('Unknown player type:', playerType);
+                        return null;
+                }
+                
+                return playerInstance;
+            } catch (error) {
+                console.error('Failed to initialize player:', error);
+                return null;
+            }
+        }
+        
+        function disposePlayer(playerInstance) {
+            if (!playerInstance) return;
+            
+            try {
+                switch(playerInstance.type) {
+                    case 'native':
+                        playerInstance.element.pause();
+                        playerInstance.element.src = '';
+                        break;
+                        
+                    case 'shaka':
+                        playerInstance.player.destroy();
+                        break;
+                        
+                    case 'hls':
+                        playerInstance.player.destroy();
+                        break;
+                        
+                    case 'videojs':
+                        playerInstance.player.dispose();
+                        break;
+                }
+            } catch (error) {
+                console.error('Error disposing player:', error);
+            }
+        }
+
+        // Clean up View 1 players
+        function cleanupView1Players() {
+            console.log('Cleaning up View 1 players...');
+            if (nativeVideo) {
+                nativeVideo.pause();
+                nativeVideo.removeAttribute('src');
+                nativeVideo.load();
+            }
+            if (shakaPlayer) {
+                try {
+                    shakaPlayer.unload().catch(e => console.warn('Shaka unload error:', e));
+                } catch (e) {
+                    console.warn('Shaka cleanup error:', e);
+                }
+            }
+            // Don't clean up HLS.js - let it keep running
+            if (videojsPlayer) {
+                try {
+                    videojsPlayer.pause();
+                    videojsPlayer.reset();
+                } catch (e) {
+                    console.warn('Video.js cleanup error:', e);
+                }
+            }
+        }
+
+        // Clean up View 2 players
+        function cleanupView2Players() {
+            console.log('Cleaning up View 2 players...');
+            view2PlayerInstances.forEach(disposePlayer);
+            view2PlayerInstances = [null, null, null, null];
+        }
+
+        // Clean up View 3 players
+        function cleanupView3Players() {
+            console.log('Cleaning up View 3 players...');
+            view3PlayerInstances.forEach(disposePlayer);
+            view3PlayerInstances = [];
+        }
+
+        // ========== GLOBAL CONTENT SELECTION ==========
+        function onGlobalContentChange(value) {
+            const view1Content = document.getElementById('view1-content');
+            const content = value || (view1Content ? view1Content.value : '');
+            
+            // Update all configs
+            CONFIG.view1.content = content;
+            CONFIG.view2.content = content;
+            CONFIG.view3.content = content;
+            if (content) {
+                localStorage.setItem('bossSelectedContentBase', content);
+                localStorage.setItem('bossSelectedContent', content);
+                if (window.BOSSNav && typeof window.BOSSNav.updateSelectedContentBadge === 'function') {
+                    window.BOSSNav.updateSelectedContentBadge();
+                }
+            }
+            
+            console.log('Global content changed to:', content);
+            if (view1Content) view1Content.value = content;
+            const view2Content = document.getElementById('view2-content');
+            if (view2Content) view2Content.value = content;
+            const view3Content = document.getElementById('view3-content');
+            if (view3Content) view3Content.value = content;
+            
+            // Reload the currently active view (cleanup happens in each load function)
+            if (currentTab === 'players') {
+                cleanupView1Players();
+                loadPlayers();
+            } else if (currentTab === 'encodings') {
+                cleanupView2Players();
+                loadEncodings();
+            } else if (currentTab === 'variants') {
+                cleanupView3Players();
+                loadVariants();
+            }
+        }
+
+        // ========== VIEW 1: 4 PLAYERS ==========
+        let shakaPlayer = null;
+        let hlsInstance = null;
+        let videojsPlayer = null;
+        let nativeVideo = null;
+
+        function onView1Change() {
+            const protocol = document.getElementById('view1-protocol').value;
+            const codec = document.getElementById('view1-codec').value;
+            const segment = document.getElementById('view1-segment').value;
+            CONFIG.view1.encoding = encodingKey(protocol, codec);
+            CONFIG.view1.segment = segment;
+            localStorage.setItem('bossSelectedProtocol', protocol);
+            localStorage.setItem('bossSelectedCodec', codec);
+            localStorage.setItem('bossSelectedSegment', segment);
+            
+            console.log('View 1 changed:', CONFIG.view1);
+            
+            // Clean up before reloading
+            cleanupView1Players();
+            loadPlayers();
+        }
+
+        function initShaka() {
+            try {
+                const video = document.getElementById('shaka-video');
+                if (!video) {
+                    console.error('Shaka video element not found');
+                    return;
+                }
+                shakaPlayer = new shaka.Player(video);
+                
+                shakaPlayer.configure({
+                    streaming: {
+                        rebufferingGoal: 2,
+                        bufferingGoal: 10,
+                        bufferBehind: 30,
+                    },
+                    manifest: {
+                        defaultPresentationDelay: 12,
+                    },
+                    abr: { enabled: true }
+                });
+                console.log('Shaka player initialized');
+            } catch (error) {
+                console.error('Failed to initialize Shaka:', error);
+            }
+        }
+
+        function initHls() {
+            try {
+                const video = document.getElementById('hls-video');
+                if (!video) {
+                    console.error('HLS video element not found');
+                    return;
+                }
+                
+                if (Hls.isSupported()) {
+                    hlsInstance = new Hls({
+                        debug: false,
+                        liveSyncDurationCount: 3,
+                        autoLevelEnabled: true
+                    });
+                    hlsInstance.attachMedia(video);
+                    
+                    // Set up event listeners ONCE during init
+                    // Error handler
+                    hlsInstance.on(Hls.Events.ERROR, (event, data) => {
+                        console.error('HLS.js error:', data.type, data.details, data);
+                        if (data.fatal) {
+                            switch(data.type) {
+                                case Hls.ErrorTypes.NETWORK_ERROR:
+                                    console.error('Fatal network error, trying to recover...');
+                                    hlsInstance.startLoad();
+                                    break;
+                                case Hls.ErrorTypes.MEDIA_ERROR:
+                                    console.error('Fatal media error, trying to recover...');
+                                    hlsInstance.recoverMediaError();
+                                    break;
+                                default:
+                                    console.error('Fatal error, cannot recover');
+                                    break;
+                            }
+                        }
+                    });
+                    
+                    // Wait for first fragment to buffer, then play
+                    hlsInstance.on(Hls.Events.FRAG_BUFFERED, () => {
+                        if (video.paused) {
+                            video.play().catch(e => console.error('HLS.js play failed:', e));
+                        }
+                    });
+                    
+                    console.log('HLS.js initialized');
+                } else {
+                    console.warn('HLS.js not supported in this browser');
+                }
+            } catch (error) {
+                console.error('Failed to initialize HLS.js:', error);
+            }
+        }
+
+        function initVideojs() {
+            try {
+                videojsPlayer = videojs('videojs-video', {
+                    liveui: true,
+                    liveTracker: {
+                        trackingThreshold: 20,
+                        liveTolerance: 15
+                    }
+                });
+                console.log('Video.js initialized');
+            } catch (error) {
+                console.error('Failed to initialize Video.js:', error);
+            }
+        }
+
+        function initHTML5() {
+            try {
+                nativeVideo = document.getElementById('native-video');
+                if (!nativeVideo) {
+                    console.error('HTML5 video element not found');
+                    return;
+                }
+                console.log('HTML5 video element found');
+            } catch (error) {
+                console.error('Failed to initialize HTML5:', error);
+            }
+        }
+
+        async function loadPlayers() {
+            const { content, encoding, segment } = CONFIG.view1;
+            const encodingConfig = CONFIG.encodingOptions[encoding];
+            const protocol = encodingConfig.protocol;
+            const masterUrl = buildMasterUrl(content, encodingConfig, segment);
+
+            if (window.BOSSNav && typeof window.BOSSNav.setSelectedUrl === 'function') {
+                window.BOSSNav.setSelectedUrl(masterUrl);
+            } else {
+                localStorage.setItem('bossSelectedUrl', masterUrl);
+            }
+            
+            console.log('View 1: Fetching master playlist:', masterUrl);
+            
+            try {
+                const variant = await discoverAndSelectHighestVariant(masterUrl);
+                console.log('View 1: Selected highest variant:', variant);
+                
+                // Use the master playlist/MPD so players can ABR (variants tab still loads variants directly)
+                const streamUrl = masterUrl;
+
+                console.log('View 1: Loading all players with master:', streamUrl);
+                setVideoStreamUrl('native-video', streamUrl);
+                setVideoStreamUrl('videojs-video', streamUrl);
+                setVideoStreamUrl('hls-video', streamUrl);
+                setVideoStreamUrl('shaka-video', streamUrl);
+                
+                // Check player capabilities and update titles
+                console.log('Protocol detected:', protocol);
+                const players = [
+                    { name: 'HTML5', titleId: 'view1-title-1', supported: protocol === 'dash' ? false : playerSupportsProtocol('HTML5', protocol) },
+                    { name: 'Video.js', titleId: 'view1-title-2', supported: playerSupportsProtocol('Video.js', protocol) },
+                    { name: 'HLS.js', titleId: 'view1-title-3', supported: playerSupportsProtocol('HLS.js', protocol) },
+                    { name: 'Shaka', titleId: 'view1-title-4', supported: playerSupportsProtocol('Shaka', protocol) },
+                ];
+
+                console.log('Players array:', players);
+
+                players.forEach(player => {
+                    let title;
+                    if (player.name === 'HTML5' && protocol === 'dash') {
+                        title = 'HTML5 - Not supported for DASH';
+                    } else {
+                        title = player.supported 
+                            ? buildAbrTitle(player.name, encodingConfig.label)
+                            : `${player.name} - Not supported for ${protocol.toUpperCase()}`;
+                    }
+                    console.log('Setting title for', player.titleId, ':', title);
+                    document.getElementById(player.titleId).textContent = title;
+                });
+
+                const nativeNote = document.getElementById('view1-note-1');
+                const nativeBadge = document.getElementById('view1-engine-1');
+                const videojsBadge = document.getElementById('view1-engine-2');
+                const hlsBadge = document.getElementById('view1-engine-3');
+                const shakaBadge = document.getElementById('view1-engine-4');
+
+                if (nativeBadge) {
+                    nativeBadge.textContent = protocol === 'dash' ? 'Native (Unavailable)' : 'Native';
+                }
+                if (videojsBadge) videojsBadge.textContent = 'Video.js';
+                if (hlsBadge) hlsBadge.textContent = 'HLS.js';
+                if (shakaBadge) shakaBadge.textContent = 'Shaka';
+                if (nativeNote) nativeNote.classList.toggle('active', protocol === 'dash');
+
+                players.forEach((player, idx) => {
+                    const badgePlayerClass = player.name === 'HTML5' ? 'native'
+                        : player.name === 'Video.js' ? 'videojs'
+                        : player.name === 'HLS.js' ? 'hlsjs'
+                        : 'shaka';
+                    const seg = segmentBadge(segment);
+                    const badges = [
+                        badgeSpan(player.name, badgePlayerClass),
+                        badgeSpan(protocol.toUpperCase(), protocol),
+                        (() => { const badge = codecBadgeFromSuffix(encodingConfig.suffix); return badgeSpan(badge.label, badge.klass); })(),
+                        badgeSpan(seg.text, seg.klass)
+                    ];
+                    setPanelBadges(`view1-badges-${idx + 1}`, badges);
+                });
+                
+                // Load HTML5 (native for HLS only)
+                try {
+                    if (nativeVideo && playerSupportsProtocol('HTML5', protocol)) {
+                        if (protocol === 'dash') {
+                            nativeVideo.removeAttribute('src');
+                        } else {
+                            nativeVideo.src = streamUrl;
+                            nativeVideo.play().catch(e => console.error('HTML5 play failed:', e));
+                        }
+                    } else if (nativeVideo) {
+                        // Clean up when not supported
+                        nativeVideo.removeAttribute('src');
+                    }
+                } catch (error) {
+                    console.error('HTML5 player failed:', error);
+                }
+                
+                // Load Shaka
+                try {
+                    console.log('Shaka check:', {
+                        shakaPlayer: !!shakaPlayer,
+                        protocol: protocol,
+                        supports: playerSupportsProtocol('Shaka', protocol)
+                    });
+                    if (shakaPlayer && playerSupportsProtocol('Shaka', protocol)) {
+                        console.log('Shaka: Loading URL:', streamUrl);
+                        await shakaPlayer.load(streamUrl);
+                        console.log('Shaka: Load successful, attempting play...');
+                        document.getElementById('shaka-video').play().catch(e => console.error('Shaka play failed:', e));
+                    } else if (shakaPlayer) {
+                        console.log('Shaka: Unloading (protocol not supported)');
+                        await shakaPlayer.unload().catch(() => {});
+                    }
+                } catch (error) {
+                    console.error('Shaka player failed:', error);
+                }
+                
+                // Load HLS.js (HLS only)
+                try {
+                    console.log('HLS.js check:', {
+                        hlsInstance: !!hlsInstance,
+                        protocol: protocol,
+                        supports: playerSupportsProtocol('HLS.js', protocol)
+                    });
+                    if (hlsInstance && playerSupportsProtocol('HLS.js', protocol)) {
+                        console.log('HLS.js: Loading source:', streamUrl);
+                        hlsInstance.loadSource(streamUrl);
+                    } else if (hlsInstance) {
+                        console.log('HLS.js: Stopping load (protocol not supported)');
+                        hlsInstance.stopLoad();
+                        document.getElementById('hls-video').removeAttribute('src');
+                    }
+                } catch (error) {
+                    console.error('HLS.js player failed:', error);
+                }
+                
+                // Load Video.js (HLS only)
+                try {
+                    if (videojsPlayer && playerSupportsProtocol('Video.js', protocol)) {
+                        videojsPlayer.src({ src: streamUrl, type: 'application/x-mpegURL' });
+                        videojsPlayer.ready(() => {
+                            videojsPlayer.play().catch(e => console.error('Video.js play failed:', e));
+                        });
+                    } else if (videojsPlayer) {
+                        videojsPlayer.pause();
+                        videojsPlayer.reset();
+                    }
+                } catch (error) {
+                    console.error('Video.js player failed:', error);
+                }
+                
+            } catch (error) {
+                console.error('View 1: Failed to load variants:', error);
+                alert('Failed to load variants: ' + error.message);
+            }
+        }
+
+        // ========== VIEW 2: 4 ENCODINGS ==========
+        let view2PlayerInstances = [null, null, null, null];
+        
+        function onView2Change() {
+            CONFIG.view2.player = document.getElementById('view2-player').value;
+            CONFIG.view2.segment = document.getElementById('view2-segment').value;
+            
+            console.log('View 2 changed:', CONFIG.view2);
+            loadEncodings();
+        }
+
+        async function loadEncodings() {
+            const { content, segment } = CONFIG.view2;
+            
+            view2PlayerInstances.forEach(disposePlayer);
+            view2PlayerInstances = [null, null, null, null];
+            
+            // Show HLS/DASH encodings (4 boxes: 2x H264, 2x HEVC)
+            const encodingKeys = ['hls_h264', 'dash_h264', 'hls_hevc', 'dash_hevc'];
+            const firstMasterUrl = buildMasterUrl(content, CONFIG.encodingOptions[encodingKeys[0]], segment || 'll');
+            if (window.BOSSNav && typeof window.BOSSNav.setSelectedUrl === 'function') {
+                window.BOSSNav.setSelectedUrl(firstMasterUrl);
+            } else {
+                localStorage.setItem('bossSelectedUrl', firstMasterUrl);
+            }
+            
+            for (let i = 0; i < 4; i++) {
+                const encodingKey = encodingKeys[i];
+                const encodingConfig = CONFIG.encodingOptions[encodingKey];
+                const protocol = encodingConfig.protocol;
+                const player = protocol === 'dash' ? 'Shaka' : 'HLS.js';
+                
+                const masterUrl = buildMasterUrl(content, encodingConfig, segment || 'll');
+                
+                try {
+                    const variant = await discoverAndSelectHighestVariant(masterUrl);
+                    
+                    // Use the master playlist/MPD so players can ABR
+                    const variantUrl = masterUrl;
+                    
+                    const videoId = `view2-video-${i + 1}`;
+                    
+                    const title = buildAbrTitle(player, encodingConfig.label);
+                    document.getElementById(`view2-title-${i + 1}`).textContent = title;
+                    const seg = segmentBadge(segment || 'll');
+                    setPanelBadges(`view2-badges-${i + 1}`, [
+                        badgeSpan(player, player === 'HTML5' ? 'native' : player === 'Video.js' ? 'videojs' : player === 'HLS.js' ? 'hlsjs' : 'shaka'),
+                        badgeSpan(protocol.toUpperCase(), protocol),
+                        (() => { const badge = codecBadgeFromSuffix(encodingConfig.suffix); return badgeSpan(badge.label, badge.klass); })(),
+                        badgeSpan(seg.text, seg.klass)
+                    ]);
+                    
+                    view2PlayerInstances[i] = await initPlayer(videoId, player, variantUrl, protocol, {
+                        abrEnabled: true,
+                        hlsAutoLevel: true
+                    });
+                } catch (error) {
+                    console.error(`View 2: Failed to load ${encodingKey}:`, error);
+                    document.getElementById(`view2-title-${i + 1}`).textContent = `Error loading ${encodingConfig.label}`;
+                }
+            }
+        }
+
+        // ========== VIEW 3: DYNAMIC VARIANTS ==========
+        let view3PlayerInstances = [];
+        
+        function onView3Change() {
+            const selectedProtocol = document.getElementById('view3-protocol').value;
+            const selectedCodec = document.getElementById('view3-codec').value;
+            const selectedSegment = document.getElementById('view3-segment').value;
+            CONFIG.view3.encoding = encodingKey(selectedProtocol, selectedCodec);
+            CONFIG.view3.segment = selectedSegment;
+            CONFIG.view3.player = document.getElementById('view3-player').value;
+            localStorage.setItem('bossSelectedProtocol', selectedProtocol);
+            localStorage.setItem('bossSelectedCodec', selectedCodec);
+            localStorage.setItem('bossSelectedSegment', selectedSegment);
+            
+            const encodingConfig = CONFIG.encodingOptions[CONFIG.view3.encoding];
+            const protocol = encodingConfig.protocol;
+            
+            // Check if player supports protocol
+            if (!playerSupportsProtocol(CONFIG.view3.player, protocol)) {
+                alert(`${CONFIG.view3.player} does not support ${protocol.toUpperCase()}. Please select Shaka for DASH.`);
+                return;
+            }
+            
+            console.log('View 3 changed:', CONFIG.view3);
+            loadVariants();
+        }
+
+        async function loadVariants() {
+            const { content, encoding, player, segment } = CONFIG.view3;
+            const encodingConfig = CONFIG.encodingOptions[encoding];
+            const protocol = encodingConfig.protocol;
+            const masterUrl = buildMasterUrl(content, encodingConfig, segment);
+
+            if (window.BOSSNav && typeof window.BOSSNav.setSelectedUrl === 'function') {
+                window.BOSSNav.setSelectedUrl(masterUrl);
+            } else {
+                localStorage.setItem('bossSelectedUrl', masterUrl);
+            }
+            
+            console.log('View 3: Fetching master playlist:', masterUrl);
+            
+            try {
+                const variants = await discoverVariants(masterUrl);
+                
+                if (variants.length === 0) {
+                    console.error('View 3: No variants discovered');
+                    alert('No variants found in master playlist');
+                    return;
+                }
+                
+                console.log(`View 3: Discovered ${variants.length} variants:`, variants);
+                
+                // For DASH, load the MPD in multiple players and pin each to a representation
+                if (protocol === 'dash') {
+                    const count = Math.min(4, variants.length);
+                    generateView3Grid(count);
+                    view3PlayerInstances.forEach(disposePlayer);
+                    view3PlayerInstances = [];
+
+                    for (let i = 0; i < count; i++) {
+                        const variant = variants[i];
+                        const videoId = `view3-video-${i + 1}`;
+                        const title = buildVariantTitle(variant);
+                        document.getElementById(`view3-title-${i + 1}`).textContent = title;
+                        const seg = segmentBadge(segment);
+                        setPanelBadges(`view3-badges-${i + 1}`, [
+                            badgeSpan(player, player === 'HTML5' ? 'native' : player === 'Video.js' ? 'videojs' : player === 'HLS.js' ? 'hlsjs' : 'shaka'),
+                            badgeSpan(protocol.toUpperCase(), protocol),
+                            (() => { const badge = codecBadgeFromSuffix(encodingConfig.suffix); return badgeSpan(badge.label, badge.klass); })(),
+                            badgeSpan(seg.text, seg.klass)
+                        ]);
+
+                        console.log(`View 3: Loading DASH representation ${i + 1}:`, title);
+                        view3PlayerInstances[i] = await initPlayer(videoId, player, masterUrl, protocol, {
+                            abrEnabled: false,
+                            shakaVariant: variant
+                        });
+                    }
+                } else {
+                    // For HLS, show each variant separately
+                    generateView3Grid(variants.length);
+                    
+                    view3PlayerInstances.forEach(disposePlayer);
+                    view3PlayerInstances = [];
+                    
+                    const baseUrl = masterUrl.substring(0, masterUrl.lastIndexOf('/') + 1);
+                    
+                    for (let i = 0; i < variants.length; i++) {
+                        const variant = variants[i];
+                        const videoId = `view3-video-${i + 1}`;
+                        const variantUrl = baseUrl + variant.filename;
+                        
+                        const title = buildVariantTitle(variant);
+                        document.getElementById(`view3-title-${i + 1}`).textContent = title;
+                        const seg = segmentBadge(segment);
+                        setPanelBadges(`view3-badges-${i + 1}`, [
+                            badgeSpan(player, player === 'HTML5' ? 'native' : player === 'Video.js' ? 'videojs' : player === 'HLS.js' ? 'hlsjs' : 'shaka'),
+                            badgeSpan(protocol.toUpperCase(), protocol),
+                            (() => { const badge = codecBadgeFromSuffix(encodingConfig.suffix); return badgeSpan(badge.label, badge.klass); })(),
+                            badgeSpan(seg.text, seg.klass)
+                        ]);
+                        
+                        console.log(`View 3: Loading variant ${i + 1}:`, title);
+                        
+                        view3PlayerInstances[i] = await initPlayer(videoId, player, variantUrl, protocol);
+                    }
+                }
+            } catch (error) {
+                console.error('View 3: Failed to load variants:', error);
+                alert('Failed to load variants: ' + error.message);
+            }
+        }
+
+        function generateView3Grid(count) {
+            const container = document.getElementById('view3-grid-container');
+            container.innerHTML = '';
+            
+            let gridClass;
+            if (count <= 4) {
+                gridClass = 'grid-2x2';
+            } else if (count <= 6) {
+                gridClass = 'grid-2x3';
+            } else if (count <= 9) {
+                gridClass = 'grid-3x3';
+                count = Math.min(count, 9);
+            } else {
+                gridClass = 'grid-3x3';
+                count = 9;
+            }
+            
+            container.className = gridClass;
+            
+            for (let i = 0; i < count; i++) {
+                const playerBox = document.createElement('div');
+                playerBox.className = 'player-box';
+                playerBox.innerHTML = `
+                    <h2 id="view3-title-${i + 1}" style="color: #f0f;">Loading...</h2>
+                    <div class="panel-badges" id="view3-badges-${i + 1}"></div>
+                    <div class="video-container">
+                        <video id="view3-video-${i + 1}" controls muted></video>
+                    </div>
+                    <div class="stats">
+                        <div class="stats-row">
+                            <span class="label">Current Time:</span>
+                            <span class="value" id="view3-time-${i + 1}">0.00s</span>
+                        </div>
+                        <div class="stats-row">
+                            <span class="label">State:</span>
+                            <span class="value" id="view3-state-${i + 1}">IDLE</span>
+                        </div>
+                    </div>
+                `;
+                container.appendChild(playerBox);
+            }
+        }
+
+        // Update stats for View 1
+        function updateStats() {
+            const shakaVideo = document.getElementById('shaka-video');
+            const hlsVideo = document.getElementById('hls-video');
+            
+            if (nativeVideo) {
+                document.getElementById('native-time').textContent = nativeVideo.currentTime.toFixed(2) + 's';
+                const buffered = nativeVideo.buffered;
+                if (buffered.length > 0) {
+                    const buf = buffered.end(buffered.length - 1) - nativeVideo.currentTime;
+                    document.getElementById('native-buffered').textContent = buf.toFixed(1) + 's';
+                }
+                document.getElementById('native-state').textContent = nativeVideo.paused ? 'PAUSED' : 'PLAYING';
+            }
+            
+            // Update Video.js stats
+            const videojsVideo = document.getElementById('videojs-video');
+            if (videojsPlayer && videojsVideo && !isNaN(videojsVideo.currentTime)) {
+                const currentTime = videojsVideo.currentTime;
+                const isPaused = videojsVideo.paused;
+                const buffered = videojsVideo.buffered;
+                
+                document.getElementById('videojs-time').textContent = currentTime.toFixed(2) + 's';
+                if (buffered.length > 0) {
+                    const buf = buffered.end(buffered.length - 1) - currentTime;
+                    document.getElementById('videojs-buffered').textContent = buf.toFixed(1) + 's';
+                }
+                document.getElementById('videojs-state').textContent = isPaused ? 'PAUSED' : 'PLAYING';
+            }
+            
+            if (hlsVideo && !isNaN(hlsVideo.currentTime)) {
+                document.getElementById('hls-time').textContent = hlsVideo.currentTime.toFixed(2) + 's';
+                const buffered = hlsVideo.buffered;
+                if (buffered.length > 0) {
+                    const buf = buffered.end(buffered.length - 1) - hlsVideo.currentTime;
+                    document.getElementById('hls-buffered').textContent = buf.toFixed(1) + 's';
+                }
+                document.getElementById('hls-state').textContent = hlsVideo.paused ? 'PAUSED' : 'PLAYING';
+            }
+            
+            if (shakaVideo && !isNaN(shakaVideo.currentTime)) {
+                document.getElementById('shaka-time').textContent = shakaVideo.currentTime.toFixed(2) + 's';
+                const buffered = shakaVideo.buffered;
+                if (buffered.length > 0) {
+                    const buf = buffered.end(buffered.length - 1) - shakaVideo.currentTime;
+                    document.getElementById('shaka-buffered').textContent = buf.toFixed(1) + 's';
+                }
+                document.getElementById('shaka-state').textContent = shakaVideo.paused ? 'PAUSED' : 'PLAYING';
+            }
+            
+        }
+
+        // Update stats for View 2
+        function updateEncodingStats() {
+            for (let i = 0; i < 4; i++) {
+                const instance = view2PlayerInstances[i];
+                if (!instance) continue;
+                
+                let currentTime, isPaused;
+                
+                if (instance.type === 'videojs') {
+                    currentTime = instance.player.currentTime();
+                    isPaused = instance.player.paused();
+                } else {
+                    currentTime = instance.element.currentTime;
+                    isPaused = instance.element.paused;
+                }
+                
+                document.getElementById(`view2-time-${i + 1}`).textContent = 
+                    currentTime.toFixed(2) + 's';
+                document.getElementById(`view2-state-${i + 1}`).textContent = 
+                    isPaused ? 'PAUSED' : 'PLAYING';
+            }
+        }
+
+        // Update stats for View 3
+        function updateVariantStats() {
+            view3PlayerInstances.forEach((instance, index) => {
+                if (!instance) return;
+                
+                let currentTime, isPaused;
+                
+                if (instance.type === 'videojs') {
+                    currentTime = instance.player.currentTime();
+                    isPaused = instance.player.paused();
+                } else {
+                    currentTime = instance.element.currentTime;
+                    isPaused = instance.element.paused;
+                }
+                
+                document.getElementById(`view3-time-${index + 1}`).textContent = 
+                    currentTime.toFixed(2) + 's';
+                document.getElementById(`view3-state-${index + 1}`).textContent = 
+                    isPaused ? 'PAUSED' : 'PLAYING';
+            });
+        }
+
+        // Initialize on load
+        document.addEventListener('DOMContentLoaded', async () => {
+            console.log('DOM Content Loaded - Initializing players...');
+            
+            try {
+                await loadContentOptions();
+                initShaka();
+                initHls();
+                initVideojs();
+                initHTML5();
+                
+                console.log('Player instances initialized, loading View 1...');
+                await loadPlayers();
+                view1Loaded = true;
+                console.log('View 1 loaded successfully');
+            } catch (error) {
+                console.error('Failed to initialize:', error);
+                alert('Failed to initialize players: ' + error.message);
+            }
+
+            initContextMenu();
+            
+            setInterval(() => {
+                if (currentTab === 'players') {
+                    updateStats();
+                } else if (currentTab === 'encodings') {
+                    updateEncodingStats();
+                } else if (currentTab === 'variants') {
+                    updateVariantStats();
+                }
+            }, 100);
+        });
+    </script>
+    </div>
+    <script src="/shared-nav.js"></script>
+</body>
+</html>

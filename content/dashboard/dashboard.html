@@ -1,0 +1,325 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dashboard - InfiniteStream</title>
+    <link rel="stylesheet" href="/shared-styles.css">
+</head>
+<body>
+    <!-- Content will be injected by shared-nav.js -->
+    <div class="boss-content-standard">
+        
+        <!-- Welcome Section -->
+        <div style="margin-bottom: 32px;">
+            <h1 style="font-size: 32px; font-weight: 400; margin-bottom: 8px; color: var(--text-primary);">
+                Welcome to InfiniteStream
+            </h1>
+            <p style="font-size: 16px; color: var(--text-secondary);">
+                Media testing platform for HLS, DASH, and live streaming
+            </p>
+        </div>
+
+        <!-- Quick Stats Cards -->
+        <div class="grid grid-cols-4" style="margin-bottom: 32px; gap: 12px;" id="statsGrid">
+            <a href="/dashboard/sources.html" class="card" style="text-decoration: none; cursor: pointer; transition: transform 0.2s, box-shadow 0.2s;" onmouseover="this.style.transform='translateY(-2px)'; this.style.boxShadow='0 4px 12px rgba(0,0,0,0.15)'" onmouseout="this.style.transform=''; this.style.boxShadow=''">
+                <div class="card-body" style="text-align: center;">
+                    <div style="font-size: 30px; font-weight: 400; color: var(--primary-blue); margin-bottom: 6px;" id="sourcesCount">
+                        <div class="spinner" style="margin: 0 auto;"></div>
+                    </div>
+                    <div style="font-size: 13px; color: var(--text-secondary);">Sources</div>
+                </div>
+            </a>
+            <a href="/dashboard/jobs.html" class="card" style="text-decoration: none; cursor: pointer; transition: transform 0.2s, box-shadow 0.2s;" onmouseover="this.style.transform='translateY(-2px)'; this.style.boxShadow='0 4px 12px rgba(0,0,0,0.15)'" onmouseout="this.style.transform=''; this.style.boxShadow=''">
+                <div class="card-body" style="text-align: center;">
+                    <div style="font-size: 30px; font-weight: 400; color: var(--warning); margin-bottom: 6px;" id="activeJobsCount">
+                        <div class="spinner" style="margin: 0 auto;"></div>
+                    </div>
+                    <div style="font-size: 13px; color: var(--text-secondary);">Active Jobs</div>
+                </div>
+            </a>
+            <a href="/dashboard/go-monitor.html" class="card" style="text-decoration: none; cursor: pointer; transition: transform 0.2s, box-shadow 0.2s;" onmouseover="this.style.transform='translateY(-2px)'; this.style.boxShadow='0 4px 12px rgba(0,0,0,0.15)'" onmouseout="this.style.transform=''; this.style.boxShadow=''">
+                <div class="card-body" style="text-align: center;">
+                    <div style="font-size: 30px; font-weight: 400; color: var(--success); margin-bottom: 6px;" id="liveStreamsCount">
+                        <div class="spinner" style="margin: 0 auto;"></div>
+                    </div>
+                    <div style="font-size: 13px; color: var(--text-secondary);">Live Streams</div>
+                </div>
+            </a>
+            <div class="card">
+                <div class="card-body" style="text-align: center;">
+                    <div style="font-size: 30px; font-weight: 400; color: var(--text-secondary); margin-bottom: 6px;" id="contentCount">
+                        <div class="spinner" style="margin: 0 auto;"></div>
+                    </div>
+                    <div style="font-size: 13px; color: var(--text-secondary);">Content Items</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Main Action Cards -->
+        <div class="grid grid-cols-3" style="margin-bottom: 32px;">
+            
+            <!-- Content Management -->
+            <div class="card">
+                <div class="card-header">
+                    <div>
+                        <div class="card-title">📤 Content Management</div>
+                        <div class="card-subtitle">Upload and encode video content</div>
+                    </div>
+                </div>
+                <div class="card-body">
+                    <p style="color: var(--text-secondary); margin-bottom: 20px; line-height: 1.6;">
+                        Upload MP4 files and transcode them into multi-bitrate ABR streaming packages with H.264 and HEVC codecs.
+                    </p>
+                    <div style="display: flex; flex-direction: column; gap: 12px;">
+                        <a href="/dashboard/upload.html" class="btn btn-primary" style="width: 100%;">
+                            Upload New Content
+                        </a>
+                        <a href="/dashboard/sources.html" class="btn btn-secondary" style="width: 100%;">
+                            Browse Source Library
+                        </a>
+                        <a href="/dashboard/jobs.html" class="btn btn-secondary" style="width: 100%;">
+                            View Encoding Jobs
+                        </a>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Playback -->
+            <div class="card">
+                <div class="card-header">
+                    <div>
+                        <div class="card-title">🎮 Playback</div>
+                        <div class="card-subtitle">Player testing and debugging</div>
+                    </div>
+                </div>
+                <div class="card-body">
+                    <p style="color: var(--text-secondary); margin-bottom: 20px; line-height: 1.6;">
+                        Test your streams with multiple players, debug playback issues, and compare player behavior.
+                    </p>
+                    <div style="display: flex; flex-direction: column; gap: 12px;">
+                        <a href="/dashboard/playback.html" class="btn btn-primary" style="width: 100%;">
+                            Playback
+                        </a>
+                        <a href="/dashboard/quartet.html" class="btn btn-secondary" style="width: 100%;">
+                            Quartet Comparison
+                        </a>
+                        <a href="/dashboard/grid.html" class="btn btn-secondary" style="width: 100%;">
+                            Mosaic ⚠️
+                        </a>
+                        <a href="/dashboard/segment-duration-comparison.html" class="btn btn-secondary" style="width: 100%;">
+                            Live Offset (2s/4s/6s)
+                        </a>
+                        <a href="/testing/shaka-player-test.html" class="btn btn-secondary" style="width: 100%;" data-developer-only>
+                            Shaka Player
+                        </a>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Live Streaming -->
+            <div class="card">
+                <div class="card-header">
+                    <div>
+                        <div class="card-title">🔴 Live Streaming</div>
+                        <div class="card-subtitle">Live stream simulation & testing</div>
+                    </div>
+                </div>
+                <div class="card-body">
+                    <p style="color: var(--text-secondary); margin-bottom: 20px; line-height: 1.6;">
+                        Simulate live streaming scenarios, test low-latency playback, and monitor stream health.
+                    </p>
+                    <div style="display: flex; flex-direction: column; gap: 12px;">
+                        <a href="/dashboard/go-monitor.html" class="btn btn-primary" style="width: 100%;">
+                            Stream Monitor
+                        </a>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Recent Activity -->
+        <div class="grid grid-cols-2">
+            
+            <!-- Recent Jobs -->
+            <div class="card">
+                <div class="card-header">
+                    <div class="card-title">Recent Encoding Jobs</div>
+                    <a href="/dashboard/jobs.html" class="btn-text btn-sm">View All</a>
+                </div>
+                <div class="card-body" style="padding: 0;">
+                    <div id="recentJobs">
+                        <div style="padding: 40px; text-align: center;">
+                            <div class="spinner" style="margin: 0 auto;"></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Recent Sources -->
+            <div class="card">
+                <div class="card-header">
+                    <div class="card-title">Recent Sources</div>
+                    <a href="/dashboard/sources.html" class="btn-text btn-sm">View All</a>
+                </div>
+                <div class="card-body" style="padding: 0;">
+                    <div id="recentSources">
+                        <div style="padding: 40px; text-align: center;">
+                            <div class="spinner" style="margin: 0 auto;"></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Warning Alert for Grid -->
+        <div class="alert alert-warning" style="margin-top: 32px;">
+            <span class="alert-icon">⚠️</span>
+            <div class="alert-content">
+                <div class="alert-title">Resource Intensive Tools</div>
+                <div>The Mosaic Player runs 16 simultaneous video players and can be resource intensive. Use single-player test pages for lighter debugging.</div>
+            </div>
+        </div>
+    </div>
+
+    <script src="/shared-nav.js"></script>
+    <script>
+        // Fetch and display statistics
+        async function loadStats() {
+            try {
+                // Fetch sources
+                const sourcesResp = await fetch('/api/sources');
+                const sourcesData = await sourcesResp.json();
+                const sources = sourcesData.sources || [];
+                document.getElementById('sourcesCount').textContent = sources.length;
+
+                // Fetch jobs
+                const jobsResp = await fetch('/api/jobs');
+                const jobsData = await jobsResp.json();
+                const jobs = jobsData.jobs || [];
+                
+                const activeJobs = jobs.filter(j => j.status === 'queued' || j.status === 'encoding');
+                
+                document.getElementById('activeJobsCount').textContent = activeJobs.length;
+
+                // Fetch live streams status
+                const statusResp = await fetch('/go-live/api/status');
+                const statusData = await statusResp.json();
+                const liveStreamsCount = Array.isArray(statusData.active_streams)
+                    ? statusData.active_streams.length
+                    : (statusData.active_processes || 0);
+                document.getElementById('liveStreamsCount').textContent = liveStreamsCount;
+
+                // Fetch content
+                const contentResp = await fetch('/api/content');
+                const contentData = await contentResp.json();
+                const contentItems = Array.isArray(contentData) ? contentData : [];
+                const uniqueContent = new Set(
+                    contentItems.map(item => (item.name || '').replace(/_h264|_hevc|_av1|_ts|_hw|_dash/g, ''))
+                );
+                document.getElementById('contentCount').textContent = uniqueContent.size || 0;
+
+                // Display recent jobs
+                displayRecentJobs(jobs.slice(0, 5));
+                
+                // Display recent sources
+                displayRecentSources(sources.slice(0, 5));
+
+            } catch (error) {
+                console.error('Error loading stats:', error);
+                document.getElementById('sourcesCount').textContent = '—';
+                document.getElementById('activeJobsCount').textContent = '—';
+                document.getElementById('liveStreamsCount').textContent = '—';
+                document.getElementById('contentCount').textContent = '—';
+            }
+        }
+
+        function displayRecentJobs(jobs) {
+            const container = document.getElementById('recentJobs');
+            
+            if (jobs.length === 0) {
+                container.innerHTML = '<div class="empty-state" style="padding: 30px;"><div class="empty-state-description">No encoding jobs yet</div></div>';
+                return;
+            }
+
+            let html = '<table class="table"><tbody>';
+            jobs.forEach(job => {
+                const statusClass = `badge-${getStatusClass(job.status)}`;
+                const date = new Date(job.created_at).toLocaleDateString();
+                
+                html += `<tr>
+                    <td><a href="/dashboard/job-detail.html?id=${job.job_id}" style="color: var(--primary-blue); text-decoration: none;">${escapeHtml(job.name)}</a></td>
+                    <td><span class="badge ${statusClass}">${job.status}</span></td>
+                    <td style="text-align: right; color: var(--text-secondary); font-size: 12px;">${date}</td>
+                </tr>`;
+            });
+            html += '</tbody></table>';
+            
+            container.innerHTML = html;
+        }
+
+        function displayRecentSources(sources) {
+            const container = document.getElementById('recentSources');
+            
+            if (sources.length === 0) {
+                container.innerHTML = '<div class="empty-state" style="padding: 30px;"><div class="empty-state-description">No sources uploaded yet</div></div>';
+                return;
+            }
+
+            let html = '<table class="table"><tbody>';
+            sources.forEach(source => {
+                const size = formatFileSize(source.file_size);
+                const date = new Date(source.uploaded_at).toLocaleDateString();
+                
+                html += `<tr>
+                    <td><a href="/dashboard/sources.html" style="color: var(--primary-blue); text-decoration: none;">${escapeHtml(source.name)}</a></td>
+                    <td style="color: var(--text-secondary); font-size: 12px;">${size}</td>
+                    <td style="text-align: right; color: var(--text-secondary); font-size: 12px;">${date}</td>
+                </tr>`;
+            });
+            html += '</tbody></table>';
+            
+            container.innerHTML = html;
+        }
+
+        function getStatusClass(status) {
+            const map = {
+                'queued': 'warning',
+                'encoding': 'info',
+                'complete': 'success',
+                'failed': 'error',
+                'cancelled': 'neutral'
+            };
+            return map[status] || 'neutral';
+        }
+
+        function formatFileSize(bytes) {
+            if (bytes === 0) return '0 B';
+            const k = 1024;
+            const sizes = ['B', 'KB', 'MB', 'GB'];
+            const i = Math.floor(Math.log(bytes) / Math.log(k));
+            return Math.round(bytes / Math.pow(k, i) * 100) / 100 + ' ' + sizes[i];
+        }
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        // Load stats on page load
+        loadStats();
+
+        // Handle developer mode visibility
+        const isDeveloperMode = new URLSearchParams(window.location.search).get('developer') === '1';
+        if (!isDeveloperMode) {
+            document.querySelectorAll('[data-developer-only]').forEach(el => {
+                el.style.display = 'none';
+            });
+        }
+
+        // Refresh stats every 30 seconds
+        setInterval(loadStats, 30000);
+    </script>
+</body>
+</html>

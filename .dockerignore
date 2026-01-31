@@ -1,0 +1,23 @@
+# VCS
+.git
+
+# macOS
+.DS_Store
+
+# Python caches
+__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+
+# Dev/test artifacts
+hlstools/
+tests/
+certs/
+
+generate_abr/__pycache__/
+generate_abr/.ruff_cache/
+generate_abr/venv/
+
+generate_abr/**/*.mp4
+generate_abr/**/*.log

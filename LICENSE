@@ -1,0 +1,29 @@
+Boss-Server License (Attribution + Internal Use + No Productization)
+
+Copyright (c) 2026 Jonathan Oliver
+
+Permission is hereby granted, free of charge, to any person or organization obtaining a copy
+of this software and associated documentation files (the "Software"), to use, copy, modify,
+and fork the Software, subject to the following conditions:
+
+1) Attribution. Any redistribution of the Software or substantial portions of it, in source
+   or binary form, must include clear attribution to "Jonathan Oliver" in a NOTICE file
+   and in any public-facing documentation.
+
+2) Internal Use Allowed. Use of the Software for personal projects and for internal
+   organizational purposes (including commercial organizations) is permitted.
+
+3) No Productization Without Permission. You may not sell, sublicense, bundle, or offer
+   the Software (or a derivative) as a commercial product or service without prior written
+   permission from Jonathan Oliver. This includes SaaS offerings, paid integrations, or
+   proprietary products derived from the Software.
+
+4) Forks Allowed. Public forks are allowed provided attribution is maintained and the
+   restrictions above are preserved.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
+INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR
+PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE
+FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
+OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.

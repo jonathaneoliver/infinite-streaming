@@ -1,0 +1,230 @@
+package util
+
+import (
+	"bufio"
+	"encoding/xml"
+	"os"
+	"path/filepath"
+	"regexp"
+	"sort"
+	"strconv"
+	"strings"
+)
+
+type ContentInfo struct {
+	Name            string  `json:"name"`
+	HasDash         bool    `json:"has_dash"`
+	HasHls          bool    `json:"has_hls"`
+	SegmentDuration *int    `json:"segment_duration"`
+	MaxResolution   *string `json:"max_resolution"`
+	MaxHeight       *int    `json:"max_height"`
+}
+
+func ListContent(contentDir string) ([]ContentInfo, error) {
+	entries, err := os.ReadDir(contentDir)
+	if err != nil {
+		return nil, err
+	}
+
+	var contentList []ContentInfo
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if strings.HasPrefix(name, ".") || strings.HasPrefix(name, "_") {
+			continue
+		}
+		itemPath := filepath.Join(contentDir, name)
+		hasDash := fileExists(filepath.Join(itemPath, "manifest.mpd"))
+		hasHls := fileExists(filepath.Join(itemPath, "master.m3u8"))
+		if !hasDash && !hasHls {
+			continue
+		}
+		segmentDuration := detectSegmentDuration(itemPath)
+		maxResolution, maxHeight := detectMaxResolution(itemPath)
+		contentList = append(contentList, ContentInfo{
+			Name:            name,
+			HasDash:         hasDash,
+			HasHls:          hasHls,
+			SegmentDuration: segmentDuration,
+			MaxResolution:   maxResolution,
+			MaxHeight:       maxHeight,
+		})
+	}
+
+	sort.Slice(contentList, func(i, j int) bool {
+		return contentList[i].Name < contentList[j].Name
+	})
+
+	return contentList, nil
+}
+
+func detectSegmentDuration(contentPath string) *int {
+	hlsDirs := []string{"720p", "540p", "360p", "1080p"}
+	for _, dir := range hlsDirs {
+		playlistPath := filepath.Join(contentPath, dir, "playlist.m3u8")
+		if !fileExists(playlistPath) {
+			continue
+		}
+		if dur := parseHlsPlaylistDuration(playlistPath); dur != nil {
+			return dur
+		}
+	}
+
+	// Fallback to DASH manifest
+	manifestPath := filepath.Join(contentPath, "manifest.mpd")
+	if fileExists(manifestPath) {
+		if dur := parseDashSegmentDuration(manifestPath); dur != nil {
+			return dur
+		}
+	}
+
+	return nil
+}
+
+func parseHlsPlaylistDuration(path string) *int {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil
+	}
+	defer file.Close()
+
+	var durations []float64
+	var targetDuration *int
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if strings.HasPrefix(line, "#EXTINF:") {
+			val := strings.TrimPrefix(line, "#EXTINF:")
+			val = strings.TrimSuffix(val, ",")
+			if f, err := strconv.ParseFloat(val, 64); err == nil {
+				durations = append(durations, f)
+				if len(durations) >= 10 {
+					break
+				}
+			}
+		} else if strings.HasPrefix(line, "#EXT-X-TARGETDURATION:") && targetDuration == nil {
+			val := strings.TrimPrefix(line, "#EXT-X-TARGETDURATION:")
+			if v, err := strconv.Atoi(strings.TrimSpace(val)); err == nil {
+				targetDuration = &v
+			}
+		}
+	}
+
+	if len(durations) > 0 {
+		var sum float64
+		for _, v := range durations {
+			sum += v
+		}
+		avg := sum / float64(len(durations))
+		rounded := int(avg + 0.5)
+		return &rounded
+	}
+
+	return targetDuration
+}
+
+func parseDashSegmentDuration(path string) *int {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+
+	type segmentList struct {
+		Timescale string `xml:"timescale,attr"`
+		Timeline  struct {
+			S struct {
+				D string `xml:"d,attr"`
+			} `xml:"S"`
+		} `xml:"SegmentTimeline"`
+	}
+
+	decoder := xml.NewDecoder(strings.NewReader(string(data)))
+	for {
+		tok, err := decoder.Token()
+		if err != nil {
+			return nil
+		}
+		switch elem := tok.(type) {
+		case xml.StartElement:
+			if elem.Name.Local != "SegmentList" {
+				continue
+			}
+			var list segmentList
+			if err := decoder.DecodeElement(&list, &elem); err != nil {
+				continue
+			}
+			timescale, _ := strconv.ParseFloat(list.Timescale, 64)
+			if timescale == 0 {
+				timescale = 1
+			}
+			if list.Timeline.S.D != "" {
+				if d, err := strconv.ParseFloat(list.Timeline.S.D, 64); err == nil {
+					segSeconds := d / timescale
+					rounded := int(segSeconds + 0.5)
+					return &rounded
+				}
+			}
+		}
+	}
+}
+
+func detectMaxResolution(contentPath string) (*string, *int) {
+	var heights []int
+	entries, err := os.ReadDir(contentPath)
+	if err == nil {
+		re := regexp.MustCompile(`^(\d{3,4})p$`)
+		for _, entry := range entries {
+			if !entry.IsDir() {
+				continue
+			}
+			match := re.FindStringSubmatch(entry.Name())
+			if match != nil {
+				if val, err := strconv.Atoi(match[1]); err == nil {
+					heights = append(heights, val)
+				}
+			}
+		}
+	}
+
+	if len(heights) == 0 {
+		// Fallback: parse master.m3u8 for RESOLUTION tags
+		masterPath := filepath.Join(contentPath, "master.m3u8")
+		if fileExists(masterPath) {
+			file, err := os.Open(masterPath)
+			if err == nil {
+				defer file.Close()
+				re := regexp.MustCompile(`RESOLUTION=(\d+)x(\d+)`)
+				scanner := bufio.NewScanner(file)
+				for scanner.Scan() {
+					line := scanner.Text()
+					match := re.FindStringSubmatch(line)
+					if match != nil {
+						if val, err := strconv.Atoi(match[2]); err == nil {
+							heights = append(heights, val)
+						}
+					}
+				}
+			}
+		}
+	}
+
+	if len(heights) == 0 {
+		return nil, nil
+	}
+
+	maxHeight := heights[0]
+	for _, h := range heights[1:] {
+		if h > maxHeight {
+			maxHeight = h
+		}
+	}
+	res := strconv.Itoa(maxHeight) + "p"
+	return &res, &maxHeight
+}
+
+func fileExists(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && !info.IsDir()
+}

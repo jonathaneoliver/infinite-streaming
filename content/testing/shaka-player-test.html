@@ -1,0 +1,575 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Shaka Analysis</title>
+    <link rel="stylesheet" href="/shared-styles.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/shaka-player/4.7.11/shaka-player.compiled.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/shaka-player/4.7.11/shaka-player.ui.min.js"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/shaka-player/4.7.11/controls.min.css">
+    <style>
+        .analysis-layout {
+            display: grid;
+            grid-template-columns: minmax(360px, 1.1fr) minmax(320px, 0.9fr);
+            gap: 16px;
+            align-items: start;
+        }
+        .player-shell {
+            background: #0b0b0b;
+            border-radius: var(--radius-lg);
+            border: 1px solid var(--border);
+            overflow: hidden;
+            box-shadow: var(--shadow-md);
+        }
+        .player-shell video {
+            width: 100%;
+            height: auto;
+            display: block;
+            background: #000;
+        }
+        .control-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+            gap: 12px;
+        }
+        .control-group {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }
+        .control-group label {
+            font-size: 12px;
+            color: var(--text-secondary);
+        }
+        .control-group input,
+        .control-group select {
+            padding: 8px 10px;
+            border-radius: 8px;
+            border: 1px solid var(--border);
+            background: #fff;
+            font-size: 13px;
+        }
+        .control-actions {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+        }
+        .analysis-card {
+            background: #fff;
+            border: 1px solid var(--border);
+            border-radius: var(--radius-md);
+            padding: 14px;
+            box-shadow: var(--shadow-sm);
+        }
+        .analysis-card h3 {
+            font-size: 14px;
+            margin-bottom: 10px;
+            color: var(--text-primary);
+        }
+        .stat-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+            gap: 8px;
+        }
+        .stat-item {
+            padding: 8px 10px;
+            border-radius: 8px;
+            border: 1px solid var(--border-light);
+            background: var(--surface);
+        }
+        .stat-label {
+            font-size: 11px;
+            color: var(--text-secondary);
+        }
+        .stat-value {
+            font-weight: 600;
+            font-size: 13px;
+            color: var(--text-primary);
+        }
+        .log-panel {
+            max-height: 320px;
+            overflow-y: auto;
+            background: #0c0c0c;
+            color: #d0d6db;
+            border-radius: var(--radius-md);
+            padding: 10px;
+            font-family: "SFMono-Regular", Menlo, Consolas, monospace;
+            font-size: 11px;
+            border: 1px solid #1f2933;
+        }
+        .log-entry {
+            margin-bottom: 6px;
+            padding-left: 8px;
+            border-left: 2px solid #4b5563;
+        }
+        .log-entry.error { border-color: #ef4444; color: #fecaca; }
+        .log-entry.warn { border-color: #f59e0b; color: #fde68a; }
+        .log-entry.info { border-color: #38bdf8; color: #bae6fd; }
+        .log-entry.event { border-color: #22c55e; color: #bbf7d0; }
+        .range-bar {
+            position: relative;
+            height: 28px;
+            background: #f1f5f9;
+            border-radius: 14px;
+            overflow: hidden;
+            border: 1px solid var(--border-light);
+        }
+        .range-seekable {
+            position: absolute;
+            top: 4px;
+            height: 20px;
+            background: #94a3b8;
+            opacity: 0.7;
+        }
+        .range-buffered {
+            position: absolute;
+            top: 6px;
+            height: 16px;
+            background: #22c55e;
+            opacity: 0.85;
+        }
+        .range-current {
+            position: absolute;
+            top: 2px;
+            width: 3px;
+            height: 24px;
+            background: #2563eb;
+        }
+        .range-live {
+            position: absolute;
+            top: 2px;
+            width: 3px;
+            height: 24px;
+            background: #ef4444;
+        }
+        .range-legend {
+            display: flex;
+            gap: 10px;
+            font-size: 11px;
+            color: var(--text-secondary);
+            margin-top: 6px;
+        }
+        .pill {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 4px 10px;
+            border-radius: 999px;
+            font-size: 11px;
+            font-weight: 600;
+            background: var(--surface);
+            border: 1px solid var(--border-light);
+        }
+        .pill.live { color: #dc2626; border-color: #fecaca; background: #fef2f2; }
+        .pill.vod { color: #0f766e; border-color: #99f6e4; background: #ecfeff; }
+        .inline-meta {
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+            margin-top: 6px;
+        }
+        .small {
+            font-size: 12px;
+            color: var(--text-secondary);
+        }
+        @media (max-width: 1100px) {
+            .analysis-layout {
+                grid-template-columns: 1fr;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="boss-content-standard">
+        <div style="margin-bottom: 16px;">
+            <h1 style="font-size: 24px; font-weight: 500;">Shaka Player Analysis</h1>
+            <p class="small">Local Shaka test harness with live metrics, buffered/seekable visualization, and event logging.</p>
+        </div>
+
+        <div class="card" style="margin-bottom: 16px;">
+            <div class="card-body">
+                <div class="control-grid">
+                    <div class="control-group" style="grid-column: span 2;">
+                        <label for="streamUrl">Stream URL</label>
+                        <input id="streamUrl" type="text" placeholder="https://.../manifest.mpd or .../master.m3u8">
+                        <div class="small" id="selectedContentLabel">Selected: –</div>
+                    </div>
+                    <div class="control-group">
+                        <label for="autoplayToggle">Autoplay</label>
+                        <select id="autoplayToggle">
+                            <option value="muted">Autoplay (Muted)</option>
+                            <option value="sound">Autoplay (Sound)</option>
+                            <option value="manual">Manual Start</option>
+                        </select>
+                    </div>
+                    <div class="control-group">
+                        <label for="abrToggle">ABR</label>
+                        <select id="abrToggle">
+                            <option value="on">Enabled</option>
+                            <option value="off">Disabled</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="control-actions" style="margin-top: 12px;">
+                    <button class="btn btn-primary" id="loadBtn">Load Stream</button>
+                    <button class="btn btn-secondary" id="reloadBtn">Reload</button>
+                    <button class="btn btn-secondary" id="toggleMuteBtn">Toggle Mute</button>
+                </div>
+            </div>
+        </div>
+
+        <div class="analysis-layout">
+            <div>
+                <div class="player-shell" id="videoContainer">
+                    <video id="video" autoplay playsinline></video>
+                </div>
+                <div class="analysis-card" style="margin-top: 12px;">
+                    <h3>Seekable & Buffered Range</h3>
+                    <div class="range-bar" id="rangeBar">
+                        <div class="range-seekable" id="seekableBar"></div>
+                        <div class="range-buffered" id="bufferedBar"></div>
+                        <div class="range-current" id="currentMarker"></div>
+                        <div class="range-live" id="liveMarker"></div>
+                    </div>
+                    <div class="range-legend">
+                        <span>Seekable</span>
+                        <span>Buffered</span>
+                        <span>Current</span>
+                        <span>Live Edge</span>
+                    </div>
+                </div>
+            </div>
+
+            <div style="display: flex; flex-direction: column; gap: 12px;">
+                <div class="analysis-card">
+                    <h3>Playback State</h3>
+                    <div class="inline-meta" id="livePills"></div>
+                    <div class="stat-grid" id="playbackStats"></div>
+                </div>
+                <div class="analysis-card">
+                    <h3>Shaka Player Stats</h3>
+                    <div class="stat-grid" id="shakaStats"></div>
+                </div>
+                <div class="analysis-card">
+                    <h3>Tracks / Variant</h3>
+                    <div class="stat-grid" id="trackStats"></div>
+                </div>
+                <div class="analysis-card">
+                    <h3>Networking</h3>
+                    <div class="stat-grid" id="networkStats"></div>
+                </div>
+                <div class="analysis-card">
+                    <h3>Event Log</h3>
+                    <div class="log-panel" id="eventLog"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="/shared-nav.js"></script>
+    <script>
+        const video = document.getElementById('video');
+        const streamUrlInput = document.getElementById('streamUrl');
+        const autoplayToggle = document.getElementById('autoplayToggle');
+        const abrToggle = document.getElementById('abrToggle');
+        const loadBtn = document.getElementById('loadBtn');
+        const reloadBtn = document.getElementById('reloadBtn');
+        const toggleMuteBtn = document.getElementById('toggleMuteBtn');
+        const selectedContentLabel = document.getElementById('selectedContentLabel');
+        const playbackStats = document.getElementById('playbackStats');
+        const shakaStats = document.getElementById('shakaStats');
+        const trackStats = document.getElementById('trackStats');
+        const networkStats = document.getElementById('networkStats');
+        const eventLog = document.getElementById('eventLog');
+        const livePills = document.getElementById('livePills');
+
+        const seekableBar = document.getElementById('seekableBar');
+        const bufferedBar = document.getElementById('bufferedBar');
+        const currentMarker = document.getElementById('currentMarker');
+        const liveMarker = document.getElementById('liveMarker');
+
+        let player = null;
+        let ui = null;
+        let updateTimer = null;
+        let lastUrl = '';
+        let requestCounts = {};
+        let responseCounts = {};
+        let lastRequest = null;
+        let lastResponse = null;
+
+        function logEvent(message, level = 'info') {
+            const entry = document.createElement('div');
+            entry.className = `log-entry ${level}`;
+            const timestamp = new Date().toLocaleTimeString();
+            entry.textContent = `[${timestamp}] ${message}`;
+            eventLog.prepend(entry);
+            while (eventLog.children.length > 120) {
+                eventLog.removeChild(eventLog.lastChild);
+            }
+        }
+
+        function getSelectedUrl() {
+            const params = new URLSearchParams(window.location.search);
+            const fromParam = params.get('src');
+            if (fromParam) {
+                return fromParam;
+            }
+            return localStorage.getItem('bossSelectedUrl') || '';
+        }
+
+        function setSelectedUrl(url) {
+            if (url) {
+                localStorage.setItem('bossSelectedUrl', url);
+            }
+            if (window.BOSSNav && window.BOSSNav.updateSelectedContentBadge) {
+                window.BOSSNav.updateSelectedContentBadge();
+            }
+        }
+
+        function updateSelectedLabel() {
+            const content = localStorage.getItem('bossSelectedContentFull') || localStorage.getItem('bossSelectedContent') || '—';
+            selectedContentLabel.textContent = `Selected: ${content}`;
+        }
+
+        function renderStatGrid(container, items) {
+            container.innerHTML = '';
+            items.forEach(({ label, value }) => {
+                const item = document.createElement('div');
+                item.className = 'stat-item';
+                const labelEl = document.createElement('div');
+                labelEl.className = 'stat-label';
+                labelEl.textContent = label;
+                const valueEl = document.createElement('div');
+                valueEl.className = 'stat-value';
+                valueEl.textContent = value;
+                item.appendChild(labelEl);
+                item.appendChild(valueEl);
+                container.appendChild(item);
+            });
+        }
+
+        function renderPills(isLive) {
+            livePills.innerHTML = '';
+            const pill = document.createElement('span');
+            pill.className = `pill ${isLive ? 'live' : 'vod'}`;
+            pill.textContent = isLive ? 'LIVE' : 'VOD';
+            livePills.appendChild(pill);
+            const manifestType = player ? player.getManifestType && player.getManifestType() : null;
+            if (manifestType) {
+                const typePill = document.createElement('span');
+                typePill.className = 'pill';
+                typePill.textContent = manifestType.toUpperCase();
+                livePills.appendChild(typePill);
+            }
+        }
+
+        function formatRange(ranges) {
+            if (!ranges || !ranges.length) {
+                return '—';
+            }
+            return ranges.map(r => `${r.start.toFixed(2)} - ${r.end.toFixed(2)}`).join(' | ');
+        }
+
+        function updateRangeBar(seekRange, bufferedRanges, currentTime) {
+            const start = seekRange ? seekRange.start : 0;
+            const end = seekRange ? seekRange.end : 0;
+            const windowSize = Math.max(0.1, end - start);
+
+            const toPercent = (value) => ((value - start) / windowSize) * 100;
+
+            const seekStart = 0;
+            const seekWidth = 100;
+            seekableBar.style.left = `${seekStart}%`;
+            seekableBar.style.width = `${seekWidth}%`;
+
+            if (bufferedRanges && bufferedRanges.length) {
+                const bufStart = Math.max(start, bufferedRanges[0].start);
+                const bufEnd = Math.min(end, bufferedRanges[bufferedRanges.length - 1].end);
+                bufferedBar.style.left = `${toPercent(bufStart)}%`;
+                bufferedBar.style.width = `${Math.max(0, toPercent(bufEnd) - toPercent(bufStart))}%`;
+            } else {
+                bufferedBar.style.width = '0%';
+            }
+
+            const currentPos = toPercent(currentTime);
+            currentMarker.style.left = `${Math.min(100, Math.max(0, currentPos))}%`;
+
+            const livePos = toPercent(end);
+            liveMarker.style.left = `${Math.min(100, Math.max(0, livePos))}%`;
+        }
+
+        function updateMetrics() {
+            if (!player) {
+                return;
+            }
+            const stats = player.getStats ? player.getStats() : {};
+            const seekRange = player.seekRange ? player.seekRange() : { start: 0, end: 0 };
+            const bufferedInfo = player.getBufferedInfo ? player.getBufferedInfo() : {};
+            const bufferedRanges = bufferedInfo.total || [];
+            const currentTime = video.currentTime || 0;
+            const isLive = player.isLive ? player.isLive() : false;
+            const liveOffset = isLive ? (seekRange.end - currentTime) : null;
+            const bufferedEnd = bufferedRanges.length ? bufferedRanges[bufferedRanges.length - 1].end : 0;
+            const bufferDepth = bufferedEnd - currentTime;
+
+            renderPills(isLive);
+
+            renderStatGrid(playbackStats, [
+                { label: 'Paused', value: video.paused ? 'Yes' : 'No' },
+                { label: 'Buffering', value: player.isBuffering ? (player.isBuffering() ? 'Yes' : 'No') : '—' },
+                { label: 'Current Time', value: currentTime.toFixed(2) + 's' },
+                { label: 'Seekable Window', value: `${seekRange.start.toFixed(2)} → ${seekRange.end.toFixed(2)}s` },
+                { label: 'Live Offset', value: liveOffset !== null ? liveOffset.toFixed(2) + 's' : '—' },
+                { label: 'Buffered End', value: bufferedEnd ? bufferedEnd.toFixed(2) + 's' : '—' },
+                { label: 'Buffer Depth', value: bufferDepth ? bufferDepth.toFixed(2) + 's' : '—' },
+                { label: 'Playback Rate', value: video.playbackRate.toFixed(2) },
+                { label: 'Video ReadyState', value: video.readyState },
+                { label: 'Video Resolution', value: `${video.videoWidth || 0}x${video.videoHeight || 0}` }
+            ]);
+
+            const statEntries = [];
+            Object.keys(stats || {}).forEach(key => {
+                const value = stats[key];
+                if (value === undefined || value === null) {
+                    return;
+                }
+                if (typeof value === 'number') {
+                    statEntries.push({ label: key, value: value.toFixed(2) });
+                } else {
+                    statEntries.push({ label: key, value: String(value) });
+                }
+            });
+            renderStatGrid(shakaStats, statEntries.slice(0, 18));
+
+            const tracks = player.getVariantTracks ? player.getVariantTracks() : [];
+            const activeTrack = tracks.find(track => track.active);
+            renderStatGrid(trackStats, [
+                { label: 'Active Track', value: activeTrack ? `${activeTrack.height}p ${activeTrack.bandwidth/1000|0} kbps` : '—' },
+                { label: 'Track Count', value: tracks.length },
+                { label: 'Audio Lang', value: activeTrack?.language || '—' },
+                { label: 'Video Codec', value: activeTrack?.videoCodec || '—' },
+                { label: 'Audio Codec', value: activeTrack?.audioCodec || '—' },
+            ]);
+
+            const requestSummary = Object.keys(requestCounts).map(key => `${key}: ${requestCounts[key]}`).join(' | ') || '—';
+            const responseSummary = Object.keys(responseCounts).map(key => `${key}: ${responseCounts[key]}`).join(' | ') || '—';
+            renderStatGrid(networkStats, [
+                { label: 'Requests', value: requestSummary },
+                { label: 'Responses', value: responseSummary },
+                { label: 'Last Request', value: lastRequest || '—' },
+                { label: 'Last Response', value: lastResponse || '—' }
+            ]);
+
+            updateRangeBar(seekRange, bufferedRanges, currentTime);
+        }
+
+        async function initPlayer(url) {
+            if (!shaka.Player.isBrowserSupported()) {
+                logEvent('Shaka Player: browser not supported', 'error');
+                return;
+            }
+
+            if (player) {
+                await player.destroy();
+            }
+            player = new shaka.Player(video);
+            ui = new shaka.ui.Overlay(player, document.getElementById('videoContainer'), video);
+            ui.getControls();
+
+            const useAbr = abrToggle.value === 'on';
+            player.configure({
+                abr: { enabled: useAbr },
+                streaming: {
+                    lowLatencyMode: true,
+                    rebufferingGoal: 2,
+                    bufferBehind: 30,
+                }
+            });
+
+            const engine = player.getNetworkingEngine();
+            requestCounts = {};
+            responseCounts = {};
+            lastRequest = null;
+            lastResponse = null;
+
+            engine.registerRequestFilter((type, request) => {
+                const label = shaka.net.NetworkingEngine.RequestType[type] || type;
+                requestCounts[label] = (requestCounts[label] || 0) + 1;
+                lastRequest = `${label} ${request.uris ? request.uris[0] : ''}`;
+            });
+            engine.registerResponseFilter((type, response) => {
+                const label = shaka.net.NetworkingEngine.RequestType[type] || type;
+                responseCounts[label] = (responseCounts[label] || 0) + 1;
+                lastResponse = `${label} ${response.uri || ''}`;
+            });
+
+            player.addEventListener('error', (event) => {
+                logEvent(`Error: ${event.detail ? event.detail.message : event}`, 'error');
+            });
+            player.addEventListener('buffering', (event) => {
+                logEvent(`Buffering: ${event.buffering}`, 'warn');
+            });
+            player.addEventListener('trackschanged', () => logEvent('Tracks changed', 'event'));
+            player.addEventListener('adaptation', () => logEvent('Adaptation triggered', 'event'));
+            player.addEventListener('variantchanged', () => logEvent('Variant changed', 'event'));
+            player.addEventListener('manifestparsed', () => logEvent('Manifest parsed', 'info'));
+
+            try {
+                await player.load(url);
+                logEvent(`Loaded: ${url}`, 'info');
+            } catch (error) {
+                logEvent(`Load failed: ${error}`, 'error');
+            }
+
+            if (autoplayToggle.value === 'sound') {
+                video.muted = false;
+            } else {
+                video.muted = true;
+            }
+
+            if (autoplayToggle.value !== 'manual') {
+                try {
+                    await video.play();
+                } catch (err) {
+                    logEvent(`Autoplay blocked: ${err.message}`, 'warn');
+                }
+            }
+        }
+
+        function loadCurrent() {
+            const url = streamUrlInput.value.trim();
+            if (!url) {
+                logEvent('No URL provided', 'warn');
+                return;
+            }
+            if (url !== lastUrl) {
+                setSelectedUrl(url);
+                lastUrl = url;
+            }
+            initPlayer(url);
+        }
+
+        loadBtn.addEventListener('click', loadCurrent);
+        reloadBtn.addEventListener('click', () => {
+            if (lastUrl) {
+                initPlayer(lastUrl);
+            }
+        });
+        toggleMuteBtn.addEventListener('click', () => {
+            video.muted = !video.muted;
+        });
+
+        document.addEventListener('DOMContentLoaded', () => {
+            const initialUrl = getSelectedUrl();
+            if (initialUrl) {
+                streamUrlInput.value = initialUrl;
+                lastUrl = initialUrl;
+            }
+            updateSelectedLabel();
+            initPlayer(initialUrl || streamUrlInput.value.trim());
+            updateTimer = setInterval(updateMetrics, 250);
+        });
+    </script>
+</body>
+</html>

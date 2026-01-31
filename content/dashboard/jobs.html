@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Encoding Jobs - InfiniteStream</title>
+    <link rel="stylesheet" href="/shared-styles.css">
+</head>
+<body data-boss-active-page="jobs">
+    <div class="boss-content-standard">
+        <div class="card">
+            <div class="card-header">
+                <h1>Encoding Jobs</h1>
+                <p>Monitor and manage your encoding jobs</p>
+            </div>
+            <div class="card-body">
+                <div id="loadingState" class="text-center text-secondary" style="padding: 40px;">
+                    <div class="spinner"></div>
+                    <div style="margin-top: 12px;">Loading jobs...</div>
+                </div>
+
+                <div id="emptyState" class="empty-state" style="display: none;">
+                    <div class="empty-state-icon">📂</div>
+                    <h2>No encoding jobs yet</h2>
+                    <p>Upload your first video to get started</p>
+                    <br>
+                    <a href="/dashboard/upload.html" class="btn btn-primary">Upload Your First Video</a>
+                </div>
+
+                <div id="jobsTableContainer" style="display: none;">
+                    <div class="table-container">
+                        <table class="table">
+                            <thead>
+                                <tr>
+                                    <th>Name</th>
+                                    <th>Status</th>
+                                    <th>Progress</th>
+                                    <th>Created</th>
+                                    <th>Duration</th>
+                                    <th>Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody id="jobsTableBody">
+                            </tbody>
+                        </table>
+                    </div>
+                    <p class="text-center text-secondary text-sm" style="margin-top: 16px;">Auto-refreshing every 2 seconds</p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let refreshInterval = null;
+
+        // Fetch and display jobs
+        async function fetchJobs() {
+            try {
+                const response = await fetch('/api/jobs');
+                const data = await response.json();
+                
+                const loadingState = document.getElementById('loadingState');
+                const emptyState = document.getElementById('emptyState');
+                const jobsTableContainer = document.getElementById('jobsTableContainer');
+                const jobsTableBody = document.getElementById('jobsTableBody');
+
+                loadingState.style.display = 'none';
+
+                if (data.jobs.length === 0) {
+                    emptyState.style.display = 'block';
+                    jobsTableContainer.style.display = 'none';
+                } else {
+                    emptyState.style.display = 'none';
+                    jobsTableContainer.style.display = 'block';
+                    
+                    // Build table rows
+                    jobsTableBody.innerHTML = data.jobs.map(job => createJobRow(job)).join('');
+                    
+                    // Attach event listeners
+                    attachEventListeners();
+                }
+            } catch (error) {
+                console.error('Failed to fetch jobs:', error);
+                document.getElementById('loadingState').innerHTML = '<div class="text-danger">Failed to load jobs</div>';
+            }
+        }
+
+        // Create table row for a job
+        function createJobRow(job) {
+            const statusBadge = getStatusBadge(job.status);
+            const createdDate = new Date(job.created_at).toLocaleString();
+            const duration = calculateDuration(job);
+            
+            return `
+                <tr>
+                    <td><strong>${escapeHtml(job.name)}</strong></td>
+                    <td>${statusBadge}</td>
+                    <td>
+                        ${job.status === 'uploading' || job.status === 'encoding' ? `
+                            <div style="margin-bottom: 4px;">${job.progress}%</div>
+                            <div class="progress" style="height: 6px;">
+                                <div class="progress-bar" style="width: ${job.progress}%"></div>
+                            </div>
+                        ` : ''}
+                        ${job.status === 'complete' ? '<div>100%</div>' : ''}
+                        ${['queued', 'failed', 'cancelled'].includes(job.status) ? '<div>-</div>' : ''}
+                    </td>
+                    <td>${createdDate}</td>
+                    <td>${duration}</td>
+                    <td>
+                        <div style="display: flex; gap: 8px;">
+                            <button class="btn btn-sm btn-primary" onclick="viewJob('${job.job_id}')">
+                                View
+                            </button>
+                            ${job.status === 'uploading' || job.status === 'encoding' || job.status === 'queued' ? `
+                                <button class="btn btn-sm btn-secondary" onclick="cancelJob('${job.job_id}')">
+                                    Cancel
+                                </button>
+                            ` : ''}
+                            ${['complete', 'failed', 'cancelled'].includes(job.status) ? `
+                                <button class="btn btn-sm btn-danger" onclick="deleteJob('${job.job_id}')">
+                                    Delete
+                                </button>
+                            ` : ''}
+                        </div>
+                    </td>
+                </tr>
+            `;
+        }
+
+        // Get status badge HTML
+        function getStatusBadge(status) {
+            const statusMap = {
+                'queued': { class: 'badge-warning', text: 'Queued' },
+                'uploading': { class: 'badge-info', text: 'Uploading' },
+                'encoding': { class: 'badge-info', text: 'Encoding' },
+                'complete': { class: 'badge-success', text: 'Complete' },
+                'failed': { class: 'badge-error', text: 'Failed' },
+                'cancelled': { class: 'badge-neutral', text: 'Cancelled' }
+            };
+            const badge = statusMap[status] || { class: 'badge-neutral', text: status };
+            return `<span class="badge ${badge.class}">${badge.text}</span>`;
+        }
+
+        // Calculate duration
+        function calculateDuration(job) {
+            if (!job.started_at) {
+                return '-';
+            }
+            
+            const start = new Date(job.started_at);
+            const end = job.completed_at ? new Date(job.completed_at) : new Date();
+            const durationMs = end - start;
+            
+            const seconds = Math.floor(durationMs / 1000);
+            const minutes = Math.floor(seconds / 60);
+            const hours = Math.floor(minutes / 60);
+            
+            if (hours > 0) {
+                return `${hours}h ${minutes % 60}m`;
+            } else if (minutes > 0) {
+                return `${minutes}m ${seconds % 60}s`;
+            } else {
+                return `${seconds}s`;
+            }
+        }
+
+        // Escape HTML
+        function escapeHtml(text) {
+            const map = {
+                '&': '&amp;',
+                '<': '&lt;',
+                '>': '&gt;',
+                '"': '&quot;',
+                "'": '&#039;'
+            };
+            return text.replace(/[&<>"']/g, m => map[m]);
+        }
+
+        // View job details
+        function viewJob(jobId) {
+            window.location.href = `/dashboard/job-detail.html?id=${jobId}`;
+        }
+
+        // Cancel job
+        async function cancelJob(jobId) {
+            if (!confirm('Are you sure you want to cancel this job?')) {
+                return;
+            }
+            
+            try {
+                // Notify SharedWorker if connected
+                if (typeof SharedWorker !== 'undefined') {
+                    try {
+                        const worker = new SharedWorker('/upload-worker.js');
+                        worker.port.start();
+                        worker.port.postMessage({
+                            type: 'CANCEL_UPLOAD',
+                            jobId: jobId
+                        });
+                    } catch (e) {
+                        console.warn('Could not notify SharedWorker:', e);
+                    }
+                }
+                
+                // Clean up session storage
+                sessionStorage.removeItem(`upload_${jobId}`);
+                
+                const response = await fetch(`/api/jobs/${jobId}/cancel`, {
+                    method: 'POST'
+                });
+                
+                if (response.ok) {
+                    fetchJobs(); // Refresh list
+                } else {
+                    alert('Failed to cancel job');
+                }
+            } catch (error) {
+                console.error('Failed to cancel job:', error);
+                alert('Failed to cancel job');
+            }
+        }
+
+        // Delete job
+        async function deleteJob(jobId) {
+            if (!confirm('Are you sure you want to delete this job? This cannot be undone.')) {
+                return;
+            }
+            
+            try {
+                const response = await fetch(`/api/jobs/${jobId}`, {
+                    method: 'DELETE'
+                });
+                
+                if (response.ok) {
+                    fetchJobs(); // Refresh list
+                } else {
+                    alert('Failed to delete job');
+                }
+            } catch (error) {
+                console.error('Failed to delete job:', error);
+                alert('Failed to delete job');
+            }
+        }
+
+        // Attach event listeners (for dynamically created elements)
+        function attachEventListeners() {
+            // Event listeners are handled via onclick attributes for simplicity
+        }
+
+        // Initialize
+        fetchJobs();
+        
+        // Auto-refresh every 2 seconds
+        refreshInterval = setInterval(fetchJobs, 2000);
+
+        // Cleanup on page unload
+        window.addEventListener('beforeunload', () => {
+            if (refreshInterval) {
+                clearInterval(refreshInterval);
+            }
+        });
+    </script>
+    <script src="/shared-nav.js"></script>
+</body>
+</html>

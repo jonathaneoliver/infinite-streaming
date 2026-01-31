@@ -1,0 +1,1629 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Live Offset Comparison - InfiniteStream</title>
+    <link rel="stylesheet" href="/shared-styles.css">
+    <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.15"></script>
+    <link href="https://vjs.zencdn.net/8.21.1/video-js.css" rel="stylesheet" />
+    <script src="https://vjs.zencdn.net/8.21.1/video.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/shaka-player@4.15.0/dist/shaka-player.ui.min.js"></script>
+    <style>
+        .page-header {
+            margin-bottom: 32px;
+        }
+        
+        .page-title {
+            font-size: 32px;
+            font-weight: 400;
+            margin-bottom: 8px;
+            color: var(--text-primary);
+        }
+        
+        .page-subtitle {
+            font-size: 16px;
+            color: var(--text-secondary);
+        }
+        
+        .controls {
+            background: var(--bg-primary);
+            border-radius: 6px;
+            padding: 16px;
+            margin-bottom: 24px;
+            box-shadow: var(--shadow-sm);
+            display: flex;
+            flex-wrap: wrap;
+            gap: 12px;
+            align-items: center;
+            justify-content: center;
+        }
+        
+        .controls button {
+            padding: 8px 16px;
+            background: var(--primary-blue);
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: 500;
+            transition: opacity 0.15s;
+        }
+        
+        .controls button:hover {
+            opacity: 0.85;
+        }
+        
+        .controls button:disabled {
+            opacity: 0.4;
+            cursor: not-allowed;
+        }
+        
+        .controls label {
+            color: var(--text-secondary);
+            font-size: 14px;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            margin-left: 12px;
+        }
+        
+        .protocol-section {
+            margin-bottom: 32px;
+        }
+        
+        .protocol-header {
+            font-size: 20px;
+            font-weight: 600;
+            color: var(--text-primary);
+            margin-bottom: 16px;
+            padding-bottom: 8px;
+            border-bottom: 2px solid var(--border-color);
+        }
+
+        :root {
+            --content-control-bg: var(--bg-secondary);
+            --content-control-border: var(--border-color);
+            --content-control-title: var(--text-secondary);
+            --content-control-label: var(--text-secondary);
+            --content-control-select-bg: var(--bg-secondary);
+            --content-control-select-text: var(--text-primary);
+        }
+        
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: 16px;
+            margin-bottom: 24px;
+        }
+        
+        @media (max-width: 1600px) {
+            .grid {
+                grid-template-columns: repeat(2, 1fr) !important;
+            }
+        }
+        
+        @media (max-width: 1000px) {
+            .grid {
+                grid-template-columns: 1fr !important;
+            }
+        }
+        
+        .player-container {
+            background: var(--bg-primary);
+            border: 2px solid var(--border-color);
+            border-radius: 8px;
+            padding: 12px;
+            position: relative;
+            cursor: pointer;
+            transition: all 0.15s;
+            box-shadow: var(--shadow-sm);
+        }
+        
+        .player-container:hover {
+            border-color: var(--primary-blue);
+            box-shadow: var(--shadow-md);
+        }
+        
+        .player-container.playing {
+            border-color: var(--success);
+            box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.1);
+        }
+        
+        .player-container.active-audio {
+            border-color: var(--primary-purple);
+            box-shadow: 0 0 0 3px rgba(139, 92, 246, 0.15);
+        }
+        
+        .player-container.stalled {
+            border-color: var(--warning);
+            box-shadow: 0 0 0 3px rgba(245, 158, 11, 0.15);
+        }
+        
+        .player-header {
+            text-align: center;
+            margin-bottom: 12px;
+        }
+        
+        .player-title {
+            font-size: 18px;
+            font-weight: 600;
+            color: var(--text-primary);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+        }
+        
+        .player-container.active-audio .player-title {
+            color: var(--primary-purple);
+        }
+        
+        .audio-indicator {
+            font-size: 16px;
+            opacity: 0;
+            transition: opacity 0.3s ease;
+        }
+        
+        .player-container.active-audio .audio-indicator {
+            opacity: 1;
+        }
+        
+        .segment-info {
+            font-size: 12px;
+            color: var(--text-secondary);
+            margin-top: 4px;
+        }
+        
+        video {
+            width: 100%;
+            background: #000;
+            border-radius: 6px;
+            aspect-ratio: 16 / 9;
+            height: auto;
+        }
+
+        .video-js {
+            width: 100% !important;
+            height: auto !important;
+            aspect-ratio: 16 / 9;
+        }
+
+        .video-js .vjs-tech {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+        }
+        
+        .stats {
+            margin-top: 12px;
+            padding: 12px;
+            background: var(--bg-secondary);
+            border-radius: 6px;
+            font-size: 12px;
+        }
+        
+        .stats-row {
+            display: flex;
+            justify-content: space-between;
+            padding: 6px 0;
+            border-bottom: 1px solid var(--border-color);
+        }
+        
+        .stats-row:last-child {
+            border-bottom: none;
+        }
+
+        .context-menu {
+            position: fixed;
+            background: #0f172a;
+            border: 1px solid rgba(255,255,255,0.12);
+            box-shadow: 0 12px 30px rgba(0,0,0,0.35);
+            border-radius: 8px;
+            padding: 6px;
+            display: none;
+            z-index: 9999;
+            min-width: 200px;
+        }
+
+        .context-menu button {
+            width: 100%;
+            background: transparent;
+            border: none;
+            text-align: left;
+            padding: 8px 10px;
+            font-size: 12px;
+            color: #e5e7eb;
+            border-radius: 6px;
+            cursor: pointer;
+        }
+
+        .context-menu button:hover {
+            background: rgba(59, 130, 246, 0.2);
+        }
+        
+        .stats-label {
+            color: var(--text-secondary);
+            font-weight: 500;
+        }
+        
+        .stats-value {
+            color: var(--text-primary);
+            font-weight: 600;
+        }
+        
+        .status-indicator {
+            display: inline-block;
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+        }
+        
+        .status-indicator.loading {
+            background: var(--text-tertiary);
+        }
+        
+        .status-indicator.playing {
+            background: var(--success);
+        }
+        
+        .status-indicator.stalled {
+            background: var(--warning);
+        }
+        
+        .status-indicator.error {
+            background: var(--danger);
+        }
+        
+        .sync-info {
+            text-align: center;
+            padding: 16px;
+            background: var(--bg-primary);
+            border: 2px solid var(--border-color);
+            border-radius: 8px;
+            box-shadow: var(--shadow-sm);
+        }
+        
+        .sync-info h3 {
+            font-size: 14px;
+            font-weight: 600;
+            color: var(--text-secondary);
+            margin-bottom: 8px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        
+        .sync-value {
+            font-size: 14px;
+            color: var(--text-primary);
+            font-weight: 600;
+            font-family: 'Courier New', monospace;
+            white-space: pre-line;
+            line-height: 1.6;
+        }
+        
+        .drift-warning {
+            color: var(--warning);
+        }
+    </style>
+    <link rel="stylesheet" href="/dashboard/content-control.css">
+</head>
+<body>
+    <div class="boss-content-wide">
+        <!-- Page Header -->
+        <div class="page-header">
+            <h1 class="page-title">Live Offset Comparison</h1>
+            <p class="page-subtitle">Compare LL-HLS vs HLS (2s/6s segments) vs DASH (LL/2s/6s) - Click a player to hear audio</p>
+        </div>
+        
+        <div class="controls">
+            <div class="content-control">
+                <div class="content-control-title">Content Control</div>
+                <div class="content-control-group">
+                    <label class="content-control-label" for="contentSelect">Content</label>
+                    <select id="contentSelect" class="content-control-select" onchange="changeContent()">
+                        <option value="">Loading...</option>
+                    </select>
+                </div>
+                <div class="content-control-group">
+                    <label class="content-control-label" for="codecSelect">Codec</label>
+                    <select id="codecSelect" class="content-control-select" onchange="applyCodecFilter()">
+                        <option value="h264" selected>H264</option>
+                        <option value="hevc">H265/HEVC</option>
+                        <option value="av1">AV1</option>
+                        <option value="all">All</option>
+                    </select>
+                </div>
+                <div class="content-control-group">
+                    <label class="content-control-label" for="hlsPlayerSelect">Player</label>
+                    <select id="hlsPlayerSelect" class="content-control-select" onchange="applyHlsSegPlayer(true)">
+                        <option value="hlsjs" selected>HLS.js</option>
+                        <option value="videojs">Video.js</option>
+                        <option value="native">Native</option>
+                    </select>
+                </div>
+            </div>
+            <button id="playAllBtn" onclick="playAll()">▶ Play All</button>
+            <button id="pauseAllBtn" onclick="pauseAll()">⏸ Pause All</button>
+            <button id="reloadAllBtn" onclick="reloadAll()">🔄 Reload All</button>
+            <button id="syncBtn" onclick="syncAll()">🔗 Sync All</button>
+            <label>
+                <input type="checkbox" id="autoUpdateStats" checked onchange="toggleAutoUpdate()">
+                Auto-update stats
+            </label>
+        </div>
+
+        <!-- HLS Players Section -->
+        <div class="protocol-section">
+            <div class="protocol-header">HLS Players</div>
+            <div class="grid" style="grid-template-columns: repeat(3, 1fr);">
+
+        <!-- LL-HLS Native Player -->
+        <div class="player-container" id="container-hls-ll-native" onclick="selectAudioStream('hls-ll-native')">
+            <div class="player-header">
+                <div class="player-title">
+                    <span class="status-indicator loading" id="status-hls-ll-native"></span>
+                    LL-HLS (Native)
+                    <span class="audio-indicator">🔊</span>
+                </div>
+                <div class="segment-info">Target: low latency from edge (~3s)</div>
+                <div class="panel-badges">
+                    <span class="panel-badge native">Native</span>
+                    <span class="panel-badge hls">HLS</span>
+                    <span class="panel-badge ll">LL</span>
+                    <span class="panel-badge h264" id="badge-codec-hls-ll-native">H264</span>
+                </div>
+            </div>
+            <video id="video-hls-ll-native" muted></video>
+            <div class="stats" id="stats-hls-ll-native">
+                <div class="stats-row">
+                    <span class="stats-label">Status:</span>
+                    <span class="stats-value" id="state-hls-ll-native">Loading...</span>
+                </div>
+                <div class="stats-row">
+                    <span class="stats-label">Current Time:</span>
+                    <span class="stats-value" id="time-hls-ll-native">0.00s</span>
+                </div>
+                <div class="stats-row">
+                    <span class="stats-label">Buffered End:</span>
+                    <span class="stats-value" id="bufferEnd-hls-ll-native">--</span>
+                </div>
+                <div class="stats-row">
+                    <span class="stats-label">Buffer Depth:</span>
+                    <span class="stats-value" id="buffer-hls-ll-native">0.0s</span>
+                </div>
+                <div class="stats-row">
+                    <span class="stats-label">Live Offset:</span>
+                    <span class="stats-value" id="liveOffset-hls-ll-native">--</span>
+                </div>
+                <div class="stats-row">
+                    <span class="stats-label">Live Latency:</span>
+                    <span class="stats-value" id="latency-hls-ll-native">-</span>
+                </div>
+                <div class="stats-row">
+                    <span class="stats-label">Stalls:</span>
+                    <span class="stats-value" id="stalls-hls-ll-native">0</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- LL-HLS HLS.js Player -->
+        <div class="player-container" id="container-hls-ll-hlsjs" onclick="selectAudioStream('hls-ll-hlsjs')">
+            <div class="player-header">
+                <div class="player-title">
+                    <span class="status-indicator loading" id="status-hls-ll-hlsjs"></span>
+                    LL-HLS (HLS.js)
+                    <span class="audio-indicator">🔊</span>
+                </div>
+                <div class="segment-info">Target: low latency from edge (~3s)</div>
+                <div class="panel-badges">
+                    <span class="panel-badge hlsjs">HLS.js</span>
+                    <span class="panel-badge hls">HLS</span>
+                    <span class="panel-badge ll">LL</span>
+                    <span class="panel-badge h264" id="badge-codec-hls-ll-hlsjs">H264</span>
+                </div>
+            </div>
+            <video id="video-hls-ll-hlsjs" muted></video>
+            <div class="stats" id="stats-hls-ll-hlsjs">
+                <div class="stats-row">
+                    <span class="stats-label">Status:</span>
+                    <span class="stats-value" id="state-hls-ll-hlsjs">Loading...</span>
+                </div>
+                <div class="stats-row">
+                    <span class="stats-label">Current Time:</span>
+                    <span class="stats-value" id="time-hls-ll-hlsjs">0.00s</span>
+                </div>
+                <div class="stats-row">
+                    <span class="stats-label">Buffered End:</span>
+                    <span class="stats-value" id="bufferEnd-hls-ll-hlsjs">--</span>
+                </div>
+                <div class="stats-row">
+                    <span class="stats-label">Buffer Depth:</span>
+                    <span class="stats-value" id="buffer-hls-ll-hlsjs">0.0s</span>
+                </div>
+                <div class="stats-row">
+                    <span class="stats-label">Live Offset:</span>
+                    <span class="stats-value" id="liveOffset-hls-ll-hlsjs">--</span>
+                </div>
+                <div class="stats-row">
+                    <span class="stats-label">Live Latency:</span>
+                    <span class="stats-value" id="latency-hls-ll-hlsjs">-</span>
+                </div>
+                <div class="stats-row">
+                    <span class="stats-label">Stalls:</span>
+                    <span class="stats-value" id="stalls-hls-ll-hlsjs">0</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- LL-HLS Video.js Player -->
+        <div class="player-container" id="container-hls-ll-videojs" onclick="selectAudioStream('hls-ll-videojs')">
+            <div class="player-header">
+                <div class="player-title">
+                    <span class="status-indicator loading" id="status-hls-ll-videojs"></span>
+                    LL-HLS (Video.js)
+                    <span class="audio-indicator">🔊</span>
+                </div>
+                <div class="segment-info">Target: low latency from edge (~3s)</div>
+                <div class="panel-badges">
+                    <span class="panel-badge videojs">Video.js</span>
+                    <span class="panel-badge hls">HLS</span>
+                    <span class="panel-badge ll">LL</span>
+                    <span class="panel-badge h264" id="badge-codec-hls-ll-videojs">H264</span>
+                </div>
+            </div>
+            <video id="video-hls-ll-videojs" class="video-js" muted></video>
+            <div class="stats" id="stats-hls-ll-videojs">
+                <div class="stats-row">
+                    <span class="stats-label">Status:</span>
+                    <span class="stats-value" id="state-hls-ll-videojs">Loading...</span>
+                </div>
+                <div class="stats-row">
+                    <span class="stats-label">Current Time:</span>
+                    <span class="stats-value" id="time-hls-ll-videojs">0.00s</span>
+                </div>
+                <div class="stats-row">
+                    <span class="stats-label">Buffered End:</span>
+                    <span class="stats-value" id="bufferEnd-hls-ll-videojs">--</span>
+                </div>
+                <div class="stats-row">
+                    <span class="stats-label">Buffer Depth:</span>
+                    <span class="stats-value" id="buffer-hls-ll-videojs">0.0s</span>
+                </div>
+                <div class="stats-row">
+                    <span class="stats-label">Live Offset:</span>
+                    <span class="stats-value" id="liveOffset-hls-ll-videojs">--</span>
+                </div>
+                <div class="stats-row">
+                    <span class="stats-label">Live Latency:</span>
+                    <span class="stats-value" id="latency-hls-ll-videojs">-</span>
+                </div>
+                <div class="stats-row">
+                    <span class="stats-label">Stalls:</span>
+                    <span class="stats-value" id="stalls-hls-ll-videojs">0</span>
+                </div>
+            </div>
+        </div>
+            </div>
+        </div>
+
+        <!-- HLS Segmentation Section -->
+        <div class="protocol-section">
+            <div class="protocol-header">HLS Segmentation</div>
+            <div class="grid" style="grid-template-columns: repeat(3, 1fr);">
+        
+        <!-- LL-HLS 1s Partials Player -->
+        <div class="player-container" id="container-llhls-1s" onclick="selectAudioStream('llhls-1s')">
+            <div class="player-header">
+                <div class="player-title">
+                    <span class="status-indicator loading" id="status-llhls-1s"></span>
+                    LL-HLS
+                    <span class="audio-indicator">🔊</span>
+                </div>
+                <div class="segment-info">Target: low latency from edge (~3s)</div>
+                <div class="panel-badges">
+                    <span class="panel-badge hlsjs" id="badge-player-llhls-1s">HLS.js</span>
+                    <span class="panel-badge hls">HLS</span>
+                    <span class="panel-badge ll">LL</span>
+                    <span class="panel-badge h264" id="badge-codec-llhls-1s">H264</span>
+                </div>
+            </div>
+            <video id="video-llhls-1s" muted></video>
+            <div class="stats" id="stats-llhls-1s">
+                <div class="stats-row">
+                    <span class="stats-label">Status:</span>
+                    <span class="stats-value" id="state-llhls-1s">Loading...</span>
+                </div>
+                <div class="stats-row">
+                    <span class="stats-label">Current Time:</span>
+                    <span class="stats-value" id="time-llhls-1s">0.00s</span>
+                </div>
+                <div class="stats-row">
+                    <span class="stats-label">Buffered End:</span>
+                    <span class="stats-value" id="bufferEnd-llhls-1s">--</span>
+                </div>
+                <div class="stats-row">
+                    <span class="stats-label">Buffer Depth:</span>
+                    <span class="stats-value" id="buffer-llhls-1s">0.0s</span>
+                </div>
+                <div class="stats-row">
+                    <span class="stats-label">Live Offset:</span>
+                    <span class="stats-value" id="liveOffset-llhls-1s">--</span>
+                </div>
+                <div class="stats-row">
+                    <span class="stats-label">Live Latency:</span>
+                    <span class="stats-value" id="latency-llhls-1s">-</span>
+                </div>
+                <div class="stats-row">
+                    <span class="stats-label">Stalls:</span>
+                    <span class="stats-value" id="stalls-llhls-1s">0</span>
+                </div>
+            </div>
+        </div>
+        
+        <!-- HLS 2s Player -->
+        <div class="player-container" id="container-hls-2s" onclick="selectAudioStream('hls-2s')">
+            <div class="player-header">
+                <div class="player-title">
+                    <span class="status-indicator loading" id="status-hls-2s"></span>
+                    HLS 2s Segments
+                    <span class="audio-indicator">🔊</span>
+                </div>
+                <div class="segment-info">Target: 3 segments from edge (-6s)</div>
+                <div class="panel-badges">
+                    <span class="panel-badge hlsjs" id="badge-player-hls-2s">HLS.js</span>
+                    <span class="panel-badge hls">HLS</span>
+                    <span class="panel-badge s2">2S</span>
+                    <span class="panel-badge h264" id="badge-codec-hls-2s">H264</span>
+                </div>
+            </div>
+            <video id="video-hls-2s" muted></video>
+            <div class="stats" id="stats-hls-2s">
+                <div class="stats-row">
+                    <span class="stats-label">Status:</span>
+                    <span class="stats-value" id="state-hls-2s">Loading...</span>
+                </div>
+                <div class="stats-row">
+                    <span class="stats-label">Current Time:</span>
+                    <span class="stats-value" id="time-hls-2s">0.00s</span>
+                </div>
+                <div class="stats-row">
+                    <span class="stats-label">Buffered End:</span>
+                    <span class="stats-value" id="bufferEnd-hls-2s">--</span>
+                </div>
+                <div class="stats-row">
+                    <span class="stats-label">Buffer Depth:</span>
+                    <span class="stats-value" id="buffer-hls-2s">0.0s</span>
+                </div>
+                <div class="stats-row">
+                    <span class="stats-label">Live Offset:</span>
+                    <span class="stats-value" id="liveOffset-hls-2s">--</span>
+                </div>
+                <div class="stats-row">
+                    <span class="stats-label">Live Latency:</span>
+                    <span class="stats-value" id="latency-hls-2s">-</span>
+                </div>
+                <div class="stats-row">
+                    <span class="stats-label">Stalls:</span>
+                    <span class="stats-value" id="stalls-hls-2s">0</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- HLS 6s Player -->
+        <div class="player-container" id="container-hls-6s" onclick="selectAudioStream('hls-6s')">
+            <div class="player-header">
+                <div class="player-title">
+                    <span class="status-indicator loading" id="status-hls-6s"></span>
+                    HLS 6s Segments
+                    <span class="audio-indicator">🔊</span>
+                </div>
+                <div class="segment-info">Target: 3 segments from edge (-18s)</div>
+                <div class="panel-badges">
+                    <span class="panel-badge hlsjs" id="badge-player-hls-6s">HLS.js</span>
+                    <span class="panel-badge hls">HLS</span>
+                    <span class="panel-badge s6">6S</span>
+                    <span class="panel-badge h264" id="badge-codec-hls-6s">H264</span>
+                </div>
+            </div>
+            <video id="video-hls-6s" muted></video>
+            <div class="stats" id="stats-hls-6s">
+                <div class="stats-row">
+                    <span class="stats-label">Status:</span>
+                    <span class="stats-value" id="state-hls-6s">Loading...</span>
+                </div>
+                <div class="stats-row">
+                    <span class="stats-label">Current Time:</span>
+                    <span class="stats-value" id="time-hls-6s">0.00s</span>
+                </div>
+                <div class="stats-row">
+                    <span class="stats-label">Buffered End:</span>
+                    <span class="stats-value" id="bufferEnd-hls-6s">--</span>
+                </div>
+                <div class="stats-row">
+                    <span class="stats-label">Buffer Depth:</span>
+                    <span class="stats-value" id="buffer-hls-6s">0.0s</span>
+                </div>
+                <div class="stats-row">
+                    <span class="stats-label">Live Offset:</span>
+                    <span class="stats-value" id="liveOffset-hls-6s">--</span>
+                </div>
+                <div class="stats-row">
+                    <span class="stats-label">Live Latency:</span>
+                    <span class="stats-value" id="latency-hls-6s">-</span>
+                </div>
+                <div class="stats-row">
+                    <span class="stats-label">Stalls:</span>
+                    <span class="stats-value" id="stalls-hls-6s">0</span>
+                </div>
+            </div>
+        </div>
+        </div>
+        </div>
+
+        <!-- DASH Section -->
+        <div class="protocol-section">
+        <div class="protocol-header">DASH Segmentation</div>
+            <div class="grid" style="grid-template-columns: repeat(3, 1fr);">
+        
+        <!-- DASH LL Player -->
+        <div class="player-container" id="container-dash-ll" onclick="selectAudioStream('dash-ll')">
+            <div class="player-header">
+                <div class="player-title">
+                    <span class="status-indicator loading" id="status-dash-ll"></span>
+                    DASH LL
+                    <span class="audio-indicator">🔊</span>
+                </div>
+                <div class="segment-info">Target: low latency from edge (~3s)</div>
+                <div class="panel-badges">
+                    <span class="panel-badge shaka">Shaka</span>
+                    <span class="panel-badge dash">DASH</span>
+                    <span class="panel-badge ll">LL</span>
+                    <span class="panel-badge h264" id="badge-codec-dash-ll">H264</span>
+                </div>
+            </div>
+            <video id="video-dash-ll" muted></video>
+            <div class="stats" id="stats-dash-ll">
+                <div class="stats-row">
+                    <span class="stats-label">Status:</span>
+                    <span class="stats-value" id="state-dash-ll">Loading...</span>
+                </div>
+                <div class="stats-row">
+                    <span class="stats-label">Current Time:</span>
+                    <span class="stats-value" id="time-dash-ll">0.00s</span>
+                </div>
+                <div class="stats-row">
+                    <span class="stats-label">Buffered End:</span>
+                    <span class="stats-value" id="bufferEnd-dash-ll">--</span>
+                </div>
+                <div class="stats-row">
+                    <span class="stats-label">Buffer Depth:</span>
+                    <span class="stats-value" id="buffer-dash-ll">0.0s</span>
+                </div>
+                <div class="stats-row">
+                    <span class="stats-label">Live Offset:</span>
+                    <span class="stats-value" id="liveOffset-dash-ll">--</span>
+                </div>
+                <div class="stats-row">
+                    <span class="stats-label">Live Latency:</span>
+                    <span class="stats-value" id="latency-dash-ll">-</span>
+                </div>
+                <div class="stats-row">
+                    <span class="stats-label">Stalls:</span>
+                    <span class="stats-value" id="stalls-dash-ll">0</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- DASH 2s Player -->
+        <div class="player-container" id="container-dash-2s" onclick="selectAudioStream('dash-2s')">
+            <div class="player-header">
+                <div class="player-title">
+                    <span class="status-indicator loading" id="status-dash-2s"></span>
+                    DASH 2s Segments
+                    <span class="audio-indicator">🔊</span>
+                </div>
+                <div class="segment-info">Target: 3 segments from edge (-6s)</div>
+                <div class="panel-badges">
+                    <span class="panel-badge shaka">Shaka</span>
+                    <span class="panel-badge dash">DASH</span>
+                    <span class="panel-badge s2">2S</span>
+                    <span class="panel-badge h264" id="badge-codec-dash-2s">H264</span>
+                </div>
+            </div>
+            <video id="video-dash-2s" muted></video>
+            <div class="stats" id="stats-dash-2s">
+                <div class="stats-row">
+                    <span class="stats-label">Status:</span>
+                    <span class="stats-value" id="state-dash-2s">Loading...</span>
+                </div>
+                <div class="stats-row">
+                    <span class="stats-label">Current Time:</span>
+                    <span class="stats-value" id="time-dash-2s">0.00s</span>
+                </div>
+                <div class="stats-row">
+                    <span class="stats-label">Buffered End:</span>
+                    <span class="stats-value" id="bufferEnd-dash-2s">--</span>
+                </div>
+                <div class="stats-row">
+                    <span class="stats-label">Buffer Depth:</span>
+                    <span class="stats-value" id="buffer-dash-2s">0.0s</span>
+                </div>
+                <div class="stats-row">
+                    <span class="stats-label">Live Offset:</span>
+                    <span class="stats-value" id="liveOffset-dash-2s">--</span>
+                </div>
+                <div class="stats-row">
+                    <span class="stats-label">Live Latency:</span>
+                    <span class="stats-value" id="latency-dash-2s">-</span>
+                </div>
+                <div class="stats-row">
+                    <span class="stats-label">Stalls:</span>
+                    <span class="stats-value" id="stalls-dash-2s">0</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- DASH 6s Player -->
+        <div class="player-container" id="container-dash-6s" onclick="selectAudioStream('dash-6s')">
+            <div class="player-header">
+                <div class="player-title">
+                    <span class="status-indicator loading" id="status-dash-6s"></span>
+                    DASH 6s Segments
+                    <span class="audio-indicator">🔊</span>
+                </div>
+                <div class="segment-info">Target: 3 segments from edge (-18s)</div>
+                <div class="panel-badges">
+                    <span class="panel-badge shaka">Shaka</span>
+                    <span class="panel-badge dash">DASH</span>
+                    <span class="panel-badge s6">6S</span>
+                    <span class="panel-badge h264" id="badge-codec-dash-6s">H264</span>
+                </div>
+            </div>
+            <video id="video-dash-6s" muted></video>
+            <div class="stats" id="stats-dash-6s">
+                <div class="stats-row">
+                    <span class="stats-label">Status:</span>
+                    <span class="stats-value" id="state-dash-6s">Loading...</span>
+                </div>
+                <div class="stats-row">
+                    <span class="stats-label">Current Time:</span>
+                    <span class="stats-value" id="time-dash-6s">0.00s</span>
+                </div>
+                <div class="stats-row">
+                    <span class="stats-label">Buffered End:</span>
+                    <span class="stats-value" id="bufferEnd-dash-6s">--</span>
+                </div>
+                <div class="stats-row">
+                    <span class="stats-label">Buffer Depth:</span>
+                    <span class="stats-value" id="buffer-dash-6s">0.0s</span>
+                </div>
+                <div class="stats-row">
+                    <span class="stats-label">Live Offset:</span>
+                    <span class="stats-value" id="liveOffset-dash-6s">--</span>
+                </div>
+                <div class="stats-row">
+                    <span class="stats-label">Live Latency:</span>
+                    <span class="stats-value" id="latency-dash-6s">-</span>
+                </div>
+                <div class="stats-row">
+                    <span class="stats-label">Stalls:</span>
+                    <span class="stats-value" id="stalls-dash-6s">0</span>
+                </div>
+            </div>
+        </div>
+        </div>
+    </div>
+
+    <div class="sync-info">
+        <h3>Playback Metrics</h3>
+        <div class="sync-value" id="driftInfo">-</div>
+        <div style="font-size: 12px; color: var(--text-secondary); margin-top: 10px;">
+            Timeline drift measures if players stay synchronized. Live latency shows each player's distance from the live edge.
+            LL variants use partials/chunks for lower latency compared to 2s and 6s segment modes.
+        </div>
+    </div>
+
+    <script>
+        let CONTENT_BASE = 'redbull_h264_20260106_220512';
+        const BASE_URL = window.location.origin;
+        let availableContent = [];
+        let allContent = [];
+        
+        const players = {
+            'hls-ll-native': {
+                video: document.getElementById('video-hls-ll-native'),
+                url: null,
+                player: null,
+                type: 'hls-native',
+                stallCount: 0,
+                retryCount: 0
+            },
+            'hls-ll-hlsjs': {
+                video: document.getElementById('video-hls-ll-hlsjs'),
+                url: null,
+                player: null,
+                type: 'llhls',
+                stallCount: 0,
+                retryCount: 0
+            },
+            'hls-ll-videojs': {
+                video: document.getElementById('video-hls-ll-videojs'),
+                url: null,
+                player: null,
+                type: 'videojs',
+                stallCount: 0,
+                retryCount: 0
+            },
+            'hls-2s': {
+                video: document.getElementById('video-hls-2s'),
+                url: null,
+                player: null,
+                type: 'hls',
+                stallCount: 0,
+                retryCount: 0
+            },
+            'hls-6s': {
+                video: document.getElementById('video-hls-6s'),
+                url: null,
+                player: null,
+                type: 'hls',
+                stallCount: 0,
+                retryCount: 0
+            },
+            'dash-ll': {
+                video: document.getElementById('video-dash-ll'),
+                url: null,
+                player: null,
+                type: 'dash',
+                stallCount: 0,
+                retryCount: 0
+            },
+            'dash-2s': {
+                video: document.getElementById('video-dash-2s'),
+                url: null,
+                player: null,
+                type: 'dash',
+                stallCount: 0,
+                retryCount: 0
+            },
+            'dash-6s': {
+                video: document.getElementById('video-dash-6s'),
+                url: null,
+                player: null,
+                type: 'dash',
+                stallCount: 0,
+                retryCount: 0
+            },
+            'llhls-1s': {
+                video: document.getElementById('video-llhls-1s'),
+                url: null,
+                player: null,
+                type: 'llhls',
+                stallCount: 0,
+                retryCount: 0
+            }
+        };
+
+        let autoUpdate = true;
+        let updateInterval = null;
+        let activeAudioStream = null;
+
+        function createPlayerId() {
+            if (window.BOSSNav && typeof window.BOSSNav.createPlayerId === 'function') {
+                return window.BOSSNav.createPlayerId();
+            }
+            return Math.random().toString(36).slice(2, 10);
+        }
+
+        function normalizeTestingBase(url) {
+            const parsed = new URL(url, window.location.origin);
+            parsed.hostname = parsed.hostname || window.location.hostname;
+            parsed.port = '20081';
+            return parsed.toString();
+        }
+
+        function buildTestingUrl(url, playerId) {
+            const base = normalizeTestingBase(url);
+            const separator = base.includes('?') ? '&' : '?';
+            return `${base}${separator}player_id=${playerId}`;
+        }
+
+        function copyTestingUrl(url) {
+            const playerId = createPlayerId();
+            const testingUrl = buildTestingUrl(url, playerId);
+            if (!navigator.clipboard) {
+                const input = document.createElement('input');
+                input.value = testingUrl;
+                document.body.appendChild(input);
+                input.select();
+                document.execCommand('copy');
+                document.body.removeChild(input);
+                return;
+            }
+            navigator.clipboard.writeText(testingUrl).catch(err => console.warn('Clipboard write failed', err));
+        }
+
+        function openTestingWindow(url) {
+            const playerId = createPlayerId();
+            const testingUrl = buildTestingUrl(url, playerId);
+            const pageUrl = `/dashboard/testing-session.html?player_id=${encodeURIComponent(playerId)}&url=${encodeURIComponent(testingUrl)}`;
+            const popup = window.open(pageUrl, '_blank');
+            if (!popup) {
+                alert('Popup blocked. Allow popups for this site.');
+            }
+        }
+
+        function openHlsjsDemo(url) {
+            if (!url || url.includes('.mpd')) {
+                alert('HLS.js demo only supports HLS (.m3u8).');
+                return;
+            }
+            const playerId = createPlayerId();
+            const testingUrl = buildTestingUrl(url, playerId);
+            const demoUrl = `https://hlsjs.video-dev.org/demo/?src=${encodeURIComponent(testingUrl)}`;
+            const popup = window.open(demoUrl, '_blank');
+            if (!popup) {
+                alert('Popup blocked. Allow popups for this site.');
+            }
+        }
+
+        function initContextMenu() {
+            const isDeveloperMode = new URLSearchParams(window.location.search).get('developer') === '1';
+            const menu = document.createElement('div');
+            menu.className = 'context-menu';
+            menu.id = 'liveOffsetContextMenu';
+            menu.innerHTML = `
+                <button id="contextOpenTesting">Open in Testing Window</button>
+                <button id="contextCopyTesting">Copy Testing URL</button>
+                ${isDeveloperMode ? '<button id="contextOpenHlsjsDemo">Open in HLS.js Demo</button>' : ''}
+            `;
+            document.body.appendChild(menu);
+
+            document.getElementById('contextOpenTesting').addEventListener('click', () => {
+                const url = menu.dataset.url;
+                if (url) openTestingWindow(url);
+                menu.style.display = 'none';
+            });
+            document.getElementById('contextCopyTesting').addEventListener('click', () => {
+                const url = menu.dataset.url;
+                if (url) copyTestingUrl(url);
+                menu.style.display = 'none';
+            });
+            const hlsjsButton = document.getElementById('contextOpenHlsjsDemo');
+            if (hlsjsButton) {
+                hlsjsButton.addEventListener('click', () => {
+                    const url = menu.dataset.url;
+                    if (url) openHlsjsDemo(url);
+                    menu.style.display = 'none';
+                });
+            }
+
+            document.addEventListener('click', () => {
+                menu.style.display = 'none';
+            });
+
+            Object.values(players).forEach(player => {
+                if (!player.video) return;
+                player.video.addEventListener('contextmenu', (event) => {
+                    event.preventDefault();
+                    const url = player.url;
+                    if (!url) return;
+                    menu.dataset.url = url;
+                    menu.style.left = `${event.clientX}px`;
+                    menu.style.top = `${event.clientY}px`;
+                    menu.style.display = 'block';
+                });
+            });
+        }
+
+        function applyHlsSegPlayer(reload = false) {
+            const playerType = document.getElementById('hlsPlayerSelect')?.value || 'hlsjs';
+            const badgeConfig = {
+                hlsjs: { text: 'HLS.js', className: 'panel-badge hlsjs' },
+                videojs: { text: 'Video.js', className: 'panel-badge videojs' },
+                native: { text: 'Native', className: 'panel-badge native' }
+            };
+            const badge = badgeConfig[playerType] || badgeConfig.hlsjs;
+
+            const badgeIds = ['badge-player-llhls-1s', 'badge-player-hls-2s', 'badge-player-hls-6s'];
+            badgeIds.forEach((id) => {
+                const el = document.getElementById(id);
+                if (!el) return;
+                el.className = badge.className;
+                el.textContent = badge.text;
+            });
+
+            // Update player types for HLS segmentation players and reload
+            players['llhls-1s'].type = playerType === 'hlsjs' ? 'llhls' : (playerType === 'videojs' ? 'videojs' : 'hls-native');
+            players['hls-2s'].type = playerType === 'hlsjs' ? 'hls' : (playerType === 'videojs' ? 'videojs' : 'hls-native');
+            players['hls-6s'].type = playerType === 'hlsjs' ? 'hls' : (playerType === 'videojs' ? 'videojs' : 'hls-native');
+
+            if (reload) {
+                ['llhls-1s', 'hls-2s', 'hls-6s'].forEach((id) => {
+                    destroyPlayerInstance(players[id]);
+                    initPlayer(id);
+                });
+            }
+        }
+
+        // Fetch available content and populate dropdown
+        function inferCodec(name = '') {
+            const lower = name.toLowerCase();
+            if (lower.includes('av1')) return 'av1';
+            if (lower.includes('hevc') || lower.includes('h265')) return 'hevc';
+            return 'h264';
+        }
+
+        function applyCodecFilter() {
+            const codec = document.getElementById('codecSelect')?.value || 'h264';
+            const filtered = allContent.filter(item => {
+                if (codec === 'all') return true;
+                return inferCodec(item.name) === codec;
+            });
+            availableContent = filtered;
+            renderContentOptions();
+        }
+
+        function renderContentOptions() {
+            const select = document.getElementById('contentSelect');
+            select.innerHTML = '';
+
+            if (availableContent.length === 0) {
+                select.innerHTML = '<option value="">No compatible content found (needs HLS+DASH)</option>';
+                return;
+            }
+
+            const grouped = {};
+            availableContent.forEach(item => {
+                const baseName = item.name.replace(/_\d{8}_\d{6}$/, '').replace(/_ts$/, '');
+                if (!grouped[baseName]) {
+                    grouped[baseName] = [];
+                }
+                grouped[baseName].push(item);
+            });
+
+            Object.keys(grouped).sort().forEach(baseName => {
+                const items = grouped[baseName];
+                if (items.length === 1) {
+                    const item = items[0];
+                    const option = document.createElement('option');
+                    option.value = item.name;
+                    option.textContent = item.name;
+                    select.appendChild(option);
+                } else {
+                    const optgroup = document.createElement('optgroup');
+                    optgroup.label = baseName;
+                    items.forEach(item => {
+                        const option = document.createElement('option');
+                        option.value = item.name;
+                        option.textContent = item.name;
+                        optgroup.appendChild(option);
+                    });
+                    select.appendChild(optgroup);
+                }
+            });
+
+            const storedFull = localStorage.getItem('bossSelectedContentFull') || localStorage.getItem('bossSelectedContent');
+            const storedBase = localStorage.getItem('bossSelectedContentBase');
+            if (storedFull && availableContent.some(item => item.name === storedFull)) {
+                CONTENT_BASE = storedFull;
+            } else if (storedBase) {
+                const match = availableContent.find(item => item.name.includes(storedBase));
+                if (match) {
+                    CONTENT_BASE = match.name;
+                }
+            }
+            select.value = CONTENT_BASE;
+            if (!select.value && availableContent.length > 0) {
+                select.value = availableContent[0].name;
+                CONTENT_BASE = availableContent[0].name;
+            }
+
+            updatePlayerUrls();
+        }
+
+        async function loadContentList() {
+            try {
+                const response = await fetch(`${BASE_URL}/api/content`);
+                allContent = await response.json();
+
+                // Filter for content that has both HLS and DASH
+                allContent = allContent.filter(item => {
+                    return item.has_hls === true && item.has_dash === true;
+                });
+                const storedFull = localStorage.getItem('bossSelectedContentFull') || localStorage.getItem('bossSelectedContent');
+                if (storedFull) {
+                    const codecFromStored = inferCodec(storedFull);
+                    const codecSelect = document.getElementById('codecSelect');
+                    if (codecSelect && codecSelect.value !== codecFromStored) {
+                        codecSelect.value = codecFromStored;
+                    }
+                }
+                applyCodecFilter();
+                
+            } catch (error) {
+                console.error('Failed to load content list:', error);
+                document.getElementById('contentSelect').innerHTML = '<option value="">Error loading content</option>';
+            }
+        }
+        
+        function updatePlayerUrls() {
+            // HLS URLs
+            players['hls-ll-native'].url = `${BASE_URL}/go-live/${CONTENT_BASE}/master.m3u8`;
+            players['hls-ll-hlsjs'].url = `${BASE_URL}/go-live/${CONTENT_BASE}/master.m3u8`;
+            players['hls-ll-videojs'].url = `${BASE_URL}/go-live/${CONTENT_BASE}/master.m3u8`;
+            players['llhls-1s'].url = `${BASE_URL}/go-live/${CONTENT_BASE}/master.m3u8`;
+            players['hls-2s'].url = `${BASE_URL}/go-live/${CONTENT_BASE}/master_2s.m3u8`;
+            players['hls-6s'].url = `${BASE_URL}/go-live/${CONTENT_BASE}/master_6s.m3u8`;
+            
+            // DASH URLs
+            players['dash-ll'].url = `${BASE_URL}/go-live/${CONTENT_BASE}/manifest.mpd`;
+            players['dash-2s'].url = `${BASE_URL}/go-live/${CONTENT_BASE}/manifest_2s.mpd`;
+            players['dash-6s'].url = `${BASE_URL}/go-live/${CONTENT_BASE}/manifest_6s.mpd`;
+
+            const selectedUrl = players['hls-ll-native'].url;
+            const existingSelectedUrl = localStorage.getItem('bossSelectedUrl') || '';
+            if (!existingSelectedUrl) {
+                if (window.BOSSNav && typeof window.BOSSNav.setSelectedUrl === 'function') {
+                    window.BOSSNav.setSelectedUrl(selectedUrl);
+                } else {
+                    localStorage.setItem('bossSelectedUrl', selectedUrl);
+                }
+            }
+
+            const baseLower = CONTENT_BASE.toLowerCase();
+            const codecClass = baseLower.includes('av1') ? 'av1' : (baseLower.includes('hevc') ? 'hevc' : 'h264');
+            const codecLabel = codecClass === 'av1' ? 'AV1' : (codecClass === 'hevc' ? 'HEVC' : 'H264');
+            ['hls-ll-native', 'hls-ll-hlsjs', 'hls-ll-videojs', 'llhls-1s', 'hls-2s', 'hls-6s', 'dash-ll', 'dash-2s', 'dash-6s'].forEach((id) => {
+                const badge = document.getElementById(`badge-codec-${id}`);
+                if (!badge) return;
+                badge.textContent = codecLabel;
+                badge.classList.remove('h264', 'hevc', 'av1');
+                badge.classList.add(codecClass);
+            });
+        }
+        
+        function changeContent() {
+            const newContent = document.getElementById('contentSelect').value;
+            if (!newContent) return;
+            
+            CONTENT_BASE = newContent;
+            localStorage.setItem('bossSelectedContentFull', newContent);
+            localStorage.setItem('bossSelectedContent', newContent);
+            const baseName = newContent
+                .replace(/_(h264|hevc|av1|dash|ts|hw)$/i, '')
+                .replace(/_\d{8}_\d{6}$/i, '');
+            localStorage.setItem('bossSelectedContentBase', baseName);
+            if (window.BOSSNav && typeof window.BOSSNav.updateSelectedContentBadge === 'function') {
+                window.BOSSNav.updateSelectedContentBadge();
+            }
+            const codecSelect = document.getElementById('codecSelect');
+            if (codecSelect && codecSelect.value !== 'all') {
+                codecSelect.value = inferCodec(newContent);
+            }
+            updatePlayerUrls();
+            
+            // Reload all players with new content
+            reloadAll();
+        }
+
+        function selectAudioStream(playerId) {
+            // Mute all players
+            Object.keys(players).forEach(id => {
+                players[id].video.muted = true;
+                document.getElementById(`container-${id}`).classList.remove('active-audio');
+            });
+
+            // Unmute selected player
+            players[playerId].video.muted = false;
+            document.getElementById(`container-${playerId}`).classList.add('active-audio');
+            activeAudioStream = playerId;
+
+            console.log(`Audio switched to ${playerId} stream`);
+        }
+
+        function destroyPlayerInstance(player) {
+            if (!player || !player.player) return;
+            try {
+                if (player.type === 'videojs' && typeof player.player.dispose === 'function') {
+                    player.player.dispose();
+                } else if (typeof player.player.destroy === 'function') {
+                    destroyPlayerInstance(player);
+                }
+            } catch (error) {
+                console.warn('Failed to destroy player instance:', error);
+            }
+            player.player = null;
+        }
+
+        function initPlayer(playerId) {
+            const player = players[playerId];
+            const video = player.video;
+
+            if (player.type === 'hls') {
+                // Initialize HLS player
+                if (Hls.isSupported()) {
+                    player.player = new Hls({
+                        debug: false,
+                        lowLatencyMode: false,
+                        backBufferLength: 10,
+                        liveSyncDurationCount: 3,
+                        liveMaxLatencyDurationCount: 6,
+                        maxLiveSyncPlaybackRate: 1
+                    });
+
+                    player.player.loadSource(player.url);
+                    player.player.attachMedia(video);
+
+                    player.player.on(Hls.Events.MANIFEST_PARSED, () => {
+                        console.log(`${playerId}: HLS Manifest loaded`);
+                        player.retryCount = 0; // Reset retry count on success
+                        updateStatus(playerId, 'playing');
+                    });
+
+                    player.player.on(Hls.Events.ERROR, (event, data) => {
+                        if (data.fatal) {
+                            console.error(`${playerId}: Fatal HLS error`, data);
+                            
+                            // Retry on manifest load errors (up to 3 times with 2s delay)
+                            if (data.type === Hls.ErrorTypes.NETWORK_ERROR && 
+                                data.details === Hls.ErrorDetails.MANIFEST_LOAD_ERROR &&
+                                player.retryCount < 3) {
+                                player.retryCount++;
+                                console.log(`${playerId}: Retrying HLS load (attempt ${player.retryCount}/3)...`);
+                                updateStatus(playerId, 'loading');
+                                setTimeout(() => {
+                                    destroyPlayerInstance(player);
+                                    initPlayer(playerId);
+                                }, 2000);
+                            } else {
+                                updateStatus(playerId, 'error');
+                            }
+                        }
+                    });
+
+                } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+                    // Native HLS support (Safari)
+                    video.src = player.url;
+                    updateStatus(playerId, 'playing');
+                }
+            } else if (player.type === 'dash') {
+                // Initialize DASH player with Shaka Player
+                player.player = new shaka.Player(video);
+                
+                // Extract segment duration from playerId (e.g., "dash-2s" -> 2, "dash-6s" -> 6, "dash-ll" -> 1)
+                const segmentDuration = playerId.includes('-6s') ? 6 : 
+                                       playerId.includes('-2s') ? 2 : 1;
+                
+                console.log(`${playerId}: Using manifest suggestedPresentationDelay for live edge positioning (${segmentDuration}s segments)`);
+                
+                // Configure Shaka to use manifest's suggestedPresentationDelay
+                // The manifest already specifies suggestedPresentationDelay for LL/2s/6s
+                player.player.configure({
+                    manifest: {
+                        dash: {
+                            ignoreSuggestedPresentationDelay: false  // Use manifest's suggestedPresentationDelay
+                        }
+                    },
+                    streaming: {
+                        // Enable live streaming mode but don't override targetLatency
+                        // Let Shaka use the manifest's suggestedPresentationDelay
+                        liveSync: {
+                            enabled: true,
+                            panicMode: false
+                        },
+                        rebufferingGoal: segmentDuration,            // Buffer 1 segment before resuming
+                        bufferingGoal: segmentDuration * 5,          // Buffer 5 segments ahead
+                        bufferBehind: segmentDuration * 5,           // Keep 5 segments behind
+                        retryParameters: {
+                            timeout: 30000,
+                            maxAttempts: 2,
+                            baseDelay: 1000,
+                            backoffFactor: 2,
+                            fuzzFactor: 0.5
+                        }
+                    }
+                });
+
+                player.player.load(player.url).then(() => {
+                    console.log(`${playerId}: Shaka Player loaded`);
+                    player.retryCount = 0; // Reset retry count on success
+                    updateStatus(playerId, 'playing');
+                }).catch((e) => {
+                    console.error(`${playerId}: Shaka error`, e);
+                    
+                    // Retry on initial load errors (up to 3 times with 2s delay)
+                    if (player.retryCount < 3) {
+                        player.retryCount++;
+                        console.log(`${playerId}: Retrying DASH load (attempt ${player.retryCount}/3)...`);
+                        updateStatus(playerId, 'loading');
+                        setTimeout(() => {
+                            destroyPlayerInstance(player);
+                            initPlayer(playerId);
+                        }, 2000);
+                    } else {
+                        updateStatus(playerId, 'error');
+                    }
+                });
+            } else if (player.type === 'llhls') {
+                // Initialize LL-HLS player with low-latency configuration
+                if (Hls.isSupported()) {
+                    player.player = new Hls({
+                        debug: false,
+                        lowLatencyMode: true,  // Enable LL-HLS support
+                        backBufferLength: 10,
+                        // Stay 3 partials back from live edge for low-latency playback
+                        // With 1s partials: 3 × 1s = ~3s latency (matches PART-HOLD-BACK=3.0)
+                        liveSyncDurationCount: 3,
+                        liveMaxLatencyDurationCount: 6,
+                        maxLiveSyncPlaybackRate: 1.05,
+                        liveDurationInfinity: true,
+                        enableWorker: true,
+                        manifestLoadingTimeOut: 10000,
+                        manifestLoadingMaxRetry: 3
+                    });
+
+                    player.player.loadSource(player.url);
+                    player.player.attachMedia(video);
+
+                    player.player.on(Hls.Events.MANIFEST_PARSED, () => {
+                        console.log(`${playerId}: LL-HLS Manifest loaded`);
+                        player.retryCount = 0;
+                        updateStatus(playerId, 'playing');
+                    });
+
+                    player.player.on(Hls.Events.ERROR, (event, data) => {
+                        if (data.fatal) {
+                            console.error(`${playerId}: Fatal LL-HLS error`, data);
+                            
+                            if (data.type === Hls.ErrorTypes.NETWORK_ERROR && 
+                                data.details === Hls.ErrorDetails.MANIFEST_LOAD_ERROR &&
+                                player.retryCount < 3) {
+                                player.retryCount++;
+                                console.log(`${playerId}: Retrying LL-HLS load (attempt ${player.retryCount}/3)...`);
+                                updateStatus(playerId, 'loading');
+                                setTimeout(() => {
+                                    destroyPlayerInstance(player);
+                                    initPlayer(playerId);
+                                }, 2000);
+                            } else {
+                                updateStatus(playerId, 'error');
+                            }
+                        }
+                    });
+
+                } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+                    // Native HLS support (Safari supports LL-HLS natively)
+                    video.src = player.url;
+                    updateStatus(playerId, 'playing');
+                }
+            } else if (player.type === 'hls-native') {
+                // Native HLS only
+                video.src = player.url;
+                updateStatus(playerId, 'playing');
+            } else if (player.type === 'videojs') {
+                // Video.js HLS playback
+                player.player = videojs(video, {
+                    autoplay: true,
+                    muted: true,
+                    controls: true,
+                    liveui: true
+                });
+                player.player.src({ src: player.url, type: 'application/x-mpegURL' });
+                player.player.ready(() => {
+                    console.log(`${playerId}: Video.js ready`);
+                    player.retryCount = 0;
+                    updateStatus(playerId, 'playing');
+                    player.player.play().catch(() => {});
+                });
+                player.player.on('error', () => {
+                    console.error(`${playerId}: Video.js error`, player.player.error());
+                    if (player.retryCount < 3) {
+                        player.retryCount++;
+                        updateStatus(playerId, 'loading');
+                        setTimeout(() => {
+                            destroyPlayerInstance(player);
+                            initPlayer(playerId);
+                        }, 2000);
+                    } else {
+                        updateStatus(playerId, 'error');
+                    }
+                });
+            }
+
+            // Common video event handlers
+            video.addEventListener('waiting', () => {
+                player.stallCount++;
+                updateStatus(playerId, 'stalled');
+                document.getElementById(`container-${playerId}`).classList.add('stalled');
+            });
+
+            video.addEventListener('playing', () => {
+                updateStatus(playerId, 'playing');
+                document.getElementById(`container-${playerId}`).classList.remove('stalled');
+                document.getElementById(`container-${playerId}`).classList.add('playing');
+            });
+
+            video.addEventListener('pause', () => {
+                updateStatus(playerId, 'paused');
+                document.getElementById(`container-${playerId}`).classList.remove('playing');
+            });
+        }
+
+        function updateStatus(playerId, status) {
+            const indicator = document.getElementById(`status-${playerId}`);
+            indicator.className = `status-indicator ${status}`;
+            
+            const statusText = {
+                'loading': 'Loading...',
+                'playing': 'Playing',
+                'paused': 'Paused',
+                'stalled': 'Stalled!',
+                'error': 'Error'
+            };
+            
+            document.getElementById(`state-${playerId}`).textContent = statusText[status] || status;
+        }
+
+        function updateStats() {
+            if (!autoUpdate) return;
+
+            Object.keys(players).forEach(playerId => {
+                const player = players[playerId];
+                const video = player.video;
+
+                // Current time
+                document.getElementById(`time-${playerId}`).textContent = video.currentTime.toFixed(2) + 's';
+
+                // Buffer length
+                if (video.buffered.length > 0) {
+                    const bufferEnd = video.buffered.end(video.buffered.length - 1);
+                    const bufferLength = bufferEnd - video.currentTime;
+                    document.getElementById(`buffer-${playerId}`).textContent = bufferLength.toFixed(1) + 's';
+                    const bufferEndEl = document.getElementById(`bufferEnd-${playerId}`);
+                    if (bufferEndEl) {
+                        bufferEndEl.textContent = bufferEnd.toFixed(2) + 's';
+                    }
+                    const liveOffsetEl = document.getElementById(`liveOffset-${playerId}`);
+                    if (liveOffsetEl && video.seekable.length > 0) {
+                        const liveEdge = video.seekable.end(video.seekable.length - 1);
+                        const liveOffset = liveEdge - video.currentTime;
+                        liveOffsetEl.textContent = liveOffset.toFixed(2) + 's';
+                    }
+                } else {
+                    const bufferEndEl = document.getElementById(`bufferEnd-${playerId}`);
+                    if (bufferEndEl) bufferEndEl.textContent = '--';
+                    const liveOffsetEl = document.getElementById(`liveOffset-${playerId}`);
+                    if (liveOffsetEl) liveOffsetEl.textContent = '--';
+                }
+
+                // Live latency
+                let latency = '-';
+                if ((player.type === 'hls' || player.type === 'llhls') && player.player && player.player.latency) {
+                    latency = player.player.latency.toFixed(1) + 's';
+                } else if (player.type === 'dash' && player.player) {
+                    // Shaka Player doesn't expose live latency directly
+                    // We can estimate it from presentation time
+                    const stats = player.player.getStats();
+                    if (stats && stats.liveLatency !== undefined) {
+                        latency = stats.liveLatency.toFixed(1) + 's';
+                    }
+                }
+                document.getElementById(`latency-${playerId}`).textContent = latency;
+
+                const liveOffsetEl = document.getElementById(`liveOffset-${playerId}`);
+                if (liveOffsetEl && liveOffsetEl.textContent === '--' && latency !== '-') {
+                    liveOffsetEl.textContent = latency;
+                }
+
+                // Stall count
+                document.getElementById(`stalls-${playerId}`).textContent = player.stallCount;
+            });
+
+            // Calculate drift between HLS and DASH streams
+            const hlsTime = players['hls-2s'].video.currentTime;
+            const dashTime = players['dash-2s'].video.currentTime;
+            const drift = dashTime - hlsTime;
+
+            let driftText = `HLS vs DASH Timeline Drift: ${drift >= 0 ? '+' : ''}${drift.toFixed(2)}s\n`;
+            driftText += `All players should maintain their protocol's synchronization`;
+            
+            const driftInfo = document.getElementById('driftInfo');
+            driftInfo.textContent = driftText;
+            
+            // Highlight significant drift
+            if (Math.abs(drift) > 2) {
+                driftInfo.classList.add('drift-warning');
+            } else {
+                driftInfo.classList.remove('drift-warning');
+            }
+        }
+
+        function playAll() {
+            Object.values(players).forEach(player => {
+                player.video.play().catch(e => console.error('Play error:', e));
+            });
+        }
+
+        function pauseAll() {
+            Object.values(players).forEach(player => {
+                player.video.pause();
+            });
+        }
+
+        function reloadAll() {
+            Object.keys(players).forEach(playerId => {
+                const player = players[playerId];
+                if (player.player) {
+                    destroyPlayerInstance(player);
+                }
+                player.stallCount = 0;
+                player.retryCount = 0; // Reset retry count on manual reload
+                initPlayer(playerId);
+            });
+        }
+
+        function syncAll() {
+            const referenceTime = players['hls-2s'].video.currentTime;
+            Object.keys(players).forEach(playerId => {
+                if (playerId !== 'hls-2s') {
+                    players[playerId].video.currentTime = referenceTime;
+                }
+            });
+        }
+
+        function toggleAutoUpdate() {
+            autoUpdate = document.getElementById('autoUpdateStats').checked;
+        }
+
+        // Initialize all players
+        window.addEventListener('DOMContentLoaded', async () => {
+            // Install Shaka Player polyfills
+            shaka.polyfill.installAll();
+            
+            // Check for browser support
+            if (!shaka.Player.isBrowserSupported()) {
+                console.error('Browser not supported by Shaka Player!');
+                return;
+            }
+            
+            // Load content list first
+            await loadContentList();
+
+            applyHlsSegPlayer(false);
+            
+            Object.keys(players).forEach(playerId => {
+                initPlayer(playerId);
+            });
+
+            initContextMenu();
+
+            // Auto-play all
+            setTimeout(() => {
+                playAll();
+            }, 500);
+
+            // Update stats every 100ms
+            updateInterval = setInterval(updateStats, 100);
+        });
+
+        // Cleanup on unload
+        window.addEventListener('beforeunload', () => {
+            if (updateInterval) {
+                clearInterval(updateInterval);
+            }
+            Object.values(players).forEach(player => {
+                if (player.player) {
+                    destroyPlayerInstance(player);
+                }
+            });
+        });
+    </script>
+
+    <script src="/shared-nav.js"></script>
+</body>
+</html>

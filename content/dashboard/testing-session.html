@@ -1,0 +1,1143 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Testing Player - InfiniteStream</title>
+    <link rel="stylesheet" href="/shared-styles.css">
+    <link href="https://vjs.zencdn.net/8.21.1/video-js.css" rel="stylesheet" />
+    <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.7"></script>
+    <script src="https://cdn.jsdelivr.net/npm/shaka-player@4.7.0/dist/shaka-player.compiled.js"></script>
+    <script src="https://vjs.zencdn.net/8.21.1/video.min.js"></script>
+    <style>
+        body {
+            background: var(--bg-secondary);
+        }
+
+        .page-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            margin-bottom: 16px;
+        }
+
+        .page-title {
+            font-size: 24px;
+            font-weight: 600;
+            color: var(--text-primary);
+        }
+
+        .page-subtitle {
+            font-size: 12px;
+            color: var(--text-secondary);
+            word-break: break-all;
+        }
+
+        .player-card {
+            background: var(--bg-primary);
+            border-radius: 12px;
+            box-shadow: var(--shadow-md);
+            padding: 16px;
+        }
+
+        .player-actions {
+            display: flex;
+            flex-wrap: wrap;
+            justify-content: flex-end;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 10px;
+        }
+
+        .player-select {
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-color);
+            color: var(--text-primary);
+            padding: 6px 10px;
+            border-radius: 8px;
+        }
+
+        .panel-badge.videojs { background: #fce7f3; color: #9d174d; }
+        .panel-badge.native { background: #e0f2fe; color: #0369a1; }
+
+        .player-frame {
+            width: 100%;
+            background: #000;
+            border-radius: 10px;
+            overflow: hidden;
+            max-height: 68vh;
+        }
+
+        .player-frame video {
+            width: 100%;
+            height: auto;
+            display: block;
+            background: #000;
+        }
+
+        .stats-grid {
+            margin-top: 12px;
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+            gap: 10px;
+            font-size: 12px;
+        }
+
+        .stats-item {
+            background: var(--bg-secondary);
+            border-radius: 6px;
+            padding: 8px 10px;
+        }
+
+        .stats-item .label {
+            color: var(--text-secondary);
+            font-weight: 600;
+            display: block;
+            margin-bottom: 2px;
+        }
+
+        .stats-item .value {
+            color: var(--text-primary);
+            font-family: 'Courier New', monospace;
+        }
+
+        .debug-log {
+            margin-top: 12px;
+            background: #0b1220;
+            color: #e5e7eb;
+            border-radius: 10px;
+            padding: 10px;
+            font-family: 'Courier New', monospace;
+            font-size: 11px;
+            max-height: 200px;
+            overflow: auto;
+        }
+
+        .session-panel {
+            margin-top: 16px;
+            background: var(--bg-primary);
+            border-radius: 12px;
+            box-shadow: var(--shadow-md);
+            padding: 16px;
+        }
+
+        .session-panel h3 {
+            font-size: 14px;
+            font-weight: 600;
+            color: var(--text-primary);
+            margin-bottom: 10px;
+        }
+
+        .session-card {
+            background: var(--bg-secondary);
+            border-radius: 10px;
+            padding: 14px;
+            border: 1px solid var(--border-color);
+        }
+
+        .session-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            flex-wrap: wrap;
+            gap: 10px;
+            margin-bottom: 10px;
+        }
+
+        .session-title {
+            font-size: 14px;
+            font-weight: 600;
+            color: var(--text-primary);
+        }
+
+        .session-meta {
+            font-size: 12px;
+            color: var(--text-secondary);
+            font-family: 'Courier New', monospace;
+        }
+
+        .session-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+            gap: 10px;
+            font-size: 12px;
+            margin-bottom: 12px;
+        }
+
+        .session-item {
+            background: var(--bg-primary);
+            border-radius: 6px;
+            padding: 8px 10px;
+        }
+
+        .session-item .label {
+            color: var(--text-secondary);
+            font-weight: 600;
+            display: block;
+            margin-bottom: 2px;
+        }
+
+        .session-item .value {
+            color: var(--text-primary);
+            font-family: 'Courier New', monospace;
+            word-break: break-word;
+        }
+
+        .failure-groups {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+            gap: 12px;
+        }
+
+        .failure-group {
+            background: var(--bg-primary);
+            border-radius: 8px;
+            padding: 10px;
+            border: 1px solid var(--border-color);
+        }
+
+        .failure-title {
+            font-size: 12px;
+            font-weight: 700;
+            color: var(--text-primary);
+            margin-bottom: 8px;
+        }
+
+        .radio-group,
+        .checkbox-group {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+            margin-bottom: 8px;
+        }
+
+        .radio-group label,
+        .checkbox-group label {
+            font-size: 11px;
+            color: var(--text-secondary);
+            display: flex;
+            align-items: center;
+            gap: 4px;
+        }
+
+        .range-row {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-bottom: 6px;
+        }
+
+        .range-row input[type="range"] {
+            flex: 1;
+        }
+
+        .range-value {
+            font-size: 11px;
+            color: var(--text-primary);
+            min-width: 32px;
+            text-align: right;
+        }
+
+        .session-actions {
+            display: flex;
+            gap: 10px;
+            margin-top: 10px;
+        }
+
+        .chart-wrap {
+            margin-top: 10px;
+            background: #ffffff;
+            border-radius: 8px;
+            padding: 6px;
+            border: 1px solid #e5e7eb;
+            width: 100%;
+        }
+
+        .bandwidth-chart {
+            width: 100%;
+            height: 220px;
+            display: block;
+        }
+    </style>
+</head>
+<body data-boss-no-sidebar data-boss-no-header>
+    <div class="boss-content-standard">
+        <div class="page-header">
+            <div>
+                <div class="page-title" id="pageTitle">Testing Player</div>
+                <div class="page-subtitle" id="playerUrl">Loading…</div>
+            </div>
+            <div class="panel-badges" id="playerBadges"></div>
+        </div>
+
+        <div class="player-card">
+            <div class="player-actions">
+                <button class="btn btn-secondary" id="retryPlayback">Retry Fetch</button>
+                <button class="btn btn-secondary" id="restartPlayback">Restart Playback</button>
+                <button class="btn btn-secondary" id="reloadPage">Reload Page</button>
+                <label>
+                    Player
+                    <select id="playerSelect" class="player-select">
+                        <option value="auto">Auto</option>
+                        <option value="hlsjs">HLS.js</option>
+                        <option value="shaka">Shaka</option>
+                        <option value="videojs">Video.js</option>
+                        <option value="native">Native</option>
+                    </select>
+                </label>
+            </div>
+            <div class="player-frame">
+                <video id="player" controls autoplay muted playsinline></video>
+            </div>
+            <div class="stats-grid">
+                <div class="stats-item"><span class="label">State</span><span class="value" id="statState">Idle</span></div>
+                <div class="stats-item"><span class="label">Time</span><span class="value" id="statTime">--</span></div>
+                <div class="stats-item"><span class="label">Buffered End</span><span class="value" id="statBufferedEnd">--</span></div>
+                <div class="stats-item"><span class="label">Buffer Depth</span><span class="value" id="statBufferDepth">--</span></div>
+                <div class="stats-item"><span class="label">Live Offset</span><span class="value" id="statLiveOffset">--</span></div>
+                <div class="stats-item"><span class="label">Bitrate</span><span class="value" id="statBitrate">--</span></div>
+                <div class="stats-item"><span class="label">Dropped Frames</span><span class="value" id="statDropped">0</span></div>
+                <div class="stats-item"><span class="label">Stalls</span><span class="value" id="statStalls">0</span></div>
+            </div>
+            <div class="debug-log" id="debugLog"></div>
+        </div>
+
+        <div class="session-panel">
+            <h3>Session Controls</h3>
+            <div id="networkShapingBanner" class="status-message" style="display:none; margin-bottom: 10px;"></div>
+            <div id="sessionControls">Loading session…</div>
+        </div>
+    </div>
+
+    <script src="/shared-nav.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+    <script src="/dashboard/testing-session-ui.js"></script>
+    <script>
+        const logEl = document.getElementById('debugLog');
+        const video = document.getElementById('player');
+        let hlsInstance = null;
+        let shakaPlayer = null;
+        let videojsPlayer = null;
+        let stallCount = 0;
+        let currentSessionId = null;
+        let currentUrl = '';
+        let autoRetryCount = 0;
+        let autoRetryTimer = null;
+        const pendingShaping = new Map();
+        const bandwidthHistory = new Map();
+        const bandwidthCharts = new Map();
+        const bandwidthVisibility = new Map();
+        let playerEstimatedMbps = null;
+        let currentRenditionMbps = null;
+
+        function log(message) {
+            const line = document.createElement('div');
+            line.textContent = `${new Date().toLocaleTimeString()} ${message}`;
+            logEl.appendChild(line);
+            logEl.scrollTop = logEl.scrollHeight;
+        }
+
+        function logHttpFailure(source, status, url) {
+            if (!status) return;
+            const parts = [source, 'HTTP', status];
+            if (url) {
+                parts.push(url);
+            }
+            log(parts.join(' '));
+        }
+
+        function extractHlsHttpFailure(data) {
+            const response = data && data.response ? data.response : null;
+            const network = data && data.networkDetails ? data.networkDetails : null;
+            const status = (response && (response.code || response.status)) ||
+                (response && response.xhr && response.xhr.status) ||
+                (network && network.status) ||
+                null;
+            const url = (response && (response.url || response.responseURL)) ||
+                (response && response.xhr && response.xhr.responseURL) ||
+                (data && data.url) ||
+                (data && data.frag && data.frag.url) ||
+                null;
+            return { status, url };
+        }
+
+        function extractShakaHttpFailure(detail) {
+            if (!detail) return { status: null, url: null };
+            let status = null;
+            let url = null;
+            if (Array.isArray(detail.data)) {
+                detail.data.forEach(item => {
+                    if (typeof item === 'number' && item >= 400 && item <= 599) {
+                        status = item;
+                    }
+                    if (typeof item === 'string' && item.startsWith('http')) {
+                        url = item;
+                    }
+                });
+                if (!url && typeof detail.data[1] === 'string') {
+                    url = detail.data[1];
+                }
+            }
+            return { status, url };
+        }
+
+        function scheduleAutoRetry(reason) {
+            if (!currentUrl) return;
+            if (autoRetryCount >= 2) return;
+            if (autoRetryTimer) return;
+            autoRetryCount += 1;
+            const delay = 1000 * autoRetryCount;
+            log(`AUTO RETRY (${autoRetryCount}): ${reason}`);
+            autoRetryTimer = setTimeout(() => {
+                autoRetryTimer = null;
+                retryPlayback();
+            }, delay);
+        }
+
+        function getParams() {
+            const params = new URLSearchParams(window.location.search);
+            return {
+                playerId: params.get('player_id') || '',
+                url: params.get('url') || '',
+                player: params.get('player') || ''
+            };
+        }
+
+        function setBadges(isDash, playerType) {
+            const badges = document.getElementById('playerBadges');
+            badges.innerHTML = '';
+            const protocol = document.createElement('span');
+            protocol.className = `panel-badge ${isDash ? 'dash' : 'hls'}`;
+            protocol.textContent = isDash ? 'DASH' : 'HLS';
+            const player = document.createElement('span');
+            const label = playerType === 'hlsjs' ? 'HLS.js'
+                : playerType === 'shaka' ? 'Shaka'
+                : playerType === 'videojs' ? 'Video.js'
+                : playerType === 'native' ? 'Native'
+                : 'Auto';
+            const cls = playerType === 'hlsjs' ? 'hlsjs'
+                : playerType === 'shaka' ? 'shaka'
+                : playerType === 'videojs' ? 'videojs'
+                : playerType === 'native' ? 'native'
+                : (isDash ? 'shaka' : 'hlsjs');
+            player.className = `panel-badge ${cls}`;
+            player.textContent = label;
+            badges.appendChild(protocol);
+            badges.appendChild(player);
+        }
+
+        function attachVideoEvents() {
+            video.addEventListener('waiting', () => {
+                stallCount += 1;
+                document.getElementById('statStalls').textContent = `${stallCount}`;
+                log('STALL: waiting');
+            });
+            video.addEventListener('stalled', () => {
+                stallCount += 1;
+                document.getElementById('statStalls').textContent = `${stallCount}`;
+                log('STALL: stalled');
+            });
+            video.addEventListener('error', () => {
+                const err = video.error;
+                const code = err && err.code ? ` code=${err.code}` : '';
+                log(`ERROR: video error${code}`);
+                scheduleAutoRetry('video error');
+            });
+            video.addEventListener('playing', () => {
+                log('PLAYING');
+            });
+        }
+
+        function updateStats() {
+            const buffered = video.buffered;
+            const current = video.currentTime || 0;
+            let bufferedEnd = '--';
+            let bufferDepth = '--';
+            if (buffered && buffered.length > 0) {
+                const end = buffered.end(buffered.length - 1);
+                bufferedEnd = `${end.toFixed(2)}s`;
+                bufferDepth = `${Math.max(0, end - current).toFixed(2)}s`;
+            }
+            document.getElementById('statState').textContent = video.paused ? 'Paused' : (video.muted ? 'Playing (Muted)' : 'Playing');
+            document.getElementById('statTime').textContent = `${current.toFixed(2)}s`;
+            document.getElementById('statBufferedEnd').textContent = bufferedEnd;
+            document.getElementById('statBufferDepth').textContent = bufferDepth;
+            document.getElementById('statLiveOffset').textContent = '--';
+
+            const quality = video.getVideoPlaybackQuality ? video.getVideoPlaybackQuality() : null;
+            if (quality) {
+                document.getElementById('statDropped').textContent = `${quality.droppedVideoFrames || 0}`;
+            }
+
+            if (hlsInstance && hlsInstance.currentLevel >= 0 && hlsInstance.levels[hlsInstance.currentLevel]) {
+                const bitrate = hlsInstance.levels[hlsInstance.currentLevel].bitrate;
+                document.getElementById('statBitrate').textContent = `${Math.round(bitrate / 1000)} kbps`;
+                currentRenditionMbps = bitrate ? Math.round((bitrate / 1024 / 1024) * 100) / 100 : null;
+                playerEstimatedMbps = hlsInstance.bandwidthEstimate
+                    ? Math.round((hlsInstance.bandwidthEstimate / 1024 / 1024) * 100) / 100
+                    : null;
+            } else if (shakaPlayer) {
+                const stats = shakaPlayer.getStats();
+                if (stats && stats.estimatedBandwidth) {
+                    document.getElementById('statBitrate').textContent = `${Math.round(stats.estimatedBandwidth / 1000)} kbps`;
+                    playerEstimatedMbps = Math.round((stats.estimatedBandwidth / 1024 / 1024) * 100) / 100;
+                    if (stats.streamBandwidth) {
+                        currentRenditionMbps = Math.round((stats.streamBandwidth / 1024 / 1024) * 100) / 100;
+                    }
+                }
+            } else if (videojsPlayer) {
+                const tech = videojsPlayer.tech && videojsPlayer.tech(true);
+                const vhs = tech && tech.vhs ? tech.vhs : (videojsPlayer.vhs || null);
+                const bandwidth = vhs && vhs.bandwidth ? vhs.bandwidth : null;
+                if (bandwidth) {
+                    document.getElementById('statBitrate').textContent = `${Math.round(bandwidth / 1000)} kbps`;
+                    playerEstimatedMbps = Math.round((bandwidth / 1024 / 1024) * 100) / 100;
+                    const media = vhs.playlists && vhs.playlists.media ? vhs.playlists.media() : null;
+                    const rendition = media && media.attributes ? media.attributes.BANDWIDTH : null;
+                    currentRenditionMbps = rendition ? Math.round((rendition / 1024 / 1024) * 100) / 100 : null;
+                }
+            } else {
+                playerEstimatedMbps = null;
+                currentRenditionMbps = null;
+            }
+        }
+
+        function resetPlayback() {
+            if (hlsInstance) {
+                hlsInstance.destroy();
+                hlsInstance = null;
+            }
+            if (shakaPlayer) {
+                shakaPlayer.destroy();
+                shakaPlayer = null;
+            }
+            if (videojsPlayer) {
+                try {
+                    videojsPlayer.dispose();
+                } catch (err) {
+                    console.warn('Video.js dispose failed', err);
+                }
+                videojsPlayer = null;
+            }
+            video.className = '';
+            video.pause();
+            video.removeAttribute('src');
+            video.load();
+            stallCount = 0;
+            autoRetryCount = 0;
+            if (autoRetryTimer) {
+                clearTimeout(autoRetryTimer);
+                autoRetryTimer = null;
+            }
+            document.getElementById('statStalls').textContent = '0';
+            document.getElementById('statDropped').textContent = '0';
+            document.getElementById('statBitrate').textContent = '--';
+        }
+
+        function retryPlayback() {
+            if (!currentUrl) return;
+            const isDash = currentUrl.includes('.mpd');
+            if (hlsInstance) {
+                try {
+                    hlsInstance.stopLoad();
+                } catch (err) {
+                    console.warn('HLS stopLoad failed', err);
+                }
+                try {
+                    hlsInstance.startLoad();
+                } catch (err) {
+                    console.warn('HLS startLoad failed', err);
+                }
+                log('RETRY: hls.js startLoad');
+                return;
+            }
+            if (shakaPlayer) {
+                if (typeof shakaPlayer.retryStreaming === 'function') {
+                    shakaPlayer.retryStreaming();
+                    log('RETRY: shaka retryStreaming');
+                } else {
+                    shakaPlayer.load(currentUrl)
+                        .then(() => log('RETRY: shaka load'))
+                        .catch(err => log(`RETRY ERROR: ${err.message}`));
+                }
+                return;
+            }
+            if (videojsPlayer) {
+                const type = isDash ? 'application/dash+xml' : 'application/x-mpegURL';
+                videojsPlayer.src({ src: currentUrl, type });
+                videojsPlayer.ready(() => {
+                    videojsPlayer.play().catch(err => log(`RETRY ERROR: ${err.message}`));
+                });
+                log('RETRY: videojs load');
+                return;
+            }
+            video.load();
+            video.play().catch(err => console.warn('Native play failed', err));
+            log('RETRY: native load');
+        }
+
+        function resolvePlayerChoice(url, choice) {
+            const isDash = url.includes('.mpd');
+            if (choice === 'hlsjs') return 'hlsjs';
+            if (choice === 'shaka') return 'shaka';
+            if (choice === 'videojs') return 'videojs';
+            if (choice === 'native') return 'native';
+            if (isDash) return 'shaka';
+            return Hls.isSupported() ? 'hlsjs' : 'native';
+        }
+
+        function getPlayerChoice() {
+            const select = document.getElementById('playerSelect');
+            return select ? select.value : 'auto';
+        }
+
+        function setPlayerChoice(value) {
+            const select = document.getElementById('playerSelect');
+            if (select) {
+                select.value = value || 'auto';
+            }
+        }
+
+        function loadStream(url) {
+            currentUrl = url;
+            autoRetryCount = 0;
+            if (autoRetryTimer) {
+                clearTimeout(autoRetryTimer);
+                autoRetryTimer = null;
+            }
+            const isDash = url.includes('.mpd');
+            const choice = getPlayerChoice();
+            const playerType = resolvePlayerChoice(url, choice);
+            document.getElementById('playerUrl').textContent = url;
+            setBadges(isDash, playerType);
+            if (playerType === 'shaka') {
+                shaka.polyfill.installAll();
+                if (!shaka.Player.isBrowserSupported()) {
+                    log('ERROR: Shaka not supported');
+                    return;
+                }
+                shakaPlayer = new shaka.Player(video);
+                shakaPlayer.addEventListener('error', (e) => {
+                    log(`ERROR: ${e.detail.code} ${e.detail.message}`);
+                    const shakaHttp = extractShakaHttpFailure(e.detail);
+                    logHttpFailure('Shaka', shakaHttp.status, shakaHttp.url);
+                    scheduleAutoRetry(`shaka ${e.detail.code}`);
+                });
+                shakaPlayer.load(url).then(() => {
+                    log('LOADED');
+                    video.play().catch(err => {
+                        log(`PLAY ERROR: ${err.message}`);
+                        scheduleAutoRetry('shaka play error');
+                    });
+                }).catch((err) => {
+                    log(`LOAD ERROR: ${err.message}`);
+                    scheduleAutoRetry('shaka load error');
+                });
+            } else if (playerType === 'hlsjs') {
+                if (Hls.isSupported()) {
+                    hlsInstance = new Hls({ enableWorker: true, lowLatencyMode: false });
+                    hlsInstance.on(Hls.Events.ERROR, (evt, data) => {
+                        log(`HLS ERROR: ${data.type} ${data.details}`);
+                        const hlsHttp = extractHlsHttpFailure(data);
+                        logHttpFailure('HLS', hlsHttp.status, hlsHttp.url);
+                        if (data && data.fatal) {
+                            scheduleAutoRetry(`hls ${data.type}`);
+                        }
+                    });
+                    hlsInstance.on(Hls.Events.BUFFER_STALLED, () => {
+                        log('HLS: buffer stalled');
+                        scheduleAutoRetry('hls stalled');
+                    });
+                    hlsInstance.on(Hls.Events.MANIFEST_PARSED, () => {
+                        video.play().catch(err => {
+                            log(`PLAY ERROR: ${err.message}`);
+                            scheduleAutoRetry('hls play error');
+                        });
+                    });
+                    hlsInstance.loadSource(url);
+                    hlsInstance.attachMedia(video);
+                } else {
+                    video.src = url;
+                    video.play().catch(err => {
+                        log(`PLAY ERROR: ${err.message}`);
+                        scheduleAutoRetry('native play error');
+                    });
+                }
+            } else if (playerType === 'videojs') {
+                if (isDash) {
+                    log('ERROR: Video.js DASH requires extra plugins. Falling back to Shaka.');
+                    setPlayerChoice('shaka');
+                    loadStream(url);
+                    return;
+                }
+                video.className = 'video-js vjs-default-skin';
+                videojsPlayer = videojs(video, {
+                    controls: true,
+                    autoplay: true,
+                    muted: true,
+                    preload: 'auto',
+                    liveui: true
+                });
+                videojsPlayer.on('error', () => {
+                    const err = videojsPlayer.error();
+                    if (err) {
+                        log(`VIDEOJS ERROR: ${err.code} ${err.message || ''}`.trim());
+                        const status = err.status || err.responseStatusCode || err.responseCode || null;
+                        const url = err.url || err.responseURL || null;
+                        logHttpFailure('Video.js', status, url);
+                    } else {
+                        log('VIDEOJS ERROR');
+                    }
+                    scheduleAutoRetry('videojs error');
+                });
+                videojsPlayer.on('vhs-error', (evt, data) => {
+                    const status = data && (data.status || data.code || data.responseCode);
+                    const url = data && (data.url || data.responseURL);
+                    logHttpFailure('Video.js', status, url);
+                });
+                videojsPlayer.src({ src: url, type: 'application/x-mpegURL' });
+                videojsPlayer.ready(() => {
+                    videojsPlayer.play().catch(err => {
+                        log(`PLAY ERROR: ${err.message}`);
+                        scheduleAutoRetry('videojs play error');
+                    });
+                });
+            } else {
+                video.src = url;
+                video.play().catch(err => {
+                    log(`PLAY ERROR: ${err.message}`);
+                    scheduleAutoRetry('native play error');
+                });
+            }
+        }
+
+        function renderSessionControls(session) {
+            const container = document.getElementById('sessionControls');
+            container.innerHTML = TestingSessionUI.renderSessionCard(session);
+        }
+
+        function bindSessionControls() {
+            const container = document.getElementById('sessionControls');
+            const shapingTimers = new Map();
+            container.addEventListener('input', (event) => {
+                if (event.target.matches('input[type="range"]')) {
+                    const valueEl = event.target.parentElement.querySelector('.range-value');
+                    if (valueEl) valueEl.textContent = event.target.value;
+                }
+            });
+            container.addEventListener('change', (event) => {
+                const card = event.target.closest('.session-card');
+                if (!card) return;
+                if (event.target.dataset.field === 'playlist_failure_urls' && event.target.value === 'All') {
+                    const checks = card.querySelectorAll('input[data-field="playlist_failure_urls"]');
+                    checks.forEach(input => {
+                        input.checked = event.target.checked;
+                    });
+                }
+                if (event.target.dataset.field === 'segment_failure_urls' && event.target.value === 'All') {
+                    const checks = card.querySelectorAll('input[data-field="segment_failure_urls"]');
+                    checks.forEach(input => {
+                        input.checked = event.target.checked;
+                    });
+                }
+                if (event.target.dataset.field && event.target.dataset.field.startsWith('shaping_')) {
+                    const sessionId = card.dataset.sessionId;
+                    if (shapingTimers.has(sessionId)) {
+                        clearTimeout(shapingTimers.get(sessionId));
+                    }
+                    shapingTimers.set(sessionId, setTimeout(() => {
+                        applyNetworkShaping(card);
+                    }, 250));
+                    return;
+                }
+                saveSession(card);
+            });
+            container.addEventListener('click', (event) => {
+                const button = event.target.closest('button');
+                if (!button) return;
+                const card = button.closest('.session-card');
+                if (!card) return;
+                if (button.dataset.action === 'save-session') {
+                    saveSession(card);
+                }
+                if (button.dataset.action === 'delete-session') {
+                    const sessionId = card.dataset.sessionId;
+                    fetch(`/api/session/${sessionId}`, { method: 'DELETE' })
+                        .then(() => {
+                            container.innerHTML = '<div class="status-message">Session deleted.</div>';
+                        })
+                        .catch(err => console.error('Error deleting session', err));
+                }
+            });
+        }
+
+        function saveSession(card) {
+            const data = TestingSessionUI.readSessionSettings(card);
+            fetch(`/api/failure-settings/${data.session_id}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(data)
+            }).catch(err => console.error('Error saving settings', err));
+        }
+
+        function applyNetworkShaping(card) {
+            const port = card.dataset.sessionPort;
+            if (!port) return;
+            const getValue = (field) => {
+                const input = card.querySelector(`input[data-field="${field}"]`);
+                return input ? Number(input.value) : 0;
+            };
+            const payload = {
+                rate_mbps: getValue('shaping_throughput_mbps'),
+                delay_ms: getValue('shaping_delay_ms'),
+                loss_pct: getValue('shaping_loss_pct')
+            };
+            const sessionId = card.dataset.sessionId;
+            if (sessionId) {
+                pendingShaping.set(sessionId, {
+                    timestamp: Date.now(),
+                    values: {
+                        nftables_bandwidth_mbps: payload.rate_mbps,
+                        nftables_delay_ms: payload.delay_ms,
+                        nftables_packet_loss: payload.loss_pct
+                    }
+                });
+                setTimeout(() => {
+                    const pending = pendingShaping.get(sessionId);
+                    if (pending && Date.now() - pending.timestamp > 4500) {
+                        pendingShaping.delete(sessionId);
+                    }
+                }, 5000);
+            }
+            fetch(`/api/nftables/shape/${port}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            }).catch(err => console.error('Error applying network shaping', err));
+        }
+
+        function findSessionByPlayerId(playerId) {
+            return fetch('/api/sessions')
+                .then(response => response.json())
+                .then(sessions => sessions.find(session => session.player_id === playerId));
+        }
+
+        function pushBandwidthSample(session) {
+            const now = Date.now();
+            const windowMs = 5 * 60 * 1000;
+            const actual = Number(session.mbps_out_avg || session.mbps_out || 0);
+            const actual1s = Number(session.mbps_out_1s || 0);
+            const active = Number(session.mbps_out_active || 0);
+            const playerEstimate = Number(playerEstimatedMbps || 0);
+            const currentRendition = Number(currentRenditionMbps || 0);
+            const target = Number(session.nftables_bandwidth_mbps || 0);
+            const key = session.session_id;
+            if (!key) return;
+            const series = bandwidthHistory.get(key) || [];
+            series.push({ ts: now, actual, actual1s, active, playerEstimate, currentRendition, target });
+            const cutoff = now - windowMs;
+            const filtered = series.filter(point => point.ts >= cutoff);
+            bandwidthHistory.set(key, filtered);
+            renderBandwidthChart(key);
+        }
+
+        function renderBandwidthChart(sessionId) {
+            const series = bandwidthHistory.get(sessionId) || [];
+            const card = document.querySelector(`.session-card[data-session-id="${sessionId}"]`);
+            if (!card) return;
+            const canvas = card.querySelector('canvas.bandwidth-chart');
+            if (!canvas) return;
+            const windowMs = 5 * 60 * 1000;
+            if (series.length === 0) return;
+            const maxTs = series[series.length - 1].ts;
+            const windowStart = maxTs - windowMs;
+            const points = series
+                .filter(point => point.ts >= windowStart)
+                .map(point => ({
+                    x: (point.ts - windowStart) / 1000,
+                    actual: point.actual,
+                    actual1s: point.actual1s,
+                    active: point.active,
+                    playerEstimate: point.playerEstimate,
+                    currentRendition: point.currentRendition,
+                    target: point.target
+                }));
+            const actualData = points.map(point => ({ x: point.x, y: point.actual }));
+            const actual1sData = points.map(point => ({ x: point.x, y: point.actual1s }));
+            const activeData = points.map(point => ({ x: point.x, y: point.active }));
+            const estimateData = points.map(point => ({ x: point.x, y: point.playerEstimate || null }));
+            const renditionData = points.map(point => ({ x: point.x, y: point.currentRendition || null }));
+            const targetData = points.map(point => ({ x: point.x, y: point.target }));
+            const visibility = bandwidthVisibility.get(sessionId) || {};
+            const maxFor = (hidden, data) => (hidden ? [0] : data.map(point => point.y || 0));
+            const maxY = Math.min(100, Math.max(1,
+                ...maxFor(visibility['Actual (18s)'] === true, actualData),
+                ...maxFor(visibility['Actual (1s)'] === true, actual1sData),
+                ...maxFor(visibility['Active (18s)'] === true, activeData),
+                ...maxFor(visibility['Player est.'] === true, estimateData),
+                ...maxFor(visibility['Rendition'] === true, renditionData),
+                ...maxFor(visibility['Limit'] === true, targetData)
+            ));
+            let chart = bandwidthCharts.get(sessionId);
+            if (chart && chart.canvas !== canvas) {
+                chart.destroy();
+                chart = null;
+                bandwidthCharts.delete(sessionId);
+            }
+            if (!chart) {
+                chart = new Chart(canvas, {
+                    type: 'line',
+                    data: {
+                        datasets: [
+                            {
+                                label: 'Actual (18s)',
+                                data: actualData,
+                                borderColor: '#38bdf8',
+                                backgroundColor: 'rgba(56,189,248,0.12)',
+                                borderWidth: 2,
+                                pointRadius: 0,
+                                tension: 0.2,
+                                hidden: visibility['Actual (18s)'] === true
+                            },
+                            {
+                                label: 'Actual (1s)',
+                                data: actual1sData,
+                                borderColor: '#a855f7',
+                                backgroundColor: 'rgba(168,85,247,0.12)',
+                                borderWidth: 1.5,
+                                pointRadius: 0,
+                                tension: 0.2,
+                                hidden: visibility['Actual (1s)'] === true
+                            },
+                            {
+                                label: 'Active (18s)',
+                                data: activeData,
+                                borderColor: '#10b981',
+                                backgroundColor: 'rgba(16,185,129,0.12)',
+                                borderWidth: 1.5,
+                                pointRadius: 0,
+                                tension: 0.2,
+                                hidden: visibility['Active (18s)'] === true
+                            },
+                            {
+                                label: 'Player est.',
+                                data: estimateData,
+                                borderColor: '#6366f1',
+                                backgroundColor: 'rgba(99,102,241,0.12)',
+                                borderWidth: 1.5,
+                                pointRadius: 0,
+                                tension: 0.2,
+                                borderDash: [6, 4],
+                                hidden: visibility['Player est.'] === true
+                            },
+                            {
+                                label: 'Rendition',
+                                data: renditionData,
+                                borderColor: '#ef4444',
+                                backgroundColor: 'rgba(239,68,68,0.12)',
+                                borderWidth: 1.5,
+                                pointRadius: 0,
+                                tension: 0.2,
+                                borderDash: [3, 3],
+                                hidden: visibility['Rendition'] === true
+                            },
+                            {
+                                label: 'Limit',
+                                data: targetData,
+                                borderColor: '#f59e0b',
+                                backgroundColor: 'rgba(245,158,11,0.12)',
+                                borderWidth: 1.5,
+                                pointRadius: 0,
+                                stepped: true,
+                                hidden: visibility['Limit'] === true
+                            }
+                        ]
+                    },
+                    options: {
+                        responsive: false,
+                        animation: false,
+                        plugins: {
+                            legend: {
+                                display: true,
+                                position: 'bottom',
+                                labels: {
+                                    color: '#6b7280',
+                                    font: { family: 'Courier New, monospace', size: 10 }
+                                },
+                                onClick: (evt, item, legend) => {
+                                    const index = item.datasetIndex;
+                                    const chartRef = legend.chart;
+                                    const label = chartRef.data.datasets[index]?.label;
+                                    if (!label) return;
+                                    const state = bandwidthVisibility.get(sessionId) || {};
+                                    const isVisible = chartRef.isDatasetVisible(index);
+                                    chartRef.setDatasetVisibility(index, !isVisible);
+                                    state[label] = isVisible;
+                                    bandwidthVisibility.set(sessionId, state);
+                                    chartRef.update('none');
+                                }
+                            }
+                        },
+                        scales: {
+                            x: {
+                                type: 'linear',
+                                min: 0,
+                                max: 300,
+                                grid: { color: '#e5e7eb' },
+                                ticks: {
+                                    color: '#6b7280',
+                                    font: { family: 'Courier New, monospace', size: 10 },
+                                    callback: (value) => {
+                                        if (value === 0) return '-5:00';
+                                        if (value === 150) return '-2:30';
+                                        if (value === 300) return 'now';
+                                        return '';
+                                    }
+                                }
+                            },
+                            y: {
+                                min: 0,
+                                max: maxY,
+                                grid: { color: '#e5e7eb' },
+                                ticks: {
+                                    color: '#6b7280',
+                                    font: { family: 'Courier New, monospace', size: 10 }
+                                },
+                                title: {
+                                    display: true,
+                                    text: 'Mbps',
+                                    color: '#6b7280',
+                                    font: { family: 'Courier New, monospace', size: 10 }
+                                }
+                            }
+                        }
+                    }
+                });
+                bandwidthCharts.set(sessionId, chart);
+            } else {
+                chart.data.datasets[0].data = actualData;
+                chart.data.datasets[1].data = actual1sData;
+                chart.data.datasets[2].data = activeData;
+                chart.data.datasets[3].data = estimateData;
+                chart.data.datasets[4].data = renditionData;
+                chart.data.datasets[5].data = targetData;
+                chart.data.datasets.forEach((dataset, idx) => {
+                    if (Object.prototype.hasOwnProperty.call(visibility, dataset.label)) {
+                        const hidden = visibility[dataset.label] === true;
+                        dataset.hidden = hidden;
+                        chart.setDatasetVisibility(idx, !hidden);
+                    }
+                });
+                chart.options.scales.y.max = maxY;
+                chart.update('none');
+            }
+        }
+
+        function refreshSession(playerId) {
+            if (!playerId) return;
+            findSessionByPlayerId(playerId)
+                .then(session => {
+                    if (session) {
+                        const pending = pendingShaping.get(session.session_id);
+                        if (pending && Date.now() - pending.timestamp < 5000) {
+                            session = {
+                                ...session,
+                                ...pending.values
+                            };
+                        }
+                        if (session.session_id) {
+                            const titleParts = ['Testing Player', `Session ${session.session_id}`];
+                            if (session.player_id) {
+                                titleParts.push(session.player_id);
+                            }
+                            const titleText = titleParts.join(' · ');
+                            document.title = titleText;
+                            const titleEl = document.getElementById('pageTitle');
+                            if (titleEl) {
+                                titleEl.textContent = titleText;
+                            }
+                        }
+                        currentSessionId = session.session_id;
+                        renderSessionControls(session);
+                        pushBandwidthSample(session);
+                    }
+                })
+                .catch(err => console.error('Error fetching session', err));
+        }
+
+        function bootstrap() {
+            const params = getParams();
+            if (params.playerId) {
+                const titleText = `Testing Player · ${params.playerId}`;
+                document.title = titleText;
+                const titleEl = document.getElementById('pageTitle');
+                if (titleEl) {
+                    titleEl.textContent = titleText;
+                }
+            }
+            if (!params.url) {
+                document.getElementById('playerUrl').textContent = 'Missing stream URL.';
+                return;
+            }
+            const savedPlayer = localStorage.getItem('testing_session_player');
+            setPlayerChoice(params.player || savedPlayer || 'auto');
+            attachVideoEvents();
+            loadStream(params.url);
+            bindSessionControls();
+            refreshSession(params.playerId);
+            setInterval(() => refreshSession(params.playerId), 1000);
+            setInterval(updateStats, 500);
+            const setNetworkShapingVisibility = (enabled) => {
+                document.querySelectorAll('[data-net-shaping]').forEach(el => {
+                    el.style.display = enabled ? '' : 'none';
+                });
+            };
+            fetch('/api/nftables/capabilities')
+                .then(res => res.json())
+                .then(info => {
+                    if (info.status !== 'enabled') {
+                        const banner = document.getElementById('networkShapingBanner');
+                        if (banner) {
+                            const reason = info.reason || 'Traffic shaping is unavailable.';
+                            banner.textContent = `Network shaping disabled (${info.platform || 'unknown'}): ${reason}`;
+                            banner.style.display = 'block';
+                        }
+                        setNetworkShapingVisibility(false);
+                    } else {
+                        setNetworkShapingVisibility(true);
+                    }
+                })
+                .catch(() => {
+                    setNetworkShapingVisibility(false);
+                });
+            document.getElementById('retryPlayback').addEventListener('click', () => {
+                log('RETRY: playback');
+                retryPlayback();
+            });
+            document.getElementById('restartPlayback').addEventListener('click', () => {
+                if (!currentUrl) return;
+                log('RESTART: playback');
+                resetPlayback();
+                loadStream(currentUrl);
+            });
+            document.getElementById('reloadPage').addEventListener('click', () => {
+                log('RELOAD: page');
+                window.location.reload();
+            });
+            const playerSelect = document.getElementById('playerSelect');
+            if (playerSelect) {
+                playerSelect.addEventListener('change', () => {
+                    localStorage.setItem('testing_session_player', playerSelect.value);
+                    if (currentUrl) {
+                        resetPlayback();
+                        loadStream(currentUrl);
+                    }
+                });
+            }
+        }
+
+        document.addEventListener('DOMContentLoaded', bootstrap);
+    </script>
+</body>
+</html>

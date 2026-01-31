@@ -1,0 +1,702 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Source Content Library - InfiniteStream</title>
+    <link rel="stylesheet" href="/shared-styles.css">
+    <style>
+        .sources-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(350px, 1fr));
+            gap: 20px;
+        }
+
+        .source-card {
+            background: var(--bg-primary);
+            border-radius: 8px;
+            padding: 20px;
+            box-shadow: var(--shadow-sm);
+            transition: transform 0.2s ease, box-shadow 0.2s ease;
+            position: relative;
+            border: 1px solid var(--border-color);
+        }
+
+        .source-card:hover {
+            transform: translateY(-2px);
+            box-shadow: var(--shadow-md);
+        }
+
+        .source-checkbox {
+            position: absolute;
+            top: 15px;
+            right: 15px;
+            width: 20px;
+            height: 20px;
+            cursor: pointer;
+        }
+
+        .source-name {
+            font-size: 1.1em;
+            font-weight: 600;
+            color: var(--text-primary);
+            margin-bottom: 12px;
+            padding-right: 30px;
+        }
+
+        .source-meta {
+            font-size: 0.9em;
+            color: var(--text-secondary);
+            margin-bottom: 16px;
+        }
+
+        .source-meta-item {
+            margin-bottom: 6px;
+        }
+
+        .source-actions {
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+        }
+
+        .header-actions {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 24px;
+            flex-wrap: wrap;
+            gap: 12px;
+        }
+
+        .header-actions-right {
+            display: flex;
+            gap: 12px;
+            flex-wrap: wrap;
+        }
+
+        /* Batch re-encode modal */
+        .modal {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.7);
+            z-index: 1000;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .modal.active {
+            display: flex;
+        }
+
+        .modal-content {
+            background: #ffffff;
+            border-radius: 12px;
+            padding: 30px;
+            max-width: 600px;
+            width: 90%;
+            max-height: 80vh;
+            overflow-y: auto;
+            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.3);
+            border: 1px solid #e0e0e0;
+        }
+
+        .modal-header {
+            font-size: 1.5em;
+            font-weight: 600;
+            margin-bottom: 20px;
+            color: #2c3e50;
+        }
+
+        .form-actions {
+            display: flex;
+            gap: 12px;
+            justify-content: flex-end;
+            margin-top: 24px;
+        }
+    </style>
+</head>
+<body data-boss-active-page="sources">
+    <div class="boss-content-standard">
+        <div class="card">
+            <div class="card-header">
+                <div class="header-actions">
+                    <h1>Source Content Library</h1>
+                    <div class="header-actions-right">
+                        <button id="batchReencodeBtn" class="btn btn-success" disabled>Batch Re-encode Selected</button>
+                    </div>
+                </div>
+                <p>Original uploaded files available for re-encoding</p>
+            </div>
+            <div class="card-body">
+                <div id="loading" class="text-center text-secondary" style="padding: 40px;">
+                    <div class="spinner"></div>
+                    <div style="margin-top: 12px;">Loading sources...</div>
+                </div>
+
+                <div id="sourcesContainer" class="sources-grid" style="display: none;"></div>
+
+                <div id="emptyState" class="empty-state" style="display: none;">
+                    <div class="empty-state-icon">📁</div>
+                    <h2>No Source Content</h2>
+                    <p>Upload your first video to get started</p>
+                    <br>
+                    <a href="/dashboard/upload.html" class="btn btn-primary">Upload Content</a>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Batch Re-encode Modal -->
+    <div id="batchModal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">Batch Re-encode Settings</div>
+            <form id="batchForm">
+                <div class="form-group">
+                    <label>Selected Sources: <strong><span id="selectedCount">0</span></strong></label>
+                </div>
+
+                <div class="form-group">
+                    <label for="batchCodec">Codec Selection</label>
+                    <select id="batchCodec" name="codec_selection" class="form-select">
+                        <option value="both">Both (H.264 + HEVC)</option>
+                        <option value="all">All (H.264 + HEVC + AV1)</option>
+                        <option value="h264">H.264 only</option>
+                        <option value="hevc">HEVC only</option>
+                        <option value="av1">AV1 only</option>
+                    </select>
+                </div>
+
+                <div class="form-group">
+                    <label for="batchMaxRes">Maximum Resolution</label>
+                    <select id="batchMaxRes" name="max_resolution" class="form-select">
+                        <option value="">No limit (encode up to source resolution)</option>
+                        <option value="360p">360p (640x360)</option>
+                        <option value="540p">540p (960x540)</option>
+                        <option value="720p">720p (1280x720)</option>
+                        <option value="1080p">1080p (1920x1080)</option>
+                        <option value="1440p">1440p (2560x1440)</option>
+                        <option value="2160p">2160p (3840x2160)</option>
+                    </select>
+                </div>
+
+                <div class="form-group">
+    <label>Partial Segment Durations</label>
+    <div style="display: flex; gap: 20px; flex-wrap: wrap; margin-top: 8px;">
+        <label style="display: flex; align-items: center; font-weight: normal; cursor: pointer;">
+            <input type="checkbox" name="batchPartialDuration" value="1000" style="margin-right: 5px;">
+            1s partials (p1000)
+        </label>
+        <label style="display: flex; align-items: center; font-weight: normal; cursor: pointer;">
+            <input type="checkbox" name="batchPartialDuration" value="200" checked style="margin-right: 5px;">
+            200ms partials (p200)
+        </label>
+    </div>
+</div>
+<div class="form-group">
+    <label for="batchHlsFormat">HLS Format</label>
+    <select id="batchHlsFormat" name="hls_format" class="form-select">
+        <option value="fmp4">fMP4 segments (modern)</option>
+        <option value="ts">MPEG-TS segments (legacy)</option>
+        <option value="both">Both formats</option>
+    </select>
+</div>
+
+                <div class="form-group">
+                    <label for="batchDurationLimit">Duration Limit (seconds)</label>
+                    <input type="number" id="batchDurationLimit" name="duration_limit" class="form-input" min="1" placeholder="Leave empty for full video">
+                    <small>Optionally trim videos to the first N seconds</small>
+                </div>
+                <div class="form-group">
+                    <label>Segment Duration</label>
+                    <label class="form-checkbox"><input type="radio" name="batchSegmentDuration" value="2"> 2s segments</label>
+                    <label class="form-checkbox"><input type="radio" name="batchSegmentDuration" value="6" checked> 6s segments</label>
+                </div>
+
+                <div class="form-group">
+                    <label>GOP Duration</label>
+                    <label class="form-checkbox"><input type="radio" name="batchGopDuration" value="1.0" checked> 1s GOPs</label>
+                    <label class="form-checkbox"><input type="radio" name="batchGopDuration" value="2.0"> 2s GOPs</label>
+                </div>
+
+                <div class="form-group">
+                    <label class="form-checkbox">
+                        <input type="checkbox" id="batchForceSoftware" name="force_software" checked>
+                        Force software encoding (disable hardware acceleration)
+                    </label>
+                </div>
+
+                <div class="form-group">
+                    <label style="display: block; margin-bottom: 8px; font-weight: 500;">
+                        Padding to Segment Boundaries:
+                    </label>
+                    <label class="form-checkbox" style="margin-bottom: 6px;">
+                        <input type="radio" id="batchPaddingNone" name="batchPadding" value="none" checked>
+                        No padding (default)
+                    </label>
+                    <label class="form-checkbox" style="margin-bottom: 6px;">
+                        <input type="radio" id="batchPaddingBlack" name="batchPadding" value="black">
+                        Black padding frames with "PADDING" label
+                    </label>
+                    <label class="form-checkbox">
+                        <input type="radio" id="batchPaddingPink" name="batchPadding" value="pink">
+                        Pink padding frames with "PADDING" label
+                    </label>
+                </div>
+
+                <div class="form-actions">
+                    <button type="button" class="btn btn-secondary" onclick="closeBatchModal()">Cancel</button>
+                    <button type="submit" class="btn btn-success">Start Batch Re-encode</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- Re-encode Modal (Single Source) -->
+    <div id="reencodeModal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">Re-encode: <span id="reencodeSourceName"></span></div>
+            <form id="reencodeForm">
+                <input type="hidden" id="reencodeSourceId">
+
+                <div class="form-group">
+                    <label>Codec Selection</label>
+                    <div style="display: flex; gap: 15px; margin-top: 8px; flex-wrap: wrap;">
+                        <label style="display: flex; align-items: center; font-weight: normal; cursor: pointer;">
+                            <input type="radio" name="reencodeCodec" value="both" checked style="margin-right: 5px;">
+                            Both (H.264 + HEVC)
+                        </label>
+                        <label style="display: flex; align-items: center; font-weight: normal; cursor: pointer;">
+                            <input type="radio" name="reencodeCodec" value="all" style="margin-right: 5px;">
+                            All (H.264 + HEVC + AV1)
+                        </label>
+                        <label style="display: flex; align-items: center; font-weight: normal; cursor: pointer;">
+                            <input type="radio" name="reencodeCodec" value="h264" style="margin-right: 5px;">
+                            H.264 only
+                        </label>
+                        <label style="display: flex; align-items: center; font-weight: normal; cursor: pointer;">
+                            <input type="radio" name="reencodeCodec" value="hevc" style="margin-right: 5px;">
+                            HEVC only
+                        </label>
+                        <label style="display: flex; align-items: center; font-weight: normal; cursor: pointer;">
+                            <input type="radio" name="reencodeCodec" value="av1" style="margin-right: 5px;">
+                            AV1 only
+                        </label>
+                    </div>
+                </div>
+
+                <div class="form-group">
+                    <label for="reencodeMaxRes">Maximum Resolution</label>
+                    <select id="reencodeMaxRes" name="max_resolution" class="form-select">
+                        <option value="">No limit (encode up to source resolution)</option>
+                        <option value="360p">360p (640x360)</option>
+                        <option value="540p">540p (960x540)</option>
+                        <option value="720p">720p (1280x720)</option>
+                        <option value="1080p">1080p (1920x1080)</option>
+                        <option value="1440p">1440p (2560x1440)</option>
+                        <option value="2160p">2160p (3840x2160)</option>
+                    </select>
+                    <small>Limit the highest resolution tier to save time and storage</small>
+                </div>
+
+                <div class="form-group">
+    <label>Partial Segment Durations</label>
+    <div style="display: flex; gap: 20px; flex-wrap: wrap; margin-top: 8px;">
+        <label style="display: flex; align-items: center; font-weight: normal; cursor: pointer;">
+            <input type="checkbox" name="reencodePartialDuration" value="1000" style="margin-right: 5px;">
+            1s partials (p1000)
+        </label>
+        <label style="display: flex; align-items: center; font-weight: normal; cursor: pointer;">
+            <input type="checkbox" name="reencodePartialDuration" value="200" checked style="margin-right: 5px;">
+            200ms partials (p200)
+        </label>
+    </div>
+</div>
+<div class="form-group">
+    <label>Segment Duration</label>
+    <label class="form-checkbox"><input type="radio" name="reencodeSegmentDuration" value="2"> 2s segments</label>
+    <label class="form-checkbox"><input type="radio" name="reencodeSegmentDuration" value="6" checked> 6s segments</label>
+</div>
+<div class="form-group">
+    <label>GOP Duration</label>
+    <label class="form-checkbox"><input type="radio" name="reencodeGopDuration" value="1.0" checked> 1s GOPs</label>
+    <label class="form-checkbox"><input type="radio" name="reencodeGopDuration" value="2.0"> 2s GOPs</label>
+</div>
+<div class="form-group">
+    <label style="display: flex; align-items: center; gap: 8px;">
+        <input type="checkbox" id="reencodeKeepMezzanine" name="keep_mezzanine" checked>
+        Preserve intermediate mezzanine files
+    </label>
+</div>
+<div class="form-group">
+    <label>HLS Format</label>
+    <div style="display: flex; gap: 20px; flex-wrap: wrap; margin-top: 8px;">
+        <label style="display: flex; align-items: center; font-weight: normal; cursor: pointer;">
+            <input type="checkbox" name="reencodeHlsFormat" value="fmp4" checked style="margin-right: 5px;">
+            fMP4 (modern)
+        </label>
+        <label style="display: flex; align-items: center; font-weight: normal; cursor: pointer;">
+            <input type="checkbox" name="reencodeHlsFormat" value="ts" style="margin-right: 5px;">
+            MPEG-TS (legacy)
+        </label>
+    </div>
+    <small>Select which HLS segment formats to generate</small>
+</div>
+
+                <!-- Advanced Options Toggle -->
+                <button type="button" class="advanced-toggle" id="reencodeAdvancedToggle">
+                    Show Advanced Options ▼
+                </button>
+                
+                <div class="advanced-options" id="reencodeAdvancedOptions">
+                    <div class="form-group">
+                        <label for="reencodeDurationLimit">Duration Limit (seconds)</label>
+                        <input type="number" id="reencodeDurationLimit" name="duration_limit" class="form-input" min="1" placeholder="Leave empty for full video">
+                        <small>Optionally trim the video to the first N seconds</small>
+                    </div>
+
+                    <div class="form-group">
+                        <label class="form-checkbox">
+                            <input type="checkbox" id="reencodeForceSoftware" name="force_software" checked>
+                            Force software encoding (disable hardware acceleration)
+                        </label>
+                    </div>
+
+                    <div class="form-group">
+                        <label style="display: block; margin-bottom: 8px; font-weight: 500;">
+                            Padding to Segment Boundaries:
+                        </label>
+                        <label class="form-checkbox" style="margin-bottom: 6px;">
+                            <input type="radio" id="reencodePaddingNone" name="reencodePadding" value="none" checked>
+                            No padding (default)
+                        </label>
+                        <label class="form-checkbox" style="margin-bottom: 6px;">
+                            <input type="radio" id="reencodePaddingBlack" name="reencodePadding" value="black">
+                            Black padding frames with "PADDING" label
+                        </label>
+                        <label class="form-checkbox">
+                            <input type="radio" id="reencodePaddingPink" name="reencodePadding" value="pink">
+                            Pink padding frames with "PADDING" label
+                        </label>
+                    </div>
+                </div>
+
+                <div class="form-actions">
+                    <button type="button" class="btn btn-secondary" onclick="closeReencodeModal()">Cancel</button>
+                    <button type="submit" class="btn btn-primary">Start Re-encode</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <script>
+        let sources = [];
+        let selectedSourceIds = new Set();
+
+        // Load sources on page load
+        async function loadSources() {
+            try {
+                const response = await fetch('/api/sources');
+                const data = await response.json();
+                sources = data.sources || [];
+
+                document.getElementById('loading').style.display = 'none';
+
+                if (sources.length === 0) {
+                    document.getElementById('emptyState').style.display = 'block';
+                } else {
+                    document.getElementById('sourcesContainer').style.display = 'grid';
+                    renderSources();
+                }
+            } catch (error) {
+                console.error('Error loading sources:', error);
+                document.getElementById('loading').innerHTML = '<div class="text-danger">Error loading sources</div>';
+            }
+        }
+
+        function renderSources() {
+            const container = document.getElementById('sourcesContainer');
+            container.innerHTML = '';
+
+            sources.forEach(source => {
+                const card = document.createElement('div');
+                card.className = 'source-card';
+                
+                const fileSize = formatFileSize(source.file_size);
+                const duration = source.duration ? formatDuration(source.duration) : 'Unknown';
+                const resolution = source.resolution || 'Unknown';
+                const uploadDate = new Date(source.uploaded_at).toLocaleString();
+
+                card.innerHTML = `
+                    <input type="checkbox" class="source-checkbox" data-source-id="${source.source_id}" 
+                           onchange="toggleSourceSelection('${source.source_id}')">
+                    <div class="source-name">${escapeHtml(source.name)}</div>
+                    <div class="source-meta">
+                        <div class="source-meta-item"><strong>File:</strong> ${escapeHtml(source.original_filename)}</div>
+                        <div class="source-meta-item"><strong>Size:</strong> ${fileSize}</div>
+                        <div class="source-meta-item"><strong>Duration:</strong> ${duration}</div>
+                        <div class="source-meta-item"><strong>Resolution:</strong> ${resolution}</div>
+                        <div class="source-meta-item"><strong>Uploaded:</strong> ${uploadDate}</div>
+                    </div>
+                    <div class="source-actions">
+                        <button class="btn btn-sm btn-primary" onclick="reencodeSource('${source.source_id}', '${escapeHtml(source.name)}')">
+                            Re-encode
+                        </button>
+                        <button class="btn btn-sm btn-danger" onclick="deleteSource('${source.source_id}', '${escapeHtml(source.name)}')">
+                            Delete
+                        </button>
+                    </div>
+                `;
+
+                container.appendChild(card);
+            });
+        }
+
+        function toggleSourceSelection(sourceId) {
+            if (selectedSourceIds.has(sourceId)) {
+                selectedSourceIds.delete(sourceId);
+            } else {
+                selectedSourceIds.add(sourceId);
+            }
+
+            const batchBtn = document.getElementById('batchReencodeBtn');
+            batchBtn.disabled = selectedSourceIds.size === 0;
+            batchBtn.textContent = `Batch Re-encode Selected (${selectedSourceIds.size})`;
+        }
+
+        function reencodeSource(sourceId, sourceName) {
+            // Open the re-encode modal
+            document.getElementById('reencodeSourceId').value = sourceId;
+            document.getElementById('reencodeSourceName').textContent = sourceName;
+            
+            // Reset form to defaults
+            document.getElementById('reencodeForm').reset();
+            document.querySelector('input[name="reencodeCodec"][value="both"]').checked = true;
+            document.querySelector('input[name="reencodeHlsFormat"][value="fmp4"]').checked = true;
+            document.getElementById('reencodeForceSoftware').checked = true;
+            document.getElementById('reencodeAdvancedOptions').classList.remove('show');
+            document.getElementById('reencodeAdvancedToggle').textContent = 'Show Advanced Options ▼';
+            
+            document.getElementById('reencodeModal').classList.add('active');
+        }
+
+        async function deleteSource(sourceId, sourceName) {
+            if (!confirm(`Delete "${sourceName}"?\n\nThis will permanently delete the source file. This action cannot be undone.`)) {
+                return;
+            }
+
+            try {
+                const response = await fetch(`/api/sources/${sourceId}`, {
+                    method: 'DELETE'
+                });
+
+                if (response.ok) {
+                    alert('Source deleted successfully');
+                    loadSources(); // Reload the list
+                } else {
+                    const error = await response.json();
+                    alert(`Error: ${error.detail}`);
+                }
+            } catch (error) {
+                console.error('Error deleting source:', error);
+                alert('Failed to delete source');
+            }
+        }
+
+        function openBatchModal() {
+            if (selectedSourceIds.size === 0) {
+                alert('Please select at least one source');
+                return;
+            }
+
+            document.getElementById('selectedCount').textContent = selectedSourceIds.size;
+            document.getElementById('batchModal').classList.add('active');
+        }
+
+        function closeBatchModal() {
+            document.getElementById('batchModal').classList.remove('active');
+        }
+
+        function closeReencodeModal() {
+            document.getElementById('reencodeModal').classList.remove('active');
+        }
+
+        // Advanced options toggle for re-encode modal
+        document.getElementById('reencodeAdvancedToggle').addEventListener('click', () => {
+            const advancedOptions = document.getElementById('reencodeAdvancedOptions');
+            const toggle = document.getElementById('reencodeAdvancedToggle');
+            advancedOptions.classList.toggle('show');
+            if (advancedOptions.classList.contains('show')) {
+                toggle.textContent = 'Hide Advanced Options ▲';
+            } else {
+                toggle.textContent = 'Show Advanced Options ▼';
+            }
+        });
+
+        document.getElementById('batchReencodeBtn').addEventListener('click', openBatchModal);
+
+        document.getElementById('batchForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+
+            const batchPartialDurations = Array.from(document.querySelectorAll('input[name="batchPartialDuration"]:checked')).map(cb => parseInt(cb.value));
+            const batchGopDuration = document.querySelector('input[name="batchGopDuration"]:checked').value;
+            const requestBody = {
+                source_ids: Array.from(selectedSourceIds),
+                codec_selection: document.getElementById('batchCodec').value,
+                max_resolution: document.getElementById('batchMaxRes').value || null,
+                hls_format: document.getElementById('batchHlsFormat').value,
+                force_software: document.getElementById('batchForceSoftware').checked,
+                padding: document.querySelector('input[name="batchPadding"]:checked').value,
+                duration_limit: document.getElementById('batchDurationLimit').value ? parseInt(document.getElementById('batchDurationLimit').value) : null,
+                partial_durations: batchPartialDurations.length > 0 ? batchPartialDurations : [200],
+                segment_duration: parseInt(document.querySelector('input[name="batchSegmentDuration"]:checked').value),
+                gop_duration: parseFloat(batchGopDuration)
+            };
+
+            try {
+                const response = await fetch('/api/sources/batch-reencode-json', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify(requestBody)
+                });
+
+                if (response.ok) {
+                    const data = await response.json();
+                    alert(`Batch re-encode started!\n\n${data.total} jobs created.`);
+                    closeBatchModal();
+                    window.location.href = '/dashboard/jobs.html';
+                } else {
+                    const error = await response.json();
+                    alert(`Error: ${error.detail}`);
+                }
+            } catch (error) {
+                console.error('Error starting batch re-encode:', error);
+                alert('Failed to start batch re-encode');
+            }
+        });
+
+        document.getElementById('reencodeForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+
+            const sourceId = document.getElementById('reencodeSourceId').value;
+
+            try {
+                const formData = new FormData();
+                
+                // Codec selection
+                const codecSelection = document.querySelector('input[name="reencodeCodec"]:checked').value;
+                formData.append('codec_selection', codecSelection);
+                
+                // Max resolution
+                const maxResolution = document.getElementById('reencodeMaxRes').value;
+                if (maxResolution) {
+                    formData.append('max_resolution', maxResolution);
+                }
+                
+                // HLS format - check which boxes are checked
+                const hlsFormats = Array.from(document.querySelectorAll('input[name="reencodeHlsFormat"]:checked'))
+                    .map(cb => cb.value);
+                let hlsFormat = 'fmp4'; // default
+                if (hlsFormats.length === 2) {
+                    hlsFormat = 'both';
+                } else if (hlsFormats.length === 1) {
+                    hlsFormat = hlsFormats[0];
+                } else if (hlsFormats.length === 0) {
+                    // If nothing checked, default to fmp4
+                    hlsFormat = 'fmp4';
+                }
+                formData.append('hls_format', hlsFormat);
+                
+                // Force software
+                formData.append('force_software', document.getElementById('reencodeForceSoftware').checked);
+                
+                // Padding option
+                const paddingOption = document.querySelector('input[name="reencodePadding"]:checked').value;
+                formData.append('padding', paddingOption);
+                
+                // Duration limit
+                const durationLimit = document.getElementById('reencodeDurationLimit').value;
+                if (durationLimit) {
+                    formData.append('duration_limit', durationLimit);
+                }
+
+                // Partial durations
+                const reencodePartialDurations = Array.from(document.querySelectorAll('input[name="reencodePartialDuration"]:checked')).map(cb => cb.value);
+                if (reencodePartialDurations.length > 0) {
+                    reencodePartialDurations.forEach(val => formData.append('partial_durations', val));
+                } else {
+                    formData.append('partial_durations', '1000');
+                }
+
+                // Segment duration
+                const segmentDuration = document.querySelector('input[name="reencodeSegmentDuration"]:checked').value;
+                formData.append('segment_duration', segmentDuration);
+                const gopDuration = document.querySelector('input[name="reencodeGopDuration"]:checked').value;
+                formData.append('gop_duration', gopDuration);
+                formData.append('keep_mezzanine', document.getElementById('reencodeKeepMezzanine').checked);
+
+                const response = await fetch(`/api/sources/${sourceId}/reencode`, {
+                    method: 'POST',
+                    body: formData
+                });
+
+                if (response.ok) {
+                    const data = await response.json();
+                    closeReencodeModal();
+                    const jobIds = Array.isArray(data.job_ids) ? data.job_ids : [];
+                    const firstJobId = jobIds[0];
+                    if (!firstJobId) {
+                        throw new Error('No job IDs returned from re-encode');
+                    }
+                    alert(`Re-encode job created!\n\nJob ID: ${firstJobId}`);
+                    window.location.href = `/dashboard/job-detail.html?id=${firstJobId}`;
+                } else {
+                    const error = await response.json();
+                    alert(`Error: ${error.detail}`);
+                }
+            } catch (error) {
+                console.error('Error creating re-encode job:', error);
+                alert('Failed to create re-encode job');
+            }
+        });
+
+        function formatFileSize(bytes) {
+            if (bytes === 0) return '0 Bytes';
+            const k = 1024;
+            const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+            const i = Math.floor(Math.log(bytes) / Math.log(k));
+            return Math.round(bytes / Math.pow(k, i) * 100) / 100 + ' ' + sizes[i];
+        }
+
+        function formatDuration(seconds) {
+            const hours = Math.floor(seconds / 3600);
+            const minutes = Math.floor((seconds % 3600) / 60);
+            const secs = Math.floor(seconds % 60);
+
+            if (hours > 0) {
+                return `${hours}h ${minutes}m ${secs}s`;
+            } else if (minutes > 0) {
+                return `${minutes}m ${secs}s`;
+            } else {
+                return `${secs}s`;
+            }
+        }
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        // Load sources on page load
+        loadSources();
+    </script>
+    <script src="/shared-nav.js"></script>
+</body>
+</html>

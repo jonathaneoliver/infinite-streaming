@@ -1,0 +1,636 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Upload Content - InfiniteStream</title>
+    <link rel="stylesheet" href="/shared-styles.css">
+    <style>
+        .upload-zone {
+            border: 3px dashed var(--border-color);
+            border-radius: 8px;
+            padding: 60px 20px;
+            text-align: center;
+            background: var(--bg-subtle);
+            cursor: pointer;
+            transition: all 0.3s ease;
+            margin-bottom: 24px;
+        }
+
+        .upload-zone.drag-over {
+            background: var(--bg-secondary);
+            border-color: var(--primary-color);
+            transform: scale(1.02);
+        }
+
+        .upload-zone p {
+            font-size: 1.2em;
+            color: var(--text-primary);
+            margin-bottom: 10px;
+            margin-top: 15px;
+        }
+
+        .upload-zone span {
+            font-size: 0.9em;
+            color: var(--text-secondary);
+        }
+
+        .file-input {
+            display: none;
+        }
+
+        .selected-file {
+            display: none;
+            background: var(--success-bg);
+            border: 2px solid var(--success-color);
+            border-radius: 8px;
+            padding: 16px;
+            margin-bottom: 24px;
+        }
+
+        .selected-file.show {
+            display: block;
+        }
+
+        .selected-file p {
+            margin: 0;
+            color: var(--success-dark);
+            font-weight: 500;
+        }
+
+        .advanced-toggle {
+            background: none;
+            border: none;
+            color: var(--primary-color);
+            cursor: pointer;
+            font-size: 1em;
+            padding: 10px 0;
+            text-decoration: underline;
+            font-weight: 500;
+        }
+
+        .advanced-options {
+            display: none;
+            padding-top: 10px;
+        }
+
+        .advanced-options.show {
+            display: block;
+        }
+
+        .progress-container {
+            display: none;
+            margin-top: 24px;
+        }
+
+        .progress-container.show {
+            display: block;
+        }
+
+        .progress-text {
+            text-align: center;
+            color: var(--text-secondary);
+            font-size: 0.9em;
+            margin-top: 8px;
+        }
+
+        .upload-warning {
+            display: none;
+            background: var(--warning-bg);
+            border: 2px solid var(--warning-color);
+            border-radius: 8px;
+            padding: 12px 16px;
+            margin-top: 16px;
+            color: var(--warning-dark);
+            font-weight: 500;
+            text-align: center;
+        }
+
+        .upload-warning.show {
+            display: block;
+        }
+
+        .upload-warning::before {
+            content: '⚠️ ';
+            font-size: 1.2em;
+        }
+    </style>
+</head>
+<body data-boss-active-page="upload">
+    <div class="boss-content-standard">
+        <div class="card">
+            <div class="card-header">
+                <h1>Upload Content</h1>
+                <p>Upload an MP4 file and configure ABR transcoding</p>
+            </div>
+            <div class="card-body">
+            <form id="uploadForm" autocomplete="off">
+                <!-- Upload Zone -->
+                <div class="upload-zone" id="uploadZone">
+                    <div style="font-size: 48px;">📁</div>
+                    <p>Drag & drop your MP4 file here</p>
+                    <span>or click to browse</span>
+                </div>
+                <input type="file" id="fileInput" class="file-input" accept=".mp4,video/mp4">
+
+                <!-- Selected File -->
+                <div class="selected-file" id="selectedFile">
+                    <p id="fileName"></p>
+                </div>
+
+                <!-- Configuration -->
+                <div class="form-group">
+                    <label>Partial Segment Durations</label>
+                    <div style="display: flex; gap: 20px; flex-wrap: wrap; margin-top: 8px;">
+                        <label style="display: flex; align-items: center; font-weight: normal; cursor: pointer;">
+                            <input type="checkbox" name="partialDuration" value="1000" style="margin-right: 5px;">
+                            1s partials (p1000)
+                        </label>
+                        <label style="display: flex; align-items: center; font-weight: normal; cursor: pointer;">
+                            <input type="checkbox" name="partialDuration" value="200" checked style="margin-right: 5px;">
+                            200ms partials (p200)
+                        </label>
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label>Segment Duration</label>
+                    <label class="form-checkbox"><input type="radio" name="segmentDuration" value="2"> 2s segments</label>
+                    <label class="form-checkbox"><input type="radio" name="segmentDuration" value="6" checked> 6s segments</label>
+                </div>
+                <div class="form-group">
+                    <label>Codec Selection</label>
+                    <div style="display: flex; gap: 15px; margin-top: 8px;">
+                        <label style="display: flex; align-items: center; font-weight: normal; cursor: pointer;">
+                            <input type="radio" name="codecSelection" value="both" checked style="margin-right: 5px;">
+                            Both (HEVC + H.264)
+                        </label>
+                        <label style="display: flex; align-items: center; font-weight: normal; cursor: pointer;">
+                            <input type="radio" name="codecSelection" value="all" style="margin-right: 5px;">
+                            All (HEVC + H.264 + AV1)
+                        </label>
+                        <label style="display: flex; align-items: center; font-weight: normal; cursor: pointer;">
+                            <input type="radio" name="codecSelection" value="hevc" style="margin-right: 5px;">
+                            HEVC only
+                        </label>
+                        <label style="display: flex; align-items: center; font-weight: normal; cursor: pointer;">
+                            <input type="radio" name="codecSelection" value="h264" style="margin-right: 5px;">
+                            H.264 only
+                        </label>
+                        <label style="display: flex; align-items: center; font-weight: normal; cursor: pointer;">
+                            <input type="radio" name="codecSelection" value="av1" style="margin-right: 5px;">
+                            AV1 only
+                        </label>
+                    </div>
+                </div>
+
+                <div class="form-group">
+                    <label for="maxResolution">Maximum Resolution</label>
+                    <select id="maxResolution" name="maxResolution" class="form-select">
+                        <option value="">No limit</option>
+                        <option value="360p">360p</option>
+                        <option value="540p">540p</option>
+                        <option value="720p">720p</option>
+                        <option value="1080p">1080p</option>
+                        <option value="1440p">1440p</option>
+                        <option value="2160p">2160p (4K)</option>
+                    </select>
+                    <small>Limit the highest resolution tier to save time and storage</small>
+                </div>
+
+                <div class="form-group">
+                    <label>HLS Format</label>
+                    <div style="display: flex; gap: 20px; flex-wrap: wrap; margin-top: 8px;">
+                        <label style="display: flex; align-items: center; font-weight: normal; cursor: pointer;">
+                            <input type="checkbox" name="hlsFormat" value="fmp4" checked style="margin-right: 5px;">
+                            fMP4 (modern)
+                        </label>
+                        <label style="display: flex; align-items: center; font-weight: normal; cursor: pointer;">
+                            <input type="checkbox" name="hlsFormat" value="ts" style="margin-right: 5px;">
+                            MPEG-TS (legacy)
+                        </label>
+                    </div>
+                    <small>Select which HLS segment formats to generate</small>
+                </div>
+
+                <!-- Advanced Options -->
+                <button type="button" class="advanced-toggle" id="advancedToggle">
+                    Show Advanced Options ▼
+                </button>
+                
+                <div class="advanced-options" id="advancedOptions">
+                    <div class="form-group">
+                        <label for="durationLimit">Duration Limit (seconds)</label>
+                        <input type="number" id="durationLimit" name="durationLimit" class="form-input" min="1" placeholder="Leave empty for full video">
+                        <small>Optionally trim the video to the first N seconds</small>
+                    </div>
+
+                    <div class="form-group">
+                        <label class="form-checkbox">
+                            <input type="checkbox" id="forceSoftware" name="forceSoftware">
+                            Force software encoding (hardware acceleration unavailable in Docker)
+                        </label>
+                        <small style="color: #888; display: block; margin-top: 4px;">
+                            Note: Hardware encoders (VideoToolbox) are not accessible from Docker containers on macOS.
+                            Software encoding will be used regardless of this setting.
+                        </small>
+                    </div>
+
+                    <div class="form-group">
+                        <label style="display: block; margin-bottom: 8px; font-weight: 500;">
+                            Padding to Segment Boundaries:
+                        </label>
+                        <label class="form-checkbox" style="margin-bottom: 6px;">
+                            <input type="radio" id="paddingNone" name="padding" value="none" checked>
+                            No padding (default)
+                        </label>
+                        <label class="form-checkbox" style="margin-bottom: 6px;">
+                            <input type="radio" id="paddingBlack" name="padding" value="black">
+                            Black padding frames with "PADDING" label
+                        </label>
+                        <label class="form-checkbox">
+                            <input type="radio" id="paddingPink" name="padding" value="pink">
+                            Pink padding frames with "PADDING" label (easier to spot)
+                        </label>
+                    </div>
+                </div>
+
+                <!-- Upload Progress -->
+                <div class="progress-container" id="progressContainer">
+                    <div class="progress">
+                        <div class="progress-bar" id="progressFill" style="width: 0%"></div>
+                    </div>
+                    <p class="progress-text" id="progressText">Uploading...</p>
+                </div>
+
+                <!-- Upload Warning -->
+                <div class="upload-warning" id="uploadWarning">
+                    Do not close this tab or navigate away until upload completes!
+                </div>
+
+                <!-- Buttons -->
+                <div style="display: flex; gap: 12px; margin-top: 24px;">
+                    <button type="button" class="btn btn-secondary" onclick="window.location.href='/dashboard/dashboard.html'">Cancel</button>
+                    <button type="submit" class="btn btn-primary" id="submitBtn" style="flex: 1;">Start Encoding</button>
+                </div>
+            </form>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const uploadZone = document.getElementById('uploadZone');
+        const fileInput = document.getElementById('fileInput');
+        const selectedFile = document.getElementById('selectedFile');
+        const fileName = document.getElementById('fileName');
+        const uploadForm = document.getElementById('uploadForm');
+        const submitBtn = document.getElementById('submitBtn');
+        const progressContainer = document.getElementById('progressContainer');
+        const progressFill = document.getElementById('progressFill');
+        const progressText = document.getElementById('progressText');
+        const advancedToggle = document.getElementById('advancedToggle');
+        const advancedOptions = document.getElementById('advancedOptions');
+        const uploadWarning = document.getElementById('uploadWarning');
+
+        let selectedFileObj = null;
+
+        // Detect SharedWorker support
+        const supportsSharedWorker = typeof SharedWorker !== 'undefined';
+        let uploadWorker = null;
+
+        if (supportsSharedWorker) {
+            try {
+                uploadWorker = new SharedWorker('/upload-worker.js');
+                uploadWorker.port.start();
+                
+                console.log('SharedWorker initialized successfully');
+                
+                // Listen for messages from worker
+                uploadWorker.port.onmessage = (e) => {
+                    const { type, jobId, progress, bytesUploaded, totalBytes, error, position, filename } = e.data;
+                    
+                    console.log('[Upload] Worker message:', type, e.data);
+                    
+                    if (type === 'PROGRESS') {
+                        // Update progress if still on upload page
+                        if (progressContainer.classList.contains('show')) {
+                            progressFill.style.width = progress + '%';
+                            progressText.textContent = `Uploading... ${progress}%`;
+                        }
+                    } else if (type === 'QUEUED') {
+                        // Upload was queued
+                        console.log(`Upload queued at position ${position}`);
+                    } else if (type === 'COMPLETE') {
+                        console.log('Upload complete via SharedWorker');
+                    } else if (type === 'ERROR') {
+                        console.error('Upload error:', error);
+                    }
+                };
+                
+                uploadWorker.port.onerror = (error) => {
+                    console.error('SharedWorker error:', error);
+                    uploadWorker = null;
+                };
+                
+            } catch (e) {
+                console.warn('SharedWorker failed to initialize:', e);
+                uploadWorker = null;
+            }
+        } else {
+            console.log('SharedWorker not supported, will use Safari fallback');
+        }
+
+        // Upload zone click
+        uploadZone.addEventListener('click', () => {
+            fileInput.click();
+        });
+
+        // File input change
+        fileInput.addEventListener('change', (e) => {
+            handleFileSelect(e.target.files[0]);
+        });
+
+        // Drag and drop
+        uploadZone.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            uploadZone.classList.add('drag-over');
+        });
+
+        uploadZone.addEventListener('dragleave', () => {
+            uploadZone.classList.remove('drag-over');
+        });
+
+        uploadZone.addEventListener('drop', (e) => {
+            e.preventDefault();
+            uploadZone.classList.remove('drag-over');
+            handleFileSelect(e.dataTransfer.files[0]);
+        });
+
+        // Handle file selection
+        function handleFileSelect(file) {
+            if (!file) return;
+
+            if (!file.name.endsWith('.mp4')) {
+                alert('Only MP4 files are supported');
+                return;
+            }
+
+            selectedFileObj = file;
+            fileName.textContent = `Selected: ${file.name} (${formatFileSize(file.size)})`;
+            selectedFile.classList.add('show');
+            uploadZone.style.display = 'none';
+            submitBtn.disabled = false;
+        }
+
+        // Format file size
+        function formatFileSize(bytes) {
+            if (bytes === 0) return '0 Bytes';
+            const k = 1024;
+            const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+            const i = Math.floor(Math.log(bytes) / Math.log(k));
+            return Math.round(bytes / Math.pow(k, i) * 100) / 100 + ' ' + sizes[i];
+        }
+
+        // Advanced options toggle
+        advancedToggle.addEventListener('click', () => {
+            advancedOptions.classList.toggle('show');
+            if (advancedOptions.classList.contains('show')) {
+                advancedToggle.textContent = 'Hide Advanced Options ▲';
+            } else {
+                advancedToggle.textContent = 'Show Advanced Options ▼';
+            }
+        });
+
+        // Track upload state
+        let isUploading = false;
+
+        // No beforeunload warning - upload continues in background via SharedWorker
+
+        // Form submission - Background Upload with SharedWorker or Safari fallback
+        uploadForm.addEventListener('submit', async (e) => {
+            e.preventDefault();
+
+            if (!selectedFileObj) {
+                alert('Please select a file');
+                return;
+            }
+
+            // Show progress
+            isUploading = true;
+            submitBtn.disabled = true;
+            progressContainer.classList.add('show');
+            progressFill.style.width = '0%';
+            progressText.textContent = 'Initializing upload...';
+
+            try {
+                // Check if upload already in progress (queue check)
+                let uploadInProgress = false;
+                let queuePosition = 0;
+                
+                if (uploadWorker) {
+                    // Query SharedWorker for active uploads
+                    uploadWorker.port.postMessage({type: 'GET_QUEUE_STATUS'});
+                    
+                    // Wait for response (with timeout)
+                    const queueStatus = await new Promise((resolve) => {
+                        const timeout = setTimeout(() => resolve(null), 1000);
+                        
+                        const handler = (e) => {
+                            if (e.data.type === 'QUEUE_STATUS') {
+                                clearTimeout(timeout);
+                                uploadWorker.port.removeEventListener('message', handler);
+                                resolve(e.data);
+                            }
+                        };
+                        
+                        uploadWorker.port.addEventListener('message', handler);
+                    });
+                    
+                    if (queueStatus && queueStatus.activeJobId) {
+                        uploadInProgress = true;
+                        queuePosition = queueStatus.queueLength + 1;
+                    }
+                } else {
+                    // Safari: Check backend API
+                    try {
+                        const statusResponse = await fetch('/api/upload/active');
+                        const statusData = await statusResponse.json();
+                        if (statusData.active_uploads > 0) {
+                            uploadInProgress = true;
+                            queuePosition = statusData.queue_length + 1;
+                        }
+                    } catch (e) {
+                        console.warn('Could not check upload status:', e);
+                    }
+                }
+                
+                // Show queue notification if needed
+                if (uploadInProgress) {
+                    const confirmed = confirm(
+                        `Another upload is in progress. This upload will be queued (position: ${queuePosition}).\n\nContinue?`
+                    );
+                    if (!confirmed) {
+                        submitBtn.disabled = false;
+                        progressContainer.classList.remove('show');
+                        isUploading = false;
+                        return;
+                    }
+                }
+
+                // Phase 1: Initialize upload and create job
+                const initFormData = new FormData();
+                initFormData.append('filename', selectedFileObj.name);
+                initFormData.append('file_size', selectedFileObj.size);
+                
+                console.log('[Upload] Init - filename:', selectedFileObj.name, 'size:', selectedFileObj.size, 'type:', typeof selectedFileObj.size);
+                
+                const codecSelection = document.querySelector('input[name="codecSelection"]:checked').value;
+                initFormData.append('codec_selection', codecSelection);
+
+                // Partial durations
+                const partialDurations = Array.from(document.querySelectorAll('input[name="partialDuration"]:checked')).map(cb => cb.value);
+                partialDurations.forEach(dur => initFormData.append('partial_durations', dur));
+
+                // Segment duration
+                const segmentDuration = document.querySelector('input[name="segmentDuration"]:checked').value;
+                initFormData.append('segment_duration', segmentDuration);
+                
+                initFormData.append('max_resolution', document.getElementById('maxResolution').value);
+                
+                // HLS format - check which boxes are checked
+                const hlsFormats = Array.from(document.querySelectorAll('input[name="hlsFormat"]:checked'))
+                    .map(cb => cb.value);
+                let hlsFormat = 'fmp4'; // default
+                if (hlsFormats.length === 2) {
+                    hlsFormat = 'both';
+                } else if (hlsFormats.length === 1) {
+                    hlsFormat = hlsFormats[0];
+                }
+                initFormData.append('hls_format', hlsFormat);
+                
+                initFormData.append('force_software', document.getElementById('forceSoftware').checked);
+                
+                // Get selected padding option
+                const paddingOption = document.querySelector('input[name="padding"]:checked').value;
+                initFormData.append('padding', paddingOption);
+                
+                const durationLimit = document.getElementById('durationLimit').value;
+                if (durationLimit) {
+                    initFormData.append('duration_limit', durationLimit);
+                }
+
+                const initResponse = await fetch('/api/upload/init', {
+                    method: 'POST',
+                    body: initFormData
+                });
+
+                if (!initResponse.ok) {
+                    throw new Error('Failed to initialize upload');
+                }
+
+                const initData = await initResponse.json();
+                const jobId = initData.job_id;
+
+                progressText.textContent = 'Job created! Starting upload...';
+
+                // Phase 2: Hand off ENTIRE upload to SharedWorker or handle manually
+                if (uploadWorker) {
+                    // Chrome/Firefox/Edge: Use SharedWorker for ENTIRE upload
+                    progressText.textContent = 'Starting background upload...';
+                    
+                    // Get encoding config
+                    const config = {
+                        codec_selection: codecSelection,
+                        partial_durations: partialDurations,
+                        max_resolution: document.getElementById('maxResolution').value,
+                        hls_format: hlsFormat,
+                        force_software: document.getElementById('forceSoftware').checked,
+                        padding: document.querySelector('input[name="padding"]:checked').value,
+                        duration_limit: durationLimit || null
+                    };
+                    
+                    uploadWorker.port.postMessage({
+                        type: 'START_UPLOAD',
+                        jobId: jobId,
+                        file: selectedFileObj,
+                        fileSize: selectedFileObj.size,  // Pass size explicitly
+                        fileName: selectedFileObj.name,   // Pass name explicitly
+                        config: config,
+                        startOffset: 0  // Start from beginning
+                    });
+                    
+                    // Store minimal info for job detail page
+                    sessionStorage.setItem('upload_jobId', jobId);
+                    sessionStorage.setItem('upload_method', 'worker');
+                    
+                    // SharedWorker: Upload continues in background
+                    // Wait longer to ensure SharedWorker receives the file object
+                    progressText.textContent = 'Upload started in background...';
+                    
+                    setTimeout(() => {
+                        isUploading = false;
+                        // Show success message with link instead of auto-redirecting
+                        progressContainer.innerHTML = `
+                            <div style="text-align: center; padding: 20px;">
+                                <div style="font-size: 48px; margin-bottom: 16px;">✓</div>
+                                <div style="font-size: 18px; font-weight: 600; margin-bottom: 8px; color: var(--text-primary);">Upload Started</div>
+                                <div style="font-size: 14px; margin-bottom: 20px; color: var(--text-secondary);">The upload is continuing in the background.</div>
+                                <a href="/dashboard/job-detail.html?id=${jobId}" class="btn btn-primary">View Upload Progress</a>
+                                <button onclick="location.reload()" class="btn btn-secondary" style="margin-left: 8px;">Upload Another File</button>
+                            </div>
+                        `;
+                    }, 2000); // Wait 2 seconds for SharedWorker to receive and start processing
+                    
+                } else {
+                    // Safari: Upload first chunk then save to sessionStorage for continuation
+                    progressText.textContent = 'Uploading first chunk...';
+                    
+                    const chunkSize = 5 * 1024 * 1024; // 5MB chunks
+                    const firstChunk = selectedFileObj.slice(0, Math.min(chunkSize, selectedFileObj.size));
+                    
+                    const firstChunkFormData = new FormData();
+                    firstChunkFormData.append('file', firstChunk);
+                    
+                    const firstChunkResponse = await fetch(`/api/upload/chunk/${jobId}`, {
+                        method: 'POST',
+                        body: firstChunkFormData
+                    });
+                    
+                    if (!firstChunkResponse.ok) {
+                        throw new Error('First chunk upload failed');
+                    }
+                    
+                    const chunkData = await firstChunkResponse.json();
+                    progressFill.style.width = chunkData.progress + '%';
+                    progressText.textContent = `Uploading... ${chunkData.progress}%`;
+                    
+                    // Safari: Save to sessionStorage for continuation
+                    progressText.textContent = 'Preparing for upload continuation...';
+                    
+                    sessionStorage.setItem('upload_jobId', jobId);
+                    sessionStorage.setItem('upload_method', 'manual');
+                    sessionStorage.setItem('upload_filename', selectedFileObj.name);
+                    sessionStorage.setItem('upload_size', selectedFileObj.size);
+                    sessionStorage.setItem('upload_offset', chunkData.received_size);
+                    
+                    // Safari: Redirect to job detail page after brief delay
+                    setTimeout(() => {
+                        isUploading = false;
+                        window.location.href = `/dashboard/job-detail.html?id=${jobId}`;
+                    }, 500);
+                }
+
+            } catch (error) {
+                console.error('Upload error:', error);
+                isUploading = false;
+                alert(`Upload failed: ${error.message}`);
+                submitBtn.disabled = false;
+                progressContainer.classList.remove('show');
+            }
+        });
+
+        // Initialize
+        submitBtn.disabled = true;
+    </script>
+    <script src="/shared-nav.js"></script>
+</body>
+</html>

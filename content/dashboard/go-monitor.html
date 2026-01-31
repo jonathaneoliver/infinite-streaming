@@ -1,0 +1,716 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Go-Live Monitor - InfiniteStream</title>
+    <link rel="stylesheet" href="/shared-styles.css">
+    <style>
+        .page-header {
+            margin-bottom: 20px;
+        }
+        
+        .page-title {
+            font-size: 32px;
+            font-weight: 400;
+            margin-bottom: 8px;
+            color: var(--text-primary);
+        }
+        
+        .page-subtitle {
+            font-size: 14px;
+            color: var(--text-secondary);
+        }
+        
+        .summary {
+            background: var(--bg-primary);
+            padding: 20px;
+            border-radius: 8px;
+            border: 1px solid var(--border-color);
+            margin-bottom: 30px;
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 20px;
+            box-shadow: var(--shadow-sm);
+        }
+        
+        .summary-item {
+            text-align: center;
+        }
+        
+        .summary-label {
+            font-size: 12px;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 8px;
+        }
+        
+        .summary-value {
+            font-size: 32px;
+            font-weight: bold;
+            color: var(--primary-blue);
+        }
+        
+        .summary-value.zero {
+            color: var(--text-tertiary);
+        }
+        
+        .streams-container {
+            background: var(--bg-primary);
+            padding: 20px;
+            border-radius: 8px;
+            border: 1px solid var(--border-color);
+            margin-bottom: 20px;
+            box-shadow: var(--shadow-sm);
+        }
+        
+        .streams-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+            padding-bottom: 10px;
+            border-bottom: 1px solid var(--border-color);
+        }
+        
+        .streams-title {
+            font-size: 20px;
+            color: var(--text-primary);
+            font-weight: 600;
+        }
+        
+        .refresh-indicator {
+            font-size: 12px;
+            color: var(--text-tertiary);
+        }
+        
+        .refresh-indicator.active {
+            color: #00ff00;
+            animation: pulse 1s infinite;
+        }
+        
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.3; }
+        }
+        
+        .stream-card {
+            background: var(--bg-secondary);
+            padding: 20px;
+            margin-bottom: 15px;
+            border-radius: 6px;
+            border: 1px solid var(--border-color);
+            box-shadow: var(--shadow-sm);
+        }
+        
+        .stream-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 15px;
+        }
+        
+        .stream-name {
+            font-size: 20px;
+            font-weight: 600;
+            color: var(--text-primary);
+        }
+        
+        .stream-type {
+            font-size: 12px;
+            padding: 4px 8px;
+            border-radius: 4px;
+            background: var(--primary-blue);
+            color: white;
+            font-weight: 600;
+        }
+        
+        .stream-type.hls {
+            background: var(--primary-blue);
+        }
+        
+        .stream-type.dash {
+            background: var(--warning);
+        }
+        
+        .stream-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 15px;
+        }
+        
+        .stream-name {
+            font-size: 20px;
+            font-weight: bold;
+            color: #00ff00;
+        }
+        
+        .stream-type {
+            font-size: 12px;
+            padding: 4px 8px;
+            border-radius: 4px;
+            background: #00ff00;
+            color: #0a0a0a;
+            font-weight: bold;
+        }
+        
+        .stream-type.hls {
+            background: #0088ff;
+            color: #fff;
+        }
+        
+        .stream-type.dash {
+            background: #ff8800;
+            color: #fff;
+        }
+
+        .stream-type.other {
+            background: #8b5cf6;
+            color: #fff;
+        }
+        
+        .stream-metrics {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 15px;
+        }
+
+        .stream-metrics.rows {
+            grid-template-columns: 1fr;
+        }
+
+        .stream-table {
+            display: grid;
+            grid-auto-rows: minmax(28px, auto);
+            gap: 6px;
+        }
+
+        .stream-row {
+            display: grid;
+            grid-template-columns: minmax(90px, 120px) 120px 90px 90px 90px 90px 80px 120px minmax(160px, 1fr);
+            gap: 10px;
+            align-items: center;
+            font-size: 12px;
+            padding: 6px 8px;
+            border-radius: 6px;
+            background: rgba(255, 255, 255, 0.03);
+        }
+
+        .stream-row.head {
+            background: transparent;
+            color: var(--text-tertiary);
+            text-transform: uppercase;
+            letter-spacing: 0.4px;
+            font-size: 10px;
+            padding: 0 8px;
+        }
+
+        .stream-row.overall {
+            background: rgba(0, 255, 0, 0.08);
+            border: 1px solid rgba(0, 255, 0, 0.2);
+        }
+
+        .stream-cell {
+            font-variant-numeric: tabular-nums;
+        }
+
+        .stream-cell.muted {
+            color: var(--text-tertiary);
+        }
+
+        .stream-cell.url {
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        
+        .metric {
+            display: flex;
+            flex-direction: column;
+        }
+        
+        .metric-label {
+            font-size: 11px;
+            color: var(--text-tertiary);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-bottom: 4px;
+        }
+        
+        .metric-value {
+            font-size: 18px;
+            color: var(--success);
+            font-weight: 600;
+        }
+        
+        .metric-value.warning {
+            color: var(--warning);
+        }
+        
+        .metric-value.critical {
+            color: var(--danger);
+        }
+            animation: blink 1s infinite;
+        }
+        
+        @keyframes blink {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.3; }
+        }
+        
+        .progress-bar {
+            width: 100%;
+            height: 6px;
+            background: var(--bg-tertiary);
+            border-radius: 3px;
+            overflow: hidden;
+            margin-top: 5px;
+        }
+        
+        .progress-fill {
+            height: 100%;
+            background: var(--success);
+            transition: width 1s linear;
+        }
+        
+        .progress-fill.warning {
+            background: var(--warning);
+        }
+        
+        .progress-fill.critical {
+            background: var(--danger);
+        }
+        
+        .empty-state {
+            text-align: center;
+            padding: 60px 20px;
+            color: var(--text-tertiary);
+        }
+        
+        .empty-state-icon {
+            font-size: 64px;
+            margin-bottom: 20px;
+        }
+        
+        .empty-state-text {
+            font-size: 18px;
+            margin-bottom: 10px;
+        }
+        
+        .empty-state-subtext {
+            font-size: 14px;
+            color: var(--text-tertiary);
+        }
+        
+        .blacklist-section {
+            background: rgba(239, 68, 68, 0.05);
+            padding: 20px;
+            border-radius: 8px;
+            border: 1px solid var(--danger);
+            margin-top: 20px;
+        }
+        
+        .blacklist-title {
+            font-size: 16px;
+            color: var(--danger);
+            margin-bottom: 15px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            font-weight: 600;
+        }
+        
+        .blacklist-item {
+            background: var(--bg-primary);
+            padding: 10px 15px;
+            margin-bottom: 8px;
+            border-radius: 4px;
+            border: 1px solid var(--danger);
+            color: var(--danger);
+            font-size: 14px;
+        }
+        
+        .error-message {
+            background: rgba(239, 68, 68, 0.05);
+            padding: 20px;
+            border-radius: 8px;
+            border: 1px solid var(--danger);
+            color: var(--danger);
+            text-align: center;
+            margin-bottom: 20px;
+        }
+        
+        .controls {
+            display: flex;
+            gap: 10px;
+            justify-content: center;
+            margin-top: 20px;
+        }
+        
+        .btn {
+            padding: 10px 20px;
+            background: var(--bg-primary);
+            border: 1px solid var(--primary-blue);
+            color: var(--primary-blue);
+            border-radius: 4px;
+            cursor: pointer;
+            font-family: inherit;
+            font-size: 14px;
+            font-weight: 500;
+            transition: all 0.2s;
+        }
+        
+        .btn:hover {
+            background: var(--primary-blue);
+            color: white;
+        }
+        
+        .btn:active {
+            transform: scale(0.95);
+        }
+    </style>
+</head>
+<body data-boss-active-page="monitor">
+    <div class="boss-content-wide">
+        <div class="page-header">
+            <h1 class="page-title">Go-Live Stream Monitor</h1>
+            <p class="page-subtitle">Real-time activity for Go live generators and viewers</p>
+        </div>
+
+        <div id="error-container"></div>
+
+        <div class="summary">
+            <div class="summary-item">
+                <div class="summary-label">Active Streams</div>
+                <div class="summary-value" id="total-streams">0</div>
+            </div>
+            <div class="summary-item">
+                <div class="summary-label">Idle Timeout</div>
+                <div class="summary-value" id="idle-timeout">300s</div>
+            </div>
+            <div class="summary-item">
+                <div class="summary-label">Mode</div>
+                <div class="summary-value" id="mode" style="font-size: 20px;">GO-LIVE</div>
+            </div>
+            <div class="summary-item">
+                <div class="summary-label">Last Update</div>
+                <div class="summary-value" id="last-update" style="font-size: 16px; color: var(--text-tertiary);">-</div>
+            </div>
+        </div>
+
+        <div class="streams-container">
+            <div class="streams-header">
+                <div class="streams-title">Active Go-Live Streams</div>
+                <div class="refresh-indicator" id="refresh-indicator">Updating...</div>
+            </div>
+            <div id="streams-list">
+                <div class="empty-state">
+                    <div class="empty-state-icon">💤</div>
+                    <div class="empty-state-text">No active streams</div>
+                    <div class="empty-state-subtext">Go-live generators shut down after idle timeout</div>
+                </div>
+            </div>
+        </div>
+
+        <div class="controls">
+            <button class="btn" onclick="fetchStatus()">Refresh Now</button>
+            <button class="btn" onclick="toggleAutoRefresh()">
+                <span id="auto-refresh-text">Auto-Refresh: ON (2s)</span>
+            </button>
+        </div>
+    </div>
+
+    <script>
+        const STATUS_URL = '/go-live/api/status';
+        const DEFAULT_IDLE_TIMEOUT = 60;
+        let autoRefreshInterval = null;
+        let autoRefreshEnabled = true;
+
+        function getProgressClass(secondsRemaining, totalSeconds) {
+            const percent = (secondsRemaining / totalSeconds) * 100;
+            if (percent <= 15) return 'critical';
+            if (percent <= 30) return 'warning';
+            return '';
+        }
+
+        function parseTimeString(timeStr) {
+            if (!timeStr) return 0;
+            if (timeStr.includes('m')) {
+                const parts = timeStr.split(' ');
+                const mins = parseFloat(parts[0].replace('m', ''));
+                const secs = parts[1] ? parseFloat(parts[1].replace('s', '')) : 0;
+                return mins * 60 + secs;
+            }
+            return parseFloat(timeStr.replace('s', '')) || 0;
+        }
+
+        function typeClass(mode) {
+            if (!mode) return 'other';
+            if (mode.startsWith('dash')) return 'dash';
+            if (mode.startsWith('hls')) return 'hls';
+            return 'other';
+        }
+
+        function renderStream(stream, idleTimeoutSeconds) {
+            const idleSeconds = parseTimeString(stream.last_request_ago || '0s');
+            const shutdownSeconds = parseTimeString(stream.will_shutdown_in || '0s');
+            const progressPercent = idleTimeoutSeconds > 0 ? (shutdownSeconds / idleTimeoutSeconds) * 100 : 0;
+            const progressClass = getProgressClass(shutdownSeconds, idleTimeoutSeconds);
+            const mode = stream.mode || 'unknown';
+
+            return `
+                <div class="stream-card">
+                    <div class="stream-header">
+                        <div class="stream-name">${stream.content || 'unknown'}</div>
+                        <div class="stream-type ${typeClass(mode)}">${mode.toUpperCase()}</div>
+                    </div>
+                    <div class="stream-metrics">
+                        <div class="metric">
+                            <div class="metric-label">Process ID</div>
+                            <div class="metric-value">${stream.process_id || '-'}</div>
+                        </div>
+                        <div class="metric">
+                            <div class="metric-label">Started At</div>
+                            <div class="metric-value">${stream.started_at || '-'}</div>
+                        </div>
+                        <div class="metric">
+                            <div class="metric-label">Last Request</div>
+                            <div class="metric-value ${idleSeconds > idleTimeoutSeconds * 0.75 ? 'warning' : ''}">${stream.last_request_ago || '-'}</div>
+                        </div>
+                        <div class="metric">
+                            <div class="metric-label">Shutdown In</div>
+                            <div class="metric-value ${progressClass}">${stream.will_shutdown_in || '-'}</div>
+                            <div class="progress-bar">
+                                <div class="progress-fill ${progressClass}" style="width: ${progressPercent}%"></div>
+                            </div>
+                        </div>
+                        <div class="metric">
+                            <div class="metric-label">Players</div>
+                            <div class="metric-value">${stream.players ?? 0}</div>
+                        </div>
+                        <div class="metric">
+                            <div class="metric-label">Total Requests</div>
+                            <div class="metric-value">${stream.total_requests ?? 0}</div>
+                        </div>
+                        <div class="metric">
+                            <div class="metric-label">Last Tick</div>
+                            <div class="metric-value">${stream.last_tick ? stream.last_tick.toFixed(3) + 's' : '-'}</div>
+                        </div>
+                        <div class="metric">
+                            <div class="metric-label">Avg 5m</div>
+                            <div class="metric-value">${stream.avg_5m ? stream.avg_5m.toFixed(3) + 's' : '-'}</div>
+                        </div>
+                    </div>
+                </div>
+            `;
+        }
+
+        function groupStreams(streams) {
+            const grouped = new Map();
+            streams.forEach((stream) => {
+                const content = stream.content || 'unknown';
+                if (!grouped.has(content)) {
+                    grouped.set(content, []);
+                }
+                grouped.get(content).push(stream);
+            });
+            return grouped;
+        }
+
+        function summarizeGroup(content, streams, idleTimeoutSeconds) {
+            let latestRequest = null;
+            let minIdle = Infinity;
+            let totalPlayers = 0;
+            let totalRequests = 0;
+            let tickTotal = 0;
+            let tickCount = 0;
+            let avgTotal = 0;
+            let avgCount = 0;
+            streams.forEach((stream) => {
+                totalPlayers += stream.players || 0;
+                totalRequests += stream.total_requests || 0;
+                if (typeof stream.last_tick === 'number') {
+                    tickTotal += stream.last_tick;
+                    tickCount += 1;
+                }
+                if (typeof stream.avg_5m === 'number') {
+                    avgTotal += stream.avg_5m;
+                    avgCount += 1;
+                }
+                if (stream.last_requested_at) {
+                    const ts = Date.parse(stream.last_requested_at);
+                    if (!Number.isNaN(ts) && (!latestRequest || ts > latestRequest)) {
+                        latestRequest = ts;
+                    }
+                }
+                const idle = parseTimeString(stream.last_request_ago || '0s');
+                if (!Number.isNaN(idle) && idle < minIdle) {
+                    minIdle = idle;
+                }
+            });
+            if (!Number.isFinite(minIdle)) {
+                minIdle = 0;
+            }
+            const progressClass = getProgressClass(idleTimeoutSeconds - minIdle, idleTimeoutSeconds);
+            const progressPercent = idleTimeoutSeconds > 0 ? Math.max(0, (idleTimeoutSeconds - minIdle) / idleTimeoutSeconds) * 100 : 0;
+            const latestLabel = latestRequest ? new Date(latestRequest).toLocaleTimeString() : '-';
+
+            const overallTick = tickCount ? (tickTotal / tickCount).toFixed(3) + 's' : '-';
+            const overallAvg = avgCount ? (avgTotal / avgCount).toFixed(3) + 's' : '-';
+            const overallIdle = minIdle.toFixed(1) + 's';
+            const overallLastAt = latestLabel;
+            const overallRequests = totalRequests;
+            const overallShutdown = Math.max(0, idleTimeoutSeconds - minIdle).toFixed(1) + 's';
+
+            return `
+                <div class="stream-card">
+                    <div class="stream-header">
+                        <div class="stream-name">${content}</div>
+                        <div class="stream-type other">GROUP</div>
+                    </div>
+                    <div class="stream-table" style="margin-top: 12px;">
+                        <div class="stream-row head">
+                            <div class="stream-cell">Session</div>
+                            <div class="stream-cell">Last Request</div>
+                            <div class="stream-cell">Idle</div>
+                            <div class="stream-cell">Requests</div>
+                            <div class="stream-cell">Tick</div>
+                            <div class="stream-cell">Avg 5m</div>
+                            <div class="stream-cell">Players</div>
+                            <div class="stream-cell">Shutdown In</div>
+                            <div class="stream-cell url">Last URL</div>
+                        </div>
+                        <div class="stream-row overall">
+                            <div class="stream-cell">OVERALL</div>
+                            <div class="stream-cell">${overallLastAt}</div>
+                            <div class="stream-cell">${overallIdle}</div>
+                            <div class="stream-cell">${overallRequests}</div>
+                            <div class="stream-cell">${overallTick}</div>
+                            <div class="stream-cell">${overallAvg}</div>
+                            <div class="stream-cell">${totalPlayers}</div>
+                            <div class="stream-cell">${overallShutdown}</div>
+                            <div class="stream-cell muted url">-</div>
+                        </div>
+                        <div class="progress-bar">
+                            <div class="progress-fill ${progressClass}" style="width: ${progressPercent}%"></div>
+                        </div>
+                        ${[...streams].sort((a, b) => {
+                            const aTs = a.last_requested_at ? Date.parse(a.last_requested_at) : 0;
+                            const bTs = b.last_requested_at ? Date.parse(b.last_requested_at) : 0;
+                            return bTs - aTs;
+                        }).map((stream) => {
+                            const mode = (stream.mode || 'unknown').toUpperCase();
+                            const idle = stream.last_request_ago || '-';
+                            const lastAt = stream.last_requested_at ? new Date(stream.last_requested_at).toLocaleTimeString() : '-';
+                            const requests = stream.total_requests ?? 0;
+                            const tick = typeof stream.last_tick === 'number' ? stream.last_tick.toFixed(3) + 's' : '-';
+                            const avg = typeof stream.avg_5m === 'number' ? stream.avg_5m.toFixed(3) + 's' : '-';
+                            const players = stream.players ?? 0;
+                            const shutdownIn = stream.will_shutdown_in || '-';
+                            return `
+                                <div class="stream-row">
+                                    <div class="stream-cell">${mode}</div>
+                                    <div class="stream-cell">${lastAt}</div>
+                                    <div class="stream-cell">${idle}</div>
+                                    <div class="stream-cell">${requests}</div>
+                                    <div class="stream-cell">${tick}</div>
+                                    <div class="stream-cell">${avg}</div>
+                                    <div class="stream-cell">${players}</div>
+                                    <div class="stream-cell">${shutdownIn}</div>
+                                    <div class="stream-cell muted url" title="${stream.last_request_uri || '-'}">${stream.last_request_uri || '-'}</div>
+                                </div>
+                            `;
+                        }).join('')}
+                    </div>
+                </div>
+            `;
+        }
+
+        async function fetchStatus() {
+            const indicator = document.getElementById('refresh-indicator');
+            indicator.classList.add('active');
+            indicator.textContent = 'Updating...';
+
+            try {
+                const response = await fetch(STATUS_URL);
+                if (!response.ok) throw new Error(`HTTP ${response.status}`);
+
+                const data = await response.json();
+                const streams = data.active_streams || [];
+                const idleTimeout = data.idle_timeout || DEFAULT_IDLE_TIMEOUT;
+
+                const totalStreams = document.getElementById('total-streams');
+                totalStreams.textContent = streams.length;
+                totalStreams.className = 'summary-value' + (streams.length > 0 ? '' : ' zero');
+
+                document.getElementById('idle-timeout').textContent = idleTimeout + 's';
+                document.getElementById('mode').textContent = (data.mode || 'go-live').toUpperCase();
+                document.getElementById('last-update').textContent = new Date().toLocaleTimeString();
+
+                const streamsList = document.getElementById('streams-list');
+                if (streams.length > 0) {
+                    const grouped = groupStreams(streams);
+                    const entries = Array.from(grouped.entries()).map(([content, items]) => ({ content, items }));
+                    entries.sort((a, b) => {
+                        const idleA = Math.max(...a.items.map(s => parseTimeString(s.last_request_ago || '0s')));
+                        const idleB = Math.max(...b.items.map(s => parseTimeString(s.last_request_ago || '0s')));
+                        return idleA - idleB;
+                    });
+                    streamsList.innerHTML = entries.map(entry => summarizeGroup(entry.content, entry.items, idleTimeout)).join('');
+                } else {
+                    streamsList.innerHTML = `
+                        <div class="empty-state">
+                            <div class="empty-state-icon">💤</div>
+                            <div class="empty-state-text">No active streams</div>
+                            <div class="empty-state-subtext">Go-live generators shut down after idle timeout</div>
+                        </div>
+                    `;
+                }
+
+                document.getElementById('error-container').innerHTML = '';
+            } catch (error) {
+                console.error('Failed to fetch status:', error);
+                document.getElementById('error-container').innerHTML = `
+                    <div class="error-message">
+                        ⚠️ Failed to fetch status: ${error.message}
+                    </div>
+                `;
+            } finally {
+                indicator.classList.remove('active');
+                indicator.textContent = 'Updated';
+            }
+        }
+
+        function toggleAutoRefresh() {
+            autoRefreshEnabled = !autoRefreshEnabled;
+            const text = document.getElementById('auto-refresh-text');
+
+            if (autoRefreshEnabled) {
+                text.textContent = 'Auto-Refresh: ON (2s)';
+                startAutoRefresh();
+            } else {
+                text.textContent = 'Auto-Refresh: OFF';
+                stopAutoRefresh();
+            }
+        }
+
+        function startAutoRefresh() {
+            stopAutoRefresh();
+            autoRefreshInterval = setInterval(fetchStatus, 2000);
+        }
+
+        function stopAutoRefresh() {
+            if (autoRefreshInterval) {
+                clearInterval(autoRefreshInterval);
+                autoRefreshInterval = null;
+            }
+        }
+
+        fetchStatus();
+        startAutoRefresh();
+    </script>
+</body>
+<script src="/shared-nav.js"></script>
+</html>

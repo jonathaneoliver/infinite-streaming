@@ -1,0 +1,23 @@
+# Development override - mount code as volumes for instant changes
+# Usage: docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d
+#
+# Benefits:
+# - No rebuild needed when editing Python scripts
+# - Just restart processes: docker exec boss1 pkill -f "live.py continuous"
+# - Much faster iteration during development
+#
+# Note: This is optional. Standard workflow (make build + restart) still works.
+
+services:
+  boss1:
+    volumes:
+      # Mount Python scripts for live editing
+      - ./live.py:/sbin/live.py:ro
+      - ./dash_live.py:/sbin/dash_live.py:ro
+      - ./generate-myshows.py:/sbin/generate-myshows.py:ro
+      - ./vod_mapping.py:/sbin/vod_mapping.py:ro
+      - ./upload_service.py:/sbin/upload_service.py:ro
+      - ./concat_segments.lua:/sbin/concat_segments.lua:ro
+      
+      # Mount web content for live editing
+      - ./content:/content:ro

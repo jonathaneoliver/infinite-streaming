@@ -1,0 +1,1134 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Mosaic - InfiniteStream</title>
+    <link rel="stylesheet" href="/shared-styles.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/shaka-player/4.7.7/shaka-player.compiled.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+    <style>
+        /* Grid-specific styles that work with InfiniteStream navigation */
+        body {
+            background: #fff;
+            color: var(--text-primary);
+            margin: 0;
+            padding: 0;
+        }
+
+        /* When in fullscreen mode (nav hidden), use black background */
+        .boss-fullscreen body {
+            overflow: hidden;
+            background: #000;
+        }
+
+        /* Content wrapper for grid page */
+        .boss-content-fullwidth {
+            width: 100%;
+            padding: 0;
+        }
+
+        .boss-fullscreen .boss-content-fullwidth {
+            margin-left: 0;
+        }
+        
+        .page-header {
+            background: var(--bg-primary);
+            padding: 16px 20px;
+            border-bottom: 2px solid var(--primary-blue);
+        }
+
+        .page-title {
+            font-size: 32px;
+            font-weight: 400;
+            margin-bottom: 8px;
+            color: var(--text-primary);
+        }
+        
+        .filters {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            gap: 15px;
+            flex-wrap: wrap;
+            padding: 5px 0;
+        }
+        
+        .filter-group {
+            display: flex;
+            align-items: center;
+            gap: 5px;
+        }
+        
+        .filter-group label {
+            font-size: 12px;
+            color: var(--text-secondary);
+        }
+        
+        .filter-group select,
+        .filter-group button {
+            padding: 4px 8px;
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-color);
+            color: var(--text-primary);
+            border-radius: 4px;
+            font-size: 11px;
+            cursor: pointer;
+        }
+        
+        .filter-group select:hover,
+        .filter-group button:hover {
+            background: var(--bg-tertiary);
+            border-color: var(--primary-blue);
+        }
+        
+        .filter-group button:active {
+            background: var(--primary-blue);
+            color: white;
+        }
+
+        .fullscreen-toggle {
+            position: fixed;
+            top: 80px;
+            right: 20px;
+            z-index: 2000;
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-color);
+            color: var(--text-primary);
+            padding: 8px 16px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 14px;
+            box-shadow: var(--shadow-md);
+        }
+
+        .boss-fullscreen .fullscreen-toggle {
+            top: 20px;
+        }
+
+        .fullscreen-toggle:hover {
+            background: var(--bg-tertiary);
+        }
+        
+        .content-info {
+            font-size: 10px;
+            color: var(--text-tertiary);
+            margin-top: 5px;
+        }
+        
+        .grid-container {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            grid-template-rows: repeat(4, 1fr);
+            gap: 12px;
+            background: #fff;
+            padding: 12px;
+        }
+
+        /* Fullscreen mode - takes full viewport */
+        .boss-fullscreen .grid-container {
+            height: 100vh;
+        }
+
+        /* Normal mode with navigation - account for header */
+        body:not(.boss-fullscreen) .grid-container {
+            height: calc(100vh - 180px);
+            margin-left: 0;
+        }
+        
+        .player-cell {
+            position: relative;
+            background: #fff;
+            overflow: hidden;
+            display: block;
+            border-radius: var(--radius-md);
+            border: 1px solid var(--border);
+            box-shadow: var(--shadow-sm);
+        }
+
+        .player-cell.audio-active {
+            outline: 2px solid var(--primary-blue);
+            box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.4);
+            z-index: 5;
+        }
+        
+        .player-label {
+            position: absolute;
+            left: 8px;
+            right: 8px;
+            bottom: 8px;
+            margin: 0;
+            padding: 4px 8px;
+            border-radius: 8px;
+            font-size: 10px;
+            font-weight: 600;
+            color: #111827;
+            background: rgba(255, 255, 255, 0.55);
+            border: 1px solid rgba(229, 231, 235, 0.6);
+            max-width: 100%;
+            white-space: normal;
+            word-break: break-word;
+            text-align: center;
+            z-index: 6;
+            pointer-events: none;
+        }
+        
+        .player-status {
+            position: absolute;
+            top: 5px;
+            right: 5px;
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-size: 10px;
+            z-index: 10;
+            background: rgba(0, 0, 0, 0.8);
+            pointer-events: none;
+        }
+        
+        .status-loading {
+            color: var(--warning);
+        }
+        
+        .status-playing {
+            color: var(--success);
+        }
+        
+        .status-error {
+            color: var(--danger);
+        }
+        
+        .player-media {
+            min-height: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: #000;
+            height: 100%;
+        }
+
+        video {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            background: #000;
+        }
+        
+        .error-message {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            color: var(--danger);
+            font-size: 12px;
+            text-align: center;
+            padding: 10px;
+            background: rgba(0, 0, 0, 0.8);
+            border-radius: 4px;
+            max-width: 90%;
+        }
+        
+        .controls {
+            position: fixed;
+            bottom: 10px;
+            right: 10px;
+            background: rgba(0, 0, 0, 0.9);
+            padding: 10px;
+            border-radius: 8px;
+            border: 1px solid var(--primary-blue);
+            z-index: 100;
+        }
+        
+        .controls button {
+            padding: 8px 16px;
+            margin: 0 5px;
+            background: var(--bg-primary);
+            border: 1px solid var(--primary-blue);
+            color: var(--primary-blue);
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 12px;
+        }
+        
+        .controls button:hover {
+            background: var(--primary-blue);
+            color: white;
+        }
+
+        .player-controls {
+            display: flex;
+            gap: 6px;
+            padding: 6px;
+            justify-content: center;
+            background: #fff;
+            border-top: 1px solid var(--border-color);
+        }
+
+        .player-controls button {
+            padding: 4px 8px;
+            font-size: 10px;
+            border: 1px solid var(--border-color);
+            border-radius: 4px;
+            background: var(--bg-secondary);
+            color: var(--text-primary);
+            cursor: pointer;
+        }
+
+        .player-controls button:hover {
+            background: var(--bg-tertiary);
+            border-color: var(--primary-blue);
+        }
+
+        .context-menu {
+            position: fixed;
+            background: #0f172a;
+            border: 1px solid rgba(255,255,255,0.12);
+            box-shadow: 0 12px 30px rgba(0,0,0,0.35);
+            border-radius: 8px;
+            padding: 6px;
+            display: none;
+            z-index: 9999;
+            min-width: 200px;
+        }
+
+        .context-menu button {
+            width: 100%;
+            background: transparent;
+            border: none;
+            text-align: left;
+            padding: 8px 10px;
+            font-size: 12px;
+            color: #e5e7eb;
+            border-radius: 6px;
+            cursor: pointer;
+        }
+
+        .context-menu button:hover {
+            background: rgba(59, 130, 246, 0.2);
+        }
+        
+        @media (max-width: 1024px) {
+            .grid-container {
+                grid-template-columns: repeat(2, 1fr);
+                grid-template-rows: repeat(8, 1fr);
+            }
+        }
+        :root {
+            --content-control-bg: #f8fafc;
+            --content-control-border: #e2e8f0;
+            --content-control-title: #64748b;
+            --content-control-label: #475569;
+            --content-control-select-bg: #ffffff;
+            --content-control-select-text: #0f172a;
+        }
+    </style>
+    <link rel="stylesheet" href="/dashboard/content-control.css">
+</head>
+<body data-boss-active-page="grid">
+
+    <div class="boss-content-fullwidth">
+        <div class="page-header">
+            <h1 class="page-title">Mosaic</h1>
+        <div class="content-control">
+            <div class="content-control-title">Content Control</div>
+            <div class="content-control-group">
+                <label class="content-control-label">Protocol</label>
+                <select id="protocolFilter" class="content-control-select" onchange="applyFiltersAndReload()">
+                    <option value="all">All</option>
+                    <option value="dash">DASH only</option>
+                    <option value="hls" selected>HLS only</option>
+                    <option value="both">Both (same content)</option>
+                </select>
+            </div>
+            <div class="content-control-group">
+                <label class="content-control-label">Codec</label>
+                <select id="codecFilter" class="content-control-select" onchange="applyFiltersAndReload()">
+                    <option value="all">All</option>
+                    <option value="h264" selected>H264 only</option>
+                    <option value="hevc">HEVC only</option>
+                    <option value="av1">AV1 only</option>
+                </select>
+            </div>
+            <div class="content-control-group">
+                <label class="content-control-label">Segment</label>
+                <select id="segmentFilter" class="content-control-select" onchange="applyFiltersAndReload()">
+                    <option value="all">All</option>
+                    <option value="ll">LL</option>
+                    <option value="2s">2s</option>
+                    <option value="6s" selected>6s</option>
+                </select>
+            </div>
+            <div class="content-control-group">
+                <label class="content-control-label">Max Res ≥</label>
+                <select id="maxResFilter" class="content-control-select" onchange="applyFiltersAndReload()">
+                    <option value="all">All</option>
+                    <option value="2160">2160p (4K+)</option>
+                    <option value="1440">1440p+</option>
+                    <option value="1080">1080p+</option>
+                    <option value="720">720p+</option>
+                    <option value="540">540p+</option>
+                    <option value="360">360p+</option>
+                </select>
+            </div>
+            <div class="filter-group">
+                <label>Content:</label>
+                <select id="contentFilter" onchange="applyFiltersAndReload()">
+                    <option value="all">All</option>
+                </select>
+            </div>
+            <div class="filter-group">
+                <button onclick="randomizeAndReload()">🎲 Randomize</button>
+            </div>
+        </div>
+        <div class="content-info" id="contentInfo">Loading content...</div>
+    </div>
+    
+    <div class="grid-container" id="grid"></div>
+    
+    
+    </div>
+    
+    <script>
+        // Content fetched from /api/content REST endpoint
+        let ALL_CONTENT = [];
+        let selectedContent = [];
+        const players = [];
+        const hlsInstances = [];
+        const videoElements = [];
+        const playerUrls = [];
+        let activeAudioIndex = null;
+        const AUDIO_MUTED_KEY = 'bossAudioMuted';
+
+        function updateAudioHighlight(index, active) {
+            const cell = document.getElementById(`cell-${index}`);
+            if (!cell) return;
+            if (active) {
+                cell.classList.add('audio-active');
+            } else {
+                cell.classList.remove('audio-active');
+            }
+        }
+
+        function setActiveAudio(index) {
+            if (activeAudioIndex === index) {
+                const video = videoElements[index];
+                if (video) {
+                    video.muted = true;
+                    video.volume = 0;
+                }
+                updateAudioHighlight(index, false);
+                activeAudioIndex = null;
+                localStorage.setItem(AUDIO_MUTED_KEY, 'true');
+                return;
+            }
+
+            if (activeAudioIndex !== null) {
+                const previous = videoElements[activeAudioIndex];
+                if (previous) {
+                    previous.muted = true;
+                    previous.volume = 0;
+                }
+                updateAudioHighlight(activeAudioIndex, false);
+            }
+
+            const video = videoElements[index];
+            if (video) {
+                video.muted = false;
+                video.volume = 1.0;
+            }
+            updateAudioHighlight(index, true);
+            activeAudioIndex = index;
+            localStorage.setItem(AUDIO_MUTED_KEY, 'false');
+            persistSelectedContentFromIndex(index);
+            const url = playerUrls[index];
+            if (url) {
+                if (window.BOSSNav && typeof window.BOSSNav.setSelectedUrl === 'function') {
+                    window.BOSSNav.setSelectedUrl(url);
+                } else {
+                    localStorage.setItem('bossSelectedUrl', url);
+                }
+            }
+        }
+        
+        // Fetch available content from server
+        async function fetchContent() {
+            try {
+                const response = await fetch('/api/content');
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                const content = await response.json();
+                
+                // Transform API response to match expected format
+                // Generate friendly labels from content names
+                ALL_CONTENT = content.map(item => ({
+                    name: item.name,
+                    label: item.name
+                        .replace(/_/g, ' ')
+                        .replace(/\b\w/g, c => c.toUpperCase())
+                        .replace(/H264/g, 'H264')
+                        .replace(/Hevc/g, 'HEVC')
+                        .replace(/Ts/g, 'TS')
+                        .replace(/Hw/g, 'HW')
+                        .replace(/Dash/g, 'DASH'),
+                    has_dash: item.has_dash,
+                    has_hls: item.has_hls,
+                    max_resolution: item.max_resolution || null,
+                    max_height: typeof item.max_height === 'number' ? item.max_height : null
+                }));
+                
+                console.log(`Loaded ${ALL_CONTENT.length} content items from /api/content`);
+                return true;
+            } catch (error) {
+                console.error('Failed to fetch content from /api/content:', error);
+                document.getElementById('contentInfo').textContent = 'Error: Failed to load content from server';
+                return false;
+            }
+        }
+        
+        // Populate content filter dropdown
+        function populateContentFilter() {
+            const contentFilter = document.getElementById('contentFilter');
+            const contentNames = [...new Set(ALL_CONTENT.map(c => c.name.replace(/_h264|_hevc|_av1|_ts|_hw|_dash/g, '')))];
+            contentNames.forEach(name => {
+                const option = document.createElement('option');
+                option.value = name;
+                option.textContent = name;
+                contentFilter.appendChild(option);
+            });
+        }
+        
+        // Apply filters and select content
+        function applyFilters() {
+            const protocolFilter = document.getElementById('protocolFilter').value;
+            const codecFilter = document.getElementById('codecFilter').value;
+            const segmentFilter = document.getElementById('segmentFilter').value;
+            const maxResFilter = document.getElementById('maxResFilter').value;
+            const contentFilter = document.getElementById('contentFilter').value;
+            
+            let filtered = ALL_CONTENT.filter(item => {
+                // Content name filter
+                if (contentFilter !== 'all' && !item.name.includes(contentFilter)) {
+                    return false;
+                }
+                
+                // Codec filter
+                if (codecFilter !== 'all') {
+                    if (codecFilter === 'h264' && !item.name.includes('h264')) return false;
+                    if (codecFilter === 'hevc' && !item.name.includes('hevc')) return false;
+                    if (codecFilter === 'av1' && !item.name.includes('av1')) return false;
+                }
+                
+                // Protocol filter
+                if (protocolFilter === 'dash' && !item.has_dash) return false;
+                if (protocolFilter === 'hls' && !item.has_hls) return false;
+                if (protocolFilter === 'both' && (!item.has_dash || !item.has_hls)) return false;
+
+                // Max resolution filter (minimum available)
+                if (maxResFilter !== 'all') {
+                    const maxHeight = item.max_height || parseInt(item.max_resolution || '', 10);
+                    if (!maxHeight || maxHeight < parseInt(maxResFilter, 10)) {
+                        return false;
+                    }
+                }
+                
+                return true;
+            });
+            
+            // Expand to include both protocols where available
+            let expanded = [];
+            filtered.forEach(item => {
+                if (item.has_dash && (protocolFilter === 'all' || protocolFilter === 'dash' || protocolFilter === 'both')) {
+                    expanded.push({ ...item, type: 'dash' });
+                }
+                if (item.has_hls && (protocolFilter === 'all' || protocolFilter === 'hls' || protocolFilter === 'both')) {
+                    expanded.push({ ...item, type: 'hls' });
+                }
+            });
+            
+            // Sort alphanumerically by name, then by type (dash before hls)
+            expanded.sort((a, b) => {
+                const nameCompare = a.name.localeCompare(b.name);
+                if (nameCompare !== 0) return nameCompare;
+                return a.type.localeCompare(b.type);
+            });
+            
+            return expanded;
+        }
+        
+        // Select 16 items (randomly if more than 16)
+        function selectContent(items, randomize = false) {
+            if (randomize) {
+                // Shuffle and take first 16
+                const shuffled = items.slice().sort(() => Math.random() - 0.5);
+                return shuffled.slice(0, 16);
+            } else {
+                // Take first 16 (already sorted alphanumerically)
+                return items.slice(0, 16);
+            }
+        }
+        
+        // Apply filters and reload
+        function applyFiltersAndReload() {
+            const segmentValue = document.getElementById('segmentFilter').value;
+            localStorage.setItem('bossSelectedSegment', segmentValue);
+            const filtered = applyFilters();
+            selectedContent = selectContent(filtered, false);
+            updateContentInfo();
+            reloadAll();
+        }
+        
+        // Randomize and reload
+        function randomizeAndReload() {
+            const filtered = applyFilters();
+            selectedContent = selectContent(filtered, true);
+            updateContentInfo();
+            reloadAll();
+        }
+        
+        // Update content info display
+        function updateContentInfo() {
+            const info = document.getElementById('contentInfo');
+            const filtered = applyFilters();
+            info.textContent = `Showing ${selectedContent.length} of ${filtered.length} available (${ALL_CONTENT.length} total content items)`;
+        }
+
+        function persistSelectedContentFromIndex(index) {
+            const item = selectedContent[index];
+            if (!item) return;
+            const fullName = item.name;
+            localStorage.setItem('bossSelectedContent', fullName);
+            localStorage.setItem('bossSelectedContentFull', fullName);
+            const baseName = fullName
+                .replace(/_(h264|hevc|av1|dash|ts|hw)$/i, '')
+                .replace(/_\d{8}_\d{6}$/i, '');
+            localStorage.setItem('bossSelectedContentBase', baseName);
+            if (window.BOSSNav && typeof window.BOSSNav.updateSelectedContentBadge === 'function') {
+                window.BOSSNav.updateSelectedContentBadge();
+            }
+        }
+        
+        // Initialize grid
+        function initGrid() {
+            const grid = document.getElementById('grid');
+            grid.innerHTML = '';
+            
+            selectedContent.forEach((item, index) => {
+                // Create cell
+                const cell = document.createElement('div');
+                cell.className = 'player-cell';
+                cell.id = `cell-${index}`;
+                
+                // Create status indicator
+                const status = document.createElement('div');
+                status.className = 'player-status status-loading';
+                status.id = `status-${index}`;
+                status.textContent = 'Loading...';
+                cell.appendChild(status);
+                
+                // Create video element inside a media wrapper
+                const media = document.createElement('div');
+                media.className = 'player-media';
+                const video = document.createElement('video');
+                video.id = `video-${index}`;
+                video.muted = true;
+                video.autoplay = true;
+                video.playsInline = true;
+                video.loop = false;
+                video.volume = 0;
+                media.appendChild(video);
+                cell.appendChild(media);
+
+                // Create label (below video)
+                const label = document.createElement('div');
+                label.className = 'player-label';
+                label.id = `label-${index}`;
+                label.textContent = 'Loading...';
+                cell.appendChild(label);
+
+                grid.appendChild(cell);
+                videoElements[index] = video;
+
+                cell.addEventListener('click', () => {
+                    setActiveAudio(index);
+                });
+                
+                // Initialize player
+                initPlayer(index, item);
+            });
+        }
+
+        function togglePlay(index) {
+            const video = videoElements[index];
+            if (!video) return;
+            if (video.paused) {
+                video.play().catch(() => {});
+            } else {
+                video.pause();
+            }
+        }
+
+        async function destroyPlayer(index) {
+            if (players[index]) {
+                await players[index].destroy();
+                players[index] = null;
+            }
+            if (hlsInstances[index]) {
+                hlsInstances[index].destroy();
+                hlsInstances[index] = null;
+            }
+        }
+
+        async function reloadPlayer(index) {
+            const cell = document.getElementById(`cell-${index}`);
+            if (!cell) return;
+            await destroyPlayer(index);
+            const statusEl = document.getElementById(`status-${index}`);
+            if (statusEl) {
+                statusEl.textContent = 'Loading...';
+                statusEl.className = 'player-status status-loading';
+            }
+            cell.querySelectorAll('.error-message').forEach((el) => el.remove());
+            const item = selectedContent[index];
+            if (item) {
+                initPlayer(index, item);
+            }
+        }
+        
+        // Initialize player for each cell
+        async function initPlayer(index, item) {
+            const video = document.getElementById(`video-${index}`);
+            const statusEl = document.getElementById(`status-${index}`);
+            const labelEl = document.getElementById(`label-${index}`);
+            const cell = document.getElementById(`cell-${index}`);
+            
+            // Ensure video stays muted always
+            video.muted = true;
+            video.volume = 0;
+            
+            try {
+                // Determine URL based on type
+                let url;
+                if (item.type === 'dash') {
+                    const segmentFilter = document.getElementById('segmentFilter').value;
+                    if (segmentFilter === '2s') {
+                        url = `/go-live/${item.name}/manifest_2s.mpd`;
+                    } else if (segmentFilter === '6s') {
+                        url = `/go-live/${item.name}/manifest_6s.mpd`;
+                    } else {
+                        url = `/go-live/${item.name}/manifest.mpd`;
+                    }
+                } else {
+                    const segmentFilter = document.getElementById('segmentFilter').value;
+                    if (segmentFilter === '2s') {
+                        url = `/go-live/${item.name}/master_2s.m3u8`;
+                    } else if (segmentFilter === '6s') {
+                        url = `/go-live/${item.name}/master_6s.m3u8`;
+                    } else {
+                        url = `/go-live/${item.name}/master.m3u8`;
+                    }
+                }
+                playerUrls[index] = url;
+                
+                // Common video event listeners
+                video.addEventListener('playing', () => {
+                    statusEl.textContent = 'Playing';
+                    statusEl.className = 'player-status status-playing';
+                });
+                
+                video.addEventListener('waiting', () => {
+                    statusEl.textContent = 'Buffering...';
+                    statusEl.className = 'player-status status-loading';
+                });
+                
+                video.addEventListener('error', (e) => {
+                    console.error(`Video ${index} error:`, e);
+                    statusEl.textContent = 'Error';
+                    statusEl.className = 'player-status status-error';
+                });
+                
+                // Ensure muted state is maintained unless this is the active audio panel
+                video.addEventListener('volumechange', () => {
+                    if (activeAudioIndex === index) {
+                        return;
+                    }
+                    if (!video.muted || video.volume > 0) {
+                        video.muted = true;
+                        video.volume = 0;
+                    }
+                });
+
+                video.addEventListener('contextmenu', (event) => {
+                    event.preventDefault();
+                    const url = playerUrls[index];
+                    if (!url) return;
+                    showContextMenu(event.clientX, event.clientY, url);
+                });
+                
+                // Use Shaka Player for DASH content
+                if (item.type === 'dash') {
+                    if (!shaka.Player.isBrowserSupported()) {
+                        throw new Error('Browser not supported for Shaka Player');
+                    }
+                    
+                    const player = new shaka.Player(video);
+                    players[index] = player;
+                    
+                    const lowerName = item.name.toLowerCase();
+                    const codecLabel = lowerName.includes('av1') ? 'AV1' : (lowerName.includes('hevc') ? 'HEVC' : 'H264');
+                    const segmentFilter = document.getElementById('segmentFilter').value;
+                    const segBadge = segmentFilter === 'all' ? 'ALL' : (segmentFilter === '2s' ? '2S' : (segmentFilter === '6s' ? '6S' : 'LL'));
+                    const segClass = segmentFilter === 'all' ? 'all' : (segmentFilter === '2s' ? 's2' : (segmentFilter === '6s' ? 's6' : 'll'));
+                    labelEl.innerHTML = `
+                        <div>${item.label}</div>
+                        <div class="panel-badges">
+                            <span class="panel-badge shaka">Shaka</span>
+                            <span class="panel-badge dash">DASH</span>
+                            <span class="panel-badge ${codecLabel === 'AV1' ? 'av1' : (codecLabel === 'HEVC' ? 'hevc' : 'h264')}">${codecLabel}</span>
+                            <span class="panel-badge ${segClass}">${segBadge}</span>
+                        </div>
+                    `;
+                    
+                    // Configure for low latency and low bitrate preference
+                    player.configure({
+                        streaming: {
+                            bufferingGoal: 10,
+                            rebufferingGoal: 2,
+                            bufferBehind: 30
+                        },
+                        abr: {
+                            enabled: true,
+                            defaultBandwidthEstimate: 500000,
+                            restrictions: {
+                                maxBandwidth: 2000000
+                            }
+                        }
+                    });
+                    
+                    // Load manifest first
+                    await player.load(url);
+                    
+                    // After loading, select the lowest quality track
+                    const tracks = player.getVariantTracks();
+                    if (tracks.length > 0) {
+                        tracks.sort((a, b) => a.bandwidth - b.bandwidth);
+                        player.selectVariantTrack(tracks[0], true);
+                        console.log(`Player ${index} selected lowest variant: ${tracks[0].bandwidth} bps`);
+                    }
+                    
+                    // Shaka-specific error handling
+                    player.addEventListener('error', (event) => {
+                        console.error(`Shaka Player ${index} error:`, event.detail);
+                        statusEl.textContent = 'Error';
+                        statusEl.className = 'player-status status-error';
+                        
+                        const errorMsg = document.createElement('div');
+                        errorMsg.className = 'error-message';
+                        errorMsg.textContent = `Error: ${event.detail.message || 'Failed to load'}`;
+                        cell.appendChild(errorMsg);
+                    });
+                    
+                    player.addEventListener('buffering', (event) => {
+                        if (event.buffering) {
+                            statusEl.textContent = 'Buffering...';
+                            statusEl.className = 'player-status status-loading';
+                        }
+                    });
+                    
+                    console.log(`Player ${index} (${item.label}) initialized with Shaka Player`);
+                    
+                } else {
+                    // Use HLS.js for HLS content
+                    if (Hls.isSupported()) {
+                        const hls = new Hls({
+                            maxBufferLength: 10,
+                            maxMaxBufferLength: 30,
+                            backBufferLength: 30,
+                            liveSyncDurationCount: 3,
+                            liveMaxLatencyDurationCount: 10,
+                            abrEwmaDefaultEstimate: 500000,
+                            abrBandWidthFactor: 0.7,
+                            abrBandWidthUpFactor: 0.5,
+                            startLevel: -1
+                        });
+                        hlsInstances[index] = hls;
+                        
+                        const lowerName = item.name.toLowerCase();
+                        const codecLabel = lowerName.includes('av1') ? 'AV1' : (lowerName.includes('hevc') ? 'HEVC' : 'H264');
+                        const segmentFilter = document.getElementById('segmentFilter').value;
+                        const segBadge = segmentFilter === 'all' ? 'ALL' : (segmentFilter === '2s' ? '2S' : (segmentFilter === '6s' ? '6S' : 'LL'));
+                        const segClass = segmentFilter === 'all' ? 'all' : (segmentFilter === '2s' ? 's2' : (segmentFilter === '6s' ? 's6' : 'll'));
+                        labelEl.innerHTML = `
+                            <div>${item.label}</div>
+                            <div class="panel-badges">
+                                <span class="panel-badge hlsjs">HLS.js</span>
+                                <span class="panel-badge hls">HLS</span>
+                                <span class="panel-badge ${codecLabel === 'AV1' ? 'av1' : (codecLabel === 'HEVC' ? 'hevc' : 'h264')}">${codecLabel}</span>
+                                <span class="panel-badge ${segClass}">${segBadge}</span>
+                            </div>
+                        `;
+                        
+                        // Force lowest quality after manifest is parsed
+                        hls.on(Hls.Events.MANIFEST_PARSED, () => {
+                            console.log(`HLS.js ${index} manifest parsed`);
+                            if (hls.levels.length > 0) {
+                                hls.currentLevel = 0;
+                                console.log(`Player ${index} forced to lowest quality: level 0 (${hls.levels[0].bitrate} bps)`);
+                            }
+                        });
+                        
+                        // HLS.js error handling
+                        hls.on(Hls.Events.ERROR, (event, data) => {
+                            console.error(`HLS.js ${index} error:`, data);
+                            if (data.fatal) {
+                                statusEl.textContent = 'Error';
+                                statusEl.className = 'player-status status-error';
+                                
+                                const errorMsg = document.createElement('div');
+                                errorMsg.className = 'error-message';
+                                errorMsg.textContent = `Error: ${data.type} - ${data.details}`;
+                                cell.appendChild(errorMsg);
+                                
+                                switch (data.type) {
+                                    case Hls.ErrorTypes.NETWORK_ERROR:
+                                        console.log(`Network error on player ${index}, trying to recover...`);
+                                        hls.startLoad();
+                                        break;
+                                    case Hls.ErrorTypes.MEDIA_ERROR:
+                                        console.log(`Media error on player ${index}, trying to recover...`);
+                                        hls.recoverMediaError();
+                                        break;
+                                    default:
+                                        console.log(`Fatal error on player ${index}, destroying HLS instance`);
+                                        hls.destroy();
+                                        break;
+                                }
+                            }
+                        });
+                        
+                        hls.loadSource(url);
+                        hls.attachMedia(video);
+                        console.log(`Player ${index} (${item.label}) initialized with HLS.js`);
+                        
+                    } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+                        // Native HLS support (Safari)
+                        labelEl.textContent = `${item.label} [HLS/Native]`;
+                        video.src = url;
+                        console.log(`Player ${index} (${item.label}) using native HLS support`);
+                    } else {
+                        throw new Error('HLS not supported in this browser');
+                    }
+                }
+                
+                // Attempt autoplay
+                try {
+                    await video.play();
+                    console.log(`Player ${index} (${item.label}) started`);
+                } catch (e) {
+                    console.warn(`Autoplay failed for player ${index}:`, e.message);
+                    statusEl.textContent = 'Click to play';
+                    statusEl.className = 'player-status status-loading';
+                    
+                    video.addEventListener('click', async () => {
+                        try {
+                            await video.play();
+                        } catch (err) {
+                            console.error(`Manual play failed:`, err);
+                        }
+                    }, { once: true });
+                }
+                
+            } catch (error) {
+                console.error(`Failed to initialize player ${index}:`, error);
+                statusEl.textContent = 'Failed';
+                statusEl.className = 'player-status status-error';
+                
+                const errorMsg = document.createElement('div');
+                errorMsg.className = 'error-message';
+                errorMsg.textContent = `Failed: ${error.message}`;
+                cell.appendChild(errorMsg);
+            }
+        }
+
+        function createPlayerId() {
+            if (window.BOSSNav && typeof window.BOSSNav.createPlayerId === 'function') {
+                return window.BOSSNav.createPlayerId();
+            }
+            return Math.random().toString(36).slice(2, 10);
+        }
+
+        function normalizeTestingBase(url) {
+            const parsed = new URL(url, window.location.origin);
+            parsed.hostname = parsed.hostname || window.location.hostname;
+            parsed.port = '20081';
+            return parsed.toString();
+        }
+
+        function buildTestingUrl(url, playerId) {
+            const base = normalizeTestingBase(url);
+            const separator = base.includes('?') ? '&' : '?';
+            return `${base}${separator}player_id=${playerId}`;
+        }
+
+        function copyTestingUrl(url) {
+            const playerId = createPlayerId();
+            const testingUrl = buildTestingUrl(url, playerId);
+            if (!navigator.clipboard) {
+                const input = document.createElement('input');
+                input.value = testingUrl;
+                document.body.appendChild(input);
+                input.select();
+                document.execCommand('copy');
+                document.body.removeChild(input);
+                return;
+            }
+            navigator.clipboard.writeText(testingUrl).catch(err => console.warn('Clipboard write failed', err));
+        }
+
+        function openTestingWindow(url) {
+            const playerId = createPlayerId();
+            const testingUrl = buildTestingUrl(url, playerId);
+            const pageUrl = `/dashboard/testing-session.html?player_id=${encodeURIComponent(playerId)}&url=${encodeURIComponent(testingUrl)}`;
+            const popup = window.open(pageUrl, '_blank');
+            if (!popup) {
+                alert('Popup blocked. Allow popups for this site.');
+            }
+        }
+
+        function openHlsjsDemo(url) {
+            if (!url || url.includes('.mpd')) {
+                alert('HLS.js demo only supports HLS (.m3u8).');
+                return;
+            }
+            const playerId = createPlayerId();
+            const testingUrl = buildTestingUrl(url, playerId);
+            const demoUrl = `https://hlsjs.video-dev.org/demo/?src=${encodeURIComponent(testingUrl)}`;
+            const popup = window.open(demoUrl, '_blank');
+            if (!popup) {
+                alert('Popup blocked. Allow popups for this site.');
+            }
+        }
+
+        function initContextMenu() {
+            const isDeveloperMode = new URLSearchParams(window.location.search).get('developer') === '1';
+            const menu = document.createElement('div');
+            menu.className = 'context-menu';
+            menu.id = 'gridContextMenu';
+            menu.innerHTML = `
+                <button id="contextOpenTesting">Open in Testing Window</button>
+                <button id="contextCopyTesting">Copy Testing URL</button>
+                ${isDeveloperMode ? '<button id="contextOpenHlsjsDemo">Open in HLS.js Demo</button>' : ''}
+            `;
+            document.body.appendChild(menu);
+
+            document.getElementById('contextOpenTesting').addEventListener('click', () => {
+                const url = menu.dataset.url;
+                if (url) openTestingWindow(url);
+                menu.style.display = 'none';
+            });
+            document.getElementById('contextCopyTesting').addEventListener('click', () => {
+                const url = menu.dataset.url;
+                if (url) copyTestingUrl(url);
+                menu.style.display = 'none';
+            });
+            const hlsjsButton = document.getElementById('contextOpenHlsjsDemo');
+            if (hlsjsButton) {
+                hlsjsButton.addEventListener('click', () => {
+                    const url = menu.dataset.url;
+                    if (url) openHlsjsDemo(url);
+                    menu.style.display = 'none';
+                });
+            }
+
+            document.addEventListener('click', () => {
+                menu.style.display = 'none';
+            });
+        }
+
+        function showContextMenu(x, y, url) {
+            const menu = document.getElementById('gridContextMenu');
+            if (!menu) return;
+            menu.dataset.url = url;
+            const hlsjsButton = document.getElementById('contextOpenHlsjsDemo');
+            if (hlsjsButton) {
+                hlsjsButton.disabled = !url || url.includes('.mpd');
+            }
+            menu.style.left = `${x}px`;
+            menu.style.top = `${y}px`;
+            menu.style.display = 'block';
+        }
+        
+        // Reload all players
+        async function reloadAll() {
+            console.log('Reloading all players...');
+            
+            // Destroy all Shaka players
+            for (let i = 0; i < players.length; i++) {
+                if (players[i]) {
+                    await players[i].destroy();
+                    players[i] = null;
+                }
+            }
+            
+            // Destroy all HLS.js instances
+            for (let i = 0; i < hlsInstances.length; i++) {
+                if (hlsInstances[i]) {
+                    hlsInstances[i].destroy();
+                    hlsInstances[i] = null;
+                }
+            }
+            
+            players.length = 0;
+            hlsInstances.length = 0;
+            videoElements.length = 0;
+            
+            // Reinitialize
+            initGrid();
+        }
+        
+        // Initialize on load
+        window.addEventListener('DOMContentLoaded', async () => {
+            console.log('Initializing dynamic 4x4 grid...');
+            initContextMenu();
+            const segmentFilter = document.getElementById('segmentFilter');
+            const storedSegment = localStorage.getItem('bossSelectedSegment');
+            const allowedSegments = new Set(['ll', '2s', '6s']);
+            if (storedSegment && allowedSegments.has(storedSegment)) {
+                segmentFilter.value = storedSegment;
+            } else {
+                segmentFilter.value = '6s';
+                localStorage.setItem('bossSelectedSegment', '6s');
+            }
+            
+            // Fetch content from REST API first
+            const success = await fetchContent();
+            if (!success) {
+                console.error('Failed to load content, cannot initialize grid');
+                return;
+            }
+            
+            populateContentFilter();
+            
+            // Start with all content, both protocols
+            const filtered = applyFilters();
+            selectedContent = selectContent(filtered, false);
+            updateContentInfo();
+            initGrid();
+        });
+        
+        // Cleanup on unload
+        window.addEventListener('beforeunload', async () => {
+            for (const player of players) {
+                if (player) {
+                    await player.destroy();
+                }
+            }
+            for (const hls of hlsInstances) {
+                if (hls) {
+                    hls.destroy();
+                }
+            }
+        });
+    </script>
+    <script src="/shared-nav.js"></script>
+</body>
+</html>

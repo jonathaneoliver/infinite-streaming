@@ -1,0 +1,780 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Playback - InfiniteStream</title>
+    <link rel="stylesheet" href="/shared-styles.css">
+    <script src="https://cdn.jsdelivr.net/npm/shaka-player@4.15.0/dist/shaka-player.ui.min.js"></script>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/shaka-player@4.15.0/dist/controls.css">
+    <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.15"></script>
+    <link href="https://vjs.zencdn.net/8.21.1/video-js.css" rel="stylesheet" />
+    <script src="https://vjs.zencdn.net/8.21.1/video.min.js"></script>
+    <style>
+        .page-header {
+            margin-bottom: 20px;
+        }
+
+        .page-title {
+            font-size: 32px;
+            font-weight: 400;
+            margin-bottom: 8px;
+            color: var(--text-primary);
+        }
+
+        .page-subtitle {
+            font-size: 14px;
+            color: var(--text-secondary);
+        }
+
+        .controls {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 12px;
+            align-items: center;
+            padding: 12px 16px;
+            background: var(--bg-primary);
+            border-radius: 8px;
+            box-shadow: var(--shadow-sm);
+            margin-bottom: 18px;
+        }
+
+        .control-group {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .control-group label {
+            font-size: 11px;
+            font-weight: 600;
+            text-transform: uppercase;
+            color: var(--text-secondary);
+        }
+
+        .control-group select {
+            padding: 6px 10px;
+            border-radius: 4px;
+            border: 1px solid var(--border-color);
+            background: var(--bg-secondary);
+            color: var(--text-primary);
+            font-size: 13px;
+        }
+
+        .control-actions button {
+            padding: 7px 12px;
+            border-radius: 6px;
+            border: 1px solid var(--border-color);
+            background: var(--bg-secondary);
+            color: var(--text-primary);
+            cursor: pointer;
+            font-size: 13px;
+        }
+
+        .control-actions button:hover {
+            border-color: var(--primary-blue);
+            background: var(--bg-tertiary);
+        }
+
+        .selected-row {
+            margin-left: auto;
+            font-size: 12px;
+            color: var(--text-secondary);
+            white-space: nowrap;
+        }
+
+        .selected-row strong {
+            color: var(--text-primary);
+        }
+
+        .player-card {
+            background: var(--bg-primary);
+            border-radius: 12px;
+            box-shadow: var(--shadow-md);
+            padding: 16px;
+        }
+
+        .player-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 12px;
+            flex-wrap: wrap;
+            gap: 8px;
+        }
+
+        .player-title {
+            font-size: 16px;
+            font-weight: 600;
+            color: var(--text-primary);
+        }
+
+        .player-meta {
+            font-size: 12px;
+            color: var(--text-secondary);
+            font-family: 'Courier New', monospace;
+        }
+
+        .video-frame {
+            width: 100%;
+            max-height: 68vh;
+            background: #000;
+            border-radius: 10px;
+            overflow: hidden;
+            cursor: pointer;
+            position: relative;
+        }
+
+        .video-click-layer {
+            position: absolute;
+            inset: 0;
+            z-index: 2;
+        }
+
+        .video-frame.audio-active {
+            outline: 2px solid var(--primary-blue);
+            box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.2);
+        }
+
+        video {
+            width: 100%;
+            height: 100%;
+            display: block;
+            background: #000;
+        }
+
+        .stats-grid {
+            margin-top: 12px;
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+            gap: 10px;
+            font-size: 12px;
+        }
+
+        .stats-item {
+            background: var(--bg-secondary);
+            border-radius: 6px;
+            padding: 8px 10px;
+        }
+
+        .stats-item .label {
+            color: var(--text-secondary);
+            font-weight: 600;
+            display: block;
+            margin-bottom: 2px;
+        }
+
+        .stats-item .value {
+            color: var(--text-primary);
+            font-family: 'Courier New', monospace;
+        }
+
+        .panel-badges {
+            display: flex;
+            gap: 6px;
+            flex-wrap: wrap;
+        }
+
+        .panel-badge {
+            padding: 3px 8px;
+            border-radius: 999px;
+            font-size: 10px;
+            font-weight: 600;
+            text-transform: uppercase;
+            border: 1px solid rgba(0,0,0,0.1);
+        }
+
+        .panel-badge.hls { background: #d1fae5; color: #047857; }
+        .panel-badge.dash { background: #dbeafe; color: #1d4ed8; }
+        .panel-badge.ll { background: #fde68a; color: #92400e; }
+        .panel-badge.s2 { background: #e0e7ff; color: #3730a3; }
+        .panel-badge.s6 { background: #fee2e2; color: #b91c1c; }
+        .panel-badge.all { background: #e2e8f0; color: #334155; }
+        .panel-badge.h264 { background: #e5e7eb; color: #374151; }
+        .panel-badge.hevc { background: #fef3c7; color: #b45309; }
+        .panel-badge.av1 { background: #ede9fe; color: #6d28d9; }
+        .panel-badge.native { background: #f3f4f6; color: #111827; }
+        .panel-badge.hlsjs { background: #dcfce7; color: #15803d; }
+        .panel-badge.videojs { background: #fce7f3; color: #9d174d; }
+        .panel-badge.shaka { background: #cffafe; color: #0e7490; }
+
+        .context-menu {
+            position: fixed;
+            background: #0f172a;
+            border: 1px solid rgba(255,255,255,0.12);
+            box-shadow: 0 12px 30px rgba(0,0,0,0.35);
+            border-radius: 8px;
+            padding: 6px;
+            display: none;
+            z-index: 9999;
+            min-width: 200px;
+        }
+
+        .context-menu button {
+            width: 100%;
+            background: transparent;
+            border: none;
+            text-align: left;
+            padding: 8px 10px;
+            font-size: 12px;
+            color: #e5e7eb;
+            border-radius: 6px;
+            cursor: pointer;
+        }
+
+        .context-menu button:hover {
+            background: rgba(59, 130, 246, 0.2);
+        }
+        :root {
+            --content-control-bg: #f8fafc;
+            --content-control-border: #e2e8f0;
+            --content-control-title: #64748b;
+            --content-control-label: #475569;
+            --content-control-select-bg: #ffffff;
+            --content-control-select-text: #0f172a;
+        }
+    </style>
+    <link rel="stylesheet" href="/dashboard/content-control.css">
+</head>
+<body>
+    <div class="boss-content-wide">
+        <div class="page-header">
+            <h1 class="page-title">Playback</h1>
+            <p class="page-subtitle">Single stream playback based on the selected content and segmentation settings.</p>
+        </div>
+
+        <div class="content-control">
+            <div class="content-control-title">Content Control</div>
+            <div class="content-control-group">
+                <label class="content-control-label">Content</label>
+                <select id="contentSelect" class="content-control-select" onchange="changeContent()">
+                    <option value="">Loading...</option>
+                </select>
+            </div>
+            <div class="content-control-group">
+                <label class="content-control-label">Protocol</label>
+                <select id="protocolSelect" class="content-control-select" onchange="applySelection()">
+                    <option value="hls" selected>HLS</option>
+                    <option value="dash">DASH</option>
+                </select>
+            </div>
+            <div class="content-control-group">
+                <label class="content-control-label">Segment</label>
+                <select id="segmentSelect" class="content-control-select" onchange="applySelection()">
+                    <option value="all">All</option>
+                    <option value="ll" selected>LL</option>
+                    <option value="2s">2s</option>
+                    <option value="6s">6s</option>
+                </select>
+            </div>
+            <div class="content-control-group">
+                <label class="content-control-label">Codec</label>
+                <select id="codecSelect" class="content-control-select" onchange="applySelection()">
+                    <option value="h264" selected>H264</option>
+                    <option value="hevc">H265/HEVC</option>
+                    <option value="av1">AV1</option>
+                    <option value="all">Auto</option>
+                </select>
+            </div>
+            <div class="content-control-group">
+                <label class="content-control-label">Player</label>
+                <select id="playerSelect" class="content-control-select" onchange="applySelection()">
+                    <option value="auto" selected>Auto</option>
+                    <option value="native">Native</option>
+                    <option value="hlsjs">HLS.js</option>
+                    <option value="videojs">Video.js</option>
+                    <option value="shaka">Shaka</option>
+                </select>
+            </div>
+            <div class="control-actions">
+                <button onclick="playStream()">▶ Play</button>
+                <button onclick="pauseStream()">⏸ Pause</button>
+                <button onclick="reloadStream()">🔄 Reload</button>
+            </div>
+            <div class="selected-row" id="selectedRow">Selected: <strong>Loading...</strong></div>
+        </div>
+
+        <div class="player-card">
+            <div class="player-header">
+                <div>
+                    <div class="player-title" id="playerTitle">Loading...</div>
+                    <div class="player-meta" id="playerMeta"></div>
+                </div>
+                <div class="panel-badges" id="playerBadges"></div>
+            </div>
+            <div class="video-frame" id="videoFrame">
+                <div class="video-click-layer" onclick="toggleMute()"></div>
+                <video id="mainVideo" controls muted></video>
+            </div>
+            <div class="stats-grid">
+                <div class="stats-item"><span class="label">State</span><span class="value" id="statState">Idle</span></div>
+                <div class="stats-item"><span class="label">Current Time</span><span class="value" id="statTime">0.00s</span></div>
+                <div class="stats-item"><span class="label">Buffered End</span><span class="value" id="statBufferedEnd">--</span></div>
+                <div class="stats-item"><span class="label">Buffer Depth</span><span class="value" id="statBufferDepth">--</span></div>
+                <div class="stats-item"><span class="label">Live Offset</span><span class="value" id="statLiveOffset">--</span></div>
+                <div class="stats-item"><span class="label">URL</span><span class="value" id="statUrl">--</span></div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const BASE_URL = '';
+        const video = document.getElementById('mainVideo');
+        const playerState = { instance: null, type: null, url: null };
+        let availableContent = [];
+        const AUDIO_MUTED_KEY = 'bossAudioMuted';
+
+        function getStoredContent() {
+            return localStorage.getItem('bossSelectedContentFull') || localStorage.getItem('bossSelectedContent') || '';
+        }
+
+        function inferCodec(name = '') {
+            const lower = name.toLowerCase();
+            if (lower.includes('av1')) return 'av1';
+            if (lower.includes('hevc') || lower.includes('h265')) return 'hevc';
+            return 'h264';
+        }
+
+        function getGlobalMuted() {
+            const stored = localStorage.getItem(AUDIO_MUTED_KEY);
+            if (stored === null) return true;
+            return stored !== 'false';
+        }
+
+        function setGlobalMuted(isMuted) {
+            localStorage.setItem(AUDIO_MUTED_KEY, isMuted ? 'true' : 'false');
+            const frame = document.getElementById('videoFrame');
+            if (frame) frame.classList.toggle('audio-active', !isMuted);
+        }
+
+        function setBadge(container, label, klass) {
+            const badge = document.createElement('span');
+            badge.className = `panel-badge ${klass}`;
+            badge.textContent = label;
+            container.appendChild(badge);
+        }
+
+        function clearPlayerInstance() {
+            if (playerState.type === 'shaka' && playerState.instance) {
+                playerState.instance.destroy();
+            }
+            if (playerState.type === 'hlsjs' && playerState.instance) {
+                playerState.instance.destroy();
+            }
+            if (playerState.type === 'videojs' && playerState.instance) {
+                playerState.instance.dispose();
+            }
+            playerState.instance = null;
+            playerState.type = null;
+            video.muted = true;
+            setGlobalMuted(true);
+            video.removeAttribute('data-vjs-player');
+            video.src = '';
+            video.load();
+        }
+
+        async function initPlayer(url, protocol, playerChoice, mutedState = true) {
+            clearPlayerInstance();
+            playerState.url = url;
+            video.muted = mutedState;
+
+            if (playerChoice === 'native') {
+                video.src = url;
+                playerState.type = 'native';
+                return;
+            }
+
+            if (playerChoice === 'shaka') {
+                const shakaPlayer = new shaka.Player(video);
+                await shakaPlayer.load(url);
+                playerState.instance = shakaPlayer;
+                playerState.type = 'shaka';
+                return;
+            }
+
+            if (playerChoice === 'videojs') {
+                video.className = 'video-js vjs-default-skin';
+                const vjs = videojs(video, {
+                    autoplay: false,
+                    controls: true,
+                    muted: mutedState,
+                    fluid: true,
+                    liveui: true
+                });
+                const mimeType = protocol === 'dash' ? 'application/dash+xml' : 'application/x-mpegURL';
+                vjs.src({ src: url, type: mimeType });
+                playerState.instance = vjs;
+                playerState.type = 'videojs';
+                return;
+            }
+
+            if (playerChoice === 'hlsjs') {
+                if (!Hls.isSupported()) {
+                    console.warn('HLS.js not supported, falling back to native');
+                    video.src = url;
+                    playerState.type = 'native';
+                    return;
+                }
+                const hls = new Hls({ liveSyncDurationCount: 3, autoLevelEnabled: true });
+                hls.loadSource(url);
+                hls.attachMedia(video);
+                playerState.instance = hls;
+                playerState.type = 'hlsjs';
+                return;
+            }
+        }
+
+        function buildStreamUrl(contentName, protocol, segment) {
+            const base = `${BASE_URL}/go-live/${contentName}`;
+            if (protocol === 'dash') {
+                if (segment === '2s') return `${base}/manifest_2s.mpd`;
+                if (segment === '6s') return `${base}/manifest_6s.mpd`;
+                return `${base}/manifest.mpd`;
+            }
+            if (segment === '2s') return `${base}/master_2s.m3u8`;
+            if (segment === '6s') return `${base}/master_6s.m3u8`;
+            return `${base}/master.m3u8`;
+        }
+
+        function chooseContent(codecSelection) {
+            const stored = getStoredContent();
+            if (!stored) return availableContent[0]?.name || '';
+            const storedCodec = inferCodec(stored);
+            if (codecSelection === 'all' || storedCodec === codecSelection) {
+                const fullMatch = availableContent.find(item => item.name === stored);
+                if (fullMatch) return fullMatch.name;
+            }
+            const base = stored
+                .replace(/_(h264|hevc|av1|dash|ts|hw)$/i, '')
+                .replace(/_\d{8}_\d{6}$/i, '');
+            const candidates = availableContent.filter(item => item.name.includes(base));
+            if (codecSelection === 'all') return candidates[0]?.name || stored;
+            const codecMatch = candidates.find(item => inferCodec(item.name) === codecSelection);
+            return codecMatch?.name || candidates[0]?.name || stored;
+        }
+
+        async function applySelection() {
+            const protocol = document.getElementById('protocolSelect').value;
+            const segment = document.getElementById('segmentSelect').value;
+            const codec = document.getElementById('codecSelect').value;
+            const playerSelect = document.getElementById('playerSelect');
+            let player = playerSelect.value;
+            const defaultPlayer = protocol === 'dash' ? 'shaka' : 'hlsjs';
+            if (player === 'auto') {
+                player = defaultPlayer;
+            }
+            const currentMuted = getGlobalMuted();
+            let codecFallback = false;
+
+            const contentSelect = document.getElementById('contentSelect');
+            let contentName = contentSelect.value || chooseContent(codec);
+            if (codec !== 'all') {
+                const candidate = chooseContent(codec);
+                if (candidate && candidate !== contentName) {
+                    contentName = candidate;
+                    contentSelect.value = candidate;
+                    localStorage.setItem('bossSelectedContentFull', candidate);
+                    localStorage.setItem('bossSelectedContent', candidate);
+                    const baseName = candidate
+                        .replace(/_(h264|hevc|av1|dash|ts|hw)$/i, '')
+                        .replace(/_\\d{8}_\\d{6}$/i, '');
+                    localStorage.setItem('bossSelectedContentBase', baseName);
+                    if (window.BOSSNav && typeof window.BOSSNav.updateSelectedContentBadge === 'function') {
+                        window.BOSSNav.updateSelectedContentBadge();
+                    }
+                    codecFallback = inferCodec(candidate) !== codec;
+                }
+            }
+            const url = buildStreamUrl(contentName, protocol, segment);
+            if (window.BOSSNav && typeof window.BOSSNav.setSelectedUrl === 'function') {
+                window.BOSSNav.setSelectedUrl(url);
+            } else {
+                localStorage.setItem('bossSelectedUrl', url);
+            }
+
+            document.getElementById('selectedRow').innerHTML = `Selected: <strong>${contentName || 'None'}</strong>`;
+            document.getElementById('playerTitle').textContent = `${protocol.toUpperCase()} ${segment.toUpperCase()} Playback`;
+            document.getElementById('playerMeta').textContent = contentName || '';
+
+            const badges = document.getElementById('playerBadges');
+            badges.innerHTML = '';
+            setBadge(badges, protocol.toUpperCase(), protocol === 'dash' ? 'dash' : 'hls');
+            const segmentLabel = segment === 'all' ? 'ALL' : segment.toUpperCase();
+            const segmentClass = segment === 'all' ? 'all' : (segment === 'll' ? 'll' : (segment === '2s' ? 's2' : 's6'));
+            setBadge(badges, segmentLabel, segmentClass);
+            const codecLabel = inferCodec(contentName);
+            setBadge(badges, codecLabel.toUpperCase(), codecLabel);
+            setBadge(badges, player === 'hlsjs' ? 'HLS.js' : player === 'videojs' ? 'Video.js' : player === 'shaka' ? 'Shaka' : 'Native', player === 'hlsjs' ? 'hlsjs' : player === 'videojs' ? 'videojs' : player === 'shaka' ? 'shaka' : 'native');
+
+            document.getElementById('statUrl').textContent = url;
+            if (codecFallback) {
+                document.getElementById('playerMeta').textContent = `${contentName} (requested ${codec.toUpperCase()} unavailable)`;
+            }
+
+            await initPlayer(url, protocol, player, currentMuted);
+            await autoPlay(currentMuted);
+        }
+
+        function populateContentSelect() {
+            const select = document.getElementById('contentSelect');
+            if (!select) return;
+            select.innerHTML = '';
+
+            if (availableContent.length === 0) {
+                select.innerHTML = '<option value=\"\">No content found</option>';
+                return;
+            }
+
+            availableContent.forEach((item) => {
+                const option = document.createElement('option');
+                option.value = item.name;
+                option.textContent = item.name;
+                select.appendChild(option);
+            });
+
+            const stored = getStoredContent();
+            if (stored && availableContent.some(item => item.name === stored)) {
+                select.value = stored;
+            } else {
+                select.value = availableContent[0].name;
+            }
+        }
+
+        function changeContent() {
+            const select = document.getElementById('contentSelect');
+            if (!select || !select.value) return;
+            const content = select.value;
+            localStorage.setItem('bossSelectedContentFull', content);
+            localStorage.setItem('bossSelectedContent', content);
+            const baseName = content
+                .replace(/_(h264|hevc|av1|dash|ts|hw)$/i, '')
+                .replace(/_\\d{8}_\\d{6}$/i, '');
+            localStorage.setItem('bossSelectedContentBase', baseName);
+            if (window.BOSSNav && typeof window.BOSSNav.updateSelectedContentBadge === 'function') {
+                window.BOSSNav.updateSelectedContentBadge();
+            }
+
+            const codecSelect = document.getElementById('codecSelect');
+            if (codecSelect && codecSelect.value !== 'all') {
+                codecSelect.value = inferCodec(content);
+            }
+
+            applySelection();
+        }
+
+        async function autoPlay(mutedState = true) {
+            try {
+                if (playerState.type === 'videojs' && playerState.instance) {
+                    playerState.instance.muted(mutedState);
+                    await playerState.instance.play();
+                    return;
+                }
+                video.muted = mutedState;
+                await video.play();
+            } catch (error) {
+                console.warn('Autoplay blocked:', error);
+            }
+        }
+
+        function playStream() {
+            autoPlay();
+        }
+
+        function pauseStream() {
+            video.pause();
+        }
+
+        async function reloadStream() {
+            await applySelection();
+            autoPlay();
+        }
+
+        function toggleMute() {
+            const nextMuted = !video.muted;
+            video.muted = nextMuted;
+            if (playerState.type === 'videojs' && playerState.instance) {
+                playerState.instance.muted(nextMuted);
+            }
+            setGlobalMuted(nextMuted);
+        }
+
+        function updateStats() {
+            const buffered = video.buffered;
+            const current = video.currentTime || 0;
+            let bufferedEnd = '--';
+            let bufferDepth = '--';
+            if (buffered && buffered.length > 0) {
+                const end = buffered.end(buffered.length - 1);
+                bufferedEnd = `${end.toFixed(2)}s`;
+                bufferDepth = `${Math.max(0, end - current).toFixed(2)}s`;
+            }
+            document.getElementById('statState').textContent = video.paused ? 'Paused' : (video.muted ? 'Playing (Muted)' : 'Playing');
+            document.getElementById('statTime').textContent = `${current.toFixed(2)}s`;
+            document.getElementById('statBufferedEnd').textContent = bufferedEnd;
+            document.getElementById('statBufferDepth').textContent = bufferDepth;
+            document.getElementById('statLiveOffset').textContent = '--';
+        }
+
+        function createPlayerId() {
+            if (window.BOSSNav && typeof window.BOSSNav.createPlayerId === 'function') {
+                return window.BOSSNav.createPlayerId();
+            }
+            return Math.random().toString(36).slice(2, 10);
+        }
+
+        function normalizeTestingBase(url) {
+            const parsed = new URL(url, window.location.origin);
+            parsed.hostname = parsed.hostname || window.location.hostname;
+            parsed.port = '20081';
+            return parsed.toString();
+        }
+
+        function buildTestingUrl(url, playerId) {
+            const base = normalizeTestingBase(url);
+            const separator = base.includes('?') ? '&' : '?';
+            return `${base}${separator}player_id=${playerId}`;
+        }
+
+        function copyTestingUrl(url) {
+            const playerId = createPlayerId();
+            const testingUrl = buildTestingUrl(url, playerId);
+            if (!navigator.clipboard) {
+                const input = document.createElement('input');
+                input.value = testingUrl;
+                document.body.appendChild(input);
+                input.select();
+                document.execCommand('copy');
+                document.body.removeChild(input);
+                return;
+            }
+            navigator.clipboard.writeText(testingUrl).catch(err => console.warn('Clipboard write failed', err));
+        }
+
+        function openTestingWindow(url) {
+            const playerId = createPlayerId();
+            const testingUrl = buildTestingUrl(url, playerId);
+            const pageUrl = `/dashboard/testing-session.html?player_id=${encodeURIComponent(playerId)}&url=${encodeURIComponent(testingUrl)}`;
+            const popup = window.open(pageUrl, '_blank');
+            if (!popup) {
+                alert('Popup blocked. Allow popups for this site.');
+            }
+        }
+
+        function openHlsjsDemo(url) {
+            if (!url || url.includes('.mpd')) {
+                alert('HLS.js demo only supports HLS (.m3u8).');
+                return;
+            }
+            const playerId = createPlayerId();
+            const testingUrl = buildTestingUrl(url, playerId);
+            const demoUrl = `https://hlsjs.video-dev.org/demo/?src=${encodeURIComponent(testingUrl)}`;
+            const popup = window.open(demoUrl, '_blank');
+            if (!popup) {
+                alert('Popup blocked. Allow popups for this site.');
+            }
+        }
+
+        async function bootstrap() {
+            try {
+                const response = await fetch(`${BASE_URL}/api/content`);
+                const all = await response.json();
+                availableContent = all.filter(item => item.has_hls || item.has_dash);
+            } catch (error) {
+                console.warn('Failed to load content list:', error);
+            }
+
+            const storedCodec = localStorage.getItem('bossSelectedCodec');
+            const storedSegment = localStorage.getItem('bossSelectedSegment');
+            const storedProtocol = localStorage.getItem('bossSelectedProtocol');
+            const storedUrl = localStorage.getItem('bossSelectedUrl') || '';
+            const codecSelect = document.getElementById('codecSelect');
+            const segmentSelect = document.getElementById('segmentSelect');
+            const protocolSelect = document.getElementById('protocolSelect');
+            if (protocolSelect) {
+                if (storedProtocol) {
+                    protocolSelect.value = storedProtocol;
+                } else if (storedUrl) {
+                    protocolSelect.value = storedUrl.toLowerCase().includes('.mpd') ? 'dash' : 'hls';
+                }
+            }
+            if (codecSelect && storedCodec) {
+                codecSelect.value = storedCodec;
+            } else {
+                const stored = getStoredContent();
+                if (stored && codecSelect) {
+                    codecSelect.value = inferCodec(stored);
+                }
+            }
+            if (segmentSelect && storedSegment) {
+                segmentSelect.value = storedSegment;
+            }
+
+            populateContentSelect();
+            const initialMuted = getGlobalMuted();
+            setGlobalMuted(initialMuted);
+            applySelection();
+            setInterval(updateStats, 500);
+        }
+
+        function initContextMenu() {
+            const isDeveloperMode = new URLSearchParams(window.location.search).get('developer') === '1';
+            const menu = document.createElement('div');
+            menu.className = 'context-menu';
+            menu.id = 'testingContextMenu';
+            menu.innerHTML = `
+                <button id="contextOpenTesting">Open in Testing Window</button>
+                <button id="contextCopyTesting">Copy Testing URL</button>
+                ${isDeveloperMode ? '<button id="contextOpenHlsjsDemo">Open in HLS.js Demo</button>' : ''}
+            `;
+            document.body.appendChild(menu);
+
+            document.getElementById('contextOpenTesting').addEventListener('click', () => {
+                const url = menu.dataset.url;
+                if (url) openTestingWindow(url);
+                menu.style.display = 'none';
+            });
+            document.getElementById('contextCopyTesting').addEventListener('click', () => {
+                const url = menu.dataset.url;
+                if (url) copyTestingUrl(url);
+                menu.style.display = 'none';
+            });
+            const hlsjsButton = document.getElementById('contextOpenHlsjsDemo');
+            if (hlsjsButton) {
+                hlsjsButton.addEventListener('click', () => {
+                    const url = menu.dataset.url;
+                    if (url) openHlsjsDemo(url);
+                    menu.style.display = 'none';
+                });
+            }
+
+            document.addEventListener('click', () => {
+                menu.style.display = 'none';
+            });
+
+            const showMenu = (event) => {
+                event.preventDefault();
+                const url = document.getElementById('statUrl')?.textContent || '';
+                if (!url) return;
+                menu.dataset.url = url;
+                menu.style.left = `${event.clientX}px`;
+                menu.style.top = `${event.clientY}px`;
+                menu.style.display = 'block';
+            };
+
+            video.addEventListener('contextmenu', showMenu);
+            const frame = document.getElementById('videoFrame');
+            if (frame) {
+                frame.addEventListener('contextmenu', showMenu);
+            }
+            const clickLayer = document.querySelector('.video-click-layer');
+            if (clickLayer) {
+                clickLayer.addEventListener('contextmenu', showMenu);
+            }
+        }
+
+        document.addEventListener('DOMContentLoaded', bootstrap);
+        document.addEventListener('DOMContentLoaded', initContextMenu);
+    </script>
+    <script src="/shared-nav.js"></script>
+</body>
+</html>

@@ -1,0 +1,709 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Job Details - InfiniteStream</title>
+    <link rel="stylesheet" href="/shared-styles.css">
+    <style>
+        .job-header-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            margin-bottom: 24px;
+            flex-wrap: wrap;
+            gap: 16px;
+        }
+
+        .job-title-section h1 {
+            font-size: 1.75em;
+            margin-bottom: 8px;
+        }
+
+        .job-id-text {
+            color: var(--text-tertiary);
+            font-size: 0.9em;
+        }
+
+        .info-grid-4 {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 16px;
+            margin-bottom: 24px;
+        }
+
+        .info-card {
+            background: var(--bg-subtle);
+            padding: 16px;
+            border-radius: 8px;
+        }
+
+        .info-card-label {
+            font-size: 0.85em;
+            color: var(--text-secondary);
+            margin-bottom: 6px;
+        }
+
+        .info-card-value {
+            font-size: 1.1em;
+            font-weight: 600;
+            color: var(--text-primary);
+        }
+
+        .config-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 12px;
+        }
+
+        .config-item {
+            display: flex;
+            justify-content: space-between;
+            padding: 12px;
+            background: var(--bg-subtle);
+            border-radius: 6px;
+        }
+
+        .config-label {
+            color: var(--text-secondary);
+        }
+
+        .config-value {
+            font-weight: 600;
+            color: var(--text-primary);
+        }
+
+        .logs-container {
+            background: #1e1e1e;
+            color: #d4d4d4;
+            padding: 16px;
+            border-radius: 8px;
+            font-family: 'Courier New', monospace;
+            font-size: 0.85em;
+            max-height: 500px;
+            overflow-y: auto;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+        }
+
+        .log-line {
+            margin-bottom: 4px;
+        }
+
+        .output-links {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+
+        .output-link {
+            display: block;
+            padding: 12px 16px;
+            background: var(--bg-subtle);
+            border: 1px solid var(--border-color);
+            border-radius: 6px;
+            text-decoration: none;
+            color: var(--primary-color);
+            transition: all 0.2s;
+        }
+
+        .output-link:hover {
+            background: var(--bg-secondary);
+            border-color: var(--primary-color);
+        }
+    </style>
+</head>
+<body data-boss-active-page="jobs">
+    <div class="boss-content-standard">
+        <div id="loadingState" class="text-center text-secondary" style="padding: 60px;">
+            <div class="spinner"></div>
+            <div style="margin-top: 12px;">Loading job details...</div>
+        </div>
+
+        <div id="jobDetails" style="display: none;">
+            <div class="card">
+                <div class="card-header">
+                    <div class="job-header-row">
+                        <div class="job-title-section">
+                            <h1 id="jobName">Job Name</h1>
+                            <p class="job-id-text" id="jobId">Job ID: </p>
+                        </div>
+                        <span id="jobStatus" class="badge">Status</span>
+                    </div>
+                </div>
+                <div class="card-body">
+                    <!-- Info Grid -->
+                    <div class="info-grid-4">
+                        <div class="info-card">
+                            <div class="info-card-label">Created</div>
+                            <div class="info-card-value" id="jobCreated">-</div>
+                        </div>
+                        <div class="info-card">
+                            <div class="info-card-label">Started</div>
+                            <div class="info-card-value" id="jobStarted">-</div>
+                        </div>
+                        <div class="info-card">
+                            <div class="info-card-label">Duration</div>
+                            <div class="info-card-value" id="jobDuration">-</div>
+                        </div>
+                        <div class="info-card">
+                            <div class="info-card-label">Completed</div>
+                            <div class="info-card-value" id="jobCompleted">-</div>
+                        </div>
+                    </div>
+
+                    <!-- Upload Continuation Banner (hidden by default) -->
+                    <div id="uploadContinuationBanner" style="display: none; background: var(--warning-bg); border: 2px solid var(--warning-color); border-radius: 8px; padding: 16px; margin-bottom: 24px;">
+                        <h3 style="margin: 0 0 8px 0; color: var(--warning-dark);">📁 Upload In Progress</h3>
+                        <p id="uploadContinuationText" style="margin: 0 0 12px 0; color: var(--warning-dark);">
+                            Background upload continuing...
+                        </p>
+                        <div class="progress" style="margin-bottom: 8px;">
+                            <div class="progress-bar" id="uploadProgressFill" style="width: 0%"></div>
+                        </div>
+                        <p id="uploadProgressText" style="margin: 0; font-size: 0.9em; color: var(--text-secondary);">0%</p>
+                        
+                        <!-- Safari fallback: file picker -->
+                        <div id="uploadFilePicker" style="display: none; margin-top: 12px;">
+                            <p style="color: var(--warning-dark); margin-bottom: 8px;">
+                                Please select the file again to continue upload:
+                            </p>
+                            <input type="file" id="continueFileInput" accept=".mp4,video/mp4" class="form-input" style="background: white;">
+                        </div>
+                    </div>
+
+                    <!-- Progress (only shown when encoding) -->
+                    <div id="progressSection" style="display: none; margin-bottom: 24px;">
+                        <h2 style="font-size: 1.2em; margin-bottom: 12px;">Progress</h2>
+                        <div class="progress" style="height: 24px;">
+                            <div class="progress-bar" id="progressFill" style="width: 0%;"></div>
+                        </div>
+                        <p id="progressText" class="text-center text-secondary" style="margin-top: 8px;">0%</p>
+                    </div>
+
+                    <!-- Error Message -->
+                    <div id="errorMessage" class="alert alert-error" style="display: none; margin-bottom: 24px;"></div>
+
+                    <!-- Action Buttons -->
+                    <div id="actionButtons" style="display: flex; gap: 12px; margin-bottom: 24px;"></div>
+                </div>
+            </div>
+
+            <!-- Configuration -->
+            <div class="card">
+                <div class="card-header">
+                    <h2>Configuration</h2>
+                </div>
+                <div class="card-body">
+                    <div class="config-grid" id="configGrid"></div>
+                </div>
+            </div>
+
+            <!-- Output -->
+            <div id="outputSection" class="card" style="display: none;">
+                <div class="card-header">
+                    <h2>Output Files</h2>
+                </div>
+                <div class="card-body">
+                    <div class="output-links" id="outputLinks"></div>
+                </div>
+            </div>
+
+            <!-- Logs -->
+            <div class="card">
+                <div class="card-header">
+                    <h2>Encoding Logs</h2>
+                </div>
+                <div class="card-body">
+                    <div class="logs-container" id="logsContainer">Waiting for logs...</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const urlParams = new URLSearchParams(window.location.search);
+        const jobId = urlParams.get('id');
+
+        let ws = null;
+        let refreshInterval = null;
+        let uploadWorkerConnection = null;
+
+        if (!jobId) {
+            document.getElementById('loadingState').innerHTML = '<div class="text-danger">No job ID provided</div>';
+        } else {
+            fetchJobDetails();
+            connectWebSocket();
+            
+            // Check if we need to continue upload
+            const uploadJobId = sessionStorage.getItem('upload_jobId');
+            const uploadMethod = sessionStorage.getItem('upload_method');
+            
+            if (uploadJobId === jobId && uploadMethod) {
+                handleUploadContinuation(uploadMethod);
+            }
+            
+            // Auto-refresh job details every 2 seconds
+            refreshInterval = setInterval(fetchJobDetails, 2000);
+        }
+
+        async function fetchJobDetails() {
+            try {
+                const response = await fetch(`/api/jobs/${jobId}`);
+                
+                if (!response.ok) {
+                    throw new Error('Job not found');
+                }
+                
+                const job = await response.json();
+                displayJobDetails(job);
+            } catch (error) {
+                console.error('Failed to fetch job details:', error);
+                document.getElementById('loadingState').innerHTML = `<div class="text-danger">Error: ${error.message}</div>`;
+            }
+        }
+
+        function displayJobDetails(job) {
+            document.getElementById('loadingState').style.display = 'none';
+            document.getElementById('jobDetails').style.display = 'block';
+
+            // Header
+            document.getElementById('jobName').textContent = job.name;
+            document.getElementById('jobId').textContent = `Job ID: ${job.job_id}`;
+            
+            const statusBadge = document.getElementById('jobStatus');
+            statusBadge.textContent = formatStatus(job.status);
+            statusBadge.className = `badge badge-${getStatusClass(job.status)}`;
+
+            // Info
+            document.getElementById('jobCreated').textContent = formatDate(job.created_at);
+            document.getElementById('jobStarted').textContent = job.started_at ? formatDate(job.started_at) : '-';
+            document.getElementById('jobDuration').textContent = calculateDuration(job);
+            document.getElementById('jobCompleted').textContent = job.completed_at ? formatDate(job.completed_at) : '-';
+
+            // Progress
+            if (job.status === 'uploading' || job.status === 'encoding') {
+                document.getElementById('progressSection').style.display = 'block';
+                const progressFill = document.getElementById('progressFill');
+                const progressText = document.getElementById('progressText');
+                progressFill.style.width = job.progress + '%';
+                progressText.textContent = job.progress + '%';
+            } else {
+                document.getElementById('progressSection').style.display = 'none';
+            }
+
+            // Configuration
+            displayConfig(job.config);
+
+            // Output
+            if (job.output_paths && job.output_paths.length > 0) {
+                document.getElementById('outputSection').style.display = 'block';
+                displayOutput(job.output_paths);
+            }
+
+            // Error message
+            if (job.error_message) {
+                const errorEl = document.getElementById('errorMessage');
+                errorEl.textContent = `Error: ${job.error_message}`;
+                errorEl.style.display = 'block';
+            }
+
+            // Action buttons
+            displayActionButtons(job);
+        }
+
+        function getStatusClass(status) {
+            const statusMap = {
+                'queued': 'warning',
+                'uploading': 'info',
+                'encoding': 'info',
+                'complete': 'success',
+                'failed': 'error',
+                'cancelled': 'neutral'
+            };
+            return statusMap[status] || 'neutral';
+        }
+
+        function displayConfig(config) {
+            const configGrid = document.getElementById('configGrid');
+            const items = [
+                { label: 'Output Name', value: config.output_name || 'Auto' },
+                { label: 'Codec', value: formatCodec(config.codec_selection) },
+                { label: 'Max Resolution', value: config.max_resolution || 'No limit' },
+                { label: 'HLS Format', value: config.hls_format || 'fMP4' },
+                { label: 'Hardware Encoding', value: config.force_software ? 'Disabled' : 'Enabled' },
+                { label: 'Padding', value: config.no_padding ? 'Disabled' : 'Enabled' },
+            ];
+
+            if (config.duration_limit) {
+                items.push({ label: 'Duration Limit', value: `${config.duration_limit}s` });
+            }
+
+            configGrid.innerHTML = items.map(item => `
+                <div class="config-item">
+                    <span class="config-label">${item.label}:</span>
+                    <span class="config-value">${item.value}</span>
+                </div>
+            `).join('');
+        }
+
+        function displayOutput(outputPaths) {
+            const outputLinks = document.getElementById('outputLinks');
+            outputLinks.innerHTML = outputPaths.map(path => {
+                const dashUrl = `/go-live/${path}/manifest.mpd`;
+                const hlsUrl = `/go-live/${path}/master.m3u8`;
+                
+                return `
+                    <a href="${dashUrl}" class="output-link" target="_blank">
+                        📺 ${path} - DASH Manifest
+                    </a>
+                    <a href="${hlsUrl}" class="output-link" target="_blank">
+                        📺 ${path} - HLS Master Playlist
+                    </a>
+                `;
+            }).join('');
+        }
+
+        function displayActionButtons(job) {
+            const actionButtons = document.getElementById('actionButtons');
+            let buttons = '';
+
+            if (job.status === 'uploading' || job.status === 'encoding' || job.status === 'queued') {
+                buttons += `<button class="btn btn-secondary" onclick="cancelJob()">Cancel Job</button>`;
+            }
+
+            if (['complete', 'failed', 'cancelled'].includes(job.status)) {
+                buttons += `<button class="btn btn-danger" onclick="deleteJob()">Delete Job</button>`;
+            }
+
+            actionButtons.innerHTML = buttons;
+        }
+
+        function connectWebSocket() {
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const wsUrl = `${protocol}//${window.location.host}/api/jobs/${jobId}/stream`;
+            
+            ws = new WebSocket(wsUrl);
+            
+            ws.onopen = () => console.log('WebSocket connected');
+            
+            ws.onmessage = (event) => {
+                if (event.data) appendLog(event.data);
+            };
+            
+            ws.onerror = (error) => console.error('WebSocket error:', error);
+            
+            ws.onclose = () => {
+                console.log('WebSocket closed');
+                setTimeout(connectWebSocket, 2000);
+            };
+        }
+
+        function appendLog(text) {
+            const logsContainer = document.getElementById('logsContainer');
+            
+            if (logsContainer.firstChild && logsContainer.firstChild.textContent === 'Waiting for logs...') {
+                logsContainer.innerHTML = '';
+            }
+            
+            const lines = text.split('\n');
+            lines.forEach(line => {
+                if (line.trim()) {
+                    const logLine = document.createElement('div');
+                    logLine.className = 'log-line';
+                    logLine.textContent = line;
+                    logsContainer.appendChild(logLine);
+                }
+            });
+            
+            logsContainer.scrollTop = logsContainer.scrollHeight;
+        }
+
+        function formatStatus(status) {
+            const statusMap = {
+                'queued': 'Queued',
+                'uploading': 'Uploading',
+                'encoding': 'Encoding',
+                'complete': 'Complete',
+                'failed': 'Failed',
+                'cancelled': 'Cancelled'
+            };
+            return statusMap[status] || status;
+        }
+
+        function formatCodec(codec) {
+            const codecMap = {
+                'both': 'HEVC + H.264',
+                'all': 'HEVC + H.264 + AV1',
+                'hevc': 'HEVC only',
+                'h264': 'H.264 only',
+                'av1': 'AV1 only'
+            };
+            return codecMap[codec] || codec;
+        }
+
+        function formatDate(dateString) {
+            return new Date(dateString).toLocaleString();
+        }
+
+        function calculateDuration(job) {
+            if (!job.started_at) return '-';
+            
+            const start = new Date(job.started_at);
+            const end = job.completed_at ? new Date(job.completed_at) : new Date();
+            const durationMs = end - start;
+            
+            const seconds = Math.floor(durationMs / 1000);
+            const minutes = Math.floor(seconds / 60);
+            const hours = Math.floor(minutes / 60);
+            
+            if (hours > 0) {
+                return `${hours}h ${minutes % 60}m ${seconds % 60}s`;
+            } else if (minutes > 0) {
+                return `${minutes}m ${seconds % 60}s`;
+            } else {
+                return `${seconds}s`;
+            }
+        }
+
+        async function cancelJob() {
+            if (!confirm('Are you sure you want to cancel this job?')) return;
+            
+            try {
+                // If there's an active upload worker connection, tell it to cancel
+                if (uploadWorkerConnection) {
+                    uploadWorkerConnection.port.postMessage({
+                        type: 'CANCEL_UPLOAD',
+                        jobId: jobId
+                    });
+                }
+                
+                // Call backend to cancel the job
+                const response = await fetch(`/api/jobs/${jobId}/cancel`, { method: 'POST' });
+                if (response.ok) {
+                    // Hide upload continuation banner if visible
+                    const banner = document.getElementById('uploadContinuationBanner');
+                    if (banner) {
+                        banner.style.display = 'none';
+                    }
+                    
+                    // Clear session storage
+                    sessionStorage.removeItem('upload_jobId');
+                    sessionStorage.removeItem('upload_method');
+                    sessionStorage.removeItem('upload_filename');
+                    sessionStorage.removeItem('upload_size');
+                    sessionStorage.removeItem('upload_offset');
+                    
+                    fetchJobDetails();
+                } else {
+                    alert('Failed to cancel job');
+                }
+            } catch (error) {
+                console.error('Failed to cancel job:', error);
+                alert('Failed to cancel job');
+            }
+        }
+
+        async function deleteJob() {
+            if (!confirm('Are you sure you want to delete this job? This cannot be undone.')) return;
+            
+            try {
+                const response = await fetch(`/api/jobs/${jobId}`, { method: 'DELETE' });
+                if (response.ok) {
+                    window.location.href = '/dashboard/jobs.html';
+                } else {
+                    alert('Failed to delete job');
+                }
+            } catch (error) {
+                console.error('Failed to delete job:', error);
+                alert('Failed to delete job');
+            }
+        }
+
+        window.addEventListener('beforeunload', () => {
+            if (ws) ws.close();
+            if (refreshInterval) clearInterval(refreshInterval);
+        });
+
+        // ============================================================================
+        // Upload Continuation Functions
+        // ============================================================================
+
+        async function handleUploadContinuation(method) {
+            const banner = document.getElementById('uploadContinuationBanner');
+            banner.style.display = 'block';
+            
+            if (method === 'worker') {
+                // Chrome/Firefox/Edge: Connect to SharedWorker
+                handleWorkerUpload();
+            } else if (method === 'manual') {
+                // Safari: Show file picker
+                handleManualUpload();
+            }
+        }
+
+        function handleWorkerUpload() {
+            const uploadContinuationText = document.getElementById('uploadContinuationText');
+            uploadContinuationText.textContent = 'Background upload in progress...';
+            
+            try {
+                uploadWorkerConnection = new SharedWorker('/upload-worker.js');
+                uploadWorkerConnection.port.start();
+                
+                console.log('[JobDetail] Connected to SharedWorker');
+                
+                // Listen for progress updates
+                uploadWorkerConnection.port.onmessage = (e) => {
+                    const { type, jobId: msgJobId, progress, bytesUploaded, totalBytes, error, position, filename } = e.data;
+                    
+                    console.log('[JobDetail] Worker message:', type, e.data);
+                    
+                    if (msgJobId !== jobId) return; // Ignore other jobs
+                    
+                    if (type === 'PROGRESS') {
+                        document.getElementById('uploadProgressFill').style.width = progress + '%';
+                        document.getElementById('uploadProgressText').textContent = 
+                            `Uploading: ${progress}% (${formatBytes(bytesUploaded)} / ${formatBytes(totalBytes)})`;
+                    } else if (type === 'QUEUED') {
+                        uploadContinuationText.textContent = `⏳ Upload queued (position ${position}). Will start when current upload completes.`;
+                    } else if (type === 'COMPLETE') {
+                        document.getElementById('uploadContinuationBanner').style.display = 'none';
+                        sessionStorage.removeItem('upload_jobId');
+                        sessionStorage.removeItem('upload_method');
+                        console.log('[JobDetail] Upload complete');
+                        // Job will transition to encoding automatically via polling
+                    } else if (type === 'ERROR') {
+                        uploadContinuationText.textContent = '❌ Upload error: ' + error;
+                        uploadContinuationText.style.color = 'var(--error-color)';
+                    } else if (type === 'NOT_FOUND') {
+                        // Upload not found in worker (might have completed already)
+                        document.getElementById('uploadContinuationBanner').style.display = 'none';
+                        sessionStorage.removeItem('upload_jobId');
+                        sessionStorage.removeItem('upload_method');
+                    }
+                };
+                
+                uploadWorkerConnection.port.onerror = (error) => {
+                    console.error('[JobDetail] SharedWorker error:', error);
+                    uploadContinuationText.textContent = '❌ Connection error. Falling back to manual upload.';
+                    // Fallback to manual upload
+                    sessionStorage.setItem('upload_method', 'manual');
+                    handleManualUpload();
+                };
+                
+                // Request current status
+                uploadWorkerConnection.port.postMessage({
+                    type: 'GET_STATUS',
+                    jobId: jobId
+                });
+                
+            } catch (error) {
+                console.error('[JobDetail] Failed to connect to SharedWorker:', error);
+                // Fallback to manual upload
+                sessionStorage.setItem('upload_method', 'manual');
+                handleManualUpload();
+            }
+        }
+
+        function handleManualUpload() {
+            const uploadContinuationText = document.getElementById('uploadContinuationText');
+            const filePicker = document.getElementById('uploadFilePicker');
+            
+            uploadContinuationText.textContent = 'Upload paused. Select the file below to continue:';
+            filePicker.style.display = 'block';
+            
+            const fileInput = document.getElementById('continueFileInput');
+            const expectedFilename = sessionStorage.getItem('upload_filename');
+            const expectedSize = parseInt(sessionStorage.getItem('upload_size'));
+            const startOffset = parseInt(sessionStorage.getItem('upload_offset'));
+            
+            fileInput.addEventListener('change', async (e) => {
+                const file = e.target.files[0];
+                
+                if (!file) return;
+                
+                // Validate file
+                if (file.name !== expectedFilename) {
+                    alert(`Please select the correct file: ${expectedFilename}`);
+                    return;
+                }
+                
+                if (file.size !== expectedSize) {
+                    alert('File size does not match. Please select the correct file.');
+                    return;
+                }
+                
+                // Hide file picker, show progress
+                filePicker.style.display = 'none';
+                uploadContinuationText.textContent = 'Resuming upload...';
+                
+                // Continue upload
+                await continueChunkedUpload(file, startOffset);
+            });
+        }
+
+        async function continueChunkedUpload(file, startOffset) {
+            const chunkSize = 5 * 1024 * 1024; // 5MB
+            
+            try {
+                for (let start = startOffset; start < file.size; start += chunkSize) {
+                    const end = Math.min(start + chunkSize, file.size);
+                    const chunk = file.slice(start, end);
+                    
+                    const formData = new FormData();
+                    formData.append('file', chunk);
+                    
+                    const response = await fetch(`/api/upload/chunk/${jobId}`, {
+                        method: 'POST',
+                        body: formData
+                    });
+                    
+                    if (!response.ok) {
+                        throw new Error('Chunk upload failed');
+                    }
+                    
+                    const data = await response.json();
+                    
+                    // Update progress
+                    document.getElementById('uploadProgressFill').style.width = data.progress + '%';
+                    document.getElementById('uploadProgressText').textContent = 
+                        `Uploading: ${data.progress}% (${formatBytes(data.received_size)} / ${formatBytes(data.expected_size)})`;
+                }
+                
+                // Complete upload
+                const completeResponse = await fetch(`/api/upload/complete/${jobId}`, {
+                    method: 'POST'
+                });
+                
+                if (!completeResponse.ok) {
+                    throw new Error('Failed to complete upload');
+                }
+                
+                // Success
+                document.getElementById('uploadContinuationBanner').style.display = 'none';
+                sessionStorage.removeItem('upload_jobId');
+                sessionStorage.removeItem('upload_method');
+                sessionStorage.removeItem('upload_filename');
+                sessionStorage.removeItem('upload_size');
+                sessionStorage.removeItem('upload_offset');
+                
+                console.log('[JobDetail] Manual upload complete');
+                
+            } catch (error) {
+                const uploadContinuationText = document.getElementById('uploadContinuationText');
+                uploadContinuationText.textContent = '❌ Upload error: ' + error.message;
+                uploadContinuationText.style.color = 'var(--error-color)';
+            }
+        }
+
+        function formatBytes(bytes) {
+            if (bytes === 0) return '0 Bytes';
+            const k = 1024;
+            const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+            const i = Math.floor(Math.log(bytes) / Math.log(k));
+            return Math.round(bytes / Math.pow(k, i) * 100) / 100 + ' ' + sizes[i];
+        }
+    </script>
+    <script src="/shared-nav.js"></script>
+</body>
+</html>

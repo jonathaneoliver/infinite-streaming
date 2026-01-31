@@ -1,0 +1,24 @@
+types {
+    text/html                             html htm shtml;
+    text/css                              css;
+    text/xml                              xml;
+    image/gif                             gif;
+    image/jpeg                            jpeg jpg;
+    application/javascript                js;
+    application/atom+xml                  atom;
+    application/rss+xml                   rss;
+
+    # HLS MIME types
+    application/vnd.apple.mpegurl         m3u8;
+    video/mp2t                            ts;
+
+    # DASH MIME types
+    application/dash+xml                  mpd;
+    video/mp4                             mp4;
+
+    # CMAF MIME types
+    video/mp4                             cmfv;
+    audio/mp4                             cmfa;
+
+    # Add more MIME types as needed
+}
