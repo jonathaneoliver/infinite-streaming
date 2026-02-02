@@ -1,13 +1,15 @@
 
 FROM golang:1.21-alpine AS go-builder
+RUN apk add git
 WORKDIR /build
 COPY go-live /build/go-live
 RUN cd /build/go-live && \
     go mod init github.com/boss/go-live && \
     go get github.com/gorilla/mux && \
-    go get github.com/bluenviron/gohlslib && \
+    go get github.com/bluenviron/gohlslib@v1.4.0 && \
     go get github.com/google/uuid && \
     go get github.com/beevik/etree@v1.2.0 && \
+    go mod tidy && \
     go build -o /out/go-live cmd/server/main.go
 
 COPY go-upload /build/go-upload

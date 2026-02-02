@@ -384,10 +384,10 @@ func parseTcBytes(line string) int64 {
 
 func main() {
 	memcachedAddr := getenv("MEMCACHED_ADDR", "memcached:11211")
-	upstreamHost := getenv("BOSS_UPSTREAM_HOST", "boss1")
-	upstreamPort := getenv("BOSS_UPSTREAM_PORT", "20081")
-	maxSessions := getenvInt("BOSS_MAX_SESSIONS", 8)
-	interfaceName := getenv("TC_INTERFACE", "eth0")
+	upstreamHost := getenvAny([]string{"INFINITE_STREAM_UPSTREAM_HOST", "INFINITE_UPSTREAM_HOST", "BOSS_UPSTREAM_HOST"}, "go-server")
+	upstreamPort := getenvAny([]string{"INFINITE_STREAM_UPSTREAM_PORT", "INFINITE_UPSTREAM_PORT", "BOSS_UPSTREAM_PORT"}, "30000")
+	maxSessions := getenvIntAny([]string{"INFINITE_STREAM_MAX_SESSIONS", "INFINITE_MAX_SESSIONS", "BOSS_MAX_SESSIONS"}, 8)
+	interfaceName := getenvAny([]string{"INFINITE_STREAM_TC_INTERFACE", "INFINITE_TC_INTERFACE", "TC_INTERFACE"}, "eth0")
 
 	mc := memcache.New(memcachedAddr)
 	app := &App{
@@ -428,16 +428,7 @@ func main() {
 
 	router.PathPrefix("/").HandlerFunc(app.handleProxy)
 
-	ports := []int{8080}
-	addPorts(&ports, 20080, 20081)
-	addPorts(&ports, 20180, 20181)
-	addPorts(&ports, 20280, 20281)
-	addPorts(&ports, 20380, 20381)
-	addPorts(&ports, 20480, 20481)
-	addPorts(&ports, 20580, 20581)
-	addPorts(&ports, 20680, 20681)
-	addPorts(&ports, 20780, 20781)
-	addPorts(&ports, 20880, 20881)
+	ports := []int{30081, 30181, 30281, 30381, 30481, 30581, 30681, 30781, 30881}
 
 	errorCh := make(chan error, len(ports))
 	for _, port := range ports {
@@ -572,19 +563,19 @@ func (a *App) handleMyShows(w http.ResponseWriter, r *http.Request) {
 	resp, err := a.client.Get(url)
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
-		writeJSON(w, map[string]string{"error": "Error fetching myshows from boss server"})
+		writeJSON(w, map[string]string{"error": "Error fetching content from upstream server"})
 		return
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {
 		w.WriteHeader(http.StatusInternalServerError)
-		writeJSON(w, map[string]string{"error": "Error fetching myshows from boss server"})
+		writeJSON(w, map[string]string{"error": "Error fetching content from upstream server"})
 		return
 	}
 	var items []map[string]interface{}
 	if err := json.NewDecoder(resp.Body).Decode(&items); err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
-		writeJSON(w, map[string]string{"error": "Error fetching myshows from boss server"})
+		writeJSON(w, map[string]string{"error": "Error fetching content from upstream server"})
 		return
 	}
 	shows := make([]map[string]string, 0)
@@ -893,7 +884,7 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 	}
 	externalPort := r.Header.Get("X-Forwarded-Port")
 	if externalPort == "" {
-		externalPort = hostPortOrDefault(r.Host, "20181")
+		externalPort = hostPortOrDefault(r.Host, "30181")
 	}
 	log.Printf("Original URL: %s", r.URL.String())
 	log.Printf("Original Host: %s", r.Host)
@@ -1667,6 +1658,15 @@ func getenv(key, fallback string) string {
 	return fallback
 }
 
+func getenvAny(keys []string, fallback string) string {
+	for _, key := range keys {
+		if value := os.Getenv(key); value != "" {
+			return value
+		}
+	}
+	return fallback
+}
+
 func getenvInt(key string, fallback int) int {
 	value := os.Getenv(key)
 	if value == "" {
@@ -1679,8 +1679,16 @@ func getenvInt(key string, fallback int) int {
 	return parsed
 }
 
-func addPorts(ports *[]int, values ...int) {
-	*ports = append(*ports, values...)
+func getenvIntAny(keys []string, fallback int) int {
+	for _, key := range keys {
+		if value := os.Getenv(key); value != "" {
+			parsed, err := strconv.Atoi(value)
+			if err == nil {
+				return parsed
+			}
+		}
+	}
+	return fallback
 }
 
 type FailureHandler struct {

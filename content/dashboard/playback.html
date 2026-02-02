@@ -625,7 +625,14 @@
         function normalizeTestingBase(url) {
             const parsed = new URL(url, window.location.origin);
             parsed.hostname = parsed.hostname || window.location.hostname;
-            parsed.port = '20081';
+            const dashboardPort = window.location.port || (window.location.protocol === 'https:' ? '443' : '80');
+            if (dashboardPort === '30000') {
+                parsed.port = '30081';
+            } else if (dashboardPort === '30081') {
+                parsed.port = dashboardPort;
+            } else {
+                parsed.port = '30081';
+            }
             return parsed.toString();
         }
 

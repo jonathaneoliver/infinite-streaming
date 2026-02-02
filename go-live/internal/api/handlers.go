@@ -23,9 +23,9 @@ import (
 )
 
 var (
-	bossOutputDir = getEnv("BOSS_OUTPUT_DIR", "/boss/dynamic_content")
-	bossContentDir = getEnv("BOSS_CONTENT_DIR", "/content")
-	goLiveDir      = getEnv("GO_LIVE_OUTPUT_DIR", filepath.Join(bossContentDir, "go-live"))
+	infiniteOutputDir = getEnvAny([]string{"INFINITE_STREAM_OUTPUT_DIR", "INFINITE_OUTPUT_DIR", "BOSS_OUTPUT_DIR"}, "/boss/dynamic_content")
+	infiniteContentDir = getEnvAny([]string{"INFINITE_STREAM_CONTENT_DIR", "INFINITE_CONTENT_DIR", "BOSS_CONTENT_DIR"}, "/content")
+	goLiveDir      = getEnv("GO_LIVE_OUTPUT_DIR", filepath.Join(infiniteContentDir, "go-live"))
 )
 
 type dashCacheEntry struct {
@@ -81,6 +81,15 @@ type hlsWorker struct {
 func getEnv(key, fallback string) string {
 	if value := os.Getenv(key); value != "" {
 		return value
+	}
+	return fallback
+}
+
+func getEnvAny(keys []string, fallback string) string {
+	for _, key := range keys {
+		if value := os.Getenv(key); value != "" {
+			return value
+		}
 	}
 	return fallback
 }
@@ -276,7 +285,7 @@ func ensureHLSWorker(h *Handler, content, inputPath, prefix string) *hlsWorker {
 	}
 	if worker != nil && worker.mpdData == nil {
 		mpdRelPath := filepath.Join(content, "manifest.mpd")
-		if mpdData, err := dash.LoadMPD(bossOutputDir, mpdRelPath); err == nil {
+		if mpdData, err := dash.LoadMPD(infiniteOutputDir, mpdRelPath); err == nil {
 			worker.mu.Lock()
 			worker.mpdRelPath = mpdRelPath
 			worker.mpdData = mpdData
@@ -913,7 +922,7 @@ func (h *Handler) ServeSegment(w http.ResponseWriter, r *http.Request) {
 	content := vars["content"]
 	pathPart := vars["path"]
 
-	segmentPath := filepath.Join(bossOutputDir, content, filepath.FromSlash(pathPart))
+	segmentPath := filepath.Join(infiniteOutputDir, content, filepath.FromSlash(pathPart))
 	if _, err := os.Stat(segmentPath); err != nil {
 		http.Error(w, fmt.Sprintf("Segment not found: %v", err), http.StatusNotFound)
 		return
@@ -951,7 +960,7 @@ func (h *Handler) OnDemandDashManifest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	mpdRelPath := filepath.Clean(filepath.Join(content, mpdPathForLoad))
-	mpdData, err := dash.LoadMPD(bossOutputDir, mpdRelPath)
+	mpdData, err := dash.LoadMPD(infiniteOutputDir, mpdRelPath)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Failed to load MPD: %v", err), http.StatusNotFound)
 		return
@@ -966,7 +975,7 @@ func (h *Handler) OnDemandDashManifest(w http.ResponseWriter, r *http.Request) {
 	}
 	dashCacheMu.Unlock()
 
-	inputPath := filepath.Join(bossOutputDir, content, "master.m3u8")
+	inputPath := filepath.Join(infiniteOutputDir, content, "master.m3u8")
 	ensureDashWorker(h, content, inputPath, mpdRelPath, mpdData)
 	h.trackRequest(r, content, "dash-"+variant)
 	h.ensureTracked(content, "dash-"+variant, "hls-worker-"+content)
@@ -1210,7 +1219,7 @@ func (h *Handler) ServeDashSegment(w http.ResponseWriter, r *http.Request) {
 	content := vars["content"]
 	pathPart := vars["path"]
 
-	segmentPath := filepath.Join(bossOutputDir, content, filepath.FromSlash(pathPart))
+	segmentPath := filepath.Join(infiniteOutputDir, content, filepath.FromSlash(pathPart))
 	if _, err := os.Stat(segmentPath); err != nil {
 		http.Error(w, fmt.Sprintf("Segment not found: %v", err), http.StatusNotFound)
 		return
@@ -1255,7 +1264,7 @@ func (h *Handler) OnDemandMasterPlaylist(w http.ResponseWriter, r *http.Request)
 	content := vars["content"]
 
 	// Input: VOD master playlist from dynamic_content
-	inputPath := filepath.Join(bossOutputDir, content, "master.m3u8")
+	inputPath := filepath.Join(infiniteOutputDir, content, "master.m3u8")
 
 	// Check if content exists
 	if _, err := os.Stat(inputPath); os.IsNotExist(err) {
@@ -1265,7 +1274,7 @@ func (h *Handler) OnDemandMasterPlaylist(w http.ResponseWriter, r *http.Request)
 
 	// Load playlist info
 	loader := &parser.PlaylistLoader{}
-	plInfo, err := loader.LoadPlaylistInfo(bossOutputDir, filepath.Join(content, "master.m3u8"))
+	plInfo, err := loader.LoadPlaylistInfo(infiniteOutputDir, filepath.Join(content, "master.m3u8"))
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Failed to load playlist: %v", err), http.StatusInternalServerError)
 		return
@@ -1307,7 +1316,7 @@ func (h *Handler) OnDemandMasterPlaylistDuration(w http.ResponseWriter, r *http.
 	prefix := routePrefix(r.URL.Path)
 	mode := "hls-" + duration
 
-	inputPath := filepath.Join(bossOutputDir, content, "master.m3u8")
+	inputPath := filepath.Join(infiniteOutputDir, content, "master.m3u8")
 	if _, err := os.Stat(inputPath); os.IsNotExist(err) {
 		http.Error(w, fmt.Sprintf("Content not found: %s", content), http.StatusNotFound)
 		return
@@ -1316,7 +1325,7 @@ func (h *Handler) OnDemandMasterPlaylistDuration(w http.ResponseWriter, r *http.
 	outputPath := durationOutputPath(content, durationMasterFilename(duration))
 
 	loader := &parser.PlaylistLoader{}
-	plInfo, err := loader.LoadPlaylistInfo(bossOutputDir, filepath.Join(content, "master.m3u8"))
+	plInfo, err := loader.LoadPlaylistInfo(infiniteOutputDir, filepath.Join(content, "master.m3u8"))
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Failed to load playlist: %v", err), http.StatusInternalServerError)
 		return
@@ -1387,7 +1396,7 @@ func (h *Handler) OnDemandVariantPlaylist(w http.ResponseWriter, r *http.Request
 		logf("LL-HLS variant request: content=%s variant=%s\n", content, variant)
 	}
 	prefix := routePrefix(r.URL.Path)
-	inputPath := filepath.Join(bossOutputDir, content, "master.m3u8")
+	inputPath := filepath.Join(infiniteOutputDir, content, "master.m3u8")
 	worker := ensureHLSWorker(h, content, inputPath, prefix)
 	if worker != nil {
 		h.ensureTracked(content, "hls-ll", "hls-worker-"+content)
@@ -1423,7 +1432,7 @@ func (h *Handler) OnDemandVariantPlaylistDuration(w http.ResponseWriter, r *http
 	duration := vars["duration"]
 	variant := vars["variant"]
 	prefix := routePrefix(r.URL.Path)
-	inputPath := filepath.Join(bossOutputDir, content, "master.m3u8")
+	inputPath := filepath.Join(infiniteOutputDir, content, "master.m3u8")
 	worker := ensureHLSWorker(h, content, inputPath, prefix)
 	if worker != nil {
 		h.ensureTracked(content, "hls-"+duration, "hls-worker-"+content)

@@ -9,14 +9,14 @@ if [[ $CMD == 'run' ]]; then
 
   docker run -it --rm \
 	 --cap-add NET_ADMIN \
-	 --name boss${SERVER} \
+	 --name infinite-streaming${SERVER} \
 	 -p "${BASESTR}80-${BASESTR}99:${BASESTR}80-${BASESTR}99" \
    -v $(pwd)/../dynamic_content:/dynamic_content \
-	 boss-server ${SERVER}
+	 infinite-streaming ${SERVER}
 
 elif [[ $CMD == 'stop' ]]; then
 
-  docker stop boss${SERVER}
+  docker stop infinite-streaming${SERVER}
 
 else
 

@@ -54,7 +54,13 @@ type Source struct {
 }
 
 func DatabasePathFromEnv() string {
-	base := os.Getenv("BOSS_DATABASE_DIR")
+	base := os.Getenv("INFINITE_STREAM_DATABASE_DIR")
+	if base == "" {
+		base = os.Getenv("INFINITE_DATABASE_DIR")
+	}
+	if base == "" {
+		base = os.Getenv("BOSS_DATABASE_DIR")
+	}
 	if base == "" {
 		base = "/boss/boss-data"
 	}

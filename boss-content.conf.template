@@ -28,18 +28,15 @@ upstream go_live {
 
 # Upstream to go-proxy (session/testing API)
 upstream go_proxy {
-    server go-proxy:20081;
+    server ${INFINITE_STREAM_PROXY_HOST}:30081;
     keepalive 4;
 }
 
 # Normal server
 server {
 
-    listen {SERVER_BASE_PORT}81 default_server;
-    listen 30081 ssl;
-
-    listen [::]:{SERVER_BASE_PORT}81 default_server;
-    listen [::]:30081 ssl;
+    listen {SERVER_PORT} default_server;
+    listen [::]:{SERVER_PORT} default_server;
 
     ssl_certificate /etc/nginx/certs/localhost.pem;
     ssl_certificate_key /etc/nginx/certs/localhost-key.pem;
@@ -63,7 +60,7 @@ server {
         # Serve media segments directly from source directory (not generated)
         # Pattern: /go-live/{content}/{resolution}/segment_00001.m4s
         location ~ ^/go-live/([^/]+)/(.+\.(ts|m4s|mp4|m4a|cmfv|cmfa|webm|m4v|aac|webvtt))$ {
-            alias ${BOSS_OUTPUT_DIR}/$1/$2;
+            alias ${INFINITE_STREAM_OUTPUT_DIR}/$1/$2;
             add_header Access-Control-Allow-Origin * always;
             add_header Accept-Ranges bytes always;  # Required for byte-range requests
             expires 1y;  # Segments are immutable, cache aggressively

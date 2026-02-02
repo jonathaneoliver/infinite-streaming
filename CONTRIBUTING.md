@@ -1,6 +1,6 @@
 # Contributing
 
-Thanks for your interest in contributing to **boss-server**.
+Thanks for your interest in contributing to **InfiniteStream**.
 
 ## License and attribution
 
@@ -29,4 +29,4 @@ any redistribution.
 
 ## Testing
 
-Use the UI at `http://localhost:20081/` and verify playback for HLS and DASH.
+Use the UI at `http://localhost:21081/` (Docker Compose) or `http://lenovo.local:30000/` (k3s) and verify playback for HLS and DASH.

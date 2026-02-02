@@ -1,4 +1,4 @@
-# boss-server
+# InfiniteStream
 
 ## AI No‑Code project
 
@@ -12,7 +12,7 @@ InfiniteStream is a Docker‑based HLS/DASH media server for testing video playe
 # Build
 make build
 # or
-# docker build --no-cache -t boss-server .
+# docker build --no-cache -t infinite-streaming .
 
 # Run
 make run
@@ -21,7 +21,8 @@ make run
 ```
 
 Open the UI:
-- http://localhost:21081/
+- Docker Compose: http://localhost:21081/
+- k3s (Lenovo): http://lenovo.local:30000/
 
 ## GitHub Container Registry (GHCR)
 
@@ -89,20 +90,23 @@ Directory layout inside `/boss`:
 
 - **go-live** (port 8010): LL‑HLS + LL‑DASH generation, plus 2s/6s variants
 - **go-upload** (port 8003): upload API, job orchestration, content discovery
-- **nginx** (ports 20080–20081): routing + static dashboard
+- **nginx**: routing + static dashboard
   - **Host UI (docker-compose)**: `http://localhost:21081/`
+  - **Host UI (k3s/NodePort)**: `http://lenovo.local:30000/`
 
 ## Primary endpoints (host)
 
 ### HLS (LL/2s/6s)
-- `http://localhost:21081/go-live/{content}/master.m3u8`
-- `http://localhost:21081/go-live/{content}/master_2s.m3u8`
-- `http://localhost:21081/go-live/{content}/master_6s.m3u8`
+- Docker Compose: `http://localhost:21081/go-live/{content}/master.m3u8`
+- k3s NodePort: `http://lenovo.local:30081/go-live/{content}/master.m3u8`
+- k3s NodePort: `http://lenovo.local:30081/go-live/{content}/master_2s.m3u8`
+- k3s NodePort: `http://lenovo.local:30081/go-live/{content}/master_6s.m3u8`
 
 ### DASH (LL/2s/6s)
-- `http://localhost:21081/go-live/{content}/manifest.mpd`
-- `http://localhost:21081/go-live/{content}/manifest_2s.mpd`
-- `http://localhost:21081/go-live/{content}/manifest_6s.mpd`
+- Docker Compose: `http://localhost:21081/go-live/{content}/manifest.mpd`
+- k3s NodePort: `http://lenovo.local:30081/go-live/{content}/manifest.mpd`
+- k3s NodePort: `http://lenovo.local:30081/go-live/{content}/manifest_2s.mpd`
+- k3s NodePort: `http://lenovo.local:30081/go-live/{content}/manifest_6s.mpd`
 
 ### APIs
 - `GET /api/content`
@@ -148,11 +152,20 @@ Directory layout inside `/boss`:
 
 Open via the Mosaic (Grid) right‑click menu → “Open in Testing Window”, or directly:
 
-```
+```text
+# Docker Compose
 http://localhost:21081/dashboard/testing-session.html?player_id=<uuid>&url=<encoded-stream-url>
+
+# k3s
+http://lenovo.local:30000/dashboard/testing-session.html?player_id=<uuid>&url=<encoded-stream-url>
 ```
 
 The `player_id` is required. The proxy uses it to bind the playback session to a dedicated port, so requests to the original port are redirected to a session‑specific port. This allows per‑session failure injection and traffic shaping without affecting other sessions.
+
+k3s NodePort mapping used by the testing flow:
+- Dashboard/UI: `30000`
+- Initial proxy stream port: `30081`
+- Session-assigned ports: `30181`, `30281`, `30381`, ... up to `30881`
 
 Controls:
 - **Retry Fetch**: re‑issues the current stream request without resetting the player.

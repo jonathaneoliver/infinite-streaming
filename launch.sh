@@ -1,17 +1,16 @@
 #!/bin/sh
 #
-# launch.sh [<server-num>]
+# launch.sh
 #
-# The parameter (server-num) determines the base port for nginx.
-# Server number 1 is on port 20080.  Server number 2 is on port 20180.
-# Server number 3 is on port 20280.  Etc.
+# Nginx listens on INFINITE_STREAM_LISTEN_PORT (or legacy vars), default 30000.
 
 
-server=$(( (($1+0)<1)?1:($1+0) ))
-serverbaseport=$(( (200 + server-1)*100 + 80 ))
+serverport="${INFINITE_STREAM_LISTEN_PORT:-${INFINITE_LISTEN_PORT:-${BOSS_LISTEN_PORT:-30000}}}"
 
 # Generate nginx config from template with environment variable substitution
-envsubst '${BOSS_OUTPUT_DIR}' < /etc/nginx/http.d/boss-content.conf.template > /etc/nginx/http.d/boss-content.conf
+export INFINITE_STREAM_OUTPUT_DIR="${INFINITE_STREAM_OUTPUT_DIR:-${INFINITE_OUTPUT_DIR:-${BOSS_OUTPUT_DIR}}}"
+export INFINITE_STREAM_PROXY_HOST="${INFINITE_STREAM_PROXY_HOST:-go-proxy}"
+envsubst '${INFINITE_STREAM_OUTPUT_DIR} ${INFINITE_STREAM_PROXY_HOST}' < /etc/nginx/http.d/boss-content.conf.template > /etc/nginx/http.d/boss-content.conf
 
 # Start background processes and nginx
 # All processes now log to stdout/stderr for proper Docker log interleaving
@@ -19,5 +18,5 @@ envsubst '${BOSS_OUTPUT_DIR}' < /etc/nginx/http.d/boss-content.conf.template > /
 ( /usr/local/bin/go-upload & ) && \
 ( /usr/local/bin/go-live & ) && \
 ( echo "Go upload service handles /api/*;" ) && \
-update-nginx-config.sh $serverbaseport && \
+update-nginx-config.sh "$serverport" && \
 nginx -g 'daemon off;'

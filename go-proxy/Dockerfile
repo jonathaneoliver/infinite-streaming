@@ -1,4 +1,4 @@
-FROM golang:1.21-alpine as build
+FROM golang:1.21-alpine AS build
 WORKDIR /app
 
 RUN go mod init github.com/boss/go-proxy
@@ -15,5 +15,5 @@ WORKDIR /app
 RUN apk add --no-cache iproute2 nftables
 COPY --from=build /app/go-proxy /usr/local/bin/go-proxy
 COPY --from=build /app/go.mod /app/go.sum /app/
-EXPOSE 8080 20080 20081 20180 20181 20280 20281 20380 20381 20480 20481 20580 20581 20680 20681 20780 20781 20880 20881
+EXPOSE 30081 30181 30281 30381 30481 30581 30681 30781 30881
 ENTRYPOINT ["/usr/local/bin/go-proxy"]

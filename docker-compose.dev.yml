@@ -3,13 +3,13 @@
 #
 # Benefits:
 # - No rebuild needed when editing Python scripts
-# - Just restart processes: docker exec boss1 pkill -f "live.py continuous"
+# - Just restart processes: docker compose exec go-server pkill -f "live.py continuous"
 # - Much faster iteration during development
 #
 # Note: This is optional. Standard workflow (make build + restart) still works.
 
 services:
-  boss1:
+  go-server:
     volumes:
       # Mount Python scripts for live editing
       - ./live.py:/sbin/live.py:ro

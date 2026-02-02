@@ -7,7 +7,7 @@ RUN go mod init github.com/boss/go-live
 # Copy source and install dependencies
 COPY . .
 RUN go get github.com/gorilla/mux
-RUN go get github.com/bluenviron/gohlslib
+RUN go get github.com/bluenviron/gohlslib@v1.4.0
 RUN go get github.com/google/uuid
 RUN go get github.com/beevik/etree@v1.2.0
 

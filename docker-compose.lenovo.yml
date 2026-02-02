@@ -1,30 +1,32 @@
 services:
-  boss1:
+  go-server:
     build: .
-    image: boss-server-smashing
-    container_name: boss-smashing
+    image: infinite-streaming
+    container_name: infinite-streaming
     cap_add:
       - NET_ADMIN
     entrypoint: /sbin/launch.sh
     command: ["1"]
     ports:
-      - "21081:20081"
+      - "30000:30000"
     volumes:
       #- /home/jonathanoliver/smashing/content:/content
       - /home/jonathanoliver/boss:/boss
       - /home/jonathanoliver/smashing/certs:/etc/nginx/certs:ro
     environment:
       # Path Configuration - Single source of truth for all path references
-      - BOSS_ROOT=/boss
-      - BOSS_UPLOADS_DIR=/boss/boss-uploads
-      - BOSS_SOURCES_DIR=/boss/originals
-      - BOSS_OUTPUT_DIR=/boss/dynamic_content
-      - BOSS_DATABASE_DIR=/boss/boss-data
-      - BOSS_TEMP_DIR=/boss/boss-tmp
-      - BOSS_CONTENT_DIR=/content
+      - INFINITE_STREAM_ROOT=/boss
+      - INFINITE_STREAM_UPLOADS_DIR=/boss/boss-uploads
+      - INFINITE_STREAM_SOURCES_DIR=/boss/originals
+      - INFINITE_STREAM_OUTPUT_DIR=/boss/dynamic_content
+      - INFINITE_STREAM_DATABASE_DIR=/boss/boss-data
+      - INFINITE_STREAM_TEMP_DIR=/boss/boss-tmp
+      - INFINITE_STREAM_CONTENT_DIR=/content
       - TMPDIR=/boss/boss-tmp
       - GO_LIVE_OUTPUT_DIR=/go-live
       - GO_UPLOAD_ADDR=:8003
+      - INFINITE_STREAM_LISTEN_PORT=30000
+      - INFINITE_STREAM_PROXY_HOST=go-proxy
     tmpfs:
       - /var/cache/nginx/live_playlists:size=100M,mode=755
       - /go-live:size=4G,mode=755
@@ -40,34 +42,25 @@ services:
       context: ./go-proxy
       dockerfile: Dockerfile
     ports:
-      - "20080:20080"
-      - "20081:20081"
-      - "20180:20180"
-      - "20181:20181"
-      - "20280:20280"
-      - "20281:20281"
-      - "20380:20380"
-      - "20381:20381"
-      - "20480:20480"
-      - "20481:20481"
-      - "20580:20580"
-      - "20581:20581"
-      - "20680:20680"
-      - "20681:20681"
-      - "20780:20780"
-      - "20781:20781"
-      - "20880:20880"
-      - "20881:20881"
+      - "30081:30081"
+      - "30181:30181"
+      - "30281:30281"
+      - "30381:30381"
+      - "30481:30481"
+      - "30581:30581"
+      - "30681:30681"
+      - "30781:30781"
+      - "30881:30881"
     networks:
       - app_network
     depends_on:
       - memcached
     environment:
       - MEMCACHED_ADDR=memcached:11211
-      - BOSS_UPSTREAM_HOST=boss1
-      - BOSS_UPSTREAM_PORT=20081
-      - BOSS_MAX_SESSIONS=8
-      - TC_INTERFACE=eth0
+      - INFINITE_STREAM_UPSTREAM_HOST=go-server
+      - INFINITE_STREAM_UPSTREAM_PORT=30000
+      - INFINITE_STREAM_MAX_SESSIONS=8
+      - INFINITE_STREAM_TC_INTERFACE=eth0
     cap_add:
       - NET_ADMIN
     privileged: true

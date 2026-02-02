@@ -346,7 +346,7 @@
                 if (url.startsWith('http://') || url.startsWith('https://')) {
                     try {
                         const parsed = new URL(url);
-                        if (parsed.hostname === window.location.hostname && (parsed.port === '' || parsed.port === '20081' || parsed.port === '30081')) {
+                        if (parsed.hostname === window.location.hostname && (parsed.port === '' || parsed.port === '30081')) {
                             const origin = new URL(window.location.origin);
                             parsed.protocol = origin.protocol;
                             parsed.port = origin.port;
