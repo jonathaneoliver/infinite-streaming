@@ -1,6 +1,6 @@
 
 
-LENOVO_HOST ?= jonathanoliver@lenovo.local
+LENOVO_HOST ?= jonathanoliver@lenovo
 K3S_KUBECONFIG ?= /home/jonathanoliver/.kube/config
 GO_SERVER_IMAGE ?= ghcr.io/jonathaneoliver/infinite-streaming:latest
 GO_PROXY_IMAGE ?= ghcr.io/jonathaneoliver/go-proxy:latest
@@ -34,7 +34,7 @@ buildx-arm64:
 buildx-push:
 	docker buildx build --platform linux/amd64,linux/arm64 -t infinite-streaming:latest --push .
 
-LENOVO_REGISTRY ?= 192.168.0.189:5000
+LENOVO_REGISTRY ?= 100.111.190.54:5000
 LENOVO_SERVER_REPO ?= infinite-streaming
 LENOVO_PROXY_REPO ?= go-proxy
 
@@ -70,8 +70,8 @@ push-go-proxy-lenovo:
 
 build-push-go-proxy-lenovo: build-go-proxy-lenovo push-go-proxy-lenovo
 
-LENOVO_SERVER_IMAGE ?= 192.168.0.189:5000/infinite-streaming:latest
-LENOVO_PROXY_IMAGE ?= 192.168.0.189:5000/go-proxy:latest
+LENOVO_SERVER_IMAGE ?= $(LENOVO_REGISTRY)/$(LENOVO_SERVER_REPO):latest
+LENOVO_PROXY_IMAGE ?= $(LENOVO_REGISTRY)/$(LENOVO_PROXY_REPO):latest
 
 deploy-lenovo-k3s-local:
 	@set -e; \
