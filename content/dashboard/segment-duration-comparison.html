@@ -920,20 +920,18 @@
         }
 
         function normalizeTestingBase(url) {
-            const parsed = new URL(url, window.location.origin);
-            parsed.hostname = parsed.hostname || window.location.hostname;
-            const dashboardPort = window.location.port || (window.location.protocol === 'https:' ? '443' : '80');
-            if (dashboardPort === '30000') {
-                parsed.port = '30081';
-            } else if (dashboardPort === '30081') {
-                parsed.port = dashboardPort;
-            } else {
-                parsed.port = '30081';
+            if (window.BOSSNav && typeof window.BOSSNav.normalizeTestingBaseUrl === 'function') {
+                return window.BOSSNav.normalizeTestingBaseUrl(url);
             }
+            const parsed = new URL(url, window.location.origin);
+            parsed.port = '30081';
             return parsed.toString();
         }
 
         function buildTestingUrl(url, playerId) {
+            if (window.BOSSNav && typeof window.BOSSNav.buildTestingUrl === 'function') {
+                return window.BOSSNav.buildTestingUrl(url, playerId);
+            }
             const base = normalizeTestingBase(url);
             const separator = base.includes('?') ? '&' : '?';
             return `${base}${separator}player_id=${playerId}`;

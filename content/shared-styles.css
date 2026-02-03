@@ -284,6 +284,16 @@ body {
     color: var(--sidebar-active-text);
 }
 
+.nav-item.disabled {
+    color: var(--text-secondary);
+    opacity: 0.55;
+    pointer-events: none;
+}
+
+.nav-item.disabled:hover {
+    background: transparent;
+}
+
 .nav-item-icon {
     font-size: 20px;
     width: 24px;

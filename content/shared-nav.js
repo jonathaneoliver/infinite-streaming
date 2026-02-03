@@ -43,6 +43,85 @@
         return urlParams.get('expert') === '1';
     }
 
+    function isJeoliverHost(hostname) {
+        if (!hostname) return false;
+        const host = String(hostname).toLowerCase();
+        return host === 'jeoliver.com' || host.endsWith('.jeoliver.com');
+    }
+
+    function isInternalNetworkHost(hostname) {
+        if (!hostname) return false;
+        const host = String(hostname).toLowerCase();
+        if (host === 'localhost' || host === '::1' || host.startsWith('127.')) return true;
+        if (host.endsWith('.local')) return true;
+        if (!host.includes('.')) return true;
+        if (/^10\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host)) return true;
+        if (/^192\.168\.\d{1,3}\.\d{1,3}$/.test(host)) return true;
+        if (/^172\.(1[6-9]|2\d|3[0-1])\.\d{1,3}\.\d{1,3}$/.test(host)) return true;
+        if (/^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.\d{1,3}\.\d{1,3}$/.test(host)) return true;
+        return false;
+    }
+
+    function shouldRestrictContentManagement() {
+        const host = window.location.hostname || '';
+        if (isJeoliverHost(host)) return true;
+        return !isInternalNetworkHost(host);
+    }
+
+    function resolvePreferredStreamHost(sourceHostname) {
+        const currentHost = (window.location.hostname || '').toLowerCase();
+        const sourceHost = (sourceHostname || '').toLowerCase();
+        const baseHost = currentHost || sourceHost;
+        if (!baseHost) return '';
+        if (isJeoliverHost(baseHost)) {
+            if (baseHost === 'jeoliver.com' || baseHost === 'www.jeoliver.com') {
+                return 'infinitestreaming.jeoliver.com';
+            }
+            return baseHost;
+        }
+        return baseHost;
+    }
+
+    function isTestingPort(port) {
+        const parsed = Number(port);
+        if (!Number.isInteger(parsed)) return false;
+        return (parsed >= 30081 && parsed <= 30881) || (parsed >= 20081 && parsed <= 20881);
+    }
+
+    function resolveTestingPort(sourcePort) {
+        const currentPort = window.location.port || (window.location.protocol === 'https:' ? '443' : '80');
+        if (isTestingPort(sourcePort)) {
+            return String(sourcePort);
+        }
+        if (isTestingPort(currentPort)) {
+            return String(currentPort);
+        }
+        if (currentPort === '30000') {
+            return '30081';
+        }
+        if (currentPort === '20080' || currentPort === '20081' || currentPort === '21081') {
+            return '20081';
+        }
+        return '30081';
+    }
+
+    function normalizeTestingBaseUrl(url) {
+        const parsed = new URL(url, window.location.origin);
+        const preferredHost = resolvePreferredStreamHost(parsed.hostname);
+        if (preferredHost) {
+            parsed.hostname = preferredHost;
+        }
+        parsed.port = resolveTestingPort(parsed.port);
+        parsed.protocol = window.location.protocol;
+        return parsed.toString();
+    }
+
+    function buildTestingUrl(url, playerId) {
+        const base = normalizeTestingBaseUrl(url);
+        const separator = base.includes('?') ? '&' : '?';
+        return `${base}${separator}player_id=${encodeURIComponent(playerId)}`;
+    }
+
     // Get active page
     function getActivePage() {
         const body = document.body;
@@ -67,6 +146,7 @@
     // Build sidebar HTML
     function buildSidebar(activePage) {
         const isDeveloper = isDeveloperMode();
+        const restrictContent = shouldRestrictContentManagement();
         
         const sections = [
             { title: 'MAIN', items: NAVIGATION.main },
@@ -105,11 +185,17 @@
             html += `<div class="nav-section-title">${section.title}</div>`;
             
             visibleItems.forEach(item => {
+                const isRestrictedItem = restrictContent && section.title === 'CONTENT';
                 const isActive = item.id === activePage ? 'active' : '';
+                const isDisabled = isRestrictedItem ? 'disabled' : '';
                 const warning = item.warning ? '<span class="nav-item-warning">⚠️</span>' : '';
                 const external = item.external ? ' target="_blank" rel="noopener"' : '';
+                const href = isRestrictedItem ? '#' : item.href;
+                const disabledAttrs = isRestrictedItem
+                    ? ' aria-disabled="true" tabindex="-1" title="Available only on internal network hosts."'
+                    : '';
                 
-                html += `<a id="nav-${item.id}" href="${item.href}" class="nav-item ${isActive}"${external}>`;
+                html += `<a id="nav-${item.id}" href="${href}" class="nav-item ${isActive} ${isDisabled}"${external}${disabledAttrs}>`;
                 html += `<span class="nav-item-icon">${item.icon}</span>`;
                 html += `<span class="nav-item-text">${item.text}</span>`;
                 html += warning;
@@ -343,23 +429,15 @@
             badge.title = `${label ? `Selected: ${label}\n` : ''}${url}`;
             if (demoLink || shakaLink) {
                 let absoluteUrl;
-                if (url.startsWith('http://') || url.startsWith('https://')) {
-                    try {
-                        const parsed = new URL(url);
-                        if (parsed.hostname === window.location.hostname && (parsed.port === '' || parsed.port === '30081')) {
-                            const origin = new URL(window.location.origin);
-                            parsed.protocol = origin.protocol;
-                            parsed.port = origin.port;
-                            absoluteUrl = parsed.toString();
-                        } else {
-                            absoluteUrl = url;
-                        }
-                    } catch {
+                try {
+                    absoluteUrl = normalizeTestingBaseUrl(url);
+                } catch {
+                    if (url.startsWith('http://') || url.startsWith('https://')) {
                         absoluteUrl = url;
+                    } else {
+                        const suffix = url.startsWith('/') ? url : `/${url}`;
+                        absoluteUrl = `${window.location.origin}${suffix}`;
                     }
-                } else {
-                    const suffix = url.startsWith('/') ? url : `/${url}`;
-                    absoluteUrl = `${window.location.origin}${suffix}`;
                 }
                 if (demoLink) {
                     demoLink.href = `${window.location.origin}/testing/hlsjs/index.html?src=${encodeURIComponent(absoluteUrl)}`;
@@ -1106,6 +1184,8 @@ Version: 2.0
         dismissProgress: dismissProgress,
         updateSelectedContentBadge: updateSelectedContentBadge,
         setSelectedUrl: setSelectedUrl,
+        normalizeTestingBaseUrl: normalizeTestingBaseUrl,
+        buildTestingUrl: buildTestingUrl,
         createPlayerId: function() {
             if (window.crypto && window.crypto.getRandomValues) {
                 const bytes = new Uint8Array(6);

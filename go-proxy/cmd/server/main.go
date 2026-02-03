@@ -19,6 +19,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"runtime"
 
@@ -39,6 +40,9 @@ type App struct {
 	upstreamPort string
 	maxSessions  int
 	client       *http.Client
+	shapeMu      sync.Mutex
+	shapeLoops   map[int]context.CancelFunc
+	shapeStates  map[int]NftShapePattern
 }
 
 type PlaylistInfo struct {
@@ -49,6 +53,15 @@ type PlaylistInfo struct {
 
 type TcTrafficManager struct {
 	interfaceName string
+}
+
+type NftShapeStep struct {
+	RateMbps        float64 `json:"rate_mbps"`
+	DurationSeconds float64 `json:"duration_seconds"`
+}
+
+type NftShapePattern struct {
+	Steps []NftShapeStep `json:"steps"`
 }
 
 func NewTcTrafficManager(interfaceName string) *TcTrafficManager {
@@ -402,6 +415,8 @@ func main() {
 				ResponseHeaderTimeout: 6 * time.Second,
 			},
 		},
+		shapeLoops:  map[int]context.CancelFunc{},
+		shapeStates: map[int]NftShapePattern{},
 	}
 
 	go app.trackPortThroughput()
@@ -422,6 +437,7 @@ func main() {
 	router.HandleFunc("/api/nftables/bandwidth/{port}", app.handleNftBandwidth).Methods(http.MethodPost)
 	router.HandleFunc("/api/nftables/loss/{port}", app.handleNftLoss).Methods(http.MethodPost)
 	router.HandleFunc("/api/nftables/shape/{port}", app.handleNftShape).Methods(http.MethodPost)
+	router.HandleFunc("/api/nftables/pattern/{port}", app.handleNftPattern).Methods(http.MethodPost)
 	router.HandleFunc("/close-socket", app.handleCloseSocket).Methods(http.MethodGet)
 	router.HandleFunc("/terminate-worker", app.handleTerminateWorker).Methods(http.MethodGet)
 	router.HandleFunc("/force-close", app.handleForceClose).Methods(http.MethodGet)
@@ -497,6 +513,13 @@ func (a *App) handleGetSessions(w http.ResponseWriter, r *http.Request) {
 						}
 					}
 				}
+				if pattern, ok := a.getShapePattern(portNum); ok {
+					session["nftables_pattern_enabled"] = len(pattern.Steps) > 0
+					session["nftables_pattern_steps"] = pattern.Steps
+				} else {
+					session["nftables_pattern_enabled"] = false
+					session["nftables_pattern_steps"] = []NftShapeStep{}
+				}
 				throughputKey := fmt.Sprintf("throughput_%s", port)
 				if item, err := a.memcache.Get(throughputKey); err == nil {
 					var throughput map[string]interface{}
@@ -536,12 +559,20 @@ func (a *App) handleSession(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodDelete {
 		sessions := a.getSessionList()
 		filtered := make([]SessionData, 0, len(sessions))
+		removedPorts := map[int]struct{}{}
 		for _, session := range sessions {
 			if getString(session, "session_id") != id {
 				filtered = append(filtered, session)
+				continue
+			}
+			if port, err := strconv.Atoi(getString(session, "x_forwarded_port")); err == nil {
+				removedPorts[port] = struct{}{}
 			}
 		}
 		a.saveSessionList(filtered)
+		for port := range removedPorts {
+			a.disablePatternForPort(port)
+		}
 		writeJSON(w, map[string]string{"message": "Session deleted successfully"})
 		return
 	}
@@ -554,6 +585,15 @@ func (a *App) handleSession(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handleClearSessions(w http.ResponseWriter, r *http.Request) {
+	a.shapeMu.Lock()
+	ports := make([]int, 0, len(a.shapeLoops))
+	for port := range a.shapeLoops {
+		ports = append(ports, port)
+	}
+	a.shapeMu.Unlock()
+	for _, port := range ports {
+		a.disablePatternForPort(port)
+	}
 	_ = a.memcache.FlushAll()
 	writeJSON(w, map[string]string{"message": "All sessions cleared successfully"})
 }
@@ -668,7 +708,191 @@ func (a *App) handleNftPort(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]string{"error": "Port not found or error reading config"})
 		return
 	}
+	if pattern, ok := a.getShapePattern(port); ok {
+		config["pattern_steps"] = pattern.Steps
+		config["pattern_enabled"] = len(pattern.Steps) > 0
+	} else {
+		config["pattern_steps"] = []NftShapeStep{}
+		config["pattern_enabled"] = false
+	}
 	writeJSON(w, config)
+}
+
+func sanitizeShapeSteps(steps []NftShapeStep) []NftShapeStep {
+	out := make([]NftShapeStep, 0, len(steps))
+	for _, step := range steps {
+		duration := step.DurationSeconds
+		if duration <= 0 {
+			duration = 1
+		}
+		rate := step.RateMbps
+		if rate < 0 {
+			rate = 0
+		}
+		out = append(out, NftShapeStep{
+			RateMbps:        rate,
+			DurationSeconds: math.Round(duration*10) / 10,
+		})
+	}
+	return out
+}
+
+func (a *App) getShapePattern(port int) (NftShapePattern, bool) {
+	a.shapeMu.Lock()
+	defer a.shapeMu.Unlock()
+	pattern, ok := a.shapeStates[port]
+	if !ok {
+		return NftShapePattern{}, false
+	}
+	copied := NftShapePattern{Steps: append([]NftShapeStep(nil), pattern.Steps...)}
+	return copied, true
+}
+
+func (a *App) stopShapeLoop(port int) {
+	a.shapeMu.Lock()
+	cancel, ok := a.shapeLoops[port]
+	if ok {
+		delete(a.shapeLoops, port)
+	}
+	delete(a.shapeStates, port)
+	a.shapeMu.Unlock()
+	if ok && cancel != nil {
+		cancel()
+	}
+}
+
+func (a *App) applyShapePattern(port int, steps []NftShapeStep, delayMs int, loss float64) error {
+	if a.traffic == nil {
+		return fmt.Errorf("traffic manager not initialized")
+	}
+	a.stopShapeLoop(port)
+	cleanSteps := sanitizeShapeSteps(steps)
+	if len(cleanSteps) == 0 {
+		a.updateSessionsByPort(port, map[string]interface{}{
+			"nftables_pattern_enabled": false,
+			"nftables_pattern_steps":   []NftShapeStep{},
+		})
+		return nil
+	}
+	if err := a.traffic.UpdateNetem(port, delayMs, loss); err != nil {
+		return err
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	a.shapeMu.Lock()
+	a.shapeLoops[port] = cancel
+	a.shapeStates[port] = NftShapePattern{Steps: append([]NftShapeStep(nil), cleanSteps...)}
+	a.shapeMu.Unlock()
+	a.updateSessionsByPort(port, map[string]interface{}{
+		"nftables_pattern_enabled": true,
+		"nftables_pattern_steps":   cleanSteps,
+		"nftables_delay_ms":        delayMs,
+		"nftables_packet_loss":     loss,
+	})
+	go a.runShapePatternLoop(ctx, port, cleanSteps, delayMs, loss)
+	return nil
+}
+
+func (a *App) runShapePatternLoop(ctx context.Context, port int, steps []NftShapeStep, delayMs int, loss float64) {
+	stepIndex := 0
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+		step := steps[stepIndex]
+		if err := a.traffic.UpdateRateLimit(port, step.RateMbps); err != nil {
+			log.Printf("NETSHAPE pattern rate failed port=%d step=%d rate=%.3f: %v", port, stepIndex+1, step.RateMbps, err)
+		} else {
+			log.Printf("NETSHAPE pattern step port=%d step=%d/%d rate=%.3f duration=%.1fs", port, stepIndex+1, len(steps), step.RateMbps, step.DurationSeconds)
+		}
+		if err := a.traffic.UpdateNetem(port, delayMs, loss); err != nil {
+			log.Printf("NETSHAPE pattern netem failed port=%d delay=%d loss=%.2f: %v", port, delayMs, loss, err)
+		}
+		a.updateSessionsByPort(port, map[string]interface{}{
+			"nftables_bandwidth_mbps":  step.RateMbps,
+			"nftables_pattern_enabled": true,
+			"nftables_pattern_steps":   steps,
+			"nftables_pattern_step":    stepIndex + 1,
+		})
+		wait := time.Duration(step.DurationSeconds * float64(time.Second))
+		timer := time.NewTimer(wait)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
+		stepIndex = (stepIndex + 1) % len(steps)
+	}
+}
+
+func (a *App) disablePatternForPort(port int) {
+	a.stopShapeLoop(port)
+	a.updateSessionsByPort(port, map[string]interface{}{
+		"nftables_pattern_enabled": false,
+		"nftables_pattern_steps":   []NftShapeStep{},
+		"nftables_pattern_step":    nil,
+	})
+}
+
+func (a *App) handleNftPattern(w http.ResponseWriter, r *http.Request) {
+	if a.traffic == nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		writeJSON(w, map[string]string{"error": "Manager not initialized"})
+		return
+	}
+	port, err := strconv.Atoi(mux.Vars(r)["port"])
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		writeJSON(w, map[string]string{"error": "invalid port"})
+		return
+	}
+	var payload struct {
+		Steps                  []NftShapeStep `json:"steps"`
+		DelayMs                int            `json:"delay_ms"`
+		LossPct                float64        `json:"loss_pct"`
+		SegmentDurationSeconds float64        `json:"segment_duration_seconds"`
+		DefaultSegments        float64        `json:"default_segments"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		writeJSON(w, map[string]string{"error": "invalid json"})
+		return
+	}
+	if len(payload.Steps) == 0 {
+		a.disablePatternForPort(port)
+		a.updateSessionsByPort(port, map[string]interface{}{
+			"nftables_pattern_segment_duration_seconds": payload.SegmentDurationSeconds,
+			"nftables_pattern_default_segments":         payload.DefaultSegments,
+		})
+		writeJSON(w, map[string]interface{}{
+			"success":         true,
+			"port":            port,
+			"pattern_enabled": false,
+			"steps":           []NftShapeStep{},
+		})
+		return
+	}
+	cleanSteps := sanitizeShapeSteps(payload.Steps)
+	if err := a.applyShapePattern(port, cleanSteps, payload.DelayMs, payload.LossPct); err != nil {
+		log.Printf("NETSHAPE pattern apply failed port=%d: %v", port, err)
+		w.WriteHeader(http.StatusInternalServerError)
+		writeJSON(w, map[string]string{"error": "Failed to apply pattern", "details": err.Error()})
+		return
+	}
+	a.updateSessionsByPort(port, map[string]interface{}{
+		"nftables_pattern_segment_duration_seconds": payload.SegmentDurationSeconds,
+		"nftables_pattern_default_segments":         payload.DefaultSegments,
+	})
+	writeJSON(w, map[string]interface{}{
+		"success":         true,
+		"port":            port,
+		"pattern_enabled": true,
+		"steps":           cleanSteps,
+		"delay_ms":        payload.DelayMs,
+		"loss_pct":        payload.LossPct,
+	})
 }
 
 func (a *App) handleNftBandwidth(w http.ResponseWriter, r *http.Request) {
@@ -708,6 +932,7 @@ func (a *App) handleNftBandwidth(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]string{"error": "invalid rate"})
 		return
 	}
+	a.disablePatternForPort(port)
 	if err := a.traffic.UpdateRateLimit(port, rateMbps); err != nil {
 		log.Printf("NETSHAPE rate limit failed port=%d rate=%g: %v", port, rateMbps, err)
 		w.WriteHeader(http.StatusInternalServerError)
@@ -750,6 +975,7 @@ func (a *App) handleNftLoss(w http.ResponseWriter, r *http.Request) {
 			loss = parsed
 		}
 	}
+	a.disablePatternForPort(port)
 	if err := a.traffic.UpdateNetem(port, 0, loss); err != nil {
 		log.Printf("NETSHAPE packet loss failed port=%d loss=%.2f: %v", port, loss, err)
 		w.WriteHeader(http.StatusInternalServerError)
@@ -816,6 +1042,7 @@ func (a *App) handleNftShape(w http.ResponseWriter, r *http.Request) {
 			loss = parsed
 		}
 	}
+	a.disablePatternForPort(port)
 	if err := a.traffic.UpdateRateLimit(port, rateMbps); err != nil {
 		log.Printf("NETSHAPE rate limit failed port=%d rate=%g: %v", port, rateMbps, err)
 		w.WriteHeader(http.StatusInternalServerError)

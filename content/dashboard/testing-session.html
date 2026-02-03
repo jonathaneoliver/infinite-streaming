@@ -239,6 +239,163 @@
             text-align: right;
         }
 
+        .btn-mini {
+            font-size: 11px;
+            padding: 4px 8px;
+            min-height: 28px;
+        }
+
+        .shape-pattern-block {
+            margin-top: 8px;
+            border-top: 1px dashed var(--border-color);
+            padding-top: 8px;
+        }
+
+        .shape-step-defaults {
+            display: grid;
+            grid-template-columns: auto 1fr auto;
+            gap: 6px;
+            align-items: center;
+            margin-bottom: 8px;
+        }
+
+        .shape-step-defaults label {
+            font-size: 11px;
+            color: var(--text-secondary);
+        }
+
+        .shape-default-seconds {
+            font-size: 11px;
+            color: var(--text-secondary);
+            text-align: right;
+            white-space: nowrap;
+        }
+
+        .shape-template-row {
+            display: grid;
+            grid-template-columns: auto minmax(320px, 1fr) auto minmax(90px, 130px) 1fr;
+            gap: 6px;
+            align-items: center;
+            margin-bottom: 8px;
+        }
+
+        .shape-template-row label {
+            font-size: 11px;
+            color: var(--text-secondary);
+        }
+
+        .shape-template-row select {
+            width: 100%;
+            min-width: 0;
+            padding: 4px 6px;
+            border: 1px solid var(--border-color);
+            border-radius: 6px;
+            background: var(--bg-secondary);
+            color: var(--text-primary);
+            font-size: 11px;
+        }
+
+        .shape-pattern-modes {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+        }
+
+        .shape-margin-modes {
+            flex-wrap: nowrap;
+        }
+
+        .shape-pattern-mode {
+            margin: 0;
+        }
+
+        .shape-pattern-mode input {
+            display: none;
+        }
+
+        .shape-pattern-mode span {
+            display: inline-block;
+            padding: 4px 8px;
+            border: 1px solid #cbd5e1;
+            border-radius: 999px;
+            font-size: 11px;
+            font-weight: 600;
+            color: var(--text-primary);
+            background: #f8fafc;
+            cursor: pointer;
+            user-select: none;
+            white-space: nowrap;
+            transition: background-color 120ms ease, border-color 120ms ease, color 120ms ease;
+        }
+
+        .shape-pattern-mode input:checked + span {
+            background: #1d4ed8;
+            border-color: #1d4ed8;
+            color: #fff;
+            box-shadow: 0 0 0 2px rgba(29, 78, 216, 0.2);
+        }
+
+        .shape-pattern-mode input:focus-visible + span {
+            outline: 2px solid #2563eb;
+            outline-offset: 1px;
+        }
+
+        .shape-step-list {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+            margin-bottom: 8px;
+        }
+
+        .shape-step-row {
+            display: grid;
+            grid-template-columns: auto minmax(120px, 180px) auto minmax(68px, 100px) auto minmax(68px, 100px) auto;
+            gap: 6px;
+            align-items: center;
+        }
+
+        .shape-step-row label {
+            font-size: 11px;
+            color: var(--text-secondary);
+        }
+
+        .shape-step-row input,
+        .shape-step-row select {
+            width: 100%;
+            min-width: 0;
+            padding: 4px 6px;
+            border: 1px solid var(--border-color);
+            border-radius: 6px;
+            background: var(--bg-secondary);
+            color: var(--text-primary);
+            font-size: 11px;
+        }
+
+        .shape-step-actions {
+            display: flex;
+            gap: 6px;
+            margin-bottom: 8px;
+        }
+
+        .shape-step-enabled {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 11px;
+            color: var(--text-secondary);
+        }
+
+        .shape-step-row.shape-step-disabled {
+            opacity: 0.55;
+        }
+
+        .shape-step-row.shape-step-risk {
+            border: 1px solid #ef4444;
+            border-radius: 8px;
+            padding: 4px;
+            background: rgba(239, 68, 68, 0.08);
+        }
+
         .session-actions {
             display: flex;
             gap: 10px;
@@ -325,6 +482,7 @@
         let autoRetryCount = 0;
         let autoRetryTimer = null;
         const pendingShaping = new Map();
+        const pendingTemplateUi = new Map();
         const bandwidthHistory = new Map();
         const bandwidthCharts = new Map();
         const bandwidthVisibility = new Map();
@@ -402,6 +560,44 @@
                 url: params.get('url') || '',
                 player: params.get('player') || ''
             };
+        }
+
+        function readTemplateUiState(card) {
+            if (!card) return null;
+            const readMode = () => {
+                const selected = card.querySelector('input[data-field="shaping_template_mode"]:checked');
+                return selected ? selected.value : 'sliders';
+            };
+            const readRadio = (field, fallback = '') => {
+                const el = card.querySelector(`input[data-field="${field}"]:checked`);
+                return el ? el.value : fallback;
+            };
+            return {
+                mode: readMode(),
+                marginPct: readRadio('shaping_template_margin_pct', '0'),
+                defaultStepSeconds: readRadio('shaping_default_step_seconds', '12')
+            };
+        }
+
+        function applyTemplateUiState(card, state) {
+            if (!card || !state) return;
+            const setMode = (value) => {
+                const mode = String(value || 'sliders');
+                const radios = card.querySelectorAll('input[data-field="shaping_template_mode"]');
+                radios.forEach((radio) => {
+                    radio.checked = radio.value === mode;
+                });
+            };
+            const setRadio = (field, value) => {
+                if (value === undefined || value === null || value === '') return;
+                const radios = card.querySelectorAll(`input[data-field="${field}"]`);
+                radios.forEach((radio) => {
+                    radio.checked = radio.value === String(value);
+                });
+            };
+            setMode(state.mode);
+            setRadio('shaping_template_margin_pct', state.marginPct);
+            setRadio('shaping_default_step_seconds', state.defaultStepSeconds);
         }
 
         function setBadges(isDash, playerType) {
@@ -720,15 +916,257 @@
         function bindSessionControls() {
             const container = document.getElementById('sessionControls');
             const shapingTimers = new Map();
+            const scheduleShapingApply = (card) => {
+                const sessionId = card.dataset.sessionId;
+                if (shapingTimers.has(sessionId)) {
+                    clearTimeout(shapingTimers.get(sessionId));
+                }
+                shapingTimers.set(sessionId, setTimeout(() => {
+                    applyNetworkShaping(card);
+                }, 250));
+            };
+            const getShapingPresets = (card) => {
+                const raw = card.dataset.shapingPresets || '';
+                if (!raw) return [];
+                try {
+                    const parsed = JSON.parse(decodeURIComponent(raw));
+                    if (!Array.isArray(parsed)) return [];
+                    return parsed;
+                } catch (err) {
+                    console.warn('Failed to parse shaping presets', err);
+                    return [];
+                }
+            };
+            const getShapingVideoPresets = (card) => {
+                const raw = card.dataset.shapingVideoPresets || '';
+                if (!raw) return [];
+                try {
+                    const parsed = JSON.parse(decodeURIComponent(raw));
+                    if (!Array.isArray(parsed)) return [];
+                    return parsed;
+                } catch (err) {
+                    console.warn('Failed to parse shaping video presets', err);
+                    return [];
+                }
+            };
+            const getShapingOverheadMbps = (card) => {
+                const parsed = Number(card.dataset.shapingOverheadMbps || 0);
+                if (!Number.isFinite(parsed) || parsed < 0) return 0;
+                return parsed;
+            };
+            const getStallRiskThresholdMbps = (card) => {
+                const videoPresets = getShapingVideoPresets(card);
+                if (!videoPresets.length) return null;
+                const minVideo = Math.min(...videoPresets
+                    .map((preset) => Number(preset.mbps))
+                    .filter((value) => Number.isFinite(value) && value > 0));
+                if (!Number.isFinite(minVideo) || minVideo <= 0) return null;
+                return Math.round(minVideo * 1.1 * 1000) / 1000;
+            };
+            const updateStepRiskUi = (card, row) => {
+                if (!card || !row) return;
+                const enabled = !!row.querySelector('input[data-field="shaping_step_enabled"]')?.checked;
+                const threshold = getStallRiskThresholdMbps(card);
+                const rate = Number(row.querySelector('input[data-field="shaping_step_mbps"]')?.value ?? 0);
+                const isRisk = enabled && Number.isFinite(threshold) && Number.isFinite(rate) && rate > 0 && rate < threshold;
+                row.classList.toggle('shape-step-risk', isRisk);
+                if (isRisk) {
+                    row.title = `Likely stall risk: ${rate} Mbps is below min variant +10% (${threshold} Mbps)`;
+                } else {
+                    row.removeAttribute('title');
+                }
+            };
+            const updateAllStepRiskUi = (card) => {
+                if (!card) return;
+                card.querySelectorAll('.shape-step-row').forEach((row) => updateStepRiskUi(card, row));
+            };
+            const syncStepPreset = (row) => {
+                const presetSelect = row.querySelector('select[data-field="shaping_step_mbps_preset"]');
+                const mbpsInput = row.querySelector('input[data-field="shaping_step_mbps"]');
+                if (!presetSelect || !mbpsInput) return;
+                const value = Number(mbpsInput.value);
+                if (!Number.isFinite(value)) {
+                    presetSelect.value = 'custom';
+                    return;
+                }
+                const matched = Array.from(presetSelect.options).find((option) => {
+                    if (option.value === 'custom') return false;
+                    return Math.abs(Number(option.value) - value) < 0.001;
+                });
+                presetSelect.value = matched ? matched.value : 'custom';
+            };
+            const setStepEnabledUi = (card, row, enabled) => {
+                row.classList.toggle('shape-step-disabled', !enabled);
+                row.querySelectorAll('select[data-field="shaping_step_mbps_preset"], input[data-field="shaping_step_mbps"], input[data-field="shaping_step_seconds"]').forEach((el) => {
+                    el.disabled = !enabled;
+                });
+                updateStepRiskUi(card, row);
+            };
+            const makeShapeStepRow = (card, rate, seconds, enabled = true) => {
+                const row = document.createElement('div');
+                row.className = 'shape-step-row';
+                row.innerHTML = TestingSessionUI.renderPatternStepRowContent(
+                    { rate_mbps: rate, duration_seconds: seconds, enabled },
+                    getShapingPresets(card)
+                );
+                syncStepPreset(row);
+                setStepEnabledUi(card, row, enabled);
+                return row;
+            };
+            const updateStepIndices = (card) => {
+                const rows = card.querySelectorAll('.shape-step-row');
+                rows.forEach((row, idx) => {
+                    row.dataset.stepIndex = String(idx);
+                });
+            };
+            const getDefaultStepSeconds = (card) => {
+                const pattern = TestingSessionUI.readShapingPattern(card);
+                return pattern.default_step_seconds;
+            };
+            const getTemplateMode = (card) => {
+                const selected = card.querySelector('input[data-field="shaping_template_mode"]:checked');
+                return selected ? selected.value : 'sliders';
+            };
+            const updateTemplateModeUi = (card) => {
+                const mode = getTemplateMode(card);
+                const throughputRow = card.querySelector('[data-field="shaping_throughput_row"]');
+                const stepList = card.querySelector('[data-field="shaping_pattern_rows"]');
+                const stepActions = card.querySelector('.shape-step-actions');
+                const usePattern = mode !== 'sliders';
+                if (throughputRow) {
+                    throughputRow.style.display = usePattern ? 'none' : '';
+                }
+                if (stepList) {
+                    stepList.style.display = usePattern ? '' : 'none';
+                }
+                if (stepActions) {
+                    stepActions.style.display = usePattern ? '' : 'none';
+                }
+            };
+            const buildTemplateSteps = (card) => {
+                const mode = getTemplateMode(card);
+                const presets = getShapingVideoPresets(card);
+                if (mode === 'sliders' || !presets.length) {
+                    return [];
+                }
+                const marginPct = Number(card.querySelector('input[data-field="shaping_template_margin_pct"]:checked')?.value || 0);
+                const overheadMbps = getShapingOverheadMbps(card);
+                const defaultSeconds = getDefaultStepSeconds(card);
+                const adjustRate = (rate) => {
+                    let adjusted = Number(rate);
+                    if (!Number.isFinite(adjusted)) adjusted = 0;
+                    adjusted = adjusted * (1 + (marginPct / 100));
+                    adjusted += overheadMbps;
+                    if (adjusted < 0) adjusted = 0;
+                    return Math.round(adjusted * 1000) / 1000;
+                };
+                const baseRates = presets
+                    .map((preset) => Number(preset.mbps))
+                    .filter((rate) => Number.isFinite(rate) && rate >= 0);
+                if (!baseRates.length) {
+                    return [];
+                }
+                const minRate = baseRates[0];
+                const maxRate = baseRates[baseRates.length - 1];
+                const maxRatePlus50 = Math.round(maxRate * 1.5 * 1000) / 1000;
+                let rates = [];
+                if (mode === 'square_wave') {
+                    rates = maxRatePlus50 === minRate ? [maxRatePlus50] : [maxRatePlus50, minRate];
+                } else if (mode === 'ramp_up') {
+                    rates = baseRates.slice();
+                    if (maxRatePlus50 > maxRate) {
+                        rates.push(maxRatePlus50);
+                    }
+                } else if (mode === 'ramp_down') {
+                    rates = baseRates.slice().reverse();
+                    if (maxRatePlus50 > maxRate) {
+                        rates.unshift(maxRatePlus50);
+                    }
+                } else if (mode === 'pyramid') {
+                    const ascending = baseRates.slice();
+                    if (maxRatePlus50 > maxRate) {
+                        ascending.push(maxRatePlus50);
+                    }
+                    rates = ascending.concat(ascending.slice(0, -1).reverse());
+                }
+                return rates
+                    .filter((rate) => Number.isFinite(rate) && rate >= 0)
+                    .map((rate) => ({ rate_mbps: adjustRate(rate), duration_seconds: defaultSeconds }));
+            };
+            const applyTemplatePattern = (card, shouldSchedule) => {
+                const mode = getTemplateMode(card);
+                const rowsHost = card.querySelector('[data-field="shaping_pattern_rows"]');
+                const steps = buildTemplateSteps(card);
+                updateTemplateModeUi(card);
+                if (rowsHost && mode !== 'sliders' && steps.length > 0) {
+                    rowsHost.innerHTML = '';
+                    steps.forEach((step) => {
+                        rowsHost.appendChild(makeShapeStepRow(card, step.rate_mbps, step.duration_seconds));
+                    });
+                    updateStepIndices(card);
+                    const throughputInput = card.querySelector('input[data-field="shaping_throughput_mbps"]');
+                    const throughputValue = card.querySelector('[data-field="shaping_throughput_row"] .range-value');
+                    if (throughputInput) {
+                        throughputInput.value = String(steps[0].rate_mbps);
+                    }
+                    if (throughputValue) {
+                        throughputValue.textContent = String(steps[0].rate_mbps);
+                    }
+                }
+                if (shouldSchedule) {
+                    scheduleShapingApply(card);
+                }
+            };
             container.addEventListener('input', (event) => {
+                const card = event.target.closest('.session-card');
                 if (event.target.matches('input[type="range"]')) {
                     const valueEl = event.target.parentElement.querySelector('.range-value');
                     if (valueEl) valueEl.textContent = event.target.value;
+                }
+                if (event.target.dataset.field === 'shaping_step_mbps') {
+                    const row = event.target.closest('.shape-step-row');
+                    if (card && row) {
+                        syncStepPreset(row);
+                        updateStepRiskUi(card, row);
+                    }
                 }
             });
             container.addEventListener('change', (event) => {
                 const card = event.target.closest('.session-card');
                 if (!card) return;
+                if (event.target.dataset.field === 'shaping_step_enabled') {
+                    const row = event.target.closest('.shape-step-row');
+                    if (row) {
+                        setStepEnabledUi(card, row, !!event.target.checked);
+                    }
+                }
+                if (event.target.dataset.field && event.target.dataset.field.startsWith('shaping_template_')) {
+                    if (card.dataset.skipTemplateAutogen === '1') {
+                        card.dataset.skipTemplateAutogen = '';
+                        updateTemplateModeUi(card);
+                        return;
+                    }
+                    pendingTemplateUi.set(String(card.dataset.sessionId), readTemplateUiState(card));
+                    applyTemplatePattern(card, true);
+                    return;
+                }
+                if (event.target.dataset.field === 'shaping_default_step_seconds') {
+                    if (getTemplateMode(card) !== 'sliders') {
+                        pendingTemplateUi.set(String(card.dataset.sessionId), readTemplateUiState(card));
+                        applyTemplatePattern(card, true);
+                    } else {
+                        scheduleShapingApply(card);
+                    }
+                    return;
+                }
+                if (event.target.dataset.field === 'shaping_step_mbps_preset') {
+                    const row = event.target.closest('.shape-step-row');
+                    const mbpsInput = row ? row.querySelector('input[data-field="shaping_step_mbps"]') : null;
+                    if (mbpsInput && event.target.value !== 'custom') {
+                        mbpsInput.value = event.target.value;
+                        updateStepRiskUi(card, row);
+                    }
+                }
                 if (event.target.dataset.field === 'playlist_failure_urls' && event.target.value === 'All') {
                     const checks = card.querySelectorAll('input[data-field="playlist_failure_urls"]');
                     checks.forEach(input => {
@@ -742,13 +1180,7 @@
                     });
                 }
                 if (event.target.dataset.field && event.target.dataset.field.startsWith('shaping_')) {
-                    const sessionId = card.dataset.sessionId;
-                    if (shapingTimers.has(sessionId)) {
-                        clearTimeout(shapingTimers.get(sessionId));
-                    }
-                    shapingTimers.set(sessionId, setTimeout(() => {
-                        applyNetworkShaping(card);
-                    }, 250));
+                    scheduleShapingApply(card);
                     return;
                 }
                 saveSession(card);
@@ -758,6 +1190,34 @@
                 if (!button) return;
                 const card = button.closest('.session-card');
                 if (!card) return;
+                if (button.dataset.action === 'add-shaping-step') {
+                    const rowsHost = card.querySelector('[data-field="shaping_pattern_rows"]');
+                    const throughput = Number(card.querySelector('input[data-field="shaping_throughput_mbps"]')?.value || 0);
+                    const defaultSeconds = getDefaultStepSeconds(card);
+                    if (rowsHost) {
+                        rowsHost.appendChild(makeShapeStepRow(card, throughput, defaultSeconds));
+                        updateStepIndices(card);
+                        scheduleShapingApply(card);
+                    }
+                    return;
+                }
+                if (button.dataset.action === 'remove-shaping-step') {
+                    const row = button.closest('.shape-step-row');
+                    if (row && row.parentElement) {
+                        row.remove();
+                        updateStepIndices(card);
+                        scheduleShapingApply(card);
+                    }
+                    return;
+                }
+                if (button.dataset.action === 'clear-shaping-pattern') {
+                    const rowsHost = card.querySelector('[data-field="shaping_pattern_rows"]');
+                    if (rowsHost) {
+                        rowsHost.innerHTML = '';
+                        scheduleShapingApply(card);
+                    }
+                    return;
+                }
                 if (button.dataset.action === 'save-session') {
                     saveSession(card);
                 }
@@ -769,6 +1229,17 @@
                         })
                         .catch(err => console.error('Error deleting session', err));
                 }
+            });
+            container.querySelectorAll('.shape-step-row').forEach((row) => {
+                const enabled = !!row.querySelector('input[data-field="shaping_step_enabled"]')?.checked;
+                const card = row.closest('.session-card');
+                if (card) {
+                    setStepEnabledUi(card, row, enabled);
+                }
+            });
+            container.querySelectorAll('.session-card').forEach((card) => {
+                updateTemplateModeUi(card);
+                updateAllStepRiskUi(card);
             });
         }
 
@@ -788,6 +1259,7 @@
                 const input = card.querySelector(`input[data-field="${field}"]`);
                 return input ? Number(input.value) : 0;
             };
+            const pattern = TestingSessionUI.readShapingPattern(card);
             const payload = {
                 rate_mbps: getValue('shaping_throughput_mbps'),
                 delay_ms: getValue('shaping_delay_ms'),
@@ -800,7 +1272,11 @@
                     values: {
                         nftables_bandwidth_mbps: payload.rate_mbps,
                         nftables_delay_ms: payload.delay_ms,
-                        nftables_packet_loss: payload.loss_pct
+                        nftables_packet_loss: payload.loss_pct,
+                        nftables_pattern_enabled: true,
+                        nftables_pattern_steps: pattern.steps || [],
+                        nftables_pattern_segment_duration_seconds: pattern.segment_duration_seconds,
+                        nftables_pattern_default_segments: pattern.default_segments
                     }
                 });
                 setTimeout(() => {
@@ -814,12 +1290,39 @@
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(payload)
-            }).catch(err => console.error('Error applying network shaping', err));
+            })
+                .then(() => {
+                    const activePatternSteps = (pattern.steps || []).filter((step) => step && step.enabled !== false);
+                    const patternPayload = {
+                        steps: activePatternSteps,
+                        segment_duration_seconds: pattern.segment_duration_seconds,
+                        default_segments: pattern.default_segments,
+                        delay_ms: payload.delay_ms,
+                        loss_pct: payload.loss_pct
+                    };
+                    return fetch(`/api/nftables/pattern/${port}`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(patternPayload)
+                    });
+                })
+                .catch(err => console.error('Error applying network shaping', err));
         }
 
         function findSessionByPlayerId(playerId) {
             return fetch('/api/sessions')
-                .then(response => response.json())
+                .then(async response => {
+                    if (!response.ok) {
+                        const body = await response.text();
+                        throw new Error(`/api/sessions failed (${response.status}): ${body.slice(0, 120)}`);
+                    }
+                    const contentType = (response.headers.get('content-type') || '').toLowerCase();
+                    if (!contentType.includes('application/json')) {
+                        const body = await response.text();
+                        throw new Error(`/api/sessions returned non-JSON: ${body.slice(0, 120)}`);
+                    }
+                    return response.json();
+                })
                 .then(sessions => sessions.find(session => session.player_id === playerId));
         }
 
@@ -1039,6 +1542,12 @@
             findSessionByPlayerId(playerId)
                 .then(session => {
                     if (session) {
+                        const container = document.getElementById('sessionControls');
+                        const existingCard = container ? container.querySelector('.session-card') : null;
+                        const sessionKey = String(session.session_id || '');
+                        if (existingCard && String(existingCard.dataset.sessionId || '') === sessionKey) {
+                            pendingTemplateUi.set(sessionKey, readTemplateUiState(existingCard));
+                        }
                         const pending = pendingShaping.get(session.session_id);
                         if (pending && Date.now() - pending.timestamp < 5000) {
                             session = {
@@ -1059,7 +1568,25 @@
                             }
                         }
                         currentSessionId = session.session_id;
+                        if (container && existingCard && container.contains(document.activeElement) &&
+                            String(existingCard.dataset.sessionId || '') === sessionKey) {
+                            pushBandwidthSample(session);
+                            return;
+                        }
                         renderSessionControls(session);
+                        if (container) {
+                            const restoredCard = container.querySelector('.session-card');
+                            const templateState = pendingTemplateUi.get(sessionKey);
+                            if (restoredCard && templateState) {
+                                applyTemplateUiState(restoredCard, templateState);
+                                // Restore mode visibility without regenerating steps.
+                                restoredCard.dataset.skipTemplateAutogen = '1';
+                                const modeEl = restoredCard.querySelector('input[data-field="shaping_template_mode"]:checked');
+                                if (modeEl) {
+                                    modeEl.dispatchEvent(new Event('change', { bubbles: true }));
+                                }
+                            }
+                        }
                         pushBandwidthSample(session);
                     }
                 })

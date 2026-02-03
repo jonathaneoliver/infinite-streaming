@@ -134,6 +134,182 @@
         return items.join('');
     }
 
+    function collectShapingBandwidthPresets(playlists) {
+        const list = sortedPlaylists(playlists);
+        const presets = [];
+        const seen = new Set();
+        list.forEach((playlist) => {
+            const bandwidth = Number(playlist.bandwidth || 0);
+            if (!Number.isFinite(bandwidth) || bandwidth <= 0) return;
+            const mbps = Math.round((bandwidth / 1000000) * 1000) / 1000;
+            const key = mbps.toFixed(3);
+            if (seen.has(key)) return;
+            seen.add(key);
+            const resolution = playlist.resolution || 'unknown';
+            const height = resolution.includes('x') ? resolution.split('x')[1] : resolution;
+            const heightLabel = playlist.url && playlist.url.includes('audio')
+                ? 'audio'
+                : (height === 'unknown' ? 'unknown' : `${height}p`);
+            const kbps = Math.round(bandwidth / 1000);
+            presets.push({
+                mbps,
+                label: `${heightLabel}/${kbps}kbps`
+            });
+        });
+        return presets;
+    }
+
+    function collectVideoShapingPresets(playlists) {
+        const list = sortedPlaylists(playlists).filter((playlist) => !(playlist.url || '').includes('audio'));
+        const presets = [];
+        const seen = new Set();
+        list.forEach((playlist) => {
+            const bandwidth = Number(playlist.bandwidth || 0);
+            if (!Number.isFinite(bandwidth) || bandwidth <= 0) return;
+            const mbps = Math.round((bandwidth / 1000000) * 1000) / 1000;
+            const key = mbps.toFixed(3);
+            if (seen.has(key)) return;
+            seen.add(key);
+            const resolution = playlist.resolution || 'unknown';
+            const height = resolution.includes('x') ? resolution.split('x')[1] : resolution;
+            const heightLabel = height === 'unknown' ? 'unknown' : `${height}p`;
+            const kbps = Math.round(bandwidth / 1000);
+            presets.push({
+                mbps,
+                label: `${heightLabel}/${kbps}kbps`
+            });
+        });
+        return presets.sort((a, b) => a.mbps - b.mbps);
+    }
+
+    function estimateAudioOverheadMbps(playlists) {
+        const list = sortedPlaylists(playlists);
+        let audioMbps = 0;
+        list.forEach((playlist) => {
+            if (!(playlist.url || '').includes('audio')) return;
+            const bandwidth = Number(playlist.bandwidth || 0);
+            if (!Number.isFinite(bandwidth) || bandwidth <= 0) return;
+            audioMbps = Math.max(audioMbps, bandwidth / 1000000);
+        });
+        const playlistOverheadMbps = 0.05;
+        return Math.round((audioMbps + playlistOverheadMbps) * 1000) / 1000;
+    }
+
+    function computeStallRiskThreshold(videoPresets) {
+        if (!Array.isArray(videoPresets) || !videoPresets.length) return null;
+        const minVideo = Math.min(...videoPresets
+            .map((preset) => Number(preset.mbps))
+            .filter((value) => Number.isFinite(value) && value > 0));
+        if (!Number.isFinite(minVideo) || minVideo <= 0) return null;
+        return Math.round(minVideo * 1.1 * 1000) / 1000;
+    }
+
+    function renderPatternStepPresetOptions(rate, presets) {
+        const numericRate = Number(rate);
+        const hasRate = Number.isFinite(numericRate);
+        let selectedValue = 'custom';
+        const options = presets || [];
+        options.forEach((preset) => {
+            if (!hasRate) return;
+            if (Math.abs(Number(preset.mbps) - numericRate) < 0.001) {
+                selectedValue = Number(preset.mbps).toFixed(3);
+            }
+        });
+        const customSelected = selectedValue === 'custom' ? ' selected' : '';
+        const optionHtml = options.map((preset) => {
+            const value = Number(preset.mbps).toFixed(3);
+            const selected = selectedValue === value ? ' selected' : '';
+            const riskPrefix = preset.risk ? '⚠ ' : '';
+            return `<option value="${value}"${selected}>${riskPrefix}${preset.label}</option>`;
+        }).join('');
+        return `<option value="custom"${customSelected}>Custom</option>${optionHtml}`;
+    }
+
+    function renderPatternStepRowContent(step, presets) {
+        const rate = Number.isFinite(Number(step.rate_mbps)) ? Number(step.rate_mbps) : 0;
+        const seconds = Number.isFinite(Number(step.duration_seconds)) ? Number(step.duration_seconds) : 1;
+        const enabled = step.enabled !== false;
+        return `
+            <label>Preset</label>
+            <select data-field="shaping_step_mbps_preset">
+                ${renderPatternStepPresetOptions(rate, presets)}
+            </select>
+            <label>Mbps</label>
+            <input type="number" min="0" step="0.1" data-field="shaping_step_mbps" value="${rate}">
+            <label>Time (s)</label>
+            <input type="number" min="0.5" step="0.1" data-field="shaping_step_seconds" value="${seconds}">
+            <label class="shape-step-enabled"><input type="checkbox" data-field="shaping_step_enabled" ${enabled ? 'checked' : ''}>Enabled</label>
+        `;
+    }
+
+    function toPositiveNumber(value, fallback) {
+        const n = Number(value);
+        if (!Number.isFinite(n) || n <= 0) return fallback;
+        return n;
+    }
+
+    function inferSegmentDurationSeconds(session) {
+        const explicit = Number(session.nftables_pattern_segment_duration_seconds || 0);
+        if (Number.isFinite(explicit) && explicit > 0) {
+            return explicit;
+        }
+        const candidates = [
+            session.manifest_url || '',
+            session.last_request_url || '',
+            session.last_playlist_url || ''
+        ];
+        for (const value of candidates) {
+            const match = value.match(/(?:_|\/)(\d+)s(?:[._/?]|$)/i);
+            if (match) {
+                const parsed = Number(match[1]);
+                if (Number.isFinite(parsed) && parsed > 0) {
+                    return parsed;
+                }
+            }
+        }
+        return 1;
+    }
+
+    function parsePatternSteps(raw) {
+        if (!Array.isArray(raw)) return [];
+        return raw
+            .map(step => {
+                if (!step || typeof step !== 'object') return null;
+                const rate = Number(step.rate_mbps);
+                const seconds = Number(step.duration_seconds);
+                const enabled = step.enabled !== false;
+                if (!Number.isFinite(rate) || !Number.isFinite(seconds) || seconds <= 0) {
+                    return null;
+                }
+                return { rate_mbps: rate, duration_seconds: seconds, enabled };
+            })
+            .filter(Boolean);
+    }
+
+    function renderPatternStepRow(index, step, presets) {
+        return `
+            <div class="shape-step-row" data-step-index="${index}">
+                ${renderPatternStepRowContent(step, presets)}
+            </div>
+        `;
+    }
+
+    function closestStepDuration(seconds) {
+        const options = [6, 12, 18, 24];
+        const numeric = Number(seconds);
+        if (!Number.isFinite(numeric) || numeric <= 0) return 12;
+        let best = options[0];
+        let bestDiff = Math.abs(numeric - best);
+        options.forEach((value) => {
+            const diff = Math.abs(numeric - value);
+            if (diff < bestDiff) {
+                best = value;
+                bestDiff = diff;
+            }
+        });
+        return best;
+    }
+
     function renderSessionCard(session, options = {}) {
         const sessionId = session.session_id;
         const playlistUrls = session.playlist_urls || [];
@@ -142,8 +318,26 @@
         const inlineHost = options.inlineHost || false;
         const hideTitle = options.hideTitle || false;
         const showPortItem = options.showPortItem || false;
+        const segmentDurationSeconds = inferSegmentDurationSeconds(session);
+        const defaultSegments = toPositiveNumber(session.nftables_pattern_default_segments, 2);
+        const defaultStepSeconds = Math.round(segmentDurationSeconds * defaultSegments * 10) / 10;
+        const selectedStepSeconds = closestStepDuration(defaultStepSeconds);
+        const videoPresets = collectVideoShapingPresets(playlistUrls);
+        const stallRiskThreshold = computeStallRiskThreshold(videoPresets);
+        const shapingPresets = collectShapingBandwidthPresets(playlistUrls).map((preset) => ({
+            ...preset,
+            risk: Number.isFinite(stallRiskThreshold) && Number(preset.mbps) < stallRiskThreshold
+        }));
+        const overheadMbps = estimateAudioOverheadMbps(playlistUrls);
+        const patternSteps = parsePatternSteps(session.nftables_pattern_steps);
+        const initialSteps = patternSteps.length
+            ? patternSteps
+            : [{ rate_mbps: Number(session.nftables_bandwidth_mbps || 0), duration_seconds: defaultStepSeconds }];
+        const encodedPresets = encodeURIComponent(JSON.stringify(shapingPresets));
+        const encodedVideoPresets = encodeURIComponent(JSON.stringify(videoPresets));
+        const templateMode = 'sliders';
         return `
-            <div class="session-card" data-session-id="${sessionId}" data-session-port="${session.x_forwarded_port || ''}">
+            <div class="session-card" data-session-id="${sessionId}" data-session-port="${session.x_forwarded_port || ''}" data-shaping-presets="${encodedPresets}" data-shaping-video-presets="${encodedVideoPresets}" data-shaping-overhead-mbps="${overheadMbps}">
                 <div class="session-header">
                     ${hideTitle ? '' : `<div class="session-title">Session ${sessionId}</div>`}
                     <div class="session-meta" title="Port">${session.x_forwarded_port || '—'}</div>
@@ -223,11 +417,6 @@
                 <div class="failure-group" data-net-shaping>
                     <div class="failure-title">Network Shaping</div>
                     <div class="range-row">
-                        <label>Throughput (Mbps)</label>
-                        <input type="range" min="0" max="30" step="0.1" data-field="shaping_throughput_mbps" value="${session.nftables_bandwidth_mbps || 0}">
-                        <span class="range-value">${session.nftables_bandwidth_mbps || 0}</span>
-                    </div>
-                    <div class="range-row">
                         <label>Delay (ms)</label>
                         <input type="range" min="0" max="250" step="5" data-field="shaping_delay_ms" value="${session.nftables_delay_ms || 0}">
                         <span class="range-value">${session.nftables_delay_ms || 0}</span>
@@ -236,6 +425,86 @@
                         <label>Loss (%)</label>
                         <input type="range" min="0" max="10" step="0.5" data-field="shaping_loss_pct" value="${session.nftables_packet_loss || 0}">
                         <span class="range-value">${session.nftables_packet_loss || 0}</span>
+                    </div>
+                    <div class="shape-pattern-block">
+                        <div class="shape-step-defaults">
+                            <label>Step Duration</label>
+                            <div class="shape-pattern-modes" data-field="shaping_default_step_seconds_group">
+                                <label class="shape-pattern-mode">
+                                    <input type="radio" name="shaping_default_step_seconds_${sessionId}" value="6" data-field="shaping_default_step_seconds" ${selectedStepSeconds === 6 ? 'checked' : ''}>
+                                    <span>6s</span>
+                                </label>
+                                <label class="shape-pattern-mode">
+                                    <input type="radio" name="shaping_default_step_seconds_${sessionId}" value="12" data-field="shaping_default_step_seconds" ${selectedStepSeconds === 12 ? 'checked' : ''}>
+                                    <span>12s</span>
+                                </label>
+                                <label class="shape-pattern-mode">
+                                    <input type="radio" name="shaping_default_step_seconds_${sessionId}" value="18" data-field="shaping_default_step_seconds" ${selectedStepSeconds === 18 ? 'checked' : ''}>
+                                    <span>18s</span>
+                                </label>
+                                <label class="shape-pattern-mode">
+                                    <input type="radio" name="shaping_default_step_seconds_${sessionId}" value="24" data-field="shaping_default_step_seconds" ${selectedStepSeconds === 24 ? 'checked' : ''}>
+                                    <span>24s</span>
+                                </label>
+                            </div>
+                            <span class="shape-default-seconds" data-field="shaping_default_seconds_label">segment ${segmentDurationSeconds}s</span>
+                        </div>
+                        <div class="shape-template-row">
+                            <label>Pattern</label>
+                            <div class="shape-pattern-modes" data-field="shaping_template_mode_group">
+                                <label class="shape-pattern-mode">
+                                    <input type="radio" name="shaping_template_mode_${sessionId}" value="sliders" data-field="shaping_template_mode" ${templateMode === 'sliders' ? 'checked' : ''}>
+                                    <span title="Use slider value">🎚 Sliders</span>
+                                </label>
+                                <label class="shape-pattern-mode">
+                                    <input type="radio" name="shaping_template_mode_${sessionId}" value="square_wave" data-field="shaping_template_mode">
+                                    <span title="Alternate max/min bitrate">▁▔ Square</span>
+                                </label>
+                                <label class="shape-pattern-mode">
+                                    <input type="radio" name="shaping_template_mode_${sessionId}" value="ramp_up" data-field="shaping_template_mode">
+                                    <span title="Step low to high">↗ Ramp Up</span>
+                                </label>
+                                <label class="shape-pattern-mode">
+                                    <input type="radio" name="shaping_template_mode_${sessionId}" value="ramp_down" data-field="shaping_template_mode">
+                                    <span title="Step high to low">↘ Ramp Down</span>
+                                </label>
+                                <label class="shape-pattern-mode">
+                                    <input type="radio" name="shaping_template_mode_${sessionId}" value="pyramid" data-field="shaping_template_mode">
+                                    <span title="Up then down">⛰ Pyramid</span>
+                                </label>
+                            </div>
+                            <label>Margin</label>
+                            <div class="shape-pattern-modes shape-margin-modes" data-field="shaping_template_margin_group">
+                                <label class="shape-pattern-mode">
+                                    <input type="radio" name="shaping_template_margin_${sessionId}" value="0" data-field="shaping_template_margin_pct" checked>
+                                    <span>Exact</span>
+                                </label>
+                                <label class="shape-pattern-mode">
+                                    <input type="radio" name="shaping_template_margin_${sessionId}" value="10" data-field="shaping_template_margin_pct">
+                                    <span>+10%</span>
+                                </label>
+                                <label class="shape-pattern-mode">
+                                    <input type="radio" name="shaping_template_margin_${sessionId}" value="25" data-field="shaping_template_margin_pct">
+                                    <span>+25%</span>
+                                </label>
+                                <label class="shape-pattern-mode">
+                                    <input type="radio" name="shaping_template_margin_${sessionId}" value="50" data-field="shaping_template_margin_pct">
+                                    <span>+50%</span>
+                                </label>
+                            </div>
+                        </div>
+                        <div class="range-row" data-field="shaping_throughput_row">
+                            <label>Throughput (Mbps)</label>
+                            <input type="range" min="0" max="30" step="0.1" data-field="shaping_throughput_mbps" value="${session.nftables_bandwidth_mbps || 0}">
+                            <span class="range-value">${session.nftables_bandwidth_mbps || 0}</span>
+                        </div>
+                        <div class="shape-step-list" data-field="shaping_pattern_rows">
+                            ${initialSteps.map((step, idx) => renderPatternStepRow(idx, step, shapingPresets)).join('')}
+                        </div>
+                        <div class="shape-step-actions">
+                            <button type="button" class="btn btn-secondary btn-mini" data-action="add-shaping-step">Add Step</button>
+                            <button type="button" class="btn btn-secondary btn-mini" data-action="clear-shaping-pattern">Clear</button>
+                        </div>
                     </div>
                     <div class="chart-wrap">
                         <canvas class="bandwidth-chart" width="820" height="220" data-field="bandwidth_chart"></canvas>
@@ -314,9 +583,68 @@
         };
     }
 
+    function readShapingPattern(card) {
+        const getNumber = (selector, fallback) => {
+            const input = card.querySelector(selector);
+            if (!input) return fallback;
+            const value = Number(input.value);
+            if (!Number.isFinite(value)) return fallback;
+            return value;
+        };
+        const segmentLabel = card.querySelector('[data-field="shaping_default_seconds_label"]');
+        const segmentMatch = segmentLabel ? segmentLabel.textContent.match(/segment\s+([0-9.]+)s/i) : null;
+        const inferredSegmentSeconds = segmentMatch ? Number(segmentMatch[1]) : 6;
+        const segmentDurationSeconds = toPositiveNumber(inferredSegmentSeconds, 6);
+        const defaultStepSeconds = toPositiveNumber(
+            Number(card.querySelector('input[data-field="shaping_default_step_seconds"]:checked')?.value || 12),
+            12
+        );
+        const defaultSegments = Math.max(0.5, Math.round((defaultStepSeconds / segmentDurationSeconds) * 10) / 10);
+        const selectedMode = card.querySelector('input[data-field="shaping_template_mode"]:checked')?.value || 'sliders';
+        const rows = Array.from(card.querySelectorAll('.shape-step-row'));
+        const rowSteps = rows.map(row => {
+            const rate = Number(row.querySelector('input[data-field="shaping_step_mbps"]')?.value ?? 0);
+            const secondsRaw = Number(row.querySelector('input[data-field="shaping_step_seconds"]')?.value ?? defaultStepSeconds);
+            const seconds = toPositiveNumber(secondsRaw, defaultStepSeconds);
+            const enabled = !!row.querySelector('input[data-field="shaping_step_enabled"]')?.checked;
+            if (!Number.isFinite(rate) || rate < 0) {
+                return null;
+            }
+            return {
+                rate_mbps: Math.round(rate * 1000) / 1000,
+                duration_seconds: Math.round(seconds * 10) / 10,
+                enabled
+            };
+        }).filter(Boolean);
+        const sliderRate = Number(card.querySelector('input[data-field="shaping_throughput_mbps"]')?.value ?? 0);
+        const sliderStep = {
+            rate_mbps: Number.isFinite(sliderRate) && sliderRate >= 0 ? Math.round(sliderRate * 1000) / 1000 : 0,
+            duration_seconds: Math.round(defaultStepSeconds * 10) / 10,
+            enabled: true
+        };
+        const steps = selectedMode === 'sliders' ? [sliderStep] : rowSteps;
+        return {
+            pattern_enabled: true,
+            segment_duration_seconds: segmentDurationSeconds,
+            default_segments: defaultSegments,
+            default_step_seconds: defaultStepSeconds,
+            steps
+        };
+    }
+
+    function updatePatternDefaultLabel(card) {
+        const pattern = readShapingPattern(card);
+        const label = card.querySelector('[data-field="shaping_default_seconds_label"]');
+        if (!label) return;
+        label.textContent = `segment ${pattern.segment_duration_seconds}s`;
+    }
+
     window.TestingSessionUI = {
         renderSessionCard,
+        renderPatternStepRowContent,
         readSessionSettings,
+        readShapingPattern,
+        updatePatternDefaultLabel,
         formatDate,
         formatDuration
     };

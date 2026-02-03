@@ -186,6 +186,163 @@
             text-align: right;
         }
 
+        .btn-mini {
+            font-size: 11px;
+            padding: 4px 8px;
+            min-height: 28px;
+        }
+
+        .shape-pattern-block {
+            margin-top: 8px;
+            border-top: 1px dashed var(--border-color);
+            padding-top: 8px;
+        }
+
+        .shape-step-defaults {
+            display: grid;
+            grid-template-columns: auto 1fr auto;
+            gap: 6px;
+            align-items: center;
+            margin-bottom: 8px;
+        }
+
+        .shape-step-defaults label {
+            font-size: 11px;
+            color: var(--text-secondary);
+        }
+
+        .shape-default-seconds {
+            font-size: 11px;
+            color: var(--text-secondary);
+            text-align: right;
+            white-space: nowrap;
+        }
+
+        .shape-template-row {
+            display: grid;
+            grid-template-columns: auto minmax(320px, 1fr) auto minmax(90px, 130px) 1fr;
+            gap: 6px;
+            align-items: center;
+            margin-bottom: 8px;
+        }
+
+        .shape-template-row label {
+            font-size: 11px;
+            color: var(--text-secondary);
+        }
+
+        .shape-template-row select {
+            width: 100%;
+            min-width: 0;
+            padding: 4px 6px;
+            border: 1px solid var(--border-color);
+            border-radius: 6px;
+            background: var(--bg-secondary);
+            color: var(--text-primary);
+            font-size: 11px;
+        }
+
+        .shape-pattern-modes {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+        }
+
+        .shape-margin-modes {
+            flex-wrap: nowrap;
+        }
+
+        .shape-pattern-mode {
+            margin: 0;
+        }
+
+        .shape-pattern-mode input {
+            display: none;
+        }
+
+        .shape-pattern-mode span {
+            display: inline-block;
+            padding: 4px 8px;
+            border: 1px solid #cbd5e1;
+            border-radius: 999px;
+            font-size: 11px;
+            font-weight: 600;
+            color: var(--text-primary);
+            background: #f8fafc;
+            cursor: pointer;
+            user-select: none;
+            white-space: nowrap;
+            transition: background-color 120ms ease, border-color 120ms ease, color 120ms ease;
+        }
+
+        .shape-pattern-mode input:checked + span {
+            background: #1d4ed8;
+            border-color: #1d4ed8;
+            color: #fff;
+            box-shadow: 0 0 0 2px rgba(29, 78, 216, 0.2);
+        }
+
+        .shape-pattern-mode input:focus-visible + span {
+            outline: 2px solid #2563eb;
+            outline-offset: 1px;
+        }
+
+        .shape-step-list {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+            margin-bottom: 8px;
+        }
+
+        .shape-step-row {
+            display: grid;
+            grid-template-columns: auto minmax(120px, 180px) auto minmax(68px, 100px) auto minmax(68px, 100px) auto;
+            gap: 6px;
+            align-items: center;
+        }
+
+        .shape-step-row label {
+            font-size: 11px;
+            color: var(--text-secondary);
+        }
+
+        .shape-step-row input,
+        .shape-step-row select {
+            width: 100%;
+            min-width: 0;
+            padding: 4px 6px;
+            border: 1px solid var(--border-color);
+            border-radius: 6px;
+            background: var(--bg-secondary);
+            color: var(--text-primary);
+            font-size: 11px;
+        }
+
+        .shape-step-actions {
+            display: flex;
+            gap: 6px;
+            margin-bottom: 8px;
+        }
+
+        .shape-step-enabled {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 11px;
+            color: var(--text-secondary);
+        }
+
+        .shape-step-row.shape-step-disabled {
+            opacity: 0.55;
+        }
+
+        .shape-step-row.shape-step-risk {
+            border: 1px solid #ef4444;
+            border-radius: 8px;
+            padding: 4px;
+            background: rgba(239, 68, 68, 0.08);
+        }
+
         .session-actions {
             display: flex;
             gap: 10px;
@@ -199,6 +356,21 @@
         .status-message {
             font-size: 12px;
             color: var(--text-secondary);
+        }
+
+        .chart-wrap {
+            margin-top: 10px;
+            background: #ffffff;
+            border-radius: 8px;
+            padding: 6px;
+            border: 1px solid #e5e7eb;
+            width: 100%;
+        }
+
+        .bandwidth-chart {
+            width: 100%;
+            height: 220px;
+            display: block;
         }
 
     </style>
@@ -473,9 +645,50 @@
             });
         }
 
+        function applyNetworkShapingForCard(card) {
+            const port = card.dataset.sessionPort;
+            if (!port) return Promise.resolve();
+            const getValue = (field) => {
+                const input = card.querySelector(`input[data-field="${field}"]`);
+                return input ? Number(input.value) : 0;
+            };
+            const payload = {
+                rate_mbps: getValue('shaping_throughput_mbps'),
+                delay_ms: getValue('shaping_delay_ms'),
+                loss_pct: getValue('shaping_loss_pct')
+            };
+            const pattern = TestingSessionUI.readShapingPattern(card);
+            return fetch(`/api/nftables/shape/${port}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            }).then(() => fetch(`/api/nftables/pattern/${port}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    steps: pattern.pattern_enabled ? pattern.steps : [],
+                    segment_duration_seconds: pattern.segment_duration_seconds,
+                    default_segments: pattern.default_segments,
+                    delay_ms: payload.delay_ms,
+                    loss_pct: payload.loss_pct
+                })
+            }));
+        }
+
         function fetchSessions() {
             fetch('/api/sessions')
-                .then(response => response.json())
+                .then(async response => {
+                    if (!response.ok) {
+                        const body = await response.text();
+                        throw new Error(`/api/sessions failed (${response.status}): ${body.slice(0, 120)}`);
+                    }
+                    const contentType = (response.headers.get('content-type') || '').toLowerCase();
+                    if (!contentType.includes('application/json')) {
+                        const body = await response.text();
+                        throw new Error(`/api/sessions returned non-JSON: ${body.slice(0, 120)}`);
+                    }
+                    return response.json();
+                })
                 .then(sessions => {
                     const next = new Map();
                     sessions.forEach(session => {
@@ -506,6 +719,12 @@
                 const valueEl = input.parentElement.querySelector('.range-value');
                 if (valueEl) valueEl.textContent = value;
             }
+            if (input.dataset.field === 'shaping_segment_duration_seconds' || input.dataset.field === 'shaping_default_segments') {
+                const card = input.closest('.session-card');
+                if (card) {
+                    TestingSessionUI.updatePatternDefaultLabel(card);
+                }
+            }
         });
 
         document.getElementById('sessionsContainer').addEventListener('change', (event) => {
@@ -524,6 +743,10 @@
                     input.checked = target.checked;
                 });
             }
+            if (target.dataset.field && target.dataset.field.startsWith('shaping_')) {
+                applyNetworkShapingForCard(card).catch(error => console.error('Error applying network shaping:', error));
+                return;
+            }
             saveSettingsForCard(card).catch(error => console.error('Error saving settings:', error));
         });
 
@@ -539,6 +762,41 @@
             const card = button.closest('.session-card');
             if (!card) return;
             const sessionId = card.dataset.sessionId;
+            if (button.dataset.action === 'add-shaping-step') {
+                const rowsHost = card.querySelector('[data-field="shaping_pattern_rows"]');
+                const pattern = TestingSessionUI.readShapingPattern(card);
+                const throughput = Number(card.querySelector('input[data-field="shaping_throughput_mbps"]')?.value || 0);
+                if (rowsHost) {
+                    const row = document.createElement('div');
+                    row.className = 'shape-step-row';
+                    row.innerHTML = `
+                        <label>Mbps</label>
+                        <input type="number" min="0" step="0.1" data-field="shaping_step_mbps" value="${throughput}">
+                        <label>Time (s)</label>
+                        <input type="number" min="0.5" step="0.1" data-field="shaping_step_seconds" value="${pattern.default_step_seconds}">
+                        <button type="button" class="btn btn-secondary btn-mini" data-action="remove-shaping-step">Remove</button>
+                    `;
+                    rowsHost.appendChild(row);
+                    applyNetworkShapingForCard(card).catch(error => console.error('Error applying network shaping:', error));
+                }
+                return;
+            }
+            if (button.dataset.action === 'remove-shaping-step') {
+                const row = button.closest('.shape-step-row');
+                if (row) {
+                    row.remove();
+                    applyNetworkShapingForCard(card).catch(error => console.error('Error applying network shaping:', error));
+                }
+                return;
+            }
+            if (button.dataset.action === 'clear-shaping-pattern') {
+                const rowsHost = card.querySelector('[data-field="shaping_pattern_rows"]');
+                if (rowsHost) {
+                    rowsHost.innerHTML = '';
+                    applyNetworkShapingForCard(card).catch(error => console.error('Error applying network shaping:', error));
+                }
+                return;
+            }
             if (button.dataset.action === 'save-session') {
                 saveSettingsForCard(card).catch(error => console.error('Error saving settings:', error));
             }
