@@ -239,6 +239,14 @@
             text-align: right;
         }
 
+        .range-row.range-row-disabled {
+            opacity: 0.55;
+        }
+
+        .range-row.range-row-disabled input[type="range"] {
+            pointer-events: none;
+        }
+
         .btn-mini {
             font-size: 11px;
             padding: 4px 8px;
@@ -377,6 +385,19 @@
             margin-bottom: 8px;
         }
 
+        .chart-axis-row {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-bottom: 8px;
+            flex-wrap: wrap;
+        }
+
+        .chart-axis-row > label {
+            font-size: 11px;
+            color: var(--text-secondary);
+        }
+
         .shape-step-enabled {
             display: inline-flex;
             align-items: center;
@@ -414,6 +435,12 @@
         .bandwidth-chart {
             width: 100%;
             height: 220px;
+            display: block;
+        }
+
+        .buffer-depth-chart {
+            width: 100%;
+            height: 170px;
             display: block;
         }
     </style>
@@ -482,10 +509,15 @@
         let autoRetryCount = 0;
         let autoRetryTimer = null;
         const pendingShaping = new Map();
-        const pendingTemplateUi = new Map();
         const bandwidthHistory = new Map();
         const bandwidthCharts = new Map();
+        const bufferDepthCharts = new Map();
         const bandwidthVisibility = new Map();
+        const bitrateAxisMaxBySession = new Map();
+        let sessionPollController = null;
+        let sessionPollInFlight = false;
+        let sessionPollRequestSeq = 0;
+        let sessionPollLastAppliedSeq = 0;
         let playerEstimatedMbps = null;
         let currentRenditionMbps = null;
 
@@ -503,6 +535,11 @@
                 parts.push(url);
             }
             log(parts.join(' '));
+        }
+
+        function normalizeBitrateAxisMaxMode(value) {
+            const normalized = String(value || 'auto').toLowerCase();
+            return ['auto', '5', '10', '20', '40'].includes(normalized) ? normalized : 'auto';
         }
 
         function extractHlsHttpFailure(data) {
@@ -560,44 +597,6 @@
                 url: params.get('url') || '',
                 player: params.get('player') || ''
             };
-        }
-
-        function readTemplateUiState(card) {
-            if (!card) return null;
-            const readMode = () => {
-                const selected = card.querySelector('input[data-field="shaping_template_mode"]:checked');
-                return selected ? selected.value : 'sliders';
-            };
-            const readRadio = (field, fallback = '') => {
-                const el = card.querySelector(`input[data-field="${field}"]:checked`);
-                return el ? el.value : fallback;
-            };
-            return {
-                mode: readMode(),
-                marginPct: readRadio('shaping_template_margin_pct', '0'),
-                defaultStepSeconds: readRadio('shaping_default_step_seconds', '12')
-            };
-        }
-
-        function applyTemplateUiState(card, state) {
-            if (!card || !state) return;
-            const setMode = (value) => {
-                const mode = String(value || 'sliders');
-                const radios = card.querySelectorAll('input[data-field="shaping_template_mode"]');
-                radios.forEach((radio) => {
-                    radio.checked = radio.value === mode;
-                });
-            };
-            const setRadio = (field, value) => {
-                if (value === undefined || value === null || value === '') return;
-                const radios = card.querySelectorAll(`input[data-field="${field}"]`);
-                radios.forEach((radio) => {
-                    radio.checked = radio.value === String(value);
-                });
-            };
-            setMode(state.mode);
-            setRadio('shaping_template_margin_pct', state.marginPct);
-            setRadio('shaping_default_step_seconds', state.defaultStepSeconds);
         }
 
         function setBadges(isDash, playerType) {
@@ -910,7 +909,7 @@
 
         function renderSessionControls(session) {
             const container = document.getElementById('sessionControls');
-            container.innerHTML = TestingSessionUI.renderSessionCard(session);
+            container.innerHTML = TestingSessionUI.renderSessionCard(session, { showBufferDepthChart: true });
         }
 
         function bindSessionControls() {
@@ -1030,12 +1029,14 @@
             const updateTemplateModeUi = (card) => {
                 const mode = getTemplateMode(card);
                 const throughputRow = card.querySelector('[data-field="shaping_throughput_row"]');
+                const throughputInput = card.querySelector('input[data-field="shaping_throughput_mbps"]');
                 const stepList = card.querySelector('[data-field="shaping_pattern_rows"]');
                 const stepActions = card.querySelector('.shape-step-actions');
                 const usePattern = mode !== 'sliders';
                 if (throughputRow) {
-                    throughputRow.style.display = usePattern ? 'none' : '';
+                    throughputRow.classList.toggle('range-row-disabled', usePattern);
                 }
+                if (throughputInput) throughputInput.disabled = usePattern;
                 if (stepList) {
                     stepList.style.display = usePattern ? '' : 'none';
                 }
@@ -1140,19 +1141,20 @@
                         setStepEnabledUi(card, row, !!event.target.checked);
                     }
                 }
+                if (event.target.dataset.field === 'bitrate_chart_max_mbps') {
+                    bitrateAxisMaxBySession.set(
+                        String(card.dataset.sessionId || ''),
+                        normalizeBitrateAxisMaxMode(event.target.value)
+                    );
+                    renderBandwidthChart(card.dataset.sessionId);
+                    return;
+                }
                 if (event.target.dataset.field && event.target.dataset.field.startsWith('shaping_template_')) {
-                    if (card.dataset.skipTemplateAutogen === '1') {
-                        card.dataset.skipTemplateAutogen = '';
-                        updateTemplateModeUi(card);
-                        return;
-                    }
-                    pendingTemplateUi.set(String(card.dataset.sessionId), readTemplateUiState(card));
                     applyTemplatePattern(card, true);
                     return;
                 }
                 if (event.target.dataset.field === 'shaping_default_step_seconds') {
                     if (getTemplateMode(card) !== 'sliders') {
-                        pendingTemplateUi.set(String(card.dataset.sessionId), readTemplateUiState(card));
                         applyTemplatePattern(card, true);
                     } else {
                         scheduleShapingApply(card);
@@ -1276,7 +1278,10 @@
                         nftables_pattern_enabled: true,
                         nftables_pattern_steps: pattern.steps || [],
                         nftables_pattern_segment_duration_seconds: pattern.segment_duration_seconds,
-                        nftables_pattern_default_segments: pattern.default_segments
+                        nftables_pattern_default_segments: pattern.default_segments,
+                        nftables_pattern_default_step_seconds: pattern.default_step_seconds,
+                        nftables_pattern_template_mode: pattern.template_mode,
+                        nftables_pattern_margin_pct: pattern.template_margin_pct
                     }
                 });
                 setTimeout(() => {
@@ -1292,11 +1297,13 @@
                 body: JSON.stringify(payload)
             })
                 .then(() => {
-                    const activePatternSteps = (pattern.steps || []).filter((step) => step && step.enabled !== false);
                     const patternPayload = {
-                        steps: activePatternSteps,
+                        steps: pattern.steps || [],
                         segment_duration_seconds: pattern.segment_duration_seconds,
                         default_segments: pattern.default_segments,
+                        default_step_seconds: pattern.default_step_seconds,
+                        template_mode: pattern.template_mode,
+                        template_margin_pct: pattern.template_margin_pct,
                         delay_ms: payload.delay_ms,
                         loss_pct: payload.loss_pct
                     };
@@ -1309,8 +1316,8 @@
                 .catch(err => console.error('Error applying network shaping', err));
         }
 
-        function findSessionByPlayerId(playerId) {
-            return fetch('/api/sessions')
+        function findSessionByPlayerId(playerId, signal) {
+            return fetch('/api/sessions', { cache: 'no-store', signal })
                 .then(async response => {
                     if (!response.ok) {
                         const body = await response.text();
@@ -1332,13 +1339,30 @@
             const actual = Number(session.mbps_out_avg || session.mbps_out || 0);
             const actual1s = Number(session.mbps_out_1s || 0);
             const active = Number(session.mbps_out_active || 0);
+            let bufferDepth = null;
+            if (video && video.buffered && video.buffered.length > 0) {
+                const current = Number(video.currentTime || 0);
+                const end = Number(video.buffered.end(video.buffered.length - 1) || 0);
+                const depth = end - current;
+                if (Number.isFinite(depth)) {
+                    bufferDepth = Math.max(0, Math.round(depth * 100) / 100);
+                }
+            }
             const playerEstimate = Number(playerEstimatedMbps || 0);
             const currentRendition = Number(currentRenditionMbps || 0);
-            const target = Number(session.nftables_bandwidth_mbps || 0);
+            const patternSteps = Array.isArray(session.nftables_pattern_steps) ? session.nftables_pattern_steps : [];
+            const patternStepIndex = Number(session.nftables_pattern_step_runtime || session.nftables_pattern_step || 0);
+            let target = Number(session.nftables_pattern_rate_runtime_mbps || session.nftables_bandwidth_mbps || 0);
+            if (patternStepIndex > 0 && patternStepIndex <= patternSteps.length) {
+                const activeStepRate = Number(patternSteps[patternStepIndex - 1]?.rate_mbps);
+                if (Number.isFinite(activeStepRate) && activeStepRate >= 0) {
+                    target = activeStepRate;
+                }
+            }
             const key = session.session_id;
             if (!key) return;
             const series = bandwidthHistory.get(key) || [];
-            series.push({ ts: now, actual, actual1s, active, playerEstimate, currentRendition, target });
+            series.push({ ts: now, actual, actual1s, active, bufferDepth, playerEstimate, currentRendition, target });
             const cutoff = now - windowMs;
             const filtered = series.filter(point => point.ts >= cutoff);
             bandwidthHistory.set(key, filtered);
@@ -1362,6 +1386,7 @@
                     actual: point.actual,
                     actual1s: point.actual1s,
                     active: point.active,
+                    bufferDepth: point.bufferDepth,
                     playerEstimate: point.playerEstimate,
                     currentRendition: point.currentRendition,
                     target: point.target
@@ -1369,12 +1394,19 @@
             const actualData = points.map(point => ({ x: point.x, y: point.actual }));
             const actual1sData = points.map(point => ({ x: point.x, y: point.actual1s }));
             const activeData = points.map(point => ({ x: point.x, y: point.active }));
+            const bufferDepthData = points.map(point => ({ x: point.x, y: Number.isFinite(point.bufferDepth) ? point.bufferDepth : null }));
             const estimateData = points.map(point => ({ x: point.x, y: point.playerEstimate || null }));
             const renditionData = points.map(point => ({ x: point.x, y: point.currentRendition || null }));
             const targetData = points.map(point => ({ x: point.x, y: point.target }));
             const visibility = bandwidthVisibility.get(sessionId) || {};
+            const axisMode = normalizeBitrateAxisMaxMode(
+                bitrateAxisMaxBySession.get(String(sessionId)) ||
+                card.querySelector('input[data-field="bitrate_chart_max_mbps"]:checked')?.value ||
+                'auto'
+            );
+            bitrateAxisMaxBySession.set(String(sessionId), axisMode);
             const maxFor = (hidden, data) => (hidden ? [0] : data.map(point => point.y || 0));
-            const maxY = Math.min(100, Math.max(1,
+            const maxYAuto = Math.min(100, Math.max(1,
                 ...maxFor(visibility['Actual (18s)'] === true, actualData),
                 ...maxFor(visibility['Actual (1s)'] === true, actual1sData),
                 ...maxFor(visibility['Active (18s)'] === true, activeData),
@@ -1382,6 +1414,7 @@
                 ...maxFor(visibility['Rendition'] === true, renditionData),
                 ...maxFor(visibility['Limit'] === true, targetData)
             ));
+            const maxY = axisMode === 'auto' ? maxYAuto : Number(axisMode);
             let chart = bandwidthCharts.get(sessionId);
             if (chart && chart.canvas !== canvas) {
                 chart.destroy();
@@ -1535,19 +1568,103 @@
                 chart.options.scales.y.max = maxY;
                 chart.update('none');
             }
+
+            const bufferCanvas = card.querySelector('canvas.buffer-depth-chart');
+            if (!bufferCanvas) return;
+            const bufferValues = bufferDepthData
+                .map((point) => Number(point.y))
+                .filter((value) => Number.isFinite(value) && value >= 0);
+            const maxBufferDepth = Math.min(60, Math.max(5, ...bufferValues, 0));
+            let bufferChart = bufferDepthCharts.get(sessionId);
+            if (bufferChart && bufferChart.canvas !== bufferCanvas) {
+                bufferChart.destroy();
+                bufferChart = null;
+                bufferDepthCharts.delete(sessionId);
+            }
+            if (!bufferChart) {
+                bufferChart = new Chart(bufferCanvas, {
+                    type: 'line',
+                    data: {
+                        datasets: [
+                            {
+                                label: 'Buffer Depth',
+                                data: bufferDepthData,
+                                borderColor: '#2563eb',
+                                backgroundColor: 'rgba(37,99,235,0.12)',
+                                borderWidth: 2,
+                                pointRadius: 0,
+                                tension: 0.2
+                            }
+                        ]
+                    },
+                    options: {
+                        responsive: false,
+                        animation: false,
+                        plugins: {
+                            legend: { display: false }
+                        },
+                        scales: {
+                            x: {
+                                type: 'linear',
+                                min: 0,
+                                max: 300,
+                                grid: { color: '#e5e7eb' },
+                                ticks: {
+                                    color: '#6b7280',
+                                    font: { family: 'Courier New, monospace', size: 10 },
+                                    callback: (value) => {
+                                        if (value === 0) return '-5:00';
+                                        if (value === 150) return '-2:30';
+                                        if (value === 300) return 'now';
+                                        return '';
+                                    }
+                                }
+                            },
+                            y: {
+                                min: 0,
+                                max: maxBufferDepth,
+                                grid: { color: '#e5e7eb' },
+                                ticks: {
+                                    color: '#6b7280',
+                                    font: { family: 'Courier New, monospace', size: 10 }
+                                },
+                                title: {
+                                    display: true,
+                                    text: 'Buffer Depth (s)',
+                                    color: '#6b7280',
+                                    font: { family: 'Courier New, monospace', size: 10 }
+                                }
+                            }
+                        }
+                    }
+                });
+                bufferDepthCharts.set(sessionId, bufferChart);
+            } else {
+                bufferChart.data.datasets[0].data = bufferDepthData;
+                bufferChart.options.scales.y.max = maxBufferDepth;
+                bufferChart.update('none');
+            }
         }
 
         function refreshSession(playerId) {
             if (!playerId) return;
-            findSessionByPlayerId(playerId)
+            if (sessionPollInFlight) {
+                return;
+            }
+            const controller = new AbortController();
+            sessionPollController = controller;
+            sessionPollInFlight = true;
+            const requestSeq = ++sessionPollRequestSeq;
+            findSessionByPlayerId(playerId, controller.signal)
                 .then(session => {
+                    if (requestSeq <= sessionPollLastAppliedSeq) {
+                        return;
+                    }
+                    sessionPollLastAppliedSeq = requestSeq;
                     if (session) {
                         const container = document.getElementById('sessionControls');
                         const existingCard = container ? container.querySelector('.session-card') : null;
                         const sessionKey = String(session.session_id || '');
-                        if (existingCard && String(existingCard.dataset.sessionId || '') === sessionKey) {
-                            pendingTemplateUi.set(sessionKey, readTemplateUiState(existingCard));
-                        }
                         const pending = pendingShaping.get(session.session_id);
                         if (pending && Date.now() - pending.timestamp < 5000) {
                             session = {
@@ -1555,8 +1672,15 @@
                                 ...pending.values
                             };
                         }
+                        session = {
+                            ...session,
+                            ui_bitrate_axis_max: normalizeBitrateAxisMaxMode(
+                                bitrateAxisMaxBySession.get(String(session.session_id)) || session.ui_bitrate_axis_max || 'auto'
+                            )
+                        };
                         if (session.session_id) {
-                            const titleParts = ['Testing Player', `Session ${session.session_id}`];
+                            const portSuffix = session.x_forwarded_port ? ` (Port ${session.x_forwarded_port})` : '';
+                            const titleParts = ['Testing Player', `Session ${session.session_id}${portSuffix}`];
                             if (session.player_id) {
                                 titleParts.push(session.player_id);
                             }
@@ -1574,23 +1698,19 @@
                             return;
                         }
                         renderSessionControls(session);
-                        if (container) {
-                            const restoredCard = container.querySelector('.session-card');
-                            const templateState = pendingTemplateUi.get(sessionKey);
-                            if (restoredCard && templateState) {
-                                applyTemplateUiState(restoredCard, templateState);
-                                // Restore mode visibility without regenerating steps.
-                                restoredCard.dataset.skipTemplateAutogen = '1';
-                                const modeEl = restoredCard.querySelector('input[data-field="shaping_template_mode"]:checked');
-                                if (modeEl) {
-                                    modeEl.dispatchEvent(new Event('change', { bubbles: true }));
-                                }
-                            }
-                        }
                         pushBandwidthSample(session);
                     }
                 })
-                .catch(err => console.error('Error fetching session', err));
+                .catch(err => {
+                    if (err && err.name === 'AbortError') return;
+                    console.error('Error fetching session', err);
+                })
+                .finally(() => {
+                    if (sessionPollController === controller) {
+                        sessionPollController = null;
+                    }
+                    sessionPollInFlight = false;
+                });
         }
 
         function bootstrap() {

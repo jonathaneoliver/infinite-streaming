@@ -17,11 +17,11 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
-	"runtime"
 
 	"github.com/bradfitz/gomemcache/memcache"
 	"github.com/gorilla/mux"
@@ -58,10 +58,33 @@ type TcTrafficManager struct {
 type NftShapeStep struct {
 	RateMbps        float64 `json:"rate_mbps"`
 	DurationSeconds float64 `json:"duration_seconds"`
+	Enabled         bool    `json:"enabled"`
 }
 
 type NftShapePattern struct {
-	Steps []NftShapeStep `json:"steps"`
+	Steps          []NftShapeStep `json:"steps"`
+	ActiveStep     int            `json:"active_step"`
+	ActiveRateMbps float64        `json:"active_rate_mbps"`
+	ActiveAt       string         `json:"active_at"`
+}
+
+func (s *NftShapeStep) UnmarshalJSON(data []byte) error {
+	type alias struct {
+		RateMbps        float64 `json:"rate_mbps"`
+		DurationSeconds float64 `json:"duration_seconds"`
+		Enabled         *bool   `json:"enabled"`
+	}
+	var raw alias
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	s.RateMbps = raw.RateMbps
+	s.DurationSeconds = raw.DurationSeconds
+	s.Enabled = true
+	if raw.Enabled != nil {
+		s.Enabled = *raw.Enabled
+	}
+	return nil
 }
 
 func NewTcTrafficManager(interfaceName string) *TcTrafficManager {
@@ -160,7 +183,11 @@ func (t *TcTrafficManager) UpdateRateLimit(port int, rateMbps float64) error {
 		return err
 	}
 	if rateMbps <= 0 {
-		log.Printf("NETSHAPE cleared rate limit port=%d", port)
+		log.Printf(
+			"NETSHAPE throughput_set ts=%s port=%d rate_mbps=0 action=clear",
+			time.Now().UTC().Format(time.RFC3339Nano),
+			port,
+		)
 		_ = t.UpdateNetem(port, 0, 0)
 		_ = t.RemoveFilter(port)
 		_ = t.RemoveClass(port)
@@ -171,6 +198,14 @@ func (t *TcTrafficManager) UpdateRateLimit(port int, rateMbps float64) error {
 	changeCmd := exec.Command(
 		"tc", "class", "change", "dev", t.interfaceName, "parent", "1:1",
 		"classid", classid, "htb", "rate", fmt.Sprintf("%gmbit", rateMbps), "ceil", fmt.Sprintf("%gmbit", rateMbps),
+	)
+	log.Printf(
+		"NETSHAPE throughput_set ts=%s port=%d rate_mbps=%.3f action=apply classid=%s iface=%s",
+		time.Now().UTC().Format(time.RFC3339Nano),
+		port,
+		rateMbps,
+		classid,
+		t.interfaceName,
 	)
 	if out, err := changeCmd.CombinedOutput(); err != nil {
 		log.Printf("NETSHAPE tc class change failed port=%d: %s", port, strings.TrimSpace(string(out)))
@@ -516,6 +551,13 @@ func (a *App) handleGetSessions(w http.ResponseWriter, r *http.Request) {
 				if pattern, ok := a.getShapePattern(portNum); ok {
 					session["nftables_pattern_enabled"] = len(pattern.Steps) > 0
 					session["nftables_pattern_steps"] = pattern.Steps
+					if pattern.ActiveAt != "" {
+						session["nftables_pattern_step"] = pattern.ActiveStep
+						session["nftables_bandwidth_mbps"] = pattern.ActiveRateMbps
+						session["nftables_pattern_step_runtime"] = pattern.ActiveStep
+						session["nftables_pattern_rate_runtime_mbps"] = pattern.ActiveRateMbps
+						session["nftables_pattern_step_runtime_at"] = pattern.ActiveAt
+					}
 				} else {
 					session["nftables_pattern_enabled"] = false
 					session["nftables_pattern_steps"] = []NftShapeStep{}
@@ -711,6 +753,9 @@ func (a *App) handleNftPort(w http.ResponseWriter, r *http.Request) {
 	if pattern, ok := a.getShapePattern(port); ok {
 		config["pattern_steps"] = pattern.Steps
 		config["pattern_enabled"] = len(pattern.Steps) > 0
+		config["pattern_step_runtime"] = pattern.ActiveStep
+		config["pattern_rate_runtime_mbps"] = pattern.ActiveRateMbps
+		config["pattern_runtime_at"] = pattern.ActiveAt
 	} else {
 		config["pattern_steps"] = []NftShapeStep{}
 		config["pattern_enabled"] = false
@@ -732,6 +777,7 @@ func sanitizeShapeSteps(steps []NftShapeStep) []NftShapeStep {
 		out = append(out, NftShapeStep{
 			RateMbps:        rate,
 			DurationSeconds: math.Round(duration*10) / 10,
+			Enabled:         step.Enabled,
 		})
 	}
 	return out
@@ -744,8 +790,26 @@ func (a *App) getShapePattern(port int) (NftShapePattern, bool) {
 	if !ok {
 		return NftShapePattern{}, false
 	}
-	copied := NftShapePattern{Steps: append([]NftShapeStep(nil), pattern.Steps...)}
+	copied := NftShapePattern{
+		Steps:          append([]NftShapeStep(nil), pattern.Steps...),
+		ActiveStep:     pattern.ActiveStep,
+		ActiveRateMbps: pattern.ActiveRateMbps,
+		ActiveAt:       pattern.ActiveAt,
+	}
 	return copied, true
+}
+
+func (a *App) setShapeRuntimeStep(port int, stepIndex int, rateMbps float64) {
+	a.shapeMu.Lock()
+	defer a.shapeMu.Unlock()
+	pattern, ok := a.shapeStates[port]
+	if !ok {
+		return
+	}
+	pattern.ActiveStep = stepIndex
+	pattern.ActiveRateMbps = rateMbps
+	pattern.ActiveAt = time.Now().UTC().Format(time.RFC3339Nano)
+	a.shapeStates[port] = pattern
 }
 
 func (a *App) stopShapeLoop(port int) {
@@ -765,9 +829,9 @@ func (a *App) applyShapePattern(port int, steps []NftShapeStep, delayMs int, los
 	if a.traffic == nil {
 		return fmt.Errorf("traffic manager not initialized")
 	}
-	a.stopShapeLoop(port)
 	cleanSteps := sanitizeShapeSteps(steps)
 	if len(cleanSteps) == 0 {
+		a.stopShapeLoop(port)
 		a.updateSessionsByPort(port, map[string]interface{}{
 			"nftables_pattern_enabled": false,
 			"nftables_pattern_steps":   []NftShapeStep{},
@@ -778,10 +842,20 @@ func (a *App) applyShapePattern(port int, steps []NftShapeStep, delayMs int, los
 		return err
 	}
 	ctx, cancel := context.WithCancel(context.Background())
+	var oldCancel context.CancelFunc
 	a.shapeMu.Lock()
+	oldCancel = a.shapeLoops[port]
 	a.shapeLoops[port] = cancel
-	a.shapeStates[port] = NftShapePattern{Steps: append([]NftShapeStep(nil), cleanSteps...)}
+	a.shapeStates[port] = NftShapePattern{
+		Steps:          append([]NftShapeStep(nil), cleanSteps...),
+		ActiveStep:     0,
+		ActiveRateMbps: 0,
+		ActiveAt:       "",
+	}
 	a.shapeMu.Unlock()
+	if oldCancel != nil {
+		oldCancel()
+	}
 	a.updateSessionsByPort(port, map[string]interface{}{
 		"nftables_pattern_enabled": true,
 		"nftables_pattern_steps":   cleanSteps,
@@ -793,6 +867,16 @@ func (a *App) applyShapePattern(port int, steps []NftShapeStep, delayMs int, los
 }
 
 func (a *App) runShapePatternLoop(ctx context.Context, port int, steps []NftShapeStep, delayMs int, loss float64) {
+	if len(steps) == 0 {
+		return
+	}
+	hasEnabledStep := false
+	for _, step := range steps {
+		if step.Enabled {
+			hasEnabledStep = true
+			break
+		}
+	}
 	stepIndex := 0
 	for {
 		select {
@@ -801,13 +885,64 @@ func (a *App) runShapePatternLoop(ctx context.Context, port int, steps []NftShap
 		default:
 		}
 		step := steps[stepIndex]
+		ts := time.Now().UTC().Format(time.RFC3339Nano)
+		if !step.Enabled {
+			log.Printf(
+				"NETSHAPE pattern_step ts=%s port=%d step=%d/%d rate_mbps=%.3f duration_s=%.1f enabled=%t status=skipped_disabled",
+				ts,
+				port,
+				stepIndex+1,
+				len(steps),
+				step.RateMbps,
+				step.DurationSeconds,
+				step.Enabled,
+			)
+			if !hasEnabledStep {
+				timer := time.NewTimer(250 * time.Millisecond)
+				select {
+				case <-ctx.Done():
+					timer.Stop()
+					return
+				case <-timer.C:
+				}
+			}
+			stepIndex = (stepIndex + 1) % len(steps)
+			continue
+		}
 		if err := a.traffic.UpdateRateLimit(port, step.RateMbps); err != nil {
-			log.Printf("NETSHAPE pattern rate failed port=%d step=%d rate=%.3f: %v", port, stepIndex+1, step.RateMbps, err)
+			log.Printf(
+				"NETSHAPE pattern_step ts=%s port=%d step=%d/%d rate_mbps=%.3f duration_s=%.1f enabled=%t status=rate_failed err=%v",
+				ts,
+				port,
+				stepIndex+1,
+				len(steps),
+				step.RateMbps,
+				step.DurationSeconds,
+				step.Enabled,
+				err,
+			)
 		} else {
-			log.Printf("NETSHAPE pattern step port=%d step=%d/%d rate=%.3f duration=%.1fs", port, stepIndex+1, len(steps), step.RateMbps, step.DurationSeconds)
+			a.setShapeRuntimeStep(port, stepIndex+1, step.RateMbps)
+			log.Printf(
+				"NETSHAPE pattern_step ts=%s port=%d step=%d/%d rate_mbps=%.3f duration_s=%.1f enabled=%t status=applied",
+				ts,
+				port,
+				stepIndex+1,
+				len(steps),
+				step.RateMbps,
+				step.DurationSeconds,
+				step.Enabled,
+			)
 		}
 		if err := a.traffic.UpdateNetem(port, delayMs, loss); err != nil {
-			log.Printf("NETSHAPE pattern netem failed port=%d delay=%d loss=%.2f: %v", port, delayMs, loss, err)
+			log.Printf(
+				"NETSHAPE pattern_netem ts=%s port=%d delay_ms=%d loss_pct=%.2f status=failed err=%v",
+				ts,
+				port,
+				delayMs,
+				loss,
+				err,
+			)
 		}
 		a.updateSessionsByPort(port, map[string]interface{}{
 			"nftables_bandwidth_mbps":  step.RateMbps,
@@ -854,17 +989,36 @@ func (a *App) handleNftPattern(w http.ResponseWriter, r *http.Request) {
 		LossPct                float64        `json:"loss_pct"`
 		SegmentDurationSeconds float64        `json:"segment_duration_seconds"`
 		DefaultSegments        float64        `json:"default_segments"`
+		DefaultStepSeconds     float64        `json:"default_step_seconds"`
+		TemplateMode           string         `json:"template_mode"`
+		TemplateMarginPct      float64        `json:"template_margin_pct"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 		w.WriteHeader(http.StatusBadRequest)
 		writeJSON(w, map[string]string{"error": "invalid json"})
 		return
 	}
+	switch payload.TemplateMode {
+	case "sliders", "square_wave", "ramp_up", "ramp_down", "pyramid":
+	default:
+		payload.TemplateMode = "sliders"
+	}
+	switch payload.TemplateMarginPct {
+	case 0, 10, 25, 50:
+	default:
+		payload.TemplateMarginPct = 0
+	}
+	if payload.DefaultStepSeconds <= 0 {
+		payload.DefaultStepSeconds = payload.DefaultSegments * payload.SegmentDurationSeconds
+	}
 	if len(payload.Steps) == 0 {
 		a.disablePatternForPort(port)
 		a.updateSessionsByPort(port, map[string]interface{}{
 			"nftables_pattern_segment_duration_seconds": payload.SegmentDurationSeconds,
 			"nftables_pattern_default_segments":         payload.DefaultSegments,
+			"nftables_pattern_default_step_seconds":     payload.DefaultStepSeconds,
+			"nftables_pattern_template_mode":            payload.TemplateMode,
+			"nftables_pattern_margin_pct":               payload.TemplateMarginPct,
 		})
 		writeJSON(w, map[string]interface{}{
 			"success":         true,
@@ -884,6 +1038,9 @@ func (a *App) handleNftPattern(w http.ResponseWriter, r *http.Request) {
 	a.updateSessionsByPort(port, map[string]interface{}{
 		"nftables_pattern_segment_duration_seconds": payload.SegmentDurationSeconds,
 		"nftables_pattern_default_segments":         payload.DefaultSegments,
+		"nftables_pattern_default_step_seconds":     payload.DefaultStepSeconds,
+		"nftables_pattern_template_mode":            payload.TemplateMode,
+		"nftables_pattern_margin_pct":               payload.TemplateMarginPct,
 	})
 	writeJSON(w, map[string]interface{}{
 		"success":         true,
@@ -1383,6 +1540,10 @@ func (a *App) applySessionShaping(session SessionData, port int) {
 	if a.traffic == nil || runtime.GOOS != "linux" {
 		return
 	}
+	if getBool(session, "nftables_pattern_enabled") || sessionHasPatternSteps(session) {
+		// Pattern loop owns the rate while enabled; avoid per-request overrides.
+		return
+	}
 	rate := getFloat(session, "nftables_bandwidth_mbps")
 	delay := getInt(session, "nftables_delay_ms")
 	loss := getFloat(session, "nftables_packet_loss")
@@ -1660,6 +1821,9 @@ func (a *App) removeInactiveSessions() {
 
 func writeJSON(w http.ResponseWriter, payload interface{}) {
 	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+	w.Header().Set("Pragma", "no-cache")
+	w.Header().Set("Expires", "0")
 	enc := json.NewEncoder(w)
 	_ = enc.Encode(payload)
 }
@@ -1693,6 +1857,20 @@ func getBool(m map[string]interface{}, key string) bool {
 		case float64:
 			return v != 0
 		}
+	}
+	return false
+}
+
+func sessionHasPatternSteps(m map[string]interface{}) bool {
+	val, ok := m["nftables_pattern_steps"]
+	if !ok || val == nil {
+		return false
+	}
+	switch v := val.(type) {
+	case []NftShapeStep:
+		return len(v) > 0
+	case []interface{}:
+		return len(v) > 0
 	}
 	return false
 }

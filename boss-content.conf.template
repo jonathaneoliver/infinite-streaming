@@ -133,38 +133,59 @@ server {
     location = /api/content {
         proxy_pass http://go_upload_service;
         add_header Access-Control-Allow-Origin * always;
+        add_header Cache-Control "no-cache, no-store, must-revalidate" always;
+        add_header Pragma "no-cache" always;
+        add_header Expires "0" always;
     }
     
     # Back-compat: older dashboards call /api/sources
     location = /api/sources {
         proxy_pass http://go_upload_service/api/content;
         add_header Access-Control-Allow-Origin * always;
+        add_header Cache-Control "no-cache, no-store, must-revalidate" always;
+        add_header Pragma "no-cache" always;
+        add_header Expires "0" always;
     }
 
     # Testing/session APIs (Flask)
     location = /api/sessions {
         proxy_pass http://go_proxy;
         add_header Access-Control-Allow-Origin * always;
+        add_header Cache-Control "no-cache, no-store, must-revalidate" always;
+        add_header Pragma "no-cache" always;
+        add_header Expires "0" always;
     }
 
     location = /api/clear-sessions {
         proxy_pass http://go_proxy;
         add_header Access-Control-Allow-Origin * always;
+        add_header Cache-Control "no-cache, no-store, must-revalidate" always;
+        add_header Pragma "no-cache" always;
+        add_header Expires "0" always;
     }
 
     location ~ ^/api/session/ {
         proxy_pass http://go_proxy;
         add_header Access-Control-Allow-Origin * always;
+        add_header Cache-Control "no-cache, no-store, must-revalidate" always;
+        add_header Pragma "no-cache" always;
+        add_header Expires "0" always;
     }
 
     location ~ ^/api/failure-settings/ {
         proxy_pass http://go_proxy;
         add_header Access-Control-Allow-Origin * always;
+        add_header Cache-Control "no-cache, no-store, must-revalidate" always;
+        add_header Pragma "no-cache" always;
+        add_header Expires "0" always;
     }
 
     location ~ ^/api/nftables/ {
         proxy_pass http://go_proxy;
         add_header Access-Control-Allow-Origin * always;
+        add_header Cache-Control "no-cache, no-store, must-revalidate" always;
+        add_header Pragma "no-cache" always;
+        add_header Expires "0" always;
     }
 
     # API: Byteranges generation (Go upload service)
@@ -174,6 +195,9 @@ server {
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         add_header Access-Control-Allow-Origin * always;
+        add_header Cache-Control "no-cache, no-store, must-revalidate" always;
+        add_header Pragma "no-cache" always;
+        add_header Expires "0" always;
     }
 
     # API: Upload service - file upload endpoints (two-phase upload)
@@ -192,6 +216,9 @@ server {
         proxy_request_buffering off;
         
         add_header Access-Control-Allow-Origin * always;
+        add_header Cache-Control "no-cache, no-store, must-revalidate" always;
+        add_header Pragma "no-cache" always;
+        add_header Expires "0" always;
     }
     
     # API: Upload service - jobs endpoints
@@ -212,6 +239,9 @@ server {
         proxy_read_timeout 60s;
         
         add_header Access-Control-Allow-Origin * always;
+        add_header Cache-Control "no-cache, no-store, must-revalidate" always;
+        add_header Pragma "no-cache" always;
+        add_header Expires "0" always;
     }
 
     # API: Upload service - sources endpoints (source content library)
@@ -227,6 +257,9 @@ server {
         proxy_read_timeout 60s;
         
         add_header Access-Control-Allow-Origin * always;
+        add_header Cache-Control "no-cache, no-store, must-revalidate" always;
+        add_header Pragma "no-cache" always;
+        add_header Expires "0" always;
     }
 
     # API: First-run setup status/actions
@@ -237,5 +270,8 @@ server {
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
 
         add_header Access-Control-Allow-Origin * always;
+        add_header Cache-Control "no-cache, no-store, must-revalidate" always;
+        add_header Pragma "no-cache" always;
+        add_header Expires "0" always;
     }
 }

@@ -318,9 +318,13 @@
         const inlineHost = options.inlineHost || false;
         const hideTitle = options.hideTitle || false;
         const showPortItem = options.showPortItem || false;
+        const showBufferDepthChart = options.showBufferDepthChart || false;
         const segmentDurationSeconds = inferSegmentDurationSeconds(session);
         const defaultSegments = toPositiveNumber(session.nftables_pattern_default_segments, 2);
-        const defaultStepSeconds = Math.round(segmentDurationSeconds * defaultSegments * 10) / 10;
+        const storedDefaultStepSeconds = toPositiveNumber(session.nftables_pattern_default_step_seconds, 0);
+        const defaultStepSeconds = storedDefaultStepSeconds > 0
+            ? Math.round(storedDefaultStepSeconds * 10) / 10
+            : Math.round(segmentDurationSeconds * defaultSegments * 10) / 10;
         const selectedStepSeconds = closestStepDuration(defaultStepSeconds);
         const videoPresets = collectVideoShapingPresets(playlistUrls);
         const stallRiskThreshold = computeStallRiskThreshold(videoPresets);
@@ -335,7 +339,15 @@
             : [{ rate_mbps: Number(session.nftables_bandwidth_mbps || 0), duration_seconds: defaultStepSeconds }];
         const encodedPresets = encodeURIComponent(JSON.stringify(shapingPresets));
         const encodedVideoPresets = encodeURIComponent(JSON.stringify(videoPresets));
-        const templateMode = 'sliders';
+        const templateModeRaw = String(session.nftables_pattern_template_mode || '').toLowerCase();
+        const templateMode = ['sliders', 'square_wave', 'ramp_up', 'ramp_down', 'pyramid'].includes(templateModeRaw)
+            ? templateModeRaw
+            : 'sliders';
+        const usePattern = templateMode !== 'sliders';
+        const marginRaw = Number(session.nftables_pattern_margin_pct);
+        const marginPct = [0, 10, 25, 50].includes(marginRaw) ? marginRaw : 0;
+        const chartMaxRaw = String(session.ui_bitrate_axis_max || '').toLowerCase();
+        const chartMaxMode = ['auto', '5', '10', '20', '40'].includes(chartMaxRaw) ? chartMaxRaw : 'auto';
         return `
             <div class="session-card" data-session-id="${sessionId}" data-session-port="${session.x_forwarded_port || ''}" data-shaping-presets="${encodedPresets}" data-shaping-video-presets="${encodedVideoPresets}" data-shaping-overhead-mbps="${overheadMbps}">
                 <div class="session-header">
@@ -426,7 +438,37 @@
                         <input type="range" min="0" max="10" step="0.5" data-field="shaping_loss_pct" value="${session.nftables_packet_loss || 0}">
                         <span class="range-value">${session.nftables_packet_loss || 0}</span>
                     </div>
+                    <div class="range-row${usePattern ? ' range-row-disabled' : ''}" data-field="shaping_throughput_row">
+                        <label>Throughput (Mbps)</label>
+                        <input type="range" min="0" max="30" step="0.1" data-field="shaping_throughput_mbps" value="${session.nftables_bandwidth_mbps || 0}" ${usePattern ? 'disabled' : ''}>
+                        <span class="range-value">${session.nftables_bandwidth_mbps || 0}</span>
+                    </div>
                     <div class="shape-pattern-block">
+                        <div class="shape-template-row">
+                            <label>Pattern</label>
+                            <div class="shape-pattern-modes" data-field="shaping_template_mode_group">
+                                <label class="shape-pattern-mode">
+                                    <input type="radio" name="shaping_template_mode_${sessionId}" value="sliders" data-field="shaping_template_mode" ${templateMode === 'sliders' ? 'checked' : ''}>
+                                    <span title="Use slider value">🎚 Sliders</span>
+                                </label>
+                                <label class="shape-pattern-mode">
+                                    <input type="radio" name="shaping_template_mode_${sessionId}" value="square_wave" data-field="shaping_template_mode" ${templateMode === 'square_wave' ? 'checked' : ''}>
+                                    <span title="Alternate max/min bitrate">▁▔ Square</span>
+                                </label>
+                                <label class="shape-pattern-mode">
+                                    <input type="radio" name="shaping_template_mode_${sessionId}" value="ramp_up" data-field="shaping_template_mode" ${templateMode === 'ramp_up' ? 'checked' : ''}>
+                                    <span title="Step low to high">↗ Ramp Up</span>
+                                </label>
+                                <label class="shape-pattern-mode">
+                                    <input type="radio" name="shaping_template_mode_${sessionId}" value="ramp_down" data-field="shaping_template_mode" ${templateMode === 'ramp_down' ? 'checked' : ''}>
+                                    <span title="Step high to low">↘ Ramp Down</span>
+                                </label>
+                                <label class="shape-pattern-mode">
+                                    <input type="radio" name="shaping_template_mode_${sessionId}" value="pyramid" data-field="shaping_template_mode" ${templateMode === 'pyramid' ? 'checked' : ''}>
+                                    <span title="Up then down">⛰ Pyramid</span>
+                                </label>
+                            </div>
+                        </div>
                         <div class="shape-step-defaults">
                             <label>Step Duration</label>
                             <div class="shape-pattern-modes" data-field="shaping_default_step_seconds_group">
@@ -450,65 +492,67 @@
                             <span class="shape-default-seconds" data-field="shaping_default_seconds_label">segment ${segmentDurationSeconds}s</span>
                         </div>
                         <div class="shape-template-row">
-                            <label>Pattern</label>
-                            <div class="shape-pattern-modes" data-field="shaping_template_mode_group">
-                                <label class="shape-pattern-mode">
-                                    <input type="radio" name="shaping_template_mode_${sessionId}" value="sliders" data-field="shaping_template_mode" ${templateMode === 'sliders' ? 'checked' : ''}>
-                                    <span title="Use slider value">🎚 Sliders</span>
-                                </label>
-                                <label class="shape-pattern-mode">
-                                    <input type="radio" name="shaping_template_mode_${sessionId}" value="square_wave" data-field="shaping_template_mode">
-                                    <span title="Alternate max/min bitrate">▁▔ Square</span>
-                                </label>
-                                <label class="shape-pattern-mode">
-                                    <input type="radio" name="shaping_template_mode_${sessionId}" value="ramp_up" data-field="shaping_template_mode">
-                                    <span title="Step low to high">↗ Ramp Up</span>
-                                </label>
-                                <label class="shape-pattern-mode">
-                                    <input type="radio" name="shaping_template_mode_${sessionId}" value="ramp_down" data-field="shaping_template_mode">
-                                    <span title="Step high to low">↘ Ramp Down</span>
-                                </label>
-                                <label class="shape-pattern-mode">
-                                    <input type="radio" name="shaping_template_mode_${sessionId}" value="pyramid" data-field="shaping_template_mode">
-                                    <span title="Up then down">⛰ Pyramid</span>
-                                </label>
-                            </div>
                             <label>Margin</label>
                             <div class="shape-pattern-modes shape-margin-modes" data-field="shaping_template_margin_group">
                                 <label class="shape-pattern-mode">
-                                    <input type="radio" name="shaping_template_margin_${sessionId}" value="0" data-field="shaping_template_margin_pct" checked>
+                                    <input type="radio" name="shaping_template_margin_${sessionId}" value="0" data-field="shaping_template_margin_pct" ${marginPct === 0 ? 'checked' : ''}>
                                     <span>Exact</span>
                                 </label>
                                 <label class="shape-pattern-mode">
-                                    <input type="radio" name="shaping_template_margin_${sessionId}" value="10" data-field="shaping_template_margin_pct">
+                                    <input type="radio" name="shaping_template_margin_${sessionId}" value="10" data-field="shaping_template_margin_pct" ${marginPct === 10 ? 'checked' : ''}>
                                     <span>+10%</span>
                                 </label>
                                 <label class="shape-pattern-mode">
-                                    <input type="radio" name="shaping_template_margin_${sessionId}" value="25" data-field="shaping_template_margin_pct">
+                                    <input type="radio" name="shaping_template_margin_${sessionId}" value="25" data-field="shaping_template_margin_pct" ${marginPct === 25 ? 'checked' : ''}>
                                     <span>+25%</span>
                                 </label>
                                 <label class="shape-pattern-mode">
-                                    <input type="radio" name="shaping_template_margin_${sessionId}" value="50" data-field="shaping_template_margin_pct">
+                                    <input type="radio" name="shaping_template_margin_${sessionId}" value="50" data-field="shaping_template_margin_pct" ${marginPct === 50 ? 'checked' : ''}>
                                     <span>+50%</span>
                                 </label>
                             </div>
                         </div>
-                        <div class="range-row" data-field="shaping_throughput_row">
-                            <label>Throughput (Mbps)</label>
-                            <input type="range" min="0" max="30" step="0.1" data-field="shaping_throughput_mbps" value="${session.nftables_bandwidth_mbps || 0}">
-                            <span class="range-value">${session.nftables_bandwidth_mbps || 0}</span>
-                        </div>
-                        <div class="shape-step-list" data-field="shaping_pattern_rows">
+                        <div class="shape-step-list" data-field="shaping_pattern_rows" style="display:${usePattern ? '' : 'none'};">
                             ${initialSteps.map((step, idx) => renderPatternStepRow(idx, step, shapingPresets)).join('')}
                         </div>
-                        <div class="shape-step-actions">
+                        <div class="shape-step-actions" style="display:${usePattern ? '' : 'none'};">
                             <button type="button" class="btn btn-secondary btn-mini" data-action="add-shaping-step">Add Step</button>
                             <button type="button" class="btn btn-secondary btn-mini" data-action="clear-shaping-pattern">Clear</button>
+                        </div>
+                        <div class="chart-axis-row">
+                            <label>Bitrate Y Max</label>
+                            <div class="shape-pattern-modes" data-field="bitrate_chart_max_mbps_group">
+                                <label class="shape-pattern-mode">
+                                    <input type="radio" name="bitrate_chart_max_mbps_${sessionId}" value="auto" data-field="bitrate_chart_max_mbps" ${chartMaxMode === 'auto' ? 'checked' : ''}>
+                                    <span>Auto</span>
+                                </label>
+                                <label class="shape-pattern-mode">
+                                    <input type="radio" name="bitrate_chart_max_mbps_${sessionId}" value="5" data-field="bitrate_chart_max_mbps" ${chartMaxMode === '5' ? 'checked' : ''}>
+                                    <span>5 Mbps</span>
+                                </label>
+                                <label class="shape-pattern-mode">
+                                    <input type="radio" name="bitrate_chart_max_mbps_${sessionId}" value="10" data-field="bitrate_chart_max_mbps" ${chartMaxMode === '10' ? 'checked' : ''}>
+                                    <span>10 Mbps</span>
+                                </label>
+                                <label class="shape-pattern-mode">
+                                    <input type="radio" name="bitrate_chart_max_mbps_${sessionId}" value="20" data-field="bitrate_chart_max_mbps" ${chartMaxMode === '20' ? 'checked' : ''}>
+                                    <span>20 Mbps</span>
+                                </label>
+                                <label class="shape-pattern-mode">
+                                    <input type="radio" name="bitrate_chart_max_mbps_${sessionId}" value="40" data-field="bitrate_chart_max_mbps" ${chartMaxMode === '40' ? 'checked' : ''}>
+                                    <span>40 Mbps</span>
+                                </label>
+                            </div>
                         </div>
                     </div>
                     <div class="chart-wrap">
                         <canvas class="bandwidth-chart" width="820" height="220" data-field="bandwidth_chart"></canvas>
                     </div>
+                    ${showBufferDepthChart ? `
+                    <div class="chart-wrap">
+                        <canvas class="buffer-depth-chart" width="820" height="170" data-field="buffer_depth_chart"></canvas>
+                    </div>
+                    ` : ''}
                 </div>
                 <div class="session-actions">
                     <button class="btn btn-secondary" data-action="save-session">Save Settings</button>
@@ -601,6 +645,7 @@
         );
         const defaultSegments = Math.max(0.5, Math.round((defaultStepSeconds / segmentDurationSeconds) * 10) / 10);
         const selectedMode = card.querySelector('input[data-field="shaping_template_mode"]:checked')?.value || 'sliders';
+        const selectedMarginPct = Number(card.querySelector('input[data-field="shaping_template_margin_pct"]:checked')?.value || 0);
         const rows = Array.from(card.querySelectorAll('.shape-step-row'));
         const rowSteps = rows.map(row => {
             const rate = Number(row.querySelector('input[data-field="shaping_step_mbps"]')?.value ?? 0);
@@ -628,6 +673,8 @@
             segment_duration_seconds: segmentDurationSeconds,
             default_segments: defaultSegments,
             default_step_seconds: defaultStepSeconds,
+            template_mode: selectedMode,
+            template_margin_pct: selectedMarginPct,
             steps
         };
     }

@@ -186,6 +186,14 @@
             text-align: right;
         }
 
+        .range-row.range-row-disabled {
+            opacity: 0.55;
+        }
+
+        .range-row.range-row-disabled input[type="range"] {
+            pointer-events: none;
+        }
+
         .btn-mini {
             font-size: 11px;
             padding: 4px 8px;
@@ -324,6 +332,19 @@
             margin-bottom: 8px;
         }
 
+        .chart-axis-row {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-bottom: 8px;
+            flex-wrap: wrap;
+        }
+
+        .chart-axis-row > label {
+            font-size: 11px;
+            color: var(--text-secondary);
+        }
+
         .shape-step-enabled {
             display: inline-flex;
             align-items: center;
@@ -420,8 +441,213 @@
         const bandwidthHistory = new Map();
         const bandwidthCharts = new Map();
         const bandwidthVisibility = new Map();
+        const bitrateAxisMaxBySession = new Map();
+        const pendingShaping = new Map();
+        const shapingTimers = new Map();
 
         const TestingSessionUI = window.TestingSessionUI;
+
+        function getShapingPresets(card) {
+            const raw = card.dataset.shapingPresets || '';
+            if (!raw) return [];
+            try {
+                const parsed = JSON.parse(decodeURIComponent(raw));
+                return Array.isArray(parsed) ? parsed : [];
+            } catch (err) {
+                console.warn('Failed to parse shaping presets', err);
+                return [];
+            }
+        }
+
+        function getShapingVideoPresets(card) {
+            const raw = card.dataset.shapingVideoPresets || '';
+            if (!raw) return [];
+            try {
+                const parsed = JSON.parse(decodeURIComponent(raw));
+                return Array.isArray(parsed) ? parsed : [];
+            } catch (err) {
+                console.warn('Failed to parse shaping video presets', err);
+                return [];
+            }
+        }
+
+        function getShapingOverheadMbps(card) {
+            const parsed = Number(card.dataset.shapingOverheadMbps || 0);
+            if (!Number.isFinite(parsed) || parsed < 0) return 0;
+            return parsed;
+        }
+
+        function getStallRiskThresholdMbps(card) {
+            const videoPresets = getShapingVideoPresets(card);
+            if (!videoPresets.length) return null;
+            const minVideo = Math.min(...videoPresets
+                .map((preset) => Number(preset.mbps))
+                .filter((value) => Number.isFinite(value) && value > 0));
+            if (!Number.isFinite(minVideo) || minVideo <= 0) return null;
+            return Math.round(minVideo * 1.1 * 1000) / 1000;
+        }
+
+        function normalizeBitrateAxisMaxMode(value) {
+            const normalized = String(value || 'auto').toLowerCase();
+            return ['auto', '5', '10', '20', '40'].includes(normalized) ? normalized : 'auto';
+        }
+
+        function updateStepRiskUi(card, row) {
+            if (!card || !row) return;
+            const enabled = !!row.querySelector('input[data-field="shaping_step_enabled"]')?.checked;
+            const threshold = getStallRiskThresholdMbps(card);
+            const rate = Number(row.querySelector('input[data-field="shaping_step_mbps"]')?.value ?? 0);
+            const isRisk = enabled && Number.isFinite(threshold) && Number.isFinite(rate) && rate > 0 && rate < threshold;
+            row.classList.toggle('shape-step-risk', isRisk);
+            if (isRisk) {
+                row.title = `Likely stall risk: ${rate} Mbps is below min variant +10% (${threshold} Mbps)`;
+            } else {
+                row.removeAttribute('title');
+            }
+        }
+
+        function updateAllStepRiskUi(card) {
+            if (!card) return;
+            card.querySelectorAll('.shape-step-row').forEach((row) => updateStepRiskUi(card, row));
+        }
+
+        function syncStepPreset(row) {
+            const presetSelect = row.querySelector('select[data-field="shaping_step_mbps_preset"]');
+            const mbpsInput = row.querySelector('input[data-field="shaping_step_mbps"]');
+            if (!presetSelect || !mbpsInput) return;
+            const value = Number(mbpsInput.value);
+            if (!Number.isFinite(value)) {
+                presetSelect.value = 'custom';
+                return;
+            }
+            const matched = Array.from(presetSelect.options).find((option) => {
+                if (option.value === 'custom') return false;
+                return Math.abs(Number(option.value) - value) < 0.001;
+            });
+            presetSelect.value = matched ? matched.value : 'custom';
+        }
+
+        function setStepEnabledUi(card, row, enabled) {
+            row.classList.toggle('shape-step-disabled', !enabled);
+            row.querySelectorAll('select[data-field="shaping_step_mbps_preset"], input[data-field="shaping_step_mbps"], input[data-field="shaping_step_seconds"]').forEach((el) => {
+                el.disabled = !enabled;
+            });
+            updateStepRiskUi(card, row);
+        }
+
+        function makeShapeStepRow(card, rate, seconds, enabled = true) {
+            const row = document.createElement('div');
+            row.className = 'shape-step-row';
+            row.innerHTML = TestingSessionUI.renderPatternStepRowContent(
+                { rate_mbps: rate, duration_seconds: seconds, enabled },
+                getShapingPresets(card)
+            );
+            syncStepPreset(row);
+            setStepEnabledUi(card, row, enabled);
+            return row;
+        }
+
+        function updateStepIndices(card) {
+            const rows = card.querySelectorAll('.shape-step-row');
+            rows.forEach((row, idx) => {
+                row.dataset.stepIndex = String(idx);
+            });
+        }
+
+        function getDefaultStepSeconds(card) {
+            const pattern = TestingSessionUI.readShapingPattern(card);
+            return pattern.default_step_seconds;
+        }
+
+        function getTemplateMode(card) {
+            const selected = card.querySelector('input[data-field="shaping_template_mode"]:checked');
+            return selected ? selected.value : 'sliders';
+        }
+
+        function updateTemplateModeUi(card) {
+            const mode = getTemplateMode(card);
+            const throughputRow = card.querySelector('[data-field="shaping_throughput_row"]');
+            const throughputInput = card.querySelector('input[data-field="shaping_throughput_mbps"]');
+            const stepList = card.querySelector('[data-field="shaping_pattern_rows"]');
+            const stepActions = card.querySelector('.shape-step-actions');
+            const usePattern = mode !== 'sliders';
+            if (throughputRow) throughputRow.classList.toggle('range-row-disabled', usePattern);
+            if (throughputInput) throughputInput.disabled = usePattern;
+            if (stepList) stepList.style.display = usePattern ? '' : 'none';
+            if (stepActions) stepActions.style.display = usePattern ? '' : 'none';
+        }
+
+        function buildTemplateSteps(card) {
+            const mode = getTemplateMode(card);
+            const presets = getShapingVideoPresets(card);
+            if (mode === 'sliders' || !presets.length) return [];
+            const marginPct = Number(card.querySelector('input[data-field="shaping_template_margin_pct"]:checked')?.value || 0);
+            const overheadMbps = getShapingOverheadMbps(card);
+            const defaultSeconds = getDefaultStepSeconds(card);
+            const adjustRate = (rate) => {
+                let adjusted = Number(rate);
+                if (!Number.isFinite(adjusted)) adjusted = 0;
+                adjusted = adjusted * (1 + (marginPct / 100));
+                adjusted += overheadMbps;
+                if (adjusted < 0) adjusted = 0;
+                return Math.round(adjusted * 1000) / 1000;
+            };
+            const baseRates = presets
+                .map((preset) => Number(preset.mbps))
+                .filter((rate) => Number.isFinite(rate) && rate >= 0);
+            if (!baseRates.length) return [];
+            const minRate = baseRates[0];
+            const maxRate = baseRates[baseRates.length - 1];
+            const maxRatePlus50 = Math.round(maxRate * 1.5 * 1000) / 1000;
+            let rates = [];
+            if (mode === 'square_wave') {
+                rates = maxRatePlus50 === minRate ? [maxRatePlus50] : [maxRatePlus50, minRate];
+            } else if (mode === 'ramp_up') {
+                rates = baseRates.slice();
+                if (maxRatePlus50 > maxRate) rates.push(maxRatePlus50);
+            } else if (mode === 'ramp_down') {
+                rates = baseRates.slice().reverse();
+                if (maxRatePlus50 > maxRate) rates.unshift(maxRatePlus50);
+            } else if (mode === 'pyramid') {
+                const ascending = baseRates.slice();
+                if (maxRatePlus50 > maxRate) ascending.push(maxRatePlus50);
+                rates = ascending.concat(ascending.slice(0, -1).reverse());
+            }
+            return rates
+                .filter((rate) => Number.isFinite(rate) && rate >= 0)
+                .map((rate) => ({ rate_mbps: adjustRate(rate), duration_seconds: defaultSeconds }));
+        }
+
+        function applyTemplatePattern(card, shouldSchedule) {
+            const mode = getTemplateMode(card);
+            const rowsHost = card.querySelector('[data-field="shaping_pattern_rows"]');
+            const steps = buildTemplateSteps(card);
+            updateTemplateModeUi(card);
+            if (rowsHost && mode !== 'sliders' && steps.length > 0) {
+                rowsHost.innerHTML = '';
+                steps.forEach((step) => {
+                    rowsHost.appendChild(makeShapeStepRow(card, step.rate_mbps, step.duration_seconds));
+                });
+                updateStepIndices(card);
+                const throughputInput = card.querySelector('input[data-field="shaping_throughput_mbps"]');
+                const throughputValue = card.querySelector('[data-field="shaping_throughput_row"] .range-value');
+                if (throughputInput) throughputInput.value = String(steps[0].rate_mbps);
+                if (throughputValue) throughputValue.textContent = String(steps[0].rate_mbps);
+            }
+            if (shouldSchedule) {
+                scheduleShapingApply(card);
+            }
+        }
+
+        function scheduleShapingApply(card) {
+            const sessionId = card.dataset.sessionId;
+            if (shapingTimers.has(sessionId)) {
+                clearTimeout(shapingTimers.get(sessionId));
+            }
+            shapingTimers.set(sessionId, setTimeout(() => {
+                applyNetworkShapingForCard(card).catch(error => console.error('Error applying network shaping:', error));
+            }, 250));
+        }
 
         function renderSessionTabs(sessions) {
             if (!sessions.length) return '';
@@ -430,7 +656,8 @@
                     ${sessions.map(session => {
                         const id = session.session_id;
                         const isActive = id === activeSessionId ? 'active' : '';
-                        const label = `Session ${id} · ${session.player_id || 'Unknown Player'}`;
+                        const portSuffix = session.x_forwarded_port ? ` (Port ${session.x_forwarded_port})` : '';
+                        const label = `Session ${id}${portSuffix} · ${session.player_id || 'Unknown Player'}`;
                         return `<button class="session-tab ${isActive}" data-session-tab="${id}">${label}</button>`;
                     }).join('')}
                 </div>
@@ -449,9 +676,37 @@
                 activeSessionId = sessionIds[0];
                 isTabLocked = false;
             }
-            const activeSession = sessions.find(session => session.session_id === activeSessionId);
+            let activeSession = sessions.find(session => session.session_id === activeSessionId);
+            const sessionKey = String(activeSession?.session_id || '');
+            const existingCard = container.querySelector('.session-card');
+            const pending = activeSession ? pendingShaping.get(activeSession.session_id) : null;
+            if (activeSession && pending && Date.now() - pending.timestamp < 5000) {
+                activeSession = {
+                    ...activeSession,
+                    ...pending.values
+                };
+            }
+            if (activeSession) {
+                const savedAxisMode = normalizeBitrateAxisMaxMode(
+                    bitrateAxisMaxBySession.get(String(activeSession.session_id)) || activeSession.ui_bitrate_axis_max || 'auto'
+                );
+                activeSession = {
+                    ...activeSession,
+                    ui_bitrate_axis_max: savedAxisMode
+                };
+            }
+            if (activeSession && existingCard && container.contains(document.activeElement) &&
+                String(existingCard.dataset.sessionId || '') === sessionKey) {
+                pushBandwidthSample(activeSession);
+                return;
+            }
             container.innerHTML = renderSessionTabs(sessions) + (activeSession ? TestingSessionUI.renderSessionCard(activeSession, { hideTitle: true, showPortItem: true }) : '');
             if (activeSession) {
+                const restoredCard = container.querySelector('.session-card');
+                if (restoredCard) {
+                    updateTemplateModeUi(restoredCard);
+                    updateAllStepRiskUi(restoredCard);
+                }
                 pushBandwidthSample(activeSession);
             }
         }
@@ -462,7 +717,15 @@
             const actual = Number(session.mbps_out_avg || session.mbps_out || 0);
             const actual1s = Number(session.mbps_out_1s || 0);
             const active = Number(session.mbps_out_active || 0);
-            const limit = Number(session.nftables_bandwidth_mbps || 0);
+            const patternSteps = Array.isArray(session.nftables_pattern_steps) ? session.nftables_pattern_steps : [];
+            const patternStepIndex = Number(session.nftables_pattern_step_runtime || session.nftables_pattern_step || 0);
+            let limit = Number(session.nftables_pattern_rate_runtime_mbps || session.nftables_bandwidth_mbps || 0);
+            if (patternStepIndex > 0 && patternStepIndex <= patternSteps.length) {
+                const activeStepRate = Number(patternSteps[patternStepIndex - 1]?.rate_mbps);
+                if (Number.isFinite(activeStepRate) && activeStepRate >= 0) {
+                    limit = activeStepRate;
+                }
+            }
             const key = session.session_id;
             if (!key) return;
             const series = bandwidthHistory.get(key) || [];
@@ -497,13 +760,20 @@
             const limitData = points.map(point => ({ x: point.x, y: point.limit }));
 
             const visibility = bandwidthVisibility.get(sessionId) || {};
+            const axisMode = normalizeBitrateAxisMaxMode(
+                bitrateAxisMaxBySession.get(String(sessionId)) ||
+                card.querySelector('input[data-field="bitrate_chart_max_mbps"]:checked')?.value ||
+                'auto'
+            );
+            bitrateAxisMaxBySession.set(String(sessionId), axisMode);
             const maxFor = (hidden, data) => (hidden ? [0] : data.map(point => point.y || 0));
-            const maxY = Math.min(100, Math.max(1,
+            const maxYAuto = Math.min(100, Math.max(1,
                 ...maxFor(visibility['Actual (18s)'] === true, actualData),
                 ...maxFor(visibility['Actual (1s)'] === true, actual1sData),
                 ...maxFor(visibility['Active (18s)'] === true, activeData),
                 ...maxFor(visibility['Limit'] === true, limitData)
             ));
+            const maxY = axisMode === 'auto' ? maxYAuto : Number(axisMode);
 
             let chart = bandwidthCharts.get(sessionId);
             if (chart && chart.canvas !== canvas) {
@@ -658,6 +928,30 @@
                 loss_pct: getValue('shaping_loss_pct')
             };
             const pattern = TestingSessionUI.readShapingPattern(card);
+            const sessionId = card.dataset.sessionId;
+            if (sessionId) {
+                pendingShaping.set(sessionId, {
+                    timestamp: Date.now(),
+                    values: {
+                        nftables_bandwidth_mbps: payload.rate_mbps,
+                        nftables_delay_ms: payload.delay_ms,
+                        nftables_packet_loss: payload.loss_pct,
+                        nftables_pattern_enabled: true,
+                        nftables_pattern_steps: pattern.steps || [],
+                        nftables_pattern_segment_duration_seconds: pattern.segment_duration_seconds,
+                        nftables_pattern_default_segments: pattern.default_segments,
+                        nftables_pattern_default_step_seconds: pattern.default_step_seconds,
+                        nftables_pattern_template_mode: pattern.template_mode,
+                        nftables_pattern_margin_pct: pattern.template_margin_pct
+                    }
+                });
+                setTimeout(() => {
+                    const pending = pendingShaping.get(sessionId);
+                    if (pending && Date.now() - pending.timestamp > 4500) {
+                        pendingShaping.delete(sessionId);
+                    }
+                }, 5000);
+            }
             return fetch(`/api/nftables/shape/${port}`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -666,9 +960,12 @@
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
-                    steps: pattern.pattern_enabled ? pattern.steps : [],
+                    steps: pattern.steps || [],
                     segment_duration_seconds: pattern.segment_duration_seconds,
                     default_segments: pattern.default_segments,
+                    default_step_seconds: pattern.default_step_seconds,
+                    template_mode: pattern.template_mode,
+                    template_margin_pct: pattern.template_margin_pct,
                     delay_ms: payload.delay_ms,
                     loss_pct: payload.loss_pct
                 })
@@ -676,7 +973,7 @@
         }
 
         function fetchSessions() {
-            fetch('/api/sessions')
+            fetch('/api/sessions', { cache: 'no-store' })
                 .then(async response => {
                     if (!response.ok) {
                         const body = await response.text();
@@ -714,13 +1011,20 @@
 
         document.getElementById('sessionsContainer').addEventListener('input', (event) => {
             const input = event.target;
+            const card = input.closest('.session-card');
             if (input.matches('input[type="range"]')) {
                 const value = input.value;
                 const valueEl = input.parentElement.querySelector('.range-value');
                 if (valueEl) valueEl.textContent = value;
             }
+            if (input.dataset.field === 'shaping_step_mbps') {
+                const row = input.closest('.shape-step-row');
+                if (card && row) {
+                    syncStepPreset(row);
+                    updateStepRiskUi(card, row);
+                }
+            }
             if (input.dataset.field === 'shaping_segment_duration_seconds' || input.dataset.field === 'shaping_default_segments') {
-                const card = input.closest('.session-card');
                 if (card) {
                     TestingSessionUI.updatePatternDefaultLabel(card);
                 }
@@ -743,8 +1047,42 @@
                     input.checked = target.checked;
                 });
             }
+            if (target.dataset.field === 'shaping_step_enabled') {
+                const row = target.closest('.shape-step-row');
+                if (row) {
+                    setStepEnabledUi(card, row, !!target.checked);
+                }
+            }
+            if (target.dataset.field === 'bitrate_chart_max_mbps') {
+                bitrateAxisMaxBySession.set(
+                    String(card.dataset.sessionId || ''),
+                    normalizeBitrateAxisMaxMode(target.value)
+                );
+                renderBandwidthChart(card.dataset.sessionId);
+                return;
+            }
+            if (target.dataset.field && target.dataset.field.startsWith('shaping_template_')) {
+                applyTemplatePattern(card, true);
+                return;
+            }
+            if (target.dataset.field === 'shaping_default_step_seconds') {
+                if (getTemplateMode(card) !== 'sliders') {
+                    applyTemplatePattern(card, true);
+                } else {
+                    scheduleShapingApply(card);
+                }
+                return;
+            }
+            if (target.dataset.field === 'shaping_step_mbps_preset') {
+                const row = target.closest('.shape-step-row');
+                const mbpsInput = row ? row.querySelector('input[data-field="shaping_step_mbps"]') : null;
+                if (mbpsInput && target.value !== 'custom') {
+                    mbpsInput.value = target.value;
+                    updateStepRiskUi(card, row);
+                }
+            }
             if (target.dataset.field && target.dataset.field.startsWith('shaping_')) {
-                applyNetworkShapingForCard(card).catch(error => console.error('Error applying network shaping:', error));
+                scheduleShapingApply(card);
                 return;
             }
             saveSettingsForCard(card).catch(error => console.error('Error saving settings:', error));
@@ -764,20 +1102,12 @@
             const sessionId = card.dataset.sessionId;
             if (button.dataset.action === 'add-shaping-step') {
                 const rowsHost = card.querySelector('[data-field="shaping_pattern_rows"]');
-                const pattern = TestingSessionUI.readShapingPattern(card);
                 const throughput = Number(card.querySelector('input[data-field="shaping_throughput_mbps"]')?.value || 0);
+                const defaultSeconds = getDefaultStepSeconds(card);
                 if (rowsHost) {
-                    const row = document.createElement('div');
-                    row.className = 'shape-step-row';
-                    row.innerHTML = `
-                        <label>Mbps</label>
-                        <input type="number" min="0" step="0.1" data-field="shaping_step_mbps" value="${throughput}">
-                        <label>Time (s)</label>
-                        <input type="number" min="0.5" step="0.1" data-field="shaping_step_seconds" value="${pattern.default_step_seconds}">
-                        <button type="button" class="btn btn-secondary btn-mini" data-action="remove-shaping-step">Remove</button>
-                    `;
-                    rowsHost.appendChild(row);
-                    applyNetworkShapingForCard(card).catch(error => console.error('Error applying network shaping:', error));
+                    rowsHost.appendChild(makeShapeStepRow(card, throughput, defaultSeconds));
+                    updateStepIndices(card);
+                    scheduleShapingApply(card);
                 }
                 return;
             }
@@ -785,7 +1115,8 @@
                 const row = button.closest('.shape-step-row');
                 if (row) {
                     row.remove();
-                    applyNetworkShapingForCard(card).catch(error => console.error('Error applying network shaping:', error));
+                    updateStepIndices(card);
+                    scheduleShapingApply(card);
                 }
                 return;
             }
@@ -793,7 +1124,7 @@
                 const rowsHost = card.querySelector('[data-field="shaping_pattern_rows"]');
                 if (rowsHost) {
                     rowsHost.innerHTML = '';
-                    applyNetworkShapingForCard(card).catch(error => console.error('Error applying network shaping:', error));
+                    scheduleShapingApply(card);
                 }
                 return;
             }
