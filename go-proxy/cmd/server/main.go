@@ -43,6 +43,8 @@ type App struct {
 	shapeMu      sync.Mutex
 	shapeLoops   map[int]context.CancelFunc
 	shapeStates  map[int]NftShapePattern
+	faultMu      sync.Mutex
+	faultLoops   map[int]context.CancelFunc
 }
 
 type PlaylistInfo struct {
@@ -67,6 +69,20 @@ type NftShapePattern struct {
 	ActiveRateMbps float64        `json:"active_rate_mbps"`
 	ActiveAt       string         `json:"active_at"`
 }
+
+type TransportFaultRuleCounters struct {
+	DropPackets   int64
+	DropBytes     int64
+	RejectPackets int64
+	RejectBytes   int64
+}
+
+const (
+	transportFaultTableName = "go_proxy_faults"
+	transportFaultChainName = "transport_faults"
+	transportUnitsSeconds   = "seconds"
+	transportUnitsPackets   = "packets"
+)
 
 func (s *NftShapeStep) UnmarshalJSON(data []byte) error {
 	type alias struct {
@@ -452,9 +468,11 @@ func main() {
 		},
 		shapeLoops:  map[int]context.CancelFunc{},
 		shapeStates: map[int]NftShapePattern{},
+		faultLoops:  map[int]context.CancelFunc{},
 	}
 
 	go app.trackPortThroughput()
+	app.restoreTransportFaultSchedules()
 
 	router := mux.NewRouter()
 	router.Use(corsMiddleware)
@@ -518,13 +536,82 @@ func (a *App) handleIndex(w http.ResponseWriter, r *http.Request) {
 func (a *App) handleGetSessions(w http.ResponseWriter, r *http.Request) {
 	a.removeInactiveSessions()
 	sessions := a.getSessionList()
+	transportCountersByPort := getTransportFaultRuleCounters()
 	if len(sessions) > 10 {
 		sessions = sessions[:10]
 	}
 	for _, session := range sessions {
-		port := getString(session, "x_forwarded_port")
-		if port != "" && a.traffic != nil {
-			if portNum, err := strconv.Atoi(port); err == nil {
+		if getString(session, "transport_failure_type") == "" {
+			session["transport_failure_type"] = normalizeTransportFaultType(getString(session, "transport_fault_type"))
+		}
+		if getString(session, "transport_failure_type") == "" {
+			session["transport_failure_type"] = "none"
+		}
+		units := normalizeTransportConsecutiveUnits(getString(session, "transport_consecutive_units"))
+		if units == transportUnitsSeconds {
+			units = normalizeTransportConsecutiveUnits(getString(session, "transport_failure_units"))
+		}
+		if units == transportUnitsSeconds {
+			units = transportConsecutiveUnitsFromMode(getString(session, "transport_failure_mode"))
+		}
+		session["transport_failure_units"] = units
+		session["transport_consecutive_units"] = units
+		session["transport_frequency_units"] = transportUnitsSeconds
+		session["transport_failure_mode"] = transportModeFromConsecutiveUnits(units)
+		if _, ok := session["transport_consecutive_failures"]; !ok {
+			legacyOn := floatFromInterface(session["transport_consecutive_seconds"])
+			if legacyOn <= 0 {
+				legacyOn = floatFromInterface(session["transport_fault_on_seconds"])
+			}
+			if legacyOn <= 0 {
+				legacyOn = 1
+			}
+			session["transport_consecutive_failures"] = int(math.Round(legacyOn))
+		}
+		if _, ok := session["transport_failure_frequency"]; !ok {
+			legacyOff := floatFromInterface(session["transport_frequency_seconds"])
+			if legacyOff < 0 {
+				legacyOff = floatFromInterface(session["transport_fault_off_seconds"])
+			}
+			if legacyOff < 0 {
+				legacyOff = 0
+			}
+			session["transport_failure_frequency"] = int(math.Round(legacyOff))
+		}
+		session["transport_fault_type"] = normalizeTransportFaultType(getString(session, "transport_failure_type"))
+		session["transport_fault_on_seconds"] = float64(getInt(session, "transport_consecutive_failures"))
+		session["transport_fault_off_seconds"] = float64(getInt(session, "transport_failure_frequency"))
+		session["transport_consecutive_seconds"] = session["transport_fault_on_seconds"]
+		session["transport_frequency_seconds"] = session["transport_fault_off_seconds"]
+		if _, ok := session["transport_fault_active"]; !ok {
+			session["transport_fault_active"] = false
+		}
+		if _, ok := session["fault_count_total"]; !ok {
+			session["fault_count_total"] = 0
+		}
+		if _, ok := session["fault_count_socket_timeout"]; !ok {
+			session["fault_count_socket_timeout"] = 0
+		}
+		if _, ok := session["fault_count_socket_reject"]; !ok {
+			session["fault_count_socket_reject"] = 0
+		}
+		if _, ok := session["fault_count_socket_drop"]; !ok {
+			session["fault_count_socket_drop"] = 0
+		}
+			dropPackets := int64FromInterface(session["transport_fault_drop_packets"])
+			rejectPackets := int64FromInterface(session["transport_fault_reject_packets"])
+			port := getString(session, "x_forwarded_port")
+			if port != "" {
+				if portNum, err := strconv.Atoi(port); err == nil {
+					if counters, ok := transportCountersByPort[portNum]; ok {
+						dropPackets = counters.DropPackets
+						rejectPackets = counters.RejectPackets
+					}
+					if a.traffic == nil {
+						session["transport_fault_drop_packets"] = dropPackets
+						session["transport_fault_reject_packets"] = rejectPackets
+						continue
+					}
 				config, err := a.traffic.GetPortConfig(portNum)
 				if err == nil && config != nil {
 					if val, ok := config["bandwidth_limit"]; ok {
@@ -572,6 +659,8 @@ func (a *App) handleGetSessions(w http.ResponseWriter, r *http.Request) {
 					}
 				}
 			}
+			session["transport_fault_drop_packets"] = dropPackets
+			session["transport_fault_reject_packets"] = rejectPackets
 		}
 	}
 	writeJSON(w, sessions)
@@ -584,15 +673,174 @@ func (a *App) handleUpdateFailureSettings(w http.ResponseWriter, r *http.Request
 		writeJSON(w, map[string]string{"error": "invalid json"})
 		return
 	}
+	transportKeys := []string{
+		"transport_failure_type",
+		"transport_consecutive_failures",
+		"transport_failure_frequency",
+		"transport_failure_units",
+		"transport_consecutive_units",
+		"transport_frequency_units",
+		"transport_failure_mode",
+		"transport_fault_type",
+		"transport_fault_on_seconds",
+		"transport_fault_off_seconds",
+		"transport_consecutive_seconds",
+		"transport_frequency_seconds",
+	}
+	transportUpdated := false
+	for _, key := range transportKeys {
+		if _, ok := payload[key]; ok {
+			transportUpdated = true
+			break
+		}
+	}
+
 	sessions := a.getSessionList()
+	var targetPort string
+	var transportSnapshot map[string]interface{}
+	manualTransportDisarm := false
+	var transportLogSession SessionData
+	transportShouldApply := false
+	transportFaultType := "none"
+	transportConsecutive := 1
+	transportConsecutiveUnits := transportUnitsSeconds
+	transportFrequency := 0
 	for _, session := range sessions {
 		if getString(session, "session_id") == id {
+			previousTransportType := normalizeTransportFaultType(getString(session, "transport_failure_type"))
+			if previousTransportType == "none" {
+				previousTransportType = normalizeTransportFaultType(getString(session, "transport_fault_type"))
+			}
 			for key, value := range payload {
+				session[key] = value
+			}
+			targetPort = getString(session, "x_forwarded_port")
+			if transportUpdated {
+				typeRaw := getString(session, "transport_failure_type")
+				if typeRaw == "" {
+					typeRaw = getString(session, "transport_fault_type")
+				}
+				if value, ok := payload["transport_failure_type"]; ok {
+					typeRaw = fmt.Sprintf("%v", value)
+				} else if value, ok := payload["transport_fault_type"]; ok {
+					typeRaw = fmt.Sprintf("%v", value)
+				}
+				session["transport_failure_type"] = normalizeTransportFaultType(typeRaw)
+				if session["transport_failure_type"] == "" {
+					session["transport_failure_type"] = "none"
+				}
+
+				unitsRaw := getString(session, "transport_consecutive_units")
+				if unitsRaw == "" {
+					unitsRaw = getString(session, "transport_failure_units")
+				}
+				if unitsRaw == "" {
+					unitsRaw = getString(session, "transport_failure_mode")
+				}
+				if value, ok := payload["transport_consecutive_units"]; ok {
+					unitsRaw = fmt.Sprintf("%v", value)
+				} else if value, ok := payload["transport_failure_units"]; ok {
+					unitsRaw = fmt.Sprintf("%v", value)
+				} else if value, ok := payload["transport_failure_mode"]; ok {
+					unitsRaw = fmt.Sprintf("%v", value)
+				}
+				consecutiveUnits := normalizeTransportConsecutiveUnits(unitsRaw)
+				if strings.Contains(strings.ToLower(strings.TrimSpace(unitsRaw)), "packet") {
+					consecutiveUnits = transportUnitsPackets
+				}
+
+				onValue := floatFromInterface(session["transport_consecutive_failures"])
+				if value, ok := payload["transport_consecutive_failures"]; ok {
+					onValue = floatFromInterface(value)
+				} else if value, ok := payload["transport_consecutive_seconds"]; ok {
+					onValue = floatFromInterface(value)
+				} else if value, ok := payload["transport_fault_on_seconds"]; ok {
+					onValue = floatFromInterface(value)
+				}
+				onValue = math.Max(0, onValue)
+				session["transport_consecutive_failures"] = int(math.Round(onValue))
+
+				offSeconds := floatFromInterface(session["transport_failure_frequency"])
+				if value, ok := payload["transport_failure_frequency"]; ok {
+					offSeconds = floatFromInterface(value)
+				} else if value, ok := payload["transport_frequency_seconds"]; ok {
+					offSeconds = floatFromInterface(value)
+				} else if value, ok := payload["transport_fault_off_seconds"]; ok {
+					offSeconds = floatFromInterface(value)
+				}
+				offSeconds = math.Max(0, offSeconds)
+				session["transport_failure_frequency"] = int(math.Round(offSeconds))
+
+				session["transport_failure_units"] = consecutiveUnits
+				session["transport_consecutive_units"] = consecutiveUnits
+				session["transport_frequency_units"] = transportUnitsSeconds
+				session["transport_failure_mode"] = transportModeFromConsecutiveUnits(consecutiveUnits)
+				session["transport_fault_type"] = session["transport_failure_type"]
+				session["transport_fault_on_seconds"] = float64(getInt(session, "transport_consecutive_failures"))
+				session["transport_fault_off_seconds"] = float64(getInt(session, "transport_failure_frequency"))
+				session["transport_consecutive_seconds"] = session["transport_fault_on_seconds"]
+				session["transport_frequency_seconds"] = session["transport_fault_off_seconds"]
+				session["transport_failure_at"] = nil
+				session["transport_failure_recover_at"] = nil
+				session["transport_reset_failure_type"] = nil
+				session["transport_fault_started_at"] = nil
+				session["transport_fault_active"] = false
+				session["transport_fault_phase_seconds"] = 0.0
+				session["transport_fault_cycle_seconds"] = 0.0
+				transportShouldApply = true
+				transportFaultType = normalizeTransportFaultType(getString(session, "transport_failure_type"))
+				transportConsecutive = getInt(session, "transport_consecutive_failures")
+				transportConsecutiveUnits = normalizeTransportConsecutiveUnits(getString(session, "transport_consecutive_units"))
+				transportFrequency = getInt(session, "transport_failure_frequency")
+				currentTransportType := normalizeTransportFaultType(getString(session, "transport_failure_type"))
+				if previousTransportType != "none" && currentTransportType == "none" {
+					manualTransportDisarm = true
+					transportLogSession = session
+				}
+				transportSnapshot = map[string]interface{}{
+					"transport_failure_type":        session["transport_failure_type"],
+					"transport_consecutive_failures": session["transport_consecutive_failures"],
+					"transport_failure_frequency":   session["transport_failure_frequency"],
+					"transport_failure_units":       session["transport_failure_units"],
+					"transport_consecutive_units":   session["transport_consecutive_units"],
+					"transport_frequency_units":     session["transport_frequency_units"],
+					"transport_failure_mode":        session["transport_failure_mode"],
+					"transport_failure_at":          nil,
+					"transport_failure_recover_at":  nil,
+					"transport_reset_failure_type":  nil,
+					"transport_fault_type":         session["transport_fault_type"],
+					"transport_fault_on_seconds":   session["transport_fault_on_seconds"],
+					"transport_fault_off_seconds":  session["transport_fault_off_seconds"],
+					"transport_consecutive_seconds": session["transport_consecutive_seconds"],
+					"transport_frequency_seconds":   session["transport_frequency_seconds"],
+					"transport_fault_started_at":   session["transport_fault_started_at"],
+					"transport_fault_active":       false,
+					"transport_fault_phase_seconds": 0.0,
+					"transport_fault_cycle_seconds": 0.0,
+				}
+			}
+			break
+		}
+	}
+	if transportUpdated && targetPort != "" && transportSnapshot != nil {
+		for _, session := range sessions {
+			if getString(session, "x_forwarded_port") != targetPort {
+				continue
+			}
+			for key, value := range transportSnapshot {
 				session[key] = value
 			}
 		}
 	}
+	if manualTransportDisarm {
+		logFaultEvent(transportLogSession, targetPort, "transport_none", "control", "transport_disarm_manual")
+	}
 	a.saveSessionList(sessions)
+	if transportShouldApply {
+		if portNum, err := strconv.Atoi(targetPort); err == nil {
+			a.armTransportFaultLoop(portNum, transportFaultType, transportConsecutive, transportConsecutiveUnits, transportFrequency)
+		}
+	}
 	writeJSON(w, map[string]string{"message": "Settings updated successfully"})
 }
 
@@ -614,11 +862,22 @@ func (a *App) handleSession(w http.ResponseWriter, r *http.Request) {
 		a.saveSessionList(filtered)
 		for port := range removedPorts {
 			a.disablePatternForPort(port)
+			a.armTransportFaultLoop(port, "none", 1, transportUnitsSeconds, 0)
 		}
 		writeJSON(w, map[string]string{"message": "Session deleted successfully"})
 		return
 	}
 	if session := a.getSessionData(id); session != nil {
+		dropPackets := int64FromInterface(session["transport_fault_drop_packets"])
+		rejectPackets := int64FromInterface(session["transport_fault_reject_packets"])
+		if port, err := strconv.Atoi(getString(session, "x_forwarded_port")); err == nil {
+			if counters, ok := getTransportFaultRuleCounters()[port]; ok {
+				dropPackets = counters.DropPackets
+				rejectPackets = counters.RejectPackets
+			}
+		}
+		session["transport_fault_drop_packets"] = dropPackets
+		session["transport_fault_reject_packets"] = rejectPackets
 		writeJSON(w, session)
 		return
 	}
@@ -627,14 +886,28 @@ func (a *App) handleSession(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handleClearSessions(w http.ResponseWriter, r *http.Request) {
+	portSet := map[int]struct{}{}
 	a.shapeMu.Lock()
-	ports := make([]int, 0, len(a.shapeLoops))
 	for port := range a.shapeLoops {
-		ports = append(ports, port)
+		portSet[port] = struct{}{}
 	}
 	a.shapeMu.Unlock()
+	for _, session := range a.getSessionList() {
+		portStr := getString(session, "x_forwarded_port")
+		if portStr == "" {
+			continue
+		}
+		if port, err := strconv.Atoi(portStr); err == nil {
+			portSet[port] = struct{}{}
+		}
+	}
+	ports := make([]int, 0, len(portSet))
+	for port := range portSet {
+		ports = append(ports, port)
+	}
 	for _, port := range ports {
 		a.disablePatternForPort(port)
+		a.armTransportFaultLoop(port, "none", 1, transportUnitsSeconds, 0)
 	}
 	_ = a.memcache.FlushAll()
 	writeJSON(w, map[string]string{"message": "All sessions cleared successfully"})
@@ -971,6 +1244,372 @@ func (a *App) disablePatternForPort(port int) {
 	})
 }
 
+func transportRuleComment(port int) string {
+	return fmt.Sprintf("go_proxy_transport_port_%d", port)
+}
+
+func runNftScript(script string) ([]byte, error) {
+	cmd := exec.Command("nft", "-f", "-")
+	cmd.Stdin = strings.NewReader(script)
+	return cmd.CombinedOutput()
+}
+
+func ensureTransportFaultChain() error {
+	if out, err := runNftScript(fmt.Sprintf("add table inet %s\n", transportFaultTableName)); err != nil {
+		msg := strings.ToLower(string(out))
+		if !strings.Contains(msg, "file exists") && !strings.Contains(msg, "exists") {
+			return fmt.Errorf("create nft table failed: %s", strings.TrimSpace(string(out)))
+		}
+	}
+	chainScript := fmt.Sprintf(
+		"add chain inet %s %s { type filter hook input priority -150; policy accept; }\n",
+		transportFaultTableName,
+		transportFaultChainName,
+	)
+	if out, err := runNftScript(chainScript); err != nil {
+		msg := strings.ToLower(string(out))
+		if !strings.Contains(msg, "file exists") && !strings.Contains(msg, "exists") {
+			return fmt.Errorf("create nft chain failed: %s", strings.TrimSpace(string(out)))
+		}
+	}
+	return nil
+}
+
+func clearTransportFaultRule(port int) error {
+	if err := ensureTransportFaultChain(); err != nil {
+		return err
+	}
+	cmd := exec.Command("nft", "-a", "list", "chain", "inet", transportFaultTableName, transportFaultChainName)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		msg := strings.ToLower(string(out))
+		if strings.Contains(msg, "no such file") || strings.Contains(msg, "does not exist") {
+			return nil
+		}
+		return fmt.Errorf("list transport fault chain failed: %s", strings.TrimSpace(string(out)))
+	}
+	comment := transportRuleComment(port)
+	handleRe := regexp.MustCompile(`handle\s+([0-9]+)`)
+	for _, line := range strings.Split(string(out), "\n") {
+		if !strings.Contains(line, comment) {
+			continue
+		}
+		match := handleRe.FindStringSubmatch(line)
+		if len(match) != 2 {
+			continue
+		}
+		delCmd := exec.Command("nft", "delete", "rule", "inet", transportFaultTableName, transportFaultChainName, "handle", match[1])
+		if delOut, delErr := delCmd.CombinedOutput(); delErr != nil {
+			msg := strings.ToLower(string(delOut))
+			if strings.Contains(msg, "no such file") || strings.Contains(msg, "does not exist") {
+				continue
+			}
+			return fmt.Errorf("delete transport fault rule failed: %s", strings.TrimSpace(string(delOut)))
+		}
+	}
+	return nil
+}
+
+func getTransportFaultRuleCounters() map[int]TransportFaultRuleCounters {
+	countersByPort := map[int]TransportFaultRuleCounters{}
+	cmd := exec.Command("nft", "-a", "list", "chain", "inet", transportFaultTableName, transportFaultChainName)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		msg := strings.ToLower(string(out))
+		if strings.Contains(msg, "no such file") || strings.Contains(msg, "does not exist") {
+			return countersByPort
+		}
+		return countersByPort
+	}
+
+	commentRe := regexp.MustCompile(`comment\s+"go_proxy_transport_port_([0-9]+)"`)
+	counterRe := regexp.MustCompile(`counter packets ([0-9]+) bytes ([0-9]+)`)
+	for _, line := range strings.Split(string(out), "\n") {
+		if !strings.Contains(line, "go_proxy_transport_port_") {
+			continue
+		}
+		commentMatch := commentRe.FindStringSubmatch(line)
+		if len(commentMatch) != 2 {
+			continue
+		}
+		port, convErr := strconv.Atoi(commentMatch[1])
+		if convErr != nil {
+			continue
+		}
+		counterMatch := counterRe.FindStringSubmatch(line)
+		if len(counterMatch) != 3 {
+			continue
+		}
+		packets, packetErr := strconv.ParseInt(counterMatch[1], 10, 64)
+		bytesVal, bytesErr := strconv.ParseInt(counterMatch[2], 10, 64)
+		if packetErr != nil || bytesErr != nil {
+			continue
+		}
+		entry := countersByPort[port]
+		lower := strings.ToLower(line)
+		if strings.Contains(lower, " reject") {
+			entry.RejectPackets += packets
+			entry.RejectBytes += bytesVal
+		} else if strings.Contains(lower, " drop") {
+			entry.DropPackets += packets
+			entry.DropBytes += bytesVal
+		}
+		countersByPort[port] = entry
+	}
+
+	return countersByPort
+}
+
+func applyTransportFaultRule(port int, faultType string) error {
+	if err := ensureTransportFaultChain(); err != nil {
+		return err
+	}
+	if err := clearTransportFaultRule(port); err != nil {
+		return err
+	}
+	faultType = normalizeTransportFaultType(faultType)
+	if faultType == "none" {
+		return nil
+	}
+	ruleAction := "drop"
+	if faultType == "reject" {
+		ruleAction = "reject with tcp reset"
+	}
+	script := fmt.Sprintf(
+		"add rule inet %s %s tcp dport %d counter %s comment %q\n",
+		transportFaultTableName,
+		transportFaultChainName,
+		port,
+		ruleAction,
+		transportRuleComment(port),
+	)
+	if out, err := runNftScript(script); err != nil {
+		return fmt.Errorf("add transport fault rule failed: %s", strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+func transportFaultConfigFromSession(session SessionData) (string, int, string, int) {
+	faultType := normalizeTransportFaultType(getString(session, "transport_failure_type"))
+	if faultType == "none" {
+		faultType = normalizeTransportFaultType(getString(session, "transport_fault_type"))
+	}
+	consecutiveUnits := normalizeTransportConsecutiveUnits(getString(session, "transport_consecutive_units"))
+	if consecutiveUnits == transportUnitsSeconds {
+		consecutiveUnits = normalizeTransportConsecutiveUnits(getString(session, "transport_failure_units"))
+	}
+	if consecutiveUnits == transportUnitsSeconds {
+		consecutiveUnits = transportConsecutiveUnitsFromMode(getString(session, "transport_failure_mode"))
+	}
+	consecutive := getInt(session, "transport_consecutive_failures")
+	if consecutive < 0 {
+		consecutive = int(math.Round(floatFromInterface(session["transport_consecutive_seconds"])))
+	}
+	if consecutive < 0 {
+		consecutive = int(math.Round(floatFromInterface(session["transport_fault_on_seconds"])))
+	}
+	if consecutive < 0 {
+		consecutive = 0
+	}
+	frequency := getInt(session, "transport_failure_frequency")
+	if frequency < 0 {
+		frequency = int(math.Round(floatFromInterface(session["transport_frequency_seconds"])))
+	}
+	if frequency < 0 {
+		frequency = int(math.Round(floatFromInterface(session["transport_fault_off_seconds"])))
+	}
+	if frequency < 0 {
+		frequency = 0
+	}
+	return faultType, consecutive, consecutiveUnits, frequency
+}
+
+func (a *App) getFirstSessionByPort(port int) SessionData {
+	portStr := strconv.Itoa(port)
+	for _, session := range a.getSessionList() {
+		if getString(session, "x_forwarded_port") == portStr {
+			return session
+		}
+	}
+	return nil
+}
+
+func (a *App) setTransportFaultSessionState(port int, faultType string, active bool, startedAt string, phaseSeconds float64, cycleSeconds float64) {
+	updates := map[string]interface{}{
+		"transport_failure_type":      faultType,
+		"transport_fault_type":        faultType,
+		"transport_fault_active":      active,
+		"transport_fault_started_at":  startedAt,
+		"transport_fault_phase_seconds": math.Round(phaseSeconds*1000) / 1000,
+		"transport_fault_cycle_seconds": math.Round(cycleSeconds*1000) / 1000,
+	}
+	a.updateSessionsByPort(port, updates)
+}
+
+func (a *App) resetTransportFaultCounters(port int) {
+	a.updateSessionsByPort(port, map[string]interface{}{
+		"transport_fault_drop_packets":   int64(0),
+		"transport_fault_reject_packets": int64(0),
+	})
+}
+
+func (a *App) stopTransportFaultLoop(port int) {
+	a.faultMu.Lock()
+	cancel, ok := a.faultLoops[port]
+	if ok {
+		delete(a.faultLoops, port)
+	}
+	a.faultMu.Unlock()
+	if ok && cancel != nil {
+		cancel()
+	}
+}
+
+func (a *App) armTransportFaultLoop(port int, faultType string, consecutiveThreshold int, consecutiveUnits string, frequencySeconds int) {
+	if consecutiveThreshold < 0 {
+		consecutiveThreshold = 0
+	}
+	if frequencySeconds < 0 {
+		frequencySeconds = 0
+	}
+	consecutiveUnits = normalizeTransportConsecutiveUnits(consecutiveUnits)
+	faultType = normalizeTransportFaultType(faultType)
+	a.stopTransportFaultLoop(port)
+	if err := clearTransportFaultRule(port); err != nil {
+		log.Printf("FAULT transport_cleanup_failed port=%d err=%v", port, err)
+	}
+	if faultType == "none" {
+		a.setTransportFaultSessionState(port, "none", false, "", 0, 0)
+		return
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	a.faultMu.Lock()
+	a.faultLoops[port] = cancel
+	a.faultMu.Unlock()
+	go a.runTransportFaultLoop(ctx, port, faultType, consecutiveThreshold, consecutiveUnits, frequencySeconds)
+}
+
+func (a *App) runTransportFaultLoop(ctx context.Context, port int, faultType string, consecutiveThreshold int, consecutiveUnits string, frequencySeconds int) {
+	defer func() {
+		a.faultMu.Lock()
+		if cancel, ok := a.faultLoops[port]; ok && cancel != nil {
+			delete(a.faultLoops, port)
+		}
+		a.faultMu.Unlock()
+		_ = clearTransportFaultRule(port)
+	}()
+
+	cycleSeconds := float64(frequencySeconds)
+	if consecutiveUnits == transportUnitsSeconds {
+		cycleSeconds = float64(consecutiveThreshold + frequencySeconds)
+	}
+	if consecutiveThreshold <= 0 {
+		cycleSeconds = 0
+	}
+	if cycleSeconds < 0 {
+		cycleSeconds = 0
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+
+		start := time.Now().UTC()
+		a.resetTransportFaultCounters(port)
+		if err := applyTransportFaultRule(port, faultType); err != nil {
+			log.Printf("FAULT transport_arm_failed ts=%s port=%d fault_type=transport_%s err=%v", start.Format(time.RFC3339Nano), port, faultType, err)
+		}
+		a.setTransportFaultSessionState(port, faultType, true, start.Format(time.RFC3339Nano), 0, cycleSeconds)
+		if session := a.getFirstSessionByPort(port); session != nil {
+			bumpFaultCounter(session, "transport_"+faultType)
+			logFaultEvent(session, strconv.Itoa(port), "transport_"+faultType, "control", "transport_arm")
+		}
+		if consecutiveThreshold <= 0 {
+			<-ctx.Done()
+			return
+		}
+
+		if consecutiveUnits == transportUnitsPackets {
+			ticker := time.NewTicker(100 * time.Millisecond)
+			reachedThreshold := false
+			for !reachedThreshold {
+				select {
+				case <-ctx.Done():
+					ticker.Stop()
+					return
+				case now := <-ticker.C:
+					matchedPackets := int64(0)
+					if counters, ok := getTransportFaultRuleCounters()[port]; ok {
+						if faultType == "reject" {
+							matchedPackets = counters.RejectPackets
+						} else {
+							matchedPackets = counters.DropPackets
+						}
+					}
+					phaseSeconds := now.Sub(start).Seconds()
+					a.setTransportFaultSessionState(port, faultType, true, start.Format(time.RFC3339Nano), phaseSeconds, cycleSeconds)
+					if matchedPackets >= int64(consecutiveThreshold) {
+						reachedThreshold = true
+					}
+				}
+			}
+			ticker.Stop()
+		} else {
+			timer := time.NewTimer(time.Duration(consecutiveThreshold) * time.Second)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return
+			case <-timer.C:
+			}
+		}
+
+		_ = clearTransportFaultRule(port)
+		if frequencySeconds <= 0 {
+			a.setTransportFaultSessionState(port, "none", false, "", 0, cycleSeconds)
+			if session := a.getFirstSessionByPort(port); session != nil {
+				logFaultEvent(session, strconv.Itoa(port), "transport_none", "control", "transport_disarm_auto")
+			}
+			return
+		}
+
+		a.setTransportFaultSessionState(port, faultType, false, "", 0, cycleSeconds)
+		if session := a.getFirstSessionByPort(port); session != nil {
+			logFaultEvent(session, strconv.Itoa(port), "transport_none", "control", "transport_disarm_cycle")
+		}
+
+		pause := time.NewTimer(time.Duration(frequencySeconds) * time.Second)
+		select {
+		case <-ctx.Done():
+			pause.Stop()
+			return
+		case <-pause.C:
+		}
+	}
+}
+
+func (a *App) restoreTransportFaultSchedules() {
+	seenPorts := map[int]struct{}{}
+	for _, session := range a.getSessionList() {
+		portStr := getString(session, "x_forwarded_port")
+		if portStr == "" {
+			continue
+		}
+		port, err := strconv.Atoi(portStr)
+		if err != nil {
+			continue
+		}
+		if _, ok := seenPorts[port]; ok {
+			continue
+		}
+		seenPorts[port] = struct{}{}
+		faultType, consecutive, consecutiveUnits, frequency := transportFaultConfigFromSession(session)
+		a.armTransportFaultLoop(port, faultType, consecutive, consecutiveUnits, frequency)
+	}
+}
+
 func (a *App) handleNftPattern(w http.ResponseWriter, r *http.Request) {
 	if a.traffic == nil {
 		w.WriteHeader(http.StatusServiceUnavailable)
@@ -1260,6 +1899,144 @@ func (a *App) handleForceClose(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte("Force closing"))
 }
 
+func requestKindLabel(isSegment, isManifest, isPlaylist bool) string {
+	if isSegment {
+		return "segment"
+	}
+	if isPlaylist {
+		return "playlist"
+	}
+	if isManifest {
+		return "manifest"
+	}
+	return "other"
+}
+
+func logFaultEvent(session SessionData, port, faultType, requestKind, actionTaken string) {
+	if strings.HasPrefix(faultType, "transport_") {
+		consecutive := float64(getInt(session, "transport_consecutive_failures"))
+		if consecutive <= 0 {
+			consecutive = floatFromInterface(session["transport_consecutive_seconds"])
+		}
+		consecutiveUnits := normalizeTransportConsecutiveUnits(getString(session, "transport_consecutive_units"))
+		if consecutiveUnits == transportUnitsSeconds {
+			consecutiveUnits = normalizeTransportConsecutiveUnits(getString(session, "transport_failure_units"))
+		}
+		if consecutiveUnits == transportUnitsSeconds {
+			consecutiveUnits = transportConsecutiveUnitsFromMode(getString(session, "transport_failure_mode"))
+		}
+		frequency := float64(getInt(session, "transport_failure_frequency"))
+		if frequency < 0 {
+			frequency = floatFromInterface(session["transport_frequency_seconds"])
+		}
+		log.Printf(
+			"FAULT ts=%s session_id=%s port=%s fault_type=%s request_kind=%s action_taken=%s transport_consecutive=%.3f transport_consecutive_units=%s transport_frequency_s=%.3f transport_active=%t transport_phase_s=%.3f transport_cycle_s=%.3f",
+			time.Now().UTC().Format(time.RFC3339Nano),
+			getString(session, "session_id"),
+			port,
+			faultType,
+			requestKind,
+			actionTaken,
+			consecutive,
+			consecutiveUnits,
+			frequency,
+			getBool(session, "transport_fault_active"),
+			floatFromInterface(session["transport_fault_phase_seconds"]),
+			floatFromInterface(session["transport_fault_cycle_seconds"]),
+		)
+		return
+	}
+	log.Printf(
+		"FAULT ts=%s session_id=%s port=%s fault_type=%s request_kind=%s action_taken=%s",
+		time.Now().UTC().Format(time.RFC3339Nano),
+		getString(session, "session_id"),
+		port,
+		faultType,
+		requestKind,
+		actionTaken,
+	)
+}
+
+func bumpFaultCounter(session SessionData, faultType string) {
+	faultType = strings.TrimSpace(strings.ToLower(faultType))
+	if faultType == "" || faultType == "none" {
+		return
+	}
+	key := "fault_count_" + strings.ReplaceAll(faultType, "-", "_")
+	session[key] = getInt(session, key) + 1
+	session["fault_count_total"] = getInt(session, "fault_count_total") + 1
+}
+
+func applySocketFault(w http.ResponseWriter, faultType string) (string, error) {
+	hj, ok := w.(http.Hijacker)
+	if !ok {
+		return "", fmt.Errorf("hijack unsupported")
+	}
+	conn, _, err := hj.Hijack()
+	if err != nil {
+		return "", err
+	}
+	switch faultType {
+	case "socket_reject", "transport_reject":
+		if tcpConn, ok := conn.(*net.TCPConn); ok {
+			_ = tcpConn.SetLinger(0)
+		}
+		_ = conn.Close()
+		return "socket_reject", nil
+	case "socket_drop", "transport_drop":
+		go func(c net.Conn) {
+			time.Sleep(90 * time.Second)
+			_ = c.Close()
+		}(conn)
+		return "socket_drop", nil
+	case "socket_timeout":
+		go func(c net.Conn) {
+			time.Sleep(45 * time.Second)
+			_ = c.Close()
+		}(conn)
+		return "socket_timeout", nil
+	default:
+		_ = conn.Close()
+		return "", fmt.Errorf("unsupported socket fault type: %s", faultType)
+	}
+}
+
+func normalizeTransportFaultType(raw string) string {
+	switch strings.TrimSpace(strings.ToLower(raw)) {
+	case "drop":
+		return "drop"
+	case "reject":
+		return "reject"
+	default:
+		return "none"
+	}
+}
+
+func normalizeTransportConsecutiveUnits(raw string) string {
+	switch strings.TrimSpace(strings.ToLower(raw)) {
+	case "packet", "packets", "pkt", "pkts":
+		return transportUnitsPackets
+	default:
+		return transportUnitsSeconds
+	}
+}
+
+func transportConsecutiveUnitsFromMode(raw string) string {
+	switch strings.TrimSpace(strings.ToLower(raw)) {
+	case "failures_per_packets", "failures_per_packet":
+		return transportUnitsPackets
+	default:
+		return transportUnitsSeconds
+	}
+}
+
+func transportModeFromConsecutiveUnits(units string) string {
+	if normalizeTransportConsecutiveUnits(units) == transportUnitsPackets {
+		return "failures_per_packets"
+	}
+	return "failures_per_seconds"
+}
+
 func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 	filename := strings.TrimPrefix(r.URL.Path, "/")
 	if filename == "" {
@@ -1342,6 +2119,28 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 			"segment_failure_recover_at":  nil,
 			"manifest_failure_at":         nil,
 			"manifest_failure_recover_at": nil,
+			"transport_failure_type":      "none",
+			"transport_failure_frequency": 0,
+			"transport_consecutive_failures": 1,
+			"transport_failure_units":     "seconds",
+			"transport_consecutive_units": "seconds",
+			"transport_frequency_units":   "seconds",
+			"transport_failure_mode":      "failures_per_seconds",
+			"transport_failure_at":        nil,
+			"transport_failure_recover_at": nil,
+			"transport_fault_type":        "none",
+			"transport_fault_on_seconds":  1,
+			"transport_fault_off_seconds": 0,
+			"transport_consecutive_seconds": 1,
+			"transport_frequency_seconds":   0,
+			"transport_fault_active":      false,
+			"transport_fault_started_at":  nil,
+			"transport_fault_drop_packets":   0,
+			"transport_fault_reject_packets": 0,
+			"fault_count_total":           0,
+			"fault_count_socket_timeout":  0,
+			"fault_count_socket_reject":   0,
+			"fault_count_socket_drop":     0,
 		}
 		sessionList = append(sessionList, sessionData)
 		a.saveSessionList(sessionList)
@@ -1400,6 +2199,7 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 
 	upstreamURL := fmt.Sprintf("http://%s:%s/%s", a.upstreamHost, a.upstreamPort, filename)
 	contentType, isManifest, isPlaylist, isSegment, playlistInfo := a.getContentType(upstreamURL)
+	requestKind := requestKindLabel(isSegment, isManifest, isPlaylist)
 
 	if isPlaylist {
 		playlistUrls := getPlaylistInfos(sessionData)
@@ -1429,24 +2229,44 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 
 	if failureType != "none" {
 		log.Printf("FAILURE! Identifier: %s, %s, %s", sessionNumber, upstreamURL, failureType)
+		actionTaken := ""
 		if failureType == "corrupted" && isSegment {
 			proxyReq, err := http.NewRequestWithContext(r.Context(), http.MethodGet, upstreamURL, nil)
 			if err != nil {
+				actionTaken = "http_502_new_request_failed"
 				w.WriteHeader(http.StatusBadGateway)
+				bumpFaultCounter(sessionData, failureType)
+				logFaultEvent(sessionData, externalPort, failureType, requestKind, actionTaken)
+				updateSessionTraffic(sessionData, requestBytes, 0)
+				sessionList[index] = sessionData
+				a.saveSessionList(sessionList)
 				return
 			}
 			resp, err := a.client.Do(proxyReq)
 			if err != nil {
 				if errors.Is(err, context.DeadlineExceeded) {
+					actionTaken = "http_504_upstream_timeout"
 					w.WriteHeader(http.StatusGatewayTimeout)
-					return
+				} else {
+					actionTaken = "http_502_upstream_failed"
+					w.WriteHeader(http.StatusBadGateway)
 				}
-				w.WriteHeader(http.StatusBadGateway)
+				bumpFaultCounter(sessionData, failureType)
+				logFaultEvent(sessionData, externalPort, failureType, requestKind, actionTaken)
+				updateSessionTraffic(sessionData, requestBytes, 0)
+				sessionList[index] = sessionData
+				a.saveSessionList(sessionList)
 				return
 			}
 			defer resp.Body.Close()
 			if resp.StatusCode >= 400 {
+				actionTaken = fmt.Sprintf("http_%d_upstream", resp.StatusCode)
 				w.WriteHeader(resp.StatusCode)
+				bumpFaultCounter(sessionData, failureType)
+				logFaultEvent(sessionData, externalPort, failureType, requestKind, actionTaken)
+				updateSessionTraffic(sessionData, requestBytes, 0)
+				sessionList[index] = sessionData
+				a.saveSessionList(sessionList)
 				return
 			}
 			if contentType != "" {
@@ -1471,7 +2291,25 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 			_ = writer.Flush()
+			actionTaken = "segment_corrupted_zero_fill"
+			bumpFaultCounter(sessionData, failureType)
+			logFaultEvent(sessionData, externalPort, failureType, requestKind, actionTaken)
 			updateSessionTraffic(sessionData, requestBytes, bytesOut)
+			sessionList[index] = sessionData
+			a.saveSessionList(sessionList)
+			return
+		}
+		if failureType == "socket_timeout" || failureType == "socket_reject" || failureType == "socket_drop" {
+			socketAction, err := applySocketFault(w, failureType)
+			if err != nil {
+				actionTaken = "fallback_http_503"
+				w.WriteHeader(http.StatusServiceUnavailable)
+			} else {
+				actionTaken = socketAction
+			}
+			bumpFaultCounter(sessionData, failureType)
+			logFaultEvent(sessionData, externalPort, failureType, requestKind, actionTaken)
+			updateSessionTraffic(sessionData, requestBytes, 0)
 			sessionList[index] = sessionData
 			a.saveSessionList(sessionList)
 			return
@@ -1481,26 +2319,39 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 		a.saveSessionList(sessionList)
 		switch failureType {
 		case "404":
+			actionTaken = "http_404"
 			w.WriteHeader(http.StatusNotFound)
 		case "403":
+			actionTaken = "http_403"
 			w.WriteHeader(http.StatusForbidden)
 		case "500":
+			actionTaken = "http_500"
 			w.WriteHeader(http.StatusInternalServerError)
 		case "timeout":
+			actionTaken = "http_504_timeout"
 			w.WriteHeader(http.StatusGatewayTimeout)
 		case "connection_refused":
+			actionTaken = "http_503_connection_refused"
 			w.WriteHeader(http.StatusServiceUnavailable)
 		case "dns_failure":
+			actionTaken = "http_502_dns_failure"
 			w.WriteHeader(http.StatusBadGateway)
 		case "rate_limiting":
+			actionTaken = "http_429_rate_limited"
 			w.WriteHeader(http.StatusTooManyRequests)
 		case "hung":
+			actionTaken = "hung_sleep_300s"
+			bumpFaultCounter(sessionData, failureType)
+			logFaultEvent(sessionData, externalPort, failureType, requestKind, actionTaken)
 			log.Printf("hanging response to request: %s", upstreamURL)
 			time.Sleep(5 * time.Minute)
 			return
 		default:
+			actionTaken = "http_500_unknown_failure"
 			w.WriteHeader(http.StatusInternalServerError)
 		}
+		bumpFaultCounter(sessionData, failureType)
+		logFaultEvent(sessionData, externalPort, failureType, requestKind, actionTaken)
 		return
 	}
 
@@ -1801,6 +2652,7 @@ func (a *App) removeInactiveSessions() {
 	}
 	active := make([]SessionData, 0, len(sessions))
 	now := time.Now()
+	removedPorts := map[int]struct{}{}
 	for _, session := range sessions {
 		lastRequest := getString(session, "last_request")
 		if lastRequest == "" {
@@ -1813,10 +2665,17 @@ func (a *App) removeInactiveSessions() {
 		if now.Sub(lastTime) < 60*time.Second {
 			active = append(active, session)
 		} else {
+			if port, err := strconv.Atoi(getString(session, "x_forwarded_port")); err == nil {
+				removedPorts[port] = struct{}{}
+			}
 			_ = a.memcache.Delete(getString(session, "session_id"))
 		}
 	}
 	a.saveSessionList(active)
+	for port := range removedPorts {
+		a.disablePatternForPort(port)
+		a.armTransportFaultLoop(port, "none", 1, transportUnitsSeconds, 0)
+	}
 }
 
 func writeJSON(w http.ResponseWriter, payload interface{}) {

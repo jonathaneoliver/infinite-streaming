@@ -54,6 +54,7 @@ To enable publishing in your fork:
 - **Live Offset**: compares live offset, buffer depth, and seekable ranges across variants.
 - **Go‑Monitor**: shows active workers, request counts, last request time, idle timeout, and tick timings.
 - **Testing session**: failure injection (HTTP errors, hung, corrupted segments), player selection (HLS.js/Shaka/Video.js/Native), and HTTP failure logging.
+- **Transport faults**: port-wide DROP/REJECT via nftables with packet counters.
 
 ### Global selection
 - The selected content + URL persists across pages. Choosing a tile or selector updates the global selection and is reflected in the header and dev tools.
@@ -180,6 +181,15 @@ Failure injection (per session):
 - Set **Frequency** (spacing between failure windows).
 Changes auto‑save.
 
+Transport faults (per session port):
+- **Fault Type**: None / Drop / Reject.
+- **Units**: Seconds or Packets / Seconds.
+- **Consecutive**:
+  - seconds mode: active fault window duration
+  - packets mode: packet threshold before disarm
+- **Frequency (secs)**: cycle spacing (0 means one-shot/manual behavior based on consecutive).
+- **Counters**: UI shows current/last `Drop pkts` and `Reject pkts`.
+
 ## Encoding pipeline
 
 Encoding is driven by the bash pipeline:
@@ -208,6 +218,7 @@ See `PRD.md` for the full list.
 ## Testing capabilities (recent additions)
 - Failure injection modes for segments/playlists/manifests, including corrupted segment payloads and hung responses.
 - Segment failure timing supports failures‑per‑second (separate frequency vs consecutive units).
+- Transport fault injection supports port-wide DROP/REJECT with seconds or packet thresholds.
 - Testing session player selector (HLS.js, Shaka, Video.js, Native) with error + HTTP failure logging.
 - Developer context menu option in Mosaic (developer=1) to open the HLS.js demo with the test URL.
 - Platform‑aware network shaping capabilities endpoint (Linux‑only support).

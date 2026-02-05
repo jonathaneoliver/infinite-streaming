@@ -912,6 +912,76 @@
             container.innerHTML = TestingSessionUI.renderSessionCard(session, { showBufferDepthChart: true });
         }
 
+        function normalizeTransportFaultType(session) {
+            const raw = String(session.transport_failure_type || session.transport_fault_type || 'none').toLowerCase();
+            if (raw === 'drop' || raw === 'reject') return raw;
+            return 'none';
+        }
+
+        function normalizeTransportFailureMode(session) {
+            const modeRaw = String(session.transport_failure_mode || '').toLowerCase();
+            if (modeRaw === 'failures_per_packets' || modeRaw === 'failures_per_packet') {
+                return 'failures_per_packets';
+            }
+            const unitsRaw = String(session.transport_consecutive_units || session.transport_failure_units || '').toLowerCase();
+            if (unitsRaw === 'packet' || unitsRaw === 'packets' || unitsRaw === 'pkt' || unitsRaw === 'pkts') {
+                return 'failures_per_packets';
+            }
+            return 'failures_per_seconds';
+        }
+
+        function syncServerFaultControls(card, session) {
+            if (!card || !session) return;
+            const sessionId = String(card.dataset.sessionId || session.session_id || '');
+            if (!sessionId) return;
+            const syncRadio = (namePrefix, value) => {
+                const radios = card.querySelectorAll(`input[name="${namePrefix}_${sessionId}"]`);
+                radios.forEach((radio) => {
+                    radio.checked = radio.value === value;
+                });
+            };
+            syncRadio('segment_failure_type', String(session.segment_failure_type || 'none'));
+            syncRadio('playlist_failure_type', String(session.playlist_failure_type || 'none'));
+            syncRadio('manifest_failure_type', String(session.manifest_failure_type || 'none'));
+            syncRadio('transport_failure_type', normalizeTransportFaultType(session));
+            syncRadio('transport_failure_mode', normalizeTransportFailureMode(session));
+            TestingSessionUI.updateTransportModeUi(card);
+            const transportConsecutiveInput = card.querySelector('input[data-field="transport_consecutive_failures"]');
+            const transportFrequencyInput = card.querySelector('input[data-field="transport_failure_frequency"]');
+            if (transportConsecutiveInput) {
+                const value = Number(
+                    session.transport_consecutive_failures ??
+                    session.transport_consecutive_seconds ??
+                    session.transport_fault_on_seconds ??
+                    0
+                );
+                transportConsecutiveInput.value = String(Number.isFinite(value) ? value : 0);
+                const valueEl = transportConsecutiveInput.parentElement?.querySelector('.range-value');
+                if (valueEl) valueEl.textContent = transportConsecutiveInput.value;
+            }
+            if (transportFrequencyInput) {
+                const value = Number(
+                    session.transport_failure_frequency ??
+                    session.transport_frequency_seconds ??
+                    session.transport_fault_off_seconds ??
+                    0
+                );
+                transportFrequencyInput.value = String(Number.isFinite(value) ? value : 0);
+                const valueEl = transportFrequencyInput.parentElement?.querySelector('.range-value');
+                if (valueEl) valueEl.textContent = transportFrequencyInput.value;
+            }
+            const stateEl = card.querySelector('[data-field="transport_fault_state"]');
+            if (stateEl) {
+                stateEl.textContent = session.transport_fault_active ? 'Active' : 'Idle';
+            }
+            const countersEl = card.querySelector('[data-field="transport_fault_counters"]');
+            if (countersEl) {
+                const dropPackets = Number(session.transport_fault_drop_packets || 0);
+                const rejectPackets = Number(session.transport_fault_reject_packets || 0);
+                countersEl.textContent = `Drop ${dropPackets} pkts · Reject ${rejectPackets} pkts`;
+            }
+        }
+
         function bindSessionControls() {
             const container = document.getElementById('sessionControls');
             const shapingTimers = new Map();
@@ -1141,6 +1211,9 @@
                         setStepEnabledUi(card, row, !!event.target.checked);
                     }
                 }
+                if (event.target.dataset.field === 'transport_failure_mode') {
+                    TestingSessionUI.updateTransportModeUi(card);
+                }
                 if (event.target.dataset.field === 'bitrate_chart_max_mbps') {
                     bitrateAxisMaxBySession.set(
                         String(card.dataset.sessionId || ''),
@@ -1242,6 +1315,7 @@
             container.querySelectorAll('.session-card').forEach((card) => {
                 updateTemplateModeUi(card);
                 updateAllStepRiskUi(card);
+                TestingSessionUI.updateTransportModeUi(card);
             });
         }
 
@@ -1694,6 +1768,7 @@
                         currentSessionId = session.session_id;
                         if (container && existingCard && container.contains(document.activeElement) &&
                             String(existingCard.dataset.sessionId || '') === sessionKey) {
+                            syncServerFaultControls(existingCard, session);
                             pushBandwidthSample(session);
                             return;
                         }
