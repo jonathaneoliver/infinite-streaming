@@ -11,8 +11,14 @@
         { value: 'dns_failure', text: 'DNS Failure' },
         { value: 'rate_limiting', text: 'Rate Limit' },
         { value: 'socket_timeout', text: 'Socket Timeout' },
-        { value: 'socket_reject', text: 'Socket Reject' },
-        { value: 'socket_drop', text: 'Socket Drop' },
+        { value: 'socket_reject', text: 'Socket Reject (Legacy)' },
+        { value: 'socket_drop', text: 'Socket Drop (Legacy)' },
+        { value: 'socket_reject_before_headers', text: 'Socket Reject (Before Headers)' },
+        { value: 'socket_drop_before_headers', text: 'Socket Drop (Before Headers)' },
+        { value: 'socket_reject_after_headers', text: 'Socket Reject (After Headers)' },
+        { value: 'socket_drop_after_headers', text: 'Socket Drop (After Headers)' },
+        { value: 'socket_reject_mid_body', text: 'Socket Reject (Mid Body)' },
+        { value: 'socket_drop_mid_body', text: 'Socket Drop (Mid Body)' },
         { value: 'hung', text: 'Hung' }
     ];
 
