@@ -23,6 +23,12 @@ This guide provides a comprehensive list of error scenarios to test HLS video pl
 - Packet loss simulation
 - DNS resolution failures
 
+### Transport-Level Faults (Port-Wide)
+- Connect timeout on playlist URL (port-wide DROP on initial connect)
+- Immediate connect failure on playlist URL (port-wide REJECT on initial connect)
+- Connection reset mid-segment (TCP RST / REJECT on established flow)
+- Established-flow packet drop (port-wide DROP on established flow)
+
 ### Network Throttling/Fluctuations
 - Slow/unpredictable bandwidth to test ABR (Adaptive Bitrate) switching
 - Sudden bandwidth drops during playback

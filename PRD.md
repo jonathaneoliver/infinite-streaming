@@ -97,6 +97,9 @@ The system is intended for:
 - Per‑session failure injection (segments/playlists/manifests) with repeatable timing.
 - Failure modes include HTTP error codes, hung responses, and corrupted segment payloads.
 - Failure timing supports failures‑per‑second (separate frequency vs consecutive units).
+- Per‑port transport fault injection (DROP/REJECT) via nftables.
+- Transport faults support consecutive units in seconds or packets, with frequency in seconds.
+- Transport fault packet counters (drop/reject) are surfaced in API/UI for observability.
 - Player selector: HLS.js, Shaka, Video.js, Native.
 - Logs player errors and HTTP failure details in the testing UI.
 

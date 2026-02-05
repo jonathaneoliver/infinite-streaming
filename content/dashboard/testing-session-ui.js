@@ -10,6 +10,9 @@
         { value: 'connection_refused', text: 'Conn Refused' },
         { value: 'dns_failure', text: 'DNS Failure' },
         { value: 'rate_limiting', text: 'Rate Limit' },
+        { value: 'socket_timeout', text: 'Socket Timeout' },
+        { value: 'socket_reject', text: 'Socket Reject' },
+        { value: 'socket_drop', text: 'Socket Drop' },
         { value: 'hung', text: 'Hung' }
     ];
 
@@ -22,6 +25,16 @@
         { value: 'requests', text: 'Requests' },
         { value: 'seconds', text: 'Seconds' },
         { value: 'failures_per_seconds', text: 'Failures / Seconds' }
+    ];
+
+    const transportFaultTypes = [
+        { value: 'none', text: 'None' },
+        { value: 'drop', text: 'Drop (Blackhole)' },
+        { value: 'reject', text: 'Reject (RST)' }
+    ];
+    const transportModeOptions = [
+        { value: 'failures_per_seconds', text: 'Seconds' },
+        { value: 'failures_per_packets', text: 'Packets / Seconds' }
     ];
 
     function formatDate(value) {
@@ -58,6 +71,20 @@
         }).join('');
     }
 
+    function renderTransportFaultOptions(name, selected) {
+        return transportFaultTypes.map(option => {
+            const checked = option.value === (selected || 'none') ? 'checked' : '';
+            return `<label><input type="radio" name="${name}" value="${option.value}" ${checked}>${option.text}</label>`;
+        }).join('');
+    }
+
+    function renderTransportModeOptions(name, selected) {
+        return transportModeOptions.map(option => {
+            const checked = option.value === (selected || 'failures_per_seconds') ? 'checked' : '';
+            return `<label><input type="radio" name="${name}" value="${option.value}" data-field="transport_failure_mode" ${checked}>${option.text}</label>`;
+        }).join('');
+    }
+
     function modeFromUnits(consecutiveUnits, frequencyUnits, fallbackUnits) {
         const cons = consecutiveUnits || fallbackUnits || 'requests';
         const freq = frequencyUnits || fallbackUnits || 'requests';
@@ -78,6 +105,46 @@
             return { consecutiveUnits: 'requests', frequencyUnits: 'seconds' };
         }
         return { consecutiveUnits: 'requests', frequencyUnits: 'requests' };
+    }
+
+    function normalizeTransportMode(raw) {
+        const value = String(raw || '').trim().toLowerCase();
+        if (value === 'failures_per_packets' || value === 'failures_per_packet') {
+            return 'failures_per_packets';
+        }
+        return 'failures_per_seconds';
+    }
+
+    function transportUnitsFromMode(mode) {
+        if (normalizeTransportMode(mode) === 'failures_per_packets') {
+            return { consecutiveUnits: 'packets', frequencyUnits: 'seconds' };
+        }
+        return { consecutiveUnits: 'seconds', frequencyUnits: 'seconds' };
+    }
+
+    function transportModeFromSession(session) {
+        const mode = normalizeTransportMode(session.transport_failure_mode);
+        if (mode === 'failures_per_packets') return mode;
+        const unitsRaw = String(session.transport_consecutive_units || session.transport_failure_units || '').trim().toLowerCase();
+        if (unitsRaw === 'packets' || unitsRaw === 'packet' || unitsRaw === 'pkts' || unitsRaw === 'pkt') {
+            return 'failures_per_packets';
+        }
+        return 'failures_per_seconds';
+    }
+
+    function transportConsecutiveRangeForMode(mode) {
+        if (normalizeTransportMode(mode) === 'failures_per_packets') {
+            return { min: 0, max: 500, step: 1, label: 'Consecutive (pkts)' };
+        }
+        return { min: 0, max: 30, step: 1, label: 'Consecutive (secs)' };
+    }
+
+    function normalizeTransportConsecutiveValue(raw, mode) {
+        const numeric = toNonNegativeNumber(raw, 0);
+        if (normalizeTransportMode(mode) === 'failures_per_packets') {
+            return Math.round(numeric);
+        }
+        return Math.round(numeric * 10) / 10;
     }
 
     function renderPlaylistOptions(sessionId, playlists, selected) {
@@ -248,6 +315,12 @@
         return n;
     }
 
+    function toNonNegativeNumber(value, fallback) {
+        const n = Number(value);
+        if (!Number.isFinite(n) || n < 0) return fallback;
+        return n;
+    }
+
     function inferSegmentDurationSeconds(session) {
         const explicit = Number(session.nftables_pattern_segment_duration_seconds || 0);
         if (Number.isFinite(explicit) && explicit > 0) {
@@ -348,6 +421,20 @@
         const marginPct = [0, 10, 25, 50].includes(marginRaw) ? marginRaw : 0;
         const chartMaxRaw = String(session.ui_bitrate_axis_max || '').toLowerCase();
         const chartMaxMode = ['auto', '5', '10', '20', '40'].includes(chartMaxRaw) ? chartMaxRaw : 'auto';
+        const transportFaultRaw = String(session.transport_failure_type || session.transport_fault_type || 'none').toLowerCase();
+        const transportFaultType = ['none', 'drop', 'reject'].includes(transportFaultRaw) ? transportFaultRaw : 'none';
+        const transportMode = transportModeFromSession(session);
+        const transportConsecutiveRange = transportConsecutiveRangeForMode(transportMode);
+        const transportConsecutive = normalizeTransportConsecutiveValue(
+            toNonNegativeNumber(session.transport_consecutive_failures, toNonNegativeNumber(session.transport_consecutive_seconds, toNonNegativeNumber(session.transport_fault_on_seconds, 0))),
+            transportMode
+        );
+        const transportOffSeconds = Math.round(
+            toNonNegativeNumber(session.transport_failure_frequency, toNonNegativeNumber(session.transport_frequency_seconds, toNonNegativeNumber(session.transport_fault_off_seconds, 0))) * 10
+        ) / 10;
+        const transportActive = !!session.transport_fault_active;
+        const transportDropPackets = Number(session.transport_fault_drop_packets || 0);
+        const transportRejectPackets = Number(session.transport_fault_reject_packets || 0);
         return `
             <div class="session-card" data-session-id="${sessionId}" data-session-port="${session.x_forwarded_port || ''}" data-shaping-presets="${encodedPresets}" data-shaping-video-presets="${encodedVideoPresets}" data-shaping-overhead-mbps="${overheadMbps}">
                 <div class="session-header">
@@ -423,6 +510,38 @@
                             <label>Frequency</label>
                             <input type="range" min="0" max="10" step="1" data-field="manifest_failure_frequency" value="${session.manifest_failure_frequency > 0 ? session.manifest_failure_frequency : 6}">
                             <span class="range-value">${session.manifest_failure_frequency > 0 ? session.manifest_failure_frequency : 6}</span>
+                        </div>
+                    </div>
+                    <div class="failure-group">
+                        <div class="failure-title">Transport Faults (Port-Wide)</div>
+                        <div class="radio-group">${renderTransportFaultOptions(`transport_failure_type_${sessionId}`, transportFaultType)}</div>
+                        <div class="radio-group">
+                            <div class="label">Units</div>
+                            ${renderTransportModeOptions(`transport_failure_mode_${sessionId}`, transportMode)}
+                        </div>
+                        <div class="range-row">
+                            <label data-field="transport_consecutive_label">${transportConsecutiveRange.label}</label>
+                            <input
+                                type="range"
+                                min="${transportConsecutiveRange.min}"
+                                max="${transportConsecutiveRange.max}"
+                                step="${transportConsecutiveRange.step}"
+                                data-field="transport_consecutive_failures"
+                                value="${transportConsecutive}">
+                            <span class="range-value">${transportConsecutive}</span>
+                        </div>
+                        <div class="range-row">
+                            <label>Frequency (secs)</label>
+                            <input type="range" min="0" max="60" step="1" data-field="transport_failure_frequency" value="${transportOffSeconds}">
+                            <span class="range-value">${transportOffSeconds}</span>
+                        </div>
+                        <div class="session-item">
+                            <span class="label">State</span>
+                            <span class="value" data-field="transport_fault_state">${transportActive ? 'Active' : 'Idle'}</span>
+                        </div>
+                        <div class="session-item">
+                            <span class="label">Fault Counters</span>
+                            <span class="value" data-field="transport_fault_counters">Drop ${transportDropPackets} pkts · Reject ${transportRejectPackets} pkts</span>
                         </div>
                     </div>
                 </div>
@@ -572,6 +691,7 @@
         const segmentFailureType = getRadioValue(`segment_failure_type_${sessionId}`);
         const playlistFailureType = getRadioValue(`playlist_failure_type_${sessionId}`);
         const manifestFailureType = getRadioValue(`manifest_failure_type_${sessionId}`);
+        const transportFaultType = getRadioValue(`transport_failure_type_${sessionId}`);
 
         const segmentFailureUnits = getRadioValue(`segment_failure_units_${sessionId}`) || 'requests';
         const playlistFailureUnits = getRadioValue(`playlist_failure_units_${sessionId}`) || 'requests';
@@ -579,9 +699,11 @@
         const segmentMode = getRadioValue(`segment_failure_mode_${sessionId}`) || modeFromUnits(null, null, segmentFailureUnits);
         const playlistMode = getRadioValue(`playlist_failure_mode_${sessionId}`) || modeFromUnits(null, null, playlistFailureUnits);
         const manifestMode = getRadioValue(`manifest_failure_mode_${sessionId}`) || modeFromUnits(null, null, manifestFailureUnits);
+        const transportMode = normalizeTransportMode(getRadioValue(`transport_failure_mode_${sessionId}`));
         const segmentUnits = unitsFromMode(segmentMode);
         const playlistUnits = unitsFromMode(playlistMode);
         const manifestUnits = unitsFromMode(manifestMode);
+        const transportUnits = transportUnitsFromMode(transportMode);
 
         const getRangeValue = (field) => {
             const input = card.querySelector(`input[data-field="${field}"]`);
@@ -623,7 +745,20 @@
             manifest_failure_units: manifestFailureUnits,
             manifest_consecutive_units: manifestUnits.consecutiveUnits,
             manifest_frequency_units: manifestUnits.frequencyUnits,
-            manifest_failure_mode: manifestMode
+            manifest_failure_mode: manifestMode,
+            transport_failure_type: transportFaultType,
+            transport_failure_frequency: getRangeValue('transport_failure_frequency'),
+            transport_consecutive_failures: getRangeValue('transport_consecutive_failures'),
+            transport_failure_units: transportUnits.consecutiveUnits,
+            transport_consecutive_units: transportUnits.consecutiveUnits,
+            transport_frequency_units: transportUnits.frequencyUnits,
+            transport_failure_mode: transportMode,
+            // Legacy aliases kept for older saved sessions/backends.
+            transport_fault_type: transportFaultType,
+            transport_consecutive_seconds: getRangeValue('transport_consecutive_failures'),
+            transport_frequency_seconds: getRangeValue('transport_failure_frequency'),
+            transport_fault_on_seconds: getRangeValue('transport_consecutive_failures'),
+            transport_fault_off_seconds: getRangeValue('transport_failure_frequency')
         };
     }
 
@@ -686,12 +821,40 @@
         label.textContent = `segment ${pattern.segment_duration_seconds}s`;
     }
 
+    function updateTransportModeUi(card) {
+        if (!card) return;
+        const sessionId = String(card.dataset.sessionId || '');
+        if (!sessionId) return;
+        const selected = card.querySelector(`input[name="transport_failure_mode_${sessionId}"]:checked`);
+        const mode = normalizeTransportMode(selected ? selected.value : 'failures_per_seconds');
+        const range = transportConsecutiveRangeForMode(mode);
+        const label = card.querySelector('[data-field="transport_consecutive_label"]');
+        const slider = card.querySelector('input[data-field="transport_consecutive_failures"]');
+        const valueEl = slider ? slider.parentElement.querySelector('.range-value') : null;
+        if (label) label.textContent = range.label;
+        if (!slider) return;
+        slider.min = String(range.min);
+        slider.max = String(range.max);
+        slider.step = String(range.step);
+        let value = Number(slider.value);
+        if (!Number.isFinite(value)) value = range.min;
+        value = Math.max(range.min, Math.min(range.max, value));
+        if (mode === 'failures_per_packets') {
+            value = Math.round(value);
+        } else {
+            value = Math.round(value * 10) / 10;
+        }
+        slider.value = String(value);
+        if (valueEl) valueEl.textContent = String(value);
+    }
+
     window.TestingSessionUI = {
         renderSessionCard,
         renderPatternStepRowContent,
         readSessionSettings,
         readShapingPattern,
         updatePatternDefaultLabel,
+        updateTransportModeUi,
         formatDate,
         formatDuration
     };
