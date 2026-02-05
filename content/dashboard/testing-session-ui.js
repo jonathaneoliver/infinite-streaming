@@ -10,16 +10,15 @@
         { value: 'connection_refused', text: 'Conn Refused' },
         { value: 'dns_failure', text: 'DNS Failure' },
         { value: 'rate_limiting', text: 'Rate Limit' },
-        { value: 'socket_timeout', text: 'Socket Timeout' },
-        { value: 'socket_reject', text: 'Socket Reject (Legacy)' },
-        { value: 'socket_drop', text: 'Socket Drop (Legacy)' },
-        { value: 'socket_reject_before_headers', text: 'Socket Reject (Before Headers)' },
-        { value: 'socket_drop_before_headers', text: 'Socket Drop (Before Headers)' },
-        { value: 'socket_reject_after_headers', text: 'Socket Reject (After Headers)' },
-        { value: 'socket_drop_after_headers', text: 'Socket Drop (After Headers)' },
-        { value: 'socket_reject_mid_body', text: 'Socket Reject (Mid Body)' },
-        { value: 'socket_drop_mid_body', text: 'Socket Drop (Mid Body)' },
-        { value: 'hung', text: 'Hung' }
+        { value: 'request_connect_reset', text: 'Request Connect Reset' },
+        { value: 'request_connect_delayed', text: 'Request Connect Delay' },
+        { value: 'request_connect_hang', text: 'Request Connect Hang' },
+        { value: 'request_first_byte_reset', text: 'Request Header Reset' },
+        { value: 'request_first_byte_delayed', text: 'Request Header Delay' },
+        { value: 'request_first_byte_hang', text: 'Request Header Hang' },
+        { value: 'request_body_reset', text: 'Request Body Reset' },
+        { value: 'request_body_delayed', text: 'Request Body Delay' },
+        { value: 'request_body_hang', text: 'Request Body Hang' }
     ];
 
     const segmentFailureTypes = [
