@@ -78,6 +78,7 @@
                                     <p><strong>Player ID:</strong> ${session.player_id}</p>
                                     <p><strong>Player IP Address:</strong> ${session.player_ip}</p>
                                     <p><strong>Manifest URL:</strong> ${session.manifest_url}</p>
+                                    <p><strong>Master Manifest URL:</strong> ${session.master_manifest_url}</p>
                                     <p><strong>Last Request Time:</strong> ${new Date(session.last_request).toISOString().slice(0, -1)}</p>
                                     <p><strong>First Request Time:</strong> ${new Date(session.first_request_time).toISOString().slice(0, -1)}</p>
                                     <p><strong>Session Duration:</strong> ${session.session_duration.toFixed(3)} seconds</p>
@@ -88,10 +89,10 @@
                                         </li>
                                         <!--
                                         <li class="nav-item">
-                                            <a class="nav-link" id="playlist-tab-${sessionId}" data-toggle="tab" href="#playlist-pane-${sessionId}" role="tab" aria-controls="playlist-pane-${sessionId}" aria-selected="false">Playlists</a>
+                                            <a class="nav-link" id="manifest-tab-${sessionId}" data-toggle="tab" href="#manifest-pane-${sessionId}" role="tab" aria-controls="manifest-pane-${sessionId}" aria-selected="false">Manifests</a>
                                         </li>
                                         <li class="nav-item">
-                                            <a class="nav-link" id="manifest-tab-${sessionId}" data-toggle="tab" href="#manifest-pane-${sessionId}" role="tab" aria-controls="manifest-pane-${sessionId}" aria-selected="false">Manifests</a>
+                                            <a class="nav-link" id="master-manifest-tab-${sessionId}" data-toggle="tab" href="#master-manifest-pane-${sessionId}" role="tab" aria-controls="master-manifest-pane-${sessionId}" aria-selected="false">Master Manifests</a>
                                         </li>
                                         -->
                                     </ul>
@@ -165,55 +166,6 @@
                                             </form>
                                         </div>
                                         <!--
-                                        <div class="tab-pane fade" id="playlist-pane-${sessionId}" role="tabpanel" aria-labelledby="playlist-tab-${sessionId}">
-                                            <form id="playlist-failure-settings-form-${sessionId}" class="mt-3">
-                                                <div class="form-group">
-                                                    <label for="playlist_failure_type_${sessionId}">Playlist Failure Type</label>
-                                                    <div id="playlist_failure_type_${sessionId}" class="form-check form-check-inline">
-                                                        <input class="form-check-input" type="radio" name="playlist_failure_type_${sessionId}" id="playlist_failure_type_none_${sessionId}" value="none" required checked>
-                                                        <label class="form-check-label" for="playlist_failure_type_none_${sessionId}">None</label>
-                                                    </div>
-                                                    <div class="form-check form-check-inline">
-                                                        <input class="form-check-input" type="radio" name="playlist_failure_type_${sessionId}" id="playlist_failure_type_404_${sessionId}" value="404" required>
-                                                        <label class="form-check-label" for="playlist_failure_type_404_${sessionId}">404 Not Found</label>
-                                                    </div>
-                                                    <div class="form-check form-check-inline">
-                                                        <input class="form-check-input" type="radio" name="playlist_failure_type_${sessionId}" id="playlist_failure_type_500_${sessionId}" value="500" required>
-                                                        <label class="form-check-label" for="playlist_failure_type_500_${sessionId}">500 Internal Server Error</label>
-                                                    </div>
-                                                    <div class="form-check form-check-inline">
-                                                        <input class="form-check-input" type="radio" name="playlist_failure_type_${sessionId}" id="playlist_failure_type_403_${sessionId}" value="403" required>
-                                                        <label class="form-check-label" for="playlist_failure_type_403_${sessionId}">403 Forbidden</label>
-                                                    </div>
-                                                    <div class="form-check form-check-inline">
-                                                        <input class="form-check-input" type="radio" name="playlist_failure_type_${sessionId}" id="playlist_failure_type_timeout_${sessionId}" value="timeout" required>
-                                                        <label class="form-check-label" for="playlist_failure_type_timeout_${sessionId}">Timeout</label>
-                                                    </div>
-                                                    <div class="form-check form-check-inline">
-                                                        <input class="form-check-input" type="radio" name="playlist_failure_type_${sessionId}" id="playlist_failure_type_connection_refused_${sessionId}" value="connection_refused" required>
-                                                        <label class="form-check-label" for="playlist_failure_type_connection_refused_${sessionId}">Connection Refused</label>
-                                                    </div>
-                                                    <div class="form-check form-check-inline">
-                                                        <input class="form-check-input" type="radio" name="playlist_failure_type_${sessionId}" id="playlist_failure_type_dns_failure_${sessionId}" value="dns_failure" required>
-                                                        <label class="form-check-label" for="playlist_failure_type_dns_failure_${sessionId}">DNS Failure</label>
-                                                    </div>
-                                                    <div class="form-check form-check-inline">
-                                                        <input class="form-check-input" type="radio" name="playlist_failure_type_${sessionId}" id="playlist_failure_type_rate_limiting_${sessionId}" value="rate_limiting" required>
-                                                        <label class="form-check-label" for="playlist_failure_type_rate_limiting_${sessionId}">Rate Limiting</label>
-                                                    </div>
-                                                </div>
-                                                <div class="form-group">
-                                                    <label for="playlist_failure_frequency_${sessionId}">Playlist Failure Frequency (every Nth request)</label>
-                                                    <input id="playlist_failure_frequency_${sessionId}" type="text" class="slider" data-slider-min="0" data-slider-max="10" data-slider-step="1" data-slider-value="10"/>
-                                                    <span id="playlist_frequency_value_${sessionId}" class="ml-2">10</span>
-                                                </div>
-                                                <div class="form-group">
-                                                    <label for="playlist_consecutive_failures_${sessionId}">Consecutive Failures</label>
-                                                    <input id="playlist_consecutive_failures_${sessionId}" type="text" class="slider" data-slider-min="1" data-slider-max="10" data-slider-step="1" data-slider-value="3"/>
-                                                    <span id="playlist_consecutive_failures_value_${sessionId}" class="ml-2">3</span>
-                                                </div>
-                                            </form>
-                                        </div>
                                         <div class="tab-pane fade" id="manifest-pane-${sessionId}" role="tabpanel" aria-labelledby="manifest-tab-${sessionId}">
                                             <form id="manifest-failure-settings-form-${sessionId}" class="mt-3">
                                                 <div class="form-group">
@@ -263,13 +215,62 @@
                                                 </div>
                                             </form>
                                         </div>
+                                        <div class="tab-pane fade" id="master-manifest-pane-${sessionId}" role="tabpanel" aria-labelledby="master-manifest-tab-${sessionId}">
+                                            <form id="master-manifest-failure-settings-form-${sessionId}" class="mt-3">
+                                                <div class="form-group">
+                                                    <label for="master_manifest_failure_type_${sessionId}">Master Manifest Failure Type</label>
+                                                    <div id="master_manifest_failure_type_${sessionId}" class="form-check form-check-inline">
+                                                        <input class="form-check-input" type="radio" name="master_manifest_failure_type_${sessionId}" id="master_manifest_failure_type_none_${sessionId}" value="none" required checked>
+                                                        <label class="form-check-label" for="master_manifest_failure_type_none_${sessionId}">None</label>
+                                                    </div>
+                                                    <div class="form-check form-check-inline">
+                                                        <input class="form-check-input" type="radio" name="master_manifest_failure_type_${sessionId}" id="master_manifest_failure_type_404_${sessionId}" value="404" required>
+                                                        <label class="form-check-label" for="master_manifest_failure_type_404_${sessionId}">404 Not Found</label>
+                                                    </div>
+                                                    <div class="form-check form-check-inline">
+                                                        <input class="form-check-input" type="radio" name="master_manifest_failure_type_${sessionId}" id="master_manifest_failure_type_500_${sessionId}" value="500" required>
+                                                        <label class="form-check-label" for="master_manifest_failure_type_500_${sessionId}">500 Internal Server Error</label>
+                                                    </div>
+                                                    <div class="form-check form-check-inline">
+                                                        <input class="form-check-input" type="radio" name="master_manifest_failure_type_${sessionId}" id="master_manifest_failure_type_403_${sessionId}" value="403" required>
+                                                        <label class="form-check-label" for="master_manifest_failure_type_403_${sessionId}">403 Forbidden</label>
+                                                    </div>
+                                                    <div class="form-check form-check-inline">
+                                                        <input class="form-check-input" type="radio" name="master_manifest_failure_type_${sessionId}" id="master_manifest_failure_type_timeout_${sessionId}" value="timeout" required>
+                                                        <label class="form-check-label" for="master_manifest_failure_type_timeout_${sessionId}">Timeout</label>
+                                                    </div>
+                                                    <div class="form-check form-check-inline">
+                                                        <input class="form-check-input" type="radio" name="master_manifest_failure_type_${sessionId}" id="master_manifest_failure_type_connection_refused_${sessionId}" value="connection_refused" required>
+                                                        <label class="form-check-label" for="master_manifest_failure_type_connection_refused_${sessionId}">Connection Refused</label>
+                                                    </div>
+                                                    <div class="form-check form-check-inline">
+                                                        <input class="form-check-input" type="radio" name="master_manifest_failure_type_${sessionId}" id="master_manifest_failure_type_dns_failure_${sessionId}" value="dns_failure" required>
+                                                        <label class="form-check-label" for="master_manifest_failure_type_dns_failure_${sessionId}">DNS Failure</label>
+                                                    </div>
+                                                    <div class="form-check form-check-inline">
+                                                        <input class="form-check-input" type="radio" name="master_manifest_failure_type_${sessionId}" id="master_manifest_failure_type_rate_limiting_${sessionId}" value="rate_limiting" required>
+                                                        <label class="form-check-label" for="master_manifest_failure_type_rate_limiting_${sessionId}">Rate Limiting</label>
+                                                    </div>
+                                                </div>
+                                                <div class="form-group">
+                                                    <label for="master_manifest_failure_frequency_${sessionId}">Master Manifest Failure Frequency (every Nth request)</label>
+                                                    <input id="master_manifest_failure_frequency_${sessionId}" type="text" class="slider" data-slider-min="0" data-slider-max="10" data-slider-step="1" data-slider-value="10"/>
+                                                    <span id="master_manifest_frequency_value_${sessionId}" class="ml-2">10</span>
+                                                </div>
+                                                <div class="form-group">
+                                                    <label for="master_manifest_consecutive_failures_${sessionId}">Consecutive Failures</label>
+                                                    <input id="master_manifest_consecutive_failures_${sessionId}" type="text" class="slider" data-slider-min="1" data-slider-max="10" data-slider-step="1" data-slider-value="3"/>
+                                                    <span id="master_manifest_consecutive_failures_value_${sessionId}" class="ml-2">3</span>
+                                                </div>
+                                            </form>
+                                        </div>
                                         -->
                                     </div>
                                 </div>
                             `);
 
                             // Initialize the sliders for each session
-                            $(`#segment_failure_frequency_${sessionId}, #manifest_failure_frequency_${sessionId}, #playlist_failure_frequency_${sessionId}, #consecutive_failures_${sessionId}, #playlist_consecutive_failures_${sessionId}, #manifest_consecutive_failures_${sessionId}`).slider({
+                            $(`#segment_failure_frequency_${sessionId}, #manifest_failure_frequency_${sessionId}, #master_manifest_failure_frequency_${sessionId}, #consecutive_failures_${sessionId}, #manifest_consecutive_failures_${sessionId}, #master_manifest_consecutive_failures_${sessionId}`).slider({
                                 formatter: function(value) {
                                     console.log('Change value:', value);
                                     return 'Current value: ' + value;
@@ -278,11 +279,11 @@
                                 const sliderId = event.target.id;
                                 console.log('Change event:', event, 'Slider ID:', sliderId);
                                 const valueSpanId = sliderId.includes('segment_failure_frequency') ? `#segment_frequency_value_${sessionId}` :
-                                                    sliderId.includes('manifest_failure_frequency') ? `#manifest_frequency_value_${sessionId}` :
-                                                    sliderId.includes('playlist_failure_frequency') ? `#playlist_frequency_value_${sessionId}` :
-                                                    sliderId.includes('consecutive_failures') ? `#consecutive_failures_value_${sessionId}` :
-                                                    sliderId.includes('playlist_consecutive_failures') ? `#playlist_consecutive_failures_value_${sessionId}` :
-                                                    `#manifest_consecutive_failures_value_${sessionId}`;
+                                                sliderId.includes('master_manifest_failure_frequency') ? `#master_manifest_frequency_value_${sessionId}` :
+                                                sliderId.includes('manifest_failure_frequency') ? `#manifest_frequency_value_${sessionId}` :
+                                                sliderId.includes('consecutive_failures') ? `#consecutive_failures_value_${sessionId}` :
+                                                sliderId.includes('master_manifest_consecutive_failures') ? `#master_manifest_consecutive_failures_value_${sessionId}` :
+                                                `#manifest_consecutive_failures_value_${sessionId}`;
                                 $(valueSpanId).text(event.value.newValue);
                                 localStorage.setItem(sliderId, event.value.newValue);
                                 saveSettings(sessionId);
@@ -290,11 +291,11 @@
                                 const sliderId = event.target.id;
                                 console.log('Slide event:', event, 'Slider ID:', sliderId);
                                 const valueSpanId = sliderId.includes('segment_failure_frequency') ? `#segment_frequency_value_${sessionId}` :
-                                                    sliderId.includes('manifest_failure_frequency') ? `#manifest_frequency_value_${sessionId}` :
-                                                    sliderId.includes('playlist_failure_frequency') ? `#playlist_frequency_value_${sessionId}` :
-                                                    sliderId.includes('consecutive_failures') ? `#consecutive_failures_value_${sessionId}` :
-                                                    sliderId.includes('playlist_consecutive_failures') ? `#playlist_consecutive_failures_value_${sessionId}` :
-                                                    `#manifest_consecutive_failures_value_${sessionId}`;
+                                                sliderId.includes('master_manifest_failure_frequency') ? `#master_manifest_frequency_value_${sessionId}` :
+                                                sliderId.includes('manifest_failure_frequency') ? `#manifest_frequency_value_${sessionId}` :
+                                                sliderId.includes('consecutive_failures') ? `#consecutive_failures_value_${sessionId}` :
+                                                sliderId.includes('master_manifest_consecutive_failures') ? `#master_manifest_consecutive_failures_value_${sessionId}` :
+                                                `#manifest_consecutive_failures_value_${sessionId}`;
                                 $(valueSpanId).text(event.value);
                             }).on('slideStop', function(event) {
                                 console.log('SlideStop event:', event, 'Slider ID:', event.target.id);
@@ -315,18 +316,18 @@
                             if (savedManifestFailureType) {
                                 $(`input[name="manifest_failure_type_${sessionId}"][value="${savedManifestFailureType}"]`).prop('checked', true);
                             }
-                            const savedPlaylistFailureType = localStorage.getItem(`playlist_failure_type_${sessionId}`);
-                            if (savedPlaylistFailureType) {
-                                $(`input[name="playlist_failure_type_${sessionId}"][value="${savedPlaylistFailureType}"]`).prop('checked', true);
+                            const savedMasterManifestFailureType = localStorage.getItem(`master_manifest_failure_type_${sessionId}`);
+                            if (savedMasterManifestFailureType) {
+                                $(`input[name="master_manifest_failure_type_${sessionId}"][value="${savedMasterManifestFailureType}"]`).prop('checked', true);
                             }
                             $(`#segment_failure_frequency_${sessionId}`).slider('setValue', localStorage.getItem(`segment_failure_frequency_${sessionId}`) || 10);
                             $(`#manifest_failure_frequency_${sessionId}`).slider('setValue', localStorage.getItem(`manifest_failure_frequency_${sessionId}`) || 10);
-                            $(`#playlist_failure_frequency_${sessionId}`).slider('setValue', localStorage.getItem(`playlist_failure_frequency_${sessionId}`) || 10);
+                            $(`#master_manifest_failure_frequency_${sessionId}`).slider('setValue', localStorage.getItem(`master_manifest_failure_frequency_${sessionId}`) || 10);
                             $(`#consecutive_failures_${sessionId}`).slider('setValue', localStorage.getItem(`consecutive_failures_${sessionId}`) || 3);
                             const savedSegmentFailureMode = localStorage.getItem(`segment_failure_mode_${sessionId}`) || 'requests';
                             $(`input[name="segment_failure_mode_${sessionId}"][value="${savedSegmentFailureMode}"]`).prop('checked', true);
 
-                            $(`input[name="segment_failure_type_${sessionId}"], input[name="manifest_failure_type_${sessionId}"], input[name="playlist_failure_type_${sessionId}"], input[name="segment_failure_mode_${sessionId}"]`).on('change', function() {
+                            $(`input[name="segment_failure_type_${sessionId}"], input[name="manifest_failure_type_${sessionId}"], input[name="master_manifest_failure_type_${sessionId}"], input[name="segment_failure_mode_${sessionId}"]`).on('change', function() {
                                 const name = $(this).attr('name');
                                 localStorage.setItem(name, $(this).val());
                                 saveSettings(sessionId);
@@ -339,7 +340,7 @@
                                 success: function(failureTypes) {
                                     $(`input[name="segment_failure_type_${sessionId}"][value="${failureTypes.segment_failure_type}"]`).prop('checked', true);
                                     $(`input[name="manifest_failure_type_${sessionId}"][value="${failureTypes.manifest_failure_type}"]`).prop('checked', true);
-                                    $(`input[name="playlist_failure_type_${sessionId}"][value="${failureTypes.playlist_failure_type}"]`).prop('checked', true);
+                                    $(`input[name="master_manifest_failure_type_${sessionId}"][value="${failureTypes.master_manifest_failure_type}"]`).prop('checked', true);
                                 },
                                 error: function(error) {
                                     console.error('Error fetching failure types:', error);
@@ -380,11 +381,11 @@
 
             function saveSettings(sessionId) {
                 const segmentFailureType = $(`input[name="segment_failure_type_${sessionId}"]:checked`).val();
-                const manifestFailureType = $(`input[name="manifest_failure_type_${sessionId}"]:checked`).val();
-                const playlistFailureType = $(`input[name="playlist_failure_type_${sessionId}"]:checked`).val();
+                        const manifestFailureType = $(`input[name="manifest_failure_type_${sessionId}"]:checked`).val();
+                        const masterManifestFailureType = $(`input[name="master_manifest_failure_type_${sessionId}"]:checked`).val();
                 const segmentFailureFrequency = $(`#segment_failure_frequency_${sessionId}`).slider('getValue');
-                const manifestFailureFrequency = $(`#manifest_failure_frequency_${sessionId}`).slider('getValue');
-                const playlistFailureFrequency = $(`#playlist_failure_frequency_${sessionId}`).slider('getValue');
+                        const manifestFailureFrequency = $(`#manifest_failure_frequency_${sessionId}`).slider('getValue');
+                        const masterManifestFailureFrequency = $(`#master_manifest_failure_frequency_${sessionId}`).slider('getValue');
                 const consecutiveFailures = $(`#consecutive_failures_${sessionId}`).slider('getValue');
                 const segmentFailureMode = $(`input[name="segment_failure_mode_${sessionId}"]:checked`).val() || 'requests';
                 const segmentConsecutiveUnits = segmentFailureMode === 'seconds' ? 'seconds' : 'requests';
@@ -392,11 +393,11 @@
 
                 // Save settings to localStorage
                 localStorage.setItem(`segment_failure_type_${sessionId}`, segmentFailureType);
-                localStorage.setItem(`manifest_failure_type_${sessionId}`, manifestFailureType);
-                localStorage.setItem(`playlist_failure_type_${sessionId}`, playlistFailureType);
+                        localStorage.setItem(`manifest_failure_type_${sessionId}`, manifestFailureType);
+                        localStorage.setItem(`master_manifest_failure_type_${sessionId}`, masterManifestFailureType);
                 localStorage.setItem(`segment_failure_frequency_${sessionId}`, segmentFailureFrequency);
-                localStorage.setItem(`manifest_failure_frequency_${sessionId}`, manifestFailureFrequency);
-                localStorage.setItem(`playlist_failure_frequency_${sessionId}`, playlistFailureFrequency);
+                        localStorage.setItem(`manifest_failure_frequency_${sessionId}`, manifestFailureFrequency);
+                        localStorage.setItem(`master_manifest_failure_frequency_${sessionId}`, masterManifestFailureFrequency);
                 localStorage.setItem(`consecutive_failures_${sessionId}`, consecutiveFailures);
                 localStorage.setItem(`segment_failure_mode_${sessionId}`, segmentFailureMode);
 
@@ -408,14 +409,14 @@
                     data: JSON.stringify({
                         session_id: sessionId,
                         segment_failure_type: segmentFailureType,
-                        manifest_failure_type: manifestFailureType,
-                        playlist_failure_type: playlistFailureType,
+                            manifest_failure_type: manifestFailureType,
+                            master_manifest_failure_type: masterManifestFailureType,
                         segment_failure_frequency: segmentFailureFrequency,
                         segment_consecutive_units: segmentConsecutiveUnits,
                         segment_frequency_units: segmentFrequencyUnits,
                         segment_failure_mode: segmentFailureMode,
-                        manifest_failure_frequency: manifestFailureFrequency,
-                        playlist_failure_frequency: playlistFailureFrequency,
+                            manifest_failure_frequency: manifestFailureFrequency,
+                            master_manifest_failure_frequency: masterManifestFailureFrequency,
                         consecutive_failures: consecutiveFailures
                     }),
                     success: function(response) {

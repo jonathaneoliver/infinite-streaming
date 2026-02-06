@@ -544,7 +544,7 @@ func (a *App) handleGetSessions(w http.ResponseWriter, r *http.Request) {
 		sessions = sessions[:10]
 	}
 	for _, session := range sessions {
-		for _, prefix := range []string{"segment", "manifest", "playlist"} {
+		for _, prefix := range []string{"segment", "manifest", "master_manifest"} {
 			typeKey := prefix + "_failure_type"
 			failureType := normalizeRequestFailureType(getString(session, typeKey))
 			if failureType == "" {
@@ -771,7 +771,7 @@ func (a *App) handleUpdateFailureSettings(w http.ResponseWriter, r *http.Request
 			for key, value := range payload {
 				session[key] = value
 			}
-			for _, prefix := range []string{"segment", "manifest", "playlist"} {
+			for _, prefix := range []string{"segment", "manifest", "master_manifest"} {
 				typeKey := prefix + "_failure_type"
 				failureType := normalizeRequestFailureType(getString(session, typeKey))
 				if failureType == "" {
@@ -1976,14 +1976,14 @@ func (a *App) handleForceClose(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte("Force closing"))
 }
 
-func requestKindLabel(isSegment, isManifest, isPlaylist bool) string {
+func requestKindLabel(isSegment, isUpdateManifest, isMasterManifest bool) string {
 	if isSegment {
 		return "segment"
 	}
-	if isPlaylist {
-		return "playlist"
+	if isMasterManifest {
+		return "master_manifest"
 	}
-	if isManifest {
+	if isUpdateManifest {
 		return "manifest"
 	}
 	return "other"
@@ -2309,9 +2309,9 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 			"headers_player_id":           playerHeader,
 			"headers_player-ID":           playerHeaderAlt,
 			"headers_x_playback_session_id": playbackSessionHeader,
-			"playlists_count":             0,
+			"manifest_requests_count":     0,
+			"master_manifest_requests_count": 0,
 			"segments_count":              0,
-			"manifests_count":             0,
 			"last_request":                nowISO(),
 			"first_request_time":          nowISO(),
 			"segment_failure_type":        "none",
@@ -2322,22 +2322,22 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 			"manifest_failure_frequency":  0,
 			"manifest_failure_units":      "requests",
 			"manifest_consecutive_failures": 0,
-			"playlist_failure_type":       "none",
-			"playlist_failure_frequency":  0,
-			"playlist_failure_units":      "requests",
-			"playlist_consecutive_failures": 0,
+			"master_manifest_failure_type":       "none",
+			"master_manifest_failure_frequency":  0,
+			"master_manifest_failure_units":      "requests",
+			"master_manifest_consecutive_failures": 0,
 			"current_failures":            0,
 			"consecutive_failures_count":  0,
 			"player_ip":                   "",
 			"user_agent":                  "",
-			"playlist_failure_at":         nil,
-			"playlist_failure_recover_at": nil,
-			"playlist_failure_urls":       []string{},
+			"manifest_failure_at":         nil,
+			"manifest_failure_recover_at": nil,
+			"manifest_failure_urls":       []string{},
 			"segment_failure_urls":        []string{},
 			"segment_failure_at":          nil,
 			"segment_failure_recover_at":  nil,
-			"manifest_failure_at":         nil,
-			"manifest_failure_recover_at": nil,
+			"master_manifest_failure_at":         nil,
+			"master_manifest_failure_recover_at": nil,
 			"transport_failure_type":      "none",
 			"transport_failure_frequency": 0,
 			"transport_consecutive_failures": 1,
@@ -2431,27 +2431,20 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 	}
 
 	upstreamURL := fmt.Sprintf("http://%s:%s/%s", a.upstreamHost, a.upstreamPort, filename)
-	contentType, isManifest, isPlaylist, isSegment, playlistInfo := a.getContentType(upstreamURL)
-	requestKind := requestKindLabel(isSegment, isManifest, isPlaylist)
+	contentType, isMasterManifest, isManifest, isSegment, playlistInfo := a.getContentType(upstreamURL)
+	requestKind := requestKindLabel(isSegment, isManifest, isMasterManifest)
 
-	if isPlaylist {
-		playlistUrls := getPlaylistInfos(sessionData)
-		base := pathBase(filename)
-		for _, playlist := range playlistUrls {
-			if strings.Contains(playlist.URL, base) {
-				sessionData["last_playlist_url"] = filename
-				break
-			}
-		}
+	if isMasterManifest {
+		sessionData["master_manifest_url"] = filename
 	}
 	if isManifest {
 		sessionData["manifest_url"] = filename
 	}
 	if playlistInfo != nil {
-		sessionData["playlist_urls"] = playlistInfo
+		sessionData["manifest_variants"] = playlistInfo
 	}
 
-	handler := NewRequestHandler(isSegment, isManifest, isPlaylist, sessionData)
+	handler := NewRequestHandler(isSegment, isManifest, isMasterManifest, sessionData)
 	failureType := handler.HandleRequest(filename)
 
 	sessionList[index] = sessionData
@@ -2665,6 +2658,9 @@ func (a *App) getContentType(target string) (string, bool, bool, bool, []Playlis
 	if strings.HasSuffix(strings.ToLower(parsed.Path), ".m3u8") && contentType == "" {
 		contentType = "application/vnd.apple.mpegurl"
 	}
+	if strings.HasSuffix(strings.ToLower(parsed.Path), ".mpd") && contentType == "" {
+		contentType = "application/dash+xml"
+	}
 
 	if strings.Contains(strings.ToLower(contentType), "mpegurl") {
 		getReq, _ := http.NewRequest(http.MethodGet, parsed.String(), nil)
@@ -2673,11 +2669,11 @@ func (a *App) getContentType(target string) (string, bool, bool, bool, []Playlis
 		getReq = getReq.WithContext(ctxGet)
 		getResp, err := a.client.Do(getReq)
 		if err != nil {
-			return contentType, false, false, false, nil
+			return contentType, false, true, false, nil
 		}
 		defer getResp.Body.Close()
 		if getResp.StatusCode >= 400 {
-			return contentType, false, false, false, nil
+			return contentType, false, true, false, nil
 		}
 		contentType = getResp.Header.Get("Content-Type")
 		body, _ := io.ReadAll(getResp.Body)
@@ -2705,6 +2701,9 @@ func (a *App) getContentType(target string) (string, bool, bool, bool, []Playlis
 				}
 			}
 		}
+		return contentType, false, true, false, nil
+	}
+	if strings.Contains(strings.ToLower(contentType), "dash") || strings.Contains(strings.ToLower(contentType), "mpd") {
 		return contentType, false, true, false, nil
 	}
 	return contentType, false, false, true, nil
@@ -3024,8 +3023,8 @@ func getStringSlice(m map[string]interface{}, key string) []string {
 	return nil
 }
 
-func getPlaylistInfos(session SessionData) []PlaylistInfo {
-	val, ok := session["playlist_urls"]
+func getManifestVariants(session SessionData) []PlaylistInfo {
+	val, ok := session["manifest_variants"]
 	if !ok || val == nil {
 		return nil
 	}
@@ -3410,15 +3409,15 @@ type RequestHandler struct {
 	failureKey string
 }
 
-func NewRequestHandler(isSegment, isManifest, isPlaylist bool, session SessionData) *RequestHandler {
+func NewRequestHandler(isSegment, isUpdateManifest, isMasterManifest bool, session SessionData) *RequestHandler {
 	if isSegment {
 		return &RequestHandler{mode: "segment", session: session}
 	}
-	if isManifest {
-		return &RequestHandler{mode: "manifest", session: session}
+	if isMasterManifest {
+		return &RequestHandler{mode: "master_manifest", session: session}
 	}
-	if isPlaylist {
-		return &RequestHandler{mode: "playlist", session: session}
+	if isUpdateManifest {
+		return &RequestHandler{mode: "manifest", session: session}
 	}
 	return &RequestHandler{mode: "unknown", session: session}
 }
@@ -3428,9 +3427,9 @@ func (h *RequestHandler) HandleRequest(filename string) string {
 	case "segment":
 		return h.handleSegmentFailure(filename)
 	case "manifest":
-		return h.handleFailure("manifest", "manifests_count")
-	case "playlist":
-		return h.handlePlaylistFailure(filename)
+		return h.handleManifestFailure(filename)
+	case "master_manifest":
+		return h.handleFailure("master_manifest", "master_manifest_requests_count")
 	default:
 		return "none"
 	}
@@ -3465,20 +3464,20 @@ func (h *RequestHandler) handleFailure(prefix, countKey string) string {
 	return failureType
 }
 
-func (h *RequestHandler) handlePlaylistFailure(filename string) string {
-	h.session["playlists_count"] = getInt(h.session, "playlists_count") + 1
-	playlistURLs := getStringSlice(h.session, "playlist_failure_urls")
-	match := shouldApplyFailure(playlistURLs, filename, pathParent(filename))
+func (h *RequestHandler) handleManifestFailure(filename string) string {
+	h.session["manifest_requests_count"] = getInt(h.session, "manifest_requests_count") + 1
+	manifestURLs := getStringSlice(h.session, "manifest_failure_urls")
+	match := shouldApplyFailure(manifestURLs, filename, pathParent(filename))
 	if !match {
 		return "none"
 	}
-	failure := NewFailureHandler("playlist", h.session)
-	failureType := failure.HandleFailure(getInt(h.session, "playlists_count"), time.Now())
-	h.session["playlist_failure_at"] = failure.failureAt
-	h.session["playlist_failure_recover_at"] = failure.failureRecoverAt
+	failure := NewFailureHandler("manifest", h.session)
+	failureType := failure.HandleFailure(getInt(h.session, "manifest_requests_count"), time.Now())
+	h.session["manifest_failure_at"] = failure.failureAt
+	h.session["manifest_failure_recover_at"] = failure.failureRecoverAt
 	if failure.resetFailureType != nil {
-		h.session["playlist_failure_type"] = failure.resetFailureType
-		h.session["playlist_reset_failure_type"] = nil
+		h.session["manifest_failure_type"] = failure.resetFailureType
+		h.session["manifest_reset_failure_type"] = nil
 	}
 	return failureType
 }
@@ -3518,22 +3517,45 @@ func shouldApplyFailure(entries []string, filename, variant string) bool {
 	if len(entries) == 0 {
 		return true
 	}
-	base := pathBase(filename)
+	decodedFilename := filename
+	if unescaped, err := url.PathUnescape(filename); err == nil {
+		decodedFilename = unescaped
+	}
+	base := pathBase(decodedFilename)
+	decodedVariant := variant
+	if unescaped, err := url.PathUnescape(variant); err == nil {
+		decodedVariant = unescaped
+	}
 	for _, entry := range entries {
 		if entry == "" {
 			continue
 		}
-		if entry == "All" {
+		decodedEntry := entry
+		if unescaped, err := url.PathUnescape(entry); err == nil {
+			decodedEntry = unescaped
+		}
+		entryBase := pathBase(decodedEntry)
+		if entryBase == "All" || decodedEntry == "All" {
 			return true
 		}
-		if entry == variant {
+		if decodedEntry == decodedVariant || entry == variant {
 			return true
 		}
-		if entry == base {
+		if decodedEntry == base || entry == base {
 			return true
 		}
-		if strings.Contains(filename, entry) {
+		if strings.Contains(decodedFilename, decodedEntry) || strings.Contains(filename, entry) {
 			return true
+		}
+		if strings.Contains(entryBase, "playlist_") {
+			trimmed := strings.TrimSuffix(entryBase, ".m3u8")
+			parts := strings.Split(trimmed, "_")
+			if len(parts) > 0 {
+				candidate := parts[len(parts)-1]
+				if candidate != "" && strings.Contains(decodedFilename, "/"+candidate+"/") {
+					return true
+				}
+			}
 		}
 	}
 	return false
@@ -3593,11 +3615,6 @@ func updateSessionTrafficAverages(session SessionData, totalIn, totalOut int64, 
 	if len(samples) > 0 {
 		prevSample = samples[len(samples)-1]
 	}
-	samples = append(samples, map[string]interface{}{
-		"ts":  now.Unix(),
-		"in":  totalIn,
-		"out": totalOut,
-	})
 	activeSamples := make([]map[string]interface{}, 0)
 	if raw, ok := session["active_io_samples"]; ok && raw != nil {
 		switch v := raw.(type) {
