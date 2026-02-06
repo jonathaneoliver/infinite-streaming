@@ -82,6 +82,9 @@ const (
 	transportFaultChainName = "transport_faults"
 	transportUnitsSeconds   = "seconds"
 	transportUnitsPackets   = "packets"
+	socketMidBodyBytes      = 64 * 1024
+	socketHangDuration      = 90 * time.Second
+	socketDelayDuration     = 12 * time.Second
 )
 
 func (s *NftShapeStep) UnmarshalJSON(data []byte) error {
@@ -541,6 +544,18 @@ func (a *App) handleGetSessions(w http.ResponseWriter, r *http.Request) {
 		sessions = sessions[:10]
 	}
 	for _, session := range sessions {
+		for _, prefix := range []string{"segment", "manifest", "master_manifest"} {
+			typeKey := prefix + "_failure_type"
+			failureType := normalizeRequestFailureType(getString(session, typeKey))
+			if failureType == "" {
+				failureType = "none"
+			}
+			session[typeKey] = failureType
+			resetKey := prefix + "_reset_failure_type"
+			if resetType := getString(session, resetKey); resetType != "" {
+				session[resetKey] = normalizeRequestFailureType(resetType)
+			}
+		}
 		if getString(session, "transport_failure_type") == "" {
 			session["transport_failure_type"] = normalizeTransportFaultType(getString(session, "transport_fault_type"))
 		}
@@ -589,29 +604,71 @@ func (a *App) handleGetSessions(w http.ResponseWriter, r *http.Request) {
 		if _, ok := session["fault_count_total"]; !ok {
 			session["fault_count_total"] = 0
 		}
-		if _, ok := session["fault_count_socket_timeout"]; !ok {
-			session["fault_count_socket_timeout"] = 0
-		}
 		if _, ok := session["fault_count_socket_reject"]; !ok {
 			session["fault_count_socket_reject"] = 0
 		}
 		if _, ok := session["fault_count_socket_drop"]; !ok {
 			session["fault_count_socket_drop"] = 0
 		}
-			dropPackets := int64FromInterface(session["transport_fault_drop_packets"])
-			rejectPackets := int64FromInterface(session["transport_fault_reject_packets"])
-			port := getString(session, "x_forwarded_port")
-			if port != "" {
-				if portNum, err := strconv.Atoi(port); err == nil {
-					if counters, ok := transportCountersByPort[portNum]; ok {
-						dropPackets = counters.DropPackets
-						rejectPackets = counters.RejectPackets
-					}
-					if a.traffic == nil {
-						session["transport_fault_drop_packets"] = dropPackets
-						session["transport_fault_reject_packets"] = rejectPackets
-						continue
-					}
+		if _, ok := session["fault_count_socket_drop_before_headers"]; !ok {
+			session["fault_count_socket_drop_before_headers"] = 0
+		}
+		if _, ok := session["fault_count_socket_reject_before_headers"]; !ok {
+			session["fault_count_socket_reject_before_headers"] = 0
+		}
+		if _, ok := session["fault_count_socket_drop_after_headers"]; !ok {
+			session["fault_count_socket_drop_after_headers"] = 0
+		}
+		if _, ok := session["fault_count_socket_reject_after_headers"]; !ok {
+			session["fault_count_socket_reject_after_headers"] = 0
+		}
+		if _, ok := session["fault_count_socket_drop_mid_body"]; !ok {
+			session["fault_count_socket_drop_mid_body"] = 0
+		}
+		if _, ok := session["fault_count_socket_reject_mid_body"]; !ok {
+			session["fault_count_socket_reject_mid_body"] = 0
+		}
+		if _, ok := session["fault_count_request_connect_hang"]; !ok {
+			session["fault_count_request_connect_hang"] = getInt(session, "fault_count_socket_drop_before_headers")
+		}
+		if _, ok := session["fault_count_request_connect_reset"]; !ok {
+			session["fault_count_request_connect_reset"] = getInt(session, "fault_count_socket_reject_before_headers")
+		}
+		if _, ok := session["fault_count_request_connect_delayed"]; !ok {
+			session["fault_count_request_connect_delayed"] = 0
+		}
+		if _, ok := session["fault_count_request_first_byte_hang"]; !ok {
+			session["fault_count_request_first_byte_hang"] = getInt(session, "fault_count_socket_drop_after_headers")
+		}
+		if _, ok := session["fault_count_request_first_byte_reset"]; !ok {
+			session["fault_count_request_first_byte_reset"] = getInt(session, "fault_count_socket_reject_after_headers")
+		}
+		if _, ok := session["fault_count_request_first_byte_delayed"]; !ok {
+			session["fault_count_request_first_byte_delayed"] = 0
+		}
+		if _, ok := session["fault_count_request_body_hang"]; !ok {
+			session["fault_count_request_body_hang"] = getInt(session, "fault_count_socket_drop_mid_body")
+		}
+		if _, ok := session["fault_count_request_body_reset"]; !ok {
+			session["fault_count_request_body_reset"] = getInt(session, "fault_count_socket_reject_mid_body")
+		}
+		if _, ok := session["fault_count_request_body_delayed"]; !ok {
+			session["fault_count_request_body_delayed"] = 0
+		}
+		dropPackets := int64FromInterface(session["transport_fault_drop_packets"])
+		rejectPackets := int64FromInterface(session["transport_fault_reject_packets"])
+		port := getString(session, "x_forwarded_port")
+		if port != "" {
+			if portNum, err := strconv.Atoi(port); err == nil {
+				if counters, ok := transportCountersByPort[portNum]; ok {
+					dropPackets = counters.DropPackets
+					rejectPackets = counters.RejectPackets
+				}
+				if a.traffic == nil {
+					session["transport_fault_drop_packets"] = dropPackets
+					session["transport_fault_reject_packets"] = rejectPackets
+					continue
+				}
 				config, err := a.traffic.GetPortConfig(portNum)
 				if err == nil && config != nil {
 					if val, ok := config["bandwidth_limit"]; ok {
@@ -713,6 +770,18 @@ func (a *App) handleUpdateFailureSettings(w http.ResponseWriter, r *http.Request
 			}
 			for key, value := range payload {
 				session[key] = value
+			}
+			for _, prefix := range []string{"segment", "manifest", "master_manifest"} {
+				typeKey := prefix + "_failure_type"
+				failureType := normalizeRequestFailureType(getString(session, typeKey))
+				if failureType == "" {
+					failureType = "none"
+				}
+				session[typeKey] = failureType
+				resetKey := prefix + "_reset_failure_type"
+				if resetType := getString(session, resetKey); resetType != "" {
+					session[resetKey] = normalizeRequestFailureType(resetType)
+				}
 			}
 			targetPort = getString(session, "x_forwarded_port")
 			if transportUpdated {
@@ -868,6 +937,14 @@ func (a *App) handleSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if session := a.getSessionData(id); session != nil {
+		for _, prefix := range []string{"segment", "manifest", "playlist"} {
+			typeKey := prefix + "_failure_type"
+			failureType := normalizeRequestFailureType(getString(session, typeKey))
+			if failureType == "" {
+				failureType = "none"
+			}
+			session[typeKey] = failureType
+		}
 		dropPackets := int64FromInterface(session["transport_fault_drop_packets"])
 		rejectPackets := int64FromInterface(session["transport_fault_reject_packets"])
 		if port, err := strconv.Atoi(getString(session, "x_forwarded_port")); err == nil {
@@ -1899,14 +1976,14 @@ func (a *App) handleForceClose(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte("Force closing"))
 }
 
-func requestKindLabel(isSegment, isManifest, isPlaylist bool) string {
+func requestKindLabel(isSegment, isUpdateManifest, isMasterManifest bool) string {
 	if isSegment {
 		return "segment"
 	}
-	if isPlaylist {
-		return "playlist"
+	if isMasterManifest {
+		return "master_manifest"
 	}
-	if isManifest {
+	if isUpdateManifest {
 		return "manifest"
 	}
 	return "other"
@@ -1967,7 +2044,71 @@ func bumpFaultCounter(session SessionData, faultType string) {
 	session["fault_count_total"] = getInt(session, "fault_count_total") + 1
 }
 
-func applySocketFault(w http.ResponseWriter, faultType string) (string, error) {
+func closeSocketAsReject(conn net.Conn) {
+	if tcpConn, ok := conn.(*net.TCPConn); ok {
+		_ = tcpConn.SetLinger(0)
+	}
+	_ = conn.Close()
+}
+
+func closeSocketAsDrop(conn net.Conn) {
+	closeSocketAsDropAfter(conn, socketHangDuration)
+}
+
+func closeSocketAsDropAfter(conn net.Conn, delay time.Duration) {
+	if delay < 0 {
+		delay = 0
+	}
+	go func(c net.Conn) {
+		time.Sleep(delay)
+		_ = c.Close()
+	}(conn)
+}
+
+func writeChunkedHeaders(conn net.Conn, contentType string) error {
+	if strings.TrimSpace(contentType) == "" {
+		contentType = "application/octet-stream"
+	}
+	header := fmt.Sprintf(
+		"HTTP/1.1 200 OK\r\nContent-Type: %s\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n",
+		contentType,
+	)
+	_, err := conn.Write([]byte(header))
+	return err
+}
+
+func writeChunkedBodyBytes(conn net.Conn, body []byte) error {
+	if len(body) == 0 {
+		return nil
+	}
+	if _, err := fmt.Fprintf(conn, "%x\r\n", len(body)); err != nil {
+		return err
+	}
+	if _, err := conn.Write(body); err != nil {
+		return err
+	}
+	_, err := conn.Write([]byte("\r\n"))
+	return err
+}
+
+func isSocketFaultType(faultType string) bool {
+	switch faultType {
+	case "request_connect_hang",
+		"request_connect_reset",
+		"request_connect_delayed",
+		"request_first_byte_hang",
+		"request_first_byte_reset",
+		"request_first_byte_delayed",
+		"request_body_hang",
+		"request_body_reset",
+		"request_body_delayed":
+		return true
+	default:
+		return false
+	}
+}
+
+func applySocketFault(w http.ResponseWriter, faultType, contentType string) (string, error) {
 	hj, ok := w.(http.Hijacker)
 	if !ok {
 		return "", fmt.Errorf("hijack unsupported")
@@ -1976,25 +2117,71 @@ func applySocketFault(w http.ResponseWriter, faultType string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	midBody := bytes.Repeat([]byte("X"), socketMidBodyBytes)
 	switch faultType {
-	case "socket_reject", "transport_reject":
-		if tcpConn, ok := conn.(*net.TCPConn); ok {
-			_ = tcpConn.SetLinger(0)
+	case "request_connect_reset":
+		closeSocketAsReject(conn)
+		return "request_connect_reset", nil
+	case "request_connect_hang":
+		closeSocketAsDrop(conn)
+		return "request_connect_hang", nil
+	case "request_connect_delayed":
+		closeSocketAsDropAfter(conn, socketDelayDuration)
+		return "request_connect_delayed", nil
+	case "request_first_byte_reset":
+		if err := writeChunkedHeaders(conn, contentType); err != nil {
+			_ = conn.Close()
+			return "", err
 		}
-		_ = conn.Close()
-		return "socket_reject", nil
-	case "socket_drop", "transport_drop":
-		go func(c net.Conn) {
-			time.Sleep(90 * time.Second)
-			_ = c.Close()
-		}(conn)
-		return "socket_drop", nil
-	case "socket_timeout":
-		go func(c net.Conn) {
-			time.Sleep(45 * time.Second)
-			_ = c.Close()
-		}(conn)
-		return "socket_timeout", nil
+		closeSocketAsReject(conn)
+		return "request_first_byte_reset", nil
+	case "request_first_byte_hang":
+		if err := writeChunkedHeaders(conn, contentType); err != nil {
+			_ = conn.Close()
+			return "", err
+		}
+		closeSocketAsDrop(conn)
+		return "request_first_byte_hang", nil
+	case "request_first_byte_delayed":
+		if err := writeChunkedHeaders(conn, contentType); err != nil {
+			_ = conn.Close()
+			return "", err
+		}
+		closeSocketAsDropAfter(conn, socketDelayDuration)
+		return "request_first_byte_delayed", nil
+	case "request_body_reset":
+		if err := writeChunkedHeaders(conn, contentType); err != nil {
+			_ = conn.Close()
+			return "", err
+		}
+		if err := writeChunkedBodyBytes(conn, midBody); err != nil {
+			_ = conn.Close()
+			return "", err
+		}
+		closeSocketAsReject(conn)
+		return "request_body_reset", nil
+	case "request_body_hang":
+		if err := writeChunkedHeaders(conn, contentType); err != nil {
+			_ = conn.Close()
+			return "", err
+		}
+		if err := writeChunkedBodyBytes(conn, midBody); err != nil {
+			_ = conn.Close()
+			return "", err
+		}
+		closeSocketAsDrop(conn)
+		return "request_body_hang", nil
+	case "request_body_delayed":
+		if err := writeChunkedHeaders(conn, contentType); err != nil {
+			_ = conn.Close()
+			return "", err
+		}
+		if err := writeChunkedBodyBytes(conn, midBody); err != nil {
+			_ = conn.Close()
+			return "", err
+		}
+		closeSocketAsDropAfter(conn, socketDelayDuration)
+		return "request_body_delayed", nil
 	default:
 		_ = conn.Close()
 		return "", fmt.Errorf("unsupported socket fault type: %s", faultType)
@@ -2009,6 +2196,38 @@ func normalizeTransportFaultType(raw string) string {
 		return "reject"
 	default:
 		return "none"
+	}
+}
+
+func normalizeRequestFailureType(raw string) string {
+	failureType := strings.TrimSpace(strings.ToLower(raw))
+	switch failureType {
+	case "hung", "socket_timeout":
+		return "request_connect_hang"
+	case "socket_drop":
+		return "request_connect_hang"
+	case "socket_reject":
+		return "request_connect_reset"
+	case "socket_drop_before_headers", "request_connect_hang":
+		return "request_connect_hang"
+	case "socket_reject_before_headers", "request_connect_reset":
+		return "request_connect_reset"
+	case "request_connect_delayed":
+		return "request_connect_delayed"
+	case "socket_drop_after_headers", "request_first_byte_hang":
+		return "request_first_byte_hang"
+	case "socket_reject_after_headers", "request_first_byte_reset":
+		return "request_first_byte_reset"
+	case "request_first_byte_delayed":
+		return "request_first_byte_delayed"
+	case "socket_drop_mid_body", "request_body_hang":
+		return "request_body_hang"
+	case "socket_reject_mid_body", "request_body_reset":
+		return "request_body_reset"
+	case "request_body_delayed":
+		return "request_body_delayed"
+	default:
+		return failureType
 	}
 }
 
@@ -2090,9 +2309,9 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 			"headers_player_id":           playerHeader,
 			"headers_player-ID":           playerHeaderAlt,
 			"headers_x_playback_session_id": playbackSessionHeader,
-			"playlists_count":             0,
+			"manifest_requests_count":     0,
+			"master_manifest_requests_count": 0,
 			"segments_count":              0,
-			"manifests_count":             0,
 			"last_request":                nowISO(),
 			"first_request_time":          nowISO(),
 			"segment_failure_type":        "none",
@@ -2103,22 +2322,22 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 			"manifest_failure_frequency":  0,
 			"manifest_failure_units":      "requests",
 			"manifest_consecutive_failures": 0,
-			"playlist_failure_type":       "none",
-			"playlist_failure_frequency":  0,
-			"playlist_failure_units":      "requests",
-			"playlist_consecutive_failures": 0,
+			"master_manifest_failure_type":       "none",
+			"master_manifest_failure_frequency":  0,
+			"master_manifest_failure_units":      "requests",
+			"master_manifest_consecutive_failures": 0,
 			"current_failures":            0,
 			"consecutive_failures_count":  0,
 			"player_ip":                   "",
 			"user_agent":                  "",
-			"playlist_failure_at":         nil,
-			"playlist_failure_recover_at": nil,
-			"playlist_failure_urls":       []string{},
+			"manifest_failure_at":         nil,
+			"manifest_failure_recover_at": nil,
+			"manifest_failure_urls":       []string{},
 			"segment_failure_urls":        []string{},
 			"segment_failure_at":          nil,
 			"segment_failure_recover_at":  nil,
-			"manifest_failure_at":         nil,
-			"manifest_failure_recover_at": nil,
+			"master_manifest_failure_at":         nil,
+			"master_manifest_failure_recover_at": nil,
 			"transport_failure_type":      "none",
 			"transport_failure_frequency": 0,
 			"transport_consecutive_failures": 1,
@@ -2138,9 +2357,23 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 			"transport_fault_drop_packets":   0,
 			"transport_fault_reject_packets": 0,
 			"fault_count_total":           0,
-			"fault_count_socket_timeout":  0,
 			"fault_count_socket_reject":   0,
 			"fault_count_socket_drop":     0,
+			"fault_count_socket_drop_before_headers":   0,
+			"fault_count_socket_reject_before_headers": 0,
+			"fault_count_socket_drop_after_headers":    0,
+			"fault_count_socket_reject_after_headers":  0,
+			"fault_count_socket_drop_mid_body":         0,
+			"fault_count_socket_reject_mid_body":       0,
+			"fault_count_request_connect_hang":         0,
+			"fault_count_request_connect_reset":        0,
+			"fault_count_request_connect_delayed":      0,
+			"fault_count_request_first_byte_hang":      0,
+			"fault_count_request_first_byte_reset":     0,
+			"fault_count_request_first_byte_delayed":   0,
+			"fault_count_request_body_hang":            0,
+			"fault_count_request_body_reset":           0,
+			"fault_count_request_body_delayed":         0,
 		}
 		sessionList = append(sessionList, sessionData)
 		a.saveSessionList(sessionList)
@@ -2198,27 +2431,20 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 	}
 
 	upstreamURL := fmt.Sprintf("http://%s:%s/%s", a.upstreamHost, a.upstreamPort, filename)
-	contentType, isManifest, isPlaylist, isSegment, playlistInfo := a.getContentType(upstreamURL)
-	requestKind := requestKindLabel(isSegment, isManifest, isPlaylist)
+	contentType, isMasterManifest, isManifest, isSegment, playlistInfo := a.getContentType(upstreamURL)
+	requestKind := requestKindLabel(isSegment, isManifest, isMasterManifest)
 
-	if isPlaylist {
-		playlistUrls := getPlaylistInfos(sessionData)
-		base := pathBase(filename)
-		for _, playlist := range playlistUrls {
-			if strings.Contains(playlist.URL, base) {
-				sessionData["last_playlist_url"] = filename
-				break
-			}
-		}
+	if isMasterManifest {
+		sessionData["master_manifest_url"] = filename
 	}
 	if isManifest {
 		sessionData["manifest_url"] = filename
 	}
 	if playlistInfo != nil {
-		sessionData["playlist_urls"] = playlistInfo
+		sessionData["manifest_variants"] = playlistInfo
 	}
 
-	handler := NewRequestHandler(isSegment, isManifest, isPlaylist, sessionData)
+	handler := NewRequestHandler(isSegment, isManifest, isMasterManifest, sessionData)
 	failureType := handler.HandleRequest(filename)
 
 	sessionList[index] = sessionData
@@ -2299,8 +2525,8 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 			a.saveSessionList(sessionList)
 			return
 		}
-		if failureType == "socket_timeout" || failureType == "socket_reject" || failureType == "socket_drop" {
-			socketAction, err := applySocketFault(w, failureType)
+		if isSocketFaultType(failureType) {
+			socketAction, err := applySocketFault(w, failureType, contentType)
 			if err != nil {
 				actionTaken = "fallback_http_503"
 				w.WriteHeader(http.StatusServiceUnavailable)
@@ -2339,13 +2565,6 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 		case "rate_limiting":
 			actionTaken = "http_429_rate_limited"
 			w.WriteHeader(http.StatusTooManyRequests)
-		case "hung":
-			actionTaken = "hung_sleep_300s"
-			bumpFaultCounter(sessionData, failureType)
-			logFaultEvent(sessionData, externalPort, failureType, requestKind, actionTaken)
-			log.Printf("hanging response to request: %s", upstreamURL)
-			time.Sleep(5 * time.Minute)
-			return
 		default:
 			actionTaken = "http_500_unknown_failure"
 			w.WriteHeader(http.StatusInternalServerError)
@@ -2439,6 +2658,9 @@ func (a *App) getContentType(target string) (string, bool, bool, bool, []Playlis
 	if strings.HasSuffix(strings.ToLower(parsed.Path), ".m3u8") && contentType == "" {
 		contentType = "application/vnd.apple.mpegurl"
 	}
+	if strings.HasSuffix(strings.ToLower(parsed.Path), ".mpd") && contentType == "" {
+		contentType = "application/dash+xml"
+	}
 
 	if strings.Contains(strings.ToLower(contentType), "mpegurl") {
 		getReq, _ := http.NewRequest(http.MethodGet, parsed.String(), nil)
@@ -2447,11 +2669,11 @@ func (a *App) getContentType(target string) (string, bool, bool, bool, []Playlis
 		getReq = getReq.WithContext(ctxGet)
 		getResp, err := a.client.Do(getReq)
 		if err != nil {
-			return contentType, false, false, false, nil
+			return contentType, false, true, false, nil
 		}
 		defer getResp.Body.Close()
 		if getResp.StatusCode >= 400 {
-			return contentType, false, false, false, nil
+			return contentType, false, true, false, nil
 		}
 		contentType = getResp.Header.Get("Content-Type")
 		body, _ := io.ReadAll(getResp.Body)
@@ -2479,6 +2701,9 @@ func (a *App) getContentType(target string) (string, bool, bool, bool, []Playlis
 				}
 			}
 		}
+		return contentType, false, true, false, nil
+	}
+	if strings.Contains(strings.ToLower(contentType), "dash") || strings.Contains(strings.ToLower(contentType), "mpd") {
 		return contentType, false, true, false, nil
 	}
 	return contentType, false, false, true, nil
@@ -2798,8 +3023,8 @@ func getStringSlice(m map[string]interface{}, key string) []string {
 	return nil
 }
 
-func getPlaylistInfos(session SessionData) []PlaylistInfo {
-	val, ok := session["playlist_urls"]
+func getManifestVariants(session SessionData) []PlaylistInfo {
+	val, ok := session["manifest_variants"]
 	if !ok || val == nil {
 		return nil
 	}
@@ -2983,8 +3208,12 @@ func NewFailureHandler(prefix string, session SessionData) *FailureHandler {
 	if frequencyUnits == "" {
 		frequencyUnits = "requests"
 	}
+	resetFailureType := session[prefix+"_reset_failure_type"]
+	if resetString, ok := resetFailureType.(string); ok {
+		resetFailureType = normalizeRequestFailureType(resetString)
+	}
 	return &FailureHandler{
-		failureType:      getString(session, prefix+"_failure_type"),
+		failureType:      normalizeRequestFailureType(getString(session, prefix+"_failure_type")),
 		failureUnits:     failureUnits,
 		consecutiveUnits: consecutiveUnits,
 		frequencyUnits:   frequencyUnits,
@@ -2992,7 +3221,7 @@ func NewFailureHandler(prefix string, session SessionData) *FailureHandler {
 		consecutive:      getInt(session, prefix+"_consecutive_failures"),
 		failureAt:        session[prefix+"_failure_at"],
 		failureRecoverAt: session[prefix+"_failure_recover_at"],
-		resetFailureType: session[prefix+"_reset_failure_type"],
+		resetFailureType: resetFailureType,
 	}
 }
 
@@ -3180,15 +3409,15 @@ type RequestHandler struct {
 	failureKey string
 }
 
-func NewRequestHandler(isSegment, isManifest, isPlaylist bool, session SessionData) *RequestHandler {
+func NewRequestHandler(isSegment, isUpdateManifest, isMasterManifest bool, session SessionData) *RequestHandler {
 	if isSegment {
 		return &RequestHandler{mode: "segment", session: session}
 	}
-	if isManifest {
-		return &RequestHandler{mode: "manifest", session: session}
+	if isMasterManifest {
+		return &RequestHandler{mode: "master_manifest", session: session}
 	}
-	if isPlaylist {
-		return &RequestHandler{mode: "playlist", session: session}
+	if isUpdateManifest {
+		return &RequestHandler{mode: "manifest", session: session}
 	}
 	return &RequestHandler{mode: "unknown", session: session}
 }
@@ -3198,9 +3427,9 @@ func (h *RequestHandler) HandleRequest(filename string) string {
 	case "segment":
 		return h.handleSegmentFailure(filename)
 	case "manifest":
-		return h.handleFailure("manifest", "manifests_count")
-	case "playlist":
-		return h.handlePlaylistFailure(filename)
+		return h.handleManifestFailure(filename)
+	case "master_manifest":
+		return h.handleFailure("master_manifest", "master_manifest_requests_count")
 	default:
 		return "none"
 	}
@@ -3235,20 +3464,20 @@ func (h *RequestHandler) handleFailure(prefix, countKey string) string {
 	return failureType
 }
 
-func (h *RequestHandler) handlePlaylistFailure(filename string) string {
-	h.session["playlists_count"] = getInt(h.session, "playlists_count") + 1
-	playlistURLs := getStringSlice(h.session, "playlist_failure_urls")
-	match := shouldApplyFailure(playlistURLs, filename, pathParent(filename))
+func (h *RequestHandler) handleManifestFailure(filename string) string {
+	h.session["manifest_requests_count"] = getInt(h.session, "manifest_requests_count") + 1
+	manifestURLs := getStringSlice(h.session, "manifest_failure_urls")
+	match := shouldApplyFailure(manifestURLs, filename, pathParent(filename))
 	if !match {
 		return "none"
 	}
-	failure := NewFailureHandler("playlist", h.session)
-	failureType := failure.HandleFailure(getInt(h.session, "playlists_count"), time.Now())
-	h.session["playlist_failure_at"] = failure.failureAt
-	h.session["playlist_failure_recover_at"] = failure.failureRecoverAt
+	failure := NewFailureHandler("manifest", h.session)
+	failureType := failure.HandleFailure(getInt(h.session, "manifest_requests_count"), time.Now())
+	h.session["manifest_failure_at"] = failure.failureAt
+	h.session["manifest_failure_recover_at"] = failure.failureRecoverAt
 	if failure.resetFailureType != nil {
-		h.session["playlist_failure_type"] = failure.resetFailureType
-		h.session["playlist_reset_failure_type"] = nil
+		h.session["manifest_failure_type"] = failure.resetFailureType
+		h.session["manifest_reset_failure_type"] = nil
 	}
 	return failureType
 }
@@ -3288,22 +3517,45 @@ func shouldApplyFailure(entries []string, filename, variant string) bool {
 	if len(entries) == 0 {
 		return true
 	}
-	base := pathBase(filename)
+	decodedFilename := filename
+	if unescaped, err := url.PathUnescape(filename); err == nil {
+		decodedFilename = unescaped
+	}
+	base := pathBase(decodedFilename)
+	decodedVariant := variant
+	if unescaped, err := url.PathUnescape(variant); err == nil {
+		decodedVariant = unescaped
+	}
 	for _, entry := range entries {
 		if entry == "" {
 			continue
 		}
-		if entry == "All" {
+		decodedEntry := entry
+		if unescaped, err := url.PathUnescape(entry); err == nil {
+			decodedEntry = unescaped
+		}
+		entryBase := pathBase(decodedEntry)
+		if entryBase == "All" || decodedEntry == "All" {
 			return true
 		}
-		if entry == variant {
+		if decodedEntry == decodedVariant || entry == variant {
 			return true
 		}
-		if entry == base {
+		if decodedEntry == base || entry == base {
 			return true
 		}
-		if strings.Contains(filename, entry) {
+		if strings.Contains(decodedFilename, decodedEntry) || strings.Contains(filename, entry) {
 			return true
+		}
+		if strings.Contains(entryBase, "playlist_") {
+			trimmed := strings.TrimSuffix(entryBase, ".m3u8")
+			parts := strings.Split(trimmed, "_")
+			if len(parts) > 0 {
+				candidate := parts[len(parts)-1]
+				if candidate != "" && strings.Contains(decodedFilename, "/"+candidate+"/") {
+					return true
+				}
+			}
 		}
 	}
 	return false
@@ -3363,11 +3615,6 @@ func updateSessionTrafficAverages(session SessionData, totalIn, totalOut int64, 
 	if len(samples) > 0 {
 		prevSample = samples[len(samples)-1]
 	}
-	samples = append(samples, map[string]interface{}{
-		"ts":  now.Unix(),
-		"in":  totalIn,
-		"out": totalOut,
-	})
 	activeSamples := make([]map[string]interface{}, 0)
 	if raw, ok := session["active_io_samples"]; ok && raw != nil {
 		switch v := raw.(type) {

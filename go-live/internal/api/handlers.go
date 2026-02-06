@@ -171,12 +171,14 @@ func (h *Handler) Status(w http.ResponseWriter, r *http.Request) {
 	procs := h.Manager.Status()
 	streams := []StreamStatus{}
 	idleSeconds := defaultIdleTimeoutSeconds
+	uniqueExternalIPs := 0
 	if h.Tracker != nil {
 		streams = h.Tracker.Snapshot(time.Now())
 		for i := range streams {
 			streams[i] = h.decorateStreamStats(streams[i])
 		}
 		idleSeconds = int(h.Tracker.IdleTimeout().Seconds())
+		uniqueExternalIPs = h.Tracker.UniqueExternalIPCount(time.Now())
 	}
 
 	response := map[string]interface{}{
@@ -185,6 +187,7 @@ func (h *Handler) Status(w http.ResponseWriter, r *http.Request) {
 		"active_processes": len(procs),
 		"processes":        procs,
 		"active_streams":   streams,
+		"unique_external_ips": uniqueExternalIPs,
 	}
 
 	w.Header().Set("Content-Type", "application/json")

@@ -1,0 +1,568 @@
+/* Refactored Testing Session UI Styles - Progressive Disclosure */
+
+/* ============================================================================
+   Collapsible Sections
+   ============================================================================ */
+
+.collapsible-section {
+    margin: 16px 0;
+    border: 1px solid #e0e0e0;
+    border-radius: 6px;
+    background: #fafafa;
+}
+
+.collapsible-header {
+    display: flex;
+    align-items: center;
+    padding: 12px 16px;
+    cursor: pointer;
+    user-select: none;
+    transition: background-color 0.2s;
+}
+
+.collapsible-header:hover {
+    background-color: #f0f0f0;
+}
+
+.collapsible-icon {
+    font-size: 12px;
+    margin-right: 8px;
+    transition: transform 0.2s;
+    color: #666;
+}
+
+.collapsible-title {
+    font-weight: 600;
+    font-size: 14px;
+    color: #333;
+    flex: 1;
+}
+
+.collapsible-badge {
+    font-size: 12px;
+    color: #666;
+    background: #e8e8e8;
+    padding: 4px 10px;
+    border-radius: 12px;
+    font-family: 'Monaco', 'Menlo', monospace;
+}
+
+.collapsible-content {
+    padding: 16px;
+    border-top: 1px solid #e0e0e0;
+}
+
+/* ============================================================================
+   Fault Injection Tabs
+   ============================================================================ */
+
+.fault-injection-section {
+    margin: 20px 0;
+}
+
+.section-title {
+    font-weight: 700;
+    font-size: 16px;
+    color: #222;
+    margin-bottom: 12px;
+    padding: 0 4px;
+}
+
+.tabs-container {
+    border: 1px solid #ddd;
+    border-radius: 8px;
+    background: white;
+    overflow: hidden;
+}
+
+.tabs-header {
+    display: flex;
+    background: #f5f5f5;
+    border-bottom: 2px solid #ddd;
+}
+
+.tab-button {
+    flex: 1;
+    padding: 12px 16px;
+    border: none;
+    background: transparent;
+    font-size: 14px;
+    font-weight: 500;
+    color: #666;
+    cursor: pointer;
+    transition: all 0.2s;
+    border-bottom: 3px solid transparent;
+    position: relative;
+}
+
+.tab-button:hover {
+    background: #ebebeb;
+    color: #333;
+}
+
+.tab-button.active {
+    color: #2196F3;
+    background: white;
+    border-bottom-color: #2196F3;
+}
+
+.tabs-content {
+    position: relative;
+}
+
+.tab-panel {
+    display: none;
+    padding: 20px;
+}
+
+.tab-panel.active {
+    display: block;
+}
+
+/* ============================================================================
+   Fault Control Rows (improved from radio groups)
+   ============================================================================ */
+
+.fault-control-row {
+    margin-bottom: 16px;
+}
+
+.fault-control-row > label:first-child {
+    display: block;
+    font-weight: 600;
+    font-size: 13px;
+    color: #555;
+    margin-bottom: 8px;
+}
+
+.fault-control-row select {
+    width: 100%;
+    padding: 8px 12px;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+    font-size: 14px;
+    background: white;
+    cursor: pointer;
+    transition: border-color 0.2s;
+}
+
+.fault-control-row select:hover {
+    border-color: #999;
+}
+
+.fault-control-row select:focus {
+    outline: none;
+    border-color: #2196F3;
+    box-shadow: 0 0 0 3px rgba(33, 150, 243, 0.1);
+}
+
+.fault-control-row .checkbox-group {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.fault-control-row .checkbox-group label {
+    display: inline-flex;
+    align-items: center;
+    padding: 6px 12px;
+    background: #f5f5f5;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+    font-size: 13px;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+
+.fault-control-row .checkbox-group label:hover {
+    background: #ebebeb;
+    border-color: #999;
+}
+
+.fault-control-row .checkbox-group input[type="checkbox"] {
+    margin-right: 6px;
+}
+
+.fault-control-row .radio-group {
+    display: flex;
+    gap: 12px;
+}
+
+.fault-control-row .radio-group label {
+    display: inline-flex;
+    align-items: center;
+    font-size: 13px;
+    cursor: pointer;
+}
+
+.fault-control-row .radio-group input[type="radio"] {
+    margin-right: 6px;
+}
+
+/* ============================================================================
+   Network Shaping Section
+   ============================================================================ */
+
+.network-shaping-section {
+    margin: 20px 0;
+    border: 1px solid #ddd;
+    border-radius: 8px;
+    padding: 16px;
+    background: white;
+}
+
+.shaping-basic-controls {
+    margin-bottom: 24px;
+    padding-bottom: 20px;
+    border-bottom: 1px solid #e8e8e8;
+}
+
+.shaping-pattern-group {
+    background: #fafafa;
+    padding: 16px;
+    border-radius: 6px;
+    border: 1px solid #e8e8e8;
+}
+
+.shaping-pattern-group > .shape-template-row:first-child {
+    margin-top: 0;
+}
+
+.shape-template-row {
+    margin-top: 16px;
+}
+
+.shape-template-row:first-child {
+    margin-top: 0;
+}
+
+.shape-step-defaults {
+    margin-top: 12px;
+    padding-top: 12px;
+    border-top: 1px solid #e0e0e0;
+}
+
+.chart-axis-row {
+    margin-top: 20px;
+    padding-top: 16px;
+    border-top: 1px solid #e0e0e0;
+}
+
+/* ============================================================================
+   Range Rows (sliders)
+   ============================================================================ */
+
+.range-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 12px;
+}
+
+.range-row label {
+    min-width: 140px;
+    font-weight: 500;
+    font-size: 13px;
+    color: #555;
+}
+
+.range-row input[type="range"] {
+    flex: 1;
+}
+
+.range-row .range-value {
+    min-width: 50px;
+    text-align: right;
+    font-family: 'Monaco', 'Menlo', monospace;
+    font-size: 13px;
+    color: #333;
+    font-weight: 600;
+}
+
+.range-row-disabled {
+    opacity: 0.5;
+    pointer-events: none;
+}
+
+/* ============================================================================
+   Shape Pattern Modes (radio button groups)
+   ============================================================================ */
+
+.shape-pattern-modes {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.shape-pattern-mode {
+    display: inline-flex;
+    align-items: center;
+    padding: 6px 12px;
+    background: white;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+    cursor: pointer;
+    transition: all 0.2s;
+    font-size: 13px;
+}
+
+.shape-pattern-mode:hover {
+    background: #f9f9f9;
+    border-color: #999;
+}
+
+.shape-pattern-mode input[type="radio"] {
+    margin-right: 6px;
+}
+
+.shape-pattern-mode input[type="radio"]:checked + span {
+    font-weight: 600;
+    color: #2196F3;
+}
+
+.shape-margin-modes .shape-pattern-mode {
+    min-width: 70px;
+    justify-content: center;
+}
+
+/* ============================================================================
+   Shape Step Rows
+   ============================================================================ */
+
+.shape-step-row {
+    display: grid;
+    grid-template-columns: auto 1fr auto 1fr auto 1fr auto auto;
+    gap: 8px;
+    align-items: center;
+    padding: 10px;
+    background: white;
+    border: 1px solid #e0e0e0;
+    border-radius: 4px;
+    margin-bottom: 8px;
+}
+
+.shape-step-row label {
+    font-size: 12px;
+    font-weight: 500;
+    color: #666;
+}
+
+.shape-step-row select,
+.shape-step-row input[type="number"] {
+    padding: 6px 8px;
+    border: 1px solid #ddd;
+    border-radius: 3px;
+    font-size: 13px;
+}
+
+.shape-step-row .shape-step-enabled {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.shape-step-list {
+    margin-top: 12px;
+}
+
+.shape-step-actions {
+    margin-top: 12px;
+    display: flex;
+    gap: 8px;
+}
+
+/* ============================================================================
+   Session Grid (for details)
+   ============================================================================ */
+
+.session-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+    gap: 12px;
+}
+
+.session-item {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.session-item .label {
+    font-size: 11px;
+    font-weight: 600;
+    color: #888;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.session-item .value {
+    font-size: 13px;
+    color: #333;
+    word-break: break-all;
+}
+
+/* ============================================================================
+   Buttons
+   ============================================================================ */
+
+.btn {
+    padding: 10px 20px;
+    border: none;
+    border-radius: 4px;
+    font-size: 14px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+
+.btn-secondary {
+    background: #f5f5f5;
+    color: #333;
+    border: 1px solid #ddd;
+}
+
+.btn-secondary:hover {
+    background: #ebebeb;
+    border-color: #999;
+}
+
+.btn-danger {
+    background: #f44336;
+    color: white;
+}
+
+.btn-danger:hover {
+    background: #d32f2f;
+}
+
+.btn-mini {
+    padding: 6px 12px;
+    font-size: 12px;
+}
+
+.session-actions {
+    margin-top: 20px;
+    display: flex;
+    gap: 12px;
+}
+
+/* ============================================================================
+   Charts
+   ============================================================================ */
+
+.chart-wrap {
+    margin-top: 16px;
+}
+
+.bandwidth-chart,
+.buffer-depth-chart {
+    width: 100%;
+    height: auto;
+    border: 1px solid #e0e0e0;
+    border-radius: 4px;
+}
+
+/* ============================================================================
+   Session Card
+   ============================================================================ */
+
+.session-card {
+    background: white;
+    border: 1px solid #ddd;
+    border-radius: 8px;
+    padding: 20px;
+    margin-bottom: 24px;
+}
+
+.session-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 20px;
+    padding-bottom: 16px;
+    border-bottom: 2px solid #f0f0f0;
+}
+
+.session-title {
+    font-size: 20px;
+    font-weight: 700;
+    color: #222;
+}
+
+.session-meta {
+    font-size: 14px;
+    color: #666;
+    font-family: 'Monaco', 'Menlo', monospace;
+    background: #f5f5f5;
+    padding: 4px 12px;
+    border-radius: 4px;
+}
+
+/* ============================================================================
+   Responsive
+   ============================================================================ */
+
+@media (max-width: 768px) {
+    .tabs-header {
+        flex-direction: column;
+    }
+
+    .tab-button {
+        border-bottom: none;
+        border-left: 3px solid transparent;
+    }
+
+    .tab-button.active {
+        border-left-color: #2196F3;
+        border-bottom-color: transparent;
+    }
+
+    .session-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .shape-step-row {
+        grid-template-columns: auto 1fr;
+        gap: 6px;
+    }
+
+    .fault-control-row .checkbox-group {
+        flex-direction: column;
+    }
+}
+
+/* ============================================================================
+   Shape Default Seconds Label
+   ============================================================================ */
+
+.shape-default-seconds {
+    display: inline-block;
+    margin-left: 12px;
+    font-size: 12px;
+    color: #888;
+    font-family: 'Monaco', 'Menlo', monospace;
+}
+
+/* ============================================================================
+   Inline Player
+   ============================================================================ */
+
+.session-inline-player {
+    margin-bottom: 16px;
+}
+
+/* ============================================================================
+   Utility Classes
+   ============================================================================ */
+
+.mt-16 {
+    margin-top: 16px;
+}
+
+.mb-16 {
+    margin-bottom: 16px;
+}
+
+.p-16 {
+    padding: 16px;
+}

@@ -51,349 +51,42 @@
             flex-wrap: wrap;
         }
 
-        .session-card {
-            background: var(--bg-secondary);
-            border-radius: 10px;
-            padding: 14px;
-            margin-bottom: 12px;
-            border: 1px solid var(--border-color);
-        }
-
-        .session-tabs {
-            display: flex;
-            gap: 6px;
-            flex-wrap: wrap;
-            margin-bottom: 12px;
-        }
-
-        .session-tab {
-            padding: 8px 14px;
-            border-radius: 999px;
-            border: 1px solid var(--border-color);
-            background: var(--bg-secondary);
-            color: var(--text-secondary);
-            font-size: 14px;
-            font-weight: 700;
-            cursor: pointer;
-        }
-
-        .session-tab.active {
-            background: var(--primary-blue);
-            color: #fff;
-            border-color: var(--primary-blue);
-        }
-
-        .session-header {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            flex-wrap: wrap;
-            gap: 10px;
-            margin-bottom: 10px;
-        }
-
-        .session-title {
-            font-size: 14px;
-            font-weight: 600;
-            color: var(--text-primary);
-        }
-
-        .session-meta {
-            font-size: 12px;
-            color: var(--text-secondary);
-            font-family: 'Courier New', monospace;
-        }
-
-        .session-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-            gap: 10px;
-            font-size: 12px;
-            margin-bottom: 12px;
-        }
-
-        .session-item {
-            background: var(--bg-primary);
-            border-radius: 6px;
-            padding: 8px 10px;
-        }
-
-        .session-item .label {
-            color: var(--text-secondary);
-            font-weight: 600;
-            display: block;
-            margin-bottom: 2px;
-        }
-
-        .session-item .value {
-            color: var(--text-primary);
-            font-family: 'Courier New', monospace;
-            word-break: break-word;
-        }
-
-        .failure-groups {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
-            gap: 12px;
-        }
-
-        .failure-group {
-            background: var(--bg-primary);
-            border-radius: 8px;
-            padding: 10px;
-            border: 1px solid var(--border-color);
-        }
-
-        .failure-title {
-            font-size: 12px;
-            font-weight: 700;
-            color: var(--text-primary);
-            margin-bottom: 8px;
-        }
-
-        .radio-group,
-        .checkbox-group {
-            display: flex;
-            flex-wrap: wrap;
-            gap: 6px;
-            margin-bottom: 8px;
-        }
-
-        .radio-group label,
-        .checkbox-group label {
-            font-size: 11px;
-            color: var(--text-secondary);
-            display: flex;
-            align-items: center;
-            gap: 4px;
-        }
-
-        .range-row {
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            margin-bottom: 6px;
-        }
-
-        .range-row input[type="range"] {
-            flex: 1;
-        }
-
-        .range-value {
-            font-size: 11px;
-            color: var(--text-primary);
-            min-width: 32px;
-            text-align: right;
-        }
-
-        .range-row.range-row-disabled {
-            opacity: 0.55;
-        }
-
-        .range-row.range-row-disabled input[type="range"] {
-            pointer-events: none;
-        }
-
-        .btn-mini {
-            font-size: 11px;
-            padding: 4px 8px;
-            min-height: 28px;
-        }
-
-        .shape-pattern-block {
-            margin-top: 8px;
-            border-top: 1px dashed var(--border-color);
-            padding-top: 8px;
-        }
-
-        .shape-step-defaults {
-            display: grid;
-            grid-template-columns: auto 1fr auto;
-            gap: 6px;
-            align-items: center;
-            margin-bottom: 8px;
-        }
-
-        .shape-step-defaults label {
-            font-size: 11px;
-            color: var(--text-secondary);
-        }
-
-        .shape-default-seconds {
-            font-size: 11px;
-            color: var(--text-secondary);
-            text-align: right;
-            white-space: nowrap;
-        }
-
-        .shape-template-row {
-            display: grid;
-            grid-template-columns: auto minmax(320px, 1fr) auto minmax(90px, 130px) 1fr;
-            gap: 6px;
-            align-items: center;
-            margin-bottom: 8px;
-        }
-
-        .shape-template-row label {
-            font-size: 11px;
-            color: var(--text-secondary);
-        }
-
-        .shape-template-row select {
-            width: 100%;
-            min-width: 0;
-            padding: 4px 6px;
-            border: 1px solid var(--border-color);
-            border-radius: 6px;
-            background: var(--bg-secondary);
-            color: var(--text-primary);
-            font-size: 11px;
-        }
-
-        .shape-pattern-modes {
-            display: flex;
-            flex-wrap: wrap;
-            gap: 6px;
-        }
-
-        .shape-margin-modes {
-            flex-wrap: nowrap;
-        }
-
-        .shape-pattern-mode {
-            margin: 0;
-        }
-
-        .shape-pattern-mode input {
-            display: none;
-        }
-
-        .shape-pattern-mode span {
-            display: inline-block;
-            padding: 4px 8px;
-            border: 1px solid #cbd5e1;
-            border-radius: 999px;
-            font-size: 11px;
-            font-weight: 600;
-            color: var(--text-primary);
-            background: #f8fafc;
-            cursor: pointer;
-            user-select: none;
-            white-space: nowrap;
-            transition: background-color 120ms ease, border-color 120ms ease, color 120ms ease;
-        }
-
-        .shape-pattern-mode input:checked + span {
-            background: #1d4ed8;
-            border-color: #1d4ed8;
-            color: #fff;
-            box-shadow: 0 0 0 2px rgba(29, 78, 216, 0.2);
-        }
-
-        .shape-pattern-mode input:focus-visible + span {
-            outline: 2px solid #2563eb;
-            outline-offset: 1px;
-        }
-
-        .shape-step-list {
-            display: flex;
-            flex-direction: column;
-            gap: 6px;
-            margin-bottom: 8px;
-        }
-
-        .shape-step-row {
-            display: grid;
-            grid-template-columns: auto minmax(120px, 180px) auto minmax(68px, 100px) auto minmax(68px, 100px) auto;
-            gap: 6px;
-            align-items: center;
-        }
-
-        .shape-step-row label {
-            font-size: 11px;
-            color: var(--text-secondary);
-        }
-
-        .shape-step-row input,
-        .shape-step-row select {
-            width: 100%;
-            min-width: 0;
-            padding: 4px 6px;
-            border: 1px solid var(--border-color);
-            border-radius: 6px;
-            background: var(--bg-secondary);
-            color: var(--text-primary);
-            font-size: 11px;
-        }
-
-        .shape-step-actions {
-            display: flex;
-            gap: 6px;
-            margin-bottom: 8px;
-        }
-
-        .chart-axis-row {
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            margin-bottom: 8px;
-            flex-wrap: wrap;
-        }
-
-        .chart-axis-row > label {
-            font-size: 11px;
-            color: var(--text-secondary);
-        }
-
-        .shape-step-enabled {
-            display: inline-flex;
-            align-items: center;
-            gap: 6px;
-            font-size: 11px;
-            color: var(--text-secondary);
-        }
-
-        .shape-step-row.shape-step-disabled {
-            opacity: 0.55;
-        }
-
-        .shape-step-row.shape-step-risk {
-            border: 1px solid #ef4444;
-            border-radius: 8px;
-            padding: 4px;
-            background: rgba(239, 68, 68, 0.08);
-        }
-
-        .session-actions {
-            display: flex;
-            gap: 10px;
-            margin-top: 10px;
-        }
-
-        .session-actions .btn {
-            font-size: 12px;
-        }
-
         .status-message {
             font-size: 12px;
             color: var(--text-secondary);
         }
 
-        .chart-wrap {
-            margin-top: 10px;
-            background: #ffffff;
-            border-radius: 8px;
-            padding: 6px;
-            border: 1px solid #e5e7eb;
-            width: 100%;
+        .session-tabs {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            margin-bottom: 16px;
         }
 
-        .bandwidth-chart {
-            width: 100%;
-            height: 220px;
-            display: block;
+        .session-tab {
+            border: 1px solid #c7d2fe;
+            background: #eef2ff;
+            color: #1e1b4b;
+            padding: 10px 14px;
+            border-radius: 999px;
+            font-size: 13px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: transform 0.1s ease, box-shadow 0.2s ease, background 0.2s ease;
         }
 
+        .session-tab:hover {
+            background: #e0e7ff;
+            box-shadow: 0 6px 14px rgba(59, 130, 246, 0.2);
+            transform: translateY(-1px);
+        }
+
+        .session-tab.active {
+            background: #1e40af;
+            color: #fff;
+            border-color: #1e40af;
+            box-shadow: 0 8px 18px rgba(30, 64, 175, 0.35);
+        }
     </style>
 </head>
 <body>
@@ -417,7 +110,8 @@
 
     <script src="/shared-nav.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
-    <script src="/dashboard/testing-session-ui.js"></script>
+    <link rel="stylesheet" href="/dashboard/testing-session-refactored.css">
+    <script src="/dashboard/testing-session-ui-refactored.js"></script>
     <script>
         const failureTypes = [
             { value: 'none', text: 'None' },
@@ -426,8 +120,7 @@
             { value: 'timeout', text: 'Timeout' },
             { value: 'connection_refused', text: 'Conn Refused' },
             { value: 'dns_failure', text: 'DNS Failure' },
-            { value: 'rate_limiting', text: 'Rate Limit' },
-            { value: 'hung', text: 'Hung' }
+            { value: 'rate_limiting', text: 'Rate Limit' }
         ];
 
         const unitOptions = [
@@ -444,6 +137,45 @@
         const bitrateAxisMaxBySession = new Map();
         const pendingShaping = new Map();
         const shapingTimers = new Map();
+        const collapseState = new Map();
+        const collapseDefaults = {
+            'session-details': true,
+            'fault-injection': false,
+            'network-shaping': false,
+            'bitrate-chart': false
+        };
+        const collapseStoragePrefix = 'testing_collapse_';
+
+        function getStoredCollapseState(key) {
+            try {
+                const value = localStorage.getItem(`${collapseStoragePrefix}${key}`);
+                if (value === null) return undefined;
+                return value === 'true';
+            } catch (err) {
+                return undefined;
+            }
+        }
+
+        function setStoredCollapseState(key, value) {
+            try {
+                localStorage.setItem(`${collapseStoragePrefix}${key}`, value ? 'true' : 'false');
+            } catch (err) {
+                collapseState.set(key, !!value);
+            }
+        }
+
+        window.TestingSessionUICollapseState = {
+            get: (key) => {
+                const stored = getStoredCollapseState(key);
+                if (typeof stored === 'boolean') return stored;
+                if (collapseState.has(key)) return collapseState.get(key);
+                return collapseDefaults[key];
+            },
+            set: (key, value) => {
+                collapseState.set(key, !!value);
+                setStoredCollapseState(key, value);
+            }
+        };
 
         const TestingSessionUI = window.TestingSessionUI;
 
@@ -693,8 +425,8 @@
                 });
             };
             syncRadio('segment_failure_type', String(session.segment_failure_type || 'none'));
-            syncRadio('playlist_failure_type', String(session.playlist_failure_type || 'none'));
             syncRadio('manifest_failure_type', String(session.manifest_failure_type || 'none'));
+            syncRadio('master_manifest_failure_type', String(session.master_manifest_failure_type || 'none'));
             syncRadio('transport_failure_type', normalizeTransportFaultType(session));
             syncRadio('transport_failure_mode', normalizeTransportFailureMode(session));
             TestingSessionUI.updateTransportModeUi(card);
@@ -771,10 +503,15 @@
                 pushBandwidthSample(activeSession);
                 return;
             }
-            container.innerHTML = renderSessionTabs(sessions) + (activeSession ? TestingSessionUI.renderSessionCard(activeSession, { hideTitle: true, showPortItem: true }) : '');
+            container.innerHTML = renderSessionTabs(sessions) + (activeSession ? TestingSessionUI.renderSessionCard(activeSession, {
+                hideTitle: true,
+                showPortItem: true,
+                sectionDefaults: collapseDefaults
+            }) : '');
             if (activeSession) {
                 const restoredCard = container.querySelector('.session-card');
                 if (restoredCard) {
+                    TestingSessionUI.applyCollapsibleState(restoredCard);
                     updateTemplateModeUi(restoredCard);
                     updateAllStepRiskUi(restoredCard);
                     TestingSessionUI.updateTransportModeUi(restoredCard);
@@ -1107,8 +844,8 @@
             const target = event.target;
             const card = target.closest('.session-card');
             if (!card) return;
-            if (target.dataset.field === 'playlist_failure_urls' && target.value === 'All') {
-                const checks = card.querySelectorAll('input[data-field="playlist_failure_urls"]');
+            if (target.dataset.field === 'manifest_failure_urls' && target.value === 'All') {
+                const checks = card.querySelectorAll('input[data-field="manifest_failure_urls"]');
                 checks.forEach(input => {
                     input.checked = target.checked;
                 });

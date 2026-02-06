@@ -36,3 +36,4 @@ __pycache__/
 *.webloc
 
 .vscode/
+tests/.hls_failure_probe_last_failed
