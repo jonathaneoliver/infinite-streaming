@@ -3,6 +3,7 @@ package api
 import (
 	"net"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -12,6 +13,7 @@ import (
 const (
 	defaultIdleTimeoutSeconds = 60
 	defaultPlayerWindowSecs   = 60
+	maxExternalIPList         = 20
 )
 
 type StreamEntry struct {
@@ -38,6 +40,10 @@ type StreamStatus struct {
 	TotalRequests   int    `json:"total_requests"`
 	LastTick        float64 `json:"last_tick,omitempty"`
 	Avg5m           float64 `json:"avg_5m,omitempty"`
+	UniqueClientIPs int      `json:"unique_client_ips,omitempty"`
+	ExternalIPCount int      `json:"external_ip_count,omitempty"`
+	ExternalIPs     []string `json:"external_ips,omitempty"`
+	ExternalIPOverflow int   `json:"external_ip_overflow,omitempty"`
 }
 
 type StreamTracker struct {
@@ -108,6 +114,7 @@ func (t *StreamTracker) Snapshot(now time.Time) []StreamStatus {
 	statuses := make([]StreamStatus, 0, len(t.streams))
 	for _, entry := range t.streams {
 		players := t.countActiveClients(entry, now)
+		clientIPs, externalIPs := t.collectActiveClientIPs(entry, now)
 		lastAgo := ""
 		willShutdown := ""
 		if !entry.LastRequest.IsZero() {
@@ -119,6 +126,7 @@ func (t *StreamTracker) Snapshot(now time.Time) []StreamStatus {
 			}
 			willShutdown = formatSeconds(remaining)
 		}
+		externalList, overflow := externalIPList(externalIPs)
 		status := StreamStatus{
 			Content:       entry.Content,
 			Mode:          entry.Mode,
@@ -127,6 +135,10 @@ func (t *StreamTracker) Snapshot(now time.Time) []StreamStatus {
 			TotalRequests: entry.TotalRequests,
 			LastRequestAgo:  lastAgo,
 			WillShutdownIn:  willShutdown,
+			UniqueClientIPs: len(clientIPs),
+			ExternalIPCount: len(externalIPs),
+			ExternalIPs:     externalList,
+			ExternalIPOverflow: overflow,
 		}
 		if !entry.StartedAt.IsZero() {
 			status.StartedAt = entry.StartedAt.UTC().Format(time.RFC3339)
@@ -244,6 +256,54 @@ func (t *StreamTracker) countActiveClients(entry *StreamEntry, now time.Time) in
 	return count
 }
 
+func (t *StreamTracker) collectActiveClientIPs(entry *StreamEntry, now time.Time) (map[string]time.Time, map[string]time.Time) {
+	clientIPs := make(map[string]time.Time)
+	externalIPs := make(map[string]time.Time)
+	if entry == nil {
+		return clientIPs, externalIPs
+	}
+	cutoff := now.Add(-t.playerWindow)
+	for key, last := range entry.Clients {
+		if last.Before(cutoff) {
+			continue
+		}
+		ip := parseClientIP(key)
+		if ip == "" || ip == "unknown" {
+			continue
+		}
+		clientIPs[ip] = last
+		if isExternalIP(ip) {
+			externalIPs[ip] = last
+		}
+	}
+	return clientIPs, externalIPs
+}
+
+func (t *StreamTracker) UniqueExternalIPCount(now time.Time) int {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	unique := make(map[string]struct{})
+	for _, entry := range t.streams {
+		if entry == nil {
+			continue
+		}
+		cutoff := now.Add(-t.playerWindow)
+		for key, last := range entry.Clients {
+			if last.Before(cutoff) {
+				continue
+			}
+			ip := parseClientIP(key)
+			if ip == "" || ip == "unknown" {
+				continue
+			}
+			if isExternalIP(ip) {
+				unique[ip] = struct{}{}
+			}
+		}
+	}
+	return len(unique)
+}
+
 func streamKey(content, mode string) string {
 	return content + "|" + mode
 }
@@ -261,6 +321,28 @@ func clientKey(r *httpRequest) string {
 		ua = "unknown"
 	}
 	return ip + "|" + ua
+}
+
+func parseClientIP(key string) string {
+	parts := strings.SplitN(key, "|", 2)
+	if len(parts) == 0 {
+		return ""
+	}
+	return strings.TrimSpace(parts[0])
+}
+
+func isExternalIP(ip string) bool {
+	parsed := net.ParseIP(strings.TrimSpace(ip))
+	if parsed == nil {
+		return false
+	}
+	if parsed.IsLoopback() || parsed.IsUnspecified() || parsed.IsLinkLocalUnicast() || parsed.IsLinkLocalMulticast() {
+		return false
+	}
+	if parsed.IsPrivate() {
+		return false
+	}
+	return true
 }
 
 type httpRequest struct {
@@ -308,4 +390,23 @@ func formatSeconds(d time.Duration) string {
 		secs = 0
 	}
 	return strconv.FormatFloat(secs, 'f', 1, 64) + "s"
+}
+
+func externalIPList(ipTimes map[string]time.Time) ([]string, int) {
+	if len(ipTimes) == 0 {
+		return nil, 0
+	}
+	keys := make([]string, 0, len(ipTimes))
+	for key := range ipTimes {
+		keys = append(keys, key)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		return ipTimes[keys[i]].After(ipTimes[keys[j]])
+	})
+	overflow := 0
+	if len(keys) > maxExternalIPList {
+		overflow = len(keys) - maxExternalIPList
+		keys = keys[:maxExternalIPList]
+	}
+	return keys, overflow
 }
