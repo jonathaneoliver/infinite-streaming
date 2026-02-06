@@ -87,6 +87,72 @@
             border-color: #1e40af;
             box-shadow: 0 8px 18px rgba(30, 64, 175, 0.35);
         }
+
+        .session-tab.grouped {
+            border-left: 4px solid #10b981;
+            padding-left: 10px;
+        }
+
+        .session-tab.grouped.active {
+            border-left-color: #34d399;
+        }
+
+        .group-badge {
+            display: inline-block;
+            background: #10b981;
+            color: white;
+            font-size: 10px;
+            font-weight: 700;
+            padding: 2px 6px;
+            border-radius: 4px;
+            margin-left: 6px;
+            vertical-align: middle;
+        }
+
+        .session-tab.active .group-badge {
+            background: #34d399;
+        }
+
+        .group-controls {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+            margin-bottom: 12px;
+        }
+
+        .session-checkbox {
+            margin-right: 8px;
+            cursor: pointer;
+            width: 18px;
+            height: 18px;
+        }
+
+        .group-info {
+            font-size: 12px;
+            color: #10b981;
+            font-weight: 600;
+            margin-top: 8px;
+            padding: 6px 10px;
+            background: #d1fae5;
+            border-radius: 6px;
+            display: inline-block;
+        }
+
+        .unlink-btn {
+            font-size: 11px;
+            padding: 4px 10px;
+            margin-left: 8px;
+            background: #ef4444;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-weight: 600;
+        }
+
+        .unlink-btn:hover {
+            background: #dc2626;
+        }
     </style>
 </head>
 <body>
@@ -383,14 +449,30 @@
 
         function renderSessionTabs(sessions) {
             if (!sessions.length) return '';
+            const hasMultipleSessions = sessions.length > 1;
+            const hasUngroupedSessions = sessions.some(s => !s.group_id);
+            const showGroupControls = hasMultipleSessions && hasUngroupedSessions;
+            
             return `
+                ${showGroupControls ? `
+                <div class="group-controls">
+                    <button class="btn btn-sm btn-secondary" id="linkSelectedSessions">Link Selected Sessions</button>
+                    <span class="status-message">Select 2+ sessions to link</span>
+                </div>
+                ` : ''}
                 <div class="session-tabs">
                     ${sessions.map(session => {
                         const id = session.session_id;
                         const isActive = id === activeSessionId ? 'active' : '';
+                        const isGrouped = session.group_id ? 'grouped' : '';
                         const portSuffix = session.x_forwarded_port ? ` (Port ${session.x_forwarded_port})` : '';
                         const label = `Session ${id}${portSuffix} · ${session.player_id || 'Unknown Player'}`;
-                        return `<button class="session-tab ${isActive}" data-session-tab="${id}">${label}</button>`;
+                        const groupBadge = session.group_id ? `<span class="group-badge">${session.group_id}</span>` : '';
+                        const checkbox = showGroupControls && !session.group_id ? 
+                            `<input type="checkbox" class="session-checkbox" data-session-id="${id}">` : '';
+                        return `<button class="session-tab ${isActive} ${isGrouped}" data-session-tab="${id}">
+                            ${checkbox}${label}${groupBadge}
+                        </button>`;
                     }).join('')}
                 </div>
             `;
@@ -503,11 +585,13 @@
                 pushBandwidthSample(activeSession);
                 return;
             }
-            container.innerHTML = renderSessionTabs(sessions) + (activeSession ? TestingSessionUI.renderSessionCard(activeSession, {
-                hideTitle: true,
-                showPortItem: true,
-                sectionDefaults: collapseDefaults
-            }) : '');
+            container.innerHTML = renderSessionTabs(sessions) + (activeSession ? 
+                renderGroupInfo(activeSession, sessions) + 
+                TestingSessionUI.renderSessionCard(activeSession, {
+                    hideTitle: true,
+                    showPortItem: true,
+                    sectionDefaults: collapseDefaults
+                }) : '');
             if (activeSession) {
                 const restoredCard = container.querySelector('.session-card');
                 if (restoredCard) {
@@ -518,6 +602,22 @@
                 }
                 pushBandwidthSample(activeSession);
             }
+        }
+
+        function renderGroupInfo(session, allSessions) {
+            if (!session.group_id) return '';
+            const groupMembers = allSessions.filter(s => s.group_id === session.group_id && s.session_id !== session.session_id);
+            if (groupMembers.length === 0) return '';
+            const memberLabels = groupMembers.map(s => {
+                const portSuffix = s.x_forwarded_port ? ` (Port ${s.x_forwarded_port})` : '';
+                return `Session ${s.session_id}${portSuffix}`;
+            }).join(', ');
+            return `
+                <div class="group-info">
+                    🔗 Linked with: ${memberLabels}
+                    <button class="unlink-btn" data-session-id="${session.session_id}">Unlink</button>
+                </div>
+            `;
         }
 
         function pushBandwidthSample(session) {
@@ -903,6 +1003,48 @@
         document.getElementById('sessionsContainer').addEventListener('click', (event) => {
             const button = event.target.closest('button');
             if (!button) return;
+            
+            // Handle link selected sessions button
+            if (button.id === 'linkSelectedSessions') {
+                const checkboxes = document.querySelectorAll('.session-checkbox:checked');
+                const sessionIds = Array.from(checkboxes).map(cb => cb.dataset.sessionId);
+                if (sessionIds.length < 2) {
+                    alert('Please select at least 2 sessions to link');
+                    return;
+                }
+                fetch('/api/session-group/link', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ session_ids: sessionIds })
+                })
+                    .then(response => response.json())
+                    .then(data => {
+                        console.log('Sessions linked:', data);
+                        fetchSessions();
+                    })
+                    .catch(error => console.error('Error linking sessions:', error));
+                return;
+            }
+            
+            // Handle unlink button
+            if (button.classList.contains('unlink-btn')) {
+                const sessionId = button.dataset.sessionId;
+                if (confirm('Unlink this session from its group?')) {
+                    fetch('/api/session-group/unlink', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ session_id: sessionId })
+                    })
+                        .then(response => response.json())
+                        .then(data => {
+                            console.log('Session unlinked:', data);
+                            fetchSessions();
+                        })
+                        .catch(error => console.error('Error unlinking session:', error));
+                }
+                return;
+            }
+            
             if (button.dataset.sessionTab) {
                 activeSessionId = button.dataset.sessionTab;
                 isTabLocked = true;
