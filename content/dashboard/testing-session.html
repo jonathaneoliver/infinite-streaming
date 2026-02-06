@@ -496,7 +496,8 @@
 
     <script src="/shared-nav.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
-    <script src="/dashboard/testing-session-ui.js"></script>
+    <link rel="stylesheet" href="/dashboard/testing-session-refactored.css">
+    <script src="/dashboard/testing-session-ui-refactored.js"></script>
     <script>
         const logEl = document.getElementById('debugLog');
         const video = document.getElementById('player');
@@ -520,6 +521,45 @@
         let sessionPollLastAppliedSeq = 0;
         let playerEstimatedMbps = null;
         let currentRenditionMbps = null;
+        const collapseState = new Map();
+        const collapseDefaults = {
+            'session-details': true,
+            'fault-injection': false,
+            'network-shaping': false,
+            'bitrate-chart': false
+        };
+        const collapseStoragePrefix = 'testing_session_collapse_';
+
+        function getStoredCollapseState(key) {
+            try {
+                const value = localStorage.getItem(`${collapseStoragePrefix}${key}`);
+                if (value === null) return undefined;
+                return value === 'true';
+            } catch (err) {
+                return undefined;
+            }
+        }
+
+        function setStoredCollapseState(key, value) {
+            try {
+                localStorage.setItem(`${collapseStoragePrefix}${key}`, value ? 'true' : 'false');
+            } catch (err) {
+                collapseState.set(key, !!value);
+            }
+        }
+
+        window.TestingSessionUICollapseState = {
+            get: (key) => {
+                const stored = getStoredCollapseState(key);
+                if (typeof stored === 'boolean') return stored;
+                if (collapseState.has(key)) return collapseState.get(key);
+                return collapseDefaults[key];
+            },
+            set: (key, value) => {
+                collapseState.set(key, !!value);
+                setStoredCollapseState(key, value);
+            }
+        };
 
         function log(message) {
             const line = document.createElement('div');
@@ -909,7 +949,11 @@
 
         function renderSessionControls(session) {
             const container = document.getElementById('sessionControls');
-            container.innerHTML = TestingSessionUI.renderSessionCard(session, { showBufferDepthChart: true });
+            container.innerHTML = TestingSessionUI.renderSessionCard(session, {
+                showBufferDepthChart: true,
+                sectionDefaults: collapseDefaults
+            });
+            TestingSessionUI.applyCollapsibleState(container);
         }
 
         function normalizeTransportFaultType(session) {
@@ -941,8 +985,8 @@
                 });
             };
             syncRadio('segment_failure_type', String(session.segment_failure_type || 'none'));
-            syncRadio('playlist_failure_type', String(session.playlist_failure_type || 'none'));
             syncRadio('manifest_failure_type', String(session.manifest_failure_type || 'none'));
+            syncRadio('master_manifest_failure_type', String(session.master_manifest_failure_type || 'none'));
             syncRadio('transport_failure_type', normalizeTransportFaultType(session));
             syncRadio('transport_failure_mode', normalizeTransportFailureMode(session));
             TestingSessionUI.updateTransportModeUi(card);
@@ -1242,8 +1286,8 @@
                         updateStepRiskUi(card, row);
                     }
                 }
-                if (event.target.dataset.field === 'playlist_failure_urls' && event.target.value === 'All') {
-                    const checks = card.querySelectorAll('input[data-field="playlist_failure_urls"]');
+                if (event.target.dataset.field === 'manifest_failure_urls' && event.target.value === 'All') {
+                    const checks = card.querySelectorAll('input[data-field="manifest_failure_urls"]');
                     checks.forEach(input => {
                         input.checked = event.target.checked;
                     });

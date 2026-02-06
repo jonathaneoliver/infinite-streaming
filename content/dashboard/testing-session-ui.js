@@ -152,32 +152,36 @@
         return Math.round(numeric * 10) / 10;
     }
 
-    function renderPlaylistOptions(sessionId, playlists, selected) {
+    function renderManifestOptions(sessionId, variants, selected) {
         const selectedSet = new Set(selected || []);
-        const list = sortedPlaylists(playlists);
+        const list = sortedPlaylists(variants);
         const allChecked = selectedSet.has('All');
         const checkbox = (value, label) => {
             const checked = allChecked || selectedSet.has(value) ? 'checked' : '';
-            return `<label><input type="checkbox" data-field="playlist_failure_urls" value="${value}" ${checked}>${label}</label>`;
+            return `<label><input type="checkbox" data-field="manifest_failure_urls" value="${value}" ${checked}>${label}</label>`;
         };
         const items = [checkbox('All', 'All'), checkbox('audio', 'Audio')];
-        list.forEach(playlist => {
-            const resolution = playlist.resolution || 'unknown';
+        list.forEach(variant => {
+            const resolution = variant.resolution || 'unknown';
             const height = resolution.includes('x') ? resolution.split('x')[1] : resolution;
             const heightLabel = height === 'unknown' ? 'unknown' : `${height}p`;
-            const label = `${heightLabel}/${Math.round(playlist.bandwidth / 1000)}kbps`;
-            items.push(checkbox(playlist.url, label));
+            const label = `${heightLabel}/${Math.round(variant.bandwidth / 1000)}kbps`;
+            items.push(checkbox(variant.url, label));
         });
         return items.join('');
     }
 
-    function variantFromPlaylistUrl(url) {
+    function variantFromManifestUrl(url) {
         if (!url) return '';
         const parts = url.split('/');
         if (parts.length > 1) {
             return parts[0] || '';
         }
-        return url.replace(/\.m3u8.*$/i, '');
+        let base = url.replace(/\?.*$/, '').replace(/\.m3u8.*$/i, '');
+        if (base.includes('_')) {
+            base = base.split('_').pop();
+        }
+        return base;
     }
 
     function renderSegmentOptions(sessionId, playlists, selected) {
@@ -190,7 +194,7 @@
         };
         const variants = new Map();
         list.forEach(playlist => {
-            const value = variantFromPlaylistUrl(playlist.url);
+            const value = variantFromManifestUrl(playlist.url);
             if (value && !variants.has(value)) {
                 const resolution = playlist.resolution || 'unknown';
                 const height = resolution.includes('x') ? resolution.split('x')[1] : resolution;
@@ -333,8 +337,8 @@
         }
         const candidates = [
             session.manifest_url || '',
-            session.last_request_url || '',
-            session.last_playlist_url || ''
+            session.master_manifest_url || '',
+            session.last_request_url || ''
         ];
         for (const value of candidates) {
             const match = value.match(/(?:_|\/)(\d+)s(?:[._/?]|$)/i);
@@ -390,8 +394,8 @@
 
     function renderSessionCard(session, options = {}) {
         const sessionId = session.session_id;
-        const playlistUrls = session.playlist_urls || [];
-        const playlistSelected = session.playlist_failure_urls || [];
+        const manifestVariants = session.manifest_variants || [];
+        const manifestSelected = session.manifest_failure_urls || [];
         const segmentSelected = session.segment_failure_urls || [];
         const inlineHost = options.inlineHost || false;
         const hideTitle = options.hideTitle || false;
@@ -404,13 +408,13 @@
             ? Math.round(storedDefaultStepSeconds * 10) / 10
             : Math.round(segmentDurationSeconds * defaultSegments * 10) / 10;
         const selectedStepSeconds = closestStepDuration(defaultStepSeconds);
-        const videoPresets = collectVideoShapingPresets(playlistUrls);
+        const videoPresets = collectVideoShapingPresets(manifestVariants);
         const stallRiskThreshold = computeStallRiskThreshold(videoPresets);
-        const shapingPresets = collectShapingBandwidthPresets(playlistUrls).map((preset) => ({
+        const shapingPresets = collectShapingBandwidthPresets(manifestVariants).map((preset) => ({
             ...preset,
             risk: Number.isFinite(stallRiskThreshold) && Number(preset.mbps) < stallRiskThreshold
         }));
-        const overheadMbps = estimateAudioOverheadMbps(playlistUrls);
+        const overheadMbps = estimateAudioOverheadMbps(manifestVariants);
         const patternSteps = parsePatternSteps(session.nftables_pattern_steps);
         const initialSteps = patternSteps.length
             ? patternSteps
@@ -455,16 +459,16 @@
                     <div class="session-item"><span class="label">First Request</span><span class="value">${formatDate(session.first_request_time)}</span></div>
                     <div class="session-item"><span class="label">Session Duration</span><span class="value">${formatDuration(session.session_duration)}</span></div>
                     <div class="session-item"><span class="label">Manifest URL</span><span class="value">${session.manifest_url || '—'}</span></div>
+                    <div class="session-item"><span class="label">Master Manifest URL</span><span class="value">${session.master_manifest_url || '—'}</span></div>
                     <div class="session-item"><span class="label">Last Request URL</span><span class="value">${session.last_request_url || '—'}</span></div>
-                    <div class="session-item"><span class="label">Last Playlist</span><span class="value">${session.last_playlist_url || '—'}</span></div>
-                    <div class="session-item"><span class="label">Counts</span><span class="value">M:${session.manifests_count || 0} P:${session.playlists_count || 0} S:${session.segments_count || 0}</span></div>
+                    <div class="session-item"><span class="label">Counts</span><span class="value">Master:${session.master_manifest_requests_count || 0} Manifest:${session.manifest_requests_count || 0} Segment:${session.segments_count || 0}</span></div>
                     <div class="session-item"><span class="label">Measured Mbps</span><span class="value">${session.measured_mbps || '—'}</span></div>
                 </div>
                 <div class="failure-groups">
                     <div class="failure-group">
                         <div class="failure-title">Segment Failures</div>
                         <div class="radio-group">${renderFailureTypeOptions(`segment_failure_type_${sessionId}`, session.segment_failure_type, segmentFailureTypes)}</div>
-                        <div class="checkbox-group">${renderSegmentOptions(sessionId, playlistUrls, segmentSelected)}</div>
+                        <div class="checkbox-group">${renderSegmentOptions(sessionId, manifestVariants, segmentSelected)}</div>
                         <div class="radio-group">
                             <div class="label">Units</div>
                             ${renderModeOptions(`segment_failure_mode_${sessionId}`, session.segment_failure_mode || 'failures_per_seconds')}
@@ -481,27 +485,9 @@
                         </div>
                     </div>
                     <div class="failure-group">
-                        <div class="failure-title">Playlist Failures</div>
-                        <div class="radio-group">${renderFailureTypeOptions(`playlist_failure_type_${sessionId}`, session.playlist_failure_type)}</div>
-                        <div class="checkbox-group">${renderPlaylistOptions(sessionId, playlistUrls, playlistSelected)}</div>
-                        <div class="radio-group">
-                            <div class="label">Units</div>
-                            ${renderModeOptions(`playlist_failure_mode_${sessionId}`, session.playlist_failure_mode || 'failures_per_seconds')}
-                        </div>
-                        <div class="range-row">
-                            <label>Consecutive</label>
-                            <input type="range" min="0" max="10" step="1" data-field="playlist_consecutive_failures" value="${session.playlist_consecutive_failures > 0 ? session.playlist_consecutive_failures : 1}">
-                            <span class="range-value">${session.playlist_consecutive_failures > 0 ? session.playlist_consecutive_failures : 1}</span>
-                        </div>
-                        <div class="range-row">
-                            <label>Frequency</label>
-                            <input type="range" min="0" max="10" step="1" data-field="playlist_failure_frequency" value="${session.playlist_failure_frequency > 0 ? session.playlist_failure_frequency : 6}">
-                            <span class="range-value">${session.playlist_failure_frequency > 0 ? session.playlist_failure_frequency : 6}</span>
-                        </div>
-                    </div>
-                    <div class="failure-group">
                         <div class="failure-title">Manifest Failures</div>
                         <div class="radio-group">${renderFailureTypeOptions(`manifest_failure_type_${sessionId}`, session.manifest_failure_type)}</div>
+                        <div class="checkbox-group">${renderManifestOptions(sessionId, manifestVariants, manifestSelected)}</div>
                         <div class="radio-group">
                             <div class="label">Units</div>
                             ${renderModeOptions(`manifest_failure_mode_${sessionId}`, session.manifest_failure_mode || 'failures_per_seconds')}
@@ -515,6 +501,24 @@
                             <label>Frequency</label>
                             <input type="range" min="0" max="10" step="1" data-field="manifest_failure_frequency" value="${session.manifest_failure_frequency > 0 ? session.manifest_failure_frequency : 6}">
                             <span class="range-value">${session.manifest_failure_frequency > 0 ? session.manifest_failure_frequency : 6}</span>
+                        </div>
+                    </div>
+                    <div class="failure-group">
+                        <div class="failure-title">Master Manifest Failures</div>
+                        <div class="radio-group">${renderFailureTypeOptions(`master_manifest_failure_type_${sessionId}`, session.master_manifest_failure_type)}</div>
+                        <div class="radio-group">
+                            <div class="label">Units</div>
+                            ${renderModeOptions(`master_manifest_failure_mode_${sessionId}`, session.master_manifest_failure_mode || 'failures_per_seconds')}
+                        </div>
+                        <div class="range-row">
+                            <label>Consecutive</label>
+                            <input type="range" min="0" max="10" step="1" data-field="master_manifest_consecutive_failures" value="${session.master_manifest_consecutive_failures > 0 ? session.master_manifest_consecutive_failures : 1}">
+                            <span class="range-value">${session.master_manifest_consecutive_failures > 0 ? session.master_manifest_consecutive_failures : 1}</span>
+                        </div>
+                        <div class="range-row">
+                            <label>Frequency</label>
+                            <input type="range" min="0" max="10" step="1" data-field="master_manifest_failure_frequency" value="${session.master_manifest_failure_frequency > 0 ? session.master_manifest_failure_frequency : 6}">
+                            <span class="range-value">${session.master_manifest_failure_frequency > 0 ? session.master_manifest_failure_frequency : 6}</span>
                         </div>
                     </div>
                     <div class="failure-group">
@@ -694,20 +698,20 @@
         };
 
         const segmentFailureType = getRadioValue(`segment_failure_type_${sessionId}`);
-        const playlistFailureType = getRadioValue(`playlist_failure_type_${sessionId}`);
         const manifestFailureType = getRadioValue(`manifest_failure_type_${sessionId}`);
+        const masterManifestFailureType = getRadioValue(`master_manifest_failure_type_${sessionId}`);
         const transportFaultType = getRadioValue(`transport_failure_type_${sessionId}`);
 
         const segmentFailureUnits = getRadioValue(`segment_failure_units_${sessionId}`) || 'requests';
-        const playlistFailureUnits = getRadioValue(`playlist_failure_units_${sessionId}`) || 'requests';
         const manifestFailureUnits = getRadioValue(`manifest_failure_units_${sessionId}`) || 'requests';
+        const masterManifestFailureUnits = getRadioValue(`master_manifest_failure_units_${sessionId}`) || 'requests';
         const segmentMode = getRadioValue(`segment_failure_mode_${sessionId}`) || modeFromUnits(null, null, segmentFailureUnits);
-        const playlistMode = getRadioValue(`playlist_failure_mode_${sessionId}`) || modeFromUnits(null, null, playlistFailureUnits);
         const manifestMode = getRadioValue(`manifest_failure_mode_${sessionId}`) || modeFromUnits(null, null, manifestFailureUnits);
+        const masterManifestMode = getRadioValue(`master_manifest_failure_mode_${sessionId}`) || modeFromUnits(null, null, masterManifestFailureUnits);
         const transportMode = normalizeTransportMode(getRadioValue(`transport_failure_mode_${sessionId}`));
         const segmentUnits = unitsFromMode(segmentMode);
-        const playlistUnits = unitsFromMode(playlistMode);
         const manifestUnits = unitsFromMode(manifestMode);
+        const masterManifestUnits = unitsFromMode(masterManifestMode);
         const transportUnits = transportUnitsFromMode(transportMode);
 
         const getRangeValue = (field) => {
@@ -715,7 +719,7 @@
             return input ? Number(input.value) : 0;
         };
 
-        const playlistChecks = Array.from(card.querySelectorAll('input[data-field="playlist_failure_urls"]:checked'))
+        const manifestChecks = Array.from(card.querySelectorAll('input[data-field="manifest_failure_urls"]:checked'))
             .map(input => input.value);
         const segmentChecks = Array.from(card.querySelectorAll('input[data-field="segment_failure_urls"]:checked'))
             .map(input => input.value);
@@ -732,16 +736,6 @@
             segment_frequency_units: segmentUnits.frequencyUnits,
             segment_failure_mode: segmentMode,
             segment_failure_urls: segmentChecks,
-            playlist_failure_at: null,
-            playlist_failure_recover_at: null,
-            playlist_failure_type: playlistFailureType,
-            playlist_failure_frequency: getRangeValue('playlist_failure_frequency'),
-            playlist_consecutive_failures: getRangeValue('playlist_consecutive_failures'),
-            playlist_failure_units: playlistFailureUnits,
-            playlist_consecutive_units: playlistUnits.consecutiveUnits,
-            playlist_frequency_units: playlistUnits.frequencyUnits,
-            playlist_failure_mode: playlistMode,
-            playlist_failure_urls: playlistChecks,
             manifest_failure_at: null,
             manifest_failure_recover_at: null,
             manifest_failure_type: manifestFailureType,
@@ -751,6 +745,16 @@
             manifest_consecutive_units: manifestUnits.consecutiveUnits,
             manifest_frequency_units: manifestUnits.frequencyUnits,
             manifest_failure_mode: manifestMode,
+            manifest_failure_urls: manifestChecks,
+            master_manifest_failure_at: null,
+            master_manifest_failure_recover_at: null,
+            master_manifest_failure_type: masterManifestFailureType,
+            master_manifest_failure_frequency: getRangeValue('master_manifest_failure_frequency'),
+            master_manifest_consecutive_failures: getRangeValue('master_manifest_consecutive_failures'),
+            master_manifest_failure_units: masterManifestFailureUnits,
+            master_manifest_consecutive_units: masterManifestUnits.consecutiveUnits,
+            master_manifest_frequency_units: masterManifestUnits.frequencyUnits,
+            master_manifest_failure_mode: masterManifestMode,
             transport_failure_type: transportFaultType,
             transport_failure_frequency: getRangeValue('transport_failure_frequency'),
             transport_consecutive_failures: getRangeValue('transport_consecutive_failures'),
