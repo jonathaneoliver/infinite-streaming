@@ -485,6 +485,9 @@ func main() {
 	router.HandleFunc("/api/failure-settings/{id}", app.handleUpdateFailureSettings).Methods(http.MethodPost)
 	router.HandleFunc("/api/session/{id}", app.handleSession).Methods(http.MethodGet, http.MethodDelete)
 	router.HandleFunc("/api/clear-sessions", app.handleClearSessions).Methods(http.MethodPost)
+	router.HandleFunc("/api/session-group/link", app.handleLinkSessions).Methods(http.MethodPost)
+	router.HandleFunc("/api/session-group/unlink", app.handleUnlinkSession).Methods(http.MethodPost)
+	router.HandleFunc("/api/session-group/{groupId}", app.handleGetGroup).Methods(http.MethodGet)
 	router.HandleFunc("/myshows", app.handleMyShows).Methods(http.MethodGet)
 	router.HandleFunc("/debug", app.handleDebug).Methods(http.MethodGet)
 	router.HandleFunc("/api/nftables/status", app.handleNftStatus).Methods(http.MethodGet)
@@ -754,6 +757,7 @@ func (a *App) handleUpdateFailureSettings(w http.ResponseWriter, r *http.Request
 
 	sessions := a.getSessionList()
 	var targetPort string
+	var targetGroupID string
 	var transportSnapshot map[string]interface{}
 	manualTransportDisarm := false
 	var transportLogSession SessionData
@@ -768,6 +772,7 @@ func (a *App) handleUpdateFailureSettings(w http.ResponseWriter, r *http.Request
 			if previousTransportType == "none" {
 				previousTransportType = normalizeTransportFaultType(getString(session, "transport_fault_type"))
 			}
+			targetGroupID = getString(session, "group_id")
 			for key, value := range payload {
 				session[key] = value
 			}
@@ -904,6 +909,49 @@ func (a *App) handleUpdateFailureSettings(w http.ResponseWriter, r *http.Request
 	if manualTransportDisarm {
 		logFaultEvent(transportLogSession, targetPort, "transport_none", "control", "transport_disarm_manual")
 	}
+	
+	// Propagate settings to group members if this session is part of a group
+	if targetGroupID != "" {
+		for _, session := range sessions {
+			sessionGroupID := getString(session, "group_id")
+			sessionID := getString(session, "session_id")
+			// Skip the original session (already updated) and non-group members
+			if sessionID == id || sessionGroupID != targetGroupID {
+				continue
+			}
+			// Apply all payload updates to group members
+			for key, value := range payload {
+				session[key] = value
+			}
+			// Apply normalized failure types
+			for _, prefix := range []string{"segment", "manifest", "master_manifest"} {
+				typeKey := prefix + "_failure_type"
+				failureType := normalizeRequestFailureType(getString(session, typeKey))
+				if failureType == "" {
+					failureType = "none"
+				}
+				session[typeKey] = failureType
+				resetKey := prefix + "_reset_failure_type"
+				if resetType := getString(session, resetKey); resetType != "" {
+					session[resetKey] = normalizeRequestFailureType(resetType)
+				}
+			}
+			// Apply transport updates if needed
+			if transportUpdated && transportSnapshot != nil {
+				for key, value := range transportSnapshot {
+					session[key] = value
+				}
+				// Apply transport fault to the group member's port
+				groupMemberPort := getString(session, "x_forwarded_port")
+				if groupMemberPort != "" && transportShouldApply {
+					if portNum, err := strconv.Atoi(groupMemberPort); err == nil {
+						a.armTransportFaultLoop(portNum, transportFaultType, transportConsecutive, transportConsecutiveUnits, transportFrequency)
+					}
+				}
+			}
+		}
+	}
+	
 	a.saveSessionList(sessions)
 	if transportShouldApply {
 		if portNum, err := strconv.Atoi(targetPort); err == nil {
@@ -988,6 +1036,97 @@ func (a *App) handleClearSessions(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = a.memcache.FlushAll()
 	writeJSON(w, map[string]string{"message": "All sessions cleared successfully"})
+}
+
+func (a *App) handleLinkSessions(w http.ResponseWriter, r *http.Request) {
+	var payload struct {
+		SessionIds []string `json:"session_ids"`
+		GroupId    string   `json:"group_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		writeJSON(w, map[string]string{"error": "invalid json"})
+		return
+	}
+	if len(payload.SessionIds) < 2 {
+		w.WriteHeader(http.StatusBadRequest)
+		writeJSON(w, map[string]string{"error": "at least 2 sessions required"})
+		return
+	}
+	
+	// Generate a group ID if not provided
+	groupID := payload.GroupId
+	if groupID == "" {
+		groupID = fmt.Sprintf("G%d", time.Now().Unix()%10000)
+	}
+	
+	sessions := a.getSessionList()
+	linkedCount := 0
+	for _, session := range sessions {
+		sessionID := getString(session, "session_id")
+		for _, targetID := range payload.SessionIds {
+			if sessionID == targetID {
+				session["group_id"] = groupID
+				linkedCount++
+				break
+			}
+		}
+	}
+	
+	if linkedCount > 0 {
+		a.saveSessionList(sessions)
+	}
+	
+	writeJSON(w, map[string]interface{}{
+		"message":      "Sessions linked successfully",
+		"group_id":     groupID,
+		"linked_count": linkedCount,
+	})
+}
+
+func (a *App) handleUnlinkSession(w http.ResponseWriter, r *http.Request) {
+	var payload struct {
+		SessionId string `json:"session_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		writeJSON(w, map[string]string{"error": "invalid json"})
+		return
+	}
+	
+	sessions := a.getSessionList()
+	found := false
+	for _, session := range sessions {
+		if getString(session, "session_id") == payload.SessionId {
+			session["group_id"] = ""
+			found = true
+			break
+		}
+	}
+	
+	if found {
+		a.saveSessionList(sessions)
+		writeJSON(w, map[string]string{"message": "Session unlinked successfully"})
+	} else {
+		w.WriteHeader(http.StatusNotFound)
+		writeJSON(w, map[string]string{"error": "Session not found"})
+	}
+}
+
+func (a *App) handleGetGroup(w http.ResponseWriter, r *http.Request) {
+	groupID := mux.Vars(r)["groupId"]
+	if groupID == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		writeJSON(w, map[string]string{"error": "group_id required"})
+		return
+	}
+	
+	groupSessions := a.getSessionsByGroupId(groupID)
+	writeJSON(w, map[string]interface{}{
+		"group_id": groupID,
+		"sessions": groupSessions,
+		"count":    len(groupSessions),
+	})
 }
 
 func (a *App) handleMyShows(w http.ResponseWriter, r *http.Request) {
@@ -1758,6 +1897,30 @@ func (a *App) handleNftPattern(w http.ResponseWriter, r *http.Request) {
 		"nftables_pattern_template_mode":            payload.TemplateMode,
 		"nftables_pattern_margin_pct":               payload.TemplateMarginPct,
 	})
+	
+	// Propagate to group members
+	groupID := a.getGroupIdByPort(port)
+	if groupID != "" {
+		groupPorts := a.getPortsForGroup(groupID)
+		for _, groupPort := range groupPorts {
+			if groupPort == port {
+				continue // Skip the original port
+			}
+			if err := a.applyShapePattern(groupPort, cleanSteps, payload.DelayMs, payload.LossPct); err != nil {
+				log.Printf("NETSHAPE group pattern propagation failed port=%d: %v", groupPort, err)
+				continue
+			}
+			a.updateSessionsByPort(groupPort, map[string]interface{}{
+				"nftables_pattern_segment_duration_seconds": payload.SegmentDurationSeconds,
+				"nftables_pattern_default_segments":         payload.DefaultSegments,
+				"nftables_pattern_default_step_seconds":     payload.DefaultStepSeconds,
+				"nftables_pattern_template_mode":            payload.TemplateMode,
+				"nftables_pattern_margin_pct":               payload.TemplateMarginPct,
+			})
+			log.Printf("NETSHAPE group pattern propagation applied port=%d group=%s", groupPort, groupID)
+		}
+	}
+	
 	writeJSON(w, map[string]interface{}{
 		"success":         true,
 		"port":            port,
@@ -1933,6 +2096,33 @@ func (a *App) handleNftShape(w http.ResponseWriter, r *http.Request) {
 		"nftables_delay_ms":       delayMs,
 		"nftables_packet_loss":    loss,
 	})
+	
+	// Propagate to group members
+	groupID := a.getGroupIdByPort(port)
+	if groupID != "" {
+		groupPorts := a.getPortsForGroup(groupID)
+		for _, groupPort := range groupPorts {
+			if groupPort == port {
+				continue // Skip the original port
+			}
+			a.disablePatternForPort(groupPort)
+			if err := a.traffic.UpdateRateLimit(groupPort, rateMbps); err != nil {
+				log.Printf("NETSHAPE group propagation rate limit failed port=%d rate=%g: %v", groupPort, rateMbps, err)
+				continue
+			}
+			if err := a.traffic.UpdateNetem(groupPort, delayMs, loss); err != nil {
+				log.Printf("NETSHAPE group propagation netem failed port=%d delay=%d loss=%.2f: %v", groupPort, delayMs, loss, err)
+				continue
+			}
+			a.updateSessionsByPort(groupPort, map[string]interface{}{
+				"nftables_bandwidth_mbps": rateMbps,
+				"nftables_delay_ms":       delayMs,
+				"nftables_packet_loss":    loss,
+			})
+			log.Printf("NETSHAPE group propagation applied port=%d rate=%g delay=%d loss=%.2f group=%s", groupPort, rateMbps, delayMs, loss, groupID)
+		}
+	}
+	
 	log.Printf("NETSHAPE applied port=%d rate=%g delay=%d loss=%.2f", port, rateMbps, delayMs, loss)
 	writeJSON(w, map[string]interface{}{
 		"success":   true,
@@ -2301,11 +2491,13 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		allocated := allocateSessionNumber(sessionList, a.maxSessions)
+		groupID := extractGroupId(playerID)
 		sessionData := SessionData{
 			"session_number":              fmt.Sprintf("%d", allocated),
 			"sid":                         fmt.Sprintf("%d", allocated),
 			"session_id":                  fmt.Sprintf("%d", allocated),
 			"player_id":                   playerID,
+			"group_id":                    groupID,
 			"headers_player_id":           playerHeader,
 			"headers_player-ID":           playerHeaderAlt,
 			"headers_x_playback_session_id": playbackSessionHeader,
@@ -3401,6 +3593,96 @@ func timeFromInterface(val interface{}) time.Time {
 		return parsed
 	}
 	return time.Time{}
+}
+
+// extractGroupId extracts group ID from player_id with pattern _G###
+// e.g., "hlsjs_G001" returns "G001", "safari_G001" returns "G001"
+func extractGroupId(playerID string) string {
+	if playerID == "" {
+		return ""
+	}
+	// Look for _G### pattern
+	re := regexp.MustCompile(`_G(\d+)$`)
+	matches := re.FindStringSubmatch(playerID)
+	if len(matches) > 1 {
+		return "G" + matches[1]
+	}
+	return ""
+}
+
+// getSessionsByGroupId returns all sessions that belong to the specified group
+func (a *App) getSessionsByGroupId(groupID string) []SessionData {
+	if groupID == "" {
+		return []SessionData{}
+	}
+	sessions := a.getSessionList()
+	var groupSessions []SessionData
+	for _, session := range sessions {
+		sessionGroupID := getString(session, "group_id")
+		if sessionGroupID == groupID {
+			groupSessions = append(groupSessions, session)
+		}
+	}
+	return groupSessions
+}
+
+// getGroupIdByPort returns the group ID for sessions on the specified port
+func (a *App) getGroupIdByPort(port int) string {
+	sessions := a.getSessionList()
+	portStr := fmt.Sprintf("%d", port)
+	for _, session := range sessions {
+		if getString(session, "x_forwarded_port") == portStr {
+			groupID := getString(session, "group_id")
+			if groupID != "" {
+				return groupID
+			}
+		}
+	}
+	return ""
+}
+
+// getPortsForGroup returns all ports used by sessions in the specified group
+func (a *App) getPortsForGroup(groupID string) []int {
+	if groupID == "" {
+		return []int{}
+	}
+	sessions := a.getSessionList()
+	portMap := make(map[int]bool)
+	for _, session := range sessions {
+		if getString(session, "group_id") == groupID {
+			if portStr := getString(session, "x_forwarded_port"); portStr != "" {
+				if port, err := strconv.Atoi(portStr); err == nil {
+					portMap[port] = true
+				}
+			}
+		}
+	}
+	var ports []int
+	for port := range portMap {
+		ports = append(ports, port)
+	}
+	return ports
+}
+
+// updateSessionGroup updates all sessions in a group with the given updates
+func (a *App) updateSessionGroup(groupID string, updates map[string]interface{}) {
+	if groupID == "" {
+		return
+	}
+	sessions := a.getSessionList()
+	changed := false
+	for _, session := range sessions {
+		sessionGroupID := getString(session, "group_id")
+		if sessionGroupID == groupID {
+			for key, value := range updates {
+				session[key] = value
+			}
+			changed = true
+		}
+	}
+	if changed {
+		a.saveSessionList(sessions)
+	}
 }
 
 type RequestHandler struct {
