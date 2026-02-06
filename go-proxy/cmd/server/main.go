@@ -465,7 +465,7 @@ func main() {
 		maxSessions:  maxSessions,
 		client: &http.Client{
 			Transport: &http.Transport{
-				DialContext: (&net.Dialer{Timeout: 6 * time.Second}).DialContext,
+				DialContext:           (&net.Dialer{Timeout: 6 * time.Second}).DialContext,
 				ResponseHeaderTimeout: 6 * time.Second,
 			},
 		},
@@ -479,7 +479,7 @@ func main() {
 
 	router := mux.NewRouter()
 	router.Use(corsMiddleware)
-	
+
 	router.HandleFunc("/index.html", app.handleIndex).Methods(http.MethodGet)
 	router.HandleFunc("/api/sessions", app.handleGetSessions).Methods(http.MethodGet)
 	router.HandleFunc("/api/failure-settings/{id}", app.handleUpdateFailureSettings).Methods(http.MethodPost)
@@ -872,25 +872,25 @@ func (a *App) handleUpdateFailureSettings(w http.ResponseWriter, r *http.Request
 					transportLogSession = session
 				}
 				transportSnapshot = map[string]interface{}{
-					"transport_failure_type":        session["transport_failure_type"],
+					"transport_failure_type":         session["transport_failure_type"],
 					"transport_consecutive_failures": session["transport_consecutive_failures"],
-					"transport_failure_frequency":   session["transport_failure_frequency"],
-					"transport_failure_units":       session["transport_failure_units"],
-					"transport_consecutive_units":   session["transport_consecutive_units"],
-					"transport_frequency_units":     session["transport_frequency_units"],
-					"transport_failure_mode":        session["transport_failure_mode"],
-					"transport_failure_at":          nil,
-					"transport_failure_recover_at":  nil,
-					"transport_reset_failure_type":  nil,
-					"transport_fault_type":         session["transport_fault_type"],
-					"transport_fault_on_seconds":   session["transport_fault_on_seconds"],
-					"transport_fault_off_seconds":  session["transport_fault_off_seconds"],
-					"transport_consecutive_seconds": session["transport_consecutive_seconds"],
-					"transport_frequency_seconds":   session["transport_frequency_seconds"],
-					"transport_fault_started_at":   session["transport_fault_started_at"],
-					"transport_fault_active":       false,
-					"transport_fault_phase_seconds": 0.0,
-					"transport_fault_cycle_seconds": 0.0,
+					"transport_failure_frequency":    session["transport_failure_frequency"],
+					"transport_failure_units":        session["transport_failure_units"],
+					"transport_consecutive_units":    session["transport_consecutive_units"],
+					"transport_frequency_units":      session["transport_frequency_units"],
+					"transport_failure_mode":         session["transport_failure_mode"],
+					"transport_failure_at":           nil,
+					"transport_failure_recover_at":   nil,
+					"transport_reset_failure_type":   nil,
+					"transport_fault_type":           session["transport_fault_type"],
+					"transport_fault_on_seconds":     session["transport_fault_on_seconds"],
+					"transport_fault_off_seconds":    session["transport_fault_off_seconds"],
+					"transport_consecutive_seconds":  session["transport_consecutive_seconds"],
+					"transport_frequency_seconds":    session["transport_frequency_seconds"],
+					"transport_fault_started_at":     session["transport_fault_started_at"],
+					"transport_fault_active":         false,
+					"transport_fault_phase_seconds":  0.0,
+					"transport_fault_cycle_seconds":  0.0,
 				}
 			}
 			break
@@ -909,7 +909,7 @@ func (a *App) handleUpdateFailureSettings(w http.ResponseWriter, r *http.Request
 	if manualTransportDisarm {
 		logFaultEvent(transportLogSession, targetPort, "transport_none", "control", "transport_disarm_manual")
 	}
-	
+
 	// Propagate settings to group members if this session is part of a group
 	if targetGroupID != "" {
 		for _, session := range sessions {
@@ -951,7 +951,7 @@ func (a *App) handleUpdateFailureSettings(w http.ResponseWriter, r *http.Request
 			}
 		}
 	}
-	
+
 	a.saveSessionList(sessions)
 	if transportShouldApply {
 		if portNum, err := strconv.Atoi(targetPort); err == nil {
@@ -1053,13 +1053,13 @@ func (a *App) handleLinkSessions(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]string{"error": "at least 2 sessions required"})
 		return
 	}
-	
+
 	// Generate a group ID if not provided
 	groupID := payload.GroupId
 	if groupID == "" {
 		groupID = fmt.Sprintf("G%d", time.Now().Unix()%10000)
 	}
-	
+
 	sessions := a.getSessionList()
 	linkedCount := 0
 	for _, session := range sessions {
@@ -1072,11 +1072,11 @@ func (a *App) handleLinkSessions(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	
+
 	if linkedCount > 0 {
 		a.saveSessionList(sessions)
 	}
-	
+
 	writeJSON(w, map[string]interface{}{
 		"message":      "Sessions linked successfully",
 		"group_id":     groupID,
@@ -1093,7 +1093,7 @@ func (a *App) handleUnlinkSession(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]string{"error": "invalid json"})
 		return
 	}
-	
+
 	sessions := a.getSessionList()
 	found := false
 	for _, session := range sessions {
@@ -1103,7 +1103,7 @@ func (a *App) handleUnlinkSession(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 	}
-	
+
 	if found {
 		a.saveSessionList(sessions)
 		writeJSON(w, map[string]string{"message": "Session unlinked successfully"})
@@ -1120,7 +1120,7 @@ func (a *App) handleGetGroup(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]string{"error": "group_id required"})
 		return
 	}
-	
+
 	groupSessions := a.getSessionsByGroupId(groupID)
 	writeJSON(w, map[string]interface{}{
 		"group_id": groupID,
@@ -1652,10 +1652,10 @@ func (a *App) getFirstSessionByPort(port int) SessionData {
 
 func (a *App) setTransportFaultSessionState(port int, faultType string, active bool, startedAt string, phaseSeconds float64, cycleSeconds float64) {
 	updates := map[string]interface{}{
-		"transport_failure_type":      faultType,
-		"transport_fault_type":        faultType,
-		"transport_fault_active":      active,
-		"transport_fault_started_at":  startedAt,
+		"transport_failure_type":        faultType,
+		"transport_fault_type":          faultType,
+		"transport_fault_active":        active,
+		"transport_fault_started_at":    startedAt,
 		"transport_fault_phase_seconds": math.Round(phaseSeconds*1000) / 1000,
 		"transport_fault_cycle_seconds": math.Round(cycleSeconds*1000) / 1000,
 	}
@@ -1897,7 +1897,7 @@ func (a *App) handleNftPattern(w http.ResponseWriter, r *http.Request) {
 		"nftables_pattern_template_mode":            payload.TemplateMode,
 		"nftables_pattern_margin_pct":               payload.TemplateMarginPct,
 	})
-	
+
 	// Propagate to group members
 	groupID := a.getGroupIdByPort(port)
 	if groupID != "" {
@@ -1920,7 +1920,7 @@ func (a *App) handleNftPattern(w http.ResponseWriter, r *http.Request) {
 			log.Printf("NETSHAPE group pattern propagation applied port=%d group=%s", groupPort, groupID)
 		}
 	}
-	
+
 	writeJSON(w, map[string]interface{}{
 		"success":         true,
 		"port":            port,
@@ -2096,7 +2096,7 @@ func (a *App) handleNftShape(w http.ResponseWriter, r *http.Request) {
 		"nftables_delay_ms":       delayMs,
 		"nftables_packet_loss":    loss,
 	})
-	
+
 	// Propagate to group members
 	groupID := a.getGroupIdByPort(port)
 	if groupID != "" {
@@ -2122,7 +2122,7 @@ func (a *App) handleNftShape(w http.ResponseWriter, r *http.Request) {
 			log.Printf("NETSHAPE group propagation applied port=%d rate=%g delay=%d loss=%.2f group=%s", groupPort, rateMbps, delayMs, loss, groupID)
 		}
 	}
-	
+
 	log.Printf("NETSHAPE applied port=%d rate=%g delay=%d loss=%.2f", port, rateMbps, delayMs, loss)
 	writeJSON(w, map[string]interface{}{
 		"success":   true,
@@ -2493,64 +2493,64 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 		allocated := allocateSessionNumber(sessionList, a.maxSessions)
 		groupID := extractGroupId(playerID)
 		sessionData := SessionData{
-			"session_number":              fmt.Sprintf("%d", allocated),
-			"sid":                         fmt.Sprintf("%d", allocated),
-			"session_id":                  fmt.Sprintf("%d", allocated),
-			"player_id":                   playerID,
-			"group_id":                    groupID,
-			"headers_player_id":           playerHeader,
-			"headers_player-ID":           playerHeaderAlt,
-			"headers_x_playback_session_id": playbackSessionHeader,
-			"manifest_requests_count":     0,
-			"master_manifest_requests_count": 0,
-			"segments_count":              0,
-			"last_request":                nowISO(),
-			"first_request_time":          nowISO(),
-			"segment_failure_type":        "none",
-			"segment_failure_frequency":   0,
-			"segment_consecutive_failures": 0,
-			"segment_failure_units":       "requests",
-			"manifest_failure_type":       "none",
-			"manifest_failure_frequency":  0,
-			"manifest_failure_units":      "requests",
-			"manifest_consecutive_failures": 0,
-			"master_manifest_failure_type":       "none",
-			"master_manifest_failure_frequency":  0,
-			"master_manifest_failure_units":      "requests",
-			"master_manifest_consecutive_failures": 0,
-			"current_failures":            0,
-			"consecutive_failures_count":  0,
-			"player_ip":                   "",
-			"user_agent":                  "",
-			"manifest_failure_at":         nil,
-			"manifest_failure_recover_at": nil,
-			"manifest_failure_urls":       []string{},
-			"segment_failure_urls":        []string{},
-			"segment_failure_at":          nil,
-			"segment_failure_recover_at":  nil,
-			"master_manifest_failure_at":         nil,
-			"master_manifest_failure_recover_at": nil,
-			"transport_failure_type":      "none",
-			"transport_failure_frequency": 0,
-			"transport_consecutive_failures": 1,
-			"transport_failure_units":     "seconds",
-			"transport_consecutive_units": "seconds",
-			"transport_frequency_units":   "seconds",
-			"transport_failure_mode":      "failures_per_seconds",
-			"transport_failure_at":        nil,
-			"transport_failure_recover_at": nil,
-			"transport_fault_type":        "none",
-			"transport_fault_on_seconds":  1,
-			"transport_fault_off_seconds": 0,
-			"transport_consecutive_seconds": 1,
-			"transport_frequency_seconds":   0,
-			"transport_fault_active":      false,
-			"transport_fault_started_at":  nil,
-			"transport_fault_drop_packets":   0,
-			"transport_fault_reject_packets": 0,
-			"fault_count_total":           0,
-			"fault_count_socket_reject":   0,
-			"fault_count_socket_drop":     0,
+			"session_number":                           fmt.Sprintf("%d", allocated),
+			"sid":                                      fmt.Sprintf("%d", allocated),
+			"session_id":                               fmt.Sprintf("%d", allocated),
+			"player_id":                                playerID,
+			"group_id":                                 groupID,
+			"headers_player_id":                        playerHeader,
+			"headers_player-ID":                        playerHeaderAlt,
+			"headers_x_playback_session_id":            playbackSessionHeader,
+			"manifest_requests_count":                  0,
+			"master_manifest_requests_count":           0,
+			"segments_count":                           0,
+			"last_request":                             nowISO(),
+			"first_request_time":                       nowISO(),
+			"segment_failure_type":                     "none",
+			"segment_failure_frequency":                0,
+			"segment_consecutive_failures":             0,
+			"segment_failure_units":                    "requests",
+			"manifest_failure_type":                    "none",
+			"manifest_failure_frequency":               0,
+			"manifest_failure_units":                   "requests",
+			"manifest_consecutive_failures":            0,
+			"master_manifest_failure_type":             "none",
+			"master_manifest_failure_frequency":        0,
+			"master_manifest_failure_units":            "requests",
+			"master_manifest_consecutive_failures":     0,
+			"current_failures":                         0,
+			"consecutive_failures_count":               0,
+			"player_ip":                                "",
+			"user_agent":                               "",
+			"manifest_failure_at":                      nil,
+			"manifest_failure_recover_at":              nil,
+			"manifest_failure_urls":                    []string{},
+			"segment_failure_urls":                     []string{},
+			"segment_failure_at":                       nil,
+			"segment_failure_recover_at":               nil,
+			"master_manifest_failure_at":               nil,
+			"master_manifest_failure_recover_at":       nil,
+			"transport_failure_type":                   "none",
+			"transport_failure_frequency":              0,
+			"transport_consecutive_failures":           1,
+			"transport_failure_units":                  "seconds",
+			"transport_consecutive_units":              "seconds",
+			"transport_frequency_units":                "seconds",
+			"transport_failure_mode":                   "failures_per_seconds",
+			"transport_failure_at":                     nil,
+			"transport_failure_recover_at":             nil,
+			"transport_fault_type":                     "none",
+			"transport_fault_on_seconds":               1,
+			"transport_fault_off_seconds":              0,
+			"transport_consecutive_seconds":            1,
+			"transport_frequency_seconds":              0,
+			"transport_fault_active":                   false,
+			"transport_fault_started_at":               nil,
+			"transport_fault_drop_packets":             0,
+			"transport_fault_reject_packets":           0,
+			"fault_count_total":                        0,
+			"fault_count_socket_reject":                0,
+			"fault_count_socket_drop":                  0,
 			"fault_count_socket_drop_before_headers":   0,
 			"fault_count_socket_reject_before_headers": 0,
 			"fault_count_socket_drop_after_headers":    0,
@@ -3373,15 +3373,15 @@ func getenvIntAny(keys []string, fallback int) int {
 }
 
 type FailureHandler struct {
-	failureType       string
-	failureUnits      string
-	consecutiveUnits  string
-	frequencyUnits    string
-	failureFrequency  int
-	consecutive       int
-	failureAt         interface{}
-	failureRecoverAt  interface{}
-	resetFailureType  interface{}
+	failureType      string
+	failureUnits     string
+	consecutiveUnits string
+	frequencyUnits   string
+	failureFrequency int
+	consecutive      int
+	failureAt        interface{}
+	failureRecoverAt interface{}
+	resetFailureType interface{}
 }
 
 func NewFailureHandler(prefix string, session SessionData) *FailureHandler {
