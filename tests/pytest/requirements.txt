@@ -1,0 +1,43 @@
+# Pytest and plugins for HLS failure injection tests
+
+# Core pytest
+pytest>=7.0.0
+
+# Parallel test execution
+pytest-xdist>=3.0.0
+
+# HTML test reports
+pytest-html>=3.1.0
+
+# Test timeouts
+pytest-timeout>=2.1.0
+
+# Code coverage
+pytest-cov>=4.0.0
+
+# Better output formatting
+pytest-sugar>=0.9.6
+
+# Repeat failed tests
+pytest-repeat>=0.9.1
+
+# Test ordering
+pytest-order>=1.0.0
+
+# Metadata for tests
+pytest-metadata>=2.0.0
+
+# Mock and fixtures
+pytest-mock>=3.10.0
+
+# Benchmark tests
+pytest-benchmark>=4.0.0
+
+# Optional: JSON reports
+pytest-json-report>=1.5.0
+
+# Optional: JUnit XML reports (built into pytest, but explicit for clarity)
+# pytest>=7.0.0 includes junit-xml support
+
+# Optional: Allure reports (advanced reporting)
+# allure-pytest>=2.12.0
