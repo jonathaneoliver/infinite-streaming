@@ -1,0 +1,160 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: infinite-streaming-dev
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: infinite-streaming-dev
+  template:
+    metadata:
+      labels:
+        app: infinite-streaming-dev
+    spec:
+      containers:
+      - name: go-server
+        image: 100.111.190.54:5000/infinite-streaming:dev
+        imagePullPolicy: Always
+        command: ["/sbin/launch.sh", "1"]
+        ports:
+        - containerPort: 30000
+        env:
+        - name: INFINITE_STREAM_ROOT
+          value: "/boss"
+        - name: INFINITE_STREAM_UPLOADS_DIR
+          value: "/boss/boss-uploads"
+        - name: INFINITE_STREAM_SOURCES_DIR
+          value: "/boss/originals"
+        - name: INFINITE_STREAM_OUTPUT_DIR
+          value: "/boss/dynamic_content"
+        - name: INFINITE_STREAM_DATABASE_DIR
+          value: "/boss/boss-data"
+        - name: INFINITE_STREAM_TEMP_DIR
+          value: "/boss/boss-tmp"
+        - name: INFINITE_STREAM_CONTENT_DIR
+          value: "/content"
+        - name: TMPDIR
+          value: "/boss/boss-tmp"
+        - name: GO_LIVE_OUTPUT_DIR
+          value: "/go-live"
+        - name: GO_UPLOAD_ADDR
+          value: ":8003"
+        - name: INFINITE_STREAM_LISTEN_PORT
+          value: "30000"
+        - name: INFINITE_STREAM_PROXY_HOST
+          value: "127.0.0.1"
+        volumeMounts:
+        - name: boss-vol
+          mountPath: /boss
+        - name: certs-vol
+          mountPath: /etc/nginx/certs
+          readOnly: true
+        - name: go-live-tmpfs
+          mountPath: /go-live
+        - name: nginx-tmpfs
+          mountPath: /var/cache/nginx/live_playlists
+
+      - name: go-proxy
+        image: 100.111.190.54:5000/go-proxy:dev
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 30081
+        - containerPort: 30181
+        - containerPort: 30281
+        - containerPort: 30381
+        - containerPort: 30481
+        - containerPort: 30581
+        - containerPort: 30681
+        - containerPort: 30781
+        - containerPort: 30881
+        env:
+        - name: MEMCACHED_ADDR
+          value: "127.0.0.1:11211"
+        - name: INFINITE_STREAM_UPSTREAM_HOST
+          value: "127.0.0.1"
+        - name: INFINITE_STREAM_UPSTREAM_PORT
+          value: "30000"
+        - name: INFINITE_STREAM_MAX_SESSIONS
+          value: "8"
+        - name: INFINITE_STREAM_TC_INTERFACE
+          value: "eth0"
+        securityContext:
+          privileged: true
+          capabilities:
+            add: ["NET_ADMIN"]
+
+      - name: memcached
+        image: memcached:latest
+        ports:
+        - containerPort: 11211
+
+      volumes:
+      - name: boss-vol
+        hostPath:
+          path: /home/jonathanoliver/boss
+          type: Directory
+      - name: certs-vol
+        hostPath:
+          path: /home/jonathanoliver/smashing/certs
+          type: Directory
+      - name: go-live-tmpfs
+        emptyDir:
+          medium: Memory
+          sizeLimit: 4Gi
+      - name: nginx-tmpfs
+        emptyDir:
+          medium: Memory
+          sizeLimit: 100Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: infinite-streaming-dev
+spec:
+  selector:
+    app: infinite-streaming-dev
+  ports:
+    - name: p40000
+      port: 40000
+      targetPort: 30000
+      nodePort: 40000
+    - name: p40081
+      port: 40081
+      targetPort: 30081
+      nodePort: 40081
+    - name: p40181
+      port: 40181
+      targetPort: 30181
+      nodePort: 40181
+    - name: p40281
+      port: 40281
+      targetPort: 30281
+      nodePort: 40281
+    - name: p40381
+      port: 40381
+      targetPort: 30381
+      nodePort: 40381
+    - name: p40481
+      port: 40481
+      targetPort: 30481
+      nodePort: 40481
+    - name: p40581
+      port: 40581
+      targetPort: 30581
+      nodePort: 40581
+    - name: p40681
+      port: 40681
+      targetPort: 30681
+      nodePort: 40681
+    - name: p40781
+      port: 40781
+      targetPort: 30781
+      nodePort: 40781
+    - name: p40881
+      port: 40881
+      targetPort: 30881
+      nodePort: 40881
+  type: NodePort
