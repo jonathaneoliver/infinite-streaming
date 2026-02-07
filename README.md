@@ -24,6 +24,41 @@ Open the UI:
 - Docker Compose: http://localhost:21081/
 - k3s (Lenovo): http://lenovo.local:30000/
 
+## Lenovo k3s: release vs dev
+
+Run release and dev side-by-side by using separate NodePort ranges and image tags.
+
+Release (stable):
+- UI: http://lenovo.local:30000/
+- Ports: 30000 (UI), 30081 (initial proxy), 30181-30881 (session ports)
+- Images: `:latest` (or your pinned release tag)
+- Deploy: `make deploy-release`
+
+Dev (active development):
+- UI: http://lenovo.local:40000/
+- Ports: 40000 (UI), 40081 (initial proxy), 40181-40881 (session ports)
+- Images: `:dev`
+- Deploy: `make deploy`
+
+The dev stack is defined in `k8s-infinite-streaming-dev.yaml`, while release uses `k8s-infinite-streaming.yaml`.
+
+## Release tagging notes
+
+Use an immutable tag for releases (for example, `v1.2.3` or a commit SHA) and keep `:latest` as a moving pointer.
+
+Suggested flow:
+1) Create a tag and push it (example: `git tag v1.2.3 && git push origin v1.2.3`).
+2) Build/push images with that tag (example: `:v1.2.3`).
+3) Deploy release using the pinned tag (set `LENOVO_SERVER_IMAGE` and `LENOVO_PROXY_IMAGE` to the release tag).
+
+Example deploy (release tag `v1.2.3`):
+
+```bash
+make deploy-release \
+  LENOVO_SERVER_IMAGE=100.111.190.54:5000/infinite-streaming:v1.2.3 \
+  LENOVO_PROXY_IMAGE=100.111.190.54:5000/go-proxy:v1.2.3
+```
+
 ## GitHub Container Registry (GHCR)
 
 This repo ships a GitHub Actions workflow that builds and publishes images to GHCR on pushes to `main`.

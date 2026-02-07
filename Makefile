@@ -5,6 +5,7 @@ K3S_KUBECONFIG ?= /home/jonathanoliver/.kube/config
 GO_SERVER_IMAGE ?= ghcr.io/jonathaneoliver/infinite-streaming:latest
 GO_PROXY_IMAGE ?= ghcr.io/jonathaneoliver/go-proxy:latest
 K8S_MANIFESTS ?= k8s-infinite-streaming.yaml
+K8S_DEPLOYMENT ?= infinite-streaming
 
 run:
 	./boss.sh 1 run
@@ -83,12 +84,12 @@ deploy-lenovo-k3s-local:
 		ssh $(LENOVO_HOST) "export KUBECONFIG=$(K3S_KUBECONFIG); kubectl apply -f -" < $$manifest; \
 	done; \
 	echo "Updating deployment images"; \
-	ssh $(LENOVO_HOST) "export KUBECONFIG=$(K3S_KUBECONFIG); kubectl set image deployment/infinite-streaming go-server=$(LENOVO_SERVER_IMAGE)"; \
-	ssh $(LENOVO_HOST) "export KUBECONFIG=$(K3S_KUBECONFIG); kubectl set image deployment/infinite-streaming go-proxy=$(LENOVO_PROXY_IMAGE)"; \
+	ssh $(LENOVO_HOST) "export KUBECONFIG=$(K3S_KUBECONFIG); kubectl set image deployment/$(K8S_DEPLOYMENT) go-server=$(LENOVO_SERVER_IMAGE)"; \
+	ssh $(LENOVO_HOST) "export KUBECONFIG=$(K3S_KUBECONFIG); kubectl set image deployment/$(K8S_DEPLOYMENT) go-proxy=$(LENOVO_PROXY_IMAGE)"; \
 	echo "Restarting deployments explicitly"; \
-	ssh $(LENOVO_HOST) "export KUBECONFIG=$(K3S_KUBECONFIG); kubectl rollout restart deployment/infinite-streaming"; \
+	ssh $(LENOVO_HOST) "export KUBECONFIG=$(K3S_KUBECONFIG); kubectl rollout restart deployment/$(K8S_DEPLOYMENT)"; \
 	echo "Waiting for rollout"; \
-	ssh $(LENOVO_HOST) "export KUBECONFIG=$(K3S_KUBECONFIG); kubectl rollout status deployment/infinite-streaming --timeout=180s"; \
+	ssh $(LENOVO_HOST) "export KUBECONFIG=$(K3S_KUBECONFIG); kubectl rollout status deployment/$(K8S_DEPLOYMENT) --timeout=180s"; \
 	echo "Deployment status"; \
 	ssh $(LENOVO_HOST) "export KUBECONFIG=$(K3S_KUBECONFIG); kubectl get pods -n default -o wide; echo; kubectl get svc -n default"
 
@@ -98,6 +99,11 @@ status-lenovo-k3s:
 	ssh $(LENOVO_HOST) "export KUBECONFIG=$(K3S_KUBECONFIG); kubectl get nodes; echo; kubectl get pods -A"
 
 deploy:
+	docker buildx build --platform linux/amd64 -t $(LENOVO_REGISTRY)/$(LENOVO_SERVER_REPO):dev --push .
+	docker buildx build --platform linux/amd64 -t $(LENOVO_REGISTRY)/$(LENOVO_PROXY_REPO):dev --push ./go-proxy
+	$(MAKE) deploy-lenovo-k3s K3S_KUBECONFIG=$(K3S_KUBECONFIG) K8S_MANIFESTS=k8s-infinite-streaming-dev.yaml K8S_DEPLOYMENT=infinite-streaming-dev LENOVO_SERVER_IMAGE=$(LENOVO_REGISTRY)/$(LENOVO_SERVER_REPO):dev LENOVO_PROXY_IMAGE=$(LENOVO_REGISTRY)/$(LENOVO_PROXY_REPO):dev
+
+deploy-release:
 	docker buildx build --platform linux/amd64 -t $(LENOVO_SERVER_IMAGE) --push .
 	docker buildx build --platform linux/amd64 -t $(LENOVO_PROXY_IMAGE) --push ./go-proxy
 	$(MAKE) deploy-lenovo-k3s K3S_KUBECONFIG=$(K3S_KUBECONFIG) LENOVO_SERVER_IMAGE=$(LENOVO_SERVER_IMAGE) LENOVO_PROXY_IMAGE=$(LENOVO_PROXY_IMAGE)
