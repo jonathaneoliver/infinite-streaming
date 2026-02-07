@@ -85,16 +85,21 @@
     function isTestingPort(port) {
         const parsed = Number(port);
         if (!Number.isInteger(parsed)) return false;
-        return (parsed >= 30081 && parsed <= 30881) || (parsed >= 20081 && parsed <= 20881);
+        return (parsed >= 20081 && parsed <= 20881)
+            || (parsed >= 30081 && parsed <= 30881)
+            || (parsed >= 40081 && parsed <= 40881);
     }
 
     function resolveTestingPort(sourcePort) {
         const currentPort = window.location.port || (window.location.protocol === 'https:' ? '443' : '80');
-        if (isTestingPort(sourcePort)) {
-            return String(sourcePort);
+        if (currentPort === '40000') {
+            return '40081';
         }
         if (isTestingPort(currentPort)) {
             return String(currentPort);
+        }
+        if (isTestingPort(sourcePort)) {
+            return String(sourcePort);
         }
         if (currentPort === '30000') {
             return '30081';
