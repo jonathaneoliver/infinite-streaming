@@ -180,3 +180,163 @@ This guide provides a comprehensive list of error scenarios to test HLS video pl
 | HTTP Code | Shaka Player | hls.js | Video.js/VHS |
 |-----------|-------------|---------|--------------|
 | **404/410** | Skips segment if possible in live. Retries, may fatal if persistent. | Sk
+
+---
+
+## Session Grouping for Comparative Testing
+
+### Overview
+
+InfiniteStream supports **session grouping** to apply identical failure scenarios and network conditions across multiple streaming sessions simultaneously. This enables direct comparison of how different players (e.g., HLS.js vs Safari native, or desktop vs mobile) handle the exact same test conditions.
+
+### Method 1: Player ID Suffix Pattern (Automatic Grouping)
+
+Sessions are automatically grouped when their `player_id` parameter contains a matching `_G###` suffix pattern.
+
+#### Usage Example
+
+```bash
+# Tab 1: HLS.js player
+http://localhost:30081/go-live/bbb/master.m3u8?player_id=hlsjs_desktop_G001
+
+# Tab 2: Safari native player  
+http://localhost:30081/go-live/bbb/master.m3u8?player_id=safari_native_G001
+
+# Tab 3: Video.js player (same group)
+http://localhost:30081/go-live/bbb/master.m3u8?player_id=videojs_G001
+```
+
+All sessions with `_G001` suffix will be automatically grouped. Any control changes applied to one session (failure injection, network shaping, etc.) will be synchronized to all other sessions in the group.
+
+#### Group ID Format
+
+- Pattern: `_G` followed by digits (e.g., `_G001`, `_G042`, `_G999`)
+- The player identifier before the suffix can be anything descriptive
+- Group IDs are case-sensitive
+
+#### Example Test Scenarios
+
+**Compare HLS.js vs Safari Native:**
+```
+player_id=hlsjs_macos_G100
+player_id=safari_native_G100
+```
+
+**Compare Desktop vs Mobile:**
+```
+player_id=safari_desktop_G200
+player_id=safari_ios_G200
+```
+
+**Compare Multiple Player Libraries:**
+```
+player_id=hlsjs_v1.4_G300
+player_id=shaka_v4.3_G300
+player_id=videojs_v8_G300
+```
+
+### Method 2: UI-Based Manual Grouping
+
+Sessions can also be grouped manually through the Testing UI, regardless of their `player_id`.
+
+#### Steps:
+
+1. Open the Testing page (`/dashboard/testing.html`)
+2. Ensure you have 2 or more active sessions
+3. Check the checkbox next to each session you want to group
+4. Click the "Link Selected Sessions" button
+5. Sessions are now grouped and will show a green group badge
+
+#### Unlinking Sessions
+
+- Click the "Unlink" button in the group info banner below the session tabs
+- Or use the API: `POST /api/session-group/unlink` with `{"session_id": "1"}`
+
+### Visual Indicators
+
+Grouped sessions are displayed with:
+- **Green left border** on session tabs
+- **Group badge** showing the group ID (e.g., `G001`)
+- **Group info banner** showing linked session details
+- **Unlink button** for easy separation
+
+### Synchronized Controls
+
+When sessions are grouped, the following controls are synchronized across all group members:
+
+#### Failure Injection:
+- Segment failure type and frequency
+- Manifest failure type and frequency  
+- Master manifest failure type and frequency
+- Transport fault type (DROP/REJECT)
+- Transport fault timing and frequency
+
+#### Network Shaping:
+- Bandwidth throttling (rate_mbps)
+- Network delay (delay_ms)
+- Packet loss percentage (loss_pct)
+- Network shaping patterns (multi-step bandwidth profiles)
+
+### API Endpoints
+
+#### Link Sessions
+```bash
+POST /api/session-group/link
+Content-Type: application/json
+
+{
+  "session_ids": ["1", "2", "3"],
+  "group_id": "G001"  # Optional - auto-generated if omitted
+}
+```
+
+#### Unlink Session
+```bash
+POST /api/session-group/unlink
+Content-Type: application/json
+
+{
+  "session_id": "1"
+}
+```
+
+#### Get Group Members
+```bash
+GET /api/session-group/{groupId}
+```
+
+Returns all sessions in the specified group.
+
+### Testing Workflow Example
+
+1. **Setup**: Open 2 browser tabs/windows:
+   - Tab A: HLS.js player with `?player_id=hlsjs_G500`
+   - Tab B: Safari native with `?player_id=safari_G500`
+
+2. **Configure**: In the Testing UI, select session from group G500
+
+3. **Apply Failures**: 
+   - Set segment failure to "404" every 10 requests
+   - Both players will experience identical failures
+
+4. **Apply Network Shaping**:
+   - Set bandwidth to 2 Mbps
+   - Both sessions will have identical bandwidth constraints
+
+5. **Observe**: Compare how each player handles the same conditions:
+   - Buffer behavior
+   - ABR switching decisions
+   - Error recovery timing
+   - User experience differences
+
+6. **Iterate**: Adjust failure patterns and network conditions while maintaining synchronization
+
+### Notes
+
+- Session grouping works with both LL-HLS and LL-DASH streams
+- Groups persist until sessions are released or explicitly unlinked
+- Up to 10 sessions can be grouped together
+- Group settings propagate in real-time (no page refresh needed)
+- Each session maintains its own performance metrics and bandwidth measurements
+
+---

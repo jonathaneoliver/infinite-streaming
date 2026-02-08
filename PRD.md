@@ -100,6 +100,8 @@ The system is intended for:
 - Per‑port transport fault injection (DROP/REJECT) via nftables.
 - Transport faults support consecutive units in seconds or packets, with frequency in seconds.
 - Transport fault packet counters (drop/reject) are surfaced in API/UI for observability.
+- Server‑authoritative control updates with per‑field PATCH + control‑revision conflict handling.
+- Session grouping controls (group/ungroup/merge) with group badges and group‑aware control propagation.
 - Player selector: HLS.js, Shaka, Video.js, Native.
 - Logs player errors and HTTP failure details in the testing UI.
 
@@ -152,6 +154,7 @@ Many platforms already expose their own failure tools (player debug features, br
 ## 11) Configuration
 - Idle timeout for workers (configurable, visible in Go‑Monitor).
 - Output directories for generated manifests (tmpfs).
+- External/internal port mapping for NodePort deployments (go‑proxy uses `EXTERNAL_PORT_BASE`, `INTERNAL_PORT_BASE`, `PORT_RANGE_COUNT`; external `4xxxx` ports map to internal `3xxxx` ports).
 
 ## 12) Known Limitations & Expected‑but‑Missing Features
 These are features commonly expected in LL streaming origins but **not currently implemented** (or incomplete):
@@ -167,7 +170,7 @@ These are features commonly expected in LL streaming origins but **not currently
 - Full DASH‑IF conformance checks.
 
 ### Player/Origin
-- Simulated network throttling / fault injection at the origin.
+- Network shaping is Linux‑only (tc/netem); non‑Linux environments will report shaping as disabled.
 - CDN cache behavior simulation and stale‑while‑revalidate flows.
 - DRM signaling or encryption.
 

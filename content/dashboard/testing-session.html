@@ -60,6 +60,49 @@
 
         .panel-badge.videojs { background: #fce7f3; color: #9d174d; }
         .panel-badge.native { background: #e0f2fe; color: #0369a1; }
+        .panel-badge.group { background: #fde68a; color: #92400e; }
+        .group-controls-row {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+            margin-bottom: 12px;
+            border: 1px solid #e5e7eb;
+            border-radius: 12px;
+            padding: 12px;
+            background: #f8fafc;
+        }
+        .group-banner {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            padding: 8px 10px;
+            border-radius: 10px;
+            border: 1px solid #bbf7d0;
+            background: #ecfdf3;
+            color: #166534;
+            font-weight: 600;
+        }
+        .group-banner .group-meta {
+            font-weight: 500;
+        }
+        .group-banner .group-actions {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+        }
+        .group-controls-row .group-select-row {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+        .group-controls-row select {
+            min-width: 220px;
+        }
+        .group-controls-row .group-hint {
+            color: #6b7280;
+        }
 
         .player-frame {
             width: 100%;
@@ -490,6 +533,7 @@
         <div class="session-panel">
             <h3>Session Controls</h3>
             <div id="networkShapingBanner" class="status-message" style="display:none; margin-bottom: 10px;"></div>
+            <div id="sessionGroupControls" class="group-controls-row"></div>
             <div id="sessionControls">Loading session…</div>
         </div>
     </div>
@@ -510,15 +554,25 @@
         let autoRetryCount = 0;
         let autoRetryTimer = null;
         const pendingShaping = new Map();
+        const pendingFailureEdits = new Map();
+        const controlRevisionBySession = new Map();
         const bandwidthHistory = new Map();
         const bandwidthCharts = new Map();
         const bufferDepthCharts = new Map();
         const bandwidthVisibility = new Map();
         const bitrateAxisMaxBySession = new Map();
+        let lastSessionsList = [];
+        let groupSessionsFetchInFlight = false;
+        let groupSelectValue = '';
+        let groupSelectSessionId = '';
         let sessionPollController = null;
         let sessionPollInFlight = false;
         let sessionPollRequestSeq = 0;
         let sessionPollLastAppliedSeq = 0;
+        let sessionsStream = null;
+        let sessionPollTimer = null;
+        const failureSaveTimers = new Map();
+        const failureSaveFields = new Map();
         let playerEstimatedMbps = null;
         let currentRenditionMbps = null;
         const collapseState = new Map();
@@ -529,6 +583,7 @@
             'bitrate-chart': false
         };
         const collapseStoragePrefix = 'testing_session_collapse_';
+        let lastServerSession = null;
 
         function getStoredCollapseState(key) {
             try {
@@ -639,7 +694,7 @@
             };
         }
 
-        function setBadges(isDash, playerType) {
+        function setBadges(isDash, playerType, groupId) {
             const badges = document.getElementById('playerBadges');
             badges.innerHTML = '';
             const protocol = document.createElement('span');
@@ -660,6 +715,12 @@
             player.textContent = label;
             badges.appendChild(protocol);
             badges.appendChild(player);
+            if (groupId) {
+                const group = document.createElement('span');
+                group.className = 'panel-badge group';
+                group.textContent = groupId;
+                badges.appendChild(group);
+            }
         }
 
         function attachVideoEvents() {
@@ -845,7 +906,7 @@
             const choice = getPlayerChoice();
             const playerType = resolvePlayerChoice(url, choice);
             document.getElementById('playerUrl').textContent = url;
-            setBadges(isDash, playerType);
+            setBadges(isDash, playerType, lastServerSession?.group_id || '');
             if (playerType === 'shaka') {
                 shaka.polyfill.installAll();
                 if (!shaka.Player.isBrowserSupported()) {
@@ -956,6 +1017,187 @@
             TestingSessionUI.applyCollapsibleState(container);
         }
 
+        function formatSessionLabel(session) {
+            if (!session) return '';
+            const portValue = session.x_forwarded_port_external || session.x_forwarded_port || '';
+            const portSuffix = portValue ? ` (Port ${portValue})` : '';
+            const playerLabel = session.player_id ? ` · ${session.player_id}` : '';
+            return `Session ${session.session_id}${portSuffix}${playerLabel}`;
+        }
+
+        function renderGroupControls(session, sessions) {
+            if (!session || !session.session_id) return '';
+            const currentId = String(session.session_id);
+            const groupId = session.group_id || '';
+            const allSessions = Array.isArray(sessions) ? sessions : [];
+            const hasOtherSessions = allSessions.some(s => String(s.session_id) !== currentId);
+            const groupMembers = groupId
+                ? allSessions.filter(s => String(s.session_id) !== currentId && s.group_id === groupId)
+                : [];
+            const memberLabels = groupMembers.map(formatSessionLabel).join(', ');
+            const groupSummary = memberLabels || 'No other sessions yet';
+            const available = allSessions.filter(s => {
+                if (String(s.session_id) === currentId) return false;
+                if (!groupId) return true;
+                return s.group_id !== groupId;
+            });
+            const options = available.map(s => {
+                const groupSuffix = s.group_id ? ` · ${s.group_id}` : '';
+                const label = `${formatSessionLabel(s)}${groupSuffix}`;
+                return `<option value="${s.session_id}">${label}</option>`;
+            }).join('');
+            const selectDisabled = available.length === 0;
+            const selectLabel = groupId ? 'Add to group' : 'Group with';
+            const banner = groupId ? `
+                <div class="group-banner">
+                    <div class="group-meta">🔗 Grouped with: ${groupSummary} <span class="panel-badge group">${groupId}</span></div>
+                    <div class="group-actions">
+                        <button class="btn btn-secondary" data-action="ungroup">Ungroup</button>
+                    </div>
+                </div>
+            ` : '';
+            const hint = selectDisabled
+                ? (hasOtherSessions ? 'No available sessions to add.' : 'Waiting for other sessions...')
+                : '';
+            return `
+                ${banner}
+                <div class="group-select-row">
+                    <label>
+                        ${selectLabel}
+                        <select id="groupWithSelect" ${selectDisabled ? 'disabled' : ''}>
+                            <option value="">Select session…</option>
+                            ${options}
+                        </select>
+                    </label>
+                    <button class="btn btn-secondary" data-action="group-with" ${selectDisabled ? 'disabled' : ''}>Group</button>
+                    ${hint ? `<span class="group-hint">${hint}</span>` : ''}
+                </div>
+            `;
+        }
+
+        function updateGroupControls(session, sessions) {
+            const container = document.getElementById('sessionGroupControls');
+            if (!container) return;
+            container.innerHTML = renderGroupControls(session, sessions);
+            const select = container.querySelector('#groupWithSelect');
+            if (select) {
+                const currentId = session ? String(session.session_id || '') : '';
+                if (groupSelectSessionId && currentId === groupSelectSessionId && groupSelectValue) {
+                    select.value = groupSelectValue;
+                }
+            }
+            if (session && session.session_id && (!Array.isArray(sessions) || sessions.length <= 1) && !groupSessionsFetchInFlight) {
+                groupSessionsFetchInFlight = true;
+                fetch('/api/sessions', { cache: 'no-store' })
+                    .then(res => res.json())
+                    .then(all => {
+                        lastSessionsList = Array.isArray(all) ? all : [];
+                        container.innerHTML = renderGroupControls(session, lastSessionsList);
+                        const retrySelect = container.querySelector('#groupWithSelect');
+                        if (retrySelect) {
+                            const currentId = String(session.session_id || '');
+                            if (groupSelectSessionId && currentId === groupSelectSessionId && groupSelectValue) {
+                                retrySelect.value = groupSelectValue;
+                            }
+                        }
+                    })
+                    .catch(err => console.error('Error fetching sessions for grouping', err))
+                    .finally(() => {
+                        groupSessionsFetchInFlight = false;
+                    });
+            }
+        }
+
+        function bindGroupControls() {
+            const container = document.getElementById('sessionGroupControls');
+            if (!container) return;
+            container.addEventListener('change', (event) => {
+                const select = event.target.closest('#groupWithSelect');
+                if (!select) return;
+                groupSelectValue = String(select.value || '');
+                const session = lastServerSession;
+                groupSelectSessionId = session && session.session_id ? String(session.session_id) : '';
+            });
+            const requestGroupWith = (session, targetId, sessions) => {
+                if (!session || !session.session_id || !targetId) return;
+                const list = Array.isArray(sessions) ? sessions : [];
+                const targetSession = list.find(item => String(item.session_id) === targetId);
+                let groupId = session.group_id || '';
+                if (!groupId && targetSession && targetSession.group_id) {
+                    groupId = targetSession.group_id;
+                }
+                const ids = new Set([String(session.session_id), targetId]);
+                if (targetSession && targetSession.group_id && targetSession.group_id !== session.group_id) {
+                    list
+                        .filter(item => item.group_id === targetSession.group_id)
+                        .forEach(item => ids.add(String(item.session_id)));
+                }
+                if (ids.size < 2) {
+                    alert('Select a session to group with.');
+                    return;
+                }
+                const payload = {
+                    session_ids: Array.from(ids)
+                };
+                if (groupId) {
+                    payload.group_id = groupId;
+                }
+                fetch('/api/session-group/link', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                })
+                    .then(() => {
+                        groupSelectValue = '';
+                        groupSelectSessionId = '';
+                        refreshSession(session.player_id);
+                    })
+                    .catch(err => console.error('Error grouping sessions', err));
+            };
+            container.addEventListener('click', (event) => {
+                const button = event.target.closest('button');
+                if (!button) return;
+                const session = lastServerSession;
+                if (!session || !session.session_id) return;
+                if (button.dataset.action === 'group-with') {
+                    const select = container.querySelector('#groupWithSelect');
+                    const targetId = select ? String(select.value || '') : '';
+                    if (!targetId) return;
+                    const targetSession = lastSessionsList.find(item => String(item.session_id) === targetId);
+                    if (!targetSession) {
+                        fetch('/api/sessions', { cache: 'no-store' })
+                            .then(res => res.json())
+                            .then(all => {
+                                lastSessionsList = Array.isArray(all) ? all : [];
+                                requestGroupWith(session, targetId, lastSessionsList);
+                            })
+                            .catch(err => console.error('Error fetching sessions for grouping', err));
+                        return;
+                    }
+                    requestGroupWith(session, targetId, lastSessionsList);
+                    return;
+                }
+                if (button.dataset.action === 'ungroup') {
+                    if (!session.group_id) return;
+                    fetch('/api/session-group/unlink', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            session_id: String(session.session_id),
+                            group_id: session.group_id,
+                            unlink_group: true
+                        })
+                    })
+                        .then(() => {
+                            groupSelectValue = '';
+                            groupSelectSessionId = '';
+                            refreshSession(session.player_id);
+                        })
+                        .catch(err => console.error('Error ungrouping sessions', err));
+                }
+            });
+        }
+
         function normalizeTransportFaultType(session) {
             const raw = String(session.transport_failure_type || session.transport_fault_type || 'none').toLowerCase();
             if (raw === 'drop' || raw === 'reject') return raw;
@@ -974,10 +1216,66 @@
             return 'failures_per_seconds';
         }
 
+        function getControlRevision(session) {
+            const revision = session ? session.control_revision : null;
+            if (revision === undefined || revision === null || revision === '') {
+                return null;
+            }
+            return String(revision);
+        }
+
+        function shouldSyncControls(sessionId, session) {
+            const key = String(sessionId || session?.session_id || '');
+            if (!key) return true;
+            const revision = getControlRevision(session);
+            const lastRevision = controlRevisionBySession.get(key);
+            if (revision === null) {
+                if (lastRevision === undefined) {
+                    controlRevisionBySession.set(key, null);
+                    return true;
+                }
+                return false;
+            }
+            if (lastRevision !== revision) {
+                controlRevisionBySession.set(key, revision);
+                return true;
+            }
+            return false;
+        }
+
         function syncServerFaultControls(card, session) {
             if (!card || !session) return;
             const sessionId = String(card.dataset.sessionId || session.session_id || '');
             if (!sessionId) return;
+            const syncSelect = (namePrefix, value) => {
+                const select = card.querySelector(`select[name="${namePrefix}_${sessionId}"]`);
+                if (select && value) {
+                    select.value = value;
+                }
+            };
+            const syncRange = (field, value, fallback) => {
+                const input = card.querySelector(`input[data-field="${field}"]`);
+                if (!input) return;
+                const numeric = Number(value);
+                const resolved = Number.isFinite(numeric) && numeric >= 0 ? numeric : fallback;
+                input.value = String(resolved);
+                const valueEl = input.parentElement?.querySelector('.range-value');
+                if (valueEl) valueEl.textContent = input.value;
+            };
+            const syncFailureScope = (field, values, allWhenEmpty) => {
+                const selected = Array.isArray(values) ? values.map(String) : [];
+                const selectedSet = new Set(selected);
+                const allChecked = allWhenEmpty
+                    ? (selected.length === 0 || selectedSet.has('All'))
+                    : selectedSet.has('All');
+                card.querySelectorAll(`input[data-field="${field}"]`).forEach(input => {
+                    if (input.value === 'All') {
+                        input.checked = allChecked;
+                        return;
+                    }
+                    input.checked = allChecked || selectedSet.has(input.value);
+                });
+            };
             const syncRadio = (namePrefix, value) => {
                 const radios = card.querySelectorAll(`input[name="${namePrefix}_${sessionId}"]`);
                 radios.forEach((radio) => {
@@ -989,6 +1287,17 @@
             syncRadio('master_manifest_failure_type', String(session.master_manifest_failure_type || 'none'));
             syncRadio('transport_failure_type', normalizeTransportFaultType(session));
             syncRadio('transport_failure_mode', normalizeTransportFailureMode(session));
+            syncSelect('segment_failure_mode', String(session.segment_failure_mode || 'failures_per_seconds'));
+            syncSelect('manifest_failure_mode', String(session.manifest_failure_mode || 'failures_per_seconds'));
+            syncSelect('master_manifest_failure_mode', String(session.master_manifest_failure_mode || 'failures_per_seconds'));
+            syncRange('segment_consecutive_failures', session.segment_consecutive_failures, 1);
+            syncRange('segment_failure_frequency', session.segment_failure_frequency, 6);
+            syncRange('manifest_consecutive_failures', session.manifest_consecutive_failures, 1);
+            syncRange('manifest_failure_frequency', session.manifest_failure_frequency, 6);
+            syncRange('master_manifest_consecutive_failures', session.master_manifest_consecutive_failures, 1);
+            syncRange('master_manifest_failure_frequency', session.master_manifest_failure_frequency, 6);
+            syncFailureScope('segment_failure_urls', session.segment_failure_urls, true);
+            syncFailureScope('manifest_failure_urls', session.manifest_failure_urls, false);
             TestingSessionUI.updateTransportModeUi(card);
             const transportConsecutiveInput = card.querySelector('input[data-field="transport_consecutive_failures"]');
             const transportFrequencyInput = card.querySelector('input[data-field="transport_failure_frequency"]');
@@ -1014,6 +1323,10 @@
                 const valueEl = transportFrequencyInput.parentElement?.querySelector('.range-value');
                 if (valueEl) valueEl.textContent = transportFrequencyInput.value;
             }
+        }
+
+        function syncServerFaultData(card, session) {
+            if (!card || !session) return;
             const stateEl = card.querySelector('[data-field="transport_fault_state"]');
             if (stateEl) {
                 stateEl.textContent = session.transport_fault_active ? 'Active' : 'Idle';
@@ -1024,6 +1337,256 @@
                 const rejectPackets = Number(session.transport_fault_reject_packets || 0);
                 countersEl.textContent = `Drop ${dropPackets} pkts · Reject ${rejectPackets} pkts`;
             }
+        }
+
+        function closestStepDuration(seconds) {
+            const options = [6, 12, 18, 24];
+            const numeric = Number(seconds);
+            if (!Number.isFinite(numeric) || numeric <= 0) return 12;
+            let best = options[0];
+            let bestDiff = Math.abs(numeric - best);
+            options.forEach((value) => {
+                const diff = Math.abs(numeric - value);
+                if (diff < bestDiff) {
+                    best = value;
+                    bestDiff = diff;
+                }
+            });
+            return best;
+        }
+
+        function inferSegmentDurationSeconds(session) {
+            const explicit = Number(session?.nftables_pattern_segment_duration_seconds || 0);
+            if (Number.isFinite(explicit) && explicit > 0) {
+                return explicit;
+            }
+            const candidates = [
+                session?.manifest_url || '',
+                session?.master_manifest_url || '',
+                session?.last_request_url || ''
+            ];
+            for (const value of candidates) {
+                const match = value.match(/(?:_|\/)(\d+)s(?:[._/?]|$)/i);
+                if (match) {
+                    const parsed = Number(match[1]);
+                    if (Number.isFinite(parsed) && parsed > 0) {
+                        return parsed;
+                    }
+                }
+            }
+            return 1;
+        }
+
+        function resolvePatternDefaults(session) {
+            const segmentDurationSeconds = inferSegmentDurationSeconds(session);
+            const defaultSegments = Number(session?.nftables_pattern_default_segments || 2);
+            const storedDefaultStepSeconds = Number(session?.nftables_pattern_default_step_seconds || 0);
+            const defaultStepSeconds = Number.isFinite(storedDefaultStepSeconds) && storedDefaultStepSeconds > 0
+                ? storedDefaultStepSeconds
+                : segmentDurationSeconds * defaultSegments;
+            return {
+                segmentDurationSeconds,
+                selectedStepSeconds: closestStepDuration(defaultStepSeconds)
+            };
+        }
+
+        function syncNetworkShapingControls(card, session) {
+            if (!card || !session) return;
+            const sessionId = String(card.dataset.sessionId || session.session_id || '');
+            if (!sessionId) return;
+            const templateModeRaw = String(session.nftables_pattern_template_mode || '').toLowerCase();
+            const templateMode = ['sliders', 'square_wave', 'ramp_up', 'ramp_down', 'pyramid'].includes(templateModeRaw)
+                ? templateModeRaw
+                : 'sliders';
+            card.querySelectorAll(`input[name="shaping_template_mode_${sessionId}"]`).forEach((radio) => {
+                radio.checked = radio.value === templateMode;
+            });
+            const marginRaw = Number(session.nftables_pattern_margin_pct);
+            const marginPct = [0, 10, 25, 50].includes(marginRaw) ? marginRaw : 0;
+            card.querySelectorAll(`input[name="shaping_template_margin_${sessionId}"]`).forEach((radio) => {
+                radio.checked = Number(radio.value) === marginPct;
+            });
+            const defaults = resolvePatternDefaults(session);
+            card.querySelectorAll(`input[name="shaping_default_step_seconds_${sessionId}"]`).forEach((radio) => {
+                radio.checked = Number(radio.value) === defaults.selectedStepSeconds;
+            });
+            const label = card.querySelector('[data-field="shaping_default_seconds_label"]');
+            if (label) {
+                label.textContent = `segment ${defaults.segmentDurationSeconds}s`;
+            }
+            updateTemplateModeUi(card);
+        }
+
+        function isFailureRangeField(field) {
+            return [
+                'segment_consecutive_failures',
+                'segment_failure_frequency',
+                'manifest_consecutive_failures',
+                'manifest_failure_frequency',
+                'master_manifest_consecutive_failures',
+                'master_manifest_failure_frequency',
+                'transport_consecutive_failures',
+                'transport_failure_frequency'
+            ].includes(field);
+        }
+
+        function getSessionBaseRevision() {
+            const revision = lastServerSession ? lastServerSession.control_revision : null;
+            if (revision === undefined || revision === null) {
+                return '';
+            }
+            return String(revision);
+        }
+
+        function queuePendingFailureEdits(sessionId, values) {
+            if (!sessionId || !values) return;
+            const key = String(sessionId);
+            const existing = pendingFailureEdits.get(key);
+            const merged = {
+                ...(existing ? existing.values : {}),
+                ...values
+            };
+            pendingFailureEdits.set(key, {
+                timestamp: Date.now(),
+                values: merged
+            });
+            setTimeout(() => {
+                const pending = pendingFailureEdits.get(key);
+                if (pending && Date.now() - pending.timestamp > 4500) {
+                    pendingFailureEdits.delete(key);
+                }
+            }, 5000);
+        }
+
+        function resolvePendingFailureEdits(sessionId, fields) {
+            const key = String(sessionId || '');
+            const pending = pendingFailureEdits.get(key);
+            if (!pending) return;
+            const values = { ...pending.values };
+            (fields || []).forEach(field => {
+                delete values[field];
+            });
+            if (Object.keys(values).length === 0) {
+                pendingFailureEdits.delete(key);
+            } else {
+                pendingFailureEdits.set(key, {
+                    timestamp: pending.timestamp,
+                    values
+                });
+            }
+        }
+
+        function buildSessionPatch(card, fields) {
+            const data = TestingSessionUI.readSessionSettings(card);
+            const set = {};
+            (fields || []).forEach(field => {
+                if (Object.prototype.hasOwnProperty.call(data, field)) {
+                    set[field] = data[field];
+                }
+            });
+            return {
+                sessionId: data.session_id,
+                set,
+                fields: fields || []
+            };
+        }
+
+        function applySessionPatchResponse(session) {
+            if (!session) return;
+            applySessionUpdate(session);
+        }
+
+        function sendSessionPatch(card, fields) {
+            const patch = buildSessionPatch(card, fields);
+            if (!patch.sessionId || Object.keys(patch.set).length === 0) {
+                return Promise.resolve();
+            }
+            queuePendingFailureEdits(patch.sessionId, patch.set);
+            return fetch(`/api/session/${patch.sessionId}`, {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    set: patch.set,
+                    fields: patch.fields,
+                    base_revision: getSessionBaseRevision()
+                })
+            }).then(async response => {
+                const body = await response.json().catch(() => ({}));
+                if (!response.ok) {
+                    if (response.status === 409 && body.session) {
+                        resolvePendingFailureEdits(patch.sessionId, patch.fields);
+                        pendingFailureEdits.delete(String(patch.sessionId));
+                        applySessionPatchResponse(body.session);
+                        return;
+                    }
+                    throw new Error(body.error || `HTTP ${response.status}`);
+                }
+                if (body.session) {
+                    resolvePendingFailureEdits(patch.sessionId, patch.fields);
+                    applySessionPatchResponse(body.session);
+                }
+            }).catch(error => {
+                console.error('Error saving settings:', error);
+            });
+        }
+
+        function scheduleFailureSave(card, field) {
+            const sessionId = card?.dataset?.sessionId;
+            if (!sessionId || !field) return;
+            const key = String(sessionId);
+            if (!failureSaveFields.has(key)) {
+                failureSaveFields.set(key, new Set());
+            }
+            failureSaveFields.get(key).add(field);
+            if (failureSaveTimers.has(key)) {
+                clearTimeout(failureSaveTimers.get(key));
+            }
+            failureSaveTimers.set(key, setTimeout(() => {
+                const fields = Array.from(failureSaveFields.get(key) || []);
+                failureSaveFields.delete(key);
+                failureSaveTimers.delete(key);
+                if (fields.length) {
+                    sendSessionPatch(card, fields);
+                }
+            }, 200));
+        }
+
+        function parseSessionControlName(name, sessionId) {
+            if (!name || !sessionId) return '';
+            const suffix = `_${sessionId}`;
+            if (!name.endsWith(suffix)) return '';
+            return name.slice(0, -suffix.length);
+        }
+
+        function resolveSessionPatchFields(target, sessionId, field) {
+            if (field === 'segment_failure_urls' || field === 'manifest_failure_urls') {
+                return [field];
+            }
+            const prefix = parseSessionControlName(target.name, sessionId);
+            if (!prefix) return [];
+            if (prefix.endsWith('_failure_type')) {
+                return [prefix];
+            }
+            if (prefix.endsWith('_failure_mode')) {
+                const base = prefix.replace('_failure_mode', '');
+                if (base === 'transport') {
+                    return [
+                        'transport_failure_mode',
+                        'transport_failure_units',
+                        'transport_consecutive_units',
+                        'transport_frequency_units',
+                        'transport_consecutive_failures',
+                        'transport_failure_frequency'
+                    ];
+                }
+                return [
+                    `${base}_failure_mode`,
+                    `${base}_failure_units`,
+                    `${base}_consecutive_units`,
+                    `${base}_frequency_units`
+                ];
+            }
+            return [];
         }
 
         function bindSessionControls() {
@@ -1237,6 +1800,9 @@
                 if (event.target.matches('input[type="range"]')) {
                     const valueEl = event.target.parentElement.querySelector('.range-value');
                     if (valueEl) valueEl.textContent = event.target.value;
+                    if (card && isFailureRangeField(event.target.dataset.field)) {
+                        scheduleFailureSave(card, event.target.dataset.field);
+                    }
                 }
                 if (event.target.dataset.field === 'shaping_step_mbps') {
                     const row = event.target.closest('.shape-step-row');
@@ -1292,17 +1858,48 @@
                         input.checked = event.target.checked;
                     });
                 }
+                if (event.target.dataset.field === 'manifest_failure_urls' && event.target.value !== 'All') {
+                    const checks = Array.from(card.querySelectorAll('input[data-field="manifest_failure_urls"]'));
+                    const allBox = checks.find(input => input.value === 'All');
+                    const scopedChecks = checks.filter(input => input.value !== 'All');
+                    if (allBox && allBox.checked) {
+                        allBox.checked = false;
+                    }
+                    if (!scopedChecks.some(input => input.checked) && allBox) {
+                        allBox.checked = true;
+                    }
+                }
                 if (event.target.dataset.field === 'segment_failure_urls' && event.target.value === 'All') {
                     const checks = card.querySelectorAll('input[data-field="segment_failure_urls"]');
                     checks.forEach(input => {
                         input.checked = event.target.checked;
                     });
                 }
+                if (event.target.dataset.field === 'segment_failure_urls' && event.target.value !== 'All') {
+                    const checks = Array.from(card.querySelectorAll('input[data-field="segment_failure_urls"]'));
+                    const allBox = checks.find(input => input.value === 'All');
+                    const scopedChecks = checks.filter(input => input.value !== 'All');
+                    if (allBox && allBox.checked) {
+                        allBox.checked = false;
+                    }
+                    if (!scopedChecks.some(input => input.checked) && allBox) {
+                        allBox.checked = true;
+                    }
+                }
                 if (event.target.dataset.field && event.target.dataset.field.startsWith('shaping_')) {
                     scheduleShapingApply(card);
                     return;
                 }
-                saveSession(card);
+                if (isFailureRangeField(event.target.dataset.field)) {
+                    scheduleFailureSave(card, event.target.dataset.field);
+                    return;
+                }
+                const sessionId = String(card.dataset.sessionId || '');
+                const field = event.target.dataset.field || '';
+                const fields = resolveSessionPatchFields(event.target, sessionId, field);
+                if (fields.length) {
+                    sendSessionPatch(card, fields);
+                }
             });
             container.addEventListener('click', (event) => {
                 const button = event.target.closest('button');
@@ -1365,11 +1962,8 @@
 
         function saveSession(card) {
             const data = TestingSessionUI.readSessionSettings(card);
-            fetch(`/api/failure-settings/${data.session_id}`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(data)
-            }).catch(err => console.error('Error saving settings', err));
+            const fields = Object.keys(data || {}).filter(field => field !== 'session_id');
+            sendSessionPatch(card, fields);
         }
 
         function applyNetworkShaping(card) {
@@ -1448,7 +2042,10 @@
                     }
                     return response.json();
                 })
-                .then(sessions => sessions.find(session => session.player_id === playerId));
+                .then(sessions => {
+                    lastSessionsList = Array.isArray(sessions) ? sessions : [];
+                    return sessions.find(session => session.player_id === playerId);
+                });
         }
 
         function pushBandwidthSample(session) {
@@ -1764,6 +2361,71 @@
             }
         }
 
+        function applySessionUpdate(session) {
+            if (!session) return;
+            const container = document.getElementById('sessionControls');
+            const existingCard = container ? container.querySelector('.session-card') : null;
+            const serverSession = session;
+            lastServerSession = serverSession;
+            const sessionKey = String(serverSession.session_id || '');
+            const pending = pendingShaping.get(String(serverSession.session_id));
+            if (pending && Date.now() - pending.timestamp < 5000) {
+                session = {
+                    ...serverSession,
+                    ...pending.values
+                };
+            }
+            const pendingFailure = pendingFailureEdits.get(String(serverSession.session_id));
+            if (pendingFailure && Date.now() - pendingFailure.timestamp < 5000) {
+                session = {
+                    ...(session || serverSession),
+                    ...pendingFailure.values
+                };
+            }
+            if (!session) {
+                session = serverSession;
+            }
+            session = {
+                ...session,
+                ui_bitrate_axis_max: normalizeBitrateAxisMaxMode(
+                    bitrateAxisMaxBySession.get(String(session.session_id)) || session.ui_bitrate_axis_max || 'auto'
+                )
+            };
+            if (session.session_id) {
+                const portValue = session.x_forwarded_port_external || session.x_forwarded_port || '';
+                const portSuffix = portValue ? ` (Port ${portValue})` : '';
+                const titleParts = ['Testing Player', `Session ${session.session_id}${portSuffix}`];
+                if (session.player_id) {
+                    titleParts.push(session.player_id);
+                }
+                const titleText = titleParts.join(' · ');
+                document.title = titleText;
+                const titleEl = document.getElementById('pageTitle');
+                if (titleEl) {
+                    titleEl.textContent = titleText;
+                }
+            }
+            currentSessionId = session.session_id;
+            if (currentUrl) {
+                const isDash = currentUrl.includes('.mpd');
+                setBadges(isDash, resolvePlayerChoice(currentUrl, getPlayerChoice()), session.group_id || '');
+            }
+            updateGroupControls(session, lastSessionsList);
+            if (container && existingCard && container.contains(document.activeElement) &&
+                String(existingCard.dataset.sessionId || '') === sessionKey) {
+                const shouldSync = shouldSyncControls(sessionKey, session);
+                if (shouldSync) {
+                    syncServerFaultControls(existingCard, session);
+                    syncNetworkShapingControls(existingCard, session);
+                }
+                syncServerFaultData(existingCard, session);
+                pushBandwidthSample(session);
+                return;
+            }
+            renderSessionControls(session);
+            pushBandwidthSample(session);
+        }
+
         function refreshSession(playerId) {
             if (!playerId) return;
             if (sessionPollInFlight) {
@@ -1779,46 +2441,7 @@
                         return;
                     }
                     sessionPollLastAppliedSeq = requestSeq;
-                    if (session) {
-                        const container = document.getElementById('sessionControls');
-                        const existingCard = container ? container.querySelector('.session-card') : null;
-                        const sessionKey = String(session.session_id || '');
-                        const pending = pendingShaping.get(session.session_id);
-                        if (pending && Date.now() - pending.timestamp < 5000) {
-                            session = {
-                                ...session,
-                                ...pending.values
-                            };
-                        }
-                        session = {
-                            ...session,
-                            ui_bitrate_axis_max: normalizeBitrateAxisMaxMode(
-                                bitrateAxisMaxBySession.get(String(session.session_id)) || session.ui_bitrate_axis_max || 'auto'
-                            )
-                        };
-                        if (session.session_id) {
-                            const portSuffix = session.x_forwarded_port ? ` (Port ${session.x_forwarded_port})` : '';
-                            const titleParts = ['Testing Player', `Session ${session.session_id}${portSuffix}`];
-                            if (session.player_id) {
-                                titleParts.push(session.player_id);
-                            }
-                            const titleText = titleParts.join(' · ');
-                            document.title = titleText;
-                            const titleEl = document.getElementById('pageTitle');
-                            if (titleEl) {
-                                titleEl.textContent = titleText;
-                            }
-                        }
-                        currentSessionId = session.session_id;
-                        if (container && existingCard && container.contains(document.activeElement) &&
-                            String(existingCard.dataset.sessionId || '') === sessionKey) {
-                            syncServerFaultControls(existingCard, session);
-                            pushBandwidthSample(session);
-                            return;
-                        }
-                        renderSessionControls(session);
-                        pushBandwidthSample(session);
-                    }
+                    applySessionUpdate(session);
                 })
                 .catch(err => {
                     if (err && err.name === 'AbortError') return;
@@ -1830,6 +2453,36 @@
                     }
                     sessionPollInFlight = false;
                 });
+        }
+
+        function startSessionPolling(playerId) {
+            if (sessionPollTimer) return;
+            sessionPollTimer = setInterval(() => refreshSession(playerId), 1000);
+        }
+
+        function startSessionStream(playerId) {
+            if (!window.EventSource) return false;
+            if (!playerId) return false;
+            const source = new EventSource('/api/sessions/stream');
+            sessionsStream = source;
+            source.addEventListener('sessions', (event) => {
+                try {
+                    const sessions = JSON.parse(event.data);
+                    lastSessionsList = Array.isArray(sessions) ? sessions : [];
+                    const session = sessions.find(item => item.player_id === playerId);
+                    applySessionUpdate(session);
+                } catch (err) {
+                    console.error('Error parsing sessions stream payload', err);
+                }
+            });
+            source.addEventListener('error', () => {
+                if (source.readyState === EventSource.CLOSED) {
+                    source.close();
+                    sessionsStream = null;
+                    startSessionPolling(playerId);
+                }
+            });
+            return true;
         }
 
         function bootstrap() {
@@ -1851,8 +2504,11 @@
             attachVideoEvents();
             loadStream(params.url);
             bindSessionControls();
+            bindGroupControls();
             refreshSession(params.playerId);
-            setInterval(() => refreshSession(params.playerId), 1000);
+            if (!startSessionStream(params.playerId)) {
+                startSessionPolling(params.playerId);
+            }
             setInterval(updateStats, 500);
             const setNetworkShapingVisibility = (enabled) => {
                 document.querySelectorAll('[data-net-shaping]').forEach(el => {

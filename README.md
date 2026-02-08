@@ -199,9 +199,9 @@ http://lenovo.local:30000/dashboard/testing-session.html?player_id=<uuid>&url=<e
 The `player_id` is required. The proxy uses it to bind the playback session to a dedicated port, so requests to the original port are redirected to a session‑specific port. This allows per‑session failure injection and traffic shaping without affecting other sessions.
 
 k3s NodePort mapping used by the testing flow:
-- Dashboard/UI: `30000`
-- Initial proxy stream port: `30081`
-- Session-assigned ports: `30181`, `30281`, `30381`, ... up to `30881`
+- External NodePorts (browser): `40000` (UI) and `40081` + `40181`..`40881` (sessions)
+- Internal container ports: `30000` (UI) and `30081` + `30181`..`30881` (sessions)
+- go‑proxy maps external → internal using `EXTERNAL_PORT_BASE`, `INTERNAL_PORT_BASE`, and `PORT_RANGE_COUNT`
 
 Controls:
 - **Retry Fetch**: re‑issues the current stream request without resetting the player.
@@ -257,6 +257,8 @@ See `PRD.md` for the full list.
 - Testing session player selector (HLS.js, Shaka, Video.js, Native) with error + HTTP failure logging.
 - Developer context menu option in Mosaic (developer=1) to open the HLS.js demo with the test URL.
 - Platform‑aware network shaping capabilities endpoint (Linux‑only support).
+- Server‑authoritative session updates with control‑revision conflict handling and SSE session stream.
+- Session grouping controls (group/ungroup/merge) that propagate failure settings and network shaping.
 
 ## Why unified error injection?
 Many environments already provide failure simulation (player debug tools, OS/Browser dev tools, routers, or lab network appliances). InfiniteStream still ships a unified error injection layer because it:
