@@ -156,6 +156,18 @@ server {
         add_header Expires "0" always;
     }
 
+    location = /api/sessions/stream {
+        proxy_pass http://go_proxy;
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_read_timeout 1h;
+        add_header Access-Control-Allow-Origin * always;
+        add_header Cache-Control "no-cache, no-store, must-revalidate" always;
+        add_header Pragma "no-cache" always;
+        add_header Expires "0" always;
+        add_header X-Accel-Buffering "no" always;
+    }
+
     location = /api/clear-sessions {
         proxy_pass http://go_proxy;
         add_header Access-Control-Allow-Origin * always;
@@ -173,6 +185,14 @@ server {
     }
 
     location ~ ^/api/failure-settings/ {
+        proxy_pass http://go_proxy;
+        add_header Access-Control-Allow-Origin * always;
+        add_header Cache-Control "no-cache, no-store, must-revalidate" always;
+        add_header Pragma "no-cache" always;
+        add_header Expires "0" always;
+    }
+
+    location ~ ^/api/session-group/ {
         proxy_pass http://go_proxy;
         add_header Access-Control-Allow-Origin * always;
         add_header Cache-Control "no-cache, no-store, must-revalidate" always;

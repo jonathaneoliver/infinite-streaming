@@ -81,6 +81,14 @@ spec:
           value: "8"
         - name: INFINITE_STREAM_TC_INTERFACE
           value: "eth0"
+        - name: EXTERNAL_PORT_BASE
+          value: "40081"
+        - name: INTERNAL_PORT_BASE
+          value: "30081"
+        - name: PORT_RANGE_COUNT
+          value: "9"
+        - name: INFINITE_STREAM_TC_DEBUG
+          value: "1"
         securityContext:
           privileged: true
           capabilities:

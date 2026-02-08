@@ -40,11 +40,71 @@ type App struct {
 	upstreamPort string
 	maxSessions  int
 	client       *http.Client
+	portMap      PortMapping
 	shapeMu      sync.Mutex
 	shapeLoops   map[int]context.CancelFunc
 	shapeStates  map[int]NftShapePattern
 	faultMu      sync.Mutex
 	faultLoops   map[int]context.CancelFunc
+	sessionsHub              *SessionEventHub
+	sessionsBroadcastMu      sync.Mutex
+	sessionsBroadcastPending bool
+	sessionsBroadcastLatest  []SessionData
+}
+
+type SessionEventHub struct {
+	mu      sync.Mutex
+	nextID  int
+	clients map[int]chan string
+}
+
+type SessionPatchRequest struct {
+	Set          map[string]interface{} `json:"set"`
+	Fields       []string               `json:"fields"`
+	BaseRevision string                 `json:"base_revision"`
+}
+
+type PortMapping struct {
+	externalBase int
+	internalBase int
+	count        int
+}
+
+func NewSessionEventHub() *SessionEventHub {
+	return &SessionEventHub{clients: map[int]chan string{}}
+}
+
+func (h *SessionEventHub) AddClient() (int, <-chan string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.nextID++
+	id := h.nextID
+	ch := make(chan string, 8)
+	h.clients[id] = ch
+	return id, ch
+}
+
+func (h *SessionEventHub) RemoveClient(id int) {
+	h.mu.Lock()
+	ch, ok := h.clients[id]
+	if ok {
+		delete(h.clients, id)
+	}
+	h.mu.Unlock()
+	if ok {
+		close(ch)
+	}
+}
+
+func (h *SessionEventHub) Broadcast(payload string) {
+	h.mu.Lock()
+	for _, ch := range h.clients {
+		select {
+		case ch <- payload:
+		default:
+		}
+	}
+	h.mu.Unlock()
 }
 
 type PlaylistInfo struct {
@@ -55,6 +115,7 @@ type PlaylistInfo struct {
 
 type TcTrafficManager struct {
 	interfaceName string
+	debug         bool
 }
 
 type NftShapeStep struct {
@@ -106,8 +167,8 @@ func (s *NftShapeStep) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-func NewTcTrafficManager(interfaceName string) *TcTrafficManager {
-	return &TcTrafficManager{interfaceName: interfaceName}
+func NewTcTrafficManager(interfaceName string, debug bool) *TcTrafficManager {
+	return &TcTrafficManager{interfaceName: interfaceName, debug: debug}
 }
 
 func (t *TcTrafficManager) IsActive() bool {
@@ -210,6 +271,7 @@ func (t *TcTrafficManager) UpdateRateLimit(port int, rateMbps float64) error {
 		_ = t.UpdateNetem(port, 0, 0)
 		_ = t.RemoveFilter(port)
 		_ = t.RemoveClass(port)
+		t.logTcState("rate_clear", port)
 		return nil
 	}
 	portSuffix := fmt.Sprintf("%03d", port%1000)
@@ -239,7 +301,8 @@ func (t *TcTrafficManager) UpdateRateLimit(port int, rateMbps float64) error {
 
 	showFilters := exec.Command("tc", "filter", "show", "dev", t.interfaceName)
 	filterOut, _ := showFilters.CombinedOutput()
-	if !strings.Contains(string(filterOut), fmt.Sprintf("flowid %s", classid)) {
+	desiredHex := fmt.Sprintf("%04x0000/ffff0000", port)
+	if !strings.Contains(string(filterOut), desiredHex) {
 		filterCmd := exec.Command(
 			"tc", "filter", "add", "dev", t.interfaceName, "protocol", "ip", "parent", "1:0", "prio", "1", "u32",
 			"match", "ip", "sport", fmt.Sprintf("%d", port), "0xffff", "flowid", classid,
@@ -264,6 +327,7 @@ func (t *TcTrafficManager) UpdateRateLimit(port int, rateMbps float64) error {
 	if !strings.Contains(string(verifyOut), fmt.Sprintf("class htb %s", classid)) {
 		return fmt.Errorf("tc class not present after update: %s", strings.TrimSpace(string(verifyOut)))
 	}
+	t.logTcState("rate_apply", port)
 	return nil
 }
 
@@ -317,6 +381,7 @@ func (t *TcTrafficManager) UpdateNetem(port int, delayMs int, lossPct float64) e
 	handle := fmt.Sprintf("%s0:", portSuffix)
 	if delayMs <= 0 && lossPct <= 0 {
 		_ = exec.Command("tc", "qdisc", "del", "dev", t.interfaceName, "parent", classid, "handle", handle, "netem").Run()
+		t.logTcState("netem_clear", port)
 		return nil
 	}
 	jitter := delayMs / 2
@@ -335,7 +400,44 @@ func (t *TcTrafficManager) UpdateNetem(port int, delayMs int, lossPct float64) e
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("tc netem failed: %s", strings.TrimSpace(string(out)))
 	}
+	t.logTcState("netem_apply", port)
 	return nil
+}
+
+func (t *TcTrafficManager) logTcState(reason string, port int) {
+	if !t.debug {
+		return
+	}
+	type tcCmd struct {
+		label string
+		args  []string
+	}
+	cmds := []tcCmd{
+		{label: "qdisc", args: []string{"qdisc", "show", "dev", t.interfaceName}},
+		{label: "class", args: []string{"class", "show", "dev", t.interfaceName}},
+		{label: "filter", args: []string{"filter", "show", "dev", t.interfaceName}},
+	}
+	for _, cmd := range cmds {
+		out, err := exec.Command("tc", cmd.args...).CombinedOutput()
+		if err != nil {
+			log.Printf("NETSHAPE_TC_STATE tc_%s dev=%s reason=%s port=%d error=%v output=%s",
+				cmd.label,
+				t.interfaceName,
+				reason,
+				port,
+				err,
+				strings.TrimSpace(string(out)),
+			)
+			continue
+		}
+		log.Printf("NETSHAPE_TC_STATE tc_%s dev=%s reason=%s port=%d output=%s",
+			cmd.label,
+			t.interfaceName,
+			reason,
+			port,
+			strings.TrimSpace(string(out)),
+		)
+	}
 }
 
 func (t *TcTrafficManager) GetNetemConfig(port int) (map[string]interface{}, error) {
@@ -449,20 +551,66 @@ func parseTcBytes(line string) int64 {
 	return 0
 }
 
+func loadPortMapping() PortMapping {
+	externalBase := getenvIntAny([]string{"EXTERNAL_PORT_BASE"}, 0)
+	internalBase := getenvIntAny([]string{"INTERNAL_PORT_BASE"}, 0)
+	count := getenvIntAny([]string{"PORT_RANGE_COUNT", "PORT_MAP_COUNT"}, 0)
+	if externalBase <= 0 || internalBase <= 0 || count <= 0 {
+		return PortMapping{}
+	}
+	return PortMapping{
+		externalBase: externalBase,
+		internalBase: internalBase,
+		count:        count,
+	}
+}
+
+func (m PortMapping) MapExternalPort(port string) (string, bool) {
+	if m.count <= 0 || m.externalBase <= 0 || m.internalBase <= 0 {
+		return port, false
+	}
+	value, err := strconv.Atoi(port)
+	if err != nil {
+		return port, false
+	}
+	externalGroup := m.externalBase / 1000
+	internalGroup := m.internalBase / 1000
+	if externalGroup <= 0 || internalGroup <= 0 {
+		return port, false
+	}
+	if value/1000 != externalGroup {
+		return port, false
+	}
+	if m.count > 0 {
+		digit := thirdFromLastDigit(strconv.Itoa(value))
+		if digit == "" {
+			return port, false
+		}
+		sessionDigit := int(digit[0] - '0')
+		if sessionDigit < 0 || sessionDigit > m.count {
+			return port, false
+		}
+	}
+	mapped := (internalGroup * 1000) + (value % 1000)
+	return strconv.Itoa(mapped), true
+}
+
 func main() {
 	memcachedAddr := getenv("MEMCACHED_ADDR", "memcached:11211")
 	upstreamHost := getenvAny([]string{"INFINITE_STREAM_UPSTREAM_HOST", "INFINITE_UPSTREAM_HOST", "BOSS_UPSTREAM_HOST"}, "go-server")
 	upstreamPort := getenvAny([]string{"INFINITE_STREAM_UPSTREAM_PORT", "INFINITE_UPSTREAM_PORT", "BOSS_UPSTREAM_PORT"}, "30000")
 	maxSessions := getenvIntAny([]string{"INFINITE_STREAM_MAX_SESSIONS", "INFINITE_MAX_SESSIONS", "BOSS_MAX_SESSIONS"}, 8)
 	interfaceName := getenvAny([]string{"INFINITE_STREAM_TC_INTERFACE", "INFINITE_TC_INTERFACE", "TC_INTERFACE"}, "eth0")
+	tcDebug := getenvBoolAny([]string{"INFINITE_STREAM_TC_DEBUG", "INFINITE_TC_DEBUG", "TC_DEBUG"}, false)
 
 	mc := memcache.New(memcachedAddr)
 	app := &App{
 		memcache:     mc,
-		traffic:      NewTcTrafficManager(interfaceName),
+		traffic:      NewTcTrafficManager(interfaceName, tcDebug),
 		upstreamHost: upstreamHost,
 		upstreamPort: upstreamPort,
 		maxSessions:  maxSessions,
+		portMap:      loadPortMapping(),
 		client: &http.Client{
 			Transport: &http.Transport{
 				DialContext:           (&net.Dialer{Timeout: 6 * time.Second}).DialContext,
@@ -472,6 +620,7 @@ func main() {
 		shapeLoops:  map[int]context.CancelFunc{},
 		shapeStates: map[int]NftShapePattern{},
 		faultLoops:  map[int]context.CancelFunc{},
+		sessionsHub: NewSessionEventHub(),
 	}
 
 	go app.trackPortThroughput()
@@ -482,8 +631,11 @@ func main() {
 
 	router.HandleFunc("/index.html", app.handleIndex).Methods(http.MethodGet)
 	router.HandleFunc("/api/sessions", app.handleGetSessions).Methods(http.MethodGet)
+	router.HandleFunc("/api/sessions/stream", app.handleSessionStream).Methods(http.MethodGet)
 	router.HandleFunc("/api/failure-settings/{id}", app.handleUpdateFailureSettings).Methods(http.MethodPost)
+	router.HandleFunc("/api/session/{id}/update", app.handleUpdateSessionSettings).Methods(http.MethodPost)
 	router.HandleFunc("/api/session/{id}", app.handleSession).Methods(http.MethodGet, http.MethodDelete)
+	router.HandleFunc("/api/session/{id}", app.handlePatchSession).Methods(http.MethodPatch)
 	router.HandleFunc("/api/clear-sessions", app.handleClearSessions).Methods(http.MethodPost)
 	router.HandleFunc("/api/session-group/link", app.handleLinkSessions).Methods(http.MethodPost)
 	router.HandleFunc("/api/session-group/unlink", app.handleUnlinkSession).Methods(http.MethodPost)
@@ -726,6 +878,102 @@ func (a *App) handleGetSessions(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, sessions)
 }
 
+func (a *App) handleSessionStream(w http.ResponseWriter, r *http.Request) {
+	if a.sessionsHub == nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		writeJSON(w, map[string]string{"error": "stream unavailable"})
+		return
+	}
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		w.WriteHeader(http.StatusInternalServerError)
+		writeJSON(w, map[string]string{"error": "stream unsupported"})
+		return
+	}
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+
+	a.removeInactiveSessions()
+	sessions := a.getSessionList()
+	payload := a.buildSessionsEvent(sessions)
+	if payload != "" {
+		_, _ = w.Write([]byte(payload))
+		flusher.Flush()
+	}
+
+	clientID, ch := a.sessionsHub.AddClient()
+	defer a.sessionsHub.RemoveClient(clientID)
+
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case msg, ok := <-ch:
+			if !ok {
+				return
+			}
+			_, _ = w.Write([]byte(msg))
+			flusher.Flush()
+		}
+	}
+}
+
+func (a *App) handlePatchSession(w http.ResponseWriter, r *http.Request) {
+	id := mux.Vars(r)["id"]
+	var payload SessionPatchRequest
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		writeJSON(w, map[string]string{"error": "invalid json"})
+		return
+	}
+	set := payload.Set
+	if set == nil {
+		set = map[string]interface{}{}
+	}
+	fields := payload.Fields
+	if len(fields) == 0 {
+		for key := range set {
+			fields = append(fields, key)
+		}
+	}
+	filtered := map[string]interface{}{}
+	for _, key := range fields {
+		if value, ok := set[key]; ok {
+			filtered[key] = value
+		}
+	}
+	if len(filtered) == 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		writeJSON(w, map[string]string{"error": "no fields provided"})
+		return
+	}
+	session, status, errMsg := a.applySessionSettingsUpdate(id, filtered, payload.BaseRevision)
+	if status != http.StatusOK {
+		w.WriteHeader(status)
+		if status == http.StatusConflict {
+			normalized := a.normalizeSessionForResponse(session)
+			writeJSON(w, map[string]interface{}{
+				"error":            errMsg,
+				"session":          normalized,
+				"control_revision": getString(normalized, "control_revision"),
+			})
+			return
+		}
+		if errMsg == "" {
+			errMsg = "update failed"
+		}
+		writeJSON(w, map[string]string{"error": errMsg})
+		return
+	}
+	normalized := a.normalizeSessionForResponse(session)
+	writeJSON(w, map[string]interface{}{
+		"session":          normalized,
+		"control_revision": getString(normalized, "control_revision"),
+	})
+}
+
 func (a *App) handleUpdateFailureSettings(w http.ResponseWriter, r *http.Request) {
 	id := mux.Vars(r)["id"]
 	var payload map[string]interface{}
@@ -733,6 +981,24 @@ func (a *App) handleUpdateFailureSettings(w http.ResponseWriter, r *http.Request
 		writeJSON(w, map[string]string{"error": "invalid json"})
 		return
 	}
+	_, status, errMsg := a.applySessionSettingsUpdate(id, payload, "")
+	if status != http.StatusOK {
+		if errMsg == "" {
+			errMsg = "update failed"
+		}
+		w.WriteHeader(status)
+		writeJSON(w, map[string]string{"error": errMsg})
+		return
+	}
+	writeJSON(w, map[string]string{"message": "Settings updated successfully"})
+}
+
+func (a *App) applySessionSettingsUpdate(id string, payload map[string]interface{}, baseRevision string) (SessionData, int, string) {
+	if payload == nil {
+		payload = map[string]interface{}{}
+	}
+	log.Printf("SESSION GROUP UPDATE request session_id=%s keys=%d", id, len(payload))
+	controlRevision := newControlRevision()
 	transportKeys := []string{
 		"transport_failure_type",
 		"transport_consecutive_failures",
@@ -756,8 +1022,23 @@ func (a *App) handleUpdateFailureSettings(w http.ResponseWriter, r *http.Request
 	}
 
 	sessions := a.getSessionList()
+	var target SessionData
+	for _, session := range sessions {
+		if getString(session, "session_id") == id {
+			target = session
+			break
+		}
+	}
+	if target == nil {
+		return nil, http.StatusNotFound, "Session not found"
+	}
+	currentRevision := getString(target, "control_revision")
+	if baseRevision != "" && currentRevision != "" && baseRevision != currentRevision {
+		return target, http.StatusConflict, "revision_conflict"
+	}
+
 	var targetPort string
-	var targetGroupID string
+	targetGroupID := getString(target, "group_id")
 	var transportSnapshot map[string]interface{}
 	manualTransportDisarm := false
 	var transportLogSession SessionData
@@ -766,134 +1047,131 @@ func (a *App) handleUpdateFailureSettings(w http.ResponseWriter, r *http.Request
 	transportConsecutive := 1
 	transportConsecutiveUnits := transportUnitsSeconds
 	transportFrequency := 0
-	for _, session := range sessions {
-		if getString(session, "session_id") == id {
-			previousTransportType := normalizeTransportFaultType(getString(session, "transport_failure_type"))
-			if previousTransportType == "none" {
-				previousTransportType = normalizeTransportFaultType(getString(session, "transport_fault_type"))
-			}
-			targetGroupID = getString(session, "group_id")
-			for key, value := range payload {
-				session[key] = value
-			}
-			for _, prefix := range []string{"segment", "manifest", "master_manifest"} {
-				typeKey := prefix + "_failure_type"
-				failureType := normalizeRequestFailureType(getString(session, typeKey))
-				if failureType == "" {
-					failureType = "none"
-				}
-				session[typeKey] = failureType
-				resetKey := prefix + "_reset_failure_type"
-				if resetType := getString(session, resetKey); resetType != "" {
-					session[resetKey] = normalizeRequestFailureType(resetType)
-				}
-			}
-			targetPort = getString(session, "x_forwarded_port")
-			if transportUpdated {
-				typeRaw := getString(session, "transport_failure_type")
-				if typeRaw == "" {
-					typeRaw = getString(session, "transport_fault_type")
-				}
-				if value, ok := payload["transport_failure_type"]; ok {
-					typeRaw = fmt.Sprintf("%v", value)
-				} else if value, ok := payload["transport_fault_type"]; ok {
-					typeRaw = fmt.Sprintf("%v", value)
-				}
-				session["transport_failure_type"] = normalizeTransportFaultType(typeRaw)
-				if session["transport_failure_type"] == "" {
-					session["transport_failure_type"] = "none"
-				}
 
-				unitsRaw := getString(session, "transport_consecutive_units")
-				if unitsRaw == "" {
-					unitsRaw = getString(session, "transport_failure_units")
-				}
-				if unitsRaw == "" {
-					unitsRaw = getString(session, "transport_failure_mode")
-				}
-				if value, ok := payload["transport_consecutive_units"]; ok {
-					unitsRaw = fmt.Sprintf("%v", value)
-				} else if value, ok := payload["transport_failure_units"]; ok {
-					unitsRaw = fmt.Sprintf("%v", value)
-				} else if value, ok := payload["transport_failure_mode"]; ok {
-					unitsRaw = fmt.Sprintf("%v", value)
-				}
-				consecutiveUnits := normalizeTransportConsecutiveUnits(unitsRaw)
-				if strings.Contains(strings.ToLower(strings.TrimSpace(unitsRaw)), "packet") {
-					consecutiveUnits = transportUnitsPackets
-				}
+	previousTransportType := normalizeTransportFaultType(getString(target, "transport_failure_type"))
+	if previousTransportType == "none" {
+		previousTransportType = normalizeTransportFaultType(getString(target, "transport_fault_type"))
+	}
 
-				onValue := floatFromInterface(session["transport_consecutive_failures"])
-				if value, ok := payload["transport_consecutive_failures"]; ok {
-					onValue = floatFromInterface(value)
-				} else if value, ok := payload["transport_consecutive_seconds"]; ok {
-					onValue = floatFromInterface(value)
-				} else if value, ok := payload["transport_fault_on_seconds"]; ok {
-					onValue = floatFromInterface(value)
-				}
-				onValue = math.Max(0, onValue)
-				session["transport_consecutive_failures"] = int(math.Round(onValue))
+	for key, value := range payload {
+		target[key] = value
+	}
+	applyControlRevision(target, controlRevision)
+	for _, prefix := range []string{"segment", "manifest", "master_manifest"} {
+		typeKey := prefix + "_failure_type"
+		failureType := normalizeRequestFailureType(getString(target, typeKey))
+		if failureType == "" {
+			failureType = "none"
+		}
+		target[typeKey] = failureType
+		resetKey := prefix + "_reset_failure_type"
+		if resetType := getString(target, resetKey); resetType != "" {
+			target[resetKey] = normalizeRequestFailureType(resetType)
+		}
+	}
+	targetPort = getString(target, "x_forwarded_port")
+	if transportUpdated {
+		typeRaw := getString(target, "transport_failure_type")
+		if typeRaw == "" {
+			typeRaw = getString(target, "transport_fault_type")
+		}
+		if value, ok := payload["transport_failure_type"]; ok {
+			typeRaw = fmt.Sprintf("%v", value)
+		} else if value, ok := payload["transport_fault_type"]; ok {
+			typeRaw = fmt.Sprintf("%v", value)
+		}
+		target["transport_failure_type"] = normalizeTransportFaultType(typeRaw)
+		if target["transport_failure_type"] == "" {
+			target["transport_failure_type"] = "none"
+		}
 
-				offSeconds := floatFromInterface(session["transport_failure_frequency"])
-				if value, ok := payload["transport_failure_frequency"]; ok {
-					offSeconds = floatFromInterface(value)
-				} else if value, ok := payload["transport_frequency_seconds"]; ok {
-					offSeconds = floatFromInterface(value)
-				} else if value, ok := payload["transport_fault_off_seconds"]; ok {
-					offSeconds = floatFromInterface(value)
-				}
-				offSeconds = math.Max(0, offSeconds)
-				session["transport_failure_frequency"] = int(math.Round(offSeconds))
+		unitsRaw := getString(target, "transport_consecutive_units")
+		if unitsRaw == "" {
+			unitsRaw = getString(target, "transport_failure_units")
+		}
+		if unitsRaw == "" {
+			unitsRaw = getString(target, "transport_failure_mode")
+		}
+		if value, ok := payload["transport_consecutive_units"]; ok {
+			unitsRaw = fmt.Sprintf("%v", value)
+		} else if value, ok := payload["transport_failure_units"]; ok {
+			unitsRaw = fmt.Sprintf("%v", value)
+		} else if value, ok := payload["transport_failure_mode"]; ok {
+			unitsRaw = fmt.Sprintf("%v", value)
+		}
+		consecutiveUnits := normalizeTransportConsecutiveUnits(unitsRaw)
+		if strings.Contains(strings.ToLower(strings.TrimSpace(unitsRaw)), "packet") {
+			consecutiveUnits = transportUnitsPackets
+		}
 
-				session["transport_failure_units"] = consecutiveUnits
-				session["transport_consecutive_units"] = consecutiveUnits
-				session["transport_frequency_units"] = transportUnitsSeconds
-				session["transport_failure_mode"] = transportModeFromConsecutiveUnits(consecutiveUnits)
-				session["transport_fault_type"] = session["transport_failure_type"]
-				session["transport_fault_on_seconds"] = float64(getInt(session, "transport_consecutive_failures"))
-				session["transport_fault_off_seconds"] = float64(getInt(session, "transport_failure_frequency"))
-				session["transport_consecutive_seconds"] = session["transport_fault_on_seconds"]
-				session["transport_frequency_seconds"] = session["transport_fault_off_seconds"]
-				session["transport_failure_at"] = nil
-				session["transport_failure_recover_at"] = nil
-				session["transport_reset_failure_type"] = nil
-				session["transport_fault_started_at"] = nil
-				session["transport_fault_active"] = false
-				session["transport_fault_phase_seconds"] = 0.0
-				session["transport_fault_cycle_seconds"] = 0.0
-				transportShouldApply = true
-				transportFaultType = normalizeTransportFaultType(getString(session, "transport_failure_type"))
-				transportConsecutive = getInt(session, "transport_consecutive_failures")
-				transportConsecutiveUnits = normalizeTransportConsecutiveUnits(getString(session, "transport_consecutive_units"))
-				transportFrequency = getInt(session, "transport_failure_frequency")
-				currentTransportType := normalizeTransportFaultType(getString(session, "transport_failure_type"))
-				if previousTransportType != "none" && currentTransportType == "none" {
-					manualTransportDisarm = true
-					transportLogSession = session
-				}
-				transportSnapshot = map[string]interface{}{
-					"transport_failure_type":         session["transport_failure_type"],
-					"transport_consecutive_failures": session["transport_consecutive_failures"],
-					"transport_failure_frequency":    session["transport_failure_frequency"],
-					"transport_failure_units":        session["transport_failure_units"],
-					"transport_consecutive_units":    session["transport_consecutive_units"],
-					"transport_frequency_units":      session["transport_frequency_units"],
-					"transport_failure_mode":         session["transport_failure_mode"],
-					"transport_failure_at":           nil,
-					"transport_failure_recover_at":   nil,
-					"transport_reset_failure_type":   nil,
-					"transport_fault_type":           session["transport_fault_type"],
-					"transport_fault_on_seconds":     session["transport_fault_on_seconds"],
-					"transport_fault_off_seconds":    session["transport_fault_off_seconds"],
-					"transport_consecutive_seconds":  session["transport_consecutive_seconds"],
-					"transport_frequency_seconds":    session["transport_frequency_seconds"],
-					"transport_fault_started_at":     session["transport_fault_started_at"],
-					"transport_fault_active":         false,
-					"transport_fault_phase_seconds":  0.0,
-					"transport_fault_cycle_seconds":  0.0,
-				}
-			}
-			break
+		onValue := floatFromInterface(target["transport_consecutive_failures"])
+		if value, ok := payload["transport_consecutive_failures"]; ok {
+			onValue = floatFromInterface(value)
+		} else if value, ok := payload["transport_consecutive_seconds"]; ok {
+			onValue = floatFromInterface(value)
+		} else if value, ok := payload["transport_fault_on_seconds"]; ok {
+			onValue = floatFromInterface(value)
+		}
+		onValue = math.Max(0, onValue)
+		target["transport_consecutive_failures"] = int(math.Round(onValue))
+
+		offSeconds := floatFromInterface(target["transport_failure_frequency"])
+		if value, ok := payload["transport_failure_frequency"]; ok {
+			offSeconds = floatFromInterface(value)
+		} else if value, ok := payload["transport_frequency_seconds"]; ok {
+			offSeconds = floatFromInterface(value)
+		} else if value, ok := payload["transport_fault_off_seconds"]; ok {
+			offSeconds = floatFromInterface(value)
+		}
+		offSeconds = math.Max(0, offSeconds)
+		target["transport_failure_frequency"] = int(math.Round(offSeconds))
+
+		target["transport_failure_units"] = consecutiveUnits
+		target["transport_consecutive_units"] = consecutiveUnits
+		target["transport_frequency_units"] = transportUnitsSeconds
+		target["transport_failure_mode"] = transportModeFromConsecutiveUnits(consecutiveUnits)
+		target["transport_fault_type"] = target["transport_failure_type"]
+		target["transport_fault_on_seconds"] = float64(getInt(target, "transport_consecutive_failures"))
+		target["transport_fault_off_seconds"] = float64(getInt(target, "transport_failure_frequency"))
+		target["transport_consecutive_seconds"] = target["transport_fault_on_seconds"]
+		target["transport_frequency_seconds"] = target["transport_fault_off_seconds"]
+		target["transport_failure_at"] = nil
+		target["transport_failure_recover_at"] = nil
+		target["transport_reset_failure_type"] = nil
+		target["transport_fault_started_at"] = nil
+		target["transport_fault_active"] = false
+		target["transport_fault_phase_seconds"] = 0.0
+		target["transport_fault_cycle_seconds"] = 0.0
+		transportShouldApply = true
+		transportFaultType = normalizeTransportFaultType(getString(target, "transport_failure_type"))
+		transportConsecutive = getInt(target, "transport_consecutive_failures")
+		transportConsecutiveUnits = normalizeTransportConsecutiveUnits(getString(target, "transport_consecutive_units"))
+		transportFrequency = getInt(target, "transport_failure_frequency")
+		currentTransportType := normalizeTransportFaultType(getString(target, "transport_failure_type"))
+		if previousTransportType != "none" && currentTransportType == "none" {
+			manualTransportDisarm = true
+			transportLogSession = target
+		}
+		transportSnapshot = map[string]interface{}{
+			"transport_failure_type":         target["transport_failure_type"],
+			"transport_consecutive_failures": target["transport_consecutive_failures"],
+			"transport_failure_frequency":    target["transport_failure_frequency"],
+			"transport_failure_units":        target["transport_failure_units"],
+			"transport_consecutive_units":    target["transport_consecutive_units"],
+			"transport_frequency_units":      target["transport_frequency_units"],
+			"transport_failure_mode":         target["transport_failure_mode"],
+			"transport_failure_at":           nil,
+			"transport_failure_recover_at":   nil,
+			"transport_reset_failure_type":   nil,
+			"transport_fault_type":           target["transport_fault_type"],
+			"transport_fault_on_seconds":     target["transport_fault_on_seconds"],
+			"transport_fault_off_seconds":    target["transport_fault_off_seconds"],
+			"transport_consecutive_seconds":  target["transport_consecutive_seconds"],
+			"transport_frequency_seconds":    target["transport_frequency_seconds"],
+			"transport_fault_started_at":     target["transport_fault_started_at"],
+			"transport_fault_active":         false,
+			"transport_fault_phase_seconds":  0.0,
+			"transport_fault_cycle_seconds":  0.0,
 		}
 	}
 	if transportUpdated && targetPort != "" && transportSnapshot != nil {
@@ -910,20 +1188,19 @@ func (a *App) handleUpdateFailureSettings(w http.ResponseWriter, r *http.Request
 		logFaultEvent(transportLogSession, targetPort, "transport_none", "control", "transport_disarm_manual")
 	}
 
-	// Propagate settings to group members if this session is part of a group
 	if targetGroupID != "" {
+		log.Printf("SESSION GROUP UPDATE propagate session_id=%s group_id=%s", id, targetGroupID)
 		for _, session := range sessions {
 			sessionGroupID := getString(session, "group_id")
 			sessionID := getString(session, "session_id")
-			// Skip the original session (already updated) and non-group members
 			if sessionID == id || sessionGroupID != targetGroupID {
 				continue
 			}
-			// Apply all payload updates to group members
+			log.Printf("SESSION GROUP UPDATE member session_id=%s group_id=%s", sessionID, sessionGroupID)
 			for key, value := range payload {
 				session[key] = value
 			}
-			// Apply normalized failure types
+			applyControlRevision(session, controlRevision)
 			for _, prefix := range []string{"segment", "manifest", "master_manifest"} {
 				typeKey := prefix + "_failure_type"
 				failureType := normalizeRequestFailureType(getString(session, typeKey))
@@ -936,12 +1213,10 @@ func (a *App) handleUpdateFailureSettings(w http.ResponseWriter, r *http.Request
 					session[resetKey] = normalizeRequestFailureType(resetType)
 				}
 			}
-			// Apply transport updates if needed
 			if transportUpdated && transportSnapshot != nil {
 				for key, value := range transportSnapshot {
 					session[key] = value
 				}
-				// Apply transport fault to the group member's port
 				groupMemberPort := getString(session, "x_forwarded_port")
 				if groupMemberPort != "" && transportShouldApply {
 					if portNum, err := strconv.Atoi(groupMemberPort); err == nil {
@@ -951,6 +1226,9 @@ func (a *App) handleUpdateFailureSettings(w http.ResponseWriter, r *http.Request
 			}
 		}
 	}
+	if targetGroupID == "" {
+		log.Printf("SESSION GROUP UPDATE no group for session_id=%s", id)
+	}
 
 	a.saveSessionList(sessions)
 	if transportShouldApply {
@@ -958,7 +1236,11 @@ func (a *App) handleUpdateFailureSettings(w http.ResponseWriter, r *http.Request
 			a.armTransportFaultLoop(portNum, transportFaultType, transportConsecutive, transportConsecutiveUnits, transportFrequency)
 		}
 	}
-	writeJSON(w, map[string]string{"message": "Settings updated successfully"})
+	return target, http.StatusOK, ""
+}
+
+func (a *App) handleUpdateSessionSettings(w http.ResponseWriter, r *http.Request) {
+	a.handleUpdateFailureSettings(w, r)
 }
 
 func (a *App) handleSession(w http.ResponseWriter, r *http.Request) {
@@ -1053,6 +1335,8 @@ func (a *App) handleLinkSessions(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]string{"error": "at least 2 sessions required"})
 		return
 	}
+	log.Printf("SESSION GROUP LINK request sessions=%v group_id=%s", payload.SessionIds, payload.GroupId)
+	controlRevision := newControlRevision()
 
 	// Generate a group ID if not provided
 	groupID := payload.GroupId
@@ -1067,6 +1351,7 @@ func (a *App) handleLinkSessions(w http.ResponseWriter, r *http.Request) {
 		for _, targetID := range payload.SessionIds {
 			if sessionID == targetID {
 				session["group_id"] = groupID
+				applyControlRevision(session, controlRevision)
 				linkedCount++
 				break
 			}
@@ -1076,6 +1361,7 @@ func (a *App) handleLinkSessions(w http.ResponseWriter, r *http.Request) {
 	if linkedCount > 0 {
 		a.saveSessionList(sessions)
 	}
+	log.Printf("SESSION GROUP LINK result group_id=%s linked=%d", groupID, linkedCount)
 
 	writeJSON(w, map[string]interface{}{
 		"message":      "Sessions linked successfully",
@@ -1086,7 +1372,9 @@ func (a *App) handleLinkSessions(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) handleUnlinkSession(w http.ResponseWriter, r *http.Request) {
 	var payload struct {
-		SessionId string `json:"session_id"`
+		SessionId   string `json:"session_id"`
+		GroupId     string `json:"group_id"`
+		UnlinkGroup bool   `json:"unlink_group"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 		w.WriteHeader(http.StatusBadRequest)
@@ -1096,17 +1384,44 @@ func (a *App) handleUnlinkSession(w http.ResponseWriter, r *http.Request) {
 
 	sessions := a.getSessionList()
 	found := false
-	for _, session := range sessions {
-		if getString(session, "session_id") == payload.SessionId {
-			session["group_id"] = ""
-			found = true
-			break
+	updated := 0
+	groupID := payload.GroupId
+	if groupID == "" && payload.SessionId != "" {
+		for _, session := range sessions {
+			if getString(session, "session_id") == payload.SessionId {
+				groupID = getString(session, "group_id")
+				break
+			}
+		}
+	}
+	if payload.UnlinkGroup && groupID != "" {
+		for _, session := range sessions {
+			if getString(session, "group_id") == groupID {
+				session["group_id"] = ""
+				applyControlRevision(session, newControlRevision())
+				updated++
+				found = true
+			}
+		}
+	} else if payload.SessionId != "" {
+		for _, session := range sessions {
+			if getString(session, "session_id") == payload.SessionId {
+				session["group_id"] = ""
+				applyControlRevision(session, newControlRevision())
+				updated++
+				found = true
+				break
+			}
 		}
 	}
 
 	if found {
 		a.saveSessionList(sessions)
-		writeJSON(w, map[string]string{"message": "Session unlinked successfully"})
+		writeJSON(w, map[string]interface{}{
+			"message":        "Session group updated successfully",
+			"group_id":       groupID,
+			"unlinked_count": updated,
+		})
 	} else {
 		w.WriteHeader(http.StatusNotFound)
 		writeJSON(w, map[string]string{"error": "Session not found"})
@@ -1222,7 +1537,9 @@ func (a *App) handleNftPort(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]string{"error": "Manager not initialized"})
 		return
 	}
-	port, err := strconv.Atoi(mux.Vars(r)["port"])
+	portStr := mux.Vars(r)["port"]
+	mappedPort, _ := a.portMap.MapExternalPort(portStr)
+	port, err := strconv.Atoi(mappedPort)
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
 		writeJSON(w, map[string]string{"error": "invalid port"})
@@ -1321,10 +1638,10 @@ func (a *App) applyShapePattern(port int, steps []NftShapeStep, delayMs int, los
 	cleanSteps := sanitizeShapeSteps(steps)
 	if len(cleanSteps) == 0 {
 		a.stopShapeLoop(port)
-		a.updateSessionsByPort(port, map[string]interface{}{
+		a.updateSessionsByPortWithControl(port, map[string]interface{}{
 			"nftables_pattern_enabled": false,
 			"nftables_pattern_steps":   []NftShapeStep{},
-		})
+		}, "")
 		return nil
 	}
 	if err := a.traffic.UpdateNetem(port, delayMs, loss); err != nil {
@@ -1345,12 +1662,12 @@ func (a *App) applyShapePattern(port int, steps []NftShapeStep, delayMs int, los
 	if oldCancel != nil {
 		oldCancel()
 	}
-	a.updateSessionsByPort(port, map[string]interface{}{
+	a.updateSessionsByPortWithControl(port, map[string]interface{}{
 		"nftables_pattern_enabled": true,
 		"nftables_pattern_steps":   cleanSteps,
 		"nftables_delay_ms":        delayMs,
 		"nftables_packet_loss":     loss,
-	})
+	}, "")
 	go a.runShapePatternLoop(ctx, port, cleanSteps, delayMs, loss)
 	return nil
 }
@@ -1453,11 +1770,11 @@ func (a *App) runShapePatternLoop(ctx context.Context, port int, steps []NftShap
 
 func (a *App) disablePatternForPort(port int) {
 	a.stopShapeLoop(port)
-	a.updateSessionsByPort(port, map[string]interface{}{
+	a.updateSessionsByPortWithControl(port, map[string]interface{}{
 		"nftables_pattern_enabled": false,
 		"nftables_pattern_steps":   []NftShapeStep{},
 		"nftables_pattern_step":    nil,
-	})
+	}, "")
 }
 
 func transportRuleComment(port int) string {
@@ -1651,15 +1968,45 @@ func (a *App) getFirstSessionByPort(port int) SessionData {
 }
 
 func (a *App) setTransportFaultSessionState(port int, faultType string, active bool, startedAt string, phaseSeconds float64, cycleSeconds float64) {
-	updates := map[string]interface{}{
-		"transport_failure_type":        faultType,
-		"transport_fault_type":          faultType,
-		"transport_fault_active":        active,
-		"transport_fault_started_at":    startedAt,
-		"transport_fault_phase_seconds": math.Round(phaseSeconds*1000) / 1000,
-		"transport_fault_cycle_seconds": math.Round(cycleSeconds*1000) / 1000,
+	sessions := a.getSessionList()
+	changed := false
+	controlRevision := ""
+	phaseRounded := math.Round(phaseSeconds*1000) / 1000
+	cycleRounded := math.Round(cycleSeconds*1000) / 1000
+	for _, session := range sessions {
+		portStr := getString(session, "x_forwarded_port")
+		if portStr == "" {
+			continue
+		}
+		if portNum, err := strconv.Atoi(portStr); err == nil && portNum == port {
+			prevType := getString(session, "transport_fault_type")
+			if prevType == "" {
+				prevType = getString(session, "transport_failure_type")
+			}
+			prevActive := getBool(session, "transport_fault_active")
+			prevStarted := getString(session, "transport_fault_started_at")
+			session["transport_failure_type"] = faultType
+			session["transport_fault_type"] = faultType
+			session["transport_fault_active"] = active
+			session["transport_fault_started_at"] = startedAt
+			session["transport_fault_phase_seconds"] = phaseRounded
+			session["transport_fault_cycle_seconds"] = cycleRounded
+			controlChanged := prevType != faultType || prevActive != active
+			if !controlChanged && startedAt != "" && prevStarted != startedAt {
+				controlChanged = true
+			}
+			if controlChanged {
+				if controlRevision == "" {
+					controlRevision = newControlRevision()
+				}
+				applyControlRevision(session, controlRevision)
+			}
+			changed = true
+		}
 	}
-	a.updateSessionsByPort(port, updates)
+	if changed {
+		a.saveSessionList(sessions)
+	}
 }
 
 func (a *App) resetTransportFaultCounters(port int) {
@@ -1832,7 +2179,9 @@ func (a *App) handleNftPattern(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]string{"error": "Manager not initialized"})
 		return
 	}
-	port, err := strconv.Atoi(mux.Vars(r)["port"])
+	portStr := mux.Vars(r)["port"]
+	mappedPort, _ := a.portMap.MapExternalPort(portStr)
+	port, err := strconv.Atoi(mappedPort)
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
 		writeJSON(w, map[string]string{"error": "invalid port"})
@@ -1868,13 +2217,13 @@ func (a *App) handleNftPattern(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(payload.Steps) == 0 {
 		a.disablePatternForPort(port)
-		a.updateSessionsByPort(port, map[string]interface{}{
+		a.updateSessionsByPortWithControl(port, map[string]interface{}{
 			"nftables_pattern_segment_duration_seconds": payload.SegmentDurationSeconds,
 			"nftables_pattern_default_segments":         payload.DefaultSegments,
 			"nftables_pattern_default_step_seconds":     payload.DefaultStepSeconds,
 			"nftables_pattern_template_mode":            payload.TemplateMode,
 			"nftables_pattern_margin_pct":               payload.TemplateMarginPct,
-		})
+		}, "")
 		writeJSON(w, map[string]interface{}{
 			"success":         true,
 			"port":            port,
@@ -1890,13 +2239,13 @@ func (a *App) handleNftPattern(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]string{"error": "Failed to apply pattern", "details": err.Error()})
 		return
 	}
-	a.updateSessionsByPort(port, map[string]interface{}{
+	a.updateSessionsByPortWithControl(port, map[string]interface{}{
 		"nftables_pattern_segment_duration_seconds": payload.SegmentDurationSeconds,
 		"nftables_pattern_default_segments":         payload.DefaultSegments,
 		"nftables_pattern_default_step_seconds":     payload.DefaultStepSeconds,
 		"nftables_pattern_template_mode":            payload.TemplateMode,
 		"nftables_pattern_margin_pct":               payload.TemplateMarginPct,
-	})
+	}, "")
 
 	// Propagate to group members
 	groupID := a.getGroupIdByPort(port)
@@ -1910,13 +2259,13 @@ func (a *App) handleNftPattern(w http.ResponseWriter, r *http.Request) {
 				log.Printf("NETSHAPE group pattern propagation failed port=%d: %v", groupPort, err)
 				continue
 			}
-			a.updateSessionsByPort(groupPort, map[string]interface{}{
+			a.updateSessionsByPortWithControl(groupPort, map[string]interface{}{
 				"nftables_pattern_segment_duration_seconds": payload.SegmentDurationSeconds,
 				"nftables_pattern_default_segments":         payload.DefaultSegments,
 				"nftables_pattern_default_step_seconds":     payload.DefaultStepSeconds,
 				"nftables_pattern_template_mode":            payload.TemplateMode,
 				"nftables_pattern_margin_pct":               payload.TemplateMarginPct,
-			})
+			}, "")
 			log.Printf("NETSHAPE group pattern propagation applied port=%d group=%s", groupPort, groupID)
 		}
 	}
@@ -1937,7 +2286,9 @@ func (a *App) handleNftBandwidth(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]string{"error": "Manager not initialized"})
 		return
 	}
-	port, err := strconv.Atoi(mux.Vars(r)["port"])
+	portStr := mux.Vars(r)["port"]
+	mappedPort, _ := a.portMap.MapExternalPort(portStr)
+	port, err := strconv.Atoi(mappedPort)
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
 		writeJSON(w, map[string]string{"error": "invalid port"})
@@ -1975,9 +2326,9 @@ func (a *App) handleNftBandwidth(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]string{"error": "Failed to update rate limit", "details": err.Error()})
 		return
 	}
-	a.updateSessionsByPort(port, map[string]interface{}{
+	a.updateSessionsByPortWithControl(port, map[string]interface{}{
 		"nftables_bandwidth_mbps": rateMbps,
-	})
+	}, "")
 	writeJSON(w, map[string]interface{}{"success": true, "port": port, "rate": fmt.Sprintf("%g Mbps", rateMbps)})
 }
 
@@ -1987,7 +2338,9 @@ func (a *App) handleNftLoss(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]string{"error": "Manager not initialized"})
 		return
 	}
-	port, err := strconv.Atoi(mux.Vars(r)["port"])
+	portStr := mux.Vars(r)["port"]
+	mappedPort, _ := a.portMap.MapExternalPort(portStr)
+	port, err := strconv.Atoi(mappedPort)
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
 		writeJSON(w, map[string]string{"error": "invalid port"})
@@ -2018,9 +2371,9 @@ func (a *App) handleNftLoss(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]string{"error": "Failed to update packet loss", "details": err.Error()})
 		return
 	}
-	a.updateSessionsByPort(port, map[string]interface{}{
+	a.updateSessionsByPortWithControl(port, map[string]interface{}{
 		"nftables_packet_loss": loss,
-	})
+	}, "")
 	writeJSON(w, map[string]interface{}{"success": true, "port": port, "loss_pct": loss})
 }
 
@@ -2030,7 +2383,9 @@ func (a *App) handleNftShape(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]string{"error": "Manager not initialized"})
 		return
 	}
-	port, err := strconv.Atoi(mux.Vars(r)["port"])
+	portStr := mux.Vars(r)["port"]
+	mappedPort, _ := a.portMap.MapExternalPort(portStr)
+	port, err := strconv.Atoi(mappedPort)
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
 		writeJSON(w, map[string]string{"error": "invalid port"})
@@ -2091,11 +2446,11 @@ func (a *App) handleNftShape(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]string{"error": "Failed to update delay/loss", "details": err.Error()})
 		return
 	}
-	a.updateSessionsByPort(port, map[string]interface{}{
+	a.updateSessionsByPortWithControl(port, map[string]interface{}{
 		"nftables_bandwidth_mbps": rateMbps,
 		"nftables_delay_ms":       delayMs,
 		"nftables_packet_loss":    loss,
-	})
+	}, "")
 
 	// Propagate to group members
 	groupID := a.getGroupIdByPort(port)
@@ -2114,11 +2469,11 @@ func (a *App) handleNftShape(w http.ResponseWriter, r *http.Request) {
 				log.Printf("NETSHAPE group propagation netem failed port=%d delay=%d loss=%.2f: %v", groupPort, delayMs, loss, err)
 				continue
 			}
-			a.updateSessionsByPort(groupPort, map[string]interface{}{
+			a.updateSessionsByPortWithControl(groupPort, map[string]interface{}{
 				"nftables_bandwidth_mbps": rateMbps,
 				"nftables_delay_ms":       delayMs,
 				"nftables_packet_loss":    loss,
-			})
+			}, "")
 			log.Printf("NETSHAPE group propagation applied port=%d rate=%g delay=%d loss=%.2f group=%s", groupPort, rateMbps, delayMs, loss, groupID)
 		}
 	}
@@ -2456,6 +2811,10 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 	if externalPort == "" {
 		externalPort = hostPortOrDefault(r.Host, "30181")
 	}
+	internalPort := externalPort
+	if mapped, ok := a.portMap.MapExternalPort(externalPort); ok {
+		internalPort = mapped
+	}
 	log.Printf("Original URL: %s", r.URL.String())
 	log.Printf("Original Host: %s", r.Host)
 	log.Printf("X-Forwarded-Port: %s", r.Header.Get("X-Forwarded-Port"))
@@ -2498,6 +2857,7 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 			"session_id":                               fmt.Sprintf("%d", allocated),
 			"player_id":                                playerID,
 			"group_id":                                 groupID,
+			"control_revision":                         newControlRevision(),
 			"headers_player_id":                        playerHeader,
 			"headers_player-ID":                        playerHeaderAlt,
 			"headers_x_playback_session_id":            playbackSessionHeader,
@@ -2566,6 +2926,8 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 			"fault_count_request_body_hang":            0,
 			"fault_count_request_body_reset":           0,
 			"fault_count_request_body_delayed":         0,
+			"x_forwarded_port":                         internalPort,
+			"x_forwarded_port_external":                externalPort,
 		}
 		sessionList = append(sessionList, sessionData)
 		a.saveSessionList(sessionList)
@@ -2602,13 +2964,14 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 	sessionData["last_request_url"] = filename
 	sessionData["user_agent"] = r.UserAgent()
 	sessionData["player_ip"] = remoteIP(r.RemoteAddr)
-	sessionData["x_forwarded_port"] = externalPort
+	sessionData["x_forwarded_port"] = internalPort
+	sessionData["x_forwarded_port_external"] = externalPort
 	requestBytes := int64(0)
 	if r.ContentLength > 0 {
 		requestBytes = r.ContentLength
 	}
 
-	portNum, _ := strconv.Atoi(externalPort)
+	portNum, _ := strconv.Atoi(internalPort)
 	if portNum > 0 {
 		a.applySessionShaping(sessionData, portNum)
 	}
@@ -3015,15 +3378,96 @@ func (a *App) getSessionData(identifier string) SessionData {
 	return nil
 }
 
+func newControlRevision() string {
+	return time.Now().UTC().Format(time.RFC3339Nano)
+}
+
+func applyControlRevision(session SessionData, revision string) {
+	rev := revision
+	if rev == "" {
+		rev = newControlRevision()
+	}
+	session["control_revision"] = rev
+}
+
+func cloneSession(session SessionData) SessionData {
+	if session == nil {
+		return nil
+	}
+	clone := make(SessionData, len(session))
+	for key, value := range session {
+		clone[key] = value
+	}
+	return clone
+}
+
+func (a *App) normalizeSessionForResponse(session SessionData) SessionData {
+	if session == nil {
+		return nil
+	}
+	clone := cloneSession(session)
+	normalized := a.normalizeSessionsForResponse([]SessionData{clone})
+	if len(normalized) == 0 {
+		return clone
+	}
+	return normalized[0]
+}
+
+func (a *App) updateSessionsByPortWithControl(port int, updates map[string]interface{}, controlRevision string) {
+	sessions := a.getSessionList()
+	changed := false
+	rev := controlRevision
+	if rev == "" {
+		rev = newControlRevision()
+	}
+	for _, session := range sessions {
+		if a.sessionMatchesPort(session, port) {
+			for key, value := range updates {
+				session[key] = value
+			}
+			applyControlRevision(session, rev)
+			changed = true
+		}
+	}
+	if changed {
+		a.saveSessionList(sessions)
+	}
+}
+
+func (a *App) sessionPortToInternal(portStr string) (int, bool) {
+	if portStr == "" {
+		return 0, false
+	}
+	if mapped, ok := a.portMap.MapExternalPort(portStr); ok {
+		if port, err := strconv.Atoi(mapped); err == nil {
+			return port, true
+		}
+	}
+	if port, err := strconv.Atoi(portStr); err == nil {
+		return port, true
+	}
+	return 0, false
+}
+
+func (a *App) sessionMatchesPort(session SessionData, port int) bool {
+	if portStr := getString(session, "x_forwarded_port"); portStr != "" {
+		if portNum, ok := a.sessionPortToInternal(portStr); ok && portNum == port {
+			return true
+		}
+	}
+	if portStr := getString(session, "x_forwarded_port_external"); portStr != "" {
+		if portNum, ok := a.sessionPortToInternal(portStr); ok && portNum == port {
+			return true
+		}
+	}
+	return false
+}
+
 func (a *App) updateSessionsByPort(port int, updates map[string]interface{}) {
 	sessions := a.getSessionList()
 	changed := false
 	for _, session := range sessions {
-		portStr := getString(session, "x_forwarded_port")
-		if portStr == "" {
-			continue
-		}
-		if portNum, err := strconv.Atoi(portStr); err == nil && portNum == port {
+		if a.sessionMatchesPort(session, port) {
 			for key, value := range updates {
 				session[key] = value
 			}
@@ -3051,6 +3495,181 @@ func (a *App) saveSessionList(sessions []SessionData) {
 	if data, err := json.Marshal(sessions); err == nil {
 		_ = a.memcache.Set(&memcache.Item{Key: "session_list", Value: data})
 	}
+	a.queueSessionsBroadcast(sessions)
+}
+
+func (a *App) normalizeSessionsForResponse(sessions []SessionData) []SessionData {
+	transportCountersByPort := getTransportFaultRuleCounters()
+	for _, session := range sessions {
+		for _, prefix := range []string{"segment", "manifest", "master_manifest"} {
+			typeKey := prefix + "_failure_type"
+			failureType := normalizeRequestFailureType(getString(session, typeKey))
+			if failureType == "" {
+				failureType = "none"
+			}
+			session[typeKey] = failureType
+			resetKey := prefix + "_reset_failure_type"
+			if resetType := getString(session, resetKey); resetType != "" {
+				session[resetKey] = normalizeRequestFailureType(resetType)
+			}
+		}
+		if getString(session, "transport_failure_type") == "" {
+			session["transport_failure_type"] = normalizeTransportFaultType(getString(session, "transport_fault_type"))
+		}
+		if getString(session, "transport_failure_type") == "" {
+			session["transport_failure_type"] = "none"
+		}
+		units := normalizeTransportConsecutiveUnits(getString(session, "transport_consecutive_units"))
+		if units == transportUnitsSeconds {
+			units = normalizeTransportConsecutiveUnits(getString(session, "transport_failure_units"))
+		}
+		if units == transportUnitsSeconds {
+			units = transportConsecutiveUnitsFromMode(getString(session, "transport_failure_mode"))
+		}
+		session["transport_failure_units"] = units
+		session["transport_consecutive_units"] = units
+		session["transport_frequency_units"] = transportUnitsSeconds
+		session["transport_failure_mode"] = transportModeFromConsecutiveUnits(units)
+		if _, ok := session["transport_consecutive_failures"]; !ok {
+			legacyOn := floatFromInterface(session["transport_consecutive_seconds"])
+			if legacyOn <= 0 {
+				legacyOn = floatFromInterface(session["transport_fault_on_seconds"])
+			}
+			if legacyOn <= 0 {
+				legacyOn = 1
+			}
+			session["transport_consecutive_failures"] = int(math.Round(legacyOn))
+		}
+		if _, ok := session["transport_failure_frequency"]; !ok {
+			legacyOff := floatFromInterface(session["transport_frequency_seconds"])
+			if legacyOff < 0 {
+				legacyOff = floatFromInterface(session["transport_fault_off_seconds"])
+			}
+			if legacyOff < 0 {
+				legacyOff = 0
+			}
+			session["transport_failure_frequency"] = int(math.Round(legacyOff))
+		}
+		session["transport_fault_type"] = normalizeTransportFaultType(getString(session, "transport_failure_type"))
+		session["transport_fault_on_seconds"] = float64(getInt(session, "transport_consecutive_failures"))
+		session["transport_fault_off_seconds"] = float64(getInt(session, "transport_failure_frequency"))
+		session["transport_consecutive_seconds"] = session["transport_fault_on_seconds"]
+		session["transport_frequency_seconds"] = session["transport_fault_off_seconds"]
+		if _, ok := session["transport_fault_active"]; !ok {
+			session["transport_fault_active"] = false
+		}
+		if _, ok := session["fault_count_total"]; !ok {
+			session["fault_count_total"] = 0
+		}
+		if _, ok := session["fault_count_socket_reject"]; !ok {
+			session["fault_count_socket_reject"] = 0
+		}
+		if _, ok := session["fault_count_socket_drop"]; !ok {
+			session["fault_count_socket_drop"] = 0
+		}
+		if _, ok := session["fault_count_socket_drop_before_headers"]; !ok {
+			session["fault_count_socket_drop_before_headers"] = 0
+		}
+		if _, ok := session["fault_count_socket_reject_before_headers"]; !ok {
+			session["fault_count_socket_reject_before_headers"] = 0
+		}
+		if _, ok := session["fault_count_socket_drop_after_headers"]; !ok {
+			session["fault_count_socket_drop_after_headers"] = 0
+		}
+		if _, ok := session["fault_count_socket_reject_after_headers"]; !ok {
+			session["fault_count_socket_reject_after_headers"] = 0
+		}
+		if _, ok := session["fault_count_socket_drop_mid_body"]; !ok {
+			session["fault_count_socket_drop_mid_body"] = 0
+		}
+		if _, ok := session["fault_count_socket_reject_mid_body"]; !ok {
+			session["fault_count_socket_reject_mid_body"] = 0
+		}
+		if _, ok := session["fault_count_request_connect_hang"]; !ok {
+			session["fault_count_request_connect_hang"] = getInt(session, "fault_count_socket_drop_before_headers")
+		}
+		if _, ok := session["fault_count_request_connect_reset"]; !ok {
+			session["fault_count_request_connect_reset"] = getInt(session, "fault_count_socket_reject_before_headers")
+		}
+		if _, ok := session["fault_count_request_connect_delayed"]; !ok {
+			session["fault_count_request_connect_delayed"] = 0
+		}
+		if _, ok := session["fault_count_request_first_byte_hang"]; !ok {
+			session["fault_count_request_first_byte_hang"] = getInt(session, "fault_count_socket_drop_after_headers")
+		}
+		if _, ok := session["fault_count_request_first_byte_reset"]; !ok {
+			session["fault_count_request_first_byte_reset"] = getInt(session, "fault_count_socket_reject_after_headers")
+		}
+		if _, ok := session["fault_count_request_first_byte_delayed"]; !ok {
+			session["fault_count_request_first_byte_delayed"] = 0
+		}
+		if _, ok := session["fault_count_request_body_hang"]; !ok {
+			session["fault_count_request_body_hang"] = getInt(session, "fault_count_socket_drop_mid_body")
+		}
+		if _, ok := session["fault_count_request_body_reset"]; !ok {
+			session["fault_count_request_body_reset"] = getInt(session, "fault_count_socket_reject_mid_body")
+		}
+		if _, ok := session["fault_count_request_body_delayed"]; !ok {
+			session["fault_count_request_body_delayed"] = 0
+		}
+		if transportCountersByPort != nil {
+			portStr := getString(session, "x_forwarded_port")
+			if portStr != "" {
+				if portNum, err := strconv.Atoi(portStr); err == nil {
+					if counters, ok := transportCountersByPort[portNum]; ok {
+						session["transport_fault_drop_packets"] = counters.DropPackets
+						session["transport_fault_reject_packets"] = counters.RejectPackets
+					}
+				}
+			}
+		}
+	}
+	return sessions
+}
+
+func (a *App) buildSessionsEvent(sessions []SessionData) string {
+	if len(sessions) > 10 {
+		sessions = sessions[:10]
+	}
+	normalized := a.normalizeSessionsForResponse(sessions)
+	data, err := json.Marshal(normalized)
+	if err != nil {
+		return ""
+	}
+	return fmt.Sprintf("event: sessions\ndata: %s\n\n", data)
+}
+
+func (a *App) queueSessionsBroadcast(sessions []SessionData) {
+	if a.sessionsHub == nil {
+		return
+	}
+	a.sessionsBroadcastMu.Lock()
+	a.sessionsBroadcastLatest = sessions
+	if a.sessionsBroadcastPending {
+		a.sessionsBroadcastMu.Unlock()
+		return
+	}
+	a.sessionsBroadcastPending = true
+	a.sessionsBroadcastMu.Unlock()
+	time.AfterFunc(250*time.Millisecond, func() {
+		a.flushSessionsBroadcast()
+	})
+}
+
+func (a *App) flushSessionsBroadcast() {
+	a.sessionsBroadcastMu.Lock()
+	sessions := a.sessionsBroadcastLatest
+	a.sessionsBroadcastLatest = nil
+	a.sessionsBroadcastPending = false
+	a.sessionsBroadcastMu.Unlock()
+	if sessions == nil {
+		return
+	}
+	payload := a.buildSessionsEvent(sessions)
+	if payload == "" {
+		return
+	}
+	a.sessionsHub.Broadcast(payload)
 }
 
 func (a *App) saveSession(identifier string, session SessionData) {
@@ -3372,6 +3991,22 @@ func getenvIntAny(keys []string, fallback int) int {
 	return fallback
 }
 
+func getenvBoolAny(keys []string, fallback bool) bool {
+	for _, key := range keys {
+		if value := os.Getenv(key); value != "" {
+			switch strings.TrimSpace(strings.ToLower(value)) {
+			case "1", "true", "yes", "y", "on":
+				return true
+			case "0", "false", "no", "n", "off":
+				return false
+			default:
+				return fallback
+			}
+		}
+	}
+	return fallback
+}
+
 type FailureHandler struct {
 	failureType      string
 	failureUnits     string
@@ -3629,13 +4264,13 @@ func (a *App) getSessionsByGroupId(groupID string) []SessionData {
 // getGroupIdByPort returns the group ID for sessions on the specified port
 func (a *App) getGroupIdByPort(port int) string {
 	sessions := a.getSessionList()
-	portStr := fmt.Sprintf("%d", port)
 	for _, session := range sessions {
-		if getString(session, "x_forwarded_port") == portStr {
-			groupID := getString(session, "group_id")
-			if groupID != "" {
-				return groupID
-			}
+		if !a.sessionMatchesPort(session, port) {
+			continue
+		}
+		groupID := getString(session, "group_id")
+		if groupID != "" {
+			return groupID
 		}
 	}
 	return ""
@@ -3651,7 +4286,12 @@ func (a *App) getPortsForGroup(groupID string) []int {
 	for _, session := range sessions {
 		if getString(session, "group_id") == groupID {
 			if portStr := getString(session, "x_forwarded_port"); portStr != "" {
-				if port, err := strconv.Atoi(portStr); err == nil {
+				if port, ok := a.sessionPortToInternal(portStr); ok {
+					portMap[port] = true
+				}
+			}
+			if portStr := getString(session, "x_forwarded_port_external"); portStr != "" {
+				if port, ok := a.sessionPortToInternal(portStr); ok {
 					portMap[port] = true
 				}
 			}
@@ -3742,6 +4382,7 @@ func (h *RequestHandler) handleFailure(prefix, countKey string) string {
 	if failure.resetFailureType != nil {
 		h.session[prefix+"_failure_type"] = failure.resetFailureType
 		h.session[prefix+"_reset_failure_type"] = nil
+		h.session["control_revision"] = newControlRevision()
 	}
 	return failureType
 }
@@ -3760,6 +4401,7 @@ func (h *RequestHandler) handleManifestFailure(filename string) string {
 	if failure.resetFailureType != nil {
 		h.session["manifest_failure_type"] = failure.resetFailureType
 		h.session["manifest_reset_failure_type"] = nil
+		h.session["control_revision"] = newControlRevision()
 	}
 	return failureType
 }
@@ -3791,6 +4433,7 @@ func (h *RequestHandler) handleSegmentFailure(filename string) string {
 	if failure.resetFailureType != nil {
 		h.session["segment_failure_type"] = failure.resetFailureType
 		h.session["segment_reset_failure_type"] = nil
+		h.session["control_revision"] = newControlRevision()
 	}
 	return failureType
 }

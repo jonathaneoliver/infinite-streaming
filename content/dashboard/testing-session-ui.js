@@ -155,7 +155,7 @@
     function renderManifestOptions(sessionId, variants, selected) {
         const selectedSet = new Set(selected || []);
         const list = sortedPlaylists(variants);
-        const allChecked = selectedSet.has('All');
+        const allChecked = selectedSet.size === 0 || selectedSet.has('All');
         const checkbox = (value, label) => {
             const checked = allChecked || selectedSet.has(value) ? 'checked' : '';
             return `<label><input type="checkbox" data-field="manifest_failure_urls" value="${value}" ${checked}>${label}</label>`;
@@ -444,17 +444,18 @@
         const transportActive = !!session.transport_fault_active;
         const transportDropPackets = Number(session.transport_fault_drop_packets || 0);
         const transportRejectPackets = Number(session.transport_fault_reject_packets || 0);
+        const portDisplay = session.x_forwarded_port_external || session.x_forwarded_port || '—';
         return `
             <div class="session-card" data-session-id="${sessionId}" data-session-port="${session.x_forwarded_port || ''}" data-shaping-presets="${encodedPresets}" data-shaping-video-presets="${encodedVideoPresets}" data-shaping-overhead-mbps="${overheadMbps}">
                 <div class="session-header">
                     ${hideTitle ? '' : `<div class="session-title">Session ${sessionId}</div>`}
-                    <div class="session-meta" title="Port">${session.x_forwarded_port || '—'}</div>
+                    <div class="session-meta" title="Port">${portDisplay}</div>
                 </div>
                 ${inlineHost ? `<div class="session-inline-player" data-inline-host="${sessionId}"></div>` : ''}
                 <div class="session-grid">
                     <div class="session-item"><span class="label">User Agent</span><span class="value">${session.user_agent || '—'}</span></div>
                     <div class="session-item"><span class="label">Player IP</span><span class="value">${session.player_ip || '—'}</span></div>
-                    ${showPortItem ? `<div class="session-item"><span class="label">Port</span><span class="value">${session.x_forwarded_port || '—'}</span></div>` : ''}
+                    ${showPortItem ? `<div class="session-item"><span class="label">Port</span><span class="value">${portDisplay}</span></div>` : ''}
                     <div class="session-item"><span class="label">Last Request</span><span class="value">${formatDate(session.last_request)}</span></div>
                     <div class="session-item"><span class="label">First Request</span><span class="value">${formatDate(session.first_request_time)}</span></div>
                     <div class="session-item"><span class="label">Session Duration</span><span class="value">${formatDuration(session.session_duration)}</span></div>
@@ -475,13 +476,13 @@
                         </div>
                         <div class="range-row">
                             <label>Consecutive</label>
-                            <input type="range" min="0" max="10" step="1" data-field="segment_consecutive_failures" value="${session.segment_consecutive_failures > 0 ? session.segment_consecutive_failures : 1}">
-                            <span class="range-value">${session.segment_consecutive_failures > 0 ? session.segment_consecutive_failures : 1}</span>
+                            <input type="range" min="0" max="10" step="1" data-field="segment_consecutive_failures" value="${Number.isFinite(Number(session.segment_consecutive_failures)) && Number(session.segment_consecutive_failures) >= 0 ? Number(session.segment_consecutive_failures) : 1}">
+                            <span class="range-value">${Number.isFinite(Number(session.segment_consecutive_failures)) && Number(session.segment_consecutive_failures) >= 0 ? Number(session.segment_consecutive_failures) : 1}</span>
                         </div>
                         <div class="range-row">
                             <label>Frequency</label>
-                            <input type="range" min="0" max="10" step="1" data-field="segment_failure_frequency" value="${session.segment_failure_frequency > 0 ? session.segment_failure_frequency : 6}">
-                            <span class="range-value">${session.segment_failure_frequency > 0 ? session.segment_failure_frequency : 6}</span>
+                            <input type="range" min="0" max="10" step="1" data-field="segment_failure_frequency" value="${Number.isFinite(Number(session.segment_failure_frequency)) && Number(session.segment_failure_frequency) >= 0 ? Number(session.segment_failure_frequency) : 6}">
+                            <span class="range-value">${Number.isFinite(Number(session.segment_failure_frequency)) && Number(session.segment_failure_frequency) >= 0 ? Number(session.segment_failure_frequency) : 6}</span>
                         </div>
                     </div>
                     <div class="failure-group">
@@ -494,13 +495,13 @@
                         </div>
                         <div class="range-row">
                             <label>Consecutive</label>
-                            <input type="range" min="0" max="10" step="1" data-field="manifest_consecutive_failures" value="${session.manifest_consecutive_failures > 0 ? session.manifest_consecutive_failures : 1}">
-                            <span class="range-value">${session.manifest_consecutive_failures > 0 ? session.manifest_consecutive_failures : 1}</span>
+                            <input type="range" min="0" max="10" step="1" data-field="manifest_consecutive_failures" value="${Number.isFinite(Number(session.manifest_consecutive_failures)) && Number(session.manifest_consecutive_failures) >= 0 ? Number(session.manifest_consecutive_failures) : 1}">
+                            <span class="range-value">${Number.isFinite(Number(session.manifest_consecutive_failures)) && Number(session.manifest_consecutive_failures) >= 0 ? Number(session.manifest_consecutive_failures) : 1}</span>
                         </div>
                         <div class="range-row">
                             <label>Frequency</label>
-                            <input type="range" min="0" max="10" step="1" data-field="manifest_failure_frequency" value="${session.manifest_failure_frequency > 0 ? session.manifest_failure_frequency : 6}">
-                            <span class="range-value">${session.manifest_failure_frequency > 0 ? session.manifest_failure_frequency : 6}</span>
+                            <input type="range" min="0" max="10" step="1" data-field="manifest_failure_frequency" value="${Number.isFinite(Number(session.manifest_failure_frequency)) && Number(session.manifest_failure_frequency) >= 0 ? Number(session.manifest_failure_frequency) : 6}">
+                            <span class="range-value">${Number.isFinite(Number(session.manifest_failure_frequency)) && Number(session.manifest_failure_frequency) >= 0 ? Number(session.manifest_failure_frequency) : 6}</span>
                         </div>
                     </div>
                     <div class="failure-group">
@@ -512,13 +513,13 @@
                         </div>
                         <div class="range-row">
                             <label>Consecutive</label>
-                            <input type="range" min="0" max="10" step="1" data-field="master_manifest_consecutive_failures" value="${session.master_manifest_consecutive_failures > 0 ? session.master_manifest_consecutive_failures : 1}">
-                            <span class="range-value">${session.master_manifest_consecutive_failures > 0 ? session.master_manifest_consecutive_failures : 1}</span>
+                            <input type="range" min="0" max="10" step="1" data-field="master_manifest_consecutive_failures" value="${Number.isFinite(Number(session.master_manifest_consecutive_failures)) && Number(session.master_manifest_consecutive_failures) >= 0 ? Number(session.master_manifest_consecutive_failures) : 1}">
+                            <span class="range-value">${Number.isFinite(Number(session.master_manifest_consecutive_failures)) && Number(session.master_manifest_consecutive_failures) >= 0 ? Number(session.master_manifest_consecutive_failures) : 1}</span>
                         </div>
                         <div class="range-row">
                             <label>Frequency</label>
-                            <input type="range" min="0" max="10" step="1" data-field="master_manifest_failure_frequency" value="${session.master_manifest_failure_frequency > 0 ? session.master_manifest_failure_frequency : 6}">
-                            <span class="range-value">${session.master_manifest_failure_frequency > 0 ? session.master_manifest_failure_frequency : 6}</span>
+                            <input type="range" min="0" max="10" step="1" data-field="master_manifest_failure_frequency" value="${Number.isFinite(Number(session.master_manifest_failure_frequency)) && Number(session.master_manifest_failure_frequency) >= 0 ? Number(session.master_manifest_failure_frequency) : 6}">
+                            <span class="range-value">${Number.isFinite(Number(session.master_manifest_failure_frequency)) && Number(session.master_manifest_failure_frequency) >= 0 ? Number(session.master_manifest_failure_frequency) : 6}</span>
                         </div>
                     </div>
                     <div class="failure-group">
