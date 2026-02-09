@@ -21,6 +21,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/bradfitz/gomemcache/memcache"
@@ -44,18 +45,38 @@ type App struct {
 	shapeMu      sync.Mutex
 	shapeLoops   map[int]context.CancelFunc
 	shapeStates  map[int]NftShapePattern
+	shapeApplyMu sync.Mutex
+	shapeApply   map[int]ShapeApplyState
 	faultMu      sync.Mutex
 	faultLoops   map[int]context.CancelFunc
 	sessionsHub              *SessionEventHub
 	sessionsBroadcastMu      sync.Mutex
 	sessionsBroadcastPending bool
 	sessionsBroadcastLatest  []SessionData
+	sessionsBroadcastSeq     uint64
 }
 
 type SessionEventHub struct {
 	mu      sync.Mutex
 	nextID  int
-	clients map[int]chan string
+	clients map[int]*SessionClient
+}
+
+type SessionClient struct {
+	ch      chan SessionsEvent
+	dropped uint64
+}
+
+type SessionsEvent struct {
+	Sessions []SessionData
+	Revision uint64
+	Dropped  uint64
+}
+
+type SessionsStreamPayload struct {
+	Revision uint64        `json:"revision"`
+	Dropped  uint64        `json:"dropped"`
+	Sessions []SessionData `json:"sessions"`
 }
 
 type SessionPatchRequest struct {
@@ -71,37 +92,50 @@ type PortMapping struct {
 }
 
 func NewSessionEventHub() *SessionEventHub {
-	return &SessionEventHub{clients: map[int]chan string{}}
+	return &SessionEventHub{clients: map[int]*SessionClient{}}
 }
 
-func (h *SessionEventHub) AddClient() (int, <-chan string) {
+func (h *SessionEventHub) AddClient() (int, <-chan SessionsEvent) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.nextID++
 	id := h.nextID
-	ch := make(chan string, 8)
-	h.clients[id] = ch
-	return id, ch
+	client := &SessionClient{ch: make(chan SessionsEvent, 1)}
+	h.clients[id] = client
+	return id, client.ch
 }
 
 func (h *SessionEventHub) RemoveClient(id int) {
 	h.mu.Lock()
-	ch, ok := h.clients[id]
+	client, ok := h.clients[id]
 	if ok {
 		delete(h.clients, id)
 	}
 	h.mu.Unlock()
 	if ok {
-		close(ch)
+		close(client.ch)
 	}
 }
 
-func (h *SessionEventHub) Broadcast(payload string) {
+
+func (h *SessionEventHub) Broadcast(sessions []SessionData, revision uint64) {
 	h.mu.Lock()
-	for _, ch := range h.clients {
+	for id, client := range h.clients {
+		if len(client.ch) == cap(client.ch) {
+			select {
+			case <-client.ch:
+				client.dropped++
+			default:
+			}
+			log.Printf("SSE drop client=%d dropped=%d", id, client.dropped)
+		}
+		dropped := client.dropped
+		event := SessionsEvent{Sessions: sessions, Revision: revision, Dropped: dropped}
 		select {
-		case ch <- payload:
+		case client.ch <- event:
+			client.dropped = 0
 		default:
+			client.dropped = dropped + 1
 		}
 	}
 	h.mu.Unlock()
@@ -116,6 +150,25 @@ type PlaylistInfo struct {
 type TcTrafficManager struct {
 	interfaceName string
 	debug         bool
+}
+
+type ShapeApplyState struct {
+	rate  float64
+	delay int
+	loss  float64
+}
+
+func (a *App) getShapeApplyState(port int) (ShapeApplyState, bool) {
+	a.shapeApplyMu.Lock()
+	state, ok := a.shapeApply[port]
+	a.shapeApplyMu.Unlock()
+	return state, ok
+}
+
+func (a *App) setShapeApplyState(port int, state ShapeApplyState) {
+	a.shapeApplyMu.Lock()
+	a.shapeApply[port] = state
+	a.shapeApplyMu.Unlock()
 }
 
 type NftShapeStep struct {
@@ -324,8 +377,11 @@ func (t *TcTrafficManager) UpdateRateLimit(port int, rateMbps float64) error {
 	afterFilterOut, _ := afterFilterCmd.CombinedOutput()
 	log.Printf("NETSHAPE tc class show dev %s: %s", t.interfaceName, strings.TrimSpace(string(verifyOut)))
 	log.Printf("NETSHAPE tc filter show dev %s: %s", t.interfaceName, strings.TrimSpace(string(afterFilterOut)))
-	if !strings.Contains(string(verifyOut), fmt.Sprintf("class htb %s", classid)) {
-		return fmt.Errorf("tc class not present after update: %s", strings.TrimSpace(string(verifyOut)))
+	verifyText := string(verifyOut)
+	classToken := fmt.Sprintf("class htb %s", classid)
+	trimmedClassToken := fmt.Sprintf("class htb 1:%d", port%1000)
+	if !strings.Contains(verifyText, classToken) && !strings.Contains(verifyText, trimmedClassToken) {
+		return fmt.Errorf("tc class not present after update: %s", strings.TrimSpace(verifyText))
 	}
 	t.logTcState("rate_apply", port)
 	return nil
@@ -619,6 +675,7 @@ func main() {
 		},
 		shapeLoops:  map[int]context.CancelFunc{},
 		shapeStates: map[int]NftShapePattern{},
+		shapeApply:  map[int]ShapeApplyState{},
 		faultLoops:  map[int]context.CancelFunc{},
 		sessionsHub: NewSessionEventHub(),
 	}
@@ -824,35 +881,13 @@ func (a *App) handleGetSessions(w http.ResponseWriter, r *http.Request) {
 					session["transport_fault_reject_packets"] = rejectPackets
 					continue
 				}
-				config, err := a.traffic.GetPortConfig(portNum)
-				if err == nil && config != nil {
-					if val, ok := config["bandwidth_limit"]; ok {
-						if val != nil {
-							session["nftables_bandwidth_limit"] = val
-						}
-					}
-					if val, ok := config["packet_loss"]; ok {
-						if val != nil {
-							session["nftables_packet_loss"] = val
-						}
-					}
-					if val, ok := config["bandwidth_mbps"]; ok {
-						if val != nil {
-							session["nftables_bandwidth_mbps"] = val
-						}
-					}
-					if val, ok := config["delay_ms"]; ok {
-						if val != nil {
-							session["nftables_delay_ms"] = val
-						}
-					}
-				}
+				session["transport_fault_drop_packets"] = dropPackets
+				session["transport_fault_reject_packets"] = rejectPackets
 				if pattern, ok := a.getShapePattern(portNum); ok {
 					session["nftables_pattern_enabled"] = len(pattern.Steps) > 0
 					session["nftables_pattern_steps"] = pattern.Steps
 					if pattern.ActiveAt != "" {
 						session["nftables_pattern_step"] = pattern.ActiveStep
-						session["nftables_bandwidth_mbps"] = pattern.ActiveRateMbps
 						session["nftables_pattern_step_runtime"] = pattern.ActiveStep
 						session["nftables_pattern_rate_runtime_mbps"] = pattern.ActiveRateMbps
 						session["nftables_pattern_step_runtime_at"] = pattern.ActiveAt
@@ -897,7 +932,9 @@ func (a *App) handleSessionStream(w http.ResponseWriter, r *http.Request) {
 
 	a.removeInactiveSessions()
 	sessions := a.getSessionList()
-	payload := a.buildSessionsEvent(sessions)
+	normalized := a.normalizeSessionsForResponse(sessions)
+	rev := atomic.AddUint64(&a.sessionsBroadcastSeq, 1)
+	payload := a.buildSessionsEvent(normalized, rev, 0)
 	if payload != "" {
 		_, _ = w.Write([]byte(payload))
 		flusher.Flush()
@@ -910,11 +947,15 @@ func (a *App) handleSessionStream(w http.ResponseWriter, r *http.Request) {
 		select {
 		case <-r.Context().Done():
 			return
-		case msg, ok := <-ch:
+		case event, ok := <-ch:
 			if !ok {
 				return
 			}
-			_, _ = w.Write([]byte(msg))
+			payload := a.buildSessionsEvent(event.Sessions, event.Revision, event.Dropped)
+			if payload == "" {
+				continue
+			}
+			_, _ = w.Write([]byte(payload))
 			flusher.Flush()
 		}
 	}
@@ -1715,7 +1756,7 @@ func (a *App) runShapePatternLoop(ctx context.Context, port int, steps []NftShap
 			stepIndex = (stepIndex + 1) % len(steps)
 			continue
 		}
-		if err := a.traffic.UpdateRateLimit(port, step.RateMbps); err != nil {
+		if err := a.applyShapeIfChanged(port, step.RateMbps, delayMs, loss); err != nil {
 			log.Printf(
 				"NETSHAPE pattern_step ts=%s port=%d step=%d/%d rate_mbps=%.3f duration_s=%.1f enabled=%t status=rate_failed err=%v",
 				ts,
@@ -1740,21 +1781,13 @@ func (a *App) runShapePatternLoop(ctx context.Context, port int, steps []NftShap
 				step.Enabled,
 			)
 		}
-		if err := a.traffic.UpdateNetem(port, delayMs, loss); err != nil {
-			log.Printf(
-				"NETSHAPE pattern_netem ts=%s port=%d delay_ms=%d loss_pct=%.2f status=failed err=%v",
-				ts,
-				port,
-				delayMs,
-				loss,
-				err,
-			)
-		}
+		// netem is applied via applyShapeIfChanged above.
 		a.updateSessionsByPort(port, map[string]interface{}{
-			"nftables_bandwidth_mbps":  step.RateMbps,
 			"nftables_pattern_enabled": true,
 			"nftables_pattern_steps":   steps,
 			"nftables_pattern_step":    stepIndex + 1,
+			"nftables_pattern_step_runtime": stepIndex + 1,
+			"nftables_pattern_rate_runtime_mbps": step.RateMbps,
 		})
 		wait := time.Duration(step.DurationSeconds * float64(time.Second))
 		timer := time.NewTimer(wait)
@@ -2181,6 +2214,7 @@ func (a *App) handleNftPattern(w http.ResponseWriter, r *http.Request) {
 	}
 	portStr := mux.Vars(r)["port"]
 	mappedPort, _ := a.portMap.MapExternalPort(portStr)
+	log.Printf("NETSHAPE request kind=pattern path=%s port_param=%s mapped_port=%s x_forwarded_port=%s", r.URL.Path, portStr, mappedPort, r.Header.Get("X-Forwarded-Port"))
 	port, err := strconv.Atoi(mappedPort)
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
@@ -2288,6 +2322,7 @@ func (a *App) handleNftBandwidth(w http.ResponseWriter, r *http.Request) {
 	}
 	portStr := mux.Vars(r)["port"]
 	mappedPort, _ := a.portMap.MapExternalPort(portStr)
+	log.Printf("NETSHAPE request kind=bandwidth path=%s port_param=%s mapped_port=%s x_forwarded_port=%s", r.URL.Path, portStr, mappedPort, r.Header.Get("X-Forwarded-Port"))
 	port, err := strconv.Atoi(mappedPort)
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
@@ -2340,6 +2375,7 @@ func (a *App) handleNftLoss(w http.ResponseWriter, r *http.Request) {
 	}
 	portStr := mux.Vars(r)["port"]
 	mappedPort, _ := a.portMap.MapExternalPort(portStr)
+	log.Printf("NETSHAPE request kind=loss path=%s port_param=%s mapped_port=%s x_forwarded_port=%s", r.URL.Path, portStr, mappedPort, r.Header.Get("X-Forwarded-Port"))
 	port, err := strconv.Atoi(mappedPort)
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
@@ -2385,6 +2421,7 @@ func (a *App) handleNftShape(w http.ResponseWriter, r *http.Request) {
 	}
 	portStr := mux.Vars(r)["port"]
 	mappedPort, _ := a.portMap.MapExternalPort(portStr)
+	log.Printf("NETSHAPE request kind=shape path=%s port_param=%s mapped_port=%s x_forwarded_port=%s", r.URL.Path, portStr, mappedPort, r.Header.Get("X-Forwarded-Port"))
 	port, err := strconv.Atoi(mappedPort)
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
@@ -2850,6 +2887,11 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		allocated := allocateSessionNumber(sessionList, a.maxSessions)
+		assignedExternalPort := replaceThirdFromLastDigit(externalPort, allocated)
+		assignedInternalPort := assignedExternalPort
+		if mapped, ok := a.portMap.MapExternalPort(assignedExternalPort); ok {
+			assignedInternalPort = mapped
+		}
 		groupID := extractGroupId(playerID)
 		sessionData := SessionData{
 			"session_number":                           fmt.Sprintf("%d", allocated),
@@ -2926,18 +2968,17 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 			"fault_count_request_body_hang":            0,
 			"fault_count_request_body_reset":           0,
 			"fault_count_request_body_delayed":         0,
-			"x_forwarded_port":                         internalPort,
-			"x_forwarded_port_external":                externalPort,
+			"x_forwarded_port":                         assignedInternalPort,
+			"x_forwarded_port_external":                assignedExternalPort,
 		}
 		sessionList = append(sessionList, sessionData)
 		a.saveSessionList(sessionList)
-		newPort := replaceThirdFromLastDigit(externalPort, allocated)
 		host := hostWithoutPort(r.Host)
-		newURL := fmt.Sprintf("http://%s:%s/%s", host, newPort, filename)
+		newURL := fmt.Sprintf("http://%s:%s/%s", host, assignedExternalPort, filename)
 		if r.URL.RawQuery != "" {
 			newURL = newURL + "?" + r.URL.RawQuery
 		}
-		log.Printf("Redirecting to new URL with port: %s %s -> %s", newURL, externalPort, newPort)
+		log.Printf("Redirecting to new URL with port: %s %s -> %s", newURL, externalPort, assignedExternalPort)
 		http.Redirect(w, r, newURL, http.StatusFound)
 		return
 	}
@@ -3172,17 +3213,48 @@ func (a *App) applySessionShaping(session SessionData, port int) {
 	rate := getFloat(session, "nftables_bandwidth_mbps")
 	delay := getInt(session, "nftables_delay_ms")
 	loss := getFloat(session, "nftables_packet_loss")
+	if err := a.applyShapeIfChanged(port, rate, delay, loss); err != nil {
+		log.Printf("NETSHAPE apply failed port=%d rate=%g delay=%d loss=%.2f: %v", port, rate, delay, loss, err)
+		return
+	}
+}
+
+func almostEqualShape(a ShapeApplyState, b ShapeApplyState) bool {
+	const eps = 0.0001
+	return a.delay == b.delay &&
+		math.Abs(a.rate-b.rate) <= eps &&
+		math.Abs(a.loss-b.loss) <= eps
+}
+
+func (a *App) applyShapeIfChanged(port int, rate float64, delay int, loss float64) error {
+	const eps = 0.0001
+	desired := ShapeApplyState{rate: rate, delay: delay, loss: loss}
+	last, ok := a.getShapeApplyState(port)
+	if ok && almostEqualShape(last, desired) {
+		return nil
+	}
 	if rate == 0 && delay == 0 && loss == 0 {
-		return
+		if err := a.traffic.UpdateRateLimit(port, 0); err != nil {
+			return err
+		}
+		a.setShapeApplyState(port, desired)
+		return nil
 	}
-	if err := a.traffic.UpdateRateLimit(port, rate); err != nil {
-		log.Printf("NETSHAPE apply rate failed port=%d rate=%g: %v", port, rate, err)
-		return
+	rateChanged := !ok || math.Abs(last.rate-rate) > eps
+	if rateChanged {
+		if err := a.traffic.UpdateRateLimit(port, rate); err != nil {
+			return err
+		}
 	}
-	if err := a.traffic.UpdateNetem(port, delay, loss); err != nil {
-		log.Printf("NETSHAPE apply netem failed port=%d delay=%d loss=%.2f: %v", port, delay, loss, err)
-		return
+	delayChanged := !ok || last.delay != delay
+	lossChanged := !ok || math.Abs(last.loss-loss) > eps
+	if delayChanged || lossChanged {
+		if err := a.traffic.UpdateNetem(port, delay, loss); err != nil {
+			return err
+		}
 	}
+	a.setShapeApplyState(port, desired)
+	return nil
 }
 
 func (a *App) getContentType(target string) (string, bool, bool, bool, []PlaylistInfo) {
@@ -3382,6 +3454,10 @@ func newControlRevision() string {
 	return time.Now().UTC().Format(time.RFC3339Nano)
 }
 
+func parseControlRevision(rev string) (time.Time, error) {
+	return time.Parse(time.RFC3339Nano, rev)
+}
+
 func applyControlRevision(session SessionData, revision string) {
 	rev := revision
 	if rev == "" {
@@ -3422,10 +3498,15 @@ func (a *App) updateSessionsByPortWithControl(port int, updates map[string]inter
 	}
 	for _, session := range sessions {
 		if a.sessionMatchesPort(session, port) {
+			log.Printf("NETSHAPE session_match port=%d session_id=%s before: x_forwarded_port=%s x_forwarded_port_external=%s nftables_bandwidth_mbps=%v",
+				port, getString(session, "session_id"), getString(session, "x_forwarded_port"),
+				getString(session, "x_forwarded_port_external"), session["nftables_bandwidth_mbps"])
 			for key, value := range updates {
 				session[key] = value
 			}
 			applyControlRevision(session, rev)
+			log.Printf("NETSHAPE session_updated port=%d session_id=%s after: nftables_bandwidth_mbps=%v",
+				port, getString(session, "session_id"), session["nftables_bandwidth_mbps"])
 			changed = true
 		}
 	}
@@ -3458,6 +3539,21 @@ func (a *App) sessionMatchesPort(session SessionData, port int) bool {
 	if portStr := getString(session, "x_forwarded_port_external"); portStr != "" {
 		if portNum, ok := a.sessionPortToInternal(portStr); ok && portNum == port {
 			return true
+		}
+	}
+	if a.portMap.count > 0 && a.portMap.externalBase > 0 && a.portMap.internalBase > 0 {
+		sessionID := getString(session, "session_id")
+		if sessionID != "" {
+			if sessionNum, err := strconv.Atoi(sessionID); err == nil && sessionNum > 0 {
+				desiredExternal := replaceThirdFromLastDigit(strconv.Itoa(a.portMap.externalBase), sessionNum)
+				if mapped, ok := a.portMap.MapExternalPort(desiredExternal); ok {
+					if mappedPort, err := strconv.Atoi(mapped); err == nil && mappedPort == port {
+						session["x_forwarded_port_external"] = desiredExternal
+						session["x_forwarded_port"] = mapped
+						return true
+					}
+				}
+			}
 		}
 	}
 	return false
@@ -3501,6 +3597,12 @@ func (a *App) saveSessionList(sessions []SessionData) {
 func (a *App) normalizeSessionsForResponse(sessions []SessionData) []SessionData {
 	transportCountersByPort := getTransportFaultRuleCounters()
 	for _, session := range sessions {
+		a.normalizeSessionPorts(session)
+		setDefault := func(key string, value interface{}) {
+			if existing, ok := session[key]; !ok || existing == nil {
+				session[key] = value
+			}
+		}
 		for _, prefix := range []string{"segment", "manifest", "master_manifest"} {
 			typeKey := prefix + "_failure_type"
 			failureType := normalizeRequestFailureType(getString(session, typeKey))
@@ -3623,20 +3725,90 @@ func (a *App) normalizeSessionsForResponse(sessions []SessionData) []SessionData
 				}
 			}
 		}
+		portStr := getString(session, "x_forwarded_port")
+		if portStr == "" {
+			portStr = getString(session, "x_forwarded_port_external")
+		}
+		if portNum, ok := a.sessionPortToInternal(portStr); ok {
+			if pattern, ok := a.getShapePattern(portNum); ok {
+				session["nftables_pattern_enabled"] = len(pattern.Steps) > 0
+				session["nftables_pattern_steps"] = pattern.Steps
+				if pattern.ActiveAt != "" {
+					session["nftables_pattern_step"] = pattern.ActiveStep
+					session["nftables_pattern_step_runtime"] = pattern.ActiveStep
+					session["nftables_pattern_rate_runtime_mbps"] = pattern.ActiveRateMbps
+					session["nftables_pattern_step_runtime_at"] = pattern.ActiveAt
+				}
+			} else {
+				session["nftables_pattern_enabled"] = false
+				session["nftables_pattern_steps"] = []NftShapeStep{}
+			}
+		}
+		setDefault("nftables_bandwidth_mbps", 0)
+		setDefault("nftables_delay_ms", 0)
+		setDefault("nftables_packet_loss", 0)
+		setDefault("nftables_pattern_enabled", false)
+		setDefault("nftables_pattern_steps", []NftShapeStep{})
+		setDefault("nftables_pattern_step", 0)
+		setDefault("nftables_pattern_step_runtime", 0)
+		setDefault("nftables_pattern_rate_runtime_mbps", session["nftables_bandwidth_mbps"])
+		setDefault("nftables_pattern_segment_duration_seconds", 0)
+		setDefault("nftables_pattern_default_segments", 2)
+		setDefault("nftables_pattern_default_step_seconds", 0)
+		setDefault("nftables_pattern_template_mode", "sliders")
+		setDefault("nftables_pattern_margin_pct", 0)
 	}
 	return sessions
 }
 
-func (a *App) buildSessionsEvent(sessions []SessionData) string {
-	if len(sessions) > 10 {
-		sessions = sessions[:10]
+func (a *App) normalizeSessionPorts(session SessionData) {
+	if a.portMap.count <= 0 || a.portMap.externalBase <= 0 || a.portMap.internalBase <= 0 {
+		return
 	}
-	normalized := a.normalizeSessionsForResponse(sessions)
-	data, err := json.Marshal(normalized)
+	sessionID := getString(session, "session_id")
+	if sessionID == "" {
+		return
+	}
+	sessionNum, err := strconv.Atoi(sessionID)
+	if err != nil || sessionNum <= 0 {
+		return
+	}
+	currentExternal := getString(session, "x_forwarded_port_external")
+	if currentExternal == "" {
+		currentExternal = strconv.Itoa(a.portMap.externalBase)
+	}
+	currentExternalNum, err := strconv.Atoi(currentExternal)
+	if err != nil {
+		return
+	}
+	externalGroup := a.portMap.externalBase / 1000
+	if externalGroup <= 0 || currentExternalNum/1000 != externalGroup {
+		return
+	}
+	if thirdFromLastDigit(currentExternal) == strconv.Itoa(sessionNum) {
+		return
+	}
+	desiredExternal := replaceThirdFromLastDigit(strconv.Itoa(a.portMap.externalBase), sessionNum)
+	if desiredExternal == currentExternal {
+		return
+	}
+	session["x_forwarded_port_external"] = desiredExternal
+	if mapped, ok := a.portMap.MapExternalPort(desiredExternal); ok {
+		session["x_forwarded_port"] = mapped
+	}
+}
+
+func (a *App) buildSessionsEvent(normalized []SessionData, revision uint64, dropped uint64) string {
+	payload := SessionsStreamPayload{
+		Revision: revision,
+		Dropped:  dropped,
+		Sessions: normalized,
+	}
+	data, err := json.Marshal(payload)
 	if err != nil {
 		return ""
 	}
-	return fmt.Sprintf("event: sessions\ndata: %s\n\n", data)
+	return fmt.Sprintf("event: sessions\nid: %d\ndata: %s\n\n", revision, data)
 }
 
 func (a *App) queueSessionsBroadcast(sessions []SessionData) {
@@ -3665,11 +3837,9 @@ func (a *App) flushSessionsBroadcast() {
 	if sessions == nil {
 		return
 	}
-	payload := a.buildSessionsEvent(sessions)
-	if payload == "" {
-		return
-	}
-	a.sessionsHub.Broadcast(payload)
+	normalized := a.normalizeSessionsForResponse(sessions)
+	rev := atomic.AddUint64(&a.sessionsBroadcastSeq, 1)
+	a.sessionsHub.Broadcast(normalized, rev)
 }
 
 func (a *App) saveSession(identifier string, session SessionData) {

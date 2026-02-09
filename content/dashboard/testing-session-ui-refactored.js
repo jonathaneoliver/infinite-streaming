@@ -278,20 +278,32 @@
         return Math.round(minVideo * 1.1 * 1000) / 1000;
     }
 
-    function renderPatternStepPresetOptions(rate, presets) {
+    function renderPatternStepPresetOptions(rate, presets, matchOptions = {}) {
         const numericRate = Number(rate);
         const hasRate = Number.isFinite(numericRate);
         let selectedValue = 'custom';
         const options = presets || [];
+        const overheadMbps = Number(matchOptions.overheadMbps || 0);
+        const marginPct = Number(matchOptions.marginPct || 0);
+        const adjust = (Number.isFinite(overheadMbps) && overheadMbps !== 0)
+            || (Number.isFinite(marginPct) && marginPct !== 0);
+        const adjustedValue = (base) => {
+            const adjusted = (base * (1 + (marginPct / 100))) + overheadMbps;
+            return Math.round(adjusted * 1000) / 1000;
+        };
         options.forEach((preset) => {
             if (!hasRate) return;
-            if (Math.abs(Number(preset.mbps) - numericRate) < 0.001) {
-                selectedValue = Number(preset.mbps).toFixed(3);
+            const base = Number(preset.mbps);
+            const candidate = adjust ? adjustedValue(base) : base;
+            if (Math.abs(candidate - numericRate) < 0.001) {
+                selectedValue = Number(candidate).toFixed(3);
             }
         });
         const customSelected = selectedValue === 'custom' ? ' selected' : '';
         const optionHtml = options.map((preset) => {
-            const value = Number(preset.mbps).toFixed(3);
+            const base = Number(preset.mbps);
+            const candidate = adjust ? adjustedValue(base) : base;
+            const value = Number(candidate).toFixed(3);
             const selected = selectedValue === value ? ' selected' : '';
             const riskPrefix = preset.risk ? '⚠ ' : '';
             return `<option value="${value}"${selected}>${riskPrefix}${preset.label}</option>`;
@@ -299,14 +311,14 @@
         return `<option value="custom"${customSelected}>Custom</option>${optionHtml}`;
     }
 
-    function renderPatternStepRowContent(step, presets) {
+    function renderPatternStepRowContent(step, presets, matchOptions = {}) {
         const rate = Number.isFinite(Number(step.rate_mbps)) ? Number(step.rate_mbps) : 0;
         const seconds = Number.isFinite(Number(step.duration_seconds)) ? Number(step.duration_seconds) : 1;
         const enabled = step.enabled !== false;
         return `
             <label>Preset</label>
             <select data-field="shaping_step_mbps_preset">
-                ${renderPatternStepPresetOptions(rate, presets)}
+                ${renderPatternStepPresetOptions(rate, presets, matchOptions)}
             </select>
             <label>Mbps</label>
             <input type="number" min="0" step="0.1" data-field="shaping_step_mbps" value="${rate}">
@@ -366,10 +378,10 @@
             .filter(Boolean);
     }
 
-    function renderPatternStepRow(index, step, presets) {
+    function renderPatternStepRow(index, step, presets, matchOptions = {}) {
         return `
             <div class="shape-step-row" data-step-index="${index}">
-                ${renderPatternStepRowContent(step, presets)}
+                ${renderPatternStepRowContent(step, presets, matchOptions)}
             </div>
         `;
     }
@@ -461,7 +473,7 @@
         const bitrateChartOpen = resolveSectionDefault(options, 'bitrate-chart', false);
 
         return `
-            <div class="session-card" data-session-id="${sessionId}" data-session-port="${session.x_forwarded_port || ''}" data-shaping-presets="${encodedPresets}" data-shaping-video-presets="${encodedVideoPresets}" data-shaping-overhead-mbps="${overheadMbps}">
+            <div class="session-card" data-session-id="${sessionId}" data-session-port="${session.x_forwarded_port_external || session.x_forwarded_port || ''}" data-shaping-presets="${encodedPresets}" data-shaping-video-presets="${encodedVideoPresets}" data-shaping-overhead-mbps="${overheadMbps}">
                 <div class="session-header">
                     ${hideTitle ? '' : `<div class="session-title">Session ${sessionId}</div>`}
                     <div class="session-meta" title="Port">${portDisplay}</div>
@@ -661,83 +673,85 @@
 
                             <!-- Pattern Controls Group -->
                             <div class="shaping-pattern-group">
-                                <div class="shape-template-row">
-                                    <label>Pattern</label>
-                                    <div class="shape-pattern-modes" data-field="shaping_template_mode_group">
-                                        <label class="shape-pattern-mode">
-                                            <input type="radio" name="shaping_template_mode_${sessionId}" value="sliders" data-field="shaping_template_mode" ${templateMode === 'sliders' ? 'checked' : ''}>
-                                            <span title="Use slider value">🎚 Sliders</span>
-                                        </label>
-                                        <label class="shape-pattern-mode">
-                                            <input type="radio" name="shaping_template_mode_${sessionId}" value="square_wave" data-field="shaping_template_mode" ${templateMode === 'square_wave' ? 'checked' : ''}>
-                                            <span title="Alternate max/min bitrate">▁▔ Square</span>
-                                        </label>
-                                        <label class="shape-pattern-mode">
-                                            <input type="radio" name="shaping_template_mode_${sessionId}" value="ramp_up" data-field="shaping_template_mode" ${templateMode === 'ramp_up' ? 'checked' : ''}>
-                                            <span title="Step low to high">↗ Ramp Up</span>
-                                        </label>
-                                        <label class="shape-pattern-mode">
-                                            <input type="radio" name="shaping_template_mode_${sessionId}" value="ramp_down" data-field="shaping_template_mode" ${templateMode === 'ramp_down' ? 'checked' : ''}>
-                                            <span title="Step high to low">↘ Ramp Down</span>
-                                        </label>
-                                        <label class="shape-pattern-mode">
-                                            <input type="radio" name="shaping_template_mode_${sessionId}" value="pyramid" data-field="shaping_template_mode" ${templateMode === 'pyramid' ? 'checked' : ''}>
-                                            <span title="Up then down">⛰ Pyramid</span>
-                                        </label>
+                                <div class="shape-template-row shape-template-compact">
+                                    <div class="shape-template-block">
+                                        <label>Pattern</label>
+                                        <div class="shape-pattern-modes compact" data-field="shaping_template_mode_group">
+                                            <label class="shape-pattern-mode">
+                                                <input type="radio" name="shaping_template_mode_${sessionId}" value="sliders" data-field="shaping_template_mode" ${templateMode === 'sliders' ? 'checked' : ''}>
+                                                <span title="Use slider value">🎚 Sliders</span>
+                                            </label>
+                                            <label class="shape-pattern-mode">
+                                                <input type="radio" name="shaping_template_mode_${sessionId}" value="square_wave" data-field="shaping_template_mode" ${templateMode === 'square_wave' ? 'checked' : ''}>
+                                                <span title="Alternate max/min bitrate">▁▔ Square</span>
+                                            </label>
+                                            <label class="shape-pattern-mode">
+                                                <input type="radio" name="shaping_template_mode_${sessionId}" value="ramp_up" data-field="shaping_template_mode" ${templateMode === 'ramp_up' ? 'checked' : ''}>
+                                                <span title="Step low to high">↗ Ramp Up</span>
+                                            </label>
+                                            <label class="shape-pattern-mode">
+                                                <input type="radio" name="shaping_template_mode_${sessionId}" value="ramp_down" data-field="shaping_template_mode" ${templateMode === 'ramp_down' ? 'checked' : ''}>
+                                                <span title="Step high to low">↘ Ramp Down</span>
+                                            </label>
+                                            <label class="shape-pattern-mode">
+                                                <input type="radio" name="shaping_template_mode_${sessionId}" value="pyramid" data-field="shaping_template_mode" ${templateMode === 'pyramid' ? 'checked' : ''}>
+                                                <span title="Up then down">⛰ Pyramid</span>
+                                            </label>
+                                        </div>
                                     </div>
-                                </div>
-
-                                <div class="shape-step-defaults">
-                                    <label>Step Duration</label>
-                                    <div class="shape-pattern-modes" data-field="shaping_default_step_seconds_group">
-                                        <label class="shape-pattern-mode">
-                                            <input type="radio" name="shaping_default_step_seconds_${sessionId}" value="6" data-field="shaping_default_step_seconds" ${selectedStepSeconds === 6 ? 'checked' : ''}>
-                                            <span>6s</span>
-                                        </label>
-                                        <label class="shape-pattern-mode">
-                                            <input type="radio" name="shaping_default_step_seconds_${sessionId}" value="12" data-field="shaping_default_step_seconds" ${selectedStepSeconds === 12 ? 'checked' : ''}>
-                                            <span>12s</span>
-                                        </label>
-                                        <label class="shape-pattern-mode">
-                                            <input type="radio" name="shaping_default_step_seconds_${sessionId}" value="18" data-field="shaping_default_step_seconds" ${selectedStepSeconds === 18 ? 'checked' : ''}>
-                                            <span>18s</span>
-                                        </label>
-                                        <label class="shape-pattern-mode">
-                                            <input type="radio" name="shaping_default_step_seconds_${sessionId}" value="24" data-field="shaping_default_step_seconds" ${selectedStepSeconds === 24 ? 'checked' : ''}>
-                                            <span>24s</span>
-                                        </label>
+                                    <div class="shape-template-block">
+                                        <label>Step Duration <span class="shape-default-seconds" data-field="shaping_default_seconds_label">segment ${segmentDurationSeconds}s</span></label>
+                                        <div class="shape-pattern-modes compact" data-field="shaping_default_step_seconds_group">
+                                            <label class="shape-pattern-mode">
+                                                <input type="radio" name="shaping_default_step_seconds_${sessionId}" value="6" data-field="shaping_default_step_seconds" ${selectedStepSeconds === 6 ? 'checked' : ''}>
+                                                <span>6s</span>
+                                            </label>
+                                            <label class="shape-pattern-mode">
+                                                <input type="radio" name="shaping_default_step_seconds_${sessionId}" value="12" data-field="shaping_default_step_seconds" ${selectedStepSeconds === 12 ? 'checked' : ''}>
+                                                <span>12s</span>
+                                            </label>
+                                            <label class="shape-pattern-mode">
+                                                <input type="radio" name="shaping_default_step_seconds_${sessionId}" value="18" data-field="shaping_default_step_seconds" ${selectedStepSeconds === 18 ? 'checked' : ''}>
+                                                <span>18s</span>
+                                            </label>
+                                            <label class="shape-pattern-mode">
+                                                <input type="radio" name="shaping_default_step_seconds_${sessionId}" value="24" data-field="shaping_default_step_seconds" ${selectedStepSeconds === 24 ? 'checked' : ''}>
+                                                <span>24s</span>
+                                            </label>
+                                        </div>
                                     </div>
-                                    <span class="shape-default-seconds" data-field="shaping_default_seconds_label">segment ${segmentDurationSeconds}s</span>
-                                </div>
-
-                                <div class="shape-template-row">
-                                    <label>Margin</label>
-                                    <div class="shape-pattern-modes shape-margin-modes" data-field="shaping_template_margin_group">
-                                        <label class="shape-pattern-mode">
-                                            <input type="radio" name="shaping_template_margin_${sessionId}" value="0" data-field="shaping_template_margin_pct" ${marginPct === 0 ? 'checked' : ''}>
-                                            <span>Exact</span>
-                                        </label>
-                                        <label class="shape-pattern-mode">
-                                            <input type="radio" name="shaping_template_margin_${sessionId}" value="10" data-field="shaping_template_margin_pct" ${marginPct === 10 ? 'checked' : ''}>
-                                            <span>+10%</span>
-                                        </label>
-                                        <label class="shape-pattern-mode">
-                                            <input type="radio" name="shaping_template_margin_${sessionId}" value="25" data-field="shaping_template_margin_pct" ${marginPct === 25 ? 'checked' : ''}>
-                                            <span>+25%</span>
-                                        </label>
-                                        <label class="shape-pattern-mode">
-                                            <input type="radio" name="shaping_template_margin_${sessionId}" value="50" data-field="shaping_template_margin_pct" ${marginPct === 50 ? 'checked' : ''}>
-                                            <span>+50%</span>
-                                        </label>
+                                    <div class="shape-template-block">
+                                        <label>Margin</label>
+                                        <div class="shape-pattern-modes shape-margin-modes compact" data-field="shaping_template_margin_group">
+                                            <label class="shape-pattern-mode">
+                                                <input type="radio" name="shaping_template_margin_${sessionId}" value="0" data-field="shaping_template_margin_pct" ${marginPct === 0 ? 'checked' : ''}>
+                                                <span>Exact</span>
+                                            </label>
+                                            <label class="shape-pattern-mode">
+                                                <input type="radio" name="shaping_template_margin_${sessionId}" value="10" data-field="shaping_template_margin_pct" ${marginPct === 10 ? 'checked' : ''}>
+                                                <span>+10%</span>
+                                            </label>
+                                            <label class="shape-pattern-mode">
+                                                <input type="radio" name="shaping_template_margin_${sessionId}" value="25" data-field="shaping_template_margin_pct" ${marginPct === 25 ? 'checked' : ''}>
+                                                <span>+25%</span>
+                                            </label>
+                                            <label class="shape-pattern-mode">
+                                                <input type="radio" name="shaping_template_margin_${sessionId}" value="50" data-field="shaping_template_margin_pct" ${marginPct === 50 ? 'checked' : ''}>
+                                                <span>+50%</span>
+                                            </label>
+                                        </div>
                                     </div>
                                 </div>
 
                                 <div class="shape-step-list" data-field="shaping_pattern_rows" style="display:${usePattern ? '' : 'none'};">
-                                    ${initialSteps.map((step, idx) => renderPatternStepRow(idx, step, shapingPresets)).join('')}
+                                    ${initialSteps.map((step, idx) => renderPatternStepRow(idx, step, shapingPresets, { overheadMbps, marginPct })).join('')}
                                 </div>
                                 <div class="shape-step-actions" style="display:${usePattern ? '' : 'none'};">
                                     <button type="button" class="btn btn-secondary btn-mini" data-action="add-shaping-step">Add Step</button>
                                     <button type="button" class="btn btn-secondary btn-mini" data-action="clear-shaping-pattern">Clear</button>
+                                </div>
+                                <div class="shape-apply-pattern" data-field="shaping_apply_pattern_row" style="display:none;">
+                                    <button type="button" class="btn btn-primary" data-action="apply-pattern">Apply Pattern</button>
                                 </div>
 
                             </div>
@@ -778,11 +792,11 @@
                             </div>
                         </div>
                         <div class="chart-wrap">
-                            <canvas class="bandwidth-chart" width="820" height="220" data-field="bandwidth_chart"></canvas>
+                            <canvas class="bandwidth-chart" data-field="bandwidth_chart"></canvas>
                         </div>
                         ${showBufferDepthChart ? `
                         <div class="chart-wrap">
-                            <canvas class="buffer-depth-chart" width="820" height="170" data-field="buffer_depth_chart"></canvas>
+                            <canvas class="buffer-depth-chart" data-field="buffer_depth_chart"></canvas>
                         </div>
                         ` : ''}
                     </div>

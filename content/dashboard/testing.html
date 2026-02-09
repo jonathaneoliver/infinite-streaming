@@ -164,7 +164,7 @@
 
         <div class="panel">
             <div class="panel-header">
-                <div class="panel-title">Active Sessions</div>
+                <div class="panel-title">Active Sessions <span class="status-message" id="sseMissedBadge"></span></div>
                 <div class="btn-row">
                     <button class="btn btn-secondary" id="refreshSessions">Refresh</button>
                     <button class="btn btn-danger" id="clearSessions">Release All Sessions</button>
@@ -198,10 +198,13 @@
         const selectedSessionIds = new Set();
         const pendingFailureEdits = new Map();
         const controlRevisionBySession = new Map();
+        const sseMissedBadge = document.getElementById('sseMissedBadge');
         let activeSessionId = null;
         let isTabLocked = false;
         let sessionsStream = null;
         let sessionsPollTimer = null;
+        let sseLastRevision = 0;
+        let sseMissedTotal = 0;
         const failureSaveTimers = new Map();
         const failureSaveFields = new Map();
         const bandwidthHistory = new Map();
@@ -865,8 +868,18 @@
             const active = Number(session.mbps_out_active || 0);
             const patternSteps = Array.isArray(session.nftables_pattern_steps) ? session.nftables_pattern_steps : [];
             const patternStepIndex = Number(session.nftables_pattern_step_runtime || session.nftables_pattern_step || 0);
-            let limit = Number(session.nftables_pattern_rate_runtime_mbps || session.nftables_bandwidth_mbps || 0);
-            if (patternStepIndex > 0 && patternStepIndex <= patternSteps.length) {
+            const patternEnabled = session.nftables_pattern_enabled === true
+                || session.nftables_pattern_enabled === 1
+                || session.nftables_pattern_enabled === 'true';
+            const runtimeTarget = Number(session.nftables_pattern_rate_runtime_mbps);
+            const bandwidthTarget = Number(session.nftables_bandwidth_mbps);
+            let limit = Number.isFinite(bandwidthTarget) ? bandwidthTarget : 0;
+            let usedRuntime = false;
+            if (patternEnabled && Number.isFinite(runtimeTarget)) {
+                limit = runtimeTarget;
+                usedRuntime = true;
+            }
+            if (!usedRuntime && patternStepIndex > 0 && patternStepIndex <= patternSteps.length) {
                 const activeStepRate = Number(patternSteps[patternStepIndex - 1]?.rate_mbps);
                 if (Number.isFinite(activeStepRate) && activeStepRate >= 0) {
                     limit = activeStepRate;
@@ -1327,6 +1340,26 @@
             return [];
         }
 
+        function updateSseMissedBadge() {
+            if (!sseMissedBadge) return;
+            if (sseMissedTotal > 0) {
+                sseMissedBadge.textContent = `Missed updates: ${sseMissedTotal}`;
+            } else {
+                sseMissedBadge.textContent = '';
+            }
+        }
+
+        function parseSessionsStreamPayload(event) {
+            const data = JSON.parse(event.data);
+            if (Array.isArray(data)) {
+                return { sessions: data, revision: Number(event.lastEventId || 0), dropped: 0 };
+            }
+            const sessions = Array.isArray(data.sessions) ? data.sessions : [];
+            const revision = Number(data.revision || event.lastEventId || 0);
+            const dropped = Number(data.dropped || 0);
+            return { sessions, revision, dropped };
+        }
+
         function startSessionsPolling() {
             if (sessionsPollTimer) return;
             sessionsPollTimer = setInterval(fetchSessions, 5000);
@@ -1338,7 +1371,28 @@
             sessionsStream = source;
             source.addEventListener('sessions', (event) => {
                 try {
-                    const sessions = JSON.parse(event.data);
+                    const payload = parseSessionsStreamPayload(event);
+                    const sessions = payload.sessions;
+                    const revision = Number(payload.revision || 0);
+                    const dropped = Number(payload.dropped || 0);
+                    let missed = 0;
+                    if (Number.isFinite(revision) && revision > 0 && sseLastRevision > 0) {
+                        const gap = revision - sseLastRevision - 1;
+                        if (gap > 0) {
+                            missed += gap;
+                        }
+                    }
+                    if (Number.isFinite(dropped) && dropped > 0) {
+                        missed += dropped;
+                    }
+                    if (missed > 0) {
+                        sseMissedTotal += missed;
+                        updateSseMissedBadge();
+                        console.warn(`SSE missed ${missed} update${missed === 1 ? '' : 's'}`);
+                    }
+                    if (Number.isFinite(revision) && revision > 0) {
+                        sseLastRevision = revision;
+                    }
                     applySessionsList(sessions);
                 } catch (err) {
                     console.error('Error parsing sessions stream payload', err);

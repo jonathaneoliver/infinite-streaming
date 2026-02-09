@@ -5,7 +5,7 @@
    ============================================================================ */
 
 .collapsible-section {
-    margin: 16px 0;
+    margin: 10px 0;
     border: 1px solid #e0e0e0;
     border-radius: 6px;
     background: #fafafa;
@@ -14,7 +14,7 @@
 .collapsible-header {
     display: flex;
     align-items: center;
-    padding: 12px 16px;
+    padding: 8px 12px;
     cursor: pointer;
     user-select: none;
     transition: background-color 0.2s;
@@ -33,13 +33,13 @@
 
 .collapsible-title {
     font-weight: 600;
-    font-size: 14px;
+    font-size: 13px;
     color: #333;
     flex: 1;
 }
 
 .collapsible-badge {
-    font-size: 12px;
+    font-size: 11px;
     color: #666;
     background: #e8e8e8;
     padding: 4px 10px;
@@ -48,7 +48,7 @@
 }
 
 .collapsible-content {
-    padding: 16px;
+    padding: 12px;
     border-top: 1px solid #e0e0e0;
 }
 
@@ -57,7 +57,7 @@
    ============================================================================ */
 
 .fault-injection-section {
-    margin: 20px 0;
+    margin: 12px 0;
 }
 
 .section-title {
@@ -65,7 +65,7 @@
     font-size: 16px;
     color: #222;
     margin-bottom: 12px;
-    padding: 0 4px;
+        font-size: 13px;
 }
 
 .tabs-container {
@@ -83,10 +83,10 @@
 
 .tab-button {
     flex: 1;
-    padding: 12px 16px;
+    padding: 8px 12px;
     border: none;
     background: transparent;
-    font-size: 14px;
+    font-size: 13px;
     font-weight: 500;
     color: #666;
     cursor: pointer;
@@ -112,7 +112,7 @@
 
 .tab-panel {
     display: none;
-    padding: 20px;
+    padding: 12px;
 }
 
 .tab-panel.active {
@@ -124,7 +124,7 @@
    ============================================================================ */
 
 .fault-control-row {
-    margin-bottom: 16px;
+    margin-bottom: 10px;
 }
 
 .fault-control-row > label:first-child {
@@ -132,15 +132,15 @@
     font-weight: 600;
     font-size: 13px;
     color: #555;
-    margin-bottom: 8px;
+    margin-bottom: 6px;
 }
 
 .fault-control-row select {
     width: 100%;
-    padding: 8px 12px;
+    padding: 6px 10px;
     border: 1px solid #ddd;
     border-radius: 4px;
-    font-size: 14px;
+    font-size: 13px;
     background: white;
     cursor: pointer;
     transition: border-color 0.2s;
@@ -159,13 +159,13 @@
 .fault-control-row .checkbox-group {
     display: flex;
     flex-wrap: wrap;
-    gap: 8px;
+    gap: 6px;
 }
 
 .fault-control-row .checkbox-group label {
     display: inline-flex;
     align-items: center;
-    padding: 6px 12px;
+    padding: 4px 10px;
     background: #f5f5f5;
     border: 1px solid #ddd;
     border-radius: 4px;
@@ -185,7 +185,7 @@
 
 .fault-control-row .radio-group {
     display: flex;
-    gap: 12px;
+    gap: 8px;
 }
 
 .fault-control-row .radio-group label {
@@ -204,22 +204,22 @@
    ============================================================================ */
 
 .network-shaping-section {
-    margin: 20px 0;
+    margin: 12px 0;
     border: 1px solid #ddd;
     border-radius: 8px;
-    padding: 16px;
+    padding: 12px;
     background: white;
 }
 
 .shaping-basic-controls {
-    margin-bottom: 24px;
-    padding-bottom: 20px;
+    margin-bottom: 16px;
+    padding-bottom: 12px;
     border-bottom: 1px solid #e8e8e8;
 }
 
 .shaping-pattern-group {
     background: #fafafa;
-    padding: 16px;
+    padding: 12px;
     border-radius: 6px;
     border: 1px solid #e8e8e8;
 }
@@ -229,7 +229,33 @@
 }
 
 .shape-template-row {
-    margin-top: 16px;
+    margin-top: 10px;
+}
+
+.shape-template-row.shape-template-compact {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+}
+
+.shape-template-block {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.shape-template-block label {
+    font-size: 12px;
+    font-weight: 600;
+    color: #555;
+    margin: 0;
+    white-space: nowrap;
+}
+
+.shape-pattern-modes.compact {
+    flex-wrap: nowrap;
 }
 
 .shape-template-row:first-child {
@@ -237,14 +263,14 @@
 }
 
 .shape-step-defaults {
-    margin-top: 12px;
-    padding-top: 12px;
+    margin-top: 8px;
+    padding-top: 8px;
     border-top: 1px solid #e0e0e0;
 }
 
 .chart-axis-row {
-    margin-top: 20px;
-    padding-top: 16px;
+    margin-top: 12px;
+    padding-top: 10px;
     border-top: 1px solid #e0e0e0;
 }
 
@@ -255,12 +281,12 @@
 .range-row {
     display: flex;
     align-items: center;
-    gap: 12px;
-    margin-bottom: 12px;
+    gap: 8px;
+    margin-bottom: 8px;
 }
 
 .range-row label {
-    min-width: 140px;
+    min-width: 120px;
     font-weight: 500;
     font-size: 13px;
     color: #555;
@@ -271,10 +297,10 @@
 }
 
 .range-row .range-value {
-    min-width: 50px;
+    min-width: 42px;
     text-align: right;
     font-family: 'Monaco', 'Menlo', monospace;
-    font-size: 13px;
+    font-size: 12px;
     color: #333;
     font-weight: 600;
 }
@@ -290,25 +316,25 @@
 
 .shape-pattern-modes {
     display: flex;
-    gap: 8px;
+    gap: 6px;
     flex-wrap: wrap;
 }
 
 .shape-pattern-mode {
     display: inline-flex;
     align-items: center;
-    padding: 6px 12px;
-    background: white;
-    border: 1px solid #ddd;
-    border-radius: 4px;
+    padding: 4px 10px;
+    background: #f3f4f6;
+    border: none;
+    border-radius: 999px;
     cursor: pointer;
     transition: all 0.2s;
     font-size: 13px;
+    box-shadow: 0 1px 0 rgba(15, 23, 42, 0.06);
 }
 
 .shape-pattern-mode:hover {
-    background: #f9f9f9;
-    border-color: #999;
+    background: #e5e7eb;
 }
 
 .shape-pattern-mode input[type="radio"] {
@@ -332,13 +358,13 @@
 .shape-step-row {
     display: grid;
     grid-template-columns: auto 1fr auto 1fr auto 1fr auto auto;
-    gap: 8px;
+    gap: 6px;
     align-items: center;
-    padding: 10px;
+    padding: 4px;
     background: white;
     border: 1px solid #e0e0e0;
     border-radius: 4px;
-    margin-bottom: 8px;
+    margin-bottom: 2px;
 }
 
 .shape-step-row label {
@@ -349,10 +375,10 @@
 
 .shape-step-row select,
 .shape-step-row input[type="number"] {
-    padding: 6px 8px;
+    padding: 3px 6px;
     border: 1px solid #ddd;
     border-radius: 3px;
-    font-size: 13px;
+    font-size: 12px;
 }
 
 .shape-step-row .shape-step-enabled {
@@ -362,13 +388,19 @@
 }
 
 .shape-step-list {
-    margin-top: 12px;
+    margin-top: 8px;
 }
 
 .shape-step-actions {
-    margin-top: 12px;
+    margin-top: 8px;
     display: flex;
-    gap: 8px;
+    gap: 6px;
+}
+
+.apply-pattern-container {
+    margin-top: 8px;
+    display: flex;
+    gap: 6px;
 }
 
 /* ============================================================================
@@ -377,8 +409,8 @@
 
 .session-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-    gap: 12px;
+    grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+    gap: 8px;
 }
 
 .session-item {
@@ -388,7 +420,7 @@
 }
 
 .session-item .label {
-    font-size: 11px;
+    font-size: 10px;
     font-weight: 600;
     color: #888;
     text-transform: uppercase;
@@ -406,10 +438,10 @@
    ============================================================================ */
 
 .btn {
-    padding: 10px 20px;
+    padding: 8px 14px;
     border: none;
     border-radius: 4px;
-    font-size: 14px;
+    font-size: 13px;
     font-weight: 500;
     cursor: pointer;
     transition: all 0.2s;
@@ -436,14 +468,14 @@
 }
 
 .btn-mini {
-    padding: 6px 12px;
-    font-size: 12px;
+    padding: 4px 10px;
+    font-size: 11px;
 }
 
 .session-actions {
-    margin-top: 20px;
+    margin-top: 12px;
     display: flex;
-    gap: 12px;
+    gap: 8px;
 }
 
 /* ============================================================================
@@ -451,7 +483,7 @@
    ============================================================================ */
 
 .chart-wrap {
-    margin-top: 16px;
+    margin-top: 10px;
 }
 
 .bandwidth-chart,
@@ -462,6 +494,14 @@
     border-radius: 4px;
 }
 
+.bandwidth-chart {
+    height: 220px;
+}
+
+.buffer-depth-chart {
+    height: 170px;
+}
+
 /* ============================================================================
    Session Card
    ============================================================================ */
@@ -470,31 +510,31 @@
     background: white;
     border: 1px solid #ddd;
     border-radius: 8px;
-    padding: 20px;
-    margin-bottom: 24px;
+    padding: 12px;
+    margin-bottom: 16px;
 }
 
 .session-header {
     display: flex;
     justify-content: space-between;
     align-items: center;
-    margin-bottom: 20px;
-    padding-bottom: 16px;
+    margin-bottom: 12px;
+    padding-bottom: 10px;
     border-bottom: 2px solid #f0f0f0;
 }
 
 .session-title {
-    font-size: 20px;
+    font-size: 16px;
     font-weight: 700;
     color: #222;
 }
 
 .session-meta {
-    font-size: 14px;
+    font-size: 12px;
     color: #666;
     font-family: 'Monaco', 'Menlo', monospace;
     background: #f5f5f5;
-    padding: 4px 12px;
+    padding: 3px 10px;
     border-radius: 4px;
 }
 
@@ -526,6 +566,18 @@
         gap: 6px;
     }
 
+    .shape-template-row.shape-template-compact {
+        align-items: flex-start;
+    }
+
+    .shape-template-block {
+        width: 100%;
+    }
+
+    .shape-pattern-modes.compact {
+        flex-wrap: wrap;
+    }
+
     .fault-control-row .checkbox-group {
         flex-direction: column;
     }
@@ -537,8 +589,8 @@
 
 .shape-default-seconds {
     display: inline-block;
-    margin-left: 12px;
-    font-size: 12px;
+    margin-left: 8px;
+    font-size: 11px;
     color: #888;
     font-family: 'Monaco', 'Menlo', monospace;
 }
@@ -548,7 +600,7 @@
    ============================================================================ */
 
 .session-inline-player {
-    margin-bottom: 16px;
+    margin-bottom: 10px;
 }
 
 /* ============================================================================
