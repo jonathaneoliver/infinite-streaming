@@ -18,7 +18,8 @@
         ],
         testing: [
             { id: 'playback', icon: '▶️', text: 'Playback', href: '/dashboard/playback.html' },
-            { id: 'testing', icon: '🧪', text: 'Testing', href: '/dashboard/testing.html' },
+            { id: 'test-playback', icon: '🧭', text: 'Testing Playback', href: '/dashboard/testing-session.html?nav=1' },
+            { id: 'testing', icon: '🧪', text: 'Testing Monitor', href: '/dashboard/testing.html' },
             { id: 'quartet', icon: '🎬', text: 'Quartet', href: '/dashboard/quartet.html' },
             { id: 'grid', icon: '🎮', text: 'Mosaic', href: '/dashboard/grid.html', warning: true },
             { id: 'segment-duration', icon: '⏱️', text: 'Live Offset', href: '/dashboard/segment-duration-comparison.html' }
@@ -125,6 +126,36 @@
         const base = normalizeTestingBaseUrl(url);
         const separator = base.includes('?') ? '&' : '?';
         return `${base}${separator}player_id=${encodeURIComponent(playerId)}`;
+    }
+
+    function createPlayerId() {
+        if (window.crypto && window.crypto.getRandomValues) {
+            const bytes = new Uint8Array(6);
+            window.crypto.getRandomValues(bytes);
+            let value = '';
+            bytes.forEach(byte => {
+                value += byte.toString(16).padStart(2, '0');
+            });
+            return value.slice(0, 8);
+        }
+        return Math.random().toString(36).slice(2, 10);
+    }
+
+    function getOrCreateTestPlaybackPlayerId() {
+        const storageKey = 'bossTestPlaybackPlayerId';
+        try {
+            const stored = localStorage.getItem(storageKey);
+            if (stored) return stored;
+        } catch {
+            return createPlayerId();
+        }
+        const id = createPlayerId();
+        try {
+            localStorage.setItem(storageKey, id);
+        } catch {
+            // Ignore storage failures (e.g., quota, disabled storage).
+        }
+        return id;
     }
 
     // Get active page
@@ -394,6 +425,7 @@
         const badge = document.getElementById('bossSelectedContent');
         const demoLink = document.getElementById('nav-hlsjs-demo');
         const shakaLink = document.getElementById('nav-shaka-demo');
+        const testPlaybackLink = document.getElementById('nav-test-playback');
         if (!badge) return;
         const full = localStorage.getItem('bossSelectedContentFull') || localStorage.getItem('bossSelectedContent');
         const base = localStorage.getItem('bossSelectedContentBase');
@@ -417,6 +449,10 @@
                 demoLink.href = 'https://hlsjs.video-dev.org/demo/';
                 demoLink.removeAttribute('aria-disabled');
             }
+            if (testPlaybackLink) {
+                testPlaybackLink.href = '/dashboard/testing-session.html?nav=1';
+                testPlaybackLink.removeAttribute('aria-disabled');
+            }
             return;
         }
 
@@ -432,7 +468,7 @@
             urlSpan.textContent = url;
             badge.appendChild(urlSpan);
             badge.title = `${label ? `Selected: ${label}\n` : ''}${url}`;
-            if (demoLink || shakaLink) {
+            if (demoLink || shakaLink || testPlaybackLink) {
                 let absoluteUrl;
                 try {
                     absoluteUrl = normalizeTestingBaseUrl(url);
@@ -443,6 +479,12 @@
                         const suffix = url.startsWith('/') ? url : `/${url}`;
                         absoluteUrl = `${window.location.origin}${suffix}`;
                     }
+                }
+                if (testPlaybackLink) {
+                    const playerId = getOrCreateTestPlaybackPlayerId();
+                    testPlaybackLink.href = `/dashboard/testing-session.html?url=${encodeURIComponent(absoluteUrl)}&player_id=${encodeURIComponent(playerId)}&nav=1`;
+                    testPlaybackLink.removeAttribute('aria-disabled');
+                    testPlaybackLink.title = 'Open selected stream in Testing Playback';
                 }
                 if (demoLink) {
                     demoLink.href = `${window.location.origin}/testing/hlsjs/index.html?src=${encodeURIComponent(absoluteUrl)}`;
@@ -464,6 +506,10 @@
             if (shakaLink) {
                 shakaLink.href = `${window.location.origin}/testing/shaka-player-test.html`;
                 shakaLink.removeAttribute('aria-disabled');
+            }
+            if (testPlaybackLink) {
+                testPlaybackLink.href = '/dashboard/testing-session.html?nav=1';
+                testPlaybackLink.removeAttribute('aria-disabled');
             }
         }
 
@@ -543,8 +589,27 @@
         }
     }
 
+    let cachedServerVersion = null;
+
+    async function fetchServerVersion() {
+        if (cachedServerVersion) return cachedServerVersion;
+        try {
+            const response = await fetch('/api/version');
+            if (!response.ok) {
+                throw new Error(`HTTP ${response.status}`);
+            }
+            const data = await response.json();
+            const version = String(data.version || '').trim();
+            cachedServerVersion = version || 'unknown';
+        } catch (error) {
+            cachedServerVersion = 'unknown';
+        }
+        return cachedServerVersion;
+    }
+
     // Show server info modal
-    function showInfo() {
+    async function showInfo() {
+        const version = await fetchServerVersion();
         const info = `
 InfiniteStream - Media Testing Platform
 
@@ -560,7 +625,7 @@ Features:
 • Live streaming simulation
 • Network shaping & throttling
 
-Version: 2.0
+Version: ${version}
         `.trim();
         
         alert(info);
@@ -1012,20 +1077,19 @@ Version: 2.0
         },
         grid: {
             title: 'Mosaic',
-            purpose: 'Quickly preview all available streams and spot issues at a glance.',
+            purpose: 'Quickly preview all available streams.',
             steps: [
                 'Select content, codec, and segment length to filter tiles.',
+                'Left-click a tile to make it the currently selected stream.',
                 'Right-click a tile to open testing tools.'
             ],
             needsContent: true
         },
         playback: {
             title: 'Playback',
-            purpose: 'Deep-dive a single stream with player diagnostics and error injection.',
+            purpose: 'Deep-dive a single stream with player diagnostics.',
             steps: [
-                'Choose content, codec, and segment length.',
-                'Use player controls and the testing menu to inject failures.'
-            ],
+                'Choose content, codec, and segment length.'            ],
             needsContent: true
         },
         quartet: {
@@ -1048,7 +1112,7 @@ Version: 2.0
         },
         testing: {
             title: 'Testing',
-            purpose: 'Create test sessions and inject failures into playback.',
+            purpose: 'Monitor ALL testing sessions and inject failures.',
             steps: [
                 'Start a session and open a testing player.',
                 'Adjust failure controls while the stream plays.'
@@ -1062,7 +1126,9 @@ Version: 2.0
                 'Use Retry Fetch, Restart Playback, and Reload Page to force immediate player actions.',
                 'Select the player engine (Auto, HTML5, HLS.js, Shaka, Video.js) to compare behavior.',
                 'Configure Segment/Playlist/Manifest failures (type, frequency, consecutive, and variants) to simulate errors.',
-                'Adjust network shaping sliders (throughput, delay, loss) when supported to test bandwidth constraints.',
+                'Adjust network shaping sliders (throughput, delay, loss) when supported to test bandwidth constraints.',                
+                'Automatic throughput patterns for test ABR rampup/down/pyramid.',
+                'Grouping of individual streaming session so they all share the same failure and network conditions.',
                 'Watch the bandwidth chart to compare selected limits vs actual throughput over time.',
                 'Use the right-click menu to open the stream in external test pages (e.g., HLS.js demo) for deeper logs.'
             ],
@@ -1097,9 +1163,7 @@ Version: 2.0
             title: 'Monitor',
             purpose: 'Watch live generation status and health in real time.',
             steps: [
-                'Check health and active streams.',
-                'Use this when testing live workflows.'
-            ]
+                'Check health and active streams.'            ]
         }
     };
 
@@ -1154,7 +1218,7 @@ Version: 2.0
         panel.id = 'panelHelp';
         panel.className = 'panel-help';
         panel.innerHTML = `
-            <div class="panel-help-title">${help.title}</div>
+            <div class="panel-help-title">Help</div>
             <label class="panel-help-expert">
                 <input type="checkbox" id="panelHelpExpertToggle">
                 Expert
@@ -1164,11 +1228,7 @@ Version: 2.0
             ${needsContentNote}
         `;
 
-        if (activePage === 'testing-session') {
-            helpContainer.appendChild(panel);
-        } else {
-            helpContainer.prepend(panel);
-        }
+        helpContainer.appendChild(panel);
 
         const toggle = document.getElementById('panelHelpExpertToggle');
         if (toggle) {
@@ -1191,18 +1251,7 @@ Version: 2.0
         setSelectedUrl: setSelectedUrl,
         normalizeTestingBaseUrl: normalizeTestingBaseUrl,
         buildTestingUrl: buildTestingUrl,
-        createPlayerId: function() {
-            if (window.crypto && window.crypto.getRandomValues) {
-                const bytes = new Uint8Array(6);
-                window.crypto.getRandomValues(bytes);
-                let value = '';
-                bytes.forEach(byte => {
-                    value += byte.toString(16).padStart(2, '0');
-                });
-                return value.slice(0, 8);
-            }
-            return Math.random().toString(36).slice(2, 10);
-        }
+        createPlayerId: createPlayerId
     };
 
     // Auto-initialize on DOM ready (unless disabled)

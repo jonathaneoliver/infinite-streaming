@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Testing - InfiniteStream</title>
+    <title>Testing Monitor - InfiniteStream</title>
     <link rel="stylesheet" href="/shared-styles.css">
     <style>
         .page-header {
@@ -158,8 +158,8 @@
 <body>
     <div class="boss-content-wide">
         <div class="page-header">
-            <div class="page-title">Testing</div>
-            <div class="page-subtitle">Launch sessions on port 30081 and tune failure settings per session.</div>
+            <div class="page-title">Testing Monitor</div>
+            <div class="page-subtitle" id="testingSubtitle">Launch sessions and tune failure settings per session.</div>
         </div>
 
         <div class="panel">
@@ -175,6 +175,23 @@
     </div>
 
     <script src="/shared-nav.js"></script>
+    <script>
+        (() => {
+            const subtitle = document.getElementById('testingSubtitle');
+            if (!subtitle) return;
+            let port = window.location.port || (window.location.protocol === 'https:' ? '443' : '80');
+            if (window.BOSSNav && typeof window.BOSSNav.normalizeTestingBaseUrl === 'function') {
+                try {
+                    const normalized = window.BOSSNav.normalizeTestingBaseUrl(window.location.origin);
+                    const parsed = new URL(normalized);
+                    port = parsed.port || port;
+                } catch (err) {
+                    console.warn('Failed to resolve testing port', err);
+                }
+            }
+            subtitle.textContent = `Launch sessions on port ${port} and tune failure settings per session.`;
+        })();
+    </script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
     <link rel="stylesheet" href="/dashboard/testing-session-refactored.css">
     <script src="/dashboard/testing-session-ui-refactored.js"></script>

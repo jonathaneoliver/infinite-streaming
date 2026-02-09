@@ -64,7 +64,7 @@ build-push-lenovo: build-lenovo push-lenovo
 build-push-lenovo-all: buildx-lenovo-all push-lenovo-all
 
 build-go-proxy-lenovo:
-	docker build --no-cache --progress=plain -t $(LENOVO_REGISTRY)/$(LENOVO_PROXY_REPO):latest ./go-proxy
+	docker build --no-cache --progress=plain --build-arg VERSION=$(shell cat VERSION) -t $(LENOVO_REGISTRY)/$(LENOVO_PROXY_REPO):latest ./go-proxy
 
 push-go-proxy-lenovo:
 	docker push $(LENOVO_REGISTRY)/$(LENOVO_PROXY_REPO):latest
@@ -100,7 +100,7 @@ status-lenovo-k3s:
 
 deploy:
 	docker buildx build --platform linux/amd64 -t $(LENOVO_REGISTRY)/$(LENOVO_SERVER_REPO):dev --push .
-	docker buildx build --platform linux/amd64 -t $(LENOVO_REGISTRY)/$(LENOVO_PROXY_REPO):dev --push ./go-proxy
+	docker buildx build --platform linux/amd64 --build-arg VERSION=$(shell cat VERSION) -t $(LENOVO_REGISTRY)/$(LENOVO_PROXY_REPO):dev --push ./go-proxy
 	$(MAKE) deploy-lenovo-k3s K3S_KUBECONFIG=$(K3S_KUBECONFIG) K8S_MANIFESTS=k8s-infinite-streaming-dev.yaml K8S_DEPLOYMENT=infinite-streaming-dev LENOVO_SERVER_IMAGE=$(LENOVO_REGISTRY)/$(LENOVO_SERVER_REPO):dev LENOVO_PROXY_IMAGE=$(LENOVO_REGISTRY)/$(LENOVO_PROXY_REPO):dev
 
 logs:
@@ -108,5 +108,5 @@ logs:
 
 deploy-release:
 	docker buildx build --platform linux/amd64 -t $(LENOVO_SERVER_IMAGE) --push .
-	docker buildx build --platform linux/amd64 -t $(LENOVO_PROXY_IMAGE) --push ./go-proxy
+	docker buildx build --platform linux/amd64 --build-arg VERSION=$(shell cat VERSION) -t $(LENOVO_PROXY_IMAGE) --push ./go-proxy
 	$(MAKE) deploy-lenovo-k3s K3S_KUBECONFIG=$(K3S_KUBECONFIG) LENOVO_SERVER_IMAGE=$(LENOVO_SERVER_IMAGE) LENOVO_PROXY_IMAGE=$(LENOVO_PROXY_IMAGE)

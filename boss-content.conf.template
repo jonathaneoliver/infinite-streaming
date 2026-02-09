@@ -156,6 +156,14 @@ server {
         add_header Expires "0" always;
     }
 
+    location = /api/version {
+        proxy_pass http://go_proxy;
+        add_header Access-Control-Allow-Origin * always;
+        add_header Cache-Control "no-cache, no-store, must-revalidate" always;
+        add_header Pragma "no-cache" always;
+        add_header Expires "0" always;
+    }
+
     location = /api/sessions/stream {
         proxy_pass http://go_proxy;
         proxy_buffering off;
