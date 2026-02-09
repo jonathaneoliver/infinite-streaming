@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Testing Player - InfiniteStream</title>
+    <title>Testing Playback - InfiniteStream</title>
     <link rel="stylesheet" href="/shared-styles.css">
     <link href="https://vjs.zencdn.net/8.21.1/video-js.css" rel="stylesheet" />
     <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.7"></script>
@@ -61,6 +61,34 @@
         .panel-badge.videojs { background: #fce7f3; color: #9d174d; }
         .panel-badge.native { background: #e0f2fe; color: #0369a1; }
         .panel-badge.group { background: #fde68a; color: #92400e; }
+
+        .context-menu {
+            position: fixed;
+            background: #0f172a;
+            border: 1px solid rgba(255,255,255,0.12);
+            box-shadow: 0 12px 30px rgba(0,0,0,0.35);
+            border-radius: 8px;
+            padding: 6px;
+            display: none;
+            z-index: 9999;
+            min-width: 200px;
+        }
+
+        .context-menu button {
+            width: 100%;
+            background: transparent;
+            border: none;
+            text-align: left;
+            padding: 8px 10px;
+            font-size: 12px;
+            color: #e5e7eb;
+            border-radius: 6px;
+            cursor: pointer;
+        }
+
+        .context-menu button:hover {
+            background: rgba(59, 130, 246, 0.2);
+        }
         .group-controls-row {
             display: flex;
             flex-direction: column;
@@ -492,7 +520,7 @@
     <div class="boss-content-wide">
         <div class="page-header">
             <div>
-                <div class="page-title" id="pageTitle">Testing Player</div>
+                <div class="page-title" id="pageTitle">Testing Playback</div>
                 <div class="page-subtitle" id="playerUrl">Loading…</div>
             </div>
             <div class="panel-badges" id="playerBadges"></div>
@@ -539,6 +567,16 @@
         </div>
     </div>
 
+    <script>
+        (() => {
+            const params = new URLSearchParams(window.location.search);
+            if (params.get('nav') === '1') {
+                document.body.removeAttribute('data-boss-no-sidebar');
+                document.body.removeAttribute('data-boss-no-header');
+                document.body.dataset.bossActivePage = 'test-playback';
+            }
+        })();
+    </script>
     <script src="/shared-nav.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
     <link rel="stylesheet" href="/dashboard/testing-session-refactored.css">
@@ -552,6 +590,7 @@
         let videojsPlayer = null;
         let stallCount = 0;
         let currentSessionId = null;
+        let currentPlayerId = '';
         let currentUrl = '';
         let autoRetryCount = 0;
         let autoRetryTimer = null;
@@ -631,6 +670,11 @@
             logEl.scrollTop = logEl.scrollHeight;
         }
 
+        function logPatternDebug(message, data) {
+            const payload = data ? ` ${JSON.stringify(data)}` : '';
+            console.warn(`[pattern-debug] ${new Date().toISOString()} ${message}${payload}`);
+        }
+
         function updateSseMissedUi() {
             if (!sseMissedEl) return;
             sseMissedEl.textContent = String(sseMissedTotal);
@@ -659,6 +703,128 @@
         function normalizeBitrateAxisMaxMode(value) {
             const normalized = String(value || 'auto').toLowerCase();
             return ['auto', '5', '10', '20', '40'].includes(normalized) ? normalized : 'auto';
+        }
+
+        function createTestingPlayerId() {
+            if (window.BOSSNav && typeof window.BOSSNav.createPlayerId === 'function') {
+                return window.BOSSNav.createPlayerId();
+            }
+            return Math.random().toString(36).slice(2, 10);
+        }
+
+        function normalizeTestingBase(url) {
+            if (window.BOSSNav && typeof window.BOSSNav.normalizeTestingBaseUrl === 'function') {
+                return window.BOSSNav.normalizeTestingBaseUrl(url);
+            }
+            const parsed = new URL(url, window.location.origin);
+            parsed.port = '30081';
+            return parsed.toString();
+        }
+
+        function buildTestingUrl(url, playerId) {
+            if (window.BOSSNav && typeof window.BOSSNav.buildTestingUrl === 'function') {
+                return window.BOSSNav.buildTestingUrl(url, playerId);
+            }
+            const base = normalizeTestingBase(url);
+            const separator = base.includes('?') ? '&' : '?';
+            return `${base}${separator}player_id=${encodeURIComponent(playerId)}`;
+        }
+
+        function copyTestingUrl(url) {
+            if (!url) return;
+            if (!navigator.clipboard) {
+                const input = document.createElement('input');
+                input.value = url;
+                document.body.appendChild(input);
+                input.select();
+                document.execCommand('copy');
+                document.body.removeChild(input);
+                return;
+            }
+            navigator.clipboard.writeText(url).catch(err => console.warn('Clipboard write failed', err));
+        }
+
+        function openTestingWindow(url) {
+            if (!url) return;
+            let baseUrl = url;
+            try {
+                const parsed = new URL(url, window.location.origin);
+                parsed.searchParams.delete('player_id');
+                baseUrl = parsed.toString();
+            } catch (err) {
+                console.warn('Failed to normalize testing URL', err);
+            }
+            const playerId = createTestingPlayerId();
+            const testingUrl = buildTestingUrl(baseUrl, playerId);
+            const pageUrl = `/dashboard/testing-session.html?player_id=${encodeURIComponent(playerId)}&url=${encodeURIComponent(testingUrl)}`;
+            const popup = window.open(pageUrl, '_blank');
+            if (!popup) {
+                alert('Popup blocked. Allow popups for this site.');
+            }
+        }
+
+        function openHlsjsDemo(url) {
+            if (!url || url.includes('.mpd')) {
+                alert('HLS.js demo only supports HLS (.m3u8).');
+                return;
+            }
+            const demoUrl = `https://hlsjs.video-dev.org/demo/?src=${encodeURIComponent(url)}`;
+            const popup = window.open(demoUrl, '_blank');
+            if (!popup) {
+                alert('Popup blocked. Allow popups for this site.');
+            }
+        }
+
+        function initContextMenu() {
+            const isDeveloperMode = new URLSearchParams(window.location.search).get('developer') === '1';
+            const menu = document.createElement('div');
+            menu.className = 'context-menu';
+            menu.id = 'testingContextMenu';
+            menu.innerHTML = `
+                <button id="contextOpenTesting">Open in Testing Window</button>
+                <button id="contextCopyTesting">Copy Testing URL</button>
+                ${isDeveloperMode ? '<button id="contextOpenHlsjsDemo">Open in HLS.js Demo</button>' : ''}
+            `;
+            document.body.appendChild(menu);
+
+            document.getElementById('contextOpenTesting').addEventListener('click', () => {
+                const url = menu.dataset.url;
+                if (url) openTestingWindow(url);
+                menu.style.display = 'none';
+            });
+            document.getElementById('contextCopyTesting').addEventListener('click', () => {
+                const url = menu.dataset.url;
+                if (url) copyTestingUrl(url);
+                menu.style.display = 'none';
+            });
+            const hlsjsButton = document.getElementById('contextOpenHlsjsDemo');
+            if (hlsjsButton) {
+                hlsjsButton.addEventListener('click', () => {
+                    const url = menu.dataset.url;
+                    if (url) openHlsjsDemo(url);
+                    menu.style.display = 'none';
+                });
+            }
+
+            document.addEventListener('click', () => {
+                menu.style.display = 'none';
+            });
+
+            const showMenu = (event) => {
+                event.preventDefault();
+                const url = currentUrl || '';
+                if (!url) return;
+                menu.dataset.url = url;
+                menu.style.left = `${event.clientX}px`;
+                menu.style.top = `${event.clientY}px`;
+                menu.style.display = 'block';
+            };
+
+            video.addEventListener('contextmenu', showMenu);
+            const frame = document.querySelector('.player-frame');
+            if (frame) {
+                frame.addEventListener('contextmenu', showMenu);
+            }
         }
 
         function extractHlsHttpFailure(data) {
@@ -711,9 +877,52 @@
 
         function getParams() {
             const params = new URLSearchParams(window.location.search);
+            let url = params.get('url') || '';
+            if (!url) {
+                url = localStorage.getItem('bossSelectedUrl') || '';
+            }
+            if (url && window.BOSSNav && typeof window.BOSSNav.normalizeTestingBaseUrl === 'function') {
+                try {
+                    url = window.BOSSNav.normalizeTestingBaseUrl(url);
+                } catch (err) {
+                    console.warn('Failed to normalize Testing Playback URL', err);
+                }
+            }
+            let playerId = params.get('player_id') || '';
+            if (!playerId) {
+                playerId = localStorage.getItem('bossTestPlaybackPlayerId') || '';
+            }
+            if (!playerId) {
+                if (window.BOSSNav && typeof window.BOSSNav.createPlayerId === 'function') {
+                    playerId = window.BOSSNav.createPlayerId();
+                } else {
+                    playerId = Math.random().toString(36).slice(2, 10);
+                }
+                try {
+                    localStorage.setItem('bossTestPlaybackPlayerId', playerId);
+                } catch (err) {
+                    console.warn('Failed to persist Testing Playback player id', err);
+                }
+            }
+            if (url) {
+                try {
+                    const parsed = new URL(url, window.location.origin);
+                    if (!parsed.searchParams.get('player_id') && playerId) {
+                        parsed.searchParams.set('player_id', playerId);
+                    }
+                    url = parsed.toString();
+                } catch (err) {
+                    console.warn('Failed to attach player id to URL', err);
+                }
+                try {
+                    localStorage.setItem('bossSelectedUrl', url);
+                } catch (err) {
+                    console.warn('Failed to persist selected url', err);
+                }
+            }
             return {
-                playerId: params.get('player_id') || '',
-                url: params.get('url') || '',
+                playerId: playerId,
+                url: url,
                 player: params.get('player') || ''
             };
         }
@@ -1039,6 +1248,26 @@
                 sectionDefaults: collapseDefaults
             });
             TestingSessionUI.applyCollapsibleState(container);
+            const card = container.querySelector('.session-card');
+            if (card) {
+                const presetsRaw = card.dataset.shapingPresets || '';
+                const videoPresetsRaw = card.dataset.shapingVideoPresets || '';
+                const hasVariants = Array.isArray(session?.manifest_variants) && session.manifest_variants.length > 0;
+                const emptyPresets = presetsRaw === '' || presetsRaw === 'W10%3D';
+                if (!hasVariants || emptyPresets) {
+                    logPatternDebug('render_session_controls_missing_presets', {
+                        sessionId: session?.session_id || null,
+                        playerId: session?.player_id || null,
+                        manifestVariants: Array.isArray(session?.manifest_variants) ? session.manifest_variants.length : null,
+                        manifestUrl: session?.manifest_url || null,
+                        masterManifestUrl: session?.master_manifest_url || null,
+                        lastRequestUrl: session?.last_request_url || null,
+                        lastRequestAt: session?.last_request || null,
+                        shapingPresetsRaw: presetsRaw,
+                        shapingVideoPresetsRaw: videoPresetsRaw
+                    });
+                }
+            }
         }
 
         function formatSessionLabel(session) {
@@ -1047,6 +1276,26 @@
             const portSuffix = portValue ? ` (Port ${portValue})` : '';
             const playerLabel = session.player_id ? ` · ${session.player_id}` : '';
             return `Session ${session.session_id}${portSuffix}${playerLabel}`;
+        }
+
+        function formatDate(value) {
+            if (window.TestingSessionUI && typeof TestingSessionUI.formatDate === 'function') {
+                return TestingSessionUI.formatDate(value);
+            }
+            if (!value) return '—';
+            const date = new Date(value);
+            return date.toLocaleString();
+        }
+
+        function formatDuration(seconds) {
+            if (window.TestingSessionUI && typeof TestingSessionUI.formatDuration === 'function') {
+                return TestingSessionUI.formatDuration(seconds);
+            }
+            if (!seconds && seconds !== 0) return '—';
+            const hrs = Math.floor(seconds / 3600).toString().padStart(2, '0');
+            const mins = Math.floor((seconds % 3600) / 60).toString().padStart(2, '0');
+            const secs = Math.floor(seconds % 60).toString().padStart(2, '0');
+            return `${hrs}:${mins}:${secs}`;
         }
 
         function renderGroupControls(session, sessions) {
@@ -1644,6 +1893,12 @@
         function bindSessionControls() {
             const container = document.getElementById('sessionControls');
             const shapingTimers = new Map();
+            const patternDebugSeen = new Set();
+            const logPatternOnce = (key, data) => {
+                if (patternDebugSeen.has(key)) return;
+                patternDebugSeen.add(key);
+                logPatternDebug(key, data);
+            };
             const scheduleShapingApply = (card) => {
                 const sessionId = card.dataset.sessionId;
                 if (shapingTimers.has(sessionId)) {
@@ -1655,7 +1910,13 @@
             };
             const getShapingPresets = (card) => {
                 const raw = card.dataset.shapingPresets || '';
-                if (!raw) return [];
+                if (!raw) {
+                    logPatternOnce(`empty_shaping_presets_${card.dataset.sessionId || 'unknown'}`, {
+                        sessionId: card.dataset.sessionId || null,
+                        shapingPresetsRaw: raw
+                    });
+                    return [];
+                }
                 try {
                     const parsed = JSON.parse(decodeURIComponent(raw));
                     if (!Array.isArray(parsed)) return [];
@@ -1667,7 +1928,13 @@
             };
             const getShapingVideoPresets = (card) => {
                 const raw = card.dataset.shapingVideoPresets || '';
-                if (!raw) return [];
+                if (!raw) {
+                    logPatternOnce(`empty_video_presets_${card.dataset.sessionId || 'unknown'}`, {
+                        sessionId: card.dataset.sessionId || null,
+                        shapingVideoPresetsRaw: raw
+                    });
+                    return [];
+                }
                 try {
                     const parsed = JSON.parse(decodeURIComponent(raw));
                     if (!Array.isArray(parsed)) return [];
@@ -1756,6 +2023,13 @@
                 const mode = getTemplateMode(card);
                 const presets = getShapingVideoPresets(card);
                 if (mode === 'sliders' || !presets.length) {
+                    if (mode !== 'sliders' && !presets.length) {
+                        logPatternOnce(`template_steps_empty_${card.dataset.sessionId || 'unknown'}_${mode}`, {
+                            sessionId: card.dataset.sessionId || null,
+                            templateMode: mode,
+                            videoPresetsCount: presets.length
+                        });
+                    }
                     return [];
                 }
                 const marginPct = Number(card.querySelector('input[data-field="shaping_template_margin_pct"]:checked')?.value || 0);
@@ -1906,6 +2180,18 @@
                     // Reset state when template mode changes, preserve when margin/overhead changes
                     const resetState = event.target.dataset.field === 'shaping_template_mode';
                     const templateMode = getTemplateMode(card);
+                    if (event.target.dataset.field === 'shaping_template_mode') {
+                        const presetsCount = getShapingVideoPresets(card).length;
+                        logPatternDebug('template_mode_change', {
+                            sessionId: card.dataset.sessionId || null,
+                            templateMode,
+                            presetsCount,
+                            manifestUrl: lastServerSession?.manifest_url || null,
+                            masterManifestUrl: lastServerSession?.master_manifest_url || null,
+                            lastRequestUrl: lastServerSession?.last_request_url || null,
+                            lastRequestAt: lastServerSession?.last_request || null
+                        });
+                    }
                     if (templateMode === 'sliders') {
                         // In sliders mode, apply immediately as before
                         applyTemplatePattern(card, true, resetState);
@@ -2178,6 +2464,30 @@
                     }
                 }
             }
+        }
+
+        function updateSessionDetailData(card, session) {
+            if (!card || !session) return;
+            const setText = (selector, value) => {
+                const el = card.querySelector(selector);
+                if (!el) return;
+                el.textContent = value;
+            };
+            const portDisplay = session.x_forwarded_port_external || session.x_forwarded_port || '—';
+            setText('[data-field="session_user_agent"]', session.user_agent || '—');
+            setText('[data-field="session_player_ip"]', session.player_ip || '—');
+            setText('[data-field="session_port_display"]', portDisplay);
+            setText('[data-field="session_last_request"]', formatDate(session.last_request));
+            setText('[data-field="session_first_request"]', formatDate(session.first_request_time));
+            setText('[data-field="session_duration"]', formatDuration(session.session_duration));
+            setText('[data-field="session_manifest_url"]', session.manifest_url || '—');
+            setText('[data-field="session_master_manifest_url"]', session.master_manifest_url || '—');
+            setText('[data-field="session_last_request_url"]', session.last_request_url || '—');
+            setText('[data-field="session_measured_mbps"]', session.measured_mbps || '—');
+            const masterCount = session.master_manifest_requests_count || 0;
+            const manifestCount = session.manifest_requests_count || 0;
+            const segmentCount = session.segments_count || 0;
+            setText('[data-field="session_detail_counts"]', `M:${masterCount} / Man:${manifestCount} / Seg:${segmentCount}`);
         }
 
         function pushBandwidthSample(session) {
@@ -2591,7 +2901,7 @@
             if (session.session_id) {
                 const portValue = session.x_forwarded_port_external || session.x_forwarded_port || '';
                 const portSuffix = portValue ? ` (Port ${portValue})` : '';
-                const titleParts = ['Testing Player', `Session ${session.session_id}${portSuffix}`];
+                const titleParts = ['Testing Playback', `Session ${session.session_id}${portSuffix}`];
                 if (session.player_id) {
                     titleParts.push(session.player_id);
                 }
@@ -2611,7 +2921,16 @@
             if (container && existingCard && String(existingCard.dataset.sessionId || '') === sessionKey) {
                 // Check if manifest_variants just became available - need to re-render for presets
                 const hasVariants = Array.isArray(session.manifest_variants) && session.manifest_variants.length > 0;
-                const hadPresets = existingCard.dataset.shapingPresets && existingCard.dataset.shapingPresets !== 'W10%3D'; // 'W10%3D' is encoded '[]'
+                let hadPresets = false;
+                const presetsRaw = existingCard.dataset.shapingPresets || '';
+                if (presetsRaw) {
+                    try {
+                        const decoded = JSON.parse(decodeURIComponent(presetsRaw));
+                        hadPresets = Array.isArray(decoded) && decoded.length > 0;
+                    } catch (err) {
+                        hadPresets = presetsRaw !== 'W10%3D' && presetsRaw !== '%5B%5D';
+                    }
+                }
                 if (hasVariants && !hadPresets) {
                     // Re-render to populate presets now that variants are available
                     renderSessionControls(session);
@@ -2625,11 +2944,13 @@
                     syncNetworkShapingControls(existingCard, session);
                 }
                 syncServerFaultData(existingCard, session);
+                updateSessionDetailData(existingCard, session);
                 updateThroughputSlider(session);
                 pushBandwidthSample(session);
                 return;
             }
             renderSessionControls(session);
+            updateSessionDetailData(container.querySelector('.session-card'), session);
             updateThroughputSlider(session);
             pushBandwidthSample(session);
         }
@@ -2716,8 +3037,9 @@
 
         function bootstrap() {
             const params = getParams();
+            currentPlayerId = params.playerId || '';
             if (params.playerId) {
-                const titleText = `Testing Player · ${params.playerId}`;
+                const titleText = `Testing Playback · ${params.playerId}`;
                 document.title = titleText;
                 const titleEl = document.getElementById('pageTitle');
                 if (titleEl) {
@@ -2789,6 +3111,7 @@
         }
 
         document.addEventListener('DOMContentLoaded', bootstrap);
+        document.addEventListener('DOMContentLoaded', initContextMenu);
     </script>
 </body>
 </html>

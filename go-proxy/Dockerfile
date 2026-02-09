@@ -1,6 +1,8 @@
 FROM golang:1.21-alpine AS build
 WORKDIR /app
 
+ARG VERSION=unknown
+
 RUN go mod init github.com/boss/go-proxy
 
 COPY . .
@@ -8,7 +10,7 @@ RUN go get github.com/gorilla/mux
 RUN go get github.com/bradfitz/gomemcache/memcache
 RUN go get github.com/grafov/m3u8
 
-RUN go build -o go-proxy cmd/server/main.go
+RUN go build -ldflags "-X main.versionString=${VERSION}" -o go-proxy cmd/server/main.go
 
 FROM alpine:3.18
 WORKDIR /app

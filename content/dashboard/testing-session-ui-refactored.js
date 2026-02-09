@@ -485,20 +485,20 @@
                     <div class="collapsible-header" data-toggle="session-details">
                         <span class="collapsible-icon">${sessionDetailsOpen ? '▼' : '▶'}</span>
                         <span class="collapsible-title">Session Details</span>
-                        <span class="collapsible-badge">M:${masterCount} / Man:${manifestCount} / Seg:${segmentCount}</span>
+                        <span class="collapsible-badge" data-field="session_detail_counts">M:${masterCount} / Man:${manifestCount} / Seg:${segmentCount}</span>
                     </div>
                     <div class="collapsible-content" data-content="session-details" style="display: ${sessionDetailsOpen ? 'block' : 'none'};">
                         <div class="session-grid">
-                            <div class="session-item"><span class="label">User Agent</span><span class="value">${session.user_agent || '—'}</span></div>
-                            <div class="session-item"><span class="label">Player IP</span><span class="value">${session.player_ip || '—'}</span></div>
-                            ${showPortItem ? `<div class="session-item"><span class="label">Port</span><span class="value">${portDisplay}</span></div>` : ''}
-                            <div class="session-item"><span class="label">Last Request</span><span class="value">${formatDate(session.last_request)}</span></div>
-                            <div class="session-item"><span class="label">First Request</span><span class="value">${formatDate(session.first_request_time)}</span></div>
-                            <div class="session-item"><span class="label">Session Duration</span><span class="value">${formatDuration(session.session_duration)}</span></div>
-                            <div class="session-item"><span class="label">Manifest URL</span><span class="value">${session.manifest_url || '—'}</span></div>
-                            <div class="session-item"><span class="label">Master Manifest URL</span><span class="value">${session.master_manifest_url || '—'}</span></div>
-                            <div class="session-item"><span class="label">Last Request URL</span><span class="value">${session.last_request_url || '—'}</span></div>
-                            <div class="session-item"><span class="label">Measured Mbps</span><span class="value">${session.measured_mbps || '—'}</span></div>
+                            <div class="session-item"><span class="label">User Agent</span><span class="value" data-field="session_user_agent">${session.user_agent || '—'}</span></div>
+                            <div class="session-item"><span class="label">Player IP</span><span class="value" data-field="session_player_ip">${session.player_ip || '—'}</span></div>
+                            ${showPortItem ? `<div class="session-item"><span class="label">Port</span><span class="value" data-field="session_port_display">${portDisplay}</span></div>` : ''}
+                            <div class="session-item"><span class="label">Last Request</span><span class="value" data-field="session_last_request">${formatDate(session.last_request)}</span></div>
+                            <div class="session-item"><span class="label">First Request</span><span class="value" data-field="session_first_request">${formatDate(session.first_request_time)}</span></div>
+                            <div class="session-item"><span class="label">Session Duration</span><span class="value" data-field="session_duration">${formatDuration(session.session_duration)}</span></div>
+                            <div class="session-item"><span class="label">Manifest URL</span><span class="value" data-field="session_manifest_url">${session.manifest_url || '—'}</span></div>
+                            <div class="session-item"><span class="label">Master Manifest URL</span><span class="value" data-field="session_master_manifest_url">${session.master_manifest_url || '—'}</span></div>
+                            <div class="session-item"><span class="label">Last Request URL</span><span class="value" data-field="session_last_request_url">${session.last_request_url || '—'}</span></div>
+                            <div class="session-item"><span class="label">Measured Mbps</span><span class="value" data-field="session_measured_mbps">${session.measured_mbps || '—'}</span></div>
                         </div>
                     </div>
                 </div>

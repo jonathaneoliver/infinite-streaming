@@ -32,6 +32,8 @@ import (
 //go:embed templates/index.html
 var indexHTML string
 
+var versionString = "unknown"
+
 type SessionData map[string]interface{}
 
 type App struct {
@@ -701,6 +703,7 @@ func main() {
 	router.HandleFunc("/debug", app.handleDebug).Methods(http.MethodGet)
 	router.HandleFunc("/api/nftables/status", app.handleNftStatus).Methods(http.MethodGet)
 	router.HandleFunc("/api/nftables/capabilities", app.handleNftCapabilities).Methods(http.MethodGet)
+	router.HandleFunc("/api/version", app.handleVersion).Methods(http.MethodGet)
 	router.HandleFunc("/api/nftables/port/{port}", app.handleNftPort).Methods(http.MethodGet)
 	router.HandleFunc("/api/nftables/bandwidth/{port}", app.handleNftBandwidth).Methods(http.MethodPost)
 	router.HandleFunc("/api/nftables/loss/{port}", app.handleNftLoss).Methods(http.MethodPost)
@@ -740,6 +743,14 @@ func corsMiddleware(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+func (a *App) handleVersion(w http.ResponseWriter, r *http.Request) {
+	version := strings.TrimSpace(versionString)
+	if version == "" {
+		version = "unknown"
+	}
+	writeJSON(w, map[string]string{"version": version})
 }
 
 func (a *App) handleIndex(w http.ResponseWriter, r *http.Request) {
@@ -2840,6 +2851,7 @@ func transportModeFromConsecutiveUnits(units string) string {
 
 func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 	filename := strings.TrimPrefix(r.URL.Path, "/")
+	escapedPath := strings.TrimPrefix(r.URL.EscapedPath(), "/")
 	if filename == "" {
 		w.WriteHeader(http.StatusNotFound)
 		return
@@ -2873,7 +2885,7 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 				assignedNum, _ := strconv.Atoi(assigned)
 				newPort := replaceThirdFromLastDigit(externalPort, assignedNum)
 				host := hostWithoutPort(r.Host)
-				newURL := fmt.Sprintf("http://%s:%s/%s", host, newPort, filename)
+				newURL := fmt.Sprintf("http://%s:%s/%s", host, newPort, escapedPath)
 				if r.URL.RawQuery != "" {
 					newURL = newURL + "?" + r.URL.RawQuery
 				}
@@ -2974,7 +2986,7 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 		sessionList = append(sessionList, sessionData)
 		a.saveSessionList(sessionList)
 		host := hostWithoutPort(r.Host)
-		newURL := fmt.Sprintf("http://%s:%s/%s", host, assignedExternalPort, filename)
+		newURL := fmt.Sprintf("http://%s:%s/%s", host, assignedExternalPort, escapedPath)
 		if r.URL.RawQuery != "" {
 			newURL = newURL + "?" + r.URL.RawQuery
 		}
@@ -3026,7 +3038,7 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	upstreamURL := fmt.Sprintf("http://%s:%s/%s", a.upstreamHost, a.upstreamPort, filename)
+	upstreamURL := fmt.Sprintf("http://%s:%s/%s", a.upstreamHost, a.upstreamPort, escapedPath)
 	contentType, isMasterManifest, isManifest, isSegment, playlistInfo := a.getContentType(upstreamURL)
 	requestKind := requestKindLabel(isSegment, isManifest, isMasterManifest)
 
@@ -3186,6 +3198,16 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {
+		log.Printf(
+			"PROXY upstream_status status=%d url=%s filename=%s request_kind=%s session_id=%s player_id=%s external_port=%s",
+			resp.StatusCode,
+			upstreamURL,
+			filename,
+			requestKind,
+			getString(sessionData, "session_id"),
+			getString(sessionData, "player_id"),
+			externalPort,
+		)
 		w.WriteHeader(resp.StatusCode)
 		return
 	}
