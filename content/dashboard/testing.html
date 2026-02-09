@@ -343,12 +343,13 @@
             updateStepRiskUi(card, row);
         }
 
-        function makeShapeStepRow(card, rate, seconds, enabled = true) {
+        function makeShapeStepRow(card, rate, seconds, enabled = true, matchOptions = {}) {
             const row = document.createElement('div');
             row.className = 'shape-step-row';
             row.innerHTML = TestingSessionUI.renderPatternStepRowContent(
                 { rate_mbps: rate, duration_seconds: seconds, enabled },
-                getShapingPresets(card)
+                getShapingPresets(card),
+                matchOptions
             );
             syncStepPreset(row);
             setStepEnabledUi(card, row, enabled);
@@ -378,11 +379,13 @@
             const throughputInput = card.querySelector('input[data-field="shaping_throughput_mbps"]');
             const stepList = card.querySelector('[data-field="shaping_pattern_rows"]');
             const stepActions = card.querySelector('.shape-step-actions');
+            const applyButton = card.querySelector('[data-field="shaping_apply_pattern_row"]');
             const usePattern = mode !== 'sliders';
             if (throughputRow) throughputRow.classList.toggle('range-row-disabled', usePattern);
             if (throughputInput) throughputInput.disabled = usePattern;
             if (stepList) stepList.style.display = usePattern ? '' : 'none';
             if (stepActions) stepActions.style.display = usePattern ? '' : 'none';
+            if (applyButton) applyButton.style.display = usePattern ? '' : 'none';
         }
 
         function buildTemplateSteps(card) {
@@ -426,15 +429,54 @@
                 .map((rate) => ({ rate_mbps: adjustRate(rate), duration_seconds: defaultSeconds }));
         }
 
-        function applyTemplatePattern(card, shouldSchedule) {
+        function applyTemplatePattern(card, shouldSchedule, resetState = false) {
             const mode = getTemplateMode(card);
             const rowsHost = card.querySelector('[data-field="shaping_pattern_rows"]');
+
+            // Capture current step states before regenerating (unless resetting)
+            const currentSteps = [];
+            if (rowsHost && !resetState) {
+                const existingRows = rowsHost.querySelectorAll('.shape-step-row');
+                existingRows.forEach((row) => {
+                    const presetSelect = row.querySelector('select[data-field="shaping_step_mbps_preset"]');
+                    const mbpsInput = row.querySelector('input[data-field="shaping_step_mbps"]');
+                    const secondsInput = row.querySelector('input[data-field="shaping_step_seconds"]');
+                    const enabledCheckbox = row.querySelector('input[data-field="shaping_step_enabled"]');
+                    currentSteps.push({
+                        isCustom: presetSelect?.value === 'custom',
+                        customMbps: mbpsInput ? Number(mbpsInput.value) : null,
+                        customSeconds: secondsInput ? Number(secondsInput.value) : null,
+                        enabled: enabledCheckbox ? enabledCheckbox.checked : true
+                    });
+                });
+            }
+
             const steps = buildTemplateSteps(card);
             updateTemplateModeUi(card);
             if (rowsHost && mode !== 'sliders' && steps.length > 0) {
+                // Preserve custom values and disabled states (unless resetting)
+                if (!resetState) {
+                    steps.forEach((step, index) => {
+                        if (currentSteps[index]) {
+                            if (currentSteps[index].isCustom && Number.isFinite(currentSteps[index].customMbps)) {
+                                step.rate_mbps = currentSteps[index].customMbps;
+                            }
+                            if (Number.isFinite(currentSteps[index].customSeconds)) {
+                                step.duration_seconds = currentSteps[index].customSeconds;
+                            }
+                            step.enabled = currentSteps[index].enabled;
+                        }
+                    });
+                }
+
+                // Get current margin and overhead for preset labels
+                const marginPct = Number(card.querySelector('input[data-field="shaping_template_margin_pct"]:checked')?.value || 0);
+                const overheadMbps = getShapingOverheadMbps(card);
+                const matchOptions = { marginPct, overheadMbps };
+
                 rowsHost.innerHTML = '';
                 steps.forEach((step) => {
-                    rowsHost.appendChild(makeShapeStepRow(card, step.rate_mbps, step.duration_seconds));
+                    rowsHost.appendChild(makeShapeStepRow(card, step.rate_mbps, step.duration_seconds, step.enabled, matchOptions));
                 });
                 updateStepIndices(card);
                 const throughputInput = card.querySelector('input[data-field="shaping_throughput_mbps"]');
@@ -1509,14 +1551,25 @@
                 return;
             }
             if (target.dataset.field && target.dataset.field.startsWith('shaping_template_')) {
-                applyTemplatePattern(card, true);
+                // Reset state when template mode changes, preserve when margin/overhead changes
+                const resetState = target.dataset.field === 'shaping_template_mode';
+                const templateMode = getTemplateMode(card);
+                if (templateMode === 'sliders') {
+                    // In sliders mode, apply immediately as before
+                    applyTemplatePattern(card, true, resetState);
+                } else {
+                    // In pattern mode, just regenerate the UI without applying
+                    applyTemplatePattern(card, false, resetState);
+                }
                 return;
             }
             if (target.dataset.field === 'shaping_default_step_seconds') {
-                if (getTemplateMode(card) !== 'sliders') {
-                    applyTemplatePattern(card, true);
-                } else {
+                const templateMode = getTemplateMode(card);
+                if (templateMode === 'sliders') {
                     scheduleShapingApply(card);
+                } else {
+                    // In pattern mode, just regenerate the UI without applying
+                    applyTemplatePattern(card, false);
                 }
                 return;
             }
@@ -1614,6 +1667,10 @@
             const card = button.closest('.session-card');
             if (!card) return;
             const sessionId = card.dataset.sessionId;
+            if (button.dataset.action === 'apply-pattern') {
+                scheduleShapingApply(card);
+                return;
+            }
             if (button.dataset.action === 'add-shaping-step') {
                 const rowsHost = card.querySelector('[data-field="shaping_pattern_rows"]');
                 const throughput = Number(card.querySelector('input[data-field="shaping_throughput_mbps"]')?.value || 0);
@@ -1621,7 +1678,10 @@
                 if (rowsHost) {
                     rowsHost.appendChild(makeShapeStepRow(card, throughput, defaultSeconds));
                     updateStepIndices(card);
-                    scheduleShapingApply(card);
+                    const templateMode = getTemplateMode(card);
+                    if (templateMode === 'sliders') {
+                        scheduleShapingApply(card);
+                    }
                 }
                 return;
             }
@@ -1630,7 +1690,10 @@
                 if (row) {
                     row.remove();
                     updateStepIndices(card);
-                    scheduleShapingApply(card);
+                    const templateMode = getTemplateMode(card);
+                    if (templateMode === 'sliders') {
+                        scheduleShapingApply(card);
+                    }
                 }
                 return;
             }
@@ -1638,7 +1701,10 @@
                 const rowsHost = card.querySelector('[data-field="shaping_pattern_rows"]');
                 if (rowsHost) {
                     rowsHost.innerHTML = '';
-                    scheduleShapingApply(card);
+                    const templateMode = getTemplateMode(card);
+                    if (templateMode === 'sliders') {
+                        scheduleShapingApply(card);
+                    }
                 }
                 return;
             }
