@@ -19,7 +19,7 @@
             align-items: center;
             justify-content: space-between;
             gap: 12px;
-            margin-bottom: 16px;
+            margin-bottom: 10px;
         }
 
         .page-title {
@@ -38,7 +38,7 @@
             background: var(--bg-primary);
             border-radius: 12px;
             box-shadow: var(--shadow-md);
-            padding: 16px;
+            padding: 12px;
         }
 
         .player-actions {
@@ -47,7 +47,7 @@
             justify-content: flex-end;
             align-items: center;
             gap: 10px;
-            margin-bottom: 10px;
+            margin-bottom: 6px;
         }
 
         .player-select {
@@ -68,7 +68,7 @@
             margin-bottom: 12px;
             border: 1px solid #e5e7eb;
             border-radius: 12px;
-            padding: 12px;
+            padding: 8px;
             background: #f8fafc;
         }
         .group-banner {
@@ -76,7 +76,7 @@
             align-items: center;
             justify-content: space-between;
             gap: 12px;
-            padding: 8px 10px;
+            padding: 6px 8px;
             border-radius: 10px;
             border: 1px solid #bbf7d0;
             background: #ecfdf3;
@@ -120,17 +120,17 @@
         }
 
         .stats-grid {
-            margin-top: 12px;
+            margin-top: 8px;
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
-            gap: 10px;
+            gap: 8px;
             font-size: 12px;
         }
 
         .stats-item {
             background: var(--bg-secondary);
             border-radius: 6px;
-            padding: 8px 10px;
+            padding: 6px 8px;
         }
 
         .stats-item .label {
@@ -146,11 +146,11 @@
         }
 
         .debug-log {
-            margin-top: 12px;
+            margin-top: 8px;
             background: #0b1220;
             color: #e5e7eb;
             border-radius: 10px;
-            padding: 10px;
+            padding: 8px;
             font-family: 'Courier New', monospace;
             font-size: 11px;
             max-height: 200px;
@@ -158,24 +158,24 @@
         }
 
         .session-panel {
-            margin-top: 16px;
+            margin-top: 12px;
             background: var(--bg-primary);
             border-radius: 12px;
             box-shadow: var(--shadow-md);
-            padding: 16px;
+            padding: 12px;
         }
 
         .session-panel h3 {
             font-size: 14px;
             font-weight: 600;
             color: var(--text-primary);
-            margin-bottom: 10px;
+            margin-bottom: 6px;
         }
 
         .session-card {
             background: var(--bg-secondary);
             border-radius: 10px;
-            padding: 14px;
+            padding: 10px;
             border: 1px solid var(--border-color);
         }
 
@@ -185,7 +185,7 @@
             justify-content: space-between;
             flex-wrap: wrap;
             gap: 10px;
-            margin-bottom: 10px;
+            margin-bottom: 6px;
         }
 
         .session-title {
@@ -524,6 +524,7 @@
                 <div class="stats-item"><span class="label">Buffer Depth</span><span class="value" id="statBufferDepth">--</span></div>
                 <div class="stats-item"><span class="label">Live Offset</span><span class="value" id="statLiveOffset">--</span></div>
                 <div class="stats-item"><span class="label">Bitrate</span><span class="value" id="statBitrate">--</span></div>
+                <div class="stats-item"><span class="label">SSE Missed</span><span class="value" id="statSseMissed">0</span></div>
                 <div class="stats-item"><span class="label">Dropped Frames</span><span class="value" id="statDropped">0</span></div>
                 <div class="stats-item"><span class="label">Stalls</span><span class="value" id="statStalls">0</span></div>
             </div>
@@ -544,6 +545,7 @@
     <script src="/dashboard/testing-session-ui-refactored.js"></script>
     <script>
         const logEl = document.getElementById('debugLog');
+        const sseMissedEl = document.getElementById('statSseMissed');
         const video = document.getElementById('player');
         let hlsInstance = null;
         let shakaPlayer = null;
@@ -554,6 +556,7 @@
         let autoRetryCount = 0;
         let autoRetryTimer = null;
         const pendingShaping = new Map();
+        const lastAppliedShaping = new Map();
         const pendingFailureEdits = new Map();
         const controlRevisionBySession = new Map();
         const bandwidthHistory = new Map();
@@ -584,6 +587,11 @@
         };
         const collapseStoragePrefix = 'testing_session_collapse_';
         let lastServerSession = null;
+        let sseLastRevision = 0;
+        let sseMissedTotal = 0;
+        let lastRuntimeRateLogged = null;
+        let lastStepRateLogged = null;
+        let lastStepIndexLogged = null;
 
         function getStoredCollapseState(key) {
             try {
@@ -621,6 +629,22 @@
             line.textContent = `${new Date().toLocaleTimeString()} ${message}`;
             logEl.appendChild(line);
             logEl.scrollTop = logEl.scrollHeight;
+        }
+
+        function updateSseMissedUi() {
+            if (!sseMissedEl) return;
+            sseMissedEl.textContent = String(sseMissedTotal);
+        }
+
+        function parseSessionsStreamPayload(event) {
+            const data = JSON.parse(event.data);
+            if (Array.isArray(data)) {
+                return { sessions: data, revision: Number(event.lastEventId || 0), dropped: 0 };
+            }
+            const sessions = Array.isArray(data.sessions) ? data.sessions : [];
+            const revision = Number(data.revision || event.lastEventId || 0);
+            const dropped = Number(data.dropped || 0);
+            return { sessions, revision, dropped };
         }
 
         function logHttpFailure(source, status, url) {
@@ -1390,6 +1414,34 @@
             };
         }
 
+        function getTemplateMode(card) {
+            const selected = card.querySelector('input[data-field="shaping_template_mode"]:checked');
+            return selected ? selected.value : 'sliders';
+        }
+
+        function updateTemplateModeUi(card) {
+            const mode = getTemplateMode(card);
+            const throughputRow = card.querySelector('[data-field="shaping_throughput_row"]');
+            const throughputInput = card.querySelector('input[data-field="shaping_throughput_mbps"]');
+            const stepList = card.querySelector('[data-field="shaping_pattern_rows"]');
+            const stepActions = card.querySelector('.shape-step-actions');
+            const applyButton = card.querySelector('[data-field="shaping_apply_pattern_row"]');
+            const usePattern = mode !== 'sliders';
+            if (throughputRow) {
+                throughputRow.classList.toggle('range-row-disabled', usePattern);
+            }
+            if (throughputInput) throughputInput.disabled = usePattern;
+            if (stepList) {
+                stepList.style.display = usePattern ? '' : 'none';
+            }
+            if (stepActions) {
+                stepActions.style.display = usePattern ? '' : 'none';
+            }
+            if (applyButton) {
+                applyButton.style.display = usePattern ? '' : 'none';
+            }
+        }
+
         function syncNetworkShapingControls(card, session) {
             if (!card || !session) return;
             const sessionId = String(card.dataset.sessionId || session.session_id || '');
@@ -1678,12 +1730,13 @@
                 });
                 updateStepRiskUi(card, row);
             };
-            const makeShapeStepRow = (card, rate, seconds, enabled = true) => {
+            const makeShapeStepRow = (card, rate, seconds, enabled = true, matchOptions = {}) => {
                 const row = document.createElement('div');
                 row.className = 'shape-step-row';
                 row.innerHTML = TestingSessionUI.renderPatternStepRowContent(
                     { rate_mbps: rate, duration_seconds: seconds, enabled },
-                    getShapingPresets(card)
+                    getShapingPresets(card),
+                    matchOptions
                 );
                 syncStepPreset(row);
                 setStepEnabledUi(card, row, enabled);
@@ -1698,28 +1751,6 @@
             const getDefaultStepSeconds = (card) => {
                 const pattern = TestingSessionUI.readShapingPattern(card);
                 return pattern.default_step_seconds;
-            };
-            const getTemplateMode = (card) => {
-                const selected = card.querySelector('input[data-field="shaping_template_mode"]:checked');
-                return selected ? selected.value : 'sliders';
-            };
-            const updateTemplateModeUi = (card) => {
-                const mode = getTemplateMode(card);
-                const throughputRow = card.querySelector('[data-field="shaping_throughput_row"]');
-                const throughputInput = card.querySelector('input[data-field="shaping_throughput_mbps"]');
-                const stepList = card.querySelector('[data-field="shaping_pattern_rows"]');
-                const stepActions = card.querySelector('.shape-step-actions');
-                const usePattern = mode !== 'sliders';
-                if (throughputRow) {
-                    throughputRow.classList.toggle('range-row-disabled', usePattern);
-                }
-                if (throughputInput) throughputInput.disabled = usePattern;
-                if (stepList) {
-                    stepList.style.display = usePattern ? '' : 'none';
-                }
-                if (stepActions) {
-                    stepActions.style.display = usePattern ? '' : 'none';
-                }
             };
             const buildTemplateSteps = (card) => {
                 const mode = getTemplateMode(card);
@@ -1771,15 +1802,54 @@
                     .filter((rate) => Number.isFinite(rate) && rate >= 0)
                     .map((rate) => ({ rate_mbps: adjustRate(rate), duration_seconds: defaultSeconds }));
             };
-            const applyTemplatePattern = (card, shouldSchedule) => {
+            const applyTemplatePattern = (card, shouldSchedule, resetState = false) => {
                 const mode = getTemplateMode(card);
                 const rowsHost = card.querySelector('[data-field="shaping_pattern_rows"]');
+                
+                // Capture current step states before regenerating (unless resetting)
+                const currentSteps = [];
+                if (rowsHost && !resetState) {
+                    const existingRows = rowsHost.querySelectorAll('.shape-step-row');
+                    existingRows.forEach((row) => {
+                        const presetSelect = row.querySelector('select[data-field="shaping_step_mbps_preset"]');
+                        const mbpsInput = row.querySelector('input[data-field="shaping_step_mbps"]');
+                        const secondsInput = row.querySelector('input[data-field="shaping_step_seconds"]');
+                        const enabledCheckbox = row.querySelector('input[data-field="shaping_step_enabled"]');
+                        currentSteps.push({
+                            isCustom: presetSelect?.value === 'custom',
+                            customMbps: mbpsInput ? Number(mbpsInput.value) : null,
+                            customSeconds: secondsInput ? Number(secondsInput.value) : null,
+                            enabled: enabledCheckbox ? enabledCheckbox.checked : true
+                        });
+                    });
+                }
+                
                 const steps = buildTemplateSteps(card);
                 updateTemplateModeUi(card);
                 if (rowsHost && mode !== 'sliders' && steps.length > 0) {
+                    // Preserve custom values and disabled states (unless resetting)
+                    if (!resetState) {
+                        steps.forEach((step, index) => {
+                            if (currentSteps[index]) {
+                                if (currentSteps[index].isCustom && Number.isFinite(currentSteps[index].customMbps)) {
+                                    step.rate_mbps = currentSteps[index].customMbps;
+                                }
+                                if (Number.isFinite(currentSteps[index].customSeconds)) {
+                                    step.duration_seconds = currentSteps[index].customSeconds;
+                                }
+                                step.enabled = currentSteps[index].enabled;
+                            }
+                        });
+                    }
+                    
+                    // Get current margin and overhead for preset labels
+                    const marginPct = Number(card.querySelector('input[data-field="shaping_template_margin_pct"]:checked')?.value || 0);
+                    const overheadMbps = getShapingOverheadMbps(card);
+                    const matchOptions = { marginPct, overheadMbps };
+                    
                     rowsHost.innerHTML = '';
                     steps.forEach((step) => {
-                        rowsHost.appendChild(makeShapeStepRow(card, step.rate_mbps, step.duration_seconds));
+                        rowsHost.appendChild(makeShapeStepRow(card, step.rate_mbps, step.duration_seconds, step.enabled, matchOptions));
                     });
                     updateStepIndices(card);
                     const throughputInput = card.querySelector('input[data-field="shaping_throughput_mbps"]');
@@ -1833,14 +1903,25 @@
                     return;
                 }
                 if (event.target.dataset.field && event.target.dataset.field.startsWith('shaping_template_')) {
-                    applyTemplatePattern(card, true);
+                    // Reset state when template mode changes, preserve when margin/overhead changes
+                    const resetState = event.target.dataset.field === 'shaping_template_mode';
+                    const templateMode = getTemplateMode(card);
+                    if (templateMode === 'sliders') {
+                        // In sliders mode, apply immediately as before
+                        applyTemplatePattern(card, true, resetState);
+                    } else {
+                        // In pattern mode, just regenerate the UI without applying
+                        applyTemplatePattern(card, false, resetState);
+                    }
                     return;
                 }
                 if (event.target.dataset.field === 'shaping_default_step_seconds') {
-                    if (getTemplateMode(card) !== 'sliders') {
-                        applyTemplatePattern(card, true);
-                    } else {
+                    const templateMode = getTemplateMode(card);
+                    if (templateMode === 'sliders') {
                         scheduleShapingApply(card);
+                    } else {
+                        // In pattern mode, just regenerate the UI without applying
+                        applyTemplatePattern(card, false);
                     }
                     return;
                 }
@@ -1906,6 +1987,10 @@
                 if (!button) return;
                 const card = button.closest('.session-card');
                 if (!card) return;
+                if (button.dataset.action === 'apply-pattern') {
+                    scheduleShapingApply(card);
+                    return;
+                }
                 if (button.dataset.action === 'add-shaping-step') {
                     const rowsHost = card.querySelector('[data-field="shaping_pattern_rows"]');
                     const throughput = Number(card.querySelector('input[data-field="shaping_throughput_mbps"]')?.value || 0);
@@ -1913,7 +1998,10 @@
                     if (rowsHost) {
                         rowsHost.appendChild(makeShapeStepRow(card, throughput, defaultSeconds));
                         updateStepIndices(card);
-                        scheduleShapingApply(card);
+                        const templateMode = getTemplateMode(card);
+                        if (templateMode === 'sliders') {
+                            scheduleShapingApply(card);
+                        }
                     }
                     return;
                 }
@@ -1922,7 +2010,10 @@
                     if (row && row.parentElement) {
                         row.remove();
                         updateStepIndices(card);
-                        scheduleShapingApply(card);
+                        const templateMode = getTemplateMode(card);
+                        if (templateMode === 'sliders') {
+                            scheduleShapingApply(card);
+                        }
                     }
                     return;
                 }
@@ -1930,7 +2021,10 @@
                     const rowsHost = card.querySelector('[data-field="shaping_pattern_rows"]');
                     if (rowsHost) {
                         rowsHost.innerHTML = '';
-                        scheduleShapingApply(card);
+                        const templateMode = getTemplateMode(card);
+                        if (templateMode === 'sliders') {
+                            scheduleShapingApply(card);
+                        }
                     }
                     return;
                 }
@@ -1974,6 +2068,9 @@
                 return input ? Number(input.value) : 0;
             };
             const pattern = TestingSessionUI.readShapingPattern(card);
+            const usePattern = pattern.template_mode !== 'sliders'
+                && Array.isArray(pattern.steps)
+                && pattern.steps.length > 0;
             const payload = {
                 rate_mbps: getValue('shaping_throughput_mbps'),
                 delay_ms: getValue('shaping_delay_ms'),
@@ -1987,14 +2084,20 @@
                         nftables_bandwidth_mbps: payload.rate_mbps,
                         nftables_delay_ms: payload.delay_ms,
                         nftables_packet_loss: payload.loss_pct,
-                        nftables_pattern_enabled: true,
-                        nftables_pattern_steps: pattern.steps || [],
+                        nftables_pattern_enabled: usePattern,
+                        nftables_pattern_steps: usePattern ? (pattern.steps || []) : [],
                         nftables_pattern_segment_duration_seconds: pattern.segment_duration_seconds,
                         nftables_pattern_default_segments: pattern.default_segments,
                         nftables_pattern_default_step_seconds: pattern.default_step_seconds,
                         nftables_pattern_template_mode: pattern.template_mode,
                         nftables_pattern_margin_pct: pattern.template_margin_pct
                     }
+                });
+                lastAppliedShaping.set(sessionId, {
+                    timestamp: Date.now(),
+                    rate: payload.rate_mbps,
+                    delay: payload.delay_ms,
+                    loss: payload.loss_pct
                 });
                 setTimeout(() => {
                     const pending = pendingShaping.get(sessionId);
@@ -2009,6 +2112,7 @@
                 body: JSON.stringify(payload)
             })
                 .then(() => {
+                    if (!usePattern) return null;
                     const patternPayload = {
                         steps: pattern.steps || [],
                         segment_duration_seconds: pattern.segment_duration_seconds,
@@ -2048,12 +2152,41 @@
                 });
         }
 
+        function updateThroughputSlider(session) {
+            if (!session) return;
+            const container = document.getElementById('sessionControls');
+            const card = container ? container.querySelector('.session-card') : null;
+            if (!card) return;
+            const patternEnabled = session.nftables_pattern_enabled === true
+                || session.nftables_pattern_enabled === 1
+                || session.nftables_pattern_enabled === 'true';
+            if (patternEnabled) {
+                const runtimeRate = Number(session.nftables_pattern_rate_runtime_mbps);
+                if (Number.isFinite(runtimeRate) && runtimeRate >= 0) {
+                    console.log('[throughput-slider]', {
+                        ts: new Date().toISOString(),
+                        runtimeRateMbps: runtimeRate,
+                        sseRevision: sseLastRevision
+                    });
+                    const throughputInput = card.querySelector('input[data-field="shaping_throughput_mbps"]');
+                    const throughputValue = card.querySelector('[data-field="shaping_throughput_row"] .range-value');
+                    if (throughputInput) {
+                        throughputInput.value = String(runtimeRate);
+                    }
+                    if (throughputValue) {
+                        throughputValue.textContent = String(runtimeRate);
+                    }
+                }
+            }
+        }
+
         function pushBandwidthSample(session) {
             const now = Date.now();
             const windowMs = 5 * 60 * 1000;
-            const actual = Number(session.mbps_out_avg || session.mbps_out || 0);
-            const actual1s = Number(session.mbps_out_1s || 0);
-            const active = Number(session.mbps_out_active || 0);
+            const actualRaw = session.mbps_out_avg ?? session.mbps_out;
+            const actual = Number.isFinite(Number(actualRaw)) ? Number(actualRaw) : null;
+            const actual1s = Number.isFinite(Number(session.mbps_out_1s)) ? Number(session.mbps_out_1s) : null;
+            const active = Number.isFinite(Number(session.mbps_out_active)) ? Number(session.mbps_out_active) : null;
             let bufferDepth = null;
             if (video && video.buffered && video.buffered.length > 0) {
                 const current = Number(video.currentTime || 0);
@@ -2067,16 +2200,78 @@
             const currentRendition = Number(currentRenditionMbps || 0);
             const patternSteps = Array.isArray(session.nftables_pattern_steps) ? session.nftables_pattern_steps : [];
             const patternStepIndex = Number(session.nftables_pattern_step_runtime || session.nftables_pattern_step || 0);
-            let target = Number(session.nftables_pattern_rate_runtime_mbps || session.nftables_bandwidth_mbps || 0);
+            const bandwidthTarget = Number(session.nftables_bandwidth_mbps);
+            const runtimeTarget = Number(session.nftables_pattern_rate_runtime_mbps);
+            const patternEnabled = session.nftables_pattern_enabled === true
+                || session.nftables_pattern_enabled === 1
+                || session.nftables_pattern_enabled === 'true';
+            const runtimeRate = Number.isFinite(runtimeTarget) ? runtimeTarget : NaN;
+            let stepRate = NaN;
             if (patternStepIndex > 0 && patternStepIndex <= patternSteps.length) {
-                const activeStepRate = Number(patternSteps[patternStepIndex - 1]?.rate_mbps);
-                if (Number.isFinite(activeStepRate) && activeStepRate >= 0) {
-                    target = activeStepRate;
+                stepRate = Number(patternSteps[patternStepIndex - 1]?.rate_mbps);
+            }
+            if (Number.isFinite(patternStepIndex) && patternStepIndex > 0 && patternStepIndex !== lastStepIndexLogged) {
+                const step = patternSteps[patternStepIndex - 1] || {};
+                lastStepIndexLogged = patternStepIndex;
+                console.log('[pattern-step index]', {
+                    ts: new Date().toISOString(),
+                    stepIndex: patternStepIndex,
+                    stepRateMbps: Number.isFinite(stepRate) ? stepRate : null,
+                    stepEnabled: step.enabled,
+                    stepDurationSeconds: step.duration_seconds,
+                    runtimeRateMbps: Number.isFinite(runtimeRate) ? runtimeRate : null,
+                    sseRevision: sseLastRevision
+                });
+            }
+            if (Number.isFinite(runtimeRate) && runtimeRate !== lastRuntimeRateLogged) {
+                lastRuntimeRateLogged = runtimeRate;
+                console.log('[pattern-rate runtime]', {
+                    ts: new Date().toISOString(),
+                    runtimeRateMbps: runtimeRate,
+                    sseRevision: sseLastRevision
+                });
+            }
+            if (Number.isFinite(stepRate) && stepRate !== lastStepRateLogged) {
+                lastStepRateLogged = stepRate;
+                console.log('[pattern-rate step]', {
+                    ts: new Date().toISOString(),
+                    stepRateMbps: stepRate,
+                    stepIndex: patternStepIndex,
+                    sseRevision: sseLastRevision
+                });
+            }
+            let target = Number.isFinite(bandwidthTarget) ? bandwidthTarget : NaN;
+            let usedRuntime = false;
+            if (patternEnabled && Number.isFinite(runtimeTarget)) {
+                target = runtimeTarget;
+                usedRuntime = true;
+            }
+            if (!usedRuntime && patternStepIndex > 0 && patternStepIndex <= patternSteps.length) {
+                if (Number.isFinite(stepRate) && stepRate >= 0) {
+                    target = stepRate;
                 }
             }
             const key = session.session_id;
+            if (!patternEnabled) {
+                const applied = lastAppliedShaping.get(key);
+                if (applied && Date.now() - applied.timestamp < 20000) {
+                    if (Number.isFinite(applied.rate) && applied.rate > 0) {
+                        if (!Number.isFinite(target) || Math.abs(target - applied.rate) > 0.01) {
+                            target = applied.rate;
+                        }
+                    }
+                }
+            }
             if (!key) return;
             const series = bandwidthHistory.get(key) || [];
+            if (!Number.isFinite(target)) {
+                const lastTarget = series.length > 0 ? series[series.length - 1].target : null;
+                if (Number.isFinite(lastTarget)) {
+                    target = lastTarget;
+                } else {
+                    target = 0;
+                }
+            }
             series.push({ ts: now, actual, actual1s, active, bufferDepth, playerEstimate, currentRendition, target });
             const cutoff = now - windowMs;
             const filtered = series.filter(point => point.ts >= cutoff);
@@ -2206,7 +2401,8 @@
                         ]
                     },
                     options: {
-                        responsive: false,
+                        responsive: true,
+                        maintainAspectRatio: false,
                         animation: false,
                         plugins: {
                             legend: {
@@ -2313,7 +2509,8 @@
                         ]
                     },
                     options: {
-                        responsive: false,
+                        responsive: true,
+                        maintainAspectRatio: false,
                         animation: false,
                         plugins: {
                             legend: { display: false }
@@ -2411,18 +2608,29 @@
                 setBadges(isDash, resolvePlayerChoice(currentUrl, getPlayerChoice()), session.group_id || '');
             }
             updateGroupControls(session, lastSessionsList);
-            if (container && existingCard && container.contains(document.activeElement) &&
-                String(existingCard.dataset.sessionId || '') === sessionKey) {
+            if (container && existingCard && String(existingCard.dataset.sessionId || '') === sessionKey) {
+                // Check if manifest_variants just became available - need to re-render for presets
+                const hasVariants = Array.isArray(session.manifest_variants) && session.manifest_variants.length > 0;
+                const hadPresets = existingCard.dataset.shapingPresets && existingCard.dataset.shapingPresets !== 'W10%3D'; // 'W10%3D' is encoded '[]'
+                if (hasVariants && !hadPresets) {
+                    // Re-render to populate presets now that variants are available
+                    renderSessionControls(session);
+                    updateThroughputSlider(session);
+                    pushBandwidthSample(session);
+                    return;
+                }
                 const shouldSync = shouldSyncControls(sessionKey, session);
                 if (shouldSync) {
                     syncServerFaultControls(existingCard, session);
                     syncNetworkShapingControls(existingCard, session);
                 }
                 syncServerFaultData(existingCard, session);
+                updateThroughputSlider(session);
                 pushBandwidthSample(session);
                 return;
             }
             renderSessionControls(session);
+            updateThroughputSlider(session);
             pushBandwidthSample(session);
         }
 
@@ -2467,8 +2675,29 @@
             sessionsStream = source;
             source.addEventListener('sessions', (event) => {
                 try {
-                    const sessions = JSON.parse(event.data);
+                    const payload = parseSessionsStreamPayload(event);
+                    const sessions = payload.sessions;
                     lastSessionsList = Array.isArray(sessions) ? sessions : [];
+                    const revision = Number(payload.revision || 0);
+                    const dropped = Number(payload.dropped || 0);
+                    let missed = 0;
+                    if (Number.isFinite(revision) && revision > 0 && sseLastRevision > 0) {
+                        const gap = revision - sseLastRevision - 1;
+                        if (gap > 0) {
+                            missed += gap;
+                        }
+                    }
+                    if (Number.isFinite(dropped) && dropped > 0) {
+                        missed += dropped;
+                    }
+                    if (missed > 0) {
+                        sseMissedTotal += missed;
+                        updateSseMissedUi();
+                        log(`SSE missed ${missed} update${missed === 1 ? '' : 's'}`);
+                    }
+                    if (Number.isFinite(revision) && revision > 0) {
+                        sseLastRevision = revision;
+                    }
                     const session = sessions.find(item => item.player_id === playerId);
                     applySessionUpdate(session);
                 } catch (err) {

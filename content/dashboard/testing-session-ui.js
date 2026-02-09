@@ -446,7 +446,7 @@
         const transportRejectPackets = Number(session.transport_fault_reject_packets || 0);
         const portDisplay = session.x_forwarded_port_external || session.x_forwarded_port || '—';
         return `
-            <div class="session-card" data-session-id="${sessionId}" data-session-port="${session.x_forwarded_port || ''}" data-shaping-presets="${encodedPresets}" data-shaping-video-presets="${encodedVideoPresets}" data-shaping-overhead-mbps="${overheadMbps}">
+            <div class="session-card" data-session-id="${sessionId}" data-session-port="${session.x_forwarded_port_external || session.x_forwarded_port || ''}" data-shaping-presets="${encodedPresets}" data-shaping-video-presets="${encodedVideoPresets}" data-shaping-overhead-mbps="${overheadMbps}">
                 <div class="session-header">
                     ${hideTitle ? '' : `<div class="session-title">Session ${sessionId}</div>`}
                     <div class="session-meta" title="Port">${portDisplay}</div>
@@ -647,6 +647,9 @@
                         <div class="shape-step-actions" style="display:${usePattern ? '' : 'none'};">
                             <button type="button" class="btn btn-secondary btn-mini" data-action="add-shaping-step">Add Step</button>
                             <button type="button" class="btn btn-secondary btn-mini" data-action="clear-shaping-pattern">Clear</button>
+                        </div>
+                        <div class="shape-apply-pattern" data-field="shaping_apply_pattern_row" style="display:none;">
+                            <button type="button" class="btn btn-primary" data-action="apply-pattern">Apply Pattern</button>
                         </div>
                         <div class="chart-axis-row">
                             <label>Bitrate Y Max</label>

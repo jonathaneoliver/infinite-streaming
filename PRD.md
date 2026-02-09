@@ -132,6 +132,15 @@ Many platforms already expose their own failure tools (player debug features, br
 - Works **cross‑team and in CI** without requiring per‑device tooling.
 - Keeps test setup **documented and portable** with the content itself.
 
+### 7.5 Session Data Distribution & Shaping Control
+- **Session store**: all session state is stored in memcache under `session_list` and broadcast on change.
+- **SSE updates**: `/api/sessions/stream` emits full session snapshots (no 10‑session cap). UI should treat each event as authoritative.
+- **Polling fallback**: when SSE is unavailable, the UI polls `/api/sessions` and applies the same normalization logic.
+- **Control vs data**: UI control widgets sync only when `control_revision` changes; data metrics update every tick.
+- **Rate limit application**: `/api/nftables/shape/{port}` applies user changes; per‑request shaping only re‑applies when the desired config changes.
+- **Pattern shaping**: the pattern loop updates the port only when a step’s target rate/delay/loss changes. Runtime fields (`nftables_pattern_step_runtime`, `nftables_pattern_rate_runtime_mbps`) are written back to session data for UI charts.
+- **Shaping cache**: the Go proxy keeps a per‑port cache of the last applied rate/delay/loss to avoid redundant `tc`/netem operations.
+
 ## 8) Encoding & Packaging (Functional Requirements)
 - `generate_abr/create_abr_ladder.sh` builds ladders for H.264/H.265/AV1.
 - Segment duration default: 6s.
