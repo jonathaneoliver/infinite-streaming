@@ -15,6 +15,10 @@ Docker-based HLS/DASH media server for testing video players under various netwo
 
 ## Development Workflow
 
+### GitHub Workflow
+- When creating issues/PRs/comments with `gh`, pass the body using a here-doc or `--body-file`; do not use `\n` in quoted strings.
+- Use the `gh-pr-issue-body` skill for GitHub CLI body formatting.
+
 ### Go Services
 - **go-live** (LL-HLS/LL-DASH + 2s/6s variants)
 - **go-upload** (uploads, jobs, content discovery)
