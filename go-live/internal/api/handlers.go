@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -157,6 +158,24 @@ func extractAttributeValue(line, key string) string {
 	return rest[:end]
 }
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 type Handler struct {
 	Manager *manager.ProcessManager
 	Tracker *StreamTracker
@@ -172,13 +191,23 @@ func (h *Handler) Status(w http.ResponseWriter, r *http.Request) {
 	streams := []StreamStatus{}
 	idleSeconds := defaultIdleTimeoutSeconds
 	uniqueExternalIPs := 0
+	uniqueExternalIPsRolling := 0
+	uniqueExternalIPsLifetime := 0
+	externalHistory := []ExternalUsageSnapshot{}
+	externalBucketMinutes := 0
+	externalRetentionHours := 0
 	if h.Tracker != nil {
-		streams = h.Tracker.Snapshot(time.Now())
+		now := time.Now()
+		streams = h.Tracker.Snapshot(now)
 		for i := range streams {
 			streams[i] = h.decorateStreamStats(streams[i])
 		}
 		idleSeconds = int(h.Tracker.IdleTimeout().Seconds())
-		uniqueExternalIPs = h.Tracker.UniqueExternalIPCount(time.Now())
+		uniqueExternalIPs = h.Tracker.UniqueExternalIPCount(now)
+		uniqueExternalIPsRolling, uniqueExternalIPsLifetime = h.Tracker.ExternalUniqueCounts(now)
+		externalHistory = h.Tracker.ExternalUsageSnapshot(now)
+		externalBucketMinutes = h.Tracker.ExternalBucketMinutes()
+		externalRetentionHours = h.Tracker.ExternalRetentionHours()
 	}
 
 	response := map[string]interface{}{
@@ -188,6 +217,11 @@ func (h *Handler) Status(w http.ResponseWriter, r *http.Request) {
 		"processes":        procs,
 		"active_streams":   streams,
 		"unique_external_ips": uniqueExternalIPs,
+		"unique_external_ips_rolling": uniqueExternalIPsRolling,
+		"unique_external_ips_lifetime": uniqueExternalIPsLifetime,
+		"external_ip_history": externalHistory,
+		"external_ip_bucket_minutes": externalBucketMinutes,
+		"external_ip_retention_hours": externalRetentionHours,
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -925,8 +959,29 @@ func (h *Handler) ServeSegment(w http.ResponseWriter, r *http.Request) {
 	content := vars["content"]
 	pathPart := vars["path"]
 
+	host, port := splitHostPort(r.Host)
+	logf(
+		"[GO-LIVE][REQUEST][SEGMENT] method=%s host=%s port=%s path=%s query=%s content=%s file=%s range=%s ua=%q\n",
+		r.Method,
+		host,
+		port,
+		r.URL.Path,
+		r.URL.RawQuery,
+		content,
+		pathPart,
+		r.Header.Get("Range"),
+		r.UserAgent(),
+	)
+
 	segmentPath := filepath.Join(infiniteOutputDir, content, filepath.FromSlash(pathPart))
 	if _, err := os.Stat(segmentPath); err != nil {
+		logf(
+			"[GO-LIVE][REQUEST][SEGMENT] not_found host=%s port=%s path=%s error=%v\n",
+			host,
+			port,
+			r.URL.Path,
+			err,
+		)
 		http.Error(w, fmt.Sprintf("Segment not found: %v", err), http.StatusNotFound)
 		return
 	}
@@ -1222,8 +1277,29 @@ func (h *Handler) ServeDashSegment(w http.ResponseWriter, r *http.Request) {
 	content := vars["content"]
 	pathPart := vars["path"]
 
+	host, port := splitHostPort(r.Host)
+	logf(
+		"[GO-LIVE][REQUEST][SEGMENT] method=%s host=%s port=%s path=%s query=%s content=%s file=%s range=%s ua=%q\n",
+		r.Method,
+		host,
+		port,
+		r.URL.Path,
+		r.URL.RawQuery,
+		content,
+		pathPart,
+		r.Header.Get("Range"),
+		r.UserAgent(),
+	)
+
 	segmentPath := filepath.Join(infiniteOutputDir, content, filepath.FromSlash(pathPart))
 	if _, err := os.Stat(segmentPath); err != nil {
+		logf(
+			"[GO-LIVE][REQUEST][SEGMENT] not_found host=%s port=%s path=%s error=%v\n",
+			host,
+			port,
+			r.URL.Path,
+			err,
+		)
 		http.Error(w, fmt.Sprintf("Segment not found: %v", err), http.StatusNotFound)
 		return
 	}
@@ -1349,7 +1425,8 @@ func (h *Handler) OnDemandMasterPlaylistDuration(w http.ResponseWriter, r *http.
 		time.Sleep(200 * time.Millisecond)
 		data, err = os.ReadFile(outputPath)
 		if err != nil {
-			http.Error(w, fmt.Sprintf("Failed to read playlist: %v", err), http.StatusInternalServerError)
+			w.Header().Set("Retry-After", "1")
+			http.Error(w, fmt.Sprintf("Master playlist not ready: %v", err), http.StatusTooManyRequests)
 			return
 		}
 	}
@@ -1907,6 +1984,46 @@ func (h *Handler) trackRequest(r *http.Request, content, mode string) {
 	}
 	meta := requestMeta(r.RemoteAddr, r.Header.Get("X-Forwarded-For"), r.UserAgent())
 	h.Tracker.RecordRequest(content, mode, r.URL.Path, clientKey(&meta), time.Now())
+	host, port := splitHostPort(r.Host)
+	if port == "" {
+		port = r.Header.Get("X-Forwarded-Port")
+	}
+	logf(
+		"[GO-LIVE][REQUEST] method=%s host=%s port=%s path=%s query=%s content=%s mode=%s player_id_q=%s player_id_h=%s playback_session_h=%s ua=%q\n",
+		r.Method,
+		host,
+		port,
+		r.URL.Path,
+		r.URL.RawQuery,
+		content,
+		mode,
+		r.URL.Query().Get("player_id"),
+		r.Header.Get("Player-ID"),
+		r.Header.Get("X-Playback-Session-Id"),
+		r.UserAgent(),
+	)
+}
+
+func splitHostPort(hostport string) (string, string) {
+	if hostport == "" {
+		return "", ""
+	}
+	if strings.HasPrefix(hostport, "[") && strings.Contains(hostport, "]") {
+		if host, port, err := net.SplitHostPort(hostport); err == nil {
+			return host, port
+		}
+		return hostport, ""
+	}
+	if strings.Contains(hostport, ":") {
+		if host, port, err := net.SplitHostPort(hostport); err == nil {
+			return host, port
+		}
+		parts := strings.Split(hostport, ":")
+		if len(parts) >= 2 {
+			return strings.Join(parts[:len(parts)-1], ":"), parts[len(parts)-1]
+		}
+	}
+	return hostport, ""
 }
 
 func (h *Handler) ensureTracked(content, mode, processID string) {

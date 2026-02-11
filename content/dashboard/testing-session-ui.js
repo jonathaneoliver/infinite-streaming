@@ -65,22 +65,20 @@
         const list = options || baseFailureTypes;
         return list.map(option => {
             const checked = option.value === (selected || 'none') ? 'checked' : '';
-            return `<label><input type="radio" name="${name}" value="${option.value}" ${checked}>${option.text}</label>`;
+            return `<label><input type="radio" name="${name}" value="${option.value}" data-field="${name.replace(/_\d+$/, '')}" ${checked}>${option.text}</label>`;
         }).join('');
     }
 
-    function renderModeOptions(name, selected) {
-        return modeOptions.map(option => {
-            const checked = option.value === (selected || 'requests') ? 'checked' : '';
-            return `<label><input type="radio" name="${name}" value="${option.value}" ${checked}>${option.text}</label>`;
+    function renderModeDropdown(name, selected) {
+        const optionsHtml = modeOptions.map(option => {
+            const isSelected = option.value === (selected || 'requests') ? 'selected' : '';
+            return `<option value="${option.value}" ${isSelected}>${option.text}</option>`;
         }).join('');
+        return `<select name="${name}" data-field="${name.replace(/_\d+$/, '')}">${optionsHtml}</select>`;
     }
 
     function renderTransportFaultOptions(name, selected) {
-        return transportFaultTypes.map(option => {
-            const checked = option.value === (selected || 'none') ? 'checked' : '';
-            return `<label><input type="radio" name="${name}" value="${option.value}" ${checked}>${option.text}</label>`;
-        }).join('');
+        return renderFailureTypeOptions(name, selected, transportFaultTypes);
     }
 
     function renderTransportModeOptions(name, selected) {
@@ -280,20 +278,32 @@
         return Math.round(minVideo * 1.1 * 1000) / 1000;
     }
 
-    function renderPatternStepPresetOptions(rate, presets) {
+    function renderPatternStepPresetOptions(rate, presets, matchOptions = {}) {
         const numericRate = Number(rate);
         const hasRate = Number.isFinite(numericRate);
         let selectedValue = 'custom';
         const options = presets || [];
+        const overheadMbps = Number(matchOptions.overheadMbps || 0);
+        const marginPct = Number(matchOptions.marginPct || 0);
+        const adjust = (Number.isFinite(overheadMbps) && overheadMbps !== 0)
+            || (Number.isFinite(marginPct) && marginPct !== 0);
+        const adjustedValue = (base) => {
+            const adjusted = (base * (1 + (marginPct / 100))) + overheadMbps;
+            return Math.round(adjusted * 1000) / 1000;
+        };
         options.forEach((preset) => {
             if (!hasRate) return;
-            if (Math.abs(Number(preset.mbps) - numericRate) < 0.001) {
-                selectedValue = Number(preset.mbps).toFixed(3);
+            const base = Number(preset.mbps);
+            const candidate = adjust ? adjustedValue(base) : base;
+            if (Math.abs(candidate - numericRate) < 0.001) {
+                selectedValue = Number(candidate).toFixed(3);
             }
         });
         const customSelected = selectedValue === 'custom' ? ' selected' : '';
         const optionHtml = options.map((preset) => {
-            const value = Number(preset.mbps).toFixed(3);
+            const base = Number(preset.mbps);
+            const candidate = adjust ? adjustedValue(base) : base;
+            const value = Number(candidate).toFixed(3);
             const selected = selectedValue === value ? ' selected' : '';
             const riskPrefix = preset.risk ? '⚠ ' : '';
             return `<option value="${value}"${selected}>${riskPrefix}${preset.label}</option>`;
@@ -301,14 +311,14 @@
         return `<option value="custom"${customSelected}>Custom</option>${optionHtml}`;
     }
 
-    function renderPatternStepRowContent(step, presets) {
+    function renderPatternStepRowContent(step, presets, matchOptions = {}) {
         const rate = Number.isFinite(Number(step.rate_mbps)) ? Number(step.rate_mbps) : 0;
         const seconds = Number.isFinite(Number(step.duration_seconds)) ? Number(step.duration_seconds) : 1;
         const enabled = step.enabled !== false;
         return `
             <label>Preset</label>
             <select data-field="shaping_step_mbps_preset">
-                ${renderPatternStepPresetOptions(rate, presets)}
+                ${renderPatternStepPresetOptions(rate, presets, matchOptions)}
             </select>
             <label>Mbps</label>
             <input type="number" min="0" step="0.1" data-field="shaping_step_mbps" value="${rate}">
@@ -368,10 +378,10 @@
             .filter(Boolean);
     }
 
-    function renderPatternStepRow(index, step, presets) {
+    function renderPatternStepRow(index, step, presets, matchOptions = {}) {
         return `
             <div class="shape-step-row" data-step-index="${index}">
-                ${renderPatternStepRowContent(step, presets)}
+                ${renderPatternStepRowContent(step, presets, matchOptions)}
             </div>
         `;
     }
@@ -390,6 +400,12 @@
             }
         });
         return best;
+    }
+
+    function resolveSectionDefault(options, key, fallback) {
+        if (!options || !options.sectionDefaults) return fallback;
+        if (!Object.prototype.hasOwnProperty.call(options.sectionDefaults, key)) return fallback;
+        return !!options.sectionDefaults[key];
     }
 
     function renderSessionCard(session, options = {}) {
@@ -445,212 +461,311 @@
         const transportDropPackets = Number(session.transport_fault_drop_packets || 0);
         const transportRejectPackets = Number(session.transport_fault_reject_packets || 0);
         const portDisplay = session.x_forwarded_port_external || session.x_forwarded_port || '—';
+
+        // Calculate summary counts for badge
+        const masterCount = session.master_manifest_requests_count || 0;
+        const manifestCount = session.manifest_requests_count || 0;
+        const segmentCount = session.segments_count || 0;
+
+        const sessionDetailsOpen = resolveSectionDefault(options, 'session-details', false);
+        const faultInjectionOpen = resolveSectionDefault(options, 'fault-injection', true);
+        const networkShapingOpen = resolveSectionDefault(options, 'network-shaping', true);
+        const bitrateChartOpen = resolveSectionDefault(options, 'bitrate-chart', false);
+
         return `
-            <div class="session-card" data-session-id="${sessionId}" data-session-port="${session.x_forwarded_port_external || session.x_forwarded_port || ''}" data-shaping-presets="${encodedPresets}" data-shaping-video-presets="${encodedVideoPresets}" data-shaping-overhead-mbps="${overheadMbps}">
+            <div class="session-card" data-session-id="${sessionId}" data-session-port="${session.x_forwarded_port_external || session.x_forwarded_port || ''}" data-segment-duration-seconds="${segmentDurationSeconds}" data-shaping-presets="${encodedPresets}" data-shaping-video-presets="${encodedVideoPresets}" data-shaping-overhead-mbps="${overheadMbps}">
                 <div class="session-header">
                     ${hideTitle ? '' : `<div class="session-title">Session ${sessionId}</div>`}
                     <div class="session-meta" title="Port">${portDisplay}</div>
                 </div>
                 ${inlineHost ? `<div class="session-inline-player" data-inline-host="${sessionId}"></div>` : ''}
-                <div class="session-grid">
-                    <div class="session-item"><span class="label">User Agent</span><span class="value">${session.user_agent || '—'}</span></div>
-                    <div class="session-item"><span class="label">Player IP</span><span class="value">${session.player_ip || '—'}</span></div>
-                    ${showPortItem ? `<div class="session-item"><span class="label">Port</span><span class="value">${portDisplay}</span></div>` : ''}
-                    <div class="session-item"><span class="label">Last Request</span><span class="value">${formatDate(session.last_request)}</span></div>
-                    <div class="session-item"><span class="label">First Request</span><span class="value">${formatDate(session.first_request_time)}</span></div>
-                    <div class="session-item"><span class="label">Session Duration</span><span class="value">${formatDuration(session.session_duration)}</span></div>
-                    <div class="session-item"><span class="label">Manifest URL</span><span class="value">${session.manifest_url || '—'}</span></div>
-                    <div class="session-item"><span class="label">Master Manifest URL</span><span class="value">${session.master_manifest_url || '—'}</span></div>
-                    <div class="session-item"><span class="label">Last Request URL</span><span class="value">${session.last_request_url || '—'}</span></div>
-                    <div class="session-item"><span class="label">Counts</span><span class="value">Master:${session.master_manifest_requests_count || 0} Manifest:${session.manifest_requests_count || 0} Segment:${session.segments_count || 0}</span></div>
-                    <div class="session-item"><span class="label">Measured Mbps</span><span class="value">${session.measured_mbps || '—'}</span></div>
-                </div>
-                <div class="failure-groups">
-                    <div class="failure-group">
-                        <div class="failure-title">Segment Failures</div>
-                        <div class="radio-group">${renderFailureTypeOptions(`segment_failure_type_${sessionId}`, session.segment_failure_type, segmentFailureTypes)}</div>
-                        <div class="checkbox-group">${renderSegmentOptions(sessionId, manifestVariants, segmentSelected)}</div>
-                        <div class="radio-group">
-                            <div class="label">Units</div>
-                            ${renderModeOptions(`segment_failure_mode_${sessionId}`, session.segment_failure_mode || 'failures_per_seconds')}
-                        </div>
-                        <div class="range-row">
-                            <label>Consecutive</label>
-                            <input type="range" min="0" max="10" step="1" data-field="segment_consecutive_failures" value="${Number.isFinite(Number(session.segment_consecutive_failures)) && Number(session.segment_consecutive_failures) >= 0 ? Number(session.segment_consecutive_failures) : 1}">
-                            <span class="range-value">${Number.isFinite(Number(session.segment_consecutive_failures)) && Number(session.segment_consecutive_failures) >= 0 ? Number(session.segment_consecutive_failures) : 1}</span>
-                        </div>
-                        <div class="range-row">
-                            <label>Frequency</label>
-                            <input type="range" min="0" max="10" step="1" data-field="segment_failure_frequency" value="${Number.isFinite(Number(session.segment_failure_frequency)) && Number(session.segment_failure_frequency) >= 0 ? Number(session.segment_failure_frequency) : 6}">
-                            <span class="range-value">${Number.isFinite(Number(session.segment_failure_frequency)) && Number(session.segment_failure_frequency) >= 0 ? Number(session.segment_failure_frequency) : 6}</span>
-                        </div>
+
+                <!-- Collapsible Session Details -->
+                <div class="collapsible-section" data-section="session-details" data-default-open="${sessionDetailsOpen}">
+                    <div class="collapsible-header" data-toggle="session-details">
+                        <span class="collapsible-icon">${sessionDetailsOpen ? '▼' : '▶'}</span>
+                        <span class="collapsible-title">Session Details</span>
+                        <span class="collapsible-badge" data-field="session_detail_counts">M:${masterCount} / Man:${manifestCount} / Seg:${segmentCount}</span>
                     </div>
-                    <div class="failure-group">
-                        <div class="failure-title">Manifest Failures</div>
-                        <div class="radio-group">${renderFailureTypeOptions(`manifest_failure_type_${sessionId}`, session.manifest_failure_type)}</div>
-                        <div class="checkbox-group">${renderManifestOptions(sessionId, manifestVariants, manifestSelected)}</div>
-                        <div class="radio-group">
-                            <div class="label">Units</div>
-                            ${renderModeOptions(`manifest_failure_mode_${sessionId}`, session.manifest_failure_mode || 'failures_per_seconds')}
-                        </div>
-                        <div class="range-row">
-                            <label>Consecutive</label>
-                            <input type="range" min="0" max="10" step="1" data-field="manifest_consecutive_failures" value="${Number.isFinite(Number(session.manifest_consecutive_failures)) && Number(session.manifest_consecutive_failures) >= 0 ? Number(session.manifest_consecutive_failures) : 1}">
-                            <span class="range-value">${Number.isFinite(Number(session.manifest_consecutive_failures)) && Number(session.manifest_consecutive_failures) >= 0 ? Number(session.manifest_consecutive_failures) : 1}</span>
-                        </div>
-                        <div class="range-row">
-                            <label>Frequency</label>
-                            <input type="range" min="0" max="10" step="1" data-field="manifest_failure_frequency" value="${Number.isFinite(Number(session.manifest_failure_frequency)) && Number(session.manifest_failure_frequency) >= 0 ? Number(session.manifest_failure_frequency) : 6}">
-                            <span class="range-value">${Number.isFinite(Number(session.manifest_failure_frequency)) && Number(session.manifest_failure_frequency) >= 0 ? Number(session.manifest_failure_frequency) : 6}</span>
-                        </div>
-                    </div>
-                    <div class="failure-group">
-                        <div class="failure-title">Master Manifest Failures</div>
-                        <div class="radio-group">${renderFailureTypeOptions(`master_manifest_failure_type_${sessionId}`, session.master_manifest_failure_type)}</div>
-                        <div class="radio-group">
-                            <div class="label">Units</div>
-                            ${renderModeOptions(`master_manifest_failure_mode_${sessionId}`, session.master_manifest_failure_mode || 'failures_per_seconds')}
-                        </div>
-                        <div class="range-row">
-                            <label>Consecutive</label>
-                            <input type="range" min="0" max="10" step="1" data-field="master_manifest_consecutive_failures" value="${Number.isFinite(Number(session.master_manifest_consecutive_failures)) && Number(session.master_manifest_consecutive_failures) >= 0 ? Number(session.master_manifest_consecutive_failures) : 1}">
-                            <span class="range-value">${Number.isFinite(Number(session.master_manifest_consecutive_failures)) && Number(session.master_manifest_consecutive_failures) >= 0 ? Number(session.master_manifest_consecutive_failures) : 1}</span>
-                        </div>
-                        <div class="range-row">
-                            <label>Frequency</label>
-                            <input type="range" min="0" max="10" step="1" data-field="master_manifest_failure_frequency" value="${Number.isFinite(Number(session.master_manifest_failure_frequency)) && Number(session.master_manifest_failure_frequency) >= 0 ? Number(session.master_manifest_failure_frequency) : 6}">
-                            <span class="range-value">${Number.isFinite(Number(session.master_manifest_failure_frequency)) && Number(session.master_manifest_failure_frequency) >= 0 ? Number(session.master_manifest_failure_frequency) : 6}</span>
-                        </div>
-                    </div>
-                    <div class="failure-group">
-                        <div class="failure-title">Transport Faults (Port-Wide)</div>
-                        <div class="radio-group">${renderTransportFaultOptions(`transport_failure_type_${sessionId}`, transportFaultType)}</div>
-                        <div class="radio-group">
-                            <div class="label">Units</div>
-                            ${renderTransportModeOptions(`transport_failure_mode_${sessionId}`, transportMode)}
-                        </div>
-                        <div class="range-row">
-                            <label data-field="transport_consecutive_label">${transportConsecutiveRange.label}</label>
-                            <input
-                                type="range"
-                                min="${transportConsecutiveRange.min}"
-                                max="${transportConsecutiveRange.max}"
-                                step="${transportConsecutiveRange.step}"
-                                data-field="transport_consecutive_failures"
-                                value="${transportConsecutive}">
-                            <span class="range-value">${transportConsecutive}</span>
-                        </div>
-                        <div class="range-row">
-                            <label>Frequency (secs)</label>
-                            <input type="range" min="0" max="60" step="1" data-field="transport_failure_frequency" value="${transportOffSeconds}">
-                            <span class="range-value">${transportOffSeconds}</span>
-                        </div>
-                        <div class="session-item">
-                            <span class="label">State</span>
-                            <span class="value" data-field="transport_fault_state">${transportActive ? 'Active' : 'Idle'}</span>
-                        </div>
-                        <div class="session-item">
-                            <span class="label">Fault Counters</span>
-                            <span class="value" data-field="transport_fault_counters">Drop ${transportDropPackets} pkts · Reject ${transportRejectPackets} pkts</span>
+                    <div class="collapsible-content" data-content="session-details" style="display: ${sessionDetailsOpen ? 'block' : 'none'};">
+                        <div class="session-grid">
+                            <div class="session-item"><span class="label">User Agent</span><span class="value" data-field="session_user_agent">${session.user_agent || '—'}</span></div>
+                            <div class="session-item"><span class="label">Player IP</span><span class="value" data-field="session_player_ip">${session.player_ip || '—'}</span></div>
+                            ${showPortItem ? `<div class="session-item"><span class="label">Port</span><span class="value" data-field="session_port_display">${portDisplay}</span></div>` : ''}
+                            <div class="session-item"><span class="label">Last Request</span><span class="value" data-field="session_last_request">${formatDate(session.last_request)}</span></div>
+                            <div class="session-item"><span class="label">First Request</span><span class="value" data-field="session_first_request">${formatDate(session.first_request_time)}</span></div>
+                            <div class="session-item"><span class="label">Session Duration</span><span class="value" data-field="session_duration">${formatDuration(session.session_duration)}</span></div>
+                            <div class="session-item"><span class="label">Manifest URL</span><span class="value" data-field="session_manifest_url">${session.manifest_url || '—'}</span></div>
+                            <div class="session-item"><span class="label">Master Manifest URL</span><span class="value" data-field="session_master_manifest_url">${session.master_manifest_url || '—'}</span></div>
+                            <div class="session-item"><span class="label">Last Request URL</span><span class="value" data-field="session_last_request_url">${session.last_request_url || '—'}</span></div>
+                            <div class="session-item"><span class="label">Measured Mbps</span><span class="value" data-field="session_measured_mbps">${session.measured_mbps || '—'}</span></div>
                         </div>
                     </div>
                 </div>
-                <div class="failure-group" data-net-shaping>
-                    <div class="failure-title">Network Shaping</div>
-                    <div class="range-row">
-                        <label>Delay (ms)</label>
-                        <input type="range" min="0" max="250" step="5" data-field="shaping_delay_ms" value="${session.nftables_delay_ms || 0}">
-                        <span class="range-value">${session.nftables_delay_ms || 0}</span>
+
+                <!-- Collapsible Fault Injection -->
+                <div class="collapsible-section" data-section="fault-injection" data-default-open="${faultInjectionOpen}">
+                    <div class="collapsible-header" data-toggle="fault-injection">
+                        <span class="collapsible-icon">${faultInjectionOpen ? '▼' : '▶'}</span>
+                        <span class="collapsible-title">Fault Injection</span>
                     </div>
-                    <div class="range-row">
-                        <label>Loss (%)</label>
-                        <input type="range" min="0" max="10" step="0.5" data-field="shaping_loss_pct" value="${session.nftables_packet_loss || 0}">
-                        <span class="range-value">${session.nftables_packet_loss || 0}</span>
-                    </div>
-                    <div class="range-row${usePattern ? ' range-row-disabled' : ''}" data-field="shaping_throughput_row">
-                        <label>Throughput (Mbps)</label>
-                        <input type="range" min="0" max="30" step="0.1" data-field="shaping_throughput_mbps" value="${session.nftables_bandwidth_mbps || 0}" ${usePattern ? 'disabled' : ''}>
-                        <span class="range-value">${session.nftables_bandwidth_mbps || 0}</span>
-                    </div>
-                    <div class="shape-pattern-block">
-                        <div class="shape-template-row">
-                            <label>Pattern</label>
-                            <div class="shape-pattern-modes" data-field="shaping_template_mode_group">
-                                <label class="shape-pattern-mode">
-                                    <input type="radio" name="shaping_template_mode_${sessionId}" value="sliders" data-field="shaping_template_mode" ${templateMode === 'sliders' ? 'checked' : ''}>
-                                    <span title="Use slider value">🎚 Sliders</span>
-                                </label>
-                                <label class="shape-pattern-mode">
-                                    <input type="radio" name="shaping_template_mode_${sessionId}" value="square_wave" data-field="shaping_template_mode" ${templateMode === 'square_wave' ? 'checked' : ''}>
-                                    <span title="Alternate max/min bitrate">▁▔ Square</span>
-                                </label>
-                                <label class="shape-pattern-mode">
-                                    <input type="radio" name="shaping_template_mode_${sessionId}" value="ramp_up" data-field="shaping_template_mode" ${templateMode === 'ramp_up' ? 'checked' : ''}>
-                                    <span title="Step low to high">↗ Ramp Up</span>
-                                </label>
-                                <label class="shape-pattern-mode">
-                                    <input type="radio" name="shaping_template_mode_${sessionId}" value="ramp_down" data-field="shaping_template_mode" ${templateMode === 'ramp_down' ? 'checked' : ''}>
-                                    <span title="Step high to low">↘ Ramp Down</span>
-                                </label>
-                                <label class="shape-pattern-mode">
-                                    <input type="radio" name="shaping_template_mode_${sessionId}" value="pyramid" data-field="shaping_template_mode" ${templateMode === 'pyramid' ? 'checked' : ''}>
-                                    <span title="Up then down">⛰ Pyramid</span>
-                                </label>
+                    <div class="collapsible-content" data-content="fault-injection" style="display: ${faultInjectionOpen ? 'block' : 'none'};">
+                        <div class="fault-injection-section">
+                            <div class="tabs-container">
+                                <div class="tabs-header">
+                                    <button class="tab-button active" data-tab="segment-failures">Segment</button>
+                                    <button class="tab-button" data-tab="manifest-failures">Manifest</button>
+                                    <button class="tab-button" data-tab="master-failures">Master</button>
+                                    <button class="tab-button" data-tab="transport-faults">Transport</button>
+                                </div>
+                                <div class="tabs-content">
+                                    <!-- Segment Tab -->
+                                    <div class="tab-panel active" data-panel="segment-failures">
+                                        <div class="fault-control-row">
+                                            <label>Failure Type</label>
+                                            <div class="radio-group">
+                                                ${renderFailureTypeOptions(`segment_failure_type_${sessionId}`, session.segment_failure_type, segmentFailureTypes)}
+                                            </div>
+                                        </div>
+                                        <div class="fault-control-row">
+                                            <label>Scope</label>
+                                            <div class="checkbox-group">${renderSegmentOptions(sessionId, manifestVariants, segmentSelected)}</div>
+                                        </div>
+                                        <div class="fault-control-row">
+                                            <label>Mode</label>
+                                            ${renderModeDropdown(`segment_failure_mode_${sessionId}`, session.segment_failure_mode || 'failures_per_seconds')}
+                                        </div>
+                                        <div class="range-row">
+                                            <label>Consecutive</label>
+                                            <input type="range" min="0" max="10" step="1" data-field="segment_consecutive_failures" value="${Number.isFinite(Number(session.segment_consecutive_failures)) && Number(session.segment_consecutive_failures) >= 0 ? Number(session.segment_consecutive_failures) : 1}">
+                                            <span class="range-value">${Number.isFinite(Number(session.segment_consecutive_failures)) && Number(session.segment_consecutive_failures) >= 0 ? Number(session.segment_consecutive_failures) : 1}</span>
+                                        </div>
+                                        <div class="range-row">
+                                            <label>Frequency</label>
+                                            <input type="range" min="0" max="10" step="1" data-field="segment_failure_frequency" value="${Number.isFinite(Number(session.segment_failure_frequency)) && Number(session.segment_failure_frequency) >= 0 ? Number(session.segment_failure_frequency) : 6}">
+                                            <span class="range-value">${Number.isFinite(Number(session.segment_failure_frequency)) && Number(session.segment_failure_frequency) >= 0 ? Number(session.segment_failure_frequency) : 6}</span>
+                                        </div>
+                                    </div>
+
+                                    <!-- Manifest Tab -->
+                                    <div class="tab-panel" data-panel="manifest-failures">
+                                        <div class="fault-control-row">
+                                            <label>Failure Type</label>
+                                            <div class="radio-group">
+                                                ${renderFailureTypeOptions(`manifest_failure_type_${sessionId}`, session.manifest_failure_type)}
+                                            </div>
+                                        </div>
+                                        <div class="fault-control-row">
+                                            <label>Scope</label>
+                                            <div class="checkbox-group">${renderManifestOptions(sessionId, manifestVariants, manifestSelected)}</div>
+                                        </div>
+                                        <div class="fault-control-row">
+                                            <label>Mode</label>
+                                            ${renderModeDropdown(`manifest_failure_mode_${sessionId}`, session.manifest_failure_mode || 'failures_per_seconds')}
+                                        </div>
+                                        <div class="range-row">
+                                            <label>Consecutive</label>
+                                            <input type="range" min="0" max="10" step="1" data-field="manifest_consecutive_failures" value="${Number.isFinite(Number(session.manifest_consecutive_failures)) && Number(session.manifest_consecutive_failures) >= 0 ? Number(session.manifest_consecutive_failures) : 1}">
+                                            <span class="range-value">${Number.isFinite(Number(session.manifest_consecutive_failures)) && Number(session.manifest_consecutive_failures) >= 0 ? Number(session.manifest_consecutive_failures) : 1}</span>
+                                        </div>
+                                        <div class="range-row">
+                                            <label>Frequency</label>
+                                            <input type="range" min="0" max="10" step="1" data-field="manifest_failure_frequency" value="${Number.isFinite(Number(session.manifest_failure_frequency)) && Number(session.manifest_failure_frequency) >= 0 ? Number(session.manifest_failure_frequency) : 6}">
+                                            <span class="range-value">${Number.isFinite(Number(session.manifest_failure_frequency)) && Number(session.manifest_failure_frequency) >= 0 ? Number(session.manifest_failure_frequency) : 6}</span>
+                                        </div>
+                                    </div>
+
+                                    <!-- Master Manifest Tab -->
+                                    <div class="tab-panel" data-panel="master-failures">
+                                        <div class="fault-control-row">
+                                            <label>Failure Type</label>
+                                            <div class="radio-group">
+                                                ${renderFailureTypeOptions(`master_manifest_failure_type_${sessionId}`, session.master_manifest_failure_type)}
+                                            </div>
+                                        </div>
+                                        <div class="fault-control-row">
+                                            <label>Mode</label>
+                                            ${renderModeDropdown(`master_manifest_failure_mode_${sessionId}`, session.master_manifest_failure_mode || 'failures_per_seconds')}
+                                        </div>
+                                        <div class="range-row">
+                                            <label>Consecutive</label>
+                                            <input type="range" min="0" max="10" step="1" data-field="master_manifest_consecutive_failures" value="${Number.isFinite(Number(session.master_manifest_consecutive_failures)) && Number(session.master_manifest_consecutive_failures) >= 0 ? Number(session.master_manifest_consecutive_failures) : 1}">
+                                            <span class="range-value">${Number.isFinite(Number(session.master_manifest_consecutive_failures)) && Number(session.master_manifest_consecutive_failures) >= 0 ? Number(session.master_manifest_consecutive_failures) : 1}</span>
+                                        </div>
+                                        <div class="range-row">
+                                            <label>Frequency</label>
+                                            <input type="range" min="0" max="10" step="1" data-field="master_manifest_failure_frequency" value="${Number.isFinite(Number(session.master_manifest_failure_frequency)) && Number(session.master_manifest_failure_frequency) >= 0 ? Number(session.master_manifest_failure_frequency) : 6}">
+                                            <span class="range-value">${Number.isFinite(Number(session.master_manifest_failure_frequency)) && Number(session.master_manifest_failure_frequency) >= 0 ? Number(session.master_manifest_failure_frequency) : 6}</span>
+                                        </div>
+                                    </div>
+
+                                    <!-- Transport Faults Tab -->
+                                    <div class="tab-panel" data-panel="transport-faults">
+                                        <div class="fault-control-row">
+                                            <label>Fault Type</label>
+                                            <div class="radio-group">
+                                                ${renderTransportFaultOptions(`transport_failure_type_${sessionId}`, transportFaultType)}
+                                            </div>
+                                        </div>
+                                        <div class="fault-control-row">
+                                            <label>Mode</label>
+                                            <div class="radio-group">
+                                                ${renderTransportModeOptions(`transport_failure_mode_${sessionId}`, transportMode)}
+                                            </div>
+                                        </div>
+                                        <div class="range-row">
+                                            <label data-field="transport_consecutive_label">${transportConsecutiveRange.label}</label>
+                                            <input
+                                                type="range"
+                                                min="${transportConsecutiveRange.min}"
+                                                max="${transportConsecutiveRange.max}"
+                                                step="${transportConsecutiveRange.step}"
+                                                data-field="transport_consecutive_failures"
+                                                value="${transportConsecutive}">
+                                            <span class="range-value">${transportConsecutive}</span>
+                                        </div>
+                                        <div class="range-row">
+                                            <label>Frequency (secs)</label>
+                                            <input type="range" min="0" max="60" step="1" data-field="transport_failure_frequency" value="${transportOffSeconds}">
+                                            <span class="range-value">${transportOffSeconds}</span>
+                                        </div>
+                                        <div class="session-item">
+                                            <span class="label">State</span>
+                                            <span class="value" data-field="transport_fault_state">${transportActive ? 'Active' : 'Idle'}</span>
+                                        </div>
+                                        <div class="session-item">
+                                            <span class="label">Fault Counters</span>
+                                            <span class="value" data-field="transport_fault_counters">Drop ${transportDropPackets} pkts · Reject ${transportRejectPackets} pkts</span>
+                                        </div>
+                                    </div>
+                                </div>
                             </div>
                         </div>
-                        <div class="shape-step-defaults">
-                            <label>Step Duration</label>
-                            <div class="shape-pattern-modes" data-field="shaping_default_step_seconds_group">
-                                <label class="shape-pattern-mode">
-                                    <input type="radio" name="shaping_default_step_seconds_${sessionId}" value="6" data-field="shaping_default_step_seconds" ${selectedStepSeconds === 6 ? 'checked' : ''}>
-                                    <span>6s</span>
-                                </label>
-                                <label class="shape-pattern-mode">
-                                    <input type="radio" name="shaping_default_step_seconds_${sessionId}" value="12" data-field="shaping_default_step_seconds" ${selectedStepSeconds === 12 ? 'checked' : ''}>
-                                    <span>12s</span>
-                                </label>
-                                <label class="shape-pattern-mode">
-                                    <input type="radio" name="shaping_default_step_seconds_${sessionId}" value="18" data-field="shaping_default_step_seconds" ${selectedStepSeconds === 18 ? 'checked' : ''}>
-                                    <span>18s</span>
-                                </label>
-                                <label class="shape-pattern-mode">
-                                    <input type="radio" name="shaping_default_step_seconds_${sessionId}" value="24" data-field="shaping_default_step_seconds" ${selectedStepSeconds === 24 ? 'checked' : ''}>
-                                    <span>24s</span>
-                                </label>
+                    </div>
+                </div>
+
+                <!-- Collapsible Network Shaping Section -->
+                <div class="collapsible-section" data-section="network-shaping" data-default-open="${networkShapingOpen}" data-net-shaping>
+                    <div class="collapsible-header" data-toggle="network-shaping">
+                        <span class="collapsible-icon">${networkShapingOpen ? '▼' : '▶'}</span>
+                        <span class="collapsible-title">Network Shaping</span>
+                    </div>
+                    <div class="collapsible-content" data-content="network-shaping" style="display: ${networkShapingOpen ? 'block' : 'none'};">
+                        <div class="network-shaping-section">
+                            <!-- Basic Controls -->
+                            <div class="shaping-basic-controls">
+                                <div class="range-row">
+                                    <label>Delay (ms)</label>
+                                    <input type="range" min="0" max="250" step="5" data-field="shaping_delay_ms" value="${session.nftables_delay_ms || 0}">
+                                    <span class="range-value">${session.nftables_delay_ms || 0}</span>
+                                </div>
+                                <div class="range-row">
+                                    <label>Loss (%)</label>
+                                    <input type="range" min="0" max="10" step="0.5" data-field="shaping_loss_pct" value="${session.nftables_packet_loss || 0}">
+                                    <span class="range-value">${session.nftables_packet_loss || 0}</span>
+                                </div>
+                                <div class="range-row${usePattern ? ' range-row-disabled' : ''}" data-field="shaping_throughput_row">
+                                    <label>Throughput (Mbps)</label>
+                                    <input type="range" min="0" max="30" step="0.1" data-field="shaping_throughput_mbps" value="${session.nftables_bandwidth_mbps || 0}" ${usePattern ? 'disabled' : ''}>
+                                    <span class="range-value">${session.nftables_bandwidth_mbps || 0}</span>
+                                </div>
                             </div>
-                            <span class="shape-default-seconds" data-field="shaping_default_seconds_label">segment ${segmentDurationSeconds}s</span>
-                        </div>
-                        <div class="shape-template-row">
-                            <label>Margin</label>
-                            <div class="shape-pattern-modes shape-margin-modes" data-field="shaping_template_margin_group">
-                                <label class="shape-pattern-mode">
-                                    <input type="radio" name="shaping_template_margin_${sessionId}" value="0" data-field="shaping_template_margin_pct" ${marginPct === 0 ? 'checked' : ''}>
-                                    <span>Exact</span>
-                                </label>
-                                <label class="shape-pattern-mode">
-                                    <input type="radio" name="shaping_template_margin_${sessionId}" value="10" data-field="shaping_template_margin_pct" ${marginPct === 10 ? 'checked' : ''}>
-                                    <span>+10%</span>
-                                </label>
-                                <label class="shape-pattern-mode">
-                                    <input type="radio" name="shaping_template_margin_${sessionId}" value="25" data-field="shaping_template_margin_pct" ${marginPct === 25 ? 'checked' : ''}>
-                                    <span>+25%</span>
-                                </label>
-                                <label class="shape-pattern-mode">
-                                    <input type="radio" name="shaping_template_margin_${sessionId}" value="50" data-field="shaping_template_margin_pct" ${marginPct === 50 ? 'checked' : ''}>
-                                    <span>+50%</span>
-                                </label>
+
+                            <!-- Pattern Controls Group -->
+                            <div class="shaping-pattern-group">
+                                <div class="shape-template-row shape-template-compact">
+                                    <div class="shape-template-block">
+                                        <label>Pattern</label>
+                                        <div class="shape-pattern-modes compact" data-field="shaping_template_mode_group">
+                                            <label class="shape-pattern-mode">
+                                                <input type="radio" name="shaping_template_mode_${sessionId}" value="sliders" data-field="shaping_template_mode" ${templateMode === 'sliders' ? 'checked' : ''}>
+                                                <span title="Use slider value">🎚 Sliders</span>
+                                            </label>
+                                            <label class="shape-pattern-mode">
+                                                <input type="radio" name="shaping_template_mode_${sessionId}" value="square_wave" data-field="shaping_template_mode" ${templateMode === 'square_wave' ? 'checked' : ''}>
+                                                <span title="Alternate max/min bitrate">▁▔ Square</span>
+                                            </label>
+                                            <label class="shape-pattern-mode">
+                                                <input type="radio" name="shaping_template_mode_${sessionId}" value="ramp_up" data-field="shaping_template_mode" ${templateMode === 'ramp_up' ? 'checked' : ''}>
+                                                <span title="Step low to high">↗ Ramp Up</span>
+                                            </label>
+                                            <label class="shape-pattern-mode">
+                                                <input type="radio" name="shaping_template_mode_${sessionId}" value="ramp_down" data-field="shaping_template_mode" ${templateMode === 'ramp_down' ? 'checked' : ''}>
+                                                <span title="Step high to low">↘ Ramp Down</span>
+                                            </label>
+                                            <label class="shape-pattern-mode">
+                                                <input type="radio" name="shaping_template_mode_${sessionId}" value="pyramid" data-field="shaping_template_mode" ${templateMode === 'pyramid' ? 'checked' : ''}>
+                                                <span title="Up then down">⛰ Pyramid</span>
+                                            </label>
+                                        </div>
+                                    </div>
+                                    <div class="shape-template-block">
+                                        <label>Step Duration</label>
+                                        <div class="shape-pattern-modes compact" data-field="shaping_default_step_seconds_group">
+                                            <label class="shape-pattern-mode">
+                                                <input type="radio" name="shaping_default_step_seconds_${sessionId}" value="6" data-field="shaping_default_step_seconds" ${selectedStepSeconds === 6 ? 'checked' : ''}>
+                                                <span>6s</span>
+                                            </label>
+                                            <label class="shape-pattern-mode">
+                                                <input type="radio" name="shaping_default_step_seconds_${sessionId}" value="12" data-field="shaping_default_step_seconds" ${selectedStepSeconds === 12 ? 'checked' : ''}>
+                                                <span>12s</span>
+                                            </label>
+                                            <label class="shape-pattern-mode">
+                                                <input type="radio" name="shaping_default_step_seconds_${sessionId}" value="18" data-field="shaping_default_step_seconds" ${selectedStepSeconds === 18 ? 'checked' : ''}>
+                                                <span>18s</span>
+                                            </label>
+                                            <label class="shape-pattern-mode">
+                                                <input type="radio" name="shaping_default_step_seconds_${sessionId}" value="24" data-field="shaping_default_step_seconds" ${selectedStepSeconds === 24 ? 'checked' : ''}>
+                                                <span>24s</span>
+                                            </label>
+                                        </div>
+                                    </div>
+                                    <div class="shape-template-block">
+                                        <label>Margin</label>
+                                        <div class="shape-pattern-modes shape-margin-modes compact" data-field="shaping_template_margin_group">
+                                            <label class="shape-pattern-mode">
+                                                <input type="radio" name="shaping_template_margin_${sessionId}" value="0" data-field="shaping_template_margin_pct" ${marginPct === 0 ? 'checked' : ''}>
+                                                <span>Exact</span>
+                                            </label>
+                                            <label class="shape-pattern-mode">
+                                                <input type="radio" name="shaping_template_margin_${sessionId}" value="10" data-field="shaping_template_margin_pct" ${marginPct === 10 ? 'checked' : ''}>
+                                                <span>+10%</span>
+                                            </label>
+                                            <label class="shape-pattern-mode">
+                                                <input type="radio" name="shaping_template_margin_${sessionId}" value="25" data-field="shaping_template_margin_pct" ${marginPct === 25 ? 'checked' : ''}>
+                                                <span>+25%</span>
+                                            </label>
+                                            <label class="shape-pattern-mode">
+                                                <input type="radio" name="shaping_template_margin_${sessionId}" value="50" data-field="shaping_template_margin_pct" ${marginPct === 50 ? 'checked' : ''}>
+                                                <span>+50%</span>
+                                            </label>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <div class="shape-step-list" data-field="shaping_pattern_rows" style="display:${usePattern ? '' : 'none'};">
+                                    ${initialSteps.map((step, idx) => renderPatternStepRow(idx, step, shapingPresets, { overheadMbps, marginPct })).join('')}
+                                </div>
+                                <div class="shape-step-actions" style="display:${usePattern ? '' : 'none'};">
+                                    <button type="button" class="btn btn-secondary btn-mini" data-action="add-shaping-step">Add Step</button>
+                                    <button type="button" class="btn btn-secondary btn-mini" data-action="clear-shaping-pattern">Clear</button>
+                                </div>
+                                <div class="shape-apply-pattern" data-field="shaping_apply_pattern_row" style="display:none;">
+                                    <button type="button" class="btn btn-primary" data-action="apply-pattern">Apply Pattern</button>
+                                </div>
+
                             </div>
                         </div>
-                        <div class="shape-step-list" data-field="shaping_pattern_rows" style="display:${usePattern ? '' : 'none'};">
-                            ${initialSteps.map((step, idx) => renderPatternStepRow(idx, step, shapingPresets)).join('')}
-                        </div>
-                        <div class="shape-step-actions" style="display:${usePattern ? '' : 'none'};">
-                            <button type="button" class="btn btn-secondary btn-mini" data-action="add-shaping-step">Add Step</button>
-                            <button type="button" class="btn btn-secondary btn-mini" data-action="clear-shaping-pattern">Clear</button>
-                        </div>
-                        <div class="shape-apply-pattern" data-field="shaping_apply_pattern_row" style="display:none;">
-                            <button type="button" class="btn btn-primary" data-action="apply-pattern">Apply Pattern</button>
-                        </div>
+                    </div>
+                </div>
+
+                <!-- Collapsible Bitrate Chart -->
+                <div class="collapsible-section" data-section="bitrate-chart" data-default-open="${bitrateChartOpen}">
+                    <div class="collapsible-header" data-toggle="bitrate-chart">
+                        <span class="collapsible-icon">${bitrateChartOpen ? '▼' : '▶'}</span>
+                        <span class="collapsible-title">Bitrate Chart</span>
+                    </div>
+                    <div class="collapsible-content" data-content="bitrate-chart" style="display: ${bitrateChartOpen ? 'block' : 'none'};">
                         <div class="chart-axis-row">
                             <label>Bitrate Y Max</label>
                             <div class="shape-pattern-modes" data-field="bitrate_chart_max_mbps_group">
@@ -676,16 +791,17 @@
                                 </label>
                             </div>
                         </div>
+                        <div class="chart-wrap">
+                            <canvas class="bandwidth-chart" data-field="bandwidth_chart"></canvas>
+                        </div>
+                        ${showBufferDepthChart ? `
+                        <div class="chart-wrap">
+                            <canvas class="buffer-depth-chart" data-field="buffer_depth_chart"></canvas>
+                        </div>
+                        ` : ''}
                     </div>
-                    <div class="chart-wrap">
-                        <canvas class="bandwidth-chart" width="820" height="220" data-field="bandwidth_chart"></canvas>
-                    </div>
-                    ${showBufferDepthChart ? `
-                    <div class="chart-wrap">
-                        <canvas class="buffer-depth-chart" width="820" height="170" data-field="buffer_depth_chart"></canvas>
-                    </div>
-                    ` : ''}
                 </div>
+
                 <div class="session-actions">
                     <button class="btn btn-secondary" data-action="save-session">Save Settings</button>
                     <button class="btn btn-danger" data-action="delete-session">Delete Session</button>
@@ -696,6 +812,12 @@
 
     function readSessionSettings(card) {
         const sessionId = card.dataset.sessionId;
+
+        const getSelectValue = (name) => {
+            const select = card.querySelector(`select[name="${name}"]`);
+            return select ? select.value : 'none';
+        };
+
         const getRadioValue = (name) => {
             const selected = card.querySelector(`input[name="${name}"]:checked`);
             return selected ? selected.value : 'none';
@@ -706,13 +828,11 @@
         const masterManifestFailureType = getRadioValue(`master_manifest_failure_type_${sessionId}`);
         const transportFaultType = getRadioValue(`transport_failure_type_${sessionId}`);
 
-        const segmentFailureUnits = getRadioValue(`segment_failure_units_${sessionId}`) || 'requests';
-        const manifestFailureUnits = getRadioValue(`manifest_failure_units_${sessionId}`) || 'requests';
-        const masterManifestFailureUnits = getRadioValue(`master_manifest_failure_units_${sessionId}`) || 'requests';
-        const segmentMode = getRadioValue(`segment_failure_mode_${sessionId}`) || modeFromUnits(null, null, segmentFailureUnits);
-        const manifestMode = getRadioValue(`manifest_failure_mode_${sessionId}`) || modeFromUnits(null, null, manifestFailureUnits);
-        const masterManifestMode = getRadioValue(`master_manifest_failure_mode_${sessionId}`) || modeFromUnits(null, null, masterManifestFailureUnits);
+        const segmentMode = getSelectValue(`segment_failure_mode_${sessionId}`) || 'requests';
+        const manifestMode = getSelectValue(`manifest_failure_mode_${sessionId}`) || 'requests';
+        const masterManifestMode = getSelectValue(`master_manifest_failure_mode_${sessionId}`) || 'requests';
         const transportMode = normalizeTransportMode(getRadioValue(`transport_failure_mode_${sessionId}`));
+
         const segmentUnits = unitsFromMode(segmentMode);
         const manifestUnits = unitsFromMode(manifestMode);
         const masterManifestUnits = unitsFromMode(masterManifestMode);
@@ -735,7 +855,7 @@
             segment_failure_type: segmentFailureType,
             segment_failure_frequency: getRangeValue('segment_failure_frequency'),
             segment_consecutive_failures: getRangeValue('segment_consecutive_failures'),
-            segment_failure_units: segmentFailureUnits,
+            segment_failure_units: segmentUnits.consecutiveUnits,
             segment_consecutive_units: segmentUnits.consecutiveUnits,
             segment_frequency_units: segmentUnits.frequencyUnits,
             segment_failure_mode: segmentMode,
@@ -745,7 +865,7 @@
             manifest_failure_type: manifestFailureType,
             manifest_failure_frequency: getRangeValue('manifest_failure_frequency'),
             manifest_consecutive_failures: getRangeValue('manifest_consecutive_failures'),
-            manifest_failure_units: manifestFailureUnits,
+            manifest_failure_units: manifestUnits.consecutiveUnits,
             manifest_consecutive_units: manifestUnits.consecutiveUnits,
             manifest_frequency_units: manifestUnits.frequencyUnits,
             manifest_failure_mode: manifestMode,
@@ -755,7 +875,7 @@
             master_manifest_failure_type: masterManifestFailureType,
             master_manifest_failure_frequency: getRangeValue('master_manifest_failure_frequency'),
             master_manifest_consecutive_failures: getRangeValue('master_manifest_consecutive_failures'),
-            master_manifest_failure_units: masterManifestFailureUnits,
+            master_manifest_failure_units: masterManifestUnits.consecutiveUnits,
             master_manifest_consecutive_units: masterManifestUnits.consecutiveUnits,
             master_manifest_frequency_units: masterManifestUnits.frequencyUnits,
             master_manifest_failure_mode: masterManifestMode,
@@ -766,7 +886,7 @@
             transport_consecutive_units: transportUnits.consecutiveUnits,
             transport_frequency_units: transportUnits.frequencyUnits,
             transport_failure_mode: transportMode,
-            // Legacy aliases kept for older saved sessions/backends.
+            // Legacy aliases
             transport_fault_type: transportFaultType,
             transport_consecutive_seconds: getRangeValue('transport_consecutive_failures'),
             transport_frequency_seconds: getRangeValue('transport_failure_frequency'),
@@ -783,10 +903,7 @@
             if (!Number.isFinite(value)) return fallback;
             return value;
         };
-        const segmentLabel = card.querySelector('[data-field="shaping_default_seconds_label"]');
-        const segmentMatch = segmentLabel ? segmentLabel.textContent.match(/segment\s+([0-9.]+)s/i) : null;
-        const inferredSegmentSeconds = segmentMatch ? Number(segmentMatch[1]) : 6;
-        const segmentDurationSeconds = toPositiveNumber(inferredSegmentSeconds, 6);
+        const segmentDurationSeconds = toPositiveNumber(card?.dataset?.segmentDurationSeconds, 6);
         const defaultStepSeconds = toPositiveNumber(
             Number(card.querySelector('input[data-field="shaping_default_step_seconds"]:checked')?.value || 12),
             12
@@ -828,10 +945,11 @@
     }
 
     function updatePatternDefaultLabel(card) {
+        if (!card) return;
         const pattern = readShapingPattern(card);
-        const label = card.querySelector('[data-field="shaping_default_seconds_label"]');
-        if (!label) return;
-        label.textContent = `segment ${pattern.segment_duration_seconds}s`;
+        if (pattern && Number.isFinite(pattern.segment_duration_seconds)) {
+            card.dataset.segmentDurationSeconds = String(pattern.segment_duration_seconds);
+        }
     }
 
     function updateTransportModeUi(card) {
@@ -861,6 +979,104 @@
         if (valueEl) valueEl.textContent = String(value);
     }
 
+    function getCollapsibleState(section, fallback) {
+        const store = window.TestingSessionUICollapseState;
+        if (store && typeof store.get === 'function') {
+            const value = store.get(section);
+            if (typeof value === 'boolean') return value;
+        }
+        if (store && Object.prototype.hasOwnProperty.call(store, section)) {
+            return !!store[section];
+        }
+        return fallback;
+    }
+
+    function setCollapsibleState(section, isOpen) {
+        const store = window.TestingSessionUICollapseState;
+        if (store && typeof store.set === 'function') {
+            store.set(section, isOpen);
+            return;
+        }
+        if (store) {
+            store[section] = isOpen;
+        }
+    }
+
+    function applyCollapsibleState(root) {
+        const host = root || document;
+        host.querySelectorAll('.collapsible-section').forEach(section => {
+            const key = section.dataset.section;
+            const content = section.querySelector('.collapsible-content');
+            const icon = section.querySelector('.collapsible-icon');
+            if (!key || !content) return;
+            const fallback = section.dataset.defaultOpen === 'true';
+            const isOpen = getCollapsibleState(key, fallback);
+            content.style.display = isOpen ? 'block' : 'none';
+            if (icon) icon.textContent = isOpen ? '▼' : '▶';
+        });
+    }
+
+    // Initialize collapsible sections and tabs
+    function initializeUI() {
+        document.addEventListener('click', (e) => {
+            // Handle collapsible toggles
+            const toggle = e.target.closest('[data-toggle]');
+            if (toggle) {
+                const section = toggle.dataset.toggle;
+                const sectionEl = toggle.closest('.collapsible-section');
+                const content = sectionEl
+                    ? sectionEl.querySelector('.collapsible-content')
+                    : document.querySelector(`[data-content="${section}"]`);
+                const icon = toggle.querySelector('.collapsible-icon');
+                if (content && icon) {
+                    const isOpen = content.style.display !== 'none';
+                    const nextOpen = !isOpen;
+                    content.style.display = nextOpen ? 'block' : 'none';
+                    icon.textContent = nextOpen ? '▼' : '▶';
+                    if (section) {
+                        setCollapsibleState(section, nextOpen);
+                    }
+                    if (section === 'network-shaping' && nextOpen) {
+                        const card = sectionEl ? sectionEl.closest('.session-card') : null;
+                        const scope = card || document;
+                        const chartContent = scope.querySelector('[data-content="bitrate-chart"]');
+                        const chartIcon = scope.querySelector('[data-toggle="bitrate-chart"] .collapsible-icon');
+                        if (chartContent && chartIcon) {
+                            chartContent.style.display = 'block';
+                            chartIcon.textContent = '▼';
+                            setCollapsibleState('bitrate-chart', true);
+                        }
+                    }
+                }
+            }
+
+            // Handle tab switches
+            const tabButton = e.target.closest('.tab-button');
+            if (tabButton) {
+                const tabName = tabButton.dataset.tab;
+                const container = tabButton.closest('.tabs-container');
+
+                // Update buttons
+                container.querySelectorAll('.tab-button').forEach(btn => btn.classList.remove('active'));
+                tabButton.classList.add('active');
+
+                // Update panels
+                container.querySelectorAll('.tab-panel').forEach(panel => panel.classList.remove('active'));
+                const targetPanel = container.querySelector(`[data-panel="${tabName}"]`);
+                if (targetPanel) targetPanel.classList.add('active');
+            }
+        });
+
+        applyCollapsibleState(document);
+    }
+
+    // Initialize on load
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', initializeUI);
+    } else {
+        initializeUI();
+    }
+
     window.TestingSessionUI = {
         renderSessionCard,
         renderPatternStepRowContent,
@@ -869,6 +1085,7 @@
         updatePatternDefaultLabel,
         updateTransportModeUi,
         formatDate,
-        formatDuration
+        formatDuration,
+        applyCollapsibleState
     };
 })();

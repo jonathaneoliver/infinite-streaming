@@ -3019,6 +3019,19 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 	sessionData["player_ip"] = remoteIP(r.RemoteAddr)
 	sessionData["x_forwarded_port"] = internalPort
 	sessionData["x_forwarded_port_external"] = externalPort
+	log.Printf(
+		"[GO-PROXY][REQUEST] method=%s host=%s port=%s path=%s query=%s session_id=%s player_id_q=%s player_id_h=%s playback_session_h=%s user_agent=%q",
+		r.Method,
+		hostWithoutPort(r.Host),
+		hostPortOrDefault(r.Host, ""),
+		r.URL.Path,
+		r.URL.RawQuery,
+		sessionNumber,
+		r.URL.Query().Get("player_id"),
+		r.Header.Get("Player-ID"),
+		r.Header.Get("X-Playback-Session-Id"),
+		r.UserAgent(),
+	)
 	requestBytes := int64(0)
 	if r.ContentLength > 0 {
 		requestBytes = r.ContentLength
@@ -3187,6 +3200,12 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadGateway)
 		return
 	}
+	if rangeHeader := r.Header.Get("Range"); rangeHeader != "" {
+		proxyReq.Header.Set("Range", rangeHeader)
+	}
+	if ifRange := r.Header.Get("If-Range"); ifRange != "" {
+		proxyReq.Header.Set("If-Range", ifRange)
+	}
 	resp, err := a.client.Do(proxyReq)
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) {
@@ -3211,12 +3230,26 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(resp.StatusCode)
 		return
 	}
+	copyUpstreamHeaders(w, resp)
 	if contentType != "" {
 		w.Header().Set("Content-Type", contentType)
 	}
 	w.Header().Set("X-Session-ID", getString(sessionData, "session_number"))
-	w.WriteHeader(http.StatusOK)
+	w.WriteHeader(resp.StatusCode)
 	writer := bufio.NewWriter(w)
+	if isSegment {
+		log.Printf(
+			"[GO-PROXY][REQUEST][SEGMENT] response status=%d content_type=%s content_length=%s accept_ranges=%s content_range=%s url=%s session_id=%s external_port=%s",
+			resp.StatusCode,
+			resp.Header.Get("Content-Type"),
+			resp.Header.Get("Content-Length"),
+			resp.Header.Get("Accept-Ranges"),
+			resp.Header.Get("Content-Range"),
+			upstreamURL,
+			getString(sessionData, "session_id"),
+			externalPort,
+		)
+	}
 	bytesOut, _ := io.Copy(writer, resp.Body)
 	_ = writer.Flush()
 	updateSessionTraffic(sessionData, requestBytes, bytesOut)
@@ -3246,6 +3279,28 @@ func almostEqualShape(a ShapeApplyState, b ShapeApplyState) bool {
 	return a.delay == b.delay &&
 		math.Abs(a.rate-b.rate) <= eps &&
 		math.Abs(a.loss-b.loss) <= eps
+}
+
+func copyUpstreamHeaders(w http.ResponseWriter, resp *http.Response) {
+	if resp == nil {
+		return
+	}
+	// Copy relevant headers for media playback and range handling.
+	pass := []string{
+		"Accept-Ranges",
+		"Cache-Control",
+		"Content-Length",
+		"Content-Range",
+		"Content-Type",
+		"ETag",
+		"Expires",
+		"Last-Modified",
+	}
+	for _, key := range pass {
+		if value := resp.Header.Get(key); value != "" {
+			w.Header().Set(key, value)
+		}
+	}
 }
 
 func (a *App) applyShapeIfChanged(port int, rate float64, delay int, loss float64) error {
@@ -3357,6 +3412,14 @@ func (a *App) getContentType(target string) (string, bool, bool, bool, []Playlis
 	}
 	return contentType, false, false, true, nil
 }
+
+
+
+
+
+
+
+
 
 func (a *App) trackPortThroughput() {
 	cache := map[int]struct {

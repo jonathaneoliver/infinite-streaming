@@ -434,6 +434,17 @@ body {
     cursor: not-allowed;
 }
 
+.btn.is-disabled,
+.btn.is-disabled:hover {
+    background: var(--surface);
+    color: var(--text-disabled);
+    border: 1px solid var(--border);
+    box-shadow: none;
+    opacity: 0.6;
+    cursor: not-allowed;
+    pointer-events: none;
+}
+
 /* Primary Button */
 .btn-primary {
     background: var(--primary-blue);

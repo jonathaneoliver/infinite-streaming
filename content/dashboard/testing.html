@@ -194,7 +194,7 @@
     </script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
     <link rel="stylesheet" href="/dashboard/testing-session-refactored.css">
-    <script src="/dashboard/testing-session-ui-refactored.js"></script>
+    <script src="/dashboard/testing-session-ui.js"></script>
     <script>
         const failureTypes = [
             { value: 'none', text: 'None' },
@@ -826,9 +826,8 @@
             card.querySelectorAll(`input[name="shaping_default_step_seconds_${sessionId}"]`).forEach((radio) => {
                 radio.checked = Number(radio.value) === defaults.selectedStepSeconds;
             });
-            const label = card.querySelector('[data-field="shaping_default_seconds_label"]');
-            if (label) {
-                label.textContent = `segment ${defaults.segmentDurationSeconds}s`;
+            if (card) {
+                card.dataset.segmentDurationSeconds = String(defaults.segmentDurationSeconds);
             }
             updateTemplateModeUi(card);
         }

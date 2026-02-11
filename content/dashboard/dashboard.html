@@ -72,13 +72,13 @@
                         Upload MP4 files and transcode them into multi-bitrate ABR streaming packages with H.264 and HEVC codecs.
                     </p>
                     <div style="display: flex; flex-direction: column; gap: 12px;">
-                        <a href="/dashboard/upload.html" class="btn btn-primary" style="width: 100%;">
+                        <a href="/dashboard/upload.html" class="btn btn-primary content-management-link" style="width: 100%;">
                             Upload New Content
                         </a>
-                        <a href="/dashboard/sources.html" class="btn btn-secondary" style="width: 100%;">
+                        <a href="/dashboard/sources.html" class="btn btn-secondary content-management-link" style="width: 100%;">
                             Browse Source Library
                         </a>
-                        <a href="/dashboard/jobs.html" class="btn btn-secondary" style="width: 100%;">
+                        <a href="/dashboard/jobs.html" class="btn btn-secondary content-management-link" style="width: 100%;">
                             View Encoding Jobs
                         </a>
                     </div>
@@ -315,6 +315,18 @@
         if (!isDeveloperMode) {
             document.querySelectorAll('[data-developer-only]').forEach(el => {
                 el.style.display = 'none';
+            });
+        }
+
+        const restrictContent = window.BOSSNav
+            && typeof window.BOSSNav.isContentManagementRestricted === 'function'
+            && window.BOSSNav.isContentManagementRestricted();
+        if (restrictContent) {
+            document.querySelectorAll('.content-management-link').forEach((link) => {
+                link.classList.add('is-disabled');
+                link.setAttribute('aria-disabled', 'true');
+                link.setAttribute('tabindex', '-1');
+                link.setAttribute('title', 'Available only on internal network hosts.');
             });
         }
 
