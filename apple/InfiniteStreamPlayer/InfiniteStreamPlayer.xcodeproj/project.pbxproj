@@ -1,0 +1,477 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 56;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		A1A1A1A1A1A1A1A1A1A10001 /* InfiniteStreamPlayerApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A11001 /* InfiniteStreamPlayerApp.swift */; };
+		A1A1A1A1A1A1A1A1A1A10002 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A11002 /* ContentView.swift */; };
+		A1A1A1A1A1A1A1A1A1A10003 /* PlaybackViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A11003 /* PlaybackViewModel.swift */; };
+		A1A1A1A1A1A1A1A1A1A10004 /* PlaybackDiagnostics.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A11004 /* PlaybackDiagnostics.swift */; };
+		A1A1A1A1A1A1A1A1A1A10005 /* PlayerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A11005 /* PlayerView.swift */; };
+		A1A1A1A1A1A1A1A1A1A10006 /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A11006 /* Models.swift */; };
+		A1A1A1A1A1A1A1A1A1A10007 /* JSONValue.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A11007 /* JSONValue.swift */; };
+		A1A1A1A1A1A1A1A1A1A10008 /* TestingSessionModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A11008 /* TestingSessionModels.swift */; };
+		A1A1A1A1A1A1A1A1A1A10009 /* SSEClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A11009 /* SSEClient.swift */; };
+		A1A1A1A1A1A1A1A1A1A1000A /* TestingSessionAPI.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A1100A /* TestingSessionAPI.swift */; };
+		A1A1A1A1A1A1A1A1A1A1000B /* TestingSessionViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A1100B /* TestingSessionViewModel.swift */; };
+		A1A1A1A1A1A1A1A1A1A1000C /* TestingSessionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A1100C /* TestingSessionView.swift */; };
+		A1A1A1A1A1A1A1A1A1A12001 /* AVKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A13001 /* AVKit.framework */; };
+		A1A1A1A1A1A1A1A1A1A12002 /* AVFoundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A13002 /* AVFoundation.framework */; };
+		A2A2A2A2A2A2A2A2A2A20001 /* InfiniteStreamPlayerApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A11001 /* InfiniteStreamPlayerApp.swift */; };
+		A2A2A2A2A2A2A2A2A2A20002 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A11002 /* ContentView.swift */; };
+		A2A2A2A2A2A2A2A2A2A20003 /* PlaybackViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A11003 /* PlaybackViewModel.swift */; };
+		A2A2A2A2A2A2A2A2A2A20004 /* PlaybackDiagnostics.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A11004 /* PlaybackDiagnostics.swift */; };
+		A2A2A2A2A2A2A2A2A2A20005 /* PlayerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A11005 /* PlayerView.swift */; };
+		A2A2A2A2A2A2A2A2A2A20006 /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A11006 /* Models.swift */; };
+		A2A2A2A2A2A2A2A2A2A20007 /* JSONValue.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A11007 /* JSONValue.swift */; };
+		A2A2A2A2A2A2A2A2A2A20008 /* TestingSessionModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A11008 /* TestingSessionModels.swift */; };
+		A2A2A2A2A2A2A2A2A2A20009 /* SSEClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A11009 /* SSEClient.swift */; };
+		A2A2A2A2A2A2A2A2A2A2000A /* TestingSessionAPI.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A1100A /* TestingSessionAPI.swift */; };
+		A2A2A2A2A2A2A2A2A2A2000B /* TestingSessionViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A1100B /* TestingSessionViewModel.swift */; };
+		A2A2A2A2A2A2A2A2A2A2000C /* TestingSessionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A1100C /* TestingSessionView.swift */; };
+		A2A2A2A2A2A2A2A2A2A22001 /* AVKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A13001 /* AVKit.framework */; };
+		A2A2A2A2A2A2A2A2A2A22002 /* AVFoundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A13002 /* AVFoundation.framework */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		A1A1A1A1A1A1A1A1A1A11001 /* InfiniteStreamPlayerApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InfiniteStreamPlayerApp.swift; sourceTree = "<group>"; };
+		A1A1A1A1A1A1A1A1A1A11002 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
+		A1A1A1A1A1A1A1A1A1A11003 /* PlaybackViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaybackViewModel.swift; sourceTree = "<group>"; };
+		A1A1A1A1A1A1A1A1A1A11004 /* PlaybackDiagnostics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaybackDiagnostics.swift; sourceTree = "<group>"; };
+		A1A1A1A1A1A1A1A1A1A11005 /* PlayerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlayerView.swift; sourceTree = "<group>"; };
+		A1A1A1A1A1A1A1A1A1A11006 /* Models.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models.swift; sourceTree = "<group>"; };
+		A1A1A1A1A1A1A1A1A1A11007 /* JSONValue.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TestingSession/JSONValue.swift; sourceTree = "<group>"; };
+		A1A1A1A1A1A1A1A1A1A11008 /* TestingSessionModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TestingSession/TestingSessionModels.swift; sourceTree = "<group>"; };
+		A1A1A1A1A1A1A1A1A1A11009 /* SSEClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TestingSession/SSEClient.swift; sourceTree = "<group>"; };
+		A1A1A1A1A1A1A1A1A1A1100A /* TestingSessionAPI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TestingSession/TestingSessionAPI.swift; sourceTree = "<group>"; };
+		A1A1A1A1A1A1A1A1A1A1100B /* TestingSessionViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TestingSession/TestingSessionViewModel.swift; sourceTree = "<group>"; };
+		A1A1A1A1A1A1A1A1A1A1100C /* TestingSessionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TestingSession/TestingSessionView.swift; sourceTree = "<group>"; };
+		A1A1A1A1A1A1A1A1A1A11010 /* InfiniteStreamPlayer-iOS/Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = "InfiniteStreamPlayer-iOS/Info.plist"; sourceTree = "<group>"; };
+		A1A1A1A1A1A1A1A1A1A11011 /* InfiniteStreamPlayer-tvOS/Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = "InfiniteStreamPlayer-tvOS/Info.plist"; sourceTree = "<group>"; };
+		A1A1A1A1A1A1A1A1A1A11020 /* InfiniteStreamPlayer.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; path = InfiniteStreamPlayer.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		A1A1A1A1A1A1A1A1A1A13001 /* AVKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = AVKit.framework; path = System/Library/Frameworks/AVKit.framework; sourceTree = SDKROOT; };
+		A1A1A1A1A1A1A1A1A1A13002 /* AVFoundation.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = AVFoundation.framework; path = System/Library/Frameworks/AVFoundation.framework; sourceTree = SDKROOT; };
+		A2A2A2A2A2A2A2A2A2A21020 /* InfiniteStreamPlayerTV.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; path = InfiniteStreamPlayerTV.app; sourceTree = BUILT_PRODUCTS_DIR; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		A1A1A1A1A1A1A1A1A1A14001 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A1A1A1A1A1A1A1A1A1A12001 /* AVKit.framework in Frameworks */,
+				A1A1A1A1A1A1A1A1A1A12002 /* AVFoundation.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A2A2A2A2A2A2A2A2A2A24001 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A2A2A2A2A2A2A2A2A2A22001 /* AVKit.framework in Frameworks */,
+				A2A2A2A2A2A2A2A2A2A22002 /* AVFoundation.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		A1A1A1A1A1A1A1A1A1A15000 = {
+			isa = PBXGroup;
+			children = (
+				A1A1A1A1A1A1A1A1A1A15001 /* InfiniteStreamPlayer */,
+				A1A1A1A1A1A1A1A1A1A15002 /* Supporting */,
+				A1A1A1A1A1A1A1A1A1A15003 /* Frameworks */,
+				A1A1A1A1A1A1A1A1A1A15004 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		A1A1A1A1A1A1A1A1A1A15001 /* InfiniteStreamPlayer */ = {
+			isa = PBXGroup;
+			children = (
+				A1A1A1A1A1A1A1A1A1A11001 /* InfiniteStreamPlayerApp.swift */,
+				A1A1A1A1A1A1A1A1A1A11002 /* ContentView.swift */,
+				A1A1A1A1A1A1A1A1A1A11003 /* PlaybackViewModel.swift */,
+				A1A1A1A1A1A1A1A1A1A11004 /* PlaybackDiagnostics.swift */,
+				A1A1A1A1A1A1A1A1A1A11005 /* PlayerView.swift */,
+				A1A1A1A1A1A1A1A1A1A11006 /* Models.swift */,
+				A1A1A1A1A1A1A1A1A1A11007 /* JSONValue.swift */,
+				A1A1A1A1A1A1A1A1A1A11008 /* TestingSessionModels.swift */,
+				A1A1A1A1A1A1A1A1A1A11009 /* SSEClient.swift */,
+				A1A1A1A1A1A1A1A1A1A1100A /* TestingSessionAPI.swift */,
+				A1A1A1A1A1A1A1A1A1A1100B /* TestingSessionViewModel.swift */,
+				A1A1A1A1A1A1A1A1A1A1100C /* TestingSessionView.swift */,
+			);
+			path = InfiniteStreamPlayer;
+			sourceTree = "<group>";
+		};
+		A1A1A1A1A1A1A1A1A1A15002 /* Supporting */ = {
+			isa = PBXGroup;
+			children = (
+				A1A1A1A1A1A1A1A1A1A11010 /* InfiniteStreamPlayer-iOS/Info.plist */,
+				A1A1A1A1A1A1A1A1A1A11011 /* InfiniteStreamPlayer-tvOS/Info.plist */,
+			);
+			name = Supporting;
+			sourceTree = "<group>";
+		};
+		A1A1A1A1A1A1A1A1A1A15003 /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+				A1A1A1A1A1A1A1A1A1A13001 /* AVKit.framework */,
+				A1A1A1A1A1A1A1A1A1A13002 /* AVFoundation.framework */,
+			);
+			name = Frameworks;
+			sourceTree = "<group>";
+		};
+		A1A1A1A1A1A1A1A1A1A15004 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				A1A1A1A1A1A1A1A1A1A11020 /* InfiniteStreamPlayer.app */,
+				A2A2A2A2A2A2A2A2A2A21020 /* InfiniteStreamPlayerTV.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		A1A1A1A1A1A1A1A1A1A16001 /* InfiniteStreamPlayer (iOS) */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A1A1A1A1A1A1A1A1A1A17001 /* Build configuration list for PBXNativeTarget "InfiniteStreamPlayer (iOS)" */;
+			buildPhases = (
+				A1A1A1A1A1A1A1A1A1A18001 /* Sources */,
+				A1A1A1A1A1A1A1A1A1A14001 /* Frameworks */,
+				A1A1A1A1A1A1A1A1A1A19001 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = "InfiniteStreamPlayer (iOS)";
+			productName = InfiniteStreamPlayer;
+			productReference = A1A1A1A1A1A1A1A1A1A11020 /* InfiniteStreamPlayer.app */;
+			productType = "com.apple.product-type.application";
+		};
+		A2A2A2A2A2A2A2A2A2A26001 /* InfiniteStreamPlayer (tvOS) */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A2A2A2A2A2A2A2A2A2A27001 /* Build configuration list for PBXNativeTarget "InfiniteStreamPlayer (tvOS)" */;
+			buildPhases = (
+				A2A2A2A2A2A2A2A2A2A28001 /* Sources */,
+				A2A2A2A2A2A2A2A2A2A24001 /* Frameworks */,
+				A2A2A2A2A2A2A2A2A2A29001 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = "InfiniteStreamPlayer (tvOS)";
+			productName = InfiniteStreamPlayer;
+			productReference = A2A2A2A2A2A2A2A2A2A21020 /* InfiniteStreamPlayerTV.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		A1A1A1A1A1A1A1A1A1A10000 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastUpgradeCheck = 2610;
+				TargetAttributes = {
+					A1A1A1A1A1A1A1A1A1A16001 = {
+						CreatedOnToolsVersion = 15.0;
+					};
+					A2A2A2A2A2A2A2A2A2A26001 = {
+						CreatedOnToolsVersion = 15.0;
+					};
+				};
+			};
+			buildConfigurationList = A1A1A1A1A1A1A1A1A1A17000 /* Build configuration list for PBXProject "InfiniteStreamPlayer" */;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = A1A1A1A1A1A1A1A1A1A15000;
+			productRefGroup = A1A1A1A1A1A1A1A1A1A15004 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				A1A1A1A1A1A1A1A1A1A16001 /* InfiniteStreamPlayer (iOS) */,
+				A2A2A2A2A2A2A2A2A2A26001 /* InfiniteStreamPlayer (tvOS) */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		A1A1A1A1A1A1A1A1A1A19001 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A2A2A2A2A2A2A2A2A2A29001 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		A1A1A1A1A1A1A1A1A1A18001 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A1A1A1A1A1A1A1A1A1A10001 /* InfiniteStreamPlayerApp.swift in Sources */,
+				A1A1A1A1A1A1A1A1A1A10002 /* ContentView.swift in Sources */,
+				A1A1A1A1A1A1A1A1A1A10003 /* PlaybackViewModel.swift in Sources */,
+				A1A1A1A1A1A1A1A1A1A10004 /* PlaybackDiagnostics.swift in Sources */,
+				A1A1A1A1A1A1A1A1A1A10005 /* PlayerView.swift in Sources */,
+				A1A1A1A1A1A1A1A1A1A10006 /* Models.swift in Sources */,
+				A1A1A1A1A1A1A1A1A1A10007 /* JSONValue.swift in Sources */,
+				A1A1A1A1A1A1A1A1A1A10008 /* TestingSessionModels.swift in Sources */,
+				A1A1A1A1A1A1A1A1A1A10009 /* SSEClient.swift in Sources */,
+				A1A1A1A1A1A1A1A1A1A1000A /* TestingSessionAPI.swift in Sources */,
+				A1A1A1A1A1A1A1A1A1A1000B /* TestingSessionViewModel.swift in Sources */,
+				A1A1A1A1A1A1A1A1A1A1000C /* TestingSessionView.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A2A2A2A2A2A2A2A2A2A28001 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A2A2A2A2A2A2A2A2A2A20001 /* InfiniteStreamPlayerApp.swift in Sources */,
+				A2A2A2A2A2A2A2A2A2A20002 /* ContentView.swift in Sources */,
+				A2A2A2A2A2A2A2A2A2A20003 /* PlaybackViewModel.swift in Sources */,
+				A2A2A2A2A2A2A2A2A2A20004 /* PlaybackDiagnostics.swift in Sources */,
+				A2A2A2A2A2A2A2A2A2A20005 /* PlayerView.swift in Sources */,
+				A2A2A2A2A2A2A2A2A2A20006 /* Models.swift in Sources */,
+				A2A2A2A2A2A2A2A2A2A20007 /* JSONValue.swift in Sources */,
+				A2A2A2A2A2A2A2A2A2A20008 /* TestingSessionModels.swift in Sources */,
+				A2A2A2A2A2A2A2A2A2A20009 /* SSEClient.swift in Sources */,
+				A2A2A2A2A2A2A2A2A2A2000A /* TestingSessionAPI.swift in Sources */,
+				A2A2A2A2A2A2A2A2A2A2000B /* TestingSessionViewModel.swift in Sources */,
+				A2A2A2A2A2A2A2A2A2A2000C /* TestingSessionView.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		A1A1A1A1A1A1A1A1A1A17100 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = "";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 63328J83Q8;
+				INFOPLIST_FILE = "InfiniteStreamPlayer-iOS/Info.plist";
+				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.jeoliver.InfiniteStreamPlayer;
+				PRODUCT_NAME = InfiniteStreamPlayer;
+				SDKROOT = iphoneos;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		A1A1A1A1A1A1A1A1A1A17101 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = "";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 63328J83Q8;
+				INFOPLIST_FILE = "InfiniteStreamPlayer-iOS/Info.plist";
+				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.jeoliver.InfiniteStreamPlayer;
+				PRODUCT_NAME = InfiniteStreamPlayer;
+				SDKROOT = iphoneos;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+		A1A1A1A1A1A1A1A1A1A17110 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				DEAD_CODE_STRIPPING = YES;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		A1A1A1A1A1A1A1A1A1A17111 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				DEAD_CODE_STRIPPING = YES;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+		A2A2A2A2A2A2A2A2A2A27100 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = "";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = "";
+				INFOPLIST_FILE = "InfiniteStreamPlayer-tvOS/Info.plist";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.jeoliver.InfiniteStreamPlayerTV;
+				PRODUCT_NAME = InfiniteStreamPlayerTV;
+				SDKROOT = appletvos;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 3;
+				TVOS_DEPLOYMENT_TARGET = 16.0;
+			};
+			name = Debug;
+		};
+		A2A2A2A2A2A2A2A2A2A27101 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = "";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = "";
+				INFOPLIST_FILE = "InfiniteStreamPlayer-tvOS/Info.plist";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.jeoliver.InfiniteStreamPlayerTV;
+				PRODUCT_NAME = InfiniteStreamPlayerTV;
+				SDKROOT = appletvos;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 3;
+				TVOS_DEPLOYMENT_TARGET = 16.0;
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		A1A1A1A1A1A1A1A1A1A17000 /* Build configuration list for PBXProject "InfiniteStreamPlayer" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A1A1A1A1A1A1A1A1A1A17110 /* Debug */,
+				A1A1A1A1A1A1A1A1A1A17111 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		A1A1A1A1A1A1A1A1A1A17001 /* Build configuration list for PBXNativeTarget "InfiniteStreamPlayer (iOS)" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A1A1A1A1A1A1A1A1A1A17100 /* Debug */,
+				A1A1A1A1A1A1A1A1A1A17101 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		A2A2A2A2A2A2A2A2A2A27001 /* Build configuration list for PBXNativeTarget "InfiniteStreamPlayer (tvOS)" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A2A2A2A2A2A2A2A2A2A27100 /* Debug */,
+				A2A2A2A2A2A2A2A2A2A27101 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = A1A1A1A1A1A1A1A1A1A10000 /* Project object */;
+}
