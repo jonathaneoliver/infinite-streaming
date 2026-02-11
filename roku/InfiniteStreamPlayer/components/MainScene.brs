@@ -1,11 +1,10 @@
-' Constants
-const CONTENT_FETCH_TIMEOUT_MS = 10000
-const DEFAULT_SERVER_INDEX = 0
-const DEFAULT_PROTOCOL_INDEX = 0  ' HLS
-const DEFAULT_SEGMENT_INDEX = 2   ' 6s
-const DEFAULT_CODEC_INDEX = 0     ' H264
-
 sub init()
+    m.contentFetchTimeoutMs = 10000
+    m.defaultServerIndex = 1
+    m.defaultProtocolIndex = 0  ' HLS
+    m.defaultSegmentIndex = 2   ' 6s
+    m.defaultCodecIndex = 0     ' H264
+
     ' Initialize component references
     m.videoPlayer = m.top.findNode("videoPlayer")
     m.statusLabel = m.top.findNode("statusLabel")
@@ -15,6 +14,7 @@ sub init()
     m.codecValue = m.top.findNode("codecValue")
     m.contentValue = m.top.findNode("contentValue")
     m.urlValue = m.top.findNode("urlValue")
+    m.contentTask = m.top.findNode("contentFetchTask")
     
     ' Initialize state
     ' Note: These server addresses match the iOS app defaults
@@ -22,24 +22,28 @@ sub init()
         {label: "Dev (40000)", host: "100.111.190.54", contentPort: "40000", playbackPort: "40081"},
         {label: "Release (30000)", host: "infinitestreaming.jeoliver.com", contentPort: "30000", playbackPort: "30081"}
     ]
-    m.currentServerIndex = DEFAULT_SERVER_INDEX
+    m.currentServerIndex = m.defaultServerIndex
     
     m.protocols = ["HLS", "DASH"]
-    m.currentProtocolIndex = DEFAULT_PROTOCOL_INDEX
+    m.currentProtocolIndex = m.defaultProtocolIndex
     
     m.segments = ["LL", "2s", "6s", "All"]
-    m.currentSegmentIndex = DEFAULT_SEGMENT_INDEX
+    m.currentSegmentIndex = m.defaultSegmentIndex
     
     m.codecs = ["H264", "H265/HEVC", "AV1", "Auto"]
-    m.currentCodecIndex = DEFAULT_CODEC_INDEX
+    m.currentCodecIndex = m.defaultCodecIndex
     
     m.availableContent = []
     m.currentContentIndex = 0
     m.playerId = generatePlayerId()
+    m.forceContentName = "INSANE_FPV_SHOTS_Hydrofoil_Windsurfing_p200_hevc"
     
     ' Set up key event observation
     m.top.setFocus(true)
     m.top.observeField("focusedChild", "onFocusedChildChange")
+
+    m.contentTask.observeField("response", "onContentFetchResponse")
+    m.contentTask.observeField("error", "onContentFetchError")
     
     ' Update display
     updateDisplay()
@@ -58,7 +62,7 @@ function generatePlayerId() as String
     return "roku_" + dt.asSeconds().toStr()
 end function
 
-sub onKeyEvent(key as String, press as Boolean) as Boolean
+function onKeyEvent(key as String, press as Boolean) as Boolean
     if not press then return false
     
     handled = false
@@ -90,7 +94,7 @@ sub onKeyEvent(key as String, press as Boolean) as Boolean
     end if
     
     return handled
-end sub
+end function
 
 sub cycleServer()
     m.currentServerIndex = (m.currentServerIndex + 1) mod m.serverEnvironments.count()
@@ -153,7 +157,9 @@ sub updateDisplay()
     m.codecValue.text = m.codecs[m.currentCodecIndex]
     
     ' Update content
-    if m.availableContent.count() > 0
+    if m.forceContentName <> invalid and m.forceContentName <> ""
+        m.contentValue.text = m.forceContentName
+    else if m.availableContent.count() > 0
         content = m.availableContent[m.currentContentIndex]
         m.contentValue.text = content.name
     else
@@ -167,30 +173,31 @@ sub fetchContentList()
     env = m.serverEnvironments[m.currentServerIndex]
     url = "http://" + env.host + ":" + env.contentPort + "/api/content"
     
-    request = CreateObject("roUrlTransfer")
-    request.SetUrl(url)
-    request.SetCertificatesFile("common:/certs/ca-bundle.crt")
-    request.InitClientCertificates()
-    request.EnablePeerVerification(false)
-    request.EnableHostVerification(false)
-    
-    port = CreateObject("roMessagePort")
-    request.SetPort(port)
-    
-    if request.AsyncGetToString()
-        msg = wait(CONTENT_FETCH_TIMEOUT_MS, port)
-        if type(msg) = "roUrlEvent"
-            if msg.GetResponseCode() = 200
-                responseString = msg.GetString()
-                parseContentList(responseString)
-            else
-                m.statusLabel.text = "Failed to fetch content: HTTP " + msg.GetResponseCode().toStr()
-            end if
-        else
-            m.statusLabel.text = "Request timeout"
-        end if
+    m.contentTask.url = url
+    m.contentTask.control = "RUN"
+end sub
+
+sub onContentFetchResponse()
+    responseString = m.contentTask.response
+    statusCode = m.contentTask.statusCode
+
+    if responseString <> invalid and responseString <> ""
+        parseContentList(responseString)
     else
-        m.statusLabel.text = "Failed to start request"
+        if statusCode > 0
+            m.statusLabel.text = "Failed to fetch content: HTTP " + statusCode.toStr()
+        else
+            m.statusLabel.text = "Failed to fetch content"
+        end if
+    end if
+end sub
+
+sub onContentFetchError()
+    errorMessage = m.contentTask.error
+    if errorMessage <> invalid and errorMessage <> ""
+        m.statusLabel.text = "Failed to fetch content: " + errorMessage
+    else
+        m.statusLabel.text = "Failed to fetch content"
     end if
 end sub
 
@@ -229,12 +236,14 @@ sub parseContentList(jsonString as String)
 end sub
 
 sub applySelection()
-    if m.availableContent.count() = 0
+    if m.forceContentName <> invalid and m.forceContentName <> ""
+        content = { name: m.forceContentName, has_hls: true, has_dash: true }
+    else if m.availableContent.count() > 0
+        content = m.availableContent[m.currentContentIndex]
+    else
         m.statusLabel.text = "No content to play"
         return
     end if
-    
-    content = m.availableContent[m.currentContentIndex]
     protocol = m.protocols[m.currentProtocolIndex]
     segment = m.segments[m.currentSegmentIndex]
     
@@ -252,6 +261,8 @@ sub applySelection()
     ' Build stream URL
     env = m.serverEnvironments[m.currentServerIndex]
     streamUrl = buildStreamURL(env, content.name, protocol, segment)
+
+    print "Stream URL: "; streamUrl
     
     ' Update URL display
     m.urlValue.text = streamUrl
@@ -261,26 +272,10 @@ sub applySelection()
 end sub
 
 function buildStreamURL(env as Object, contentName as String, protocol as String, segment as String) as String
-    baseUrl = "http://" + env.host + ":" + env.contentPort
+    baseUrl = "http://" + env.host + ":" + env.playbackPort
     path = "/go-live/" + contentName + "/"
     
-    if protocol = "DASH"
-        if segment = "2s"
-            path = path + "manifest_2s.mpd"
-        else if segment = "6s"
-            path = path + "manifest_6s.mpd"
-        else
-            path = path + "manifest.mpd"  ' LL or All
-        end if
-    else  ' HLS
-        if segment = "2s"
-            path = path + "master_2s.m3u8"
-        else if segment = "6s"
-            path = path + "master_6s.m3u8"
-        else
-            path = path + "master.m3u8"  ' LL or All
-        end if
-    end if
+    path = path + "manifest_2s.mpd"
     
     ' Add player_id query parameter
     streamUrl = baseUrl + path + "?player_id=" + m.playerId
@@ -304,12 +299,7 @@ sub playStream(url as String, contentName as String)
 end sub
 
 function getStreamFormat() as String
-    protocol = m.protocols[m.currentProtocolIndex]
-    if protocol = "DASH"
-        return "dash"
-    else
-        return "hls"
-    end if
+    return "dash"
 end function
 
 sub onVideoStateChange()

@@ -6,6 +6,8 @@
     <script type="text/brightscript" uri="pkg:/components/MainScene.brs" />
     
     <children>
+        <ContentFetchTask id="contentFetchTask" />
+
         <!-- Background -->
         <Rectangle 
             id="background"

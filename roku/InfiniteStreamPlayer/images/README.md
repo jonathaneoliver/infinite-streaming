@@ -16,6 +16,9 @@ This directory should contain the following image files for the Roku channel:
 4. **splash_sd.png** (720x480 pixels)
    - Splash screen for SD resolution
 
+5. **channel_store_hd.png** (1280x720 pixels)
+   - Channel store artwork (HD)
+
 ## Notes
 
 For development and testing, you can create simple placeholder images with:
