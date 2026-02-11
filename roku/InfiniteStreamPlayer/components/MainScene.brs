@@ -171,6 +171,8 @@ sub fetchContentList()
     request.SetUrl(url)
     request.SetCertificatesFile("common:/certs/ca-bundle.crt")
     request.InitClientCertificates()
+    ' Disable SSL verification for development/testing with self-signed certs or HTTP
+    ' For production HTTPS, these should be enabled (set to true)
     request.EnablePeerVerification(false)
     request.EnableHostVerification(false)
     
@@ -205,7 +207,11 @@ sub parseContentList(jsonString as String)
     if json <> invalid and type(json) = "roArray"
         m.availableContent = []
         for each item in json
-            if item.has_hls = true or item.has_dash = true
+            ' Check if content has HLS or DASH support (with safety check for missing fields)
+            hasHls = (item.has_hls <> invalid AND item.has_hls = true)
+            hasDash = (item.has_dash <> invalid AND item.has_dash = true)
+            
+            if hasHls or hasDash
                 ' Filter to H264 content only (matching iOS behavior)
                 if isH264Content(item.name)
                     m.availableContent.push(item)
