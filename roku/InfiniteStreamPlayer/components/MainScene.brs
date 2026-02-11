@@ -1,3 +1,10 @@
+' Constants
+const CONTENT_FETCH_TIMEOUT_MS = 10000
+const DEFAULT_SERVER_INDEX = 0
+const DEFAULT_PROTOCOL_INDEX = 0  ' HLS
+const DEFAULT_SEGMENT_INDEX = 2   ' 6s
+const DEFAULT_CODEC_INDEX = 0     ' H264
+
 sub init()
     ' Initialize component references
     m.videoPlayer = m.top.findNode("videoPlayer")
@@ -10,20 +17,21 @@ sub init()
     m.urlValue = m.top.findNode("urlValue")
     
     ' Initialize state
+    ' Note: These server addresses match the iOS app defaults
     m.serverEnvironments = [
         {label: "Dev (40000)", host: "100.111.190.54", contentPort: "40000", playbackPort: "40081"},
         {label: "Release (30000)", host: "infinitestreaming.jeoliver.com", contentPort: "30000", playbackPort: "30081"}
     ]
-    m.currentServerIndex = 0
+    m.currentServerIndex = DEFAULT_SERVER_INDEX
     
     m.protocols = ["HLS", "DASH"]
-    m.currentProtocolIndex = 0
+    m.currentProtocolIndex = DEFAULT_PROTOCOL_INDEX
     
     m.segments = ["LL", "2s", "6s", "All"]
-    m.currentSegmentIndex = 2  ' Default to 6s
+    m.currentSegmentIndex = DEFAULT_SEGMENT_INDEX
     
     m.codecs = ["H264", "H265/HEVC", "AV1", "Auto"]
-    m.currentCodecIndex = 0  ' Default to H264
+    m.currentCodecIndex = DEFAULT_CODEC_INDEX
     
     m.availableContent = []
     m.currentContentIndex = 0
@@ -170,7 +178,7 @@ sub fetchContentList()
     request.SetPort(port)
     
     if request.AsyncGetToString()
-        msg = wait(10000, port)  ' 10 second timeout
+        msg = wait(CONTENT_FETCH_TIMEOUT_MS, port)
         if type(msg) = "roUrlEvent"
             if msg.GetResponseCode() = 200
                 responseString = msg.GetString()
@@ -186,6 +194,12 @@ sub fetchContentList()
     end if
 end sub
 
+function isH264Content(contentName as String) as Boolean
+    ' Check if content is H264 by excluding HEVC/H265/AV1 (matching iOS app behavior)
+    nameLower = LCase(contentName)
+    return not (nameLower.Instr("hevc") >= 0 or nameLower.Instr("h265") >= 0 or nameLower.Instr("av1") >= 0)
+end function
+
 sub parseContentList(jsonString as String)
     json = ParseJson(jsonString)
     if json <> invalid and type(json) = "roArray"
@@ -193,8 +207,7 @@ sub parseContentList(jsonString as String)
         for each item in json
             if item.has_hls = true or item.has_dash = true
                 ' Filter to H264 content only (matching iOS behavior)
-                contentName = item.name
-                if not (LCase(contentName).Instr("hevc") >= 0 or LCase(contentName).Instr("h265") >= 0 or LCase(contentName).Instr("av1") >= 0)
+                if isH264Content(item.name)
                     m.availableContent.push(item)
                 end if
             end if
