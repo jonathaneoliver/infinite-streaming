@@ -580,7 +580,7 @@
     <script src="/shared-nav.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
     <link rel="stylesheet" href="/dashboard/testing-session-refactored.css">
-    <script src="/dashboard/testing-session-ui-refactored.js"></script>
+    <script src="/dashboard/testing-session-ui.js"></script>
     <script>
         const logEl = document.getElementById('debugLog');
         const sseMissedEl = document.getElementById('statSseMissed');
@@ -1711,9 +1711,8 @@
             card.querySelectorAll(`input[name="shaping_default_step_seconds_${sessionId}"]`).forEach((radio) => {
                 radio.checked = Number(radio.value) === defaults.selectedStepSeconds;
             });
-            const label = card.querySelector('[data-field="shaping_default_seconds_label"]');
-            if (label) {
-                label.textContent = `segment ${defaults.segmentDurationSeconds}s`;
+            if (card) {
+                card.dataset.segmentDurationSeconds = String(defaults.segmentDurationSeconds);
             }
             updateTemplateModeUi(card);
         }
@@ -2448,19 +2447,35 @@
                 || session.nftables_pattern_enabled === 'true';
             if (patternEnabled) {
                 const runtimeRate = Number(session.nftables_pattern_rate_runtime_mbps);
-                if (Number.isFinite(runtimeRate) && runtimeRate >= 0) {
+                const stepIndex = Number(session.nftables_pattern_step_runtime || session.nftables_pattern_step || 0);
+                const steps = Array.isArray(session.nftables_pattern_steps) ? session.nftables_pattern_steps : [];
+                let stepRate = NaN;
+                if (stepIndex > 0 && stepIndex <= steps.length) {
+                    stepRate = Number(steps[stepIndex - 1]?.rate_mbps);
+                }
+                const baseRate = Number(session.nftables_bandwidth_mbps);
+                let target = runtimeRate;
+                if (!Number.isFinite(target)) {
+                    target = stepRate;
+                }
+                if (!Number.isFinite(target)) {
+                    target = baseRate;
+                }
+                if (Number.isFinite(target) && target >= 0) {
                     console.log('[throughput-slider]', {
                         ts: new Date().toISOString(),
                         runtimeRateMbps: runtimeRate,
+                        stepRateMbps: stepRate,
+                        targetRateMbps: target,
                         sseRevision: sseLastRevision
                     });
                     const throughputInput = card.querySelector('input[data-field="shaping_throughput_mbps"]');
                     const throughputValue = card.querySelector('[data-field="shaping_throughput_row"] .range-value');
                     if (throughputInput) {
-                        throughputInput.value = String(runtimeRate);
+                        throughputInput.value = String(target);
                     }
                     if (throughputValue) {
-                        throughputValue.textContent = String(runtimeRate);
+                        throughputValue.textContent = String(target);
                     }
                 }
             }

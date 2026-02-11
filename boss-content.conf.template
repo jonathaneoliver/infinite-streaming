@@ -5,6 +5,12 @@
 # On-Demand Live Streaming - HTTP-level Configuration
 # ============================================================
 
+# Nginx access log format with explicit prefix for grep-friendly filtering.
+log_format nginx_access 'NGINX access time=$time_iso8601 remote=$remote_addr '
+                        'host=$host port=$server_port reqid=$request_id '
+                        'request="$request" status=$status bytes=$body_bytes_sent '
+                        'referer="$http_referer" ua="$http_user_agent"';
+
 # Proxy cache for on-demand HLS live playlists
 # Cache is mounted as tmpfs (RAM) via docker-compose.yml for fast access
 proxy_cache_path /var/cache/nginx/live_playlists 
@@ -45,7 +51,7 @@ server {
 
     add_header Access-Control-Allow-Origin *;
     # Log to stderr for proper time-interleaving in Docker logs
-    access_log stderr combined;
+    access_log /dev/stderr nginx_access;
     error_log stderr info;
     
     # Increase upload size limit for video files (10GB)
@@ -72,6 +78,7 @@ server {
         location ~ ^/go-live/.*\.m3u8$ {
             proxy_pass http://go_live;
             proxy_set_header Host $host;
+            proxy_set_header X-Forwarded-Port $server_port;
             proxy_set_header X-Real-IP $remote_addr;
             proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
 
@@ -84,6 +91,7 @@ server {
         location ~ ^/go-live/.*\.mpd$ {
             proxy_pass http://go_live;
             proxy_set_header Host $host;
+            proxy_set_header X-Forwarded-Port $server_port;
             proxy_set_header X-Real-IP $remote_addr;
             proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
 
@@ -94,6 +102,7 @@ server {
         # Default: proxy to Go service (for API endpoints like /go-live/api/status)
         proxy_pass http://go_live;
         proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Port $server_port;
         add_header Access-Control-Allow-Origin * always;
     }
 

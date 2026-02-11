@@ -14,6 +14,9 @@ const (
 	defaultIdleTimeoutSeconds = 60
 	defaultPlayerWindowSecs   = 60
 	maxExternalIPList         = 20
+	defaultExternalIPBucketMinutes = 60
+	defaultExternalIPRetentionHours = 168
+	externalPruneInterval = time.Minute
 )
 
 type StreamEntry struct {
@@ -46,18 +49,49 @@ type StreamStatus struct {
 	ExternalIPOverflow int   `json:"external_ip_overflow,omitempty"`
 }
 
+type ExternalUsageBucket struct {
+	Start     time.Time
+	Requests  int
+	UniqueIPs map[string]struct{}
+}
+
+type ExternalUsageSnapshot struct {
+	BucketStart       string `json:"bucket_start"`
+	ExternalRequests  int    `json:"external_requests"`
+	UniqueExternalIPs int    `json:"unique_external_ips"`
+}
+
 type StreamTracker struct {
 	mu           sync.RWMutex
 	streams      map[string]*StreamEntry
 	idleTimeout  time.Duration
 	playerWindow time.Duration
+	externalUsage     map[int64]*ExternalUsageBucket
+	externalUnique    map[string]struct{}
+	externalLastSeen  map[string]time.Time
+	externalBucket    time.Duration
+	externalRetention time.Duration
+	externalPruneAt   time.Time
 }
 
 func NewStreamTracker() *StreamTracker {
+	bucketMinutes := envMinutes("GO_LIVE_EXTERNAL_IP_BUCKET_MINUTES", defaultExternalIPBucketMinutes)
+	retentionHours := envHours("GO_LIVE_EXTERNAL_IP_RETENTION_HOURS", defaultExternalIPRetentionHours)
+	if bucketMinutes <= 0 {
+		bucketMinutes = defaultExternalIPBucketMinutes
+	}
+	if retentionHours <= 0 {
+		retentionHours = defaultExternalIPRetentionHours
+	}
 	return &StreamTracker{
 		streams:      make(map[string]*StreamEntry),
 		idleTimeout:  envSeconds("GO_LIVE_IDLE_TIMEOUT", defaultIdleTimeoutSeconds),
 		playerWindow: envSeconds("GO_LIVE_PLAYER_WINDOW", defaultPlayerWindowSecs),
+		externalUsage:     make(map[int64]*ExternalUsageBucket),
+		externalUnique:    make(map[string]struct{}),
+		externalLastSeen:  make(map[string]time.Time),
+		externalBucket:    time.Duration(bucketMinutes) * time.Minute,
+		externalRetention: time.Duration(retentionHours) * time.Hour,
 	}
 }
 
@@ -106,6 +140,7 @@ func (t *StreamTracker) RecordRequest(content, mode, uri, clientKey string, now 
 		entry.Clients[clientKey] = now
 	}
 	t.pruneClients(entry, now)
+	t.recordExternalIPLocked(clientKey, now)
 }
 
 func (t *StreamTracker) Snapshot(now time.Time) []StreamStatus {
@@ -279,6 +314,61 @@ func (t *StreamTracker) collectActiveClientIPs(entry *StreamEntry, now time.Time
 	return clientIPs, externalIPs
 }
 
+func (t *StreamTracker) recordExternalIPLocked(clientKey string, now time.Time) {
+	if clientKey == "" {
+		return
+	}
+	ip := parseClientIP(clientKey)
+	if ip == "" || ip == "unknown" {
+		return
+	}
+	if !isExternalIP(ip) {
+		return
+	}
+	if t.externalUnique != nil {
+		t.externalUnique[ip] = struct{}{}
+	}
+	if t.externalLastSeen != nil {
+		t.externalLastSeen[ip] = now
+	}
+	if t.externalUsage != nil && t.externalBucket > 0 {
+		bucketStart := now.Truncate(t.externalBucket)
+		bucketKey := bucketStart.Unix()
+		bucket := t.externalUsage[bucketKey]
+		if bucket == nil {
+			bucket = &ExternalUsageBucket{
+				Start:     bucketStart,
+				UniqueIPs: make(map[string]struct{}),
+			}
+			t.externalUsage[bucketKey] = bucket
+		}
+		bucket.Requests++
+		bucket.UniqueIPs[ip] = struct{}{}
+	}
+	t.pruneExternalUsageLocked(now)
+}
+
+func (t *StreamTracker) pruneExternalUsageLocked(now time.Time) {
+	if t.externalRetention <= 0 {
+		return
+	}
+	if !t.externalPruneAt.IsZero() && now.Sub(t.externalPruneAt) < externalPruneInterval {
+		return
+	}
+	cutoff := now.Add(-t.externalRetention)
+	for key, bucket := range t.externalUsage {
+		if bucket == nil || bucket.Start.Before(cutoff) {
+			delete(t.externalUsage, key)
+		}
+	}
+	for ip, last := range t.externalLastSeen {
+		if last.Before(cutoff) {
+			delete(t.externalLastSeen, ip)
+		}
+	}
+	t.externalPruneAt = now
+}
+
 func (t *StreamTracker) UniqueExternalIPCount(now time.Time) int {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
@@ -302,6 +392,51 @@ func (t *StreamTracker) UniqueExternalIPCount(now time.Time) int {
 		}
 	}
 	return len(unique)
+}
+
+func (t *StreamTracker) ExternalUsageSnapshot(now time.Time) []ExternalUsageSnapshot {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.pruneExternalUsageLocked(now)
+	if len(t.externalUsage) == 0 {
+		return nil
+	}
+	snapshots := make([]ExternalUsageSnapshot, 0, len(t.externalUsage))
+	for _, bucket := range t.externalUsage {
+		if bucket == nil {
+			continue
+		}
+		snapshots = append(snapshots, ExternalUsageSnapshot{
+			BucketStart:       bucket.Start.UTC().Format(time.RFC3339),
+			ExternalRequests:  bucket.Requests,
+			UniqueExternalIPs: len(bucket.UniqueIPs),
+		})
+	}
+	sort.Slice(snapshots, func(i, j int) bool {
+		return snapshots[i].BucketStart < snapshots[j].BucketStart
+	})
+	return snapshots
+}
+
+func (t *StreamTracker) ExternalUniqueCounts(now time.Time) (rolling int, lifetime int) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.pruneExternalUsageLocked(now)
+	return len(t.externalLastSeen), len(t.externalUnique)
+}
+
+func (t *StreamTracker) ExternalBucketMinutes() int {
+	if t.externalBucket <= 0 {
+		return 0
+	}
+	return int(t.externalBucket.Minutes())
+}
+
+func (t *StreamTracker) ExternalRetentionHours() int {
+	if t.externalRetention <= 0 {
+		return 0
+	}
+	return int(t.externalRetention.Hours())
 }
 
 func streamKey(content, mode string) string {
@@ -382,6 +517,30 @@ func envSeconds(name string, fallback int) time.Duration {
 		return time.Duration(fallback) * time.Second
 	}
 	return time.Duration(secs) * time.Second
+}
+
+func envMinutes(name string, fallback int) int {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return fallback
+	}
+	mins, err := strconv.Atoi(value)
+	if err != nil || mins <= 0 {
+		return fallback
+	}
+	return mins
+}
+
+func envHours(name string, fallback int) int {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return fallback
+	}
+	hours, err := strconv.Atoi(value)
+	if err != nil || hours <= 0 {
+		return fallback
+	}
+	return hours
 }
 
 func formatSeconds(d time.Duration) string {

@@ -64,6 +64,71 @@
             margin-bottom: 20px;
             box-shadow: var(--shadow-sm);
         }
+
+        .external-ip-history {
+            position: relative;
+        }
+
+        .external-ip-legend {
+            display: flex;
+            gap: 16px;
+            align-items: center;
+            margin-bottom: 10px;
+            font-size: 12px;
+            color: var(--text-secondary);
+        }
+
+        .legend-item {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .legend-swatch {
+            display: inline-block;
+            width: 12px;
+            height: 12px;
+            border-radius: 3px;
+        }
+
+        .legend-swatch.requests {
+            background: var(--primary-blue);
+        }
+
+        .legend-swatch.uniques {
+            background: var(--warning);
+        }
+
+        .external-ip-chart-wrap {
+            position: relative;
+        }
+
+        #external-ip-chart {
+            width: 100%;
+            display: block;
+        }
+
+        .external-ip-empty {
+            position: absolute;
+            inset: 0;
+            display: none;
+            align-items: center;
+            justify-content: center;
+            color: var(--text-tertiary);
+            font-size: 13px;
+        }
+
+        .external-ip-empty.active {
+            display: flex;
+        }
+
+        .external-ip-range {
+            margin-top: 8px;
+            font-size: 12px;
+            color: var(--text-tertiary);
+            display: flex;
+            justify-content: space-between;
+        }
         
         .streams-header {
             display: flex;
@@ -387,8 +452,16 @@
                 <div class="summary-value" id="total-streams">0</div>
             </div>
             <div class="summary-item">
-                <div class="summary-label">Unique External IPs</div>
-                <div class="summary-value" id="unique-external-ips">0</div>
+                <div class="summary-label">Unique External IPs (Active)</div>
+                <div class="summary-value" id="unique-external-ips-active">0</div>
+            </div>
+            <div class="summary-item">
+                <div class="summary-label">Unique External IPs (7d)</div>
+                <div class="summary-value" id="unique-external-ips-rolling">0</div>
+            </div>
+            <div class="summary-item">
+                <div class="summary-label">Unique External IPs (Lifetime)</div>
+                <div class="summary-value" id="unique-external-ips-lifetime">0</div>
             </div>
             <div class="summary-item">
                 <div class="summary-label">Idle Timeout</div>
@@ -402,6 +475,22 @@
                 <div class="summary-label">Last Update</div>
                 <div class="summary-value" id="last-update" style="font-size: 16px; color: var(--text-tertiary);">-</div>
             </div>
+        </div>
+
+        <div class="streams-container external-ip-history">
+            <div class="streams-header">
+                <div class="streams-title">External IP Activity</div>
+                <div class="refresh-indicator" id="external-ip-window">Last 7 days</div>
+            </div>
+            <div class="external-ip-legend">
+                <div class="legend-item"><span class="legend-swatch requests"></span>Requests</div>
+                <div class="legend-item"><span class="legend-swatch uniques"></span>Unique IPs</div>
+            </div>
+            <div class="external-ip-chart-wrap">
+                <canvas id="external-ip-chart" height="140"></canvas>
+                <div class="external-ip-empty" id="external-ip-empty">No external IP activity yet.</div>
+            </div>
+            <div class="external-ip-range" id="external-ip-range"></div>
         </div>
 
         <div class="streams-container">
@@ -642,6 +731,107 @@
             `;
         }
 
+        function renderExternalHistory(history, bucketMinutes, retentionHours) {
+            const canvas = document.getElementById('external-ip-chart');
+            const empty = document.getElementById('external-ip-empty');
+            const range = document.getElementById('external-ip-range');
+            const windowLabel = document.getElementById('external-ip-window');
+            if (!canvas) return;
+
+            const resolvedBucket = Number(bucketMinutes) || 60;
+            const resolvedRetention = Number(retentionHours) || 168;
+            if (windowLabel) {
+                windowLabel.textContent = `Last ${resolvedRetention}h`;
+            }
+
+            if (!Array.isArray(history) || history.length === 0) {
+                if (empty) empty.classList.add('active');
+                if (range) range.textContent = '';
+                const ctx = canvas.getContext('2d');
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+                return;
+            }
+
+            if (empty) empty.classList.remove('active');
+
+            const sorted = [...history].sort((a, b) => {
+                return new Date(a.bucket_start) - new Date(b.bucket_start);
+            });
+            const requests = sorted.map(item => Number(item.external_requests) || 0);
+            const uniques = sorted.map(item => Number(item.unique_external_ips) || 0);
+            const maxValue = Math.max(1, ...requests, ...uniques);
+
+            const parent = canvas.parentElement;
+            const width = parent ? parent.clientWidth : 600;
+            const height = 140;
+            canvas.width = width;
+            canvas.height = height;
+
+            const ctx = canvas.getContext('2d');
+            ctx.clearRect(0, 0, width, height);
+
+            const padding = { left: 36, right: 12, top: 10, bottom: 24 };
+            const chartWidth = width - padding.left - padding.right;
+            const chartHeight = height - padding.top - padding.bottom;
+
+            ctx.strokeStyle = 'rgba(0,0,0,0.15)';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.moveTo(padding.left, padding.top + chartHeight);
+            ctx.lineTo(padding.left + chartWidth, padding.top + chartHeight);
+            ctx.stroke();
+
+            const points = sorted.length;
+            const stepX = points > 1 ? chartWidth / (points - 1) : 0;
+
+            const mapY = (value) => padding.top + chartHeight - (value / maxValue) * chartHeight;
+
+            ctx.strokeStyle = '#1a73e8';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            requests.forEach((value, index) => {
+                const x = padding.left + stepX * index;
+                const y = mapY(value);
+                if (index === 0) {
+                    ctx.moveTo(x, y);
+                } else {
+                    ctx.lineTo(x, y);
+                }
+            });
+            ctx.stroke();
+
+            ctx.strokeStyle = '#f9ab00';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            uniques.forEach((value, index) => {
+                const x = padding.left + stepX * index;
+                const y = mapY(value);
+                if (index === 0) {
+                    ctx.moveTo(x, y);
+                } else {
+                    ctx.lineTo(x, y);
+                }
+            });
+            ctx.stroke();
+
+            ctx.fillStyle = '#5f6368';
+            ctx.font = '11px sans-serif';
+            ctx.fillText(maxValue.toString(), 4, padding.top + 8);
+            ctx.fillText('0', 10, padding.top + chartHeight + 12);
+
+            const first = sorted[0]?.bucket_start;
+            const last = sorted[sorted.length - 1]?.bucket_start;
+            if (range && first && last) {
+                const startLabel = new Date(first).toLocaleString();
+                const endLabel = new Date(last).toLocaleString();
+                range.innerHTML = `<span>${startLabel}</span><span>${endLabel}</span>`;
+            }
+
+            if (resolvedBucket !== 60 && windowLabel) {
+                windowLabel.textContent = `Last ${resolvedRetention}h (bucket ${resolvedBucket}m)`;
+            }
+        }
+
         async function fetchStatus() {
             const indicator = document.getElementById('refresh-indicator');
             indicator.classList.add('active');
@@ -658,10 +848,30 @@
                 const totalStreams = document.getElementById('total-streams');
                 totalStreams.textContent = streams.length;
                 totalStreams.className = 'summary-value' + (streams.length > 0 ? '' : ' zero');
-                const externalTotal = document.getElementById('unique-external-ips');
-                const externalCount = data.unique_external_ips || 0;
-                externalTotal.textContent = externalCount;
-                externalTotal.className = 'summary-value' + (externalCount > 0 ? '' : ' zero');
+                const externalActive = document.getElementById('unique-external-ips-active');
+                const externalRolling = document.getElementById('unique-external-ips-rolling');
+                const externalLifetime = document.getElementById('unique-external-ips-lifetime');
+                const activeCount = data.unique_external_ips || 0;
+                const rollingCount = data.unique_external_ips_rolling ?? activeCount;
+                const lifetimeCount = data.unique_external_ips_lifetime ?? 0;
+                if (externalActive) {
+                    externalActive.textContent = activeCount;
+                    externalActive.className = 'summary-value' + (activeCount > 0 ? '' : ' zero');
+                }
+                if (externalRolling) {
+                    externalRolling.textContent = rollingCount;
+                    externalRolling.className = 'summary-value' + (rollingCount > 0 ? '' : ' zero');
+                }
+                if (externalLifetime) {
+                    externalLifetime.textContent = lifetimeCount;
+                    externalLifetime.className = 'summary-value' + (lifetimeCount > 0 ? '' : ' zero');
+                }
+
+                renderExternalHistory(
+                    data.external_ip_history || [],
+                    data.external_ip_bucket_minutes,
+                    data.external_ip_retention_hours
+                );
 
                 document.getElementById('idle-timeout').textContent = idleTimeout + 's';
                 document.getElementById('mode').textContent = (data.mode || 'go-live').toUpperCase();

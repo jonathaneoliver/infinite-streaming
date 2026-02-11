@@ -1251,7 +1251,8 @@ Version: ${version}
         setSelectedUrl: setSelectedUrl,
         normalizeTestingBaseUrl: normalizeTestingBaseUrl,
         buildTestingUrl: buildTestingUrl,
-        createPlayerId: createPlayerId
+        createPlayerId: createPlayerId,
+        isContentManagementRestricted: shouldRestrictContentManagement
     };
 
     // Auto-initialize on DOM ready (unless disabled)

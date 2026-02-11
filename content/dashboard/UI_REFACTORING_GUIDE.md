@@ -80,7 +80,7 @@ The testing session interface has been refactored to use **progressive disclosur
 ## File Structure
 
 ### New Files Created:
-1. **`testing-session-ui-refactored.js`** - Refactored JavaScript with:
+1. **`testing-session-ui.js`** - Refactored JavaScript with:
    - Collapsible section logic
    - Tabbed interface logic
    - Dropdown rendering (instead of radio buttons)
@@ -116,7 +116,7 @@ The testing session interface has been refactored to use **progressive disclosur
 
    <!-- With this -->
    <link rel="stylesheet" href="/dashboard/testing-session-refactored.css">
-   <script src="/dashboard/testing-session-ui-refactored.js"></script>
+   <script src="/dashboard/testing-session-ui.js"></script>
    ```
 
 3. **Test the interface**:
