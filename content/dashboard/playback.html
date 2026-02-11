@@ -286,6 +286,13 @@
                     <option value="shaka">Shaka</option>
                 </select>
             </div>
+            <div class="content-control-group">
+                <label class="content-control-label">Allow 4K</label>
+                <label style="display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-secondary);">
+                    <input id="prefer4kToggle" type="checkbox">
+                    Allow 4K (native)
+                </label>
+            </div>
             <div class="control-actions">
                 <button onclick="playStream()">▶ Play</button>
                 <button onclick="pauseStream()">⏸ Pause</button>
@@ -323,6 +330,7 @@
         const playerState = { instance: null, type: null, url: null };
         let availableContent = [];
         const AUDIO_MUTED_KEY = 'bossAudioMuted';
+        const NATIVE_4K_KEY = 'bossPrefer4kNative';
 
         function getStoredContent() {
             return localStorage.getItem('bossSelectedContentFull') || localStorage.getItem('bossSelectedContent') || '';
@@ -345,6 +353,21 @@
             localStorage.setItem(AUDIO_MUTED_KEY, isMuted ? 'true' : 'false');
             const frame = document.getElementById('videoFrame');
             if (frame) frame.classList.toggle('audio-active', !isMuted);
+        }
+
+        function getPrefer4kNative() {
+            return localStorage.getItem(NATIVE_4K_KEY) === 'true';
+        }
+
+        function setPrefer4kNative(enabled) {
+            localStorage.setItem(NATIVE_4K_KEY, enabled ? 'true' : 'false');
+        }
+
+        function applyNative4kPreference(videoEl) {
+            if (!videoEl) return;
+            if (!getPrefer4kNative()) return;
+            videoEl.setAttribute('width', '3840');
+            videoEl.setAttribute('height', '2160');
         }
 
         function setBadge(container, label, klass) {
@@ -379,6 +402,7 @@
             video.muted = mutedState;
 
             if (playerChoice === 'native') {
+                applyNative4kPreference(video);
                 video.src = url;
                 playerState.type = 'native';
                 return;
@@ -411,6 +435,7 @@
             if (playerChoice === 'hlsjs') {
                 if (!Hls.isSupported()) {
                     console.warn('HLS.js not supported, falling back to native');
+                    applyNative4kPreference(video);
                     video.src = url;
                     playerState.type = 'native';
                     return;
@@ -717,6 +742,14 @@
             populateContentSelect();
             const initialMuted = getGlobalMuted();
             setGlobalMuted(initialMuted);
+            const prefer4kToggle = document.getElementById('prefer4kToggle');
+            if (prefer4kToggle) {
+                prefer4kToggle.checked = getPrefer4kNative();
+                prefer4kToggle.addEventListener('change', () => {
+                    setPrefer4kNative(prefer4kToggle.checked);
+                    applySelection();
+                });
+            }
             applySelection();
             setInterval(updateStats, 500);
         }

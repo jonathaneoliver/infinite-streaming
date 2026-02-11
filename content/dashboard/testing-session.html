@@ -541,6 +541,10 @@
                         <option value="native">Native</option>
                     </select>
                 </label>
+                <label>
+                    Allow 4K
+                    <input id="prefer4kToggle" type="checkbox">
+                </label>
             </div>
             <div class="player-frame">
                 <video id="player" controls autoplay muted playsinline></video>
@@ -585,6 +589,7 @@
         const logEl = document.getElementById('debugLog');
         const sseMissedEl = document.getElementById('statSseMissed');
         const video = document.getElementById('player');
+        const NATIVE_4K_KEY = 'bossPrefer4kNative';
         let hlsInstance = null;
         let shakaPlayer = null;
         let videojsPlayer = null;
@@ -1128,6 +1133,13 @@
             }
         }
 
+        function applyNative4kPreference(videoEl) {
+            if (!videoEl) return;
+            if (localStorage.getItem(NATIVE_4K_KEY) !== 'true') return;
+            videoEl.setAttribute('width', '3840');
+            videoEl.setAttribute('height', '2160');
+        }
+
         function loadStream(url) {
             currentUrl = url;
             autoRetryCount = 0;
@@ -1187,6 +1199,7 @@
                     hlsInstance.loadSource(url);
                     hlsInstance.attachMedia(video);
                 } else {
+                    applyNative4kPreference(video);
                     video.src = url;
                     video.play().catch(err => {
                         log(`PLAY ERROR: ${err.message}`);
@@ -1233,6 +1246,7 @@
                     });
                 });
             } else {
+                applyNative4kPreference(video);
                 video.src = url;
                 video.play().catch(err => {
                     log(`PLAY ERROR: ${err.message}`);
@@ -2883,6 +2897,12 @@
             }
         }
 
+        document.addEventListener('testing-session:charts-resize', (event) => {
+            const sessionId = event.detail && event.detail.sessionId;
+            if (!sessionId) return;
+            requestAnimationFrame(() => renderBandwidthChart(sessionId));
+        });
+
         function applySessionUpdate(session) {
             if (!session) return;
             const container = document.getElementById('sessionControls');
@@ -3117,6 +3137,17 @@
             if (playerSelect) {
                 playerSelect.addEventListener('change', () => {
                     localStorage.setItem('testing_session_player', playerSelect.value);
+                    if (currentUrl) {
+                        resetPlayback();
+                        loadStream(currentUrl);
+                    }
+                });
+            }
+            const prefer4kToggle = document.getElementById('prefer4kToggle');
+            if (prefer4kToggle) {
+                prefer4kToggle.checked = localStorage.getItem(NATIVE_4K_KEY) === 'true';
+                prefer4kToggle.addEventListener('change', () => {
+                    localStorage.setItem(NATIVE_4K_KEY, prefer4kToggle.checked ? 'true' : 'false');
                     if (currentUrl) {
                         resetPlayback();
                         loadStream(currentUrl);

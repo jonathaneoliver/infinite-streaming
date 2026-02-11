@@ -86,6 +86,9 @@ struct ContentView: View {
                         }
                     }
                     .buttonStyle(.bordered)
+                    Spacer()
+                    Toggle("Allow 4K", isOn: $viewModel.prefer4kNative)
+                        .toggleStyle(.switch)
                 }
 
                 PlayerView(player: viewModel.player)
