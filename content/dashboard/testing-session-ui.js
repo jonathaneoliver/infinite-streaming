@@ -1036,6 +1036,16 @@
                     if (section) {
                         setCollapsibleState(section, nextOpen);
                     }
+                    if (section === 'bitrate-chart' && nextOpen) {
+                        const card = sectionEl ? sectionEl.closest('.session-card') : null;
+                        const sessionId = card ? card.dataset.sessionId : null;
+                        if (sessionId) {
+                            const event = new CustomEvent('testing-session:charts-resize', {
+                                detail: { sessionId }
+                            });
+                            document.dispatchEvent(event);
+                        }
+                    }
                     if (section === 'network-shaping' && nextOpen) {
                         const card = sectionEl ? sectionEl.closest('.session-card') : null;
                         const scope = card || document;
@@ -1045,6 +1055,13 @@
                             chartContent.style.display = 'block';
                             chartIcon.textContent = '▼';
                             setCollapsibleState('bitrate-chart', true);
+                            const sessionId = card ? card.dataset.sessionId : null;
+                            if (sessionId) {
+                                const event = new CustomEvent('testing-session:charts-resize', {
+                                    detail: { sessionId }
+                                });
+                                document.dispatchEvent(event);
+                            }
                         }
                     }
                 }

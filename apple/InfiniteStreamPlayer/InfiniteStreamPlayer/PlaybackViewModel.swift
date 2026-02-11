@@ -1,5 +1,6 @@
 import AVFoundation
 import Combine
+import CoreGraphics
 import Foundation
 
 @MainActor
@@ -43,6 +44,9 @@ final class PlaybackViewModel: ObservableObject {
     @Published var primePlayback: Bool = true
     @Published var forcePlayerIdOnPlayback: Bool = false
     @Published var allowPlayerIdOnContentPort: Bool = false
+    @Published var prefer4kNative: Bool = false {
+        didSet { persist(.prefer4kNative, prefer4kNative ? "true" : "false") }
+    }
 
     let player = AVPlayer()
     let diagnostics = PlaybackDiagnostics()
@@ -284,6 +288,7 @@ final class PlaybackViewModel: ObservableObject {
 
         let asset = AVURLAsset(url: url, options: nil)
         let item = AVPlayerItem(asset: asset)
+        apply4kPreference(to: item)
         player.replaceCurrentItem(with: item)
         player.isMuted = isMuted
         player.automaticallyWaitsToMinimizeStalling = true
@@ -373,6 +378,7 @@ final class PlaybackViewModel: ObservableObject {
         case baseURL = "bossBaseURL"
         case playbackBaseURL = "bossPlaybackBaseURL"
         case playerId = "bossPlayerId"
+        case prefer4kNative = "bossPrefer4kNative"
     }
 
     private func loadDefaults() {
@@ -411,6 +417,9 @@ final class PlaybackViewModel: ObservableObject {
         }
         if let storedPlayerId = defaults.string(forKey: DefaultsKey.playerId.rawValue) {
             playerId = storedPlayerId
+        }
+        if let storedPrefer4k = defaults.string(forKey: DefaultsKey.prefer4kNative.rawValue) {
+            prefer4kNative = storedPrefer4k == "true"
         }
     }
 
@@ -743,6 +752,17 @@ final class PlaybackViewModel: ObservableObject {
             return UInt64(seconds * 1000)
         }
         return nil
+    }
+
+    private func apply4kPreference(to item: AVPlayerItem) {
+        if prefer4kNative {
+            item.preferredPeakBitRate = 0
+            if #available(iOS 15.0, tvOS 15.0, *) {
+                item.preferredMaximumResolution = CGSize(width: 3840, height: 2160)
+            }
+        } else if #available(iOS 15.0, tvOS 15.0, *) {
+            item.preferredMaximumResolution = .zero
+        }
     }
 
     private func logPlaylistBodies(for masterURL: URL) async {
