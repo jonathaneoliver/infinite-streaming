@@ -1,0 +1,24 @@
+##   Channel Details
+title=InfiniteStream Player
+subtitle=HLS/DASH Test Player
+major_version=1
+minor_version=0
+build_version=0
+
+##   Channel Assets
+###  Main Menu Icons / Channel Poster Artwork
+mm_icon_focus_hd=pkg:/images/logo_hd.png
+mm_icon_focus_sd=pkg:/images/logo_sd.png
+
+###  Splash Screen + Loading Screen Artwork
+splash_screen_hd=pkg:/images/splash_hd.png
+splash_screen_sd=pkg:/images/splash_sd.png
+splash_color=#000000
+splash_min_time=0
+
+##   Resolution
+ui_resolutions=fhd
+
+##   Application Attributes
+requires_audiometadata=0
+supports_input_launch=0
