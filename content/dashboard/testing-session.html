@@ -1530,6 +1530,22 @@
             return false;
         }
 
+        function syncContentControls(card, session) {
+            if (!card || !session) return;
+            const strip = card.querySelector('input[data-field="content_strip_codecs"]');
+            if (strip) {
+                strip.checked = !!session.content_strip_codecs;
+            }
+            const allowed = Array.isArray(session.content_allowed_variants)
+                ? session.content_allowed_variants.map(String)
+                : [];
+            const allowedSet = new Set(allowed);
+            const allChecked = allowedSet.size === 0;
+            card.querySelectorAll('input[data-field="content_allowed_variants"]').forEach((input) => {
+                input.checked = allChecked || allowedSet.has(String(input.value));
+            });
+        }
+
         function syncServerFaultControls(card, session) {
             if (!card || !session) return;
             const sessionId = String(card.dataset.sessionId || session.session_id || '');
@@ -2266,6 +2282,10 @@
                         allBox.checked = true;
                     }
                 }
+                if (event.target.dataset.field === 'content_allowed_variants' || event.target.dataset.field === 'content_strip_codecs') {
+                    sendSessionPatch(card, ['content_allowed_variants', 'content_strip_codecs']);
+                    return;
+                }
                 if (event.target.dataset.field && event.target.dataset.field.startsWith('shaping_')) {
                     scheduleShapingApply(card);
                     return;
@@ -2977,6 +2997,7 @@
                 if (shouldSync) {
                     syncServerFaultControls(existingCard, session);
                     syncNetworkShapingControls(existingCard, session);
+                    syncContentControls(existingCard, session);
                 }
                 syncServerFaultData(existingCard, session);
                 updateSessionDetailData(existingCard, session);

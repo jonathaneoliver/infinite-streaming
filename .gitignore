@@ -37,3 +37,4 @@ __pycache__/
 
 .vscode/
 tests/.hls_failure_probe_last_failed
+apple/InfiniteStreamPlayer/InfiniteStreamPlayer.xcodeproj/project.xcworkspace/xcuserdata/jonathanoliver.xcuserdatad/UserInterfaceState.xcuserstate
