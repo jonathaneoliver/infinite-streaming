@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<component name="ContentFetchTask" extends="Task">
+    <interface>
+        <field id="url" type="string" />
+        <field id="response" type="string" />
+        <field id="statusCode" type="integer" />
+        <field id="error" type="string" />
+    </interface>
+
+    <script type="text/brightscript" uri="pkg:/components/ContentFetchTask.brs" />
+</component>

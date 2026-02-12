@@ -13,6 +13,7 @@ import urllib.parse
 # Pytest configuration
 def pytest_configure(config):
     """Register custom markers."""
+    config.addinivalue_line("markers", "integration: Integration tests")
     config.addinivalue_line("markers", "http: HTTP-level failure tests")
     config.addinivalue_line("markers", "socket: Socket-level failure tests")
     config.addinivalue_line("markers", "transport: Transport-level failure tests")

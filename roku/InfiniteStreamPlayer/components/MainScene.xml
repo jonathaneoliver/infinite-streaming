@@ -1,0 +1,170 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<component name="MainScene" extends="Scene">
+    <interface>
+    </interface>
+    
+    <script type="text/brightscript" uri="pkg:/components/MainScene.brs" />
+    
+    <children>
+        <ContentFetchTask id="contentFetchTask" />
+
+        <!-- Background -->
+        <Rectangle 
+            id="background"
+            width="1920"
+            height="1080"
+            color="0x000000FF" />
+        
+        <!-- Title -->
+        <Label 
+            id="titleLabel"
+            text="InfiniteStream Player"
+            translation="[60, 40]"
+            width="1800"
+            height="60"
+            font="font:LargeBoldSystemFont"
+            color="0xFFFFFFFF" />
+        
+        <!-- Content Control Group -->
+        <Group id="controlGroup" translation="[60, 120]">
+            <!-- Server Environment Label -->
+            <Label 
+                id="serverLabel"
+                text="Server:"
+                translation="[0, 0]"
+                width="200"
+                height="40"
+                font="font:MediumSystemFont"
+                color="0xFFFFFFFF" />
+            <Label 
+                id="serverValue"
+                text="Dev (40000)"
+                translation="[210, 0]"
+                width="400"
+                height="40"
+                font="font:MediumSystemFont"
+                color="0x00FF00FF" />
+            
+            <!-- Protocol Label -->
+            <Label 
+                id="protocolLabel"
+                text="Protocol:"
+                translation="[0, 50]"
+                width="200"
+                height="40"
+                font="font:MediumSystemFont"
+                color="0xFFFFFFFF" />
+            <Label 
+                id="protocolValue"
+                text="HLS"
+                translation="[210, 50]"
+                width="400"
+                height="40"
+                font="font:MediumSystemFont"
+                color="0x00FF00FF" />
+            
+            <!-- Segment Label -->
+            <Label 
+                id="segmentLabel"
+                text="Segment:"
+                translation="[0, 100]"
+                width="200"
+                height="40"
+                font="font:MediumSystemFont"
+                color="0xFFFFFFFF" />
+            <Label 
+                id="segmentValue"
+                text="6s"
+                translation="[210, 100]"
+                width="400"
+                height="40"
+                font="font:MediumSystemFont"
+                color="0x00FF00FF" />
+            
+            <!-- Codec Label -->
+            <Label 
+                id="codecLabel"
+                text="Codec:"
+                translation="[0, 150]"
+                width="200"
+                height="40"
+                font="font:MediumSystemFont"
+                color="0xFFFFFFFF" />
+            <Label 
+                id="codecValue"
+                text="H264"
+                translation="[210, 150]"
+                width="400"
+                height="40"
+                font="font:MediumSystemFont"
+                color="0x00FF00FF" />
+            
+            <!-- Content Label -->
+            <Label 
+                id="contentLabel"
+                text="Content:"
+                translation="[0, 200]"
+                width="200"
+                height="40"
+                font="font:MediumSystemFont"
+                color="0xFFFFFFFF" />
+            <Label 
+                id="contentValue"
+                text="Loading..."
+                translation="[210, 200]"
+                width="600"
+                height="40"
+                font="font:MediumSystemFont"
+                color="0x00FF00FF" />
+            
+            <!-- URL Label -->
+            <Label 
+                id="urlLabel"
+                text="URL:"
+                translation="[0, 250]"
+                width="200"
+                height="40"
+                font="font:SmallSystemFont"
+                color="0xFFFFFFFF" />
+            <Label 
+                id="urlValue"
+                text=""
+                translation="[210, 250]"
+                width="1600"
+                height="60"
+                font="font:SmallSystemFont"
+                color="0xAAAAAAAA"
+                wrap="true" />
+        </Group>
+        
+        <!-- Video Player -->
+        <Video 
+            id="videoPlayer"
+            translation="[60, 400]"
+            width="1800"
+            height="540"
+            visible="true"
+            loop="false"
+            enableTrickPlay="true" />
+        
+        <!-- Status Label -->
+        <Label 
+            id="statusLabel"
+            text="Initializing..."
+            translation="[60, 960]"
+            width="1800"
+            height="40"
+            font="font:MediumSystemFont"
+            color="0xFFFFFFFF" />
+        
+        <!-- Instructions -->
+        <Label 
+            id="instructionsLabel"
+            text="Use remote: OK=Play/Pause | Back=Exit | Left/Right=Change Settings"
+            translation="[60, 1010]"
+            width="1800"
+            height="40"
+            font="font:SmallSystemFont"
+            color="0xAAAAAAAA" />
+    </children>
+</component>

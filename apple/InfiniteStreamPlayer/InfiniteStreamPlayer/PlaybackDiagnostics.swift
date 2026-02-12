@@ -13,11 +13,18 @@ final class PlaybackDiagnostics: ObservableObject {
     @Published var currentTime: Double = 0
     @Published var bufferedEnd: Double?
     @Published var bufferDepth: Double?
+    @Published var seekableEnd: Double?
     @Published var liveOffset: Double?
+    @Published var displayWidth: Double?
+    @Published var displayHeight: Double?
+    @Published var videoWidth: Double?
+    @Published var videoHeight: Double?
     @Published var playbackRate: Float = 0
     @Published var likelyToKeepUp: Bool = false
     @Published var bufferEmpty: Bool = false
     @Published var stallCount: Int = 0
+    @Published var stallTimeSeconds: Double = 0
+    @Published var lastStallDurationSeconds: Double = 0
     @Published var observedBitrate: Double?
     @Published var indicatedBitrate: Double?
     @Published var averageVideoBitrate: Double?
@@ -44,6 +51,8 @@ final class PlaybackDiagnostics: ObservableObject {
     private weak var player: AVPlayer?
     private var lastBufferSampleAt: Date?
     private var lastPlayerSampleAt: Date?
+    private var stallStartAt: Date?
+    private var hasRenderedFirstFrame: Bool = false
     private let maxSeriesSamples = 600
     private let seriesWindowSeconds: TimeInterval = 300
 
@@ -57,11 +66,18 @@ final class PlaybackDiagnostics: ObservableObject {
         currentTime = 0
         bufferedEnd = nil
         bufferDepth = nil
+        seekableEnd = nil
         liveOffset = nil
+        displayWidth = nil
+        displayHeight = nil
+        videoWidth = nil
+        videoHeight = nil
         playbackRate = 0
         likelyToKeepUp = false
         bufferEmpty = false
         stallCount = 0
+        stallTimeSeconds = 0
+        lastStallDurationSeconds = 0
         observedBitrate = nil
         indicatedBitrate = nil
         averageVideoBitrate = nil
@@ -84,6 +100,12 @@ final class PlaybackDiagnostics: ObservableObject {
         liveOffsetSamples = []
         lastBufferSampleAt = nil
         lastPlayerSampleAt = nil
+        stallStartAt = nil
+        hasRenderedFirstFrame = false
+    }
+
+    func markFirstFrameRendered() {
+        hasRenderedFirstFrame = true
     }
 
     private func observePlayer(_ player: AVPlayer) {
@@ -93,9 +115,14 @@ final class PlaybackDiagnostics: ObservableObject {
             .receive(on: DispatchQueue.main)
             .sink { [weak self] status in
                 switch status {
-                case .paused: self?.state = "Paused"
-                case .waitingToPlayAtSpecifiedRate: self?.state = "Buffering"
-                case .playing: self?.state = "Playing"
+                case .paused:
+                    self?.state = "Paused"
+                case .waitingToPlayAtSpecifiedRate:
+                    self?.state = "Buffering"
+                    self?.startStallIfNeeded()
+                case .playing:
+                    self?.state = "Playing"
+                    self?.endStallIfNeeded()
                 @unknown default: self?.state = "Unknown"
                 }
             }
@@ -119,7 +146,7 @@ final class PlaybackDiagnostics: ObservableObject {
         NotificationCenter.default.publisher(for: .AVPlayerItemPlaybackStalled)
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in
-                self?.stallCount += 1
+                self?.startStallIfNeeded()
             }
             .store(in: &cancellables)
 
@@ -173,12 +200,30 @@ final class PlaybackDiagnostics: ObservableObject {
         guard let item = player?.currentItem else { return }
         likelyToKeepUp = item.isPlaybackLikelyToKeepUp
         bufferEmpty = item.isPlaybackBufferEmpty
+        let presentation = item.presentationSize
+        if presentation.width > 0 && presentation.height > 0 {
+            videoWidth = presentation.width
+            videoHeight = presentation.height
+        } else {
+            videoWidth = nil
+            videoHeight = nil
+        }
         if let error = item.error {
             lastError = describeError(error)
         }
         if let itemError = item.error {
             self.itemError = describeError(itemError)
         }
+    }
+
+    func updateDisplaySize(_ size: CGSize) {
+        guard size.width > 0 && size.height > 0 else {
+            displayWidth = nil
+            displayHeight = nil
+            return
+        }
+        displayWidth = size.width
+        displayHeight = size.height
     }
 
     private func updateBufferMetrics() {
@@ -201,11 +246,32 @@ final class PlaybackDiagnostics: ObservableObject {
         }
         if let liveRange = item.seekableTimeRanges.last?.timeRangeValue {
             let liveEdge = liveRange.start.seconds + liveRange.duration.seconds
+            seekableEnd = liveEdge
             liveOffset = max(0, liveEdge - currentTime)
         } else {
+            seekableEnd = nil
             liveOffset = nil
         }
         samplePlayerMetrics(now: Date())
+    }
+
+    private func startStallIfNeeded() {
+        guard hasRenderedFirstFrame else {
+            return
+        }
+        if stallStartAt != nil {
+            return
+        }
+        stallStartAt = Date()
+        stallCount += 1
+    }
+
+    private func endStallIfNeeded() {
+        guard let start = stallStartAt else { return }
+        let duration = max(0, Date().timeIntervalSince(start))
+        lastStallDurationSeconds = duration
+        stallTimeSeconds += duration
+        stallStartAt = nil
     }
 
     private func updateAccessLog(from item: AVPlayerItem) {

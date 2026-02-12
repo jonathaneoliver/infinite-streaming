@@ -3842,6 +3842,14 @@ func (a *App) normalizeSessionsForResponse(sessions []SessionData) []SessionData
 		setDefault("nftables_pattern_default_step_seconds", 0)
 		setDefault("nftables_pattern_template_mode", "sliders")
 		setDefault("nftables_pattern_margin_pct", 0)
+		bestMbps := bestVariantMbps(session)
+		videoMbps := getFloat(session, "player_metrics_video_bitrate_mbps")
+		if bestMbps > 0 && videoMbps > 0 {
+			quality := (videoMbps / bestMbps) * 100
+			session["player_metrics_video_quality_pct"] = math.Round(quality*100) / 100
+		} else {
+			delete(session, "player_metrics_video_quality_pct")
+		}
 	}
 	return sessions
 }
@@ -4103,6 +4111,23 @@ func getManifestVariants(session SessionData) []PlaylistInfo {
 		return nil
 	}
 	return infos
+}
+
+func bestVariantMbps(session SessionData) float64 {
+	variants := getManifestVariants(session)
+	if len(variants) == 0 {
+		return 0
+	}
+	maxBandwidth := 0
+	for _, variant := range variants {
+		if variant.Bandwidth > maxBandwidth {
+			maxBandwidth = variant.Bandwidth
+		}
+	}
+	if maxBandwidth <= 0 {
+		return 0
+	}
+	return float64(maxBandwidth) / 1_000_000
 }
 
 func nowISO() string {

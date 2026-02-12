@@ -156,7 +156,7 @@ final class TestingSessionViewModel: ObservableObject {
 
     func applyPattern(port: String, pattern: PatternRequest) async {
         if let sessionId = session?.sessionId, !sessionId.isEmpty {
-            var pending: [String: JSONValue] = [
+            let pending: [String: JSONValue] = [
                 "nftables_pattern_enabled": .bool(true),
                 "nftables_pattern_steps": .array(pattern.steps),
                 "nftables_pattern_default_step_seconds": .number(pattern.default_step_seconds),

@@ -87,13 +87,31 @@ struct ContentView: View {
                     }
                     .buttonStyle(.bordered)
                     Spacer()
-                    Toggle("Allow 4K", isOn: $viewModel.prefer4kNative)
-                        .toggleStyle(.switch)
+                    HStack(spacing: 6) {
+                        Toggle("", isOn: $viewModel.prefer4kNative)
+                            .labelsHidden()
+                            .toggleStyle(.switch)
+                        Text("Allow 4K")
+                    }
                 }
 
                 PlayerView(player: viewModel.player)
                     .aspectRatio(16.0 / 9.0, contentMode: .fit)
                     .frame(maxWidth: .infinity)
+                    .background(
+                        GeometryReader { geo in
+                            Color.clear
+                                .onAppear {
+                                    viewModel.diagnostics.updateDisplaySize(geo.size)
+                                    DispatchQueue.main.async {
+                                        viewModel.diagnostics.updateDisplaySize(geo.size)
+                                    }
+                                }
+                                .onChange(of: geo.size) { newSize in
+                                    viewModel.diagnostics.updateDisplaySize(newSize)
+                                }
+                        }
+                    )
                     .background(Color.black)
                     .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                     .padding(.horizontal, -16)
@@ -179,7 +197,7 @@ struct ContentView: View {
                 }
                 .font(.caption)
 
-                if let controlURL = URL(string: viewModel.baseURLString) {
+                if URL(string: viewModel.baseURLString) != nil {
                     TestingSessionView(viewModel: testingViewModel, diagnostics: viewModel.diagnostics, appLogs: viewModel.logLines)
                 }
 
