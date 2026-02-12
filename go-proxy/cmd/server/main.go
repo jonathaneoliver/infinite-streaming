@@ -3302,11 +3302,10 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 			logFaultEvent(sessionData, externalPort, failureType, requestKind, actionTaken)
 			updateSessionTraffic(sessionData, requestBytes, 0)
 			// Log network entry for socket fault
+			// Socket faults manipulate the connection directly (RST, hang, delay)
+			// and don't generate HTTP responses, so we log with 503 status
 			sessionID := getString(sessionData, "session_id")
 			status := http.StatusServiceUnavailable
-			if err == nil {
-				status = http.StatusOK // Socket faults might not set a proper status
-			}
 			netEntry := createFaultLogEntry(upstreamURL, requestKind, failureType, actionTaken, status, requestBytes)
 			a.addNetworkLogEntry(sessionID, netEntry)
 			sessionList[index] = sessionData
@@ -3385,12 +3384,13 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 	}
 	resp, netEntry, err := a.doRequestWithTracing(r.Context(), proxyReq)
 	if err != nil {
+		// Set status before writing header
 		if errors.Is(err, context.DeadlineExceeded) {
-			w.WriteHeader(http.StatusGatewayTimeout)
 			netEntry.Status = http.StatusGatewayTimeout
+			w.WriteHeader(http.StatusGatewayTimeout)
 		} else {
-			w.WriteHeader(http.StatusBadGateway)
 			netEntry.Status = http.StatusBadGateway
+			w.WriteHeader(http.StatusBadGateway)
 		}
 		// Log network entry for error
 		sessionID := getString(sessionData, "session_id")

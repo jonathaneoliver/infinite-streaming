@@ -1256,7 +1256,7 @@
                 }
 
                 // Render rows (most recent first)
-                const rows = entries.reverse().map(entry => renderNetworkLogRow(entry)).join('');
+                const rows = entries.slice().reverse().map(entry => renderNetworkLogRow(entry)).join('');
                 tbody.innerHTML = rows;
 
                 // Apply filters
