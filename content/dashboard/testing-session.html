@@ -1345,6 +1345,19 @@
             return Hls.isSupported() ? 'hlsjs' : 'native';
         }
 
+        function applyActiveFaultTab(card, tabName) {
+            if (!card || !tabName) return;
+            const container = card.querySelector('.tabs-container');
+            if (!container) return;
+            const targetButton = container.querySelector(`.tab-button[data-tab="${tabName}"]`);
+            const targetPanel = container.querySelector(`.tab-panel[data-panel="${tabName}"]`);
+            if (!targetButton || !targetPanel) return;
+            container.querySelectorAll('.tab-button').forEach(btn => btn.classList.remove('active'));
+            targetButton.classList.add('active');
+            container.querySelectorAll('.tab-panel').forEach(panel => panel.classList.remove('active'));
+            targetPanel.classList.add('active');
+        }
+
         function getPlayerChoice() {
             const select = document.getElementById('playerSelect');
             return select ? select.value : 'auto';
@@ -1497,6 +1510,7 @@
 
         function renderSessionControls(session) {
             const container = document.getElementById('sessionControls');
+            const activeTab = container.querySelector('.tab-button.active')?.dataset?.tab || '';
             container.innerHTML = TestingSessionUI.renderSessionCard(session, {
                 showBufferDepthChart: true,
                 sectionDefaults: collapseDefaults
@@ -1504,6 +1518,7 @@
             TestingSessionUI.applyCollapsibleState(container);
             const card = container.querySelector('.session-card');
             if (card) {
+                applyActiveFaultTab(card, activeTab);
                 const presetsRaw = card.dataset.shapingPresets || '';
                 const videoPresetsRaw = card.dataset.shapingVideoPresets || '';
                 const hasVariants = Array.isArray(session?.manifest_variants) && session.manifest_variants.length > 0;

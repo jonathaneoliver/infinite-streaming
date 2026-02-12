@@ -660,6 +660,19 @@
             return false;
         }
 
+        function applyActiveFaultTab(card, tabName) {
+            if (!card || !tabName) return;
+            const container = card.querySelector('.tabs-container');
+            if (!container) return;
+            const targetButton = container.querySelector(`.tab-button[data-tab="${tabName}"]`);
+            const targetPanel = container.querySelector(`.tab-panel[data-panel="${tabName}"]`);
+            if (!targetButton || !targetPanel) return;
+            container.querySelectorAll('.tab-button').forEach(btn => btn.classList.remove('active'));
+            targetButton.classList.add('active');
+            container.querySelectorAll('.tab-panel').forEach(panel => panel.classList.remove('active'));
+            targetPanel.classList.add('active');
+        }
+
         function syncContentControls(card, session) {
             if (!card || !session) return;
             const strip = card.querySelector('input[data-field="content_strip_codecs"]');
@@ -953,6 +966,7 @@
                 pushBandwidthSample(activeSession);
                 return;
             }
+            const activeTab = existingCard?.querySelector('.tab-button.active')?.dataset?.tab || '';
             container.innerHTML = renderSessionTabs(sessions) + (activeSession ? 
                 renderGroupInfo(activeSession, sessions) + 
                 TestingSessionUI.renderSessionCard(activeSession, {
@@ -963,6 +977,7 @@
             if (activeSession) {
                 const restoredCard = container.querySelector('.session-card');
                 if (restoredCard) {
+                    applyActiveFaultTab(restoredCard, activeTab);
                     TestingSessionUI.applyCollapsibleState(restoredCard);
                     updateTemplateModeUi(restoredCard);
                     updateAllStepRiskUi(restoredCard);
@@ -998,7 +1013,7 @@
             const active = Number(session.mbps_out_active || 0);
             const videoBitrate = Number(session.player_metrics_video_bitrate_mbps || 0);
             const networkBitrate = Number(session.player_metrics_network_bitrate_mbps || 0);
-            const patternSteps = Array.isArray(session.nftables_pattern_steps) ? session.nftables_pattern_steps : [];
+                const patternSteps = Array.isArray(session.nftables_pattern_steps) ? session.nftables_pattern_steps : [];
             const patternStepIndex = Number(session.nftables_pattern_step_runtime || session.nftables_pattern_step || 0);
             const patternEnabled = session.nftables_pattern_enabled === true
                 || session.nftables_pattern_enabled === 1
