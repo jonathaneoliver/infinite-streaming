@@ -1,230 +1,285 @@
-# InfiniteStreamer.com WordPress Site
+# InfiniteStreamer.com Homepage Deployment
 
-This directory contains the WordPress deployment configuration for infinitestreamer.com, designed to run on your k3s server (lenovo).
+This directory contains **two deployment options** for the infinitestreamer.com homepage:
 
-## Prerequisites
+1. **WordPress** - Full CMS with easy content editing (recommended for frequent updates)
+2. **Static HTML** - Fast, simple, secure (recommended for stability)
+
+Both options are designed to run on your k3s server (lenovo) and include all content from the issue requirements.
+
+## Quick Decision Guide
+
+**Choose WordPress if:**
+- ✅ You want a user-friendly admin interface
+- ✅ Multiple people will update content
+- ✅ You need frequent content updates
+- ✅ You want plugins and themes
+
+**Choose Static HTML if:**
+- ✅ Content rarely changes
+- ✅ You prefer maximum speed and security
+- ✅ You want simplest possible setup
+- ✅ You're comfortable editing HTML directly
+
+---
+
+# Option 1: WordPress Deployment
+
+Full-featured CMS with admin panel for easy content management.
+
+## WordPress Quick Start
+
+**Ports:** WordPress on 30080, MySQL on 3306 (internal)
+
+**Files:** `k8s-wordpress.yaml`, `deploy.sh`, `QUICKSTART.md`
+
+### Prerequisites
 
 - k3s cluster running on lenovo
 - kubectl configured to access your k3s cluster
-- Host directories for persistent storage
+- Host directories for persistent storage (created automatically by deploy script)
 
-## Quick Start
+### Deploy WordPress
 
-### 1. Create Host Directories
-
-On your lenovo server, create the directories for persistent storage:
+**Using the Deploy Script (Recommended):**
 
 ```bash
-sudo mkdir -p /home/jonathanoliver/wordpress/mysql
-sudo mkdir -p /home/jonathanoliver/wordpress/wp-content
+cd wordpress-content
+./deploy.sh
+```
+
+**Or Manually:**
+
+```bash
+# On lenovo, create directories
+sudo mkdir -p /home/jonathanoliver/wordpress/{mysql,wp-content}
 sudo chown -R $(id -u):$(id -g) /home/jonathanoliver/wordpress
-```
 
-### 2. Deploy WordPress
-
-```bash
+# Deploy from your machine
 kubectl apply -f k8s-wordpress.yaml
-```
 
-### 3. Wait for Pods to Start
-
-```bash
+# Wait for pods
 kubectl get pods -w
 ```
 
-Wait until both `wordpress-mysql-*` and `wordpress-*` pods are in Running state.
+Access WordPress at: **http://lenovo.local:30080**
 
-### 4. Access WordPress
+📚 **Full Instructions:** See [QUICKSTART.md](QUICKSTART.md) for complete setup guide
 
-Open your browser and navigate to:
-```
-http://lenovo.local:30080
-```
+---
 
-Or using the IP address:
-```
-http://192.168.0.189:30080
-```
+# Option 2: Static HTML Deployment
 
-### 5. Complete WordPress Installation
+Fast, lightweight static site with no database required.
 
-1. Select your language
-2. Click "Continue"
-3. Fill in the site information:
-   - **Site Title**: Infinite Streaming
-   - **Username**: admin (or your preferred username)
-   - **Password**: (use a strong password)
-   - **Your Email**: your-email@example.com
-4. Click "Install WordPress"
+**Port:** 30082
 
-### 6. Configure Homepage Content
+**Files:** `static-homepage/index.html`, `static-homepage/k8s-static-site.yaml`
 
-After installation, follow these steps to create the homepage:
+## Static Site Quick Start
 
-#### Option A: Manual Setup (Recommended for Full Control)
-
-1. Log in to WordPress admin at `http://lenovo.local:30080/wp-admin`
-2. Go to **Pages > Add New**
-3. Create a new page titled "Home"
-4. Use the content from `wordpress-content/homepage-content.html` (see below)
-5. Publish the page
-6. Go to **Settings > Reading**
-7. Select "A static page" and choose "Home" as your homepage
-8. Save changes
-
-#### Option B: Use the Initialization Script
-
-If you prefer automated setup, you can use the provided initialization script after WordPress is installed:
+### Deploy Static Site
 
 ```bash
-# Copy the initialization script to the WordPress pod
-kubectl cp wordpress-content/init-homepage.sh wordpress-POD-NAME:/tmp/
-
-# Execute the script inside the pod
-kubectl exec -it wordpress-POD-NAME -- bash /tmp/init-homepage.sh
+kubectl apply -f static-homepage/k8s-static-site.yaml
 ```
 
-Replace `wordpress-POD-NAME` with your actual WordPress pod name (find it with `kubectl get pods`).
+Access site at: **http://lenovo.local:30082**
 
-### 7. Add Screenshots
+That's it! The static site is served from a ConfigMap (no persistent storage needed).
 
-After setting up the homepage:
+📚 **Full Instructions:** See [static-homepage/README.md](static-homepage/README.md)
 
-1. Log in to WordPress admin
-2. Go to **Media > Add New**
-3. Upload all images from the `screenshots/` directory:
-   - dashboard.png
-   - encoding-jobs.png
-   - live-offset.png
-   - mosaic.png
-   - playback.png
-   - source-library.png
-   - testing-player.png
-   - upload-content.png
+---
 
-4. Edit your homepage and insert images where marked in the content
+# Files in This Directory
 
-### 8. Configure Theme (Optional)
+```
+wordpress-content/
+├── README.md                    # This file - overview of both options
+├── QUICKSTART.md               # Detailed WordPress setup guide
+├── deploy.sh                   # WordPress deployment script
+├── homepage-content.html       # WordPress page content (copy/paste)
+├── theme-style.css            # Optional custom CSS for WordPress
+└── static-homepage/
+    ├── README.md              # Static site documentation
+    ├── index.html             # Static homepage (self-contained)
+    └── k8s-static-site.yaml   # Static site k8s deployment
+```
 
-For a minimal, professional look:
+# Common Tasks
 
-1. Go to **Appearance > Themes**
-2. Install and activate "Astra" (free, lightweight, and fast)
-3. Or use any minimalist theme like "GeneratePress" or "Kadence"
+## Check Deployment Status
 
-For more customization:
-1. Go to **Appearance > Customize**
-2. Adjust colors, fonts, and layout
-3. Make it responsive and mobile-friendly
+**WordPress:**
+```bash
+kubectl get pods -l app=wordpress
+kubectl logs -f <wordpress-pod-name>
+```
 
-## Domain Configuration
+**Static:**
+```bash
+kubectl get pods -l app=infinitestreamer-static
+```
 
-To use infinitestreamer.com:
+## Update Content
 
-1. Update your DNS settings at GoDaddy:
-   - Create an A record pointing to your lenovo server's public IP
-   - Or create a CNAME if using a proxy service
+**WordPress:**
+- Log in to http://lenovo.local:30080/wp-admin
+- Edit pages through the visual editor
 
-2. Update WordPress site URL:
-   ```bash
-   kubectl exec -it wordpress-POD-NAME -- wp option update siteurl 'http://infinitestreamer.com' --allow-root
-   kubectl exec -it wordpress-POD-NAME -- wp option update home 'http://infinitestreamer.com' --allow-root
-   ```
+**Static:**
+- Edit `static-homepage/index.html`
+- Redeploy: `kubectl delete -f static-homepage/k8s-static-site.yaml && kubectl apply -f static-homepage/k8s-static-site.yaml`
 
-3. For HTTPS (recommended for production):
-   - Set up a reverse proxy with SSL (nginx, traefik, or k3s ingress)
-   - Use Let's Encrypt for free SSL certificates
-   - Update WordPress URLs to https://infinitestreamer.com
+## Domain Setup (infinitestreamer.com)
 
-## Maintenance
+### 1. Update DNS at GoDaddy
+### 1. Update DNS at GoDaddy
 
-### Backup
+- Log in to GoDaddy DNS Management
+- Add A record: `@` → `[your lenovo public IP]`
+- TTL: 600 seconds
+
+### 2. Update Site URLs
+
+**WordPress:**
+```bash
+kubectl exec -it <wordpress-pod> -- wp option update siteurl 'http://infinitestreamer.com' --allow-root
+kubectl exec -it <wordpress-pod> -- wp option update home 'http://infinitestreamer.com' --allow-root
+```
+
+**Static:** No URL changes needed
+
+### 3. Enable HTTPS (Optional but Recommended)
+
+**Option A - Cloudflare (Easiest):**
+1. Add infinitestreamer.com to Cloudflare (free)
+2. Update nameservers at GoDaddy
+3. Enable "Flexible SSL" in Cloudflare
+4. Done! Cloudflare handles HTTPS
+
+**Option B - cert-manager + Let's Encrypt:**
+1. Install cert-manager in k3s
+2. Create Ingress with TLS annotations
+3. Let's Encrypt auto-provisions certificate
+
+---
+
+# Switching Between WordPress and Static
+
+## From WordPress to Static
+1. Deploy static site: `kubectl apply -f static-homepage/k8s-static-site.yaml`
+2. Access on port 30082 first to verify
+3. Remove WordPress: `kubectl delete -f k8s-wordpress.yaml`
+4. Update DNS/ingress to point to static service
+
+## From Static to WordPress
+1. Deploy WordPress: `./deploy.sh` or `kubectl apply -f k8s-wordpress.yaml`
+2. Complete WordPress setup
+3. Access on port 30080 to verify
+4. Remove static: `kubectl delete -f static-homepage/k8s-static-site.yaml`
+5. Update DNS/ingress to point to WordPress service
+
+---
+
+# Troubleshooting
+
+## WordPress Issues
+
+**Can't access admin:**
+- Check pod status: `kubectl get pods`
+- Check logs: `kubectl logs <wordpress-pod>`
+- Verify port 30080 is accessible
+
+**Database connection error:**
+- Wait for MySQL to fully start
+- Check MySQL logs: `kubectl logs <mysql-pod>`
+
+**Site loads slowly:**
+- Install a caching plugin (WP Super Cache)
+- Optimize images
+- Consider using Cloudflare CDN
+
+## Static Site Issues
+
+**404 errors:**
+- Verify ConfigMap: `kubectl get configmap infinitestreamer-static-html`
+- Check pod logs: `kubectl logs <static-pod>`
+
+**Content not updating:**
+- Delete and recreate deployment:
+  ```bash
+  kubectl delete -f static-homepage/k8s-static-site.yaml
+  kubectl apply -f static-homepage/k8s-static-site.yaml
+  ```
+
+---
+
+# Backup and Recovery
+
+## WordPress Backup
 
 ```bash
-# Backup MySQL database
-kubectl exec wordpress-mysql-POD-NAME -- mysqldump -u wordpress -pWordPressPass123! wordpress > wordpress-backup.sql
+# Database
+kubectl exec <mysql-pod> -- mysqldump -u wordpress -pWordPressPass123! wordpress > backup-$(date +%Y%m%d).sql
 
-# Backup WordPress files
-kubectl cp wordpress-POD-NAME:/var/www/html ./wordpress-backup
+# Files
+kubectl cp <wordpress-pod>:/var/www/html ./wordpress-files-backup
 ```
 
-### Update WordPress
+## Static Site Backup
 
-```bash
-# Update from WordPress admin or use WP-CLI:
-kubectl exec -it wordpress-POD-NAME -- wp core update --allow-root
-kubectl exec -it wordpress-POD-NAME -- wp plugin update --all --allow-root
-kubectl exec -it wordpress-POD-NAME -- wp theme update --all --allow-root
-```
+Static site is in Git - no backup needed! Just redeploy from the yaml file.
 
-### Scale or Restart
+---
 
-```bash
-# Restart WordPress
-kubectl rollout restart deployment wordpress
+# Performance Comparison
 
-# Restart MySQL
-kubectl rollout restart deployment wordpress-mysql
+| Metric | WordPress | Static HTML |
+|--------|-----------|-------------|
+| Page Load | ~500ms-2s | ~50-200ms |
+| Memory Usage | ~256MB | ~10MB |
+| Setup Time | 10-15 min | 2-3 min |
+| Update Time | 1-2 min | 5-10 min |
+| Security Risk | Medium | Very Low |
 
-# Delete and redeploy
-kubectl delete -f k8s-wordpress.yaml
-kubectl apply -f k8s-wordpress.yaml
-```
+---
 
-## Troubleshooting
+# Next Steps
 
-### Check pod logs
-```bash
-kubectl logs -f wordpress-POD-NAME
-kubectl logs -f wordpress-mysql-POD-NAME
-```
+1. **Choose your deployment option** (WordPress or Static)
+2. **Deploy to k3s** using instructions above
+3. **Configure domain** at GoDaddy (optional)
+4. **Enable HTTPS** via Cloudflare or cert-manager
+5. **Test on multiple devices** (desktop, mobile, tablet)
+6. **Set up monitoring** (uptime monitoring service)
+7. **Schedule backups** (if using WordPress)
 
-### Check pod status
-```bash
-kubectl describe pod wordpress-POD-NAME
-kubectl describe pod wordpress-mysql-POD-NAME
-```
+---
 
-### Access WordPress container
-```bash
-kubectl exec -it wordpress-POD-NAME -- bash
-```
+# Support and Resources
 
-### Common Issues
+- **WordPress Setup:** See [QUICKSTART.md](QUICKSTART.md)
+- **Static Site:** See [static-homepage/README.md](static-homepage/README.md)
+- **Infinite Streaming:** https://github.com/jonathaneoliver/infinite-streaming
+- **k3s Docs:** https://docs.k3s.io/
+- **WordPress:** https://wordpress.org/documentation/
 
-1. **Pods not starting**: Check PersistentVolume paths exist on the host
-2. **Database connection error**: Wait for MySQL pod to be fully ready
-3. **Port already in use**: Change nodePort in k8s-wordpress.yaml if 30080 is taken
-4. **Permission denied on volumes**: Check directory ownership on host
+---
 
 ## Security Notes
 
 **Important for Production:**
 
-1. Change default passwords in `k8s-wordpress.yaml` before deploying
-2. Use Kubernetes secrets properly (don't commit passwords to git)
-3. Set up SSL/TLS for HTTPS
-4. Keep WordPress, plugins, and themes updated
-5. Use strong admin passwords
-6. Install security plugins like Wordfence
-7. Regular backups
+1. ⚠️ **Change default passwords** in `k8s-wordpress.yaml` before deploying
+2. 🔐 Use **strong admin passwords** for WordPress
+3. 🔒 Enable **HTTPS/SSL** for production use
+4. 🔄 Keep WordPress/plugins **updated regularly**
+5. 💾 Set up **automated backups**
+6. 🛡️ Consider **security plugins** (Wordfence, iThemes Security)
+7. 🚫 **Don't commit** real passwords to Git
 
-## Customization
+---
 
-The homepage content is designed to be easily editable through the WordPress editor. You can:
-
-- Update text and descriptions
-- Add/remove features
-- Change layout
-- Update screenshots
-- Add new sections
-- Modify calls-to-action
-
-All changes can be made through the WordPress admin interface without touching code.
-
-## Support
-
-For issues with:
-- **Infinite Streaming**: See [GitHub repository](https://github.com/jonathaneoliver/infinite-streaming)
-- **WordPress deployment**: Check Kubernetes logs and this README
-- **Domain/DNS**: Consult GoDaddy support or your DNS provider
+*Created for the Infinite Streaming project homepage deployment*
