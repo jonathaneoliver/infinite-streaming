@@ -802,6 +802,49 @@
                     </div>
                 </div>
 
+                <!-- Collapsible Network Log -->
+                <div class="collapsible-section" data-section="network-log" data-default-open="false">
+                    <div class="collapsible-header" data-toggle="network-log">
+                        <span class="collapsible-icon">▶</span>
+                        <span class="collapsible-title">Network Log</span>
+                        <span class="collapsible-badge" data-field="network_log_count">0 requests</span>
+                    </div>
+                    <div class="collapsible-content" data-content="network-log" style="display: none;">
+                        <div class="network-log-section">
+                            <div class="network-log-controls">
+                                <button type="button" class="btn btn-mini btn-secondary" data-action="refresh-network-log">Refresh</button>
+                                <label class="network-log-filter">
+                                    <input type="checkbox" data-filter="show-faulted" checked>
+                                    Show Faults
+                                </label>
+                                <label class="network-log-filter">
+                                    <input type="checkbox" data-filter="show-successful" checked>
+                                    Show Successful
+                                </label>
+                            </div>
+                            <div class="network-log-table-wrap">
+                                <table class="network-log-table">
+                                    <thead>
+                                        <tr>
+                                            <th class="net-col-method">Method</th>
+                                            <th class="net-col-path">Path</th>
+                                            <th class="net-col-type">Type</th>
+                                            <th class="net-col-status">Status</th>
+                                            <th class="net-col-size">Size</th>
+                                            <th class="net-col-timing">Timing</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody data-field="network_log_body">
+                                        <tr class="network-log-empty">
+                                            <td colspan="6">No network requests yet. Requests will appear here once playback starts.</td>
+                                        </tr>
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
                 <div class="session-actions">
                     <button class="btn btn-secondary" data-action="save-session">Save Settings</button>
                     <button class="btn btn-danger" data-action="delete-session">Delete Session</button>
@@ -1064,6 +1107,13 @@
                             }
                         }
                     }
+                    if (section === 'network-log' && nextOpen) {
+                        const card = sectionEl ? sectionEl.closest('.session-card') : null;
+                        const sessionId = card ? card.dataset.sessionId : null;
+                        if (sessionId && window.TestingSessionUI) {
+                            window.TestingSessionUI.updateNetworkLog(sessionId);
+                        }
+                    }
                 }
             }
 
@@ -1087,6 +1137,175 @@
         applyCollapsibleState(document);
     }
 
+    // Network Log Functions
+    function formatBytes(bytes) {
+        if (!bytes || bytes === 0) return '—';
+        if (bytes < 1024) return bytes + ' B';
+        if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+        return (bytes / (1024 * 1024)).toFixed(2) + ' MB';
+    }
+
+    function formatMilliseconds(ms) {
+        if (!ms && ms !== 0) return '—';
+        if (ms < 1) return '<1ms';
+        if (ms < 1000) return Math.round(ms) + 'ms';
+        return (ms / 1000).toFixed(2) + 's';
+    }
+
+    function getStatusClass(status) {
+        if (status >= 200 && status < 300) return 'net-status-2xx';
+        if (status >= 300 && status < 400) return 'net-status-3xx';
+        if (status >= 400 && status < 500) return 'net-status-4xx';
+        if (status >= 500) return 'net-status-5xx';
+        return '';
+    }
+
+    function renderNetworkTimingBar(entry) {
+        if (entry.faulted && !entry.dns_ms && !entry.connect_ms && !entry.ttfb_ms) {
+            return `<span class="net-fault-injected">Injected by proxy</span>`;
+        }
+
+        const total = entry.total_ms || 0;
+        if (total === 0) return '<span class="net-timing-total">—</span>';
+
+        const dns = entry.dns_ms || 0;
+        const connect = entry.connect_ms || 0;
+        const tls = entry.tls_ms || 0;
+        const ttfb = entry.ttfb_ms || 0;
+        const transfer = entry.transfer_ms || 0;
+
+        const dnsWidth = total > 0 ? (dns / total * 100) : 0;
+        const connectWidth = total > 0 ? (connect / total * 100) : 0;
+        const tlsWidth = total > 0 ? (tls / total * 100) : 0;
+        const ttfbWidth = total > 0 ? (ttfb / total * 100) : 0;
+        const transferWidth = total > 0 ? (transfer / total * 100) : 0;
+
+        let html = '<div class="net-timing-bar">';
+        if (dnsWidth > 0) {
+            html += `<div class="net-timing-segment net-timing-dns" style="width: ${dnsWidth}%;" title="DNS: ${formatMilliseconds(dns)}"></div>`;
+        }
+        if (connectWidth > 0) {
+            html += `<div class="net-timing-segment net-timing-connect" style="width: ${connectWidth}%;" title="Connect: ${formatMilliseconds(connect)}"></div>`;
+        }
+        if (tlsWidth > 0) {
+            html += `<div class="net-timing-segment net-timing-tls" style="width: ${tlsWidth}%;" title="TLS: ${formatMilliseconds(tls)}"></div>`;
+        }
+        if (ttfbWidth > 0) {
+            html += `<div class="net-timing-segment net-timing-ttfb" style="width: ${ttfbWidth}%;" title="TTFB: ${formatMilliseconds(ttfb)}"></div>`;
+        }
+        if (transferWidth > 0) {
+            html += `<div class="net-timing-segment net-timing-transfer" style="width: ${transferWidth}%;" title="Transfer: ${formatMilliseconds(transfer)}"></div>`;
+        }
+        html += '</div>';
+        html += `<span class="net-timing-total">${formatMilliseconds(total)}</span>`;
+        return html;
+    }
+
+    function renderNetworkLogRow(entry) {
+        const pathParts = (entry.path || entry.url || '').split('/');
+        const filename = pathParts[pathParts.length - 1] || entry.path || entry.url || '—';
+        const statusClass = getStatusClass(entry.status);
+        const faultBadge = entry.faulted ? `<span class="net-fault-badge">${entry.fault_category || 'fault'}</span>` : '';
+        const rowClass = entry.faulted ? 'faulted' : '';
+
+        return `
+            <tr class="${rowClass}" data-faulted="${entry.faulted || false}">
+                <td class="net-col-method">${entry.method || 'GET'}</td>
+                <td class="net-col-path">
+                    <div class="net-path" title="${entry.url || ''}">${filename}</div>
+                </td>
+                <td class="net-col-type">
+                    <span class="net-type">${entry.request_kind || '—'}</span>
+                </td>
+                <td class="net-col-status">
+                    <span class="net-status ${statusClass}">${entry.status || '—'}</span>
+                    ${faultBadge}
+                </td>
+                <td class="net-col-size net-size">${formatBytes(entry.bytes_out || 0)}</td>
+                <td class="net-col-timing">${renderNetworkTimingBar(entry)}</td>
+            </tr>
+        `;
+    }
+
+    function updateNetworkLog(sessionId) {
+        const card = document.querySelector(`.session-card[data-session-id="${sessionId}"]`);
+        if (!card) return;
+
+        const tbody = card.querySelector('[data-field="network_log_body"]');
+        const countBadge = card.querySelector('[data-field="network_log_count"]');
+        if (!tbody) return;
+
+        fetch(`/api/session/${sessionId}/network`)
+            .then(response => response.json())
+            .then(data => {
+                const entries = data.entries || [];
+                const count = entries.length;
+
+                // Update count badge
+                if (countBadge) {
+                    countBadge.textContent = `${count} request${count !== 1 ? 's' : ''}`;
+                }
+
+                if (count === 0) {
+                    tbody.innerHTML = `
+                        <tr class="network-log-empty">
+                            <td colspan="6">No network requests yet. Requests will appear here once playback starts.</td>
+                        </tr>
+                    `;
+                    return;
+                }
+
+                // Render rows (most recent first)
+                const rows = entries.reverse().map(entry => renderNetworkLogRow(entry)).join('');
+                tbody.innerHTML = rows;
+
+                // Apply filters
+                applyNetworkLogFilters(card);
+            })
+            .catch(error => {
+                console.error('Failed to fetch network log:', error);
+                if (tbody) {
+                    tbody.innerHTML = `
+                        <tr class="network-log-empty">
+                            <td colspan="6" style="color: #dc2626;">Failed to load network log</td>
+                        </tr>
+                    `;
+                }
+            });
+    }
+
+    function applyNetworkLogFilters(card) {
+        const showFaulted = card.querySelector('[data-filter="show-faulted"]')?.checked ?? true;
+        const showSuccessful = card.querySelector('[data-filter="show-successful"]')?.checked ?? true;
+        const tbody = card.querySelector('[data-field="network_log_body"]');
+        if (!tbody) return;
+
+        const rows = tbody.querySelectorAll('tr:not(.network-log-empty)');
+        let visibleCount = 0;
+
+        rows.forEach(row => {
+            const isFaulted = row.dataset.faulted === 'true';
+            const shouldShow = (isFaulted && showFaulted) || (!isFaulted && showSuccessful);
+            row.style.display = shouldShow ? '' : 'none';
+            if (shouldShow) visibleCount++;
+        });
+
+        // Show empty message if no rows match filters
+        if (visibleCount === 0 && rows.length > 0) {
+            const emptyRow = tbody.querySelector('.network-log-empty');
+            if (!emptyRow) {
+                tbody.insertAdjacentHTML('beforeend', `
+                    <tr class="network-log-empty">
+                        <td colspan="6">No requests match the current filters</td>
+                    </tr>
+                `);
+            }
+        } else {
+            const emptyRow = tbody.querySelector('.network-log-empty');
+            if (emptyRow) emptyRow.remove();
+        }
+    }
+
     // Initialize on load
     if (document.readyState === 'loading') {
         document.addEventListener('DOMContentLoaded', initializeUI);
@@ -1103,6 +1322,8 @@
         updateTransportModeUi,
         formatDate,
         formatDuration,
-        applyCollapsibleState
+        applyCollapsibleState,
+        updateNetworkLog,
+        applyNetworkLogFilters
     };
 })();
