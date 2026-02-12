@@ -52,6 +52,7 @@ final class PlaybackDiagnostics: ObservableObject {
     private var lastBufferSampleAt: Date?
     private var lastPlayerSampleAt: Date?
     private var stallStartAt: Date?
+    private var hasRenderedFirstFrame: Bool = false
     private let maxSeriesSamples = 600
     private let seriesWindowSeconds: TimeInterval = 300
 
@@ -100,6 +101,11 @@ final class PlaybackDiagnostics: ObservableObject {
         lastBufferSampleAt = nil
         lastPlayerSampleAt = nil
         stallStartAt = nil
+        hasRenderedFirstFrame = false
+    }
+
+    func markFirstFrameRendered() {
+        hasRenderedFirstFrame = true
     }
 
     private func observePlayer(_ player: AVPlayer) {
@@ -250,6 +256,9 @@ final class PlaybackDiagnostics: ObservableObject {
     }
 
     private func startStallIfNeeded() {
+        guard hasRenderedFirstFrame else {
+            return
+        }
         if stallStartAt != nil {
             return
         }

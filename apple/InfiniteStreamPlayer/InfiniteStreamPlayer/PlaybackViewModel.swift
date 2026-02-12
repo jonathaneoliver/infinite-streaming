@@ -596,6 +596,7 @@ final class PlaybackViewModel: ObservableObject {
                     let elapsed = self.roundSeconds(Date().timeIntervalSince(startAt))
                     self.videoFirstFrameSeconds = elapsed
                     self.firstFrameReported = true
+                    self.diagnostics.markFirstFrameRendered()
                     Task {
                         await self.sendPlayerMetrics(event: "video_first_frame", extra: [
                             "player_metrics_video_first_frame_time_s": elapsed

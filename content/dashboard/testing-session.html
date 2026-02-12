@@ -1119,7 +1119,7 @@
             });
             video.addEventListener('waiting', () => {
                 sendPlayerStateChange('buffering');
-                if (!stallStartAt) {
+                if (firstFrameReported && !stallStartAt) {
                     stallStartAt = Date.now();
                     stallCount += 1;
                     document.getElementById('statStalls').textContent = `${stallCount}`;
@@ -1129,7 +1129,7 @@
             });
             video.addEventListener('stalled', () => {
                 sendPlayerStateChange('buffering');
-                if (!stallStartAt) {
+                if (firstFrameReported && !stallStartAt) {
                     stallStartAt = Date.now();
                     stallCount += 1;
                     document.getElementById('statStalls').textContent = `${stallCount}`;
