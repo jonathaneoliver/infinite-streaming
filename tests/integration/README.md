@@ -410,8 +410,8 @@ curl http://lenovo:30000/api/sessions
 ### Import Errors
 
 ```bash
-# Ensure you're in the pytest directory
-cd tests/pytest
+# Ensure you're in the integration tests directory
+cd tests/integration
 
 # Run pytest
 pytest
