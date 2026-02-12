@@ -1,0 +1,436 @@
+---
+# ConfigMap containing the static HTML site
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: infinitestreamer-static-html
+data:
+  index.html: |
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <meta name="description" content="Infinite Streaming - Docker-based HLS/DASH media server and AI no-code tool for testing video players under real-time, deterministic conditions">
+        <meta name="keywords" content="HLS, DASH, LL-HLS, LL-DASH, video streaming, player testing, media server, Docker">
+        <title>Infinite Streaming - Professional Video Stream Testing Platform</title>
+        
+        <style>
+            * {
+                margin: 0;
+                padding: 0;
+                box-sizing: border-box;
+            }
+
+            body {
+                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+                line-height: 1.6;
+                color: #333;
+                background-color: #ffffff;
+            }
+
+            html {
+                scroll-behavior: smooth;
+            }
+
+            .hero-section {
+                text-align: center;
+                padding: 100px 20px;
+                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                color: white;
+            }
+
+            .hero-section h1 {
+                font-size: 3.5em;
+                margin-bottom: 20px;
+                font-weight: 700;
+            }
+
+            .hero-section p {
+                font-size: 1.5em;
+                margin-bottom: 40px;
+                opacity: 0.95;
+                max-width: 800px;
+                margin-left: auto;
+                margin-right: auto;
+            }
+
+            .btn {
+                display: inline-block;
+                padding: 15px 40px;
+                background: white;
+                color: #667eea;
+                text-decoration: none;
+                border-radius: 30px;
+                font-weight: 600;
+                font-size: 1.1em;
+                box-shadow: 0 4px 15px rgba(0, 0, 0, 0.2);
+                transition: transform 0.3s ease, box-shadow 0.3s ease;
+                margin: 10px;
+            }
+
+            .btn:hover {
+                transform: translateY(-2px);
+                box-shadow: 0 6px 20px rgba(0, 0, 0, 0.3);
+            }
+
+            .btn-outline {
+                background: transparent;
+                color: white;
+                border: 2px solid white;
+            }
+
+            .content-section {
+                max-width: 1200px;
+                margin: 0 auto;
+                padding: 60px 20px;
+            }
+
+            section {
+                margin-bottom: 80px;
+            }
+
+            h2 {
+                font-size: 2.5em;
+                margin-bottom: 30px;
+                color: #333;
+                text-align: center;
+            }
+
+            h3 {
+                font-size: 1.5em;
+                color: #667eea;
+                margin-bottom: 15px;
+            }
+
+            .about-text {
+                font-size: 1.2em;
+                line-height: 1.8;
+                color: #555;
+                text-align: center;
+                max-width: 900px;
+                margin: 0 auto 40px;
+            }
+
+            .feature-grid {
+                display: grid;
+                grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+                gap: 30px;
+                margin-top: 40px;
+            }
+
+            .feature-card {
+                padding: 30px;
+                background: #f8f9fa;
+                border-radius: 10px;
+                box-shadow: 0 2px 10px rgba(0, 0, 0, 0.05);
+                transition: transform 0.3s ease, box-shadow 0.3s ease;
+            }
+
+            .feature-card:hover {
+                transform: translateY(-5px);
+                box-shadow: 0 4px 20px rgba(0, 0, 0, 0.1);
+            }
+
+            .feature-card p {
+                line-height: 1.7;
+                color: #555;
+            }
+
+            .use-case-card {
+                background: #f8f9fa;
+                padding: 40px;
+                border-radius: 10px;
+                margin-bottom: 20px;
+                border-left: 4px solid #667eea;
+                transition: transform 0.3s ease, box-shadow 0.3s ease;
+            }
+
+            .use-case-card:hover {
+                transform: translateX(5px);
+                box-shadow: 0 4px 15px rgba(0, 0, 0, 0.1);
+            }
+
+            .use-case-card p {
+                line-height: 1.8;
+                color: #555;
+            }
+
+            .cta-section {
+                text-align: center;
+                padding: 80px 20px;
+                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                color: white;
+                border-radius: 15px;
+                margin: 60px 0;
+            }
+
+            .cta-section h2 {
+                color: white;
+                font-size: 2.5em;
+                margin-bottom: 20px;
+            }
+
+            .cta-section p {
+                font-size: 1.3em;
+                margin-bottom: 40px;
+                opacity: 0.95;
+            }
+
+            .cta-buttons {
+                display: flex;
+                gap: 20px;
+                justify-content: center;
+                flex-wrap: wrap;
+            }
+
+            footer {
+                background: #333;
+                color: white;
+                padding: 40px 20px;
+                text-align: center;
+            }
+
+            footer a {
+                color: #667eea;
+                text-decoration: none;
+            }
+
+            footer a:hover {
+                text-decoration: underline;
+            }
+
+            @media (max-width: 768px) {
+                .hero-section h1 {
+                    font-size: 2.5em;
+                }
+                
+                .hero-section p {
+                    font-size: 1.2em;
+                }
+                
+                h2 {
+                    font-size: 2em;
+                }
+                
+                .feature-grid {
+                    grid-template-columns: 1fr;
+                }
+                
+                .cta-buttons {
+                    flex-direction: column;
+                    align-items: center;
+                }
+                
+                .btn {
+                    width: 100%;
+                    max-width: 300px;
+                }
+            }
+
+            @media (max-width: 480px) {
+                .hero-section {
+                    padding: 60px 15px;
+                }
+                
+                .hero-section h1 {
+                    font-size: 2em;
+                }
+                
+                .hero-section p {
+                    font-size: 1em;
+                }
+                
+                h2 {
+                    font-size: 1.75em;
+                }
+                
+                .feature-card,
+                .use-case-card {
+                    padding: 20px;
+                }
+
+                .content-section {
+                    padding: 40px 15px;
+                }
+            }
+        </style>
+    </head>
+    <body>
+        <!-- Hero Section -->
+        <div class="hero-section">
+            <h1>Infinite Streaming</h1>
+            <p>Docker-based HLS/DASH media server and AI no-code tool for deterministic live stream testing</p>
+            <a href="https://github.com/jonathaneoliver/infinite-streaming" class="btn">Get Started on GitHub</a>
+        </div>
+
+        <!-- Main Content -->
+        <div class="content-section">
+            
+            <!-- About Section -->
+            <section>
+                <h2>About Infinite Streaming</h2>
+                <p class="about-text">
+                    Infinite Streaming (from the InfiniteStream project) is a Docker-based HLS/DASH media server and AI no-code tool for testing video players under real-time, deterministic live-like conditions. It automatically generates low-latency HLS (LL-HLS) and DASH (LL-DASH) streams, including multiple segment variants, and features a powerful web dashboard for side-by-side comparisons, diagnostics, and monitoring.
+                </p>
+            </section>
+
+            <!-- Key Features Section -->
+            <section>
+                <h2>Key Features</h2>
+                
+                <div class="feature-grid">
+                    
+                    <div class="feature-card">
+                        <h3>🤖 AI No-Code</h3>
+                        <p>Build and manage media streaming with minimal engineering effort. Automated stream generation and intelligent content management.</p>
+                    </div>
+
+                    <div class="feature-card">
+                        <h3>⚡ LL-HLS and LL-DASH</h3>
+                        <p>Real-time, low-latency stream generation for robust player testing. Support for both HLS and DASH protocols with sub-second latency.</p>
+                    </div>
+
+                    <div class="feature-card">
+                        <h3>🎬 Multi-variant Output</h3>
+                        <p>2s/6s segments, sliding window, and auto shutdown of idle sessions. Multiple quality levels and segment durations for comprehensive testing.</p>
+                    </div>
+
+                    <div class="feature-card">
+                        <h3>📊 Web Dashboard & Visualization</h3>
+                        <p>Mosaic views, playback comparisons, live offset tracking, and grid/multi-tile filtering. Real-time monitoring and diagnostics at your fingertips.</p>
+                    </div>
+
+                    <div class="feature-card">
+                        <h3>🔧 Diagnostics & Testing</h3>
+                        <p>Built-in failure injection (errors, timeouts, etc.), playback monitoring and diagnostics, session grouping, and traffic shaping for realistic test scenarios.</p>
+                    </div>
+
+                    <div class="feature-card">
+                        <h3>📁 Easy Content Management</h3>
+                        <p>Upload originals through the dashboard or copy directly to the host folder for on-the-fly streaming and testing. Simple drag-and-drop interface.</p>
+                    </div>
+
+                </div>
+            </section>
+
+            <!-- Use Cases Section -->
+            <section>
+                <h2>Use Cases</h2>
+                
+                <div class="use-case-card">
+                    <h3>📹 Video Player Testing</h3>
+                    <p>Test video players under deterministic low-latency conditions with real-time feedback and metrics.</p>
+                </div>
+
+                <div class="use-case-card">
+                    <h3>🔄 HLS/DASH Comparison</h3>
+                    <p>Compare HLS and DASH playback across different devices or player libraries side-by-side to understand performance differences.</p>
+                </div>
+
+                <div class="use-case-card">
+                    <h3>🔍 Automated Diagnostics</h3>
+                    <p>Automated diagnostics, failure injection, and stress testing for stream resilience. Identify issues before they reach production.</p>
+                </div>
+
+                <div class="use-case-card">
+                    <h3>🏭 QA and CI/CD Labs</h3>
+                    <p>QA and CI/CD lab environments for continuous integration of media streaming pipelines with automated test suites.</p>
+                </div>
+
+                <div class="use-case-card">
+                    <h3>🌐 Network Throttling & ABR Testing</h3>
+                    <p>Grouped network throttling and patterned traffic shaping enables easy, side-by-side ABR (adaptive bitrate) comparison between different player builds, libraries, media segment durations, or encoding ladders.</p>
+                </div>
+
+                <div class="use-case-card">
+                    <h3>⚖️ ABR Algorithm Evaluation</h3>
+                    <p>Evaluate trade-offs in ABR algorithms by simulating real-world unstable networks with precise control over network conditions.</p>
+                </div>
+
+                <div class="use-case-card">
+                    <h3>🎯 Repeatable, Deterministic Streaming</h3>
+                    <p>Traditional live streaming is not repeatable—every run is different. Infinite Streaming solves this with deterministic, controlled content for precise, apples-to-apples comparisons.</p>
+                </div>
+
+                <div class="use-case-card">
+                    <h3>💾 Efficient Storage via Looping</h3>
+                    <p>Use short, looped segments as the basis of an "infinite" streaming session, minimizing storage requirements even for long-duration test scenarios.</p>
+                </div>
+
+                <div class="use-case-card">
+                    <h3>🤖 Scriptable API</h3>
+                    <p>All network conditioning and fault injection actions are fully scriptable via REST API—perfect for automated, repeatable QA workflows.</p>
+                </div>
+            </section>
+
+            <!-- Call to Action Section -->
+            <section class="cta-section">
+                <h2>Get Started Today</h2>
+                <p>Test your media workflows with Infinite Streaming</p>
+                <div class="cta-buttons">
+                    <a href="https://github.com/jonathaneoliver/infinite-streaming" class="btn">View on GitHub</a>
+                    <a href="https://github.com/jonathaneoliver/infinite-streaming#readme" class="btn btn-outline">Read Documentation</a>
+                </div>
+                <p style="margin-top: 30px; font-size: 1.1em; opacity: 0.9;">Questions? Visit our GitHub repository for setup instructions or contact us for a demo.</p>
+            </section>
+
+        </div>
+
+        <!-- Footer -->
+        <footer>
+            <p>&copy; 2026 Infinite Streaming. Open Source Project.</p>
+            <p style="margin-top: 10px;">
+                <a href="https://github.com/jonathaneoliver/infinite-streaming">GitHub</a> | 
+                <a href="https://github.com/jonathaneoliver/infinite-streaming#readme">Documentation</a> | 
+                <a href="https://github.com/jonathaneoliver/infinite-streaming/issues">Report Issues</a>
+            </p>
+        </footer>
+    </body>
+    </html>
+
+---
+# nginx Deployment for Static Site
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: infinitestreamer-static
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: infinitestreamer-static
+  template:
+    metadata:
+      labels:
+        app: infinitestreamer-static
+    spec:
+      containers:
+      - name: nginx
+        image: nginx:alpine
+        ports:
+        - containerPort: 80
+        volumeMounts:
+        - name: html-content
+          mountPath: /usr/share/nginx/html
+          readOnly: true
+      volumes:
+      - name: html-content
+        configMap:
+          name: infinitestreamer-static-html
+
+---
+# Service for Static Site
+apiVersion: v1
+kind: Service
+metadata:
+  name: infinitestreamer-static
+spec:
+  selector:
+    app: infinitestreamer-static
+  ports:
+    - name: http
+      port: 80
+      targetPort: 80
+      nodePort: 30082
+  type: NodePort
