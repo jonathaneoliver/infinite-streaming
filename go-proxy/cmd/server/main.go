@@ -3353,11 +3353,15 @@ func manipulateHLSMaster(body []byte, stripCodecs bool, allowedVariants []string
 	
 	// Strip codecs if requested
 	if stripCodecs {
+		hasCodecs := false
 		for _, variant := range master.Variants {
 			if variant != nil && variant.Codecs != "" {
+				hasCodecs = true
 				variant.Codecs = ""
-				modified = true
 			}
+		}
+		if hasCodecs {
+			modified = true
 		}
 	}
 	
@@ -3376,10 +3380,18 @@ func manipulateHLSMaster(body []byte, stripCodecs bool, allowedVariants []string
 }
 
 // manipulateDASHManifest modifies a DASH manifest
+// Note: stripCodecs and allowedVariants parameters are reserved for future DASH implementation
 func manipulateDASHManifest(body []byte, stripCodecs bool, allowedVariants []string) ([]byte, error) {
-	// For DASH, we would need XML parsing and manipulation
-	// For now, return the original body as DASH support is more complex
-	// and would require additional XML parsing libraries
+	// DASH manifest manipulation would require XML parsing and manipulation
+	// using libraries like encoding/xml or third-party XML processors.
+	// This is deferred to keep the initial implementation focused on HLS.
+	// When implemented, this function should:
+	// 1. Parse the MPD XML
+	// 2. Filter AdaptationSet/Representation elements based on allowedVariants
+	// 3. Remove codecs attributes from Representation elements if stripCodecs is true
+	// 4. Re-serialize and return the modified XML
+	_ = stripCodecs      // Silence unused parameter warning
+	_ = allowedVariants  // Silence unused parameter warning
 	log.Printf("[GO-PROXY][CONTENT] DASH manifest manipulation not yet implemented")
 	return body, nil
 }
