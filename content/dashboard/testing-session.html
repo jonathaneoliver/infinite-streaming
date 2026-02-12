@@ -542,8 +542,8 @@
                     </select>
                 </label>
                 <label>
-                    Allow 4K
                     <input id="prefer4kToggle" type="checkbox">
+                    Allow 4K
                 </label>
             </div>
             <div class="player-frame">
@@ -594,6 +594,17 @@
         let shakaPlayer = null;
         let videojsPlayer = null;
         let stallCount = 0;
+        let stallTimeS = 0;
+        let lastStallDurationS = 0;
+        let stallStartAt = null;
+        let lastRenditionMbps = null;
+        let lastRateShiftAt = 0;
+        let lastPlayerState = null;
+        let playbackStartAt = null;
+        let videoFirstFrameS = null;
+        let videoPlayingTimeS = null;
+        let firstFrameReported = false;
+        let playingReported = false;
         let currentSessionId = null;
         let currentPlayerId = '';
         let currentUrl = '';
@@ -625,6 +636,7 @@
         const collapseState = new Map();
         const collapseDefaults = {
             'session-details': true,
+            'player-metrics': false,
             'fault-injection': false,
             'network-shaping': false,
             'bitrate-chart': false
@@ -636,6 +648,7 @@
         let lastRuntimeRateLogged = null;
         let lastStepRateLogged = null;
         let lastStepIndexLogged = null;
+        let metricsHeartbeatTimer = null;
 
         function getStoredCollapseState(key) {
             try {
@@ -675,6 +688,20 @@
             logEl.scrollTop = logEl.scrollHeight;
         }
 
+        function sendPlayerStateChange(nextState) {
+            if (!nextState || nextState === lastPlayerState) return;
+            const previous = lastPlayerState;
+            lastPlayerState = nextState;
+            const extra = {
+                player_metrics_state: nextState,
+                player_metrics_state_to: nextState
+            };
+            if (previous !== null && previous !== undefined) {
+                extra.player_metrics_state_from = previous;
+            }
+            sendSessionMetrics('state_change', extra);
+        }
+
         function logPatternDebug(message, data) {
             const payload = data ? ` ${JSON.stringify(data)}` : '';
             console.warn(`[pattern-debug] ${new Date().toISOString()} ${message}${payload}`);
@@ -703,6 +730,114 @@
                 parts.push(url);
             }
             log(parts.join(' '));
+        }
+
+        function toMetricNumber(value) {
+            if (value === null || value === undefined) return null;
+            const numeric = Number(value);
+            if (!Number.isFinite(numeric)) return null;
+            return Math.round(numeric * 100) / 100;
+        }
+
+        function toMetricSeconds(value) {
+            if (value === null || value === undefined) return null;
+            const numeric = Number(value);
+            if (!Number.isFinite(numeric)) return null;
+            return Math.round(numeric * 1000) / 1000;
+        }
+
+        function formatResolution(width, height) {
+            const w = Number(width);
+            const h = Number(height);
+            if (!Number.isFinite(w) || !Number.isFinite(h) || w <= 0 || h <= 0) return null;
+            return `${Math.round(w)}x${Math.round(h)}`;
+        }
+
+        function markPlaybackStart() {
+            playbackStartAt = performance.now();
+            videoFirstFrameS = null;
+            videoPlayingTimeS = null;
+            firstFrameReported = false;
+            playingReported = false;
+        }
+
+        function buildMetricsPayload(eventType, extra = {}) {
+            const buffered = video.buffered;
+            const seekable = video.seekable;
+            const current = Number(video.currentTime || 0);
+            const displayResolution = formatResolution(video.clientWidth, video.clientHeight);
+            const videoResolution = formatResolution(video.videoWidth, video.videoHeight);
+            let bufferedEnd = null;
+            let bufferDepth = null;
+            let seekableEnd = null;
+            if (buffered && buffered.length > 0) {
+                const end = buffered.end(buffered.length - 1);
+                bufferedEnd = toMetricSeconds(end);
+                bufferDepth = toMetricSeconds(Math.max(0, end - current));
+            }
+            if (seekable && seekable.length > 0) {
+                const end = seekable.end(seekable.length - 1);
+                seekableEnd = toMetricSeconds(end);
+            }
+            const quality = video.getVideoPlaybackQuality ? video.getVideoPlaybackQuality() : null;
+            const droppedFrames = quality ? Number(quality.droppedVideoFrames || 0) : null;
+            const base = {
+                player_metrics_source: 'web',
+                player_metrics_last_event: eventType,
+                player_metrics_trigger_type: eventType,
+                player_metrics_last_event_at: new Date().toISOString(),
+                player_metrics_event_time: new Date().toISOString(),
+                player_metrics_state: video.paused ? 'paused' : 'playing',
+                player_metrics_position_s: toMetricSeconds(current),
+                player_metrics_playback_rate: toMetricNumber(video.playbackRate || 0),
+                player_metrics_buffer_depth_s: bufferDepth,
+                player_metrics_buffer_end_s: bufferedEnd,
+                player_metrics_seekable_end_s: seekableEnd,
+                player_metrics_live_edge_s: seekableEnd,
+                player_metrics_live_offset_s: null,
+                player_metrics_display_resolution: displayResolution,
+                player_metrics_video_resolution: videoResolution,
+                player_metrics_video_first_frame_time_s: toMetricSeconds(videoFirstFrameS),
+                player_metrics_video_start_time_s: toMetricSeconds(videoPlayingTimeS),
+                player_metrics_video_bitrate_mbps: toMetricNumber(currentRenditionMbps),
+                player_metrics_network_bitrate_mbps: toMetricNumber(playerEstimatedMbps),
+                player_metrics_dropped_frames: droppedFrames,
+                player_metrics_stall_count: stallCount,
+                player_metrics_stall_time_s: toMetricSeconds(stallTimeS),
+                player_metrics_last_stall_time_s: toMetricSeconds(lastStallDurationS)
+            };
+            const merged = { ...base, ...extra };
+            const compact = {};
+            Object.entries(merged).forEach(([key, value]) => {
+                if (value === null || value === undefined || value === '') return;
+                compact[key] = value;
+            });
+            return compact;
+        }
+
+        function sendSessionMetrics(eventType, extra = {}) {
+            if (!currentSessionId) return;
+            const payload = buildMetricsPayload(eventType, extra);
+            const fields = Object.keys(payload);
+            if (!fields.length) return;
+            fetch(`/api/session/${currentSessionId}`, {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    set: payload,
+                    fields,
+                    base_revision: getSessionBaseRevision()
+                })
+            }).catch(err => console.warn('Metrics patch failed', err));
+        }
+
+        function scheduleMetricsHeartbeat() {
+            if (metricsHeartbeatTimer) {
+                clearInterval(metricsHeartbeatTimer);
+            }
+            metricsHeartbeatTimer = setInterval(() => {
+                sendSessionMetrics('heartbeat');
+            }, 5000);
         }
 
         function normalizeBitrateAxisMaxMode(value) {
@@ -962,23 +1097,75 @@
         }
 
         function attachVideoEvents() {
+            video.addEventListener('loadeddata', () => {
+                if (!playbackStartAt || firstFrameReported) return;
+                const elapsed = Math.round(((performance.now() - playbackStartAt) / 1000) * 1000) / 1000;
+                videoFirstFrameS = elapsed;
+                firstFrameReported = true;
+                sendSessionMetrics('video_first_frame', {
+                    player_metrics_video_first_frame_time_s: elapsed
+                });
+            });
+            video.addEventListener('timeupdate', () => {
+                if (!playbackStartAt || playingReported) return;
+                if (video.paused) return;
+                if (video.currentTime < 0.1) return;
+                const elapsed = Math.round(((performance.now() - playbackStartAt) / 1000) * 1000) / 1000;
+                videoPlayingTimeS = elapsed;
+                playingReported = true;
+                sendSessionMetrics('video_start_time', {
+                    player_metrics_video_start_time_s: elapsed
+                });
+            });
             video.addEventListener('waiting', () => {
-                stallCount += 1;
-                document.getElementById('statStalls').textContent = `${stallCount}`;
+                sendPlayerStateChange('buffering');
+                if (!stallStartAt) {
+                    stallStartAt = Date.now();
+                    stallCount += 1;
+                    document.getElementById('statStalls').textContent = `${stallCount}`;
+                    sendSessionMetrics('stall_start');
+                }
                 log('STALL: waiting');
             });
             video.addEventListener('stalled', () => {
-                stallCount += 1;
-                document.getElementById('statStalls').textContent = `${stallCount}`;
+                sendPlayerStateChange('buffering');
+                if (!stallStartAt) {
+                    stallStartAt = Date.now();
+                    stallCount += 1;
+                    document.getElementById('statStalls').textContent = `${stallCount}`;
+                    sendSessionMetrics('stall_start');
+                }
                 log('STALL: stalled');
+            });
+            video.addEventListener('pause', () => {
+                sendPlayerStateChange('paused');
+                log('PAUSED');
+            });
+            video.addEventListener('ended', () => {
+                sendPlayerStateChange('ended');
+                log('ENDED');
             });
             video.addEventListener('error', () => {
                 const err = video.error;
                 const code = err && err.code ? ` code=${err.code}` : '';
                 log(`ERROR: video error${code}`);
+                sendSessionMetrics('error', {
+                    player_metrics_error: `video error${code}`.trim(),
+                    player_metrics_error_code: err && err.code ? err.code : null
+                });
                 scheduleAutoRetry('video error');
             });
             video.addEventListener('playing', () => {
+                sendPlayerStateChange('playing');
+                if (stallStartAt) {
+                    const duration = (Date.now() - stallStartAt) / 1000;
+                    stallStartAt = null;
+                    lastStallDurationS = Math.round(duration * 100) / 100;
+                    stallTimeS = Math.round((stallTimeS + duration) * 100) / 100;
+                    sendSessionMetrics('stall_end', {
+                        player_metrics_last_stall_time_s: lastStallDurationS
+                    });
+                }
                 log('PLAYING');
             });
         }
@@ -1035,6 +1222,32 @@
                 playerEstimatedMbps = null;
                 currentRenditionMbps = null;
             }
+
+            if (currentRenditionMbps !== null && currentRenditionMbps !== undefined) {
+                const numeric = Number(currentRenditionMbps);
+                if (Number.isFinite(numeric)) {
+                    if (lastRenditionMbps !== null && lastRenditionMbps !== undefined) {
+                        const prev = Number(lastRenditionMbps);
+                        if (numeric !== prev) {
+                            sendSessionMetrics('video_bitrate_change', {
+                                player_metrics_video_bitrate_from_mbps: Math.round(prev * 100) / 100,
+                                player_metrics_video_bitrate_to_mbps: Math.round(numeric * 100) / 100
+                            });
+                        }
+                        const delta = numeric - prev;
+                        const now = Date.now();
+                        if (Math.abs(delta) >= 0.1 && now - lastRateShiftAt > 2000) {
+                            const direction = delta > 0 ? 'rate_shift_up' : 'rate_shift_down';
+                            sendSessionMetrics(direction, {
+                                player_metrics_rate_from_mbps: Math.round(prev * 100) / 100,
+                                player_metrics_rate_to_mbps: Math.round(numeric * 100) / 100
+                            });
+                            lastRateShiftAt = now;
+                        }
+                    }
+                    lastRenditionMbps = numeric;
+                }
+            }
         }
 
         function resetPlayback() {
@@ -1059,6 +1272,17 @@
             video.removeAttribute('src');
             video.load();
             stallCount = 0;
+            stallTimeS = 0;
+            lastStallDurationS = 0;
+            stallStartAt = null;
+            lastRenditionMbps = null;
+            lastRateShiftAt = 0;
+            lastPlayerState = null;
+            playbackStartAt = null;
+            videoFirstFrameS = null;
+            videoPlayingTimeS = null;
+            firstFrameReported = false;
+            playingReported = false;
             autoRetryCount = 0;
             if (autoRetryTimer) {
                 clearTimeout(autoRetryTimer);
@@ -1142,6 +1366,7 @@
 
         function loadStream(url) {
             currentUrl = url;
+            markPlaybackStart();
             autoRetryCount = 0;
             if (autoRetryTimer) {
                 clearTimeout(autoRetryTimer);
@@ -1163,6 +1388,10 @@
                     log(`ERROR: ${e.detail.code} ${e.detail.message}`);
                     const shakaHttp = extractShakaHttpFailure(e.detail);
                     logHttpFailure('Shaka', shakaHttp.status, shakaHttp.url);
+                    sendSessionMetrics('error', {
+                        player_metrics_error: `shaka ${e.detail.code} ${e.detail.message}`.trim(),
+                        player_metrics_error_code: e.detail.code
+                    });
                     scheduleAutoRetry(`shaka ${e.detail.code}`);
                 });
                 shakaPlayer.load(url).then(() => {
@@ -1182,6 +1411,10 @@
                         log(`HLS ERROR: ${data.type} ${data.details}`);
                         const hlsHttp = extractHlsHttpFailure(data);
                         logHttpFailure('HLS', hlsHttp.status, hlsHttp.url);
+                        sendSessionMetrics('error', {
+                            player_metrics_error: `hls ${data.type} ${data.details}`.trim(),
+                            player_metrics_error_code: data.type
+                        });
                         if (data && data.fatal) {
                             scheduleAutoRetry(`hls ${data.type}`);
                         }
@@ -1228,8 +1461,15 @@
                         const status = err.status || err.responseStatusCode || err.responseCode || null;
                         const url = err.url || err.responseURL || null;
                         logHttpFailure('Video.js', status, url);
+                        sendSessionMetrics('error', {
+                            player_metrics_error: `videojs ${err.code} ${err.message || ''}`.trim(),
+                            player_metrics_error_code: err.code
+                        });
                     } else {
                         log('VIDEOJS ERROR');
+                        sendSessionMetrics('error', {
+                            player_metrics_error: 'videojs error'
+                        });
                     }
                     scheduleAutoRetry('videojs error');
                 });
@@ -2502,6 +2742,19 @@
                 if (!el) return;
                 el.textContent = value;
             };
+            const formatMetricNumber = (value, suffix = '') => {
+                if (value === null || value === undefined || value === '') return '—';
+                const numeric = Number(value);
+                if (!Number.isFinite(numeric)) return String(value);
+                const rounded = Math.round(numeric * 100) / 100;
+                return `${rounded}${suffix}`;
+            };
+            const formatSeconds = (value) => {
+                if (value === null || value === undefined || value === '') return '—';
+                const numeric = Number(value);
+                if (!Number.isFinite(numeric)) return String(value);
+                return `${numeric.toFixed(3)}s`;
+            };
             const portDisplay = session.x_forwarded_port_external || session.x_forwarded_port || '—';
             setText('[data-field="session_user_agent"]', session.user_agent || '—');
             setText('[data-field="session_player_ip"]', session.player_ip || '—');
@@ -2517,6 +2770,32 @@
             const manifestCount = session.manifest_requests_count || 0;
             const segmentCount = session.segments_count || 0;
             setText('[data-field="session_detail_counts"]', `M:${masterCount} / Man:${manifestCount} / Seg:${segmentCount}`);
+
+            setText('[data-field="player_metrics_last_event"]', session.player_metrics_last_event || '—');
+            setText('[data-field="player_metrics_trigger_type"]', session.player_metrics_trigger_type || '—');
+            setText('[data-field="player_metrics_last_event_at"]', formatDate(session.player_metrics_last_event_at));
+            setText('[data-field="player_metrics_event_time"]', formatDate(session.player_metrics_event_time));
+            setText('[data-field="player_metrics_state"]', session.player_metrics_state || '—');
+            setText('[data-field="player_metrics_position_s"]', formatSeconds(session.player_metrics_position_s));
+            setText('[data-field="player_metrics_playback_rate"]', formatMetricNumber(session.player_metrics_playback_rate, 'x'));
+            setText('[data-field="player_metrics_buffer_depth_s"]', formatSeconds(session.player_metrics_buffer_depth_s));
+            setText('[data-field="player_metrics_buffer_end_s"]', formatSeconds(session.player_metrics_buffer_end_s));
+            setText('[data-field="player_metrics_seekable_end_s"]', formatSeconds(session.player_metrics_seekable_end_s));
+            setText('[data-field="player_metrics_live_edge_s"]', formatSeconds(session.player_metrics_live_edge_s));
+            setText('[data-field="player_metrics_live_offset_s"]', formatSeconds(session.player_metrics_live_offset_s));
+            setText('[data-field="player_metrics_display_resolution"]', session.player_metrics_display_resolution || '—');
+            setText('[data-field="player_metrics_video_resolution"]', session.player_metrics_video_resolution || '—');
+            setText('[data-field="player_metrics_video_first_frame_time_s"]', formatSeconds(session.player_metrics_video_first_frame_time_s));
+            setText('[data-field="player_metrics_video_start_time_s"]', formatSeconds(session.player_metrics_video_start_time_s));
+            setText('[data-field="player_metrics_video_bitrate_mbps"]', formatMetricNumber(session.player_metrics_video_bitrate_mbps, ' Mbps'));
+            setText('[data-field="player_metrics_video_quality_pct"]', formatMetricNumber(session.player_metrics_video_quality_pct, '%'));
+            setText('[data-field="player_metrics_network_bitrate_mbps"]', formatMetricNumber(session.player_metrics_network_bitrate_mbps, ' Mbps'));
+            setText('[data-field="player_metrics_dropped_frames"]', formatMetricNumber(session.player_metrics_dropped_frames));
+            setText('[data-field="player_metrics_stall_count"]', formatMetricNumber(session.player_metrics_stall_count));
+            setText('[data-field="player_metrics_stall_time_s"]', formatSeconds(session.player_metrics_stall_time_s));
+            setText('[data-field="player_metrics_last_stall_time_s"]', formatSeconds(session.player_metrics_last_stall_time_s));
+            setText('[data-field="player_metrics_error"]', session.player_metrics_error || '—');
+            setText('[data-field="player_metrics_source"]', session.player_metrics_source || '—');
         }
 
         function pushBandwidthSample(session) {
@@ -3096,6 +3375,7 @@
                 startSessionPolling(params.playerId);
             }
             setInterval(updateStats, 500);
+            scheduleMetricsHeartbeat();
             const setNetworkShapingVisibility = (enabled) => {
                 document.querySelectorAll('[data-net-shaping]').forEach(el => {
                     el.style.display = enabled ? '' : 'none';

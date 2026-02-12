@@ -54,6 +54,20 @@ final class PlaybackViewModel: ObservableObject {
     private let decoder = JSONDecoder()
     private var cancellables: Set<AnyCancellable> = []
     private var playlistMonitorTask: Task<Void, Never>?
+    private var metricsHeartbeatTimer: Timer?
+    private var metricsSessionId: String?
+    private var metricsLastSessionLookup: Date?
+    private var lastReportedRenditionMbps: Double?
+    private var lastReportedState: String?
+    private var playbackStartAt: Date?
+    private var videoFirstFrameSeconds: Double?
+    private var videoPlayingTimeSeconds: Double?
+    private var firstFrameReported: Bool = false
+    private var playingReported: Bool = false
+    private var lastReportedStallCount: Int = 0
+    private var lastReportedStallDuration: Double = 0
+    private let metricsHeartbeatSeconds: TimeInterval = 5
+    private let metricsSessionLookupSeconds: TimeInterval = 30
     private let diagnosticsProbesEnabled = false
     private let logPlaylistsOnPlay = false
     private let masterPreflightEnabled = true
@@ -68,6 +82,8 @@ final class PlaybackViewModel: ObservableObject {
             persist(.playerId, playerId)
         }
         bindDiagnosticsLogging()
+        bindMetricsReporting()
+        startMetricsHeartbeat()
     }
 
     func refreshContentList() async {
@@ -289,10 +305,20 @@ final class PlaybackViewModel: ObservableObject {
         let asset = AVURLAsset(url: url, options: nil)
         let item = AVPlayerItem(asset: asset)
         apply4kPreference(to: item)
+        playbackStartAt = Date()
+        videoFirstFrameSeconds = nil
+        videoPlayingTimeSeconds = nil
+        firstFrameReported = false
+        playingReported = false
         player.replaceCurrentItem(with: item)
         player.isMuted = isMuted
         player.automaticallyWaitsToMinimizeStalling = true
         diagnostics.reset()
+        lastReportedStallCount = 0
+        lastReportedStallDuration = 0
+        lastReportedRenditionMbps = nil
+        metricsSessionId = nil
+        metricsLastSessionLookup = nil
         log("AVPlayerItem created for \(url.absoluteString)")
         player.play()
         log("AVPlayer play() called")
@@ -451,6 +477,7 @@ final class PlaybackViewModel: ObservableObject {
             .filter { !$0.isEmpty }
             .sink { [weak self] value in
                 self?.log("Item error: \(value)")
+                Task { await self?.sendPlayerMetrics(event: "error", extra: ["player_metrics_error": value]) }
             }
             .store(in: &cancellables)
 
@@ -459,6 +486,7 @@ final class PlaybackViewModel: ObservableObject {
             .filter { !$0.isEmpty }
             .sink { [weak self] value in
                 self?.log("Playback failure: \(value)")
+                Task { await self?.sendPlayerMetrics(event: "error", extra: ["player_metrics_error": value]) }
             }
             .store(in: &cancellables)
 
@@ -467,6 +495,7 @@ final class PlaybackViewModel: ObservableObject {
             .filter { !$0.isEmpty }
             .sink { [weak self] value in
                 self?.log("Player error: \(value)")
+                Task { await self?.sendPlayerMetrics(event: "error", extra: ["player_metrics_error": value]) }
             }
             .store(in: &cancellables)
 
@@ -508,7 +537,248 @@ final class PlaybackViewModel: ObservableObject {
                 self?.log("Waiting reason: \(value)")
             }
             .store(in: &cancellables)
+
     }
+
+
+    private func bindMetricsReporting() {
+        diagnostics.$stallCount
+            .removeDuplicates()
+            .sink { [weak self] count in
+                guard let self else { return }
+                if count > self.lastReportedStallCount {
+                    self.lastReportedStallCount = count
+                    Task { await self.sendPlayerMetrics(event: "stall_start") }
+                }
+            }
+            .store(in: &cancellables)
+
+        diagnostics.$lastStallDurationSeconds
+            .removeDuplicates()
+            .sink { [weak self] duration in
+                guard let self else { return }
+                if duration > 0 && duration != self.lastReportedStallDuration {
+                    self.lastReportedStallDuration = duration
+                    Task {
+                        await self.sendPlayerMetrics(event: "stall_end", extra: [
+                            "player_metrics_last_stall_time_s": self.roundSeconds(duration)
+                        ])
+                    }
+                }
+            }
+            .store(in: &cancellables)
+
+        diagnostics.$state
+            .removeDuplicates()
+            .sink { [weak self] state in
+                guard let self else { return }
+                let previous = self.lastReportedState
+                if let previous, previous != state {
+                    Task {
+                        await self.sendPlayerMetrics(event: "state_change", extra: [
+                            "player_metrics_state_from": previous,
+                            "player_metrics_state_to": state
+                        ])
+                    }
+                } else if previous == nil {
+                    Task { await self.sendPlayerMetrics(event: "state_change") }
+                }
+                self.lastReportedState = state
+            }
+            .store(in: &cancellables)
+
+        diagnostics.$currentTime
+            .removeDuplicates()
+            .sink { [weak self] currentTime in
+                guard let self else { return }
+                guard let startAt = self.playbackStartAt else { return }
+                if !self.firstFrameReported && currentTime > 0 {
+                    let elapsed = self.roundSeconds(Date().timeIntervalSince(startAt))
+                    self.videoFirstFrameSeconds = elapsed
+                    self.firstFrameReported = true
+                    Task {
+                        await self.sendPlayerMetrics(event: "video_first_frame", extra: [
+                            "player_metrics_video_first_frame_time_s": elapsed
+                        ])
+                    }
+                }
+                if !self.playingReported && currentTime >= 0.1 && self.diagnostics.playbackRate > 0 {
+                    let elapsed = self.roundSeconds(Date().timeIntervalSince(startAt))
+                    self.videoPlayingTimeSeconds = elapsed
+                    self.playingReported = true
+                    Task {
+                        await self.sendPlayerMetrics(event: "video_start_time", extra: [
+                            "player_metrics_video_start_time_s": elapsed
+                        ])
+                    }
+                }
+            }
+            .store(in: &cancellables)
+
+        Publishers.CombineLatest(diagnostics.$indicatedBitrate, diagnostics.$averageVideoBitrate)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] indicated, average in
+                self?.handleRenditionShift(indicated: indicated, average: average)
+            }
+            .store(in: &cancellables)
+    }
+
+    private func startMetricsHeartbeat() {
+        metricsHeartbeatTimer?.invalidate()
+        metricsHeartbeatTimer = Timer.scheduledTimer(withTimeInterval: metricsHeartbeatSeconds, repeats: true) { [weak self] _ in
+            Task { await self?.sendPlayerMetrics(event: "heartbeat") }
+        }
+    }
+
+    private func handleRenditionShift(indicated: Double?, average: Double?) {
+        let bps = indicated ?? average
+        guard let bps, bps > 0 else { return }
+        let mbps = roundMetric(bps / 1_000_000)
+        if let previous = lastReportedRenditionMbps {
+            if mbps != previous {
+                Task {
+                    await sendPlayerMetrics(event: "video_bitrate_change", extra: [
+                        "player_metrics_video_bitrate_from_mbps": previous,
+                        "player_metrics_video_bitrate_to_mbps": mbps
+                    ])
+                }
+            }
+            let delta = mbps - previous
+            if abs(delta) >= 0.1 {
+                let event = delta > 0 ? "rate_shift_up" : "rate_shift_down"
+                Task {
+                    await sendPlayerMetrics(event: event, extra: [
+                        "player_metrics_rate_from_mbps": previous,
+                        "player_metrics_rate_to_mbps": mbps
+                    ])
+                }
+            }
+        }
+        lastReportedRenditionMbps = mbps
+    }
+
+    private func sendPlayerMetrics(event: String, extra: [String: Any] = [:]) async {
+        guard !currentURL.isEmpty else { return }
+        guard let baseURL = metricsBaseURL() else { return }
+        guard let sessionId = await resolveMetricsSessionId(baseURL: baseURL) else { return }
+        let payload = buildMetricsPayload(event: event, extra: extra)
+        if payload.isEmpty { return }
+        await patchSessionMetrics(sessionId: sessionId, baseURL: baseURL, payload: payload)
+    }
+
+    private func metricsBaseURL() -> URL? {
+        if let url = URL(string: playbackBaseURLString) {
+            return url
+        }
+        return URL(string: baseURLString)
+    }
+
+    private func resolveMetricsSessionId(baseURL: URL) async -> String? {
+        let now = Date()
+        if let existing = metricsSessionId,
+           let lastLookup = metricsLastSessionLookup,
+           now.timeIntervalSince(lastLookup) < metricsSessionLookupSeconds {
+            return existing
+        }
+        let sessionsURL = baseURL.appendingPathComponent("api/sessions")
+        do {
+            let (data, response) = try await URLSession.shared.data(from: sessionsURL)
+            if let http = response as? HTTPURLResponse, http.statusCode >= 400 {
+                return nil
+            }
+            guard let json = try JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
+                return nil
+            }
+            let match = json.first { entry in
+                (entry["player_id"] as? String) == playerId
+            }
+            if let sessionId = match?["session_id"] as? String, !sessionId.isEmpty {
+                metricsSessionId = sessionId
+                metricsLastSessionLookup = now
+                return sessionId
+            }
+        } catch {
+            return nil
+        }
+        return nil
+    }
+
+    private func buildMetricsPayload(event: String, extra: [String: Any]) -> [String: Any] {
+        var payload: [String: Any?] = [
+            "player_metrics_source": "ios",
+            "player_metrics_last_event": event,
+            "player_metrics_trigger_type": event,
+            "player_metrics_last_event_at": ISO8601DateFormatter().string(from: Date()),
+            "player_metrics_event_time": ISO8601DateFormatter().string(from: Date()),
+            "player_metrics_state": diagnostics.state,
+            "player_metrics_position_s": roundSeconds(diagnostics.currentTime),
+            "player_metrics_playback_rate": roundMetric(Double(diagnostics.playbackRate)),
+            "player_metrics_buffer_depth_s": diagnostics.bufferDepth.map { roundSeconds($0) },
+            "player_metrics_buffer_end_s": diagnostics.bufferedEnd.map { roundSeconds($0) },
+            "player_metrics_seekable_end_s": diagnostics.seekableEnd.map { roundSeconds($0) },
+            "player_metrics_live_edge_s": diagnostics.seekableEnd.map { roundSeconds($0) },
+            "player_metrics_live_offset_s": diagnostics.liveOffset.map { roundSeconds($0) },
+            "player_metrics_display_resolution": formatResolution(width: diagnostics.displayWidth, height: diagnostics.displayHeight),
+            "player_metrics_video_resolution": formatResolution(width: diagnostics.videoWidth, height: diagnostics.videoHeight),
+            "player_metrics_video_first_frame_time_s": videoFirstFrameSeconds,
+            "player_metrics_video_start_time_s": videoPlayingTimeSeconds,
+            "player_metrics_stall_count": diagnostics.stallCount,
+            "player_metrics_stall_time_s": roundSeconds(diagnostics.stallTimeSeconds),
+            "player_metrics_last_stall_time_s": roundSeconds(diagnostics.lastStallDurationSeconds),
+            "player_metrics_video_bitrate_mbps": mbps(from: diagnostics.indicatedBitrate ?? diagnostics.averageVideoBitrate),
+            "player_metrics_network_bitrate_mbps": mbps(from: diagnostics.observedBitrate)
+        ]
+        extra.forEach { key, value in
+            payload[key] = value
+        }
+        var compact: [String: Any] = [:]
+        for (key, value) in payload {
+            if let value {
+                compact[key] = value
+            }
+        }
+        return compact
+    }
+
+    private func patchSessionMetrics(sessionId: String, baseURL: URL, payload: [String: Any]) async {
+        let url = baseURL.appendingPathComponent("api/session").appendingPathComponent(sessionId)
+        var request = URLRequest(url: url)
+        request.httpMethod = "PATCH"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        let body: [String: Any] = [
+            "set": payload,
+            "fields": Array(payload.keys),
+            "base_revision": ""
+        ]
+        do {
+            request.httpBody = try JSONSerialization.data(withJSONObject: body, options: [])
+            let (_, response) = try await URLSession.shared.data(for: request)
+            if let http = response as? HTTPURLResponse, http.statusCode >= 400 {
+                log("Metrics patch failed: HTTP \(http.statusCode)")
+            }
+        } catch {
+            log("Metrics patch failed: \(error.localizedDescription)")
+        }
+    }
+
+    private func mbps(from bps: Double?) -> Double? {
+        guard let bps, bps > 0 else { return nil }
+        return roundMetric(bps / 1_000_000)
+    }
+
+    private func formatResolution(width: Double?, height: Double?) -> String? {
+        guard let width, let height, width > 0, height > 0 else { return nil }
+        return "\(Int(width))x\(Int(height))"
+    }
+
+    private func roundSeconds(_ value: Double) -> Double {
+        return (value * 1000).rounded() / 1000
+    }
+
+    private func roundMetric(_ value: Double) -> Double {
+        return (value * 100).rounded() / 100
+    }
+
 
     private func probeURL(_ url: URL) async {
         do {

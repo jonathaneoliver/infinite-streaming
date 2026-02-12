@@ -56,6 +56,21 @@
         return `${hrs}:${mins}:${secs}`;
     }
 
+    function formatPercent(value) {
+        if (value === null || value === undefined || value === '') return '—';
+        const numeric = Number(value);
+        if (!Number.isFinite(numeric)) return String(value);
+        const rounded = Math.round(numeric * 100) / 100;
+        return `${rounded}%`;
+    }
+
+    function formatSeconds(value) {
+        if (value === null || value === undefined || value === '') return '—';
+        const numeric = Number(value);
+        if (!Number.isFinite(numeric)) return String(value);
+        return `${numeric.toFixed(3)}s`;
+    }
+
     function sortedPlaylists(playlists) {
         if (!Array.isArray(playlists)) return [];
         return playlists.slice().sort((a, b) => b.bandwidth - a.bandwidth);
@@ -471,6 +486,7 @@
         const faultInjectionOpen = resolveSectionDefault(options, 'fault-injection', true);
         const networkShapingOpen = resolveSectionDefault(options, 'network-shaping', true);
         const bitrateChartOpen = resolveSectionDefault(options, 'bitrate-chart', false);
+        const playerMetricsOpen = resolveSectionDefault(options, 'player-metrics', false);
 
         return `
             <div class="session-card" data-session-id="${sessionId}" data-session-port="${session.x_forwarded_port_external || session.x_forwarded_port || ''}" data-segment-duration-seconds="${segmentDurationSeconds}" data-shaping-presets="${encodedPresets}" data-shaping-video-presets="${encodedVideoPresets}" data-shaping-overhead-mbps="${overheadMbps}">
@@ -499,6 +515,43 @@
                             <div class="session-item"><span class="label">Master Manifest URL</span><span class="value" data-field="session_master_manifest_url">${session.master_manifest_url || '—'}</span></div>
                             <div class="session-item"><span class="label">Last Request URL</span><span class="value" data-field="session_last_request_url">${session.last_request_url || '—'}</span></div>
                             <div class="session-item"><span class="label">Measured Mbps</span><span class="value" data-field="session_measured_mbps">${session.measured_mbps || '—'}</span></div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Collapsible Player Metrics -->
+                <div class="collapsible-section" data-section="player-metrics" data-default-open="${playerMetricsOpen}">
+                    <div class="collapsible-header" data-toggle="player-metrics">
+                        <span class="collapsible-icon">${playerMetricsOpen ? '▼' : '▶'}</span>
+                        <span class="collapsible-title">Player Metrics</span>
+                    </div>
+                    <div class="collapsible-content" data-content="player-metrics" style="display: ${playerMetricsOpen ? 'block' : 'none'};">
+                        <div class="session-grid">
+                            <div class="session-item"><span class="label">Last Event</span><span class="value" data-field="player_metrics_last_event">${session.player_metrics_last_event || '—'}</span></div>
+                            <div class="session-item"><span class="label">trigger_type</span><span class="value" data-field="player_metrics_trigger_type">${session.player_metrics_trigger_type || '—'}</span></div>
+                            <div class="session-item"><span class="label">Last Event At</span><span class="value" data-field="player_metrics_last_event_at">${formatDate(session.player_metrics_last_event_at) || '—'}</span></div>
+                            <div class="session-item"><span class="label">Event Time</span><span class="value" data-field="player_metrics_event_time">${formatDate(session.player_metrics_event_time) || '—'}</span></div>
+                            <div class="session-item"><span class="label">State</span><span class="value" data-field="player_metrics_state">${session.player_metrics_state || '—'}</span></div>
+                            <div class="session-item"><span class="label">Position</span><span class="value" data-field="player_metrics_position_s">${session.player_metrics_position_s ?? '—'}</span></div>
+                            <div class="session-item"><span class="label">Playback Rate</span><span class="value" data-field="player_metrics_playback_rate">${session.player_metrics_playback_rate ?? '—'}</span></div>
+                            <div class="session-item"><span class="label">Buffer Depth</span><span class="value" data-field="player_metrics_buffer_depth_s">${formatSeconds(session.player_metrics_buffer_depth_s)}</span></div>
+                            <div class="session-item"><span class="label">Buffer End</span><span class="value" data-field="player_metrics_buffer_end_s">${formatSeconds(session.player_metrics_buffer_end_s)}</span></div>
+                            <div class="session-item"><span class="label">Seekable End</span><span class="value" data-field="player_metrics_seekable_end_s">${formatSeconds(session.player_metrics_seekable_end_s)}</span></div>
+                            <div class="session-item"><span class="label">Live Edge</span><span class="value" data-field="player_metrics_live_edge_s">${formatSeconds(session.player_metrics_live_edge_s)}</span></div>
+                            <div class="session-item"><span class="label">Live Offset</span><span class="value" data-field="player_metrics_live_offset_s">${formatSeconds(session.player_metrics_live_offset_s)}</span></div>
+                            <div class="session-item"><span class="label">Display Resolution</span><span class="value" data-field="player_metrics_display_resolution">${session.player_metrics_display_resolution ?? '—'}</span></div>
+                            <div class="session-item"><span class="label">Video Resolution</span><span class="value" data-field="player_metrics_video_resolution">${session.player_metrics_video_resolution ?? '—'}</span></div>
+                            <div class="session-item"><span class="label">First Frame Time</span><span class="value" data-field="player_metrics_video_first_frame_time_s">${formatSeconds(session.player_metrics_video_first_frame_time_s)}</span></div>
+                            <div class="session-item"><span class="label">Video Start Time</span><span class="value" data-field="player_metrics_video_start_time_s">${formatSeconds(session.player_metrics_video_start_time_s)}</span></div>
+                            <div class="session-item"><span class="label">Video Bitrate Mbps</span><span class="value" data-field="player_metrics_video_bitrate_mbps">${session.player_metrics_video_bitrate_mbps ?? '—'}</span></div>
+                            <div class="session-item"><span class="label">Video Quality</span><span class="value" data-field="player_metrics_video_quality_pct">${formatPercent(session.player_metrics_video_quality_pct)}</span></div>
+                            <div class="session-item"><span class="label">Network Bitrate Mbps</span><span class="value" data-field="player_metrics_network_bitrate_mbps">${session.player_metrics_network_bitrate_mbps ?? '—'}</span></div>
+                            <div class="session-item"><span class="label">Dropped Frames</span><span class="value" data-field="player_metrics_dropped_frames">${session.player_metrics_dropped_frames ?? '—'}</span></div>
+                            <div class="session-item"><span class="label">Stalls</span><span class="value" data-field="player_metrics_stall_count">${session.player_metrics_stall_count ?? '—'}</span></div>
+                            <div class="session-item"><span class="label">Stall Time</span><span class="value" data-field="player_metrics_stall_time_s">${formatSeconds(session.player_metrics_stall_time_s)}</span></div>
+                            <div class="session-item"><span class="label">Last Stall Time</span><span class="value" data-field="player_metrics_last_stall_time_s">${formatSeconds(session.player_metrics_last_stall_time_s)}</span></div>
+                            <div class="session-item"><span class="label">Last Error</span><span class="value" data-field="player_metrics_error">${session.player_metrics_error || '—'}</span></div>
+                            <div class="session-item"><span class="label">Source</span><span class="value" data-field="player_metrics_source">${session.player_metrics_source || '—'}</span></div>
                         </div>
                     </div>
                 </div>

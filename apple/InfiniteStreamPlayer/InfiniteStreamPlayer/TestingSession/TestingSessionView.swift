@@ -43,7 +43,6 @@ struct TestingSessionView: View {
             bitrateChart
             debugLog
         }
-        .padding()
         .onAppear {
             hydrateFromSession()
             viewModel.start()
@@ -116,6 +115,20 @@ struct TestingSessionView: View {
                     self.statsCell("Master Manifest URL", session.masterManifestURL)
                     self.statsCell("Last Request URL", session.lastRequestURL)
                     self.statsCell("Measured Mbps", formatMbps(session))
+                }
+                let metrics = playerMetricsRows(session)
+                if !metrics.isEmpty {
+                    Divider().padding(.vertical, 4)
+                    Text("Player Metrics")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    LazyVGrid(columns: [
+                        GridItem(.adaptive(minimum: 180), spacing: 16)
+                    ], spacing: 14) {
+                        ForEach(metrics, id: \.0) { row in
+                            self.statsCell(row.0, row.1)
+                        }
+                    }
                 }
             } else {
                 Text("No session yet").font(.caption).foregroundColor(.secondary)
@@ -437,6 +450,67 @@ struct TestingSessionView: View {
     private func formatMbps(_ session: SessionData) -> String {
         let value = session.mbpsOutAvg ?? session.mbpsOut ?? 0
         return String(format: "%.2f Mbps", value)
+    }
+
+    private func formatSeconds3(_ value: Double?) -> String {
+        guard let value else { return "—" }
+        return String(format: "%.3fs", value)
+    }
+
+    private func formatMbpsValue(_ value: Double?) -> String {
+        guard let value else { return "—" }
+        return String(format: "%.2f Mbps", value)
+    }
+
+    private func formatPercentValue(_ value: Double?) -> String {
+        guard let value else { return "—" }
+        return String(format: "%.2f%%", value)
+    }
+
+    private func formatRateValue(_ value: Double?) -> String {
+        guard let value else { return "—" }
+        return String(format: "%.2fx", value)
+    }
+
+    private func metricString(_ session: SessionData, _ key: String) -> String {
+        session[key]?.stringValue ?? "—"
+    }
+
+    private func metricDouble(_ session: SessionData, _ key: String) -> Double? {
+        session[key]?.doubleValue
+    }
+
+    private func metricInt(_ session: SessionData, _ key: String) -> Int? {
+        session[key]?.intValue
+    }
+
+    private func playerMetricsRows(_ session: SessionData) -> [(String, String)] {
+        let rows: [(String, String)] = [
+            ("Last Event", metricString(session, "player_metrics_last_event")),
+            ("Trigger Type", metricString(session, "player_metrics_trigger_type")),
+            ("Event Time", metricString(session, "player_metrics_event_time")),
+            ("State", metricString(session, "player_metrics_state")),
+            ("Position", formatSeconds3(metricDouble(session, "player_metrics_position_s"))),
+            ("Playback Rate", formatRateValue(metricDouble(session, "player_metrics_playback_rate"))),
+            ("Buffer Depth", formatSeconds3(metricDouble(session, "player_metrics_buffer_depth_s"))),
+            ("Buffer End", formatSeconds3(metricDouble(session, "player_metrics_buffer_end_s"))),
+            ("Seekable End", formatSeconds3(metricDouble(session, "player_metrics_seekable_end_s"))),
+            ("Live Edge", formatSeconds3(metricDouble(session, "player_metrics_live_edge_s"))),
+            ("Live Offset", formatSeconds3(metricDouble(session, "player_metrics_live_offset_s"))),
+            ("Display Resolution", metricString(session, "player_metrics_display_resolution")),
+            ("Video Resolution", metricString(session, "player_metrics_video_resolution")),
+            ("First Frame Time", formatSeconds3(metricDouble(session, "player_metrics_video_first_frame_time_s"))),
+            ("Video Start Time", formatSeconds3(metricDouble(session, "player_metrics_video_start_time_s"))),
+            ("Video Bitrate", formatMbpsValue(metricDouble(session, "player_metrics_video_bitrate_mbps"))),
+            ("Network Bitrate", formatMbpsValue(metricDouble(session, "player_metrics_network_bitrate_mbps"))),
+            ("Video Quality", formatPercentValue(metricDouble(session, "player_metrics_video_quality_pct"))),
+            ("Stalls", metricInt(session, "player_metrics_stall_count").map(String.init) ?? "—"),
+            ("Stall Time", formatSeconds3(metricDouble(session, "player_metrics_stall_time_s"))),
+            ("Last Stall Time", formatSeconds3(metricDouble(session, "player_metrics_last_stall_time_s"))),
+            ("Last Error", metricString(session, "player_metrics_error")),
+            ("Source", metricString(session, "player_metrics_source"))
+        ]
+        return rows.filter { $0.1 != "—" && !$0.1.isEmpty }
     }
 
 

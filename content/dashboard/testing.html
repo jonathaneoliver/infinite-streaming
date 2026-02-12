@@ -233,6 +233,7 @@
         const collapseState = new Map();
         const collapseDefaults = {
             'session-details': true,
+            'player-metrics': false,
             'fault-injection': false,
             'network-shaping': false,
             'bitrate-chart': false
@@ -754,6 +755,58 @@
                 countersEl.textContent = `Drop ${dropPackets} pkts · Reject ${rejectPackets} pkts`;
             }
         }
+        function formatDate(value) {
+            if (!value) return '—';
+            const date = new Date(value);
+            return date.toLocaleString();
+        }
+        function formatMetricNumber(value, suffix = '') {
+            if (value === null || value === undefined || value === '') return '—';
+            const numeric = Number(value);
+            if (!Number.isFinite(numeric)) return String(value);
+            const rounded = Math.round(numeric * 100) / 100;
+            return `${rounded}${suffix}`;
+        }
+        function formatSeconds(value) {
+            if (value === null || value === undefined || value === '') return '—';
+            const numeric = Number(value);
+            if (!Number.isFinite(numeric)) return String(value);
+            return `${numeric.toFixed(3)}s`;
+        }
+
+        function updateSessionDetailData(card, session) {
+            if (!card || !session) return;
+            const setText = (selector, value) => {
+                const el = card.querySelector(selector);
+                if (!el) return;
+                el.textContent = value;
+            };
+            setText('[data-field="player_metrics_last_event"]', session.player_metrics_last_event || '—');
+            setText('[data-field="player_metrics_trigger_type"]', session.player_metrics_trigger_type || '—');
+            setText('[data-field="player_metrics_last_event_at"]', formatDate(session.player_metrics_last_event_at));
+            setText('[data-field="player_metrics_event_time"]', formatDate(session.player_metrics_event_time));
+            setText('[data-field="player_metrics_state"]', session.player_metrics_state || '—');
+            setText('[data-field="player_metrics_position_s"]', formatSeconds(session.player_metrics_position_s));
+            setText('[data-field="player_metrics_playback_rate"]', formatMetricNumber(session.player_metrics_playback_rate, 'x'));
+            setText('[data-field="player_metrics_buffer_depth_s"]', formatSeconds(session.player_metrics_buffer_depth_s));
+            setText('[data-field="player_metrics_buffer_end_s"]', formatSeconds(session.player_metrics_buffer_end_s));
+            setText('[data-field="player_metrics_seekable_end_s"]', formatSeconds(session.player_metrics_seekable_end_s));
+            setText('[data-field="player_metrics_live_edge_s"]', formatSeconds(session.player_metrics_live_edge_s));
+            setText('[data-field="player_metrics_live_offset_s"]', formatSeconds(session.player_metrics_live_offset_s));
+            setText('[data-field="player_metrics_display_resolution"]', session.player_metrics_display_resolution || '—');
+            setText('[data-field="player_metrics_video_resolution"]', session.player_metrics_video_resolution || '—');
+            setText('[data-field="player_metrics_video_first_frame_time_s"]', formatSeconds(session.player_metrics_video_first_frame_time_s));
+            setText('[data-field="player_metrics_video_start_time_s"]', formatSeconds(session.player_metrics_video_start_time_s));
+            setText('[data-field="player_metrics_video_bitrate_mbps"]', formatMetricNumber(session.player_metrics_video_bitrate_mbps, ' Mbps'));
+            setText('[data-field="player_metrics_video_quality_pct"]', formatMetricNumber(session.player_metrics_video_quality_pct, '%'));
+            setText('[data-field="player_metrics_network_bitrate_mbps"]', formatMetricNumber(session.player_metrics_network_bitrate_mbps, ' Mbps'));
+            setText('[data-field="player_metrics_dropped_frames"]', formatMetricNumber(session.player_metrics_dropped_frames));
+            setText('[data-field="player_metrics_stall_count"]', formatMetricNumber(session.player_metrics_stall_count));
+            setText('[data-field="player_metrics_stall_time_s"]', formatSeconds(session.player_metrics_stall_time_s));
+            setText('[data-field="player_metrics_last_stall_time_s"]', formatSeconds(session.player_metrics_last_stall_time_s));
+            setText('[data-field="player_metrics_error"]', session.player_metrics_error || '—');
+            setText('[data-field="player_metrics_source"]', session.player_metrics_source || '—');
+        }
 
         function closestStepDuration(seconds) {
             const options = [6, 12, 18, 24];
@@ -879,6 +932,7 @@
                     syncNetworkShapingControls(existingCard, activeSession);
                 }
                 syncServerFaultData(existingCard, activeSession);
+                updateSessionDetailData(existingCard, activeSession);
                 pushBandwidthSample(activeSession);
                 return;
             }
@@ -896,6 +950,7 @@
                     updateTemplateModeUi(restoredCard);
                     updateAllStepRiskUi(restoredCard);
                     TestingSessionUI.updateTransportModeUi(restoredCard);
+                    updateSessionDetailData(restoredCard, activeSession);
                 }
                 pushBandwidthSample(activeSession);
             }
@@ -924,6 +979,8 @@
             const actual = Number(session.mbps_out_avg || session.mbps_out || 0);
             const actual1s = Number(session.mbps_out_1s || 0);
             const active = Number(session.mbps_out_active || 0);
+            const videoBitrate = Number(session.player_metrics_video_bitrate_mbps || 0);
+            const networkBitrate = Number(session.player_metrics_network_bitrate_mbps || 0);
             const patternSteps = Array.isArray(session.nftables_pattern_steps) ? session.nftables_pattern_steps : [];
             const patternStepIndex = Number(session.nftables_pattern_step_runtime || session.nftables_pattern_step || 0);
             const patternEnabled = session.nftables_pattern_enabled === true
@@ -946,7 +1003,7 @@
             const key = session.session_id;
             if (!key) return;
             const series = bandwidthHistory.get(key) || [];
-            series.push({ ts: now, actual, actual1s, active, limit });
+            series.push({ ts: now, actual, actual1s, active, limit, videoBitrate, networkBitrate });
             const cutoff = now - windowMs;
             const filtered = series.filter(point => point.ts >= cutoff);
             bandwidthHistory.set(key, filtered);
@@ -969,12 +1026,16 @@
                     actual: point.actual,
                     actual1s: point.actual1s,
                     active: point.active,
-                    limit: point.limit
+                    limit: point.limit,
+                    videoBitrate: point.videoBitrate,
+                    networkBitrate: point.networkBitrate
                 }));
             const actualData = points.map(point => ({ x: point.x, y: point.actual }));
             const actual1sData = points.map(point => ({ x: point.x, y: point.actual1s }));
             const activeData = points.map(point => ({ x: point.x, y: point.active }));
             const limitData = points.map(point => ({ x: point.x, y: point.limit }));
+            const videoBitrateData = points.map(point => ({ x: point.x, y: point.videoBitrate }));
+            const networkBitrateData = points.map(point => ({ x: point.x, y: point.networkBitrate }));
 
             const visibility = bandwidthVisibility.get(sessionId) || {};
             const axisMode = normalizeBitrateAxisMaxMode(
@@ -988,6 +1049,8 @@
                 ...maxFor(visibility['Actual (18s)'] === true, actualData),
                 ...maxFor(visibility['Actual (1s)'] === true, actual1sData),
                 ...maxFor(visibility['Active (18s)'] === true, activeData),
+                ...maxFor(visibility['Video Bitrate'] === true, videoBitrateData),
+                ...maxFor(visibility['Network Bitrate'] === true, networkBitrateData),
                 ...maxFor(visibility['Limit'] === true, limitData)
             ));
             const maxY = axisMode === 'auto' ? maxYAuto : Number(axisMode);
@@ -1032,6 +1095,26 @@
                                 pointRadius: 0,
                                 tension: 0.2,
                                 hidden: visibility['Active (18s)'] === true
+                            },
+                            {
+                                label: 'Video Bitrate',
+                                data: videoBitrateData,
+                                borderColor: '#ef4444',
+                                backgroundColor: 'rgba(239,68,68,0.12)',
+                                borderWidth: 1.5,
+                                pointRadius: 0,
+                                tension: 0.2,
+                                hidden: visibility['Video Bitrate'] === true
+                            },
+                            {
+                                label: 'Network Bitrate',
+                                data: networkBitrateData,
+                                borderColor: '#14b8a6',
+                                backgroundColor: 'rgba(20,184,166,0.12)',
+                                borderWidth: 1.5,
+                                pointRadius: 0,
+                                tension: 0.2,
+                                hidden: visibility['Network Bitrate'] === true
                             },
                             {
                                 label: 'Limit',
@@ -1110,7 +1193,9 @@
                 chart.data.datasets[0].data = actualData;
                 chart.data.datasets[1].data = actual1sData;
                 chart.data.datasets[2].data = activeData;
-                chart.data.datasets[3].data = limitData;
+                chart.data.datasets[3].data = videoBitrateData;
+                chart.data.datasets[4].data = networkBitrateData;
+                chart.data.datasets[5].data = limitData;
                 chart.data.datasets.forEach((dataset, idx) => {
                     if (Object.prototype.hasOwnProperty.call(visibility, dataset.label)) {
                         const hidden = visibility[dataset.label] === true;
