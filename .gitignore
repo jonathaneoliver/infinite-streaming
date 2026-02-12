@@ -37,3 +37,5 @@ __pycache__/
 
 .vscode/
 tests/.hls_failure_probe_last_failed
+go-proxy/go.mod
+go-proxy/go.sum
