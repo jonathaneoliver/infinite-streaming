@@ -223,6 +223,32 @@
         return items.join('');
     }
 
+    function renderContentVariantOptions(sessionId, variants, allowedVariants) {
+        const list = sortedPlaylists(variants);
+        const allowedSet = new Set(allowedVariants || []);
+        const allChecked = allowedSet.size === 0;
+        
+        const checkbox = (value, label) => {
+            const checked = allChecked || allowedSet.has(value) ? 'checked' : '';
+            return `<label><input type="checkbox" data-field="content_allowed_variants" value="${value}" ${checked}>${label}</label>`;
+        };
+        
+        const items = [];
+        list.forEach(variant => {
+            const resolution = variant.resolution || 'unknown';
+            const height = resolution.includes('x') ? resolution.split('x')[1] : resolution;
+            const heightLabel = height === 'unknown' ? 'unknown' : `${height}p`;
+            const label = `${heightLabel} / ${Math.round(variant.bandwidth / 1000)} kbps`;
+            items.push(checkbox(variant.url, label));
+        });
+        
+        if (items.length === 0) {
+            return '<span class="no-variants-message">Play content once to populate variant list</span>';
+        }
+        
+        return items.join('');
+    }
+
     function collectShapingBandwidthPresets(playlists) {
         const list = sortedPlaylists(playlists);
         const presets = [];
@@ -246,6 +272,17 @@
             });
         });
         return presets;
+    }
+
+    function getBool(obj, key) {
+        const val = obj[key];
+        return val === true || val === 'true' || val === 1 || val === '1';
+    }
+
+    function getStringSlice(obj, key) {
+        const val = obj[key];
+        if (Array.isArray(val)) return val;
+        return [];
     }
 
     function collectVideoShapingPresets(playlists) {
@@ -570,6 +607,7 @@
                                     <button class="tab-button" data-tab="manifest-failures">Manifest</button>
                                     <button class="tab-button" data-tab="master-failures">Master</button>
                                     <button class="tab-button" data-tab="transport-faults">Transport</button>
+                                    <button class="tab-button" data-tab="content-manipulation">Content</button>
                                 </div>
                                 <div class="tabs-content">
                                     <!-- Segment Tab -->
@@ -689,6 +727,29 @@
                                         <div class="session-item">
                                             <span class="label">Fault Counters</span>
                                             <span class="value" data-field="transport_fault_counters">Drop ${transportDropPackets} pkts · Reject ${transportRejectPackets} pkts</span>
+                                        </div>
+                                    </div>
+
+                                    <!-- Content Manipulation Tab -->
+                                    <div class="tab-panel" data-panel="content-manipulation">
+                                        <div class="fault-control-row">
+                                            <label>Strip CODEC Information</label>
+                                            <div class="checkbox-group">
+                                                <label>
+                                                    <input type="checkbox" data-field="content_strip_codecs" ${getBool(session, 'content_strip_codecs') ? 'checked' : ''}>
+                                                    Remove CODEC attributes from master playlist
+                                                </label>
+                                            </div>
+                                        </div>
+                                        <div class="fault-control-row">
+                                            <label>Allowed Variants</label>
+                                            <div class="checkbox-group">
+                                                ${renderContentVariantOptions(sessionId, manifestVariants, getStringSlice(session, 'content_allowed_variants'))}
+                                            </div>
+                                        </div>
+                                        <div class="content-tab-note">
+                                            <strong>Note:</strong> Content modifications apply to master playlist requests. 
+                                            For HLS, play content once to populate variant list, configure settings, then replay to apply changes.
                                         </div>
                                     </div>
                                 </div>
@@ -900,6 +961,11 @@
             .map(input => input.value);
         const segmentChecks = Array.from(card.querySelectorAll('input[data-field="segment_failure_urls"]:checked'))
             .map(input => input.value);
+        
+        // Content manipulation settings
+        const contentStripCodecs = !!card.querySelector('input[data-field="content_strip_codecs"]')?.checked;
+        const contentAllowedVariants = Array.from(card.querySelectorAll('input[data-field="content_allowed_variants"]:checked'))
+            .map(input => input.value);
 
         return {
             session_id: sessionId,
@@ -944,7 +1010,10 @@
             transport_consecutive_seconds: getRangeValue('transport_consecutive_failures'),
             transport_frequency_seconds: getRangeValue('transport_failure_frequency'),
             transport_fault_on_seconds: getRangeValue('transport_consecutive_failures'),
-            transport_fault_off_seconds: getRangeValue('transport_failure_frequency')
+            transport_fault_off_seconds: getRangeValue('transport_failure_frequency'),
+            // Content manipulation
+            content_strip_codecs: contentStripCodecs,
+            content_allowed_variants: contentAllowedVariants.length > 0 ? contentAllowedVariants : []
         };
     }
 
