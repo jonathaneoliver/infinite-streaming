@@ -1,0 +1,311 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Network Log Demo - InfiniteStream</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            margin: 20px;
+            background: #f5f5f5;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 12px;
+            padding: 20px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        }
+        h1 {
+            margin-bottom: 20px;
+            color: #333;
+        }
+        .network-log-section {
+            padding: 12px 0;
+        }
+        .network-log-controls {
+            display: flex;
+            gap: 12px;
+            margin-bottom: 12px;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+        .btn {
+            padding: 6px 12px;
+            background: #4f46e5;
+            color: white;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 13px;
+        }
+        .btn:hover {
+            background: #4338ca;
+        }
+        .network-log-filter {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 13px;
+            cursor: pointer;
+            user-select: none;
+        }
+        .network-log-table-wrap {
+            overflow-x: auto;
+            border: 1px solid #ddd;
+            border-radius: 6px;
+            background: #fff;
+        }
+        .network-log-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 12px;
+        }
+        .network-log-table th {
+            background: #f5f5f5;
+            padding: 8px;
+            text-align: left;
+            font-weight: 600;
+            border-bottom: 2px solid #ddd;
+            white-space: nowrap;
+        }
+        .network-log-table td {
+            padding: 6px 8px;
+            border-bottom: 1px solid #eee;
+            vertical-align: middle;
+        }
+        .network-log-table tbody tr:hover {
+            background: #f9f9f9;
+        }
+        .network-log-table tbody tr.faulted {
+            background: #fef2f2;
+        }
+        .network-log-table tbody tr.faulted:hover {
+            background: #fee2e2;
+        }
+        .net-path {
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            font-family: monospace;
+            font-size: 11px;
+            max-width: 300px;
+        }
+        .net-status {
+            font-weight: 600;
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-size: 11px;
+            text-align: center;
+            display: inline-block;
+            min-width: 40px;
+        }
+        .net-status-2xx {
+            background: #d1fae5;
+            color: #065f46;
+        }
+        .net-status-4xx {
+            background: #fed7aa;
+            color: #92400e;
+        }
+        .net-status-5xx {
+            background: #fecaca;
+            color: #991b1b;
+        }
+        .net-type {
+            font-size: 11px;
+            font-weight: 500;
+            text-transform: capitalize;
+        }
+        .net-size {
+            font-family: monospace;
+            font-size: 11px;
+            text-align: right;
+        }
+        .net-timing-bar {
+            display: flex;
+            height: 20px;
+            background: #f3f4f6;
+            border-radius: 3px;
+            overflow: hidden;
+            position: relative;
+            min-width: 150px;
+        }
+        .net-timing-segment {
+            height: 100%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 9px;
+            font-weight: 600;
+            color: #fff;
+        }
+        .net-timing-dns {
+            background: #8b5cf6;
+        }
+        .net-timing-connect {
+            background: #f59e0b;
+        }
+        .net-timing-ttfb {
+            background: #3b82f6;
+        }
+        .net-timing-transfer {
+            background: #6366f1;
+        }
+        .net-timing-total {
+            margin-left: 8px;
+            font-size: 11px;
+            font-weight: 500;
+            color: #666;
+        }
+        .net-fault-badge {
+            display: inline-block;
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-size: 10px;
+            font-weight: 600;
+            background: #fca5a5;
+            color: #7f1d1d;
+            margin-left: 6px;
+        }
+        .net-fault-injected {
+            font-style: italic;
+            color: #666;
+            font-size: 11px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🌐 Network Log - Session 1</h1>
+        
+        <div class="network-log-section">
+            <div class="network-log-controls">
+                <button class="btn">Refresh</button>
+                <label class="network-log-filter">
+                    <input type="checkbox" checked>
+                    Show Faults
+                </label>
+                <label class="network-log-filter">
+                    <input type="checkbox" checked>
+                    Show Successful
+                </label>
+            </div>
+            
+            <div class="network-log-table-wrap">
+                <table class="network-log-table">
+                    <thead>
+                        <tr>
+                            <th>Method</th>
+                            <th>Path</th>
+                            <th>Type</th>
+                            <th>Status</th>
+                            <th>Size</th>
+                            <th>Timing</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <!-- Successful segment request -->
+                        <tr>
+                            <td>GET</td>
+                            <td><div class="net-path" title="/my-great-show/segment_0001.m4s">/my-great-show/segment_0001.m4s</div></td>
+                            <td><span class="net-type">segment</span></td>
+                            <td><span class="net-status net-status-2xx">200</span></td>
+                            <td class="net-size">1.2 MB</td>
+                            <td>
+                                <div class="net-timing-bar">
+                                    <div class="net-timing-dns" style="width: 5%;" title="DNS: 2ms"></div>
+                                    <div class="net-timing-connect" style="width: 10%;" title="Connect: 5ms"></div>
+                                    <div class="net-timing-ttfb" style="width: 25%;" title="TTFB: 12ms"></div>
+                                    <div class="net-timing-transfer" style="width: 60%;" title="Transfer: 31ms"></div>
+                                </div>
+                                <span class="net-timing-total">50ms</span>
+                            </td>
+                        </tr>
+                        
+                        <!-- Faulted request - HTTP 404 -->
+                        <tr class="faulted">
+                            <td>GET</td>
+                            <td><div class="net-path" title="/my-great-show/segment_0002.m4s">/my-great-show/segment_0002.m4s</div></td>
+                            <td><span class="net-type">segment</span></td>
+                            <td>
+                                <span class="net-status net-status-4xx">404</span>
+                                <span class="net-fault-badge">http</span>
+                            </td>
+                            <td class="net-size">—</td>
+                            <td><span class="net-fault-injected">Injected by proxy</span></td>
+                        </tr>
+                        
+                        <!-- Successful manifest request -->
+                        <tr>
+                            <td>GET</td>
+                            <td><div class="net-path" title="/my-great-show/manifest.m3u8">/my-great-show/manifest.m3u8</div></td>
+                            <td><span class="net-type">manifest</span></td>
+                            <td><span class="net-status net-status-2xx">200</span></td>
+                            <td class="net-size">3.4 KB</td>
+                            <td>
+                                <div class="net-timing-bar">
+                                    <div class="net-timing-connect" style="width: 15%;" title="Connect: 0ms (reused)"></div>
+                                    <div class="net-timing-ttfb" style="width: 40%;" title="TTFB: 8ms"></div>
+                                    <div class="net-timing-transfer" style="width: 45%;" title="Transfer: 4ms"></div>
+                                </div>
+                                <span class="net-timing-total">12ms</span>
+                            </td>
+                        </tr>
+                        
+                        <!-- Socket fault -->
+                        <tr class="faulted">
+                            <td>GET</td>
+                            <td><div class="net-path" title="/my-great-show/segment_0003.m4s">/my-great-show/segment_0003.m4s</div></td>
+                            <td><span class="net-type">segment</span></td>
+                            <td>
+                                <span class="net-status net-status-5xx">503</span>
+                                <span class="net-fault-badge">socket</span>
+                            </td>
+                            <td class="net-size">—</td>
+                            <td><span class="net-fault-injected">Injected by proxy</span></td>
+                        </tr>
+                        
+                        <!-- Corrupted segment (has timing, but zeroed data) -->
+                        <tr class="faulted">
+                            <td>GET</td>
+                            <td><div class="net-path" title="/my-great-show/segment_0004.m4s">/my-great-show/segment_0004.m4s</div></td>
+                            <td><span class="net-type">segment</span></td>
+                            <td>
+                                <span class="net-status net-status-2xx">200</span>
+                                <span class="net-fault-badge">corruption</span>
+                            </td>
+                            <td class="net-size">1.1 MB</td>
+                            <td>
+                                <div class="net-timing-bar">
+                                    <div class="net-timing-ttfb" style="width: 30%;" title="TTFB: 15ms"></div>
+                                    <div class="net-timing-transfer" style="width: 70%;" title="Transfer: 35ms"></div>
+                                </div>
+                                <span class="net-timing-total">50ms</span>
+                            </td>
+                        </tr>
+                        
+                        <!-- More successful segments -->
+                        <tr>
+                            <td>GET</td>
+                            <td><div class="net-path" title="/my-great-show/segment_0005.m4s">/my-great-show/segment_0005.m4s</div></td>
+                            <td><span class="net-type">segment</span></td>
+                            <td><span class="net-status net-status-2xx">200</span></td>
+                            <td class="net-size">1.3 MB</td>
+                            <td>
+                                <div class="net-timing-bar">
+                                    <div class="net-timing-ttfb" style="width: 20%;" title="TTFB: 10ms"></div>
+                                    <div class="net-timing-transfer" style="width: 80%;" title="Transfer: 42ms"></div>
+                                </div>
+                                <span class="net-timing-total">52ms</span>
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+</body>
+</html>
