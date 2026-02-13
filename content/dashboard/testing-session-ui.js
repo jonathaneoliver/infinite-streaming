@@ -44,6 +44,14 @@
     const networkLogEntriesBySession = new Map();
     const networkWaterfallTimelines = new Map();
     const networkWaterfallViewBySession = new Map();
+    const networkWaterfallFollowModeBySession = new Map();
+    const networkWaterfallFullRangeBySession = new Map();
+    const networkWaterfallRenderSignatureBySession = new Map();
+    const networkWaterfallRollingWindowMs = 5 * 60 * 1000;
+    const networkLogAutoRefreshTimers = new Map();
+    const networkLogFetchInFlight = new Set();
+    const networkLogAutoRefreshMs = 1500;
+    const networkLogDeveloperEnabled = new URLSearchParams(window.location.search).get('developer') === '1';
 
     function formatDate(value) {
         if (!value) return '—';
@@ -464,6 +472,9 @@
         const transportDropPackets = Number(session.transport_fault_drop_packets || 0);
         const transportRejectPackets = Number(session.transport_fault_reject_packets || 0);
         const portDisplay = session.x_forwarded_port_external || session.x_forwarded_port || '—';
+        const developerMode = typeof options.developerMode === 'boolean'
+            ? options.developerMode
+            : (new URLSearchParams(window.location.search).get('developer') === '1');
 
         // Calculate summary counts for badge
         const masterCount = session.master_manifest_requests_count || 0;
@@ -805,6 +816,7 @@
                     </div>
                 </div>
 
+                ${developerMode ? `
                 <!-- Collapsible Network Log -->
                 <div class="collapsible-section" data-section="network-log" data-default-open="false">
                     <div class="collapsible-header" data-toggle="network-log">
@@ -816,6 +828,10 @@
                         <div class="network-log-section">
                             <div class="network-log-controls">
                                 <button type="button" class="btn btn-mini btn-secondary" data-action="refresh-network-log">Refresh</button>
+                                <button type="button" class="btn btn-mini btn-secondary" data-action="network-log-jump-first">First</button>
+                                <button type="button" class="btn btn-mini btn-secondary" data-action="network-log-jump-last">Last</button>
+                                <button type="button" class="btn btn-mini btn-secondary" data-action="network-log-jump-fit">Fit</button>
+                                <button type="button" class="btn btn-mini btn-secondary" data-action="network-log-follow">Following Latest</button>
                                 <label class="network-log-filter">
                                     <input type="checkbox" data-filter="show-faulted" checked>
                                     Show Faults
@@ -825,32 +841,18 @@
                                     Show Successful
                                 </label>
                             </div>
+                            <div class="network-log-warning">
+                                Transfer timings and derived Mbps are approximate.
+                                They are most reliable when the network is slow and transfers are large (especially video segments).
+                            </div>
                             <div class="network-log-waterfall-wrap">
                                 <div class="network-log-waterfall" data-field="network_log_waterfall"></div>
                                 <div class="network-log-waterfall-empty" data-field="network_log_waterfall_empty" style="display:none;">No requests to plot yet.</div>
                             </div>
-                            <div class="network-log-table-wrap">
-                                <table class="network-log-table">
-                                    <thead>
-                                        <tr>
-                                            <th class="net-col-method">Method</th>
-                                            <th class="net-col-path">Path</th>
-                                            <th class="net-col-type">Type</th>
-                                            <th class="net-col-status">Status</th>
-                                            <th class="net-col-size">Size</th>
-                                            <th class="net-col-timing">Timing</th>
-                                        </tr>
-                                    </thead>
-                                    <tbody data-field="network_log_body">
-                                        <tr class="network-log-empty">
-                                            <td colspan="6">No network requests yet. Requests will appear here once playback starts.</td>
-                                        </tr>
-                                    </tbody>
-                                </table>
-                            </div>
                         </div>
                     </div>
                 </div>
+                ` : ''}
 
                 <div class="session-actions">
                     <button class="btn btn-secondary" data-action="save-session">Save Settings</button>
@@ -1063,12 +1065,65 @@
             const isOpen = getCollapsibleState(key, fallback);
             content.style.display = isOpen ? 'block' : 'none';
             if (icon) icon.textContent = isOpen ? '▼' : '▶';
+            if (key === 'network-log') {
+                if (!networkLogDeveloperEnabled) {
+                    return;
+                }
+                const card = section.closest('.session-card');
+                const sessionId = card ? String(card.dataset.sessionId || '') : '';
+                if (!sessionId) return;
+                if (isOpen) {
+                    if (!hasNetworkLogFollowModeState(sessionId)) {
+                        setNetworkLogFollowMode(sessionId, true);
+                    }
+                    updateNetworkLogFollowButton(card, sessionId);
+                    startNetworkLogAutoRefresh(sessionId, card);
+                } else {
+                    stopNetworkLogAutoRefresh(sessionId);
+                }
+            }
         });
     }
 
     // Initialize collapsible sections and tabs
     function initializeUI() {
         document.addEventListener('click', (e) => {
+            const actionButton = e.target.closest('[data-action]');
+            if (actionButton) {
+                const action = actionButton.dataset.action;
+                if (action === 'network-log-follow') {
+                    const card = actionButton.closest('.session-card');
+                    const sessionId = card ? String(card.dataset.sessionId || '') : '';
+                    if (sessionId) {
+                        const nextFollow = !isNetworkLogFollowMode(sessionId);
+                        setNetworkLogFollowMode(sessionId, nextFollow);
+                        updateNetworkLogFollowButton(card, sessionId);
+                        if (nextFollow) {
+                            jumpWaterfallView(sessionId, 'last');
+                        }
+                    }
+                    return;
+                }
+                if (action === 'network-log-jump-first' || action === 'network-log-jump-last' || action === 'network-log-jump-fit') {
+                    const card = actionButton.closest('.session-card');
+                    const sessionId = card ? card.dataset.sessionId : '';
+                    if (sessionId) {
+                        if (action === 'network-log-jump-first') {
+                            setNetworkLogFollowMode(sessionId, false);
+                            updateNetworkLogFollowButton(card, sessionId);
+                            jumpWaterfallView(sessionId, 'first');
+                        } else if (action === 'network-log-jump-last') {
+                            jumpWaterfallView(sessionId, 'last');
+                        } else {
+                            setNetworkLogFollowMode(sessionId, false);
+                            updateNetworkLogFollowButton(card, sessionId);
+                            jumpWaterfallView(sessionId, 'fit');
+                        }
+                    }
+                    return;
+                }
+            }
+
             // Handle collapsible toggles
             const toggle = e.target.closest('[data-toggle]');
             if (toggle) {
@@ -1118,7 +1173,18 @@
                         const card = sectionEl ? sectionEl.closest('.session-card') : null;
                         const sessionId = card ? card.dataset.sessionId : null;
                         if (sessionId && window.TestingSessionUI) {
-                            window.TestingSessionUI.updateNetworkLog(sessionId);
+                            if (!hasNetworkLogFollowModeState(sessionId)) {
+                                setNetworkLogFollowMode(sessionId, true);
+                            }
+                            updateNetworkLogFollowButton(card, sessionId);
+                            startNetworkLogAutoRefresh(sessionId, card);
+                        }
+                    }
+                    if (section === 'network-log' && !nextOpen) {
+                        const card = sectionEl ? sectionEl.closest('.session-card') : null;
+                        const sessionId = card ? String(card.dataset.sessionId || '') : '';
+                        if (sessionId) {
+                            stopNetworkLogAutoRefresh(sessionId);
                         }
                     }
                 }
@@ -1142,12 +1208,146 @@
         });
 
         applyCollapsibleState(document);
+        if (!networkLogDeveloperEnabled) {
+            stopAllNetworkLogAutoRefresh();
+            return;
+        }
+        resumeNetworkLogAutoRefreshForVisiblePanels();
         window.addEventListener('resize', () => {
             networkWaterfallTimelines.forEach((state) => {
                 if (state && state.timeline && typeof state.timeline.redraw === 'function') {
                     state.timeline.redraw();
                 }
             });
+        });
+        document.addEventListener('visibilitychange', () => {
+            if (document.hidden) {
+                stopAllNetworkLogAutoRefresh();
+                return;
+            }
+            resumeNetworkLogAutoRefreshForVisiblePanels();
+        });
+    }
+
+    function stopNetworkLogAutoRefresh(sessionId) {
+        const key = String(sessionId || '');
+        if (!key) return;
+        const timer = networkLogAutoRefreshTimers.get(key);
+        if (timer) {
+            clearInterval(timer);
+            networkLogAutoRefreshTimers.delete(key);
+        }
+    }
+
+    function stopAllNetworkLogAutoRefresh() {
+        Array.from(networkLogAutoRefreshTimers.keys()).forEach((sessionId) => {
+            stopNetworkLogAutoRefresh(sessionId);
+        });
+    }
+
+    function startNetworkLogAutoRefresh(sessionId, card) {
+        if (!networkLogDeveloperEnabled) return;
+        const key = String(sessionId || '');
+        if (!key || document.hidden) return;
+        const hostCard = card || document.querySelector(`.session-card[data-session-id="${key}"]`);
+        if (!hostCard) return;
+        if (networkLogAutoRefreshTimers.has(key)) return;
+        updateNetworkLog(key, { skipIfInFlight: true });
+        const timer = setInterval(() => {
+            updateNetworkLog(key, { skipIfInFlight: true });
+        }, networkLogAutoRefreshMs);
+        networkLogAutoRefreshTimers.set(key, timer);
+    }
+
+    function isNetworkLogFollowMode(sessionId) {
+        const key = String(sessionId || '');
+        return networkWaterfallFollowModeBySession.get(key) !== false;
+    }
+
+    function hasNetworkLogFollowModeState(sessionId) {
+        const key = String(sessionId || '');
+        if (!key) return false;
+        return networkWaterfallFollowModeBySession.has(key);
+    }
+
+    function setNetworkLogFollowMode(sessionId, enabled) {
+        const key = String(sessionId || '');
+        if (!key) return;
+        networkWaterfallFollowModeBySession.set(key, !!enabled);
+    }
+
+    function updateNetworkLogFollowButton(card, sessionId) {
+        const hostCard = card || document.querySelector(`.session-card[data-session-id="${sessionId}"]`);
+        if (!hostCard) return;
+        const button = hostCard.querySelector('[data-action="network-log-follow"]');
+        if (!button) return;
+        const following = isNetworkLogFollowMode(sessionId);
+        button.textContent = 'Following Latest';
+        button.setAttribute('aria-pressed', following ? 'true' : 'false');
+        button.classList.toggle('btn-primary', following);
+        button.classList.toggle('btn-secondary', !following);
+    }
+
+    function scrollWaterfallToLatestRow(state) {
+        if (!state || !state.host) return;
+        const applyScroll = () => {
+            if (!state.host) return;
+            const leftContent = state.host.querySelector('.vis-panel.vis-left .vis-content');
+            const centerContent = state.host.querySelector('.vis-panel.vis-center .vis-content');
+            if (!leftContent && !centerContent) return;
+
+            const leftMax = leftContent ? Math.max(0, leftContent.scrollHeight - leftContent.clientHeight) : 0;
+            const centerMax = centerContent ? Math.max(0, centerContent.scrollHeight - centerContent.clientHeight) : 0;
+            const target = Math.max(leftMax, centerMax);
+
+            if (leftContent) leftContent.scrollTop = target;
+            if (centerContent) centerContent.scrollTop = target;
+
+            const leftAtBottom = !leftContent || Math.abs(leftMax - leftContent.scrollTop) <= 1;
+            const centerAtBottom = !centerContent || Math.abs(centerMax - centerContent.scrollTop) <= 1;
+            return leftAtBottom && centerAtBottom;
+        };
+
+        if (typeof window !== 'undefined' && typeof window.requestAnimationFrame === 'function') {
+            let attempts = 0;
+            const tick = () => {
+                attempts += 1;
+                const done = applyScroll();
+                if (!done && attempts < 8) {
+                    window.requestAnimationFrame(tick);
+                }
+            };
+            window.requestAnimationFrame(() => {
+                window.requestAnimationFrame(tick);
+            });
+            return;
+        }
+        let tries = 0;
+        const retry = () => {
+            tries += 1;
+            const done = applyScroll();
+            if (!done && tries < 5) {
+                setTimeout(retry, 16);
+            }
+        };
+        setTimeout(retry, 0);
+    }
+
+    function resumeNetworkLogAutoRefreshForVisiblePanels() {
+        if (!networkLogDeveloperEnabled) {
+            stopAllNetworkLogAutoRefresh();
+            return;
+        }
+        document.querySelectorAll('.session-card').forEach((card) => {
+            const sessionId = String(card.dataset.sessionId || '');
+            if (!sessionId) return;
+            const content = card.querySelector('[data-content="network-log"]');
+            if (!content || content.style.display === 'none') {
+                stopNetworkLogAutoRefresh(sessionId);
+                return;
+            }
+            updateNetworkLogFollowButton(card, sessionId);
+            startNetworkLogAutoRefresh(sessionId, card);
         });
     }
 
@@ -1166,79 +1366,35 @@
         return (ms / 1000).toFixed(2) + 's';
     }
 
-    function getStatusClass(status) {
-        if (status >= 200 && status < 300) return 'net-status-2xx';
-        if (status >= 300 && status < 400) return 'net-status-3xx';
-        if (status >= 400 && status < 500) return 'net-status-4xx';
-        if (status >= 500) return 'net-status-5xx';
-        return '';
+    function formatMbpsFromBytesAndMs(bytes, transferMs) {
+        const bytesNum = Number(bytes || 0);
+        const msNum = Number(transferMs || 0);
+        if (!Number.isFinite(bytesNum) || !Number.isFinite(msNum) || bytesNum <= 0 || msNum <= 0) {
+            return '—';
+        }
+        const mbps = (bytesNum * 8) / (msNum * 1000);
+        if (!Number.isFinite(mbps) || mbps <= 0) {
+            return '—';
+        }
+        return `${mbps.toFixed(2)} Mbps`;
     }
 
-    function renderNetworkTimingBar(entry) {
-        if (entry.faulted && !entry.dns_ms && !entry.connect_ms && !entry.ttfb_ms) {
-            return `<span class="net-fault-injected">Injected by proxy</span>`;
-        }
-
-        const total = entry.total_ms || 0;
-        if (total === 0) return '<span class="net-timing-total">—</span>';
-
-        const dns = entry.dns_ms || 0;
-        const connect = entry.connect_ms || 0;
-        const tls = entry.tls_ms || 0;
-        const ttfb = entry.ttfb_ms || 0;
-        const transfer = entry.transfer_ms || 0;
-
-        const dnsWidth = total > 0 ? (dns / total * 100) : 0;
-        const connectWidth = total > 0 ? (connect / total * 100) : 0;
-        const tlsWidth = total > 0 ? (tls / total * 100) : 0;
-        const ttfbWidth = total > 0 ? (ttfb / total * 100) : 0;
-        const transferWidth = total > 0 ? (transfer / total * 100) : 0;
-
-        let html = '<div class="net-timing-bar">';
-        if (dnsWidth > 0) {
-            html += `<div class="net-timing-segment net-timing-dns" style="width: ${dnsWidth}%;" title="DNS: ${formatMilliseconds(dns)}"></div>`;
-        }
-        if (connectWidth > 0) {
-            html += `<div class="net-timing-segment net-timing-connect" style="width: ${connectWidth}%;" title="Connect: ${formatMilliseconds(connect)}"></div>`;
-        }
-        if (tlsWidth > 0) {
-            html += `<div class="net-timing-segment net-timing-tls" style="width: ${tlsWidth}%;" title="TLS: ${formatMilliseconds(tls)}"></div>`;
-        }
-        if (ttfbWidth > 0) {
-            html += `<div class="net-timing-segment net-timing-ttfb" style="width: ${ttfbWidth}%;" title="TTFB: ${formatMilliseconds(ttfb)}"></div>`;
-        }
-        if (transferWidth > 0) {
-            html += `<div class="net-timing-segment net-timing-transfer" style="width: ${transferWidth}%;" title="Transfer: ${formatMilliseconds(transfer)}"></div>`;
-        }
-        html += '</div>';
-        html += `<span class="net-timing-total">${formatMilliseconds(total)}</span>`;
-        return html;
+    function escapeHtml(value) {
+        return String(value || '')
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
     }
 
-    function renderNetworkLogRow(entry) {
-        const pathParts = (entry.path || entry.url || '').split('/');
-        const filename = pathParts[pathParts.length - 1] || entry.path || entry.url || '—';
-        const statusClass = getStatusClass(entry.status);
-        const faultBadge = entry.faulted ? `<span class="net-fault-badge">${entry.fault_category || 'fault'}</span>` : '';
-        const rowClass = entry.faulted ? 'faulted' : '';
-
-        return `
-            <tr class="${rowClass}" data-faulted="${entry.faulted || false}">
-                <td class="net-col-method">${entry.method || 'GET'}</td>
-                <td class="net-col-path">
-                    <div class="net-path" title="${entry.url || ''}">${filename}</div>
-                </td>
-                <td class="net-col-type">
-                    <span class="net-type">${entry.request_kind || '—'}</span>
-                </td>
-                <td class="net-col-status">
-                    <span class="net-status ${statusClass}">${entry.status || '—'}</span>
-                    ${faultBadge}
-                </td>
-                <td class="net-col-size net-size">${formatBytes(entry.bytes_out || 0)}</td>
-                <td class="net-col-timing">${renderNetworkTimingBar(entry)}</td>
-            </tr>
-        `;
+    function formatColumn(value, width, alignRight = false) {
+        const text = String(value ?? '—');
+        let clipped = text;
+        if (clipped.length > width) {
+            clipped = width >= 2 ? `${clipped.slice(0, width - 1)}…` : clipped.slice(0, width);
+        }
+        return alignRight ? clipped.padStart(width, ' ') : clipped.padEnd(width, ' ');
     }
 
     function hasVisTimeline() {
@@ -1261,7 +1417,72 @@
     }
 
     function buildWaterfallRows(entries) {
-        const rows = entries.slice().slice(-120).map((entry, index) => {
+        const decodeSegment = (value) => {
+            if (!value) return '';
+            try {
+                return decodeURIComponent(value);
+            } catch (err) {
+                return value;
+            }
+        };
+        const parsePathAndVariant = (entry) => {
+            let pathname = String(entry.path || '');
+            if (!pathname && entry.url) {
+                try {
+                    pathname = new URL(entry.url).pathname || '';
+                } catch (err) {
+                    pathname = String(entry.url || '');
+                }
+            }
+            const rawSegments = pathname.split('/').filter(Boolean);
+            const segments = rawSegments.map((segment) => decodeSegment(segment));
+            const filename = segments[segments.length - 1] || decodeSegment(pathname) || 'request';
+
+            let pathSegments = segments.slice();
+            if (pathSegments.length >= 3 && (pathSegments[0] === 'go-live' || pathSegments[0] === 'go-proxy')) {
+                // Hide route and content title segment: /go-live/<content>/<rest...> -> /<rest...>
+                pathSegments = pathSegments.slice(2);
+            }
+            const pathDisplay = pathSegments.join('/') || filename;
+
+            let variantName = '';
+            let variantKbps = '';
+
+            const playlistMatch = filename.match(/playlist_\d+s_(audio|\d{3,4}p)(?:[_-](\d{3,6})kbps)?\.m3u8/i);
+            if (playlistMatch) {
+                variantName = String(playlistMatch[1] || '');
+                variantKbps = String(playlistMatch[2] || '');
+            }
+
+            if (!variantName) {
+                for (let i = pathSegments.length - 1; i >= 0; i -= 1) {
+                    const seg = String(pathSegments[i] || '');
+                    if (/^\d{3,4}p$/i.test(seg) || /^audio$/i.test(seg)) {
+                        variantName = seg;
+                        break;
+                    }
+                }
+            }
+
+            if (!variantKbps) {
+                const kbpsMatch = pathname.match(/(\d{3,6})kbps/i);
+                if (kbpsMatch) {
+                    variantKbps = String(kbpsMatch[1] || '');
+                }
+            }
+
+            let variantLabel = '';
+            if (variantName) {
+                variantLabel = variantName.toLowerCase() === 'audio' ? 'audio' : variantName;
+                if (variantKbps) {
+                    variantLabel += `/${variantKbps}kbps`;
+                }
+            }
+
+            return { filename, pathDisplay, variantLabel };
+        };
+
+        const rows = entries.slice().map((entry, index) => {
             const timestamp = Date.parse(entry.timestamp || '') || 0;
             const dns = Number(entry.dns_ms || 0);
             const connect = Number(entry.connect_ms || 0);
@@ -1273,15 +1494,16 @@
             const wait = Math.max(0, ttfb - handshake);
             const transfer = transferRaw > 0 ? transferRaw : Math.max(0, total - ttfb);
             const duration = Math.max(0, dns + connect + tls + wait + transfer);
-            const pathParts = (entry.path || entry.url || '').split('/');
-            const filename = pathParts[pathParts.length - 1] || entry.path || 'request';
+            const parsed = parsePathAndVariant(entry);
             const prefix = entry.faulted ? '!' : '';
             return {
                 index,
                 entry,
                 timestamp,
-                filename,
-                label: `${prefix}${entry.method || 'GET'} ${filename}`,
+                filename: parsed.filename,
+                pathDisplay: parsed.pathDisplay,
+                variantLabel: parsed.variantLabel,
+                label: `${prefix}${entry.method || 'GET'} ${parsed.pathDisplay}`,
                 dns,
                 connect,
                 tls,
@@ -1290,7 +1512,168 @@
                 duration
             };
         });
-        return rows.filter((row) => row.timestamp > 0).sort((a, b) => a.timestamp - b.timestamp);
+        const ordered = rows.filter((row) => row.timestamp > 0).sort((a, b) => a.timestamp - b.timestamp);
+        if (!ordered.length) return ordered;
+        const newestTimestamp = ordered[ordered.length - 1].timestamp;
+        const cutoff = newestTimestamp - networkWaterfallRollingWindowMs;
+        return ordered.filter((row) => (row.timestamp + row.duration) >= cutoff);
+    }
+
+    function ensureWaterfallSelectionBox(state) {
+        if (!state || !state.host) return null;
+        let box = state.host.querySelector('.waterfall-selection-box');
+        if (!box) {
+            box = document.createElement('div');
+            box.className = 'waterfall-selection-box';
+            box.style.display = 'none';
+            state.host.appendChild(box);
+        }
+        return box;
+    }
+
+    function getWaterfallCenterPanel(state) {
+        if (!state || !state.host) return null;
+        return state.host.querySelector('.vis-panel.vis-center');
+    }
+
+    function pixelToTimelineMs(state, clientX, panelRect) {
+        if (!state || !state.timeline || !panelRect || panelRect.width <= 0) return NaN;
+        const x = Math.max(0, Math.min(panelRect.width, clientX - panelRect.left));
+        const currentWindow = state.timeline.getWindow();
+        if (!currentWindow || !currentWindow.start || !currentWindow.end) return NaN;
+        const startMs = new Date(currentWindow.start).getTime();
+        const endMs = new Date(currentWindow.end).getTime();
+        if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs <= startMs) return NaN;
+        return startMs + (x / panelRect.width) * (endMs - startMs);
+    }
+
+    function beginWaterfallSelection(state, key, event) {
+        if (!state || !state.timeline || !state.host) return;
+        if (event.button !== 0 || !event.shiftKey) return;
+        const center = getWaterfallCenterPanel(state);
+        if (!center || !center.contains(event.target)) return;
+        const rect = center.getBoundingClientRect();
+        const hostRect = state.host.getBoundingClientRect();
+        if (!rect || rect.width <= 0) return;
+        const startMs = pixelToTimelineMs(state, event.clientX, rect);
+        if (!Number.isFinite(startMs)) return;
+        const startX = Math.max(0, Math.min(rect.width, event.clientX - rect.left));
+        const leftOffset = Math.max(0, rect.left - hostRect.left);
+        const selection = ensureWaterfallSelectionBox(state);
+        if (!selection) return;
+        event.preventDefault();
+        state.host.classList.add('is-selecting');
+        selection.style.display = 'block';
+        selection.style.left = `${leftOffset + startX}px`;
+        selection.style.width = '0px';
+        state.drag = {
+            key,
+            startMs,
+            endMs: startMs,
+            startX,
+            endX: startX,
+            leftOffset
+        };
+    }
+
+    function updateWaterfallSelection(state, event) {
+        if (!state || !state.drag || !state.host) return;
+        const center = getWaterfallCenterPanel(state);
+        if (!center) return;
+        const rect = center.getBoundingClientRect();
+        if (!rect || rect.width <= 0) return;
+        const endMs = pixelToTimelineMs(state, event.clientX, rect);
+        if (!Number.isFinite(endMs)) return;
+        const endX = Math.max(0, Math.min(rect.width, event.clientX - rect.left));
+        const selection = ensureWaterfallSelectionBox(state);
+        if (!selection) return;
+        state.drag.endMs = endMs;
+        state.drag.endX = endX;
+        const left = Math.min(state.drag.startX, endX);
+        const width = Math.max(1, Math.abs(endX - state.drag.startX));
+        selection.style.left = `${state.drag.leftOffset + left}px`;
+        selection.style.width = `${width}px`;
+    }
+
+    function finishWaterfallSelection(state) {
+        if (!state || !state.drag || !state.timeline || !state.host) return;
+        const drag = state.drag;
+        state.drag = null;
+        const selection = ensureWaterfallSelectionBox(state);
+        if (selection) {
+            selection.style.display = 'none';
+            selection.style.width = '0px';
+        }
+        state.host.classList.remove('is-selecting');
+        const pixelDelta = Math.abs((drag.endX || drag.startX) - drag.startX);
+        const startMs = Math.min(drag.startMs, drag.endMs);
+        const endMs = Math.max(drag.startMs, drag.endMs);
+        if (pixelDelta < 4 || !Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs - startMs < 20) return;
+        state.timeline.setWindow(new Date(startMs), new Date(endMs), { animation: false });
+        networkWaterfallViewBySession.set(drag.key, { startMs, endMs });
+        setNetworkLogFollowMode(drag.key, false);
+        updateNetworkLogFollowButton(null, drag.key);
+    }
+
+    function resetWaterfallView(state, key) {
+        if (!state || !state.timeline) return;
+        const fullRange = networkWaterfallFullRangeBySession.get(key);
+        if (!fullRange || !Number.isFinite(fullRange.startMs) || !Number.isFinite(fullRange.endMs) || fullRange.endMs <= fullRange.startMs) return;
+        networkWaterfallViewBySession.delete(key);
+        state.timeline.setWindow(new Date(fullRange.startMs), new Date(fullRange.endMs), { animation: false });
+        state.timeline.redraw();
+    }
+
+    function jumpWaterfallView(sessionId, direction) {
+        const key = String(sessionId || '');
+        if (!key) return;
+        const state = networkWaterfallTimelines.get(key);
+        const fullRange = networkWaterfallFullRangeBySession.get(key);
+        if (!state || !state.timeline || !fullRange) return;
+        if (!Number.isFinite(fullRange.startMs) || !Number.isFinite(fullRange.endMs) || fullRange.endMs <= fullRange.startMs) return;
+
+        if (direction === 'fit') {
+            resetWaterfallView(state, key);
+            return;
+        }
+
+        const win = state.timeline.getWindow();
+        const currentStart = new Date(win.start).getTime();
+        const currentEnd = new Date(win.end).getTime();
+        const spanMs = Math.max(100, currentEnd - currentStart);
+
+        let nextStart = fullRange.startMs;
+        let nextEnd = Math.min(fullRange.endMs, nextStart + spanMs);
+        if (direction === 'last') {
+            nextEnd = fullRange.endMs;
+            nextStart = Math.max(fullRange.startMs, nextEnd - spanMs);
+        }
+        state.timeline.setWindow(new Date(nextStart), new Date(nextEnd), { animation: false });
+        networkWaterfallViewBySession.set(key, { startMs: nextStart, endMs: nextEnd });
+        state.timeline.redraw();
+    }
+
+    function bindWaterfallSelectionHandlers(state, key) {
+        if (!state || !state.host || state.selectionHandlersBound) return;
+        state.selectionHandlersBound = true;
+        const onMouseDown = (event) => beginWaterfallSelection(state, key, event);
+        const onMouseMove = (event) => updateWaterfallSelection(state, event);
+        const onMouseUp = () => finishWaterfallSelection(state);
+        const onDoubleClick = (event) => {
+            const center = getWaterfallCenterPanel(state);
+            if (!center || !center.contains(event.target)) return;
+            resetWaterfallView(state, key);
+        };
+        state.host.addEventListener('mousedown', onMouseDown);
+        window.addEventListener('mousemove', onMouseMove);
+        window.addEventListener('mouseup', onMouseUp);
+        state.host.addEventListener('dblclick', onDoubleClick);
+        state.cleanupSelectionHandlers = () => {
+            state.host.removeEventListener('mousedown', onMouseDown);
+            window.removeEventListener('mousemove', onMouseMove);
+            window.removeEventListener('mouseup', onMouseUp);
+            state.host.removeEventListener('dblclick', onDoubleClick);
+        };
     }
 
     function ensureWaterfallTimeline(card, sessionId) {
@@ -1302,6 +1685,9 @@
         if (state && state.host !== field) {
             if (state.timeline && typeof state.timeline.destroy === 'function') {
                 state.timeline.destroy();
+            }
+            if (state.cleanupSelectionHandlers) {
+                state.cleanupSelectionHandlers();
             }
             state = null;
         }
@@ -1336,12 +1722,16 @@
                 },
                 format: {
                     minorLabels: {
-                        millisecond: 'SSS[ms]',
-                        second: 's.SSS[s]'
+                        millisecond: 'HH:mm:ss.SSS',
+                        second: 'HH:mm:ss',
+                        minute: 'HH:mm',
+                        hour: 'HH:mm'
                     },
                     majorLabels: {
-                        millisecond: '',
-                        second: 's'
+                        millisecond: 'YYYY-MM-DD',
+                        second: 'YYYY-MM-DD',
+                        minute: 'YYYY-MM-DD',
+                        hour: 'YYYY-MM-DD'
                     }
                 }
             };
@@ -1352,9 +1742,12 @@
                 const endMs = new Date(props.end).getTime();
                 if (Number.isFinite(startMs) && Number.isFinite(endMs) && endMs > startMs) {
                     networkWaterfallViewBySession.set(key, { startMs, endMs });
+                    setNetworkLogFollowMode(key, false);
+                    updateNetworkLogFollowButton(null, key);
                 }
             });
-            state = { host: field, timeline, groups, items };
+            state = { host: field, timeline, groups, items, drag: null };
+            bindWaterfallSelectionHandlers(state, key);
             networkWaterfallTimelines.set(key, state);
         }
         return state;
@@ -1377,6 +1770,8 @@
             emptyHost.textContent = 'No requests to plot yet.';
             emptyHost.style.display = 'block';
             const state = networkWaterfallTimelines.get(key);
+            networkWaterfallFullRangeBySession.delete(key);
+            networkWaterfallRenderSignatureBySession.delete(key);
             if (state && state.items && state.groups) {
                 state.items.clear();
                 state.groups.clear();
@@ -1391,8 +1786,27 @@
         const state = ensureWaterfallTimeline(card, key);
         if (!state) return;
 
-        const minStart = Math.min(...rows.map((row) => row.timestamp));
-        const toTime = (offsetMs) => new Date(Math.max(0, Math.round(offsetMs)));
+        const dataStartMs = Math.min(...rows.map((row) => row.timestamp));
+        const dataEndMs = Math.max(...rows.map((row) => row.timestamp + row.duration));
+        const firstRow = rows[0];
+        const lastRow = rows[rows.length - 1];
+        const renderSignature = [
+            rows.length,
+            Math.round(dataStartMs),
+            Math.round(dataEndMs),
+            firstRow ? `${firstRow.filename}|${firstRow.entry.status || ''}|${Math.round(firstRow.duration)}` : '',
+            lastRow ? `${lastRow.filename}|${lastRow.entry.status || ''}|${Math.round(lastRow.duration)}` : ''
+        ].join('|');
+        const previousSignature = networkWaterfallRenderSignatureBySession.get(key);
+        if (previousSignature === renderSignature) {
+            updateNetworkLogFollowButton(card, key);
+            if (isNetworkLogFollowMode(key)) {
+                scrollWaterfallToLatestRow(state);
+            }
+            return;
+        }
+        networkWaterfallRenderSignatureBySession.set(key, renderSignature);
+        const toTime = (timestampMs) => new Date(Math.max(0, Math.round(timestampMs)));
         const groups = [];
         const items = [];
 
@@ -1400,15 +1814,39 @@
             const groupId = idx + 1;
             const method = row.entry.method || 'GET';
             const status = row.entry.status || '—';
-            const kind = row.entry.request_kind || 'request';
-            const labelClass = row.entry.faulted ? 'waterfall-label is-faulted' : 'waterfall-label';
-            const relativeStart = row.timestamp - minStart;
+            const labelClass = row.entry.faulted ? 'waterfall-rowtext is-faulted' : 'waterfall-rowtext';
+            const requestStartMs = row.timestamp;
             const bytesOut = Number(row.entry.bytes_out || 0);
-            const sizeLabel = bytesOut > 0 ? formatBytes(bytesOut) : '—';
+            const bytesLabel = bytesOut > 0 ? formatBytes(bytesOut) : '—';
+            const mbpsLabel = formatMbpsFromBytesAndMs(bytesOut, row.transfer);
+            const variantLabel = row.variantLabel || '—';
+            const filenameLower = String(row.filename || '').toLowerCase();
+            let segmentLabel = '—';
+            const segmentMatch = filenameLower.match(/segment[_-](\d+)/);
+            if (segmentMatch) {
+                segmentLabel = segmentMatch[1];
+            } else if (filenameLower.includes('init.')) {
+                segmentLabel = 'init';
+            } else if (filenameLower.includes('playlist')) {
+                segmentLabel = 'playlist';
+            } else if (filenameLower.includes('master')) {
+                segmentLabel = 'master';
+            } else if (row.filename) {
+                segmentLabel = row.filename;
+            }
+            const labelText = [
+                formatColumn(method, 6),
+                formatColumn(row.pathDisplay, 54),
+                formatColumn(variantLabel, 10),
+                formatColumn(segmentLabel, 10),
+                formatColumn(status, 6, true),
+                formatColumn(bytesLabel, 10, true),
+                formatColumn(mbpsLabel, 10, true)
+            ].join(' ');
 
             groups.push({
                 id: groupId,
-                content: `<div class="${labelClass}"><span class="waterfall-method">${method}</span><span class="waterfall-path" title="${row.entry.url || row.entry.path || ''}">${row.filename}</span><span class="waterfall-meta">${status} · ${kind} · ${sizeLabel}</span></div>`
+                content: `<span class="${labelClass}" title="${escapeHtml(row.entry.url || row.entry.path || '')}">${escapeHtml(labelText)}</span>`
             });
 
             const phases = [
@@ -1419,7 +1857,7 @@
                 { key: 'transfer', value: row.transfer, label: 'Receive' }
             ];
 
-            let cursor = relativeStart;
+            let cursor = requestStartMs;
             phases.forEach((phase) => {
                 if (phase.value <= 0) return;
                 const phaseStart = cursor;
@@ -1447,100 +1885,84 @@
         state.groups.add(groups);
         state.items.add(items);
 
-        const maxEnd = Math.max(...rows.map((row) => (row.timestamp - minStart) + row.duration));
+        const fullStartMs = dataStartMs;
+        const latestTransferEndMs = dataEndMs;
+        const rightPadMs = 1000;
+        const fullEndMs = latestTransferEndMs + rightPadMs;
+        networkWaterfallFullRangeBySession.set(key, { startMs: fullStartMs, endMs: fullEndMs });
+        state.timeline.setOptions({
+            min: toTime(fullStartMs),
+            max: toTime(fullEndMs),
+            zoomMax: Math.max(1000, fullEndMs - fullStartMs)
+        });
         const storedView = networkWaterfallViewBySession.get(key);
-        if (storedView && Number.isFinite(storedView.startMs) && Number.isFinite(storedView.endMs)) {
-            const clampedStart = Math.max(0, Math.min(maxEnd, storedView.startMs));
-            const clampedEnd = Math.max(clampedStart + 20, Math.min(maxEnd + 200, storedView.endMs));
+        const following = isNetworkLogFollowMode(key);
+        updateNetworkLogFollowButton(card, key);
+        if (following) {
+            const spanFromStored = (storedView && Number.isFinite(storedView.startMs) && Number.isFinite(storedView.endMs))
+                ? (storedView.endMs - storedView.startMs)
+                : (fullEndMs - fullStartMs);
+            const spanMs = Math.max(20, Math.min(spanFromStored, Math.max(20, fullEndMs - fullStartMs)));
+            const followEnd = fullEndMs;
+            const followStart = Math.max(fullStartMs, followEnd - spanMs);
+            state.timeline.setWindow(toTime(followStart), toTime(followEnd), { animation: false });
+            networkWaterfallViewBySession.set(key, { startMs: followStart, endMs: followEnd });
+        } else if (storedView && Number.isFinite(storedView.startMs) && Number.isFinite(storedView.endMs)) {
+            const clampedStart = Math.max(fullStartMs, Math.min(fullEndMs, storedView.startMs));
+            const clampedEnd = Math.max(clampedStart + 20, Math.min(fullEndMs, storedView.endMs));
             state.timeline.setWindow(toTime(clampedStart), toTime(clampedEnd), { animation: false });
         } else {
-            state.timeline.setWindow(toTime(0), toTime(maxEnd + 200), { animation: false });
+            state.timeline.setWindow(toTime(fullStartMs), toTime(fullEndMs), { animation: false });
         }
         state.timeline.redraw();
+        if (following) {
+            scrollWaterfallToLatestRow(state);
+        }
     }
 
-    function updateNetworkLog(sessionId) {
-        const card = document.querySelector(`.session-card[data-session-id="${sessionId}"]`);
-        if (!card) return;
+    function updateNetworkLog(sessionId, options = {}) {
+        if (!networkLogDeveloperEnabled) return;
+        const key = String(sessionId || '');
+        if (!key) return;
+        if (options.skipIfInFlight && networkLogFetchInFlight.has(key)) return;
 
-        const tbody = card.querySelector('[data-field="network_log_body"]');
+        const card = document.querySelector(`.session-card[data-session-id="${key}"]`);
+        if (!card) {
+            stopNetworkLogAutoRefresh(key);
+            return;
+        }
+
         const countBadge = card.querySelector('[data-field="network_log_count"]');
-        if (!tbody) return;
+        networkLogFetchInFlight.add(key);
 
-        fetch(`/api/session/${sessionId}/network`)
+        fetch(`/api/session/${key}/network`)
             .then(response => response.json())
             .then(data => {
                 const entries = data.entries || [];
                 const count = entries.length;
-                networkLogEntriesBySession.set(String(sessionId), entries);
+                networkLogEntriesBySession.set(key, entries);
 
                 // Update count badge
                 if (countBadge) {
                     countBadge.textContent = `${count} request${count !== 1 ? 's' : ''}`;
                 }
-
-                if (count === 0) {
-                    tbody.innerHTML = `
-                        <tr class="network-log-empty">
-                            <td colspan="6">No network requests yet. Requests will appear here once playback starts.</td>
-                        </tr>
-                    `;
-                    updateNetworkWaterfall(card, sessionId);
-                    return;
-                }
-
-                // Render rows (most recent first)
-                const rows = entries.slice().reverse().map(entry => renderNetworkLogRow(entry)).join('');
-                tbody.innerHTML = rows;
-
-                // Apply filters
                 applyNetworkLogFilters(card);
             })
             .catch(error => {
                 console.error('Failed to fetch network log:', error);
-                networkLogEntriesBySession.delete(String(sessionId));
-                if (tbody) {
-                    tbody.innerHTML = `
-                        <tr class="network-log-empty">
-                            <td colspan="6" style="color: #dc2626;">Failed to load network log</td>
-                        </tr>
-                    `;
+                networkLogEntriesBySession.delete(key);
+                if (countBadge) {
+                    countBadge.textContent = '0 requests';
                 }
-                updateNetworkWaterfall(card, sessionId);
+                updateNetworkWaterfall(card, key);
+            })
+            .finally(() => {
+                networkLogFetchInFlight.delete(key);
             });
     }
 
     function applyNetworkLogFilters(card) {
         const sessionId = String(card?.dataset?.sessionId || '');
-        const showFaulted = card.querySelector('[data-filter="show-faulted"]')?.checked ?? true;
-        const showSuccessful = card.querySelector('[data-filter="show-successful"]')?.checked ?? true;
-        const tbody = card.querySelector('[data-field="network_log_body"]');
-        if (!tbody) return;
-
-        const rows = tbody.querySelectorAll('tr:not(.network-log-empty)');
-        let visibleCount = 0;
-
-        rows.forEach(row => {
-            const isFaulted = row.dataset.faulted === 'true';
-            const shouldShow = (isFaulted && showFaulted) || (!isFaulted && showSuccessful);
-            row.style.display = shouldShow ? '' : 'none';
-            if (shouldShow) visibleCount++;
-        });
-
-        // Show empty message if no rows match filters
-        if (visibleCount === 0 && rows.length > 0) {
-            const emptyRow = tbody.querySelector('.network-log-empty');
-            if (!emptyRow) {
-                tbody.insertAdjacentHTML('beforeend', `
-                    <tr class="network-log-empty">
-                        <td colspan="6">No requests match the current filters</td>
-                    </tr>
-                `);
-            }
-        } else {
-            const emptyRow = tbody.querySelector('.network-log-empty');
-            if (emptyRow) emptyRow.remove();
-        }
         if (sessionId) {
             updateNetworkWaterfall(card, sessionId);
         }

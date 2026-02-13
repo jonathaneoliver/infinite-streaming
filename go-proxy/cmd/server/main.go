@@ -55,7 +55,7 @@ type NetworkLogEntry struct {
 	ConnectMs    float64 `json:"connect_ms"`
 	TLSMs        float64 `json:"tls_ms"`
 	TTFBMs       float64 `json:"ttfb_ms"`       // Time to first byte
-	TransferMs   float64 `json:"transfer_ms"`
+	TransferMs   float64 `json:"transfer_ms"`   // Downstream write+flush time to client
 	TotalMs      float64 `json:"total_ms"`
 	
 	// Fault injection metadata
@@ -3248,33 +3248,20 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 				a.saveSessionList(sessionList)
 				return
 			}
-			if contentType != "" {
-				w.Header().Set("Content-Type", contentType)
-			}
-			w.Header().Set("X-Session-ID", getString(sessionData, "session_number"))
-			w.WriteHeader(http.StatusOK)
-			writer := bufio.NewWriter(w)
-			buf := make([]byte, 32*1024)
-			var bytesOut int64
-			transferStart := time.Now()
-			for {
-				n, err := resp.Body.Read(buf)
-				if n > 0 {
-					for i := 0; i < n; i++ {
-						buf[i] = 0
-					}
-					_, _ = writer.Write(buf[:n])
-					bytesOut += int64(n)
+				if contentType != "" {
+					w.Header().Set("Content-Type", contentType)
 				}
-				if err != nil {
-					break
+				w.Header().Set("X-Session-ID", getString(sessionData, "session_number"))
+				w.WriteHeader(http.StatusOK)
+				bytesOut, transferMs, copyErr := streamToClientMeasured(w, resp.Body, true)
+				if copyErr != nil && !errors.Is(copyErr, io.EOF) {
+					log.Printf("segment_corrupted write error session_id=%s err=%v", getString(sessionData, "session_id"), copyErr)
 				}
-			}
-			_ = writer.Flush()
-			netEntry.TransferMs = float64(time.Since(transferStart).Microseconds()) / 1000.0
-			actionTaken = "segment_corrupted_zero_fill"
-			bumpFaultCounter(sessionData, failureType)
-			logFaultEvent(sessionData, externalPort, failureType, requestKind, actionTaken)
+				netEntry.TransferMs = transferMs
+				mergeTotalTiming(netEntry)
+				actionTaken = "segment_corrupted_zero_fill"
+				bumpFaultCounter(sessionData, failureType)
+				logFaultEvent(sessionData, externalPort, failureType, requestKind, actionTaken)
 			updateSessionTraffic(sessionData, requestBytes, bytesOut)
 			// Log network entry for corruption (has timing + bytes transferred, but zeroed)
 			sessionID := getString(sessionData, "session_id")
@@ -3425,7 +3412,6 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("X-Session-ID", getString(sessionData, "session_number"))
 	w.WriteHeader(resp.StatusCode)
-	writer := bufio.NewWriter(w)
 	if isSegment {
 		log.Printf(
 			"[GO-PROXY][REQUEST][SEGMENT] response status=%d content_type=%s content_length=%s accept_ranges=%s content_range=%s url=%s session_id=%s external_port=%s",
@@ -3439,10 +3425,12 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 			externalPort,
 		)
 	}
-	transferStart := time.Now()
-	bytesOut, _ := io.Copy(writer, resp.Body)
-	_ = writer.Flush()
-	netEntry.TransferMs = float64(time.Since(transferStart).Microseconds()) / 1000.0
+	bytesOut, transferMs, copyErr := streamToClientMeasured(w, resp.Body, false)
+	if copyErr != nil && !errors.Is(copyErr, io.EOF) {
+		log.Printf("proxy_write_error session_id=%s url=%s err=%v", getString(sessionData, "session_id"), upstreamURL, copyErr)
+	}
+	netEntry.TransferMs = transferMs
+	mergeTotalTiming(netEntry)
 	updateSessionTraffic(sessionData, requestBytes, bytesOut)
 	// Log successful network entry
 	sessionID := getString(sessionData, "session_id")
@@ -3776,7 +3764,8 @@ func (a *App) getOrCreateNetworkLog(sessionID string) *NetworkLogRingBuffer {
 		return rb
 	}
 	
-	rb := NewNetworkLogRingBuffer(200)
+	// Keep enough requests to support a rolling 5-minute client view under load.
+	rb := NewNetworkLogRingBuffer(5000)
 	a.networkLogs[sessionID] = rb
 	return rb
 }
@@ -3788,6 +3777,69 @@ func (a *App) addNetworkLogEntry(sessionID string, entry NetworkLogEntry) {
 	}
 	rb := a.getOrCreateNetworkLog(sessionID)
 	rb.Add(entry)
+}
+
+func durationToMilliseconds(d time.Duration) float64 {
+	return float64(d.Microseconds()) / 1000.0
+}
+
+func mergeTotalTiming(entry *NetworkLogEntry) {
+	if entry == nil {
+		return
+	}
+	combined := entry.TTFBMs + entry.TransferMs
+	if combined > entry.TotalMs {
+		entry.TotalMs = combined
+	}
+}
+
+// streamToClientMeasured copies bytes from src to client response writer and measures
+// downstream write+flush time, which is where traffic shaping backpressure appears.
+func streamToClientMeasured(w http.ResponseWriter, src io.Reader, zeroFill bool) (int64, float64, error) {
+	var bytesOut int64
+	var writeElapsed time.Duration
+	buf := make([]byte, 32*1024)
+	flusher, canFlush := w.(http.Flusher)
+
+	for {
+		n, readErr := src.Read(buf)
+		if n > 0 {
+			chunk := buf[:n]
+			if zeroFill {
+				for i := range chunk {
+					chunk[i] = 0
+				}
+			}
+
+			writeStart := time.Now()
+			written, writeErr := w.Write(chunk)
+			writeElapsed += time.Since(writeStart)
+			if written > 0 {
+				bytesOut += int64(written)
+			}
+			if writeErr != nil {
+				return bytesOut, durationToMilliseconds(writeElapsed), writeErr
+			}
+			if written != n {
+				return bytesOut, durationToMilliseconds(writeElapsed), io.ErrShortWrite
+			}
+
+			if canFlush {
+				flushStart := time.Now()
+				flusher.Flush()
+				writeElapsed += time.Since(flushStart)
+			}
+		}
+
+		if readErr != nil {
+			if errors.Is(readErr, io.EOF) {
+				break
+			}
+			return bytesOut, durationToMilliseconds(writeElapsed), readErr
+		}
+	}
+
+	return bytesOut, durationToMilliseconds(writeElapsed), nil
 }
 
 // doRequestWithTracing executes an HTTP request with timing trace and returns the response and timings

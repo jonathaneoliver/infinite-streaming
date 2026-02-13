@@ -495,7 +495,7 @@
 }
 
 .bandwidth-chart {
-    height: 220px;
+    height: 160px;
 }
 
 .buffer-depth-chart {
@@ -505,6 +505,17 @@
 /* ============================================================================
    Network Log Waterfall
    ============================================================================ */
+
+.network-log-warning {
+    margin: 0 0 10px;
+    padding: 8px 10px;
+    border: 1px solid #f3d6a1;
+    border-radius: 6px;
+    background: #fff8e8;
+    color: #7a4d00;
+    font-size: 12px;
+    line-height: 1.35;
+}
 
 .network-log-waterfall-wrap {
     border: 1px solid #d7dde8;
@@ -516,6 +527,7 @@
 }
 
 .network-log-waterfall {
+    position: relative;
     width: 100%;
     min-height: 280px;
     height: 320px;
@@ -536,7 +548,7 @@
 .network-log-waterfall .vis-panel.vis-left {
     border-right: 1px solid #e2e8f0;
     background: #f8fafc;
-    min-width: 360px;
+    min-width: 620px;
 }
 
 .network-log-waterfall .vis-panel.vis-center {
@@ -561,6 +573,16 @@
     font-weight: 600;
 }
 
+.network-log-waterfall .vis-panel.vis-left .vis-content,
+.network-log-waterfall .vis-panel.vis-center .vis-content {
+    box-sizing: border-box;
+    padding-bottom: 24px;
+}
+
+.network-log-waterfall.is-selecting .vis-panel.vis-center {
+    cursor: crosshair;
+}
+
 .network-log-waterfall .vis-foreground .vis-group {
     border-bottom: 1px solid #eef2f7;
     height: 22px;
@@ -570,6 +592,12 @@
     border-bottom: 1px solid #eef2f7;
     padding: 2px 8px;
     height: 22px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+}
+
+.network-log-waterfall .vis-labelset .vis-label .vis-inner {
+    width: 100%;
+    overflow: hidden;
 }
 
 .network-log-waterfall .vis-itemset .vis-background,
@@ -605,44 +633,27 @@
     background: #34d399;
 }
 
-.waterfall-label {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    min-height: 18px;
-    color: #0f172a;
+.waterfall-rowtext {
+    color: #334155;
+    font-size: 9px;
+    line-height: 1.1;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+    white-space: pre;
 }
 
-.waterfall-label.is-faulted .waterfall-path {
+.waterfall-rowtext.is-faulted {
     color: #b42318;
 }
 
-.waterfall-method {
-    display: inline-block;
-    min-width: 34px;
-    font-size: 9px;
-    font-weight: 700;
-    letter-spacing: 0.03em;
-    color: #334155;
-    text-transform: uppercase;
-}
-
-.waterfall-path {
-    flex: 1;
-    min-width: 0;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    font-size: 10px;
-}
-
-.waterfall-meta {
-    color: #64748b;
-    font-size: 9px;
-    white-space: nowrap;
-    max-width: 38%;
-    overflow: hidden;
-    text-overflow: ellipsis;
+.waterfall-selection-box {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    pointer-events: none;
+    background: rgba(29, 78, 216, 0.14);
+    border-left: 1px solid rgba(29, 78, 216, 0.55);
+    border-right: 1px solid rgba(29, 78, 216, 0.55);
+    z-index: 20;
 }
 
 /* ============================================================================

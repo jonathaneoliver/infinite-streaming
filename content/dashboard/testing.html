@@ -485,6 +485,7 @@
         };
 
         const TestingSessionUI = window.TestingSessionUI;
+        const isDeveloperMode = new URLSearchParams(window.location.search).get('developer') === '1';
 
         function getShapingPresets(card) {
             const raw = card.dataset.shapingPresets || '';
@@ -828,6 +829,31 @@
             }
         }
 
+        function updateSessionDetailFields(card, session) {
+            if (!card || !session) return;
+            const setField = (field, value) => {
+                const el = card.querySelector(`[data-field="${field}"]`);
+                if (el) el.textContent = value;
+            };
+            setField('session_user_agent', session.user_agent || '—');
+            setField('session_player_ip', session.player_ip || '—');
+            setField('session_port_display', session.x_forwarded_port_external || session.x_forwarded_port || '—');
+            setField('session_last_request', TestingSessionUI.formatDate(session.last_request));
+            setField('session_first_request', TestingSessionUI.formatDate(session.first_request_time));
+            setField('session_duration', TestingSessionUI.formatDuration(session.session_duration));
+            setField('session_manifest_url', session.manifest_url || '—');
+            setField('session_master_manifest_url', session.master_manifest_url || '—');
+            setField('session_last_request_url', session.last_request_url || '—');
+            setField('session_measured_mbps', session.measured_mbps || '—');
+            const counts = card.querySelector('[data-field="session_detail_counts"]');
+            if (counts) {
+                const masterCount = session.master_manifest_requests_count || 0;
+                const manifestCount = session.manifest_requests_count || 0;
+                const segmentCount = session.segments_count || 0;
+                counts.textContent = `M:${masterCount} / Man:${manifestCount} / Seg:${segmentCount}`;
+            }
+        }
+
         function normalizeTransportFaultType(session) {
             const raw = String(session.transport_failure_type || session.transport_fault_type || 'none').toLowerCase();
             if (raw === 'drop' || raw === 'reject') return raw;
@@ -1084,9 +1110,9 @@
                     ui_bitrate_axis_max: savedAxisMode
                 };
             }
-            if (activeSession && existingCard && container.contains(document.activeElement) &&
-                String(existingCard.dataset.sessionId || '') === sessionKey) {
+            if (activeSession && existingCard && String(existingCard.dataset.sessionId || '') === sessionKey) {
                 updateTabsAndGroupInfo(container, sessions, activeSession);
+                updateSessionDetailFields(existingCard, activeSession);
                 const shouldSync = shouldSyncControls(sessionKey, activeSession);
                 if (shouldSync) {
                     syncServerFaultControls(existingCard, activeSession);
@@ -1101,6 +1127,7 @@
                 TestingSessionUI.renderSessionCard(activeSession, {
                     hideTitle: true,
                     showPortItem: true,
+                    developerMode: isDeveloperMode,
                     sectionDefaults: collapseDefaults
                 }) : '');
             if (activeSession) {
