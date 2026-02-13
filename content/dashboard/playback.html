@@ -197,6 +197,7 @@
         .panel-badge.hlsjs { background: #dcfce7; color: #15803d; }
         .panel-badge.videojs { background: #fce7f3; color: #9d174d; }
         .panel-badge.shaka { background: #cffafe; color: #0e7490; }
+        .panel-badge.k4 { background: #6d28d9; color: #f3e8ff; }
 
         .context-menu {
             position: fixed;
@@ -375,6 +376,23 @@
             badge.className = `panel-badge ${klass}`;
             badge.textContent = label;
             container.appendChild(badge);
+        }
+
+        function update4kBadge() {
+            const badges = document.getElementById('playerBadges');
+            if (!badges || !video) return;
+            
+            const existing4kBadge = badges.querySelector('.panel-badge.k4');
+            const is4k = video.videoHeight >= 2160;
+            
+            if (is4k && !existing4kBadge) {
+                const badge4k = document.createElement('span');
+                badge4k.className = 'panel-badge k4';
+                badge4k.textContent = '4K';
+                badges.appendChild(badge4k);
+            } else if (!is4k && existing4kBadge) {
+                existing4kBadge.remove();
+            }
         }
 
         function clearPlayerInstance() {
@@ -638,6 +656,7 @@
             document.getElementById('statBufferedEnd').textContent = bufferedEnd;
             document.getElementById('statBufferDepth').textContent = bufferDepth;
             document.getElementById('statLiveOffset').textContent = '--';
+            update4kBadge();
         }
 
         function createPlayerId() {

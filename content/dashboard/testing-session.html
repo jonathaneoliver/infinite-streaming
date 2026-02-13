@@ -1099,6 +1099,23 @@
             }
         }
 
+        function update4kBadge() {
+            const badges = document.getElementById('playerBadges');
+            if (!badges || !video) return;
+            
+            const existing4kBadge = badges.querySelector('.panel-badge.k4');
+            const is4k = video.videoHeight >= 2160;
+            
+            if (is4k && !existing4kBadge) {
+                const badge4k = document.createElement('span');
+                badge4k.className = 'panel-badge k4';
+                badge4k.textContent = '4K';
+                badges.appendChild(badge4k);
+            } else if (!is4k && existing4kBadge) {
+                existing4kBadge.remove();
+            }
+        }
+
         function attachVideoEvents() {
             video.addEventListener('loadeddata', () => {
                 if (!playbackStartAt || firstFrameReported) return;
@@ -1251,6 +1268,8 @@
                     lastRenditionMbps = numeric;
                 }
             }
+
+            update4kBadge();
         }
 
         function resetPlayback() {
