@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/tls"
 	_ "embed"
 	"encoding/json"
 	"errors"
@@ -13,6 +14,7 @@ import (
 	"math"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	"net/url"
 	"os"
 	"os/exec"
@@ -36,6 +38,85 @@ var versionString = "unknown"
 
 type SessionData map[string]interface{}
 
+// NetworkLogEntry represents a single network request/response in the session
+type NetworkLogEntry struct {
+	Timestamp        time.Time `json:"timestamp"`
+	Method           string    `json:"method"`
+	URL              string    `json:"url"`
+	Path             string    `json:"path"`
+	RequestKind      string    `json:"request_kind"` // "segment", "manifest", "master_manifest"
+	Status           int       `json:"status"`
+	BytesIn          int64     `json:"bytes_in"`
+	BytesOut         int64     `json:"bytes_out"`
+	ContentType      string    `json:"content_type"`
+	
+	// Timing phases (milliseconds)
+	DNSMs        float64 `json:"dns_ms"`
+	ConnectMs    float64 `json:"connect_ms"`
+	TLSMs        float64 `json:"tls_ms"`
+	TTFBMs       float64 `json:"ttfb_ms"`       // Time to first byte
+	TransferMs   float64 `json:"transfer_ms"`   // Downstream write+flush time to client
+	TotalMs      float64 `json:"total_ms"`
+	
+	// Fault injection metadata
+	Faulted        bool   `json:"faulted"`
+	FaultType      string `json:"fault_type,omitempty"`
+	FaultAction    string `json:"fault_action,omitempty"`
+	FaultCategory  string `json:"fault_category,omitempty"` // "http", "socket", "transport", "corruption"
+}
+
+// NetworkLogRingBuffer maintains a bounded list of recent network entries
+type NetworkLogRingBuffer struct {
+	mu      sync.RWMutex
+	entries []NetworkLogEntry
+	maxSize int
+	index   int
+}
+
+// NewNetworkLogRingBuffer creates a new ring buffer with the specified capacity
+func NewNetworkLogRingBuffer(maxSize int) *NetworkLogRingBuffer {
+	return &NetworkLogRingBuffer{
+		entries: make([]NetworkLogEntry, 0, maxSize),
+		maxSize: maxSize,
+	}
+}
+
+// Add appends a new entry to the ring buffer
+func (rb *NetworkLogRingBuffer) Add(entry NetworkLogEntry) {
+	rb.mu.Lock()
+	defer rb.mu.Unlock()
+	
+	if len(rb.entries) < rb.maxSize {
+		rb.entries = append(rb.entries, entry)
+	} else {
+		rb.entries[rb.index] = entry
+	}
+	rb.index = (rb.index + 1) % rb.maxSize
+}
+
+// GetAll returns all entries in chronological order (oldest first)
+func (rb *NetworkLogRingBuffer) GetAll() []NetworkLogEntry {
+	rb.mu.RLock()
+	defer rb.mu.RUnlock()
+	
+	if len(rb.entries) == 0 {
+		return []NetworkLogEntry{}
+	}
+	
+	// If buffer is not full, return in order
+	if len(rb.entries) < rb.maxSize {
+		result := make([]NetworkLogEntry, len(rb.entries))
+		copy(result, rb.entries)
+		return result
+	}
+	
+	// Buffer is full, reconstruct chronological order
+	result := make([]NetworkLogEntry, rb.maxSize)
+	copy(result, rb.entries[rb.index:])
+	copy(result[rb.maxSize-rb.index:], rb.entries[:rb.index])
+	return result
+}
+
 type App struct {
 	memcache     *memcache.Client
 	traffic      *TcTrafficManager
@@ -51,6 +132,8 @@ type App struct {
 	shapeApply   map[int]ShapeApplyState
 	faultMu      sync.Mutex
 	faultLoops   map[int]context.CancelFunc
+	networkLogsMu sync.RWMutex
+	networkLogs   map[string]*NetworkLogRingBuffer // sessionId -> ring buffer
 	sessionsHub              *SessionEventHub
 	sessionsBroadcastMu      sync.Mutex
 	sessionsBroadcastPending bool
@@ -680,6 +763,7 @@ func main() {
 		shapeApply:  map[int]ShapeApplyState{},
 		faultLoops:  map[int]context.CancelFunc{},
 		sessionsHub: NewSessionEventHub(),
+		networkLogs: map[string]*NetworkLogRingBuffer{},
 	}
 
 	go app.trackPortThroughput()
@@ -695,6 +779,7 @@ func main() {
 	router.HandleFunc("/api/session/{id}/update", app.handleUpdateSessionSettings).Methods(http.MethodPost)
 	router.HandleFunc("/api/session/{id}", app.handleSession).Methods(http.MethodGet, http.MethodDelete)
 	router.HandleFunc("/api/session/{id}", app.handlePatchSession).Methods(http.MethodPatch)
+	router.HandleFunc("/api/session/{id}/network", app.handleGetNetworkLog).Methods(http.MethodGet)
 	router.HandleFunc("/api/clear-sessions", app.handleClearSessions).Methods(http.MethodPost)
 	router.HandleFunc("/api/session-group/link", app.handleLinkSessions).Methods(http.MethodPost)
 	router.HandleFunc("/api/session-group/unlink", app.handleUnlinkSession).Methods(http.MethodPost)
@@ -1342,6 +1427,29 @@ func (a *App) handleSession(w http.ResponseWriter, r *http.Request) {
 	}
 	w.WriteHeader(http.StatusNotFound)
 	writeJSON(w, map[string]string{"error": "Session not found"})
+}
+
+func (a *App) handleGetNetworkLog(w http.ResponseWriter, r *http.Request) {
+	id := mux.Vars(r)["id"]
+	
+	a.networkLogsMu.RLock()
+	ringBuffer, exists := a.networkLogs[id]
+	a.networkLogsMu.RUnlock()
+	
+	if !exists {
+		writeJSON(w, map[string]interface{}{
+			"session_id": id,
+			"entries":    []NetworkLogEntry{},
+		})
+		return
+	}
+	
+	entries := ringBuffer.GetAll()
+	writeJSON(w, map[string]interface{}{
+		"session_id": id,
+		"entries":    entries,
+		"count":      len(entries),
+	})
 }
 
 func (a *App) handleClearSessions(w http.ResponseWriter, r *http.Request) {
@@ -3085,22 +3193,37 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 				bumpFaultCounter(sessionData, failureType)
 				logFaultEvent(sessionData, externalPort, failureType, requestKind, actionTaken)
 				updateSessionTraffic(sessionData, requestBytes, 0)
+				// Log network entry for fault
+				sessionID := getString(sessionData, "session_id")
+				netEntry := createFaultLogEntry(upstreamURL, requestKind, failureType, actionTaken, http.StatusBadGateway, requestBytes)
+				a.addNetworkLogEntry(sessionID, netEntry)
 				sessionList[index] = sessionData
 				a.saveSessionList(sessionList)
 				return
 			}
-			resp, err := a.client.Do(proxyReq)
+			resp, netEntry, err := a.doRequestWithTracing(r.Context(), proxyReq)
 			if err != nil {
 				if errors.Is(err, context.DeadlineExceeded) {
 					actionTaken = "http_504_upstream_timeout"
 					w.WriteHeader(http.StatusGatewayTimeout)
+					netEntry.Status = http.StatusGatewayTimeout
 				} else {
 					actionTaken = "http_502_upstream_failed"
 					w.WriteHeader(http.StatusBadGateway)
+					netEntry.Status = http.StatusBadGateway
 				}
 				bumpFaultCounter(sessionData, failureType)
 				logFaultEvent(sessionData, externalPort, failureType, requestKind, actionTaken)
 				updateSessionTraffic(sessionData, requestBytes, 0)
+				// Log network entry with timing (even for failures)
+				sessionID := getString(sessionData, "session_id")
+				netEntry.RequestKind = requestKind
+				netEntry.BytesIn = requestBytes
+				netEntry.Faulted = true
+				netEntry.FaultType = failureType
+				netEntry.FaultAction = actionTaken
+				netEntry.FaultCategory = categorizeFaultType(failureType)
+				a.addNetworkLogEntry(sessionID, *netEntry)
 				sessionList[index] = sessionData
 				a.saveSessionList(sessionList)
 				return
@@ -3112,36 +3235,44 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 				bumpFaultCounter(sessionData, failureType)
 				logFaultEvent(sessionData, externalPort, failureType, requestKind, actionTaken)
 				updateSessionTraffic(sessionData, requestBytes, 0)
+				// Log network entry with upstream error
+				sessionID := getString(sessionData, "session_id")
+				netEntry.RequestKind = requestKind
+				netEntry.BytesIn = requestBytes
+				netEntry.Faulted = true
+				netEntry.FaultType = failureType
+				netEntry.FaultAction = actionTaken
+				netEntry.FaultCategory = categorizeFaultType(failureType)
+				a.addNetworkLogEntry(sessionID, *netEntry)
 				sessionList[index] = sessionData
 				a.saveSessionList(sessionList)
 				return
 			}
-			if contentType != "" {
-				w.Header().Set("Content-Type", contentType)
-			}
-			w.Header().Set("X-Session-ID", getString(sessionData, "session_number"))
-			w.WriteHeader(http.StatusOK)
-			writer := bufio.NewWriter(w)
-			buf := make([]byte, 32*1024)
-			var bytesOut int64
-			for {
-				n, err := resp.Body.Read(buf)
-				if n > 0 {
-					for i := 0; i < n; i++ {
-						buf[i] = 0
-					}
-					_, _ = writer.Write(buf[:n])
-					bytesOut += int64(n)
+				if contentType != "" {
+					w.Header().Set("Content-Type", contentType)
 				}
-				if err != nil {
-					break
+				w.Header().Set("X-Session-ID", getString(sessionData, "session_number"))
+				w.WriteHeader(http.StatusOK)
+				bytesOut, transferMs, copyErr := streamToClientMeasured(w, resp.Body, true)
+				if copyErr != nil && !errors.Is(copyErr, io.EOF) {
+					log.Printf("segment_corrupted write error session_id=%s err=%v", getString(sessionData, "session_id"), copyErr)
 				}
-			}
-			_ = writer.Flush()
-			actionTaken = "segment_corrupted_zero_fill"
-			bumpFaultCounter(sessionData, failureType)
-			logFaultEvent(sessionData, externalPort, failureType, requestKind, actionTaken)
+				netEntry.TransferMs = transferMs
+				mergeTotalTiming(netEntry)
+				actionTaken = "segment_corrupted_zero_fill"
+				bumpFaultCounter(sessionData, failureType)
+				logFaultEvent(sessionData, externalPort, failureType, requestKind, actionTaken)
 			updateSessionTraffic(sessionData, requestBytes, bytesOut)
+			// Log network entry for corruption (has timing + bytes transferred, but zeroed)
+			sessionID := getString(sessionData, "session_id")
+			netEntry.RequestKind = requestKind
+			netEntry.BytesIn = requestBytes
+			netEntry.BytesOut = bytesOut
+			netEntry.Faulted = true
+			netEntry.FaultType = failureType
+			netEntry.FaultAction = actionTaken
+			netEntry.FaultCategory = categorizeFaultType(failureType)
+			a.addNetworkLogEntry(sessionID, *netEntry)
 			sessionList[index] = sessionData
 			a.saveSessionList(sessionList)
 			return
@@ -3157,6 +3288,13 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 			bumpFaultCounter(sessionData, failureType)
 			logFaultEvent(sessionData, externalPort, failureType, requestKind, actionTaken)
 			updateSessionTraffic(sessionData, requestBytes, 0)
+			// Log network entry for socket fault
+			// Socket faults manipulate the connection directly (RST, hang, delay)
+			// and don't generate HTTP responses, so we log with 503 status
+			sessionID := getString(sessionData, "session_id")
+			status := http.StatusServiceUnavailable
+			netEntry := createFaultLogEntry(upstreamURL, requestKind, failureType, actionTaken, status, requestBytes)
+			a.addNetworkLogEntry(sessionID, netEntry)
 			sessionList[index] = sessionData
 			a.saveSessionList(sessionList)
 			return
@@ -3192,12 +3330,37 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 		}
 		bumpFaultCounter(sessionData, failureType)
 		logFaultEvent(sessionData, externalPort, failureType, requestKind, actionTaken)
+		// Log network entry for HTTP faults
+		sessionID := getString(sessionData, "session_id")
+		status := http.StatusInternalServerError
+		switch actionTaken {
+		case "http_404":
+			status = http.StatusNotFound
+		case "http_403":
+			status = http.StatusForbidden
+		case "http_500":
+			status = http.StatusInternalServerError
+		case "http_504_timeout":
+			status = http.StatusGatewayTimeout
+		case "http_503_connection_refused":
+			status = http.StatusServiceUnavailable
+		case "http_502_dns_failure":
+			status = http.StatusBadGateway
+		case "http_429_rate_limited":
+			status = http.StatusTooManyRequests
+		}
+		netEntry := createFaultLogEntry(upstreamURL, requestKind, failureType, actionTaken, status, requestBytes)
+		a.addNetworkLogEntry(sessionID, netEntry)
 		return
 	}
 
 	proxyReq, err := http.NewRequestWithContext(r.Context(), http.MethodGet, upstreamURL, nil)
 	if err != nil {
 		w.WriteHeader(http.StatusBadGateway)
+		// Log network entry for error
+		sessionID := getString(sessionData, "session_id")
+		netEntry := createFaultLogEntry(upstreamURL, requestKind, "none", "http_502_request_failed", http.StatusBadGateway, requestBytes)
+		a.addNetworkLogEntry(sessionID, netEntry)
 		return
 	}
 	if rangeHeader := r.Header.Get("Range"); rangeHeader != "" {
@@ -3206,13 +3369,21 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 	if ifRange := r.Header.Get("If-Range"); ifRange != "" {
 		proxyReq.Header.Set("If-Range", ifRange)
 	}
-	resp, err := a.client.Do(proxyReq)
+	resp, netEntry, err := a.doRequestWithTracing(r.Context(), proxyReq)
 	if err != nil {
+		// Set status before writing header
 		if errors.Is(err, context.DeadlineExceeded) {
+			netEntry.Status = http.StatusGatewayTimeout
 			w.WriteHeader(http.StatusGatewayTimeout)
-			return
+		} else {
+			netEntry.Status = http.StatusBadGateway
+			w.WriteHeader(http.StatusBadGateway)
 		}
-		w.WriteHeader(http.StatusBadGateway)
+		// Log network entry for error
+		sessionID := getString(sessionData, "session_id")
+		netEntry.RequestKind = requestKind
+		netEntry.BytesIn = requestBytes
+		a.addNetworkLogEntry(sessionID, *netEntry)
 		return
 	}
 	defer resp.Body.Close()
@@ -3228,6 +3399,11 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 			externalPort,
 		)
 		w.WriteHeader(resp.StatusCode)
+		// Log network entry for upstream error
+		sessionID := getString(sessionData, "session_id")
+		netEntry.RequestKind = requestKind
+		netEntry.BytesIn = requestBytes
+		a.addNetworkLogEntry(sessionID, *netEntry)
 		return
 	}
 	copyUpstreamHeaders(w, resp)
@@ -3282,6 +3458,12 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 	}
 	
 	updateSessionTraffic(sessionData, requestBytes, bytesOut)
+	// Log successful network entry
+	sessionID := getString(sessionData, "session_id")
+	netEntry.RequestKind = requestKind
+	netEntry.BytesIn = requestBytes
+	netEntry.BytesOut = bytesOut
+	a.addNetworkLogEntry(sessionID, *netEntry)
 	sessionList[index] = sessionData
 	a.saveSessionList(sessionList)
 }
@@ -3699,6 +3881,214 @@ func cloneSession(session SessionData) SessionData {
 		clone[key] = value
 	}
 	return clone
+}
+
+// getOrCreateNetworkLog retrieves or creates a network log ring buffer for a session
+func (a *App) getOrCreateNetworkLog(sessionID string) *NetworkLogRingBuffer {
+	a.networkLogsMu.RLock()
+	if rb, exists := a.networkLogs[sessionID]; exists {
+		a.networkLogsMu.RUnlock()
+		return rb
+	}
+	a.networkLogsMu.RUnlock()
+	
+	a.networkLogsMu.Lock()
+	defer a.networkLogsMu.Unlock()
+	
+	// Double-check after acquiring write lock
+	if rb, exists := a.networkLogs[sessionID]; exists {
+		return rb
+	}
+	
+	// Keep enough requests to support a rolling 5-minute client view under load.
+	rb := NewNetworkLogRingBuffer(5000)
+	a.networkLogs[sessionID] = rb
+	return rb
+}
+
+// addNetworkLogEntry adds a network log entry to the session's ring buffer
+func (a *App) addNetworkLogEntry(sessionID string, entry NetworkLogEntry) {
+	if sessionID == "" {
+		return
+	}
+	rb := a.getOrCreateNetworkLog(sessionID)
+	rb.Add(entry)
+}
+
+func durationToMilliseconds(d time.Duration) float64 {
+	return float64(d.Microseconds()) / 1000.0
+}
+
+func mergeTotalTiming(entry *NetworkLogEntry) {
+	if entry == nil {
+		return
+	}
+	combined := entry.TTFBMs + entry.TransferMs
+	if combined > entry.TotalMs {
+		entry.TotalMs = combined
+	}
+}
+
+// streamToClientMeasured copies bytes from src to client response writer and measures
+// downstream write+flush time, which is where traffic shaping backpressure appears.
+func streamToClientMeasured(w http.ResponseWriter, src io.Reader, zeroFill bool) (int64, float64, error) {
+	var bytesOut int64
+	var writeElapsed time.Duration
+	buf := make([]byte, 32*1024)
+	flusher, canFlush := w.(http.Flusher)
+
+	for {
+		n, readErr := src.Read(buf)
+		if n > 0 {
+			chunk := buf[:n]
+			if zeroFill {
+				for i := range chunk {
+					chunk[i] = 0
+				}
+			}
+
+			writeStart := time.Now()
+			written, writeErr := w.Write(chunk)
+			writeElapsed += time.Since(writeStart)
+			if written > 0 {
+				bytesOut += int64(written)
+			}
+			if writeErr != nil {
+				return bytesOut, durationToMilliseconds(writeElapsed), writeErr
+			}
+			if written != n {
+				return bytesOut, durationToMilliseconds(writeElapsed), io.ErrShortWrite
+			}
+
+			if canFlush {
+				flushStart := time.Now()
+				flusher.Flush()
+				writeElapsed += time.Since(flushStart)
+			}
+		}
+
+		if readErr != nil {
+			if errors.Is(readErr, io.EOF) {
+				break
+			}
+			return bytesOut, durationToMilliseconds(writeElapsed), readErr
+		}
+	}
+
+	return bytesOut, durationToMilliseconds(writeElapsed), nil
+}
+
+// doRequestWithTracing executes an HTTP request with timing trace and returns the response and timings
+func (a *App) doRequestWithTracing(ctx context.Context, req *http.Request) (*http.Response, *NetworkLogEntry, error) {
+	entry := &NetworkLogEntry{
+		Timestamp:   time.Now(),
+		Method:      req.Method,
+		URL:         req.URL.String(),
+		Path:        req.URL.Path,
+	}
+	
+	var start, dnsStart, connectStart, tlsStart time.Time
+	start = time.Now()
+	
+	trace := &httptrace.ClientTrace{
+		DNSStart: func(_ httptrace.DNSStartInfo) {
+			dnsStart = time.Now()
+		},
+		DNSDone: func(_ httptrace.DNSDoneInfo) {
+			if !dnsStart.IsZero() {
+				entry.DNSMs = float64(time.Since(dnsStart).Microseconds()) / 1000.0
+			}
+		},
+		ConnectStart: func(_, _ string) {
+			connectStart = time.Now()
+		},
+		ConnectDone: func(_, _ string, _ error) {
+			if !connectStart.IsZero() {
+				entry.ConnectMs = float64(time.Since(connectStart).Microseconds()) / 1000.0
+			}
+		},
+		TLSHandshakeStart: func() {
+			tlsStart = time.Now()
+		},
+		TLSHandshakeDone: func(_ tls.ConnectionState, _ error) {
+			if !tlsStart.IsZero() {
+				entry.TLSMs = float64(time.Since(tlsStart).Microseconds()) / 1000.0
+			}
+		},
+		GotFirstResponseByte: func() {
+			// TTFB is from start of request to first byte
+			entry.TTFBMs = float64(time.Since(start).Microseconds()) / 1000.0
+		},
+	}
+	
+	req = req.WithContext(httptrace.WithClientTrace(ctx, trace))
+	
+	resp, err := a.client.Do(req)
+	if err != nil {
+		entry.TotalMs = float64(time.Since(start).Microseconds()) / 1000.0
+		return nil, entry, err
+	}
+	
+	// If we got first byte, calculate transfer time after body is read
+	// Note: We'll update TransferMs after body is copied
+	entry.TotalMs = float64(time.Since(start).Microseconds()) / 1000.0
+	entry.Status = resp.StatusCode
+	entry.ContentType = resp.Header.Get("Content-Type")
+	
+	return resp, entry, nil
+}
+
+// createFaultLogEntry creates a network log entry for a faulted request
+func createFaultLogEntry(url, requestKind, faultType, faultAction string, status int, bytesIn int64) NetworkLogEntry {
+	return NetworkLogEntry{
+		Timestamp:     time.Now(),
+		Method:        "GET",
+		URL:           url,
+		Path:          extractPathFromURL(url),
+		RequestKind:   requestKind,
+		Status:        status,
+		BytesIn:       bytesIn,
+		BytesOut:      0,
+		Faulted:       true,
+		FaultType:     faultType,
+		FaultAction:   faultAction,
+		FaultCategory: categorizeFaultType(faultType),
+	}
+}
+
+// extractPathFromURL extracts the path from a URL string
+func extractPathFromURL(urlStr string) string {
+	if u, err := url.Parse(urlStr); err == nil {
+		return u.Path
+	}
+	return urlStr
+}
+
+// categorizeFaultType returns the category for a given fault type
+func categorizeFaultType(faultType string) string {
+	faultType = strings.ToLower(strings.TrimSpace(faultType))
+	
+	if faultType == "" || faultType == "none" {
+		return ""
+	}
+	
+	// Socket faults
+	if strings.HasPrefix(faultType, "request_") {
+		return "socket"
+	}
+	
+	// Corruption
+	if faultType == "corrupted" {
+		return "corruption"
+	}
+	
+	// Transport faults
+	if strings.HasPrefix(faultType, "transport_") {
+		return "transport"
+	}
+	
+	// HTTP faults (404, 500, etc.)
+	return "http"
 }
 
 func (a *App) normalizeSessionForResponse(session SessionData) SessionData {

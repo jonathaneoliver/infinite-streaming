@@ -583,12 +583,15 @@
     </script>
     <script src="/shared-nav.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/vis-timeline@7.7.3/styles/vis-timeline-graph2d.min.css">
+    <script src="https://cdn.jsdelivr.net/npm/vis-timeline@7.7.3/standalone/umd/vis-timeline-graph2d.min.js"></script>
     <link rel="stylesheet" href="/dashboard/testing-session-refactored.css">
     <script src="/dashboard/testing-session-ui.js"></script>
     <script>
         const logEl = document.getElementById('debugLog');
         const sseMissedEl = document.getElementById('statSseMissed');
         const video = document.getElementById('player');
+        const isDeveloperMode = new URLSearchParams(window.location.search).get('developer') === '1';
         const NATIVE_4K_KEY = 'bossPrefer4kNative';
         let hlsInstance = null;
         let shakaPlayer = null;
@@ -1513,6 +1516,7 @@
             const activeTab = container.querySelector('.tab-button.active')?.dataset?.tab || '';
             container.innerHTML = TestingSessionUI.renderSessionCard(session, {
                 showBufferDepthChart: true,
+                developerMode: isDeveloperMode,
                 sectionDefaults: collapseDefaults
             });
             TestingSessionUI.applyCollapsibleState(container);

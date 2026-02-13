@@ -495,11 +495,165 @@
 }
 
 .bandwidth-chart {
-    height: 220px;
+    height: 320px;
 }
 
 .buffer-depth-chart {
     height: 170px;
+}
+
+/* ============================================================================
+   Network Log Waterfall
+   ============================================================================ */
+
+.network-log-warning {
+    margin: 0 0 10px;
+    padding: 8px 10px;
+    border: 1px solid #f3d6a1;
+    border-radius: 6px;
+    background: #fff8e8;
+    color: #7a4d00;
+    font-size: 12px;
+    line-height: 1.35;
+}
+
+.network-log-waterfall-wrap {
+    border: 1px solid #d7dde8;
+    border-radius: 6px;
+    background: #fff;
+    margin-bottom: 10px;
+    padding: 0;
+    overflow: hidden;
+}
+
+.network-log-waterfall {
+    position: relative;
+    width: 100%;
+    min-height: 280px;
+    height: 320px;
+}
+
+.network-log-waterfall-empty {
+    color: #6b7280;
+    font-size: 12px;
+    padding: 8px;
+}
+
+.network-log-waterfall .vis-timeline {
+    border: 0;
+    background: #fff;
+    font-size: 11px;
+}
+
+.network-log-waterfall .vis-panel.vis-left {
+    border-right: 1px solid #e2e8f0;
+    background: #f8fafc;
+    min-width: 620px;
+}
+
+.network-log-waterfall .vis-panel.vis-center {
+    background: #fff;
+    background-image: repeating-linear-gradient(
+        to right,
+        rgba(148, 163, 184, 0.12) 0,
+        rgba(148, 163, 184, 0.12) 1px,
+        transparent 1px,
+        transparent 40px
+    );
+}
+
+.network-log-waterfall .vis-time-axis {
+    border-bottom: 1px solid #e2e8f0;
+    background: #f8fafc;
+}
+
+.network-log-waterfall .vis-time-axis .vis-text {
+    color: #64748b;
+    font-size: 10px;
+    font-weight: 600;
+}
+
+.network-log-waterfall .vis-panel.vis-left .vis-content,
+.network-log-waterfall .vis-panel.vis-center .vis-content {
+    box-sizing: border-box;
+    padding-bottom: 24px;
+}
+
+.network-log-waterfall.is-selecting .vis-panel.vis-center {
+    cursor: crosshair;
+}
+
+.network-log-waterfall .vis-foreground .vis-group {
+    border-bottom: 1px solid #eef2f7;
+    height: 22px;
+}
+
+.network-log-waterfall .vis-labelset .vis-label {
+    border-bottom: 1px solid #eef2f7;
+    padding: 2px 8px;
+    height: 22px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+}
+
+.network-log-waterfall .vis-labelset .vis-label .vis-inner {
+    width: 100%;
+    overflow: hidden;
+}
+
+.network-log-waterfall .vis-itemset .vis-background,
+.network-log-waterfall .vis-itemset .vis-foreground {
+    background: transparent;
+}
+
+.network-log-waterfall .vis-item {
+    border: 0;
+    border-radius: 0;
+    height: 9px;
+    top: 6px;
+    box-shadow: inset 0 0 0 1px rgba(15, 23, 42, 0.12);
+}
+
+.network-log-waterfall .vis-item.waterfall-dns {
+    background: #8e8cd8;
+}
+
+.network-log-waterfall .vis-item.waterfall-connect {
+    background: #f59e0b;
+}
+
+.network-log-waterfall .vis-item.waterfall-tls {
+    background: #b084eb;
+}
+
+.network-log-waterfall .vis-item.waterfall-wait {
+    background: #7dd3fc;
+}
+
+.network-log-waterfall .vis-item.waterfall-transfer {
+    background: #34d399;
+}
+
+.waterfall-rowtext {
+    color: #334155;
+    font-size: 9px;
+    line-height: 1.1;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+    white-space: pre;
+}
+
+.waterfall-rowtext.is-faulted {
+    color: #b42318;
+}
+
+.waterfall-selection-box {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    pointer-events: none;
+    background: rgba(29, 78, 216, 0.14);
+    border-left: 1px solid rgba(29, 78, 216, 0.55);
+    border-right: 1px solid rgba(29, 78, 216, 0.55);
+    z-index: 20;
 }
 
 /* ============================================================================

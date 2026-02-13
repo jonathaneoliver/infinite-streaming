@@ -153,6 +153,218 @@
         .unlink-btn:hover {
             background: #dc2626;
         }
+
+        /* Network Log Styles */
+        .network-log-section {
+            padding: 12px 0;
+        }
+
+        .network-log-controls {
+            display: flex;
+            gap: 12px;
+            margin-bottom: 12px;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+
+        .network-log-filter {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 13px;
+            cursor: pointer;
+            user-select: none;
+        }
+
+        .network-log-filter input[type="checkbox"] {
+            cursor: pointer;
+        }
+
+        .network-log-table-wrap {
+            overflow-x: auto;
+            border: 1px solid var(--border-color, #ddd);
+            border-radius: 6px;
+            background: var(--bg-primary, #fff);
+        }
+
+        .network-log-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 12px;
+        }
+
+        .network-log-table th {
+            background: var(--bg-secondary, #f5f5f5);
+            padding: 8px;
+            text-align: left;
+            font-weight: 600;
+            border-bottom: 2px solid var(--border-color, #ddd);
+            white-space: nowrap;
+        }
+
+        .network-log-table td {
+            padding: 6px 8px;
+            border-bottom: 1px solid var(--border-color, #eee);
+            vertical-align: middle;
+        }
+
+        .network-log-table tbody tr:hover {
+            background: var(--bg-hover, #f9f9f9);
+        }
+
+        .network-log-table tbody tr.faulted {
+            background: #fef2f2;
+        }
+
+        .network-log-table tbody tr.faulted:hover {
+            background: #fee2e2;
+        }
+
+        .network-log-empty td {
+            text-align: center;
+            color: var(--text-secondary, #666);
+            padding: 20px;
+            font-style: italic;
+        }
+
+        .net-col-method {
+            width: 60px;
+        }
+
+        .net-col-path {
+            min-width: 200px;
+            max-width: 400px;
+        }
+
+        .net-col-type {
+            width: 90px;
+        }
+
+        .net-col-status {
+            width: 60px;
+        }
+
+        .net-col-size {
+            width: 80px;
+        }
+
+        .net-col-timing {
+            width: 200px;
+        }
+
+        .net-path {
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            font-family: monospace;
+            font-size: 11px;
+        }
+
+        .net-status {
+            font-weight: 600;
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-size: 11px;
+            text-align: center;
+            display: inline-block;
+            min-width: 40px;
+        }
+
+        .net-status-2xx {
+            background: #d1fae5;
+            color: #065f46;
+        }
+
+        .net-status-3xx {
+            background: #dbeafe;
+            color: #1e40af;
+        }
+
+        .net-status-4xx {
+            background: #fed7aa;
+            color: #92400e;
+        }
+
+        .net-status-5xx {
+            background: #fecaca;
+            color: #991b1b;
+        }
+
+        .net-type {
+            font-size: 11px;
+            font-weight: 500;
+            text-transform: capitalize;
+        }
+
+        .net-size {
+            font-family: monospace;
+            font-size: 11px;
+            text-align: right;
+        }
+
+        .net-timing-bar {
+            display: flex;
+            height: 20px;
+            background: #f3f4f6;
+            border-radius: 3px;
+            overflow: hidden;
+            position: relative;
+        }
+
+        .net-timing-segment {
+            height: 100%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 9px;
+            font-weight: 600;
+            color: #fff;
+            transition: all 0.2s;
+        }
+
+        .net-timing-dns {
+            background: #8b5cf6;
+        }
+
+        .net-timing-connect {
+            background: #f59e0b;
+        }
+
+        .net-timing-tls {
+            background: #10b981;
+        }
+
+        .net-timing-ttfb {
+            background: #3b82f6;
+        }
+
+        .net-timing-transfer {
+            background: #6366f1;
+        }
+
+        .net-timing-total {
+            margin-left: 8px;
+            font-size: 11px;
+            font-weight: 500;
+            color: var(--text-secondary, #666);
+        }
+
+        .net-fault-badge {
+            display: inline-block;
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-size: 10px;
+            font-weight: 600;
+            background: #fca5a5;
+            color: #7f1d1d;
+            margin-left: 6px;
+        }
+
+        .net-fault-injected {
+            font-style: italic;
+            color: var(--text-secondary, #666);
+            font-size: 11px;
+        }
     </style>
 </head>
 <body>
@@ -193,6 +405,8 @@
         })();
     </script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/vis-timeline@7.7.3/styles/vis-timeline-graph2d.min.css">
+    <script src="https://cdn.jsdelivr.net/npm/vis-timeline@7.7.3/standalone/umd/vis-timeline-graph2d.min.js"></script>
     <link rel="stylesheet" href="/dashboard/testing-session-refactored.css">
     <script src="/dashboard/testing-session-ui.js"></script>
     <script>
@@ -272,6 +486,7 @@
         };
 
         const TestingSessionUI = window.TestingSessionUI;
+        const isDeveloperMode = new URLSearchParams(window.location.search).get('developer') === '1';
 
         function getShapingPresets(card) {
             const raw = card.dataset.shapingPresets || '';
@@ -615,6 +830,31 @@
             }
         }
 
+        function updateSessionDetailFields(card, session) {
+            if (!card || !session) return;
+            const setField = (field, value) => {
+                const el = card.querySelector(`[data-field="${field}"]`);
+                if (el) el.textContent = value;
+            };
+            setField('session_user_agent', session.user_agent || '—');
+            setField('session_player_ip', session.player_ip || '—');
+            setField('session_port_display', session.x_forwarded_port_external || session.x_forwarded_port || '—');
+            setField('session_last_request', TestingSessionUI.formatDate(session.last_request));
+            setField('session_first_request', TestingSessionUI.formatDate(session.first_request_time));
+            setField('session_duration', TestingSessionUI.formatDuration(session.session_duration));
+            setField('session_manifest_url', session.manifest_url || '—');
+            setField('session_master_manifest_url', session.master_manifest_url || '—');
+            setField('session_last_request_url', session.last_request_url || '—');
+            setField('session_measured_mbps', session.measured_mbps || '—');
+            const counts = card.querySelector('[data-field="session_detail_counts"]');
+            if (counts) {
+                const masterCount = session.master_manifest_requests_count || 0;
+                const manifestCount = session.manifest_requests_count || 0;
+                const segmentCount = session.segments_count || 0;
+                counts.textContent = `M:${masterCount} / Man:${manifestCount} / Seg:${segmentCount}`;
+            }
+        }
+
         function normalizeTransportFaultType(session) {
             const raw = String(session.transport_failure_type || session.transport_fault_type || 'none').toLowerCase();
             if (raw === 'drop' || raw === 'reject') return raw;
@@ -952,9 +1192,9 @@
                     ui_bitrate_axis_max: savedAxisMode
                 };
             }
-            if (activeSession && existingCard && container.contains(document.activeElement) &&
-                String(existingCard.dataset.sessionId || '') === sessionKey) {
+            if (activeSession && existingCard && String(existingCard.dataset.sessionId || '') === sessionKey) {
                 updateTabsAndGroupInfo(container, sessions, activeSession);
+                updateSessionDetailFields(existingCard, activeSession);
                 const shouldSync = shouldSyncControls(sessionKey, activeSession);
                 if (shouldSync) {
                     syncServerFaultControls(existingCard, activeSession);
@@ -972,6 +1212,7 @@
                 TestingSessionUI.renderSessionCard(activeSession, {
                     hideTitle: true,
                     showPortItem: true,
+                    developerMode: isDeveloperMode,
                     sectionDefaults: collapseDefaults
                 }) : '');
             if (activeSession) {
@@ -1094,6 +1335,16 @@
                 bandwidthCharts.delete(sessionId);
             }
             if (!chart) {
+                // Ensure the canvas uses CSS sizing (prevent huge drawing buffer)
+                try {
+                    canvas.style.height = '320px';
+                    canvas.style.width = '100%';
+                    canvas.removeAttribute && canvas.removeAttribute('width');
+                    canvas.removeAttribute && canvas.removeAttribute('height');
+                } catch (e) {
+                    /* ignore */
+                }
+
                 chart = new Chart(canvas, {
                     type: 'line',
                     data: {
@@ -1161,7 +1412,9 @@
                         ]
                     },
                     options: {
-                        responsive: false,
+                        // Let Chart.js size the drawing buffer to the CSS box (handles DPR)
+                        responsive: true,
+                        maintainAspectRatio: false,
                         animation: false,
                         plugins: {
                             legend: {
@@ -1679,6 +1932,14 @@
             if (target.dataset.field === 'transport_failure_mode') {
                 TestingSessionUI.updateTransportModeUi(card);
             }
+            // Handle network log filter checkboxes
+            if (target.dataset.filter && target.closest('[data-content="network-log"]')) {
+                const card = target.closest('.session-card');
+                if (card && window.TestingSessionUI) {
+                    window.TestingSessionUI.applyNetworkLogFilters(card);
+                }
+                return;
+            }
             if (target.dataset.field === 'bitrate_chart_max_mbps') {
                 bitrateAxisMaxBySession.set(
                     String(card.dataset.sessionId || ''),
@@ -1842,6 +2103,13 @@
                     if (templateMode === 'sliders') {
                         scheduleShapingApply(card);
                     }
+                }
+                return;
+            }
+            if (button.dataset.action === 'refresh-network-log') {
+                const sessionId = card.dataset.sessionId;
+                if (sessionId && window.TestingSessionUI) {
+                    window.TestingSessionUI.updateNetworkLog(sessionId);
                 }
                 return;
             }
