@@ -418,7 +418,7 @@ assert count > 5, f"Expected more than 5 failures, got {count}"
 pytest --collect-only
 
 # Ensure you're in the right directory
-cd tests/pytest
+cd tests/integration
 
 # Ensure test functions start with test_
 def test_my_function():  # ✓

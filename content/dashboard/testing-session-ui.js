@@ -67,6 +67,21 @@
         return `${hrs}:${mins}:${secs}`;
     }
 
+    function formatPercent(value) {
+        if (value === null || value === undefined || value === '') return '—';
+        const numeric = Number(value);
+        if (!Number.isFinite(numeric)) return String(value);
+        const rounded = Math.round(numeric * 100) / 100;
+        return `${rounded}%`;
+    }
+
+    function formatSeconds(value) {
+        if (value === null || value === undefined || value === '') return '—';
+        const numeric = Number(value);
+        if (!Number.isFinite(numeric)) return String(value);
+        return `${numeric.toFixed(3)}s`;
+    }
+
     function sortedPlaylists(playlists) {
         if (!Array.isArray(playlists)) return [];
         return playlists.slice().sort((a, b) => b.bandwidth - a.bandwidth);
@@ -219,6 +234,32 @@
         return items.join('');
     }
 
+    function renderContentVariantOptions(sessionId, variants, allowedVariants) {
+        const list = sortedPlaylists(variants);
+        const allowedSet = new Set(allowedVariants || []);
+        const allChecked = allowedSet.size === 0;
+        
+        const checkbox = (value, label) => {
+            const checked = allChecked || allowedSet.has(value) ? 'checked' : '';
+            return `<label><input type="checkbox" data-field="content_allowed_variants" value="${value}" ${checked}>${label}</label>`;
+        };
+        
+        const items = [];
+        list.forEach(variant => {
+            const resolution = variant.resolution || 'unknown';
+            const height = resolution.includes('x') ? resolution.split('x')[1] : resolution;
+            const heightLabel = height === 'unknown' ? 'unknown' : `${height}p`;
+            const label = `${heightLabel} / ${Math.round(variant.bandwidth / 1000)} kbps`;
+            items.push(checkbox(variant.url, label));
+        });
+        
+        if (items.length === 0) {
+            return '<span class="no-variants-message">Play content once to populate variant list</span>';
+        }
+        
+        return items.join('');
+    }
+
     function collectShapingBandwidthPresets(playlists) {
         const list = sortedPlaylists(playlists);
         const presets = [];
@@ -242,6 +283,17 @@
             });
         });
         return presets;
+    }
+
+    function getBool(obj, key) {
+        const val = obj[key];
+        return val === true || val === 'true' || val === 1 || val === '1';
+    }
+
+    function getStringSlice(obj, key) {
+        const val = obj[key];
+        if (Array.isArray(val)) return val;
+        return [];
     }
 
     function collectVideoShapingPresets(playlists) {
@@ -485,6 +537,7 @@
         const faultInjectionOpen = resolveSectionDefault(options, 'fault-injection', true);
         const networkShapingOpen = resolveSectionDefault(options, 'network-shaping', true);
         const bitrateChartOpen = resolveSectionDefault(options, 'bitrate-chart', false);
+        const playerMetricsOpen = resolveSectionDefault(options, 'player-metrics', false);
 
         return `
             <div class="session-card" data-session-id="${sessionId}" data-session-port="${session.x_forwarded_port_external || session.x_forwarded_port || ''}" data-segment-duration-seconds="${segmentDurationSeconds}" data-shaping-presets="${encodedPresets}" data-shaping-video-presets="${encodedVideoPresets}" data-shaping-overhead-mbps="${overheadMbps}">
@@ -517,6 +570,43 @@
                     </div>
                 </div>
 
+                <!-- Collapsible Player Metrics -->
+                <div class="collapsible-section" data-section="player-metrics" data-default-open="${playerMetricsOpen}">
+                    <div class="collapsible-header" data-toggle="player-metrics">
+                        <span class="collapsible-icon">${playerMetricsOpen ? '▼' : '▶'}</span>
+                        <span class="collapsible-title">Player Metrics</span>
+                    </div>
+                    <div class="collapsible-content" data-content="player-metrics" style="display: ${playerMetricsOpen ? 'block' : 'none'};">
+                        <div class="session-grid">
+                            <div class="session-item"><span class="label">Last Event</span><span class="value" data-field="player_metrics_last_event">${session.player_metrics_last_event || '—'}</span></div>
+                            <div class="session-item"><span class="label">trigger_type</span><span class="value" data-field="player_metrics_trigger_type">${session.player_metrics_trigger_type || '—'}</span></div>
+                            <div class="session-item"><span class="label">Last Event At</span><span class="value" data-field="player_metrics_last_event_at">${formatDate(session.player_metrics_last_event_at) || '—'}</span></div>
+                            <div class="session-item"><span class="label">Event Time</span><span class="value" data-field="player_metrics_event_time">${formatDate(session.player_metrics_event_time) || '—'}</span></div>
+                            <div class="session-item"><span class="label">State</span><span class="value" data-field="player_metrics_state">${session.player_metrics_state || '—'}</span></div>
+                            <div class="session-item"><span class="label">Position</span><span class="value" data-field="player_metrics_position_s">${session.player_metrics_position_s ?? '—'}</span></div>
+                            <div class="session-item"><span class="label">Playback Rate</span><span class="value" data-field="player_metrics_playback_rate">${session.player_metrics_playback_rate ?? '—'}</span></div>
+                            <div class="session-item"><span class="label">Buffer Depth</span><span class="value" data-field="player_metrics_buffer_depth_s">${formatSeconds(session.player_metrics_buffer_depth_s)}</span></div>
+                            <div class="session-item"><span class="label">Buffer End</span><span class="value" data-field="player_metrics_buffer_end_s">${formatSeconds(session.player_metrics_buffer_end_s)}</span></div>
+                            <div class="session-item"><span class="label">Seekable End</span><span class="value" data-field="player_metrics_seekable_end_s">${formatSeconds(session.player_metrics_seekable_end_s)}</span></div>
+                            <div class="session-item"><span class="label">Live Edge</span><span class="value" data-field="player_metrics_live_edge_s">${formatSeconds(session.player_metrics_live_edge_s)}</span></div>
+                            <div class="session-item"><span class="label">Live Offset</span><span class="value" data-field="player_metrics_live_offset_s">${formatSeconds(session.player_metrics_live_offset_s)}</span></div>
+                            <div class="session-item"><span class="label">Display Resolution</span><span class="value" data-field="player_metrics_display_resolution">${session.player_metrics_display_resolution ?? '—'}</span></div>
+                            <div class="session-item"><span class="label">Video Resolution</span><span class="value" data-field="player_metrics_video_resolution">${session.player_metrics_video_resolution ?? '—'}</span></div>
+                            <div class="session-item"><span class="label">First Frame Time</span><span class="value" data-field="player_metrics_video_first_frame_time_s">${formatSeconds(session.player_metrics_video_first_frame_time_s)}</span></div>
+                            <div class="session-item"><span class="label">Video Start Time</span><span class="value" data-field="player_metrics_video_start_time_s">${formatSeconds(session.player_metrics_video_start_time_s)}</span></div>
+                            <div class="session-item"><span class="label">Video Bitrate Mbps</span><span class="value" data-field="player_metrics_video_bitrate_mbps">${session.player_metrics_video_bitrate_mbps ?? '—'}</span></div>
+                            <div class="session-item"><span class="label">Video Quality</span><span class="value" data-field="player_metrics_video_quality_pct">${formatPercent(session.player_metrics_video_quality_pct)}</span></div>
+                            <div class="session-item"><span class="label">Network Bitrate Mbps</span><span class="value" data-field="player_metrics_network_bitrate_mbps">${session.player_metrics_network_bitrate_mbps ?? '—'}</span></div>
+                            <div class="session-item"><span class="label">Dropped Frames</span><span class="value" data-field="player_metrics_dropped_frames">${session.player_metrics_dropped_frames ?? '—'}</span></div>
+                            <div class="session-item"><span class="label">Stalls</span><span class="value" data-field="player_metrics_stall_count">${session.player_metrics_stall_count ?? '—'}</span></div>
+                            <div class="session-item"><span class="label">Stall Time</span><span class="value" data-field="player_metrics_stall_time_s">${formatSeconds(session.player_metrics_stall_time_s)}</span></div>
+                            <div class="session-item"><span class="label">Last Stall Time</span><span class="value" data-field="player_metrics_last_stall_time_s">${formatSeconds(session.player_metrics_last_stall_time_s)}</span></div>
+                            <div class="session-item"><span class="label">Last Error</span><span class="value" data-field="player_metrics_error">${session.player_metrics_error || '—'}</span></div>
+                            <div class="session-item"><span class="label">Source</span><span class="value" data-field="player_metrics_source">${session.player_metrics_source || '—'}</span></div>
+                        </div>
+                    </div>
+                </div>
+
                 <!-- Collapsible Fault Injection -->
                 <div class="collapsible-section" data-section="fault-injection" data-default-open="${faultInjectionOpen}">
                     <div class="collapsible-header" data-toggle="fault-injection">
@@ -531,6 +621,7 @@
                                     <button class="tab-button" data-tab="manifest-failures">Manifest</button>
                                     <button class="tab-button" data-tab="master-failures">Master</button>
                                     <button class="tab-button" data-tab="transport-faults">Transport</button>
+                                    <button class="tab-button" data-tab="content-manipulation">Content</button>
                                 </div>
                                 <div class="tabs-content">
                                     <!-- Segment Tab -->
@@ -650,6 +741,29 @@
                                         <div class="session-item">
                                             <span class="label">Fault Counters</span>
                                             <span class="value" data-field="transport_fault_counters">Drop ${transportDropPackets} pkts · Reject ${transportRejectPackets} pkts</span>
+                                        </div>
+                                    </div>
+
+                                    <!-- Content Manipulation Tab -->
+                                    <div class="tab-panel" data-panel="content-manipulation">
+                                        <div class="fault-control-row">
+                                            <label>Strip CODEC Information</label>
+                                            <div class="checkbox-group">
+                                                <label>
+                                                    <input type="checkbox" data-field="content_strip_codecs" ${getBool(session, 'content_strip_codecs') ? 'checked' : ''}>
+                                                    Remove CODEC attributes from master playlist
+                                                </label>
+                                            </div>
+                                        </div>
+                                        <div class="fault-control-row">
+                                            <label>Allowed Variants</label>
+                                            <div class="checkbox-group">
+                                                ${renderContentVariantOptions(sessionId, manifestVariants, getStringSlice(session, 'content_allowed_variants'))}
+                                            </div>
+                                        </div>
+                                        <div class="content-tab-note">
+                                            <strong>Note:</strong> Content modifications apply to master playlist requests. 
+                                            For HLS, play content once to populate variant list, configure settings, then replay to apply changes.
                                         </div>
                                     </div>
                                 </div>
@@ -899,6 +1013,11 @@
             .map(input => input.value);
         const segmentChecks = Array.from(card.querySelectorAll('input[data-field="segment_failure_urls"]:checked'))
             .map(input => input.value);
+        
+        // Content manipulation settings
+        const contentStripCodecs = !!card.querySelector('input[data-field="content_strip_codecs"]')?.checked;
+        const contentAllowedVariants = Array.from(card.querySelectorAll('input[data-field="content_allowed_variants"]:checked'))
+            .map(input => input.value);
 
         return {
             session_id: sessionId,
@@ -943,7 +1062,10 @@
             transport_consecutive_seconds: getRangeValue('transport_consecutive_failures'),
             transport_frequency_seconds: getRangeValue('transport_failure_frequency'),
             transport_fault_on_seconds: getRangeValue('transport_consecutive_failures'),
-            transport_fault_off_seconds: getRangeValue('transport_failure_frequency')
+            transport_fault_off_seconds: getRangeValue('transport_failure_frequency'),
+            // Content manipulation
+            content_strip_codecs: contentStripCodecs,
+            content_allowed_variants: contentAllowedVariants.length > 0 ? contentAllowedVariants : []
         };
     }
 

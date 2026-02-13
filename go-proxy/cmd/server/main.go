@@ -3411,26 +3411,52 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", contentType)
 	}
 	w.Header().Set("X-Session-ID", getString(sessionData, "session_number"))
-	w.WriteHeader(resp.StatusCode)
-	if isSegment {
-		log.Printf(
-			"[GO-PROXY][REQUEST][SEGMENT] response status=%d content_type=%s content_length=%s accept_ranges=%s content_range=%s url=%s session_id=%s external_port=%s",
-			resp.StatusCode,
-			resp.Header.Get("Content-Type"),
-			resp.Header.Get("Content-Length"),
-			resp.Header.Get("Accept-Ranges"),
-			resp.Header.Get("Content-Range"),
-			upstreamURL,
-			getString(sessionData, "session_id"),
-			externalPort,
-		)
+	
+	var bytesOut int64
+	
+	// Apply content manipulation for master playlists
+	if isMasterManifest && shouldApplyContentManipulation(sessionData) {
+		bodyBytes, err := io.ReadAll(resp.Body)
+		if err != nil {
+			log.Printf("ERROR: Failed to read master playlist body: %v", err)
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		
+		modifiedBody, err := a.applyContentManipulation(bodyBytes, sessionData, contentType)
+		if err != nil {
+			log.Printf("ERROR: Failed to manipulate master playlist: %v", err)
+			// Fall back to original content
+			modifiedBody = bodyBytes
+		}
+		
+		w.Header().Set("Content-Length", strconv.Itoa(len(modifiedBody)))
+		w.WriteHeader(resp.StatusCode)
+		writer := bufio.NewWriter(w)
+		_, _ = writer.Write(modifiedBody)
+		_ = writer.Flush()
+		bytesOut = int64(len(modifiedBody))
+		log.Printf("[GO-PROXY][CONTENT] Applied content manipulation to master playlist session_id=%s", getString(sessionData, "session_id"))
+	} else {
+		w.WriteHeader(resp.StatusCode)
+		writer := bufio.NewWriter(w)
+		if isSegment {
+			log.Printf(
+				"[GO-PROXY][REQUEST][SEGMENT] response status=%d content_type=%s content_length=%s accept_ranges=%s content_range=%s url=%s session_id=%s external_port=%s",
+				resp.StatusCode,
+				resp.Header.Get("Content-Type"),
+				resp.Header.Get("Content-Length"),
+				resp.Header.Get("Accept-Ranges"),
+				resp.Header.Get("Content-Range"),
+				upstreamURL,
+				getString(sessionData, "session_id"),
+				externalPort,
+			)
+		}
+		bytesOut, _ = io.Copy(writer, resp.Body)
+		_ = writer.Flush()
 	}
-	bytesOut, transferMs, copyErr := streamToClientMeasured(w, resp.Body, false)
-	if copyErr != nil && !errors.Is(copyErr, io.EOF) {
-		log.Printf("proxy_write_error session_id=%s url=%s err=%v", getString(sessionData, "session_id"), upstreamURL, copyErr)
-	}
-	netEntry.TransferMs = transferMs
-	mergeTotalTiming(netEntry)
+	
 	updateSessionTraffic(sessionData, requestBytes, bytesOut)
 	// Log successful network entry
 	sessionID := getString(sessionData, "session_id")
@@ -3440,6 +3466,116 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 	a.addNetworkLogEntry(sessionID, *netEntry)
 	sessionList[index] = sessionData
 	a.saveSessionList(sessionList)
+}
+
+// shouldApplyContentManipulation checks if any content manipulation settings are enabled
+func shouldApplyContentManipulation(session SessionData) bool {
+	if getBool(session, "content_strip_codecs") {
+		return true
+	}
+	allowedVariants := getStringSlice(session, "content_allowed_variants")
+	if len(allowedVariants) > 0 {
+		return true
+	}
+	return false
+}
+
+// applyContentManipulation modifies master playlist/manifest content based on session settings
+func (a *App) applyContentManipulation(body []byte, session SessionData, contentType string) ([]byte, error) {
+	stripCodecs := getBool(session, "content_strip_codecs")
+	allowedVariants := getStringSlice(session, "content_allowed_variants")
+	
+	// Handle HLS master playlists
+	if strings.Contains(strings.ToLower(contentType), "mpegurl") || strings.Contains(strings.ToLower(contentType), "m3u8") {
+		return manipulateHLSMaster(body, stripCodecs, allowedVariants)
+	}
+	
+	// Handle DASH manifests
+	if strings.Contains(strings.ToLower(contentType), "dash") || strings.Contains(strings.ToLower(contentType), "mpd") {
+		return manipulateDASHManifest(body, stripCodecs, allowedVariants)
+	}
+	
+	return body, nil
+}
+
+// manipulateHLSMaster modifies an HLS master playlist
+func manipulateHLSMaster(body []byte, stripCodecs bool, allowedVariants []string) ([]byte, error) {
+	playlist, listType, err := m3u8.DecodeFrom(bufio.NewReader(bytes.NewReader(body)), true)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode HLS playlist: %w", err)
+	}
+	
+	if listType != m3u8.MASTER {
+		// Not a master playlist, return unchanged
+		return body, nil
+	}
+	
+	master := playlist.(*m3u8.MasterPlaylist)
+	modified := false
+	
+	// Filter variants if allowedVariants is specified
+	if len(allowedVariants) > 0 {
+		allowedMap := make(map[string]bool)
+		for _, v := range allowedVariants {
+			allowedMap[v] = true
+		}
+		
+		filteredVariants := make([]*m3u8.Variant, 0)
+		for _, variant := range master.Variants {
+			if variant != nil && allowedMap[variant.URI] {
+				filteredVariants = append(filteredVariants, variant)
+			}
+		}
+		
+		if len(filteredVariants) != len(master.Variants) {
+			master.Variants = filteredVariants
+			modified = true
+		}
+	}
+	
+	// Strip codecs if requested
+	if stripCodecs {
+		hasCodecs := false
+		for _, variant := range master.Variants {
+			if variant != nil && variant.Codecs != "" {
+				hasCodecs = true
+				variant.Codecs = ""
+			}
+		}
+		if hasCodecs {
+			modified = true
+		}
+	}
+	
+	if !modified {
+		return body, nil
+	}
+	
+	// Encode the modified playlist
+	var buf bytes.Buffer
+	_, err = master.Encode().WriteTo(&buf)
+	if err != nil {
+		return nil, fmt.Errorf("failed to encode HLS playlist: %w", err)
+	}
+	
+	return buf.Bytes(), nil
+}
+
+// manipulateDASHManifest modifies a DASH manifest
+// Note: stripCodecs and allowedVariants parameters are reserved for future DASH implementation
+func manipulateDASHManifest(body []byte, stripCodecs bool, allowedVariants []string) ([]byte, error) {
+	// DASH manifest manipulation would require XML parsing and manipulation
+	// using libraries like encoding/xml or third-party XML processors.
+	// This is deferred to keep the initial implementation focused on HLS.
+	// When implemented, this function should:
+	// 1. Parse the MPD XML
+	// 2. Filter AdaptationSet/Representation elements based on allowedVariants
+	// 3. Remove codecs attributes from Representation elements if stripCodecs is true
+	// 4. Re-serialize and return the modified XML
+	_ = stripCodecs      // Silence unused parameter warning
+	_ = allowedVariants  // Silence unused parameter warning
+	log.Printf("[GO-PROXY][CONTENT] DASH manifest manipulation not yet implemented")
+	return body, nil
 }
 
 func (a *App) applySessionShaping(session SessionData, port int) {
@@ -4235,6 +4371,14 @@ func (a *App) normalizeSessionsForResponse(sessions []SessionData) []SessionData
 		setDefault("nftables_pattern_default_step_seconds", 0)
 		setDefault("nftables_pattern_template_mode", "sliders")
 		setDefault("nftables_pattern_margin_pct", 0)
+		bestMbps := bestVariantMbps(session)
+		videoMbps := getFloat(session, "player_metrics_video_bitrate_mbps")
+		if bestMbps > 0 && videoMbps > 0 {
+			quality := (videoMbps / bestMbps) * 100
+			session["player_metrics_video_quality_pct"] = math.Round(quality*100) / 100
+		} else {
+			delete(session, "player_metrics_video_quality_pct")
+		}
 	}
 	return sessions
 }
@@ -4496,6 +4640,23 @@ func getManifestVariants(session SessionData) []PlaylistInfo {
 		return nil
 	}
 	return infos
+}
+
+func bestVariantMbps(session SessionData) float64 {
+	variants := getManifestVariants(session)
+	if len(variants) == 0 {
+		return 0
+	}
+	maxBandwidth := 0
+	for _, variant := range variants {
+		if variant.Bandwidth > maxBandwidth {
+			maxBandwidth = variant.Bandwidth
+		}
+	}
+	if maxBandwidth <= 0 {
+		return 0
+	}
+	return float64(maxBandwidth) / 1_000_000
 }
 
 func nowISO() string {

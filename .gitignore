@@ -39,3 +39,4 @@ __pycache__/
 tests/.hls_failure_probe_last_failed
 go-proxy/go.mod
 go-proxy/go.sum
+apple/InfiniteStreamPlayer/InfiniteStreamPlayer.xcodeproj/project.xcworkspace/xcuserdata/jonathanoliver.xcuserdatad/UserInterfaceState.xcuserstate

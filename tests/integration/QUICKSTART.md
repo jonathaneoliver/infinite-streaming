@@ -3,8 +3,8 @@
 ## Installation (One Time Setup)
 
 ```bash
-# Navigate to pytest directory
-cd tests/pytest
+# Navigate to integration tests directory
+cd tests/integration
 
 # Install dependencies
 pip install -r requirements.txt
@@ -71,7 +71,7 @@ test_hls_failures.py::TestHTTPFailures::test_segment_http_failure_instant[404_no
 ## Test Structure
 
 ```
-tests/pytest/
+tests/integration/
 ├── conftest.py              # Fixtures and configuration
 ├── helpers.py               # Utility functions
 ├── test_hls_failures.py     # Main test file
@@ -135,7 +135,7 @@ pip install pytest
 ### "Collection error" or "Import error"
 ```bash
 # Make sure you're in the pytest directory
-cd tests/pytest
+cd tests/integration
 pytest
 ```
 

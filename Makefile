@@ -6,6 +6,11 @@ GO_SERVER_IMAGE ?= ghcr.io/jonathaneoliver/infinite-streaming:latest
 GO_PROXY_IMAGE ?= ghcr.io/jonathaneoliver/go-proxy:latest
 K8S_MANIFESTS ?= k8s-infinite-streaming.yaml
 K8S_DEPLOYMENT ?= infinite-streaming
+IOS_SIM_DEVICE ?= iPad Pro 13-inch (M5)
+IOS_APP_BUNDLE_ID ?= com.jeoliver.InfiniteStreamPlayer
+IOS_API_BASE ?= http://lenovo:40000
+IOS_METRICS_DURATION ?= 900
+IOS_SCORE_MIN ?= 60
 
 run:
 	./boss.sh 1 run
@@ -110,3 +115,13 @@ deploy-release:
 	docker buildx build --platform linux/amd64 -t $(LENOVO_SERVER_IMAGE) --push .
 	docker buildx build --platform linux/amd64 --build-arg VERSION=$(shell cat VERSION) -t $(LENOVO_PROXY_IMAGE) --push ./go-proxy
 	$(MAKE) deploy-lenovo-k3s K3S_KUBECONFIG=$(K3S_KUBECONFIG) LENOVO_SERVER_IMAGE=$(LENOVO_SERVER_IMAGE) LENOVO_PROXY_IMAGE=$(LENOVO_PROXY_IMAGE)
+
+test-ios-sim-metrics:
+	PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \
+	IOS_SIM_TEST_RUN=1 \
+	IOS_VERBOSE=1 \
+	IOS_SIM_DEVICE="$(IOS_SIM_DEVICE)" \
+	IOS_APP_BUNDLE_ID="$(IOS_APP_BUNDLE_ID)" \
+	IOS_METRICS_DURATION=$(IOS_METRICS_DURATION) \
+	IOS_SCORE_MIN=$(IOS_SCORE_MIN) \
+	pytest tests/integration -k ios_simulator_pyramid_metrics -m integration -vv --api-base $(IOS_API_BASE)

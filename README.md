@@ -267,6 +267,30 @@ Many environments already provide failure simulation (player debug tools, OS/Bro
 - **Is portable and reproducible** in CI, on shared QA rigs, and across teams.
 - **Decouples test setup from client device tooling**, so tests are easier to document and repeat.
 
+## Client apps
+
+InfiniteStream includes native client apps for testing on various platforms:
+
+### iOS/tvOS App
+Located in `apple/InfiniteStreamPlayer/`, this SwiftUI app provides:
+- Protocol selection (HLS/DASH)
+- Segment duration and codec options
+- Server environment switching
+- Content selection and auto-play
+- Detailed playback diagnostics
+- Testing session integration
+
+### Roku Channel
+Located in `roku/InfiniteStreamPlayer/`, this BrightScript channel provides:
+- HLS and DASH playback support
+- Protocol, segment, and codec selection
+- Server environment switching
+- Content selection and auto-play
+- Remote control navigation
+- Engineering-focused testing solution
+
+See the README in each directory for platform-specific setup and usage instructions.
+
 ## Documentation index
 
 - `PRD.md`

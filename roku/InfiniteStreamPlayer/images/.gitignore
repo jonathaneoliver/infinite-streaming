@@ -1,0 +1,2 @@
+# Ignore image creation script (used only once)
+create_images.py
