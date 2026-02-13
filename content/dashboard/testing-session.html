@@ -1103,12 +1103,12 @@
             const badges = document.getElementById('playerBadges');
             if (!badges || !video) return;
             
-            const existing4kBadge = badges.querySelector('.panel-badge.k4');
+            const existing4kBadge = badges.querySelector('.panel-badge.uhd');
             const is4k = video.videoHeight >= 2160;
             
             if (is4k && !existing4kBadge) {
                 const badge4k = document.createElement('span');
-                badge4k.className = 'panel-badge k4';
+                badge4k.className = 'panel-badge uhd';
                 badge4k.textContent = '4K';
                 badges.appendChild(badge4k);
             } else if (!is4k && existing4kBadge) {
