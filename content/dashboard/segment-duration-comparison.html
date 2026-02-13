@@ -919,6 +919,29 @@
             return Math.random().toString(36).slice(2, 10);
         }
 
+        // Add dynamic 4K/UHD badge when video height is >= 2160px
+        function update4kBadge(video, badgesContainer) {
+            const UHD_HEIGHT_THRESHOLD = 2160;
+            if (!video || !badgesContainer) return;
+            function apply() {
+                const existing = badgesContainer.querySelector('.panel-badge.uhd');
+                const is4k = (video.videoHeight || 0) >= UHD_HEIGHT_THRESHOLD;
+                if (is4k && !existing) {
+                    const span = document.createElement('span');
+                    span.className = 'panel-badge uhd';
+                    span.textContent = '4K';
+                    badgesContainer.appendChild(span);
+                } else if (!is4k && existing) {
+                    existing.remove();
+                }
+            }
+            if (video.readyState >= 1) {
+                apply();
+            } else {
+                video.addEventListener('loadedmetadata', apply, { once: true });
+            }
+        }
+
         function normalizeTestingBase(url) {
             if (window.BOSSNav && typeof window.BOSSNav.normalizeTestingBaseUrl === 'function') {
                 return window.BOSSNav.normalizeTestingBaseUrl(url);

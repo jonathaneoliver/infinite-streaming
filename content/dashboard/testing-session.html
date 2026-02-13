@@ -10,16 +10,16 @@
     <script src="https://cdn.jsdelivr.net/npm/shaka-player@4.7.0/dist/shaka-player.compiled.js"></script>
     <script src="https://vjs.zencdn.net/8.21.1/video.min.js"></script>
     <style>
-        body {
-            background: var(--bg-secondary);
-        }
-
-        .page-header {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            gap: 12px;
-            margin-bottom: 10px;
+            try {
+                const prev = lastServerSession;
+                const prevMax = prev ? (prev.max_height || prev.max_resolution || null) : null;
+                const nextMax = serverSession ? (serverSession.max_height || serverSession.max_resolution || null) : null;
+                if (String(prevMax) !== String(nextMax)) {
+                    if (isDeveloperMode) console.debug('Session metadata change', { session_id: serverSession?.session_id, prevMax, nextMax });
+                }
+            } catch (e) {
+                if (isDeveloperMode) console.warn('Failed to compare session metadata', e);
+            }
         }
 
         .page-title {
@@ -593,6 +593,7 @@
         const video = document.getElementById('player');
         const isDeveloperMode = new URLSearchParams(window.location.search).get('developer') === '1';
         const NATIVE_4K_KEY = 'bossPrefer4kNative';
+        const UHD_HEIGHT_THRESHOLD = 2160; // 4K/UHD resolution threshold
         let hlsInstance = null;
         let shakaPlayer = null;
         let videojsPlayer = null;
@@ -646,6 +647,32 @@
         };
         const collapseStoragePrefix = 'testing_session_collapse_';
         let lastServerSession = null;
+        // remember if a session was known to have 4K so badge stays persistent
+        const persistent4kBySession = new Map();
+
+        // Helper: persist known-4K per session to localStorage so SSE or /api/session gaps
+        // won't remove the badge once we've observed 4K for a session.
+        function setKnown4kForSession(sessionId) {
+            if (!sessionId) return;
+            try {
+                persistent4kBySession.set(String(sessionId), true);
+            } catch (e) {}
+            try {
+                localStorage.setItem('bossKnown4k:session:' + String(sessionId), 'true');
+            } catch (e) {}
+        }
+
+        function isKnown4kForSession(sessionId) {
+            if (!sessionId) return false;
+            try {
+                if (persistent4kBySession.get(String(sessionId))) return true;
+            } catch (e) {}
+            try {
+                return localStorage.getItem('bossKnown4k:session:' + String(sessionId)) === 'true';
+            } catch (e) {
+                return false;
+            }
+        }
         let sseLastRevision = 0;
         let sseMissedTotal = 0;
         let lastRuntimeRateLogged = null;
@@ -1070,7 +1097,7 @@
             };
         }
 
-        function setBadges(isDash, playerType, groupId) {
+        function setBadges(isDash, playerType, groupId, codecLabel, codecClass, segmentLabel, segmentClass) {
             const badges = document.getElementById('playerBadges');
             badges.innerHTML = '';
             const protocol = document.createElement('span');
@@ -1091,11 +1118,170 @@
             player.textContent = label;
             badges.appendChild(protocol);
             badges.appendChild(player);
+
+            // Codec badge
+            if (codecLabel) {
+                const codec = document.createElement('span');
+                codec.className = `panel-badge ${codecClass || ''}`.trim();
+                codec.textContent = codecLabel;
+                badges.appendChild(codec);
+            }
+
+            // Segment badge (LL / 2S / 6S)
+            if (segmentLabel) {
+                const seg = document.createElement('span');
+                seg.className = `panel-badge ${segmentClass || ''}`.trim();
+                seg.textContent = segmentLabel;
+                badges.appendChild(seg);
+            }
+
+            // 4K/UHD badge: prefer authoritative session metadata or persisted known-4K state.
+            try {
+                const UHD_HEIGHT_THRESHOLD = 2160;
+                let show4k = false;
+                // If the server session metadata indicates 4K, show it.
+                if (lastServerSession) {
+                    try {
+                        const mh = Number(lastServerSession.max_height || 0);
+                        if (Number.isFinite(mh) && mh >= UHD_HEIGHT_THRESHOLD) show4k = true;
+                    } catch (e) {}
+                    try {
+                        const mr = String(lastServerSession.max_resolution || '').trim();
+                        const m1 = mr.match(/(\d{3,4})x(\d{3,4})/i);
+                        if (m1 && Number(m1[2]) >= UHD_HEIGHT_THRESHOLD) show4k = true;
+                        const m2 = mr.match(/(\d{3,4})p$/i);
+                        if (m2 && Number(m2[1]) >= UHD_HEIGHT_THRESHOLD) show4k = true;
+                        const m3 = mr.match(/^(\d{3,4})$/);
+                        if (m3 && Number(m3[1]) >= UHD_HEIGHT_THRESHOLD) show4k = true;
+                    } catch (e) {}
+                }
+
+                // If we've previously recorded this session/content as 4K, prefer that
+                if (!show4k && currentSessionId && isKnown4kForSession(String(currentSessionId))) {
+                    show4k = true;
+                }
+
+                if (show4k) {
+                    const badge4k = document.createElement('span');
+                    badge4k.className = 'panel-badge uhd';
+                    badge4k.textContent = '4K';
+                    badges.appendChild(badge4k);
+                }
+            } catch (e) {}
+
             if (groupId) {
                 const group = document.createElement('span');
                 group.className = 'panel-badge group';
                 group.textContent = groupId;
                 badges.appendChild(group);
+            }
+        }
+
+        // Derive codec and segment badges from a URL or session metadata
+        function deriveCodecAndSegment(url, session) {
+            let codec = null;
+            let codecClass = '';
+            let segment = null;
+            let segmentClass = '';
+
+            const source = String(url || session?.master_manifest_url || session?.manifest_url || '').toLowerCase();
+            if (source.includes('_h264') || source.includes('h264')) {
+                codec = 'H264'; codecClass = 'h264';
+            } else if (source.includes('_hevc') || source.includes('hevc') || source.includes('h265')) {
+                codec = 'HEVC'; codecClass = 'hevc';
+            } else if (source.includes('_av1') || source.includes('av1')) {
+                codec = 'AV1'; codecClass = 'av1';
+            }
+
+            if (source.includes('master_2s') || source.includes('manifest_2s') || source.includes('_2s')) {
+                segment = '2S'; segmentClass = 's2';
+            } else if (source.includes('master_6s') || source.includes('manifest_6s') || source.includes('_6s')) {
+                segment = '6S'; segmentClass = 's6';
+            } else {
+                segment = 'LL'; segmentClass = 'll';
+            }
+
+            return { codec, codecClass, segment, segmentClass };
+        }
+
+        function update4kBadge() {
+            const badges = document.getElementById('playerBadges');
+            if (!badges || !video) return;
+
+            // Prefer session metadata (max_height / max_resolution) when available.
+            // If metadata indicates 4K/UHD, keep the badge persistent regardless of SSE or
+            // transient video height changes. Fall back to video.videoHeight when no
+            // metadata is available.
+            function metadataIndicates4k(session) {
+                if (!session) return null;
+                // max_height may be numeric
+                if (session.max_height && Number(session.max_height)) {
+                    if (Number(session.max_height) >= UHD_HEIGHT_THRESHOLD) return true;
+                }
+                // max_resolution could be '3840x2160' or '2160p' or '2160'
+                if (session.max_resolution && typeof session.max_resolution === 'string') {
+                    const s = session.max_resolution.trim();
+                    const m1 = s.match(/(\d+)x(\d+)/i);
+                    if (m1) {
+                        const h = Number(m1[2]);
+                        if (Number.isFinite(h) && h >= UHD_HEIGHT_THRESHOLD) return true;
+                    }
+                    const m2 = s.match(/(\d+)p$/i);
+                    if (m2) {
+                        const h = Number(m2[1]);
+                        if (Number.isFinite(h) && h >= UHD_HEIGHT_THRESHOLD) return true;
+                    }
+                    const m3 = s.match(/^(\d+)$/);
+                    if (m3) {
+                        const h = Number(m3[1]);
+                        if (Number.isFinite(h) && h >= UHD_HEIGHT_THRESHOLD) return true;
+                    }
+                }
+                return null;
+            }
+
+            const existing4kBadge = badges.querySelector('.panel-badge.uhd');
+
+            // Prefer server metadata or persisted state. Don't remove the badge
+            // simply because runtime videoHeight changed — once 4K is observed or
+            // declared it should remain until content metadata changes.
+            let metaHas4k = false;
+            try {
+                if (lastServerSession) {
+                    const mh = Number(lastServerSession.max_height || 0);
+                    if (Number.isFinite(mh) && mh >= UHD_HEIGHT_THRESHOLD) metaHas4k = true;
+                    const mr = String(lastServerSession.max_resolution || '').trim();
+                    const m1 = mr.match(/(\d{3,4})x(\d{3,4})/i);
+                    if (m1 && Number(m1[2]) >= UHD_HEIGHT_THRESHOLD) metaHas4k = true;
+                    const m2 = mr.match(/(\d{3,4})p$/i);
+                    if (m2 && Number(m2[1]) >= UHD_HEIGHT_THRESHOLD) metaHas4k = true;
+                    const m3 = mr.match(/^(\d{3,4})$/);
+                    if (m3 && Number(m3[1]) >= UHD_HEIGHT_THRESHOLD) metaHas4k = true;
+                }
+            } catch (e) {}
+
+            if (metaHas4k && currentSessionId) setKnown4kForSession(currentSessionId);
+
+            const persistent = currentSessionId && isKnown4kForSession(String(currentSessionId));
+
+            // If metadata/persistence indicates 4K, ensure badge present and do nothing else.
+            if ((metaHas4k || persistent) && !existing4kBadge) {
+                const badge4k = document.createElement('span');
+                badge4k.className = 'panel-badge uhd';
+                badge4k.textContent = '4K';
+                badges.appendChild(badge4k);
+                return;
+            }
+
+            // Fallback: if no authoritative metadata/persistence, use runtime height to
+            // detect 4K and then persist it so it behaves like metadata going forward.
+            const runtime4k = (video.videoHeight || 0) >= UHD_HEIGHT_THRESHOLD;
+            if (runtime4k && !existing4kBadge) {
+                if (currentSessionId) setKnown4kForSession(currentSessionId);
+                const badge4k = document.createElement('span');
+                badge4k.className = 'panel-badge uhd';
+                badge4k.textContent = '4K';
+                badges.appendChild(badge4k);
             }
         }
 
@@ -1251,6 +1437,8 @@
                     lastRenditionMbps = numeric;
                 }
             }
+
+            // 4K badge is now handled deterministically in setBadges(); removed runtime updater.
         }
 
         function resetPlayback() {
@@ -1272,80 +1460,29 @@
             }
             video.className = '';
             video.pause();
-            video.removeAttribute('src');
-            video.load();
-            stallCount = 0;
-            stallTimeS = 0;
-            lastStallDurationS = 0;
-            stallStartAt = null;
-            lastRenditionMbps = null;
-            lastRateShiftAt = 0;
-            lastPlayerState = null;
-            playbackStartAt = null;
-            videoFirstFrameS = null;
-            videoPlayingTimeS = null;
-            firstFrameReported = false;
-            playingReported = false;
-            autoRetryCount = 0;
-            if (autoRetryTimer) {
-                clearTimeout(autoRetryTimer);
-                autoRetryTimer = null;
-            }
-            document.getElementById('statStalls').textContent = '0';
-            document.getElementById('statDropped').textContent = '0';
-            document.getElementById('statBitrate').textContent = '--';
+            // runtime update4kBadge removed — 4K is handled deterministically in setBadges().
         }
 
-        function retryPlayback() {
-            if (!currentUrl) return;
-            const isDash = currentUrl.includes('.mpd');
-            if (hlsInstance) {
-                try {
-                    hlsInstance.stopLoad();
-                } catch (err) {
-                    console.warn('HLS stopLoad failed', err);
-                }
-                try {
-                    hlsInstance.startLoad();
-                } catch (err) {
-                    console.warn('HLS startLoad failed', err);
-                }
-                log('RETRY: hls.js startLoad');
-                return;
+        function getPlayerChoice() {
+            const select = document.getElementById('playerSelect');
+            return select ? select.value : 'auto';
+        }
+
+        function setPlayerChoice(value) {
+            const select = document.getElementById('playerSelect');
+            if (select) {
+                select.value = value || 'auto';
             }
-            if (shakaPlayer) {
-                if (typeof shakaPlayer.retryStreaming === 'function') {
-                    shakaPlayer.retryStreaming();
-                    log('RETRY: shaka retryStreaming');
-                } else {
-                    shakaPlayer.load(currentUrl)
-                        .then(() => log('RETRY: shaka load'))
-                        .catch(err => log(`RETRY ERROR: ${err.message}`));
-                }
-                return;
-            }
-            if (videojsPlayer) {
-                const type = isDash ? 'application/dash+xml' : 'application/x-mpegURL';
-                videojsPlayer.src({ src: currentUrl, type });
-                videojsPlayer.ready(() => {
-                    videojsPlayer.play().catch(err => log(`RETRY ERROR: ${err.message}`));
-                });
-                log('RETRY: videojs load');
-                return;
-            }
-            video.load();
-            video.play().catch(err => console.warn('Native play failed', err));
-            log('RETRY: native load');
         }
 
         function resolvePlayerChoice(url, choice) {
-            const isDash = url.includes('.mpd');
+            const isDash = url && String(url).includes('.mpd');
             if (choice === 'hlsjs') return 'hlsjs';
             if (choice === 'shaka') return 'shaka';
             if (choice === 'videojs') return 'videojs';
             if (choice === 'native') return 'native';
             if (isDash) return 'shaka';
-            return Hls.isSupported() ? 'hlsjs' : 'native';
+            return (typeof Hls !== 'undefined' && Hls.isSupported()) ? 'hlsjs' : 'native';
         }
 
         function applyActiveFaultTab(card, tabName) {
@@ -1359,18 +1496,6 @@
             targetButton.classList.add('active');
             container.querySelectorAll('.tab-panel').forEach(panel => panel.classList.remove('active'));
             targetPanel.classList.add('active');
-        }
-
-        function getPlayerChoice() {
-            const select = document.getElementById('playerSelect');
-            return select ? select.value : 'auto';
-        }
-
-        function setPlayerChoice(value) {
-            const select = document.getElementById('playerSelect');
-            if (select) {
-                select.value = value || 'auto';
-            }
         }
 
         function applyNative4kPreference(videoEl) {
@@ -1392,7 +1517,16 @@
             const choice = getPlayerChoice();
             const playerType = resolvePlayerChoice(url, choice);
             document.getElementById('playerUrl').textContent = url;
-            setBadges(isDash, playerType, lastServerSession?.group_id || '');
+            const derived = deriveCodecAndSegment(url, lastServerSession);
+            setBadges(
+                isDash,
+                playerType,
+                lastServerSession?.group_id || '',
+                derived.codec,
+                derived.codecClass,
+                derived.segment,
+                derived.segmentClass
+            );
             if (playerType === 'shaka') {
                 shaka.polyfill.installAll();
                 if (!shaka.Player.isBrowserSupported()) {
@@ -3226,7 +3360,36 @@
             const container = document.getElementById('sessionControls');
             const existingCard = container ? container.querySelector('.session-card') : null;
             const serverSession = session;
+            // Debug: log changes to session max_height/max_resolution to detect intermittent metadata
+            try {
+                const prev = lastServerSession;
+                const prevMax = prev ? (prev.max_height || prev.max_resolution || null) : null;
+                const nextMax = serverSession ? (serverSession.max_height || serverSession.max_resolution || null) : null;
+                if (String(prevMax) !== String(nextMax)) {
+                    console.debug('Session metadata change', { session_id: serverSession?.session_id, prevMax, nextMax });
+                }
+            } catch (e) {
+                console.warn('Failed to compare session metadata', e);
+            }
             lastServerSession = serverSession;
+            // If server session metadata explicitly indicates 4K, persist that immediately
+            try {
+                if (serverSession) {
+                    if (serverSession.max_height && Number(serverSession.max_height) >= UHD_HEIGHT_THRESHOLD) {
+                        setKnown4kForSession(serverSession.session_id);
+                    } else if (serverSession.max_resolution && typeof serverSession.max_resolution === 'string') {
+                        const s = serverSession.max_resolution.trim();
+                        const m1 = s.match(/(\d+)x(\d+)/i);
+                        if (m1 && Number(m1[2]) >= UHD_HEIGHT_THRESHOLD) setKnown4kForSession(serverSession.session_id);
+                        const m2 = s.match(/(\d+)p$/i);
+                        if (m2 && Number(m2[1]) >= UHD_HEIGHT_THRESHOLD) setKnown4kForSession(serverSession.session_id);
+                        const m3 = s.match(/^(\d+)$/);
+                        if (m3 && Number(m3[1]) >= UHD_HEIGHT_THRESHOLD) setKnown4kForSession(serverSession.session_id);
+                    }
+                }
+            } catch (e) {
+                // ignore
+            }
             const sessionKey = String(serverSession.session_id || '');
             const pending = pendingShaping.get(String(serverSession.session_id));
             if (pending && Date.now() - pending.timestamp < 5000) {
@@ -3268,7 +3431,16 @@
             currentSessionId = session.session_id;
             if (currentUrl) {
                 const isDash = currentUrl.includes('.mpd');
-                setBadges(isDash, resolvePlayerChoice(currentUrl, getPlayerChoice()), session.group_id || '');
+                const derived = deriveCodecAndSegment(currentUrl, session);
+                setBadges(
+                    isDash,
+                    resolvePlayerChoice(currentUrl, getPlayerChoice()),
+                    session.group_id || '',
+                    derived.codec,
+                    derived.codecClass,
+                    derived.segment,
+                    derived.segmentClass
+                );
             }
             updateGroupControls(session, lastSessionsList);
             if (container && existingCard && String(existingCard.dataset.sessionId || '') === sessionKey) {

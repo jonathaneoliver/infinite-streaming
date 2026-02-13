@@ -331,6 +331,7 @@
         let availableContent = [];
         const AUDIO_MUTED_KEY = 'bossAudioMuted';
         const NATIVE_4K_KEY = 'bossPrefer4kNative';
+        const UHD_HEIGHT_THRESHOLD = 2160; // 4K/UHD resolution threshold
 
         function getStoredContent() {
             return localStorage.getItem('bossSelectedContentFull') || localStorage.getItem('bossSelectedContent') || '';
@@ -375,6 +376,59 @@
             badge.className = `panel-badge ${klass}`;
             badge.textContent = label;
             container.appendChild(badge);
+        }
+
+        function update4kBadge() {
+            const badges = document.getElementById('playerBadges');
+            if (!badges || !video) return;
+
+            function metadataIndicates4kForContent(contentName) {
+                if (!contentName || !Array.isArray(availableContent)) return null;
+                const item = availableContent.find(i => i && i.name === contentName);
+                if (!item) return null;
+                if (item.max_height && Number(item.max_height)) {
+                    if (Number(item.max_height) >= UHD_HEIGHT_THRESHOLD) return true;
+                }
+                if (item.max_resolution && typeof item.max_resolution === 'string') {
+                    const s = item.max_resolution.trim();
+                    const m1 = s.match(/(\d+)x(\d+)/i);
+                    if (m1) {
+                        const h = Number(m1[2]);
+                        if (Number.isFinite(h) && h >= UHD_HEIGHT_THRESHOLD) return true;
+                    }
+                    const m2 = s.match(/(\d+)p$/i);
+                    if (m2) {
+                        const h = Number(m2[1]);
+                        if (Number.isFinite(h) && h >= UHD_HEIGHT_THRESHOLD) return true;
+                    }
+                    const m3 = s.match(/^(\d+)$/);
+                    if (m3) {
+                        const h = Number(m3[1]);
+                        if (Number.isFinite(h) && h >= UHD_HEIGHT_THRESHOLD) return true;
+                    }
+                }
+                return null;
+            }
+
+            const existing4kBadge = badges.querySelector('.panel-badge.uhd');
+            const contentSelect = document.getElementById('contentSelect');
+            const contentName = contentSelect ? contentSelect.value : (getStoredContent() || '');
+            const metaHas4k = metadataIndicates4kForContent(contentName);
+            let is4k = false;
+            if (metaHas4k === true) {
+                is4k = true;
+            } else {
+                is4k = (video.videoHeight || 0) >= UHD_HEIGHT_THRESHOLD;
+            }
+
+            if (is4k && !existing4kBadge) {
+                const badge4k = document.createElement('span');
+                badge4k.className = 'panel-badge uhd';
+                badge4k.textContent = '4K';
+                badges.appendChild(badge4k);
+            } else if (!is4k && existing4kBadge) {
+                existing4kBadge.remove();
+            }
         }
 
         function clearPlayerInstance() {
@@ -638,6 +692,7 @@
             document.getElementById('statBufferedEnd').textContent = bufferedEnd;
             document.getElementById('statBufferDepth').textContent = bufferDepth;
             document.getElementById('statLiveOffset').textContent = '--';
+            update4kBadge();
         }
 
         function createPlayerId() {

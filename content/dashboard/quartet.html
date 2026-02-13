@@ -677,6 +677,9 @@
             view2: { content: 'fashion', player: 'HTML5' },
             view3: { content: 'fashion', player: 'HLS.js', encoding: 'hls_h264', segment: 'll' }
         };
+
+        // Content metadata map keyed by full content name (including suffix)
+        const QUARTET_CONTENT_META = {};
         
         // Helper function to build master playlist URL
         function encodeContentName(name) {
@@ -701,6 +704,57 @@
 
         function badgeSpan(text, klass) {
             return `<span class="panel-badge ${klass}">${text}</span>`;
+        }
+
+        // Add dynamic 4K/UHD badge. Prefer content metadata (QUARTET_CONTENT_META[name])
+        function update4kBadge(video, badgesContainer, metaItem) {
+            const UHD_HEIGHT_THRESHOLD = 2160;
+            if (!video || !badgesContainer) return;
+
+            function parseMetaHeight(it) {
+                if (!it) return null;
+                if (typeof it.max_height === 'number' && !isNaN(it.max_height)) return it.max_height;
+                if (it.max_resolution && typeof it.max_resolution === 'string') {
+                    const res = it.max_resolution.trim();
+                    let m = res.match(/(\d{3,4})x(\d{3,4})/);
+                    if (m && m[2]) return parseInt(m[2], 10);
+                    m = res.match(/(\d{3,4})p$/i);
+                    if (m) return parseInt(m[1], 10);
+                    m = res.match(/^(\d{3,4})$/);
+                    if (m) return parseInt(m[1], 10);
+                }
+                return null;
+            }
+
+            function apply() {
+                const existing = badgesContainer.querySelector('.panel-badge.uhd');
+                const metaHeight = parseMetaHeight(metaItem);
+                const is4kMeta = metaHeight && metaHeight >= UHD_HEIGHT_THRESHOLD;
+                const is4kVideo = (video.videoHeight || 0) >= UHD_HEIGHT_THRESHOLD;
+                const shouldHave = is4kMeta || is4kVideo;
+
+                if (shouldHave && !existing) {
+                    const span = document.createElement('span');
+                    span.className = 'panel-badge uhd';
+                    span.textContent = '4K';
+                    badgesContainer.appendChild(span);
+                } else if (!shouldHave && existing) {
+                    existing.remove();
+                }
+            }
+
+            // If metadata indicates 4K, apply immediately
+            const metaHeightNow = parseMetaHeight(metaItem);
+            if (metaHeightNow && metaHeightNow >= UHD_HEIGHT_THRESHOLD) {
+                apply();
+                return;
+            }
+
+            if (video.readyState >= 1) {
+                apply();
+            } else {
+                video.addEventListener('loadedmetadata', apply, { once: true });
+            }
         }
 
         function segmentBadge(segment) {
@@ -753,6 +807,21 @@
                     throw new Error(`HTTP ${response.status}`);
                 }
                 const content = await response.json();
+                // store metadata for lookup by full content name (e.g. fashion_h264)
+                content.forEach((it) => {
+                    QUARTET_CONTENT_META[it.name] = {
+                        max_height: typeof it.max_height === 'number' ? it.max_height : null,
+                        max_resolution: it.max_resolution || null
+                    };
+                });
+                // Debug: log count of 4K content available to quartet
+                try {
+                    const items = content.filter(it => (it.max_height || 0) >= 2160);
+                    console.log(`QUARTET: /api/content returned ${content.length} items; ${items.length} with max_height>=2160`);
+                    if (items.length > 0) console.debug('QUARTET 4K items', items.map(i => ({ name: i.name, max_height: i.max_height, max_resolution: i.max_resolution })));
+                } catch (e) {
+                    console.warn('QUARTET content debug failed', e);
+                }
                 const baseNames = new Set();
                 content.forEach((item) => {
                     let name = item.name || '';
@@ -1565,6 +1634,14 @@
                         badgeSpan(seg.text, seg.klass)
                     ];
                     setPanelBadges(`view1-badges-${idx + 1}`, badges);
+                    // if corresponding video exists, update 4K badge
+                    const videoIdMap = ['native-video','videojs-video','hls-video','shaka-video'];
+                    const vid = document.getElementById(videoIdMap[idx]);
+                    const badgesEl = document.getElementById(`view1-badges-${idx + 1}`);
+                    if (vid && badgesEl) {
+                        const metaKey = `${content}${encodingConfig.suffix}`;
+                        update4kBadge(vid, badgesEl, QUARTET_CONTENT_META[metaKey]);
+                    }
                 });
                 
                 // Load HTML5 (native for HLS only)
@@ -1695,6 +1772,13 @@
                         (() => { const badge = codecBadgeFromSuffix(encodingConfig.suffix); return badgeSpan(badge.label, badge.klass); })(),
                         badgeSpan(seg.text, seg.klass)
                     ]);
+                    // update 4K badge for encoding grid (prefer content metadata)
+                    const vidEl = document.getElementById(`view2-video-${i + 1}`);
+                    const badgesEl2 = document.getElementById(`view2-badges-${i + 1}`);
+                    if (vidEl && badgesEl2) {
+                        const metaKey = `${content}${encodingConfig.suffix}`;
+                        update4kBadge(vidEl, badgesEl2, QUARTET_CONTENT_META[metaKey]);
+                    }
                     
                     view2PlayerInstances[i] = await initPlayer(videoId, player, variantUrl, protocol, {
                         abrEnabled: true,
@@ -1779,6 +1863,13 @@
                             badgeSpan(seg.text, seg.klass)
                         ]);
 
+                        const vid3 = document.getElementById(`view3-video-${i + 1}`);
+                        const badges3 = document.getElementById(`view3-badges-${i + 1}`);
+                        if (vid3 && badges3) {
+                            const metaKey = `${content}${encodingConfig.suffix}`;
+                            update4kBadge(vid3, badges3, QUARTET_CONTENT_META[metaKey]);
+                        }
+
                         console.log(`View 3: Loading DASH representation ${i + 1}:`, title);
                         view3PlayerInstances[i] = await initPlayer(videoId, player, masterUrl, protocol, {
                             abrEnabled: false,
@@ -1808,9 +1899,16 @@
                             (() => { const badge = codecBadgeFromSuffix(encodingConfig.suffix); return badgeSpan(badge.label, badge.klass); })(),
                             badgeSpan(seg.text, seg.klass)
                         ]);
-                        
+                        // try to set 4K badge for this variant panel (prefer content metadata)
+                        const vidEl = document.getElementById(videoId);
+                        const badgesElv = document.getElementById(`view3-badges-${i + 1}`);
+                        if (vidEl && badgesElv) {
+                            const metaKey = `${content}${encodingConfig.suffix}`;
+                            update4kBadge(vidEl, badgesElv, QUARTET_CONTENT_META[metaKey]);
+                        }
+
                         console.log(`View 3: Loading variant ${i + 1}:`, title);
-                        
+
                         view3PlayerInstances[i] = await initPlayer(videoId, player, variantUrl, protocol);
                     }
                 }
