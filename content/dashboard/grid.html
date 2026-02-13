@@ -473,10 +473,19 @@
                     has_dash: item.has_dash,
                     has_hls: item.has_hls,
                     max_resolution: item.max_resolution || null,
-                    max_height: typeof item.max_height === 'number' ? item.max_height : null
+                    max_height: (typeof item.max_height === 'number') ? item.max_height : (localStorage.getItem('bossKnown4k:' + item.name) === 'true' ? 2160 : null)
                 }));
                 
-                console.log(`Loaded ${ALL_CONTENT.length} content items from /api/content`);
+                // Debug: log summary of 4K-capable content detected from server
+                try {
+                    const fourK = ALL_CONTENT.filter(c => (c.max_height || 0) >= 2160);
+                    console.log(`Loaded ${ALL_CONTENT.length} content items from /api/content; ${fourK.length} with max_height>=2160`);
+                    if (fourK.length > 0) {
+                        console.debug('4K items:', fourK.map(f => ({ name: f.name, max_height: f.max_height, max_resolution: f.max_resolution })));
+                    }
+                } catch (e) {
+                    console.warn('Content debug log failed', e);
+                }
                 return true;
             } catch (error) {
                 console.error('Failed to fetch content from /api/content:', error);
@@ -787,6 +796,9 @@
                             <span class="panel-badge ${segClass}">${segBadge}</span>
                         </div>
                     `;
+                    // update 4K badge dynamically for this player (prefer content metadata)
+                    const badgesContainer = labelEl.querySelector('.panel-badges');
+                    update4kBadge(video, badgesContainer, item);
                     
                     // Configure for low latency and low bitrate preference
                     player.configure({
@@ -866,6 +878,9 @@
                                 <span class="panel-badge ${segClass}">${segBadge}</span>
                             </div>
                         `;
+                        // update 4K badge dynamically for this player (prefer content metadata)
+                        const badgesContainer = labelEl.querySelector('.panel-badges');
+                        update4kBadge(video, badgesContainer, item);
                         
                         // Force lowest quality after manifest is parsed
                         hls.on(Hls.Events.MANIFEST_PARSED, () => {
@@ -954,6 +969,59 @@
                 return window.BOSSNav.createPlayerId();
             }
             return Math.random().toString(36).slice(2, 10);
+        }
+
+        // Add dynamic 4K/UHD badge. Prefer content metadata (item.max_height or item.max_resolution)
+        function update4kBadge(video, badgesContainer, item) {
+            const UHD_HEIGHT_THRESHOLD = 2160;
+            if (!video || !badgesContainer) return;
+
+            function parseMetaHeight(it) {
+                if (!it) return null;
+                if (typeof it.max_height === 'number' && !isNaN(it.max_height)) return it.max_height;
+                if (it.max_resolution && typeof it.max_resolution === 'string') {
+                    // formats: "3840x2160", "2160p", "2160"
+                    const res = it.max_resolution.trim();
+                    let m = res.match(/(\d{3,4})x(\d{3,4})/);
+                    if (m && m[2]) return parseInt(m[2], 10);
+                    m = res.match(/(\d{3,4})p$/i);
+                    if (m) return parseInt(m[1], 10);
+                    m = res.match(/^(\d{3,4})$/);
+                    if (m) return parseInt(m[1], 10);
+                }
+                return null;
+            }
+
+            function apply() {
+                const existing = badgesContainer.querySelector('.panel-badge.uhd');
+                const metaHeight = parseMetaHeight(item);
+                const is4kMeta = metaHeight && metaHeight >= UHD_HEIGHT_THRESHOLD;
+                const is4kVideo = (video.videoHeight || 0) >= UHD_HEIGHT_THRESHOLD;
+                const shouldHave = is4kMeta || is4kVideo;
+
+                if (shouldHave && !existing) {
+                    const span = document.createElement('span');
+                    span.className = 'panel-badge uhd';
+                    span.textContent = '4K';
+                    badgesContainer.appendChild(span);
+                } else if (!shouldHave && existing) {
+                    existing.remove();
+                }
+            }
+
+            // If metadata explicitly indicates 4K, apply immediately.
+            const metaHeightNow = parseMetaHeight(item);
+            if (metaHeightNow && metaHeightNow >= UHD_HEIGHT_THRESHOLD) {
+                apply();
+                return;
+            }
+
+            // Otherwise wait for metadata from the video (if needed)
+            if (video.readyState >= 1) {
+                apply();
+            } else {
+                video.addEventListener('loadedmetadata', apply, { once: true });
+            }
         }
 
         function normalizeTestingBase(url) {
