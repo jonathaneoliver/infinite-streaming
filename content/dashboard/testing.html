@@ -1335,6 +1335,16 @@
                 bandwidthCharts.delete(sessionId);
             }
             if (!chart) {
+                // Ensure the canvas uses CSS sizing (prevent huge drawing buffer)
+                try {
+                    canvas.style.height = '320px';
+                    canvas.style.width = '100%';
+                    canvas.removeAttribute && canvas.removeAttribute('width');
+                    canvas.removeAttribute && canvas.removeAttribute('height');
+                } catch (e) {
+                    /* ignore */
+                }
+
                 chart = new Chart(canvas, {
                     type: 'line',
                     data: {
@@ -1402,7 +1412,9 @@
                         ]
                     },
                     options: {
-                        responsive: false,
+                        // Let Chart.js size the drawing buffer to the CSS box (handles DPR)
+                        responsive: true,
+                        maintainAspectRatio: false,
                         animation: false,
                         plugins: {
                             legend: {
