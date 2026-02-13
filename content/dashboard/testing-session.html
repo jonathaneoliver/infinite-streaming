@@ -593,6 +593,7 @@
         const video = document.getElementById('player');
         const isDeveloperMode = new URLSearchParams(window.location.search).get('developer') === '1';
         const NATIVE_4K_KEY = 'bossPrefer4kNative';
+        const UHD_HEIGHT_THRESHOLD = 2160; // 4K/UHD resolution threshold
         let hlsInstance = null;
         let shakaPlayer = null;
         let videojsPlayer = null;
@@ -1104,7 +1105,7 @@
             if (!badges || !video) return;
             
             const existing4kBadge = badges.querySelector('.panel-badge.uhd');
-            const is4k = video.videoHeight >= 2160;
+            const is4k = video.videoHeight >= UHD_HEIGHT_THRESHOLD;
             
             if (is4k && !existing4kBadge) {
                 const badge4k = document.createElement('span');
