@@ -41,6 +41,9 @@
         { value: 'failures_per_seconds', text: 'Seconds' },
         { value: 'failures_per_packets', text: 'Packets / Seconds' }
     ];
+    const networkLogEntriesBySession = new Map();
+    const networkWaterfallTimelines = new Map();
+    const networkWaterfallViewBySession = new Map();
 
     function formatDate(value) {
         if (!value) return '—';
@@ -822,6 +825,10 @@
                                     Show Successful
                                 </label>
                             </div>
+                            <div class="network-log-waterfall-wrap">
+                                <div class="network-log-waterfall" data-field="network_log_waterfall"></div>
+                                <div class="network-log-waterfall-empty" data-field="network_log_waterfall_empty" style="display:none;">No requests to plot yet.</div>
+                            </div>
                             <div class="network-log-table-wrap">
                                 <table class="network-log-table">
                                     <thead>
@@ -1135,6 +1142,13 @@
         });
 
         applyCollapsibleState(document);
+        window.addEventListener('resize', () => {
+            networkWaterfallTimelines.forEach((state) => {
+                if (state && state.timeline && typeof state.timeline.redraw === 'function') {
+                    state.timeline.redraw();
+                }
+            });
+        });
     }
 
     // Network Log Functions
@@ -1227,6 +1241,224 @@
         `;
     }
 
+    function hasVisTimeline() {
+        return (
+            typeof window !== 'undefined' &&
+            window.vis &&
+            typeof window.vis.DataSet === 'function' &&
+            typeof window.vis.Timeline === 'function'
+        );
+    }
+
+    function getFilteredNetworkEntries(card, sessionId) {
+        const entries = networkLogEntriesBySession.get(String(sessionId)) || [];
+        const showFaulted = card.querySelector('[data-filter="show-faulted"]')?.checked ?? true;
+        const showSuccessful = card.querySelector('[data-filter="show-successful"]')?.checked ?? true;
+        return entries.filter((entry) => {
+            const faulted = !!entry.faulted;
+            return (faulted && showFaulted) || (!faulted && showSuccessful);
+        });
+    }
+
+    function buildWaterfallRows(entries) {
+        const rows = entries.slice().slice(-120).map((entry, index) => {
+            const timestamp = Date.parse(entry.timestamp || '') || 0;
+            const dns = Number(entry.dns_ms || 0);
+            const connect = Number(entry.connect_ms || 0);
+            const tls = Number(entry.tls_ms || 0);
+            const ttfb = Number(entry.ttfb_ms || 0);
+            const total = Number(entry.total_ms || 0);
+            const transferRaw = Number(entry.transfer_ms || 0);
+            const handshake = dns + connect + tls;
+            const wait = Math.max(0, ttfb - handshake);
+            const transfer = transferRaw > 0 ? transferRaw : Math.max(0, total - ttfb);
+            const duration = Math.max(0, dns + connect + tls + wait + transfer);
+            const pathParts = (entry.path || entry.url || '').split('/');
+            const filename = pathParts[pathParts.length - 1] || entry.path || 'request';
+            const prefix = entry.faulted ? '!' : '';
+            return {
+                index,
+                entry,
+                timestamp,
+                filename,
+                label: `${prefix}${entry.method || 'GET'} ${filename}`,
+                dns,
+                connect,
+                tls,
+                wait,
+                transfer,
+                duration
+            };
+        });
+        return rows.filter((row) => row.timestamp > 0).sort((a, b) => a.timestamp - b.timestamp);
+    }
+
+    function ensureWaterfallTimeline(card, sessionId) {
+        const field = card.querySelector('[data-field="network_log_waterfall"]');
+        if (!field || !hasVisTimeline()) return null;
+        const key = String(sessionId);
+        let state = networkWaterfallTimelines.get(key) || null;
+
+        if (state && state.host !== field) {
+            if (state.timeline && typeof state.timeline.destroy === 'function') {
+                state.timeline.destroy();
+            }
+            state = null;
+        }
+
+        if (!state) {
+            const groups = new window.vis.DataSet();
+            const items = new window.vis.DataSet();
+            const options = {
+                stack: false,
+                zoomable: true,
+                moveable: true,
+                horizontalScroll: true,
+                verticalScroll: true,
+                showCurrentTime: false,
+                selectable: false,
+                showMajorLabels: false,
+                showMinorLabels: true,
+                orientation: { axis: 'top', item: 'bottom' },
+                groupHeightMode: 'fixed',
+                margin: {
+                    axis: 0,
+                    item: {
+                        horizontal: 0,
+                        vertical: 0
+                    }
+                },
+                minHeight: '240px',
+                maxHeight: '360px',
+                tooltip: {
+                    followMouse: true,
+                    overflowMethod: 'flip'
+                },
+                format: {
+                    minorLabels: {
+                        millisecond: 'SSS[ms]',
+                        second: 's.SSS[s]'
+                    },
+                    majorLabels: {
+                        millisecond: '',
+                        second: 's'
+                    }
+                }
+            };
+            const timeline = new window.vis.Timeline(field, items, groups, options);
+            timeline.on('rangechanged', (props) => {
+                if (!props || !props.start || !props.end || props.byUser !== true) return;
+                const startMs = new Date(props.start).getTime();
+                const endMs = new Date(props.end).getTime();
+                if (Number.isFinite(startMs) && Number.isFinite(endMs) && endMs > startMs) {
+                    networkWaterfallViewBySession.set(key, { startMs, endMs });
+                }
+            });
+            state = { host: field, timeline, groups, items };
+            networkWaterfallTimelines.set(key, state);
+        }
+        return state;
+    }
+
+    function updateNetworkWaterfall(card, sessionId) {
+        const key = String(sessionId);
+        const chartHost = card.querySelector('[data-field="network_log_waterfall"]');
+        const emptyHost = card.querySelector('[data-field="network_log_waterfall_empty"]');
+        if (!chartHost || !emptyHost) return;
+
+        if (!hasVisTimeline()) {
+            emptyHost.textContent = 'vis-timeline not loaded; waterfall unavailable.';
+            emptyHost.style.display = 'block';
+            return;
+        }
+
+        const rows = buildWaterfallRows(getFilteredNetworkEntries(card, key));
+        if (!rows.length) {
+            emptyHost.textContent = 'No requests to plot yet.';
+            emptyHost.style.display = 'block';
+            const state = networkWaterfallTimelines.get(key);
+            if (state && state.items && state.groups) {
+                state.items.clear();
+                state.groups.clear();
+                if (state.timeline && typeof state.timeline.redraw === 'function') {
+                    state.timeline.redraw();
+                }
+            }
+            return;
+        }
+        emptyHost.style.display = 'none';
+
+        const state = ensureWaterfallTimeline(card, key);
+        if (!state) return;
+
+        const minStart = Math.min(...rows.map((row) => row.timestamp));
+        const toTime = (offsetMs) => new Date(Math.max(0, Math.round(offsetMs)));
+        const groups = [];
+        const items = [];
+
+        rows.forEach((row, idx) => {
+            const groupId = idx + 1;
+            const method = row.entry.method || 'GET';
+            const status = row.entry.status || '—';
+            const kind = row.entry.request_kind || 'request';
+            const labelClass = row.entry.faulted ? 'waterfall-label is-faulted' : 'waterfall-label';
+            const relativeStart = row.timestamp - minStart;
+            const bytesOut = Number(row.entry.bytes_out || 0);
+            const sizeLabel = bytesOut > 0 ? formatBytes(bytesOut) : '—';
+
+            groups.push({
+                id: groupId,
+                content: `<div class="${labelClass}"><span class="waterfall-method">${method}</span><span class="waterfall-path" title="${row.entry.url || row.entry.path || ''}">${row.filename}</span><span class="waterfall-meta">${status} · ${kind} · ${sizeLabel}</span></div>`
+            });
+
+            const phases = [
+                { key: 'dns', value: row.dns, label: 'DNS' },
+                { key: 'connect', value: row.connect, label: 'Connect' },
+                { key: 'tls', value: row.tls, label: 'TLS' },
+                { key: 'wait', value: row.wait, label: 'Wait' },
+                { key: 'transfer', value: row.transfer, label: 'Receive' }
+            ];
+
+            let cursor = relativeStart;
+            phases.forEach((phase) => {
+                if (phase.value <= 0) return;
+                const phaseStart = cursor;
+                const phaseEnd = cursor + phase.value;
+                items.push({
+                    id: `${groupId}-${phase.key}`,
+                    group: groupId,
+                    start: toTime(phaseStart),
+                    end: toTime(phaseEnd),
+                    className: `waterfall-phase waterfall-${phase.key}`,
+                    title: [
+                        `${method} ${row.filename}`,
+                        `Status: ${status}`,
+                        `${phase.label}: ${formatMilliseconds(phase.value)}`,
+                        `Total: ${formatMilliseconds(row.duration)}`,
+                        row.entry.url || row.entry.path || ''
+                    ].join('\n')
+                });
+                cursor = phaseEnd;
+            });
+        });
+
+        state.groups.clear();
+        state.items.clear();
+        state.groups.add(groups);
+        state.items.add(items);
+
+        const maxEnd = Math.max(...rows.map((row) => (row.timestamp - minStart) + row.duration));
+        const storedView = networkWaterfallViewBySession.get(key);
+        if (storedView && Number.isFinite(storedView.startMs) && Number.isFinite(storedView.endMs)) {
+            const clampedStart = Math.max(0, Math.min(maxEnd, storedView.startMs));
+            const clampedEnd = Math.max(clampedStart + 20, Math.min(maxEnd + 200, storedView.endMs));
+            state.timeline.setWindow(toTime(clampedStart), toTime(clampedEnd), { animation: false });
+        } else {
+            state.timeline.setWindow(toTime(0), toTime(maxEnd + 200), { animation: false });
+        }
+        state.timeline.redraw();
+    }
+
     function updateNetworkLog(sessionId) {
         const card = document.querySelector(`.session-card[data-session-id="${sessionId}"]`);
         if (!card) return;
@@ -1240,6 +1472,7 @@
             .then(data => {
                 const entries = data.entries || [];
                 const count = entries.length;
+                networkLogEntriesBySession.set(String(sessionId), entries);
 
                 // Update count badge
                 if (countBadge) {
@@ -1252,6 +1485,7 @@
                             <td colspan="6">No network requests yet. Requests will appear here once playback starts.</td>
                         </tr>
                     `;
+                    updateNetworkWaterfall(card, sessionId);
                     return;
                 }
 
@@ -1264,6 +1498,7 @@
             })
             .catch(error => {
                 console.error('Failed to fetch network log:', error);
+                networkLogEntriesBySession.delete(String(sessionId));
                 if (tbody) {
                     tbody.innerHTML = `
                         <tr class="network-log-empty">
@@ -1271,10 +1506,12 @@
                         </tr>
                     `;
                 }
+                updateNetworkWaterfall(card, sessionId);
             });
     }
 
     function applyNetworkLogFilters(card) {
+        const sessionId = String(card?.dataset?.sessionId || '');
         const showFaulted = card.querySelector('[data-filter="show-faulted"]')?.checked ?? true;
         const showSuccessful = card.querySelector('[data-filter="show-successful"]')?.checked ?? true;
         const tbody = card.querySelector('[data-field="network_log_body"]');
@@ -1304,6 +1541,9 @@
             const emptyRow = tbody.querySelector('.network-log-empty');
             if (emptyRow) emptyRow.remove();
         }
+        if (sessionId) {
+            updateNetworkWaterfall(card, sessionId);
+        }
     }
 
     // Initialize on load
@@ -1324,6 +1564,7 @@
         formatDuration,
         applyCollapsibleState,
         updateNetworkLog,
-        applyNetworkLogFilters
+        applyNetworkLogFilters,
+        updateNetworkWaterfall
     };
 })();
