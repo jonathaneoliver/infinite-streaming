@@ -40,29 +40,29 @@ type SessionData map[string]interface{}
 
 // NetworkLogEntry represents a single network request/response in the session
 type NetworkLogEntry struct {
-	Timestamp        time.Time `json:"timestamp"`
-	Method           string    `json:"method"`
-	URL              string    `json:"url"`
-	Path             string    `json:"path"`
-	RequestKind      string    `json:"request_kind"` // "segment", "manifest", "master_manifest"
-	Status           int       `json:"status"`
-	BytesIn          int64     `json:"bytes_in"`
-	BytesOut         int64     `json:"bytes_out"`
-	ContentType      string    `json:"content_type"`
-	
+	Timestamp   time.Time `json:"timestamp"`
+	Method      string    `json:"method"`
+	URL         string    `json:"url"`
+	Path        string    `json:"path"`
+	RequestKind string    `json:"request_kind"` // "segment", "manifest", "master_manifest"
+	Status      int       `json:"status"`
+	BytesIn     int64     `json:"bytes_in"`
+	BytesOut    int64     `json:"bytes_out"`
+	ContentType string    `json:"content_type"`
+
 	// Timing phases (milliseconds)
-	DNSMs        float64 `json:"dns_ms"`
-	ConnectMs    float64 `json:"connect_ms"`
-	TLSMs        float64 `json:"tls_ms"`
-	TTFBMs       float64 `json:"ttfb_ms"`       // Time to first byte
-	TransferMs   float64 `json:"transfer_ms"`   // Downstream write+flush time to client
-	TotalMs      float64 `json:"total_ms"`
-	
+	DNSMs      float64 `json:"dns_ms"`
+	ConnectMs  float64 `json:"connect_ms"`
+	TLSMs      float64 `json:"tls_ms"`
+	TTFBMs     float64 `json:"ttfb_ms"`     // Time to first byte
+	TransferMs float64 `json:"transfer_ms"` // Downstream write+flush time to client
+	TotalMs    float64 `json:"total_ms"`
+
 	// Fault injection metadata
-	Faulted        bool   `json:"faulted"`
-	FaultType      string `json:"fault_type,omitempty"`
-	FaultAction    string `json:"fault_action,omitempty"`
-	FaultCategory  string `json:"fault_category,omitempty"` // "http", "socket", "transport", "corruption"
+	Faulted       bool   `json:"faulted"`
+	FaultType     string `json:"fault_type,omitempty"`
+	FaultAction   string `json:"fault_action,omitempty"`
+	FaultCategory string `json:"fault_category,omitempty"` // "http", "socket", "transport", "corruption"
 }
 
 // NetworkLogRingBuffer maintains a bounded list of recent network entries
@@ -85,7 +85,7 @@ func NewNetworkLogRingBuffer(maxSize int) *NetworkLogRingBuffer {
 func (rb *NetworkLogRingBuffer) Add(entry NetworkLogEntry) {
 	rb.mu.Lock()
 	defer rb.mu.Unlock()
-	
+
 	if len(rb.entries) < rb.maxSize {
 		rb.entries = append(rb.entries, entry)
 	} else {
@@ -98,18 +98,18 @@ func (rb *NetworkLogRingBuffer) Add(entry NetworkLogEntry) {
 func (rb *NetworkLogRingBuffer) GetAll() []NetworkLogEntry {
 	rb.mu.RLock()
 	defer rb.mu.RUnlock()
-	
+
 	if len(rb.entries) == 0 {
 		return []NetworkLogEntry{}
 	}
-	
+
 	// If buffer is not full, return in order
 	if len(rb.entries) < rb.maxSize {
 		result := make([]NetworkLogEntry, len(rb.entries))
 		copy(result, rb.entries)
 		return result
 	}
-	
+
 	// Buffer is full, reconstruct chronological order
 	result := make([]NetworkLogEntry, rb.maxSize)
 	copy(result, rb.entries[rb.index:])
@@ -118,22 +118,22 @@ func (rb *NetworkLogRingBuffer) GetAll() []NetworkLogEntry {
 }
 
 type App struct {
-	memcache     *memcache.Client
-	traffic      *TcTrafficManager
-	upstreamHost string
-	upstreamPort string
-	maxSessions  int
-	client       *http.Client
-	portMap      PortMapping
-	shapeMu      sync.Mutex
-	shapeLoops   map[int]context.CancelFunc
-	shapeStates  map[int]NftShapePattern
-	shapeApplyMu sync.Mutex
-	shapeApply   map[int]ShapeApplyState
-	faultMu      sync.Mutex
-	faultLoops   map[int]context.CancelFunc
-	networkLogsMu sync.RWMutex
-	networkLogs   map[string]*NetworkLogRingBuffer // sessionId -> ring buffer
+	memcache                 *memcache.Client
+	traffic                  *TcTrafficManager
+	upstreamHost             string
+	upstreamPort             string
+	maxSessions              int
+	client                   *http.Client
+	portMap                  PortMapping
+	shapeMu                  sync.Mutex
+	shapeLoops               map[int]context.CancelFunc
+	shapeStates              map[int]NftShapePattern
+	shapeApplyMu             sync.Mutex
+	shapeApply               map[int]ShapeApplyState
+	faultMu                  sync.Mutex
+	faultLoops               map[int]context.CancelFunc
+	networkLogsMu            sync.RWMutex
+	networkLogs              map[string]*NetworkLogRingBuffer // sessionId -> ring buffer
 	sessionsHub              *SessionEventHub
 	sessionsBroadcastMu      sync.Mutex
 	sessionsBroadcastPending bool
@@ -201,7 +201,6 @@ func (h *SessionEventHub) RemoveClient(id int) {
 		close(client.ch)
 	}
 }
-
 
 func (h *SessionEventHub) Broadcast(sessions []SessionData, revision uint64) {
 	h.mu.Lock()
@@ -780,6 +779,7 @@ func main() {
 	router.HandleFunc("/api/session/{id}", app.handleSession).Methods(http.MethodGet, http.MethodDelete)
 	router.HandleFunc("/api/session/{id}", app.handlePatchSession).Methods(http.MethodPatch)
 	router.HandleFunc("/api/session/{id}/network", app.handleGetNetworkLog).Methods(http.MethodGet)
+	router.HandleFunc("/api/external-ips", app.handleGetExternalIPs).Methods(http.MethodGet)
 	router.HandleFunc("/api/clear-sessions", app.handleClearSessions).Methods(http.MethodPost)
 	router.HandleFunc("/api/session-group/link", app.handleLinkSessions).Methods(http.MethodPost)
 	router.HandleFunc("/api/session-group/unlink", app.handleUnlinkSession).Methods(http.MethodPost)
@@ -1431,11 +1431,11 @@ func (a *App) handleSession(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) handleGetNetworkLog(w http.ResponseWriter, r *http.Request) {
 	id := mux.Vars(r)["id"]
-	
+
 	a.networkLogsMu.RLock()
 	ringBuffer, exists := a.networkLogs[id]
 	a.networkLogsMu.RUnlock()
-	
+
 	if !exists {
 		writeJSON(w, map[string]interface{}{
 			"session_id": id,
@@ -1443,12 +1443,67 @@ func (a *App) handleGetNetworkLog(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	
+
 	entries := ringBuffer.GetAll()
 	writeJSON(w, map[string]interface{}{
 		"session_id": id,
 		"entries":    entries,
 		"count":      len(entries),
+	})
+}
+
+func (a *App) handleGetExternalIPs(w http.ResponseWriter, r *http.Request) {
+	sessionList := a.getSessionList()
+
+	type ExternalIPEntry struct {
+		SessionID       string `json:"session_id"`
+		PlayerID        string `json:"player_id"`
+		OriginationIP   string `json:"origination_ip"`
+		OriginationTime string `json:"origination_time"`
+		LastRequestTime string `json:"last_request_time"`
+		IsExternal      bool   `json:"is_external"`
+		UserAgent       string `json:"user_agent,omitempty"`
+	}
+
+	var externalIPs []ExternalIPEntry
+	var allIPs []ExternalIPEntry
+
+	for _, session := range sessionList {
+		originIP := getString(session, "origination_ip")
+		if originIP == "" {
+			continue
+		}
+
+		entry := ExternalIPEntry{
+			SessionID:       getString(session, "session_id"),
+			PlayerID:        getString(session, "player_id"),
+			OriginationIP:   originIP,
+			OriginationTime: getString(session, "origination_time"),
+			LastRequestTime: getString(session, "last_request"),
+			IsExternal:      getBool(session, "is_external_ip"),
+			UserAgent:       getString(session, "user_agent"),
+		}
+
+		allIPs = append(allIPs, entry)
+		if entry.IsExternal {
+			externalIPs = append(externalIPs, entry)
+		}
+	}
+
+	// Check for filter parameter
+	filter := r.URL.Query().Get("filter")
+	var result []ExternalIPEntry
+
+	if filter == "external" {
+		result = externalIPs
+	} else {
+		result = allIPs
+	}
+
+	writeJSON(w, map[string]interface{}{
+		"entries":       result,
+		"total":         len(result),
+		"external_only": filter == "external",
 	})
 }
 
@@ -1902,10 +1957,10 @@ func (a *App) runShapePatternLoop(ctx context.Context, port int, steps []NftShap
 		}
 		// netem is applied via applyShapeIfChanged above.
 		a.updateSessionsByPort(port, map[string]interface{}{
-			"nftables_pattern_enabled": true,
-			"nftables_pattern_steps":   steps,
-			"nftables_pattern_step":    stepIndex + 1,
-			"nftables_pattern_step_runtime": stepIndex + 1,
+			"nftables_pattern_enabled":           true,
+			"nftables_pattern_steps":             steps,
+			"nftables_pattern_step":              stepIndex + 1,
+			"nftables_pattern_step_runtime":      stepIndex + 1,
 			"nftables_pattern_rate_runtime_mbps": step.RateMbps,
 		})
 		wait := time.Duration(step.DurationSeconds * float64(time.Second))
@@ -3124,11 +3179,33 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 	sessionData["last_request"] = nowISO()
 	sessionData["last_request_url"] = filename
 	sessionData["user_agent"] = r.UserAgent()
-	sessionData["player_ip"] = remoteIP(r.RemoteAddr)
+
+	// Extract client IP considering X-Forwarded-For
+	clientIP := extractClientIP(r.RemoteAddr, r.Header.Get("X-Forwarded-For"))
+	sessionData["player_ip"] = clientIP
+	sessionData["x_forwarded_for"] = r.Header.Get("X-Forwarded-For")
+
+	// Track origination IP on first request
+	if _, hasOriginIP := sessionData["origination_ip"]; !hasOriginIP {
+		sessionData["origination_ip"] = clientIP
+		sessionData["origination_time"] = nowISO()
+		sessionData["is_external_ip"] = isExternalIP(clientIP)
+
+		// Log external IP access
+		if isExternalIP(clientIP) {
+			log.Printf("[GO-PROXY][EXTERNAL-IP] session_id=%s player_id=%s ip=%s user_agent=%q",
+				sessionNumber,
+				getString(sessionData, "player_id"),
+				clientIP,
+				r.UserAgent(),
+			)
+		}
+	}
+
 	sessionData["x_forwarded_port"] = internalPort
 	sessionData["x_forwarded_port_external"] = externalPort
 	log.Printf(
-		"[GO-PROXY][REQUEST] method=%s host=%s port=%s path=%s query=%s session_id=%s player_id_q=%s player_id_h=%s playback_session_h=%s user_agent=%q",
+		"[GO-PROXY][REQUEST] method=%s host=%s port=%s path=%s query=%s session_id=%s player_id_q=%s player_id_h=%s playback_session_h=%s client_ip=%s user_agent=%q",
 		r.Method,
 		hostWithoutPort(r.Host),
 		hostPortOrDefault(r.Host, ""),
@@ -3138,6 +3215,7 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 		r.URL.Query().Get("player_id"),
 		r.Header.Get("Player-ID"),
 		r.Header.Get("X-Playback-Session-Id"),
+		clientIP,
 		r.UserAgent(),
 	)
 	requestBytes := int64(0)
@@ -3248,20 +3326,20 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 				a.saveSessionList(sessionList)
 				return
 			}
-				if contentType != "" {
-					w.Header().Set("Content-Type", contentType)
-				}
-				w.Header().Set("X-Session-ID", getString(sessionData, "session_number"))
-				w.WriteHeader(http.StatusOK)
-				bytesOut, transferMs, copyErr := streamToClientMeasured(w, resp.Body, true)
-				if copyErr != nil && !errors.Is(copyErr, io.EOF) {
-					log.Printf("segment_corrupted write error session_id=%s err=%v", getString(sessionData, "session_id"), copyErr)
-				}
-				netEntry.TransferMs = transferMs
-				mergeTotalTiming(netEntry)
-				actionTaken = "segment_corrupted_zero_fill"
-				bumpFaultCounter(sessionData, failureType)
-				logFaultEvent(sessionData, externalPort, failureType, requestKind, actionTaken)
+			if contentType != "" {
+				w.Header().Set("Content-Type", contentType)
+			}
+			w.Header().Set("X-Session-ID", getString(sessionData, "session_number"))
+			w.WriteHeader(http.StatusOK)
+			bytesOut, transferMs, copyErr := streamToClientMeasured(w, resp.Body, true)
+			if copyErr != nil && !errors.Is(copyErr, io.EOF) {
+				log.Printf("segment_corrupted write error session_id=%s err=%v", getString(sessionData, "session_id"), copyErr)
+			}
+			netEntry.TransferMs = transferMs
+			mergeTotalTiming(netEntry)
+			actionTaken = "segment_corrupted_zero_fill"
+			bumpFaultCounter(sessionData, failureType)
+			logFaultEvent(sessionData, externalPort, failureType, requestKind, actionTaken)
 			updateSessionTraffic(sessionData, requestBytes, bytesOut)
 			// Log network entry for corruption (has timing + bytes transferred, but zeroed)
 			sessionID := getString(sessionData, "session_id")
@@ -3411,9 +3489,9 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", contentType)
 	}
 	w.Header().Set("X-Session-ID", getString(sessionData, "session_number"))
-	
+
 	var bytesOut int64
-	
+
 	// Apply content manipulation for master playlists
 	if isMasterManifest && shouldApplyContentManipulation(sessionData) {
 		bodyBytes, err := io.ReadAll(resp.Body)
@@ -3422,14 +3500,14 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
-		
+
 		modifiedBody, err := a.applyContentManipulation(bodyBytes, sessionData, contentType)
 		if err != nil {
 			log.Printf("ERROR: Failed to manipulate master playlist: %v", err)
 			// Fall back to original content
 			modifiedBody = bodyBytes
 		}
-		
+
 		w.Header().Set("Content-Length", strconv.Itoa(len(modifiedBody)))
 		w.WriteHeader(resp.StatusCode)
 		writer := bufio.NewWriter(w)
@@ -3456,7 +3534,7 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 		bytesOut, _ = io.Copy(writer, resp.Body)
 		_ = writer.Flush()
 	}
-	
+
 	updateSessionTraffic(sessionData, requestBytes, bytesOut)
 	// Log successful network entry
 	sessionID := getString(sessionData, "session_id")
@@ -3484,17 +3562,17 @@ func shouldApplyContentManipulation(session SessionData) bool {
 func (a *App) applyContentManipulation(body []byte, session SessionData, contentType string) ([]byte, error) {
 	stripCodecs := getBool(session, "content_strip_codecs")
 	allowedVariants := getStringSlice(session, "content_allowed_variants")
-	
+
 	// Handle HLS master playlists
 	if strings.Contains(strings.ToLower(contentType), "mpegurl") || strings.Contains(strings.ToLower(contentType), "m3u8") {
 		return manipulateHLSMaster(body, stripCodecs, allowedVariants)
 	}
-	
+
 	// Handle DASH manifests
 	if strings.Contains(strings.ToLower(contentType), "dash") || strings.Contains(strings.ToLower(contentType), "mpd") {
 		return manipulateDASHManifest(body, stripCodecs, allowedVariants)
 	}
-	
+
 	return body, nil
 }
 
@@ -3504,35 +3582,35 @@ func manipulateHLSMaster(body []byte, stripCodecs bool, allowedVariants []string
 	if err != nil {
 		return nil, fmt.Errorf("failed to decode HLS playlist: %w", err)
 	}
-	
+
 	if listType != m3u8.MASTER {
 		// Not a master playlist, return unchanged
 		return body, nil
 	}
-	
+
 	master := playlist.(*m3u8.MasterPlaylist)
 	modified := false
-	
+
 	// Filter variants if allowedVariants is specified
 	if len(allowedVariants) > 0 {
 		allowedMap := make(map[string]bool)
 		for _, v := range allowedVariants {
 			allowedMap[v] = true
 		}
-		
+
 		filteredVariants := make([]*m3u8.Variant, 0)
 		for _, variant := range master.Variants {
 			if variant != nil && allowedMap[variant.URI] {
 				filteredVariants = append(filteredVariants, variant)
 			}
 		}
-		
+
 		if len(filteredVariants) != len(master.Variants) {
 			master.Variants = filteredVariants
 			modified = true
 		}
 	}
-	
+
 	// Strip codecs if requested
 	if stripCodecs {
 		hasCodecs := false
@@ -3546,18 +3624,18 @@ func manipulateHLSMaster(body []byte, stripCodecs bool, allowedVariants []string
 			modified = true
 		}
 	}
-	
+
 	if !modified {
 		return body, nil
 	}
-	
+
 	// Encode the modified playlist
 	var buf bytes.Buffer
 	_, err = master.Encode().WriteTo(&buf)
 	if err != nil {
 		return nil, fmt.Errorf("failed to encode HLS playlist: %w", err)
 	}
-	
+
 	return buf.Bytes(), nil
 }
 
@@ -3572,8 +3650,8 @@ func manipulateDASHManifest(body []byte, stripCodecs bool, allowedVariants []str
 	// 2. Filter AdaptationSet/Representation elements based on allowedVariants
 	// 3. Remove codecs attributes from Representation elements if stripCodecs is true
 	// 4. Re-serialize and return the modified XML
-	_ = stripCodecs      // Silence unused parameter warning
-	_ = allowedVariants  // Silence unused parameter warning
+	_ = stripCodecs     // Silence unused parameter warning
+	_ = allowedVariants // Silence unused parameter warning
 	log.Printf("[GO-PROXY][CONTENT] DASH manifest manipulation not yet implemented")
 	return body, nil
 }
@@ -3734,14 +3812,6 @@ func (a *App) getContentType(target string) (string, bool, bool, bool, []Playlis
 	return contentType, false, false, true, nil
 }
 
-
-
-
-
-
-
-
-
 func (a *App) trackPortThroughput() {
 	cache := map[int]struct {
 		bytes     int64
@@ -3891,15 +3961,15 @@ func (a *App) getOrCreateNetworkLog(sessionID string) *NetworkLogRingBuffer {
 		return rb
 	}
 	a.networkLogsMu.RUnlock()
-	
+
 	a.networkLogsMu.Lock()
 	defer a.networkLogsMu.Unlock()
-	
+
 	// Double-check after acquiring write lock
 	if rb, exists := a.networkLogs[sessionID]; exists {
 		return rb
 	}
-	
+
 	// Keep enough requests to support a rolling 5-minute client view under load.
 	rb := NewNetworkLogRingBuffer(5000)
 	a.networkLogs[sessionID] = rb
@@ -3981,15 +4051,15 @@ func streamToClientMeasured(w http.ResponseWriter, src io.Reader, zeroFill bool)
 // doRequestWithTracing executes an HTTP request with timing trace and returns the response and timings
 func (a *App) doRequestWithTracing(ctx context.Context, req *http.Request) (*http.Response, *NetworkLogEntry, error) {
 	entry := &NetworkLogEntry{
-		Timestamp:   time.Now(),
-		Method:      req.Method,
-		URL:         req.URL.String(),
-		Path:        req.URL.Path,
+		Timestamp: time.Now(),
+		Method:    req.Method,
+		URL:       req.URL.String(),
+		Path:      req.URL.Path,
 	}
-	
+
 	var start, dnsStart, connectStart, tlsStart time.Time
 	start = time.Now()
-	
+
 	trace := &httptrace.ClientTrace{
 		DNSStart: func(_ httptrace.DNSStartInfo) {
 			dnsStart = time.Now()
@@ -4020,21 +4090,21 @@ func (a *App) doRequestWithTracing(ctx context.Context, req *http.Request) (*htt
 			entry.TTFBMs = float64(time.Since(start).Microseconds()) / 1000.0
 		},
 	}
-	
+
 	req = req.WithContext(httptrace.WithClientTrace(ctx, trace))
-	
+
 	resp, err := a.client.Do(req)
 	if err != nil {
 		entry.TotalMs = float64(time.Since(start).Microseconds()) / 1000.0
 		return nil, entry, err
 	}
-	
+
 	// If we got first byte, calculate transfer time after body is read
 	// Note: We'll update TransferMs after body is copied
 	entry.TotalMs = float64(time.Since(start).Microseconds()) / 1000.0
 	entry.Status = resp.StatusCode
 	entry.ContentType = resp.Header.Get("Content-Type")
-	
+
 	return resp, entry, nil
 }
 
@@ -4067,26 +4137,26 @@ func extractPathFromURL(urlStr string) string {
 // categorizeFaultType returns the category for a given fault type
 func categorizeFaultType(faultType string) string {
 	faultType = strings.ToLower(strings.TrimSpace(faultType))
-	
+
 	if faultType == "" || faultType == "none" {
 		return ""
 	}
-	
+
 	// Socket faults
 	if strings.HasPrefix(faultType, "request_") {
 		return "socket"
 	}
-	
+
 	// Corruption
 	if faultType == "corrupted" {
 		return "corruption"
 	}
-	
+
 	// Transport faults
 	if strings.HasPrefix(faultType, "transport_") {
 		return "transport"
 	}
-	
+
 	// HTTP faults (404, 500, etc.)
 	return "http"
 }
@@ -4745,6 +4815,43 @@ func remoteIP(addr string) string {
 		return host
 	}
 	return addr
+}
+
+// extractClientIP extracts the client IP considering X-Forwarded-For header
+func extractClientIP(remoteAddr, xForwardedFor string) string {
+	clientIP := ""
+	// First, check X-Forwarded-For header (takes precedence)
+	if xForwardedFor != "" {
+		parts := strings.Split(xForwardedFor, ",")
+		if len(parts) > 0 {
+			clientIP = strings.TrimSpace(parts[0])
+		}
+	}
+	// Fallback to RemoteAddr
+	if clientIP == "" {
+		host, _, err := net.SplitHostPort(remoteAddr)
+		if err == nil {
+			clientIP = host
+		} else {
+			clientIP = remoteAddr
+		}
+	}
+	return clientIP
+}
+
+// isExternalIP determines if an IP address is external (not private, loopback, etc.)
+func isExternalIP(ip string) bool {
+	parsed := net.ParseIP(strings.TrimSpace(ip))
+	if parsed == nil {
+		return false
+	}
+	if parsed.IsLoopback() || parsed.IsUnspecified() || parsed.IsLinkLocalUnicast() || parsed.IsLinkLocalMulticast() {
+		return false
+	}
+	if parsed.IsPrivate() {
+		return false
+	}
+	return true
 }
 
 func pathBase(path string) string {
