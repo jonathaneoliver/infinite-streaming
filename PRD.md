@@ -140,6 +140,12 @@ Many platforms already expose their own failure tools (player debug features, br
 - **Rate limit application**: `/api/nftables/shape/{port}` applies user changes; per‑request shaping only re‑applies when the desired config changes.
 - **Pattern shaping**: the pattern loop updates the port only when a step’s target rate/delay/loss changes. Runtime fields (`nftables_pattern_step_runtime`, `nftables_pattern_rate_runtime_mbps`) are written back to session data for UI charts.
 - **Shaping cache**: the Go proxy keeps a per‑port cache of the last applied rate/delay/loss to avoid redundant `tc`/netem operations.
+- **Wire metrics sampling**: throughput sampler runs every 100ms using per-port `tc` class counters.
+- **Wire sustained (18s)**: `mbps_wire_sustained`/`mbps_wire_sustained_18s` are wall‑time sustained rates over the last 18s (bytes / elapsed time).
+- **Wire active (18s)**: `mbps_wire_active` divides active bytes by active seconds only.
+- **Short windows**: `mbps_wire_sustained_6s`, `mbps_wire_sustained_1s`, and `mbps_wire_active_6s` are computed from 6s/1s sample windows.
+- **Wire throughput**: `mbps_wire_throughput` is defined as max(`mbps_wire_active_1s`) over a rolling 6s window.
+- **Port reconciliation**: session throughput hydration chooses the freshest sample across external and internal port keys.
 
 ## 8) Encoding & Packaging (Functional Requirements)
 - `generate_abr/create_abr_ladder.sh` builds ladders for H.264/H.265/AV1.

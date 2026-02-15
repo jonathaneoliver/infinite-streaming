@@ -260,6 +260,14 @@ See `PRD.md` for the full list.
 - Server‑authoritative session updates with control‑revision conflict handling and SSE session stream.
 - Session grouping controls (group/ungroup/merge) that propagate failure settings and network shaping.
 
+### Wire metric implementation notes
+- Sampling cadence is 100ms and metrics are computed from `tc` class counters per session port.
+- `mbps_wire_sustained` and `mbps_wire_sustained_18s` are equivalent 18s wall‑time sustained rates: total bytes / wall time in the window.
+- `mbps_wire_active` reports active‑only throughput for the 18s window (idle periods excluded).
+- `mbps_wire_sustained_6s` and `mbps_wire_sustained_1s` are wall‑time sustained variants for shorter windows.
+- `mbps_wire_throughput` is the rolling max over the last 6 seconds of `mbps_wire_active_1s`.
+- Session hydration selects the freshest throughput sample across external/internal session ports to avoid stale values.
+
 ## Why unified error injection?
 Many environments already provide failure simulation (player debug tools, OS/Browser dev tools, routers, or lab network appliances). InfiniteStream still ships a unified error injection layer because it:
 - **Keeps tests deterministic** across players and environments (same failure schedule, same stream).
