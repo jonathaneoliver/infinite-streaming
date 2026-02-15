@@ -508,7 +508,7 @@
         const marginRaw = Number(session.nftables_pattern_margin_pct);
         const marginPct = [0, 10, 25, 50].includes(marginRaw) ? marginRaw : 0;
         const chartMaxRaw = String(session.ui_bitrate_axis_max || '').toLowerCase();
-        const chartMaxMode = ['auto', '5', '10', '20', '40'].includes(chartMaxRaw) ? chartMaxRaw : 'auto';
+        const chartMaxMode = ['auto', '5', '10', '20', '30', '40', '50'].includes(chartMaxRaw) ? chartMaxRaw : 'auto';
         const transportFaultRaw = String(session.transport_failure_type || session.transport_fault_type || 'none').toLowerCase();
         const transportFaultType = ['none', 'drop', 'reject'].includes(transportFaultRaw) ? transportFaultRaw : 'none';
         const transportMode = transportModeFromSession(session);
@@ -568,6 +568,31 @@
                             <div class="session-item"><span class="label">Master Manifest URL</span><span class="value" data-field="session_master_manifest_url">${session.master_manifest_url || '—'}</span></div>
                             <div class="session-item"><span class="label">Last Request URL</span><span class="value" data-field="session_last_request_url">${session.last_request_url || '—'}</span></div>
                             <div class="session-item"><span class="label">Measured Mbps</span><span class="value" data-field="session_measured_mbps">${session.measured_mbps || '—'}</span></div>
+                            <div class="session-item"><span class="label">mbps_in</span><span class="value" data-field="session_mbps_in">${session.mbps_in ?? '—'}</span></div>
+                            <div class="session-item"><span class="label">mbps_out</span><span class="value" data-field="session_mbps_out">${session.mbps_out ?? '—'}</span></div>
+                            <div class="session-item"><span class="label">mbps_in_avg</span><span class="value" data-field="session_mbps_in_avg">${session.mbps_in_avg ?? '—'}</span></div>
+                            <div class="session-item"><span class="label">mbps_in_1s</span><span class="value" data-field="session_mbps_in_1s">${session.mbps_in_1s ?? '—'}</span></div>
+                            <div class="session-item"><span class="label">mbps_in_active</span><span class="value" data-field="session_mbps_in_active">${session.mbps_in_active ?? '—'}</span></div>
+                            <div class="session-item"><span class="label">mbps_estimate</span><span class="value" data-field="session_mbps_estimate">${session.mbps_estimate ?? '—'}</span></div>
+                            <div class="session-item"><span class="label">mbps_estimate_1s</span><span class="value" data-field="session_mbps_estimate_1s">${session.mbps_estimate_1s ?? '—'}</span></div>
+                            <div class="session-item"><span class="label">mbps_estimate_10s</span><span class="value" data-field="session_mbps_estimate_10s">${session.mbps_estimate_10s ?? '—'}</span></div>
+                            <div class="session-item"><span class="label">mbps_estimate_p25</span><span class="value" data-field="session_mbps_estimate_p25">${session.mbps_estimate_p25 ?? '—'}</span></div>
+                            <div class="session-item"><span class="label">mbps_segment_active</span><span class="value" data-field="session_mbps_segment_active">${session.mbps_segment_active ?? '—'}</span></div>
+                            <div class="session-item"><span class="label">bytes_in_total</span><span class="value" data-field="session_bytes_in_total">${session.bytes_in_total ?? '—'}</span></div>
+                            <div class="session-item"><span class="label">bytes_out_total</span><span class="value" data-field="session_bytes_out_total">${session.bytes_out_total ?? '—'}</span></div>
+                            <div class="session-item"><span class="label">bytes_in_last</span><span class="value" data-field="session_bytes_in_last">${session.bytes_in_last ?? '—'}</span></div>
+                            <div class="session-item"><span class="label">bytes_out_last</span><span class="value" data-field="session_bytes_out_last">${session.bytes_out_last ?? '—'}</span></div>
+                            <div class="session-item"><span class="label">mbps_estimate_completed_bytes</span><span class="value" data-field="session_mbps_estimate_completed_bytes">${session.mbps_estimate_completed_bytes ?? '—'}</span></div>
+                            <div class="session-item"><span class="label">measurement_window_io</span><span class="value" data-field="session_measurement_window_io">${session.measurement_window_io ?? '—'}</span></div>
+                            <div class="session-item"><span class="label">measurement_window_io_1s</span><span class="value" data-field="session_measurement_window_io_1s">${session.measurement_window_io_1s ?? '—'}</span></div>
+                            <div class="session-item"><span class="label">measurement_window_active</span><span class="value" data-field="session_measurement_window_active">${session.measurement_window_active ?? '—'}</span></div>
+                            <div class="session-item"><span class="label">measurement_window_segment_active</span><span class="value" data-field="session_measurement_window_segment_active">${session.measurement_window_segment_active ?? '—'}</span></div>
+                            <div class="session-item"><span class="label">mbps_wire_sustained</span><span class="value" data-field="session_mbps_wire_sustained">${session.mbps_wire_sustained ?? '—'}</span></div>
+                            <div class="session-item"><span class="label">mbps_wire_active</span><span class="value" data-field="session_mbps_wire_active">${session.mbps_wire_active ?? '—'}</span></div>
+                            <div class="session-item"><span class="label">mbps_wire_sustained_6s</span><span class="value" data-field="session_mbps_wire_sustained_6s">${session.mbps_wire_sustained_6s ?? '—'}</span></div>
+                            <div class="session-item"><span class="label">mbps_wire_active_6s</span><span class="value" data-field="session_mbps_wire_active_6s">${session.mbps_wire_active_6s ?? '—'}</span></div>
+                            <div class="session-item"><span class="label">mbps_wire_sustained_1s</span><span class="value" data-field="session_mbps_wire_sustained_1s">${session.mbps_wire_sustained_1s ?? '—'}</span></div>
+                            <div class="session-item"><span class="label">wire_throughput</span><span class="value" data-field="session_mbps_wire_throughput">${session.mbps_wire_throughput ?? '—'}</span></div>
                         </div>
                     </div>
                 </div>
@@ -796,7 +821,7 @@
                                 </div>
                                 <div class="range-row${usePattern ? ' range-row-disabled' : ''}" data-field="shaping_throughput_row">
                                     <label>Throughput (Mbps)</label>
-                                    <input type="range" min="0" max="30" step="0.1" data-field="shaping_throughput_mbps" value="${session.nftables_bandwidth_mbps || 0}" ${usePattern ? 'disabled' : ''}>
+                                    <input type="range" min="0" max="50" step="0.1" data-field="shaping_throughput_mbps" value="${session.nftables_bandwidth_mbps || 0}" ${usePattern ? 'disabled' : ''}>
                                     <span class="range-value">${session.nftables_bandwidth_mbps || 0}</span>
                                 </div>
                             </div>
@@ -916,8 +941,16 @@
                                     <span>20 Mbps</span>
                                 </label>
                                 <label class="shape-pattern-mode">
+                                    <input type="radio" name="bitrate_chart_max_mbps_${sessionId}" value="30" data-field="bitrate_chart_max_mbps" ${chartMaxMode === '30' ? 'checked' : ''}>
+                                    <span>30 Mbps</span>
+                                </label>
+                                <label class="shape-pattern-mode">
                                     <input type="radio" name="bitrate_chart_max_mbps_${sessionId}" value="40" data-field="bitrate_chart_max_mbps" ${chartMaxMode === '40' ? 'checked' : ''}>
                                     <span>40 Mbps</span>
+                                </label>
+                                <label class="shape-pattern-mode">
+                                    <input type="radio" name="bitrate_chart_max_mbps_${sessionId}" value="50" data-field="bitrate_chart_max_mbps" ${chartMaxMode === '50' ? 'checked' : ''}>
+                                    <span>50 Mbps</span>
                                 </label>
                             </div>
                         </div>

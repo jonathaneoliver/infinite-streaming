@@ -900,7 +900,7 @@
 
         function normalizeBitrateAxisMaxMode(value) {
             const normalized = String(value || 'auto').toLowerCase();
-            return ['auto', '5', '10', '20', '40'].includes(normalized) ? normalized : 'auto';
+            return ['auto', '5', '10', '20', '30', '40', '50'].includes(normalized) ? normalized : 'auto';
         }
 
         function createTestingPlayerId() {
@@ -2877,6 +2877,45 @@
         }
 
         function findSessionByPlayerId(playerId, signal) {
+            const selectSessionForPlayer = (sessions, id) => {
+                const list = Array.isArray(sessions) ? sessions : [];
+                if (!id || !list.length) return null;
+
+                if (currentSessionId) {
+                    const sticky = list.find(item => String(item.session_id) === String(currentSessionId));
+                    if (sticky) return sticky;
+                }
+
+                const matches = list.filter(item => item.player_id === id);
+                if (!matches.length) return null;
+                if (matches.length === 1) return matches[0];
+
+                const score = (session) => {
+                    const lastRequest = Date.parse(session.last_request || '') || 0;
+                    const firstRequest = Date.parse(session.first_request_time || '') || 0;
+                    const wireScore =
+                        Number.isFinite(Number(session.mbps_wire_sustained)) ||
+                        Number.isFinite(Number(session.mbps_wire_active)) ||
+                        Number.isFinite(Number(session.mbps_wire_sustained_6s)) ||
+                        Number.isFinite(Number(session.mbps_wire_active_6s)) ||
+                        Number.isFinite(Number(session.mbps_wire_sustained_1s)) ||
+                        Number.isFinite(Number(session.mbps_wire_active_1s)) ||
+                        Number.isFinite(Number(session.mbps_wire_throughput))
+                            ? 1
+                            : 0;
+                    return { wireScore, lastRequest, firstRequest };
+                };
+
+                matches.sort((a, b) => {
+                    const sa = score(a);
+                    const sb = score(b);
+                    if (sb.wireScore !== sa.wireScore) return sb.wireScore - sa.wireScore;
+                    if (sb.lastRequest !== sa.lastRequest) return sb.lastRequest - sa.lastRequest;
+                    return sb.firstRequest - sa.firstRequest;
+                });
+                return matches[0];
+            };
+
             return fetch('/api/sessions', { cache: 'no-store', signal })
                 .then(async response => {
                     if (!response.ok) {
@@ -2892,7 +2931,7 @@
                 })
                 .then(sessions => {
                     lastSessionsList = Array.isArray(sessions) ? sessions : [];
-                    return sessions.find(session => session.player_id === playerId);
+                    return selectSessionForPlayer(lastSessionsList, playerId);
                 });
         }
 
@@ -2960,6 +2999,12 @@
                 if (!Number.isFinite(numeric)) return String(value);
                 return `${numeric.toFixed(3)}s`;
             };
+            const formatCounter = (value) => {
+                if (value === null || value === undefined || value === '') return '—';
+                const numeric = Number(value);
+                if (!Number.isFinite(numeric)) return String(value);
+                return Math.round(numeric).toLocaleString();
+            };
             const portDisplay = session.x_forwarded_port_external || session.x_forwarded_port || '—';
             setText('[data-field="session_user_agent"]', session.user_agent || '—');
             setText('[data-field="session_player_ip"]', session.player_ip || '—');
@@ -2970,7 +3015,32 @@
             setText('[data-field="session_manifest_url"]', session.manifest_url || '—');
             setText('[data-field="session_master_manifest_url"]', session.master_manifest_url || '—');
             setText('[data-field="session_last_request_url"]', session.last_request_url || '—');
-            setText('[data-field="session_measured_mbps"]', session.measured_mbps || '—');
+            setText('[data-field="session_measured_mbps"]', formatMetricNumber(session.measured_mbps, ' Mbps'));
+            setText('[data-field="session_mbps_in"]', formatMetricNumber(session.mbps_in, ' Mbps'));
+            setText('[data-field="session_mbps_out"]', formatMetricNumber(session.mbps_out, ' Mbps'));
+            setText('[data-field="session_mbps_in_avg"]', formatMetricNumber(session.mbps_in_avg, ' Mbps'));
+            setText('[data-field="session_mbps_in_1s"]', formatMetricNumber(session.mbps_in_1s, ' Mbps'));
+            setText('[data-field="session_mbps_in_active"]', formatMetricNumber(session.mbps_in_active, ' Mbps'));
+            setText('[data-field="session_mbps_estimate"]', formatMetricNumber(session.mbps_estimate, ' Mbps'));
+            setText('[data-field="session_mbps_estimate_1s"]', formatMetricNumber(session.mbps_estimate_1s, ' Mbps'));
+            setText('[data-field="session_mbps_estimate_10s"]', formatMetricNumber(session.mbps_estimate_10s, ' Mbps'));
+            setText('[data-field="session_mbps_estimate_p25"]', formatMetricNumber(session.mbps_estimate_p25, ' Mbps'));
+            setText('[data-field="session_mbps_segment_active"]', formatMetricNumber(session.mbps_segment_active, ' Mbps'));
+            setText('[data-field="session_bytes_in_total"]', formatCounter(session.bytes_in_total));
+            setText('[data-field="session_bytes_out_total"]', formatCounter(session.bytes_out_total));
+            setText('[data-field="session_bytes_in_last"]', formatCounter(session.bytes_in_last));
+            setText('[data-field="session_bytes_out_last"]', formatCounter(session.bytes_out_last));
+            setText('[data-field="session_mbps_estimate_completed_bytes"]', formatCounter(session.mbps_estimate_completed_bytes));
+            setText('[data-field="session_measurement_window_io"]', formatMetricNumber(session.measurement_window_io, 's'));
+            setText('[data-field="session_measurement_window_io_1s"]', formatMetricNumber(session.measurement_window_io_1s, 's'));
+            setText('[data-field="session_measurement_window_active"]', formatMetricNumber(session.measurement_window_active, 's'));
+            setText('[data-field="session_measurement_window_segment_active"]', formatMetricNumber(session.measurement_window_segment_active, 's'));
+            setText('[data-field="session_mbps_wire_sustained"]', formatMetricNumber(session.mbps_wire_sustained, ' Mbps'));
+            setText('[data-field="session_mbps_wire_active"]', formatMetricNumber(session.mbps_wire_active, ' Mbps'));
+            setText('[data-field="session_mbps_wire_sustained_6s"]', formatMetricNumber(session.mbps_wire_sustained_6s, ' Mbps'));
+            setText('[data-field="session_mbps_wire_active_6s"]', formatMetricNumber(session.mbps_wire_active_6s, ' Mbps'));
+            setText('[data-field="session_mbps_wire_sustained_1s"]', formatMetricNumber(session.mbps_wire_sustained_1s, ' Mbps'));
+            setText('[data-field="session_mbps_wire_throughput"]', formatMetricNumber(session.mbps_wire_throughput, ' Mbps'));
             const masterCount = session.master_manifest_requests_count || 0;
             const manifestCount = session.manifest_requests_count || 0;
             const segmentCount = session.segments_count || 0;
@@ -3006,10 +3076,12 @@
         function pushBandwidthSample(session) {
             const now = Date.now();
             const windowMs = 5 * 60 * 1000;
-            const actualRaw = session.mbps_out_avg ?? session.mbps_out;
-            const actual = Number.isFinite(Number(actualRaw)) ? Number(actualRaw) : null;
-            const actual1s = Number.isFinite(Number(session.mbps_out_1s)) ? Number(session.mbps_out_1s) : null;
-            const active = Number.isFinite(Number(session.mbps_out_active)) ? Number(session.mbps_out_active) : null;
+            const wireSustained = Number.isFinite(Number(session.mbps_wire_sustained)) ? Number(session.mbps_wire_sustained) : null;
+            const wireActive = Number.isFinite(Number(session.mbps_wire_active)) ? Number(session.mbps_wire_active) : null;
+            const wireSustained6s = Number.isFinite(Number(session.mbps_wire_sustained_6s)) ? Number(session.mbps_wire_sustained_6s) : null;
+            const wireActive6s = Number.isFinite(Number(session.mbps_wire_active_6s)) ? Number(session.mbps_wire_active_6s) : null;
+            const wireSustained1s = Number.isFinite(Number(session.mbps_wire_sustained_1s)) ? Number(session.mbps_wire_sustained_1s) : null;
+            const wireThroughput = Number.isFinite(Number(session.mbps_wire_throughput)) ? Number(session.mbps_wire_throughput) : null;
             let bufferDepth = null;
             if (video && video.buffered && video.buffered.length > 0) {
                 const current = Number(video.currentTime || 0);
@@ -3095,7 +3167,7 @@
                     target = 0;
                 }
             }
-            series.push({ ts: now, actual, actual1s, active, bufferDepth, playerEstimate, currentRendition, target });
+            series.push({ ts: now, wireSustained, wireActive, wireSustained6s, wireActive6s, wireSustained1s, wireThroughput, bufferDepth, playerEstimate, currentRendition, target });
             const cutoff = now - windowMs;
             const filtered = series.filter(point => point.ts >= cutoff);
             bandwidthHistory.set(key, filtered);
@@ -3116,22 +3188,41 @@
                 .filter(point => point.ts >= windowStart)
                 .map(point => ({
                     x: (point.ts - windowStart) / 1000,
-                    actual: point.actual,
-                    actual1s: point.actual1s,
-                    active: point.active,
+                    wireSustained: point.wireSustained,
+                    wireActive: point.wireActive,
+                    wireSustained6s: point.wireSustained6s,
+                    wireActive6s: point.wireActive6s,
+                    wireSustained1s: point.wireSustained1s,
+                    wireThroughput: point.wireThroughput,
                     bufferDepth: point.bufferDepth,
                     playerEstimate: point.playerEstimate,
                     currentRendition: point.currentRendition,
                     target: point.target
                 }));
-            const actualData = points.map(point => ({ x: point.x, y: point.actual }));
-            const actual1sData = points.map(point => ({ x: point.x, y: point.actual1s }));
-            const activeData = points.map(point => ({ x: point.x, y: point.active }));
+            const wireSustainedData = points.map(point => ({ x: point.x, y: point.wireSustained }));
+            const wireActiveData = points.map(point => ({ x: point.x, y: point.wireActive }));
+            const wireSustained6sData = points.map(point => ({ x: point.x, y: point.wireSustained6s }));
+            const wireActive6sData = points.map(point => ({ x: point.x, y: point.wireActive6s }));
+            const wireSustained1sData = points.map(point => ({ x: point.x, y: point.wireSustained1s }));
+            const wireThroughputData = points.map(point => ({ x: point.x, y: point.wireThroughput }));
             const bufferDepthData = points.map(point => ({ x: point.x, y: Number.isFinite(point.bufferDepth) ? point.bufferDepth : null }));
             const estimateData = points.map(point => ({ x: point.x, y: point.playerEstimate || null }));
             const renditionData = points.map(point => ({ x: point.x, y: point.currentRendition || null }));
             const targetData = points.map(point => ({ x: point.x, y: point.target }));
             const visibility = bandwidthVisibility.get(sessionId) || {};
+            const defaultVisibleLabels = new Set([
+                'Wire Sustained (6s)',
+                'Wire Throughput',
+                'Player est.',
+                'Rendition',
+                'Limit'
+            ]);
+            const isSeriesHidden = (label) => {
+                if (Object.prototype.hasOwnProperty.call(visibility, label)) {
+                    return visibility[label] === true;
+                }
+                return !defaultVisibleLabels.has(label);
+            };
             const axisMode = normalizeBitrateAxisMaxMode(
                 bitrateAxisMaxBySession.get(String(sessionId)) ||
                 card.querySelector('input[data-field="bitrate_chart_max_mbps"]:checked')?.value ||
@@ -3140,12 +3231,15 @@
             bitrateAxisMaxBySession.set(String(sessionId), axisMode);
             const maxFor = (hidden, data) => (hidden ? [0] : data.map(point => point.y || 0));
             const maxYAuto = Math.min(100, Math.max(1,
-                ...maxFor(visibility['Actual (18s)'] === true, actualData),
-                ...maxFor(visibility['Actual (1s)'] === true, actual1sData),
-                ...maxFor(visibility['Active (18s)'] === true, activeData),
-                ...maxFor(visibility['Player est.'] === true, estimateData),
-                ...maxFor(visibility['Rendition'] === true, renditionData),
-                ...maxFor(visibility['Limit'] === true, targetData)
+                ...maxFor(isSeriesHidden('Wire Sustained (18s)'), wireSustainedData),
+                ...maxFor(isSeriesHidden('Wire Active'), wireActiveData),
+                ...maxFor(isSeriesHidden('Wire Sustained (6s)'), wireSustained6sData),
+                ...maxFor(isSeriesHidden('Wire Active (6s)'), wireActive6sData),
+                ...maxFor(isSeriesHidden('Wire Sustained (1s)'), wireSustained1sData),
+                ...maxFor(isSeriesHidden('Wire Throughput'), wireThroughputData),
+                ...maxFor(isSeriesHidden('Player est.'), estimateData),
+                ...maxFor(isSeriesHidden('Rendition'), renditionData),
+                ...maxFor(isSeriesHidden('Limit'), targetData)
             ));
             const maxY = axisMode === 'auto' ? maxYAuto : Number(axisMode);
             let chart = bandwidthCharts.get(sessionId);
@@ -3160,34 +3254,70 @@
                     data: {
                         datasets: [
                             {
-                                label: 'Actual (18s)',
-                                data: actualData,
-                                borderColor: '#38bdf8',
-                                backgroundColor: 'rgba(56,189,248,0.12)',
-                                borderWidth: 2,
-                                pointRadius: 0,
-                                tension: 0.2,
-                                hidden: visibility['Actual (18s)'] === true
-                            },
-                            {
-                                label: 'Actual (1s)',
-                                data: actual1sData,
-                                borderColor: '#a855f7',
-                                backgroundColor: 'rgba(168,85,247,0.12)',
+                                label: 'Wire Sustained (18s)',
+                                data: wireSustainedData,
+                                borderColor: '#0891b2',
+                                backgroundColor: 'rgba(8,145,178,0.12)',
                                 borderWidth: 1.5,
                                 pointRadius: 0,
                                 tension: 0.2,
-                                hidden: visibility['Actual (1s)'] === true
+                                borderDash: [6, 3],
+                                hidden: isSeriesHidden('Wire Sustained (18s)')
                             },
                             {
-                                label: 'Active (18s)',
-                                data: activeData,
-                                borderColor: '#10b981',
-                                backgroundColor: 'rgba(16,185,129,0.12)',
+                                label: 'Wire Active',
+                                data: wireActiveData,
+                                borderColor: '#0f766e',
+                                backgroundColor: 'rgba(15,118,110,0.12)',
                                 borderWidth: 1.5,
                                 pointRadius: 0,
                                 tension: 0.2,
-                                hidden: visibility['Active (18s)'] === true
+                                borderDash: [2, 4],
+                                hidden: isSeriesHidden('Wire Active')
+                            },
+                            {
+                                label: 'Wire Sustained (6s)',
+                                data: wireSustained6sData,
+                                borderColor: '#155e75',
+                                backgroundColor: 'rgba(21,94,117,0.12)',
+                                borderWidth: 1.5,
+                                pointRadius: 0,
+                                tension: 0.2,
+                                borderDash: [8, 3],
+                                hidden: isSeriesHidden('Wire Sustained (6s)')
+                            },
+                            {
+                                label: 'Wire Active (6s)',
+                                data: wireActive6sData,
+                                borderColor: '#115e59',
+                                backgroundColor: 'rgba(17,94,89,0.12)',
+                                borderWidth: 1.5,
+                                pointRadius: 0,
+                                tension: 0.2,
+                                borderDash: [3, 5],
+                                hidden: isSeriesHidden('Wire Active (6s)')
+                            },
+                            {
+                                label: 'Wire Sustained (1s)',
+                                data: wireSustained1sData,
+                                borderColor: '#0e7490',
+                                backgroundColor: 'rgba(14,116,144,0.12)',
+                                borderWidth: 1.5,
+                                pointRadius: 0,
+                                tension: 0.2,
+                                borderDash: [4, 4],
+                                hidden: isSeriesHidden('Wire Sustained (1s)')
+                            },
+                            {
+                                label: 'Wire Throughput',
+                                data: wireThroughputData,
+                                borderColor: '#0d9488',
+                                backgroundColor: 'rgba(13,148,136,0.12)',
+                                borderWidth: 1.5,
+                                pointRadius: 0,
+                                tension: 0.2,
+                                borderDash: [1, 3],
+                                hidden: isSeriesHidden('Wire Throughput')
                             },
                             {
                                 label: 'Player est.',
@@ -3198,7 +3328,7 @@
                                 pointRadius: 0,
                                 tension: 0.2,
                                 borderDash: [6, 4],
-                                hidden: visibility['Player est.'] === true
+                                hidden: isSeriesHidden('Player est.')
                             },
                             {
                                 label: 'Rendition',
@@ -3209,7 +3339,7 @@
                                 pointRadius: 0,
                                 tension: 0.2,
                                 borderDash: [3, 3],
-                                hidden: visibility['Rendition'] === true
+                                hidden: isSeriesHidden('Rendition')
                             },
                             {
                                 label: 'Limit',
@@ -3219,7 +3349,7 @@
                                 borderWidth: 1.5,
                                 pointRadius: 0,
                                 stepped: true,
-                                hidden: visibility['Limit'] === true
+                                hidden: isSeriesHidden('Limit')
                             }
                         ]
                     },
@@ -3286,18 +3416,19 @@
                 });
                 bandwidthCharts.set(sessionId, chart);
             } else {
-                chart.data.datasets[0].data = actualData;
-                chart.data.datasets[1].data = actual1sData;
-                chart.data.datasets[2].data = activeData;
-                chart.data.datasets[3].data = estimateData;
-                chart.data.datasets[4].data = renditionData;
-                chart.data.datasets[5].data = targetData;
+                chart.data.datasets[0].data = wireSustainedData;
+                chart.data.datasets[1].data = wireActiveData;
+                chart.data.datasets[2].data = wireSustained6sData;
+                chart.data.datasets[3].data = wireActive6sData;
+                chart.data.datasets[4].data = wireSustained1sData;
+                chart.data.datasets[5].data = wireThroughputData;
+                chart.data.datasets[6].data = estimateData;
+                chart.data.datasets[7].data = renditionData;
+                chart.data.datasets[8].data = targetData;
                 chart.data.datasets.forEach((dataset, idx) => {
-                    if (Object.prototype.hasOwnProperty.call(visibility, dataset.label)) {
-                        const hidden = visibility[dataset.label] === true;
-                        dataset.hidden = hidden;
-                        chart.setDatasetVisibility(idx, !hidden);
-                    }
+                    const hidden = isSeriesHidden(dataset.label);
+                    dataset.hidden = hidden;
+                    chart.setDatasetVisibility(idx, !hidden);
                 });
                 chart.options.scales.y.max = maxY;
                 chart.update('none');
@@ -3577,7 +3708,23 @@
                     if (Number.isFinite(revision) && revision > 0) {
                         sseLastRevision = revision;
                     }
-                    const session = sessions.find(item => item.player_id === playerId);
+                    const session = (() => {
+                        if (currentSessionId) {
+                            const sticky = sessions.find(item => String(item.session_id) === String(currentSessionId));
+                            if (sticky) return sticky;
+                        }
+                        const matches = sessions.filter(item => item.player_id === playerId);
+                        if (!matches.length) return null;
+                        matches.sort((a, b) => {
+                            const aLast = Date.parse(a.last_request || '') || 0;
+                            const bLast = Date.parse(b.last_request || '') || 0;
+                            if (bLast !== aLast) return bLast - aLast;
+                            const aFirst = Date.parse(a.first_request_time || '') || 0;
+                            const bFirst = Date.parse(b.first_request_time || '') || 0;
+                            return bFirst - aFirst;
+                        });
+                        return matches[0];
+                    })();
                     applySessionUpdate(session);
                 } catch (err) {
                     console.error('Error parsing sessions stream payload', err);

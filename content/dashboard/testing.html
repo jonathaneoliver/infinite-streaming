@@ -530,7 +530,7 @@
 
         function normalizeBitrateAxisMaxMode(value) {
             const normalized = String(value || 'auto').toLowerCase();
-            return ['auto', '5', '10', '20', '40'].includes(normalized) ? normalized : 'auto';
+            return ['auto', '5', '10', '20', '30', '40', '50'].includes(normalized) ? normalized : 'auto';
         }
 
         function updateStepRiskUi(card, row) {
@@ -845,7 +845,13 @@
             setField('session_manifest_url', session.manifest_url || '—');
             setField('session_master_manifest_url', session.master_manifest_url || '—');
             setField('session_last_request_url', session.last_request_url || '—');
-            setField('session_measured_mbps', session.measured_mbps || '—');
+            setField('session_measured_mbps', session.measured_mbps ?? '—');
+            setField('session_mbps_wire_sustained', session.mbps_wire_sustained ?? '—');
+            setField('session_mbps_wire_active', session.mbps_wire_active ?? '—');
+            setField('session_mbps_wire_sustained_6s', session.mbps_wire_sustained_6s ?? '—');
+            setField('session_mbps_wire_active_6s', session.mbps_wire_active_6s ?? '—');
+            setField('session_mbps_wire_sustained_1s', session.mbps_wire_sustained_1s ?? '—');
+            setField('session_mbps_wire_throughput', session.mbps_wire_throughput ?? '—');
             const counts = card.querySelector('[data-field="session_detail_counts"]');
             if (counts) {
                 const masterCount = session.master_manifest_requests_count || 0;
@@ -1249,9 +1255,12 @@
         function pushBandwidthSample(session) {
             const now = Date.now();
             const windowMs = 5 * 60 * 1000;
-            const actual = Number(session.mbps_out_avg || session.mbps_out || 0);
-            const actual1s = Number(session.mbps_out_1s || 0);
-            const active = Number(session.mbps_out_active || 0);
+            const wireSustained = Number(session.mbps_wire_sustained || 0);
+            const wireActive = Number.isFinite(Number(session.mbps_wire_active)) ? Number(session.mbps_wire_active) : null;
+            const wireSustained6s = Number(session.mbps_wire_sustained_6s || 0);
+            const wireActive6s = Number.isFinite(Number(session.mbps_wire_active_6s)) ? Number(session.mbps_wire_active_6s) : null;
+            const wireSustained1s = Number(session.mbps_wire_sustained_1s || 0);
+            const wireThroughput = Number.isFinite(Number(session.mbps_wire_throughput)) ? Number(session.mbps_wire_throughput) : null;
             const videoBitrate = Number(session.player_metrics_video_bitrate_mbps || 0);
             const networkBitrate = Number(session.player_metrics_network_bitrate_mbps || 0);
                 const patternSteps = Array.isArray(session.nftables_pattern_steps) ? session.nftables_pattern_steps : [];
@@ -1276,7 +1285,7 @@
             const key = session.session_id;
             if (!key) return;
             const series = bandwidthHistory.get(key) || [];
-            series.push({ ts: now, actual, actual1s, active, limit, videoBitrate, networkBitrate });
+            series.push({ ts: now, wireSustained, wireActive, wireSustained6s, wireActive6s, wireSustained1s, wireThroughput, limit, videoBitrate, networkBitrate });
             const cutoff = now - windowMs;
             const filtered = series.filter(point => point.ts >= cutoff);
             bandwidthHistory.set(key, filtered);
@@ -1296,21 +1305,40 @@
                 .filter(point => point.ts >= windowStart)
                 .map(point => ({
                     x: (point.ts - windowStart) / 1000,
-                    actual: point.actual,
-                    actual1s: point.actual1s,
-                    active: point.active,
+                    wireSustained: point.wireSustained,
+                    wireActive: point.wireActive,
+                    wireSustained6s: point.wireSustained6s,
+                    wireActive6s: point.wireActive6s,
+                    wireSustained1s: point.wireSustained1s,
+                    wireThroughput: point.wireThroughput,
                     limit: point.limit,
                     videoBitrate: point.videoBitrate,
                     networkBitrate: point.networkBitrate
                 }));
-            const actualData = points.map(point => ({ x: point.x, y: point.actual }));
-            const actual1sData = points.map(point => ({ x: point.x, y: point.actual1s }));
-            const activeData = points.map(point => ({ x: point.x, y: point.active }));
+            const wireSustainedData = points.map(point => ({ x: point.x, y: point.wireSustained }));
+            const wireActiveData = points.map(point => ({ x: point.x, y: point.wireActive }));
+            const wireSustained6sData = points.map(point => ({ x: point.x, y: point.wireSustained6s }));
+            const wireActive6sData = points.map(point => ({ x: point.x, y: point.wireActive6s }));
+            const wireSustained1sData = points.map(point => ({ x: point.x, y: point.wireSustained1s }));
+            const wireThroughputData = points.map(point => ({ x: point.x, y: point.wireThroughput }));
             const limitData = points.map(point => ({ x: point.x, y: point.limit }));
             const videoBitrateData = points.map(point => ({ x: point.x, y: point.videoBitrate }));
             const networkBitrateData = points.map(point => ({ x: point.x, y: point.networkBitrate }));
 
             const visibility = bandwidthVisibility.get(sessionId) || {};
+            const defaultVisibleLabels = new Set([
+                'Wire Sustained (6s)',
+                'Wire Throughput',
+                'Video Bitrate',
+                'Network Bitrate',
+                'Limit'
+            ]);
+            const isSeriesHidden = (label) => {
+                if (Object.prototype.hasOwnProperty.call(visibility, label)) {
+                    return visibility[label] === true;
+                }
+                return !defaultVisibleLabels.has(label);
+            };
             const axisMode = normalizeBitrateAxisMaxMode(
                 bitrateAxisMaxBySession.get(String(sessionId)) ||
                 card.querySelector('input[data-field="bitrate_chart_max_mbps"]:checked')?.value ||
@@ -1319,12 +1347,15 @@
             bitrateAxisMaxBySession.set(String(sessionId), axisMode);
             const maxFor = (hidden, data) => (hidden ? [0] : data.map(point => point.y || 0));
             const maxYAuto = Math.min(100, Math.max(1,
-                ...maxFor(visibility['Actual (18s)'] === true, actualData),
-                ...maxFor(visibility['Actual (1s)'] === true, actual1sData),
-                ...maxFor(visibility['Active (18s)'] === true, activeData),
-                ...maxFor(visibility['Video Bitrate'] === true, videoBitrateData),
-                ...maxFor(visibility['Network Bitrate'] === true, networkBitrateData),
-                ...maxFor(visibility['Limit'] === true, limitData)
+                ...maxFor(isSeriesHidden('Wire Sustained (18s)'), wireSustainedData),
+                ...maxFor(isSeriesHidden('Wire Active'), wireActiveData),
+                ...maxFor(isSeriesHidden('Wire Sustained (6s)'), wireSustained6sData),
+                ...maxFor(isSeriesHidden('Wire Active (6s)'), wireActive6sData),
+                ...maxFor(isSeriesHidden('Wire Sustained (1s)'), wireSustained1sData),
+                ...maxFor(isSeriesHidden('Wire Throughput'), wireThroughputData),
+                ...maxFor(isSeriesHidden('Video Bitrate'), videoBitrateData),
+                ...maxFor(isSeriesHidden('Network Bitrate'), networkBitrateData),
+                ...maxFor(isSeriesHidden('Limit'), limitData)
             ));
             const maxY = axisMode === 'auto' ? maxYAuto : Number(axisMode);
 
@@ -1350,34 +1381,70 @@
                     data: {
                         datasets: [
                             {
-                                label: 'Actual (18s)',
-                                data: actualData,
-                                borderColor: '#38bdf8',
-                                backgroundColor: 'rgba(56,189,248,0.12)',
-                                borderWidth: 2,
-                                pointRadius: 0,
-                                tension: 0.2,
-                                hidden: visibility['Actual (18s)'] === true
-                            },
-                            {
-                                label: 'Actual (1s)',
-                                data: actual1sData,
-                                borderColor: '#a855f7',
-                                backgroundColor: 'rgba(168,85,247,0.12)',
+                                label: 'Wire Sustained (18s)',
+                                data: wireSustainedData,
+                                borderColor: '#0891b2',
+                                backgroundColor: 'rgba(8,145,178,0.12)',
                                 borderWidth: 1.5,
                                 pointRadius: 0,
                                 tension: 0.2,
-                                hidden: visibility['Actual (1s)'] === true
+                                borderDash: [6, 3],
+                                hidden: isSeriesHidden('Wire Sustained (18s)')
                             },
                             {
-                                label: 'Active (18s)',
-                                data: activeData,
-                                borderColor: '#10b981',
-                                backgroundColor: 'rgba(16,185,129,0.12)',
+                                label: 'Wire Active',
+                                data: wireActiveData,
+                                borderColor: '#0f766e',
+                                backgroundColor: 'rgba(15,118,110,0.12)',
                                 borderWidth: 1.5,
                                 pointRadius: 0,
                                 tension: 0.2,
-                                hidden: visibility['Active (18s)'] === true
+                                borderDash: [2, 4],
+                                hidden: isSeriesHidden('Wire Active')
+                            },
+                            {
+                                label: 'Wire Sustained (6s)',
+                                data: wireSustained6sData,
+                                borderColor: '#155e75',
+                                backgroundColor: 'rgba(21,94,117,0.12)',
+                                borderWidth: 1.5,
+                                pointRadius: 0,
+                                tension: 0.2,
+                                borderDash: [8, 3],
+                                hidden: isSeriesHidden('Wire Sustained (6s)')
+                            },
+                            {
+                                label: 'Wire Active (6s)',
+                                data: wireActive6sData,
+                                borderColor: '#115e59',
+                                backgroundColor: 'rgba(17,94,89,0.12)',
+                                borderWidth: 1.5,
+                                pointRadius: 0,
+                                tension: 0.2,
+                                borderDash: [3, 5],
+                                hidden: isSeriesHidden('Wire Active (6s)')
+                            },
+                            {
+                                label: 'Wire Sustained (1s)',
+                                data: wireSustained1sData,
+                                borderColor: '#0e7490',
+                                backgroundColor: 'rgba(14,116,144,0.12)',
+                                borderWidth: 1.5,
+                                pointRadius: 0,
+                                tension: 0.2,
+                                borderDash: [4, 4],
+                                hidden: isSeriesHidden('Wire Sustained (1s)')
+                            },
+                            {
+                                label: 'Wire Throughput',
+                                data: wireThroughputData,
+                                borderColor: '#0d9488',
+                                backgroundColor: 'rgba(13,148,136,0.12)',
+                                borderWidth: 1.5,
+                                pointRadius: 0,
+                                tension: 0.2,
+                                borderDash: [1, 3],
+                                hidden: isSeriesHidden('Wire Throughput')
                             },
                             {
                                 label: 'Video Bitrate',
@@ -1387,7 +1454,7 @@
                                 borderWidth: 1.5,
                                 pointRadius: 0,
                                 tension: 0.2,
-                                hidden: visibility['Video Bitrate'] === true
+                                hidden: isSeriesHidden('Video Bitrate')
                             },
                             {
                                 label: 'Network Bitrate',
@@ -1397,7 +1464,7 @@
                                 borderWidth: 1.5,
                                 pointRadius: 0,
                                 tension: 0.2,
-                                hidden: visibility['Network Bitrate'] === true
+                                hidden: isSeriesHidden('Network Bitrate')
                             },
                             {
                                 label: 'Limit',
@@ -1407,7 +1474,7 @@
                                 borderWidth: 1.5,
                                 pointRadius: 0,
                                 stepped: true,
-                                hidden: visibility['Limit'] === true
+                                hidden: isSeriesHidden('Limit')
                             }
                         ]
                     },
@@ -1475,18 +1542,19 @@
                 });
                 bandwidthCharts.set(sessionId, chart);
             } else {
-                chart.data.datasets[0].data = actualData;
-                chart.data.datasets[1].data = actual1sData;
-                chart.data.datasets[2].data = activeData;
-                chart.data.datasets[3].data = videoBitrateData;
-                chart.data.datasets[4].data = networkBitrateData;
-                chart.data.datasets[5].data = limitData;
+                chart.data.datasets[0].data = wireSustainedData;
+                chart.data.datasets[1].data = wireActiveData;
+                chart.data.datasets[2].data = wireSustained6sData;
+                chart.data.datasets[3].data = wireActive6sData;
+                chart.data.datasets[4].data = wireSustained1sData;
+                chart.data.datasets[5].data = wireThroughputData;
+                chart.data.datasets[6].data = videoBitrateData;
+                chart.data.datasets[7].data = networkBitrateData;
+                chart.data.datasets[8].data = limitData;
                 chart.data.datasets.forEach((dataset, idx) => {
-                    if (Object.prototype.hasOwnProperty.call(visibility, dataset.label)) {
-                        const hidden = visibility[dataset.label] === true;
-                        dataset.hidden = hidden;
-                        chart.setDatasetVisibility(idx, !hidden);
-                    }
+                    const hidden = isSeriesHidden(dataset.label);
+                    dataset.hidden = hidden;
+                    chart.setDatasetVisibility(idx, !hidden);
                 });
                 chart.options.scales.y.max = maxY;
                 chart.update('none');

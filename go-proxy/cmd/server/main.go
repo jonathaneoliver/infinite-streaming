@@ -562,24 +562,8 @@ func (t *TcTrafficManager) UpdateRateLimit(port int, rateMbps float64) error {
 		}
 	}
 
-	showFilters := exec.Command("tc", "filter", "show", "dev", t.interfaceName)
-	filterOut, _ := showFilters.CombinedOutput()
-	desiredHex := fmt.Sprintf("%04x0000/ffff0000", port)
-	if !strings.Contains(string(filterOut), desiredHex) {
-		filterCmd := exec.Command(
-			"tc", "filter", "add", "dev", t.interfaceName, "protocol", "ip", "parent", "1:0", "prio", "1", "u32",
-			"match", "ip", "sport", fmt.Sprintf("%d", port), "0xffff", "flowid", classid,
-		)
-		if out, err := filterCmd.CombinedOutput(); err != nil {
-			log.Printf("NETSHAPE tc filter add (sport) failed port=%d: %s", port, strings.TrimSpace(string(out)))
-			fallbackCmd := exec.Command(
-				"tc", "filter", "add", "dev", t.interfaceName, "protocol", "ip", "parent", "1:0", "prio", "1", "u32",
-				"match", "ip", "dport", fmt.Sprintf("%d", port), "0xffff", "flowid", classid,
-			)
-			if out2, err2 := fallbackCmd.CombinedOutput(); err2 != nil {
-				return fmt.Errorf("tc filter add failed: %s; fallback failed: %s", strings.TrimSpace(string(out)), strings.TrimSpace(string(out2)))
-			}
-		}
+	if err := t.ensurePortFilter(port, classid); err != nil {
+		return err
 	}
 	verifyCmd := exec.Command("tc", "class", "show", "dev", t.interfaceName)
 	verifyOut, _ := verifyCmd.CombinedOutput()
@@ -613,7 +597,37 @@ func (t *TcTrafficManager) RemoveFilter(port int) error {
 	return nil
 }
 
+func (t *TcTrafficManager) ensurePortFilter(port int, classid string) error {
+	showFilters := exec.Command("tc", "filter", "show", "dev", t.interfaceName)
+	filterOut, _ := showFilters.CombinedOutput()
+	desiredHex := fmt.Sprintf("%04x0000/ffff0000", port)
+	if strings.Contains(string(filterOut), desiredHex) {
+		return nil
+	}
+	filterCmd := exec.Command(
+		"tc", "filter", "add", "dev", t.interfaceName, "protocol", "ip", "parent", "1:0", "prio", "1", "u32",
+		"match", "ip", "sport", fmt.Sprintf("%d", port), "0xffff", "flowid", classid,
+	)
+	if out, err := filterCmd.CombinedOutput(); err != nil {
+		log.Printf("NETSHAPE tc filter add (sport) failed port=%d: %s", port, strings.TrimSpace(string(out)))
+		fallbackCmd := exec.Command(
+			"tc", "filter", "add", "dev", t.interfaceName, "protocol", "ip", "parent", "1:0", "prio", "1", "u32",
+			"match", "ip", "dport", fmt.Sprintf("%d", port), "0xffff", "flowid", classid,
+		)
+		if out2, err2 := fallbackCmd.CombinedOutput(); err2 != nil {
+			return fmt.Errorf("tc filter add failed: %s; fallback failed: %s", strings.TrimSpace(string(out)), strings.TrimSpace(string(out2)))
+		}
+	}
+	return nil
+}
+
 func (t *TcTrafficManager) EnsureClass(port int, rateMbps float64) error {
+	if err := t.EnsureRootQdisc(); err != nil {
+		return err
+	}
+	if err := t.EnsureRootClass(); err != nil {
+		return err
+	}
 	cmd := exec.Command("tc", "class", "show", "dev", t.interfaceName)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -622,10 +636,7 @@ func (t *TcTrafficManager) EnsureClass(port int, rateMbps float64) error {
 	portSuffix := fmt.Sprintf("%03d", port%1000)
 	classid := fmt.Sprintf("1:%s", portSuffix)
 	if strings.Contains(string(output), classid) {
-		return nil
-	}
-	if err := t.EnsureRootClass(); err != nil {
-		return err
+		return t.ensurePortFilter(port, classid)
 	}
 	return t.UpdateRateLimit(port, rateMbps)
 }
@@ -1100,7 +1111,10 @@ func (a *App) handleGetSessions(w http.ResponseWriter, r *http.Request) {
 		}
 		dropPackets := int64FromInterface(session["transport_fault_drop_packets"])
 		rejectPackets := int64FromInterface(session["transport_fault_reject_packets"])
-		port := getString(session, "x_forwarded_port")
+		port := getString(session, "x_forwarded_port_external")
+		if port == "" {
+			port = getString(session, "x_forwarded_port")
+		}
 		if port != "" {
 			if portNum, err := strconv.Atoi(port); err == nil {
 				if counters, ok := transportCountersByPort[portNum]; ok {
@@ -1127,15 +1141,7 @@ func (a *App) handleGetSessions(w http.ResponseWriter, r *http.Request) {
 					session["nftables_pattern_enabled"] = false
 					session["nftables_pattern_steps"] = []NftShapeStep{}
 				}
-				throughputKey := fmt.Sprintf("throughput_%s", port)
-				if item, err := a.memcache.Get(throughputKey); err == nil {
-					var throughput map[string]interface{}
-					if err := json.Unmarshal(item.Value, &throughput); err == nil {
-						session["measured_mbps"] = throughput["mbps"]
-						session["measured_bytes"] = throughput["bytes"]
-						session["measurement_window"] = throughput["window_seconds"]
-					}
-				}
+				applySessionThroughput(session, a.getSessionThroughput(session))
 			}
 			session["transport_fault_drop_packets"] = dropPackets
 			session["transport_fault_reject_packets"] = rejectPackets
@@ -1555,6 +1561,13 @@ func (a *App) handleSession(w http.ResponseWriter, r *http.Request) {
 				dropPackets = counters.DropPackets
 				rejectPackets = counters.RejectPackets
 			}
+		}
+		port := getString(session, "x_forwarded_port_external")
+		if port == "" {
+			port = getString(session, "x_forwarded_port")
+		}
+		if port != "" {
+			applySessionThroughput(session, a.getSessionThroughput(session))
 		}
 		session["transport_fault_drop_packets"] = dropPackets
 		session["transport_fault_reject_packets"] = rejectPackets
@@ -3980,87 +3993,286 @@ func (a *App) getContentType(target string) (string, bool, bool, bool, []Playlis
 }
 
 func (a *App) trackPortThroughput() {
-	cache := map[int]struct {
-		bytes     int64
-		timestamp time.Time
-	}{}
-	for {
-		sessions := a.getSessionList()
-		activePorts := map[int]struct{}{}
-		for _, session := range sessions {
-			portStr := getString(session, "x_forwarded_port")
-			if portStr == "" {
+	type throughputSample struct {
+		at         time.Time
+		deltaBytes int64
+		dtSeconds  float64
+		active     bool
+	}
+	type throughputValueSample struct {
+		at    time.Time
+		value float64
+	}
+	type throughputState struct {
+		bytes          int64
+		timestamp      time.Time
+		samples        []throughputSample
+		active1sValues []throughputValueSample
+	}
+	const (
+		sampleInterval      = 100 * time.Millisecond
+		activeWindow        = 18 * time.Second
+		mediumWindow        = 6 * time.Second
+		shortWindow         = 1 * time.Second
+		activeByteThreshold = int64(1024)
+		minActiveSeconds    = 1.0
+	)
+	cache := map[int]throughputState{}
+	counterReady := map[int]bool{}
+	activePorts := map[int]struct{}{}
+	lastPortsRefresh := time.Time{}
+	updatePort := func(port int, bytesValue int64, now time.Time) {
+		if bytesValue <= 0 {
+			return
+		}
+		state, ok := cache[port]
+		if !ok || state.timestamp.IsZero() {
+			cache[port] = throughputState{bytes: bytesValue, timestamp: now, samples: state.samples, active1sValues: state.active1sValues}
+			return
+		}
+		deltaBytes := bytesValue - state.bytes
+		deltaSeconds := now.Sub(state.timestamp).Seconds()
+		state.bytes = bytesValue
+		state.timestamp = now
+		if deltaBytes < 0 || deltaSeconds <= 0 {
+			cache[port] = state
+			return
+		}
+		sample := throughputSample{
+			at:         now,
+			deltaBytes: deltaBytes,
+			dtSeconds:  deltaSeconds,
+			active:     deltaBytes > activeByteThreshold,
+		}
+		state.samples = append(state.samples, sample)
+		cutoff := now.Add(-activeWindow)
+		mediumCutoff := now.Add(-mediumWindow)
+		shortCutoff := now.Add(-shortWindow)
+		trimmed := make([]throughputSample, 0, len(state.samples))
+		var totalBytes int64
+		var activeBytes int64
+		var mediumTotalBytes int64
+		var mediumActiveBytes int64
+		var shortTotalBytes int64
+		var shortActiveBytes int64
+		totalSeconds := 0.0
+		activeSeconds := 0.0
+		mediumTotalSeconds := 0.0
+		mediumActiveSeconds := 0.0
+		shortTotalSeconds := 0.0
+		shortActiveSeconds := 0.0
+		for _, existing := range state.samples {
+			if existing.at.Before(cutoff) {
 				continue
 			}
-			if port, err := strconv.Atoi(portStr); err == nil {
-				activePorts[port] = struct{}{}
+			trimmed = append(trimmed, existing)
+			if existing.deltaBytes > 0 {
+				totalBytes += existing.deltaBytes
 			}
-		}
-		if len(activePorts) == 0 {
-			time.Sleep(5 * time.Second)
-			continue
-		}
-		now := time.Now()
-		if a.traffic != nil && runtime.GOOS == "linux" {
-			for port := range activePorts {
-				bytesValue, err := a.traffic.GetPortBytes(port)
-				if err != nil || bytesValue <= 0 {
-					continue
+			if existing.dtSeconds > 0 {
+				totalSeconds += existing.dtSeconds
+			}
+			if existing.active {
+				if existing.deltaBytes > 0 {
+					activeBytes += existing.deltaBytes
 				}
-				if prev, ok := cache[port]; ok {
-					deltaBytes := bytesValue - prev.bytes
-					deltaTime := now.Sub(prev.timestamp).Seconds()
-					if deltaTime > 0 {
-						mbps := (float64(deltaBytes) * 8) / (deltaTime * 1024 * 1024)
-						payload := map[string]interface{}{
-							"mbps":           math.Round(mbps*100) / 100,
-							"bytes":          deltaBytes,
-							"window_seconds": math.Round(deltaTime*10) / 10,
-							"timestamp":      now.Unix(),
-						}
-						if bytes, err := json.Marshal(payload); err == nil {
-							_ = a.memcache.Set(&memcache.Item{Key: fmt.Sprintf("throughput_%d", port), Value: bytes, Expiration: 30})
-						}
+				if existing.dtSeconds > 0 {
+					activeSeconds += existing.dtSeconds
+				}
+			}
+			if !existing.at.Before(mediumCutoff) {
+				if existing.deltaBytes > 0 {
+					mediumTotalBytes += existing.deltaBytes
+				}
+				if existing.dtSeconds > 0 {
+					mediumTotalSeconds += existing.dtSeconds
+				}
+				if existing.active {
+					if existing.deltaBytes > 0 {
+						mediumActiveBytes += existing.deltaBytes
+					}
+					if existing.dtSeconds > 0 {
+						mediumActiveSeconds += existing.dtSeconds
 					}
 				}
-				cache[port] = struct {
-					bytes     int64
-					timestamp time.Time
-				}{bytes: bytesValue, timestamp: now}
 			}
-			time.Sleep(5 * time.Second)
+			if !existing.at.Before(shortCutoff) {
+				if existing.deltaBytes > 0 {
+					shortTotalBytes += existing.deltaBytes
+				}
+				if existing.dtSeconds > 0 {
+					shortTotalSeconds += existing.dtSeconds
+				}
+				if existing.active {
+					if existing.deltaBytes > 0 {
+						shortActiveBytes += existing.deltaBytes
+					}
+					if existing.dtSeconds > 0 {
+						shortActiveSeconds += existing.dtSeconds
+					}
+				}
+			}
+		}
+		state.samples = trimmed
+
+		mbpsSustained := 0.0
+		if totalSeconds > 0 {
+			mbpsSustained = (float64(totalBytes) * 8) / (totalSeconds * 1024 * 1024)
+		}
+		mbpsSustained1s := 0.0
+		if shortTotalSeconds > 0 {
+			mbpsSustained1s = (float64(shortTotalBytes) * 8) / (shortTotalSeconds * 1024 * 1024)
+		}
+		mbpsSustained6s := 0.0
+		if mediumTotalSeconds > 0 {
+			mbpsSustained6s = (float64(mediumTotalBytes) * 8) / (mediumTotalSeconds * 1024 * 1024)
+		}
+		var mbpsActive interface{}
+		if activeSeconds >= minActiveSeconds {
+			mbpsActive = math.Round((((float64(activeBytes) * 8) / (activeSeconds * 1024 * 1024)) * 100)) / 100
+		} else {
+			mbpsActive = nil
+		}
+		var mbpsActive1s interface{}
+		currentActive1s := 0.0
+		hasCurrentActive1s := false
+		if shortActiveSeconds > 0 {
+			currentActive1s = (float64(shortActiveBytes) * 8) / (shortActiveSeconds * 1024 * 1024)
+			hasCurrentActive1s = true
+			mbpsActive1s = math.Round((currentActive1s * 100)) / 100
+		} else {
+			mbpsActive1s = nil
+		}
+		if hasCurrentActive1s {
+			state.active1sValues = append(state.active1sValues, throughputValueSample{at: now, value: currentActive1s})
+		}
+		throughputCutoff := now.Add(-mediumWindow)
+		trimmedActive1sValues := make([]throughputValueSample, 0, len(state.active1sValues))
+		maxActive1s := -1.0
+		for _, valueSample := range state.active1sValues {
+			if valueSample.at.Before(throughputCutoff) {
+				continue
+			}
+			trimmedActive1sValues = append(trimmedActive1sValues, valueSample)
+			if valueSample.value > maxActive1s {
+				maxActive1s = valueSample.value
+			}
+		}
+		state.active1sValues = trimmedActive1sValues
+		var mbpsWireThroughput interface{}
+		if maxActive1s >= 0 {
+			mbpsWireThroughput = math.Round((maxActive1s * 100)) / 100
+		} else {
+			mbpsWireThroughput = nil
+		}
+		var mbpsActive6s interface{}
+		if mediumActiveSeconds > 0 {
+			mbpsActive6s = math.Round((((float64(mediumActiveBytes) * 8) / (mediumActiveSeconds * 1024 * 1024)) * 100)) / 100
+		} else {
+			mbpsActive6s = nil
+		}
+		cache[port] = state
+		payload := map[string]interface{}{
+			"mbps":                       math.Round(mbpsSustained*100) / 100,
+			"bytes":                      deltaBytes,
+			"window_seconds":             math.Round(totalSeconds*100) / 100,
+			"timestamp":                  now.Unix(),
+			"mbps_wire_sustained":        math.Round(mbpsSustained*100) / 100,
+			"mbps_wire_sustained_18s":    math.Round(mbpsSustained*100) / 100,
+			"mbps_wire_active":           mbpsActive,
+			"mbps_wire_active_1s":        mbpsActive1s,
+			"mbps_wire_throughput":       mbpsWireThroughput,
+			"mbps_wire_sustained_1s":     math.Round(mbpsSustained1s*100) / 100,
+			"mbps_wire_sustained_6s":     math.Round(mbpsSustained6s*100) / 100,
+			"mbps_wire_active_6s":        mbpsActive6s,
+			"wire_active_bytes":          activeBytes,
+			"wire_total_bytes":           totalBytes,
+			"wire_active_window_seconds": math.Round(activeSeconds*100) / 100,
+			"wire_window_seconds":        math.Round(totalSeconds*100) / 100,
+		}
+		if bytes, err := json.Marshal(payload); err == nil {
+			_ = a.memcache.Set(&memcache.Item{Key: fmt.Sprintf("throughput_%d", port), Value: bytes, Expiration: 30})
+		}
+		log.Printf(
+			"WIRE_TC_METRIC port=%d bytes_now=%d delta_bytes=%d dt_s=%.3f active=%t active_threshold_bytes=%d wire_total_bytes=%d wire_active_bytes=%d wire_window_s=%.3f wire_active_window_s=%.3f mbps_wire_sustained=%.2f mbps_wire_active=%v mbps_wire_sustained_6s=%.2f mbps_wire_active_6s=%v wire_window_6s_s=%.3f wire_active_window_6s_s=%.3f mbps_wire_sustained_1s=%.2f mbps_wire_active_1s=%v mbps_wire_throughput=%v wire_window_1s_s=%.3f wire_active_window_1s_s=%.3f",
+			port,
+			bytesValue,
+			deltaBytes,
+			deltaSeconds,
+			sample.active,
+			activeByteThreshold,
+			totalBytes,
+			activeBytes,
+			totalSeconds,
+			activeSeconds,
+			math.Round(mbpsSustained*100)/100,
+			mbpsActive,
+			math.Round(mbpsSustained6s*100)/100,
+			mbpsActive6s,
+			mediumTotalSeconds,
+			mediumActiveSeconds,
+			math.Round(mbpsSustained1s*100)/100,
+			mbpsActive1s,
+			mbpsWireThroughput,
+			shortTotalSeconds,
+			shortActiveSeconds,
+		)
+	}
+	for {
+		now := time.Now()
+		if lastPortsRefresh.IsZero() || now.Sub(lastPortsRefresh) >= time.Second {
+			sessions := a.getSessionList()
+			refreshed := map[int]struct{}{}
+			addPort := func(portStr string) {
+				if portStr == "" {
+					return
+				}
+				if port, err := strconv.Atoi(portStr); err == nil {
+					refreshed[port] = struct{}{}
+				}
+			}
+			for _, session := range sessions {
+				addPort(getString(session, "x_forwarded_port_external"))
+				addPort(getString(session, "x_forwarded_port"))
+			}
+			activePorts = refreshed
+			lastPortsRefresh = now
+		}
+		if len(activePorts) == 0 {
+			time.Sleep(sampleInterval)
+			continue
+		}
+		if a.traffic != nil && runtime.GOOS == "linux" {
+			for port := range activePorts {
+				if !counterReady[port] {
+					if err := a.traffic.EnsureClass(port, 10000); err != nil {
+						log.Printf("WIRE_TC_METRIC port=%d counter_ready=false ensure_class_err=%v", port, err)
+						continue
+					}
+					counterReady[port] = true
+					log.Printf("WIRE_TC_METRIC port=%d counter_ready=true mode=unlimited_counter", port)
+				}
+				bytesValue, err := a.traffic.GetPortBytes(port)
+				if err != nil {
+					log.Printf("WIRE_TC_METRIC port=%d counter_read_err=%v", port, err)
+					continue
+				}
+				updatePort(port, bytesValue, now)
+			}
+			time.Sleep(sampleInterval)
 			continue
 		}
 		cmd := exec.Command("nft", "list", "chain", "inet", "throttle", "output")
 		output, err := cmd.CombinedOutput()
 		if err == nil {
 			bytesValue := parseNftBytes(string(output))
-			if bytesValue > 0 {
+			if bytesValue >= 0 {
 				for port := range activePorts {
-					if prev, ok := cache[port]; ok {
-						deltaBytes := bytesValue - prev.bytes
-						deltaTime := now.Sub(prev.timestamp).Seconds()
-						if deltaTime > 0 {
-							mbps := (float64(deltaBytes) * 8) / (deltaTime * 1024 * 1024)
-							payload := map[string]interface{}{
-								"mbps":           math.Round(mbps*100) / 100,
-								"bytes":          deltaBytes,
-								"window_seconds": math.Round(deltaTime*10) / 10,
-								"timestamp":      now.Unix(),
-							}
-							if bytes, err := json.Marshal(payload); err == nil {
-								_ = a.memcache.Set(&memcache.Item{Key: fmt.Sprintf("throughput_%d", port), Value: bytes, Expiration: 30})
-							}
-						}
-					}
-					cache[port] = struct {
-						bytes     int64
-						timestamp time.Time
-					}{bytes: bytesValue, timestamp: now}
+					updatePort(port, bytesValue, now)
 				}
 			}
 		}
-		time.Sleep(5 * time.Second)
+		time.Sleep(sampleInterval)
 	}
 }
 
@@ -4445,10 +4657,74 @@ func (a *App) saveSessionList(sessions []SessionData) {
 	a.queueSessionsBroadcast(sessions)
 }
 
+func applySessionThroughput(session SessionData, throughput map[string]interface{}) {
+	if session == nil || throughput == nil {
+		return
+	}
+	session["measured_mbps"] = throughput["mbps"]
+	session["measured_bytes"] = throughput["bytes"]
+	session["measurement_window"] = throughput["window_seconds"]
+	session["mbps_wire_sustained"] = throughput["mbps_wire_sustained"]
+	session["mbps_wire_sustained_18s"] = throughput["mbps_wire_sustained_18s"]
+	session["mbps_wire_active"] = throughput["mbps_wire_active"]
+	session["mbps_wire_active_1s"] = throughput["mbps_wire_active_1s"]
+	session["mbps_wire_throughput"] = throughput["mbps_wire_throughput"]
+	session["mbps_wire_sustained_1s"] = throughput["mbps_wire_sustained_1s"]
+	session["mbps_wire_sustained_6s"] = throughput["mbps_wire_sustained_6s"]
+	session["mbps_wire_active_6s"] = throughput["mbps_wire_active_6s"]
+	session["wire_active_bytes"] = throughput["wire_active_bytes"]
+	session["wire_total_bytes"] = throughput["wire_total_bytes"]
+	session["wire_active_window_seconds"] = throughput["wire_active_window_seconds"]
+	session["wire_window_seconds"] = throughput["wire_window_seconds"]
+}
+
+func (a *App) getSessionThroughput(session SessionData) map[string]interface{} {
+	if session == nil {
+		return nil
+	}
+	port := getString(session, "x_forwarded_port_external")
+	if port == "" {
+		port = getString(session, "x_forwarded_port")
+	}
+	if port == "" {
+		return nil
+	}
+	throughputKeys := []string{fmt.Sprintf("throughput_%s", port)}
+	if internalPort := getString(session, "x_forwarded_port"); internalPort != "" && internalPort != port {
+		throughputKeys = append(throughputKeys, fmt.Sprintf("throughput_%s", internalPort))
+	}
+	var best map[string]interface{}
+	bestTimestamp := int64(0)
+	for _, throughputKey := range throughputKeys {
+		item, err := a.memcache.Get(throughputKey)
+		if err != nil {
+			continue
+		}
+		var throughput map[string]interface{}
+		if err := json.Unmarshal(item.Value, &throughput); err != nil {
+			continue
+		}
+		timestamp := int64FromInterface(throughput["timestamp"])
+		if best == nil || timestamp > bestTimestamp {
+			best = throughput
+			bestTimestamp = timestamp
+		}
+	}
+	return best
+}
+
+func (a *App) hydrateSessionThroughput(session SessionData) {
+	if session == nil {
+		return
+	}
+	applySessionThroughput(session, a.getSessionThroughput(session))
+}
+
 func (a *App) normalizeSessionsForResponse(sessions []SessionData) []SessionData {
 	transportCountersByPort := getTransportFaultRuleCounters()
 	for _, session := range sessions {
 		a.normalizeSessionPorts(session)
+		a.hydrateSessionThroughput(session)
 		setDefault := func(key string, value interface{}) {
 			if existing, ok := session[key]; !ok || existing == nil {
 				session[key] = value
