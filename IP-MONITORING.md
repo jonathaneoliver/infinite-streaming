@@ -133,11 +133,45 @@ curl http://localhost:30081/api/external-ips?filter=external
 
 ## Testing
 
-To test the feature:
-1. Start a streaming session from an external IP or use X-Forwarded-For header
+### Testing External IP Detection
+
+The feature detects external IPs using Go's `net.IP.IsPrivate()` method. An IP is considered external if it's not:
+- Private (RFC 1918: 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16)
+- Loopback (127.0.0.0/8, ::1)
+- Link-local (169.254.0.0/16, fe80::/10)
+- Unspecified (0.0.0.0, ::)
+
+#### Scenario 1: Direct Access (Development/Local Testing)
+When accessing the service directly on ports 30XXX or 40XXX from a local network:
+- **IP detected**: Your local/private network IP (e.g., 192.168.1.100, 10.0.0.50)
+- **Classification**: Internal (no EXTERNAL badge)
+- **Why**: Direct connections without a reverse proxy don't have X-Forwarded-For headers
+
+#### Scenario 2: Access Through Domain with Reverse Proxy
+When accessing via `infinitestreaming.jeoliver.com` (or any domain with nginx reverse proxy):
+- **IP detected**: Your public internet IP (from X-Forwarded-For header)
+- **Classification**: External (shows EXTERNAL badge)
+- **Why**: The external nginx sets X-Forwarded-For with the client's public IP
+
+#### Scenario 3: Manual X-Forwarded-For Testing
+To test external IP detection locally, manually set the X-Forwarded-For header:
+
+```bash
+# Test with simulated external IP
+curl -H "X-Forwarded-For: 203.0.113.45" http://localhost:30081/your-stream.m3u8?player_id=test
+
+# Check the session in API
+curl http://localhost:30081/api/external-ips?filter=external
+```
+
+### Testing Steps
+
+1. Start a streaming session from an external IP or with X-Forwarded-For header
 2. Check the logs for `[GO-PROXY][EXTERNAL-IP]` entries
 3. View the session details in the dashboard
 4. Check the External IP Monitoring panel
+
+**Note**: For accurate external IP tracking in production, ensure the application is deployed behind a trusted reverse proxy (nginx) that properly sets X-Forwarded-For headers.
 
 ## Future Enhancements
 
