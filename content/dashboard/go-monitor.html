@@ -91,14 +91,6 @@
             border-radius: 3px;
         }
 
-        .legend-swatch.requests {
-            background: var(--primary-blue);
-        }
-
-        .legend-swatch.uniques {
-            background: var(--warning);
-        }
-
         .external-ip-chart-wrap {
             position: relative;
         }
@@ -482,15 +474,26 @@
                 <div class="streams-title">External IP Activity</div>
                 <div class="refresh-indicator" id="external-ip-window">Last 7 days</div>
             </div>
-            <div class="external-ip-legend">
-                <div class="legend-item"><span class="legend-swatch requests"></span>Requests</div>
-                <div class="legend-item"><span class="legend-swatch uniques"></span>Unique IPs</div>
-            </div>
+            <div class="external-ip-legend" id="external-ip-legend"></div>
             <div class="external-ip-chart-wrap">
                 <canvas id="external-ip-chart" height="140"></canvas>
                 <div class="external-ip-empty" id="external-ip-empty">No external IP activity yet.</div>
             </div>
             <div class="external-ip-range" id="external-ip-range"></div>
+        </div>
+
+        <div class="streams-container">
+            <div class="streams-header">
+                <div class="streams-title">External WAN Sessions (Persisted)</div>
+                <div class="refresh-indicator">Stored by backend</div>
+            </div>
+            <div id="external-wan-sessions-list">
+                <div class="empty-state">
+                    <div class="empty-state-icon">🌐</div>
+                    <div class="empty-state-text">No external WAN sessions recorded</div>
+                    <div class="empty-state-subtext">Records appear here when external users request go-live streams.</div>
+                </div>
+            </div>
         </div>
 
         <div class="streams-container">
@@ -520,6 +523,13 @@
         const DEFAULT_IDLE_TIMEOUT = 60;
         let autoRefreshInterval = null;
         let autoRefreshEnabled = true;
+        let wanSortKey = 'last_seen_at';
+        let wanSortDirection = 'desc';
+
+        const INTERNAL_WAN_COLOR = '#ef4444';
+        const WAN_SERIES_COLORS = [
+            '#2563eb', '#16a34a', '#d97706', '#9333ea', '#0ea5e9', '#f43f5e', '#65a30d', '#0891b2', '#7c3aed', '#ea580c'
+        ];
 
         function getProgressClass(secondsRemaining, totalSeconds) {
             const percent = (secondsRemaining / totalSeconds) * 100;
@@ -731,7 +741,72 @@
             `;
         }
 
-        function renderExternalHistory(history, bucketMinutes, retentionHours) {
+        function isInternalWAN(ip) {
+            const value = String(ip || '').trim().toLowerCase();
+            if (!value) return false;
+            if (value === 'localhost' || value === '::1' || value.startsWith('127.')) return true;
+            if (/^10\./.test(value)) return true;
+            if (/^192\.168\./.test(value)) return true;
+            if (/^172\.(1[6-9]|2\d|3[0-1])\./.test(value)) return true;
+            if (/^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./.test(value)) return true;
+            if (/^fc|^fd/.test(value)) return true;
+            return false;
+        }
+
+        function colorForWAN(ip, index) {
+            if (isInternalWAN(ip)) return INTERNAL_WAN_COLOR;
+            return WAN_SERIES_COLORS[index % WAN_SERIES_COLORS.length];
+        }
+
+        function buildWANBuckets(sessions, bucketMinutes) {
+            const bucketSizeMs = Math.max(1, Number(bucketMinutes) || 60) * 60 * 1000;
+            const bucketSet = new Set();
+            const wanBuckets = new Map();
+
+            sessions.forEach((session) => {
+                const ip = String(session.wan_ip || '').trim();
+                const startedRaw = session.started_at || session.last_seen_at;
+                if (!ip || !startedRaw) return;
+                const ts = Date.parse(startedRaw);
+                if (Number.isNaN(ts)) return;
+                const bucketTs = Math.floor(ts / bucketSizeMs) * bucketSizeMs;
+                bucketSet.add(bucketTs);
+                let byBucket = wanBuckets.get(ip);
+                if (!byBucket) {
+                    byBucket = new Map();
+                    wanBuckets.set(ip, byBucket);
+                }
+                byBucket.set(bucketTs, (byBucket.get(bucketTs) || 0) + 1);
+            });
+
+            const buckets = Array.from(bucketSet).sort((a, b) => a - b);
+            const series = Array.from(wanBuckets.entries())
+                .map(([ip, byBucket]) => ({
+                    ip,
+                    values: buckets.map((bucket) => byBucket.get(bucket) || 0),
+                    total: Array.from(byBucket.values()).reduce((sum, val) => sum + val, 0)
+                }))
+                .sort((a, b) => b.total - a.total);
+
+            return { buckets, series };
+        }
+
+        function renderWANLegend(series, maxSeries) {
+            const legend = document.getElementById('external-ip-legend');
+            if (!legend) return;
+            if (!Array.isArray(series) || series.length === 0) {
+                legend.innerHTML = '<div class="legend-item">No WAN series</div>';
+                return;
+            }
+            const visible = series.slice(0, maxSeries);
+            legend.innerHTML = visible.map((entry, index) => {
+                const color = colorForWAN(entry.ip, index);
+                const internalBadge = isInternalWAN(entry.ip) ? ' (internal)' : '';
+                return `<div class="legend-item"><span class="legend-swatch" style="background:${color};"></span>${entry.ip}${internalBadge}</div>`;
+            }).join('');
+        }
+
+        function renderExternalHistory(sessions, bucketMinutes, retentionHours) {
             const canvas = document.getElementById('external-ip-chart');
             const empty = document.getElementById('external-ip-empty');
             const range = document.getElementById('external-ip-range');
@@ -744,9 +819,10 @@
                 windowLabel.textContent = `Last ${resolvedRetention}h`;
             }
 
-            if (!Array.isArray(history) || history.length === 0) {
+            if (!Array.isArray(sessions) || sessions.length === 0) {
                 if (empty) empty.classList.add('active');
                 if (range) range.textContent = '';
+                renderWANLegend([], 0);
                 const ctx = canvas.getContext('2d');
                 ctx.clearRect(0, 0, canvas.width, canvas.height);
                 return;
@@ -754,12 +830,20 @@
 
             if (empty) empty.classList.remove('active');
 
-            const sorted = [...history].sort((a, b) => {
-                return new Date(a.bucket_start) - new Date(b.bucket_start);
-            });
-            const requests = sorted.map(item => Number(item.external_requests) || 0);
-            const uniques = sorted.map(item => Number(item.unique_external_ips) || 0);
-            const maxValue = Math.max(1, ...requests, ...uniques);
+            const { buckets, series } = buildWANBuckets(sessions, resolvedBucket);
+            const maxSeries = 10;
+            const visibleSeries = series.slice(0, maxSeries);
+            renderWANLegend(visibleSeries, maxSeries);
+
+            if (buckets.length === 0 || visibleSeries.length === 0) {
+                if (empty) empty.classList.add('active');
+                if (range) range.textContent = '';
+                const ctx = canvas.getContext('2d');
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+                return;
+            }
+
+            const maxValue = Math.max(1, ...visibleSeries.flatMap(item => item.values));
 
             const parent = canvas.parentElement;
             const width = parent ? parent.clientWidth : 600;
@@ -781,55 +865,149 @@
             ctx.lineTo(padding.left + chartWidth, padding.top + chartHeight);
             ctx.stroke();
 
-            const points = sorted.length;
+            const points = buckets.length;
             const stepX = points > 1 ? chartWidth / (points - 1) : 0;
 
             const mapY = (value) => padding.top + chartHeight - (value / maxValue) * chartHeight;
 
-            ctx.strokeStyle = '#1a73e8';
-            ctx.lineWidth = 2;
-            ctx.beginPath();
-            requests.forEach((value, index) => {
-                const x = padding.left + stepX * index;
-                const y = mapY(value);
-                if (index === 0) {
-                    ctx.moveTo(x, y);
-                } else {
-                    ctx.lineTo(x, y);
-                }
+            visibleSeries.forEach((entry, seriesIndex) => {
+                ctx.strokeStyle = colorForWAN(entry.ip, seriesIndex);
+                ctx.lineWidth = isInternalWAN(entry.ip) ? 3 : 2;
+                ctx.beginPath();
+                entry.values.forEach((value, index) => {
+                    const x = padding.left + stepX * index;
+                    const y = mapY(value);
+                    if (index === 0) {
+                        ctx.moveTo(x, y);
+                    } else {
+                        ctx.lineTo(x, y);
+                    }
+                });
+                ctx.stroke();
             });
-            ctx.stroke();
-
-            ctx.strokeStyle = '#f9ab00';
-            ctx.lineWidth = 2;
-            ctx.beginPath();
-            uniques.forEach((value, index) => {
-                const x = padding.left + stepX * index;
-                const y = mapY(value);
-                if (index === 0) {
-                    ctx.moveTo(x, y);
-                } else {
-                    ctx.lineTo(x, y);
-                }
-            });
-            ctx.stroke();
 
             ctx.fillStyle = '#5f6368';
             ctx.font = '11px sans-serif';
             ctx.fillText(maxValue.toString(), 4, padding.top + 8);
             ctx.fillText('0', 10, padding.top + chartHeight + 12);
 
-            const first = sorted[0]?.bucket_start;
-            const last = sorted[sorted.length - 1]?.bucket_start;
+            const first = buckets[0] ? new Date(buckets[0]).toISOString() : '';
+            const last = buckets[buckets.length - 1] ? new Date(buckets[buckets.length - 1]).toISOString() : '';
             if (range && first && last) {
                 const startLabel = new Date(first).toLocaleString();
                 const endLabel = new Date(last).toLocaleString();
                 range.innerHTML = `<span>${startLabel}</span><span>${endLabel}</span>`;
             }
 
-            if (resolvedBucket !== 60 && windowLabel) {
-                windowLabel.textContent = `Last ${resolvedRetention}h (bucket ${resolvedBucket}m)`;
+            if (windowLabel) {
+                windowLabel.textContent = `Sessions by WAN (Last ${resolvedRetention}h, bucket ${resolvedBucket}m)`;
             }
+        }
+
+        function formatDurationSeconds(seconds) {
+            const value = Number(seconds) || 0;
+            if (value < 60) return `${value.toFixed(1)}s`;
+            if (value < 3600) return `${(value / 60).toFixed(1)}m`;
+            return `${(value / 3600).toFixed(2)}h`;
+        }
+
+        function compareWANRows(left, right, key) {
+            const leftVal = left?.[key];
+            const rightVal = right?.[key];
+
+            if (key === 'duration_seconds' || key === 'requests') {
+                const leftNum = Number(leftVal) || 0;
+                const rightNum = Number(rightVal) || 0;
+                return leftNum - rightNum;
+            }
+
+            if (key === 'started_at' || key === 'last_seen_at') {
+                const leftTime = Date.parse(leftVal || '') || 0;
+                const rightTime = Date.parse(rightVal || '') || 0;
+                return leftTime - rightTime;
+            }
+
+            const leftStr = String(leftVal || '').toLowerCase();
+            const rightStr = String(rightVal || '').toLowerCase();
+            return leftStr.localeCompare(rightStr);
+        }
+
+        function sortExternalWANSessions(sessions) {
+            const sorted = [...sessions].sort((a, b) => compareWANRows(a, b, wanSortKey));
+            if (wanSortDirection === 'desc') {
+                sorted.reverse();
+            }
+            return sorted;
+        }
+
+        function toggleWANSort(key) {
+            if (wanSortKey === key) {
+                wanSortDirection = wanSortDirection === 'asc' ? 'desc' : 'asc';
+            } else {
+                wanSortKey = key;
+                wanSortDirection = (key === 'started_at' || key === 'last_seen_at' || key === 'duration_seconds' || key === 'requests') ? 'desc' : 'asc';
+            }
+            fetchStatus();
+        }
+
+        function sortLabel(label, key) {
+            if (wanSortKey !== key) return label;
+            return `${label} ${wanSortDirection === 'asc' ? '▲' : '▼'}`;
+        }
+
+        function renderExternalWANSessions(sessions) {
+            const container = document.getElementById('external-wan-sessions-list');
+            if (!container) return;
+
+            if (!Array.isArray(sessions) || sessions.length === 0) {
+                container.innerHTML = `
+                    <div class="empty-state">
+                        <div class="empty-state-icon">🌐</div>
+                        <div class="empty-state-text">No external WAN sessions recorded</div>
+                        <div class="empty-state-subtext">Records appear here when external users request go-live streams.</div>
+                    </div>
+                `;
+                return;
+            }
+
+            const sortedSessions = sortExternalWANSessions(sessions);
+
+            const rows = sortedSessions.map((session) => {
+                const startedAt = session.started_at ? new Date(session.started_at).toLocaleString() : '-';
+                const lastSeenAt = session.last_seen_at ? new Date(session.last_seen_at).toLocaleString() : '-';
+                const duration = formatDurationSeconds(session.duration_seconds);
+                const requests = Number(session.requests) || 0;
+                return `
+                    <div class="stream-row" style="grid-template-columns: minmax(120px, 160px) minmax(120px, 170px) 90px 120px 170px 170px 90px 80px minmax(220px, 1fr);">
+                        <div class="stream-cell" title="${session.wan_ip || '-'}">${session.wan_ip || '-'}</div>
+                        <div class="stream-cell" title="${session.content || '-'}">${session.content || '-'}</div>
+                        <div class="stream-cell" title="${session.mode || '-'}">${session.mode || '-'}</div>
+                        <div class="stream-cell" title="${session.player_id || '-'}">${session.player_id || '-'}</div>
+                        <div class="stream-cell" title="${startedAt}">${startedAt}</div>
+                        <div class="stream-cell" title="${lastSeenAt}">${lastSeenAt}</div>
+                        <div class="stream-cell">${duration}</div>
+                        <div class="stream-cell">${requests}</div>
+                        <div class="stream-cell url" title="${session.summary || '-'}">${session.summary || '-'}</div>
+                    </div>
+                `;
+            }).join('');
+
+            container.innerHTML = `
+                <div class="stream-table">
+                    <div class="stream-row head" style="grid-template-columns: minmax(120px, 160px) minmax(120px, 170px) 90px 120px 170px 170px 90px 80px minmax(220px, 1fr);">
+                        <div class="stream-cell"><button class="btn btn-sm btn-secondary" onclick="toggleWANSort('wan_ip')">${sortLabel('WAN IP', 'wan_ip')}</button></div>
+                        <div class="stream-cell"><button class="btn btn-sm btn-secondary" onclick="toggleWANSort('content')">${sortLabel('Content', 'content')}</button></div>
+                        <div class="stream-cell"><button class="btn btn-sm btn-secondary" onclick="toggleWANSort('mode')">${sortLabel('Mode', 'mode')}</button></div>
+                        <div class="stream-cell"><button class="btn btn-sm btn-secondary" onclick="toggleWANSort('player_id')">${sortLabel('Player ID', 'player_id')}</button></div>
+                        <div class="stream-cell"><button class="btn btn-sm btn-secondary" onclick="toggleWANSort('started_at')">${sortLabel('Started', 'started_at')}</button></div>
+                        <div class="stream-cell"><button class="btn btn-sm btn-secondary" onclick="toggleWANSort('last_seen_at')">${sortLabel('Last Seen', 'last_seen_at')}</button></div>
+                        <div class="stream-cell"><button class="btn btn-sm btn-secondary" onclick="toggleWANSort('duration_seconds')">${sortLabel('Duration', 'duration_seconds')}</button></div>
+                        <div class="stream-cell"><button class="btn btn-sm btn-secondary" onclick="toggleWANSort('requests')">${sortLabel('Req', 'requests')}</button></div>
+                        <div class="stream-cell"><button class="btn btn-sm btn-secondary" onclick="toggleWANSort('summary')">${sortLabel('Summary', 'summary')}</button></div>
+                    </div>
+                    ${rows}
+                </div>
+            `;
         }
 
         async function fetchStatus() {
@@ -868,10 +1046,11 @@
                 }
 
                 renderExternalHistory(
-                    data.external_ip_history || [],
+                    data.external_wan_sessions || [],
                     data.external_ip_bucket_minutes,
                     data.external_ip_retention_hours
                 );
+                renderExternalWANSessions(data.external_wan_sessions || []);
 
                 document.getElementById('idle-timeout').textContent = idleTimeout + 's';
                 document.getElementById('mode').textContent = (data.mode || 'go-live').toUpperCase();

@@ -122,6 +122,7 @@ kind: Service
 metadata:
   name: infinite-streaming-dev
 spec:
+  externalTrafficPolicy: Local
   selector:
     app: infinite-streaming-dev
   ports:

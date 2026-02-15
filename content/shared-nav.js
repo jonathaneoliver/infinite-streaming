@@ -69,6 +69,10 @@
         return !isInternalNetworkHost(host);
     }
 
+    function shouldRestrictMonitorAccess() {
+        return shouldRestrictContentManagement();
+    }
+
     function resolvePreferredStreamHost(sourceHostname) {
         const currentHost = (window.location.hostname || '').toLowerCase();
         const sourceHost = (sourceHostname || '').toLowerCase();
@@ -183,6 +187,7 @@
     function buildSidebar(activePage) {
         const isDeveloper = isDeveloperMode();
         const restrictContent = shouldRestrictContentManagement();
+        const restrictMonitor = shouldRestrictMonitorAccess();
         
         const sections = [
             { title: 'MAIN', items: NAVIGATION.main },
@@ -221,7 +226,9 @@
             html += `<div class="nav-section-title">${section.title}</div>`;
             
             visibleItems.forEach(item => {
-                const isRestrictedItem = restrictContent && section.title === 'CONTENT';
+                const isContentRestrictedItem = restrictContent && section.title === 'CONTENT';
+                const isMonitorRestrictedItem = restrictMonitor && section.title === 'LIVE STREAMING' && item.id === 'monitor';
+                const isRestrictedItem = isContentRestrictedItem || isMonitorRestrictedItem;
                 const isActive = item.id === activePage ? 'active' : '';
                 const isDisabled = isRestrictedItem ? 'disabled' : '';
                 const warning = item.warning ? '<span class="nav-item-warning">⚠️</span>' : '';
@@ -1252,7 +1259,8 @@ Version: ${version}
         normalizeTestingBaseUrl: normalizeTestingBaseUrl,
         buildTestingUrl: buildTestingUrl,
         createPlayerId: createPlayerId,
-        isContentManagementRestricted: shouldRestrictContentManagement
+        isContentManagementRestricted: shouldRestrictContentManagement,
+        isMonitorRestricted: shouldRestrictMonitorAccess
     };
 
     // Auto-initialize on DOM ready (unless disabled)

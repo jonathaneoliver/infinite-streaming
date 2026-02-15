@@ -566,6 +566,7 @@
         <div class="session-panel">
             <h3>Session Controls</h3>
             <div id="networkShapingBanner" class="status-message" style="display:none; margin-bottom: 10px;"></div>
+            <div id="streamAccessBanner" class="status-message" style="display:none; margin-bottom: 10px;"></div>
             <div id="sessionGroupControls" class="group-controls-row"></div>
             <div id="sessionControls">Loading session…</div>
         </div>
@@ -760,6 +761,33 @@
                 parts.push(url);
             }
             log(parts.join(' '));
+            if (Number(status) === 429) {
+                showStreamAccessAlert(url);
+            }
+        }
+
+        let streamLimitAlertShown = false;
+
+        function showStreamAccessAlert(url) {
+            const banner = document.getElementById('streamAccessBanner');
+            const suffix = url ? ` (${url})` : '';
+            const message = `Stream start blocked: external users are limited to 2 active test streams. Close an existing stream and retry${suffix}.`;
+            if (banner) {
+                banner.textContent = message;
+                banner.style.display = 'block';
+            }
+            if (!streamLimitAlertShown) {
+                streamLimitAlertShown = true;
+                alert('You reached the external limit of 2 active test streams. Close one and retry.');
+            }
+        }
+
+        function clearStreamAccessAlert() {
+            const banner = document.getElementById('streamAccessBanner');
+            if (banner) {
+                banner.style.display = 'none';
+                banner.textContent = '';
+            }
         }
 
         function toMetricNumber(value) {
@@ -1508,6 +1536,7 @@
         function loadStream(url) {
             currentUrl = url;
             markPlaybackStart();
+            clearStreamAccessAlert();
             autoRetryCount = 0;
             if (autoRetryTimer) {
                 clearTimeout(autoRetryTimer);
@@ -1545,6 +1574,7 @@
                     scheduleAutoRetry(`shaka ${e.detail.code}`);
                 });
                 shakaPlayer.load(url).then(() => {
+                    clearStreamAccessAlert();
                     log('LOADED');
                     video.play().catch(err => {
                         log(`PLAY ERROR: ${err.message}`);
@@ -1574,6 +1604,7 @@
                         scheduleAutoRetry('hls stalled');
                     });
                     hlsInstance.on(Hls.Events.MANIFEST_PARSED, () => {
+                        clearStreamAccessAlert();
                         video.play().catch(err => {
                             log(`PLAY ERROR: ${err.message}`);
                             scheduleAutoRetry('hls play error');
@@ -1630,6 +1661,7 @@
                 });
                 videojsPlayer.src({ src: url, type: 'application/x-mpegURL' });
                 videojsPlayer.ready(() => {
+                    clearStreamAccessAlert();
                     videojsPlayer.play().catch(err => {
                         log(`PLAY ERROR: ${err.message}`);
                         scheduleAutoRetry('videojs play error');
