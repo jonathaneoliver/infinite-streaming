@@ -9,6 +9,7 @@ RUN cd /build/go-live && \
     go get github.com/bluenviron/gohlslib@v1.4.0 && \
     go get github.com/google/uuid && \
     go get github.com/beevik/etree@v1.2.0 && \
+  go get modernc.org/sqlite@v1.29.0 && \
     go mod tidy && \
     go build -o /out/go-live cmd/server/main.go
 

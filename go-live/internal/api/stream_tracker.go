@@ -1,52 +1,60 @@
 package api
 
 import (
+	"database/sql"
 	"net"
+	"net/url"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	_ "modernc.org/sqlite"
 )
 
 const (
-	defaultIdleTimeoutSeconds = 60
-	defaultPlayerWindowSecs   = 60
-	maxExternalIPList         = 20
-	defaultExternalIPBucketMinutes = 60
-	defaultExternalIPRetentionHours = 168
-	externalPruneInterval = time.Minute
+	defaultIdleTimeoutSeconds          = 60
+	defaultPlayerWindowSecs            = 60
+	maxExternalIPList                  = 20
+	defaultExternalIPBucketMinutes     = 60
+	defaultExternalIPRetentionHours    = 168
+	externalPruneInterval              = time.Minute
+	defaultExternalSessionDBFilename   = "go-live-external-sessions.sqlite"
+	defaultExternalSessionDBPath       = "/tmp/go-live-external-sessions.sqlite"
+	defaultExternalSessionHistoryLimit = 250
 )
 
 type StreamEntry struct {
-	Content       string
-	Mode          string
-	ProcessID     string
-	StartedAt     time.Time
-	LastRequest   time.Time
+	Content        string
+	Mode           string
+	ProcessID      string
+	StartedAt      time.Time
+	LastRequest    time.Time
 	LastRequestURI string
-	Clients       map[string]time.Time
-	TotalRequests int
+	Clients        map[string]time.Time
+	TotalRequests  int
 }
 
 type StreamStatus struct {
-	Content         string `json:"content"`
-	Mode            string `json:"mode"`
-	ProcessID       string `json:"process_id,omitempty"`
-	StartedAt       string `json:"started_at,omitempty"`
-	LastRequestedAt string `json:"last_requested_at,omitempty"`
-	LastRequestURI  string `json:"last_request_uri,omitempty"`
-	LastRequestAgo  string `json:"last_request_ago,omitempty"`
-	WillShutdownIn  string `json:"will_shutdown_in,omitempty"`
-	Players         int    `json:"players"`
-	TotalRequests   int    `json:"total_requests"`
-	LastTick        float64 `json:"last_tick,omitempty"`
-	Avg5m           float64 `json:"avg_5m,omitempty"`
-	UniqueClientIPs int      `json:"unique_client_ips,omitempty"`
-	ExternalIPCount int      `json:"external_ip_count,omitempty"`
-	ExternalIPs     []string `json:"external_ips,omitempty"`
-	ExternalIPOverflow int   `json:"external_ip_overflow,omitempty"`
+	Content            string   `json:"content"`
+	Mode               string   `json:"mode"`
+	ProcessID          string   `json:"process_id,omitempty"`
+	StartedAt          string   `json:"started_at,omitempty"`
+	LastRequestedAt    string   `json:"last_requested_at,omitempty"`
+	LastRequestURI     string   `json:"last_request_uri,omitempty"`
+	LastRequestAgo     string   `json:"last_request_ago,omitempty"`
+	WillShutdownIn     string   `json:"will_shutdown_in,omitempty"`
+	Players            int      `json:"players"`
+	TotalRequests      int      `json:"total_requests"`
+	LastTick           float64  `json:"last_tick,omitempty"`
+	Avg5m              float64  `json:"avg_5m,omitempty"`
+	UniqueClientIPs    int      `json:"unique_client_ips,omitempty"`
+	ExternalIPCount    int      `json:"external_ip_count,omitempty"`
+	ExternalIPs        []string `json:"external_ips,omitempty"`
+	ExternalIPOverflow int      `json:"external_ip_overflow,omitempty"`
 }
 
 type ExternalUsageBucket struct {
@@ -61,17 +69,46 @@ type ExternalUsageSnapshot struct {
 	UniqueExternalIPs int    `json:"unique_external_ips"`
 }
 
+type ExternalSessionRecord struct {
+	SessionKey string    `json:"session_key"`
+	WANIP      string    `json:"wan_ip"`
+	Content    string    `json:"content"`
+	Mode       string    `json:"mode"`
+	Summary    string    `json:"summary"`
+	PlayerID   string    `json:"player_id,omitempty"`
+	StartedAt  time.Time `json:"started_at"`
+	EndedAt    time.Time `json:"ended_at,omitempty"`
+	LastSeenAt time.Time `json:"last_seen_at"`
+	Requests   int       `json:"requests"`
+}
+
+type ExternalSessionSnapshot struct {
+	SessionKey      string  `json:"session_key"`
+	WANIP           string  `json:"wan_ip"`
+	Content         string  `json:"content"`
+	Mode            string  `json:"mode"`
+	Summary         string  `json:"summary"`
+	PlayerID        string  `json:"player_id,omitempty"`
+	StartedAt       string  `json:"started_at"`
+	LastSeenAt      string  `json:"last_seen_at"`
+	DurationSeconds float64 `json:"duration_seconds"`
+	Requests        int     `json:"requests"`
+}
+
 type StreamTracker struct {
-	mu           sync.RWMutex
-	streams      map[string]*StreamEntry
-	idleTimeout  time.Duration
-	playerWindow time.Duration
-	externalUsage     map[int64]*ExternalUsageBucket
-	externalUnique    map[string]struct{}
-	externalLastSeen  map[string]time.Time
-	externalBucket    time.Duration
-	externalRetention time.Duration
-	externalPruneAt   time.Time
+	mu                     sync.RWMutex
+	streams                map[string]*StreamEntry
+	idleTimeout            time.Duration
+	playerWindow           time.Duration
+	externalUsage          map[int64]*ExternalUsageBucket
+	externalUnique         map[string]struct{}
+	externalLastSeen       map[string]time.Time
+	externalBucket         time.Duration
+	externalRetention      time.Duration
+	externalPruneAt        time.Time
+	externalSessionDBPath  string
+	externalSessionDB      *sql.DB
+	externalActiveSessions map[string]*ExternalSessionRecord
 }
 
 func NewStreamTracker() *StreamTracker {
@@ -83,16 +120,20 @@ func NewStreamTracker() *StreamTracker {
 	if retentionHours <= 0 {
 		retentionHours = defaultExternalIPRetentionHours
 	}
-	return &StreamTracker{
-		streams:      make(map[string]*StreamEntry),
-		idleTimeout:  envSeconds("GO_LIVE_IDLE_TIMEOUT", defaultIdleTimeoutSeconds),
-		playerWindow: envSeconds("GO_LIVE_PLAYER_WINDOW", defaultPlayerWindowSecs),
-		externalUsage:     make(map[int64]*ExternalUsageBucket),
-		externalUnique:    make(map[string]struct{}),
-		externalLastSeen:  make(map[string]time.Time),
-		externalBucket:    time.Duration(bucketMinutes) * time.Minute,
-		externalRetention: time.Duration(retentionHours) * time.Hour,
+	tracker := &StreamTracker{
+		streams:                make(map[string]*StreamEntry),
+		idleTimeout:            envSeconds("GO_LIVE_IDLE_TIMEOUT", defaultIdleTimeoutSeconds),
+		playerWindow:           envSeconds("GO_LIVE_PLAYER_WINDOW", defaultPlayerWindowSecs),
+		externalUsage:          make(map[int64]*ExternalUsageBucket),
+		externalUnique:         make(map[string]struct{}),
+		externalLastSeen:       make(map[string]time.Time),
+		externalBucket:         time.Duration(bucketMinutes) * time.Minute,
+		externalRetention:      time.Duration(retentionHours) * time.Hour,
+		externalSessionDBPath:  resolveExternalSessionDBPath(),
+		externalActiveSessions: make(map[string]*ExternalSessionRecord),
 	}
+	tracker.externalSessionDB = openExternalSessionDB(tracker.externalSessionDBPath)
+	return tracker
 }
 
 func (t *StreamTracker) IdleTimeout() time.Duration {
@@ -141,11 +182,85 @@ func (t *StreamTracker) RecordRequest(content, mode, uri, clientKey string, now 
 	}
 	t.pruneClients(entry, now)
 	t.recordExternalIPLocked(clientKey, now)
+	t.finalizeInactiveExternalSessionsLocked(now)
+	t.recordExternalSessionLocked(content, mode, uri, clientKey, now)
+}
+
+func (t *StreamTracker) ExternalSessionHistory(now time.Time, limit int) []ExternalSessionSnapshot {
+	t.mu.Lock()
+	t.finalizeInactiveExternalSessionsLocked(now)
+	db := t.externalSessionDB
+	t.mu.Unlock()
+	if db == nil {
+		return nil
+	}
+	if limit <= 0 {
+		limit = defaultExternalSessionHistoryLimit
+	}
+	query := `
+		SELECT session_key, wan_ip, content, mode, summary, player_id, started_at, ended_at, last_seen_at, requests, duration_seconds
+		FROM external_wan_session_events
+		WHERE summary = 'master.m3u8'
+		   OR summary LIKE '%/master.m3u8'
+		   OR summary LIKE 'master_%.m3u8'
+		   OR summary LIKE '%/master_%.m3u8'
+		ORDER BY COALESCE(ended_at, last_seen_at) DESC
+		LIMIT ?
+	`
+	resultRows, err := db.Query(query, limit)
+	if err != nil {
+		return nil
+	}
+	defer resultRows.Close()
+
+	rows := make([]ExternalSessionSnapshot, 0, limit)
+	for resultRows.Next() {
+		var rec ExternalSessionRecord
+		var startedAt string
+		var endedAt sql.NullString
+		var lastSeenAt string
+		var durationSeconds sql.NullFloat64
+		if err := resultRows.Scan(&rec.SessionKey, &rec.WANIP, &rec.Content, &rec.Mode, &rec.Summary, &rec.PlayerID, &startedAt, &endedAt, &lastSeenAt, &rec.Requests, &durationSeconds); err != nil {
+			continue
+		}
+		started, err1 := time.Parse(time.RFC3339, startedAt)
+		lastSeen, err2 := time.Parse(time.RFC3339, lastSeenAt)
+		if err1 != nil || err2 != nil {
+			continue
+		}
+		effectiveLastSeen := lastSeen
+		if endedAt.Valid {
+			if endedParsed, err := time.Parse(time.RFC3339, endedAt.String); err == nil {
+				effectiveLastSeen = endedParsed
+			}
+		}
+		duration := durationSeconds.Float64
+		if !durationSeconds.Valid {
+			duration = effectiveLastSeen.Sub(started).Seconds()
+			if duration < 0 {
+				duration = 0
+			}
+		}
+		rows = append(rows, ExternalSessionSnapshot{
+			SessionKey:      rec.SessionKey,
+			WANIP:           rec.WANIP,
+			Content:         rec.Content,
+			Mode:            rec.Mode,
+			Summary:         rec.Summary,
+			PlayerID:        rec.PlayerID,
+			StartedAt:       started.UTC().Format(time.RFC3339),
+			LastSeenAt:      effectiveLastSeen.UTC().Format(time.RFC3339),
+			DurationSeconds: duration,
+			Requests:        rec.Requests,
+		})
+	}
+	return rows
 }
 
 func (t *StreamTracker) Snapshot(now time.Time) []StreamStatus {
-	t.mu.RLock()
-	defer t.mu.RUnlock()
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.finalizeInactiveExternalSessionsLocked(now)
 	statuses := make([]StreamStatus, 0, len(t.streams))
 	for _, entry := range t.streams {
 		players := t.countActiveClients(entry, now)
@@ -163,16 +278,16 @@ func (t *StreamTracker) Snapshot(now time.Time) []StreamStatus {
 		}
 		externalList, overflow := externalIPList(externalIPs)
 		status := StreamStatus{
-			Content:       entry.Content,
-			Mode:          entry.Mode,
-			ProcessID:     entry.ProcessID,
-			Players:       players,
-			TotalRequests: entry.TotalRequests,
-			LastRequestAgo:  lastAgo,
-			WillShutdownIn:  willShutdown,
-			UniqueClientIPs: len(clientIPs),
-			ExternalIPCount: len(externalIPs),
-			ExternalIPs:     externalList,
+			Content:            entry.Content,
+			Mode:               entry.Mode,
+			ProcessID:          entry.ProcessID,
+			Players:            players,
+			TotalRequests:      entry.TotalRequests,
+			LastRequestAgo:     lastAgo,
+			WillShutdownIn:     willShutdown,
+			UniqueClientIPs:    len(clientIPs),
+			ExternalIPCount:    len(externalIPs),
+			ExternalIPs:        externalList,
 			ExternalIPOverflow: overflow,
 		}
 		if !entry.StartedAt.IsZero() {
@@ -206,8 +321,8 @@ func (t *StreamTracker) IdleContentEntries(now time.Time) []StreamEntry {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
 	type agg struct {
-		last   time.Time
-		entry  *StreamEntry
+		last  time.Time
+		entry *StreamEntry
 	}
 	byContent := make(map[string]*agg)
 	for _, entry := range t.streams {
@@ -246,12 +361,14 @@ func (t *StreamTracker) Remove(content, mode string) {
 	key := streamKey(content, mode)
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	t.finalizeExternalSessionsForStreamLocked(content, mode, time.Now().UTC())
 	delete(t.streams, key)
 }
 
 func (t *StreamTracker) RemoveContentModePrefix(content, prefix string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	now := time.Now().UTC()
 	for key, entry := range t.streams {
 		if entry == nil {
 			continue
@@ -260,6 +377,7 @@ func (t *StreamTracker) RemoveContentModePrefix(content, prefix string) {
 			continue
 		}
 		if strings.HasPrefix(entry.Mode, prefix) {
+			t.finalizeExternalSessionsForStreamLocked(entry.Content, entry.Mode, now)
 			delete(t.streams, key)
 		}
 	}
@@ -346,6 +464,122 @@ func (t *StreamTracker) recordExternalIPLocked(clientKey string, now time.Time) 
 		bucket.UniqueIPs[ip] = struct{}{}
 	}
 	t.pruneExternalUsageLocked(now)
+}
+
+func (t *StreamTracker) recordExternalSessionLocked(content, mode, uri, clientKey string, now time.Time) {
+	ip := parseClientIP(clientKey)
+	if ip == "" || ip == "unknown" || !isExternalIP(ip) {
+		return
+	}
+	playerID, summary := sessionSummaryFromURI(uri)
+	if summary == "" {
+		summary = mode
+	}
+	isMasterRequest := isMasterPlaylistURI(summary)
+	sessionKey := externalSessionKey(ip, content, mode, playerID, "")
+	if existing, ok := t.externalActiveSessions[sessionKey]; ok && existing != nil {
+		existing.LastSeenAt = now
+		existing.Requests++
+		return
+	}
+	if !isMasterRequest {
+		return
+	}
+	rec := &ExternalSessionRecord{
+		SessionKey: sessionKey,
+		WANIP:      ip,
+		Content:    content,
+		Mode:       mode,
+		Summary:    summary,
+		PlayerID:   playerID,
+		StartedAt:  now,
+		LastSeenAt: now,
+		Requests:   1,
+	}
+	t.externalActiveSessions[sessionKey] = rec
+	t.persistExternalSessionStartLocked(rec)
+}
+
+func (t *StreamTracker) finalizeInactiveExternalSessionsLocked(now time.Time) {
+	if t.idleTimeout <= 0 {
+		return
+	}
+	for key, rec := range t.externalActiveSessions {
+		if rec == nil {
+			delete(t.externalActiveSessions, key)
+			continue
+		}
+		if now.Sub(rec.LastSeenAt) >= t.idleTimeout {
+			t.persistExternalSessionEndLocked(rec, rec.LastSeenAt)
+			delete(t.externalActiveSessions, key)
+		}
+	}
+}
+
+func (t *StreamTracker) finalizeExternalSessionsForStreamLocked(content, mode string, endedAt time.Time) {
+	for key, rec := range t.externalActiveSessions {
+		if rec == nil {
+			delete(t.externalActiveSessions, key)
+			continue
+		}
+		if rec.Content != content || rec.Mode != mode {
+			continue
+		}
+		t.persistExternalSessionEndLocked(rec, endedAt)
+		delete(t.externalActiveSessions, key)
+	}
+}
+
+func (t *StreamTracker) persistExternalSessionStartLocked(rec *ExternalSessionRecord) {
+	if rec == nil || t.externalSessionDB == nil {
+		return
+	}
+	started := rec.StartedAt.UTC().Format(time.RFC3339)
+	_, _ = t.externalSessionDB.Exec(
+		`INSERT INTO external_wan_session_events (
+			session_key, wan_ip, content, mode, summary, player_id, started_at, last_seen_at, requests
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		rec.SessionKey,
+		rec.WANIP,
+		rec.Content,
+		rec.Mode,
+		rec.Summary,
+		rec.PlayerID,
+		started,
+		started,
+		rec.Requests,
+	)
+}
+
+func (t *StreamTracker) persistExternalSessionEndLocked(rec *ExternalSessionRecord, endedAt time.Time) {
+	if rec == nil || t.externalSessionDB == nil {
+		return
+	}
+	if endedAt.IsZero() {
+		endedAt = rec.LastSeenAt
+	}
+	if endedAt.IsZero() {
+		endedAt = time.Now().UTC()
+	}
+	duration := endedAt.Sub(rec.StartedAt).Seconds()
+	if duration < 0 {
+		duration = 0
+	}
+	_, _ = t.externalSessionDB.Exec(
+		`UPDATE external_wan_session_events
+		 SET ended_at = ?, last_seen_at = ?, duration_seconds = ?, requests = ?
+		 WHERE id = (
+			SELECT id FROM external_wan_session_events
+			WHERE session_key = ? AND ended_at IS NULL
+			ORDER BY started_at DESC
+			LIMIT 1
+		 )`,
+		endedAt.UTC().Format(time.RFC3339),
+		endedAt.UTC().Format(time.RFC3339),
+		duration,
+		rec.Requests,
+		rec.SessionKey,
+	)
 }
 
 func (t *StreamTracker) pruneExternalUsageLocked(now time.Time) {
@@ -568,4 +802,93 @@ func externalIPList(ipTimes map[string]time.Time) ([]string, int) {
 		keys = keys[:maxExternalIPList]
 	}
 	return keys, overflow
+}
+
+func resolveExternalSessionDBPath() string {
+	if explicit := strings.TrimSpace(os.Getenv("GO_LIVE_EXTERNAL_SESSION_DB_PATH")); explicit != "" {
+		return explicit
+	}
+	if base := strings.TrimSpace(os.Getenv("INFINITE_STREAM_DATABASE_DIR")); base != "" {
+		return filepath.Join(base, defaultExternalSessionDBFilename)
+	}
+	return defaultExternalSessionDBPath
+}
+
+func sessionSummaryFromURI(uri string) (string, string) {
+	trimmed := strings.TrimSpace(uri)
+	if trimmed == "" {
+		return "", ""
+	}
+	parsed, err := url.Parse(trimmed)
+	if err != nil {
+		return "", trimmed
+	}
+	playerID := strings.TrimSpace(parsed.Query().Get("player_id"))
+	path := strings.TrimSpace(parsed.Path)
+	if path == "" {
+		path = trimmed
+	}
+	if strings.HasPrefix(path, "/") {
+		path = path[1:]
+	}
+	return playerID, path
+}
+
+func externalSessionKey(ip, content, mode, playerID, summary string) string {
+	parts := []string{strings.TrimSpace(ip), strings.TrimSpace(content), strings.TrimSpace(mode), strings.TrimSpace(playerID), strings.TrimSpace(summary)}
+	return strings.Join(parts, "|")
+}
+
+func isMasterPlaylistURI(summary string) bool {
+	value := strings.TrimSpace(summary)
+	if value == "" {
+		return false
+	}
+	base := filepath.Base(value)
+	if base == "master.m3u8" {
+		return true
+	}
+	if strings.HasPrefix(base, "master_") && strings.HasSuffix(base, ".m3u8") {
+		return true
+	}
+	return false
+}
+
+func openExternalSessionDB(dbPath string) *sql.DB {
+	if strings.TrimSpace(dbPath) == "" {
+		return nil
+	}
+	dir := filepath.Dir(dbPath)
+	if dir != "" {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			return nil
+		}
+	}
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		return nil
+	}
+	if _, err := db.Exec(`
+		CREATE TABLE IF NOT EXISTS external_wan_session_events (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			session_key TEXT NOT NULL,
+			wan_ip TEXT NOT NULL,
+			content TEXT NOT NULL,
+			mode TEXT NOT NULL,
+			summary TEXT NOT NULL,
+			player_id TEXT NOT NULL DEFAULT '',
+			started_at TEXT NOT NULL,
+			last_seen_at TEXT NOT NULL,
+			ended_at TEXT,
+			duration_seconds REAL,
+			requests INTEGER NOT NULL DEFAULT 0
+		);
+		CREATE INDEX IF NOT EXISTS idx_external_wan_session_events_last_seen ON external_wan_session_events(last_seen_at DESC);
+		CREATE INDEX IF NOT EXISTS idx_external_wan_session_events_wan_ip ON external_wan_session_events(wan_ip);
+		CREATE INDEX IF NOT EXISTS idx_external_wan_session_events_key ON external_wan_session_events(session_key);
+	`); err != nil {
+		_ = db.Close()
+		return nil
+	}
+	return db
 }

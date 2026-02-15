@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"database/sql"
 	_ "embed"
 	"encoding/json"
 	"errors"
@@ -29,6 +30,7 @@ import (
 	"github.com/bradfitz/gomemcache/memcache"
 	"github.com/gorilla/mux"
 	"github.com/grafov/m3u8"
+	_ "modernc.org/sqlite"
 )
 
 //go:embed templates/index.html
@@ -119,6 +121,7 @@ func (rb *NetworkLogRingBuffer) GetAll() []NetworkLogEntry {
 
 type App struct {
 	memcache                 *memcache.Client
+	sessionEvents            *SessionEventStore
 	traffic                  *TcTrafficManager
 	upstreamHost             string
 	upstreamPort             string
@@ -162,6 +165,10 @@ type SessionsStreamPayload struct {
 	Revision uint64        `json:"revision"`
 	Dropped  uint64        `json:"dropped"`
 	Sessions []SessionData `json:"sessions"`
+}
+
+type SessionEventStore struct {
+	db *sql.DB
 }
 
 type SessionPatchRequest struct {
@@ -283,7 +290,126 @@ const (
 	socketMidBodyBytes      = 64 * 1024
 	socketHangDuration      = 90 * time.Second
 	socketDelayDuration     = 12 * time.Second
+	externalWANSessionLimit = 2
+	defaultSessionEventsDB  = "/tmp/go-proxy-session-events.sqlite"
 )
+
+func newSessionEventStore(path string) (*SessionEventStore, error) {
+	if strings.TrimSpace(path) == "" {
+		path = defaultSessionEventsDB
+	}
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		return nil, err
+	}
+	db.SetMaxOpenConns(1)
+	db.SetConnMaxLifetime(0)
+	schema := `
+		CREATE TABLE IF NOT EXISTS session_lifecycle_events (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			session_id TEXT NOT NULL,
+			player_id TEXT,
+			origination_ip TEXT,
+			external_port TEXT,
+			internal_port TEXT,
+			manifest_url TEXT,
+			started_at TEXT NOT NULL,
+			ended_at TEXT,
+			duration_seconds REAL,
+			end_reason TEXT,
+			created_at TEXT NOT NULL DEFAULT (STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'now')),
+			updated_at TEXT NOT NULL DEFAULT (STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'now'))
+		);
+		CREATE INDEX IF NOT EXISTS idx_session_lifecycle_events_session ON session_lifecycle_events(session_id);
+		CREATE INDEX IF NOT EXISTS idx_session_lifecycle_events_started_at ON session_lifecycle_events(started_at DESC);
+	`
+	if _, err := db.Exec(schema); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	return &SessionEventStore{db: db}, nil
+}
+
+func (s *SessionEventStore) RecordStart(session SessionData, manifestURL string, startedAt time.Time) error {
+	if s == nil || s.db == nil {
+		return nil
+	}
+	if startedAt.IsZero() {
+		startedAt = time.Now().UTC()
+	}
+	_, err := s.db.Exec(
+		`INSERT INTO session_lifecycle_events (
+			session_id, player_id, origination_ip, external_port, internal_port, manifest_url, started_at, updated_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		getString(session, "session_id"),
+		getString(session, "player_id"),
+		getString(session, "origination_ip"),
+		getString(session, "x_forwarded_port_external"),
+		getString(session, "x_forwarded_port"),
+		manifestURL,
+		startedAt.UTC().Format(time.RFC3339Nano),
+		time.Now().UTC().Format(time.RFC3339Nano),
+	)
+	return err
+}
+
+func (s *SessionEventStore) RecordEnd(session SessionData, endedAt time.Time, reason string) error {
+	if s == nil || s.db == nil {
+		return nil
+	}
+	if endedAt.IsZero() {
+		endedAt = time.Now().UTC()
+	}
+	startAt := timeFromInterface(session["session_start_time"])
+	if startAt.IsZero() {
+		startAt = timeFromInterface(session["first_request_time"])
+	}
+	if startAt.IsZero() {
+		startAt = endedAt
+	}
+	durationSeconds := endedAt.Sub(startAt).Seconds()
+	if durationSeconds < 0 {
+		durationSeconds = 0
+	}
+	_, err := s.db.Exec(
+		`UPDATE session_lifecycle_events
+		SET ended_at = ?, duration_seconds = ?, end_reason = ?, updated_at = ?
+		WHERE id = (
+			SELECT id FROM session_lifecycle_events
+			WHERE session_id = ? AND ended_at IS NULL
+			ORDER BY started_at DESC
+			LIMIT 1
+		)`,
+		endedAt.UTC().Format(time.RFC3339Nano),
+		durationSeconds,
+		reason,
+		time.Now().UTC().Format(time.RFC3339Nano),
+		getString(session, "session_id"),
+	)
+	return err
+}
+
+func (a *App) recordSessionStart(session SessionData, manifestURL string) {
+	if a == nil || a.sessionEvents == nil {
+		return
+	}
+	startAt := timeFromInterface(session["session_start_time"])
+	if startAt.IsZero() {
+		startAt = timeFromInterface(session["first_request_time"])
+	}
+	if err := a.sessionEvents.RecordStart(session, manifestURL, startAt); err != nil {
+		log.Printf("session event start failed session_id=%s err=%v", getString(session, "session_id"), err)
+	}
+}
+
+func (a *App) recordSessionEnd(session SessionData, reason string) {
+	if a == nil || a.sessionEvents == nil {
+		return
+	}
+	if err := a.sessionEvents.RecordEnd(session, time.Now().UTC(), reason); err != nil {
+		log.Printf("session event end failed session_id=%s reason=%s err=%v", getString(session, "session_id"), reason, err)
+	}
+}
 
 func (s *NftShapeStep) UnmarshalJSON(data []byte) error {
 	type alias struct {
@@ -755,13 +881,18 @@ func main() {
 	tcDebug := getenvBoolAny([]string{"INFINITE_STREAM_TC_DEBUG", "INFINITE_TC_DEBUG", "TC_DEBUG"}, false)
 
 	mc := memcache.New(memcachedAddr)
+	eventStore, eventStoreErr := newSessionEventStore(getenv("GO_PROXY_SESSION_EVENTS_DB", defaultSessionEventsDB))
+	if eventStoreErr != nil {
+		log.Printf("session event store disabled: %v", eventStoreErr)
+	}
 	app := &App{
-		memcache:     mc,
-		traffic:      NewTcTrafficManager(interfaceName, tcDebug),
-		upstreamHost: upstreamHost,
-		upstreamPort: upstreamPort,
-		maxSessions:  maxSessions,
-		portMap:      loadPortMapping(),
+		memcache:      mc,
+		sessionEvents: eventStore,
+		traffic:       NewTcTrafficManager(interfaceName, tcDebug),
+		upstreamHost:  upstreamHost,
+		upstreamPort:  upstreamPort,
+		maxSessions:   maxSessions,
+		portMap:       loadPortMapping(),
 		client: &http.Client{
 			Transport: &http.Transport{
 				DialContext:           (&net.Dialer{Timeout: 6 * time.Second}).DialContext,
@@ -790,6 +921,7 @@ func main() {
 	router.HandleFunc("/api/session/{id}", app.handleSession).Methods(http.MethodGet, http.MethodDelete)
 	router.HandleFunc("/api/session/{id}", app.handlePatchSession).Methods(http.MethodPatch)
 	router.HandleFunc("/api/session/{id}/network", app.handleGetNetworkLog).Methods(http.MethodGet)
+	router.HandleFunc("/api/external-ips", app.handleGetExternalIPs).Methods(http.MethodGet)
 	router.HandleFunc("/api/clear-sessions", app.handleClearSessions).Methods(http.MethodPost)
 	router.HandleFunc("/api/session-group/link", app.handleLinkSessions).Methods(http.MethodPost)
 	router.HandleFunc("/api/session-group/unlink", app.handleUnlinkSession).Methods(http.MethodPost)
@@ -857,6 +989,10 @@ func (a *App) handleIndex(w http.ResponseWriter, r *http.Request) {
 func (a *App) handleGetSessions(w http.ResponseWriter, r *http.Request) {
 	a.removeInactiveSessions()
 	sessions := a.getSessionList()
+	if shouldScopeSessionsByRequesterIP(r) {
+		requesterIP := extractClientIP(r.RemoteAddr, r.Header.Get("X-Forwarded-For"))
+		sessions = filterSessionsByOriginationIP(sessions, requesterIP)
+	}
 	transportCountersByPort := getTransportFaultRuleCounters()
 	if len(sessions) > 10 {
 		sessions = sessions[:10]
@@ -1396,6 +1532,7 @@ func (a *App) handleSession(w http.ResponseWriter, r *http.Request) {
 				filtered = append(filtered, session)
 				continue
 			}
+			a.recordSessionEnd(session, "deleted")
 			if port, err := strconv.Atoi(getString(session, "x_forwarded_port")); err == nil {
 				removedPorts[port] = struct{}{}
 			}
@@ -1464,14 +1601,75 @@ func (a *App) handleGetNetworkLog(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (a *App) handleGetExternalIPs(w http.ResponseWriter, r *http.Request) {
+	sessionList := a.getSessionList()
+	if shouldScopeSessionsByRequesterIP(r) {
+		requesterIP := extractClientIP(r.RemoteAddr, r.Header.Get("X-Forwarded-For"))
+		sessionList = filterSessionsByOriginationIP(sessionList, requesterIP)
+	}
+
+	type ExternalIPEntry struct {
+		SessionID       string `json:"session_id"`
+		PlayerID        string `json:"player_id"`
+		OriginationIP   string `json:"origination_ip"`
+		OriginationTime string `json:"origination_time"`
+		LastRequestTime string `json:"last_request_time"`
+		IsExternal      bool   `json:"is_external"`
+		UserAgent       string `json:"user_agent,omitempty"`
+	}
+
+	var externalIPs []ExternalIPEntry
+	var allIPs []ExternalIPEntry
+
+	for _, session := range sessionList {
+		originIP := getString(session, "origination_ip")
+		if originIP == "" {
+			continue
+		}
+
+		entry := ExternalIPEntry{
+			SessionID:       getString(session, "session_id"),
+			PlayerID:        getString(session, "player_id"),
+			OriginationIP:   originIP,
+			OriginationTime: getString(session, "origination_time"),
+			LastRequestTime: getString(session, "last_request"),
+			IsExternal:      getBool(session, "is_external_ip"),
+			UserAgent:       getString(session, "user_agent"),
+		}
+
+		allIPs = append(allIPs, entry)
+		if entry.IsExternal {
+			externalIPs = append(externalIPs, entry)
+		}
+	}
+
+	// Check for filter parameter
+	filter := r.URL.Query().Get("filter")
+	var result []ExternalIPEntry
+
+	if filter == "external" {
+		result = externalIPs
+	} else {
+		result = allIPs
+	}
+
+	writeJSON(w, map[string]interface{}{
+		"entries":       result,
+		"total":         len(result),
+		"external_only": filter == "external",
+	})
+}
+
 func (a *App) handleClearSessions(w http.ResponseWriter, r *http.Request) {
+	sessions := a.getSessionList()
 	portSet := map[int]struct{}{}
 	a.shapeMu.Lock()
 	for port := range a.shapeLoops {
 		portSet[port] = struct{}{}
 	}
 	a.shapeMu.Unlock()
-	for _, session := range a.getSessionList() {
+	for _, session := range sessions {
+		a.recordSessionEnd(session, "cleared")
 		portStr := getString(session, "x_forwarded_port")
 		if portStr == "" {
 			continue
@@ -2988,12 +3186,14 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 	log.Printf("Original Host: %s", r.Host)
 	log.Printf("X-Forwarded-Port: %s", r.Header.Get("X-Forwarded-Port"))
 
+	a.removeInactiveSessions()
 	sessionList := a.getSessionList()
 	sessionNumber := thirdFromLastDigit(externalPort)
 	playerID := r.URL.Query().Get("player_id")
 	playerHeader := r.Header.Get("player_id")
 	playerHeaderAlt := r.Header.Get("Player-ID")
 	playbackSessionHeader := r.Header.Get("X-Playback-Session-Id")
+	requesterIP := extractClientIP(r.RemoteAddr, r.Header.Get("X-Forwarded-For"))
 
 	if playerID != "" && sessionNumber == "0" {
 		if existing := findSessionByPlayerID(sessionList, playerID, playerHeader, playerHeaderAlt, playbackSessionHeader); existing != nil {
@@ -3014,10 +3214,24 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
+		if isExternalIP(requesterIP) {
+			activeForRequester := countActiveSessionsForIP(sessionList, requesterIP)
+			if activeForRequester >= externalWANSessionLimit {
+				w.WriteHeader(http.StatusTooManyRequests)
+				writeJSON(w, map[string]interface{}{
+					"error":                  "external session limit reached",
+					"limit":                  externalWANSessionLimit,
+					"requester_ip":           requesterIP,
+					"active_sessions_for_ip": activeForRequester,
+				})
+				return
+			}
+		}
 		if len(sessionList) >= a.maxSessions {
 			w.WriteHeader(http.StatusServiceUnavailable)
 			return
 		}
+		createdAt := nowISO()
 		allocated := allocateSessionNumber(sessionList, a.maxSessions)
 		assignedExternalPort := replaceThirdFromLastDigit(externalPort, allocated)
 		assignedInternalPort := assignedExternalPort
@@ -3038,8 +3252,9 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 			"manifest_requests_count":                  0,
 			"master_manifest_requests_count":           0,
 			"segments_count":                           0,
-			"last_request":                             nowISO(),
-			"first_request_time":                       nowISO(),
+			"last_request":                             createdAt,
+			"first_request_time":                       createdAt,
+			"session_start_time":                       createdAt,
 			"segment_failure_type":                     "none",
 			"segment_failure_frequency":                0,
 			"segment_consecutive_failures":             0,
@@ -3054,8 +3269,11 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 			"master_manifest_consecutive_failures":     0,
 			"current_failures":                         0,
 			"consecutive_failures_count":               0,
-			"player_ip":                                "",
+			"player_ip":                                requesterIP,
 			"user_agent":                               "",
+			"origination_ip":                           requesterIP,
+			"origination_time":                         createdAt,
+			"is_external_ip":                           isExternalIP(requesterIP),
 			"manifest_failure_at":                      nil,
 			"manifest_failure_recover_at":              nil,
 			"manifest_failure_urls":                    []string{},
@@ -3105,6 +3323,11 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 		}
 		sessionList = append(sessionList, sessionData)
 		a.saveSessionList(sessionList)
+		manifestURL := "/" + escapedPath
+		if r.URL.RawQuery != "" {
+			manifestURL = manifestURL + "?" + r.URL.RawQuery
+		}
+		a.recordSessionStart(sessionData, manifestURL)
 		host := hostWithoutPort(r.Host)
 		newURL := fmt.Sprintf("http://%s:%s/%s", host, assignedExternalPort, escapedPath)
 		if r.URL.RawQuery != "" {
@@ -3136,11 +3359,33 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 	sessionData["last_request"] = nowISO()
 	sessionData["last_request_url"] = filename
 	sessionData["user_agent"] = r.UserAgent()
-	sessionData["player_ip"] = remoteIP(r.RemoteAddr)
+
+	// Extract client IP considering X-Forwarded-For
+	clientIP := extractClientIP(r.RemoteAddr, r.Header.Get("X-Forwarded-For"))
+	sessionData["player_ip"] = clientIP
+	sessionData["x_forwarded_for"] = r.Header.Get("X-Forwarded-For")
+
+	// Track origination IP on first request
+	if _, hasOriginIP := sessionData["origination_ip"]; !hasOriginIP {
+		sessionData["origination_ip"] = clientIP
+		sessionData["origination_time"] = nowISO()
+		sessionData["is_external_ip"] = isExternalIP(clientIP)
+
+		// Log external IP access
+		if isExternalIP(clientIP) {
+			log.Printf("[GO-PROXY][EXTERNAL-IP] session_id=%s player_id=%s ip=%s user_agent=%q",
+				sessionNumber,
+				getString(sessionData, "player_id"),
+				clientIP,
+				r.UserAgent(),
+			)
+		}
+	}
+
 	sessionData["x_forwarded_port"] = internalPort
 	sessionData["x_forwarded_port_external"] = externalPort
 	log.Printf(
-		"[GO-PROXY][REQUEST] method=%s host=%s port=%s path=%s query=%s session_id=%s player_id_q=%s player_id_h=%s playback_session_h=%s user_agent=%q",
+		"[GO-PROXY][REQUEST] method=%s host=%s port=%s path=%s query=%s session_id=%s player_id_q=%s player_id_h=%s playback_session_h=%s client_ip=%s user_agent=%q",
 		r.Method,
 		hostWithoutPort(r.Host),
 		hostPortOrDefault(r.Host, ""),
@@ -3150,6 +3395,7 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 		r.URL.Query().Get("player_id"),
 		r.Header.Get("Player-ID"),
 		r.Header.Get("X-Playback-Session-Id"),
+		clientIP,
 		r.UserAgent(),
 	)
 	requestBytes := int64(0)
@@ -4760,6 +5006,7 @@ func (a *App) removeInactiveSessions() {
 		if now.Sub(lastTime) < 60*time.Second {
 			active = append(active, session)
 		} else {
+			a.recordSessionEnd(session, "inactive_timeout")
 			if port, err := strconv.Atoi(getString(session, "x_forwarded_port")); err == nil {
 				removedPorts[port] = struct{}{}
 			}
@@ -4995,6 +5242,45 @@ func hostPortOrDefault(hostport, fallback string) string {
 	return port
 }
 
+func shouldScopeSessionsByRequesterIP(r *http.Request) bool {
+	host := strings.ToLower(hostWithoutPort(r.Host))
+	return host == "infinitestreaming.jeoliver.com"
+}
+
+func filterSessionsByOriginationIP(sessions []SessionData, requesterIP string) []SessionData {
+	requesterIP = strings.TrimSpace(requesterIP)
+	if requesterIP == "" {
+		return []SessionData{}
+	}
+	filtered := make([]SessionData, 0, len(sessions))
+	for _, session := range sessions {
+		if strings.TrimSpace(getString(session, "origination_ip")) == requesterIP {
+			filtered = append(filtered, session)
+		}
+	}
+	return filtered
+}
+
+func countActiveSessionsForIP(sessions []SessionData, requesterIP string) int {
+	requesterIP = strings.TrimSpace(requesterIP)
+	if requesterIP == "" {
+		return 0
+	}
+	count := 0
+	for _, session := range sessions {
+		originIP := strings.TrimSpace(getString(session, "origination_ip"))
+		if originIP == requesterIP {
+			count++
+			continue
+		}
+		playerIP := strings.TrimSpace(getString(session, "player_ip"))
+		if playerIP == requesterIP {
+			count++
+		}
+	}
+	return count
+}
+
 func hostWithoutPort(hostport string) string {
 	host, _, err := net.SplitHostPort(hostport)
 	if err != nil {
@@ -5012,6 +5298,52 @@ func remoteIP(addr string) string {
 		return host
 	}
 	return addr
+}
+
+// extractClientIP extracts the client IP considering X-Forwarded-For header
+// Note: X-Forwarded-For can be spoofed by clients. This function assumes
+// the application is deployed behind a trusted reverse proxy (nginx).
+// For production use, configure the trusted proxy to strip client-provided
+// X-Forwarded-For headers and only use the proxy-set value.
+func extractClientIP(remoteAddr, xForwardedFor string) string {
+	clientIP := ""
+	// First, check X-Forwarded-For header (takes precedence when behind trusted proxy)
+	if xForwardedFor != "" {
+		parts := strings.Split(xForwardedFor, ",")
+		if len(parts) > 0 {
+			clientIP = strings.TrimSpace(parts[0])
+		}
+	}
+	// Fallback to RemoteAddr
+	if clientIP == "" {
+		host, _, err := net.SplitHostPort(remoteAddr)
+		if err == nil {
+			clientIP = host
+		} else {
+			clientIP = remoteAddr
+		}
+	}
+	return clientIP
+}
+
+// isExternalIP determines if an IP address is external (not private, loopback, etc.)
+// Returns false for invalid IPs and logs them for debugging
+func isExternalIP(ip string) bool {
+	parsed := net.ParseIP(strings.TrimSpace(ip))
+	if parsed == nil {
+		// Log invalid IP addresses for debugging
+		if ip != "" && ip != "unknown" {
+			log.Printf("[GO-PROXY][WARN] Invalid IP address for external check: %q", ip)
+		}
+		return false
+	}
+	if parsed.IsLoopback() || parsed.IsUnspecified() || parsed.IsLinkLocalUnicast() || parsed.IsLinkLocalMulticast() {
+		return false
+	}
+	if parsed.IsPrivate() {
+		return false
+	}
+	return true
 }
 
 func pathBase(path string) string {

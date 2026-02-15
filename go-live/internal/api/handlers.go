@@ -24,9 +24,9 @@ import (
 )
 
 var (
-	infiniteOutputDir = getEnvAny([]string{"INFINITE_STREAM_OUTPUT_DIR", "INFINITE_OUTPUT_DIR", "BOSS_OUTPUT_DIR"}, "/boss/dynamic_content")
+	infiniteOutputDir  = getEnvAny([]string{"INFINITE_STREAM_OUTPUT_DIR", "INFINITE_OUTPUT_DIR", "BOSS_OUTPUT_DIR"}, "/boss/dynamic_content")
 	infiniteContentDir = getEnvAny([]string{"INFINITE_STREAM_CONTENT_DIR", "INFINITE_CONTENT_DIR", "BOSS_CONTENT_DIR"}, "/content")
-	goLiveDir      = getEnv("GO_LIVE_OUTPUT_DIR", filepath.Join(infiniteContentDir, "go-live"))
+	goLiveDir          = getEnv("GO_LIVE_OUTPUT_DIR", filepath.Join(infiniteContentDir, "go-live"))
 )
 
 type dashCacheEntry struct {
@@ -54,12 +54,12 @@ var (
 )
 
 var (
-	dashTickMu   sync.RWMutex
+	dashTickMu    sync.RWMutex
 	dashTickByKey = make(map[string]tickStats)
 )
 
 var (
-	rangeTickMu   sync.RWMutex
+	rangeTickMu    sync.RWMutex
 	rangeTickByKey = make(map[string]tickStats)
 )
 
@@ -69,15 +69,14 @@ var (
 )
 
 type hlsWorker struct {
-	content   string
-	inputPath string
-	prefix    string
-	cancel    context.CancelFunc
+	content    string
+	inputPath  string
+	prefix     string
+	cancel     context.CancelFunc
 	mu         sync.Mutex
 	mpdRelPath string
 	mpdData    *dash.MPDData
 }
-
 
 func getEnv(key, fallback string) string {
 	if value := os.Getenv(key); value != "" {
@@ -158,24 +157,6 @@ func extractAttributeValue(line, key string) string {
 	return rest[:end]
 }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 type Handler struct {
 	Manager *manager.ProcessManager
 	Tracker *StreamTracker
@@ -194,6 +175,7 @@ func (h *Handler) Status(w http.ResponseWriter, r *http.Request) {
 	uniqueExternalIPsRolling := 0
 	uniqueExternalIPsLifetime := 0
 	externalHistory := []ExternalUsageSnapshot{}
+	externalWANSessions := []ExternalSessionSnapshot{}
 	externalBucketMinutes := 0
 	externalRetentionHours := 0
 	if h.Tracker != nil {
@@ -206,22 +188,24 @@ func (h *Handler) Status(w http.ResponseWriter, r *http.Request) {
 		uniqueExternalIPs = h.Tracker.UniqueExternalIPCount(now)
 		uniqueExternalIPsRolling, uniqueExternalIPsLifetime = h.Tracker.ExternalUniqueCounts(now)
 		externalHistory = h.Tracker.ExternalUsageSnapshot(now)
+		externalWANSessions = h.Tracker.ExternalSessionHistory(now, 250)
 		externalBucketMinutes = h.Tracker.ExternalBucketMinutes()
 		externalRetentionHours = h.Tracker.ExternalRetentionHours()
 	}
 
 	response := map[string]interface{}{
-		"mode":            "go-live",
-		"idle_timeout":    idleSeconds,
-		"active_processes": len(procs),
-		"processes":        procs,
-		"active_streams":   streams,
-		"unique_external_ips": uniqueExternalIPs,
-		"unique_external_ips_rolling": uniqueExternalIPsRolling,
+		"mode":                         "go-live",
+		"idle_timeout":                 idleSeconds,
+		"active_processes":             len(procs),
+		"processes":                    procs,
+		"active_streams":               streams,
+		"unique_external_ips":          uniqueExternalIPs,
+		"unique_external_ips_rolling":  uniqueExternalIPsRolling,
 		"unique_external_ips_lifetime": uniqueExternalIPsLifetime,
-		"external_ip_history": externalHistory,
-		"external_ip_bucket_minutes": externalBucketMinutes,
-		"external_ip_retention_hours": externalRetentionHours,
+		"external_ip_history":          externalHistory,
+		"external_wan_sessions":        externalWANSessions,
+		"external_ip_bucket_minutes":   externalBucketMinutes,
+		"external_ip_retention_hours":  externalRetentionHours,
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -2087,8 +2071,8 @@ func (h *Handler) StartIdleReaper() {
 				if entry.ProcessID == "" || !strings.HasPrefix(entry.ProcessID, "dash-") {
 					continue
 				}
-					logf("[GO-LIVE] Stopping idle DASH generator: content=%s mode=%s idle=%s\n",
-						entry.Content, entry.Mode, formatSeconds(now.Sub(entry.LastRequest)))
+				logf("[GO-LIVE] Stopping idle DASH generator: content=%s mode=%s idle=%s\n",
+					entry.Content, entry.Mode, formatSeconds(now.Sub(entry.LastRequest)))
 				stopDashGenerator(strings.TrimPrefix(entry.ProcessID, "dash-"))
 				h.Tracker.Remove(entry.Content, entry.Mode)
 			}

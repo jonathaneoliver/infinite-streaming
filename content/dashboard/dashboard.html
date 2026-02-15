@@ -38,7 +38,7 @@
                     <div style="font-size: 13px; color: var(--text-secondary);">Active Jobs</div>
                 </div>
             </a>
-            <a href="/dashboard/go-monitor.html" class="card" style="text-decoration: none; cursor: pointer; transition: transform 0.2s, box-shadow 0.2s;" onmouseover="this.style.transform='translateY(-2px)'; this.style.boxShadow='0 4px 12px rgba(0,0,0,0.15)'" onmouseout="this.style.transform=''; this.style.boxShadow=''">
+            <a href="/dashboard/go-monitor.html" class="card monitor-link" style="text-decoration: none; cursor: pointer; transition: transform 0.2s, box-shadow 0.2s;" onmouseover="this.style.transform='translateY(-2px)'; this.style.boxShadow='0 4px 12px rgba(0,0,0,0.15)'" onmouseout="this.style.transform=''; this.style.boxShadow=''">
                 <div class="card-body" style="text-align: center;">
                     <div style="font-size: 30px; font-weight: 400; color: var(--success); margin-bottom: 6px;" id="liveStreamsCount">
                         <div class="spinner" style="margin: 0 auto;"></div>
@@ -130,7 +130,7 @@
                         Simulate live streaming scenarios, test low-latency playback, and monitor stream health.
                     </p>
                     <div style="display: flex; flex-direction: column; gap: 12px;">
-                        <a href="/dashboard/go-monitor.html" class="btn btn-primary" style="width: 100%;">
+                        <a href="/dashboard/go-monitor.html" class="btn btn-primary monitor-link" style="width: 100%;">
                             Stream Monitor
                         </a>
                     </div>
@@ -327,6 +327,19 @@
                 link.setAttribute('aria-disabled', 'true');
                 link.setAttribute('tabindex', '-1');
                 link.setAttribute('title', 'Available only on internal network hosts.');
+            });
+        }
+
+        const restrictMonitor = window.BOSSNav
+            && typeof window.BOSSNav.isMonitorRestricted === 'function'
+            && window.BOSSNav.isMonitorRestricted();
+        if (restrictMonitor) {
+            document.querySelectorAll('.monitor-link').forEach((link) => {
+                link.classList.add('is-disabled');
+                link.setAttribute('aria-disabled', 'true');
+                link.setAttribute('tabindex', '-1');
+                link.setAttribute('title', 'Available only on internal network hosts.');
+                link.href = '#';
             });
         }
 

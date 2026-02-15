@@ -159,6 +159,10 @@ server {
     # Testing/session APIs (Flask)
     location = /api/sessions {
         proxy_pass http://go_proxy;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Port $server_port;
         add_header Access-Control-Allow-Origin * always;
         add_header Cache-Control "no-cache, no-store, must-revalidate" always;
         add_header Pragma "no-cache" always;
@@ -167,6 +171,10 @@ server {
 
     location = /api/version {
         proxy_pass http://go_proxy;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Port $server_port;
         add_header Access-Control-Allow-Origin * always;
         add_header Cache-Control "no-cache, no-store, must-revalidate" always;
         add_header Pragma "no-cache" always;
@@ -175,6 +183,10 @@ server {
 
     location = /api/sessions/stream {
         proxy_pass http://go_proxy;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Port $server_port;
         proxy_buffering off;
         proxy_cache off;
         proxy_read_timeout 1h;
@@ -187,6 +199,22 @@ server {
 
     location = /api/clear-sessions {
         proxy_pass http://go_proxy;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Port $server_port;
+        add_header Access-Control-Allow-Origin * always;
+        add_header Cache-Control "no-cache, no-store, must-revalidate" always;
+        add_header Pragma "no-cache" always;
+        add_header Expires "0" always;
+    }
+
+    location = /api/external-ips {
+        proxy_pass http://go_proxy;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Port $server_port;
         add_header Access-Control-Allow-Origin * always;
         add_header Cache-Control "no-cache, no-store, must-revalidate" always;
         add_header Pragma "no-cache" always;
@@ -195,6 +223,10 @@ server {
 
     location ~ ^/api/session/ {
         proxy_pass http://go_proxy;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Port $server_port;
         add_header Access-Control-Allow-Origin * always;
         add_header Cache-Control "no-cache, no-store, must-revalidate" always;
         add_header Pragma "no-cache" always;
@@ -203,6 +235,10 @@ server {
 
     location ~ ^/api/failure-settings/ {
         proxy_pass http://go_proxy;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Port $server_port;
         add_header Access-Control-Allow-Origin * always;
         add_header Cache-Control "no-cache, no-store, must-revalidate" always;
         add_header Pragma "no-cache" always;
@@ -211,6 +247,10 @@ server {
 
     location ~ ^/api/session-group/ {
         proxy_pass http://go_proxy;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Port $server_port;
         add_header Access-Control-Allow-Origin * always;
         add_header Cache-Control "no-cache, no-store, must-revalidate" always;
         add_header Pragma "no-cache" always;
@@ -219,6 +259,10 @@ server {
 
     location ~ ^/api/nftables/ {
         proxy_pass http://go_proxy;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Port $server_port;
         add_header Access-Control-Allow-Origin * always;
         add_header Cache-Control "no-cache, no-store, must-revalidate" always;
         add_header Pragma "no-cache" always;
