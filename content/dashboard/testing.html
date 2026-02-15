@@ -662,7 +662,7 @@
                 .map((rate) => ({ rate_mbps: adjustRate(rate), duration_seconds: defaultSeconds }));
         }
 
-        function applyTemplatePattern(card, shouldSchedule, resetState = false) {
+        function applyTemplatePattern(card, shouldSchedule, resetState = false, preserveStepDurations = true) {
             const mode = getTemplateMode(card);
             const rowsHost = card.querySelector('[data-field="shaping_pattern_rows"]');
 
@@ -694,7 +694,7 @@
                             if (currentSteps[index].isCustom && Number.isFinite(currentSteps[index].customMbps)) {
                                 step.rate_mbps = currentSteps[index].customMbps;
                             }
-                            if (Number.isFinite(currentSteps[index].customSeconds)) {
+                            if (preserveStepDurations && Number.isFinite(currentSteps[index].customSeconds)) {
                                 step.duration_seconds = currentSteps[index].customSeconds;
                             }
                             step.enabled = currentSteps[index].enabled;
@@ -724,6 +724,31 @@
 
         function scheduleShapingApply(card) {
             const sessionId = card.dataset.sessionId;
+            if (sessionId) {
+                const getValue = (field) => {
+                    const input = card.querySelector(`input[data-field="${field}"]`);
+                    return input ? Number(input.value) : 0;
+                };
+                const pattern = TestingSessionUI.readShapingPattern(card);
+                const usePattern = pattern.template_mode !== 'sliders'
+                    && Array.isArray(pattern.steps)
+                    && pattern.steps.length > 0;
+                pendingShaping.set(sessionId, {
+                    timestamp: Date.now(),
+                    values: {
+                        nftables_bandwidth_mbps: getValue('shaping_throughput_mbps'),
+                        nftables_delay_ms: getValue('shaping_delay_ms'),
+                        nftables_packet_loss: getValue('shaping_loss_pct'),
+                        nftables_pattern_enabled: usePattern,
+                        nftables_pattern_steps: usePattern ? (pattern.steps || []) : [],
+                        nftables_pattern_segment_duration_seconds: pattern.segment_duration_seconds,
+                        nftables_pattern_default_segments: pattern.default_segments,
+                        nftables_pattern_default_step_seconds: pattern.default_step_seconds,
+                        nftables_pattern_template_mode: pattern.template_mode,
+                        nftables_pattern_margin_pct: pattern.template_margin_pct
+                    }
+                });
+            }
             if (shapingTimers.has(sessionId)) {
                 clearTimeout(shapingTimers.get(sessionId));
             }
@@ -1157,6 +1182,51 @@
             if (card) {
                 card.dataset.segmentDurationSeconds = String(defaults.segmentDurationSeconds);
             }
+            const syncRange = (field, value, fallback = 0) => {
+                const input = card.querySelector(`input[data-field="${field}"]`);
+                if (!input) return;
+                const numeric = Number(value);
+                const resolved = Number.isFinite(numeric) ? numeric : fallback;
+                input.value = String(resolved);
+                const valueEl = input.parentElement?.querySelector('.range-value');
+                if (valueEl) valueEl.textContent = String(resolved);
+            };
+            syncRange('shaping_delay_ms', session.nftables_delay_ms, 0);
+            syncRange('shaping_loss_pct', session.nftables_packet_loss, 0);
+            const rowsHost = card.querySelector('[data-field="shaping_pattern_rows"]');
+            if (rowsHost) {
+                const rawSteps = Array.isArray(session.nftables_pattern_steps) ? session.nftables_pattern_steps : [];
+                const normalizedSteps = rawSteps
+                    .map((step) => {
+                        const rate = Number(step?.rate_mbps);
+                        const seconds = Number(step?.duration_seconds);
+                        const enabled = step?.enabled !== false;
+                        if (!Number.isFinite(rate) || rate < 0) return null;
+                        return {
+                            rate_mbps: Math.round(rate * 1000) / 1000,
+                            duration_seconds: Number.isFinite(seconds) && seconds > 0
+                                ? Math.round(seconds * 10) / 10
+                                : defaults.selectedStepSeconds,
+                            enabled
+                        };
+                    })
+                    .filter(Boolean);
+                const fallbackRate = Number(session.nftables_bandwidth_mbps || 0);
+                const steps = normalizedSteps.length
+                    ? normalizedSteps
+                    : [{ rate_mbps: fallbackRate, duration_seconds: defaults.selectedStepSeconds, enabled: true }];
+                const marginPctForMatch = [0, 10, 25, 50].includes(marginPct) ? marginPct : 0;
+                const matchOptions = { marginPct: marginPctForMatch, overheadMbps: getShapingOverheadMbps(card) };
+                rowsHost.innerHTML = '';
+                steps.forEach((step) => {
+                    rowsHost.appendChild(makeShapeStepRow(card, step.rate_mbps, step.duration_seconds, step.enabled, matchOptions));
+                });
+                updateStepIndices(card);
+                updateAllStepRiskUi(card);
+                const throughputFallback = Number(session.nftables_bandwidth_mbps);
+                const throughputValue = Number.isFinite(throughputFallback) ? throughputFallback : steps[0].rate_mbps;
+                syncRange('shaping_throughput_mbps', throughputValue, 0);
+            }
             updateTemplateModeUi(card);
         }
 
@@ -1580,6 +1650,10 @@
                 loss_pct: getValue('shaping_loss_pct')
             };
             const pattern = TestingSessionUI.readShapingPattern(card);
+            const usePattern = pattern.template_mode !== 'sliders'
+                && Array.isArray(pattern.steps)
+                && pattern.steps.length > 0;
+            const patternSteps = usePattern ? (pattern.steps || []) : [];
             const sessionId = card.dataset.sessionId;
             if (sessionId) {
                 pendingShaping.set(sessionId, {
@@ -1588,8 +1662,8 @@
                         nftables_bandwidth_mbps: payload.rate_mbps,
                         nftables_delay_ms: payload.delay_ms,
                         nftables_packet_loss: payload.loss_pct,
-                        nftables_pattern_enabled: true,
-                        nftables_pattern_steps: pattern.steps || [],
+                        nftables_pattern_enabled: usePattern,
+                        nftables_pattern_steps: patternSteps,
                         nftables_pattern_segment_duration_seconds: pattern.segment_duration_seconds,
                         nftables_pattern_default_segments: pattern.default_segments,
                         nftables_pattern_default_step_seconds: pattern.default_step_seconds,
@@ -1612,7 +1686,7 @@
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
-                    steps: pattern.steps || [],
+                    steps: patternSteps,
                     segment_duration_seconds: pattern.segment_duration_seconds,
                     default_segments: pattern.default_segments,
                     default_step_seconds: pattern.default_step_seconds,
@@ -2024,8 +2098,9 @@
                     // In sliders mode, apply immediately as before
                     applyTemplatePattern(card, true, resetState);
                 } else {
-                    // In pattern mode, just regenerate the UI without applying
+                    // In pattern mode, regenerate UI then persist selection
                     applyTemplatePattern(card, false, resetState);
+                    scheduleShapingApply(card);
                 }
                 return;
             }
@@ -2034,8 +2109,9 @@
                 if (templateMode === 'sliders') {
                     scheduleShapingApply(card);
                 } else {
-                    // In pattern mode, just regenerate the UI without applying
-                    applyTemplatePattern(card, false);
+                    // In pattern mode, regenerate UI then persist selection
+                    applyTemplatePattern(card, false, false, false);
+                    scheduleShapingApply(card);
                 }
                 return;
             }

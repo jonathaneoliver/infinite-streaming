@@ -15,6 +15,10 @@ Docker-based HLS/DASH media server for testing video players under various netwo
 
 ## Development Workflow
 
+### Product Behavior Source of Truth
+- Before making UI or product-behavior changes, read `PRD.md` and align implementation to it.
+- If `AGENTS.md` and `PRD.md` conflict, follow `AGENTS.md` and explicitly call out the conflict in your summary/PR notes.
+
 ### GitHub Workflow
 - When creating issues/PRs/comments with `gh`, pass the body using a here-doc or `--body-file`; do not use `\n` in quoted strings.
 - Use the `gh-pr-issue-body` skill for GitHub CLI body formatting.
