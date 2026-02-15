@@ -100,6 +100,13 @@ A dedicated panel on the testing dashboard (`/dashboard/testing.html`) shows:
 2. **Data Storage**: IP data is stored in memory as part of session data (ephemeral)
 3. **Access Control**: The `/api/external-ips` endpoint is available to authenticated dashboard users
 4. **Logging**: External IP access is logged for audit purposes
+5. **X-Forwarded-For Handling**: 
+   - The implementation uses X-Forwarded-For header for IP extraction
+   - **Important**: This header can be spoofed by clients
+   - The application assumes deployment behind a trusted reverse proxy (nginx)
+   - For production: Ensure the reverse proxy strips client-provided X-Forwarded-For headers
+   - The proxy should only set the X-Forwarded-For header with the actual client IP
+6. **Invalid IP Logging**: Invalid IP addresses are logged with warnings for debugging purposes
 
 ## Usage Examples
 

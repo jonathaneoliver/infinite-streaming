@@ -4818,9 +4818,13 @@ func remoteIP(addr string) string {
 }
 
 // extractClientIP extracts the client IP considering X-Forwarded-For header
+// Note: X-Forwarded-For can be spoofed by clients. This function assumes
+// the application is deployed behind a trusted reverse proxy (nginx).
+// For production use, configure the trusted proxy to strip client-provided
+// X-Forwarded-For headers and only use the proxy-set value.
 func extractClientIP(remoteAddr, xForwardedFor string) string {
 	clientIP := ""
-	// First, check X-Forwarded-For header (takes precedence)
+	// First, check X-Forwarded-For header (takes precedence when behind trusted proxy)
 	if xForwardedFor != "" {
 		parts := strings.Split(xForwardedFor, ",")
 		if len(parts) > 0 {
@@ -4840,9 +4844,14 @@ func extractClientIP(remoteAddr, xForwardedFor string) string {
 }
 
 // isExternalIP determines if an IP address is external (not private, loopback, etc.)
+// Returns false for invalid IPs and logs them for debugging
 func isExternalIP(ip string) bool {
 	parsed := net.ParseIP(strings.TrimSpace(ip))
 	if parsed == nil {
+		// Log invalid IP addresses for debugging
+		if ip != "" && ip != "unknown" {
+			log.Printf("[GO-PROXY][WARN] Invalid IP address for external check: %q", ip)
+		}
 		return false
 	}
 	if parsed.IsLoopback() || parsed.IsUnspecified() || parsed.IsLinkLocalUnicast() || parsed.IsLinkLocalMulticast() {
