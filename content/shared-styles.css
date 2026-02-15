@@ -679,6 +679,17 @@ body {
     border: 1px solid var(--border);
 }
 
+.external-badge {
+    background: #f59e0b;
+    color: #1b1b1b;
+    font-weight: 600;
+    padding: 2px 6px;
+    border-radius: 3px;
+    font-size: 10px;
+    text-transform: uppercase;
+    margin-left: 4px;
+}
+
 /* ============================================
    Player Panel Badges
    ============================================ */

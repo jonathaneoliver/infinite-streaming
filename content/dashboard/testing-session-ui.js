@@ -558,6 +558,8 @@
                         <div class="session-grid">
                             <div class="session-item"><span class="label">User Agent</span><span class="value" data-field="session_user_agent">${session.user_agent || '—'}</span></div>
                             <div class="session-item"><span class="label">Player IP</span><span class="value" data-field="session_player_ip">${session.player_ip || '—'}</span></div>
+                            <div class="session-item"><span class="label">Origination IP</span><span class="value" data-field="session_origination_ip">${session.origination_ip || '—'}${session.is_external_ip ? ' <span class="badge external-badge">External</span>' : ''}</span></div>
+                            <div class="session-item"><span class="label">Origination Time</span><span class="value" data-field="session_origination_time">${formatDate(session.origination_time)}</span></div>
                             ${showPortItem ? `<div class="session-item"><span class="label">Port</span><span class="value" data-field="session_port_display">${portDisplay}</span></div>` : ''}
                             <div class="session-item"><span class="label">Last Request</span><span class="value" data-field="session_last_request">${formatDate(session.last_request)}</span></div>
                             <div class="session-item"><span class="label">First Request</span><span class="value" data-field="session_first_request">${formatDate(session.first_request_time)}</span></div>

@@ -384,6 +384,22 @@
             </div>
             <div id="sessionsContainer"></div>
         </div>
+
+        <div class="panel" id="externalIPsPanel" style="margin-top: 20px;">
+            <div class="panel-header">
+                <div class="panel-title">External IP Monitoring</div>
+                <div class="btn-row">
+                    <button class="btn btn-secondary" id="refreshExternalIPs">Refresh</button>
+                    <label style="margin-left: 10px;">
+                        <input type="checkbox" id="filterExternalOnly" checked>
+                        External IPs Only
+                    </label>
+                </div>
+            </div>
+            <div id="externalIPsContainer">
+                <div class="status-message">Loading...</div>
+            </div>
+        </div>
     </div>
 
     <script src="/shared-nav.js"></script>
@@ -1594,6 +1610,75 @@
             renderSessions();
         }
 
+        function fetchExternalIPs() {
+            const filterExternal = document.getElementById('filterExternalOnly').checked;
+            const url = filterExternal ? '/api/external-ips?filter=external' : '/api/external-ips';
+            
+            fetch(url, { cache: 'no-store' })
+                .then(async response => {
+                    if (!response.ok) {
+                        throw new Error(`Failed to fetch external IPs: ${response.status}`);
+                    }
+                    return response.json();
+                })
+                .then(data => renderExternalIPs(data))
+                .catch(error => {
+                    console.error('Error fetching external IPs:', error);
+                    document.getElementById('externalIPsContainer').innerHTML = 
+                        '<div class="status-message">Failed to load external IP data.</div>';
+                });
+        }
+
+        function renderExternalIPs(data) {
+            const container = document.getElementById('externalIPsContainer');
+            
+            if (!data.entries || data.entries.length === 0) {
+                container.innerHTML = '<div class="status-message">No IP data available.</div>';
+                return;
+            }
+
+            const rows = data.entries.map(entry => {
+                const externalBadge = entry.is_external ? 
+                    '<span class="external-badge">External</span>' : '';
+                const originTime = entry.origination_time ? 
+                    new Date(entry.origination_time).toLocaleString() : '—';
+                const lastReqTime = entry.last_request_time ? 
+                    new Date(entry.last_request_time).toLocaleString() : '—';
+                
+                return `
+                    <tr>
+                        <td>${entry.session_id || '—'}</td>
+                        <td>${entry.player_id || '—'}</td>
+                        <td>${entry.origination_ip || '—'} ${externalBadge}</td>
+                        <td>${originTime}</td>
+                        <td>${lastReqTime}</td>
+                        <td style="max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="${entry.user_agent || ''}">${entry.user_agent || '—'}</td>
+                    </tr>
+                `;
+            }).join('');
+
+            container.innerHTML = `
+                <div style="padding: 10px; color: var(--text-secondary);">
+                    Total entries: ${data.total}
+                </div>
+                <table class="data-table" style="width: 100%;">
+                    <thead>
+                        <tr>
+                            <th>Session ID</th>
+                            <th>Player ID</th>
+                            <th>Origination IP</th>
+                            <th>First Seen</th>
+                            <th>Last Seen</th>
+                            <th>User Agent</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        ${rows}
+                    </tbody>
+                </table>
+            `;
+        }
+
         function isFailureRangeField(field) {
             return [
                 'segment_consecutive_failures',
@@ -1843,6 +1928,9 @@
                 .then(() => fetchSessions())
                 .catch(error => console.error('Error clearing sessions:', error));
         });
+
+        document.getElementById('refreshExternalIPs').addEventListener('click', fetchExternalIPs);
+        document.getElementById('filterExternalOnly').addEventListener('change', fetchExternalIPs);
 
         document.getElementById('sessionsContainer').addEventListener('input', (event) => {
             const input = event.target;
@@ -2124,6 +2212,7 @@
         });
 
         fetchSessions();
+        fetchExternalIPs();
         if (!startSessionsStream()) {
             startSessionsPolling();
         }
