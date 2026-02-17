@@ -1,0 +1,12 @@
+{"timestamp":"2024-01-01T12:00:00Z","variant_bitrate_mbps":5.0,"buffer_depth_s":10.5,"stall_count":0}
+{"timestamp":"2024-01-01T12:00:02Z","variant_bitrate_mbps":5.0,"buffer_depth_s":10.2,"stall_count":0}
+{"timestamp":"2024-01-01T12:00:25Z","variant_bitrate_mbps":3.0,"buffer_depth_s":8.5,"stall_count":0}
+{"timestamp":"2024-01-01T12:00:27Z","variant_bitrate_mbps":3.0,"buffer_depth_s":8.2,"stall_count":0}
+{"timestamp":"2024-01-01T12:00:50Z","variant_bitrate_mbps":2.0,"buffer_depth_s":7.1,"stall_count":0}
+{"timestamp":"2024-01-01T12:00:52Z","variant_bitrate_mbps":2.0,"buffer_depth_s":6.9,"stall_count":0}
+{"timestamp":"2024-01-01T12:01:15Z","variant_bitrate_mbps":1.0,"buffer_depth_s":5.2,"stall_count":0}
+{"timestamp":"2024-01-01T12:01:17Z","variant_bitrate_mbps":1.0,"buffer_depth_s":5.0,"stall_count":0}
+{"timestamp":"2024-01-01T12:01:40Z","variant_bitrate_mbps":2.0,"buffer_depth_s":6.5,"stall_count":0}
+{"timestamp":"2024-01-01T12:01:42Z","variant_bitrate_mbps":2.0,"buffer_depth_s":6.8,"stall_count":0}
+{"timestamp":"2024-01-01T12:02:05Z","variant_bitrate_mbps":3.0,"buffer_depth_s":8.1,"stall_count":0}
+{"timestamp":"2024-01-01T12:02:07Z","variant_bitrate_mbps":3.0,"buffer_depth_s":8.4,"stall_count":0}

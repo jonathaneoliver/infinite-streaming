@@ -1,0 +1,42 @@
+# ABR Characterization Experiment Configuration
+# This is an example configuration for the abrchar tool
+
+# HLS multivariant playlist URL to test
+hls_url: https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8
+
+# Experiment duration (optional, default: 5m)
+experiment_duration: 5m
+
+# Player identifier for labeling results
+player_id: hlsjs-abrchar-test
+
+# Throttle configuration
+throttle:
+  # Throttling method: "http" or "shell"
+  method: http
+  
+  # HTTP method configuration (used when method=http)
+  http_url: http://localhost:21081  # Base URL of go-proxy
+  port: 30081                        # Session port to throttle
+  
+  # Shell method configuration (used when method=shell)
+  # command: "tc qdisc change dev eth0 root tbf rate {{.Rate}}mbit"
+  # reset_cmd: "tc qdisc del dev eth0 root"
+  
+  # Throttle schedule parameters
+  warmup_bandwidth: 20.0   # Starting bandwidth in Mbps (typically 2x top variant)
+  step_percent: 10.0       # Percentage decrease per step (e.g., 10 = 10% steps)
+  hold_duration: 20s       # Hold each bandwidth level for this duration
+  min_bandwidth: 1.0       # Minimum bandwidth to test (Mbps)
+  max_bandwidth: 20.0      # Maximum bandwidth to test (Mbps)
+  direction: down          # Throttle direction: "down", "up", or "down-up"
+
+# Output directory for results
+output_dir: ./abrchar-output
+
+# Analysis parameters
+analysis:
+  # Number of recent segment downloads to use for throughput estimation
+  # Larger window = more stable estimate but slower to react
+  # Recommended: 5-10 for 2s segments
+  throughput_window_size: 5
