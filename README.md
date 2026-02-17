@@ -241,6 +241,33 @@ Defaults (UI + pipeline):
 - Partial duration: **200ms**
 - GOP duration: **1s**
 
+## ABR Characterization Tool
+
+The `abrchar` tool in `cmd/abrchar` provides automated ABR (Adaptive Bitrate) characterization for HLS players:
+
+- **Parse HLS multivariant playlists** - Extract BANDWIDTH and AVERAGE-BANDWIDTH attributes
+- **Analyze telemetry data** - Detect variant switches and compute metrics
+- **Generate reports** - JSON summary and Markdown report with:
+  - Downswitch/upswitch threshold distributions
+  - Safety factors (α = variant_bw / throughput)
+  - Hysteresis analysis
+  - Switch latency
+
+See `cmd/abrchar/README.md` for detailed usage instructions.
+
+**Quick start:**
+
+```bash
+cd cmd/abrchar
+go build -o abrchar main.go
+
+# Analyze existing telemetry data
+./abrchar analyze \
+  --data ./telemetry-logs \
+  --hls-url https://example.com/master.m3u8 \
+  --output ./analysis-results
+```
+
 ## Known limitations (selected)
 
 These are common LL‑HLS/LL‑DASH expectations that are **not fully implemented**:
