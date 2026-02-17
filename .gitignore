@@ -40,9 +40,4 @@ tests/.hls_failure_probe_last_failed
 go-proxy/go.mod
 go-proxy/go.sum
 apple/InfiniteStreamPlayer/InfiniteStreamPlayer.xcodeproj/project.xcworkspace/xcuserdata/jonathanoliver.xcuserdatad/UserInterfaceState.xcuserstate
-
-# ABR characterization tool
-cmd/abrchar/abrchar
-cmd/abrchar/test-output/
-cmd/abrchar/abrchar-output/
-cmd/abrchar/results/
+tests/abrchar/test_output/

@@ -243,7 +243,7 @@ Defaults (UI + pipeline):
 
 ## ABR Characterization Tool
 
-The `abrchar` tool in `cmd/abrchar` provides automated ABR (Adaptive Bitrate) characterization for HLS players:
+The `tests/abrchar` module provides automated ABR (Adaptive Bitrate) characterization for HLS players:
 
 - **Parse HLS multivariant playlists** - Extract BANDWIDTH and AVERAGE-BANDWIDTH attributes
 - **Analyze telemetry data** - Detect variant switches and compute metrics
@@ -251,21 +251,20 @@ The `abrchar` tool in `cmd/abrchar` provides automated ABR (Adaptive Bitrate) ch
   - Downswitch/upswitch threshold distributions
   - Safety factors (α = variant_bw / throughput)
   - Hysteresis analysis
-  - Switch latency
 
-See `cmd/abrchar/README.md` for detailed usage instructions.
+See `tests/abrchar/README.md` for detailed usage.
 
 **Quick start:**
 
 ```bash
-cd cmd/abrchar
-go build -o abrchar main.go
-
-# Analyze existing telemetry data
-./abrchar analyze \
+# Analyze existing telemetry
+python -m tests.abrchar.cli analyze \
   --data ./telemetry-logs \
   --hls-url https://example.com/master.m3u8 \
   --output ./analysis-results
+
+# Run tests
+pytest tests/abrchar/ -v
 ```
 
 ## Known limitations (selected)
