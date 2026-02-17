@@ -16,7 +16,10 @@ throttle:
   method: http
   
   # HTTP method configuration (used when method=http)
-  http_url: http://localhost:21081  # Base URL of go-proxy
+  # Note: Base URL should point to the go-proxy API endpoint
+  # For docker-compose: http://localhost:21081
+  # For k3s dev: http://lenovo.local:40000
+  http_url: http://localhost:21081  # Base URL of go-proxy API
   port: 30081                        # Session port to throttle
   
   # Shell method configuration (used when method=shell)

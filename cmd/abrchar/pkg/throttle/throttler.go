@@ -71,7 +71,7 @@ func (t *HTTPThrottler) SetBandwidth(bandwidthMbps float64) error {
 
 // Reset removes all throttling
 func (t *HTTPThrottler) Reset() error {
-	// Set to a very high bandwidth (100 Gbps) to effectively disable throttling
+	// Set to a very high bandwidth (100 Gbps = 100000 Mbps) to effectively disable throttling
 	return t.SetBandwidth(100000)
 }
 

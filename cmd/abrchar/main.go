@@ -120,13 +120,14 @@ func runExperiment(configFile, hlsURL, outputDir string) error {
 		}
 	} else {
 		// Create minimal config from command-line args
+		// These defaults match example-config.yaml
 		cfg = &config.Config{
 			HLSURL:    hlsURL,
 			OutputDir: outputDir,
 		}
 		cfg.Throttle.Method = "http"
-		cfg.Throttle.HTTPURL = "http://localhost:8080"
-		cfg.Throttle.Port = 30081
+		cfg.Throttle.HTTPURL = "http://localhost:21081"  // Docker compose default
+		cfg.Throttle.Port = 30081                         // Default session port
 		
 		// Apply defaults
 		if cfg.OutputDir == "" {
