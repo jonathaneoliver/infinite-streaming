@@ -45,3 +45,4 @@ apple/InfiniteStreamPlayer/InfiniteStreamPlayer.xcodeproj/project.xcworkspace/xc
 cmd/abrchar/abrchar
 cmd/abrchar/test-output/
 cmd/abrchar/abrchar-output/
+cmd/abrchar/results/
