@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">InfiniteStream Player</string>
+    <string name="retry_fetch">Retry Fetch</string>
+    <string name="restart_playback">Restart Playback</string>
+    <string name="server">Server:</string>
+    <string name="protocol">Protocol:</string>
+    <string name="segment">Segment:</string>
+    <string name="codec">Codec:</string>
+    <string name="content">Content:</string>
+    <string name="ready">Ready</string>
+</resources>
