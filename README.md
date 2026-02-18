@@ -288,6 +288,16 @@ Located in `apple/InfiniteStreamPlayer/`, this SwiftUI app provides:
 - Detailed playback diagnostics
 - Testing session integration
 
+### Android App
+Located in `android/InfiniteStreamPlayer/`, this ExoPlayer-based app provides:
+- Minimal single-page interface
+- HLS and DASH playback support
+- Protocol, segment, and codec selection
+- Server environment switching (Dev/Release)
+- Content selection and auto-play
+- Essential playback controls (retry fetch, restart playback)
+- Clean UI modeled after the iOS app
+
 ### Roku Channel
 Located in `roku/InfiniteStreamPlayer/`, this BrightScript channel provides:
 - HLS and DASH playback support
