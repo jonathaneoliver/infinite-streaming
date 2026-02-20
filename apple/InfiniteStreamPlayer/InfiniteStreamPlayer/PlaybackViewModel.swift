@@ -47,6 +47,10 @@ final class PlaybackViewModel: ObservableObject {
     @Published var prefer4kNative: Bool = false {
         didSet { persist(.prefer4kNative, prefer4kNative ? "true" : "false") }
     }
+    @Published var autoRecoveryEnabled: Bool = false {
+        didSet { persist(.autoRecoveryEnabled, autoRecoveryEnabled ? "true" : "false") }
+    }
+    @Published var playerRestarts: Int = 0
 
     let player = AVPlayer()
     let diagnostics = PlaybackDiagnostics()
@@ -68,6 +72,10 @@ final class PlaybackViewModel: ObservableObject {
     private var lastReportedStallDuration: Double = 0
     private let metricsHeartbeatSeconds: TimeInterval = 5
     private let metricsSessionLookupSeconds: TimeInterval = 30
+    private let autoRecoveryThresholdSeconds: TimeInterval = 60
+    private let autoRecoveryCooldownSeconds: TimeInterval = 60
+    private var zeroBufferStartedAt: Date?
+    private var lastAutoRecoveryRestartAt: Date?
     private let diagnosticsProbesEnabled = false
     private let logPlaylistsOnPlay = false
     private let masterPreflightEnabled = true
@@ -190,7 +198,19 @@ final class PlaybackViewModel: ObservableObject {
         reload()
     }
 
-    func restartPlayback() {
+    func restartPlayback(reason: String = "manual") {
+        playerRestarts = max(0, playerRestarts) + 1
+        if reason == "auto_recovery_zero_buffer" {
+            lastAutoRecoveryRestartAt = Date()
+            zeroBufferStartedAt = nil
+        }
+        Task {
+            await sendPlayerMetrics(event: "restart", extra: [
+                "player_metrics_restart_reason": reason,
+                "player_restarts": playerRestarts,
+                "player_auto_recovery_enabled": autoRecoveryEnabled
+            ])
+        }
         player.pause()
         player.replaceCurrentItem(with: nil)
         reload()
@@ -405,6 +425,7 @@ final class PlaybackViewModel: ObservableObject {
         case playbackBaseURL = "bossPlaybackBaseURL"
         case playerId = "bossPlayerId"
         case prefer4kNative = "bossPrefer4kNative"
+        case autoRecoveryEnabled = "bossAutoRecovery"
     }
 
     private func loadDefaults() {
@@ -446,6 +467,9 @@ final class PlaybackViewModel: ObservableObject {
         }
         if let storedPrefer4k = defaults.string(forKey: DefaultsKey.prefer4kNative.rawValue) {
             prefer4kNative = storedPrefer4k == "true"
+        }
+        if let storedAutoRecovery = defaults.string(forKey: DefaultsKey.autoRecoveryEnabled.rawValue) {
+            autoRecoveryEnabled = storedAutoRecovery == "true"
         }
     }
 
@@ -627,8 +651,49 @@ final class PlaybackViewModel: ObservableObject {
     private func startMetricsHeartbeat() {
         metricsHeartbeatTimer?.invalidate()
         metricsHeartbeatTimer = Timer.scheduledTimer(withTimeInterval: metricsHeartbeatSeconds, repeats: true) { [weak self] _ in
-            Task { await self?.sendPlayerMetrics(event: "heartbeat") }
+            Task {
+                self?.evaluateAutoRecoveryIfNeeded()
+                await self?.sendPlayerMetrics(event: "heartbeat")
+            }
         }
+    }
+
+    private func evaluateAutoRecoveryIfNeeded() {
+        guard autoRecoveryEnabled else {
+            zeroBufferStartedAt = nil
+            return
+        }
+        guard !currentURL.isEmpty else {
+            zeroBufferStartedAt = nil
+            return
+        }
+        guard player.timeControlStatus != .paused else {
+            zeroBufferStartedAt = nil
+            return
+        }
+
+        let depth = diagnostics.bufferDepth ?? -1
+        if depth > 0.01 {
+            zeroBufferStartedAt = nil
+            return
+        }
+
+        let now = Date()
+        if zeroBufferStartedAt == nil {
+            zeroBufferStartedAt = now
+            return
+        }
+        let zeroDuration = now.timeIntervalSince(zeroBufferStartedAt ?? now)
+        if zeroDuration < autoRecoveryThresholdSeconds {
+            return
+        }
+        if let last = lastAutoRecoveryRestartAt,
+           now.timeIntervalSince(last) < autoRecoveryCooldownSeconds {
+            return
+        }
+
+        log("Auto-recovery: restarting playback after \(Int(zeroDuration))s at zero buffer depth")
+        restartPlayback(reason: "auto_recovery_zero_buffer")
     }
 
     private func handleRenditionShift(indicated: Double?, average: Double?) {
@@ -726,6 +791,8 @@ final class PlaybackViewModel: ObservableObject {
             "player_metrics_stall_count": diagnostics.stallCount,
             "player_metrics_stall_time_s": roundSeconds(diagnostics.stallTimeSeconds),
             "player_metrics_last_stall_time_s": roundSeconds(diagnostics.lastStallDurationSeconds),
+            "player_restarts": playerRestarts,
+            "player_auto_recovery_enabled": autoRecoveryEnabled,
             "player_metrics_video_bitrate_mbps": mbps(from: diagnostics.indicatedBitrate ?? diagnostics.averageVideoBitrate),
             "player_metrics_network_bitrate_mbps": mbps(from: diagnostics.observedBitrate)
         ]

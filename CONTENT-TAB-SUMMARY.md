@@ -199,3 +199,12 @@ No configuration changes required - feature is opt-in via UI.
 The Content tab implementation successfully adds powerful new testing capabilities to InfiniteStream while maintaining code quality, security, and user experience standards. The feature enables critical testing scenarios for video player development, particularly around CODEC handling and ABR ladder constraints.
 
 The implementation is production-ready pending manual testing in a live environment to validate end-to-end functionality and capture visual documentation from the running system.
+
+## Player Characterization Backlog (Throughput Limiting)
+
+The following player-characterization items should be revisited after the current four additions (Transient shock tolerance, Startup robustness under caps, Downshift latency by severity, Hysteresis gap):
+
+- Live-edge resilience under sustained caps and post-restore recovery
+- Estimator accuracy drift (player estimate vs wire throughput bias/lag)
+- Buffer depletion/refill slope modeling under bursty constraints
+- Floor stickiness after network recovery

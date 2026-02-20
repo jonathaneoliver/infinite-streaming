@@ -289,7 +289,10 @@ final class TestingSessionViewModel: ObservableObject {
             mbpsOut: session.mbpsOut ?? 0,
             mbpsOut1s: session.mbpsOut1s ?? 0,
             mbpsOutActive: session.mbpsOutActive ?? 0,
-            mbpsOutAvg: session.mbpsOutAvg ?? 0
+            mbpsOutAvg: session.mbpsOutAvg ?? 0,
+            serverRenditionMbps: session.raw["server_video_rendition_mbps"]?.doubleValue,
+            framesDisplayed: session.raw["player_metrics_frames_displayed"]?.doubleValue,
+            framesDropped: session.raw["player_metrics_dropped_frames"]?.doubleValue
         )
         bandwidthSamples.append(sample)
         let cutoff = now.addingTimeInterval(-samplesWindowSeconds)
@@ -363,6 +366,9 @@ struct BandwidthSample: Identifiable {
     let mbpsOut1s: Double
     let mbpsOutActive: Double
     let mbpsOutAvg: Double
+    let serverRenditionMbps: Double?
+    let framesDisplayed: Double?
+    let framesDropped: Double?
 }
 
 private struct PendingEdit {

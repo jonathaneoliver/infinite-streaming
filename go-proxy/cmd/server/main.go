@@ -142,6 +142,7 @@ type App struct {
 	sessionsBroadcastPending bool
 	sessionsBroadcastLatest  []SessionData
 	sessionsBroadcastSeq     uint64
+	uiStateVersionSeq        uint64
 }
 
 type SessionEventHub struct {
@@ -1147,6 +1148,14 @@ func (a *App) applySessionSettingsUpdate(id string, payload map[string]interface
 			break
 		}
 	}
+	shapeRateFields := []string{"nftables_bandwidth_mbps", "nftables_delay_ms", "nftables_packet_loss"}
+	shapeRateUpdated := false
+	for _, key := range shapeRateFields {
+		if _, ok := payload[key]; ok {
+			shapeRateUpdated = true
+			break
+		}
+	}
 
 	sessions := a.getSessionList()
 	var target SessionData
@@ -1159,6 +1168,7 @@ func (a *App) applySessionSettingsUpdate(id string, payload map[string]interface
 	if target == nil {
 		return nil, http.StatusNotFound, "Session not found"
 	}
+	updatedSessions := []SessionData{target}
 	currentRevision := getString(target, "control_revision")
 	if baseRevision != "" && currentRevision != "" && baseRevision != currentRevision {
 		return target, http.StatusConflict, "revision_conflict"
@@ -1184,6 +1194,10 @@ func (a *App) applySessionSettingsUpdate(id string, payload map[string]interface
 		target[key] = value
 	}
 	applyControlRevision(target, controlRevision)
+	shapeCommandSource := "session_patch"
+	if shapeRateUpdated && getBool(target, "abrchar_run_lock") {
+		shapeCommandSource = "abrchar"
+	}
 	for _, prefix := range []string{"segment", "manifest", "master_manifest"} {
 		typeKey := prefix + "_failure_type"
 		failureType := normalizeRequestFailureType(getString(target, typeKey))
@@ -1351,16 +1365,66 @@ func (a *App) applySessionSettingsUpdate(id string, payload map[string]interface
 					}
 				}
 			}
+			updatedSessions = append(updatedSessions, session)
 		}
 	}
 	if targetGroupID == "" {
 		log.Printf("SESSION GROUP UPDATE no group for session_id=%s", id)
+	}
+	if shapeRateUpdated {
+		for _, session := range updatedSessions {
+			if session == nil {
+				continue
+			}
+			session["nftables_pattern_enabled"] = false
+			session["nftables_pattern_steps"] = []NftShapeStep{}
+			session["nftables_pattern_step"] = nil
+			session["nftables_pattern_step_runtime"] = nil
+			session["nftables_pattern_rate_runtime_mbps"] = nil
+			session["nftables_pattern_step_runtime_at"] = nil
+		}
 	}
 
 	a.saveSessionList(sessions)
 	if transportShouldApply {
 		if portNum, err := strconv.Atoi(targetPort); err == nil {
 			a.armTransportFaultLoop(portNum, transportFaultType, transportConsecutive, transportConsecutiveUnits, transportFrequency)
+		}
+	}
+	if shapeRateUpdated {
+		portsApplied := map[int]struct{}{}
+		for _, session := range updatedSessions {
+			if session == nil {
+				continue
+			}
+			portStr := getString(session, "x_forwarded_port")
+			if portStr == "" {
+				continue
+			}
+			portNum, err := strconv.Atoi(portStr)
+			if err != nil {
+				continue
+			}
+			if _, exists := portsApplied[portNum]; exists {
+				continue
+			}
+			portsApplied[portNum] = struct{}{}
+			rateMbps := getFloat(session, "nftables_bandwidth_mbps")
+			delayMs := getInt(session, "nftables_delay_ms")
+			lossPct := getFloat(session, "nftables_packet_loss")
+			sessionID := getString(session, "session_id")
+			if shapeCommandSource == "abrchar" {
+				log.Printf("ABRCHAR_LIMIT_CMD session_id=%s port=%d rate_mbps=%.3f delay_ms=%d loss_pct=%.3f control_revision=%s", sessionID, portNum, rateMbps, delayMs, lossPct, controlRevision)
+			} else {
+				log.Printf("SESSION_LIMIT_CMD source=%s session_id=%s port=%d rate_mbps=%.3f delay_ms=%d loss_pct=%.3f control_revision=%s", shapeCommandSource, sessionID, portNum, rateMbps, delayMs, lossPct, controlRevision)
+			}
+			a.stopShapeLoop(portNum)
+			if shapeCommandSource == "abrchar" {
+				log.Printf("ABRCHAR_LIMIT_APPLY session_id=%s port=%d rate_mbps=%.3f delay_ms=%d loss_pct=%.3f", sessionID, portNum, rateMbps, delayMs, lossPct)
+			} else {
+				log.Printf("SESSION_LIMIT_APPLY source=%s session_id=%s port=%d rate_mbps=%.3f delay_ms=%d loss_pct=%.3f", shapeCommandSource, sessionID, portNum, rateMbps, delayMs, lossPct)
+			}
+			a.applySessionShaping(session, portNum)
 		}
 	}
 	return target, http.StatusOK, ""
@@ -3279,6 +3343,7 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 	if playlistInfo != nil {
 		sessionData["manifest_variants"] = playlistInfo
 	}
+	inferServerVideoRendition(sessionData, filename, isManifest, isSegment)
 
 	handler := NewRequestHandler(isSegment, isManifest, isMasterManifest, sessionData)
 	failureType := handler.HandleRequest(filename)
@@ -4139,15 +4204,15 @@ func (a *App) getSessionData(identifier string) SessionData {
 	if identifier == "" {
 		return nil
 	}
-	if item, err := a.memcache.Get(identifier); err == nil {
-		var session SessionData
-		if err := json.Unmarshal(item.Value, &session); err == nil {
-			return session
-		}
-	}
 	sessions := a.getSessionList()
 	for _, session := range sessions {
 		if getString(session, "session_id") == identifier {
+			return session
+		}
+	}
+	if item, err := a.memcache.Get(identifier); err == nil {
+		var session SessionData
+		if err := json.Unmarshal(item.Value, &session); err == nil {
 			return session
 		}
 	}
@@ -4160,6 +4225,52 @@ func newControlRevision() string {
 
 func parseControlRevision(rev string) (time.Time, error) {
 	return time.Parse(time.RFC3339Nano, rev)
+}
+
+func isControlRevisionNewer(existing string, incoming string) bool {
+	if existing == "" {
+		return false
+	}
+	if incoming == "" {
+		return true
+	}
+	existingAt, existingErr := parseControlRevision(existing)
+	incomingAt, incomingErr := parseControlRevision(incoming)
+	if existingErr != nil || incomingErr != nil {
+		return existing > incoming
+	}
+	return existingAt.After(incomingAt)
+}
+
+func copySessionControlState(target SessionData, source SessionData) {
+	if target == nil || source == nil {
+		return
+	}
+	controlKeys := []string{
+		"control_revision",
+		"nftables_bandwidth_mbps",
+		"nftables_delay_ms",
+		"nftables_packet_loss",
+		"nftables_pattern_enabled",
+		"nftables_pattern_steps",
+		"nftables_pattern_step",
+		"nftables_pattern_step_runtime",
+		"nftables_pattern_rate_runtime_mbps",
+		"nftables_pattern_step_runtime_at",
+		"nftables_pattern_segment_duration_seconds",
+		"nftables_pattern_default_segments",
+		"nftables_pattern_default_step_seconds",
+		"nftables_pattern_template_mode",
+		"nftables_pattern_margin_pct",
+		"abrchar_run_lock",
+		"abrchar_run_owner",
+		"abrchar_run_started_at",
+	}
+	for _, key := range controlKeys {
+		if value, ok := source[key]; ok {
+			target[key] = value
+		}
+	}
 }
 
 func applyControlRevision(session SessionData, revision string) {
@@ -4500,6 +4611,39 @@ func (a *App) getSessionList() []SessionData {
 }
 
 func (a *App) saveSessionList(sessions []SessionData) {
+	existing := a.getSessionList()
+	if len(existing) > 0 && len(sessions) > 0 {
+		existingByID := map[string]SessionData{}
+		for _, session := range existing {
+			id := getString(session, "session_id")
+			if id == "" {
+				continue
+			}
+			existingByID[id] = session
+		}
+		for _, session := range sessions {
+			id := getString(session, "session_id")
+			if id == "" {
+				continue
+			}
+			existingSession, ok := existingByID[id]
+			if !ok {
+				continue
+			}
+			existingRevision := getString(existingSession, "control_revision")
+			incomingRevision := getString(session, "control_revision")
+			if isControlRevisionNewer(existingRevision, incomingRevision) {
+				copySessionControlState(session, existingSession)
+			}
+		}
+	}
+
+	uiVersion := atomic.AddUint64(&a.uiStateVersionSeq, 1)
+	uiRevision := newControlRevision()
+	for _, session := range sessions {
+		session["ui_state_version"] = uiVersion
+		session["ui_state_revision"] = uiRevision
+	}
 	if data, err := json.Marshal(sessions); err == nil {
 		_ = a.memcache.Set(&memcache.Item{Key: "session_list", Value: data})
 	}
@@ -4594,6 +4738,8 @@ func (a *App) normalizeSessionsForResponse(sessions []SessionData) []SessionData
 		if getString(session, "transport_failure_type") == "" {
 			session["transport_failure_type"] = normalizeTransportFaultType(getString(session, "transport_fault_type"))
 		}
+		setDefault("ui_state_version", float64(0))
+		setDefault("ui_state_revision", "")
 		if getString(session, "transport_failure_type") == "" {
 			session["transport_failure_type"] = "none"
 		}
@@ -5003,6 +5149,88 @@ func getManifestVariants(session SessionData) []PlaylistInfo {
 		return nil
 	}
 	return infos
+}
+
+func inferServerVideoRendition(session SessionData, filename string, isManifest, isSegment bool) {
+	if !(isManifest || isSegment) {
+		return
+	}
+	decoded := filename
+	if unescaped, err := url.PathUnescape(filename); err == nil && unescaped != "" {
+		decoded = unescaped
+	}
+	rawParent := pathParent(decoded)
+	variantLabel := rawParent
+	if isManifest {
+		base := pathBase(decoded)
+		if variantLabel == "" && strings.HasPrefix(strings.ToLower(base), "playlist_") {
+			variantLabel = strings.TrimSuffix(base, ".m3u8")
+		}
+	}
+	if variantLabel == "" {
+		return
+	}
+
+	variants := getManifestVariants(session)
+	if len(variants) == 0 {
+		return
+	}
+
+	bestIdx := -1
+	bestScore := -1
+	for idx, variant := range variants {
+		score := 0
+		variantURL := variant.URL
+		variantPath := variantURL
+		if parsed, err := url.Parse(variantURL); err == nil {
+			if parsed.Path != "" {
+				variantPath = parsed.Path
+			}
+		}
+		variantPath = strings.TrimPrefix(variantPath, "/")
+		variantParent := pathParent(variantPath)
+		variantBase := pathBase(variantPath)
+
+		if variantPath != "" && strings.Contains(decoded, variantPath) {
+			score += 8
+		}
+		if variantParent != "" && strings.Contains(decoded, "/"+variantParent+"/") {
+			score += 5
+		}
+		if variantBase != "" && strings.Contains(decoded, variantBase) {
+			score += 3
+		}
+		if variantParent != "" && variantParent == variantLabel {
+			score += 6
+		}
+		if strings.HasPrefix(strings.ToLower(variantBase), "playlist_") {
+			token := strings.TrimSuffix(strings.TrimPrefix(variantBase, "playlist_"), ".m3u8")
+			if token != "" && strings.Contains(decoded, "/"+token+"/") {
+				score += 4
+			}
+		}
+
+		if score > bestScore {
+			bestScore = score
+			bestIdx = idx
+		}
+	}
+
+	if bestIdx >= 0 && bestScore > 0 {
+		selected := variants[bestIdx]
+		session["server_video_rendition"] = variantLabel
+		session["server_video_rendition_at"] = nowISO()
+		if selected.Bandwidth > 0 {
+			session["server_video_rendition_mbps"] = math.Round((float64(selected.Bandwidth)/1_000_000)*1000) / 1000
+			session["server_video_rendition_bandwidth"] = selected.Bandwidth
+		}
+		if selected.Resolution != "" {
+			session["server_video_rendition_resolution"] = selected.Resolution
+		}
+		if selected.URL != "" {
+			session["server_video_rendition_url"] = selected.URL
+		}
+	}
 }
 
 func bestVariantMbps(session SessionData) float64 {

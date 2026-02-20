@@ -93,6 +93,12 @@ struct ContentView: View {
                             .toggleStyle(.switch)
                         Text("Allow 4K")
                     }
+                    HStack(spacing: 6) {
+                        Toggle("", isOn: $viewModel.autoRecoveryEnabled)
+                            .labelsHidden()
+                            .toggleStyle(.switch)
+                        Text("Auto-Recovery")
+                    }
                 }
 
                 PlayerView(player: viewModel.player)

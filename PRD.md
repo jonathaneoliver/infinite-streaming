@@ -105,6 +105,30 @@ The system is intended for:
 - Player selector: HLS.js, Shaka, Video.js, Native.
 - Logs player errors and HTTP failure details in the testing UI.
 
+### 7.6 Player Characterization (ABR)
+- A per‑session **Player Characterization** panel is available in the Testing session UI.
+- Purpose: generate deterministic ABR ramp runs and capture switch/stall behavior under controlled limits.
+- Controls include:
+   - direction (`down`, `up`, `down+up`)
+   - hold duration
+   - network overhead selector (`5%` or `10%`)
+   - min/max limit bounds
+- Ramp generation model:
+   - Parse active HLS ladder from master playlist.
+   - Convert media ladder values to wire targets using selected overhead:
+      - `wire_variant_mbps = media_variant_mbps / (1 - overhead_pct)`
+   - For each adjacent ladder pair, generate interpolation points:
+      - `0%, 5%, 10%, 25%, 50%, 75%, 90%, 95%`
+   - Apply direction ordering (down/up) to produce the step sequence.
+- Run output requirements:
+   - live progress log
+   - switch/stall event capture
+   - per‑period throughput and buffer-depth stats
+   - downloadable report artifacts (JSON + markdown)
+- Restart behavior during characterization:
+   - detect persistent stalled conditions from cumulative `stall_time_s` sample deltas and stalled-like sample streaks
+   - optionally restart playback without changing active shaping limits when thresholds are crossed
+
 **Quartet**
 - Side‑by‑side comparison of multiple encodings/players.
 - Uses best‑fit player by protocol (e.g., Shaka for DASH, HLS.js for HLS).
@@ -141,11 +165,19 @@ Many platforms already expose their own failure tools (player debug features, br
 - **Pattern shaping**: the pattern loop updates the port only when a step’s target rate/delay/loss changes. Runtime fields (`nftables_pattern_step_runtime`, `nftables_pattern_rate_runtime_mbps`) are written back to session data for UI charts.
 - **Shaping cache**: the Go proxy keeps a per‑port cache of the last applied rate/delay/loss to avoid redundant `tc`/netem operations.
 - **Wire metrics sampling**: throughput sampler runs every 100ms using per-port `tc` class counters.
+- **Wire metric scope**: sampled bytes include packet-level transport/application overhead seen at that interface (for example TCP/IP headers and TLS/HTTP bytes), but exclude physical link-layer overhead (for example Ethernet preamble/IFG/FCS).
 - **Wire sustained (18s)**: `mbps_wire_sustained`/`mbps_wire_sustained_18s` are wall‑time sustained rates over the last 18s (bytes / elapsed time).
 - **Wire active (18s)**: `mbps_wire_active` divides active bytes by active seconds only.
 - **Short windows**: `mbps_wire_sustained_6s`, `mbps_wire_sustained_1s`, and `mbps_wire_active_6s` are computed from 6s/1s sample windows.
 - **Wire throughput**: `mbps_wire_throughput` is defined as max(`mbps_wire_active_1s`) over a rolling 6s window.
 - **Port reconciliation**: session throughput hydration chooses the freshest sample across external and internal port keys.
+- **Metric semantics**:
+   - **Limit**: shaping target configured by control plane (`/api/nftables/shape/{port}`); prescriptive, not measured.
+   - **Wire throughput**: measured interface throughput from `tc` counters (`mbps_wire_*`), including packet-level transport/application overhead visible at that interface.
+   - **Player estimate**: player-reported ABR network estimate (`player_metrics_network_bitrate_mbps`), algorithmic and client-side.
+- **Expected differences**:
+   - `wire throughput` generally converges toward but does not exceed `limit` for sustained intervals.
+   - `player estimate` should follow `wire throughput` trends over time but may diverge transiently due to smoothing, startup bias, rebuffering, or adaptation hysteresis.
 
 ## 8) Encoding & Packaging (Functional Requirements)
 - `generate_abr/create_abr_ladder.sh` builds ladders for H.264/H.265/AV1.

@@ -13,6 +13,13 @@ import urllib.request
 UA = "hls-failure-probe-pytest/1.0"
 
 
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Redirect handler that blocks HTTP redirects when disabled."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
 def utc_now_iso():
     """Return current UTC time in ISO format."""
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
@@ -27,7 +34,7 @@ def encode_url_path(url):
     )
 
 
-def http_fetch(url, timeout=20, verbose=False):
+def http_fetch(url, timeout=20, verbose=False, follow_redirects=True):
     """
     Fetch URL and return (status, data, duration, error).
 
@@ -47,20 +54,35 @@ def http_fetch(url, timeout=20, verbose=False):
     )
     t0 = time.time()
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        opener = (
+            urllib.request.build_opener()
+            if follow_redirects
+            else urllib.request.build_opener(_NoRedirectHandler())
+        )
+        with opener.open(req, timeout=timeout) as resp:
             data = resp.read()
             status = getattr(resp, "status", resp.getcode())
+            final_url = resp.geturl()
         dt = time.time() - t0
         if verbose:
+            redirect_note = ""
+            if final_url and final_url != url:
+                redirect_note = f" final_url={final_url}"
             print(
                 f"{utc_now_iso()} FETCH status={status} dur_ms={dt * 1000:.1f} "
-                f"bytes={len(data)} url={url}",
+                f"bytes={len(data)} url={url}{redirect_note}",
                 flush=True,
             )
         return status, data, dt, None
     except urllib.error.HTTPError as exc:
         dt = time.time() - t0
-        data = exc.read()
+        try:
+            data = exc.read()
+        finally:
+            try:
+                exc.close()
+            except Exception:
+                pass
         if verbose:
             print(
                 f"{utc_now_iso()} FETCH status={exc.code} dur_ms={dt * 1000:.1f} "
@@ -98,9 +120,14 @@ def http_fetch(url, timeout=20, verbose=False):
         return None, b"", dt, f"error:{exc}"
 
 
-def http_get_text(url, timeout=10, verbose=False):
+def http_get_text(url, timeout=10, verbose=False, follow_redirects=True):
     """Fetch URL and return (status, text, duration, error)."""
-    status, data, dt, err = http_fetch(url, timeout=timeout, verbose=verbose)
+    status, data, dt, err = http_fetch(
+        url,
+        timeout=timeout,
+        verbose=verbose,
+        follow_redirects=follow_redirects,
+    )
     return status, data.decode("utf-8", errors="replace"), dt, err
 
 
@@ -233,17 +260,180 @@ def parse_media_playlist(text, base_url, player_id):
 def find_session_by_player_id(api_base, player_id, timeout=12, verbose=False):
     """Find session by player_id with polling."""
     deadline = time.time() + timeout
+    last_sessions = None
     while time.time() < deadline:
         url = f"{api_base}/api/sessions"
         try:
             sessions = api_request_json(url, timeout=10, verbose=verbose)
         except Exception:
             sessions = None
+        last_sessions = sessions
+        if isinstance(sessions, list):
+            if verbose:
+                raw_payload = json.dumps(sessions, default=str)
+                if len(raw_payload) > 12000:
+                    raw_payload = raw_payload[:12000] + " ...<truncated>"
+                print(
+                    f"{utc_now_iso()} SESSIONS raw_json={raw_payload}",
+                    flush=True,
+                )
+                summary = []
+                for item in sessions[:8]:
+                    if not isinstance(item, dict):
+                        continue
+                    sid = item.get("session_id")
+                    pid = item.get("player_id")
+                    port = item.get("x_forwarded_port_external") or item.get("x_forwarded_port")
+                    state = item.get("player_metrics_state")
+                    summary.append(
+                        f"sid={sid} pid={pid} port={port} state={state}"
+                    )
+                print(
+                    f"{utc_now_iso()} SESSIONS poll expected_player_id={player_id} "
+                    f"count={len(sessions)} sample=[{'; '.join(summary)}]",
+                    flush=True,
+                )
+        elif verbose:
+            payload_type = type(sessions).__name__
+            payload_value = repr(sessions)
+            if len(payload_value) > 2000:
+                payload_value = payload_value[:2000] + " ...<truncated>"
+            print(
+                f"{utc_now_iso()} SESSIONS raw_nonlist type={payload_type} value={payload_value}",
+                flush=True,
+            )
         if isinstance(sessions, list):
             for session in sessions:
                 if session.get("player_id") == player_id:
+                    if verbose:
+                        print(
+                            f"{utc_now_iso()} SESSIONS match found session_id={session.get('session_id')} "
+                            f"player_id={session.get('player_id')}",
+                            flush=True,
+                        )
                     return session
         time.sleep(0.4)
+    if verbose:
+        if isinstance(last_sessions, list):
+            print(
+                f"{utc_now_iso()} SESSIONS no match for player_id={player_id}; "
+                f"last_count={len(last_sessions)}",
+                flush=True,
+            )
+            for item in last_sessions[:20]:
+                if not isinstance(item, dict):
+                    continue
+                sid = item.get("session_id")
+                pid = item.get("player_id")
+                port = item.get("x_forwarded_port_external") or item.get("x_forwarded_port")
+                state = item.get("player_metrics_state")
+                print(
+                    f"{utc_now_iso()} SESSIONS item sid={sid} pid={pid} port={port} state={state}",
+                    flush=True,
+                )
+        else:
+            print(
+                f"{utc_now_iso()} SESSIONS no match for player_id={player_id}; "
+                f"last_payload_type={type(last_sessions).__name__}",
+                flush=True,
+            )
+    return None
+
+
+def find_session_by_player_id_sse(api_base, player_id, timeout=12, verbose=False):
+    """Find session by player_id via SSE stream (/api/sessions/stream)."""
+    url = f"{api_base}/api/sessions/stream"
+    req = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": UA,
+            "Accept": "text/event-stream",
+            "Cache-Control": "no-cache",
+            "Pragma": "no-cache",
+        },
+    )
+    deadline = time.time() + max(1, float(timeout))
+
+    def _player_match(candidate):
+        if candidate is None:
+            return False
+        cand = str(candidate)
+        target = str(player_id)
+        return cand == target or cand.startswith(target) or target.startswith(cand)
+
+    buffer = []
+    try:
+        with urllib.request.urlopen(req, timeout=max(5, int(timeout) + 3)) as resp:
+            if verbose:
+                print(f"{utc_now_iso()} SSE connected url={url}", flush=True)
+            while time.time() < deadline:
+                raw = resp.readline()
+                if not raw:
+                    break
+                line = raw.decode("utf-8", errors="replace").rstrip("\r\n")
+                if line:
+                    buffer.append(line)
+                    continue
+
+                event_name = "message"
+                data_lines = []
+                for item in buffer:
+                    if item.startswith("event:"):
+                        event_name = item.split(":", 1)[1].strip() or "message"
+                    elif item.startswith("data:"):
+                        data_lines.append(item[5:].lstrip())
+                buffer = []
+
+                if not data_lines:
+                    continue
+                payload_raw = "\n".join(data_lines)
+                if verbose:
+                    trimmed_payload = payload_raw
+                    if len(trimmed_payload) > 12000:
+                        trimmed_payload = trimmed_payload[:12000] + " ...<truncated>"
+                    print(
+                        f"{utc_now_iso()} SSE raw_event event={event_name} data={trimmed_payload}",
+                        flush=True,
+                    )
+                try:
+                    payload = json.loads(payload_raw)
+                except json.JSONDecodeError:
+                    if verbose:
+                        trimmed = payload_raw[:300] + (" ...<truncated>" if len(payload_raw) > 300 else "")
+                        print(f"{utc_now_iso()} SSE decode_error event={event_name} data={trimmed}", flush=True)
+                    continue
+
+                sessions = payload.get("sessions") if isinstance(payload, dict) else None
+                if not isinstance(sessions, list):
+                    continue
+
+                if verbose:
+                    preview = []
+                    for s in sessions[:8]:
+                        if not isinstance(s, dict):
+                            continue
+                        preview.append(
+                            f"sid={s.get('session_id')} pid={s.get('player_id')} "
+                            f"port={s.get('x_forwarded_port_external') or s.get('x_forwarded_port')}"
+                        )
+                    print(
+                        f"{utc_now_iso()} SSE sessions event={event_name} count={len(sessions)} "
+                        f"expected_player_id={player_id} sample=[{'; '.join(preview)}]",
+                        flush=True,
+                    )
+
+                for session in sessions:
+                    if isinstance(session, dict) and _player_match(session.get("player_id")):
+                        if verbose:
+                            print(
+                                f"{utc_now_iso()} SSE match found session_id={session.get('session_id')} "
+                                f"player_id={session.get('player_id')}",
+                                flush=True,
+                            )
+                        return session
+    except Exception as exc:
+        if verbose:
+            print(f"{utc_now_iso()} SSE subscribe failed url={url} error={exc}", flush=True)
     return None
 
 

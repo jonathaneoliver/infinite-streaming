@@ -365,6 +365,202 @@
             color: var(--text-secondary, #666);
             font-size: 11px;
         }
+maybe a histogram of b
+        .abrchar-panel {
+            border: 1px solid var(--border-color);
+            border-radius: 10px;
+            background: var(--bg-secondary);
+            padding: 8px;
+        }
+
+        .abrchar-summary {
+            cursor: pointer;
+            font-weight: 600;
+            color: var(--text-primary);
+        }
+
+        .abrchar-body {
+            margin-top: 8px;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        .abrchar-controls {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            align-items: flex-end;
+        }
+
+        .abrchar-controls label {
+            font-size: 12px;
+            color: var(--text-secondary);
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }
+
+        .abrchar-controls input,
+        .abrchar-controls select {
+            min-width: 96px;
+            border: 1px solid var(--border-color);
+            border-radius: 6px;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            padding: 4px 6px;
+            font-size: 12px;
+        }
+
+        .abrchar-actions {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .abrchar-progress {
+            max-height: 180px;
+            overflow-y: auto;
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            background: var(--bg-primary);
+            padding: 8px;
+            font-size: 12px;
+            font-family: 'Courier New', monospace;
+        }
+
+        .abrchar-summary-box {
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            background: var(--bg-primary);
+            padding: 8px;
+            font-size: 12px;
+            color: var(--text-primary);
+        }
+
+        .abrchar-report-box {
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            background: var(--bg-primary);
+            padding: 8px;
+            font-size: 12px;
+            color: var(--text-primary);
+            white-space: pre-wrap;
+            max-height: 260px;
+            overflow: auto;
+        }
+
+        .abrchar-downloads {
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+        }
+
+        .abrchar-ruler-wrap {
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            background: var(--bg-primary);
+            padding: 8px;
+        }
+
+        .abrchar-ruler-head {
+            font-size: 12px;
+            color: var(--text-secondary);
+            margin-bottom: 6px;
+        }
+
+        .abrchar-ruler {
+            position: relative;
+            height: 124px;
+            overflow: visible;
+        }
+
+        .abrchar-ruler-track {
+            position: absolute;
+            left: 0;
+            right: 0;
+            top: 70px;
+            height: 2px;
+            background: var(--border-color);
+        }
+
+        .abrchar-ruler-marker {
+            position: absolute;
+            top: 18px;
+            transform: translateX(-50%);
+            pointer-events: none;
+            z-index: 2;
+        }
+
+        .abrchar-ruler-line {
+            width: 2px;
+            margin-top: 14px;
+            height: calc(54px + (var(--label-lane, 0) * 16px));
+            margin-left: auto;
+            margin-right: auto;
+            background: #64748b;
+        }
+
+        .abrchar-ruler-marker.variant .abrchar-ruler-line { background: #64748b; }
+        .abrchar-ruler-marker.limit .abrchar-ruler-line { background: #f59e0b; }
+        .abrchar-ruler-marker.throughput .abrchar-ruler-line { background: #14b8a6; }
+        .abrchar-ruler-marker.wire-throughput .abrchar-ruler-line { background: #2563eb; }
+        .abrchar-ruler-marker.player-estimate .abrchar-ruler-line { background: #0ea5e9; }
+        .abrchar-ruler-marker.top-range .abrchar-ruler-line { background: #dc2626; }
+        .abrchar-ruler-marker.current-variant { z-index: 5; }
+        .abrchar-ruler-marker.current-variant .abrchar-ruler-line {
+            background: #7c3aed;
+            width: 4px;
+            margin-top: 14px;
+            height: calc(60px + (var(--label-lane, 0) * 16px));
+            box-shadow: 0 0 0 2px rgba(124, 58, 237, 0.2);
+        }
+
+        .abrchar-ruler-label {
+            margin-top: calc(2px + (var(--label-lane, 0) * 16px));
+            font-size: 10px;
+            color: var(--text-primary);
+            white-space: nowrap;
+            transform: translateY(2px);
+        }
+        .abrchar-ruler-marker.variant .abrchar-ruler-label {
+            position: absolute;
+            left: 50%;
+            top: calc(-2px - (var(--label-lane, 0) * 16px));
+            margin-top: 0;
+            transform: translateX(-50%);
+            color: #64748b;
+        }
+        .abrchar-ruler-marker.limit .abrchar-ruler-label { color: #b45309; }
+        .abrchar-ruler-marker.throughput .abrchar-ruler-label { color: #0f766e; }
+        .abrchar-ruler-marker.wire-throughput .abrchar-ruler-label { color: #1d4ed8; }
+        .abrchar-ruler-marker.player-estimate .abrchar-ruler-label { color: #0369a1; }
+        .abrchar-ruler-marker.top-range .abrchar-ruler-label { color: #b91c1c; }
+        .abrchar-ruler-marker.current-variant .abrchar-ruler-label {
+            font-weight: 800;
+            color: #5b21b6;
+        }
+
+        .abrchar-ruler-max,
+        .abrchar-ruler-min {
+            position: absolute;
+            bottom: 0;
+            font-size: 10px;
+            color: var(--text-secondary);
+        }
+
+        .abrchar-ruler-min { left: 0; }
+        .abrchar-ruler-max { right: 0; }
+
+        .abrchar-line {
+            margin-bottom: 4px;
+        }
+
+        .abrchar-event { color: #0f766e; }
+        .abrchar-warn { color: #b45309; }
+        .abrchar-error { color: #b91c1c; }
+        .abrchar-success { color: #166534; }
     </style>
 </head>
 <body>
@@ -409,6 +605,7 @@
     <script src="https://cdn.jsdelivr.net/npm/vis-timeline@7.7.3/standalone/umd/vis-timeline-graph2d.min.js"></script>
     <link rel="stylesheet" href="/dashboard/testing-session-refactored.css">
     <script src="/dashboard/testing-session-ui.js"></script>
+    <script src="/dashboard/player-characterization.js"></script>
     <script>
         const failureTypes = [
             { value: 'none', text: 'None' },
@@ -436,12 +633,18 @@
         let sessionsPollTimer = null;
         let sseLastRevision = 0;
         let sseMissedTotal = 0;
+        let lastAppliedSnapshotVersion = 0;
         const failureSaveTimers = new Map();
         const failureSaveFields = new Map();
         const bandwidthHistory = new Map();
+        const bandwidthEventHistory = new Map();
         const bandwidthCharts = new Map();
+        const bufferDepthCharts = new Map();
+        const videoFpsCharts = new Map();
         const bandwidthVisibility = new Map();
+        const bandwidthVariantsEnabledBySession = new Map();
         const bitrateAxisMaxBySession = new Map();
+        const lastRecordedPlayerEventBySession = new Map();
         const pendingShaping = new Map();
         const shapingTimers = new Map();
         const collapseState = new Map();
@@ -462,6 +665,18 @@
             } catch (err) {
                 return undefined;
             }
+        }
+
+        function getSessionSnapshotVersion(session) {
+            const uiVersion = Number(session?.ui_state_version);
+            if (Number.isFinite(uiVersion) && uiVersion > 0) {
+                return uiVersion;
+            }
+            const controlRevisionMs = Date.parse(String(session?.control_revision || ''));
+            if (Number.isFinite(controlRevisionMs) && controlRevisionMs > 0) {
+                return controlRevisionMs;
+            }
+            return 0;
         }
 
         function setStoredCollapseState(key, value) {
@@ -487,6 +702,29 @@
 
         const TestingSessionUI = window.TestingSessionUI;
         const isDeveloperMode = new URLSearchParams(window.location.search).get('developer') === '1';
+
+        function mountPlayerCharacterizationForCard(card, session) {
+            if (!isDeveloperMode) return;
+            if (!card || !session) return;
+            const host = card.querySelector('[data-field="player_characterization_host"]');
+            if (!host) return;
+            if (!window.PlayerCharacterization || typeof window.PlayerCharacterization.mount !== 'function') return;
+            const mountKey = `session-${session.session_id}`;
+            if (host.dataset.abrcharMounted === mountKey) return;
+            window.PlayerCharacterization.mount({
+                hostElement: host,
+                instanceKey: mountKey,
+                getSession: () => {
+                    if (!activeSessionId) return null;
+                    return sessionsById.get(String(activeSessionId)) || null;
+                },
+                getCurrentUrl: () => {
+                    const current = activeSessionId ? sessionsById.get(String(activeSessionId)) : null;
+                    return current ? (current.master_manifest_url || current.manifest_url || '') : '';
+                }
+            });
+            host.dataset.abrcharMounted = mountKey;
+        }
 
         function getShapingPresets(card) {
             const raw = card.dataset.shapingPresets || '';
@@ -724,6 +962,10 @@
 
         function scheduleShapingApply(card) {
             const sessionId = card.dataset.sessionId;
+            if (sessionId && isAbrcharRunLocked(sessionId)) {
+                console.warn('[NETSHAPE] Ignoring manual shaping update while ABR characterization lock is active.');
+                return;
+            }
             if (sessionId) {
                 const getValue = (field) => {
                     const input = card.querySelector(`input[data-field="${field}"]`);
@@ -861,6 +1103,8 @@
                 const el = card.querySelector(`[data-field="${field}"]`);
                 if (el) el.textContent = value;
             };
+            setField('session_session_id', session.session_id || '—');
+            setField('session_player_id', session.player_id || '—');
             setField('session_user_agent', session.user_agent || '—');
             setField('session_player_ip', session.player_ip || '—');
             setField('session_port_display', session.x_forwarded_port_external || session.x_forwarded_port || '—');
@@ -929,6 +1173,16 @@
                 return true;
             }
             return false;
+        }
+
+        function isAbrcharRunLocked(sessionId) {
+            const key = String(sessionId || '');
+            if (!key) return false;
+            const session = sessionsById.get(key);
+            if (!session) return false;
+            return session.abrchar_run_lock === true
+                || session.abrchar_run_lock === 1
+                || session.abrchar_run_lock === 'true';
         }
 
         function applyActiveFaultTab(card, tabName) {
@@ -1074,6 +1328,73 @@
             return `${numeric.toFixed(3)}s`;
         }
 
+        function parseVariantResolution(resolution) {
+            const value = String(resolution || '').trim().toLowerCase();
+            if (!value) return { width: null, height: null };
+            const dimensions = value.match(/(\d{3,4})\s*x\s*(\d{3,4})/i);
+            if (dimensions) {
+                return {
+                    width: Number(dimensions[1]),
+                    height: Number(dimensions[2])
+                };
+            }
+            const progressive = value.match(/(\d{3,4})\s*p$/i);
+            if (progressive) {
+                return {
+                    width: null,
+                    height: Number(progressive[1])
+                };
+            }
+            const numeric = Number(value);
+            if (Number.isFinite(numeric) && numeric > 0) {
+                return {
+                    width: null,
+                    height: numeric
+                };
+            }
+            return { width: null, height: null };
+        }
+
+        function parseVideoResolution(resolution) {
+            return parseVariantResolution(resolution);
+        }
+
+        function isSessionNativeSafari(session) {
+            const browser = String(session?.player_metrics_browser_family || '').trim().toLowerCase();
+            const engine = String(session?.player_metrics_playback_engine || '').trim().toLowerCase();
+            return browser === 'safari' && engine === 'native';
+        }
+
+        function inferSessionNativeRenditionMbps(session) {
+            if (!isSessionNativeSafari(session)) return null;
+            const videoResolution = parseVideoResolution(session?.player_metrics_video_resolution);
+            const videoHeight = Number(videoResolution.height || 0);
+            if (!Number.isFinite(videoHeight) || videoHeight <= 0) return null;
+            const videoWidth = Number(videoResolution.width || 0);
+            const variants = Array.isArray(session?.manifest_variants) ? session.manifest_variants : [];
+            if (!variants.length) return null;
+
+            let best = null;
+            variants.forEach((variant) => {
+                const bandwidth = Number(variant?.bandwidth || 0);
+                if (!Number.isFinite(bandwidth) || bandwidth <= 0) return;
+                const parsed = parseVariantResolution(variant?.resolution);
+                const height = Number(parsed.height || 0);
+                const width = Number(parsed.width || 0);
+                if (!Number.isFinite(height) || height <= 0) return;
+                const heightDelta = Math.abs(height - videoHeight);
+                const hasWidth = Number.isFinite(width) && width > 0 && Number.isFinite(videoWidth) && videoWidth > 0;
+                const widthDelta = hasWidth ? Math.abs(width - videoWidth) : 0;
+                const score = (heightDelta * 10000) + widthDelta;
+                if (!best || score < best.score || (score === best.score && bandwidth > best.bandwidth)) {
+                    best = { score, bandwidth };
+                }
+            });
+
+            if (!best) return null;
+            return Math.round((best.bandwidth / 1000000) * 1000) / 1000;
+        }
+
         function updateSessionDetailData(card, session) {
             if (!card || !session) return;
             const setText = (selector, value) => {
@@ -1081,6 +1402,12 @@
                 if (!el) return;
                 el.textContent = value;
             };
+            const inferredVideoBitrateMbps = inferSessionNativeRenditionMbps(session);
+            const rawVideoBitrate = Number(session.player_metrics_video_bitrate_mbps);
+            const hasMeasuredVideoBitrate = Number.isFinite(rawVideoBitrate) && rawVideoBitrate > 0;
+            const displayVideoBitrate = hasMeasuredVideoBitrate
+                ? formatMetricNumber(rawVideoBitrate, ' Mbps')
+                : (Number.isFinite(inferredVideoBitrateMbps) ? `~${formatMetricNumber(inferredVideoBitrateMbps, ' Mbps')}` : '—');
             setText('[data-field="player_metrics_last_event"]', session.player_metrics_last_event || '—');
             setText('[data-field="player_metrics_trigger_type"]', session.player_metrics_trigger_type || '—');
             setText('[data-field="player_metrics_last_event_at"]', formatDate(session.player_metrics_last_event_at));
@@ -1097,9 +1424,12 @@
             setText('[data-field="player_metrics_video_resolution"]', session.player_metrics_video_resolution || '—');
             setText('[data-field="player_metrics_video_first_frame_time_s"]', formatSeconds(session.player_metrics_video_first_frame_time_s));
             setText('[data-field="player_metrics_video_start_time_s"]', formatSeconds(session.player_metrics_video_start_time_s));
-            setText('[data-field="player_metrics_video_bitrate_mbps"]', formatMetricNumber(session.player_metrics_video_bitrate_mbps, ' Mbps'));
+            setText('[data-field="player_metrics_video_bitrate_mbps"]', displayVideoBitrate);
+            setText('[data-field="server_video_rendition"]', session.server_video_rendition || '—');
+            setText('[data-field="server_video_rendition_mbps"]', formatMetricNumber(session.server_video_rendition_mbps, ' Mbps'));
             setText('[data-field="player_metrics_video_quality_pct"]', formatMetricNumber(session.player_metrics_video_quality_pct, '%'));
             setText('[data-field="player_metrics_network_bitrate_mbps"]', formatMetricNumber(session.player_metrics_network_bitrate_mbps, ' Mbps'));
+            setText('[data-field="player_metrics_frames_displayed"]', formatMetricNumber(session.player_metrics_frames_displayed));
             setText('[data-field="player_metrics_dropped_frames"]', formatMetricNumber(session.player_metrics_dropped_frames));
             setText('[data-field="player_metrics_stall_count"]', formatMetricNumber(session.player_metrics_stall_count));
             setText('[data-field="player_metrics_stall_time_s"]', formatSeconds(session.player_metrics_stall_time_s));
@@ -1279,6 +1609,7 @@
                 }
                 syncServerFaultData(existingCard, activeSession);
                 updateSessionDetailData(existingCard, activeSession);
+                mountPlayerCharacterizationForCard(existingCard, activeSession);
                 pushBandwidthSample(activeSession);
                 return;
             }
@@ -1288,6 +1619,7 @@
                 TestingSessionUI.renderSessionCard(activeSession, {
                     hideTitle: true,
                     showPortItem: true,
+                    showBufferDepthChart: true,
                     developerMode: isDeveloperMode,
                     sectionDefaults: collapseDefaults
                 }) : '');
@@ -1300,6 +1632,7 @@
                     updateAllStepRiskUi(restoredCard);
                     TestingSessionUI.updateTransportModeUi(restoredCard);
                     updateSessionDetailData(restoredCard, activeSession);
+                    mountPlayerCharacterizationForCard(restoredCard, activeSession);
                 }
                 pushBandwidthSample(activeSession);
             }
@@ -1322,40 +1655,154 @@
             `;
         }
 
+        function bandwidthSeriesKey(label) {
+            return String(label || '').replace(/\s*\(V\d+\)$/, '');
+        }
+
+        function isVariantSeriesLabel(label) {
+            return /^Variant V\d+$/.test(String(label || ''));
+        }
+
+        function buildVariantLadder(variants) {
+            if (!Array.isArray(variants) || !variants.length) return [];
+            const ladder = variants
+                .map((variant) => Number(variant?.bandwidth || 0))
+                .filter((bandwidth) => Number.isFinite(bandwidth) && bandwidth > 0)
+                .map((bandwidth) => Math.round((bandwidth / 1000000) * 1000) / 1000)
+                .filter((value, index, array) => array.indexOf(value) === index)
+                .sort((a, b) => a - b);
+            return ladder.map((mbps, index) => ({
+                vx: `V${index + 1}`,
+                mbps
+            }));
+        }
+
+        function parseBandwidthChartEventType(rawEventType) {
+            const eventType = String(rawEventType || '').trim().toLowerCase();
+            if (!eventType) return null;
+            if (eventType.includes('stall')) return 'STALL';
+            if (eventType.includes('restart')) return 'RESTART';
+            return null;
+        }
+
+        function getBandwidthChartEventTimestampMs(session, fallbackMs) {
+            const candidates = [
+                session?.player_metrics_last_event_at,
+                session?.player_metrics_event_time,
+                session?.control_revision
+            ];
+            for (const candidate of candidates) {
+                const parsed = Date.parse(String(candidate || ''));
+                if (Number.isFinite(parsed) && parsed > 0) {
+                    return parsed;
+                }
+            }
+            return fallbackMs;
+        }
+
+        function formatBitrateChartAbsoluteTick(windowStartMs, offsetSeconds) {
+            const ts = Number(windowStartMs) + (Number(offsetSeconds) * 1000);
+            if (!Number.isFinite(ts)) return '';
+            return new Date(ts).toLocaleTimeString([], {
+                hour12: false,
+                hour: '2-digit',
+                minute: '2-digit',
+                second: '2-digit'
+            });
+        }
+
+        function formatBitrateChartRange(windowStartMs, windowEndMs) {
+            const start = formatBitrateChartAbsoluteTick(windowStartMs, 0);
+            const end = formatBitrateChartAbsoluteTick(windowStartMs, (Number(windowEndMs) - Number(windowStartMs)) / 1000);
+            if (!start || !end) return 'Window: —';
+            return `Window: ${start} → ${end}`;
+        }
+
         function pushBandwidthSample(session) {
             const now = Date.now();
-            const windowMs = 5 * 60 * 1000;
-            const wireSustained = Number(session.mbps_wire_sustained || 0);
+            const windowMs = 10 * 60 * 1000;
+            const wireSustained = Number.isFinite(Number(session.mbps_wire_sustained)) ? Number(session.mbps_wire_sustained) : null;
             const wireActive = Number.isFinite(Number(session.mbps_wire_active)) ? Number(session.mbps_wire_active) : null;
-            const wireSustained6s = Number(session.mbps_wire_sustained_6s || 0);
+            const wireSustained6s = Number.isFinite(Number(session.mbps_wire_sustained_6s)) ? Number(session.mbps_wire_sustained_6s) : null;
             const wireActive6s = Number.isFinite(Number(session.mbps_wire_active_6s)) ? Number(session.mbps_wire_active_6s) : null;
-            const wireSustained1s = Number(session.mbps_wire_sustained_1s || 0);
+            const wireSustained1s = Number.isFinite(Number(session.mbps_wire_sustained_1s)) ? Number(session.mbps_wire_sustained_1s) : null;
             const wireThroughput = Number.isFinite(Number(session.mbps_wire_throughput)) ? Number(session.mbps_wire_throughput) : null;
-            const videoBitrate = Number(session.player_metrics_video_bitrate_mbps || 0);
-            const networkBitrate = Number(session.player_metrics_network_bitrate_mbps || 0);
-                const patternSteps = Array.isArray(session.nftables_pattern_steps) ? session.nftables_pattern_steps : [];
+            const bufferDepth = Number.isFinite(Number(session.player_metrics_buffer_depth_s))
+                ? Number(session.player_metrics_buffer_depth_s)
+                : null;
+            const measuredVideoBitrate = Number(session.player_metrics_video_bitrate_mbps);
+            const inferredVideoBitrate = inferSessionNativeRenditionMbps(session);
+            const currentRendition = (Number.isFinite(measuredVideoBitrate) && measuredVideoBitrate > 0)
+                ? measuredVideoBitrate
+                : (Number.isFinite(inferredVideoBitrate) ? inferredVideoBitrate : null);
+            const playerEstimate = Number.isFinite(Number(session.player_metrics_network_bitrate_mbps))
+                ? Number(session.player_metrics_network_bitrate_mbps)
+                : null;
+            const serverRendition = Number.isFinite(Number(session.server_video_rendition_mbps))
+                ? Number(session.server_video_rendition_mbps)
+                : null;
+            const framesDisplayed = Number.isFinite(Number(session.player_metrics_frames_displayed))
+                ? Number(session.player_metrics_frames_displayed)
+                : null;
+            const framesDropped = Number.isFinite(Number(session.player_metrics_dropped_frames))
+                ? Number(session.player_metrics_dropped_frames)
+                : null;
+            const variantLadder = buildVariantLadder(session.manifest_variants);
+            const patternSteps = Array.isArray(session.nftables_pattern_steps) ? session.nftables_pattern_steps : [];
             const patternStepIndex = Number(session.nftables_pattern_step_runtime || session.nftables_pattern_step || 0);
             const patternEnabled = session.nftables_pattern_enabled === true
                 || session.nftables_pattern_enabled === 1
                 || session.nftables_pattern_enabled === 'true';
             const runtimeTarget = Number(session.nftables_pattern_rate_runtime_mbps);
             const bandwidthTarget = Number(session.nftables_bandwidth_mbps);
-            let limit = Number.isFinite(bandwidthTarget) ? bandwidthTarget : 0;
+            const key = session.session_id;
+            if (!key) return;
+
+            const eventType = parseBandwidthChartEventType(session.player_metrics_last_event || session.player_metrics_trigger_type);
+            if (eventType) {
+                const eventAtMs = getBandwidthChartEventTimestampMs(session, now);
+                const eventStamp = `${eventType}|${session.player_metrics_last_event_at || session.player_metrics_event_time || eventAtMs}`;
+                const lastStamp = lastRecordedPlayerEventBySession.get(String(key));
+                if (eventStamp !== lastStamp) {
+                    const eventSeries = bandwidthEventHistory.get(key) || [];
+                    eventSeries.push({ ts: eventAtMs, type: eventType });
+                    const eventCutoff = now - windowMs;
+                    bandwidthEventHistory.set(key, eventSeries.filter((event) => Number(event.ts) >= eventCutoff));
+                    lastRecordedPlayerEventBySession.set(String(key), eventStamp);
+                }
+            }
+
+            const series = bandwidthHistory.get(key) || [];
+            const lastLimit = series.length ? Number(series[series.length - 1].target) : NaN;
+            let target = Number.isFinite(bandwidthTarget) ? bandwidthTarget : (Number.isFinite(lastLimit) ? lastLimit : 0);
             let usedRuntime = false;
             if (patternEnabled && Number.isFinite(runtimeTarget)) {
-                limit = runtimeTarget;
+                target = runtimeTarget;
                 usedRuntime = true;
             }
             if (!usedRuntime && patternStepIndex > 0 && patternStepIndex <= patternSteps.length) {
                 const activeStepRate = Number(patternSteps[patternStepIndex - 1]?.rate_mbps);
                 if (Number.isFinite(activeStepRate) && activeStepRate >= 0) {
-                    limit = activeStepRate;
+                    target = activeStepRate;
                 }
             }
-            const key = session.session_id;
-            if (!key) return;
-            const series = bandwidthHistory.get(key) || [];
-            series.push({ ts: now, wireSustained, wireActive, wireSustained6s, wireActive6s, wireSustained1s, wireThroughput, limit, videoBitrate, networkBitrate });
+            series.push({
+                ts: now,
+                wireSustained,
+                wireActive,
+                wireSustained6s,
+                wireActive6s,
+                wireSustained1s,
+                wireThroughput,
+                bufferDepth,
+                playerEstimate,
+                currentRendition,
+                serverRendition,
+                framesDisplayed,
+                framesDropped,
+                target,
+                variantLadder
+            });
             const cutoff = now - windowMs;
             const filtered = series.filter(point => point.ts >= cutoff);
             bandwidthHistory.set(key, filtered);
@@ -1364,13 +1811,18 @@
 
         function renderBandwidthChart(sessionId) {
             const series = bandwidthHistory.get(sessionId) || [];
+            const eventSeries = bandwidthEventHistory.get(sessionId) || [];
             const card = document.querySelector(`.session-card[data-session-id="${sessionId}"]`);
             if (!card) return;
             const canvas = card.querySelector('canvas.bandwidth-chart');
             if (!canvas || !series.length) return;
-            const windowMs = 5 * 60 * 1000;
+            const windowMs = 10 * 60 * 1000;
             const maxTs = series[series.length - 1].ts;
             const windowStart = maxTs - windowMs;
+            const chartRangeLabel = card.querySelector('[data-field="bandwidth_chart_range"]');
+            if (chartRangeLabel) {
+                chartRangeLabel.textContent = formatBitrateChartRange(windowStart, maxTs);
+            }
             const points = series
                 .filter(point => point.ts >= windowStart)
                 .map(point => ({
@@ -1381,33 +1833,76 @@
                     wireActive6s: point.wireActive6s,
                     wireSustained1s: point.wireSustained1s,
                     wireThroughput: point.wireThroughput,
-                    limit: point.limit,
-                    videoBitrate: point.videoBitrate,
-                    networkBitrate: point.networkBitrate
+                    bufferDepth: point.bufferDepth,
+                    playerEstimate: point.playerEstimate,
+                    currentRendition: point.currentRendition,
+                    serverRendition: point.serverRendition,
+                    framesDisplayed: point.framesDisplayed,
+                    framesDropped: point.framesDropped,
+                    target: point.target,
+                    variantLadder: point.variantLadder
                 }));
+            const chartEvents = eventSeries
+                .filter((event) => Number(event.ts) >= windowStart)
+                .map((event) => ({
+                    x: (event.ts - windowStart) / 1000,
+                    type: event.type
+                }))
+                .filter((event) => Number.isFinite(event.x) && event.x >= 0 && event.x <= 600);
             const wireSustainedData = points.map(point => ({ x: point.x, y: point.wireSustained }));
             const wireActiveData = points.map(point => ({ x: point.x, y: point.wireActive }));
             const wireSustained6sData = points.map(point => ({ x: point.x, y: point.wireSustained6s }));
             const wireActive6sData = points.map(point => ({ x: point.x, y: point.wireActive6s }));
             const wireSustained1sData = points.map(point => ({ x: point.x, y: point.wireSustained1s }));
             const wireThroughputData = points.map(point => ({ x: point.x, y: point.wireThroughput }));
-            const limitData = points.map(point => ({ x: point.x, y: point.limit }));
-            const videoBitrateData = points.map(point => ({ x: point.x, y: point.videoBitrate }));
-            const networkBitrateData = points.map(point => ({ x: point.x, y: point.networkBitrate }));
+            const bufferDepthData = points.map(point => ({ x: point.x, y: Number.isFinite(point.bufferDepth) ? point.bufferDepth : null }));
+            const estimateData = points.map(point => ({ x: point.x, y: point.playerEstimate || null }));
+            const renditionData = points.map(point => ({ x: point.x, y: point.currentRendition || null }));
+            const serverRenditionData = points.map(point => ({ x: point.x, y: point.serverRendition || null }));
+            const framesDisplayedData = points.map(point => ({ x: point.x, y: Number.isFinite(point.framesDisplayed) ? point.framesDisplayed : null }));
+            const framesDroppedData = points.map(point => ({ x: point.x, y: Number.isFinite(point.framesDropped) ? point.framesDropped : null }));
+            const targetData = points.map(point => ({ x: point.x, y: point.target }));
+
+            let variantLadder = [];
+            for (let idx = points.length - 1; idx >= 0; idx -= 1) {
+                if (Array.isArray(points[idx].variantLadder) && points[idx].variantLadder.length) {
+                    variantLadder = points[idx].variantLadder;
+                    break;
+                }
+            }
 
             const visibility = bandwidthVisibility.get(sessionId) || {};
+            const variantsEnabled = bandwidthVariantsEnabledBySession.get(String(sessionId)) !== false;
+            const variantToggleButton = card.querySelector('button[data-action="toggle-variants"]');
+            if (variantToggleButton) {
+                variantToggleButton.textContent = variantsEnabled ? 'Hide Variants' : 'Show Variants';
+                variantToggleButton.setAttribute('aria-pressed', variantsEnabled ? 'true' : 'false');
+            }
             const defaultVisibleLabels = new Set([
                 'Wire Sustained (6s)',
                 'Wire Throughput',
-                'Video Bitrate',
-                'Network Bitrate',
-                'Limit'
+                'Player est.',
+                'Rendition',
+                'Server Rendition',
+                'Limit',
+                'STALL',
+                'RESTART'
             ]);
             const isSeriesHidden = (label) => {
+                const key = bandwidthSeriesKey(label);
+                if (isVariantSeriesLabel(key) && !variantsEnabled) {
+                    return true;
+                }
                 if (Object.prototype.hasOwnProperty.call(visibility, label)) {
                     return visibility[label] === true;
                 }
-                return !defaultVisibleLabels.has(label);
+                if (Object.prototype.hasOwnProperty.call(visibility, key)) {
+                    return visibility[key] === true;
+                }
+                if (isVariantSeriesLabel(key)) {
+                    return false;
+                }
+                return !defaultVisibleLabels.has(key);
             };
             const axisMode = normalizeBitrateAxisMaxMode(
                 bitrateAxisMaxBySession.get(String(sessionId)) ||
@@ -1416,18 +1911,181 @@
             );
             bitrateAxisMaxBySession.set(String(sessionId), axisMode);
             const maxFor = (hidden, data) => (hidden ? [0] : data.map(point => point.y || 0));
-            const maxYAuto = Math.min(100, Math.max(1,
+            const maxYAutoRaw = Math.max(1,
                 ...maxFor(isSeriesHidden('Wire Sustained (18s)'), wireSustainedData),
                 ...maxFor(isSeriesHidden('Wire Active'), wireActiveData),
                 ...maxFor(isSeriesHidden('Wire Sustained (6s)'), wireSustained6sData),
                 ...maxFor(isSeriesHidden('Wire Active (6s)'), wireActive6sData),
                 ...maxFor(isSeriesHidden('Wire Sustained (1s)'), wireSustained1sData),
                 ...maxFor(isSeriesHidden('Wire Throughput'), wireThroughputData),
-                ...maxFor(isSeriesHidden('Video Bitrate'), videoBitrateData),
-                ...maxFor(isSeriesHidden('Network Bitrate'), networkBitrateData),
-                ...maxFor(isSeriesHidden('Limit'), limitData)
-            ));
+                ...maxFor(isSeriesHidden('Player est.'), estimateData),
+                ...maxFor(isSeriesHidden('Rendition'), renditionData),
+                ...maxFor(isSeriesHidden('Server Rendition'), serverRenditionData),
+                ...maxFor(isSeriesHidden('Limit'), targetData)
+            );
+            const maxYAuto = Math.min(100, Math.max(1, (Math.ceil((maxYAutoRaw * 1.05) * 10) / 10)));
             const maxY = axisMode === 'auto' ? maxYAuto : Number(axisMode);
+
+            const buildEventMarkerData = (type) => {
+                const markerData = [];
+                chartEvents.forEach((event) => {
+                    if (event.type !== type) return;
+                    markerData.push({ x: event.x, y: 0 });
+                    markerData.push({ x: event.x, y: maxY });
+                    markerData.push({ x: event.x, y: null });
+                });
+                return markerData;
+            };
+            const stallMarkerData = buildEventMarkerData('STALL');
+            const restartMarkerData = buildEventMarkerData('RESTART');
+
+            const variantDatasets = variantLadder.map((variant, index) => {
+                const label = `Variant ${variant.vx}`;
+                return {
+                    label,
+                    data: points.map(point => ({ x: point.x, y: variant.mbps })),
+                    borderColor: '#9ca3af',
+                    backgroundColor: 'rgba(156,163,175,0.12)',
+                    borderWidth: 1,
+                    pointRadius: 0,
+                    tension: 0,
+                    borderDash: [4, 4],
+                    hidden: isSeriesHidden(label)
+                };
+            });
+
+            const datasets = [
+                {
+                    label: 'Wire Sustained (18s)',
+                    data: wireSustainedData,
+                    borderColor: '#0891b2',
+                    backgroundColor: 'rgba(8,145,178,0.12)',
+                    borderWidth: 1.5,
+                    pointRadius: 0,
+                    tension: 0.2,
+                    borderDash: [6, 3],
+                    hidden: isSeriesHidden('Wire Sustained (18s)')
+                },
+                {
+                    label: 'Wire Active',
+                    data: wireActiveData,
+                    borderColor: '#0f766e',
+                    backgroundColor: 'rgba(15,118,110,0.12)',
+                    borderWidth: 1.5,
+                    pointRadius: 0,
+                    tension: 0.2,
+                    borderDash: [2, 4],
+                    hidden: isSeriesHidden('Wire Active')
+                },
+                {
+                    label: 'Wire Sustained (6s)',
+                    data: wireSustained6sData,
+                    borderColor: '#155e75',
+                    backgroundColor: 'rgba(21,94,117,0.12)',
+                    borderWidth: 1.5,
+                    pointRadius: 0,
+                    tension: 0.2,
+                    borderDash: [8, 3],
+                    hidden: isSeriesHidden('Wire Sustained (6s)')
+                },
+                {
+                    label: 'Wire Active (6s)',
+                    data: wireActive6sData,
+                    borderColor: '#115e59',
+                    backgroundColor: 'rgba(17,94,89,0.12)',
+                    borderWidth: 1.5,
+                    pointRadius: 0,
+                    tension: 0.2,
+                    borderDash: [3, 5],
+                    hidden: isSeriesHidden('Wire Active (6s)')
+                },
+                {
+                    label: 'Wire Sustained (1s)',
+                    data: wireSustained1sData,
+                    borderColor: '#0e7490',
+                    backgroundColor: 'rgba(14,116,144,0.12)',
+                    borderWidth: 1.5,
+                    pointRadius: 0,
+                    tension: 0.2,
+                    borderDash: [4, 4],
+                    hidden: isSeriesHidden('Wire Sustained (1s)')
+                },
+                {
+                    label: 'Wire Throughput',
+                    data: wireThroughputData,
+                    borderColor: '#0d9488',
+                    backgroundColor: 'rgba(13,148,136,0.12)',
+                    borderWidth: 1.5,
+                    pointRadius: 0,
+                    tension: 0.2,
+                    borderDash: [1, 3],
+                    hidden: isSeriesHidden('Wire Throughput')
+                },
+                {
+                    label: 'Player est.',
+                    data: estimateData,
+                    borderColor: '#6366f1',
+                    backgroundColor: 'rgba(99,102,241,0.12)',
+                    borderWidth: 1.5,
+                    pointRadius: 0,
+                    tension: 0.2,
+                    borderDash: [6, 4],
+                    hidden: isSeriesHidden('Player est.')
+                },
+                {
+                    label: 'Rendition',
+                    data: renditionData,
+                    borderColor: '#ef4444',
+                    backgroundColor: 'rgba(239,68,68,0.12)',
+                    borderWidth: 1.5,
+                    pointRadius: 0,
+                    tension: 0.2,
+                    borderDash: [3, 3],
+                    hidden: isSeriesHidden('Rendition')
+                },
+                {
+                    label: 'Server Rendition',
+                    data: serverRenditionData,
+                    borderColor: '#b45309',
+                    backgroundColor: 'rgba(180,83,9,0.12)',
+                    borderWidth: 1.5,
+                    pointRadius: 0,
+                    tension: 0.2,
+                    borderDash: [10, 4],
+                    hidden: isSeriesHidden('Server Rendition')
+                },
+                ...variantDatasets,
+                {
+                    label: 'Limit',
+                    data: targetData,
+                    borderColor: '#f59e0b',
+                    backgroundColor: 'rgba(245,158,11,0.12)',
+                    borderWidth: 1.5,
+                    pointRadius: 0,
+                    stepped: true,
+                    hidden: isSeriesHidden('Limit')
+                },
+                {
+                    label: 'STALL',
+                    data: stallMarkerData,
+                    borderColor: '#dc2626',
+                    backgroundColor: 'rgba(220,38,38,0.12)',
+                    borderWidth: 1.25,
+                    pointRadius: 0,
+                    tension: 0,
+                    hidden: isSeriesHidden('STALL')
+                },
+                {
+                    label: 'RESTART',
+                    data: restartMarkerData,
+                    borderColor: '#7c3aed',
+                    backgroundColor: 'rgba(124,58,237,0.12)',
+                    borderWidth: 1.25,
+                    pointRadius: 0,
+                    tension: 0,
+                    hidden: isSeriesHidden('RESTART')
+                }
+            ];
 
             let chart = bandwidthCharts.get(sessionId);
             if (chart && chart.canvas !== canvas) {
@@ -1449,104 +2107,7 @@
                 chart = new Chart(canvas, {
                     type: 'line',
                     data: {
-                        datasets: [
-                            {
-                                label: 'Wire Sustained (18s)',
-                                data: wireSustainedData,
-                                borderColor: '#0891b2',
-                                backgroundColor: 'rgba(8,145,178,0.12)',
-                                borderWidth: 1.5,
-                                pointRadius: 0,
-                                tension: 0.2,
-                                borderDash: [6, 3],
-                                hidden: isSeriesHidden('Wire Sustained (18s)')
-                            },
-                            {
-                                label: 'Wire Active',
-                                data: wireActiveData,
-                                borderColor: '#0f766e',
-                                backgroundColor: 'rgba(15,118,110,0.12)',
-                                borderWidth: 1.5,
-                                pointRadius: 0,
-                                tension: 0.2,
-                                borderDash: [2, 4],
-                                hidden: isSeriesHidden('Wire Active')
-                            },
-                            {
-                                label: 'Wire Sustained (6s)',
-                                data: wireSustained6sData,
-                                borderColor: '#155e75',
-                                backgroundColor: 'rgba(21,94,117,0.12)',
-                                borderWidth: 1.5,
-                                pointRadius: 0,
-                                tension: 0.2,
-                                borderDash: [8, 3],
-                                hidden: isSeriesHidden('Wire Sustained (6s)')
-                            },
-                            {
-                                label: 'Wire Active (6s)',
-                                data: wireActive6sData,
-                                borderColor: '#115e59',
-                                backgroundColor: 'rgba(17,94,89,0.12)',
-                                borderWidth: 1.5,
-                                pointRadius: 0,
-                                tension: 0.2,
-                                borderDash: [3, 5],
-                                hidden: isSeriesHidden('Wire Active (6s)')
-                            },
-                            {
-                                label: 'Wire Sustained (1s)',
-                                data: wireSustained1sData,
-                                borderColor: '#0e7490',
-                                backgroundColor: 'rgba(14,116,144,0.12)',
-                                borderWidth: 1.5,
-                                pointRadius: 0,
-                                tension: 0.2,
-                                borderDash: [4, 4],
-                                hidden: isSeriesHidden('Wire Sustained (1s)')
-                            },
-                            {
-                                label: 'Wire Throughput',
-                                data: wireThroughputData,
-                                borderColor: '#0d9488',
-                                backgroundColor: 'rgba(13,148,136,0.12)',
-                                borderWidth: 1.5,
-                                pointRadius: 0,
-                                tension: 0.2,
-                                borderDash: [1, 3],
-                                hidden: isSeriesHidden('Wire Throughput')
-                            },
-                            {
-                                label: 'Video Bitrate',
-                                data: videoBitrateData,
-                                borderColor: '#ef4444',
-                                backgroundColor: 'rgba(239,68,68,0.12)',
-                                borderWidth: 1.5,
-                                pointRadius: 0,
-                                tension: 0.2,
-                                hidden: isSeriesHidden('Video Bitrate')
-                            },
-                            {
-                                label: 'Network Bitrate',
-                                data: networkBitrateData,
-                                borderColor: '#14b8a6',
-                                backgroundColor: 'rgba(20,184,166,0.12)',
-                                borderWidth: 1.5,
-                                pointRadius: 0,
-                                tension: 0.2,
-                                hidden: isSeriesHidden('Network Bitrate')
-                            },
-                            {
-                                label: 'Limit',
-                                data: limitData,
-                                borderColor: '#f59e0b',
-                                backgroundColor: 'rgba(245,158,11,0.12)',
-                                borderWidth: 1.5,
-                                pointRadius: 0,
-                                stepped: true,
-                                hidden: isSeriesHidden('Limit')
-                            }
-                        ]
+                        datasets
                     },
                     options: {
                         // Let Chart.js size the drawing buffer to the CSS box (handles DPR)
@@ -1570,8 +2131,20 @@
                                     const isVisible = chartRef.isDatasetVisible(index);
                                     chartRef.setDatasetVisibility(index, !isVisible);
                                     state[label] = isVisible;
+                                    state[bandwidthSeriesKey(label)] = isVisible;
                                     bandwidthVisibility.set(sessionId, state);
                                     chartRef.update('none');
+                                }
+                            },
+                            tooltip: {
+                                callbacks: {
+                                    title: (items) => {
+                                        const first = Array.isArray(items) && items.length ? items[0] : null;
+                                        if (!first) return '';
+                                        const xValue = Number(first.parsed?.x);
+                                        const startMs = Number(chart?.$windowStartMs || windowStart);
+                                        return formatBitrateChartAbsoluteTick(startMs, xValue);
+                                    }
                                 }
                             }
                         },
@@ -1579,16 +2152,20 @@
                             x: {
                                 type: 'linear',
                                 min: 0,
-                                max: 300,
+                                max: 600,
                                 grid: { color: '#e5e7eb' },
                                 ticks: {
                                     color: '#6b7280',
                                     font: { family: 'Courier New, monospace', size: 10 },
+                                    stepSize: 60,
+                                    autoSkip: true,
                                     callback: (value) => {
-                                        if (value === 0) return '-5:00';
-                                        if (value === 150) return '-2:30';
-                                        if (value === 300) return 'now';
-                                        return '';
+                                        const numeric = Number(value);
+                                        if (!Number.isFinite(numeric)) return '';
+                                        const rounded = Math.round(numeric);
+                                        if (rounded % 60 !== 0) return '';
+                                        const startMs = Number(chart?.$windowStartMs || windowStart);
+                                        return formatBitrateChartAbsoluteTick(startMs, rounded);
                                     }
                                 }
                             },
@@ -1610,24 +2187,399 @@
                         }
                     }
                 });
+                chart.$windowStartMs = windowStart;
                 bandwidthCharts.set(sessionId, chart);
             } else {
-                chart.data.datasets[0].data = wireSustainedData;
-                chart.data.datasets[1].data = wireActiveData;
-                chart.data.datasets[2].data = wireSustained6sData;
-                chart.data.datasets[3].data = wireActive6sData;
-                chart.data.datasets[4].data = wireSustained1sData;
-                chart.data.datasets[5].data = wireThroughputData;
-                chart.data.datasets[6].data = videoBitrateData;
-                chart.data.datasets[7].data = networkBitrateData;
-                chart.data.datasets[8].data = limitData;
+                chart.data.datasets = datasets;
                 chart.data.datasets.forEach((dataset, idx) => {
                     const hidden = isSeriesHidden(dataset.label);
                     dataset.hidden = hidden;
                     chart.setDatasetVisibility(idx, !hidden);
                 });
+                chart.$windowStartMs = windowStart;
                 chart.options.scales.y.max = maxY;
                 chart.update('none');
+            }
+
+            const bufferCanvas = card.querySelector('canvas.buffer-depth-chart');
+            if (!bufferCanvas) return;
+            const bufferChartRangeLabel = card.querySelector('[data-field="buffer_depth_chart_range"]');
+            if (bufferChartRangeLabel) {
+                bufferChartRangeLabel.textContent = formatBitrateChartRange(windowStart, maxTs);
+            }
+            const bufferValues = bufferDepthData
+                .map((point) => Number(point.y))
+                .filter((value) => Number.isFinite(value) && value >= 0);
+            const maxBufferDepth = Math.min(60, Math.max(5, ...bufferValues, 0));
+            let bufferChart = bufferDepthCharts.get(sessionId);
+            if (bufferChart && bufferChart.canvas !== bufferCanvas) {
+                bufferChart.destroy();
+                bufferChart = null;
+                bufferDepthCharts.delete(sessionId);
+            }
+            if (!bufferChart) {
+                bufferChart = new Chart(bufferCanvas, {
+                    type: 'line',
+                    data: {
+                        datasets: [
+                            {
+                                label: 'Buffer Depth',
+                                data: bufferDepthData,
+                                borderColor: '#2563eb',
+                                backgroundColor: 'rgba(37,99,235,0.12)',
+                                borderWidth: 2,
+                                pointRadius: 0,
+                                tension: 0.2
+                            }
+                        ]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        animation: false,
+                        plugins: {
+                            legend: { display: false },
+                            tooltip: {
+                                callbacks: {
+                                    title: (items) => {
+                                        const first = Array.isArray(items) && items.length ? items[0] : null;
+                                        if (!first) return '';
+                                        const xValue = Number(first.parsed?.x);
+                                        const startMs = Number(bufferChart?.$windowStartMs || windowStart);
+                                        return formatBitrateChartAbsoluteTick(startMs, xValue);
+                                    }
+                                }
+                            }
+                        },
+                        scales: {
+                            x: {
+                                type: 'linear',
+                                min: 0,
+                                max: 600,
+                                grid: { color: '#e5e7eb' },
+                                ticks: {
+                                    color: '#6b7280',
+                                    font: { family: 'Courier New, monospace', size: 10 },
+                                    stepSize: 60,
+                                    autoSkip: true,
+                                    callback: (value) => {
+                                        const numeric = Number(value);
+                                        if (!Number.isFinite(numeric)) return '';
+                                        const rounded = Math.round(numeric);
+                                        if (rounded % 60 !== 0) return '';
+                                        const startMs = Number(bufferChart?.$windowStartMs || windowStart);
+                                        return formatBitrateChartAbsoluteTick(startMs, rounded);
+                                    }
+                                }
+                            },
+                            y: {
+                                min: 0,
+                                max: maxBufferDepth,
+                                grid: { color: '#e5e7eb' },
+                                ticks: {
+                                    color: '#6b7280',
+                                    font: { family: 'Courier New, monospace', size: 10 }
+                                },
+                                title: {
+                                    display: true,
+                                    text: 'Buffer Depth (s)',
+                                    color: '#6b7280',
+                                    font: { family: 'Courier New, monospace', size: 10 }
+                                }
+                            }
+                        }
+                    }
+                });
+                bufferChart.$windowStartMs = windowStart;
+                bufferDepthCharts.set(sessionId, bufferChart);
+            } else {
+                bufferChart.data.datasets[0].data = bufferDepthData;
+                bufferChart.$windowStartMs = windowStart;
+                bufferChart.options.scales.y.max = maxBufferDepth;
+                bufferChart.update('none');
+            }
+
+            const fpsCanvas = card.querySelector('canvas.video-fps-chart');
+            if (!fpsCanvas) return;
+            const fpsChartRangeLabel = card.querySelector('[data-field="video_fps_chart_range"]');
+            const fpsData = [];
+            const droppedFpsDataRaw = [];
+            let fpsAnchor = null;
+            let droppedAnchor = null;
+            const minFpsWindowSeconds = 0.75;
+            const maxReasonableFps = 120;
+            for (let idx = 0; idx < framesDisplayedData.length; idx += 1) {
+                const currentPoint = framesDisplayedData[idx];
+                const currentFrames = Number(currentPoint.y);
+                const currentX = Number(currentPoint.x);
+                if (!Number.isFinite(currentFrames) || !Number.isFinite(currentX)) {
+                    fpsData.push({ x: currentPoint.x, y: null });
+                    continue;
+                }
+                if (!fpsAnchor) {
+                    fpsAnchor = { x: currentX, frames: currentFrames };
+                    fpsData.push({ x: currentPoint.x, y: null });
+                    continue;
+                }
+                const deltaSeconds = currentX - fpsAnchor.x;
+                const deltaFrames = currentFrames - fpsAnchor.frames;
+                if (!Number.isFinite(deltaSeconds) || deltaSeconds <= 0 || deltaFrames < 0) {
+                    fpsAnchor = { x: currentX, frames: currentFrames };
+                    fpsData.push({ x: currentPoint.x, y: null });
+                    continue;
+                }
+                if (deltaSeconds < minFpsWindowSeconds) {
+                    fpsData.push({ x: currentPoint.x, y: null });
+                    continue;
+                }
+                const fps = deltaFrames / deltaSeconds;
+                if (!Number.isFinite(fps) || fps < 0 || fps > maxReasonableFps) {
+                    fpsAnchor = { x: currentX, frames: currentFrames };
+                    fpsData.push({ x: currentPoint.x, y: null });
+                    continue;
+                }
+                fpsData.push({ x: currentPoint.x, y: fps });
+                fpsAnchor = { x: currentX, frames: currentFrames };
+            }
+            for (let idx = 0; idx < framesDroppedData.length; idx += 1) {
+                const currentPoint = framesDroppedData[idx];
+                const currentDropped = Number(currentPoint.y);
+                const currentX = Number(currentPoint.x);
+                if (!Number.isFinite(currentDropped) || !Number.isFinite(currentX)) {
+                    droppedFpsDataRaw.push({ x: currentPoint.x, y: null });
+                    continue;
+                }
+                if (!droppedAnchor) {
+                    droppedAnchor = { x: currentX, frames: currentDropped };
+                    droppedFpsDataRaw.push({ x: currentPoint.x, y: null });
+                    continue;
+                }
+                const deltaSeconds = currentX - droppedAnchor.x;
+                const deltaDropped = currentDropped - droppedAnchor.frames;
+                if (!Number.isFinite(deltaSeconds) || deltaSeconds <= 0 || deltaDropped < 0) {
+                    droppedAnchor = { x: currentX, frames: currentDropped };
+                    droppedFpsDataRaw.push({ x: currentPoint.x, y: null });
+                    continue;
+                }
+                if (deltaSeconds < minFpsWindowSeconds) {
+                    droppedFpsDataRaw.push({ x: currentPoint.x, y: null });
+                    continue;
+                }
+                const droppedFps = deltaDropped / deltaSeconds;
+                if (!Number.isFinite(droppedFps) || droppedFps < 0 || droppedFps > maxReasonableFps) {
+                    droppedAnchor = { x: currentX, frames: currentDropped };
+                    droppedFpsDataRaw.push({ x: currentPoint.x, y: null });
+                    continue;
+                }
+                droppedFpsDataRaw.push({ x: currentPoint.x, y: droppedFps });
+                droppedAnchor = { x: currentX, frames: currentDropped };
+            }
+            const fpsValues = fpsData.map((point) => Number(point.y)).filter((value) => Number.isFinite(value) && value >= 0);
+            const droppedFpsValues = droppedFpsDataRaw.map((point) => Number(point.y)).filter((value) => Number.isFinite(value) && value >= 0);
+            const fpsSmoothedData = [];
+            let smooth = null;
+            const smoothingAlpha = 0.3;
+            for (const point of fpsData) {
+                const y = Number(point.y);
+                if (!Number.isFinite(y) || y < 0) {
+                    fpsSmoothedData.push({ x: point.x, y: null });
+                    continue;
+                }
+                if (smooth === null) {
+                    smooth = y;
+                } else {
+                    smooth = (smoothingAlpha * y) + ((1 - smoothingAlpha) * smooth);
+                }
+                fpsSmoothedData.push({ x: point.x, y: smooth });
+            }
+            const droppedFpsSmoothedData = [];
+            let droppedSmooth = null;
+            const droppedSmoothingAlpha = 0.35;
+            for (const point of droppedFpsDataRaw) {
+                const y = Number(point.y);
+                if (!Number.isFinite(y) || y < 0) {
+                    droppedFpsSmoothedData.push({ x: point.x, y: null });
+                    continue;
+                }
+                if (droppedSmooth === null) {
+                    droppedSmooth = y;
+                } else {
+                    droppedSmooth = (droppedSmoothingAlpha * y) + ((1 - droppedSmoothingAlpha) * droppedSmooth);
+                }
+                droppedFpsSmoothedData.push({ x: point.x, y: droppedSmooth });
+            }
+            const fpsSorted = [...fpsValues].sort((a, b) => a - b);
+            const baselineIdx = fpsSorted.length
+                ? Math.max(0, Math.min(fpsSorted.length - 1, Math.floor(fpsSorted.length * 0.75)))
+                : -1;
+            const baselineFps = baselineIdx >= 0 ? fpsSorted[baselineIdx] : 30;
+            const lowFpsThreshold = Math.max(8, baselineFps * 0.75);
+            const baselineData = points.map(point => ({ x: point.x, y: baselineFps }));
+            const lowThresholdData = points.map(point => ({ x: point.x, y: lowFpsThreshold }));
+            const lowFpsData = fpsSmoothedData.map(point => {
+                const y = Number(point.y);
+                return { x: point.x, y: (Number.isFinite(y) && y < lowFpsThreshold) ? y : null };
+            });
+            const maxFps = Math.min(120, Math.max(10, baselineFps * 1.2, ...fpsValues, 0));
+            const maxDroppedFps = Math.min(30, Math.max(2, ...droppedFpsValues, 0));
+            if (fpsChartRangeLabel) {
+                fpsChartRangeLabel.textContent = `${formatBitrateChartRange(windowStart, maxTs)} | baseline ${baselineFps.toFixed(1)} fps, low < ${lowFpsThreshold.toFixed(1)}, dropped max ${maxDroppedFps.toFixed(2)}/s`;
+            }
+            let fpsChart = videoFpsCharts.get(sessionId);
+            if (fpsChart && fpsChart.canvas !== fpsCanvas) {
+                fpsChart.destroy();
+                fpsChart = null;
+                videoFpsCharts.delete(sessionId);
+            }
+            if (!fpsChart) {
+                fpsChart = new Chart(fpsCanvas, {
+                    type: 'line',
+                    data: {
+                        datasets: [
+                            {
+                                label: 'FPS (smoothed)',
+                                data: fpsSmoothedData,
+                                borderColor: '#7e22ce',
+                                backgroundColor: 'rgba(126,34,206,0.10)',
+                                borderWidth: 2.2,
+                                pointRadius: 0,
+                                tension: 0.2
+                            },
+                            {
+                                label: 'Low FPS',
+                                data: lowFpsData,
+                                borderColor: '#dc2626',
+                                backgroundColor: 'rgba(220,38,38,0.22)',
+                                borderWidth: 2,
+                                pointRadius: 0,
+                                tension: 0.2,
+                                spanGaps: false
+                            },
+                            {
+                                label: 'FPS Baseline',
+                                data: baselineData,
+                                borderColor: '#475569',
+                                borderWidth: 1,
+                                pointRadius: 0,
+                                tension: 0,
+                                borderDash: [6, 4]
+                            },
+                            {
+                                label: 'Low Threshold',
+                                data: lowThresholdData,
+                                borderColor: '#b91c1c',
+                                borderWidth: 1,
+                                pointRadius: 0,
+                                tension: 0,
+                                borderDash: [3, 4]
+                            },
+                            {
+                                label: 'Dropped Frames/s',
+                                data: droppedFpsSmoothedData,
+                                yAxisID: 'yDrop',
+                                borderColor: '#ea580c',
+                                backgroundColor: 'rgba(234,88,12,0.14)',
+                                borderWidth: 1.8,
+                                pointRadius: 0,
+                                tension: 0.2,
+                                borderDash: [5, 3]
+                            }
+                        ]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        animation: false,
+                        plugins: {
+                            legend: {
+                                display: true,
+                                position: 'bottom',
+                                labels: {
+                                    color: '#6b7280',
+                                    font: { family: 'Courier New, monospace', size: 10 },
+                                    boxWidth: 14,
+                                    usePointStyle: true,
+                                }
+                            },
+                            tooltip: {
+                                callbacks: {
+                                    title: (items) => {
+                                        const first = Array.isArray(items) && items.length ? items[0] : null;
+                                        if (!first) return '';
+                                        const xValue = Number(first.parsed?.x);
+                                        const startMs = Number(fpsChart?.$windowStartMs || windowStart);
+                                        return formatBitrateChartAbsoluteTick(startMs, xValue);
+                                    }
+                                }
+                            }
+                        },
+                        scales: {
+                            x: {
+                                type: 'linear',
+                                min: 0,
+                                max: 600,
+                                grid: { color: '#e5e7eb' },
+                                ticks: {
+                                    color: '#6b7280',
+                                    font: { family: 'Courier New, monospace', size: 10 },
+                                    stepSize: 60,
+                                    autoSkip: true,
+                                    callback: (value) => {
+                                        const numeric = Number(value);
+                                        if (!Number.isFinite(numeric)) return '';
+                                        const rounded = Math.round(numeric);
+                                        if (rounded % 60 !== 0) return '';
+                                        const startMs = Number(fpsChart?.$windowStartMs || windowStart);
+                                        return formatBitrateChartAbsoluteTick(startMs, rounded);
+                                    }
+                                }
+                            },
+                            y: {
+                                min: 0,
+                                max: maxFps,
+                                grid: { color: '#e5e7eb' },
+                                ticks: {
+                                    color: '#6b7280',
+                                    font: { family: 'Courier New, monospace', size: 10 }
+                                },
+                                title: {
+                                    display: true,
+                                    text: 'Frames/s',
+                                    color: '#6b7280',
+                                    font: { family: 'Courier New, monospace', size: 10 }
+                                }
+                            },
+                            yDrop: {
+                                position: 'right',
+                                min: 0,
+                                max: maxDroppedFps,
+                                grid: { drawOnChartArea: false },
+                                ticks: {
+                                    color: '#9a3412',
+                                    font: { family: 'Courier New, monospace', size: 10 }
+                                },
+                                title: {
+                                    display: true,
+                                    text: 'Dropped/s',
+                                    color: '#9a3412',
+                                    font: { family: 'Courier New, monospace', size: 10 }
+                                }
+                            }
+                        }
+                    }
+                });
+                fpsChart.$windowStartMs = windowStart;
+                videoFpsCharts.set(sessionId, fpsChart);
+            } else {
+                fpsChart.data.datasets[0].data = fpsSmoothedData;
+                fpsChart.data.datasets[1].data = lowFpsData;
+                fpsChart.data.datasets[2].data = baselineData;
+                fpsChart.data.datasets[3].data = lowThresholdData;
+                fpsChart.data.datasets[4].data = droppedFpsSmoothedData;
+                fpsChart.$windowStartMs = windowStart;
+                fpsChart.options.scales.y.max = maxFps;
+                fpsChart.options.scales.yDrop.max = maxDroppedFps;
+                fpsChart.update('none');
             }
         }
 
@@ -1638,8 +2590,12 @@
         }
 
         function applyNetworkShapingForCard(card) {
-            const port = card.dataset.sessionPort;
-            if (!port) return Promise.resolve();
+            const sessionId = card.dataset.sessionId;
+            if (!sessionId) return Promise.resolve();
+            if (sessionId && isAbrcharRunLocked(sessionId)) {
+                console.warn('[NETSHAPE] Manual shaping apply blocked because ABR characterization is running.');
+                return Promise.resolve();
+            }
             const getValue = (field) => {
                 const input = card.querySelector(`input[data-field="${field}"]`);
                 return input ? Number(input.value) : 0;
@@ -1654,48 +2610,40 @@
                 && Array.isArray(pattern.steps)
                 && pattern.steps.length > 0;
             const patternSteps = usePattern ? (pattern.steps || []) : [];
-            const sessionId = card.dataset.sessionId;
-            if (sessionId) {
-                pendingShaping.set(sessionId, {
-                    timestamp: Date.now(),
-                    values: {
-                        nftables_bandwidth_mbps: payload.rate_mbps,
-                        nftables_delay_ms: payload.delay_ms,
-                        nftables_packet_loss: payload.loss_pct,
-                        nftables_pattern_enabled: usePattern,
-                        nftables_pattern_steps: patternSteps,
-                        nftables_pattern_segment_duration_seconds: pattern.segment_duration_seconds,
-                        nftables_pattern_default_segments: pattern.default_segments,
-                        nftables_pattern_default_step_seconds: pattern.default_step_seconds,
-                        nftables_pattern_template_mode: pattern.template_mode,
-                        nftables_pattern_margin_pct: pattern.template_margin_pct
-                    }
-                });
-                setTimeout(() => {
-                    const pending = pendingShaping.get(sessionId);
-                    if (pending && Date.now() - pending.timestamp > 4500) {
-                        pendingShaping.delete(sessionId);
-                    }
-                }, 5000);
-            }
-            return fetch(`/api/nftables/shape/${port}`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(payload)
-            }).then(() => fetch(`/api/nftables/pattern/${port}`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    steps: patternSteps,
-                    segment_duration_seconds: pattern.segment_duration_seconds,
-                    default_segments: pattern.default_segments,
-                    default_step_seconds: pattern.default_step_seconds,
-                    template_mode: pattern.template_mode,
-                    template_margin_pct: pattern.template_margin_pct,
-                    delay_ms: payload.delay_ms,
-                    loss_pct: payload.loss_pct
-                })
-            }));
+            pendingShaping.set(sessionId, {
+                timestamp: Date.now(),
+                values: {
+                    nftables_bandwidth_mbps: payload.rate_mbps,
+                    nftables_delay_ms: payload.delay_ms,
+                    nftables_packet_loss: payload.loss_pct,
+                    nftables_pattern_enabled: usePattern,
+                    nftables_pattern_steps: patternSteps,
+                    nftables_pattern_segment_duration_seconds: pattern.segment_duration_seconds,
+                    nftables_pattern_default_segments: pattern.default_segments,
+                    nftables_pattern_default_step_seconds: pattern.default_step_seconds,
+                    nftables_pattern_template_mode: pattern.template_mode,
+                    nftables_pattern_margin_pct: pattern.template_margin_pct
+                }
+            });
+            setTimeout(() => {
+                const pending = pendingShaping.get(sessionId);
+                if (pending && Date.now() - pending.timestamp > 4500) {
+                    pendingShaping.delete(sessionId);
+                }
+            }, 5000);
+            const fields = [
+                'nftables_bandwidth_mbps',
+                'nftables_delay_ms',
+                'nftables_packet_loss',
+                'nftables_pattern_enabled',
+                'nftables_pattern_steps',
+                'nftables_pattern_segment_duration_seconds',
+                'nftables_pattern_default_segments',
+                'nftables_pattern_default_step_seconds',
+                'nftables_pattern_template_mode',
+                'nftables_pattern_margin_pct'
+            ];
+            return sendSessionPatch(card, fields);
         }
 
         function fetchSessions() {
@@ -1720,11 +2668,43 @@
         }
 
         function applySessionsList(sessions) {
+            const incomingList = Array.isArray(sessions) ? sessions : [];
+            const incomingMaxVersion = incomingList.reduce((max, session) => {
+                const version = getSessionSnapshotVersion(session);
+                return version > max ? version : max;
+            }, 0);
+            if (
+                incomingMaxVersion > 0
+                && lastAppliedSnapshotVersion > 0
+                && incomingMaxVersion < lastAppliedSnapshotVersion
+            ) {
+                return;
+            }
+
             const next = new Map();
-            sessions.forEach(session => {
-                const key = String(session.session_id);
-                next.set(key, session);
+            incomingList.forEach((incomingSession) => {
+                const key = String(incomingSession?.session_id || '');
+                if (!key) return;
+                const existingSession = sessionsById.get(key);
+                if (!existingSession) {
+                    next.set(key, incomingSession);
+                    return;
+                }
+                const incomingVersion = getSessionSnapshotVersion(incomingSession);
+                const existingVersion = getSessionSnapshotVersion(existingSession);
+                if (incomingVersion === 0 && existingVersion > 0) {
+                    next.set(key, existingSession);
+                } else if (existingVersion === 0 || incomingVersion >= existingVersion) {
+                    next.set(key, incomingSession);
+                } else {
+                    next.set(key, existingSession);
+                }
             });
+
+            if (incomingMaxVersion > lastAppliedSnapshotVersion) {
+                lastAppliedSnapshotVersion = incomingMaxVersion;
+            }
+
             sessionsById.clear();
             next.forEach((value, key) => sessionsById.set(key, value));
             const validIds = new Set(next.keys());
@@ -2209,6 +3189,13 @@
             const card = button.closest('.session-card');
             if (!card) return;
             const sessionId = card.dataset.sessionId;
+            if (button.dataset.action === 'toggle-variants') {
+                const key = String(sessionId || '');
+                const variantsEnabled = bandwidthVariantsEnabledBySession.get(key) !== false;
+                bandwidthVariantsEnabledBySession.set(key, !variantsEnabled);
+                renderBandwidthChart(sessionId);
+                return;
+            }
             if (button.dataset.action === 'apply-pattern') {
                 scheduleShapingApply(card);
                 return;
