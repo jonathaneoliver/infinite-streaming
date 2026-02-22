@@ -812,6 +812,7 @@
         let lastStallDurationS = 0;
         let stallStartAt = null;
         let lastRenditionMbps = null;
+        let profileShiftCount = 0;
         let lastRateShiftAt = 0;
         let lastPlayerState = null;
         let playbackStartAt = null;
@@ -826,6 +827,7 @@
         let autoRecoveryZeroStartedAtMs = null;
         let autoRecoveryLastRestartAtMs = 0;
         let playerRestartCount = 0;
+        let playerLoopCount = 0;
         let autoRetryCount = 0;
         let autoRetryTimer = null;
         const pendingShaping = new Map();
@@ -841,6 +843,10 @@
         const bandwidthVariantsEnabledBySession = new Map();
         const bitrateAxisMaxBySession = new Map();
         const lastRecordedPlayerEventBySession = new Map();
+        const lastRecordedLoopCountBySession = new Map();
+        const lastRecordedServerLoopCountBySession = new Map();
+        const lastRecordedLoopEventStampBySession = new Map();
+        const lastRecordedServerLoopEventStampBySession = new Map();
         let lastSessionsList = [];
         let groupSessionsFetchInFlight = false;
         let groupSelectValue = '';
@@ -898,6 +904,58 @@
         let lastStepIndexLogged = null;
         let metricsHeartbeatTimer = null;
         let lastAppliedSnapshotVersion = 0;
+        var lastHandledRemoteRestartRequestId = '';
+        var remoteRestartInFlight = false;
+
+        function isTruthySessionFlag(value) {
+            if (value === true || value === 1) return true;
+            const text = String(value || '').trim().toLowerCase();
+            return text === 'true' || text === '1' || text === 'yes' || text === 'on';
+        }
+
+        function maybeHandleRemoteRestartRequest(session) {
+            if (!session || !currentSessionId) return;
+            const requestId = String(session.player_restart_request_id || '').trim();
+            const requested = isTruthySessionFlag(session.player_restart_requested);
+            if (!requested || !requestId) return;
+            if (remoteRestartInFlight) return;
+            if (requestId === lastHandledRemoteRestartRequestId) return;
+
+            remoteRestartInFlight = true;
+            lastHandledRemoteRestartRequestId = requestId;
+            const reasonRaw = String(session.player_restart_request_reason || '').trim();
+            const reason = reasonRaw || 'remote_command';
+            performPlaybackRestart(reason);
+
+            const handledAt = new Date().toISOString();
+            fetch(`/api/session/${currentSessionId}`, {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    set: {
+                        player_restart_requested: false,
+                        player_restart_request_state: 'completed',
+                        player_restart_request_handled_at: handledAt,
+                        player_restart_request_handled_by: `web:${currentPlayerId || 'unknown'}`,
+                        player_restart_request_error: '',
+                        player_restart_request_id: requestId
+                    },
+                    fields: [
+                        'player_restart_requested',
+                        'player_restart_request_state',
+                        'player_restart_request_handled_at',
+                        'player_restart_request_handled_by',
+                        'player_restart_request_error',
+                        'player_restart_request_id'
+                    ],
+                    base_revision: getSessionBaseRevision()
+                })
+            }).catch((err) => {
+                console.warn('Remote restart ack failed', err);
+            }).finally(() => {
+                remoteRestartInFlight = false;
+            });
+        }
 
         function getSessionSnapshotVersion(session) {
             const uiVersion = Number(session?.ui_state_version);
@@ -1194,6 +1252,61 @@
             videoPlayingTimeS = null;
             firstFrameReported = false;
             playingReported = false;
+            profileShiftCount = 0;
+            lastRenditionMbps = null;
+            playerLoopCount = 0;
+        }
+
+        function extractLoopCountFromManifestText(manifestText) {
+            const text = String(manifestText || '');
+            if (!text) return null;
+            const regex = /#EXT-X-DATERANGE:[^\n]*X-LOOP-COUNT\s*=\s*"?(\d+)"?/ig;
+            let match = null;
+            let loopCount = null;
+            while ((match = regex.exec(text)) !== null) {
+                const parsed = Number(match[1]);
+                if (Number.isFinite(parsed)) {
+                    loopCount = Math.max(0, Math.round(parsed));
+                }
+            }
+            return loopCount;
+        }
+
+        function applyDetectedPlayerLoopCount(nextCount, source = 'hls_daterange') {
+            const numeric = Number(nextCount);
+            if (!Number.isFinite(numeric) || numeric < 0) return;
+            const normalized = Math.max(0, Math.round(numeric));
+            const previous = Math.max(0, Math.round(Number(playerLoopCount || 0)));
+            const increment = Math.max(0, normalized - previous);
+            if (normalized === previous) return;
+            playerLoopCount = normalized;
+            console.log('[HLS LOOP MARKER]', {
+                source,
+                previous,
+                current: normalized,
+                increment
+            });
+            sendSessionMetrics('loop_marker', {
+                player_metrics_loop_count_player: normalized,
+                player_metrics_loop_count_increment: increment,
+                player_metrics_loop_source: source
+            });
+        }
+
+        async function detectLoopCountFromHlsLevel(data) {
+            const details = data && data.details ? data.details : null;
+            const mediaUrl = details && details.url ? details.url : null;
+            if (!mediaUrl) return;
+            try {
+                const response = await fetch(mediaUrl, { cache: 'no-store' });
+                if (!response.ok) return;
+                const manifestText = await response.text();
+                const loopCount = extractLoopCountFromManifestText(manifestText);
+                if (loopCount === null || loopCount === undefined) return;
+                applyDetectedPlayerLoopCount(loopCount, 'hls_daterange');
+            } catch (err) {
+                console.warn('HLS loop marker fetch failed', err);
+            }
         }
 
         function buildMetricsPayload(eventType, extra = {}) {
@@ -1244,6 +1357,9 @@
                 player_metrics_network_bitrate_mbps: toMetricNumber(playerEstimatedMbps),
                 player_auto_recovery_enabled: autoRecoveryEnabled,
                 player_restarts: Math.max(0, Math.round(playerRestartCount || 0)),
+                player_metrics_profile_shift_count: Math.max(0, Math.round(profileShiftCount || 0)),
+                player_metrics_loop_count_player: Math.max(0, Math.round(Number(playerLoopCount || 0))),
+                player_metrics_loop_count_increment: 0,
                 player_metrics_frames_displayed: toMetricNumber(displayedFrames),
                 player_metrics_total_video_frames: toMetricNumber(totalFrames),
                 player_metrics_dropped_frames: droppedFrames,
@@ -1857,9 +1973,11 @@
                     if (lastRenditionMbps !== null && lastRenditionMbps !== undefined) {
                         const prev = Number(lastRenditionMbps);
                         if (numeric !== prev) {
+                            profileShiftCount = Math.max(0, Number(profileShiftCount || 0)) + 1;
                             sendSessionMetrics('video_bitrate_change', {
                                 player_metrics_video_bitrate_from_mbps: Math.round(prev * 100) / 100,
-                                player_metrics_video_bitrate_to_mbps: Math.round(numeric * 100) / 100
+                                player_metrics_video_bitrate_to_mbps: Math.round(numeric * 100) / 100,
+                                player_metrics_profile_shift_count: Math.max(0, Math.round(profileShiftCount || 0))
                             });
                         }
                         const delta = numeric - prev;
@@ -2020,6 +2138,9 @@
                             log(`PLAY ERROR: ${err.message}`);
                             scheduleAutoRetry('hls play error');
                         });
+                    });
+                    hlsInstance.on(Hls.Events.LEVEL_LOADED, (_evt, data) => {
+                        detectLoopCountFromHlsLevel(data);
                     });
                     hlsInstance.loadSource(url);
                     hlsInstance.attachMedia(video);
@@ -3586,6 +3707,8 @@
             setText('[data-field="session_manifest_url"]', session.manifest_url || '—');
             setText('[data-field="session_master_manifest_url"]', session.master_manifest_url || '—');
             setText('[data-field="session_last_request_url"]', session.last_request_url || '—');
+            setText('[data-field="session_loop_count_server"]', formatMetricNumber(session.loop_count_server ?? 0));
+            setText('[data-field="session_loop_count_player"]', formatMetricNumber(session.player_metrics_loop_count_player ?? 0));
             setText('[data-field="session_measured_mbps"]', formatMetricNumber(session.measured_mbps, ' Mbps'));
             setText('[data-field="session_mbps_in"]', formatMetricNumber(session.mbps_in, ' Mbps'));
             setText('[data-field="session_mbps_out"]', formatMetricNumber(session.mbps_out, ' Mbps'));
@@ -3638,6 +3761,9 @@
             setText('[data-field="server_video_rendition_mbps"]', formatMetricNumber(session.server_video_rendition_mbps, ' Mbps'));
             setText('[data-field="player_metrics_video_quality_pct"]', formatMetricNumber(session.player_metrics_video_quality_pct, '%'));
             setText('[data-field="player_metrics_network_bitrate_mbps"]', formatMetricNumber(session.player_metrics_network_bitrate_mbps, ' Mbps'));
+            setText('[data-field="player_metrics_loop_count"]', formatMetricNumber(session.player_metrics_loop_count_player ?? 0));
+            setText('[data-field="player_metrics_loop_count_increment"]', formatMetricNumber(session.player_metrics_loop_count_increment ?? 0));
+            setText('[data-field="player_metrics_profile_shift_count"]', formatMetricNumber(session.player_metrics_profile_shift_count));
             setText('[data-field="player_metrics_frames_displayed"]', formatMetricNumber(session.player_metrics_frames_displayed));
             setText('[data-field="player_metrics_dropped_frames"]', formatMetricNumber(session.player_metrics_dropped_frames));
             setText('[data-field="player_metrics_stall_count"]', formatMetricNumber(session.player_metrics_stall_count));
@@ -3675,6 +3801,7 @@
             if (!eventType) return null;
             if (eventType.includes('stall')) return 'STALL';
             if (eventType.includes('restart')) return 'RESTART';
+            if (eventType.includes('loop')) return 'LOOP';
             return null;
         }
 
@@ -3807,6 +3934,42 @@
             }
             if (!key) return;
 
+            const numericLoopCount = Number(session.player_metrics_loop_count_player);
+            if (Number.isFinite(numericLoopCount) && numericLoopCount >= 0) {
+                const loopCount = Math.max(0, Math.round(numericLoopCount));
+                const prevLoopCount = lastRecordedLoopCountBySession.get(String(key));
+                if (Number.isFinite(prevLoopCount) && loopCount > prevLoopCount) {
+                    const stamp = `${String(key)}|player|${loopCount}`;
+                    if (lastRecordedLoopEventStampBySession.get(String(key)) !== stamp) {
+                        const eventSeries = bandwidthEventHistory.get(key) || [];
+                        const loopEventAtMs = getBandwidthChartEventTimestampMs(session, now);
+                        eventSeries.push({ ts: loopEventAtMs, type: 'LOOP_PLAYER' });
+                        const eventCutoff = now - windowMs;
+                        bandwidthEventHistory.set(key, eventSeries.filter((event) => Number(event.ts) >= eventCutoff));
+                        lastRecordedLoopEventStampBySession.set(String(key), stamp);
+                    }
+                }
+                lastRecordedLoopCountBySession.set(String(key), loopCount);
+            }
+
+            const numericServerLoopCount = Number(session.loop_count_server);
+            if (Number.isFinite(numericServerLoopCount) && numericServerLoopCount >= 0) {
+                const serverLoopCount = Math.max(0, Math.round(numericServerLoopCount));
+                const prevServerLoopCount = lastRecordedServerLoopCountBySession.get(String(key));
+                if (Number.isFinite(prevServerLoopCount) && serverLoopCount > prevServerLoopCount) {
+                    const stamp = `${String(key)}|server|${serverLoopCount}`;
+                    if (lastRecordedServerLoopEventStampBySession.get(String(key)) !== stamp) {
+                        const eventSeries = bandwidthEventHistory.get(key) || [];
+                        const loopEventAtMs = getBandwidthChartEventTimestampMs(session, now);
+                        eventSeries.push({ ts: loopEventAtMs, type: 'LOOP_SERVER' });
+                        const eventCutoff = now - windowMs;
+                        bandwidthEventHistory.set(key, eventSeries.filter((event) => Number(event.ts) >= eventCutoff));
+                        lastRecordedServerLoopEventStampBySession.set(String(key), stamp);
+                    }
+                }
+                lastRecordedServerLoopCountBySession.set(String(key), serverLoopCount);
+            }
+
             const eventType = parseBandwidthChartEventType(session.player_metrics_last_event || session.player_metrics_trigger_type);
             if (eventType) {
                 const eventAtMs = getBandwidthChartEventTimestampMs(session, now);
@@ -3929,7 +4092,9 @@
                 'Server Rendition',
                 'Limit',
                 'STALL',
-                'RESTART'
+                'RESTART',
+                'LOOP PLAYER',
+                'LOOP SERVER'
             ]);
             const isSeriesHidden = (label) => {
                 const key = bandwidthSeriesKey(label);
@@ -3980,6 +4145,8 @@
             };
             const stallMarkerData = buildEventMarkerData('STALL');
             const restartMarkerData = buildEventMarkerData('RESTART');
+            const loopPlayerMarkerData = buildEventMarkerData('LOOP_PLAYER');
+            const loopServerMarkerData = buildEventMarkerData('LOOP_SERVER');
             const variantDatasets = variantLadder.map((variant, index) => {
                 const label = `Variant ${variant.vx}`;
                 return {
@@ -4124,6 +4291,26 @@
                     pointRadius: 0,
                     tension: 0,
                     hidden: isSeriesHidden('RESTART')
+                },
+                {
+                    label: 'LOOP PLAYER',
+                    data: loopPlayerMarkerData,
+                    borderColor: '#16a34a',
+                    backgroundColor: 'rgba(22,163,74,0.12)',
+                    borderWidth: 1.25,
+                    pointRadius: 0,
+                    tension: 0,
+                    hidden: isSeriesHidden('LOOP PLAYER')
+                },
+                {
+                    label: 'LOOP SERVER',
+                    data: loopServerMarkerData,
+                    borderColor: '#0ea5e9',
+                    backgroundColor: 'rgba(14,165,233,0.12)',
+                    borderWidth: 1.25,
+                    pointRadius: 0,
+                    tension: 0,
+                    hidden: isSeriesHidden('LOOP SERVER')
                 }
             ];
             let chart = bandwidthCharts.get(sessionId);
@@ -4344,77 +4531,52 @@
             }
             const fpsData = [];
             const droppedFpsDataRaw = [];
-            let fpsAnchor = null;
-            let droppedAnchor = null;
-            const minFpsWindowSeconds = 0.75;
+            const fpsWindowSeconds = 1.0;
             const maxReasonableFps = 120;
-            for (let idx = 0; idx < framesDisplayedData.length; idx += 1) {
-                const currentPoint = framesDisplayedData[idx];
-                const currentFrames = Number(currentPoint.y);
-                const currentX = Number(currentPoint.x);
-                if (!Number.isFinite(currentFrames) || !Number.isFinite(currentX)) {
-                    fpsData.push({ x: currentPoint.x, y: null });
-                    continue;
+            const buildRateSeries = (counterSeries) => {
+                const out = [];
+                for (let idx = 0; idx < counterSeries.length; idx += 1) {
+                    const currentPoint = counterSeries[idx];
+                    const currentCount = Number(currentPoint.y);
+                    const currentX = Number(currentPoint.x);
+                    if (!Number.isFinite(currentCount) || !Number.isFinite(currentX)) {
+                        out.push({ x: currentPoint.x, y: null });
+                        continue;
+                    }
+                    const targetX = currentX - fpsWindowSeconds;
+                    let anchorPoint = null;
+                    for (let j = idx - 1; j >= 0; j -= 1) {
+                        const candidateX = Number(counterSeries[j]?.x);
+                        if (!Number.isFinite(candidateX)) continue;
+                        if (candidateX <= targetX) {
+                            anchorPoint = counterSeries[j];
+                            break;
+                        }
+                    }
+                    if (!anchorPoint) {
+                        out.push({ x: currentPoint.x, y: null });
+                        continue;
+                    }
+                    const anchorCount = Number(anchorPoint.y);
+                    const anchorX = Number(anchorPoint.x);
+                    const deltaSeconds = currentX - anchorX;
+                    const deltaCount = currentCount - anchorCount;
+                    if (!Number.isFinite(anchorCount) || !Number.isFinite(anchorX) || deltaSeconds <= 0 || deltaCount < 0) {
+                        out.push({ x: currentPoint.x, y: null });
+                        continue;
+                    }
+                    const rate = deltaCount / deltaSeconds;
+                    if (!Number.isFinite(rate) || rate < 0 || rate > maxReasonableFps) {
+                        out.push({ x: currentPoint.x, y: null });
+                        continue;
+                    }
+                    out.push({ x: currentPoint.x, y: rate });
                 }
-                if (!fpsAnchor) {
-                    fpsAnchor = { x: currentX, frames: currentFrames };
-                    fpsData.push({ x: currentPoint.x, y: null });
-                    continue;
-                }
-                const deltaSeconds = currentX - fpsAnchor.x;
-                const deltaFrames = currentFrames - fpsAnchor.frames;
-                if (!Number.isFinite(deltaSeconds) || deltaSeconds <= 0 || deltaFrames < 0) {
-                    fpsAnchor = { x: currentX, frames: currentFrames };
-                    fpsData.push({ x: currentPoint.x, y: null });
-                    continue;
-                }
-                if (deltaSeconds < minFpsWindowSeconds) {
-                    fpsData.push({ x: currentPoint.x, y: null });
-                    continue;
-                }
-                const fps = deltaFrames / deltaSeconds;
-                if (!Number.isFinite(fps) || fps < 0 || fps > maxReasonableFps) {
-                    fpsAnchor = { x: currentX, frames: currentFrames };
-                    fpsData.push({ x: currentPoint.x, y: null });
-                    continue;
-                }
-                fpsData.push({ x: currentPoint.x, y: fps });
-                fpsAnchor = { x: currentX, frames: currentFrames };
-            }
+                return out;
+            };
 
-            for (let idx = 0; idx < framesDroppedData.length; idx += 1) {
-                const currentPoint = framesDroppedData[idx];
-                const currentDropped = Number(currentPoint.y);
-                const currentX = Number(currentPoint.x);
-                if (!Number.isFinite(currentDropped) || !Number.isFinite(currentX)) {
-                    droppedFpsDataRaw.push({ x: currentPoint.x, y: null });
-                    continue;
-                }
-                if (!droppedAnchor) {
-                    droppedAnchor = { x: currentX, frames: currentDropped };
-                    droppedFpsDataRaw.push({ x: currentPoint.x, y: null });
-                    continue;
-                }
-                const deltaSeconds = currentX - droppedAnchor.x;
-                const deltaDropped = currentDropped - droppedAnchor.frames;
-                if (!Number.isFinite(deltaSeconds) || deltaSeconds <= 0 || deltaDropped < 0) {
-                    droppedAnchor = { x: currentX, frames: currentDropped };
-                    droppedFpsDataRaw.push({ x: currentPoint.x, y: null });
-                    continue;
-                }
-                if (deltaSeconds < minFpsWindowSeconds) {
-                    droppedFpsDataRaw.push({ x: currentPoint.x, y: null });
-                    continue;
-                }
-                const droppedFps = deltaDropped / deltaSeconds;
-                if (!Number.isFinite(droppedFps) || droppedFps < 0 || droppedFps > maxReasonableFps) {
-                    droppedAnchor = { x: currentX, frames: currentDropped };
-                    droppedFpsDataRaw.push({ x: currentPoint.x, y: null });
-                    continue;
-                }
-                droppedFpsDataRaw.push({ x: currentPoint.x, y: droppedFps });
-                droppedAnchor = { x: currentX, frames: currentDropped };
-            }
+            fpsData.push(...buildRateSeries(framesDisplayedData));
+            droppedFpsDataRaw.push(...buildRateSeries(framesDroppedData));
 
             const fpsValues = fpsData
                 .map((point) => Number(point.y))
@@ -4658,6 +4820,7 @@
             if (Number.isFinite(serverRestarts) && serverRestarts >= 0) {
                 playerRestartCount = Math.max(playerRestartCount, Math.round(serverRestarts));
             }
+            maybeHandleRemoteRestartRequest(serverSession);
             // If server session metadata explicitly indicates 4K, persist that immediately
             try {
                 if (serverSession) {

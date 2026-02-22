@@ -73,7 +73,15 @@ def pytest_addoption(parser):
     parser.addoption(
         "--abrchar-test-mode",
         default="smooth",
-        choices=["smooth", "steps"],
+        choices=[
+            "smooth",
+            "steps",
+            "transient-shock",
+            "startup-caps",
+            "downshift-severity",
+            "hysteresis-gap",
+            "emergency-downshift",
+        ],
         help="Characterization schedule mode",
     )
     parser.addoption(
@@ -91,6 +99,12 @@ def pytest_addoption(parser):
         help="How many times to repeat the characterization step schedule",
     )
     parser.addoption("--abrchar-run-name", default="", help="Optional user-friendly name for this characterization run")
+    parser.addoption(
+        "--abrchar-plot-logs",
+        action="store_true",
+        default=False,
+        help="Emit ABRCHAR_PLOT structured telemetry lines for offline charting (default: disabled)",
+    )
     parser.addoption(
         "--abrchar-open-browser",
         action="store_true",
@@ -159,6 +173,7 @@ def config(request):
         'abrchar_max_steps': request.config.getoption("--abrchar-max-steps"),
         'abrchar_repeat_count': request.config.getoption("--abrchar-repeat-count"),
         'abrchar_run_name': request.config.getoption("--abrchar-run-name"),
+        'abrchar_plot_logs': request.config.getoption("--abrchar-plot-logs"),
         'abrchar_open_browser': request.config.getoption("abrchar_open_browser"),
         'abrchar_browser_wait': request.config.getoption("--abrchar-browser-wait"),
         'abrchar_session_id': request.config.getoption("--abrchar-session-id"),
@@ -367,6 +382,7 @@ def session_id(api_base, hls_base, stream_info, player_id, config):
 
     attach_session_id = str(getattr(config, "abrchar_session_id", "") or "").strip()
     attach_player_id = str(getattr(config, "abrchar_player_id", "") or "").strip()
+    explicit_attach_requested = bool(attach_session_id or attach_player_id)
     attach_timeout = max(5.0, float(getattr(config, "abrchar_attach_timeout", 60.0) or 60.0))
     launch_ios_sim = bool(getattr(config, "abrchar_launch_ios_simulator", False))
     ios_bundle_id = "com.jeoliver.InfiniteStreamPlayer"
@@ -404,7 +420,7 @@ def session_id(api_base, hls_base, stream_info, player_id, config):
                 print(f"Attached to existing session_id={attach_session_id}", flush=True)
             return str(snap.get("session_id"))
         if config.verbose:
-            print(f"session_id={attach_session_id} not found; trying fallback flow", flush=True)
+            print(f"session_id={attach_session_id} not found", flush=True)
 
     if attach_player_id:
         if config.verbose:
@@ -418,7 +434,7 @@ def session_id(api_base, hls_base, stream_info, player_id, config):
                 print(f"Attached to existing player_id={attach_player_id}", flush=True)
             return session["session_id"]
         if config.verbose:
-            print(f"player_id={attach_player_id} not found; trying fallback flow", flush=True)
+            print(f"player_id={attach_player_id} not found", flush=True)
 
     if launch_ios_sim:
         launched = try_launch_ios_simulator()
@@ -438,6 +454,12 @@ def session_id(api_base, hls_base, stream_info, player_id, config):
                 print("No session found after simulator launch; continuing with browser fallback", flush=True)
         elif config.verbose:
             print("Simulator launch not successful; continuing with browser fallback", flush=True)
+
+    if explicit_attach_requested:
+        pytest.exit(
+            "Attach target was not found (session/player). Refusing browser fallback to avoid creating extra playback sessions. "
+            "Verify --abrchar-session-id/--abrchar-player-id or run without attach flags."
+        )
 
     # Warm up session by opening dashboard playback page (matches real UI flow).
     def force_player_id(input_url):

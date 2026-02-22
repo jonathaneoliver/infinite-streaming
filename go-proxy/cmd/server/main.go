@@ -37,6 +37,7 @@ import (
 var indexHTML string
 
 var versionString = "unknown"
+var segmentSequenceDigitsRegex = regexp.MustCompile(`\d+`)
 
 type SessionData map[string]interface{}
 
@@ -137,12 +138,19 @@ type App struct {
 	faultLoops               map[int]context.CancelFunc
 	networkLogsMu            sync.RWMutex
 	networkLogs              map[string]*NetworkLogRingBuffer // sessionId -> ring buffer
+	loopStateMu              sync.Mutex
+	loopStateBySession       map[string]ServerLoopState
 	sessionsHub              *SessionEventHub
 	sessionsBroadcastMu      sync.Mutex
 	sessionsBroadcastPending bool
 	sessionsBroadcastLatest  []SessionData
 	sessionsBroadcastSeq     uint64
 	uiStateVersionSeq        uint64
+}
+
+type ServerLoopState struct {
+	LastSegmentSeq int
+	MaxSegmentSeq  int
 }
 
 type SessionEventHub struct {
@@ -900,12 +908,13 @@ func main() {
 				ResponseHeaderTimeout: 6 * time.Second,
 			},
 		},
-		shapeLoops:  map[int]context.CancelFunc{},
-		shapeStates: map[int]NftShapePattern{},
-		shapeApply:  map[int]ShapeApplyState{},
-		faultLoops:  map[int]context.CancelFunc{},
-		sessionsHub: NewSessionEventHub(),
-		networkLogs: map[string]*NetworkLogRingBuffer{},
+		shapeLoops:         map[int]context.CancelFunc{},
+		shapeStates:        map[int]NftShapePattern{},
+		shapeApply:         map[int]ShapeApplyState{},
+		faultLoops:         map[int]context.CancelFunc{},
+		sessionsHub:        NewSessionEventHub(),
+		networkLogs:        map[string]*NetworkLogRingBuffer{},
+		loopStateBySession: map[string]ServerLoopState{},
 	}
 
 	go app.trackPortThroughput()
@@ -1193,6 +1202,27 @@ func (a *App) applySessionSettingsUpdate(id string, payload map[string]interface
 	for key, value := range payload {
 		target[key] = value
 	}
+	if _, ok := payload["player_metrics_loop_count_player"]; ok {
+		log.Printf(
+			"LOOP_COUNTER_PATCH session_id=%s source=%s event=%s player_loop_count=%d loop_increment=%d server_loop_count=%d",
+			id,
+			getString(target, "player_metrics_source"),
+			getString(target, "player_metrics_last_event"),
+			getInt(target, "player_metrics_loop_count_player"),
+			getInt(target, "player_metrics_loop_count_increment"),
+			getInt(target, "loop_count_server"),
+		)
+	} else if _, ok := payload["player_metrics_loop_count_increment"]; ok {
+		log.Printf(
+			"LOOP_COUNTER_PATCH session_id=%s source=%s event=%s player_loop_count=%d loop_increment=%d server_loop_count=%d",
+			id,
+			getString(target, "player_metrics_source"),
+			getString(target, "player_metrics_last_event"),
+			getInt(target, "player_metrics_loop_count_player"),
+			getInt(target, "player_metrics_loop_count_increment"),
+			getInt(target, "loop_count_server"),
+		)
+	}
 	applyControlRevision(target, controlRevision)
 	shapeCommandSource := "session_patch"
 	if shapeRateUpdated && getBool(target, "abrchar_run_lock") {
@@ -1445,6 +1475,7 @@ func (a *App) handleSession(w http.ResponseWriter, r *http.Request) {
 				filtered = append(filtered, session)
 				continue
 			}
+			a.removeServerLoopState(id)
 			a.recordSessionEnd(session, "deleted")
 			if port, err := strconv.Atoi(getString(session, "x_forwarded_port")); err == nil {
 				removedPorts[port] = struct{}{}
@@ -1582,6 +1613,7 @@ func (a *App) handleClearSessions(w http.ResponseWriter, r *http.Request) {
 	}
 	a.shapeMu.Unlock()
 	for _, session := range sessions {
+		a.removeServerLoopState(getString(session, "session_id"))
 		a.recordSessionEnd(session, "cleared")
 		portStr := getString(session, "x_forwarded_port")
 		if portStr == "" {
@@ -3233,7 +3265,9 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 			"fault_count_request_body_delayed":         0,
 			"x_forwarded_port":                         assignedInternalPort,
 			"x_forwarded_port_external":                assignedExternalPort,
+			"loop_count_server":                        0,
 		}
+		a.resetServerLoopState(fmt.Sprintf("%d", allocated))
 		sessionList = append(sessionList, sessionData)
 		a.saveSessionList(sessionList)
 		manifestURL := "/" + escapedPath
@@ -3344,6 +3378,9 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 		sessionData["manifest_variants"] = playlistInfo
 	}
 	inferServerVideoRendition(sessionData, filename, isManifest, isSegment)
+	if isSegment {
+		a.observeServerSegmentLoop(sessionData, filename)
+	}
 
 	handler := NewRequestHandler(isSegment, isManifest, isMasterManifest, sessionData)
 	failureType := handler.HandleRequest(filename)
@@ -4740,6 +4777,14 @@ func (a *App) normalizeSessionsForResponse(sessions []SessionData) []SessionData
 		}
 		setDefault("ui_state_version", float64(0))
 		setDefault("ui_state_revision", "")
+		setDefault("player_restart_requested", false)
+		setDefault("player_restart_request_id", "")
+		setDefault("player_restart_request_reason", "")
+		setDefault("player_restart_request_requested_at", "")
+		setDefault("player_restart_request_state", "idle")
+		setDefault("player_restart_request_handled_at", "")
+		setDefault("player_restart_request_handled_by", "")
+		setDefault("player_restart_request_error", "")
 		if getString(session, "transport_failure_type") == "" {
 			session["transport_failure_type"] = "none"
 		}
@@ -4879,6 +4924,10 @@ func (a *App) normalizeSessionsForResponse(sessions []SessionData) []SessionData
 		setDefault("nftables_pattern_default_step_seconds", 0)
 		setDefault("nftables_pattern_template_mode", "sliders")
 		setDefault("nftables_pattern_margin_pct", 0)
+		setDefault("player_metrics_profile_shift_count", 0)
+		setDefault("loop_count_server", 0)
+		setDefault("player_metrics_loop_count_player", 0)
+		setDefault("player_metrics_loop_count_increment", 0)
 		bestMbps := bestVariantMbps(session)
 		videoMbps := getFloat(session, "player_metrics_video_bitrate_mbps")
 		if bestMbps > 0 && videoMbps > 0 {
@@ -5287,6 +5336,105 @@ func allocateSessionNumber(sessions []SessionData, max int) int {
 		}
 	}
 	return 1
+}
+
+func extractSegmentSequence(path string) (int, bool) {
+	trimmed := strings.TrimSpace(path)
+	if trimmed == "" {
+		return 0, false
+	}
+	if idx := strings.Index(trimmed, "?"); idx >= 0 {
+		trimmed = trimmed[:idx]
+	}
+	if slash := strings.LastIndex(trimmed, "/"); slash >= 0 {
+		trimmed = trimmed[slash+1:]
+	}
+	if trimmed == "" {
+		return 0, false
+	}
+	if dot := strings.LastIndex(trimmed, "."); dot > 0 {
+		trimmed = trimmed[:dot]
+	}
+	if trimmed == "" {
+		return 0, false
+	}
+	tokens := segmentSequenceDigitsRegex.FindAllString(trimmed, -1)
+	if len(tokens) == 0 {
+		return 0, false
+	}
+	seq, err := strconv.Atoi(tokens[len(tokens)-1])
+	if err != nil || seq < 0 {
+		return 0, false
+	}
+	return seq, true
+}
+
+func (a *App) resetServerLoopState(sessionID string) {
+	if strings.TrimSpace(sessionID) == "" {
+		return
+	}
+	a.loopStateMu.Lock()
+	a.loopStateBySession[sessionID] = ServerLoopState{}
+	a.loopStateMu.Unlock()
+}
+
+func (a *App) removeServerLoopState(sessionID string) {
+	if strings.TrimSpace(sessionID) == "" {
+		return
+	}
+	a.loopStateMu.Lock()
+	delete(a.loopStateBySession, sessionID)
+	a.loopStateMu.Unlock()
+}
+
+func (a *App) observeServerSegmentLoop(session SessionData, requestPath string) {
+	if session == nil {
+		return
+	}
+	pathLower := strings.ToLower(strings.TrimSpace(requestPath))
+	if strings.Contains(pathLower, "/audio/") {
+		return
+	}
+	sessionID := getString(session, "session_id")
+	if sessionID == "" {
+		return
+	}
+	seq, ok := extractSegmentSequence(requestPath)
+	if !ok {
+		return
+	}
+
+	a.loopStateMu.Lock()
+	state := a.loopStateBySession[sessionID]
+	prevLast := state.LastSegmentSeq
+	prevMax := state.MaxSegmentSeq
+	loopDetected := state.MaxSegmentSeq >= 5 && state.LastSegmentSeq > 0 && seq+5 < state.LastSegmentSeq
+	if seq > state.MaxSegmentSeq {
+		state.MaxSegmentSeq = seq
+	}
+	state.LastSegmentSeq = seq
+	a.loopStateBySession[sessionID] = state
+	a.loopStateMu.Unlock()
+
+	log.Printf(
+		"LOOP_COUNTER_SERVER_OBS session_id=%s seq=%d prev_last=%d prev_max=%d new_last=%d new_max=%d detected=%t loop_count_server=%d path=%s",
+		sessionID,
+		seq,
+		prevLast,
+		prevMax,
+		state.LastSegmentSeq,
+		state.MaxSegmentSeq,
+		loopDetected,
+		getInt(session, "loop_count_server"),
+		requestPath,
+	)
+
+	if loopDetected {
+		count := getInt(session, "loop_count_server") + 1
+		session["loop_count_server"] = count
+		session["loop_count_server_last_at"] = nowISO()
+		log.Printf("LOOP_SERVER session_id=%s loop_count_server=%d segment_seq=%d", sessionID, count, seq)
+	}
 }
 
 func findSessionByPlayerID(sessions []SessionData, ids ...string) SessionData {

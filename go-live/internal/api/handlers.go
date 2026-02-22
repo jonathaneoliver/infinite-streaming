@@ -64,8 +64,9 @@ var (
 )
 
 var (
-	hlsWorkerMu sync.Mutex
-	hlsWorkers  = make(map[string]*hlsWorker)
+	hlsWorkerMu           sync.Mutex
+	hlsWorkers            = make(map[string]*hlsWorker)
+	hlsLoopEpochByContent = make(map[string]time.Time)
 )
 
 type hlsWorker struct {
@@ -76,6 +77,7 @@ type hlsWorker struct {
 	mu         sync.Mutex
 	mpdRelPath string
 	mpdData    *dash.MPDData
+	startedAt  time.Time
 }
 
 func getEnv(key, fallback string) string {
@@ -286,11 +288,17 @@ func ensureHLSWorker(h *Handler, content, inputPath, prefix string) *hlsWorker {
 	if worker == nil || !h.Manager.IsRunning(processID) {
 		ctx, cancel := context.WithCancel(context.Background())
 		h.Manager.Spawn(processID, inputPath, goLiveDir, cancel)
+		loopEpoch := hlsLoopEpochByContent[content]
+		if loopEpoch.IsZero() {
+			loopEpoch = time.Now().UTC()
+			hlsLoopEpochByContent[content] = loopEpoch
+		}
 		worker = &hlsWorker{
 			content:   content,
 			inputPath: inputPath,
 			prefix:    prefix,
 			cancel:    cancel,
+			startedAt: loopEpoch,
 		}
 		hlsWorkers[content] = worker
 		hlsWorkerMu.Unlock()
@@ -398,13 +406,35 @@ func runUnifiedHLSWorker(ctx context.Context, worker *hlsWorker) {
 		}
 		variantURIs = append(variantURIs, variant.URI)
 	}
+	llSegmentCount := 1
+	if len(variantURIs) > 0 {
+		if canonicalInfo, _, err := loader.LoadPlaylistInfoWithByteranges(folder, variantURIs[0]); err == nil && canonicalInfo != nil && canonicalInfo.MediaPlaylist != nil {
+			count := 0
+			for _, seg := range canonicalInfo.MediaPlaylist.Segments {
+				if seg != nil {
+					count++
+				}
+			}
+			if count > 0 {
+				llSegmentCount = count
+			}
+		}
+	}
+	llSegmentDuration := minDuration / float64(llSegmentCount)
+	if math.IsNaN(llSegmentDuration) || math.IsInf(llSegmentDuration, 0) || llSegmentDuration <= 0 {
+		llSegmentDuration = 1
+	}
 
 	llMasterWritten := false
 	master2sWritten := false
 	master6sWritten := false
 	lastLLUpdate := time.Time{}
+	lastSegLL := int64(-1)
 	lastSeg2 := int64(-1)
 	lastSeg6 := int64(-1)
+	loopCountLL := 0
+	loopCount2 := 0
+	loopCount6 := 0
 	lastDashSeg2 := int64(-1)
 	lastDashSeg6 := int64(-1)
 	var recentLLTicks []struct {
@@ -442,6 +472,19 @@ func runUnifiedHLSWorker(ctx context.Context, worker *hlsWorker) {
 		mpdRelPath := worker.mpdRelPath
 		mpdData := worker.mpdData
 		worker.mu.Unlock()
+
+		currentSegLL := int64(math.Floor(timeOffset / llSegmentDuration))
+		if currentSegLL < 0 {
+			currentSegLL = 0
+		}
+		if currentSegLL >= int64(llSegmentCount) {
+			currentSegLL = int64(llSegmentCount - 1)
+		}
+		if lastSegLL >= 0 && currentSegLL < lastSegLL {
+			loopCountLL++
+			logf("[GO-LIVE:LOOP][LL] wrap_detected content=%s loop_count=%d prev_seg=%d seg=%d\n", content, loopCountLL, lastSegLL, currentSegLL)
+		}
+		lastSegLL = currentSegLL
 
 		if !llMasterWritten {
 			if err := writeMasterPlaylist(inputPath, filepath.Join(goLiveDir, content, "master.m3u8")); err != nil {
@@ -498,6 +541,7 @@ func runUnifiedHLSWorker(ctx context.Context, worker *hlsWorker) {
 					variantInfo.RelPath,
 					variantInfo.SegmentMap,
 					timeNow,
+					loopCountLL,
 					minDuration,
 					maxDuration,
 				)
@@ -525,6 +569,7 @@ func runUnifiedHLSWorker(ctx context.Context, worker *hlsWorker) {
 					variantInfo.RelPath,
 					variantInfo.SegmentMap,
 					timeNow,
+					loopCountLL,
 					minDuration,
 					maxDuration,
 				)
@@ -575,6 +620,10 @@ func runUnifiedHLSWorker(ctx context.Context, worker *hlsWorker) {
 		}
 
 		currentSeg2 := int64(math.Floor(timeOffset / 2.0))
+		if lastSeg2 >= 0 && currentSeg2 < lastSeg2 {
+			loopCount2++
+			logf("[GO-LIVE:LOOP][2s] wrap_detected content=%s loop_count=%d prev_seg=%d seg=%d\n", content, loopCount2, lastSeg2, currentSeg2)
+		}
 		if currentSeg2 != lastSeg2 {
 			tickStart := time.Now()
 			for _, variant := range masterInfo.MasterPlaylist.Variants {
@@ -599,6 +648,7 @@ func runUnifiedHLSWorker(ctx context.Context, worker *hlsWorker) {
 					variantInfo.RelPath,
 					variantInfo.SegmentMap,
 					timeNow,
+					loopCount2,
 					minDuration,
 					maxDuration,
 					"2s",
@@ -631,6 +681,7 @@ func runUnifiedHLSWorker(ctx context.Context, worker *hlsWorker) {
 					variantInfo.RelPath,
 					variantInfo.SegmentMap,
 					timeNow,
+					loopCount2,
 					minDuration,
 					maxDuration,
 					"2s",
@@ -684,6 +735,10 @@ func runUnifiedHLSWorker(ctx context.Context, worker *hlsWorker) {
 		}
 
 		currentSeg6 := int64(math.Floor(timeOffset / 6.0))
+		if lastSeg6 >= 0 && currentSeg6 < lastSeg6 {
+			loopCount6++
+			logf("[GO-LIVE:LOOP][6s] wrap_detected content=%s loop_count=%d prev_seg=%d seg=%d\n", content, loopCount6, lastSeg6, currentSeg6)
+		}
 		if currentSeg6 != lastSeg6 {
 			tickStart := time.Now()
 			for _, variant := range masterInfo.MasterPlaylist.Variants {
@@ -708,6 +763,7 @@ func runUnifiedHLSWorker(ctx context.Context, worker *hlsWorker) {
 					variantInfo.RelPath,
 					variantInfo.SegmentMap,
 					timeNow,
+					loopCount6,
 					minDuration,
 					maxDuration,
 					"6s",
@@ -740,6 +796,7 @@ func runUnifiedHLSWorker(ctx context.Context, worker *hlsWorker) {
 					variantInfo.RelPath,
 					variantInfo.SegmentMap,
 					timeNow,
+					loopCount6,
 					minDuration,
 					maxDuration,
 					"6s",
@@ -1588,6 +1645,7 @@ func runContinuousLLHLS(ctx context.Context, inputPath, outputPath, content stri
 		// Generate variant playlists (regenerated every loop)
 		// Use Unix timestamp with fractional seconds (like Python's time.time())
 		timeNow := float64(startTime.UnixNano()) / 1e9
+		loopCount := int(timeNow / minDuration)
 
 		// Log timing info every 10 iterations for debugging
 		if iteration%10 == 0 {
@@ -1626,6 +1684,7 @@ func runContinuousLLHLS(ctx context.Context, inputPath, outputPath, content stri
 				variantInfo.RelPath,
 				variantInfo.SegmentMap,
 				timeNow,
+				loopCount,
 				minDuration,
 				maxDuration,
 			)
@@ -1660,6 +1719,7 @@ func runContinuousLLHLS(ctx context.Context, inputPath, outputPath, content stri
 				variantInfo.RelPath,
 				variantInfo.SegmentMap,
 				timeNow,
+				loopCount,
 				minDuration,
 				maxDuration,
 			)
@@ -1777,6 +1837,7 @@ func runContinuousHLSRange(ctx context.Context, inputPath, outputPath, content, 
 		startTime := time.Now()
 		timeNow := float64(startTime.UnixNano()) / 1e9
 		timeOffset := math.Mod(timeNow, minDuration)
+		loopCount := int(timeNow / minDuration)
 		currentSegIndex := int64(math.Floor(timeOffset / segSeconds))
 
 		if !masterWritten {
@@ -1838,6 +1899,7 @@ func runContinuousHLSRange(ctx context.Context, inputPath, outputPath, content, 
 				variantInfo.RelPath,
 				variantInfo.SegmentMap,
 				timeNow,
+				loopCount,
 				minDuration,
 				maxDuration,
 				duration,
@@ -1874,6 +1936,7 @@ func runContinuousHLSRange(ctx context.Context, inputPath, outputPath, content, 
 				variantInfo.RelPath,
 				variantInfo.SegmentMap,
 				timeNow,
+				loopCount,
 				minDuration,
 				maxDuration,
 				duration,

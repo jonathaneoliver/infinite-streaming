@@ -35,6 +35,13 @@ func logOncePerSecondLL(message string) {
 // LLHLSGenerator generates LL-HLS playlists matching Python ll_live.py behavior
 type LLHLSGenerator struct{}
 
+func writeLoopDateRange(sb *strings.Builder, loopCount int, at time.Time, marker string) {
+	timestamp := at.UTC().Format("2006-01-02T15:04:05.000Z")
+	// Loop boundary marker for downstream analytics and loop counters.
+	// sb.WriteString(fmt.Sprintf("#EXT-X-DATERANGE:ID=\"loop-%d-%s\",CLASS=\"com.infinite.loop\",START-DATE=\"%s\",X-LOOP-COUNT=\"%d\"\n", loopCount, marker, timestamp, loopCount))
+	logOncePerSecondLL(fmt.Sprintf("[GO-LIVE:LOOP][LL] marker=%s loop_count=%d start_date=%s", marker, loopCount, timestamp))
+}
+
 // GenerateVariantPlaylist generates a single variant playlist with byte-range partials
 // This matches the Python generate_ll_playlist() function exactly
 func (g *LLHLSGenerator) GenerateVariantPlaylist(
@@ -43,6 +50,7 @@ func (g *LLHLSGenerator) GenerateVariantPlaylist(
 	relPath string,
 	segmentMap string,
 	timeNow float64,
+	loopCount int,
 	minDuration float64,
 	maxDuration float64,
 ) (string, error) {
@@ -50,9 +58,8 @@ func (g *LLHLSGenerator) GenerateVariantPlaylist(
 	// Auto-detect content characteristics from first segment
 	segmentDuration, partialsPerSegment, partialDuration := detectContentCharacteristics(pl, byteranges)
 
-	// Calculate live position
+	// Playlist position remains absolute-time based.
 	timeOffset := math.Mod(timeNow, minDuration)
-	loopCount := int(timeNow / minDuration)
 
 	// Calculate PDT (Program Date Time)
 	pdtSeconds := timeNow - maxDuration
@@ -114,6 +121,7 @@ func (g *LLHLSGenerator) GenerateVariantPlaylist(
 
 	// Add discontinuity at loop boundary
 	if currentSegmentIdx == 0 {
+		writeLoopDateRange(&sb, loopCount, pdt, "head")
 		sb.WriteString("#EXT-X-DISCONTINUITY\n")
 		if segmentMap != "" {
 			sb.WriteString(fmt.Sprintf("#EXT-X-MAP:URI=\"%s\"\n", baseURI(segmentMap)))
@@ -172,6 +180,8 @@ func (g *LLHLSGenerator) GenerateVariantPlaylist(
 		}
 
 		// Add discontinuity before switching from previous loop to current loop segments
+		boundaryAt := pdt.Add(time.Duration(accumulatedDuration * float64(time.Second)))
+		writeLoopDateRange(&sb, loopCount, boundaryAt, "wrap")
 		sb.WriteString("#EXT-X-DISCONTINUITY\n")
 		if segmentMap != "" {
 			sb.WriteString(fmt.Sprintf("#EXT-X-MAP:URI=\"%s\"\n", baseURI(segmentMap)))

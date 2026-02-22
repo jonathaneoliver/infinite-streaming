@@ -569,6 +569,8 @@
                             <div class="session-item"><span class="label">Manifest URL</span><span class="value" data-field="session_manifest_url">${session.manifest_url || '—'}</span></div>
                             <div class="session-item"><span class="label">Master Manifest URL</span><span class="value" data-field="session_master_manifest_url">${session.master_manifest_url || '—'}</span></div>
                             <div class="session-item"><span class="label">Last Request URL</span><span class="value" data-field="session_last_request_url">${session.last_request_url || '—'}</span></div>
+                            <div class="session-item"><span class="label">Loop Count (Server)</span><span class="value" data-field="session_loop_count_server">${session.loop_count_server ?? '0'}</span></div>
+                            <div class="session-item"><span class="label">Loop Count (Player)</span><span class="value" data-field="session_loop_count_player">${session.player_metrics_loop_count_player ?? '0'}</span></div>
                             <div class="session-item"><span class="label">Measured Mbps</span><span class="value" data-field="session_measured_mbps">${session.measured_mbps || '—'}</span></div>
                             <div class="session-item"><span class="label">mbps_in</span><span class="value" data-field="session_mbps_in">${session.mbps_in ?? '—'}</span></div>
                             <div class="session-item"><span class="label">mbps_out</span><span class="value" data-field="session_mbps_out">${session.mbps_out ?? '—'}</span></div>
@@ -628,6 +630,9 @@
                             <div class="session-item"><span class="label">Server Rendition Mbps</span><span class="value" data-field="server_video_rendition_mbps">${session.server_video_rendition_mbps ?? '—'}</span></div>
                             <div class="session-item"><span class="label">Video Quality</span><span class="value" data-field="player_metrics_video_quality_pct">${formatPercent(session.player_metrics_video_quality_pct)}</span></div>
                             <div class="session-item"><span class="label">Network Bitrate Mbps</span><span class="value" data-field="player_metrics_network_bitrate_mbps">${session.player_metrics_network_bitrate_mbps ?? '—'}</span></div>
+                            <div class="session-item"><span class="label">Loop Count</span><span class="value" data-field="player_metrics_loop_count">${session.player_metrics_loop_count_player ?? '0'}</span></div>
+                            <div class="session-item"><span class="label">Loop Count Increment</span><span class="value" data-field="player_metrics_loop_count_increment">${session.player_metrics_loop_count_increment ?? '0'}</span></div>
+                            <div class="session-item"><span class="label">Profile Shifts</span><span class="value" data-field="player_metrics_profile_shift_count">${session.player_metrics_profile_shift_count ?? '0'}</span></div>
                             <div class="session-item"><span class="label">Frames Displayed</span><span class="value" data-field="player_metrics_frames_displayed">${session.player_metrics_frames_displayed ?? '—'}</span></div>
                             <div class="session-item"><span class="label">Dropped Frames</span><span class="value" data-field="player_metrics_dropped_frames">${session.player_metrics_dropped_frames ?? '—'}</span></div>
                             <div class="session-item"><span class="label">Stalls</span><span class="value" data-field="player_metrics_stall_count">${session.player_metrics_stall_count ?? '—'}</span></div>

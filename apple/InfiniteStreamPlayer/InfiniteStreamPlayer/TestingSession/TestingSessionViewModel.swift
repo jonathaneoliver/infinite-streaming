@@ -25,12 +25,16 @@ final class TestingSessionViewModel: ObservableObject {
     private var pendingEditsBySession: [String: PendingEdit] = [:]
     private let pendingTTL: TimeInterval = 5
     private var lastLimitSampleAt: Date?
+    private var lastHandledRestartRequestId: String = ""
+    private var remoteRestartInFlight: Bool = false
+    private let onRemoteRestartRequested: ((String) -> Void)?
 
-    init(playerId: String, controlBaseURL: URL) {
+    init(playerId: String, controlBaseURL: URL, onRemoteRestartRequested: ((String) -> Void)? = nil) {
         self.playerId = playerId
         let normalized = Self.normalizeControlBaseURL(controlBaseURL)
         self.controlBaseURL = normalized
         self.api = TestingSessionAPI(controlBaseURL: normalized)
+        self.onRemoteRestartRequested = onRemoteRestartRequested
     }
 
     private static func normalizeControlBaseURL(_ url: URL) -> URL {
@@ -255,7 +259,49 @@ final class TestingSessionViewModel: ObservableObject {
         let match = mergedSessions.first { $0.playerId == playerId }
         session = match
         if let match {
+            handleRemoteRestartRequest(match)
+        }
+        if let match {
             appendBandwidthSample(from: match)
+        }
+    }
+
+    private func handleRemoteRestartRequest(_ session: SessionData) {
+        let requestId = session.playerRestartRequestId.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard session.playerRestartRequested, !requestId.isEmpty else { return }
+        guard requestId != lastHandledRestartRequestId else { return }
+        guard !remoteRestartInFlight else { return }
+
+        remoteRestartInFlight = true
+        lastHandledRestartRequestId = requestId
+        let reason = session.playerRestartRequestReason.isEmpty ? "remote_command" : session.playerRestartRequestReason
+        let restartHandler = onRemoteRestartRequested
+        let restartInvoked = restartHandler != nil
+        restartHandler?(reason)
+
+        Task { [weak self] in
+            guard let self else { return }
+            let handledAt = ISO8601DateFormatter().string(from: Date())
+            let set: [String: JSONValue] = [
+                "player_restart_requested": .bool(false),
+                "player_restart_request_state": .string(restartInvoked ? "completed" : "failed"),
+                "player_restart_request_handled_at": .string(handledAt),
+                "player_restart_request_handled_by": .string("ios_app"),
+                "player_restart_request_error": .string(restartInvoked ? "" : "restart_handler_unavailable"),
+                "player_restart_request_id": .string(requestId)
+            ]
+            let fields = Array(set.keys)
+            do {
+                _ = try await self.api.patchSession(
+                    sessionId: session.sessionId,
+                    set: set,
+                    fields: fields,
+                    baseRevision: session.controlRevision
+                )
+            } catch {
+                self.log("Remote restart ack failed: \(error.localizedDescription)")
+            }
+            self.remoteRestartInFlight = false
         }
     }
 

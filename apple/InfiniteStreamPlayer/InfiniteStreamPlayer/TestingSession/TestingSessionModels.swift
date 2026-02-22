@@ -48,6 +48,17 @@ struct SessionData: Codable, Equatable, Identifiable {
     var segmentCount: Int? { raw["segments_count"]?.intValue }
     var controlRevision: String { raw["control_revision"]?.stringValue ?? "" }
 
+    var playerRestartRequested: Bool {
+        if let value = raw["player_restart_requested"]?.boolValue {
+            return value
+        }
+        let text = raw["player_restart_requested"]?.stringValue ?? ""
+        return ["1", "true", "yes", "on"].contains(text.lowercased())
+    }
+    var playerRestartRequestId: String { raw["player_restart_request_id"]?.stringValue ?? "" }
+    var playerRestartRequestReason: String { raw["player_restart_request_reason"]?.stringValue ?? "" }
+    var playerRestartRequestState: String { raw["player_restart_request_state"]?.stringValue ?? "" }
+
     var transportFaultActive: Bool { raw["transport_fault_active"]?.boolValue ?? false }
     var transportFaultDropPackets: Int { raw["transport_fault_drop_packets"]?.intValue ?? 0 }
     var transportFaultRejectPackets: Int { raw["transport_fault_reject_packets"]?.intValue ?? 0 }

@@ -11,6 +11,7 @@ import json
 import re
 import statistics
 import time
+import uuid
 from typing import Any
 
 import pytest
@@ -239,6 +240,829 @@ def _build_huge_steps_schedule(
     return steps
 
 
+def _build_transient_shock_schedule(
+    ladder_mbps: list[float],
+    overhead_pct: float,
+    min_mbps: float | None,
+    max_mbps: float | None,
+) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
+    if not ladder_mbps:
+        return [], None
+
+    overhead_ratio = max(0.0, min(0.25, _to_number(overhead_pct, 10.0) / 100.0))
+    wire_multiplier = 1.0 / max(0.01, (1.0 - overhead_ratio))
+    floor = max(0.1, float(min_mbps) if min_mbps is not None else (ladder_mbps[0] * wire_multiplier))
+    ceiling_default = ladder_mbps[-1] * wire_multiplier * 2.0
+    ceiling = max(floor, float(max_mbps) if max_mbps is not None and max_mbps > 0 else ceiling_default)
+
+    top_wire = ladder_mbps[-1] * wire_multiplier
+    baseline_target = max(floor, min(ceiling, top_wire * 1.15))
+    severities = [
+        {"key": "small", "drop_pct": 30},
+        {"key": "medium", "drop_pct": 55},
+        {"key": "severe", "drop_pct": 80},
+    ]
+
+    steps: list[dict[str, Any]] = []
+    for order, severity in enumerate(severities, start=1):
+        drop_pct = float(severity["drop_pct"])
+        shock_target = max(floor, min(ceiling, baseline_target * (1.0 - (drop_pct / 100.0))))
+        steps.append(
+            {
+                "target_mbps": round(baseline_target, 3),
+                "direction": "up",
+                "hold_seconds": 20,
+                "mode": "transient-shock",
+                "step_kind": "transient-precondition",
+                "shock_severity": severity["key"],
+                "shock_drop_pct": drop_pct,
+                "shock_order": order,
+            }
+        )
+        steps.append(
+            {
+                "target_mbps": round(shock_target, 3),
+                "direction": "down",
+                "hold_seconds": 8,
+                "mode": "transient-shock",
+                "step_kind": "transient-shock",
+                "shock_severity": severity["key"],
+                "shock_drop_pct": drop_pct,
+                "shock_order": order,
+                "skip_settle": True,
+                "force_hold_without_settle": True,
+            }
+        )
+        steps.append(
+            {
+                "target_mbps": round(baseline_target, 3),
+                "direction": "up",
+                "hold_seconds": 20,
+                "mode": "transient-shock",
+                "step_kind": "transient-recovery",
+                "shock_severity": severity["key"],
+                "shock_drop_pct": drop_pct,
+                "shock_order": order,
+            }
+        )
+
+    return steps, {
+        "baseline_target_mbps": round(baseline_target, 3),
+        "severities": severities,
+    }
+
+
+def _compute_stall_deltas(samples: list[dict[str, Any]]) -> tuple[float | None, float | None]:
+    stall_counts = [
+        _to_number(sample.get("stall_count"), None)
+        for sample in samples
+        if _to_number(sample.get("stall_count"), None) is not None
+    ]
+    stall_times = [
+        _to_number(sample.get("stall_time_s"), None)
+        for sample in samples
+        if _to_number(sample.get("stall_time_s"), None) is not None
+    ]
+    stall_count_delta = (max(stall_counts) - min(stall_counts)) if stall_counts else None
+    stall_time_delta = (max(stall_times) - min(stall_times)) if stall_times else None
+    return stall_count_delta, stall_time_delta
+
+
+def _time_to_buffer_full_seconds(samples: list[dict[str, Any]]) -> tuple[float | None, float | None]:
+    """Estimate when buffer becomes effectively full using running-max envelope.
+
+    This intentionally ignores stepped/sawtooth buffer increments by using a
+    monotonic envelope and finding the earliest point after which no meaningful
+    additional growth occurs.
+    """
+    points: list[tuple[float, float]] = []
+    t0: datetime | None = None
+    for sample in samples:
+        value = _to_number(sample.get("buffer_depth_s"), None)
+        if value is None:
+            continue
+        ts = _parse_iso_z(sample.get("ts"))
+        if ts is None:
+            continue
+        if t0 is None:
+            t0 = ts
+        elapsed = max(0.0, (ts - t0).total_seconds())
+        points.append((elapsed, float(value)))
+
+    if not points:
+        return None, None
+
+    running_max: list[float] = []
+    current_max = float("-inf")
+    for _, value in points:
+        current_max = max(current_max, value)
+        running_max.append(current_max)
+
+    final_peak = running_max[-1]
+    if final_peak <= 0:
+        return None, None
+
+    tolerance = max(0.25, final_peak * 0.03)
+    target_floor = final_peak - tolerance
+
+    for idx, (elapsed, _) in enumerate(points):
+        if running_max[idx] < target_floor:
+            continue
+        if idx < len(running_max) - 1:
+            future_peak = max(running_max[idx + 1 :])
+            if future_peak > running_max[idx] + tolerance:
+                continue
+        return round(elapsed, 3), round(final_peak, 3)
+
+    return round(points[-1][0], 3), round(final_peak, 3)
+
+
+def _build_transient_shock_summary(run: dict[str, Any]) -> dict[str, Any] | None:
+    severities = ["small", "medium", "severe"]
+    summaries: list[dict[str, Any]] = []
+
+    for severity in severities:
+        shock_steps = [
+            (index, step)
+            for index, step in enumerate(run.get("steps", []))
+            if str(step.get("mode")) == "transient-shock"
+            and str(step.get("shock_severity")) == severity
+            and str(step.get("step_kind")) == "transient-shock"
+        ]
+
+        if not shock_steps:
+            summaries.append(
+                {
+                    "severity": severity,
+                    "drop_pct": None,
+                    "downswitch_count": 0,
+                    "downswitch_latency_median_s": None,
+                    "recovery_upshift_latency_median_s": None,
+                    "stall_count_delta_total": 0,
+                    "stall_time_delta_s_total": 0,
+                    "unexpected_downswitch_during_recovery": 0,
+                }
+            )
+            continue
+
+        down_latencies: list[float] = []
+        recovery_latencies: list[float] = []
+        downswitch_count = 0
+        unexpected_recovery_downswitch_count = 0
+        stall_count_total = 0.0
+        stall_time_total = 0.0
+        representative_drop = None
+
+        for shock_step_index, shock_step in shock_steps:
+            shock_switches = [
+                event
+                for event in run.get("switch_events", [])
+                if int(_to_number(event.get("step_index"), -1) or -1) == shock_step_index
+            ]
+            down_switches = [
+                event
+                for event in shock_switches
+                if _to_number(event.get("to_variant_mbps"), None) is not None
+                and _to_number(event.get("from_variant_mbps"), None) is not None
+                and float(event["to_variant_mbps"]) < float(event["from_variant_mbps"])
+            ]
+            if down_switches:
+                first_latency = _to_number(down_switches[0].get("time_from_limit_change_s"), None)
+                if first_latency is not None:
+                    down_latencies.append(float(first_latency))
+            downswitch_count += len(down_switches)
+            representative_drop = representative_drop if representative_drop is not None else _to_number(shock_step.get("shock_drop_pct"), None)
+
+            shock_samples = [
+                sample
+                for sample in run.get("samples", [])
+                if int(_to_number(sample.get("step_index"), -1) or -1) == shock_step_index
+            ]
+            stall_count_delta, stall_time_delta = _compute_stall_deltas(shock_samples)
+            stall_count_total += float(_to_number(stall_count_delta, 0) or 0)
+            stall_time_total += float(_to_number(stall_time_delta, 0) or 0)
+
+            recovery_step_index = None
+            for candidate_index, candidate_step in enumerate(run.get("steps", [])):
+                if candidate_index <= shock_step_index:
+                    continue
+                if str(candidate_step.get("mode")) != "transient-shock":
+                    continue
+                if str(candidate_step.get("step_kind")) != "transient-recovery":
+                    continue
+                if str(candidate_step.get("shock_severity")) != severity:
+                    continue
+                if int(_to_number(candidate_step.get("shock_order"), 0) or 0) != int(_to_number(shock_step.get("shock_order"), 0) or 0):
+                    continue
+                recovery_step_index = candidate_index
+                break
+
+            if recovery_step_index is not None:
+                recovery_switches = [
+                    event
+                    for event in run.get("switch_events", [])
+                    if int(_to_number(event.get("step_index"), -1) or -1) == recovery_step_index
+                ]
+                recovery_up = [
+                    event
+                    for event in recovery_switches
+                    if _to_number(event.get("to_variant_mbps"), None) is not None
+                    and _to_number(event.get("from_variant_mbps"), None) is not None
+                    and float(event["to_variant_mbps"]) > float(event["from_variant_mbps"])
+                ]
+                recovery_down = [
+                    event
+                    for event in recovery_switches
+                    if _to_number(event.get("to_variant_mbps"), None) is not None
+                    and _to_number(event.get("from_variant_mbps"), None) is not None
+                    and float(event["to_variant_mbps"]) < float(event["from_variant_mbps"])
+                ]
+                if recovery_up:
+                    first_recovery_latency = _to_number(recovery_up[0].get("time_from_limit_change_s"), None)
+                    if first_recovery_latency is not None:
+                        recovery_latencies.append(float(first_recovery_latency))
+                unexpected_recovery_downswitch_count += len(recovery_down)
+
+                recovery_samples = [
+                    sample
+                    for sample in run.get("samples", [])
+                    if int(_to_number(sample.get("step_index"), -1) or -1) == recovery_step_index
+                ]
+                recovery_stall_count_delta, recovery_stall_time_delta = _compute_stall_deltas(recovery_samples)
+                stall_count_total += float(_to_number(recovery_stall_count_delta, 0) or 0)
+                stall_time_total += float(_to_number(recovery_stall_time_delta, 0) or 0)
+
+        summaries.append(
+            {
+                "severity": severity,
+                "drop_pct": representative_drop,
+                "downswitch_count": downswitch_count,
+                "downswitch_latency_median_s": _median(down_latencies),
+                "recovery_upshift_latency_median_s": _median(recovery_latencies),
+                "stall_count_delta_total": stall_count_total,
+                "stall_time_delta_s_total": round(stall_time_total, 2),
+                "unexpected_downswitch_during_recovery": unexpected_recovery_downswitch_count,
+            }
+        )
+
+    if not any((entry.get("downswitch_count", 0) > 0) or (entry.get("recovery_upshift_latency_median_s") is not None) for entry in summaries):
+        return None
+    return {"severities": summaries}
+
+
+def _build_startup_caps_schedule(
+    ladder_mbps: list[float],
+    overhead_pct: float,
+    min_mbps: float | None,
+    max_mbps: float | None,
+    repeat_count: int,
+) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
+    if not ladder_mbps:
+        return [], None
+
+    overhead_ratio = max(0.0, min(0.25, _to_number(overhead_pct, 10.0) / 100.0))
+    wire_multiplier = 1.0 / max(0.01, (1.0 - overhead_ratio))
+    floor = max(0.1, float(min_mbps) if min_mbps is not None else (ladder_mbps[0] * wire_multiplier))
+    ceiling_default = ladder_mbps[-1] * wire_multiplier * 2.0
+    ceiling = max(floor, float(max_mbps) if max_mbps is not None and max_mbps > 0 else ceiling_default)
+
+    mid_index = max(0, (len(ladder_mbps) - 1) // 2)
+    high_target_index = max(0, len(ladder_mbps) - 2)
+    scenario_indices: list[tuple[str, int]] = [
+        ("low", 0),
+        ("mid", mid_index),
+        ("high", high_target_index),
+    ]
+    seen_labels: set[tuple[str, int]] = set()
+    deduped_indices: list[tuple[str, int]] = []
+    for label, index in scenario_indices:
+        key = (label, index)
+        if key in seen_labels:
+            continue
+        seen_labels.add(key)
+        deduped_indices.append((label, index))
+
+    caps: list[dict[str, Any]] = []
+    for label, target_index in deduped_indices:
+        next_index = min(len(ladder_mbps) - 1, target_index + 1)
+        target_variant = float(ladder_mbps[target_index])
+        next_variant = float(ladder_mbps[next_index])
+        midpoint_media = ((target_variant + next_variant) / 2.0) if next_index > target_index else target_variant
+        cap_wire = max(floor, min(ceiling, midpoint_media * wire_multiplier))
+        caps.append(
+            {
+                "cap_label": label,
+                "cap_target_mbps": cap_wire,
+                "target_variant_mbps": round(target_variant, 3),
+                "next_variant_mbps": round(next_variant, 3),
+                "cap_midpoint_media_mbps": round(midpoint_media, 3),
+            }
+        )
+
+    repeats = max(1, int(repeat_count))
+    steps: list[dict[str, Any]] = []
+    scenario_counter = 0
+    for cycle_index in range(repeats):
+        for cap in caps:
+            scenario_counter += 1
+            steps.append(
+                {
+                    "target_mbps": round(cap["cap_target_mbps"], 3),
+                    "hold_seconds": 45,
+                    "direction": "up",
+                    "mode": "startup-caps",
+                    "step_kind": "startup-cap",
+                    "startup_cap_label": cap["cap_label"],
+                    "startup_scenario_index": scenario_counter,
+                    "cycle_index": cycle_index + 1,
+                    "target_variant_mbps": cap["target_variant_mbps"],
+                    "next_variant_mbps": cap["next_variant_mbps"],
+                    "cap_midpoint_media_mbps": cap["cap_midpoint_media_mbps"],
+                    "restart_playback_before_step": True,
+                    "skip_settle": True,
+                    "force_hold_without_settle": True,
+                }
+            )
+
+    return steps, {"caps": caps, "repeat_count": repeats}
+
+
+def _build_downshift_severity_schedule(
+    ladder_mbps: list[float],
+    overhead_pct: float,
+    min_mbps: float | None,
+    max_mbps: float | None,
+    repeat_count: int,
+) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
+    if not ladder_mbps:
+        return [], None
+
+    overhead_ratio = max(0.0, min(0.25, _to_number(overhead_pct, 10.0) / 100.0))
+    wire_multiplier = 1.0 / max(0.01, (1.0 - overhead_ratio))
+    floor = max(0.1, float(min_mbps) if min_mbps is not None else (ladder_mbps[0] * wire_multiplier))
+    ceiling_default = ladder_mbps[-1] * wire_multiplier * 2.0
+    ceiling = max(floor, float(max_mbps) if max_mbps is not None and max_mbps > 0 else ceiling_default)
+    top_wire = ladder_mbps[-1] * wire_multiplier
+    high_target = max(floor, min(ceiling, top_wire * 1.12))
+
+    severity_buckets = [
+        {"key": "small", "target_drop_pct": 30},
+        {"key": "medium", "target_drop_pct": 55},
+        {"key": "severe", "target_drop_pct": 80},
+    ]
+
+    repeats = max(1, int(repeat_count))
+    steps: list[dict[str, Any]] = []
+    for cycle_index in range(repeats):
+        for order, bucket in enumerate(severity_buckets, start=1):
+            drop_pct = float(bucket["target_drop_pct"])
+            target = max(floor, min(ceiling, high_target * (1.0 - (drop_pct / 100.0))))
+            steps.append(
+                {
+                    "target_mbps": round(high_target, 3),
+                    "hold_seconds": 15,
+                    "direction": "up",
+                    "mode": "downshift-severity",
+                    "step_kind": "severity-precondition",
+                    "severity_bucket": bucket["key"],
+                    "severity_drop_pct": drop_pct,
+                    "severity_order": order + (cycle_index * len(severity_buckets)),
+                    "cycle_index": cycle_index + 1,
+                }
+            )
+            steps.append(
+                {
+                    "target_mbps": round(target, 3),
+                    "hold_seconds": 25,
+                    "direction": "down",
+                    "mode": "downshift-severity",
+                    "step_kind": "severity-drop",
+                    "severity_bucket": bucket["key"],
+                    "severity_drop_pct": drop_pct,
+                    "severity_order": order + (cycle_index * len(severity_buckets)),
+                    "cycle_index": cycle_index + 1,
+                }
+            )
+
+    return steps, {
+        "severity_buckets": severity_buckets,
+        "high_target_mbps": round(high_target, 3),
+        "repeat_count": repeats,
+    }
+
+
+def _build_hysteresis_gap_schedule(
+    ladder_mbps: list[float],
+    overhead_pct: float,
+    min_mbps: float | None,
+    max_mbps: float | None,
+    repeat_count: int,
+) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
+    if len(ladder_mbps) < 2:
+        return [], None
+
+    overhead_ratio = max(0.0, min(0.25, _to_number(overhead_pct, 10.0) / 100.0))
+    wire_multiplier = 1.0 / max(0.01, (1.0 - overhead_ratio))
+    floor = max(0.1, float(min_mbps) if min_mbps is not None else (ladder_mbps[0] * wire_multiplier))
+    ceiling_default = ladder_mbps[-1] * wire_multiplier * 2.0
+    ceiling = max(floor, float(max_mbps) if max_mbps is not None and max_mbps > 0 else ceiling_default)
+
+    repeats = max(1, int(repeat_count))
+    steps: list[dict[str, Any]] = []
+    for cycle_index in range(repeats):
+        for low_index in range(0, len(ladder_mbps) - 1):
+            high_index = low_index + 1
+            down_probe_target = max(floor, min(ceiling, ladder_mbps[low_index] * wire_multiplier * 1.02))
+            up_probe_target = max(floor, min(ceiling, ladder_mbps[high_index] * wire_multiplier * 0.98))
+            rung_label = f"V{low_index + 1}<->V{high_index + 1}"
+            steps.append(
+                {
+                    "target_mbps": round(down_probe_target, 3),
+                    "hold_seconds": 18,
+                    "direction": "down",
+                    "mode": "hysteresis-gap",
+                    "step_kind": "hysteresis-down-probe",
+                    "rung_low_index": low_index,
+                    "rung_high_index": high_index,
+                    "rung_label": rung_label,
+                    "cycle_index": cycle_index + 1,
+                }
+            )
+            steps.append(
+                {
+                    "target_mbps": round(up_probe_target, 3),
+                    "hold_seconds": 18,
+                    "direction": "up",
+                    "mode": "hysteresis-gap",
+                    "step_kind": "hysteresis-up-probe",
+                    "rung_low_index": low_index,
+                    "rung_high_index": high_index,
+                    "rung_label": rung_label,
+                    "cycle_index": cycle_index + 1,
+                }
+            )
+
+    return steps, {"pair_count": len(ladder_mbps) - 1, "repeat_count": repeats}
+
+
+def _build_emergency_downshift_schedule(
+    ladder_mbps: list[float],
+    overhead_pct: float,
+    min_mbps: float | None,
+    max_mbps: float | None,
+    repeat_count: int,
+) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
+    if len(ladder_mbps) < 2:
+        return [], None
+
+    overhead_ratio = max(0.0, min(0.25, _to_number(overhead_pct, 10.0) / 100.0))
+    wire_multiplier = 1.0 / max(0.01, (1.0 - overhead_ratio))
+    floor = max(0.1, float(min_mbps) if min_mbps is not None else (ladder_mbps[0] * wire_multiplier))
+    ceiling_default = ladder_mbps[-1] * wire_multiplier * 6.0
+    ceiling = max(floor, float(max_mbps) if max_mbps is not None and max_mbps > 0 else ceiling_default)
+
+    top_variant = ladder_mbps[-1]
+    second_bottom = ladder_mbps[1]
+    bottom = ladder_mbps[0]
+    high_target = max(floor, min(ceiling, top_variant * wire_multiplier * 3.0))
+    low_midpoint = (bottom + second_bottom) / 2.0
+    low_target = max(floor, min(ceiling, low_midpoint * wire_multiplier * 1.05))
+
+    cycles = max(1, int(repeat_count))
+    steps: list[dict[str, Any]] = []
+    for cycle_index in range(1, cycles + 1):
+        steps.append(
+            {
+                "target_mbps": round(high_target, 3),
+                "hold_seconds": 30,
+                "direction": "up",
+                "mode": "emergency-downshift",
+                "step_kind": "emergency-high",
+                "cycle_index": cycle_index,
+            }
+        )
+        steps.append(
+            {
+                "target_mbps": round(low_target, 3),
+                "hold_seconds": 30,
+                "direction": "down",
+                "mode": "emergency-downshift",
+                "step_kind": "emergency-low",
+                "cycle_index": cycle_index,
+            }
+        )
+
+    return steps, {
+        "cycle_count": cycles,
+        "high_target_mbps": round(high_target, 3),
+        "low_target_mbps": round(low_target, 3),
+    }
+
+
+def _build_startup_caps_summary(run: dict[str, Any]) -> dict[str, Any] | None:
+    scenarios: list[dict[str, Any]] = []
+    for index, step in enumerate(run.get("steps", [])):
+        if str(step.get("mode")) != "startup-caps" or str(step.get("step_kind")) != "startup-cap":
+            continue
+        step_samples = [sample for sample in run.get("samples", []) if int(_to_number(sample.get("step_index"), -1) or -1) == index]
+        startup_latency = None
+        first_variant = None
+        up_switches = [
+            event
+            for event in run.get("switch_events", [])
+            if int(_to_number(event.get("step_index"), -1) or -1) == index
+            and _to_number(event.get("to_variant_mbps"), None) is not None
+            and _to_number(event.get("from_variant_mbps"), None) is not None
+            and float(event["to_variant_mbps"]) > float(event["from_variant_mbps"])
+        ]
+        if up_switches:
+            startup_latency = _to_number(up_switches[0].get("time_from_limit_change_s"), None)
+            first_variant = _to_number(up_switches[0].get("to_variant_mbps"), None)
+        for sample in step_samples:
+            variant = _to_number(sample.get("timing_variant_mbps"), None)
+            if variant is not None:
+                if first_variant is None:
+                    first_variant = variant
+                break
+        buffer_values = [_to_number(s.get("buffer_depth_s"), None) for s in step_samples]
+        buffer_values = [v for v in buffer_values if v is not None]
+        buffer_full_time_s, buffer_full_depth_s = _time_to_buffer_full_seconds(step_samples)
+        video_start_values = [_to_number(s.get("video_start_time_s"), None) for s in step_samples]
+        video_start_values = [v for v in video_start_values if v is not None]
+        video_start_time_s = video_start_values[0] if video_start_values else None
+        cold_start_event = next(
+            (
+                event
+                for event in run.get("cold_start_events", [])
+                if int(_to_number(event.get("step_index"), -1) or -1) == index
+            ),
+            None,
+        )
+        if video_start_time_s is None and isinstance(cold_start_event, dict):
+            video_start_time_s = _to_number(cold_start_event.get("video_start_time_s"), None)
+
+        initial_variant = next((
+            _to_number(s.get("timing_variant_mbps"), None)
+            for s in step_samples
+            if _to_number(s.get("timing_variant_mbps"), None) is not None
+        ), None)
+        step_switches = [
+            event
+            for event in run.get("switch_events", [])
+            if int(_to_number(event.get("step_index"), -1) or -1) == index
+            and _to_number(event.get("to_variant_mbps"), None) is not None
+            and _to_number(event.get("from_variant_mbps"), None) is not None
+            and float(event["to_variant_mbps"]) > float(event["from_variant_mbps"])
+        ]
+        variant_path: list[str] = []
+        if initial_variant is not None:
+            variant_path.append(f"{float(initial_variant):.3f}")
+        for event in step_switches:
+            to_variant = _to_number(event.get("to_variant_mbps"), None)
+            if to_variant is None:
+                continue
+            token = f"{float(to_variant):.3f}"
+            if not variant_path or variant_path[-1] != token:
+                variant_path.append(token)
+
+        target_variant = _to_number(step.get("target_variant_mbps"), None)
+        target_reached = False
+        reached_target_latency_s = None
+        if target_variant is not None:
+            tolerance = max(0.05, float(target_variant) * 0.02)
+            if initial_variant is not None and float(initial_variant) >= float(target_variant) - tolerance:
+                target_reached = True
+                reached_target_latency_s = 0.0
+            else:
+                for event in step_switches:
+                    to_variant = _to_number(event.get("to_variant_mbps"), None)
+                    if to_variant is None:
+                        continue
+                    if float(to_variant) >= float(target_variant) - tolerance:
+                        target_reached = True
+                        reached_target_latency_s = _to_number(event.get("time_from_limit_change_s"), None)
+                        break
+
+        stall_count_delta, stall_time_delta = _compute_stall_deltas(step_samples)
+        scenarios.append(
+            {
+                "scenario": int(_to_number(step.get("startup_scenario_index"), len(scenarios) + 1) or (len(scenarios) + 1)),
+                "cap_label": step.get("startup_cap_label"),
+                "cap_target_mbps": _to_number(step.get("target_mbps"), None),
+                "target_variant_mbps": target_variant,
+                "next_variant_mbps": _to_number(step.get("next_variant_mbps"), None),
+                "cap_midpoint_media_mbps": _to_number(step.get("cap_midpoint_media_mbps"), None),
+                "startup_latency_s": startup_latency,
+                "video_start_time_s": video_start_time_s,
+                "cold_start_confirmed": bool(cold_start_event.get("confirmed")) if isinstance(cold_start_event, dict) else None,
+                "buffer_full_time_s": buffer_full_time_s,
+                "buffer_full_depth_s": buffer_full_depth_s,
+                "first_rendition_mbps": first_variant,
+                "variant_path": " -> ".join(variant_path) if variant_path else "",
+                "target_reached": target_reached,
+                "reached_target_latency_s": reached_target_latency_s,
+                "minimum_buffer_s": min(buffer_values) if buffer_values else None,
+                "stall_count_delta": stall_count_delta,
+                "stall_time_delta_s": stall_time_delta,
+            }
+        )
+
+    if not scenarios:
+        return None
+    latencies = [_to_number(item.get("startup_latency_s"), None) for item in scenarios]
+    latencies = [v for v in latencies if v is not None]
+    return {
+        "scenarios": scenarios,
+        "aggregate": {
+            "startup_latency_median_s": _median([float(v) for v in latencies]) if latencies else None,
+            "stall_count_delta_total": sum(float(_to_number(item.get("stall_count_delta"), 0) or 0) for item in scenarios),
+            "stall_time_delta_s_total": round(sum(float(_to_number(item.get("stall_time_delta_s"), 0) or 0) for item in scenarios), 3),
+        },
+    }
+
+
+def _build_downshift_severity_summary(run: dict[str, Any]) -> dict[str, Any] | None:
+    buckets = [
+        {"key": "small", "min": 20, "max": 40},
+        {"key": "medium", "min": 40, "max": 70},
+        {"key": "severe", "min": 70, "max": 100},
+    ]
+    rows: list[dict[str, Any]] = []
+    for bucket in buckets:
+        latencies: list[float] = []
+        sample_count = 0
+        for index, step in enumerate(run.get("steps", [])):
+            if str(step.get("mode")) != "downshift-severity" or str(step.get("step_kind")) != "severity-drop":
+                continue
+            drop_pct = _to_number(step.get("severity_drop_pct"), None)
+            if drop_pct is None or drop_pct < bucket["min"] or drop_pct >= bucket["max"]:
+                continue
+            sample_count += 1
+            down_switches = [
+                event
+                for event in run.get("switch_events", [])
+                if int(_to_number(event.get("step_index"), -1) or -1) == index
+                and _to_number(event.get("to_variant_mbps"), None) is not None
+                and _to_number(event.get("from_variant_mbps"), None) is not None
+                and float(event["to_variant_mbps"]) < float(event["from_variant_mbps"])
+            ]
+            if down_switches:
+                first_latency = _to_number(down_switches[0].get("time_from_limit_change_s"), None)
+                if first_latency is not None:
+                    latencies.append(float(first_latency))
+
+        rows.append(
+            {
+                "severity": bucket["key"],
+                "drop_pct_range": f"{bucket['min']}-{bucket['max']}",
+                "sample_count": sample_count,
+                "min_latency_s": min(latencies) if latencies else None,
+                "median_latency_s": _median(latencies) if latencies else None,
+                "p95_latency_s": _percentile(latencies, 95) if latencies else None,
+                "max_latency_s": max(latencies) if latencies else None,
+            }
+        )
+
+    if not rows:
+        return None
+    return {"buckets": rows}
+
+
+def _build_hysteresis_gap_summary(run: dict[str, Any]) -> dict[str, Any] | None:
+    pair_keys: set[tuple[int, int]] = set()
+    for step in run.get("steps", []):
+        if str(step.get("mode")) != "hysteresis-gap":
+            continue
+        low_idx = int(_to_number(step.get("rung_low_index"), -1) or -1)
+        high_idx = int(_to_number(step.get("rung_high_index"), -1) or -1)
+        if low_idx >= 0 and high_idx >= 0:
+            pair_keys.add((low_idx, high_idx))
+
+    if not pair_keys:
+        return None
+
+    pairs: list[dict[str, Any]] = []
+    for low_idx, high_idx in sorted(pair_keys):
+        down_steps = [
+            (index, step)
+            for index, step in enumerate(run.get("steps", []))
+            if str(step.get("mode")) == "hysteresis-gap"
+            and str(step.get("step_kind")) == "hysteresis-down-probe"
+            and int(_to_number(step.get("rung_low_index"), -1) or -1) == low_idx
+            and int(_to_number(step.get("rung_high_index"), -1) or -1) == high_idx
+        ]
+        up_steps = [
+            (index, step)
+            for index, step in enumerate(run.get("steps", []))
+            if str(step.get("mode")) == "hysteresis-gap"
+            and str(step.get("step_kind")) == "hysteresis-up-probe"
+            and int(_to_number(step.get("rung_low_index"), -1) or -1) == low_idx
+            and int(_to_number(step.get("rung_high_index"), -1) or -1) == high_idx
+        ]
+
+        down_latencies: list[float] = []
+        up_latencies: list[float] = []
+        for step_index, _ in down_steps:
+            switches = [
+                event
+                for event in run.get("switch_events", [])
+                if int(_to_number(event.get("step_index"), -1) or -1) == step_index
+                and _to_number(event.get("to_variant_mbps"), None) is not None
+                and _to_number(event.get("from_variant_mbps"), None) is not None
+                and float(event["to_variant_mbps"]) < float(event["from_variant_mbps"])
+            ]
+            if switches:
+                latency = _to_number(switches[0].get("time_from_limit_change_s"), None)
+                if latency is not None:
+                    down_latencies.append(float(latency))
+        for step_index, _ in up_steps:
+            switches = [
+                event
+                for event in run.get("switch_events", [])
+                if int(_to_number(event.get("step_index"), -1) or -1) == step_index
+                and _to_number(event.get("to_variant_mbps"), None) is not None
+                and _to_number(event.get("from_variant_mbps"), None) is not None
+                and float(event["to_variant_mbps"]) > float(event["from_variant_mbps"])
+            ]
+            if switches:
+                latency = _to_number(switches[0].get("time_from_limit_change_s"), None)
+                if latency is not None:
+                    up_latencies.append(float(latency))
+
+        down_med = _median(down_latencies) if down_latencies else None
+        up_med = _median(up_latencies) if up_latencies else None
+        gap = (up_med - down_med) if (down_med is not None and up_med is not None) else None
+        pairs.append(
+            {
+                "rung_pair": f"V{low_idx + 1}<->V{high_idx + 1}",
+                "alpha_down_median": down_med,
+                "alpha_up_median": up_med,
+                "hysteresis_gap": gap,
+                "downshift_events": len(down_latencies),
+                "upshift_events": len(up_latencies),
+            }
+        )
+
+    gaps = [float(_to_number(item.get("hysteresis_gap"), None)) for item in pairs if _to_number(item.get("hysteresis_gap"), None) is not None]
+    return {
+        "pairs": pairs,
+        "aggregate": {
+            "gap_median": _median(gaps) if gaps else None,
+        },
+    }
+
+
+def _build_emergency_downshift_summary(run: dict[str, Any]) -> dict[str, Any] | None:
+    rows: list[dict[str, Any]] = []
+    for cycle in sorted({int(_to_number(step.get("cycle_index"), 0) or 0) for step in run.get("steps", []) if str(step.get("mode")) == "emergency-downshift" and int(_to_number(step.get("cycle_index"), 0) or 0) > 0}):
+        high_step_idx = next((idx for idx, step in enumerate(run.get("steps", [])) if str(step.get("mode")) == "emergency-downshift" and str(step.get("step_kind")) == "emergency-high" and int(_to_number(step.get("cycle_index"), 0) or 0) == cycle), None)
+        low_step_idx = next((idx for idx, step in enumerate(run.get("steps", [])) if str(step.get("mode")) == "emergency-downshift" and str(step.get("step_kind")) == "emergency-low" and int(_to_number(step.get("cycle_index"), 0) or 0) == cycle), None)
+        if high_step_idx is None or low_step_idx is None:
+            continue
+
+        down_switches = [
+            event
+            for event in run.get("switch_events", [])
+            if int(_to_number(event.get("step_index"), -1) or -1) == low_step_idx
+            and _to_number(event.get("to_variant_mbps"), None) is not None
+            and _to_number(event.get("from_variant_mbps"), None) is not None
+            and float(event["to_variant_mbps"]) < float(event["from_variant_mbps"])
+        ]
+        up_switches = [
+            event
+            for event in run.get("switch_events", [])
+            if int(_to_number(event.get("step_index"), -1) or -1) == high_step_idx
+            and _to_number(event.get("to_variant_mbps"), None) is not None
+            and _to_number(event.get("from_variant_mbps"), None) is not None
+            and float(event["to_variant_mbps"]) > float(event["from_variant_mbps"])
+        ]
+        low_samples = [sample for sample in run.get("samples", []) if int(_to_number(sample.get("step_index"), -1) or -1) == low_step_idx]
+        stall_count_delta, stall_time_delta = _compute_stall_deltas(low_samples)
+        min_buffer = min([_to_number(s.get("buffer_depth_s"), None) for s in low_samples if _to_number(s.get("buffer_depth_s"), None) is not None], default=None)
+        rows.append(
+            {
+                "cycle": cycle,
+                "first_downswitch_latency_s": _to_number(down_switches[0].get("time_from_limit_change_s"), None) if down_switches else None,
+                "first_upswitch_latency_s": _to_number(up_switches[0].get("time_from_limit_change_s"), None) if up_switches else None,
+                "stall_count_delta": stall_count_delta,
+                "stall_time_delta_s": stall_time_delta,
+                "minimum_buffer_s": min_buffer,
+            }
+        )
+
+    if not rows:
+        return None
+    down = [float(_to_number(row.get("first_downswitch_latency_s"), None)) for row in rows if _to_number(row.get("first_downswitch_latency_s"), None) is not None]
+    up = [float(_to_number(row.get("first_upswitch_latency_s"), None)) for row in rows if _to_number(row.get("first_upswitch_latency_s"), None) is not None]
+    return {
+        "cycles": rows,
+        "aggregate": {
+            "downshift_first_switch_latency_median_s": _median(down) if down else None,
+            "upshift_first_switch_latency_median_s": _median(up) if up else None,
+        },
+    }
+
+
 def _throughput_mbps(snapshot: dict[str, Any]) -> float | None:
     for key in (
         "mbps_wire_active_6s",
@@ -334,6 +1158,121 @@ def _patch_session_fields(api_base: str, session_id: str, set_values: dict[str, 
         return True
     except Exception:
         return False
+
+
+def _is_truthy(value: Any) -> bool:
+    if value is True:
+        return True
+    if value is False or value is None:
+        return False
+    if isinstance(value, (int, float)):
+        return float(value) != 0
+    text = str(value).strip().lower()
+    return text in {"1", "true", "yes", "on"}
+
+
+def _request_remote_restart(
+    api_base: str,
+    session_id: str,
+    reason: str,
+    timeout_seconds: int = 30,
+    verbose: bool = False,
+) -> tuple[bool, str, str]:
+    request_id = str(uuid.uuid4())
+    requested_at = utc_now_iso()
+    payload = {
+        "player_restart_requested": True,
+        "player_restart_request_id": request_id,
+        "player_restart_request_reason": str(reason or "remote_command"),
+        "player_restart_request_requested_at": requested_at,
+        "player_restart_request_state": "requested",
+        "player_restart_request_handled_at": "",
+        "player_restart_request_handled_by": "",
+        "player_restart_request_error": "",
+    }
+    if not _patch_session_fields(api_base, session_id, payload):
+        return False, request_id, "patch_failed"
+
+    deadline = time.time() + max(5, int(timeout_seconds))
+    while time.time() < deadline:
+        snap = fetch_session_snapshot(api_base, session_id, verbose=False) or {}
+        observed_id = str(snap.get("player_restart_request_id") or "")
+        if observed_id != request_id:
+            time.sleep(0.5)
+            continue
+
+        requested = _is_truthy(snap.get("player_restart_requested"))
+        state = str(snap.get("player_restart_request_state") or "").strip().lower()
+        if (not requested) and state in {"completed", "succeeded", "done"}:
+            return True, request_id, "completed"
+        if state in {"failed", "error", "timed_out", "timeout"}:
+            error_msg = str(snap.get("player_restart_request_error") or "failed")
+            return False, request_id, error_msg
+        time.sleep(0.5)
+
+    if verbose:
+        print(
+            f"{utc_now_iso()} ABRCHAR restart_request_timeout session_id={session_id} request_id={request_id}",
+            flush=True,
+        )
+    return False, request_id, "timeout"
+
+
+def _confirm_cold_start_after_restart(
+    api_base: str,
+    session_id: str,
+    pre_restart_restarts: int,
+    pre_restart_position_s: float | None,
+    timeout_seconds: int = 20,
+) -> dict[str, Any]:
+    deadline = time.time() + max(5, int(timeout_seconds))
+    last_snapshot: dict[str, Any] | None = None
+
+    while time.time() < deadline:
+        snap = fetch_session_snapshot(api_base, session_id, verbose=False) or {}
+        last_snapshot = snap
+        restart_count = int(_to_number(snap.get("player_restarts"), 0) or 0)
+        position_s = _to_number(snap.get("player_metrics_position_s"), None)
+        buffer_depth_s = _to_number(snap.get("player_metrics_buffer_depth_s"), None)
+        video_start_time_s = _to_number(snap.get("player_metrics_video_start_time_s"), None)
+
+        restart_observed = restart_count > pre_restart_restarts
+        position_reset = (
+            pre_restart_position_s is not None
+            and position_s is not None
+            and float(position_s) <= max(3.0, float(pre_restart_position_s) * 0.25)
+        )
+        buffer_reset = buffer_depth_s is not None and float(buffer_depth_s) <= 1.0
+        startup_time_seen = video_start_time_s is not None and float(video_start_time_s) <= 3.0
+
+        if restart_observed and (position_reset or buffer_reset or startup_time_seen):
+            return {
+                "confirmed": True,
+                "restart_observed": restart_observed,
+                "position_reset": position_reset,
+                "buffer_reset": buffer_reset,
+                "startup_time_seen": startup_time_seen,
+                "player_restarts": restart_count,
+                "position_s": position_s,
+                "buffer_depth_s": buffer_depth_s,
+                "video_start_time_s": video_start_time_s,
+                "ts": utc_now_iso(),
+            }
+        time.sleep(0.5)
+
+    fallback = last_snapshot or {}
+    return {
+        "confirmed": False,
+        "restart_observed": int(_to_number(fallback.get("player_restarts"), 0) or 0) > pre_restart_restarts,
+        "position_reset": False,
+        "buffer_reset": False,
+        "startup_time_seen": _to_number(fallback.get("player_metrics_video_start_time_s"), None) is not None,
+        "player_restarts": int(_to_number(fallback.get("player_restarts"), 0) or 0),
+        "position_s": _to_number(fallback.get("player_metrics_position_s"), None),
+        "buffer_depth_s": _to_number(fallback.get("player_metrics_buffer_depth_s"), None),
+        "video_start_time_s": _to_number(fallback.get("player_metrics_video_start_time_s"), None),
+        "ts": utc_now_iso(),
+    }
 
 
 def _apply_rate(api_base: str, session_id: str, target_mbps: float) -> None:
@@ -880,6 +1819,110 @@ def _write_reports(run: dict[str, Any], output_prefix: str) -> tuple[str, str]:
             lines.extend(["", "## Smooth Switch Threshold Summary", ""])
             lines.extend(_render_smooth_switch_aggregate_table(aggregate_rows))
 
+    transient_summary = run.get("transient_shock_summary") if isinstance(run, dict) else None
+    if isinstance(transient_summary, dict):
+        severity_rows = transient_summary.get("severities") if isinstance(transient_summary.get("severities"), list) else []
+        if severity_rows:
+            lines.extend(["", "## Transient Shock Summary", ""])
+            lines.append("| Severity | Drop % | Downswitch Count | Downswitch Latency Median (s) | Recovery Upshift Latency Median (s) | Stall Count Δ Total | Stall Time Δ Total (s) | Unexpected Recovery Downswitches |")
+            lines.append("|:---|---:|---:|---:|---:|---:|---:|---:|")
+            for row in severity_rows:
+                lines.append(
+                    "| "
+                    f"{row.get('severity') or '—'} | "
+                    f"{_fmt3(row.get('drop_pct'))} | "
+                    f"{int(_to_number(row.get('downswitch_count'), 0) or 0)} | "
+                    f"{_fmt3(row.get('downswitch_latency_median_s'))} | "
+                    f"{_fmt3(row.get('recovery_upshift_latency_median_s'))} | "
+                    f"{_fmt3(row.get('stall_count_delta_total'))} | "
+                    f"{_fmt3(row.get('stall_time_delta_s_total'))} | "
+                    f"{int(_to_number(row.get('unexpected_downswitch_during_recovery'), 0) or 0)} |"
+                )
+
+    startup_summary = run.get("startup_caps_summary") if isinstance(run, dict) else None
+    if isinstance(startup_summary, dict):
+        scenario_rows = startup_summary.get("scenarios") if isinstance(startup_summary.get("scenarios"), list) else []
+        if scenario_rows:
+            lines.extend(["", "## Startup Caps Summary", ""])
+            lines.append("| Scenario | Cap Label | Target Variant (Mbps) | Next Variant (Mbps) | Cap Limit (Mbps) | Midpoint Media (Mbps) | Cold Start Confirmed | Video Start Time (s) | Startup Latency (s) | Reach Target (s) | Buffer Full Time (s) | Buffer Full Depth (s) | First Rendition (Mbps) | Variant Path | Min Buffer (s) | Stall Count Δ | Stall Time Δ (s) |")
+            lines.append("|---:|:---|---:|---:|---:|---:|:---:|---:|---:|---:|---:|---:|---:|:---|---:|---:|---:|")
+            for row in scenario_rows:
+                lines.append(
+                    "| "
+                    f"{int(_to_number(row.get('scenario'), 0) or 0)} | "
+                    f"{row.get('cap_label') or '—'} | "
+                    f"{_fmt3(row.get('target_variant_mbps'))} | "
+                    f"{_fmt3(row.get('next_variant_mbps'))} | "
+                    f"{_fmt3(row.get('cap_target_mbps'))} | "
+                    f"{_fmt3(row.get('cap_midpoint_media_mbps'))} | "
+                    f"{'yes' if row.get('cold_start_confirmed') else 'no'} | "
+                    f"{_fmt3(row.get('video_start_time_s'))} | "
+                    f"{_fmt3(row.get('startup_latency_s'))} | "
+                    f"{_fmt3(row.get('reached_target_latency_s'))} | "
+                    f"{_fmt3(row.get('buffer_full_time_s'))} | "
+                    f"{_fmt3(row.get('buffer_full_depth_s'))} | "
+                    f"{_fmt3(row.get('first_rendition_mbps'))} | "
+                    f"{(row.get('variant_path') or '—').replace('|', '/') } | "
+                    f"{_fmt3(row.get('minimum_buffer_s'))} | "
+                    f"{_fmt3(row.get('stall_count_delta'))} | "
+                    f"{_fmt3(row.get('stall_time_delta_s'))} |"
+                )
+
+    downshift_summary = run.get("downshift_severity_summary") if isinstance(run, dict) else None
+    if isinstance(downshift_summary, dict):
+        bucket_rows = downshift_summary.get("buckets") if isinstance(downshift_summary.get("buckets"), list) else []
+        if bucket_rows:
+            lines.extend(["", "## Downshift Severity Summary", ""])
+            lines.append("| Severity | Drop Range (%) | Samples | Min Latency (s) | Median Latency (s) | P95 Latency (s) | Max Latency (s) |")
+            lines.append("|:---|:---|---:|---:|---:|---:|---:|")
+            for row in bucket_rows:
+                lines.append(
+                    "| "
+                    f"{row.get('severity') or '—'} | "
+                    f"{row.get('drop_pct_range') or '—'} | "
+                    f"{int(_to_number(row.get('sample_count'), 0) or 0)} | "
+                    f"{_fmt3(row.get('min_latency_s'))} | "
+                    f"{_fmt3(row.get('median_latency_s'))} | "
+                    f"{_fmt3(row.get('p95_latency_s'))} | "
+                    f"{_fmt3(row.get('max_latency_s'))} |"
+                )
+
+    hysteresis_summary = run.get("hysteresis_gap_summary") if isinstance(run, dict) else None
+    if isinstance(hysteresis_summary, dict):
+        pair_rows = hysteresis_summary.get("pairs") if isinstance(hysteresis_summary.get("pairs"), list) else []
+        if pair_rows:
+            lines.extend(["", "## Hysteresis Gap Summary", ""])
+            lines.append("| Rung Pair | Alpha Down Median (s) | Alpha Up Median (s) | Gap (s) | Downshift Events | Upshift Events |")
+            lines.append("|:---|---:|---:|---:|---:|---:|")
+            for row in pair_rows:
+                lines.append(
+                    "| "
+                    f"{row.get('rung_pair') or '—'} | "
+                    f"{_fmt3(row.get('alpha_down_median'))} | "
+                    f"{_fmt3(row.get('alpha_up_median'))} | "
+                    f"{_fmt3(row.get('hysteresis_gap'))} | "
+                    f"{int(_to_number(row.get('downshift_events'), 0) or 0)} | "
+                    f"{int(_to_number(row.get('upshift_events'), 0) or 0)} |"
+                )
+
+    emergency_summary = run.get("emergency_downshift_summary") if isinstance(run, dict) else None
+    if isinstance(emergency_summary, dict):
+        cycle_rows = emergency_summary.get("cycles") if isinstance(emergency_summary.get("cycles"), list) else []
+        if cycle_rows:
+            lines.extend(["", "## Emergency Downshift Summary", ""])
+            lines.append("| Cycle | First Downshift Latency (s) | First Upshift Latency (s) | Stall Count Δ | Stall Time Δ (s) | Min Buffer (s) |")
+            lines.append("|---:|---:|---:|---:|---:|---:|")
+            for row in cycle_rows:
+                lines.append(
+                    "| "
+                    f"{int(_to_number(row.get('cycle'), 0) or 0)} | "
+                    f"{_fmt3(row.get('first_downswitch_latency_s'))} | "
+                    f"{_fmt3(row.get('first_upswitch_latency_s'))} | "
+                    f"{_fmt3(row.get('stall_count_delta'))} | "
+                    f"{_fmt3(row.get('stall_time_delta_s'))} | "
+                    f"{_fmt3(row.get('minimum_buffer_s'))} |"
+                )
+
     lines.extend(["", "## Artifacts", "", f"- JSON: {json_path}", f"- Markdown: {md_path}"])
 
     with open(md_path, "w", encoding="utf-8") as fh:
@@ -956,10 +1999,68 @@ def test_player_characterization_host_runner(
     test_mode = str(getattr(config, "abrchar_test_mode", "smooth"))
     repeat_count = max(1, int(getattr(config, "abrchar_repeat_count", 10)))
 
+    transient_config: dict[str, Any] | None = None
+    startup_caps_config: dict[str, Any] | None = None
+    downshift_severity_config: dict[str, Any] | None = None
+    hysteresis_gap_config: dict[str, Any] | None = None
+    emergency_downshift_config: dict[str, Any] | None = None
     if test_mode == "steps":
         schedule = _build_huge_steps_schedule(
             ladder_mbps=ladder_mbps,
             cycles=repeat_count,
+        )
+        expanded_steps = schedule
+    elif test_mode == "transient-shock":
+        schedule, transient_config = _build_transient_shock_schedule(
+            ladder_mbps=ladder_mbps,
+            overhead_pct=net_overhead_pct,
+            min_mbps=_to_number(getattr(config, "min_mbps", None), None),
+            max_mbps=_to_number(getattr(config, "max_mbps", None), None),
+        )
+        expanded_steps = []
+        for cycle_index in range(repeat_count):
+            for template_index, template_step in enumerate(schedule):
+                step_copy = dict(template_step)
+                step_copy["cycle_index"] = cycle_index + 1
+                step_copy["template_step_index"] = template_index
+                base_order = int(_to_number(step_copy.get("shock_order"), 0) or 0)
+                if base_order > 0:
+                    step_copy["shock_order"] = base_order + (cycle_index * 3)
+                expanded_steps.append(step_copy)
+    elif test_mode == "startup-caps":
+        schedule, startup_caps_config = _build_startup_caps_schedule(
+            ladder_mbps=ladder_mbps,
+            overhead_pct=net_overhead_pct,
+            min_mbps=_to_number(getattr(config, "min_mbps", None), None),
+            max_mbps=_to_number(getattr(config, "max_mbps", None), None),
+            repeat_count=repeat_count,
+        )
+        expanded_steps = schedule
+    elif test_mode == "downshift-severity":
+        schedule, downshift_severity_config = _build_downshift_severity_schedule(
+            ladder_mbps=ladder_mbps,
+            overhead_pct=net_overhead_pct,
+            min_mbps=_to_number(getattr(config, "min_mbps", None), None),
+            max_mbps=_to_number(getattr(config, "max_mbps", None), None),
+            repeat_count=repeat_count,
+        )
+        expanded_steps = schedule
+    elif test_mode == "hysteresis-gap":
+        schedule, hysteresis_gap_config = _build_hysteresis_gap_schedule(
+            ladder_mbps=ladder_mbps,
+            overhead_pct=net_overhead_pct,
+            min_mbps=_to_number(getattr(config, "min_mbps", None), None),
+            max_mbps=_to_number(getattr(config, "max_mbps", None), None),
+            repeat_count=repeat_count,
+        )
+        expanded_steps = schedule
+    elif test_mode == "emergency-downshift":
+        schedule, emergency_downshift_config = _build_emergency_downshift_schedule(
+            ladder_mbps=ladder_mbps,
+            overhead_pct=net_overhead_pct,
+            min_mbps=_to_number(getattr(config, "min_mbps", None), None),
+            max_mbps=_to_number(getattr(config, "max_mbps", None), None),
+            repeat_count=repeat_count,
         )
         expanded_steps = schedule
     else:
@@ -1001,7 +2102,8 @@ def test_player_characterization_host_runner(
                     flush=True,
                 )
         if test_mode != "steps":
-            print(f"{utc_now_iso()} ABRCHAR smooth_limit_template", flush=True)
+            template_label = "transient_shock_template" if test_mode == "transient-shock" else "smooth_limit_template"
+            print(f"{utc_now_iso()} ABRCHAR {template_label}", flush=True)
             for idx, step in enumerate(schedule, start=1):
                 print(
                     f"  T{idx:02d}: {step.get('direction')} {float(step.get('target_mbps', 0)):.3f} Mbps "
@@ -1026,19 +2128,74 @@ def test_player_characterization_host_runner(
         "loop_completion_events": [],
         "step_transition_summary": [],
         "recovery_events": [],
+        "cold_start_events": [],
         "warnings": [],
         "summary": {},
     }
+    if transient_config is not None:
+        run["transient_shock_config"] = transient_config
+    if startup_caps_config is not None:
+        run["startup_caps_config"] = startup_caps_config
+    if downshift_severity_config is not None:
+        run["downshift_severity_config"] = downshift_severity_config
+    if hysteresis_gap_config is not None:
+        run["hysteresis_gap_config"] = hysteresis_gap_config
+    if emergency_downshift_config is not None:
+        run["emergency_downshift_config"] = emergency_downshift_config
 
     huge_mode = test_mode == "steps"
+    track_loop_completion = test_mode in ("smooth", "steps")
     last_observed_player_restarts = int(_to_number(initial.get("player_restarts"), 0) or 0)
     last_variant = _timing_variant_mbps(initial)
     top_variant_mbps = float(ladder_mbps[-1])
     top_variant_tolerance = max(0.05, top_variant_mbps * 0.02)
     loop_completion_target_s = 30.0
     loop_state_by_cycle: dict[int, dict[str, Any]] = {}
+    last_observed_stall_count = _to_number(initial.get("player_metrics_stall_count"), 0.0) or 0.0
+    last_observed_stall_time_s = _to_number(initial.get("player_metrics_stall_time_s"), 0.0) or 0.0
+
+    def _emit_plot_log(kind: str, payload: dict[str, Any]) -> None:
+        if not bool(getattr(config, "abrchar_plot_logs", False)):
+            return
+        record = {
+            "kind": kind,
+            "run_number": run_number,
+            "run_name": run_name,
+            "test_mode": test_mode,
+            "session_id": session_id,
+            "payload": payload,
+        }
+        print(
+            f"{utc_now_iso()} ABRCHAR_PLOT {json.dumps(record, separators=(',', ':'), sort_keys=True)}",
+            flush=True,
+        )
+
+    def _emit_sample_plot_log(sample: dict[str, Any]) -> None:
+        _emit_plot_log(
+            "sample",
+            {
+                "ts": sample.get("ts"),
+                "step_index": sample.get("step_index"),
+                "cycle_index": sample.get("cycle_index"),
+                "step_kind": sample.get("step_kind"),
+                "direction": sample.get("direction"),
+                "target_mbps": sample.get("target_mbps"),
+                "throughput_mbps": sample.get("throughput_mbps"),
+                "player_variant_mbps": sample.get("variant_mbps"),
+                "server_variant_mbps": sample.get("server_variant_mbps"),
+                "timing_variant_mbps": sample.get("timing_variant_mbps"),
+                "network_bitrate_mbps": sample.get("network_bitrate_mbps"),
+                "buffer_depth_s": sample.get("buffer_depth_s"),
+                "frames_displayed": sample.get("frames_displayed"),
+                "stall_count": sample.get("stall_count"),
+                "stall_time_s": sample.get("stall_time_s"),
+                "player_restarts": sample.get("player_restarts"),
+            },
+        )
 
     def _observe_loop_completion(sample: dict[str, Any], step: dict[str, Any]) -> None:
+        if not track_loop_completion:
+            return
         cycle_index = int(_to_number(step.get("cycle_index"), 1) or 1)
         state = loop_state_by_cycle.setdefault(
             cycle_index,
@@ -1125,6 +2282,8 @@ def test_player_characterization_host_runner(
             "server_variant_mbps": server_variant,
             "timing_variant_mbps": timing_variant,
             "network_bitrate_mbps": _to_number(snap.get("player_metrics_network_bitrate_mbps"), None),
+            "video_start_time_s": _to_number(snap.get("player_metrics_video_start_time_s"), None),
+            "video_first_frame_time_s": _to_number(snap.get("player_metrics_video_first_frame_time_s"), None),
             "buffer_depth_s": _to_number(snap.get("player_metrics_buffer_depth_s"), None),
             "frames_displayed": _to_number(snap.get("player_metrics_frames_displayed"), None),
             "stall_count": _to_number(snap.get("player_metrics_stall_count"), None),
@@ -1147,12 +2306,44 @@ def test_player_characterization_host_runner(
             "delta": delta,
         }
         run["recovery_events"].append(event)
+        _emit_plot_log("event_restart", event)
         print(
             f"{utc_now_iso()} ABRCHAR recovery player_restart_observed "
             f"step_index={step_index + 1} delta={delta} total={current}",
             flush=True,
         )
         last_observed_player_restarts = current
+
+    def _observe_stall_events(sample: dict[str, Any], step_index: int) -> None:
+        nonlocal last_observed_stall_count, last_observed_stall_time_s
+        current_count = _to_number(sample.get("stall_count"), None)
+        current_time = _to_number(sample.get("stall_time_s"), None)
+        if current_count is not None and float(current_count) > float(last_observed_stall_count):
+            event = {
+                "ts": sample.get("ts"),
+                "type": "stall_count_increase",
+                "step_index": step_index,
+                "cycle_index": sample.get("cycle_index"),
+                "stall_count": float(current_count),
+                "stall_count_delta": round(float(current_count) - float(last_observed_stall_count), 3),
+                "stall_time_s": current_time,
+            }
+            _emit_plot_log("event_stall", event)
+        if current_time is not None and float(current_time) > float(last_observed_stall_time_s) + 0.01:
+            event = {
+                "ts": sample.get("ts"),
+                "type": "stall_time_increase",
+                "step_index": step_index,
+                "cycle_index": sample.get("cycle_index"),
+                "stall_time_s": float(current_time),
+                "stall_time_delta_s": round(float(current_time) - float(last_observed_stall_time_s), 3),
+                "stall_count": current_count,
+            }
+            _emit_plot_log("event_stall", event)
+        if current_count is not None:
+            last_observed_stall_count = float(current_count)
+        if current_time is not None:
+            last_observed_stall_time_s = float(current_time)
 
     try:
         for step_index, step in enumerate(run["steps"]):
@@ -1205,7 +2396,9 @@ def test_player_characterization_host_runner(
                     snap = fetch_session_snapshot(api_base, session_id, verbose=False) or {}
                     sample = _sample_from_snapshot(step_index, step, target, snap)
                     run["samples"].append(sample)
+                    _emit_sample_plot_log(sample)
                     _observe_player_restarts(sample, step_index)
+                    _observe_stall_events(sample, step_index)
                     step_samples.append(sample)
 
                     if step_start_frames is None and sample.get("frames_displayed") is not None:
@@ -1249,6 +2442,7 @@ def test_player_characterization_host_runner(
                             "variant_source": "server_rendition" if sample.get("server_variant_mbps") is not None else "player_variant",
                         }
                         run["switch_events"].append(event)
+                        _emit_plot_log("event_switch", event)
                         print(
                             f"{utc_now_iso()} ABRCHAR rendition_change cycle={step.get('cycle_index')} "
                             f"step_kind={step.get('step_kind')} from={float(last_variant):.3f} to={float(variant):.3f} "
@@ -1283,7 +2477,9 @@ def test_player_characterization_host_runner(
                     snap = fetch_session_snapshot(api_base, session_id, verbose=False) or {}
                     sample = _sample_from_snapshot(step_index, step, target, snap)
                     run["samples"].append(sample)
+                    _emit_sample_plot_log(sample)
                     _observe_player_restarts(sample, step_index)
+                    _observe_stall_events(sample, step_index)
                     step_samples.append(sample)
 
                     if step_start_frames is None and sample.get("frames_displayed") is not None:
@@ -1330,6 +2526,7 @@ def test_player_characterization_host_runner(
                             "variant_source": "server_rendition" if sample.get("server_variant_mbps") is not None else "player_variant",
                         }
                         run["switch_events"].append(event)
+                        _emit_plot_log("event_switch", event)
                         print(
                             f"{utc_now_iso()} ABRCHAR rendition_change cycle={step.get('cycle_index')} "
                             f"step_kind={step.get('step_kind')} from={float(last_variant):.3f} to={float(variant):.3f} "
@@ -1403,6 +2600,7 @@ def test_player_characterization_host_runner(
                     time.sleep(step_gap_seconds)
                 continue
 
+            step_apply_mono = time.time()
             _apply_rate(api_base, session_id, target)
             if config.verbose:
                 print(
@@ -1427,46 +2625,119 @@ def test_player_characterization_host_runner(
                     }
                 )
 
-            data_plane_validation = _validate_data_plane_rate_effect(
-                api_base,
-                session_id,
-                target,
-                sample_seconds=15,
-            )
-            if config.verbose:
+            if bool(step.get("restart_playback_before_step")):
+                restart_reason = str(step.get("step_kind") or "startup_caps_precondition")
+                pre_restart_snapshot = fetch_session_snapshot(api_base, session_id, verbose=False) or {}
+                pre_restart_restarts = int(_to_number(pre_restart_snapshot.get("player_restarts"), 0) or 0)
+                pre_restart_position_s = _to_number(pre_restart_snapshot.get("player_metrics_position_s"), None)
+                ok_restart, restart_request_id, restart_status = _request_remote_restart(
+                    api_base=api_base,
+                    session_id=session_id,
+                    reason=restart_reason,
+                    timeout_seconds=30,
+                    verbose=config.verbose,
+                )
+                if config.verbose:
+                    print(
+                        f"{utc_now_iso()} ABRCHAR remote_restart request_id={restart_request_id} "
+                        f"ok={ok_restart} status={restart_status} step_index={step_index + 1}",
+                        flush=True,
+                    )
+                if not ok_restart:
+                    run["warnings"].append(
+                        {
+                            "type": "remote_restart_failed",
+                            "step_index": step_index,
+                            "request_id": restart_request_id,
+                            "status": restart_status,
+                            "reason": restart_reason,
+                        }
+                    )
+                cold_start = _confirm_cold_start_after_restart(
+                    api_base=api_base,
+                    session_id=session_id,
+                    pre_restart_restarts=pre_restart_restarts,
+                    pre_restart_position_s=pre_restart_position_s,
+                    timeout_seconds=20,
+                )
+                cold_start_event = {
+                    "step_index": step_index,
+                    "cycle_index": step.get("cycle_index"),
+                    "request_id": restart_request_id,
+                    "confirmed": bool(cold_start.get("confirmed")),
+                    "player_restarts": cold_start.get("player_restarts"),
+                    "position_s": cold_start.get("position_s"),
+                    "buffer_depth_s": cold_start.get("buffer_depth_s"),
+                    "video_start_time_s": cold_start.get("video_start_time_s"),
+                    "ts": cold_start.get("ts") or utc_now_iso(),
+                }
+                run["cold_start_events"].append(cold_start_event)
+                if config.verbose:
+                    print(
+                        f"{utc_now_iso()} ABRCHAR cold_start_check step_index={step_index + 1} "
+                        f"confirmed={cold_start_event.get('confirmed')} "
+                        f"video_start_time_s={cold_start_event.get('video_start_time_s')} "
+                        f"position_s={cold_start_event.get('position_s')} buffer_depth_s={cold_start_event.get('buffer_depth_s')}",
+                        flush=True,
+                    )
+                if not bool(cold_start_event.get("confirmed")):
+                    run["warnings"].append(
+                        {
+                            "type": "cold_start_unconfirmed",
+                            "step_index": step_index,
+                            "request_id": restart_request_id,
+                            "details": cold_start,
+                        }
+                    )
+
+            skip_settle = bool(step.get("skip_settle") or step.get("force_hold_without_settle"))
+
+            if not skip_settle:
+                data_plane_validation = _validate_data_plane_rate_effect(
+                    api_base,
+                    session_id,
+                    target,
+                    sample_seconds=15,
+                )
+                if config.verbose:
+                    print(
+                        f"{utc_now_iso()} ABRCHAR dataplane_check target_mbps={target:.3f} "
+                        f"result={data_plane_validation}",
+                        flush=True,
+                    )
+                if data_plane_validation.get("checked") and data_plane_validation.get("suspicious"):
+                    run["warnings"].append(
+                        {
+                            "type": "dataplane_suspicious",
+                            "step_index": step_index,
+                            "target_mbps": target,
+                            "details": data_plane_validation,
+                        }
+                    )
+                if data_plane_validation.get("checked") and data_plane_validation.get("stagnant"):
+                    run["warnings"].append(
+                        {
+                            "type": "dataplane_stagnant",
+                            "step_index": step_index,
+                            "target_mbps": target,
+                            "details": data_plane_validation,
+                        }
+                    )
+            elif config.verbose:
                 print(
-                    f"{utc_now_iso()} ABRCHAR dataplane_check target_mbps={target:.3f} "
-                    f"result={data_plane_validation}",
+                    f"{utc_now_iso()} ABRCHAR settle_skipped step_index={step_index + 1} target_mbps={target:.3f}",
                     flush=True,
-                )
-            if data_plane_validation.get("checked") and data_plane_validation.get("suspicious"):
-                run["warnings"].append(
-                    {
-                        "type": "dataplane_suspicious",
-                        "step_index": step_index,
-                        "target_mbps": target,
-                        "details": data_plane_validation,
-                    }
-                )
-            if data_plane_validation.get("checked") and data_plane_validation.get("stagnant"):
-                run["warnings"].append(
-                    {
-                        "type": "dataplane_stagnant",
-                        "step_index": step_index,
-                        "target_mbps": target,
-                        "details": data_plane_validation,
-                    }
                 )
 
             settle_deadline = time.time() + max(5, int(config.abrchar_settle_timeout))
             settle_needed = max(2, int(round(max(0.05, float(config.abrchar_settle_tolerance)) * 10)))
             settle_hits = 0
-            settled = False
+            settled = skip_settle
             last_settle_log_at = 0.0
             step_start_stall_count: float | None = None
             step_start_stall_time_s: float | None = None
 
-            while time.time() < settle_deadline:
+            while (not skip_settle) and time.time() < settle_deadline:
                 snap = fetch_session_snapshot(api_base, session_id, verbose=False) or {}
                 throughput = _throughput_mbps(snap)
                 variant = _timing_variant_mbps(snap)
@@ -1474,7 +2745,9 @@ def test_player_characterization_host_runner(
                 stall_time = _to_number(snap.get("player_metrics_stall_time_s"), None)
                 sample = _sample_from_snapshot(step_index, step, target, snap)
                 run["samples"].append(sample)
+                _emit_sample_plot_log(sample)
                 _observe_player_restarts(sample, step_index)
+                _observe_stall_events(sample, step_index)
                 _observe_loop_completion(sample, step)
                 if step_start_stall_count is None and sample.get("stall_count") is not None:
                     step_start_stall_count = float(sample["stall_count"])
@@ -1494,10 +2767,15 @@ def test_player_characterization_host_runner(
                         {
                             "ts": sample["ts"],
                             "step_index": step_index,
+                            "step_kind": step.get("step_kind"),
+                            "cycle_index": step.get("cycle_index"),
+                            "shock_severity": step.get("shock_severity"),
+                            "shock_order": step.get("shock_order"),
                             "from_variant_mbps": last_variant,
                             "to_variant_mbps": variant,
                             "target_mbps": target,
                             "throughput_mbps": throughput,
+                            "time_from_limit_change_s": round(max(0.0, time.time() - step_apply_mono), 3),
                             "stall_count_delta": stall_count_delta,
                             "stall_time_delta_s": stall_time_delta_s,
                         }
@@ -1551,8 +2829,41 @@ def test_player_characterization_host_runner(
                 stall_time = _to_number(snap.get("player_metrics_stall_time_s"), None)
                 sample = _sample_from_snapshot(step_index, step, target, snap)
                 run["samples"].append(sample)
+                _emit_sample_plot_log(sample)
                 _observe_player_restarts(sample, step_index)
+                _observe_stall_events(sample, step_index)
                 _observe_loop_completion(sample, step)
+                if step_start_stall_count is None and sample.get("stall_count") is not None:
+                    step_start_stall_count = float(sample["stall_count"])
+                if step_start_stall_time_s is None and sample.get("stall_time_s") is not None:
+                    step_start_stall_time_s = float(sample["stall_time_s"])
+                if variant is not None and last_variant is not None and abs(variant - last_variant) >= 0.05:
+                    current_stall_count = _to_number(sample.get("stall_count"), None)
+                    current_stall_time_s = _to_number(sample.get("stall_time_s"), None)
+                    stall_count_delta = None
+                    stall_time_delta_s = None
+                    if current_stall_count is not None and step_start_stall_count is not None:
+                        stall_count_delta = round(max(0.0, float(current_stall_count) - float(step_start_stall_count)), 3)
+                    if current_stall_time_s is not None and step_start_stall_time_s is not None:
+                        stall_time_delta_s = round(max(0.0, float(current_stall_time_s) - float(step_start_stall_time_s)), 3)
+                    run["switch_events"].append(
+                        {
+                            "ts": sample["ts"],
+                            "step_index": step_index,
+                            "step_kind": step.get("step_kind"),
+                            "cycle_index": step.get("cycle_index"),
+                            "shock_severity": step.get("shock_severity"),
+                            "shock_order": step.get("shock_order"),
+                            "from_variant_mbps": last_variant,
+                            "to_variant_mbps": variant,
+                            "target_mbps": target,
+                            "throughput_mbps": throughput,
+                            "time_from_limit_change_s": round(max(0.0, time.time() - step_apply_mono), 3),
+                            "stall_count_delta": stall_count_delta,
+                            "stall_time_delta_s": stall_time_delta_s,
+                        }
+                    )
+                    _emit_plot_log("event_switch", run["switch_events"][-1])
                 if variant is not None:
                     last_variant = variant
                 now = time.time()
@@ -1639,9 +2950,20 @@ def test_player_characterization_host_runner(
     run["summary"]["transition_latency_median_s"] = (
         round(_median(transition_latencies), 3) if transition_latencies else None
     )
-    run["summary"]["loop_completion_count"] = len(run.get("loop_completion_events", []))
-    if not huge_mode:
+    if track_loop_completion:
+        run["summary"]["loop_completion_count"] = len(run.get("loop_completion_events", []))
+    if test_mode == "smooth":
         run["smooth_switch_summary"] = _build_smooth_switch_summary(run)
+    if test_mode == "transient-shock":
+        run["transient_shock_summary"] = _build_transient_shock_summary(run)
+    if test_mode == "startup-caps":
+        run["startup_caps_summary"] = _build_startup_caps_summary(run)
+    if test_mode == "downshift-severity":
+        run["downshift_severity_summary"] = _build_downshift_severity_summary(run)
+    if test_mode == "hysteresis-gap":
+        run["hysteresis_gap_summary"] = _build_hysteresis_gap_summary(run)
+    if test_mode == "emergency-downshift":
+        run["emergency_downshift_summary"] = _build_emergency_downshift_summary(run)
 
     if huge_mode:
         down_rows = [
@@ -1688,25 +3010,26 @@ def test_player_characterization_host_runner(
         run["summary"]["huge_down_timing_p95_s"] = round(_percentile(down_timings, 95), 3) if down_timings else None
         run["summary"]["huge_up_timing_p95_s"] = round(_percentile(up_timings, 95), 3) if up_timings else None
 
-    completed_cycles = {
-        int(_to_number(item.get("cycle_index"), 0) or 0)
-        for item in run.get("loop_completion_events", [])
-        if int(_to_number(item.get("cycle_index"), 0) or 0) > 0
-    }
-    missing_cycles = [cycle for cycle in range(1, repeat_count + 1) if cycle not in completed_cycles]
-    if missing_cycles:
-        run["warnings"].append(
-            {
-                "type": "loop_completion_missing",
-                "missing_cycles": missing_cycles,
-                "criterion": "top_variant_stable_30s",
-            }
-        )
-        print(
-            f"{utc_now_iso()} ABRCHAR loop_incomplete missing_cycles={missing_cycles} "
-            "criterion=top_variant_stable_30s",
-            flush=True,
-        )
+    if track_loop_completion:
+        completed_cycles = {
+            int(_to_number(item.get("cycle_index"), 0) or 0)
+            for item in run.get("loop_completion_events", [])
+            if int(_to_number(item.get("cycle_index"), 0) or 0) > 0
+        }
+        missing_cycles = [cycle for cycle in range(1, repeat_count + 1) if cycle not in completed_cycles]
+        if missing_cycles:
+            run["warnings"].append(
+                {
+                    "type": "loop_completion_missing",
+                    "missing_cycles": missing_cycles,
+                    "criterion": "top_variant_stable_30s",
+                }
+            )
+            print(
+                f"{utc_now_iso()} ABRCHAR loop_incomplete missing_cycles={missing_cycles} "
+                "criterion=top_variant_stable_30s",
+                flush=True,
+            )
 
     artifact_prefix = str(
         tmp_path / f"abrchar_run{run_number:04d}_{_slugify(run_name)}_{session_id}_{int(time.time())}"
@@ -1746,6 +3069,147 @@ def test_player_characterization_host_runner(
         if aggregate_rows:
             print(f"{utc_now_iso()} ABRCHAR smooth_switch_threshold_summary", flush=True)
             for table_line in _render_smooth_switch_aggregate_plain(aggregate_rows):
+                print(table_line, flush=True)
+
+    transient_summary = run.get("transient_shock_summary") if isinstance(run, dict) else None
+    if isinstance(transient_summary, dict):
+        severity_rows = transient_summary.get("severities") if isinstance(transient_summary.get("severities"), list) else []
+        if severity_rows:
+            print(f"{utc_now_iso()} ABRCHAR transient_shock_summary", flush=True)
+            headers = [
+                "Severity",
+                "Drop %",
+                "Downswitches",
+                "Down Lat Med (s)",
+                "Recovery Up Med (s)",
+                "Stall Δ Count",
+                "Stall Δ Time (s)",
+                "Unexpected Recovery Down",
+            ]
+            rows = [
+                [
+                    str(row.get("severity") or "—"),
+                    _fmt3(row.get("drop_pct")),
+                    str(int(_to_number(row.get("downswitch_count"), 0) or 0)),
+                    _fmt3(row.get("downswitch_latency_median_s")),
+                    _fmt3(row.get("recovery_upshift_latency_median_s")),
+                    _fmt3(row.get("stall_count_delta_total")),
+                    _fmt3(row.get("stall_time_delta_s_total")),
+                    str(int(_to_number(row.get("unexpected_downswitch_during_recovery"), 0) or 0)),
+                ]
+                for row in severity_rows
+            ]
+            for table_line in _render_plain_table(headers, rows):
+                print(table_line, flush=True)
+
+    startup_summary = run.get("startup_caps_summary") if isinstance(run, dict) else None
+    if isinstance(startup_summary, dict):
+        scenario_rows = startup_summary.get("scenarios") if isinstance(startup_summary.get("scenarios"), list) else []
+        if scenario_rows:
+            print(f"{utc_now_iso()} ABRCHAR startup_caps_summary", flush=True)
+            headers = [
+                "Scenario",
+                "Cap",
+                "Target Var",
+                "Next Var",
+                "Cap Limit",
+                "Midpoint",
+                "ColdStart",
+                "VideoStart",
+                "Startup(s)",
+                "ReachTarget(s)",
+                "BufferFull(s)",
+                "BufferDepth(s)",
+                "First Rend",
+                "Variant Path",
+                "Min Buffer",
+                "Stall Δ Cnt",
+                "Stall Δ Time",
+            ]
+            rows = [
+                [
+                    str(int(_to_number(row.get("scenario"), 0) or 0)),
+                    str(row.get("cap_label") or "—"),
+                    _fmt3(row.get("target_variant_mbps")),
+                    _fmt3(row.get("next_variant_mbps")),
+                    _fmt3(row.get("cap_target_mbps")),
+                    _fmt3(row.get("cap_midpoint_media_mbps")),
+                    "yes" if row.get("cold_start_confirmed") else "no",
+                    _fmt3(row.get("video_start_time_s")),
+                    _fmt3(row.get("startup_latency_s")),
+                    _fmt3(row.get("reached_target_latency_s")),
+                    _fmt3(row.get("buffer_full_time_s")),
+                    _fmt3(row.get("buffer_full_depth_s")),
+                    _fmt3(row.get("first_rendition_mbps")),
+                    str(row.get("variant_path") or "—"),
+                    _fmt3(row.get("minimum_buffer_s")),
+                    _fmt3(row.get("stall_count_delta")),
+                    _fmt3(row.get("stall_time_delta_s")),
+                ]
+                for row in scenario_rows
+            ]
+            for table_line in _render_plain_table(headers, rows):
+                print(table_line, flush=True)
+
+    downshift_summary = run.get("downshift_severity_summary") if isinstance(run, dict) else None
+    if isinstance(downshift_summary, dict):
+        bucket_rows = downshift_summary.get("buckets") if isinstance(downshift_summary.get("buckets"), list) else []
+        if bucket_rows:
+            print(f"{utc_now_iso()} ABRCHAR downshift_severity_summary", flush=True)
+            headers = ["Severity", "Drop Range", "Samples", "Min", "Median", "P95", "Max"]
+            rows = [
+                [
+                    str(row.get("severity") or "—"),
+                    str(row.get("drop_pct_range") or "—"),
+                    str(int(_to_number(row.get("sample_count"), 0) or 0)),
+                    _fmt3(row.get("min_latency_s")),
+                    _fmt3(row.get("median_latency_s")),
+                    _fmt3(row.get("p95_latency_s")),
+                    _fmt3(row.get("max_latency_s")),
+                ]
+                for row in bucket_rows
+            ]
+            for table_line in _render_plain_table(headers, rows):
+                print(table_line, flush=True)
+
+    hysteresis_summary = run.get("hysteresis_gap_summary") if isinstance(run, dict) else None
+    if isinstance(hysteresis_summary, dict):
+        pair_rows = hysteresis_summary.get("pairs") if isinstance(hysteresis_summary.get("pairs"), list) else []
+        if pair_rows:
+            print(f"{utc_now_iso()} ABRCHAR hysteresis_gap_summary", flush=True)
+            headers = ["Rung Pair", "Alpha Down", "Alpha Up", "Gap", "Down Ev", "Up Ev"]
+            rows = [
+                [
+                    str(row.get("rung_pair") or "—"),
+                    _fmt3(row.get("alpha_down_median")),
+                    _fmt3(row.get("alpha_up_median")),
+                    _fmt3(row.get("hysteresis_gap")),
+                    str(int(_to_number(row.get("downshift_events"), 0) or 0)),
+                    str(int(_to_number(row.get("upshift_events"), 0) or 0)),
+                ]
+                for row in pair_rows
+            ]
+            for table_line in _render_plain_table(headers, rows):
+                print(table_line, flush=True)
+
+    emergency_summary = run.get("emergency_downshift_summary") if isinstance(run, dict) else None
+    if isinstance(emergency_summary, dict):
+        cycle_rows = emergency_summary.get("cycles") if isinstance(emergency_summary.get("cycles"), list) else []
+        if cycle_rows:
+            print(f"{utc_now_iso()} ABRCHAR emergency_downshift_summary", flush=True)
+            headers = ["Cycle", "Downshift(s)", "Upshift(s)", "Stall Δ Cnt", "Stall Δ Time", "Min Buffer"]
+            rows = [
+                [
+                    str(int(_to_number(row.get("cycle"), 0) or 0)),
+                    _fmt3(row.get("first_downswitch_latency_s")),
+                    _fmt3(row.get("first_upswitch_latency_s")),
+                    _fmt3(row.get("stall_count_delta")),
+                    _fmt3(row.get("stall_time_delta_s")),
+                    _fmt3(row.get("minimum_buffer_s")),
+                ]
+                for row in cycle_rows
+            ]
+            for table_line in _render_plain_table(headers, rows):
                 print(table_line, flush=True)
 
     if config.verbose:
