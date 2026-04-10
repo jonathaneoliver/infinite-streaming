@@ -759,6 +759,298 @@ def _build_emergency_downshift_schedule(
     }
 
 
+def _pick_sparse_ladder(ladder_mbps: list[float], sparse_count: int) -> list[float]:
+    if not ladder_mbps:
+        return []
+    count = max(1, int(sparse_count))
+    if count >= len(ladder_mbps):
+        return [float(v) for v in ladder_mbps]
+    if count == 1:
+        return [float(ladder_mbps[0])]
+    out: list[float] = []
+    for i in range(count):
+        pos = i * (len(ladder_mbps) - 1) / (count - 1)
+        idx = int(round(pos))
+        out.append(float(ladder_mbps[idx]))
+    return _unique_sorted_positive(out)
+
+
+def _build_throughput_accuracy_schedule(
+    ladder_mbps: list[float],
+    overhead_pct: float,
+    min_mbps: float | None,
+    max_mbps: float | None,
+    repeat_count: int,
+    max_limit_mbps: float,
+    sparse_variants: int,
+) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
+    if not ladder_mbps:
+        return [], None
+
+    overhead_ratio = max(0.0, min(0.25, _to_number(overhead_pct, 10.0) / 100.0))
+    wire_multiplier = 1.0 / max(0.01, (1.0 - overhead_ratio))
+    floor = max(0.1, float(min_mbps) if min_mbps is not None else (ladder_mbps[0] * wire_multiplier))
+    configured_cap = _to_number(max_limit_mbps, 100.0)
+    ceiling_default = ladder_mbps[-1] * wire_multiplier * 4.0
+    ceiling = max(floor, configured_cap if configured_cap is not None and configured_cap > 0 else ceiling_default)
+    if max_mbps is not None and max_mbps > 0:
+        ceiling = min(ceiling, float(max_mbps))
+
+    sparse_ladder = _pick_sparse_ladder(ladder_mbps, sparse_variants)
+
+    # Wide sweep up to max limit for sensitivity/accuracy characterization.
+    raw_targets = [0.5, 1, 2, 3, 5, 8, 10, 15, 20, 30, 40, 60, 80, 100]
+    targets = _unique_sorted_positive([
+        max(floor, min(ceiling, float(v)))
+        for v in raw_targets
+        if float(v) <= ceiling + 1e-9
+    ])
+    if not targets:
+        targets = [round(floor, 3)]
+
+    repeats = max(1, int(repeat_count))
+    steps: list[dict[str, Any]] = []
+    for cycle_index in range(repeats):
+        for idx, target in enumerate(targets):
+            prev = targets[idx - 1] if idx > 0 else targets[0]
+            direction = "up" if target >= prev else "down"
+            steps.append(
+                {
+                    "target_mbps": round(float(target), 3),
+                    "hold_seconds": 20,
+                    "direction": direction,
+                    "mode": "throughput-accuracy",
+                    "step_kind": "throughput-accuracy-sweep",
+                    "cycle_index": cycle_index + 1,
+                    "sparse_ladder_mbps": sparse_ladder,
+                }
+            )
+
+    return steps, {
+        "sparse_ladder_mbps": sparse_ladder,
+        "target_limits_mbps": targets,
+        "repeat_count": repeats,
+        "max_limit_mbps": round(float(ceiling), 3),
+    }
+
+
+def _build_throughput_calcs_schedule(
+    ladder_mbps: list[float],
+    overhead_pct: float,
+    min_mbps: float | None,
+    max_mbps: float | None,
+    repeat_count: int,
+    max_limit_mbps: float,
+    sparse_variants: int,
+) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
+    if not ladder_mbps:
+        return [], None
+
+    overhead_ratio = max(0.0, min(0.25, _to_number(overhead_pct, 10.0) / 100.0))
+    wire_multiplier = 1.0 / max(0.01, (1.0 - overhead_ratio))
+    floor = max(0.1, float(min_mbps) if min_mbps is not None else (ladder_mbps[0] * wire_multiplier))
+    configured_cap = _to_number(max_limit_mbps, 100.0)
+    ceiling_default = ladder_mbps[-1] * wire_multiplier * 4.0
+    ceiling = max(floor, configured_cap if configured_cap is not None and configured_cap > 0 else ceiling_default)
+    if max_mbps is not None and max_mbps > 0:
+        ceiling = min(ceiling, float(max_mbps))
+
+    sparse_ladder = _pick_sparse_ladder(ladder_mbps, sparse_variants)
+
+    # Accuracy sweep: 20% above each ladder rung + fixed 10Mbps jumps up to cap.
+    per_variant_targets = [float(v) * 1.2 for v in ladder_mbps]
+    fixed_targets = [float(v) for v in range(10, int(min(100.0, ceiling)) + 1, 10)]
+    targets = _unique_sorted_positive([
+        max(floor, min(ceiling, value))
+        for value in (per_variant_targets + fixed_targets)
+    ])
+    if not targets:
+        targets = [round(floor, 3)]
+
+    # Response-time jumps for up/down throughput estimate adaptation.
+    top_jump = max(10.0, min(ceiling, 100.0))
+    low_jump = max(floor, min(ceiling, 10.0))
+    mid_jump = max(floor, min(ceiling, 50.0))
+    jump_sequence = [top_jump, low_jump, mid_jump, low_jump, top_jump]
+
+    def make_phase_steps(phase: str, cycle_index: int) -> list[dict[str, Any]]:
+        phase_steps: list[dict[str, Any]] = []
+        prev_target = targets[0]
+        for target in targets:
+            direction = "up" if target >= prev_target else "down"
+            phase_steps.append(
+                {
+                    "target_mbps": round(float(target), 3),
+                    "hold_seconds": 16,
+                    "direction": direction,
+                    "mode": "throughput-calcs",
+                    "step_kind": "throughput-calcs-accuracy",
+                    "phase": phase,
+                    "cycle_index": cycle_index,
+                }
+            )
+            prev_target = target
+        prev_jump = jump_sequence[0]
+        for target in jump_sequence:
+            direction = "up" if target >= prev_jump else "down"
+            phase_steps.append(
+                {
+                    "target_mbps": round(float(target), 3),
+                    "hold_seconds": 20,
+                    "direction": direction,
+                    "mode": "throughput-calcs",
+                    "step_kind": "throughput-calcs-jump",
+                    "phase": phase,
+                    "cycle_index": cycle_index,
+                    "skip_settle": True,
+                    "force_hold_without_settle": True,
+                }
+            )
+            prev_jump = target
+        return phase_steps
+
+    repeats = max(1, int(repeat_count))
+    steps: list[dict[str, Any]] = []
+    for cycle_index in range(1, repeats + 1):
+        steps.extend(make_phase_steps("all_variants", cycle_index))
+        steps.extend(make_phase_steps("sparse_variants", cycle_index))
+
+    return steps, {
+        "target_limits_mbps": targets,
+        "jump_sequence_mbps": jump_sequence,
+        "repeat_count": repeats,
+        "max_limit_mbps": round(float(ceiling), 3),
+        "sparse_variant_count": int(max(1, sparse_variants)),
+        "sparse_ladder_mbps": sparse_ladder,
+        "phases": ["all_variants", "sparse_variants"],
+    }
+
+
+def _build_throughput_accuracy_summary(run: dict[str, Any]) -> dict[str, Any] | None:
+    steps = run.get("steps", []) if isinstance(run, dict) else []
+    samples = run.get("samples", []) if isinstance(run, dict) else []
+    if not isinstance(steps, list) or not isinstance(samples, list) or not steps:
+        return None
+
+    rows: list[dict[str, Any]] = []
+    for step_index, step in enumerate(steps):
+        if str(step.get("mode")) != "throughput-accuracy":
+            continue
+        step_samples = [
+            sample
+            for sample in samples
+            if int(_to_number(sample.get("step_index"), -1) or -1) == step_index
+        ]
+        if not step_samples:
+            continue
+        target = _to_number(step.get("target_mbps"), None)
+        if target is None or target <= 0:
+            continue
+
+        player_vals = [
+            float(v)
+            for v in (_to_number(sample.get("network_bitrate_mbps"), None) for sample in step_samples)
+            if v is not None and v >= 0
+        ]
+        server_vals = [
+            float(v)
+            for v in (_to_number(sample.get("throughput_mbps"), None) for sample in step_samples)
+            if v is not None and v >= 0
+        ]
+        variant_vals = [
+            float(v)
+            for v in (_to_number(sample.get("timing_variant_mbps"), None) for sample in step_samples)
+            if v is not None and v > 0
+        ]
+
+        player_med = _median(player_vals) if player_vals else None
+        server_med = _median(server_vals) if server_vals else None
+        variant_med = _median(variant_vals) if variant_vals else None
+
+        player_vs_limit_pct = abs(player_med - target) / target * 100.0 if player_med is not None else None
+        player_vs_server_pct = abs(player_med - server_med) / server_med * 100.0 if player_med is not None and server_med not in (None, 0) else None
+        variant_vs_limit_pct = abs(variant_med - target) / target * 100.0 if variant_med is not None else None
+        headroom_ratio = target / variant_med if variant_med not in (None, 0) else None
+
+        rows.append(
+            {
+                "step_index": step_index,
+                "cycle_index": int(_to_number(step.get("cycle_index"), 0) or 0),
+                "phase": str(step.get("phase") or "default"),
+                "target_mbps": float(target),
+                "player_median_mbps": player_med,
+                "server_median_mbps": server_med,
+                "variant_median_mbps": variant_med,
+                "player_vs_limit_pct": player_vs_limit_pct,
+                "player_vs_server_pct": player_vs_server_pct,
+                "variant_vs_limit_pct": variant_vs_limit_pct,
+                "headroom_ratio": headroom_ratio,
+            }
+        )
+
+    if not rows:
+        return None
+
+    def bucket_for(headroom_ratio: float | None) -> str:
+        if headroom_ratio is None:
+            return "unknown"
+        if headroom_ratio <= 1.5:
+            return "<=1.5x"
+        if headroom_ratio <= 3.0:
+            return "1.5x-3x"
+        if headroom_ratio <= 10.0:
+            return "3x-10x"
+        return ">10x"
+
+    bucketed: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        key = bucket_for(_to_number(row.get("headroom_ratio"), None))
+        bucketed.setdefault(key, []).append(row)
+
+    phase_rows: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        phase_rows.setdefault(str(row.get("phase") or "default"), []).append(row)
+
+    bucket_summary: list[dict[str, Any]] = []
+    for key in ("<=1.5x", "1.5x-3x", "3x-10x", ">10x", "unknown"):
+        items = bucketed.get(key, [])
+        if not items:
+            continue
+        pvl = [float(v) for v in (_to_number(item.get("player_vs_limit_pct"), None) for item in items) if v is not None]
+        pvs = [float(v) for v in (_to_number(item.get("player_vs_server_pct"), None) for item in items) if v is not None]
+        vvl = [float(v) for v in (_to_number(item.get("variant_vs_limit_pct"), None) for item in items) if v is not None]
+        bucket_summary.append(
+            {
+                "headroom_bucket": key,
+                "steps": len(items),
+                "player_vs_limit_mape_pct": _mean(pvl),
+                "player_vs_server_mape_pct": _mean(pvs),
+                "variant_vs_limit_mape_pct": _mean(vvl),
+            }
+        )
+
+    phase_summary: list[dict[str, Any]] = []
+    for phase, items in sorted(phase_rows.items(), key=lambda item: item[0]):
+        pvl = [float(v) for v in (_to_number(item.get("player_vs_limit_pct"), None) for item in items) if v is not None]
+        pvs = [float(v) for v in (_to_number(item.get("player_vs_server_pct"), None) for item in items) if v is not None]
+        vvl = [float(v) for v in (_to_number(item.get("variant_vs_limit_pct"), None) for item in items) if v is not None]
+        phase_summary.append(
+            {
+                "phase": phase,
+                "steps": len(items),
+                "player_vs_limit_mape_pct": _mean(pvl),
+                "player_vs_server_mape_pct": _mean(pvs),
+                "variant_vs_limit_mape_pct": _mean(vvl),
+            }
+        )
+
+    return {
+        "rows": rows,
+        "headroom_buckets": bucket_summary,
+        "phase_summary": phase_summary,
+    }
+
+
 def _build_startup_caps_summary(run: dict[str, Any]) -> dict[str, Any] | None:
     scenarios: list[dict[str, Any]] = []
     for index, step in enumerate(run.get("steps", [])):
@@ -1063,12 +1355,114 @@ def _build_emergency_downshift_summary(run: dict[str, Any]) -> dict[str, Any] | 
     }
 
 
+def _direction_from_step(step: dict[str, Any]) -> str | None:
+    label = str(step.get("direction") or "").strip().lower()
+    if "down" in label:
+        return "down"
+    if "up" in label:
+        return "up"
+    return None
+
+
+def _build_accuracy_summary(run: dict[str, Any]) -> dict[str, Any] | None:
+    samples = run.get("samples", []) if isinstance(run, dict) else []
+    steps = run.get("steps", []) if isinstance(run, dict) else []
+    if not isinstance(samples, list) or not isinstance(steps, list) or not samples:
+        return None
+
+    def build_pair_metrics(source_key: str, target_key: str) -> dict[str, Any]:
+        abs_pct_errors: list[float] = []
+        abs_errors: list[float] = []
+        signed_errors: list[float] = []
+        for sample in samples:
+            source = _to_number(sample.get(source_key), None)
+            target = _to_number(sample.get(target_key), None)
+            if source is None or target is None:
+                continue
+            if target <= 0:
+                continue
+            err = float(source) - float(target)
+            signed_errors.append(err)
+            abs_errors.append(abs(err))
+            abs_pct_errors.append(abs(err) / float(target) * 100.0)
+        return {
+            "sample_count": len(abs_pct_errors),
+            "mape_pct": _mean(abs_pct_errors),
+            "mae_mbps": _mean(abs_errors),
+            "bias_mbps": _mean(signed_errors),
+        }
+
+    def build_settle_metrics(tolerance_ratio: float) -> dict[str, Any]:
+        up_latencies: list[float] = []
+        down_latencies: list[float] = []
+        for step_index, step in enumerate(steps):
+            direction = _direction_from_step(step)
+            if direction is None:
+                continue
+            target = _to_number(step.get("target_mbps"), None)
+            if target is None or target <= 0:
+                continue
+            step_samples = [
+                sample
+                for sample in samples
+                if int(_to_number(sample.get("step_index"), -1) or -1) == step_index
+            ]
+            if not step_samples:
+                continue
+
+            base_ts = _parse_iso_z(step_samples[0].get("ts"))
+            latency: float | None = None
+            for sample in step_samples:
+                player_estimate = _to_number(sample.get("network_bitrate_mbps"), None)
+                if player_estimate is None:
+                    continue
+                if abs(float(player_estimate) - float(target)) > (float(target) * tolerance_ratio):
+                    continue
+                sample_ts = _parse_iso_z(sample.get("ts"))
+                if base_ts is not None and sample_ts is not None:
+                    latency = max(0.0, (sample_ts - base_ts).total_seconds())
+                else:
+                    latency = 0.0
+                break
+
+            if latency is None:
+                continue
+            if direction == "up":
+                up_latencies.append(float(latency))
+            elif direction == "down":
+                down_latencies.append(float(latency))
+
+        return {
+            "up": {
+                "observed": len(up_latencies),
+                "median_s": _median(up_latencies),
+                "p95_s": _percentile(up_latencies, 95) if up_latencies else None,
+            },
+            "down": {
+                "observed": len(down_latencies),
+                "median_s": _median(down_latencies),
+                "p95_s": _percentile(down_latencies, 95) if down_latencies else None,
+            },
+        }
+
+    summary = {
+        "player_vs_limit": build_pair_metrics("network_bitrate_mbps", "target_mbps"),
+        "player_vs_server": build_pair_metrics("network_bitrate_mbps", "throughput_mbps"),
+        "player_settle_to_limit": {
+            "pct10": build_settle_metrics(0.10),
+            "pct20": build_settle_metrics(0.20),
+        },
+    }
+    return summary
+
+
 def _throughput_mbps(snapshot: dict[str, Any]) -> float | None:
     for key in (
-        "mbps_wire_active_6s",
+        "mbps_wire_active_network",
         "mbps_wire_throughput",
         "mbps_wire_sustained_6s",
         "mbps_wire_sustained_1s",
+        "mbps_wire_active_6s",
         "measured_mbps",
     ):
         value = _to_number(snapshot.get(key), None)
@@ -1079,12 +1473,15 @@ def _throughput_mbps(snapshot: dict[str, Any]) -> float | None:
 
 def _wire_throughput_mbps(snapshot: dict[str, Any]) -> float | None:
     return _to_number(
-        snapshot.get("mbps_wire_active_6s"),
+        snapshot.get("mbps_wire_active_network"),
         _to_number(
             snapshot.get("mbps_wire_throughput"),
             _to_number(
                 snapshot.get("mbps_wire_sustained_6s"),
-                _to_number(snapshot.get("mbps_wire_sustained_1s"), _to_number(snapshot.get("measured_mbps"), None)),
+                _to_number(
+                    snapshot.get("mbps_wire_sustained_1s"),
+                    _to_number(snapshot.get("mbps_wire_active_6s"), _to_number(snapshot.get("measured_mbps"), None)),
+                ),
             ),
         ),
     )
@@ -1158,6 +1555,113 @@ def _patch_session_fields(api_base: str, session_id: str, set_values: dict[str, 
         return True
     except Exception:
         return False
+
+
+def _pick_sparse_variant_urls(variants: list[dict[str, Any]], sparse_count: int) -> list[str]:
+    rows: list[dict[str, Any]] = []
+    for item in variants:
+        if not isinstance(item, dict):
+            continue
+        url = str(item.get("url") or "").strip()
+        bandwidth = _to_number(item.get("bandwidth"), None)
+        if not url or bandwidth is None or bandwidth <= 0:
+            continue
+        rows.append({"url": url, "bandwidth": float(bandwidth)})
+    if not rows:
+        return []
+    rows.sort(key=lambda row: row["bandwidth"])
+
+    count = max(1, int(sparse_count))
+    if count >= len(rows):
+        return [str(row["url"]) for row in rows]
+    if count == 1:
+        return [str(rows[0]["url"])]
+
+    chosen: list[str] = []
+    seen: set[str] = set()
+    for i in range(count):
+        pos = i * (len(rows) - 1) / (count - 1)
+        idx = int(round(pos))
+        url = str(rows[idx]["url"])
+        if url in seen:
+            continue
+        seen.add(url)
+        chosen.append(url)
+    return chosen
+
+
+def _apply_content_variant_mode(
+    api_base: str,
+    session_id: str,
+    mode: str,
+    sparse_count: int,
+    variants: list[dict[str, Any]],
+    verbose: bool,
+) -> dict[str, Any]:
+    selected_mode = str(mode or "off").strip().lower()
+    if selected_mode == "off":
+        return {"applied": False, "mode": "off", "allowed_variants": []}
+
+    if selected_mode == "all":
+        allowed_variants: list[str] = []
+    elif selected_mode == "sparse":
+        allowed_variants = _pick_sparse_variant_urls(variants, sparse_count)
+        if not allowed_variants:
+            return {
+                "applied": False,
+                "mode": "sparse",
+                "allowed_variants": [],
+                "error": "no_variant_urls_available",
+            }
+    else:
+        return {
+            "applied": False,
+            "mode": selected_mode,
+            "allowed_variants": [],
+            "error": "invalid_mode",
+        }
+
+    ok_patch = _patch_session_fields(
+        api_base,
+        session_id,
+        {"content_allowed_variants": allowed_variants},
+    )
+    if not ok_patch:
+        return {
+            "applied": False,
+            "mode": selected_mode,
+            "allowed_variants": allowed_variants,
+            "error": "patch_failed",
+        }
+
+    pre_snapshot = fetch_session_snapshot(api_base, session_id, verbose=False) or {}
+    pre_restarts = int(_to_number(pre_snapshot.get("player_restarts"), 0) or 0)
+    pre_position_s = _to_number(pre_snapshot.get("player_metrics_position_s"), None)
+    ok_restart, restart_request_id, restart_status = _request_remote_restart(
+        api_base=api_base,
+        session_id=session_id,
+        reason=f"content_variant_mode_{selected_mode}",
+        timeout_seconds=30,
+        verbose=verbose,
+    )
+    cold_start = _confirm_cold_start_after_restart(
+        api_base=api_base,
+        session_id=session_id,
+        pre_restart_restarts=pre_restarts,
+        pre_restart_position_s=pre_position_s,
+        timeout_seconds=20,
+    )
+
+    return {
+        "applied": True,
+        "mode": selected_mode,
+        "allowed_variants": allowed_variants,
+        "restart_requested": True,
+        "restart_ok": bool(ok_restart),
+        "restart_request_id": restart_request_id,
+        "restart_status": restart_status,
+        "cold_start_confirmed": bool(cold_start.get("confirmed")),
+    }
 
 
 def _is_truthy(value: Any) -> bool:
@@ -1923,6 +2427,76 @@ def _write_reports(run: dict[str, Any], output_prefix: str) -> tuple[str, str]:
                     f"{_fmt3(row.get('minimum_buffer_s'))} |"
                 )
 
+    throughput_accuracy = run.get("throughput_accuracy_summary") if isinstance(run, dict) else None
+    if isinstance(throughput_accuracy, dict):
+        phase_rows = throughput_accuracy.get("phase_summary") if isinstance(throughput_accuracy.get("phase_summary"), list) else []
+        if phase_rows:
+            lines.extend(["", "## Throughput Accuracy By Phase", ""])
+            lines.append("| Phase | Steps | Player vs Limit MAPE % | Player vs Server MAPE % | Variant vs Limit MAPE % |")
+            lines.append("|:---|---:|---:|---:|---:|")
+            for row in phase_rows:
+                lines.append(
+                    "| "
+                    f"{row.get('phase') or '—'} | "
+                    f"{int(_to_number(row.get('steps'), 0) or 0)} | "
+                    f"{_fmt3(row.get('player_vs_limit_mape_pct'))} | "
+                    f"{_fmt3(row.get('player_vs_server_mape_pct'))} | "
+                    f"{_fmt3(row.get('variant_vs_limit_mape_pct'))} |"
+                )
+        bucket_rows = throughput_accuracy.get("headroom_buckets") if isinstance(throughput_accuracy.get("headroom_buckets"), list) else []
+        if bucket_rows:
+            lines.extend(["", "## Throughput Accuracy By Headroom", ""])
+            lines.append("| Headroom Bucket (limit/variant) | Steps | Player vs Limit MAPE % | Player vs Server MAPE % | Variant vs Limit MAPE % |")
+            lines.append("|:---|---:|---:|---:|---:|")
+            for row in bucket_rows:
+                lines.append(
+                    "| "
+                    f"{row.get('headroom_bucket') or '—'} | "
+                    f"{int(_to_number(row.get('steps'), 0) or 0)} | "
+                    f"{_fmt3(row.get('player_vs_limit_mape_pct'))} | "
+                    f"{_fmt3(row.get('player_vs_server_mape_pct'))} | "
+                    f"{_fmt3(row.get('variant_vs_limit_mape_pct'))} |"
+                )
+
+    accuracy_summary = run.get("accuracy_summary") if isinstance(run, dict) else None
+    if isinstance(accuracy_summary, dict):
+        pvl = accuracy_summary.get("player_vs_limit") if isinstance(accuracy_summary.get("player_vs_limit"), dict) else {}
+        pvs = accuracy_summary.get("player_vs_server") if isinstance(accuracy_summary.get("player_vs_server"), dict) else {}
+        settle = accuracy_summary.get("player_settle_to_limit") if isinstance(accuracy_summary.get("player_settle_to_limit"), dict) else {}
+        lines.extend(["", "## Throughput Accuracy Summary", ""])
+        lines.append("| Comparison | Samples | MAPE % | MAE (Mbps) | Bias (Mbps) |")
+        lines.append("|:---|---:|---:|---:|---:|")
+        lines.append(
+            "| Player vs Limit | "
+            f"{int(_to_number(pvl.get('sample_count'), 0) or 0)} | "
+            f"{_fmt3(pvl.get('mape_pct'))} | "
+            f"{_fmt3(pvl.get('mae_mbps'))} | "
+            f"{_fmt3(pvl.get('bias_mbps'))} |"
+        )
+        lines.append(
+            "| Player vs Server Throughput | "
+            f"{int(_to_number(pvs.get('sample_count'), 0) or 0)} | "
+            f"{_fmt3(pvs.get('mape_pct'))} | "
+            f"{_fmt3(pvs.get('mae_mbps'))} | "
+            f"{_fmt3(pvs.get('bias_mbps'))} |"
+        )
+
+        lines.extend(["", "## Player Settle Latency To Limit", ""])
+        lines.append("| Band | Direction | Observed Steps | Median (s) | P95 (s) |")
+        lines.append("|:---|:---|---:|---:|---:|")
+        for band_key, band_label in (("pct10", "±10%"), ("pct20", "±20%")):
+            band = settle.get(band_key) if isinstance(settle.get(band_key), dict) else {}
+            for direction in ("down", "up"):
+                row = band.get(direction) if isinstance(band.get(direction), dict) else {}
+                lines.append(
+                    "| "
+                    f"{band_label} | "
+                    f"{direction} | "
+                    f"{int(_to_number(row.get('observed'), 0) or 0)} | "
+                    f"{_fmt3(row.get('median_s'))} | "
+                    f"{_fmt3(row.get('p95_s'))} |"
+                )
+
     lines.extend(["", "## Artifacts", "", f"- JSON: {json_path}", f"- Markdown: {md_path}"])
 
     with open(md_path, "w", encoding="utf-8") as fh:
@@ -2004,6 +2578,8 @@ def test_player_characterization_host_runner(
     downshift_severity_config: dict[str, Any] | None = None
     hysteresis_gap_config: dict[str, Any] | None = None
     emergency_downshift_config: dict[str, Any] | None = None
+    throughput_accuracy_config: dict[str, Any] | None = None
+    throughput_calcs_config: dict[str, Any] | None = None
     if test_mode == "steps":
         schedule = _build_huge_steps_schedule(
             ladder_mbps=ladder_mbps,
@@ -2061,6 +2637,28 @@ def test_player_characterization_host_runner(
             min_mbps=_to_number(getattr(config, "min_mbps", None), None),
             max_mbps=_to_number(getattr(config, "max_mbps", None), None),
             repeat_count=repeat_count,
+        )
+        expanded_steps = schedule
+    elif test_mode == "throughput-accuracy":
+        schedule, throughput_accuracy_config = _build_throughput_accuracy_schedule(
+            ladder_mbps=ladder_mbps,
+            overhead_pct=net_overhead_pct,
+            min_mbps=_to_number(getattr(config, "min_mbps", None), None),
+            max_mbps=_to_number(getattr(config, "max_mbps", None), None),
+            repeat_count=repeat_count,
+            max_limit_mbps=_to_number(getattr(config, "abrchar_accuracy_max_limit_mbps", 100.0), 100.0) or 100.0,
+            sparse_variants=int(getattr(config, "abrchar_accuracy_sparse_variants", 2) or 2),
+        )
+        expanded_steps = schedule
+    elif test_mode == "throughput-calcs":
+        schedule, throughput_calcs_config = _build_throughput_calcs_schedule(
+            ladder_mbps=ladder_mbps,
+            overhead_pct=net_overhead_pct,
+            min_mbps=_to_number(getattr(config, "min_mbps", None), None),
+            max_mbps=_to_number(getattr(config, "max_mbps", None), None),
+            repeat_count=repeat_count,
+            max_limit_mbps=_to_number(getattr(config, "abrchar_accuracy_max_limit_mbps", 100.0), 100.0) or 100.0,
+            sparse_variants=int(getattr(config, "abrchar_content_sparse_variants", 2) or 2),
         )
         expanded_steps = schedule
     else:
@@ -2142,6 +2740,11 @@ def test_player_characterization_host_runner(
         run["hysteresis_gap_config"] = hysteresis_gap_config
     if emergency_downshift_config is not None:
         run["emergency_downshift_config"] = emergency_downshift_config
+    if throughput_accuracy_config is not None:
+        run["throughput_accuracy_config"] = throughput_accuracy_config
+    if throughput_calcs_config is not None:
+        run["throughput_calcs_config"] = throughput_calcs_config
+    run["content_variant_mode_events"] = []
 
     huge_mode = test_mode == "steps"
     track_loop_completion = test_mode in ("smooth", "steps")
@@ -2185,6 +2788,10 @@ def test_player_characterization_host_runner(
                 "server_variant_mbps": sample.get("server_variant_mbps"),
                 "timing_variant_mbps": sample.get("timing_variant_mbps"),
                 "network_bitrate_mbps": sample.get("network_bitrate_mbps"),
+                "mbps_wire_active_1s": sample.get("mbps_wire_active_1s"),
+                "mbps_wire_active_short_ewma": sample.get("mbps_wire_active_short_ewma"),
+                "mbps_wire_active_long_ewma": sample.get("mbps_wire_active_long_ewma"),
+                "mbps_wire_active_network": sample.get("mbps_wire_active_network"),
                 "buffer_depth_s": sample.get("buffer_depth_s"),
                 "frames_displayed": sample.get("frames_displayed"),
                 "stall_count": sample.get("stall_count"),
@@ -2282,6 +2889,10 @@ def test_player_characterization_host_runner(
             "server_variant_mbps": server_variant,
             "timing_variant_mbps": timing_variant,
             "network_bitrate_mbps": _to_number(snap.get("player_metrics_network_bitrate_mbps"), None),
+            "mbps_wire_active_1s": _to_number(snap.get("mbps_wire_active_1s"), None),
+            "mbps_wire_active_short_ewma": _to_number(snap.get("mbps_wire_active_short_ewma"), None),
+            "mbps_wire_active_long_ewma": _to_number(snap.get("mbps_wire_active_long_ewma"), None),
+            "mbps_wire_active_network": _to_number(snap.get("mbps_wire_active_network"), None),
             "video_start_time_s": _to_number(snap.get("player_metrics_video_start_time_s"), None),
             "video_first_frame_time_s": _to_number(snap.get("player_metrics_video_first_frame_time_s"), None),
             "buffer_depth_s": _to_number(snap.get("player_metrics_buffer_depth_s"), None),
@@ -2346,13 +2957,57 @@ def test_player_characterization_host_runner(
             last_observed_stall_time_s = float(current_time)
 
     try:
+        active_phase: str | None = None
         for step_index, step in enumerate(run["steps"]):
+            step_phase = str(step.get("phase") or "")
+            if test_mode == "throughput-calcs" and step_phase and step_phase != active_phase:
+                latest_snapshot = fetch_session_snapshot(api_base, session_id, verbose=False) or {}
+                latest_variants = latest_snapshot.get("manifest_variants") if isinstance(latest_snapshot.get("manifest_variants"), list) else []
+                phase_mode = "all" if step_phase == "all_variants" else "sparse"
+                event = _apply_content_variant_mode(
+                    api_base=api_base,
+                    session_id=session_id,
+                    mode=phase_mode,
+                    sparse_count=int(getattr(config, "abrchar_content_sparse_variants", 2) or 2),
+                    variants=latest_variants,
+                    verbose=bool(config.verbose),
+                )
+                event["phase"] = step_phase
+                event["step_index"] = step_index
+                run["content_variant_mode_events"].append(event)
+                if config.verbose:
+                    print(
+                        f"{utc_now_iso()} ABRCHAR content_variant_mode phase={step_phase} mode={phase_mode} "
+                        f"applied={event.get('applied')} restart_ok={event.get('restart_ok')} "
+                        f"allowed_count={len(event.get('allowed_variants', []))}",
+                        flush=True,
+                    )
+                active_phase = step_phase
+            elif test_mode != "throughput-calcs" and active_phase is None:
+                selected_mode = str(getattr(config, "abrchar_content_variant_mode", "off") or "off").strip().lower()
+                if selected_mode in ("all", "sparse"):
+                    latest_snapshot = fetch_session_snapshot(api_base, session_id, verbose=False) or {}
+                    latest_variants = latest_snapshot.get("manifest_variants") if isinstance(latest_snapshot.get("manifest_variants"), list) else []
+                    event = _apply_content_variant_mode(
+                        api_base=api_base,
+                        session_id=session_id,
+                        mode=selected_mode,
+                        sparse_count=int(getattr(config, "abrchar_content_sparse_variants", 2) or 2),
+                        variants=latest_variants,
+                        verbose=bool(config.verbose),
+                    )
+                    event["phase"] = "pre_run"
+                    event["step_index"] = step_index
+                    run["content_variant_mode_events"].append(event)
+                active_phase = "ready"
+
             target = float(step["target_mbps"])
             if config.verbose:
                 print(
                     f"{utc_now_iso()} ABRCHAR step_begin index={step_index + 1}/{len(run['steps'])} "
                     f"cycle={step.get('cycle_index', 1)}/{repeat_count} "
                     f"direction={step.get('direction')} step_kind={step.get('step_kind', 'smooth')} "
+                    f"phase={step.get('phase', '-') } "
                     f"target_mbps={target:.3f}",
                     flush=True,
                 )
@@ -2690,7 +3345,12 @@ def test_player_characterization_host_runner(
                         }
                     )
 
-            skip_settle = bool(step.get("skip_settle") or step.get("force_hold_without_settle"))
+            step_kind = str(step.get("step_kind") or "").strip().lower()
+            adaptive_accuracy_dwell = step_kind in {"throughput-calcs-accuracy", "throughput-accuracy-sweep"}
+            accuracy_ratio = 0.10
+            accuracy_min_seconds = 15.0
+            accuracy_max_seconds = 120.0
+            skip_settle = bool(step.get("skip_settle") or step.get("force_hold_without_settle") or adaptive_accuracy_dwell)
 
             if not skip_settle:
                 data_plane_validation = _validate_data_plane_rate_effect(
@@ -2725,7 +3385,8 @@ def test_player_characterization_host_runner(
                     )
             elif config.verbose:
                 print(
-                    f"{utc_now_iso()} ABRCHAR settle_skipped step_index={step_index + 1} target_mbps={target:.3f}",
+                    f"{utc_now_iso()} ABRCHAR settle_skipped step_index={step_index + 1} "
+                    f"target_mbps={target:.3f} adaptive_dwell={adaptive_accuracy_dwell}",
                     flush=True,
                 )
 
@@ -2798,7 +3459,11 @@ def test_player_characterization_host_runner(
                     print(
                         f"{utc_now_iso()} ABRCHAR settle_wait step_index={step_index + 1} "
                         f"target_mbps={target:.3f} throughput_mbps={throughput} variant_mbps={variant} "
-                        f"buffer_depth_s={sample.get('buffer_depth_s')} stall_count={stall_count}",
+                        f"buffer_depth_s={sample.get('buffer_depth_s')} stall_count={stall_count} "
+                        f"mbps_wire_active_1s={sample.get('mbps_wire_active_1s')} "
+                        f"mbps_wire_active_short_ewma={sample.get('mbps_wire_active_short_ewma')} "
+                        f"mbps_wire_active_long_ewma={sample.get('mbps_wire_active_long_ewma')} "
+                        f"mbps_wire_active_network={sample.get('mbps_wire_active_network')}",
                         flush=True,
                     )
                     last_settle_log_at = now
@@ -2821,7 +3486,12 @@ def test_player_characterization_host_runner(
 
             hold_seconds = max(1, int(step.get("hold_seconds", smooth_step_seconds)))
             last_hold_log_at = 0.0
-            for _ in range(hold_seconds):
+            adaptive_started_at = time.time()
+            adaptive_matched = False
+            hold_iteration = 0
+            while True:
+                if not adaptive_accuracy_dwell and hold_iteration >= hold_seconds:
+                    break
                 snap = fetch_session_snapshot(api_base, session_id, verbose=False) or {}
                 throughput = _throughput_mbps(snap)
                 variant = _timing_variant_mbps(snap)
@@ -2866,15 +3536,47 @@ def test_player_characterization_host_runner(
                     _emit_plot_log("event_switch", run["switch_events"][-1])
                 if variant is not None:
                     last_variant = variant
+
+                player_estimate_mbps = _to_number(sample.get("network_bitrate_mbps"), None)
+                if adaptive_accuracy_dwell and player_estimate_mbps is not None and target > 0:
+                    if abs(float(player_estimate_mbps) - float(target)) <= (float(target) * accuracy_ratio):
+                        adaptive_matched = True
+
+                if adaptive_accuracy_dwell:
+                    elapsed = max(0.0, time.time() - adaptive_started_at)
+                    if adaptive_matched and elapsed >= accuracy_min_seconds:
+                        break
+                    if elapsed >= accuracy_max_seconds:
+                        if not adaptive_matched:
+                            run["warnings"].append(
+                                {
+                                    "type": "throughput_accuracy_threshold_timeout",
+                                    "step_index": step_index,
+                                    "step_kind": step.get("step_kind"),
+                                    "target_mbps": target,
+                                    "signal": "network_bitrate_mbps",
+                                    "threshold_ratio": accuracy_ratio,
+                                    "min_seconds": accuracy_min_seconds,
+                                    "max_seconds": accuracy_max_seconds,
+                                }
+                            )
+                        break
+
                 now = time.time()
-                if config.verbose and (now - last_hold_log_at) >= 5.0:
+                if config.verbose and (now - last_hold_log_at) >= 1.0:
                     print(
                         f"{utc_now_iso()} ABRCHAR hold_monitor step_index={step_index + 1} "
                         f"target_mbps={target:.3f} throughput_mbps={throughput} variant_mbps={variant} "
-                        f"stall_count={stall_count} stall_time_s={stall_time}",
+                        f"network_bitrate_mbps={sample.get('network_bitrate_mbps')} "
+                        f"stall_count={stall_count} stall_time_s={stall_time} "
+                        f"mbps_wire_active_1s={sample.get('mbps_wire_active_1s')} "
+                        f"mbps_wire_active_short_ewma={sample.get('mbps_wire_active_short_ewma')} "
+                        f"mbps_wire_active_long_ewma={sample.get('mbps_wire_active_long_ewma')} "
+                        f"mbps_wire_active_network={sample.get('mbps_wire_active_network')}",
                         flush=True,
                     )
                     last_hold_log_at = now
+                hold_iteration += 1
                 time.sleep(1)
 
             if (not huge_mode) and step_gap_seconds > 0 and step_index < (len(run["steps"]) - 1):
@@ -2964,6 +3666,12 @@ def test_player_characterization_host_runner(
         run["hysteresis_gap_summary"] = _build_hysteresis_gap_summary(run)
     if test_mode == "emergency-downshift":
         run["emergency_downshift_summary"] = _build_emergency_downshift_summary(run)
+    if test_mode == "throughput-accuracy":
+        run["throughput_accuracy_summary"] = _build_throughput_accuracy_summary(run)
+    if test_mode == "throughput-calcs":
+        run["throughput_accuracy_summary"] = _build_throughput_accuracy_summary(run)
+
+    run["accuracy_summary"] = _build_accuracy_summary(run)
 
     if huge_mode:
         down_rows = [
@@ -3211,6 +3919,87 @@ def test_player_characterization_host_runner(
             ]
             for table_line in _render_plain_table(headers, rows):
                 print(table_line, flush=True)
+
+    throughput_accuracy = run.get("throughput_accuracy_summary") if isinstance(run, dict) else None
+    if isinstance(throughput_accuracy, dict):
+        phase_rows = throughput_accuracy.get("phase_summary") if isinstance(throughput_accuracy.get("phase_summary"), list) else []
+        if phase_rows:
+            print(f"{utc_now_iso()} ABRCHAR throughput_phase_accuracy_summary", flush=True)
+            headers = ["Phase", "Steps", "Player vs Limit MAPE %", "Player vs Server MAPE %", "Variant vs Limit MAPE %"]
+            rows = [
+                [
+                    str(row.get("phase") or "—"),
+                    str(int(_to_number(row.get("steps"), 0) or 0)),
+                    _fmt3(row.get("player_vs_limit_mape_pct")),
+                    _fmt3(row.get("player_vs_server_mape_pct")),
+                    _fmt3(row.get("variant_vs_limit_mape_pct")),
+                ]
+                for row in phase_rows
+            ]
+            for table_line in _render_plain_table(headers, rows):
+                print(table_line, flush=True)
+        bucket_rows = throughput_accuracy.get("headroom_buckets") if isinstance(throughput_accuracy.get("headroom_buckets"), list) else []
+        if bucket_rows:
+            print(f"{utc_now_iso()} ABRCHAR throughput_headroom_accuracy_summary", flush=True)
+            headers = ["Headroom Bucket", "Steps", "Player vs Limit MAPE %", "Player vs Server MAPE %", "Variant vs Limit MAPE %"]
+            rows = [
+                [
+                    str(row.get("headroom_bucket") or "—"),
+                    str(int(_to_number(row.get("steps"), 0) or 0)),
+                    _fmt3(row.get("player_vs_limit_mape_pct")),
+                    _fmt3(row.get("player_vs_server_mape_pct")),
+                    _fmt3(row.get("variant_vs_limit_mape_pct")),
+                ]
+                for row in bucket_rows
+            ]
+            for table_line in _render_plain_table(headers, rows):
+                print(table_line, flush=True)
+
+    accuracy_summary = run.get("accuracy_summary") if isinstance(run, dict) else None
+    if isinstance(accuracy_summary, dict):
+        pvl = accuracy_summary.get("player_vs_limit") if isinstance(accuracy_summary.get("player_vs_limit"), dict) else {}
+        pvs = accuracy_summary.get("player_vs_server") if isinstance(accuracy_summary.get("player_vs_server"), dict) else {}
+        settle = accuracy_summary.get("player_settle_to_limit") if isinstance(accuracy_summary.get("player_settle_to_limit"), dict) else {}
+
+        print(f"{utc_now_iso()} ABRCHAR throughput_accuracy_summary", flush=True)
+        headers = ["Comparison", "Samples", "MAPE %", "MAE (Mbps)", "Bias (Mbps)"]
+        rows = [
+            [
+                "Player vs Limit",
+                str(int(_to_number(pvl.get("sample_count"), 0) or 0)),
+                _fmt3(pvl.get("mape_pct")),
+                _fmt3(pvl.get("mae_mbps")),
+                _fmt3(pvl.get("bias_mbps")),
+            ],
+            [
+                "Player vs Server Throughput",
+                str(int(_to_number(pvs.get("sample_count"), 0) or 0)),
+                _fmt3(pvs.get("mape_pct")),
+                _fmt3(pvs.get("mae_mbps")),
+                _fmt3(pvs.get("bias_mbps")),
+            ],
+        ]
+        for table_line in _render_plain_table(headers, rows):
+            print(table_line, flush=True)
+
+        print(f"{utc_now_iso()} ABRCHAR settle_latency_summary", flush=True)
+        headers = ["Band", "Direction", "Observed", "Median (s)", "P95 (s)"]
+        rows = []
+        for band_key, band_label in (("pct10", "±10%"), ("pct20", "±20%")):
+            band = settle.get(band_key) if isinstance(settle.get(band_key), dict) else {}
+            for direction in ("down", "up"):
+                row = band.get(direction) if isinstance(band.get(direction), dict) else {}
+                rows.append(
+                    [
+                        band_label,
+                        direction,
+                        str(int(_to_number(row.get("observed"), 0) or 0)),
+                        _fmt3(row.get("median_s")),
+                        _fmt3(row.get("p95_s")),
+                    ]
+                )
+        for table_line in _render_plain_table(headers, rows):
+            print(table_line, flush=True)
 
     if config.verbose:
         print(f"{utc_now_iso()} ABRCHAR JSON report: {json_path}", flush=True)

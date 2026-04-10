@@ -5,6 +5,7 @@ import subprocess
 import time
 import uuid
 import webbrowser
+import re
 from typing import Optional
 
 import pytest
@@ -50,6 +51,11 @@ def pytest_addoption(parser):
     parser.addoption("--expect-corrupted", type=int, default=1, help="Min corrupted segment count")
     parser.addoption("--url", help="Specific stream URL to test")
     parser.addoption(
+        "--content-name",
+        default="INSANE_FPV_NEW_p200_h264",
+        help="Preferred content name for auto-discovery (exact match, fallback to first compatible content)",
+    )
+    parser.addoption(
         "--follow-redirects",
         action="store_true",
         default=True,
@@ -81,8 +87,40 @@ def pytest_addoption(parser):
             "downshift-severity",
             "hysteresis-gap",
             "emergency-downshift",
+            "throughput-accuracy",
+            "throughput-calcs",
         ],
         help="Characterization schedule mode",
+    )
+    parser.addoption(
+        "--abrchar-accuracy-max-limit-mbps",
+        type=float,
+        default=100.0,
+        help="throughput-accuracy mode: maximum shaping limit to test (Mbps)",
+    )
+    parser.addoption(
+        "--abrchar-accuracy-sparse-variants",
+        type=int,
+        default=2,
+        help="throughput-accuracy mode: emulate sparse ladder using this many representative variants (default: 2)",
+    )
+    parser.addoption(
+        "--abrchar-content-variant-mode",
+        default="off",
+        choices=["off", "all", "sparse"],
+        help="Pre-test content tab variant filtering mode: off (no change), all (clear filter), sparse (select representative subset)",
+    )
+    parser.addoption(
+        "--abrchar-content-sparse-variants",
+        type=int,
+        default=2,
+        help="When --abrchar-content-variant-mode=sparse, how many variants to allow",
+    )
+    parser.addoption(
+        "--abrchar-stream-profile",
+        default="6s",
+        choices=["ll", "2s", "6s"],
+        help="HLS stream profile to use for auto-discovery: ll (master.m3u8), 2s (master_2s.m3u8), or 6s (master_6s.m3u8)",
     )
     parser.addoption(
         "--net-overhead",
@@ -124,6 +162,18 @@ def pytest_addoption(parser):
         default=2.5,
         help="Seconds to wait after opening browser before polling /api/sessions",
     )
+    parser.addoption(
+        "--abrchar-live-offset-seconds",
+        type=float,
+        default=0.0,
+        help="When opening testing-session.html, seek this many seconds behind live edge (e.g. 30)",
+    )
+    parser.addoption(
+        "--abrchar-safari-native",
+        action="store_true",
+        default=False,
+        help="Launch testing-session.html in Safari and force player=native",
+    )
     parser.addoption("--abrchar-session-id", default="", help="Attach ABR characterization to an existing session_id")
     parser.addoption("--abrchar-player-id", default="", help="Attach ABR characterization to an existing player_id (e.g. iPad simulator app)")
     parser.addoption(
@@ -161,6 +211,7 @@ def config(request):
         'expect_throttle': request.config.getoption("--expect-throttle"),
         'expect_corrupted': request.config.getoption("--expect-corrupted"),
         'url': request.config.getoption("--url"),
+        'content_name': request.config.getoption("--content-name"),
         'follow_redirects': request.config.getoption("--follow-redirects"),
         'abrchar_hold_seconds': request.config.getoption("--abrchar-hold-seconds"),
         'abrchar_smooth_step_seconds': request.config.getoption("--abrchar-smooth-step-seconds"),
@@ -168,6 +219,11 @@ def config(request):
         'abrchar_settle_timeout': request.config.getoption("--abrchar-settle-timeout"),
         'abrchar_settle_tolerance': request.config.getoption("--abrchar-settle-tolerance"),
         'abrchar_test_mode': request.config.getoption("--abrchar-test-mode"),
+        'abrchar_accuracy_max_limit_mbps': request.config.getoption("--abrchar-accuracy-max-limit-mbps"),
+        'abrchar_accuracy_sparse_variants': request.config.getoption("--abrchar-accuracy-sparse-variants"),
+        'abrchar_content_variant_mode': request.config.getoption("--abrchar-content-variant-mode"),
+        'abrchar_content_sparse_variants': request.config.getoption("--abrchar-content-sparse-variants"),
+        'abrchar_stream_profile': request.config.getoption("--abrchar-stream-profile"),
         'net_overhead_pct': request.config.getoption("--net-overhead"),
         'abrchar_overhead_pct': request.config.getoption("--abrchar-overhead-pct"),
         'abrchar_max_steps': request.config.getoption("--abrchar-max-steps"),
@@ -176,6 +232,8 @@ def config(request):
         'abrchar_plot_logs': request.config.getoption("--abrchar-plot-logs"),
         'abrchar_open_browser': request.config.getoption("abrchar_open_browser"),
         'abrchar_browser_wait': request.config.getoption("--abrchar-browser-wait"),
+        'abrchar_live_offset_seconds': request.config.getoption("--abrchar-live-offset-seconds"),
+        'abrchar_safari_native': request.config.getoption("--abrchar-safari-native"),
         'abrchar_session_id': request.config.getoption("--abrchar-session-id"),
         'abrchar_player_id': request.config.getoption("--abrchar-player-id"),
         'abrchar_attach_timeout': request.config.getoption("--abrchar-attach-timeout"),
@@ -228,6 +286,7 @@ def stream_info(config, api_base, hls_base, player_id):
             config.timeout,
             config.verbose,
             config.follow_redirects,
+            str(getattr(config, "abrchar_stream_profile", "6s") or "6s"),
         )
 
     return _auto_select_stream(
@@ -237,12 +296,31 @@ def stream_info(config, api_base, hls_base, player_id):
         config.timeout,
         config.verbose,
         config.follow_redirects,
+        str(getattr(config, "abrchar_stream_profile", "6s") or "6s"),
+        str(getattr(config, "content_name", "") or "").strip(),
     )
 
 
-def _prepare_provided_url(url, player_id, timeout, verbose, follow_redirects):
+def _prepare_provided_url(url, player_id, timeout, verbose, follow_redirects, stream_profile):
     """Prepare provided URL for testing."""
     from .helpers import ensure_player_id, http_get_text, parse_master_variants, pick_best_variant
+
+    profile = str(stream_profile or "6s").strip().lower()
+    master_by_profile = {
+        "ll": "master.m3u8",
+        "2s": "master_2s.m3u8",
+        "6s": "master_6s.m3u8",
+    }
+    if profile not in master_by_profile:
+        pytest.exit(f"Invalid --abrchar-stream-profile value: {stream_profile}")
+
+    def rewrite_master_profile(input_url):
+        text = str(input_url or "")
+        if not text:
+            return text
+        target = master_by_profile[profile]
+        # Rewrite any known go-live master filename to selected profile.
+        return re.sub(r"/(master(?:_[26]s)?\.m3u8)(?=([?#]|$))", f"/{target}", text)
 
     def force_player_id(input_url):
         split = urllib.parse.urlsplit(str(input_url or ""))
@@ -252,7 +330,7 @@ def _prepare_provided_url(url, player_id, timeout, verbose, follow_redirects):
             (split.scheme, split.netloc, split.path, urllib.parse.urlencode(query, doseq=True), split.fragment)
         )
 
-    provided_url = force_player_id(url)
+    provided_url = force_player_id(rewrite_master_profile(url))
     status, text, _, err = http_get_text(
         provided_url,
         timeout=timeout,
@@ -292,9 +370,19 @@ def _prepare_provided_url(url, player_id, timeout, verbose, follow_redirects):
     }
 
 
-def _auto_select_stream(api_base, hls_base, player_id, timeout, verbose, follow_redirects):
+def _auto_select_stream(api_base, hls_base, player_id, timeout, verbose, follow_redirects, stream_profile, preferred_content_name):
     """Auto-select H264 HLS stream from content API."""
     from .helpers import ensure_player_id, http_get_text, parse_master_variants, is_h264_master
+
+    profile = str(stream_profile or "6s").strip().lower()
+    master_by_profile = {
+        "ll": "master.m3u8",
+        "2s": "master_2s.m3u8",
+        "6s": "master_6s.m3u8",
+    }
+    if profile not in master_by_profile:
+        pytest.exit(f"Invalid --abrchar-stream-profile value: {stream_profile}")
+    master_filename = master_by_profile[profile]
 
     content_url = f"{api_base}/api/content"
     status, text, _, err = http_get_text(
@@ -321,7 +409,21 @@ def _auto_select_stream(api_base, hls_base, player_id, timeout, verbose, follow_
     if not candidates:
         pytest.exit("No HLS content found")
 
-    # Find first H264 6s content.
+    preferred_name = str(preferred_content_name or "").strip()
+    if preferred_name:
+        preferred = [item for item in candidates if str(item.get("name") or "") == preferred_name]
+        if preferred:
+            others = [item for item in candidates if str(item.get("name") or "") != preferred_name]
+            candidates = preferred + others
+            if verbose:
+                print(f"Preferred content requested: {preferred_name}", flush=True)
+        elif verbose:
+            print(
+                f"Preferred content not found in API list, falling back to first compatible stream: {preferred_name}",
+                flush=True,
+            )
+
+    # Find first H264 content for the selected stream profile.
     # Probe without player_id to avoid creating many player-bound sessions during
     # discovery (which can trigger HTTP 429 rate limiting on busy hosts).
     for item in candidates:
@@ -330,7 +432,7 @@ def _auto_select_stream(api_base, hls_base, player_id, timeout, verbose, follow_
             continue
 
         safe_name = urllib.parse.quote(name, safe="")
-        master_probe_url = f"{hls_base}/go-live/{safe_name}/master_6s.m3u8"
+        master_probe_url = f"{hls_base}/go-live/{safe_name}/{master_filename}"
 
         status, master_text, _, _ = http_get_text(
             master_probe_url,
@@ -365,7 +467,7 @@ def _auto_select_stream(api_base, hls_base, player_id, timeout, verbose, follow_
         }
 
     pytest.exit(
-        "No suitable H264 HLS content found (or discovery was throttled with HTTP 429). "
+        f"No suitable H264 HLS content found for profile '{profile}' (or discovery was throttled with HTTP 429). "
         "Try passing --url with a known-good master/variant URL."
     )
 
@@ -474,12 +576,18 @@ def session_id(api_base, hls_base, stream_info, player_id, config):
     playback_url = force_player_id(raw_playback_url)
     if config.abrchar_open_browser and playback_url:
         open_folds = 'network-shaping,bitrate-chart,player-characterization'
-        launch_query = urllib.parse.urlencode({
+        launch_params = {
             'player_id': player_id,
             'url': playback_url,
             'open_folds': open_folds,
             'auto_recovery': '1',
-        })
+        }
+        live_offset_seconds = float(getattr(config, 'abrchar_live_offset_seconds', 0.0) or 0.0)
+        if live_offset_seconds > 0:
+            launch_params['live_offset_s'] = f"{live_offset_seconds:g}"
+        if bool(getattr(config, 'abrchar_safari_native', False)):
+            launch_params['player'] = 'native'
+        launch_query = urllib.parse.urlencode(launch_params)
         browser_url = (
             f"{hls_base}/dashboard/testing-session.html?{launch_query}"
         )
@@ -492,7 +600,18 @@ def session_id(api_base, hls_base, stream_info, player_id, config):
                 flush=True,
             )
         try:
-            opened = webbrowser.open(browser_url, new=2, autoraise=True)
+            if bool(getattr(config, 'abrchar_safari_native', False)):
+                proc = subprocess.run(["open", "-a", "Safari", browser_url], capture_output=True, text=True, timeout=20, check=False)
+                opened = proc.returncode == 0
+                if config.verbose and (proc.stdout or proc.stderr):
+                    stdout = (proc.stdout or "").strip()
+                    stderr = (proc.stderr or "").strip()
+                    if stdout:
+                        print(f"Safari open stdout: {stdout}", flush=True)
+                    if stderr:
+                        print(f"Safari open stderr: {stderr}", flush=True)
+            else:
+                opened = webbrowser.open(browser_url, new=2, autoraise=True)
             if config.verbose:
                 print(f"Browser open result: {opened}", flush=True)
         except Exception as exc:
