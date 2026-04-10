@@ -9,8 +9,8 @@
 # - Adaptive quality levels: up to 6 tiers (360p through 2160p)
 # - Dynamic frame rate detection and GOP calculation
 # - Multi codec support: H.265 (HEVC), H.264 (AVC), and AV1
-# - Hardware encoding: VideoToolbox (macOS) with 5-13x speedup
-# - Automatic fallback to software encoders (libx265/libx264)
+# - Optional hardware encoding: VideoToolbox (macOS) with 5-13x speedup
+# - Software encoding by default (libx265/libx264)
 # - SMPTE timecode burn-in per variant
 # - Closed GOPs with fixed keyframe intervals
 # - 4-second segment duration
@@ -30,22 +30,29 @@ set -o pipefail
 usage() {
     cat << EOF
 Usage: $0 --input <file_or_m3u8> [OPTIONS]
+       $0 --resume-package-from <abr_ladder_dir> [OPTIONS]
 
 Create ABR ladder with multiple resolutions and codecs from any video source.
 
 Required Arguments:
-  --input <path>          Input video file (.mp4, .mkv, .mov) or HLS playlist (.m3u8)
+  One of:
+    --input <path>                 Input video file (.mp4, .mkv, .mov) or HLS playlist (.m3u8)
+    --resume-package-from <path>   Resume from an existing abr_ladder temp dir and run
+                                   packaging/manifests only (skip re-encoding)
 
 Optional Arguments:
   --output <name>         Base name for output files (default: derived from input filename)
   --output-dir <path>     Base output directory (default: current working directory)
                           Relative paths are resolved from where you run the script
+  --resume-package-from <path> Resume from existing temp dir with encoded files
+                         (expects files like h264_360p.mp4/hevc_360p.mp4 and optional audio.mp4)
   --codec <hevc|h264|av1|both|all> Codec selection (default: both)
   --no-hevc              Skip HEVC encoding (same as --codec h264)
   --no-h264              Skip H.264 encoding (same as --codec hevc)
   --no-av1               Skip AV1 encoding (same as --codec both)
   --time <seconds>       Limit video duration (e.g., --time 30 for 30 seconds)
-  --force-software       Force software encoding (disable hardware acceleration)
+  --force-software       Force software encoding (default behavior)
+  --force-hardware       Force hardware encoding via VideoToolbox (macOS)
   --max-res <resolution> Limit maximum resolution tier encoded
                          Valid: 360p, 540p, 720p, 1080p, 1440p, 2160p
                          Example: --max-res 1080p (skips 1440p, 2160p)
@@ -55,27 +62,36 @@ Optional Arguments:
   --padding-pink         Enable padding to segment boundaries with PINK frames
                          (Adds "PADDING" label to padded frames)
   --no-padding           Disable automatic padding to segment boundaries
-                         (by default, videos are padded with black frames)
+                         (padding is OFF by default)
   --hls-format <format>  HLS output format (default: fmp4)
                          Options:
                            fmp4 - fragmented MP4 segments (default, modern)
                            ts   - MPEG-TS segments (legacy, maximum compatibility)
                            both - Generate both fMP4 and TS variants
-  --segment-duration <s> Segment duration in seconds (default: 2)
-  --partial-duration <s> Partial/GOP duration in seconds (default: 1.0)
+  --segment-duration <s> Segment duration in seconds (default: 6)
+  --partial-duration <s> Partial/GOP duration in seconds (default: 0.2)
   --gop-duration <s>     GOP/keyframe duration in seconds (default: 1.0)
+  --bitrate-override-hevc <map> Override HEVC ladder kbps by resolution (e.g. 360p=1367,540p=2617)
+  --bitrate-override-h264 <map> Override H264 ladder kbps by resolution (e.g. 360p=1421,540p=2762)
+  --vmaf-lookup-csv <p>  CSV from crf_bandwidth_sweep.py for estimated VMAF burn-in
+                         (default: ./crf_bandwidth_sweep_newer.csv next to this script, if present)
+  --vmaf-lookup-mode <m> Lookup mode: auto|sw|hw|hwmatch (default: auto)
   --keep-mezzanine       Preserve intermediate encoded files
   --help                 Show this help message
 
 Hardware Encoding:
-  By default, hardware encoders are automatically used when available:
+  By default, software encoders are used:
+  - libx265 / libx264 (software)
+  - Use --force-hardware to enable VideoToolbox on macOS
+  - If --force-hardware is set but unavailable, the script exits with error
+
+Optional Hardware Encoding:
   - macOS: VideoToolbox (hevc_videotoolbox, h264_videotoolbox)
   - Provides 5-13x faster encoding with similar quality
-  - Automatically falls back to software if hardware unavailable
-  - Use --force-software to disable hardware acceleration
+  - Enable with --force-hardware
 
 Examples:
-  # From MP4 file (outputs to current directory, uses hardware if available)
+  # From MP4 file (outputs to current directory, software encoding default)
   $0 --input video.mp4
 
   # From MKV file with custom output name
@@ -105,20 +121,29 @@ Examples:
   # Limit to 1080p maximum (save time/storage on 4K source)
   $0 --input 4k_video.mp4 --max-res 1080p
   
-  # Force software encoding (slower but cross-platform compatible)
+  # Force software encoding explicitly (same as default)
   $0 --input video.mp4 --force-software
   
-  # Enable padding with black frames (default)
+  # Force hardware encoding (VideoToolbox, macOS)
+  $0 --input video.mp4 --force-hardware
+  
+  # Enable padding with black frames
   $0 --input video.mp4 --padding
   
   # Enable padding with pink frames (easier to spot padding)
   $0 --input video.mp4 --padding-pink
   
-  # Disable padding completely
+  # Disable padding completely (default behavior)
   $0 --input video.mp4 --no-padding
 
   # Preserve intermediate encoded files (mezzanine + per-variant MP4s)
   $0 --input video.mp4 --keep-mezzanine
+
+  # Burn estimated VMAF from a prior sweep CSV
+  $0 --input video.mp4 --vmaf-lookup-csv /path/to/crf_bandwidth_sweep_new.csv
+
+  # Resume at packaging/manifests phase from a prior run temp directory
+  $0 --resume-package-from ./my_video_tmp/abr_ladder_12345 --codec h264
 
 Output Behavior:
   - Output files are created in your current working directory by default
@@ -148,13 +173,24 @@ INPUT_FILE=""
 OUTPUT_BASE_NAME=""  # Custom base name for output files
 OUTPUT_BASE_DIR=""
 CODEC_SELECTION="both"  # both, hevc, h264, av1, all
+CODEC_SELECTION_EXPLICIT=false
 TIME_LIMIT=""  # Optional duration limit in seconds
 FORCE_SOFTWARE=false  # Force software encoding (disables hardware)
+FORCE_HARDWARE=false  # Force hardware encoding (VideoToolbox)
 HLS_FORMAT="fmp4"  # fmp4, ts, both
-PAD_TO_SEGMENT_BOUNDARY=true  # Automatically pad to segment boundaries
+PAD_TO_SEGMENT_BOUNDARY=false  # Padding is disabled by default
 MAX_RESOLUTION_HEIGHT=""  # Optional max resolution limit (e.g., "1080p")
 PADDING_COLOR="black"  # Color for padding frames (black or pink)
 KEEP_MEZZANINE=false  # Preserve intermediate encoded files
+VMAF_LOOKUP_CSV=""    # Optional CSV for estimated VMAF burn-in label
+VMAF_LOOKUP_MODE="auto"  # auto|sw|hw|hwmatch
+BITRATE_OVERRIDE_HEVC=""  # Optional map: "360p=1367,540p=2617,..."
+BITRATE_OVERRIDE_H264=""  # Optional map: "360p=1421,540p=2762,..."
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+DEFAULT_VMAF_LOOKUP_CSV="${SCRIPT_DIR}/crf_bandwidth_sweep_newer.csv"
+RESUME_PACKAGE_FROM=""    # Optional path to existing abr_ladder temp dir
+RESUME_MODE=false
+FRAGMENT_PARSER_SCRIPT="" # Auto-detected path to parse_fmp4_fragments.py
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -170,20 +206,29 @@ while [[ $# -gt 0 ]]; do
             OUTPUT_BASE_DIR="$2"
             shift 2
             ;;
+        --resume-package-from)
+            RESUME_PACKAGE_FROM="$2"
+            RESUME_MODE=true
+            shift 2
+            ;;
         --codec)
             CODEC_SELECTION="$2"
+            CODEC_SELECTION_EXPLICIT=true
             shift 2
             ;;
         --no-hevc)
             CODEC_SELECTION="h264"
+            CODEC_SELECTION_EXPLICIT=true
             shift
             ;;
         --no-h264)
             CODEC_SELECTION="hevc"
+            CODEC_SELECTION_EXPLICIT=true
             shift
             ;;
         --no-av1)
             CODEC_SELECTION="both"
+            CODEC_SELECTION_EXPLICIT=true
             shift
             ;;
         --time)
@@ -192,6 +237,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --force-software)
             FORCE_SOFTWARE=true
+            shift
+            ;;
+        --force-hardware)
+            FORCE_HARDWARE=true
             shift
             ;;
         --no-padding)
@@ -228,6 +277,22 @@ while [[ $# -gt 0 ]]; do
             GOP_DURATION="$2"
             shift 2
             ;;
+        --bitrate-override-hevc)
+            BITRATE_OVERRIDE_HEVC="$2"
+            shift 2
+            ;;
+        --bitrate-override-h264)
+            BITRATE_OVERRIDE_H264="$2"
+            shift 2
+            ;;
+        --vmaf-lookup-csv)
+            VMAF_LOOKUP_CSV="$2"
+            shift 2
+            ;;
+        --vmaf-lookup-mode)
+            VMAF_LOOKUP_MODE="$2"
+            shift 2
+            ;;
         --help|-h)
             usage
             exit 0
@@ -245,20 +310,37 @@ while [[ $# -gt 0 ]]; do
 done
 
 # Validate required arguments
-if [[ -z "$INPUT_FILE" ]]; then
-    echo "Error: --input is required"
+if [[ "$RESUME_MODE" == "false" ]] && [[ -z "$INPUT_FILE" ]]; then
+    echo "Error: either --input or --resume-package-from is required"
     usage
     exit 1
 fi
 
-if [[ ! -f "$INPUT_FILE" ]]; then
-    echo "Error: Input file not found: $INPUT_FILE"
-    exit 1
+# Validate resume path if requested
+if [[ "$RESUME_MODE" == "true" ]]; then
+    if [[ -z "$RESUME_PACKAGE_FROM" ]]; then
+        echo "Error: --resume-package-from requires a path"
+        exit 1
+    fi
+    if [[ "$RESUME_PACKAGE_FROM" != /* ]]; then
+        RESUME_PACKAGE_FROM="$(cd "$(dirname "$RESUME_PACKAGE_FROM")" && pwd)/$(basename "$RESUME_PACKAGE_FROM")"
+    fi
+    if [[ ! -d "$RESUME_PACKAGE_FROM" ]]; then
+        echo "Error: resume directory not found: $RESUME_PACKAGE_FROM"
+        exit 1
+    fi
 fi
 
-# Convert to absolute path (needed for M3U8 files with relative segment paths)
-if [[ "$INPUT_FILE" != /* ]]; then
-    INPUT_FILE="$(cd "$(dirname "$INPUT_FILE")" && pwd)/$(basename "$INPUT_FILE")"
+if [[ "$RESUME_MODE" == "false" ]]; then
+    if [[ ! -f "$INPUT_FILE" ]]; then
+        echo "Error: Input file not found: $INPUT_FILE"
+        exit 1
+    fi
+
+    # Convert to absolute path (needed for M3U8 files with relative segment paths)
+    if [[ "$INPUT_FILE" != /* ]]; then
+        INPUT_FILE="$(cd "$(dirname "$INPUT_FILE")" && pwd)/$(basename "$INPUT_FILE")"
+    fi
 fi
 
 # Validate codec selection
@@ -284,6 +366,35 @@ if [[ "$HLS_FORMAT" != "fmp4" ]] && [[ "$HLS_FORMAT" != "ts" ]] && [[ "$HLS_FORM
     exit 1
 fi
 
+# Validate mutually exclusive hardware/software force flags
+if [[ "$FORCE_SOFTWARE" == "true" ]] && [[ "$FORCE_HARDWARE" == "true" ]]; then
+    echo "Error: --force-software and --force-hardware cannot be used together"
+    exit 1
+fi
+
+# Validate VMAF lookup mode
+if [[ "$VMAF_LOOKUP_MODE" != "auto" ]] && [[ "$VMAF_LOOKUP_MODE" != "sw" ]] && [[ "$VMAF_LOOKUP_MODE" != "hw" ]] && [[ "$VMAF_LOOKUP_MODE" != "hwmatch" ]]; then
+    echo "Error: --vmaf-lookup-mode must be 'auto', 'sw', 'hw', or 'hwmatch'"
+    exit 1
+fi
+
+# Use default lookup CSV if user did not pass one explicitly.
+if [[ -z "$VMAF_LOOKUP_CSV" ]] && [[ -f "$DEFAULT_VMAF_LOOKUP_CSV" ]]; then
+    VMAF_LOOKUP_CSV="$DEFAULT_VMAF_LOOKUP_CSV"
+fi
+
+# Validate VMAF lookup CSV if provided
+if [[ -n "$VMAF_LOOKUP_CSV" ]]; then
+    if [[ ! -f "$VMAF_LOOKUP_CSV" ]]; then
+        echo "Error: --vmaf-lookup-csv file not found: $VMAF_LOOKUP_CSV"
+        exit 1
+    fi
+    # Convert to absolute path for consistent access
+    if [[ "$VMAF_LOOKUP_CSV" != /* ]]; then
+        VMAF_LOOKUP_CSV="$(cd "$(dirname "$VMAF_LOOKUP_CSV")" && pwd)/$(basename "$VMAF_LOOKUP_CSV")"
+    fi
+fi
+
 # Validate max-res if provided
 if [[ -n "$MAX_RESOLUTION_HEIGHT" ]]; then
     case "$MAX_RESOLUTION_HEIGHT" in
@@ -302,7 +413,6 @@ fi
 # Configuration
 ################################################################################
 
-SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 # Allow TMPDIR override via environment variable (defaults to /tmp)
 TEMP_BASE="${TMPDIR:-/tmp}"
 # Allow TMPDIR-OUTPUT override via environment variable (defaults to output dir)
@@ -322,9 +432,10 @@ LOG_FILE="$TEMP_DIR/encoding.log"
 SKIP_AUDIO=false
 
 # Padding configuration
-SEGMENT_DURATION="${SEGMENT_DURATION:-2}"    # Target segment duration in seconds
-PARTIAL_DURATION="${PARTIAL_DURATION:-1.0}"  # Partial (GOP) duration in seconds
+SEGMENT_DURATION="${SEGMENT_DURATION:-6}"    # Target segment duration in seconds
+PARTIAL_DURATION="${PARTIAL_DURATION:-0.2}"  # Partial fragment duration in seconds
 GOP_DURATION="${GOP_DURATION:-1.0}"          # GOP/keyframe duration in seconds
+MAXRATE_PERCENT="${MAXRATE_PERCENT:-124}"    # Peak cap percentage of target bitrate (<125% guidance)
 MULTI_DURATION_LCM=12           # LCM of 2s/4s/6s for multi-duration support
 PADDING_THRESHOLD=0.1           # Minimum remainder to trigger padding (seconds)
 PADDING_WARNING_RATIO=50        # Warn if padding exceeds this % of total duration
@@ -362,12 +473,12 @@ NC='\033[0m' # No Color
 # All possible resolution tiers (filtered based on source resolution)
 # Format: name:width:height:bitrate_h265_kbps:bitrate_h264_kbps:bitrate_av1_kbps:preset:fontsize_tc:fontsize_label:x:y_tc:y_label
 declare -a ALL_RESOLUTION_TIERS=(
-    "360p:640:360:800:1100:700:medium:20:16:10:10:30"
-    "540p:960:540:1400:1900:1200:medium:24:20:10:10:34"
-    "720p:1280:720:2500:3400:2200:medium:28:24:10:10:38"
-    "1080p:1920:1080:5000:6800:4400:medium:36:32:10:10:45"
-    "1440p:2560:1440:9000:12200:8000:medium:42:36:10:10:52"
-    "2160p:3840:2160:16000:21700:14000:medium:54:48:10:10:64"
+    "360p:640:360:300:600:300:medium:20:16:10:10:30"
+    "540p:960:540:900:1200:900:medium:24:20:10:10:34"
+    "720p:1280:720:1500:2400:1500:medium:28:24:10:10:38"
+    "1080p:1920:1080:4500:5000:4500:medium:36:32:10:10:45"
+    "1440p:2560:1440:7500:11000:7500:medium:42:36:10:10:52"
+    "2160p:3840:2160:15000:21700:15000:medium:54:48:10:10:64"
 )
 
 # Will be populated after source detection
@@ -380,7 +491,7 @@ declare -a PROFILES=()
 ################################################################################
 
 # Hardware encoding configuration
-USE_HARDWARE="auto"  # auto|yes|no
+USE_HARDWARE="no"  # yes|no
 HARDWARE_AVAILABLE=false
 HARDWARE_ENCODER_HEVC="hevc_videotoolbox"
 HARDWARE_ENCODER_H264="h264_videotoolbox"
@@ -403,16 +514,38 @@ detect_hardware_encoders() {
     return 0
 }
 
+detect_fragment_parser_script() {
+    if [[ -f "/sbin/parse_fmp4_fragments.py" ]]; then
+        FRAGMENT_PARSER_SCRIPT="/sbin/parse_fmp4_fragments.py"
+        return 0
+    fi
+    if [[ -f "$SCRIPT_DIR/../parse_fmp4_fragments.py" ]]; then
+        FRAGMENT_PARSER_SCRIPT="$SCRIPT_DIR/../parse_fmp4_fragments.py"
+        return 0
+    fi
+    if [[ -f "$SCRIPT_DIR/parse_fmp4_fragments.py" ]]; then
+        FRAGMENT_PARSER_SCRIPT="$SCRIPT_DIR/parse_fmp4_fragments.py"
+        return 0
+    fi
+    FRAGMENT_PARSER_SCRIPT=""
+    return 1
+}
+
 # Auto-detect hardware encoders
 if detect_hardware_encoders; then
     HARDWARE_AVAILABLE=true
     ENCODING_INFOS+=("Hardware encoders available: VideoToolbox (HEVC & H.264)")
 fi
 
-# Override if user forced software encoding
-if [[ "$FORCE_SOFTWARE" == "true" ]]; then
+# Override encode mode based on user flags (software is default).
+if [[ "$FORCE_HARDWARE" == "true" ]]; then
+    USE_HARDWARE="yes"
+    ENCODING_INFOS+=("Hardware encoding forced via --force-hardware flag")
+elif [[ "$FORCE_SOFTWARE" == "true" ]]; then
     USE_HARDWARE="no"
     ENCODING_INFOS+=("Software encoding forced via --force-software flag")
+else
+    ENCODING_INFOS+=("Using software encoding by default (set --force-hardware to enable VideoToolbox)")
 fi
 
 select_encoder() {
@@ -434,12 +567,8 @@ select_encoder() {
         exit 1
     fi
     
-    # Auto mode: use hardware if available
-    if [[ "$HARDWARE_AVAILABLE" == "true" ]]; then
-        echo "hardware"
-    else
-        echo "software"
-    fi
+    # Default mode: software encoding.
+    echo "software"
 }
 
 ################################################################################
@@ -485,6 +614,7 @@ print_header() {
 get_resolution_name() {
     local width=$1
     case $width in
+        480)  echo "270p" ;;
         1920) echo "1080p" ;;
         1280) echo "720p" ;;
         960)  echo "540p" ;;
@@ -506,6 +636,377 @@ get_resolution_height() {
         "2160p") echo "2160" ;;
         *) echo "0" ;;
     esac
+}
+
+resolve_bitrate_override() {
+    local mapping="$1"
+    local res_name="$2"
+    local default_kbps="$3"
+
+    if [[ -z "$mapping" ]]; then
+        echo "$default_kbps"
+        return 0
+    fi
+
+    local entry=""
+    IFS=',' read -ra entries <<< "$mapping"
+    for entry in "${entries[@]}"; do
+        # Strip whitespace to accept formats like "360p = 1421"
+        local normalized="${entry//[[:space:]]/}"
+        if [[ "$normalized" =~ ^([^=]+)=([0-9]+)$ ]]; then
+            local key="${BASH_REMATCH[1]}"
+            local val="${BASH_REMATCH[2]}"
+            if [[ "$key" == "$res_name" ]]; then
+                echo "$val"
+                return 0
+            fi
+        fi
+    done
+
+    echo "$default_kbps"
+    return 0
+}
+
+estimate_vmaf_from_lookup() {
+    local codec="$1"
+    local encoder_type="$2"  # software|hardware
+    local res_name="$3"
+    local bitrate_kbps="$4"
+
+    if [[ -z "$VMAF_LOOKUP_CSV" ]] || [[ ! -f "$VMAF_LOOKUP_CSV" ]]; then
+        return 0
+    fi
+    # AV1 is not part of current characterization CSV in this workflow.
+    if [[ "$codec" == "av1" ]]; then
+        return 0
+    fi
+
+    local candidate_modes=()
+    if [[ "$VMAF_LOOKUP_MODE" != "auto" ]]; then
+        candidate_modes=("$VMAF_LOOKUP_MODE")
+    else
+        if [[ "$encoder_type" == "software" ]]; then
+            candidate_modes=("sw")
+        else
+            # Hardware bitrate-control production runs are closest to hwmatch.
+            candidate_modes=("hwmatch" "hw")
+        fi
+    fi
+
+    local target_mbps
+    target_mbps=$(awk -v kbps="$bitrate_kbps" 'BEGIN{printf "%.6f", kbps/1000.0}')
+
+    local mode
+    for mode in "${candidate_modes[@]}"; do
+        local pairs
+        pairs=$(awk -F, -v c="$codec" -v m="$mode" -v r="$res_name" '
+            NR == 1 { next }
+            $4 == c && $5 == m && $1 == r && $10 != "" && $12 != "" {
+                print $10 "," $12
+            }
+        ' "$VMAF_LOOKUP_CSV" | sort -t, -k1,1n)
+
+        if [[ -z "$pairs" ]]; then
+            continue
+        fi
+
+        local prev_avg=""
+        local prev_vmaf=""
+        local est=""
+        while IFS=, read -r avg_mbps vmaf; do
+            if awk -v t="$target_mbps" -v a="$avg_mbps" 'BEGIN{exit !(t==a)}'; then
+                est="$vmaf"
+                break
+            fi
+            if awk -v t="$target_mbps" -v a="$avg_mbps" 'BEGIN{exit !(t<a)}'; then
+                if [[ -n "$prev_avg" ]]; then
+                    est=$(awk -v t="$target_mbps" -v a0="$prev_avg" -v v0="$prev_vmaf" -v a1="$avg_mbps" -v v1="$vmaf" '
+                        BEGIN {
+                            if (a1 == a0) { printf "%.3f", v1; exit }
+                            ratio = (t - a0) / (a1 - a0)
+                            printf "%.3f", v0 + ratio * (v1 - v0)
+                        }')
+                else
+                    # Target is below first sample; use first sample as conservative nearest estimate.
+                    est="$vmaf"
+                fi
+                break
+            fi
+            prev_avg="$avg_mbps"
+            prev_vmaf="$vmaf"
+        done <<< "$pairs"
+
+        if [[ -z "$est" ]] && [[ -n "$prev_vmaf" ]]; then
+            # Target above highest sampled bitrate; clamp to highest sample.
+            est="$prev_vmaf"
+        fi
+
+        if [[ -n "$est" ]]; then
+            echo "$est"
+            return 0
+        fi
+    done
+
+    return 0
+}
+
+estimate_average_bandwidth_from_lookup() {
+    local codec="$1"
+    local encoder_type="$2"  # software|hardware
+    local res_name="$3"
+    local bitrate_kbps="$4"
+
+    if [[ -z "$VMAF_LOOKUP_CSV" ]] || [[ ! -f "$VMAF_LOOKUP_CSV" ]]; then
+        return 0
+    fi
+    # AV1 is not part of current characterization CSV in this workflow.
+    if [[ "$codec" == "av1" ]]; then
+        return 0
+    fi
+
+    local candidate_modes=()
+    if [[ "$VMAF_LOOKUP_MODE" != "auto" ]]; then
+        candidate_modes=("$VMAF_LOOKUP_MODE")
+    else
+        if [[ "$encoder_type" == "software" ]]; then
+            candidate_modes=("sw")
+        else
+            # Hardware bitrate-control production runs are closest to hwmatch.
+            candidate_modes=("hwmatch" "hw")
+        fi
+    fi
+
+    local target_mbps
+    target_mbps=$(awk -v kbps="$bitrate_kbps" 'BEGIN{printf "%.6f", kbps/1000.0}')
+
+    local mode
+    for mode in "${candidate_modes[@]}"; do
+        local pairs
+        # X axis: target_avg_mbps when available (hwmatch), else avg_bandwidth_mbps.
+        # Y axis: measured avg_bandwidth_mbps.
+        pairs=$(awk -F, -v c="$codec" -v m="$mode" -v r="$res_name" '
+            NR == 1 { next }
+            $4 == c && $5 == m && $1 == r && $10 != "" {
+                x = $9
+                if (x == "") x = $10
+                if (x != "") print x "," $10
+            }
+        ' "$VMAF_LOOKUP_CSV" | sort -t, -k1,1n)
+
+        if [[ -z "$pairs" ]]; then
+            continue
+        fi
+
+        local prev_x=""
+        local prev_y=""
+        local est=""
+        while IFS=, read -r x y; do
+            if awk -v t="$target_mbps" -v cur="$x" 'BEGIN{exit !(t==cur)}'; then
+                est="$y"
+                break
+            fi
+            if awk -v t="$target_mbps" -v cur="$x" 'BEGIN{exit !(t<cur)}'; then
+                if [[ -n "$prev_x" ]]; then
+                    est=$(awk -v t="$target_mbps" -v x0="$prev_x" -v y0="$prev_y" -v x1="$x" -v y1="$y" '
+                        BEGIN {
+                            if (x1 == x0) { printf "%.6f", y1; exit }
+                            ratio = (t - x0) / (x1 - x0)
+                            printf "%.6f", y0 + ratio * (y1 - y0)
+                        }')
+                else
+                    est="$y"
+                fi
+                break
+            fi
+            prev_x="$x"
+            prev_y="$y"
+        done <<< "$pairs"
+
+        if [[ -z "$est" ]] && [[ -n "$prev_y" ]]; then
+            est="$prev_y"
+        fi
+
+        if [[ -n "$est" ]]; then
+            echo "$est"
+            return 0
+        fi
+    done
+
+    return 0
+}
+
+prepare_resume_packaging_context() {
+    print_header "Phase 0: Resume Packaging Setup"
+
+    TEMP_DIR="$RESUME_PACKAGE_FROM"
+    LOG_FILE="$TEMP_DIR/encoding.log"
+    TEMP_BASE="$(dirname "$TEMP_DIR")"
+
+    # Ensure log file exists so downstream log calls can append safely.
+    touch "$LOG_FILE" 2>/dev/null || {
+        echo "Error: Cannot write log file in resume directory: $LOG_FILE"
+        exit 1
+    }
+
+    if [[ -n "$INPUT_FILE" ]]; then
+        log_warn "--input is ignored in resume mode"
+    fi
+    INPUT_FILE="$RESUME_PACKAGE_FROM"
+    INPUT_SIZE="N/A (resume mode)"
+    INPUT_DURATION="N/A (resume mode)"
+
+    # Derive defaults from the previous run path if caller did not provide output naming.
+    local resume_parent_name
+    resume_parent_name="$(basename "$(dirname "$RESUME_PACKAGE_FROM")")"
+    local resume_base_name=""
+    if [[ "$resume_parent_name" == *_tmp ]]; then
+        resume_base_name="${resume_parent_name%_tmp}"
+    else
+        resume_base_name="$(basename "$RESUME_PACKAGE_FROM")"
+    fi
+
+    if [[ -z "$OUTPUT_BASE_NAME" ]]; then
+        OUTPUT_BASE_NAME="${resume_base_name}_resume"
+    fi
+    if [[ -z "$OUTPUT_BASE_DIR" ]]; then
+        OUTPUT_BASE_DIR="$(dirname "$(dirname "$RESUME_PACKAGE_FROM")")"
+    fi
+
+    local has_hevc_any=false
+    local has_h264_any=false
+    local has_av1_any=false
+
+    for tier in "${ALL_RESOLUTION_TIERS[@]}"; do
+        IFS=':' read -r name _ _ _ _ _ _ _ _ _ _ <<< "$tier"
+        if [[ -s "$TEMP_DIR/hevc_${name}.mp4" ]]; then
+            has_hevc_any=true
+        fi
+        if [[ -s "$TEMP_DIR/h264_${name}.mp4" ]]; then
+            has_h264_any=true
+        fi
+        if [[ -s "$TEMP_DIR/av1_${name}.mp4" ]]; then
+            has_av1_any=true
+        fi
+    done
+
+    if [[ "$CODEC_SELECTION_EXPLICIT" == "false" ]]; then
+        if [[ "$has_hevc_any" == "true" ]] && [[ "$has_h264_any" == "true" ]] && [[ "$has_av1_any" == "true" ]]; then
+            CODEC_SELECTION="all"
+        elif [[ "$has_hevc_any" == "true" ]] && [[ "$has_h264_any" == "true" ]]; then
+            CODEC_SELECTION="both"
+        elif [[ "$has_hevc_any" == "true" ]]; then
+            CODEC_SELECTION="hevc"
+        elif [[ "$has_h264_any" == "true" ]]; then
+            CODEC_SELECTION="h264"
+        elif [[ "$has_av1_any" == "true" ]]; then
+            CODEC_SELECTION="av1"
+        else
+            log_error "No encoded variant MP4s found in resume directory: $TEMP_DIR"
+            exit 1
+        fi
+        log "Auto-selected codec mode for resume: $CODEC_SELECTION"
+    fi
+
+    local need_hevc=false
+    local need_h264=false
+    local need_av1=false
+    case "$CODEC_SELECTION" in
+        both)
+            need_hevc=true
+            need_h264=true
+            ;;
+        hevc)
+            need_hevc=true
+            ;;
+        h264)
+            need_h264=true
+            ;;
+        av1)
+            need_av1=true
+            ;;
+        all)
+            need_hevc=true
+            need_h264=true
+            need_av1=true
+            ;;
+    esac
+
+    if [[ "$need_hevc" == "true" ]] && [[ "$has_hevc_any" != "true" ]]; then
+        log_error "Resume mode requested HEVC packaging, but no hevc_*.mp4 files were found in $TEMP_DIR"
+        exit 1
+    fi
+    if [[ "$need_h264" == "true" ]] && [[ "$has_h264_any" != "true" ]]; then
+        log_error "Resume mode requested H.264 packaging, but no h264_*.mp4 files were found in $TEMP_DIR"
+        exit 1
+    fi
+    if [[ "$need_av1" == "true" ]] && [[ "$has_av1_any" != "true" ]]; then
+        log_error "Resume mode requested AV1 packaging, but no av1_*.mp4 files were found in $TEMP_DIR"
+        exit 1
+    fi
+
+    PROFILES=()
+    for tier in "${ALL_RESOLUTION_TIERS[@]}"; do
+        IFS=':' read -r name width height bitrate_h265 bitrate_h264 bitrate_av1 preset fontsize_tc fontsize_label x y_tc y_label <<< "$tier"
+        local include_tier=true
+        if [[ "$need_hevc" == "true" ]] && [[ ! -s "$TEMP_DIR/hevc_${name}.mp4" ]]; then
+            include_tier=false
+        fi
+        if [[ "$need_h264" == "true" ]] && [[ ! -s "$TEMP_DIR/h264_${name}.mp4" ]]; then
+            include_tier=false
+        fi
+        if [[ "$need_av1" == "true" ]] && [[ ! -s "$TEMP_DIR/av1_${name}.mp4" ]]; then
+            include_tier=false
+        fi
+        if [[ "$include_tier" == "true" ]]; then
+            PROFILES+=("$width:$height:$bitrate_h265:$bitrate_h264:$bitrate_av1:$preset:$fontsize_tc:$fontsize_label:$x:$y_tc:$y_label")
+            log_success "Resume tier detected: $name"
+        fi
+    done
+
+    if [[ ${#PROFILES[@]} -eq 0 ]]; then
+        log_error "No common tiers found for selected codec mode '$CODEC_SELECTION' in $TEMP_DIR"
+        exit 1
+    fi
+
+    if [[ -s "$TEMP_DIR/audio.mp4" ]]; then
+        SKIP_AUDIO=false
+        log_success "Audio mezzanine found for resume: audio.mp4"
+    else
+        SKIP_AUDIO=true
+        log_warn "audio.mp4 not found in resume directory; packaging video-only output"
+    fi
+
+    # Minimal source metadata for summary output in resume mode.
+    local probe_codec="h264"
+    if [[ "$need_hevc" == "true" ]]; then
+        probe_codec="hevc"
+    elif [[ "$need_av1" == "true" ]]; then
+        probe_codec="av1"
+    fi
+    local first_profile="${PROFILES[0]}"
+    IFS=':' read -r first_w _ _ _ _ _ _ _ _ _ _ <<< "$first_profile"
+    local first_res
+    first_res="$(get_resolution_name "$first_w")"
+    local probe_file="$TEMP_DIR/${probe_codec}_${first_res}.mp4"
+    if [[ -f "$probe_file" ]]; then
+        SOURCE_WIDTH=$(ffprobe -v error -select_streams v:0 -show_entries stream=width -of default=noprint_wrappers=1:nokey=1 "$probe_file" 2>/dev/null)
+        SOURCE_HEIGHT=$(ffprobe -v error -select_streams v:0 -show_entries stream=height -of default=noprint_wrappers=1:nokey=1 "$probe_file" 2>/dev/null)
+        SOURCE_FPS=$(ffprobe -v error -select_streams v:0 -show_entries stream=r_frame_rate -of default=noprint_wrappers=1:nokey=1 "$probe_file" 2>/dev/null)
+        SOURCE_FPS_DECIMAL=$(echo "$SOURCE_FPS" | awk -F/ '{if ($2=="" || $2==0) printf "0.00"; else printf "%.2f", $1/$2}')
+        if [[ -z "$SOURCE_WIDTH" ]]; then SOURCE_WIDTH="N/A"; fi
+        if [[ -z "$SOURCE_HEIGHT" ]]; then SOURCE_HEIGHT="N/A"; fi
+        if [[ -z "$SOURCE_FPS" ]]; then SOURCE_FPS="N/A"; fi
+    else
+        SOURCE_WIDTH="N/A"
+        SOURCE_HEIGHT="N/A"
+        SOURCE_FPS="N/A"
+        SOURCE_FPS_DECIMAL="0.00"
+    fi
+
+    log "Resume source directory: $TEMP_DIR"
+    log "Resume codec selection: $CODEC_SELECTION"
+    log "Resume tiers selected: ${#PROFILES[@]}"
+    echo ""
 }
 
 ################################################################################
@@ -811,8 +1312,12 @@ check_prerequisites() {
     fi
     log_success "ffmpeg: $(ffmpeg -version | head -1)"
     
-    # Check for encoders and show which will be used
-    local encoder_type=$(select_encoder "hevc")
+    # Check for encoders and show which will be used.
+    # Only resolve HEVC/H.264 encoder mode when those codecs are requested.
+    local encoder_type="software"
+    if [[ "$CODEC_SELECTION" == "both" ]] || [[ "$CODEC_SELECTION" == "all" ]] || [[ "$CODEC_SELECTION" == "hevc" ]] || [[ "$CODEC_SELECTION" == "h264" ]]; then
+        encoder_type=$(select_encoder "hevc")
+    fi
     
     if [[ "$CODEC_SELECTION" == "both" ]] || [[ "$CODEC_SELECTION" == "all" ]] || [[ "$CODEC_SELECTION" == "hevc" ]]; then
         if [[ "$encoder_type" == "hardware" ]]; then
@@ -867,6 +1372,14 @@ check_prerequisites() {
         exit 1
     fi
     log_success "Font available"
+
+    # Check fMP4 fragment parser helper (used in Phase 6).
+    if detect_fragment_parser_script; then
+        log_success "Fragment parser: $FRAGMENT_PARSER_SCRIPT"
+    else
+        log_warn "Fragment parser script not found (parse_fmp4_fragments.py)"
+        log_warn "Phase 6 (.byteranges generation) will be skipped"
+    fi
     
     echo ""
 }
@@ -1272,19 +1785,77 @@ encode_variant() {
         fi
         encoder_label="SW"
     fi
+
+    # Optional estimated VMAF label from characterization CSV lookup.
+    local vmaf_label=""
+    local vmaf_estimate=""
+    if [[ -n "$VMAF_LOOKUP_CSV" ]]; then
+        vmaf_estimate=$(estimate_vmaf_from_lookup "$codec" "$encoder_type" "$res_name" "$bitrate_kbps")
+        if [[ -n "$vmaf_estimate" ]]; then
+            vmaf_label="VMAF~${vmaf_estimate}"
+        fi
+    fi
+    # Average label defaults to target bitrate; hardware can optionally use CSV estimate.
+    local avg_bandwidth_label="AVG~${bitrate_mbps}Mbps"
+    local avg_bandwidth_estimate=""
+    local avg_for_peak_mbps="$bitrate_mbps"
+    if [[ -n "$VMAF_LOOKUP_CSV" ]] && [[ "$encoder_type" == "hardware" ]]; then
+        avg_bandwidth_estimate=$(estimate_average_bandwidth_from_lookup "$codec" "$encoder_type" "$res_name" "$bitrate_kbps")
+        if [[ -n "$avg_bandwidth_estimate" ]]; then
+            local avg_bandwidth_mbps
+            avg_bandwidth_mbps=$(awk -v m="$avg_bandwidth_estimate" 'BEGIN{printf "%.2f", m+0}')
+            avg_bandwidth_label="AVG~${avg_bandwidth_mbps}Mbps"
+            avg_for_peak_mbps="$avg_bandwidth_mbps"
+        fi
+    fi
+    local peak_bandwidth_label=""
+    local peak_cap_mbps
+    peak_cap_mbps=$(awk -v kbps="$bitrate_kbps" -v pct="$MAXRATE_PERCENT" -v avg="$avg_for_peak_mbps" 'BEGIN{p=(kbps * pct / 100.0) / 1000.0; if (p < avg) p=avg; printf "%.2f", p}')
+    peak_bandwidth_label="PEAK<=${peak_cap_mbps}Mbps"
+    local avg_peak_bandwidth_label=""
+    if [[ -n "$avg_bandwidth_label" ]] && [[ -n "$peak_bandwidth_label" ]]; then
+        avg_peak_bandwidth_label="${avg_bandwidth_label} / ${peak_bandwidth_label}"
+    elif [[ -n "$avg_bandwidth_label" ]]; then
+        avg_peak_bandwidth_label="$avg_bandwidth_label"
+    elif [[ -n "$peak_bandwidth_label" ]]; then
+        avg_peak_bandwidth_label="$peak_bandwidth_label"
+    fi
+    local rate_burnin_label="$bitrate_label"
+    if [[ -n "$avg_peak_bandwidth_label" ]]; then
+        rate_burnin_label="$avg_peak_bandwidth_label"
+    fi
     
     log "Encoding: ${codec_res_fps_label} @ ${bitrate_label} (${bitrate_kbps}kbps target, preset $preset) - $encoder_name"
     log "  Resolution: ${width}x${height}"
     log "  Timecode: ${fontsize_tc}px at ($x_offset, $y_tc)"
+    if [[ -n "$avg_peak_bandwidth_label" ]]; then
+        if [[ -n "$avg_bandwidth_estimate" ]]; then
+            log "  Avg/Peak bandwidth: ${avg_peak_bandwidth_label} (AVG from $VMAF_LOOKUP_CSV, PEAK from maxrate cap)"
+        else
+            log "  Avg/Peak bandwidth: ${avg_peak_bandwidth_label} (from target bitrate + maxrate cap)"
+        fi
+    fi
+    if [[ -n "$vmaf_label" ]]; then
+        log "  VMAF estimate: ${vmaf_label} (from $VMAF_LOOKUP_CSV)"
+    fi
     
     # Build filter based on encoder type
     local filter=""
     if [ "$encoder_type" = "software" ]; then
         # 5-layer burn-in for software: timecode, bitrate, codec+res+fps, encoder, watermark
-        log "  Bitrate: ${fontsize_label}px at ($x_offset, $y_label)"
+        log "  Rate burn-in: ${rate_burnin_label} (${fontsize_label}px at ($x_offset, $y_label))"
         
         local y_bitrate=$((y_tc + fontsize_tc + 5))
-        local y_codec_res_fps=$((y_bitrate + fontsize_label + 5))
+        local y_next=$((y_bitrate + fontsize_label + 5))
+        local draw_vmaf_filter=""
+        # VMAF burn-in intentionally disabled.
+        # if [[ -n "$vmaf_label" ]]; then
+        #     local y_vmaf=$y_next
+        #     draw_vmaf_filter="drawtext=fontfile='${FONT}':text='${vmaf_label}':fontsize=${fontsize_label}:fontcolor=lime:box=1:boxcolor=black@0.7:boxborderw=5:x=${x_offset}:y=${y_vmaf},\\"
+        #     y_next=$((y_vmaf + fontsize_label + 5))
+        #     log "  VMAF burn-in: ${fontsize_label}px at ($x_offset, $y_vmaf)"
+        # fi
+        local y_codec_res_fps=$y_next
         local y_encoder=$((y_codec_res_fps + fontsize_label + 5))
         local y_watermark=$((y_encoder + fontsize_label + 5))
         
@@ -1306,7 +1877,8 @@ encode_variant() {
         # Add burn-in overlays (applied to all frames including padded ones)
         filter="${filter},\
 drawtext=fontfile='${FONT}':timecode='00\\:00\\:00\\:00':rate=${SOURCE_FPS}:fontsize=${fontsize_tc}:fontcolor=yellow:box=1:boxcolor=black@1.0:boxborderw=5:x=${x_offset}:y=${y_tc},\
-drawtext=fontfile='${FONT}':text='${bitrate_label}':fontsize=${fontsize_label}:fontcolor=cyan:box=1:boxcolor=black@0.7:boxborderw=5:x=${x_offset}:y=${y_bitrate},\
+drawtext=fontfile='${FONT}':text='${rate_burnin_label}':fontsize=${fontsize_label}:fontcolor=cyan:box=1:boxcolor=black@0.7:boxborderw=5:x=${x_offset}:y=${y_bitrate},\
+${draw_vmaf_filter}\
 drawtext=fontfile='${FONT}':text='${codec_res_fps_label}':fontsize=${fontsize_label}:fontcolor=cyan:box=1:boxcolor=black@0.7:boxborderw=5:x=${x_offset}:y=${y_codec_res_fps},\
 drawtext=fontfile='${FONT}':text='${encoder_label}':fontsize=${fontsize_label}:fontcolor=orange:box=1:boxcolor=black@0.7:boxborderw=5:x=${x_offset}:y=${y_encoder},\
 drawtext=fontfile='${FONT}':text='JEO':fontsize=${fontsize_label}:fontcolor=white:box=1:boxcolor=black@0.7:boxborderw=5:x=${x_offset}:y=${y_watermark}"
@@ -1321,8 +1893,21 @@ drawtext=fontfile='${FONT}':text='JEO':fontsize=${fontsize_label}:fontcolor=whit
             log "  Padding label: ${fontsize_padding}px at top-right (all padding frames)"
         fi
     else
-        # 4-layer burn-in for hardware: timecode, codec+res+fps, encoder, watermark (NO bitrate)
-        local y_codec_res_fps=$((y_tc + fontsize_tc + 5))
+        # Hardware layout mirrors software vertical order at top:
+        # timecode -> rate (AVG/PEAK when available) -> codec+res+fps -> encoder -> watermark
+        local y_bitrate=$((y_tc + fontsize_tc + 5))
+        local y_next=$((y_bitrate + fontsize_label + 5))
+        local draw_rate_filter="drawtext=fontfile='${FONT}':text='${rate_burnin_label}':fontsize=${fontsize_label}:fontcolor=cyan:box=1:boxcolor=black@0.7:boxborderw=5:x=${x_offset}:y=${y_bitrate},\\"
+        log "  Rate burn-in: ${rate_burnin_label} (${fontsize_label}px at ($x_offset, $y_bitrate))"
+        local draw_vmaf_filter=""
+        # VMAF burn-in intentionally disabled.
+        # if [[ -n "$vmaf_label" ]]; then
+        #     local y_vmaf=$y_next
+        #     draw_vmaf_filter="drawtext=fontfile='${FONT}':text='${vmaf_label}':fontsize=${fontsize_label}:fontcolor=lime:box=1:boxcolor=black@0.7:boxborderw=5:x=${x_offset}:y=${y_vmaf},\\"
+        #     y_next=$((y_vmaf + fontsize_label + 5))
+        #     log "  VMAF burn-in: ${fontsize_label}px at ($x_offset, $y_vmaf)"
+        # fi
+        local y_codec_res_fps=$y_next
         local y_encoder=$((y_codec_res_fps + fontsize_label + 5))
         local y_watermark=$((y_encoder + fontsize_label + 5))
         
@@ -1344,6 +1929,8 @@ drawtext=fontfile='${FONT}':text='JEO':fontsize=${fontsize_label}:fontcolor=whit
         # Add burn-in overlays (applied to all frames including padded ones)
         filter="${filter},\
 drawtext=fontfile='${FONT}':timecode='00\\:00\\:00\\:00':rate=${SOURCE_FPS}:fontsize=${fontsize_tc}:fontcolor=yellow:box=1:boxcolor=black@1.0:boxborderw=5:x=${x_offset}:y=${y_tc},\
+${draw_rate_filter}\
+${draw_vmaf_filter}\
 drawtext=fontfile='${FONT}':text='${codec_res_fps_label}':fontsize=${fontsize_label}:fontcolor=cyan:box=1:boxcolor=black@0.7:boxborderw=5:x=${x_offset}:y=${y_codec_res_fps},\
 drawtext=fontfile='${FONT}':text='${encoder_label}':fontsize=${fontsize_label}:fontcolor=orange:box=1:boxcolor=black@0.7:boxborderw=5:x=${x_offset}:y=${y_encoder},\
 drawtext=fontfile='${FONT}':text='JEO':fontsize=${fontsize_label}:fontcolor=white:box=1:boxcolor=black@0.7:boxborderw=5:x=${x_offset}:y=${y_watermark}"
@@ -1368,8 +1955,9 @@ drawtext=fontfile='${FONT}':text='JEO':fontsize=${fontsize_label}:fontcolor=whit
             ffmpeg -i "$MEZZANINE" \
                    -vf "$filter" \
                    -c:v hevc_videotoolbox \
+                   -allow_sw 1 \
                    -b:v "${bitrate_kbps}k" \
-                   -maxrate "$((bitrate_kbps * 110 / 100))k" \
+                   -maxrate "$((bitrate_kbps * MAXRATE_PERCENT / 100))k" \
                    -bufsize "$((bitrate_kbps * 2))k" \
                    -g "$KEYINT" \
                    -force_key_frames "expr:gte(n,n_forced*$KEYINT)" \
@@ -1385,7 +1973,7 @@ drawtext=fontfile='${FONT}':text='JEO':fontsize=${fontsize_label}:fontcolor=whit
                    -vf "$filter" \
                    -c:v libx265 \
                    -b:v "${bitrate_kbps}k" \
-                   -maxrate "$((bitrate_kbps * 110 / 100))k" \
+                   -maxrate "$((bitrate_kbps * MAXRATE_PERCENT / 100))k" \
                    -bufsize "$((bitrate_kbps * 2))k" \
                    -preset "$preset" \
                    -threads 0 \
@@ -1403,8 +1991,9 @@ drawtext=fontfile='${FONT}':text='JEO':fontsize=${fontsize_label}:fontcolor=whit
             ffmpeg -i "$MEZZANINE" \
                    -vf "$filter" \
                    -c:v h264_videotoolbox \
+                   -allow_sw 1 \
                    -b:v "${bitrate_kbps}k" \
-                   -maxrate "$((bitrate_kbps * 110 / 100))k" \
+                   -maxrate "$((bitrate_kbps * MAXRATE_PERCENT / 100))k" \
                    -bufsize "$((bitrate_kbps * 2))k" \
                    -g "$KEYINT" \
                    -force_key_frames "expr:gte(n,n_forced*$KEYINT)" \
@@ -1420,7 +2009,7 @@ drawtext=fontfile='${FONT}':text='JEO':fontsize=${fontsize_label}:fontcolor=whit
                    -vf "$filter" \
                    -c:v libx264 \
                    -b:v "${bitrate_kbps}k" \
-                   -maxrate "$((bitrate_kbps * 110 / 100))k" \
+                   -maxrate "$((bitrate_kbps * MAXRATE_PERCENT / 100))k" \
                    -bufsize "$((bitrate_kbps * 2))k" \
                    -preset "$preset" \
                    -threads 0 \
@@ -1439,7 +2028,7 @@ drawtext=fontfile='${FONT}':text='JEO':fontsize=${fontsize_label}:fontcolor=whit
                -c:v libsvtav1 \
                -preset 8 \
                -b:v "${bitrate_kbps}k" \
-               -maxrate "$((bitrate_kbps * 110 / 100))k" \
+               -maxrate "$((bitrate_kbps * MAXRATE_PERCENT / 100))k" \
                -bufsize "$((bitrate_kbps * 2))k" \
                -g "$KEYINT" \
                -force_key_frames "expr:gte(n,n_forced*$KEYINT)" \
@@ -1495,15 +2084,20 @@ encode_all_variants() {
     # Parse profiles and encode
     for profile in "${PROFILES[@]}"; do
         IFS=':' read -r width height bitrate_h265 bitrate_h264 bitrate_av1 preset fontsize_tc fontsize_label x y_tc y_label <<< "$profile"
+        local res_name=$(get_resolution_name "$width")
+        local bitrate_h265_effective
+        local bitrate_h264_effective
+        bitrate_h265_effective=$(resolve_bitrate_override "$BITRATE_OVERRIDE_HEVC" "$res_name" "$bitrate_h265")
+        bitrate_h264_effective=$(resolve_bitrate_override "$BITRATE_OVERRIDE_H264" "$res_name" "$bitrate_h264")
         
         # Encode HEVC variant if requested
         if [[ "$CODEC_SELECTION" == "both" ]] || [[ "$CODEC_SELECTION" == "all" ]] || [[ "$CODEC_SELECTION" == "hevc" ]]; then
-            encode_variant "hevc" "$width" "$height" "$bitrate_h265" "$preset" "$fontsize_tc" "$fontsize_label" "$x" "$y_tc" "$y_label"
+            encode_variant "hevc" "$width" "$height" "$bitrate_h265_effective" "$preset" "$fontsize_tc" "$fontsize_label" "$x" "$y_tc" "$y_label"
         fi
         
         # Encode H.264 variant if requested
         if [[ "$CODEC_SELECTION" == "both" ]] || [[ "$CODEC_SELECTION" == "all" ]] || [[ "$CODEC_SELECTION" == "h264" ]]; then
-            encode_variant "h264" "$width" "$height" "$bitrate_h264" "$preset" "$fontsize_tc" "$fontsize_label" "$x" "$y_tc" "$y_label"
+            encode_variant "h264" "$width" "$height" "$bitrate_h264_effective" "$preset" "$fontsize_tc" "$fontsize_label" "$x" "$y_tc" "$y_label"
         fi
 
         # Encode AV1 variant if requested
@@ -1826,6 +2420,26 @@ EOF
     
     # Add video variants
     echo "# Video Variants" >> "$master_file"
+
+    # Measure default audio rendition average bitrate once for BANDWIDTH/AVERAGE-BANDWIDTH.
+    local audio_average_bandwidth=0
+    if [[ "$SKIP_AUDIO" != "true" ]] && [[ -f "$output_dir/audio/playlist.m3u8" ]]; then
+        local audio_total_bytes=0
+        local audio_total_duration=$(awk -F: '/^#EXTINF:/{gsub(/,.*/, "", $2); s+=$2} END{printf "%.6f", s+0}' "$output_dir/audio/playlist.m3u8")
+        if [[ -f "$output_dir/audio/init.mp4" ]]; then
+            local audio_init_size=$(stat -c %s "$output_dir/audio/init.mp4" 2>/dev/null || stat -f %z "$output_dir/audio/init.mp4" 2>/dev/null)
+            audio_total_bytes=$((audio_total_bytes + audio_init_size))
+        fi
+        for audio_seg in "$output_dir/audio"/segment_*.m4s; do
+            if [[ -f "$audio_seg" ]]; then
+                local audio_seg_size=$(stat -c %s "$audio_seg" 2>/dev/null || stat -f %z "$audio_seg" 2>/dev/null)
+                audio_total_bytes=$((audio_total_bytes + audio_seg_size))
+            fi
+        done
+        if awk -v d="$audio_total_duration" 'BEGIN{exit !(d>0)}'; then
+            audio_average_bandwidth=$(awk -v bytes="$audio_total_bytes" -v dur="$audio_total_duration" 'BEGIN {printf "%.0f", (bytes * 8) / dur}')
+        fi
+    fi
     
     # Process each resolution in reverse order (highest first)
     for profile in "${PROFILES[@]}"; do
@@ -1884,9 +2498,15 @@ EOF
             total_bytes=$((total_bytes + init_size))
         fi
         
-        # Calculate bandwidth (bits per second)
-        local duration=$(awk -v count="$segment_count" -v seg="$SEGMENT_DURATION" 'BEGIN {printf "%.6f", count * seg}')
-        local bandwidth=$(awk -v bytes="$total_bytes" -v dur="$duration" 'BEGIN {printf "%.0f", (bytes * 8) / dur}')
+        # Calculate average video bitrate (bits per second) from generated media.
+        local duration=$(awk -F: '/^#EXTINF:/{gsub(/,.*/, "", $2); s+=$2} END{printf "%.6f", s+0}' "$variant_playlist")
+        if ! awk -v d="$duration" 'BEGIN{exit !(d>0)}'; then
+            duration=$(awk -v count="$segment_count" -v seg="$SEGMENT_DURATION" 'BEGIN {printf "%.6f", count * seg}')
+        fi
+        local video_average_bandwidth=$(awk -v bytes="$total_bytes" -v dur="$duration" 'BEGIN {printf "%.0f", (bytes * 8) / dur}')
+        local video_peak_bandwidth
+        video_peak_bandwidth=$(awk -v avg="$video_average_bandwidth" -v pct="$MAXRATE_PERCENT" 'BEGIN {p=(avg*pct/100.0); if (p<avg) p=avg; printf "%.0f", p}')
+        local bandwidth="$video_peak_bandwidth"
         
         # Build CODECS string
         local codecs_str="$video_codecs"
@@ -1894,11 +2514,18 @@ EOF
             codecs_str="${video_codecs},mp4a.40.2"
         fi
         
+        # Include default audio rendition bitrate in both BANDWIDTH and AVERAGE-BANDWIDTH.
+        local average_bandwidth="$video_average_bandwidth"
+        if [[ "$audio_average_bandwidth" -gt 0 ]]; then
+            bandwidth=$((bandwidth + audio_average_bandwidth))
+            average_bandwidth=$((average_bandwidth + audio_average_bandwidth))
+        fi
+
         # Write variant line
         if [[ "$SKIP_AUDIO" != "true" ]]; then
-            echo "#EXT-X-STREAM-INF:BANDWIDTH=$bandwidth,RESOLUTION=${width}x${height},CODECS=\"$codecs_str\",AUDIO=\"audio\",FRAME-RATE=$framerate" >> "$master_file"
+            echo "#EXT-X-STREAM-INF:BANDWIDTH=$bandwidth,AVERAGE-BANDWIDTH=$average_bandwidth,RESOLUTION=${width}x${height},CODECS=\"$codecs_str\",AUDIO=\"audio\",FRAME-RATE=$framerate" >> "$master_file"
         else
-            echo "#EXT-X-STREAM-INF:BANDWIDTH=$bandwidth,RESOLUTION=${width}x${height},CODECS=\"$codecs_str\",FRAME-RATE=$framerate" >> "$master_file"
+            echo "#EXT-X-STREAM-INF:BANDWIDTH=$bandwidth,AVERAGE-BANDWIDTH=$average_bandwidth,RESOLUTION=${width}x${height},CODECS=\"$codecs_str\",FRAME-RATE=$framerate" >> "$master_file"
         fi
         echo "$res_name/playlist.m3u8" >> "$master_file"
     done
@@ -2010,12 +2637,20 @@ parse_fmp4_fragments() {
     print_header "Phase 6: Generating Fragment Metadata"
     
     log "Parsing fMP4 segments to generate .byteranges files for LL-HLS support..."
+
+    if ! detect_fragment_parser_script; then
+        log_warn "Skipping Phase 6: parser helper not found"
+        echo ""
+        return 0
+    fi
+    log "Using fragment parser: $FRAGMENT_PARSER_SCRIPT"
     
     local total_parsed=0
     local total_failed=0
     local hevc_count=0
     local h264_count=0
     local av1_count=0
+    local first_failure_logged=false
     
     # Process HEVC package if it exists
     if [[ -n "$OUTPUT_DIR_HEVC" ]] && [[ -d "$OUTPUT_DIR_HEVC" ]]; then
@@ -2028,11 +2663,17 @@ parse_fmp4_fragments() {
             fi
             
             # Run parser without stdout/stderr to reduce pipe traffic
-            if python3 /sbin/parse_fmp4_fragments.py --track-type "$track_type" --segment-duration "$SEGMENT_DURATION" --gop-duration "$GOP_DURATION" "$segment" >/dev/null 2>&1; then
+            if python3 "$FRAGMENT_PARSER_SCRIPT" --track-type "$track_type" --segment-duration "$SEGMENT_DURATION" --gop-duration "$GOP_DURATION" "$segment" >/dev/null 2>&1; then
                 ((total_parsed++))
                 ((hevc_count++))
             else
                 ((total_failed++))
+                if [[ "$first_failure_logged" == "false" ]]; then
+                    local err_sample
+                    err_sample=$(python3 "$FRAGMENT_PARSER_SCRIPT" --track-type "$track_type" --segment-duration "$SEGMENT_DURATION" --gop-duration "$GOP_DURATION" "$segment" 2>&1 | head -1)
+                    log_warn "Sample parser error: ${err_sample:-unknown}"
+                    first_failure_logged=true
+                fi
             fi
         done < <(find "$OUTPUT_DIR_HEVC" -name "*.m4s" -print0 | sort -z)
         log_success "HEVC: Parsed $hevc_count segments"
@@ -2049,11 +2690,17 @@ parse_fmp4_fragments() {
             fi
             
             # Run parser without stdout/stderr to reduce pipe traffic
-            if python3 /sbin/parse_fmp4_fragments.py --track-type "$track_type" --segment-duration "$SEGMENT_DURATION" --gop-duration "$GOP_DURATION" "$segment" >/dev/null 2>&1; then
+            if python3 "$FRAGMENT_PARSER_SCRIPT" --track-type "$track_type" --segment-duration "$SEGMENT_DURATION" --gop-duration "$GOP_DURATION" "$segment" >/dev/null 2>&1; then
                 ((total_parsed++))
                 ((h264_count++))
             else
                 ((total_failed++))
+                if [[ "$first_failure_logged" == "false" ]]; then
+                    local err_sample
+                    err_sample=$(python3 "$FRAGMENT_PARSER_SCRIPT" --track-type "$track_type" --segment-duration "$SEGMENT_DURATION" --gop-duration "$GOP_DURATION" "$segment" 2>&1 | head -1)
+                    log_warn "Sample parser error: ${err_sample:-unknown}"
+                    first_failure_logged=true
+                fi
             fi
         done < <(find "$OUTPUT_DIR_H264" -name "*.m4s" -print0 | sort -z)
         log_success "H.264: Parsed $h264_count segments"
@@ -2067,12 +2714,17 @@ parse_fmp4_fragments() {
             if [[ "$segment_file" == */audio/* ]]; then
                 track_type="audio"
             fi
-            if python3 /sbin/parse_fmp4_fragments.py --track-type "$track_type" --segment-duration "$SEGMENT_DURATION" --gop-duration "$GOP_DURATION" "$segment_file" >/dev/null 2>&1; then
+            if python3 "$FRAGMENT_PARSER_SCRIPT" --track-type "$track_type" --segment-duration "$SEGMENT_DURATION" --gop-duration "$GOP_DURATION" "$segment_file" >/dev/null 2>&1; then
                 ((total_parsed++)) || true
                 ((av1_count++)) || true
             else
                 ((total_failed++)) || true
-                log_warn "Failed to parse: $segment_file"
+                if [[ "$first_failure_logged" == "false" ]]; then
+                    local err_sample
+                    err_sample=$(python3 "$FRAGMENT_PARSER_SCRIPT" --track-type "$track_type" --segment-duration "$SEGMENT_DURATION" --gop-duration "$GOP_DURATION" "$segment_file" 2>&1 | head -1)
+                    log_warn "Sample parser error: ${err_sample:-unknown}"
+                    first_failure_logged=true
+                fi
             fi
         done < <(find "$OUTPUT_DIR_AV1" -name "*.m4s" -print0 | sort -z)
         log_success "AV1: Parsed $av1_count segments"
@@ -2353,6 +3005,22 @@ EOF
     
     # Find all resolution directories and sort them
     local res_dirs=$(find "$ts_output_dir" -mindepth 1 -maxdepth 1 -type d ! -name "audio" | sort -r)
+
+    # Measure default audio rendition average bitrate once for BANDWIDTH/AVERAGE-BANDWIDTH.
+    local audio_average_bandwidth=0
+    if [ "$SKIP_AUDIO" != "true" ] && [ -f "${ts_output_dir}/audio/playlist.m3u8" ]; then
+        local audio_total_bytes=0
+        local audio_total_duration=$(awk -F: '/^#EXTINF:/{gsub(/,.*/, "", $2); s+=$2} END{printf "%.6f", s+0}' "${ts_output_dir}/audio/playlist.m3u8")
+        for audio_ts in "${ts_output_dir}/audio"/segment_*.ts; do
+            if [ -f "$audio_ts" ]; then
+                local audio_seg_size=$(stat -c %s "$audio_ts" 2>/dev/null || stat -f %z "$audio_ts" 2>/dev/null)
+                audio_total_bytes=$((audio_total_bytes + audio_seg_size))
+            fi
+        done
+        if awk -v d="$audio_total_duration" 'BEGIN{exit !(d>0)}'; then
+            audio_average_bandwidth=$(awk -v bytes="$audio_total_bytes" -v dur="$audio_total_duration" 'BEGIN {printf "%.0f", (bytes * 8) / dur}')
+        fi
+    fi
     
     # Check if DASH manifest exists for metadata extraction
     local use_dash_metadata=true
@@ -2483,11 +3151,35 @@ EOF
             continue
         fi
         
+        # Measure average video bitrate from generated TS media playlist.
+        local video_total_bytes=0
+        local video_total_duration=$(awk -F: '/^#EXTINF:/{gsub(/,.*/, "", $2); s+=$2} END{printf "%.6f", s+0}' "$ts_playlist")
+        for ts_file in "$res_dir"/segment_*.ts; do
+            if [ -f "$ts_file" ]; then
+                local file_size=$(stat -c %s "$ts_file" 2>/dev/null || stat -f %z "$ts_file" 2>/dev/null)
+                video_total_bytes=$((video_total_bytes + file_size))
+            fi
+        done
+        local video_average_bandwidth="$bandwidth"
+        local average_bandwidth="$video_average_bandwidth"
+        if awk -v d="$video_total_duration" 'BEGIN{exit !(d>0)}'; then
+            video_average_bandwidth=$(awk -v bytes="$video_total_bytes" -v dur="$video_total_duration" 'BEGIN {printf "%.0f", (bytes * 8) / dur}')
+            average_bandwidth="$video_average_bandwidth"
+        fi
+        local video_peak_bandwidth
+        video_peak_bandwidth=$(awk -v avg="$video_average_bandwidth" -v pct="$MAXRATE_PERCENT" 'BEGIN {p=(avg*pct/100.0); if (p<avg) p=avg; printf "%.0f", p}')
+        bandwidth="$video_peak_bandwidth"
+        # Include default audio rendition bitrate in both BANDWIDTH and AVERAGE-BANDWIDTH.
+        if [ "$audio_average_bandwidth" -gt 0 ]; then
+            bandwidth=$((video_peak_bandwidth + audio_average_bandwidth))
+            average_bandwidth=$((average_bandwidth + audio_average_bandwidth))
+        fi
+
         # Write variant entry with actual codecs
         if [ "$SKIP_AUDIO" != "true" ]; then
-            echo "#EXT-X-STREAM-INF:BANDWIDTH=${bandwidth},RESOLUTION=${width}x${height},CODECS=\"${video_codecs},${audio_codecs}\",AUDIO=\"audio\"" >> "$master_file"
+            echo "#EXT-X-STREAM-INF:BANDWIDTH=${bandwidth},AVERAGE-BANDWIDTH=${average_bandwidth},RESOLUTION=${width}x${height},CODECS=\"${video_codecs},${audio_codecs}\",AUDIO=\"audio\"" >> "$master_file"
         else
-            echo "#EXT-X-STREAM-INF:BANDWIDTH=${bandwidth},RESOLUTION=${width}x${height},CODECS=\"${video_codecs}\"" >> "$master_file"
+            echo "#EXT-X-STREAM-INF:BANDWIDTH=${bandwidth},AVERAGE-BANDWIDTH=${average_bandwidth},RESOLUTION=${width}x${height},CODECS=\"${video_codecs}\"" >> "$master_file"
         fi
         echo "${res_name}/playlist.m3u8" >> "$master_file"
     done
@@ -2707,6 +3399,7 @@ get_resolution_dimensions() {
     local res_name=$1
     case "$res_name" in
         "2160p") echo "3840×2160" ;;
+        "1440p") echo "2560×1440" ;;
         "1080p") echo "1920×1080" ;;
         "720p") echo "1280×720" ;;
         "540p") echo "960×540" ;;
@@ -2794,9 +3487,75 @@ print_summary() {
     echo ""
 }
 
+print_resume_summary() {
+    print_header "Resume Packaging Complete!"
+
+    echo -e "${CYAN}Resume Source:${NC}"
+    echo -e "  Directory: $RESUME_PACKAGE_FROM"
+    echo -e "  Codec selection: $CODEC_SELECTION"
+    echo -e "  Tiers packaged: ${#PROFILES[@]}"
+    echo -e "  Audio: $([ "$SKIP_AUDIO" == "true" ] && echo "None (video-only)" || echo "Included")"
+    echo ""
+
+    echo -e "${CYAN}Output Packages:${NC}"
+    echo ""
+
+    if [[ -n "$OUTPUT_DIR_HEVC" ]] && [ -f "$OUTPUT_DIR_HEVC/manifest.mpd" ]; then
+        local hevc_size=$(du -sh "$OUTPUT_DIR_HEVC" | cut -f1)
+        echo -e "  ${GREEN}HEVC Package (DASH + HLS fMP4):${NC} $OUTPUT_DIR_HEVC ($hevc_size)"
+        echo -e "    DASH: http://localhost:8000/$(basename "$OUTPUT_DIR_HEVC")/manifest.mpd"
+        if [ -f "$OUTPUT_DIR_HEVC/master.m3u8" ]; then
+            echo -e "    HLS:  http://localhost:8000/$(basename "$OUTPUT_DIR_HEVC")/master.m3u8"
+        fi
+        echo ""
+    fi
+
+    if [[ -n "$OUTPUT_DIR_HEVC_TS" ]] && [ -f "$OUTPUT_DIR_HEVC_TS/master.m3u8" ]; then
+        local hevc_ts_size=$(du -sh "$OUTPUT_DIR_HEVC_TS" | cut -f1)
+        echo -e "  ${GREEN}HEVC Package (HLS TS):${NC} $OUTPUT_DIR_HEVC_TS ($hevc_ts_size)"
+        echo -e "    HLS:  http://localhost:8000/$(basename "$OUTPUT_DIR_HEVC_TS")/master.m3u8"
+        echo ""
+    fi
+
+    if [[ -n "$OUTPUT_DIR_H264" ]] && [ -f "$OUTPUT_DIR_H264/manifest.mpd" ]; then
+        local h264_size=$(du -sh "$OUTPUT_DIR_H264" | cut -f1)
+        echo -e "  ${GREEN}H.264 Package (DASH + HLS fMP4):${NC} $OUTPUT_DIR_H264 ($h264_size)"
+        echo -e "    DASH: http://localhost:8000/$(basename "$OUTPUT_DIR_H264")/manifest.mpd"
+        if [ -f "$OUTPUT_DIR_H264/master.m3u8" ]; then
+            echo -e "    HLS:  http://localhost:8000/$(basename "$OUTPUT_DIR_H264")/master.m3u8"
+        fi
+        echo ""
+    fi
+
+    if [[ -n "$OUTPUT_DIR_H264_TS" ]] && [ -f "$OUTPUT_DIR_H264_TS/master.m3u8" ]; then
+        local h264_ts_size=$(du -sh "$OUTPUT_DIR_H264_TS" | cut -f1)
+        echo -e "  ${GREEN}H.264 Package (HLS TS):${NC} $OUTPUT_DIR_H264_TS ($h264_ts_size)"
+        echo -e "    HLS:  http://localhost:8000/$(basename "$OUTPUT_DIR_H264_TS")/master.m3u8"
+        echo ""
+    fi
+
+    if [[ -n "$OUTPUT_DIR_AV1" ]] && [ -f "$OUTPUT_DIR_AV1/manifest.mpd" ]; then
+        local av1_size=$(du -sh "$OUTPUT_DIR_AV1" | cut -f1)
+        echo -e "  ${GREEN}AV1 Package (DASH + HLS fMP4):${NC} $OUTPUT_DIR_AV1 ($av1_size)"
+        echo -e "    DASH: http://localhost:8000/$(basename "$OUTPUT_DIR_AV1")/manifest.mpd"
+        if [ -f "$OUTPUT_DIR_AV1/master.m3u8" ]; then
+            echo -e "    HLS:  http://localhost:8000/$(basename "$OUTPUT_DIR_AV1")/master.m3u8"
+        fi
+        echo ""
+    fi
+
+    echo -e "${CYAN}Log File:${NC}"
+    echo -e "  $LOG_FILE"
+    echo ""
+}
+
 cleanup() {
-    log "Keeping encoded files for inspection: $TEMP_DIR"
-    log "To remove: rm -rf $TEMP_DIR"
+    if [[ "$RESUME_MODE" == "true" ]]; then
+        log "Resume mode: source temp directory retained: $TEMP_DIR"
+    else
+        log "Keeping encoded files for inspection: $TEMP_DIR"
+        log "To remove: rm -rf $TEMP_DIR"
+    fi
     
     # Clean up old Shaka Packager temp files (older than 1 day)
     local old_temp_files=$(find "${TEMP_BASE}/encoding" -name "packager-tempfile-*" -type f -mtime +1 2>/dev/null | wc -l | tr -d ' ')
@@ -2844,40 +3603,67 @@ main() {
 
     TOTAL_START=$(date +%s)
 
-    # Derive output directories
-    derive_output_directories "$INPUT_FILE"
-
-    # Place temp files alongside output by default
-    if [[ -n "$TMPDIR_OUTPUT" ]]; then
-        if [[ "$TMPDIR_OUTPUT" != /* ]]; then
-            TMPDIR_OUTPUT="$PWD/$TMPDIR_OUTPUT"
-        fi
-        TEMP_BASE="$TMPDIR_OUTPUT"
+    if [[ "$RESUME_MODE" == "true" ]]; then
+        prepare_resume_packaging_context
+        derive_output_directories "$RESUME_PACKAGE_FROM"
     else
-        TEMP_BASE="${OUTPUT_BASE_DIR}_tmp"
+        # Derive output directories
+        derive_output_directories "$INPUT_FILE"
+
+        # Place temp files alongside output by default
+        if [[ -n "$TMPDIR_OUTPUT" ]]; then
+            if [[ "$TMPDIR_OUTPUT" != /* ]]; then
+                TMPDIR_OUTPUT="$PWD/$TMPDIR_OUTPUT"
+            fi
+            TEMP_BASE="$TMPDIR_OUTPUT"
+        else
+            TEMP_BASE="${OUTPUT_BASE_DIR}_tmp"
+        fi
+        TEMP_DIR="${TEMP_BASE}/abr_ladder_$$"
+        LOG_FILE="$TEMP_DIR/encoding.log"
+        mkdir -p "$TEMP_DIR"
     fi
-    TEMP_DIR="${TEMP_BASE}/abr_ladder_$$"
-    LOG_FILE="$TEMP_DIR/encoding.log"
-    mkdir -p "$TEMP_DIR"
 
     print_header "ABR Ladder Generator - Universal Input Support"
     log "Script: $0"
-    log "Input: $INPUT_FILE"
+    if [[ "$RESUME_MODE" == "true" ]]; then
+        log "Resume source: $RESUME_PACKAGE_FROM"
+    else
+        log "Input: $INPUT_FILE"
+    fi
     log "Codec selection: $CODEC_SELECTION"
+    if [[ -n "$BITRATE_OVERRIDE_HEVC" ]]; then
+        log "HEVC bitrate overrides: $BITRATE_OVERRIDE_HEVC"
+    fi
+    if [[ -n "$BITRATE_OVERRIDE_H264" ]]; then
+        log "H264 bitrate overrides: $BITRATE_OVERRIDE_H264"
+    fi
+    if [[ -n "$VMAF_LOOKUP_CSV" ]]; then
+        log "Lookup CSV: $VMAF_LOOKUP_CSV"
+    else
+        log "Lookup CSV: disabled"
+    fi
     log "Temp directory: $TEMP_DIR"
     echo ""
 
-    # Validate input
-    validate_input "$INPUT_FILE"
-    
+    if [[ "$RESUME_MODE" == "false" ]]; then
+        # Validate input
+        validate_input "$INPUT_FILE"
+    fi
+
     # Check prerequisites
     check_prerequisites
-    
-    # Execute phases
-    create_mezzanine
-    select_resolution_tiers
-    encode_all_variants
-    create_audio_mezzanine
+
+    if [[ "$RESUME_MODE" == "false" ]]; then
+        # Execute encode phases
+        create_mezzanine
+        select_resolution_tiers
+        encode_all_variants
+        create_audio_mezzanine
+    else
+        log "Resume mode: skipping mezzanine creation and variant encoding"
+        echo ""
+    fi
     
     # Package variants based on codec selection
     # Use Shaka Packager (package_dash) for Safari-compatible fMP4 structure
@@ -2926,20 +3712,23 @@ main() {
     TOTAL_MINUTES=$((TOTAL_DURATION / 60))
     TOTAL_SECONDS=$((TOTAL_DURATION % 60))
     
-    # Generate encoding reports
-    if [[ "$CODEC_SELECTION" == "both" ]] || [[ "$CODEC_SELECTION" == "all" ]] || [[ "$CODEC_SELECTION" == "hevc" ]]; then
-        generate_encoding_report "$OUTPUT_DIR_HEVC" "hevc"
+    if [[ "$RESUME_MODE" == "false" ]]; then
+        # Generate encoding reports
+        if [[ "$CODEC_SELECTION" == "both" ]] || [[ "$CODEC_SELECTION" == "all" ]] || [[ "$CODEC_SELECTION" == "hevc" ]]; then
+            generate_encoding_report "$OUTPUT_DIR_HEVC" "hevc"
+        fi
+        
+        if [[ "$CODEC_SELECTION" == "both" ]] || [[ "$CODEC_SELECTION" == "all" ]] || [[ "$CODEC_SELECTION" == "h264" ]]; then
+            generate_encoding_report "$OUTPUT_DIR_H264" "h264"
+        fi
+        
+        if [[ "$CODEC_SELECTION" == "all" ]] || [[ "$CODEC_SELECTION" == "av1" ]]; then
+            generate_encoding_report "$OUTPUT_DIR_AV1" "av1"
+        fi
+        print_summary
+    else
+        print_resume_summary
     fi
-    
-    if [[ "$CODEC_SELECTION" == "both" ]] || [[ "$CODEC_SELECTION" == "all" ]] || [[ "$CODEC_SELECTION" == "h264" ]]; then
-        generate_encoding_report "$OUTPUT_DIR_H264" "h264"
-    fi
-    
-    if [[ "$CODEC_SELECTION" == "all" ]] || [[ "$CODEC_SELECTION" == "av1" ]]; then
-        generate_encoding_report "$OUTPUT_DIR_AV1" "av1"
-    fi
-    
-    print_summary
     
     log_success "Total time: ${TOTAL_MINUTES}m ${TOTAL_SECONDS}s"
     echo ""
