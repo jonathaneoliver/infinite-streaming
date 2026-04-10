@@ -6,10 +6,12 @@ ARG VERSION=unknown
 RUN go mod init github.com/boss/go-proxy
 
 COPY . .
+
 RUN go get github.com/gorilla/mux
 RUN go get github.com/bradfitz/gomemcache/memcache
 RUN go get github.com/grafov/m3u8
 RUN go get modernc.org/sqlite@v1.29.0
+RUN go get github.com/vishvananda/netlink@v1.3.0
 
 RUN go build -ldflags "-X main.versionString=${VERSION}" -o go-proxy cmd/server/main.go
 

@@ -495,12 +495,50 @@
         }
 
         .chart-wrap {
+            position: relative;
             margin-top: 10px;
             background: #ffffff;
             border-radius: 8px;
             padding: 6px;
             border: 1px solid #e5e7eb;
             width: 100%;
+        }
+
+        .chart-paused-badge {
+            display: none;
+            position: absolute;
+            top: 8px;
+            right: 10px;
+            background: rgba(30, 41, 59, 0.72);
+            color: #f8fafc;
+            font-family: 'Courier New', monospace;
+            font-size: 10px;
+            font-weight: bold;
+            letter-spacing: 0.1em;
+            padding: 2px 7px;
+            border-radius: 4px;
+            pointer-events: none;
+            z-index: 10;
+        }
+        .chart-wrap.chart-paused .chart-paused-badge {
+            display: block;
+        }
+        .chart-wrap.chart-paused {
+            cursor: pointer;
+        }
+
+        button[data-action="pause-bitrate-chart"].chart-live {
+            color: #16a34a;
+            border-color: #16a34a;
+            font-weight: 600;
+        }
+        @keyframes chart-pulse-dot {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.35; }
+        }
+        button[data-action="pause-bitrate-chart"].chart-live::before {
+            content: '● ';
+            animation: chart-pulse-dot 1.2s ease-in-out infinite;
         }
 
         .bandwidth-chart {
@@ -661,6 +699,7 @@
         .abrchar-ruler-marker.variant .abrchar-ruler-line { background: #64748b; }
         .abrchar-ruler-marker.limit .abrchar-ruler-line { background: #f59e0b; }
         .abrchar-ruler-marker.throughput .abrchar-ruler-line { background: #14b8a6; }
+        .abrchar-ruler-marker.wire-active-1s .abrchar-ruler-line { background: #059669; }
         .abrchar-ruler-marker.wire-throughput .abrchar-ruler-line { background: #2563eb; }
         .abrchar-ruler-marker.player-estimate .abrchar-ruler-line { background: #0ea5e9; }
         .abrchar-ruler-marker.top-range .abrchar-ruler-line { background: #dc2626; }
@@ -690,6 +729,7 @@
         }
         .abrchar-ruler-marker.limit .abrchar-ruler-label { color: #b45309; }
         .abrchar-ruler-marker.throughput .abrchar-ruler-label { color: #0f766e; }
+        .abrchar-ruler-marker.wire-active-1s .abrchar-ruler-label { color: #047857; }
         .abrchar-ruler-marker.wire-throughput .abrchar-ruler-label { color: #1d4ed8; }
         .abrchar-ruler-marker.player-estimate .abrchar-ruler-label { color: #0369a1; }
         .abrchar-ruler-marker.top-range .abrchar-ruler-label { color: #b91c1c; }
@@ -791,6 +831,7 @@
     </script>
     <script src="/shared-nav.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2.0.1/dist/chartjs-plugin-zoom.min.js"></script>
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/vis-timeline@7.7.3/styles/vis-timeline-graph2d.min.css">
     <script src="https://cdn.jsdelivr.net/npm/vis-timeline@7.7.3/standalone/umd/vis-timeline-graph2d.min.js"></script>
     <link rel="stylesheet" href="/dashboard/testing-session-refactored.css">
@@ -823,6 +864,9 @@
         let currentSessionId = null;
         let currentPlayerId = '';
         let currentUrl = '';
+        let desiredLiveOffsetSeconds = 0;
+        let liveOffsetSeekTimer = null;
+        let liveOffsetSeekDeadlineMs = 0;
         let autoRecoveryEnabled = false;
         let autoRecoveryZeroStartedAtMs = null;
         let autoRecoveryLastRestartAtMs = 0;
@@ -839,8 +883,9 @@
         const bandwidthCharts = new Map();
         const bufferDepthCharts = new Map();
         const videoFpsCharts = new Map();
+        const chartViewportBySession = new Map();
+        const chartPausedBySession = new Map();
         const bandwidthVisibility = new Map();
-        const bandwidthVariantsEnabledBySession = new Map();
         const bitrateAxisMaxBySession = new Map();
         const lastRecordedPlayerEventBySession = new Map();
         const lastRecordedLoopCountBySession = new Map();
@@ -853,6 +898,16 @@
         let groupSelectSessionId = '';
         let sessionPollController = null;
         let sessionPollInFlight = false;
+        if (window.Chart && window['chartjs-plugin-zoom']) {
+            const zoomPlugin = window['chartjs-plugin-zoom'].default || window['chartjs-plugin-zoom'];
+            if (zoomPlugin && typeof Chart.register === 'function') {
+                try {
+                    Chart.register(zoomPlugin);
+                } catch (_) {
+                    // Ignore duplicate registration errors.
+                }
+            }
+        }
         let sessionPollRequestSeq = 0;
         let sessionPollLastAppliedSeq = 0;
         let sessionsStream = null;
@@ -1316,7 +1371,7 @@
             const displayResolution = formatResolution(video.clientWidth, video.clientHeight);
             const videoResolution = formatResolution(video.videoWidth, video.videoHeight);
             let bufferedEnd = null;
-            let bufferDepth = null;
+            let bufferDepth = 0;
             let seekableEnd = null;
             if (buffered && buffered.length > 0) {
                 const end = buffered.end(buffered.length - 1);
@@ -1327,6 +1382,9 @@
                 const end = seekable.end(seekable.length - 1);
                 seekableEnd = toMetricSeconds(end);
             }
+            const liveOffset = (seekableEnd !== null)
+                ? toMetricSeconds(Math.max(0, seekableEnd - current))
+                : null;
             const quality = video.getVideoPlaybackQuality ? video.getVideoPlaybackQuality() : null;
             const totalFrames = quality ? Number(quality.totalVideoFrames || 0) : null;
             const droppedFrames = quality ? Number(quality.droppedVideoFrames || 0) : null;
@@ -1348,7 +1406,7 @@
                 player_metrics_buffer_end_s: bufferedEnd,
                 player_metrics_seekable_end_s: seekableEnd,
                 player_metrics_live_edge_s: seekableEnd,
-                player_metrics_live_offset_s: null,
+                player_metrics_live_offset_s: liveOffset,
                 player_metrics_display_resolution: displayResolution,
                 player_metrics_video_resolution: videoResolution,
                 player_metrics_video_first_frame_time_s: toMetricSeconds(videoFirstFrameS),
@@ -1413,7 +1471,7 @@
             }
             metricsHeartbeatTimer = setInterval(() => {
                 sendSessionMetrics('heartbeat');
-            }, 5000);
+            }, 1000);
         }
 
         function normalizeBitrateAxisMaxMode(value) {
@@ -1591,6 +1649,48 @@
             }, delay);
         }
 
+        function clearLiveOffsetSeekTimer() {
+            if (!liveOffsetSeekTimer) return;
+            clearInterval(liveOffsetSeekTimer);
+            liveOffsetSeekTimer = null;
+        }
+
+        function tryApplyLiveOffset(reason = 'startup') {
+            if (!(Number.isFinite(desiredLiveOffsetSeconds) && desiredLiveOffsetSeconds > 0)) return false;
+            if (!video || !video.seekable || video.seekable.length <= 0) return false;
+            const liveEdge = Number(video.seekable.end(video.seekable.length - 1));
+            if (!Number.isFinite(liveEdge)) return false;
+            const target = Math.max(0, liveEdge - desiredLiveOffsetSeconds);
+            if (!Number.isFinite(target)) return false;
+            try {
+                video.currentTime = target;
+            } catch (err) {
+                return false;
+            }
+            log(`LIVE OFFSET: applied ${desiredLiveOffsetSeconds.toFixed(1)}s behind live (${reason})`);
+            return true;
+        }
+
+        function scheduleLiveOffsetSeek(reason = 'startup') {
+            clearLiveOffsetSeekTimer();
+            if (!(Number.isFinite(desiredLiveOffsetSeconds) && desiredLiveOffsetSeconds > 0)) return;
+            liveOffsetSeekDeadlineMs = Date.now() + 20000;
+            const tick = () => {
+                if (tryApplyLiveOffset(reason)) {
+                    clearLiveOffsetSeekTimer();
+                    return;
+                }
+                if (Date.now() >= liveOffsetSeekDeadlineMs) {
+                    log(`LIVE OFFSET: unable to apply ${desiredLiveOffsetSeconds.toFixed(1)}s (seekable not ready)`);
+                    clearLiveOffsetSeekTimer();
+                }
+            };
+            tick();
+            if (!liveOffsetSeekTimer) {
+                liveOffsetSeekTimer = setInterval(tick, 250);
+            }
+        }
+
         function getParams() {
             const params = new URLSearchParams(window.location.search);
             let url = params.get('url') || '';
@@ -1636,11 +1736,16 @@
                     console.warn('Failed to persist selected url', err);
                 }
             }
+            let liveOffsetSeconds = Number(params.get('live_offset_s') || '0');
+            if (!Number.isFinite(liveOffsetSeconds) || liveOffsetSeconds < 0) {
+                liveOffsetSeconds = 0;
+            }
             return {
                 playerId: playerId,
                 url: url,
                 player: params.get('player') || '',
-                autoRecovery: params.get('auto_recovery')
+                autoRecovery: params.get('auto_recovery'),
+                liveOffsetSeconds: liveOffsetSeconds
             };
         }
 
@@ -1999,6 +2104,7 @@
         }
 
         function resetPlayback() {
+            clearLiveOffsetSeekTimer();
             if (hlsInstance) {
                 hlsInstance.destroy();
                 hlsInstance = null;
@@ -2065,6 +2171,7 @@
         function loadStream(url) {
             currentUrl = url;
             markPlaybackStart();
+            clearLiveOffsetSeekTimer();
             clearStreamAccessAlert();
             autoRetryCount = 0;
             if (autoRetryTimer) {
@@ -2207,6 +2314,7 @@
                     scheduleAutoRetry('native play error');
                 });
             }
+            scheduleLiveOffsetSeek('load_stream');
         }
 
         function renderSessionControls(session) {
@@ -2249,8 +2357,10 @@
                 }
             }
 
+            const buffered = video && video.buffered ? video.buffered : null;
+            const current = Number(video && Number.isFinite(video.currentTime) ? video.currentTime : 0);
             const depthValue = (buffered && buffered.length > 0)
-                ? Math.max(0, Number(buffered.end(buffered.length - 1) || 0) - Number(current || 0))
+                ? Math.max(0, Number(buffered.end(buffered.length - 1) || 0) - current)
                 : 0;
             if (autoRecoveryEnabled && currentUrl && !video.paused) {
                 if (Number.isFinite(depthValue) && depthValue <= 0.01) {
@@ -2895,9 +3005,29 @@
         function buildSessionPatch(card, fields) {
             const data = TestingSessionUI.readSessionSettings(card);
             const set = {};
+            const getShapingNumber = (field, fallback = 0) => {
+                const input = card.querySelector(`input[data-field="${field}"]`);
+                const value = input ? Number(input.value) : fallback;
+                return Number.isFinite(value) ? value : fallback;
+            };
+            const shapingPattern = TestingSessionUI.readShapingPattern(card);
+            const shapingFieldValues = {
+                nftables_bandwidth_mbps: getShapingNumber('shaping_throughput_mbps', 0),
+                nftables_delay_ms: getShapingNumber('shaping_delay_ms', 0),
+                nftables_packet_loss: getShapingNumber('shaping_loss_pct', 0),
+                nftables_pattern_enabled: shapingPattern.template_mode !== 'sliders' && Array.isArray(shapingPattern.steps) && shapingPattern.steps.length > 0,
+                nftables_pattern_steps: Array.isArray(shapingPattern.steps) ? shapingPattern.steps : [],
+                nftables_pattern_segment_duration_seconds: shapingPattern.segment_duration_seconds,
+                nftables_pattern_default_segments: shapingPattern.default_segments,
+                nftables_pattern_default_step_seconds: shapingPattern.default_step_seconds,
+                nftables_pattern_template_mode: shapingPattern.template_mode,
+                nftables_pattern_margin_pct: shapingPattern.template_margin_pct
+            };
             (fields || []).forEach(field => {
                 if (Object.prototype.hasOwnProperty.call(data, field)) {
                     set[field] = data[field];
+                } else if (Object.prototype.hasOwnProperty.call(shapingFieldValues, field)) {
+                    set[field] = shapingFieldValues[field];
                 }
             });
             return {
@@ -3313,11 +3443,29 @@
                     TestingSessionUI.updateTransportModeUi(card);
                 }
                 if (event.target.dataset.field === 'bitrate_chart_max_mbps') {
-                    bitrateAxisMaxBySession.set(
-                        String(card.dataset.sessionId || ''),
-                        normalizeBitrateAxisMaxMode(event.target.value)
-                    );
-                    renderBandwidthChart(card.dataset.sessionId);
+                    const sessionId = String(card.dataset.sessionId || '');
+                    const axisMode = normalizeBitrateAxisMaxMode(event.target.value);
+                    bitrateAxisMaxBySession.set(sessionId, axisMode);
+                    if (isChartPaused(sessionId)) {
+                        // renderBandwidthChart is a no-op while paused, so apply directly.
+                        const chart = bandwidthCharts.get(sessionId);
+                        if (chart) {
+                            let maxY;
+                            if (axisMode === 'auto') {
+                                const visibleMax = chart.data.datasets
+                                    .filter((_, idx) => chart.isDatasetVisible(idx))
+                                    .flatMap(ds => ds.data.map(pt => Number(pt.y) || 0))
+                                    .reduce((m, v) => Math.max(m, v), 1);
+                                maxY = Math.min(100, Math.max(1, Math.ceil(visibleMax * 1.05 * 10) / 10));
+                            } else {
+                                maxY = Number(axisMode);
+                            }
+                            chart.options.scales.y.max = maxY;
+                            chart.update('none');
+                        }
+                    } else {
+                        renderBandwidthChart(sessionId);
+                    }
                     return;
                 }
                 if (event.target.dataset.field && event.target.dataset.field.startsWith('shaping_template_')) {
@@ -3423,11 +3571,22 @@
                 if (!button) return;
                 const card = button.closest('.session-card');
                 if (!card) return;
-                if (button.dataset.action === 'toggle-variants') {
+                if (button.dataset.action === 'reset-bitrate-zoom') {
                     const sessionId = String(card.dataset.sessionId || '');
-                    const variantsEnabled = bandwidthVariantsEnabledBySession.get(sessionId) !== false;
-                    bandwidthVariantsEnabledBySession.set(sessionId, !variantsEnabled);
-                    renderBandwidthChart(sessionId);
+                    chartViewportBySession.delete(sessionId);
+                    if (rightPanDragState && rightPanDragState.sessionId === sessionId) {
+                        rightPanDragState = null;
+                    }
+                    for (const chart of getChartsForSession(sessionId)) {
+                        if (chart && typeof chart.resetZoom === 'function') {
+                            chart.resetZoom('none');
+                        }
+                    }
+                    return;
+                }
+                if (button.dataset.action === 'pause-bitrate-chart') {
+                    const sessionId = String(card.dataset.sessionId || '');
+                    toggleChartPause(sessionId);
                     return;
                 }
                 if (button.dataset.action === 'apply-pattern') {
@@ -3545,12 +3704,6 @@
                 delay: payload.delay_ms,
                 loss: payload.loss_pct
             });
-            setTimeout(() => {
-                const pending = pendingShaping.get(sessionId);
-                if (pending && Date.now() - pending.timestamp > 4500) {
-                    pendingShaping.delete(sessionId);
-                }
-            }, 5000);
             const fields = [
                 'nftables_bandwidth_mbps',
                 'nftables_delay_ms',
@@ -3564,6 +3717,34 @@
                 'nftables_pattern_margin_pct'
             ];
             sendSessionPatch(card, fields);
+        }
+
+        function shapingValuesMatch(serverSession, pendingValues) {
+            if (!serverSession || !pendingValues) return false;
+            const sameNumber = (a, b, tolerance = 0.001) => {
+                const left = Number(a);
+                const right = Number(b);
+                if (!Number.isFinite(left) || !Number.isFinite(right)) return false;
+                return Math.abs(left - right) <= tolerance;
+            };
+            const sameBool = (a, b) => {
+                const toBool = (value) => value === true || value === 1 || value === 'true';
+                return toBool(a) === toBool(b);
+            };
+            const sameJson = (a, b) => {
+                try {
+                    return JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
+                } catch {
+                    return false;
+                }
+            };
+
+            if (!sameNumber(serverSession.nftables_bandwidth_mbps, pendingValues.nftables_bandwidth_mbps, 0.01)) return false;
+            if (!sameNumber(serverSession.nftables_delay_ms, pendingValues.nftables_delay_ms, 0.1)) return false;
+            if (!sameNumber(serverSession.nftables_packet_loss, pendingValues.nftables_packet_loss, 0.01)) return false;
+            if (!sameBool(serverSession.nftables_pattern_enabled, pendingValues.nftables_pattern_enabled)) return false;
+            if (!sameJson(serverSession.nftables_pattern_steps, pendingValues.nftables_pattern_steps)) return false;
+            return true;
         }
 
         function findSessionByPlayerId(playerId, signal) {
@@ -3584,13 +3765,8 @@
                     const lastRequest = Date.parse(session.last_request || '') || 0;
                     const firstRequest = Date.parse(session.first_request_time || '') || 0;
                     const wireScore =
-                        Number.isFinite(Number(session.mbps_wire_sustained)) ||
-                        Number.isFinite(Number(session.mbps_wire_active)) ||
-                        Number.isFinite(Number(session.mbps_wire_sustained_6s)) ||
-                        Number.isFinite(Number(session.mbps_wire_active_6s)) ||
-                        Number.isFinite(Number(session.mbps_wire_sustained_1s)) ||
-                        Number.isFinite(Number(session.mbps_wire_active_1s)) ||
-                        Number.isFinite(Number(session.mbps_wire_throughput))
+                        Number.isFinite(Number(session.mbps_shaper_rate)) ||
+                        Number.isFinite(Number(session.mbps_transfer_rate))
                             ? 1
                             : 0;
                     return { wireScore, lastRequest, firstRequest };
@@ -3729,12 +3905,6 @@
             setText('[data-field="session_measurement_window_io_1s"]', formatMetricNumber(session.measurement_window_io_1s, 's'));
             setText('[data-field="session_measurement_window_active"]', formatMetricNumber(session.measurement_window_active, 's'));
             setText('[data-field="session_measurement_window_segment_active"]', formatMetricNumber(session.measurement_window_segment_active, 's'));
-            setText('[data-field="session_mbps_wire_sustained"]', formatMetricNumber(session.mbps_wire_sustained, ' Mbps'));
-            setText('[data-field="session_mbps_wire_active"]', formatMetricNumber(session.mbps_wire_active, ' Mbps'));
-            setText('[data-field="session_mbps_wire_sustained_6s"]', formatMetricNumber(session.mbps_wire_sustained_6s, ' Mbps'));
-            setText('[data-field="session_mbps_wire_active_6s"]', formatMetricNumber(session.mbps_wire_active_6s, ' Mbps'));
-            setText('[data-field="session_mbps_wire_sustained_1s"]', formatMetricNumber(session.mbps_wire_sustained_1s, ' Mbps'));
-            setText('[data-field="session_mbps_wire_throughput"]', formatMetricNumber(session.mbps_wire_throughput, ' Mbps'));
             const masterCount = session.master_manifest_requests_count || 0;
             const manifestCount = session.manifest_requests_count || 0;
             const segmentCount = session.segments_count || 0;
@@ -3778,9 +3948,7 @@
             return String(label || '').replace(/\s*\(V\d+\)$/, '');
         }
 
-        function isVariantSeriesLabel(label) {
-            return /^Variant V\d+$/.test(String(label || ''));
-        }
+
 
         function buildVariantLadder(variants) {
             if (!Array.isArray(variants) || !variants.length) return [];
@@ -3838,15 +4006,284 @@
             return `Window: ${start} → ${end}`;
         }
 
+        function pinBitrateChartToLiveEdge(chartRef) {
+            const xScale = chartRef?.scales?.x;
+            if (!xScale) return;
+            const domainMin = 0;
+            const domainMax = 600;
+            const currentMin = Number(xScale.min);
+            const currentMax = Number(xScale.max);
+            if (!Number.isFinite(currentMin) || !Number.isFinite(currentMax)) return;
+            const span = Math.max(2, Math.min(domainMax - domainMin, currentMax - currentMin));
+            const nextMax = domainMax;
+            const nextMin = Math.max(domainMin, nextMax - span);
+            if (typeof chartRef.zoomScale === 'function') {
+                // Store via plugin so the pin survives future chart.update() calls.
+                // zoomScale does not fire onZoomComplete so this is safe to call here.
+                chartRef.zoomScale('x', { min: nextMin, max: nextMax }, 'none');
+            } else if (chartRef.options?.scales?.x) {
+                chartRef.options.scales.x.min = nextMin;
+                chartRef.options.scales.x.max = nextMax;
+            }
+        }
+
+        function normalizeChartViewport(minValue, maxValue) {
+            const domainMin = 0;
+            const domainMax = 600;
+            let min = Number(minValue);
+            let max = Number(maxValue);
+            if (!Number.isFinite(min) || !Number.isFinite(max)) return null;
+            if (max < min) {
+                const tmp = min;
+                min = max;
+                max = tmp;
+            }
+            let span = max - min;
+            if (!Number.isFinite(span) || span <= 0) {
+                return { min: domainMin, max: domainMax };
+            }
+            span = Math.max(2, Math.min(domainMax - domainMin, span));
+            max = Math.min(domainMax, max);
+            min = Math.max(domainMin, max - span);
+            max = min + span;
+            if (max > domainMax) {
+                max = domainMax;
+                min = domainMax - span;
+            }
+            if (min < domainMin) {
+                min = domainMin;
+                max = domainMin + span;
+            }
+            return { min, max };
+        }
+
+        function readChartViewport(chartRef) {
+            const xScale = chartRef?.scales?.x;
+            if (!xScale) return null;
+            return normalizeChartViewport(xScale.min, xScale.max);
+        }
+
+        function applyChartViewport(chartRef, viewport) {
+            if (!chartRef || !viewport) return;
+            if (typeof chartRef.zoomScale === 'function') {
+                // Use the plugin API so the zoom state is stored inside the plugin and
+                // survives future chart.update() calls (direct options writes get overridden
+                // by the plugin's beforeUpdate hook).  zoomScale does NOT fire onZoomComplete.
+                chartRef.zoomScale('x', { min: viewport.min, max: viewport.max }, 'none');
+            } else if (chartRef.options?.scales?.x) {
+                chartRef.options.scales.x.min = viewport.min;
+                chartRef.options.scales.x.max = viewport.max;
+            }
+        }
+
+        function applyStoredChartViewport(sessionId, chartRef) {
+            const viewport = chartViewportBySession.get(String(sessionId || ''));
+            if (!viewport) return false;
+            applyChartViewport(chartRef, viewport);
+            return true;
+        }
+
+        function getChartsForSession(sessionId) {
+            const key = String(sessionId || '');
+            return [
+                bandwidthCharts.get(key),
+                bufferDepthCharts.get(key),
+                videoFpsCharts.get(key)
+            ].filter((chartRef) => !!chartRef);
+        }
+
+        function syncChartViewportAcrossSession(sessionId, sourceChart) {
+            const key = String(sessionId || '');
+            const viewport = readChartViewport(sourceChart);
+            if (!viewport) return;
+            chartViewportBySession.set(key, viewport);
+            for (const chartRef of getChartsForSession(key)) {
+                if (!chartRef || chartRef === sourceChart) continue;
+                applyChartViewport(chartRef, viewport);
+                // zoomScale (used inside applyChartViewport) calls update internally;
+                // only call update explicitly when falling back to direct options writes.
+                if (typeof chartRef.zoomScale !== 'function') {
+                    chartRef.update('none');
+                }
+            }
+        }
+
+        function buildUnifiedChartZoomOptions(sessionId) {
+            const key = String(sessionId || '');
+            return {
+                pan: {
+                    enabled: true,
+                    mode: 'x',
+                    threshold: 2,
+                    // Must be inside pan{} in chartjs-plugin-zoom v2
+                    onPanComplete: ({ chart: chartRef }) => {
+                        syncChartViewportAcrossSession(key, chartRef);
+                    }
+                },
+                limits: {
+                    x: { min: 0, max: 600, minRange: 2 }
+                },
+                zoom: {
+                    wheel: {
+                        enabled: true
+                    },
+                    drag: {
+                        enabled: true,
+                        modifierKey: 'alt',
+                        borderColor: '#1d4ed8',
+                        borderWidth: 1,
+                        backgroundColor: 'rgba(37, 99, 235, 0.12)'
+                    },
+                    mode: 'x',
+                    // Must be inside zoom{} in chartjs-plugin-zoom v2
+                    onZoomComplete: ({ chart: chartRef }) => {
+                        pinBitrateChartToLiveEdge(chartRef);
+                        syncChartViewportAcrossSession(key, chartRef);
+                    }
+                }
+            };
+        }
+
+        let rightPanDragState = null;
+        let rightPanListenersInstalled = false;
+
+        function installRightMousePanHandlers(sessionId, chartRef) {
+            const canvas = chartRef?.canvas;
+            if (!canvas || canvas.dataset.rightPanBound === '1') return;
+            canvas.dataset.rightPanBound = '1';
+            const key = String(sessionId || '');
+            canvas.addEventListener('contextmenu', (event) => {
+                event.preventDefault();
+            });
+            canvas.addEventListener('mousedown', (event) => {
+                if (event.button !== 2) return;
+                event.preventDefault();
+                const viewport = readChartViewport(chartRef) || { min: 0, max: 600 };
+                rightPanDragState = {
+                    sessionId: key,
+                    sourceChart: chartRef,
+                    startClientX: event.clientX,
+                    startViewport: viewport
+                };
+            });
+            if (rightPanListenersInstalled) return;
+            rightPanListenersInstalled = true;
+            window.addEventListener('mousemove', (event) => {
+                if (!rightPanDragState) return;
+                const sourceChart = rightPanDragState.sourceChart;
+                const chartArea = sourceChart?.chartArea;
+                if (!sourceChart || !chartArea) return;
+                const widthPx = Math.max(1, chartArea.right - chartArea.left);
+                const span = rightPanDragState.startViewport.max - rightPanDragState.startViewport.min;
+                if (!Number.isFinite(span) || span <= 0) return;
+                const deltaPx = event.clientX - rightPanDragState.startClientX;
+                const deltaValue = (deltaPx / widthPx) * span;
+                const viewport = normalizeChartViewport(
+                    rightPanDragState.startViewport.min - deltaValue,
+                    rightPanDragState.startViewport.max - deltaValue
+                );
+                if (!viewport) return;
+                chartViewportBySession.set(rightPanDragState.sessionId, viewport);
+                for (const chart of getChartsForSession(rightPanDragState.sessionId)) {
+                    applyChartViewport(chart, viewport);
+                    if (typeof chart.zoomScale !== 'function') {
+                        chart.update('none');
+                    }
+                }
+            });
+            window.addEventListener('mouseup', (event) => {
+                if (!rightPanDragState) return;
+                if (event.button === 2) {
+                    rightPanDragState = null;
+                }
+            });
+            window.addEventListener('blur', () => {
+                rightPanDragState = null;
+            });
+        }
+
+        function isChartPaused(sessionId) {
+            return chartPausedBySession.get(String(sessionId || '')) === true;
+        }
+
+        function updatePauseButtonAndOverlays(sessionId) {
+            const key = String(sessionId || '');
+            const paused = isChartPaused(key);
+            const card = document.querySelector(`.session-card[data-session-id="${key}"]`);
+            if (!card) return;
+            const btn = card.querySelector('button[data-action="pause-bitrate-chart"]');
+            if (btn) {
+                if (paused) {
+                    btn.textContent = 'Live';
+                    btn.classList.add('chart-live');
+                } else {
+                    btn.textContent = '⏸ Pause';
+                    btn.classList.remove('chart-live');
+                }
+            }
+            for (const wrap of card.querySelectorAll('.chart-wrap')) {
+                let badge = wrap.querySelector('.chart-paused-badge');
+                if (!badge) {
+                    badge = document.createElement('div');
+                    badge.className = 'chart-paused-badge';
+                    badge.textContent = 'PAUSED';
+                    wrap.appendChild(badge);
+                }
+                wrap.classList.toggle('chart-paused', paused);
+            }
+        }
+
+        function toggleChartPause(sessionId) {
+            const key = String(sessionId || '');
+            const wasPaused = isChartPaused(key);
+            chartPausedBySession.set(key, !wasPaused);
+            updatePauseButtonAndOverlays(key);
+            if (wasPaused) {
+                renderBandwidthChart(key);
+            }
+        }
+
+        function installChartClickPauseHandler(sessionId, chartRef) {
+            const canvas = chartRef?.canvas;
+            if (!canvas || canvas.dataset.pauseHandlerBound === '1') return;
+            canvas.dataset.pauseHandlerBound = '1';
+            let startX = 0;
+            let startY = 0;
+            canvas.addEventListener('mousedown', (e) => {
+                if (e.button !== 0) return;
+                startX = e.clientX;
+                startY = e.clientY;
+            });
+            canvas.addEventListener('click', (e) => {
+                if (e.altKey) return;
+                if (Math.abs(e.clientX - startX) > 5 || Math.abs(e.clientY - startY) > 5) return;
+                // Only toggle pause for clicks inside the plot area.
+                // Clicks in the legend / title regions (outside chartArea) are for
+                // Chart.js legend interaction and must not trigger pause.
+                const chartArea = chartRef.chartArea;
+                if (chartArea) {
+                    const rect = canvas.getBoundingClientRect();
+                    const cx = e.clientX - rect.left;
+                    const cy = e.clientY - rect.top;
+                    if (cx < chartArea.left || cx > chartArea.right || cy < chartArea.top || cy > chartArea.bottom) {
+                        return;
+                    }
+                }
+                toggleChartPause(sessionId);
+            });
+        }
+
         function pushBandwidthSample(session) {
             const now = Date.now();
             const windowMs = 10 * 60 * 1000;
-            const wireSustained = Number.isFinite(Number(session.mbps_wire_sustained)) ? Number(session.mbps_wire_sustained) : null;
-            const wireActive = Number.isFinite(Number(session.mbps_wire_active)) ? Number(session.mbps_wire_active) : null;
-            const wireSustained6s = Number.isFinite(Number(session.mbps_wire_sustained_6s)) ? Number(session.mbps_wire_sustained_6s) : null;
-            const wireActive6s = Number.isFinite(Number(session.mbps_wire_active_6s)) ? Number(session.mbps_wire_active_6s) : null;
-            const wireSustained1s = Number.isFinite(Number(session.mbps_wire_sustained_1s)) ? Number(session.mbps_wire_sustained_1s) : null;
-            const wireThroughput = Number.isFinite(Number(session.mbps_wire_throughput)) ? Number(session.mbps_wire_throughput) : null;
+            const key = session.session_id;
+            const shaperRate = Number.isFinite(Number(session.mbps_shaper_rate)) ? Number(session.mbps_shaper_rate) : null;
+            const shaperAvg = Number.isFinite(Number(session.mbps_shaper_avg)) ? Number(session.mbps_shaper_avg) : null;
+            const transferRate = session.mbps_transfer_rate != null && Number.isFinite(Number(session.mbps_transfer_rate)) ? Number(session.mbps_transfer_rate) : null;
+            const transferComplete = session.mbps_transfer_complete != null && Number.isFinite(Number(session.mbps_transfer_complete)) ? Number(session.mbps_transfer_complete) : null;
+            const fullSegmentNetworkBitrate = Number.isFinite(Number(session.full_segment_network_bitrate_mbps))
+                ? Number(session.full_segment_network_bitrate_mbps)
+                : null;
             let bufferDepth = null;
             if (video && video.buffered && video.buffered.length > 0) {
                 const current = Number(video.currentTime || 0);
@@ -3860,6 +4297,9 @@
             const currentRendition = Number(currentRenditionMbps || 0);
             const framesDisplayed = Number.isFinite(Number(session.player_metrics_frames_displayed))
                 ? Number(session.player_metrics_frames_displayed)
+                : null;
+            const metricsAtMs = session.player_metrics_event_time
+                ? Date.parse(session.player_metrics_event_time) || null
                 : null;
             const framesDropped = Number.isFinite(Number(session.player_metrics_dropped_frames))
                 ? Number(session.player_metrics_dropped_frames)
@@ -3921,7 +4361,6 @@
                     target = stepRate;
                 }
             }
-            const key = session.session_id;
             if (!patternEnabled) {
                 const applied = lastAppliedShaping.get(key);
                 if (applied && Date.now() - applied.timestamp < 20000) {
@@ -3995,16 +4434,16 @@
             }
             series.push({
                 ts: now,
-                wireSustained,
-                wireActive,
-                wireSustained6s,
-                wireActive6s,
-                wireSustained1s,
-                wireThroughput,
+                shaperRate,
+                shaperAvg,
+                transferRate,
+                transferComplete,
+                fullSegmentNetworkBitrate,
                 bufferDepth,
                 playerEstimate,
                 currentRendition,
                 framesDisplayed,
+                metricsAtMs,
                 framesDropped,
                 serverRendition,
                 target,
@@ -4017,6 +4456,7 @@
         }
 
         function renderBandwidthChart(sessionId) {
+            if (isChartPaused(sessionId)) return;
             const series = bandwidthHistory.get(sessionId) || [];
             const eventSeries = bandwidthEventHistory.get(sessionId) || [];
             const card = document.querySelector(`.session-card[data-session-id="${sessionId}"]`);
@@ -4035,16 +4475,16 @@
                 .filter(point => point.ts >= windowStart)
                 .map(point => ({
                     x: (point.ts - windowStart) / 1000,
-                    wireSustained: point.wireSustained,
-                    wireActive: point.wireActive,
-                    wireSustained6s: point.wireSustained6s,
-                    wireActive6s: point.wireActive6s,
-                    wireSustained1s: point.wireSustained1s,
-                    wireThroughput: point.wireThroughput,
+                    shaperRate: point.shaperRate,
+                    shaperAvg: point.shaperAvg,
+                    transferRate: point.transferRate,
+                    transferComplete: point.transferComplete,
+                    fullSegmentNetworkBitrate: point.fullSegmentNetworkBitrate,
                     bufferDepth: point.bufferDepth,
                     playerEstimate: point.playerEstimate,
                     currentRendition: point.currentRendition,
                     framesDisplayed: point.framesDisplayed,
+                    metricsAtMs: point.metricsAtMs,
                     framesDropped: point.framesDropped,
                     serverRendition: point.serverRendition,
                     target: point.target,
@@ -4057,15 +4497,14 @@
                     type: event.type
                 }))
                 .filter((event) => Number.isFinite(event.x) && event.x >= 0 && event.x <= 600);
-            const wireSustainedData = points.map(point => ({ x: point.x, y: point.wireSustained }));
-            const wireActiveData = points.map(point => ({ x: point.x, y: point.wireActive }));
-            const wireSustained6sData = points.map(point => ({ x: point.x, y: point.wireSustained6s }));
-            const wireActive6sData = points.map(point => ({ x: point.x, y: point.wireActive6s }));
-            const wireSustained1sData = points.map(point => ({ x: point.x, y: point.wireSustained1s }));
-            const wireThroughputData = points.map(point => ({ x: point.x, y: point.wireThroughput }));
+            const shaperRateData = points.map(point => ({ x: point.x, y: point.shaperRate }));
+            const shaperAvgData = points.map(point => ({ x: point.x, y: point.shaperAvg }));
+            const transferRateData = points.map(point => ({ x: point.x, y: point.transferRate }));
+            const transferCompleteData = points.map(point => ({ x: point.x, y: point.transferComplete }));
+            const fullSegmentNetworkBitrateData = points.map(point => ({ x: point.x, y: point.fullSegmentNetworkBitrate }));
             const bufferDepthData = points.map(point => ({ x: point.x, y: Number.isFinite(point.bufferDepth) ? point.bufferDepth : null }));
-            const framesDisplayedData = points.map(point => ({ x: point.x, y: Number.isFinite(point.framesDisplayed) ? point.framesDisplayed : null }));
-            const framesDroppedData = points.map(point => ({ x: point.x, y: Number.isFinite(point.framesDropped) ? point.framesDropped : null }));
+            const framesDisplayedData = points.map(point => ({ x: point.x, y: Number.isFinite(point.framesDisplayed) ? point.framesDisplayed : null, atMs: point.metricsAtMs || null }));
+            const framesDroppedData = points.map(point => ({ x: point.x, y: Number.isFinite(point.framesDropped) ? point.framesDropped : null, atMs: point.metricsAtMs || null }));
             const estimateData = points.map(point => ({ x: point.x, y: point.playerEstimate || null }));
             const renditionData = points.map(point => ({ x: point.x, y: point.currentRendition || null }));
             const serverRenditionData = points.map(point => ({ x: point.x, y: point.serverRendition || null }));
@@ -4078,18 +4517,15 @@
                 }
             }
             const visibility = bandwidthVisibility.get(sessionId) || {};
-            const variantsEnabled = bandwidthVariantsEnabledBySession.get(String(sessionId)) !== false;
-            const variantToggleButton = card.querySelector('button[data-action="toggle-variants"]');
-            if (variantToggleButton) {
-                variantToggleButton.textContent = variantsEnabled ? 'Hide Variants' : 'Show Variants';
-                variantToggleButton.setAttribute('aria-pressed', variantsEnabled ? 'true' : 'false');
-            }
             const defaultVisibleLabels = new Set([
-                'Wire Sustained (6s)',
-                'Wire Throughput',
+                'mbps_shaper_rate',
+                'mbps_shaper_avg',
+                'mbps_transfer_rate',
+                'mbps_transfer_complete',
                 'Player est.',
                 'Rendition',
                 'Server Rendition',
+                'Variants',
                 'Limit',
                 'STALL',
                 'RESTART',
@@ -4098,17 +4534,11 @@
             ]);
             const isSeriesHidden = (label) => {
                 const key = bandwidthSeriesKey(label);
-                if (isVariantSeriesLabel(key) && !variantsEnabled) {
-                    return true;
-                }
                 if (Object.prototype.hasOwnProperty.call(visibility, label)) {
                     return visibility[label] === true;
                 }
                 if (Object.prototype.hasOwnProperty.call(visibility, key)) {
                     return visibility[key] === true;
-                }
-                if (isVariantSeriesLabel(key)) {
-                    return false;
                 }
                 return !defaultVisibleLabels.has(key);
             };
@@ -4120,12 +4550,10 @@
             bitrateAxisMaxBySession.set(String(sessionId), axisMode);
             const maxFor = (hidden, data) => (hidden ? [0] : data.map(point => point.y || 0));
             const maxYAutoRaw = Math.max(1,
-                ...maxFor(isSeriesHidden('Wire Sustained (18s)'), wireSustainedData),
-                ...maxFor(isSeriesHidden('Wire Active'), wireActiveData),
-                ...maxFor(isSeriesHidden('Wire Sustained (6s)'), wireSustained6sData),
-                ...maxFor(isSeriesHidden('Wire Active (6s)'), wireActive6sData),
-                ...maxFor(isSeriesHidden('Wire Sustained (1s)'), wireSustained1sData),
-                ...maxFor(isSeriesHidden('Wire Throughput'), wireThroughputData),
+                ...maxFor(isSeriesHidden('mbps_shaper_rate'), shaperRateData),
+                ...maxFor(isSeriesHidden('mbps_shaper_avg'), shaperAvgData),
+                ...maxFor(isSeriesHidden('mbps_transfer_rate'), transferRateData),
+                ...maxFor(isSeriesHidden('mbps_transfer_complete'), transferCompleteData),
                 ...maxFor(isSeriesHidden('Player est.'), estimateData),
                 ...maxFor(isSeriesHidden('Rendition'), renditionData),
                 ...maxFor(isSeriesHidden('Server Rendition'), serverRenditionData),
@@ -4147,10 +4575,10 @@
             const restartMarkerData = buildEventMarkerData('RESTART');
             const loopPlayerMarkerData = buildEventMarkerData('LOOP_PLAYER');
             const loopServerMarkerData = buildEventMarkerData('LOOP_SERVER');
+            const variantsHidden = isSeriesHidden('Variants');
             const variantDatasets = variantLadder.map((variant, index) => {
-                const label = `Variant ${variant.vx}`;
                 return {
-                    label,
+                    label: index === 0 ? 'Variants' : `_Variant ${variant.vx}`,
                     data: points.map(point => ({ x: point.x, y: variant.mbps })),
                     borderColor: '#9ca3af',
                     backgroundColor: 'rgba(156,163,175,0.12)',
@@ -4158,75 +4586,54 @@
                     pointRadius: 0,
                     tension: 0,
                     borderDash: index % 2 === 0 ? [2, 6] : [6, 3],
-                    hidden: isSeriesHidden(label)
+                    hidden: variantsHidden
                 };
             });
             const datasets = [
                 {
-                    label: 'Wire Sustained (18s)',
-                    data: wireSustainedData,
-                    borderColor: '#0891b2',
-                    backgroundColor: 'rgba(8,145,178,0.12)',
-                    borderWidth: 1.5,
-                    pointRadius: 0,
-                    tension: 0.2,
-                    borderDash: [6, 3],
-                    hidden: isSeriesHidden('Wire Sustained (18s)')
-                },
-                {
-                    label: 'Wire Active',
-                    data: wireActiveData,
+                    label: 'mbps_shaper_rate',
+                    data: shaperRateData,
                     borderColor: '#0f766e',
                     backgroundColor: 'rgba(15,118,110,0.12)',
-                    borderWidth: 1.5,
+                    borderWidth: 1.7,
                     pointRadius: 0,
-                    tension: 0.2,
-                    borderDash: [2, 4],
-                    hidden: isSeriesHidden('Wire Active')
+                    tension: 0.15,
+                    borderDash: [8, 2],
+                    hidden: isSeriesHidden('mbps_shaper_rate')
                 },
                 {
-                    label: 'Wire Sustained (6s)',
-                    data: wireSustained6sData,
-                    borderColor: '#155e75',
-                    backgroundColor: 'rgba(21,94,117,0.12)',
-                    borderWidth: 1.5,
-                    pointRadius: 0,
-                    tension: 0.2,
-                    borderDash: [8, 3],
-                    hidden: isSeriesHidden('Wire Sustained (6s)')
-                },
-                {
-                    label: 'Wire Active (6s)',
-                    data: wireActive6sData,
-                    borderColor: '#115e59',
-                    backgroundColor: 'rgba(17,94,89,0.12)',
-                    borderWidth: 1.5,
-                    pointRadius: 0,
-                    tension: 0.2,
-                    borderDash: [3, 5],
-                    hidden: isSeriesHidden('Wire Active (6s)')
-                },
-                {
-                    label: 'Wire Sustained (1s)',
-                    data: wireSustained1sData,
-                    borderColor: '#0e7490',
-                    backgroundColor: 'rgba(14,116,144,0.12)',
-                    borderWidth: 1.5,
-                    pointRadius: 0,
-                    tension: 0.2,
-                    borderDash: [4, 4],
-                    hidden: isSeriesHidden('Wire Sustained (1s)')
-                },
-                {
-                    label: 'Wire Throughput',
-                    data: wireThroughputData,
+                    label: 'mbps_shaper_avg',
+                    data: shaperAvgData,
                     borderColor: '#0d9488',
                     backgroundColor: 'rgba(13,148,136,0.12)',
-                    borderWidth: 1.5,
+                    borderWidth: 1.7,
                     pointRadius: 0,
-                    tension: 0.2,
-                    borderDash: [1, 3],
-                    hidden: isSeriesHidden('Wire Throughput')
+                    tension: 0.15,
+                    borderDash: [10, 3],
+                    hidden: isSeriesHidden('mbps_shaper_avg')
+                },
+                {
+                    label: 'mbps_transfer_rate',
+                    data: transferRateData,
+                    borderColor: '#f97316',
+                    backgroundColor: 'rgba(249,115,22,0.12)',
+                    borderWidth: 2,
+                    pointRadius: 0,
+                    tension: 0,
+                    borderDash: [4, 2],
+                    hidden: isSeriesHidden('mbps_transfer_rate')
+                },
+                {
+                    label: 'mbps_transfer_complete',
+                    data: transferCompleteData,
+                    borderColor: '#dc2626',
+                    backgroundColor: 'rgba(220,38,38,0.15)',
+                    borderWidth: 3,
+                    pointRadius: 3,
+                    pointBackgroundColor: '#dc2626',
+                    tension: 0,
+                    stepped: 'after',
+                    hidden: isSeriesHidden('mbps_transfer_complete')
                 },
                 {
                     label: 'Player est.',
@@ -4335,7 +4742,8 @@
                                 position: 'bottom',
                                 labels: {
                                     color: '#6b7280',
-                                    font: { family: 'Courier New, monospace', size: 10 }
+                                    font: { family: 'Courier New, monospace', size: 10 },
+                                    filter: (item) => !item.text.startsWith('_')
                                 },
                                 onClick: (evt, item, legend) => {
                                     const index = item.datasetIndex;
@@ -4344,10 +4752,32 @@
                                     if (!label) return;
                                     const state = bandwidthVisibility.get(sessionId) || {};
                                     const isVisible = chartRef.isDatasetVisible(index);
-                                    chartRef.setDatasetVisibility(index, !isVisible);
-                                    state[label] = isVisible;
-                                    state[bandwidthSeriesKey(label)] = isVisible;
+                                    if (label === 'Variants') {
+                                        // Toggle all variant datasets together.
+                                        const newVisible = !isVisible;
+                                        chartRef.data.datasets.forEach((ds, i) => {
+                                            if (ds.label === 'Variants' || (ds.label && ds.label.startsWith('_Variant'))) {
+                                                chartRef.setDatasetVisibility(i, newVisible);
+                                            }
+                                        });
+                                        state['Variants'] = !newVisible;
+                                    } else {
+                                        chartRef.setDatasetVisibility(index, !isVisible);
+                                        state[label] = isVisible;
+                                        state[bandwidthSeriesKey(label)] = isVisible;
+                                    }
                                     bandwidthVisibility.set(sessionId, state);
+                                    // Recalculate Y-axis max from visible datasets.
+                                    const currentAxisMode = normalizeBitrateAxisMaxMode(
+                                        bitrateAxisMaxBySession.get(String(sessionId)) || 'auto'
+                                    );
+                                    if (currentAxisMode === 'auto') {
+                                        const visibleMax = chartRef.data.datasets
+                                            .filter((_, i) => chartRef.isDatasetVisible(i))
+                                            .flatMap(ds => ds.data.map(pt => Number(pt.y) || 0))
+                                            .reduce((m, v) => Math.max(m, v), 1);
+                                        chartRef.options.scales.y.max = Math.min(100, Math.max(1, Math.ceil(visibleMax * 1.05 * 10) / 10));
+                                    }
                                     chartRef.update('none');
                                 }
                             },
@@ -4361,7 +4791,8 @@
                                         return formatBitrateChartAbsoluteTick(startMs, xValue);
                                     }
                                 }
-                            }
+                            },
+                            zoom: buildUnifiedChartZoomOptions(sessionId)
                         },
                         scales: {
                             x: {
@@ -4403,11 +4834,20 @@
                     }
                 });
                 chart.$windowStartMs = windowStart;
+                const restoredBitrateViewport = applyStoredChartViewport(sessionId, chart);
+                installRightMousePanHandlers(sessionId, chart);
+                installChartClickPauseHandler(sessionId, chart);
+                if (restoredBitrateViewport) {
+                    chart.update('none');
+                }
                 bandwidthCharts.set(sessionId, chart);
             } else {
                 chart.data.datasets = datasets;
                 chart.data.datasets.forEach((dataset, idx) => {
-                    const hidden = isSeriesHidden(dataset.label);
+                    const label = dataset.label;
+                    const hidden = (label && label.startsWith('_Variant'))
+                        ? isSeriesHidden('Variants')
+                        : isSeriesHidden(label);
                     dataset.hidden = hidden;
                     chart.setDatasetVisibility(idx, !hidden);
                 });
@@ -4473,7 +4913,8 @@
                                         return formatBitrateChartAbsoluteTick(startMs, xValue);
                                     }
                                 }
-                            }
+                            },
+                            zoom: buildUnifiedChartZoomOptions(sessionId)
                         },
                         scales: {
                             x: {
@@ -4515,6 +4956,12 @@
                     }
                 });
                 bufferChart.$windowStartMs = windowStart;
+                const restoredBufferViewport = applyStoredChartViewport(sessionId, bufferChart);
+                installRightMousePanHandlers(sessionId, bufferChart);
+                installChartClickPauseHandler(sessionId, bufferChart);
+                if (restoredBufferViewport) {
+                    bufferChart.update('none');
+                }
                 bufferDepthCharts.set(sessionId, bufferChart);
             } else {
                 bufferChart.data.datasets[0].data = bufferDepthData;
@@ -4531,7 +4978,7 @@
             }
             const fpsData = [];
             const droppedFpsDataRaw = [];
-            const fpsWindowSeconds = 1.0;
+            const fpsWindowSeconds = 2.0;
             const maxReasonableFps = 120;
             const buildRateSeries = (counterSeries) => {
                 const out = [];
@@ -4558,10 +5005,15 @@
                         continue;
                     }
                     const anchorCount = Number(anchorPoint.y);
-                    const anchorX = Number(anchorPoint.x);
-                    const deltaSeconds = currentX - anchorX;
+                    // Use actual measurement timestamps (atMs) when available,
+                    // falling back to chart x-axis positions.
+                    const currentMs = Number(currentPoint.atMs);
+                    const anchorMs = Number(anchorPoint.atMs);
+                    const deltaSeconds = (Number.isFinite(currentMs) && Number.isFinite(anchorMs) && currentMs > anchorMs)
+                        ? (currentMs - anchorMs) / 1000
+                        : currentX - Number(anchorPoint.x);
                     const deltaCount = currentCount - anchorCount;
-                    if (!Number.isFinite(anchorCount) || !Number.isFinite(anchorX) || deltaSeconds <= 0 || deltaCount < 0) {
+                    if (!Number.isFinite(anchorCount) || deltaSeconds <= 0 || deltaCount < 0) {
                         out.push({ x: currentPoint.x, y: null });
                         continue;
                     }
@@ -4586,7 +5038,7 @@
                 .filter((value) => Number.isFinite(value) && value >= 0);
             const fpsSmoothedData = [];
             let smooth = null;
-            const smoothingAlpha = 0.3;
+            const smoothingAlpha = 0.15;
             for (const point of fpsData) {
                 const y = Number(point.y);
                 if (!Number.isFinite(y) || y < 0) {
@@ -4701,7 +5153,14 @@
                         maintainAspectRatio: false,
                         animation: false,
                         plugins: {
-                            legend: { display: false },
+                            legend: {
+                                display: true,
+                                position: 'bottom',
+                                labels: {
+                                    color: '#6b7280',
+                                    font: { family: 'Courier New, monospace', size: 10 }
+                                }
+                            },
                             tooltip: {
                                 callbacks: {
                                     title: (items) => {
@@ -4712,7 +5171,8 @@
                                         return formatBitrateChartAbsoluteTick(startMs, xValue);
                                     }
                                 }
-                            }
+                            },
+                            zoom: buildUnifiedChartZoomOptions(sessionId)
                         },
                         scales: {
                             x: {
@@ -4770,6 +5230,12 @@
                     }
                 });
                 fpsChart.$windowStartMs = windowStart;
+                const restoredFpsViewport = applyStoredChartViewport(sessionId, fpsChart);
+                installRightMousePanHandlers(sessionId, fpsChart);
+                installChartClickPauseHandler(sessionId, fpsChart);
+                if (restoredFpsViewport) {
+                    fpsChart.update('none');
+                }
                 videoFpsCharts.set(sessionId, fpsChart);
             } else {
                 fpsChart.data.datasets[0].data = fpsSmoothedData;
@@ -4841,11 +5307,16 @@
             }
             const sessionKey = String(serverSession.session_id || '');
             const pending = pendingShaping.get(String(serverSession.session_id));
-            if (pending && Date.now() - pending.timestamp < 5000) {
-                session = {
-                    ...serverSession,
-                    ...pending.values
-                };
+            if (pending) {
+                if (shapingValuesMatch(serverSession, pending.values)) {
+                    pendingShaping.delete(String(serverSession.session_id));
+                } else {
+                    // Keep local slider state until backend snapshot catches up.
+                    session = {
+                        ...serverSession,
+                        ...pending.values
+                    };
+                }
             }
             const pendingFailure = pendingFailureEdits.get(String(serverSession.session_id));
             if (pendingFailure && Date.now() - pendingFailure.timestamp < 5000) {
@@ -5029,6 +5500,10 @@
         function bootstrap() {
             const params = getParams();
             currentPlayerId = params.playerId || '';
+            desiredLiveOffsetSeconds = Number(params.liveOffsetSeconds || 0);
+            if (!Number.isFinite(desiredLiveOffsetSeconds) || desiredLiveOffsetSeconds < 0) {
+                desiredLiveOffsetSeconds = 0;
+            }
             if (params.playerId) {
                 const titleText = `Testing Playback · ${params.playerId}`;
                 document.title = titleText;
@@ -5040,6 +5515,9 @@
             if (!params.url) {
                 document.getElementById('playerUrl').textContent = 'Missing stream URL.';
                 return;
+            }
+            if (desiredLiveOffsetSeconds > 0) {
+                log(`LIVE OFFSET: target ${desiredLiveOffsetSeconds.toFixed(1)}s behind live`);
             }
             const savedPlayer = localStorage.getItem('testing_session_player');
             setPlayerChoice(params.player || savedPlayer || 'auto');

@@ -964,7 +964,8 @@
                                     <span>50 Mbps</span>
                                 </label>
                             </div>
-                            <button type="button" class="btn btn-secondary btn-mini" data-action="toggle-variants">Hide Variants</button>
+                            <button type="button" class="btn btn-secondary btn-mini" data-action="reset-bitrate-zoom">Reset Zoom</button>
+                            <button type="button" class="btn btn-secondary btn-mini" data-action="pause-bitrate-chart">⏸ Pause</button>
                         </div>
                         <div data-field="bandwidth_chart_range">Window: —</div>
                         <div class="chart-wrap">

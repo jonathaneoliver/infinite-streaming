@@ -30,7 +30,9 @@ import (
 	"github.com/bradfitz/gomemcache/memcache"
 	"github.com/gorilla/mux"
 	"github.com/grafov/m3u8"
+	"github.com/vishvananda/netlink"
 	_ "modernc.org/sqlite"
+
 )
 
 //go:embed templates/index.html
@@ -40,6 +42,50 @@ var versionString = "unknown"
 var segmentSequenceDigitsRegex = regexp.MustCompile(`\d+`)
 
 type SessionData map[string]interface{}
+
+// segmentFlightInfo tracks an active segment download for throughput measurement.
+type segmentFlightInfo struct {
+	startTime time.Time
+	id        uint64 // generation counter; markSegmentFlightEnd only fires if id matches
+}
+
+// segmentRunRecord holds the precise start/end timestamps and TC byte counter
+// values captured by awaitSocketDrain at TC-backlog transition points.
+// startTime/startBytes are set when backlog first goes non-zero (Phase 1 end).
+// endTime/endBytes are set when backlog returns to zero (Phase 2 end).
+type segmentRunRecord struct {
+	startTime  time.Time
+	startBytes int64
+	endTime    time.Time
+	endBytes   int64
+}
+
+// tcSample holds a single 10ms TC poll result from awaitSocketDrain.
+type tcSample struct {
+	at      time.Time
+	bytes   int64
+	backlog int64
+}
+
+// wireRateSample holds a byte-change-gated throughput measurement computed in
+// awaitSocketDrain. Rate is only computed when bytes change AND ≥100ms has
+// elapsed since the previous report — this eliminates HTB burst aliasing.
+type wireRateSample struct {
+	at    time.Time
+	mbps  float64
+	bytes int64 // delta bytes in this measurement window
+}
+
+// tcStatsCache holds the latest TC stats for a port, shared across concurrent
+// awaitSocketDrain goroutines. Only one netlink call is made per refresh interval.
+type tcStatsCache struct {
+	mu      sync.Mutex
+	at      time.Time
+	bytes   int64
+	backlog int64
+}
+
+
 
 // NetworkLogEntry represents a single network request/response in the session
 type NetworkLogEntry struct {
@@ -146,6 +192,22 @@ type App struct {
 	sessionsBroadcastLatest  []SessionData
 	sessionsBroadcastSeq     uint64
 	uiStateVersionSeq        uint64
+	segmentFlightMu          sync.Mutex
+	segmentFlight            map[int]segmentFlightInfo // internal port -> segment transfer info
+	segmentFlightSeq         uint64                    // atomic generation counter for flight IDs
+	segmentRunMu             sync.Mutex
+	segmentRun               map[int]segmentRunRecord // internal port -> last completed run record
+	drainActiveMu            sync.Mutex
+	drainActive              map[int]bool // per-port: true while awaitSocketDrain is running
+	tcSamplesMu              sync.Mutex
+	tcSamples                map[int][]tcSample
+	wireRateMu               sync.Mutex
+	wireRate                 map[int]wireRateSample // latest byte-change-gated rate per port
+	tcCacheMu                sync.Mutex
+	tcCache                  map[int]*tcStatsCache // per-port TC stats cache
+	transferCompleteMu           sync.Mutex
+	transferCompleteMbps         map[int]float64   // latest completed segment Mbps per port
+	transferCompleteAt           map[int]time.Time // when the drain completed
 }
 
 type ServerLoopState struct {
@@ -250,6 +312,9 @@ type PlaylistInfo struct {
 type TcTrafficManager struct {
 	interfaceName string
 	debug         bool
+	nlMu          sync.Mutex
+	nlHandle      *netlink.Handle // persistent netlink handle, created lazily
+	nlLink        netlink.Link    // resolved once from interfaceName
 }
 
 type ShapeApplyState struct {
@@ -479,11 +544,44 @@ func (t *TcTrafficManager) EnsureRootClass() error {
 	addCmd := exec.Command(
 		"tc", "class", "add", "dev", t.interfaceName, "parent", "1:",
 		"classid", "1:1", "htb", "rate", "10000mbit", "ceil", "10000mbit",
+		"burst", "16k", "cburst", "16k", "quantum", "1514",
 	)
 	if out, err := addCmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("tc root class add failed: %s", strings.TrimSpace(string(out)))
 	}
 	return nil
+}
+
+func htbClassParams(rateMbps float64) (burstBytes, cburstBytes, quantumBytes int) {
+	const (
+		mtuBytes            = 1514
+		minBurstBytes       = mtuBytes
+		maxBurstBytes       = 4 * 1024
+		targetBurstSeconds  = 0.004
+		mediumRateMbps      = 20.0
+		highRateMbps        = 100.0
+		mediumQuantumFactor = 2
+		highQuantumFactor   = 4
+	)
+
+	rateBps := math.Max(0, rateMbps) * 1_000_000.0
+	computedBurst := int(math.Round((rateBps / 8.0) * targetBurstSeconds))
+	if computedBurst < minBurstBytes {
+		computedBurst = minBurstBytes
+	}
+	if computedBurst > maxBurstBytes {
+		computedBurst = maxBurstBytes
+	}
+	burstBytes = computedBurst
+	cburstBytes = computedBurst
+
+	quantumBytes = mtuBytes
+	if rateMbps >= highRateMbps {
+		quantumBytes = highQuantumFactor * mtuBytes
+	} else if rateMbps >= mediumRateMbps {
+		quantumBytes = mediumQuantumFactor * mtuBytes
+	}
+	return burstBytes, cburstBytes, quantumBytes
 }
 
 func (t *TcTrafficManager) GetPortConfig(port int) (map[string]interface{}, error) {
@@ -548,23 +646,32 @@ func (t *TcTrafficManager) UpdateRateLimit(port int, rateMbps float64) error {
 	}
 	portSuffix := fmt.Sprintf("%03d", port%1000)
 	classid := fmt.Sprintf("1:%s", portSuffix)
+	burstBytes, cburstBytes, quantumBytes := htbClassParams(rateMbps)
+	burstArg := fmt.Sprintf("%db", burstBytes)
+	cburstArg := fmt.Sprintf("%db", cburstBytes)
+	quantumArg := strconv.Itoa(quantumBytes)
 	changeCmd := exec.Command(
 		"tc", "class", "change", "dev", t.interfaceName, "parent", "1:1",
 		"classid", classid, "htb", "rate", fmt.Sprintf("%gmbit", rateMbps), "ceil", fmt.Sprintf("%gmbit", rateMbps),
+		"burst", burstArg, "cburst", cburstArg, "quantum", quantumArg,
 	)
 	log.Printf(
-		"NETSHAPE throughput_set ts=%s port=%d rate_mbps=%.3f action=apply classid=%s iface=%s",
+		"NETSHAPE throughput_set ts=%s port=%d rate_mbps=%.3f action=apply classid=%s iface=%s burst_bytes=%d cburst_bytes=%d quantum_bytes=%d",
 		time.Now().UTC().Format(time.RFC3339Nano),
 		port,
 		rateMbps,
 		classid,
 		t.interfaceName,
+		burstBytes,
+		cburstBytes,
+		quantumBytes,
 	)
 	if out, err := changeCmd.CombinedOutput(); err != nil {
 		log.Printf("NETSHAPE tc class change failed port=%d: %s", port, strings.TrimSpace(string(out)))
 		addCmd := exec.Command(
 			"tc", "class", "add", "dev", t.interfaceName, "parent", "1:1",
 			"classid", classid, "htb", "rate", fmt.Sprintf("%gmbit", rateMbps), "ceil", fmt.Sprintf("%gmbit", rateMbps),
+			"burst", burstArg, "cburst", cburstArg, "quantum", quantumArg,
 		)
 		if outAdd, errAdd := addCmd.CombinedOutput(); errAdd != nil {
 			return fmt.Errorf("tc class change failed: %s; add failed: %s", strings.TrimSpace(string(out)), strings.TrimSpace(string(outAdd)))
@@ -755,37 +862,82 @@ func (t *TcTrafficManager) GetNetemConfig(port int) (map[string]interface{}, err
 	return config, nil
 }
 
-func (t *TcTrafficManager) GetPortBytes(port int) (int64, error) {
-	cmd := exec.Command("tc", "-s", "class", "show", "dev", t.interfaceName, "parent", "1:1")
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		cmd = exec.Command("tc", "-s", "class", "show", "dev", t.interfaceName)
-		output, err = cmd.CombinedOutput()
-		if err != nil {
-			return 0, err
-		}
+// ensureNL initialises the persistent netlink handle and resolves the interface
+// on first call. Subsequent calls are a fast mutex-check and return. The caller
+// must hold no locks.
+func (t *TcTrafficManager) ensureNL() (*netlink.Handle, netlink.Link, error) {
+	t.nlMu.Lock()
+	defer t.nlMu.Unlock()
+	if t.nlHandle != nil {
+		return t.nlHandle, t.nlLink, nil
 	}
-	portSuffix := fmt.Sprintf("%03d", port%1000)
-	classid := fmt.Sprintf("1:%s", portSuffix)
-	lines := strings.Split(string(output), "\n")
-	found := false
-	for i := 0; i < len(lines); i++ {
-		line := lines[i]
-		if strings.Contains(line, classid) && strings.Contains(line, "class htb") {
-			found = true
+	h, err := netlink.NewHandle()
+	if err != nil {
+		return nil, nil, fmt.Errorf("netlink: new handle: %w", err)
+	}
+	link, err := h.LinkByName(t.interfaceName)
+	if err != nil {
+		h.Delete()
+		return nil, nil, fmt.Errorf("netlink: link %s: %w", t.interfaceName, err)
+	}
+	t.nlHandle = h
+	t.nlLink = link
+	return h, link, nil
+}
+
+// GetPortStats returns the cumulative bytes sent and the current TC queue backlog
+// for the HTB class associated with port. Uses a persistent netlink handle
+// (no fork/exec); backlog returns -1 when queue stats are absent.
+func (t *TcTrafficManager) GetPortStats(port int) (bytes int64, backlog int64, err error) {
+	h, link, err := t.ensureNL()
+	if err != nil {
+		return 0, -1, err
+	}
+
+	// TC classids are written as "1:<portSuffix>" where portSuffix is the decimal
+	// port%1000 formatted as a string — but TC interprets the minor part as hex.
+	// e.g. port 30181 → classid "1:181" → TC reads minor as 0x181 = 385 decimal.
+	portSuffix := port % 1000
+	minorHex, _ := strconv.ParseUint(fmt.Sprintf("%03d", portSuffix), 16, 16)
+	targetHandle := netlink.MakeHandle(1, uint16(minorHex))
+
+	// Pass HANDLE_NONE (0) to dump all classes on the interface, then filter
+	// by handle. Kernel-side parent filtering in RTM_GETTCLASS|NLM_F_DUMP is
+	// unreliable across kernel versions — iproute2's tc does the same.
+	t.nlMu.Lock()
+	classes, classErr := h.ClassList(link, netlink.HANDLE_NONE)
+	t.nlMu.Unlock()
+	if classErr != nil {
+		return 0, -1, classErr
+	}
+
+	for _, class := range classes {
+		attrs := class.Attrs()
+		if attrs.Handle != targetHandle {
 			continue
 		}
-		if found {
-			bytes := parseTcBytes(line)
-			if bytes > 0 {
-				return bytes, nil
-			}
-			if strings.HasPrefix(strings.TrimSpace(line), "class") {
-				break
-			}
+		if attrs.Statistics == nil {
+			return 0, -1, nil
 		}
+		if attrs.Statistics.Basic != nil {
+			bytes = int64(attrs.Statistics.Basic.Bytes)
+		}
+		backlog = -1
+		if attrs.Statistics.Queue != nil {
+			backlog = int64(attrs.Statistics.Queue.Backlog)
+		}
+		return bytes, backlog, nil
 	}
-	return 0, nil
+	if t.debug {
+		log.Printf("NL_GET_PORT_STATS port=%d handle=0x%08x class_not_found total_classes=%d", port, targetHandle, len(classes))
+	}
+	return 0, -1, nil
+}
+
+// GetPortBytes is a convenience wrapper kept for callers that only need byte counters.
+func (t *TcTrafficManager) GetPortBytes(port int) (int64, error) {
+	b, _, err := t.GetPortStats(port)
+	return b, err
 }
 
 func rateToMbps(rateStr string) interface{} {
@@ -837,6 +989,21 @@ func parseTcBytes(line string) int64 {
 	return 0
 }
 
+// parseTcBacklog parses the TC queue backlog bytes from a line like:
+//
+//	rate 1.99Mbit 123pps backlog 45678b 20p requeues 0
+//
+// Returns -1 if the pattern is not found (so callers can distinguish zero-backlog from absent).
+func parseTcBacklog(line string) int64 {
+	re := regexp.MustCompile(`backlog\s+(\d+)b`)
+	match := re.FindStringSubmatch(line)
+	if len(match) == 2 {
+		val, _ := strconv.ParseInt(match[1], 10, 64)
+		return val
+	}
+	return -1
+}
+
 func loadPortMapping() PortMapping {
 	externalBase := getenvIntAny([]string{"EXTERNAL_PORT_BASE"}, 0)
 	internalBase := getenvIntAny([]string{"INTERNAL_PORT_BASE"}, 0)
@@ -882,18 +1049,19 @@ func (m PortMapping) MapExternalPort(port string) (string, bool) {
 }
 
 func main() {
+	log.SetFlags(log.Ldate | log.Ltime | log.Lmicroseconds)
 	memcachedAddr := getenv("MEMCACHED_ADDR", "memcached:11211")
 	upstreamHost := getenvAny([]string{"INFINITE_STREAM_UPSTREAM_HOST", "INFINITE_UPSTREAM_HOST", "BOSS_UPSTREAM_HOST"}, "go-server")
 	upstreamPort := getenvAny([]string{"INFINITE_STREAM_UPSTREAM_PORT", "INFINITE_UPSTREAM_PORT", "BOSS_UPSTREAM_PORT"}, "30000")
 	maxSessions := getenvIntAny([]string{"INFINITE_STREAM_MAX_SESSIONS", "INFINITE_MAX_SESSIONS", "BOSS_MAX_SESSIONS"}, 8)
 	interfaceName := getenvAny([]string{"INFINITE_STREAM_TC_INTERFACE", "INFINITE_TC_INTERFACE", "TC_INTERFACE"}, "eth0")
 	tcDebug := getenvBoolAny([]string{"INFINITE_STREAM_TC_DEBUG", "INFINITE_TC_DEBUG", "TC_DEBUG"}, false)
-
 	mc := memcache.New(memcachedAddr)
 	eventStore, eventStoreErr := newSessionEventStore(getenv("GO_PROXY_SESSION_EVENTS_DB", defaultSessionEventsDB))
 	if eventStoreErr != nil {
 		log.Printf("session event store disabled: %v", eventStoreErr)
 	}
+
 	app := &App{
 		memcache:      mc,
 		sessionEvents: eventStore,
@@ -915,6 +1083,14 @@ func main() {
 		sessionsHub:        NewSessionEventHub(),
 		networkLogs:        map[string]*NetworkLogRingBuffer{},
 		loopStateBySession: map[string]ServerLoopState{},
+		segmentFlight:      map[int]segmentFlightInfo{},
+		segmentRun:         map[int]segmentRunRecord{},
+		drainActive:        map[int]bool{},
+		tcSamples:          map[int][]tcSample{},
+		wireRate:            map[int]wireRateSample{},
+		tcCache:             map[int]*tcStatsCache{},
+		transferCompleteMbps:    map[int]float64{},
+		transferCompleteAt:      map[int]time.Time{},
 	}
 
 	go app.trackPortThroughput()
@@ -959,7 +1135,11 @@ func main() {
 		addr := fmt.Sprintf(":%d", port)
 		go func(bind string) {
 			log.Printf("go-proxy listening on %s", bind)
-			errorCh <- http.ListenAndServe(bind, router)
+			srv := &http.Server{
+				Addr:    bind,
+				Handler: router,
+			}
+			errorCh <- srv.ListenAndServe()
 		}(addr)
 	}
 
@@ -1159,10 +1339,11 @@ func (a *App) applySessionSettingsUpdate(id string, payload map[string]interface
 	}
 	shapeRateFields := []string{"nftables_bandwidth_mbps", "nftables_delay_ms", "nftables_packet_loss"}
 	shapeRateUpdated := false
+	shapeFieldsPresent := make([]string, 0, len(shapeRateFields))
 	for _, key := range shapeRateFields {
 		if _, ok := payload[key]; ok {
 			shapeRateUpdated = true
-			break
+			shapeFieldsPresent = append(shapeFieldsPresent, key)
 		}
 	}
 
@@ -1227,6 +1408,11 @@ func (a *App) applySessionSettingsUpdate(id string, payload map[string]interface
 	shapeCommandSource := "session_patch"
 	if shapeRateUpdated && getBool(target, "abrchar_run_lock") {
 		shapeCommandSource = "abrchar"
+	}
+	if !shapeRateUpdated {
+		log.Printf("SESSION_LIMIT_SKIP source=%s session_id=%s reason=shape_fields_missing expected=%s", shapeCommandSource, id, strings.Join(shapeRateFields, ","))
+	} else {
+		log.Printf("SESSION_LIMIT_UPDATE source=%s session_id=%s shape_fields_present=%s", shapeCommandSource, id, strings.Join(shapeFieldsPresent, ","))
 	}
 	for _, prefix := range []string{"segment", "manifest", "master_manifest"} {
 		typeKey := prefix + "_failure_type"
@@ -1423,19 +1609,29 @@ func (a *App) applySessionSettingsUpdate(id string, payload map[string]interface
 	}
 	if shapeRateUpdated {
 		portsApplied := map[int]struct{}{}
+		skippedNil := 0
+		skippedNoPort := 0
+		skippedInvalidPort := 0
+		skippedDuplicatePort := 0
 		for _, session := range updatedSessions {
 			if session == nil {
+				skippedNil++
 				continue
 			}
 			portStr := getString(session, "x_forwarded_port")
 			if portStr == "" {
+				skippedNoPort++
+				log.Printf("SESSION_LIMIT_SKIP source=%s session_id=%s reason=missing_x_forwarded_port", shapeCommandSource, getString(session, "session_id"))
 				continue
 			}
 			portNum, err := strconv.Atoi(portStr)
 			if err != nil {
+				skippedInvalidPort++
+				log.Printf("SESSION_LIMIT_SKIP source=%s session_id=%s reason=invalid_x_forwarded_port value=%q", shapeCommandSource, getString(session, "session_id"), portStr)
 				continue
 			}
 			if _, exists := portsApplied[portNum]; exists {
+				skippedDuplicatePort++
 				continue
 			}
 			portsApplied[portNum] = struct{}{}
@@ -1456,6 +1652,17 @@ func (a *App) applySessionSettingsUpdate(id string, payload map[string]interface
 			}
 			a.applySessionShaping(session, portNum)
 		}
+		log.Printf(
+			"SESSION_LIMIT_DISPATCH source=%s session_id=%s updated_sessions=%d applied_ports=%d skipped_nil=%d skipped_missing_port=%d skipped_invalid_port=%d skipped_duplicate_port=%d",
+			shapeCommandSource,
+			id,
+			len(updatedSessions),
+			len(portsApplied),
+			skippedNil,
+			skippedNoPort,
+			skippedInvalidPort,
+			skippedDuplicatePort,
+		)
 	}
 	return target, http.StatusOK, ""
 }
@@ -3367,6 +3574,17 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 	upstreamURL := fmt.Sprintf("http://%s:%s/%s", a.upstreamHost, a.upstreamPort, escapedPath)
 	contentType, isMasterManifest, isManifest, isSegment, playlistInfo := a.getContentType(upstreamURL)
 	requestKind := requestKindLabel(isSegment, isManifest, isMasterManifest)
+	segmentTransferStartedAt := time.Time{}
+	segmentTransferStartBytes := int64(0)
+	var flightPortNum int
+	if isSegment {
+		segmentTransferStartedAt = time.Now()
+		segmentTransferStartBytes, _ = a.getSessionWireTCBytesNow(sessionData)
+		if fp, err := strconv.Atoi(internalPort); err == nil {
+			flightPortNum = fp
+			log.Printf("SEGMENT_FLIGHT_INIT port=%d internalPort=%s externalPort=%s", fp, internalPort, externalPort)
+		}
+	}
 
 	if isMasterManifest {
 		sessionData["master_manifest_url"] = filename
@@ -3472,6 +3690,9 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 			bumpFaultCounter(sessionData, failureType)
 			logFaultEvent(sessionData, externalPort, failureType, requestKind, actionTaken)
 			updateSessionTraffic(sessionData, requestBytes, bytesOut)
+			if isSegment {
+				a.applyFullSegmentNetworkBitrate(sessionData, segmentTransferStartBytes, segmentTransferStartedAt)
+			}
 			// Log network entry for corruption (has timing + bytes transferred, but zeroed)
 			sessionID := getString(sessionData, "session_id")
 			netEntry.RequestKind = requestKind
@@ -3664,9 +3885,19 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 		}
 		bytesOut, _ = io.Copy(writer, resp.Body)
 		_ = writer.Flush()
+		// On the segment success path, hand flight-end off to the socket drain goroutine
+		// so it waits for the TC backlog to drain before marking the flight as done.
+		// Only launch on Linux where a.traffic is available (TC backlog polling requires TC).
+		if flightPortNum > 0 && a.traffic != nil {
+			port := flightPortNum
+			go a.awaitSocketDrain(port)
+		}
 	}
 
 	updateSessionTraffic(sessionData, requestBytes, bytesOut)
+	if isSegment {
+		a.applyFullSegmentNetworkBitrate(sessionData, segmentTransferStartBytes, segmentTransferStartedAt)
+	}
 	// Log successful network entry
 	sessionID := getString(sessionData, "session_id")
 	netEntry.RequestKind = requestKind
@@ -3789,10 +4020,12 @@ func manipulateDASHManifest(body []byte, stripCodecs bool, allowedVariants []str
 
 func (a *App) applySessionShaping(session SessionData, port int) {
 	if a.traffic == nil || runtime.GOOS != "linux" {
+		log.Printf("NETSHAPE apply skipped port=%d reason=traffic_unavailable_or_non_linux runtime=%s traffic_nil=%t", port, runtime.GOOS, a.traffic == nil)
 		return
 	}
 	if getBool(session, "nftables_pattern_enabled") || sessionHasPatternSteps(session) {
 		// Pattern loop owns the rate while enabled; avoid per-request overrides.
+		log.Printf("NETSHAPE apply skipped port=%d reason=pattern_enabled pattern_enabled=%t pattern_steps=%t", port, getBool(session, "nftables_pattern_enabled"), sessionHasPatternSteps(session))
 		return
 	}
 	rate := getFloat(session, "nftables_bandwidth_mbps")
@@ -3838,9 +4071,11 @@ func (a *App) applyShapeIfChanged(port int, rate float64, delay int, loss float6
 	desired := ShapeApplyState{rate: rate, delay: delay, loss: loss}
 	last, ok := a.getShapeApplyState(port)
 	if ok && almostEqualShape(last, desired) {
+		log.Printf("NETSHAPE apply skipped port=%d reason=unchanged rate_mbps=%.3f delay_ms=%d loss_pct=%.3f", port, rate, delay, loss)
 		return nil
 	}
 	if rate == 0 && delay == 0 && loss == 0 {
+		log.Printf("NETSHAPE apply clear port=%d", port)
 		if err := a.traffic.UpdateRateLimit(port, 0); err != nil {
 			return err
 		}
@@ -3849,6 +4084,7 @@ func (a *App) applyShapeIfChanged(port int, rate float64, delay int, loss float6
 	}
 	rateChanged := !ok || math.Abs(last.rate-rate) > eps
 	if rateChanged {
+		log.Printf("NETSHAPE apply rate_change port=%d from_mbps=%.3f to_mbps=%.3f", port, last.rate, rate)
 		if err := a.traffic.UpdateRateLimit(port, rate); err != nil {
 			return err
 		}
@@ -3856,6 +4092,7 @@ func (a *App) applyShapeIfChanged(port int, rate float64, delay int, loss float6
 	delayChanged := !ok || last.delay != delay
 	lossChanged := !ok || math.Abs(last.loss-loss) > eps
 	if delayChanged || lossChanged {
+		log.Printf("NETSHAPE apply netem_change port=%d from_delay_ms=%d to_delay_ms=%d from_loss_pct=%.3f to_loss_pct=%.3f", port, last.delay, delay, last.loss, loss)
 		if err := a.traffic.UpdateNetem(port, delay, loss); err != nil {
 			return err
 		}
@@ -3945,40 +4182,46 @@ func (a *App) getContentType(target string) (string, bool, bool, bool, []Playlis
 
 func (a *App) trackPortThroughput() {
 	type throughputSample struct {
-		at         time.Time
-		deltaBytes int64
-		dtSeconds  float64
-		active     bool
+		at            time.Time
+		deltaBytes    int64
+		dtSeconds     float64
+		active        bool
+		inFlight      bool
+		backlogActive bool // true when TC queue backlog > 0 (active segment transfer)
 	}
-	type throughputValueSample struct {
-		at    time.Time
-		value float64
+	type a1sSample struct {
+		at   time.Time
+		mbps float64
 	}
 	type throughputState struct {
-		bytes          int64
-		timestamp      time.Time
-		samples        []throughputSample
-		active1sValues []throughputValueSample
+		bytes                int64
+		timestamp            time.Time
+		samples              []throughputSample
+		a1sHistory           []a1sSample // rolling buffer of a1s values for a6s averaging
 	}
 	const (
 		sampleInterval      = 100 * time.Millisecond
-		activeWindow        = 18 * time.Second
-		mediumWindow        = 6 * time.Second
 		shortWindow         = 1 * time.Second
-		activeByteThreshold = int64(1024)
-		minActiveSeconds    = 1.0
+		mediumWindow        = 6 * time.Second
+		transferRateWindow   = 400 * time.Millisecond
+		activeByteThreshold = int64(8192)
 	)
 	cache := map[int]throughputState{}
 	counterReady := map[int]bool{}
 	activePorts := map[int]struct{}{}
 	lastPortsRefresh := time.Time{}
-	updatePort := func(port int, bytesValue int64, now time.Time) {
+	updatePort := func(port int, bytesValue int64, backlogBytes int64, now time.Time) {
 		if bytesValue <= 0 {
 			return
 		}
 		state, ok := cache[port]
 		if !ok || state.timestamp.IsZero() {
-			cache[port] = throughputState{bytes: bytesValue, timestamp: now, samples: state.samples, active1sValues: state.active1sValues}
+			cache[port] = throughputState{
+				bytes:                bytesValue,
+				timestamp:            now,
+				samples:              state.samples,
+				a1sHistory:           state.a1sHistory,
+			}
 			return
 		}
 		deltaBytes := bytesValue - state.bytes
@@ -3989,189 +4232,150 @@ func (a *App) trackPortThroughput() {
 			cache[port] = state
 			return
 		}
+		flightInfo, inFlight := a.getSegmentFlightInfo(port)
+		flightStart := flightInfo.startTime
+		backlogActive := backlogBytes > 0
+		if inFlight {
+			log.Printf("SEGMENT_INFLIGHT port=%d age_ms=%d tc_backlog_bytes=%d backlog_active=%t", port, now.Sub(flightStart).Milliseconds(), backlogBytes, backlogActive)
+		}
+		// Sample TC queue backlog for mbps_video_app (TC drain rate).
 		sample := throughputSample{
-			at:         now,
-			deltaBytes: deltaBytes,
-			dtSeconds:  deltaSeconds,
-			active:     deltaBytes > activeByteThreshold,
+			at:            now,
+			deltaBytes:    deltaBytes,
+			dtSeconds:     deltaSeconds,
+			active:        deltaBytes > activeByteThreshold,
+			inFlight:      inFlight,
+			backlogActive: backlogActive,
 		}
 		state.samples = append(state.samples, sample)
-		cutoff := now.Add(-activeWindow)
+		// Trim samples older than 6s (needed for adjacentBacklogActiveRate).
 		mediumCutoff := now.Add(-mediumWindow)
 		shortCutoff := now.Add(-shortWindow)
-		trimmed := make([]throughputSample, 0, len(state.samples))
-		var totalBytes int64
-		var activeBytes int64
-		var mediumTotalBytes int64
-		var mediumActiveBytes int64
-		var shortTotalBytes int64
-		var shortActiveBytes int64
-		totalSeconds := 0.0
-		activeSeconds := 0.0
-		mediumTotalSeconds := 0.0
-		mediumActiveSeconds := 0.0
-		shortTotalSeconds := 0.0
-		shortActiveSeconds := 0.0
-		for _, existing := range state.samples {
-			if existing.at.Before(cutoff) {
-				continue
-			}
-			trimmed = append(trimmed, existing)
-			if existing.deltaBytes > 0 {
-				totalBytes += existing.deltaBytes
-			}
-			if existing.dtSeconds > 0 {
-				totalSeconds += existing.dtSeconds
-			}
-			if existing.active {
-				if existing.deltaBytes > 0 {
-					activeBytes += existing.deltaBytes
-				}
-				if existing.dtSeconds > 0 {
-					activeSeconds += existing.dtSeconds
+		{
+			trimmed := state.samples[:0]
+			for _, s := range state.samples {
+				if !s.at.Before(mediumCutoff) {
+					trimmed = append(trimmed, s)
 				}
 			}
-			if !existing.at.Before(mediumCutoff) {
-				if existing.deltaBytes > 0 {
-					mediumTotalBytes += existing.deltaBytes
-				}
-				if existing.dtSeconds > 0 {
-					mediumTotalSeconds += existing.dtSeconds
-				}
-				if existing.active {
-					if existing.deltaBytes > 0 {
-						mediumActiveBytes += existing.deltaBytes
-					}
-					if existing.dtSeconds > 0 {
-						mediumActiveSeconds += existing.dtSeconds
-					}
-				}
-			}
-			if !existing.at.Before(shortCutoff) {
-				if existing.deltaBytes > 0 {
-					shortTotalBytes += existing.deltaBytes
-				}
-				if existing.dtSeconds > 0 {
-					shortTotalSeconds += existing.dtSeconds
-				}
-				if existing.active {
-					if existing.deltaBytes > 0 {
-						shortActiveBytes += existing.deltaBytes
-					}
-					if existing.dtSeconds > 0 {
-						shortActiveSeconds += existing.dtSeconds
-					}
-				}
-			}
+			state.samples = trimmed
 		}
-		state.samples = trimmed
+		// adjacentBacklogActiveRate computes throughput over the most recent contiguous
+		// run of samples where backlogActive==true (TC queue had queued bytes).
+		adjacentBacklogActiveRate := func(samples []throughputSample, cutoff time.Time) (float64, bool) {
+			var runBytes int64
+			runSeconds := 0.0
+			inRun := false
+			for idx := len(samples) - 1; idx >= 0; idx-- {
+				existing := samples[idx]
+				if existing.at.Before(cutoff) {
+					break
+				}
+				if !inRun {
+					if !existing.backlogActive {
+						continue
+					}
+					inRun = true
+				}
+				if !existing.backlogActive {
+					break
+				}
+				if existing.deltaBytes > 0 {
+					runBytes += existing.deltaBytes
+				}
+				if existing.dtSeconds > 0 {
+					runSeconds += existing.dtSeconds
+				}
+			}
+			if !inRun || runSeconds <= 0 {
+				return 0, false
+			}
+			return (float64(runBytes) * 8) / (runSeconds * 1024 * 1024), true
+		}
+		adjacent1sRate, hasAdjacent1s := adjacentBacklogActiveRate(state.samples, shortCutoff)
 
-		mbpsSustained := 0.0
-		if totalSeconds > 0 {
-			mbpsSustained = (float64(totalBytes) * 8) / (totalSeconds * 1024 * 1024)
-		}
-		mbpsSustained1s := 0.0
-		if shortTotalSeconds > 0 {
-			mbpsSustained1s = (float64(shortTotalBytes) * 8) / (shortTotalSeconds * 1024 * 1024)
-		}
-		mbpsSustained6s := 0.0
-		if mediumTotalSeconds > 0 {
-			mbpsSustained6s = (float64(mediumTotalBytes) * 8) / (mediumTotalSeconds * 1024 * 1024)
-		}
-		var mbpsActive interface{}
-		if activeSeconds >= minActiveSeconds {
-			mbpsActive = math.Round((((float64(activeBytes) * 8) / (activeSeconds * 1024 * 1024)) * 100)) / 100
+		var mbpsShaperRate interface{}
+		if backlogActive && hasAdjacent1s {
+			mbpsShaperRate = math.Round((adjacent1sRate * 100)) / 100
 		} else {
-			mbpsActive = nil
+			mbpsShaperRate = nil
 		}
-		var mbpsActive1s interface{}
-		currentActive1s := 0.0
-		hasCurrentActive1s := false
-		if shortActiveSeconds > 0 {
-			currentActive1s = (float64(shortActiveBytes) * 8) / (shortActiveSeconds * 1024 * 1024)
-			hasCurrentActive1s = true
-			mbpsActive1s = math.Round((currentActive1s * 100)) / 100
-		} else {
-			mbpsActive1s = nil
+		// Record non-nil a1s values and compute a6s as their rolling average over 6s.
+		if v, ok := mbpsShaperRate.(float64); ok {
+			state.a1sHistory = append(state.a1sHistory, a1sSample{at: now, mbps: v})
 		}
-		if hasCurrentActive1s {
-			state.active1sValues = append(state.active1sValues, throughputValueSample{at: now, value: currentActive1s})
-		}
-		throughputCutoff := now.Add(-mediumWindow)
-		trimmedActive1sValues := make([]throughputValueSample, 0, len(state.active1sValues))
-		maxActive1s := -1.0
-		for _, valueSample := range state.active1sValues {
-			if valueSample.at.Before(throughputCutoff) {
-				continue
+		{
+			trimmed := state.a1sHistory[:0]
+			for _, s := range state.a1sHistory {
+				if !s.at.Before(mediumCutoff) {
+					trimmed = append(trimmed, s)
+				}
 			}
-			trimmedActive1sValues = append(trimmedActive1sValues, valueSample)
-			if valueSample.value > maxActive1s {
-				maxActive1s = valueSample.value
+			state.a1sHistory = trimmed
+		}
+		var mbpsShaperAvg interface{}
+		if len(state.a1sHistory) > 0 {
+			sum := 0.0
+			for _, s := range state.a1sHistory {
+				sum += s.mbps
+			}
+			mbpsShaperAvg = math.Round((sum/float64(len(state.a1sHistory)))*100) / 100
+		}
+		// mbps_transfer_rate: byte-change-gated rate computed in awaitSocketDrain.
+		// Rate is only emitted when TC bytes change AND ≥100ms since previous
+		// report, eliminating HTB burst aliasing.
+		var mbpsTransferRate interface{}
+		{
+			a.wireRateMu.Lock()
+			wr, ok := a.wireRate[port]
+			a.wireRateMu.Unlock()
+			if ok && now.Sub(wr.at) < transferRateWindow {
+				mbpsTransferRate = wr.mbps
 			}
 		}
-		state.active1sValues = trimmedActive1sValues
-		var mbpsWireThroughput interface{}
-		if maxActive1s >= 0 {
-			mbpsWireThroughput = math.Round((maxActive1s * 100)) / 100
-		} else {
-			mbpsWireThroughput = nil
+		// mbps_transfer_complete: completed-segment bitrate from SOCKET_DRAIN_DONE.
+		// Emitted for one SSE tick after each drain completes.
+		var mbpsTransferComplete interface{}
+		{
+			a.transferCompleteMu.Lock()
+			drainMbps, ok := a.transferCompleteMbps[port]
+			drainAt, _ := a.transferCompleteAt[port]
+			a.transferCompleteMu.Unlock()
+			// Only emit if the drain completed within the last SSE tick (~100ms).
+			if ok && now.Sub(drainAt) < 2*sampleInterval {
+				mbpsTransferComplete = drainMbps
+			}
 		}
-		var mbpsActive6s interface{}
-		if mediumActiveSeconds > 0 {
-			mbpsActive6s = math.Round((((float64(mediumActiveBytes) * 8) / (mediumActiveSeconds * 1024 * 1024)) * 100)) / 100
-		} else {
-			mbpsActive6s = nil
-		}
+
+
+
+
 		cache[port] = state
 		payload := map[string]interface{}{
-			"mbps":                       math.Round(mbpsSustained*100) / 100,
-			"bytes":                      deltaBytes,
-			"window_seconds":             math.Round(totalSeconds*100) / 100,
-			"timestamp":                  now.Unix(),
-			"mbps_wire_sustained":        math.Round(mbpsSustained*100) / 100,
-			"mbps_wire_sustained_18s":    math.Round(mbpsSustained*100) / 100,
-			"mbps_wire_active":           mbpsActive,
-			"mbps_wire_active_1s":        mbpsActive1s,
-			"mbps_wire_throughput":       mbpsWireThroughput,
-			"mbps_wire_sustained_1s":     math.Round(mbpsSustained1s*100) / 100,
-			"mbps_wire_sustained_6s":     math.Round(mbpsSustained6s*100) / 100,
-			"mbps_wire_active_6s":        mbpsActive6s,
-			"wire_active_bytes":          activeBytes,
-			"wire_total_bytes":           totalBytes,
-			"wire_active_window_seconds": math.Round(activeSeconds*100) / 100,
-			"wire_window_seconds":        math.Round(totalSeconds*100) / 100,
+			"bytes":                       deltaBytes,
+			"wire_tc_bytes_now":           bytesValue,
+			"timestamp":                   now.Unix(),
+			"timestamp_ms":                now.UnixMilli(),
+			"mbps_shaper_rate":               mbpsShaperRate,
+			"mbps_shaper_avg":               mbpsShaperAvg,
+			"mbps_transfer_rate":           mbpsTransferRate,
+			"mbps_transfer_complete":          mbpsTransferComplete,
 		}
 		if bytes, err := json.Marshal(payload); err == nil {
 			_ = a.memcache.Set(&memcache.Item{Key: fmt.Sprintf("throughput_%d", port), Value: bytes, Expiration: 30})
 		}
 		log.Printf(
-			"WIRE_TC_METRIC port=%d bytes_now=%d delta_bytes=%d dt_s=%.3f active=%t active_threshold_bytes=%d wire_total_bytes=%d wire_active_bytes=%d wire_window_s=%.3f wire_active_window_s=%.3f mbps_wire_sustained=%.2f mbps_wire_active=%v mbps_wire_sustained_6s=%.2f mbps_wire_active_6s=%v wire_window_6s_s=%.3f wire_active_window_6s_s=%.3f mbps_wire_sustained_1s=%.2f mbps_wire_active_1s=%v mbps_wire_throughput=%v wire_window_1s_s=%.3f wire_active_window_1s_s=%.3f",
+			"WIRE_TC_METRIC port=%d bytes_now=%d delta_bytes=%d dt_s=%.3f active=%t",
 			port,
 			bytesValue,
 			deltaBytes,
 			deltaSeconds,
 			sample.active,
-			activeByteThreshold,
-			totalBytes,
-			activeBytes,
-			totalSeconds,
-			activeSeconds,
-			math.Round(mbpsSustained*100)/100,
-			mbpsActive,
-			math.Round(mbpsSustained6s*100)/100,
-			mbpsActive6s,
-			mediumTotalSeconds,
-			mediumActiveSeconds,
-			math.Round(mbpsSustained1s*100)/100,
-			mbpsActive1s,
-			mbpsWireThroughput,
-			shortTotalSeconds,
-			shortActiveSeconds,
 		)
 	}
 	for {
-		now := time.Now()
-		if lastPortsRefresh.IsZero() || now.Sub(lastPortsRefresh) >= time.Second {
+		tickNow := time.Now()
+		if lastPortsRefresh.IsZero() || tickNow.Sub(lastPortsRefresh) >= time.Second {
 			sessions := a.getSessionList()
 			refreshed := map[int]struct{}{}
 			addPort := func(portStr string) {
@@ -4183,11 +4387,17 @@ func (a *App) trackPortThroughput() {
 				}
 			}
 			for _, session := range sessions {
-				addPort(getString(session, "x_forwarded_port_external"))
 				addPort(getString(session, "x_forwarded_port"))
 			}
+			// Clear state for ports that are no longer active.
+			for port := range cache {
+				if _, ok := refreshed[port]; !ok {
+					delete(cache, port)
+					delete(counterReady, port)
+				}
+			}
 			activePorts = refreshed
-			lastPortsRefresh = now
+			lastPortsRefresh = tickNow
 		}
 		if len(activePorts) == 0 {
 			time.Sleep(sampleInterval)
@@ -4198,17 +4408,19 @@ func (a *App) trackPortThroughput() {
 				if !counterReady[port] {
 					if err := a.traffic.EnsureClass(port, 10000); err != nil {
 						log.Printf("WIRE_TC_METRIC port=%d counter_ready=false ensure_class_err=%v", port, err)
+						delete(cache, port) // clear stale state (a1sHistory etc.)
 						continue
 					}
 					counterReady[port] = true
 					log.Printf("WIRE_TC_METRIC port=%d counter_ready=true mode=unlimited_counter", port)
 				}
-				bytesValue, err := a.traffic.GetPortBytes(port)
+				bytesValue, backlogBytes, err := a.traffic.GetPortStats(port)
 				if err != nil {
 					log.Printf("WIRE_TC_METRIC port=%d counter_read_err=%v", port, err)
 					continue
 				}
-				updatePort(port, bytesValue, now)
+				sampleNow := time.Now()
+				updatePort(port, bytesValue, backlogBytes, sampleNow)
 			}
 			time.Sleep(sampleInterval)
 			continue
@@ -4219,7 +4431,8 @@ func (a *App) trackPortThroughput() {
 			bytesValue := parseNftBytes(string(output))
 			if bytesValue >= 0 {
 				for port := range activePorts {
-					updatePort(port, bytesValue, now)
+					sampleNow := time.Now()
+					updatePort(port, bytesValue, -1, sampleNow) // no backlog info on non-Linux path
 				}
 			}
 		}
@@ -4693,39 +4906,337 @@ func applySessionThroughput(session SessionData, throughput map[string]interface
 	}
 	session["measured_mbps"] = throughput["mbps"]
 	session["measured_bytes"] = throughput["bytes"]
+	session["wire_tc_bytes_now"] = throughput["wire_tc_bytes_now"]
 	session["measurement_window"] = throughput["window_seconds"]
-	session["mbps_wire_sustained"] = throughput["mbps_wire_sustained"]
-	session["mbps_wire_sustained_18s"] = throughput["mbps_wire_sustained_18s"]
-	session["mbps_wire_active"] = throughput["mbps_wire_active"]
-	session["mbps_wire_active_1s"] = throughput["mbps_wire_active_1s"]
-	session["mbps_wire_throughput"] = throughput["mbps_wire_throughput"]
-	session["mbps_wire_sustained_1s"] = throughput["mbps_wire_sustained_1s"]
-	session["mbps_wire_sustained_6s"] = throughput["mbps_wire_sustained_6s"]
-	session["mbps_wire_active_6s"] = throughput["mbps_wire_active_6s"]
+	session["mbps_shaper_rate"] = throughput["mbps_shaper_rate"]
+	session["mbps_shaper_avg"] = throughput["mbps_shaper_avg"]
+	session["mbps_transfer_rate"] = throughput["mbps_transfer_rate"]
+	session["mbps_transfer_complete"] = throughput["mbps_transfer_complete"]
 	session["wire_active_bytes"] = throughput["wire_active_bytes"]
 	session["wire_total_bytes"] = throughput["wire_total_bytes"]
 	session["wire_active_window_seconds"] = throughput["wire_active_window_seconds"]
 	session["wire_window_seconds"] = throughput["wire_window_seconds"]
 }
 
+func (a *App) getSessionWireTCBytesNow(session SessionData) (int64, int64) {
+	throughput := a.getSessionThroughput(session)
+	if throughput == nil {
+		return 0, 0
+	}
+	return int64FromInterface(throughput["wire_tc_bytes_now"]), int64FromInterface(throughput["timestamp_ms"])
+}
+
+func (a *App) markSegmentFlightStart(port int) uint64 {
+	id := atomic.AddUint64(&a.segmentFlightSeq, 1)
+	a.segmentFlightMu.Lock()
+	a.segmentFlight[port] = segmentFlightInfo{startTime: time.Now(), id: id}
+	a.segmentFlightMu.Unlock()
+	log.Printf("SEGMENT_FLIGHT_START port=%d id=%d", port, id)
+	return id
+}
+
+func (a *App) markSegmentFlightEnd(port int, id uint64) {
+	a.segmentFlightMu.Lock()
+	if info, ok := a.segmentFlight[port]; ok && info.id == id {
+		delete(a.segmentFlight, port)
+		log.Printf("SEGMENT_FLIGHT_END port=%d id=%d", port, id)
+	} else if ok {
+		log.Printf("SEGMENT_FLIGHT_END_SKIP port=%d id=%d current_id=%d (stale goroutine)", port, id, info.id)
+	}
+	a.segmentFlightMu.Unlock()
+}
+
+// getPortStatsForDrain returns (bytes, backlog, active, err) for a port.
+//
+// When eBPF stats are available it reads the BPF map (no subprocess).
+// When eBPF is unavailable it falls back to netlink TC stats.
+// active is derived from backlog > 0 (TC) or eBPF activeTTL.
+const tcCacheTTL = 5 * time.Millisecond
+
+func (a *App) getPortStatsForDrain(port int) (bytes int64, backlog int64, active bool, err error) {
+	// Use per-port cache to avoid duplicate netlink calls from concurrent goroutines.
+	a.tcCacheMu.Lock()
+	cache := a.tcCache[port]
+	if cache == nil {
+		cache = &tcStatsCache{}
+		a.tcCache[port] = cache
+	}
+	a.tcCacheMu.Unlock()
+
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	if time.Since(cache.at) < tcCacheTTL {
+		return cache.bytes, cache.backlog, cache.backlog > 0, nil
+	}
+	b, bl, tcErr := a.traffic.GetPortStats(port)
+	if tcErr != nil {
+		return 0, 0, false, tcErr
+	}
+	cache.bytes = b
+	cache.backlog = bl
+	cache.at = time.Now()
+	return b, bl, bl > 0, nil
+}
+
+// awaitSocketDrain tracks a segment transfer lifecycle via TC queue / eBPF byte counters.
+//
+// Phase 0 (5ms poll): confirms port is idle (backlog=0 / bytes stable) before watching.
+// Phase 1 (5ms poll): waits for 0→active transition; fires SEGMENT_FLIGHT_START.
+// Phase 2 (10ms poll): accumulates tcSamples; fires SEGMENT_FLIGHT_END when idle.
+//
+// tcSamples.backlog is set to 1 when bytes changed vs the previous poll, 0 when
+// stable. This makes the mbps_transfer_rate backwards walk break precisely at the
+// point bytes stopped incrementing — more accurate than TC backlog which can
+// reflect queued-but-not-yet-sent data.
+func (a *App) awaitSocketDrain(port int) {
+	if a.traffic == nil {
+		return
+	}
+	// Only one drain goroutine per port at a time.
+	a.drainActiveMu.Lock()
+	if a.drainActive[port] {
+		a.drainActiveMu.Unlock()
+		return
+	}
+	a.drainActive[port] = true
+	a.drainActiveMu.Unlock()
+	defer func() {
+		a.drainActiveMu.Lock()
+		delete(a.drainActive, port)
+		a.drainActiveMu.Unlock()
+	}()
+	// Quick check: if there's no TC class for this port (no shaping configured),
+	// we have no byte counters to work with — bail silently.
+	// Quick check: if there's no TC class for this port (no shaping configured),
+	// we have no byte counters to work with — bail silently.
+	_, backlog, err := a.traffic.GetPortStats(port)
+	if err != nil || backlog == -1 {
+		return // no TC class → no stats available
+	}
+	// Phase 0: confirm port is idle before watching for a new transfer start.
+	// Idle = bytes stable AND backlog == 0.
+	var phase0Prev int64 = -1
+	phase0Deadline := time.Now().Add(100 * time.Millisecond)
+	for {
+		bytes, backlog, _, err := a.getPortStatsForDrain(port)
+		if err != nil {
+			return
+		}
+		bytesStable := phase0Prev >= 0 && bytes == phase0Prev
+		if bytesStable && backlog <= 0 {
+			break
+		}
+		phase0Prev = bytes
+		if time.Now().After(phase0Deadline) {
+			// Port continuously active — skip Phase 0/1, go straight to Phase 2.
+			// Use current bytes/time as the run start.
+			log.Printf("SOCKET_DRAIN_BUSY port=%d backlog=%d (skipping to phase2)", port, backlog)
+			phase0Prev = bytes
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	// Phase 1: wait for idle→active transition (up to 500ms).
+	// Active = bytes incrementing OR backlog > 0.
+	// If Phase 0 timed out (port busy), backlog is already > 0 so Phase 1
+	// activates immediately.
+	var runStartBytes int64
+	var runStartTime time.Time
+	var phase1PrevBytes int64 = phase0Prev
+	phase1Deadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(phase1Deadline) {
+		t := time.Now()
+		bytes, backlog, _, err := a.getPortStatsForDrain(port)
+		if err != nil {
+			return
+		}
+		if bytes > phase1PrevBytes || backlog > 0 {
+			runStartBytes = bytes
+			runStartTime = t
+			break
+		}
+		phase1PrevBytes = bytes
+		time.Sleep(5 * time.Millisecond)
+	}
+	if runStartTime.IsZero() {
+		log.Printf("SOCKET_DRAIN_SKIP port=%d (port never became active)", port)
+		return
+	}
+	// Active transition detected: fire SEGMENT_FLIGHT_START.
+	id := a.markSegmentFlightStart(port)
+	defer a.markSegmentFlightEnd(port, id)
+	// Phase 2: poll every 10ms, accumulate tcSamples, until transfer completes.
+	// Active = bytes incrementing OR backlog > 0.
+	// Drain = backlog == 0 AND bytes stable for 2 consecutive polls.
+	//
+	// Wire rate (mbps_transfer_rate) is computed at byte-change events that are
+	// ≥100ms after the previous report. This aligns measurement boundaries to
+	// actual TC burst edges, eliminating HTB burst aliasing.
+	var prevBytes int64 = -1
+	var prevBacklog int64 = -1
+	idleStreak := 0
+	const idleThreshold = 2
+	const wireRateMinGap = 250 * time.Millisecond
+	var wireAnchorBytes int64 = runStartBytes
+	var wireAnchorTime time.Time = runStartTime
+	stallReported := false
+	phase2Deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(phase2Deadline) {
+		sampleTime := time.Now()
+		bytes, backlogBytes, _, err := a.getPortStatsForDrain(port)
+		if err != nil {
+			return
+		}
+		bytesChanged := prevBytes >= 0 && bytes > prevBytes
+		active := bytesChanged || backlogBytes > 0
+		var backlogVal int64
+		if active {
+			backlogVal = 1
+			idleStreak = 0
+		} else if prevBytes >= 0 {
+			idleStreak++
+		}
+		// Wire rate reporting with backlog-aware boundaries:
+		//
+		// 1. Normal: report on first byte-change ≥250ms after anchor.
+		// 2. Drain: when backlog hits 0 AND bytes changed, report immediately
+		//    (natural segment boundary — clean endpoint regardless of timer).
+		// 3. Refill: when backlog transitions 0→>0, reset anchor (new segment
+		//    starts flowing — begin fresh 250ms window).
+		// 4. Stall: if bytes unchanged for ≥500ms, report 0 once.
+		sinceLast := sampleTime.Sub(wireAnchorTime)
+		backlogDrained := bytesChanged && backlogBytes <= 0 && prevBacklog > 0
+		backlogRefilled := backlogBytes > 0 && prevBacklog == 0 && prevBacklog >= 0
+
+		if backlogRefilled {
+			// New data entering empty queue — reset anchor for fresh measurement.
+			wireAnchorBytes = bytes
+			wireAnchorTime = sampleTime
+			stallReported = false
+		} else if backlogDrained || (bytesChanged && sinceLast >= wireRateMinGap) {
+			// Report rate: either backlog just drained (immediate) or ≥250ms elapsed.
+			// Suppress tiny drain reports (< 1KB) — not meaningful rate data.
+			// Stall reports (0 bytes) are handled separately and still fire.
+			deltaBytes := bytes - wireAnchorBytes
+			elapsed := sinceLast.Seconds()
+			if !(backlogDrained && deltaBytes < 1024) && deltaBytes > 0 && elapsed > 0 {
+				rate := math.Round(float64(deltaBytes)*8/(elapsed*1024*1024)*100) / 100
+				tag := "interval"
+				if backlogDrained {
+					tag = "drain"
+				}
+				a.wireRateMu.Lock()
+				a.wireRate[port] = wireRateSample{at: sampleTime, mbps: rate, bytes: deltaBytes}
+				a.wireRateMu.Unlock()
+				log.Printf("SEGMENT_WIRE_RATE port=%d mbps=%.2f delta_bytes=%d elapsed_ms=%d backlog=%d tag=%s",
+					port, rate, deltaBytes, sinceLast.Milliseconds(), backlogBytes, tag)
+			}
+			wireAnchorBytes = bytes
+			wireAnchorTime = sampleTime
+			stallReported = false
+		} else if !bytesChanged && !stallReported && sinceLast >= 2*wireRateMinGap {
+			// Bytes stalled for ≥500ms — report 0 once.
+			a.wireRateMu.Lock()
+			a.wireRate[port] = wireRateSample{at: sampleTime, mbps: 0, bytes: 0}
+			a.wireRateMu.Unlock()
+			log.Printf("SEGMENT_WIRE_RATE port=%d mbps=0.00 stall_ms=%d backlog=%d tag=stall",
+				port, sinceLast.Milliseconds(), backlogBytes)
+			stallReported = true
+		}
+		prevBacklog = backlogBytes
+		prevBytes = bytes
+		sample := tcSample{at: sampleTime, bytes: bytes, backlog: backlogVal}
+		a.tcSamplesMu.Lock()
+		samples := a.tcSamples[port]
+		samples = append(samples, sample)
+		if len(samples) > 20 {
+			samples = samples[len(samples)-20:]
+		}
+		a.tcSamples[port] = samples
+		a.tcSamplesMu.Unlock()
+		log.Printf("SEGMENT_WIRE_10MS port=%d bytes=%d backlog_bytes=%d active=%t idle_streak=%d", port, bytes, backlogBytes, active, idleStreak)
+		if idleStreak >= idleThreshold {
+			runEndTime := sampleTime
+			elapsed := runEndTime.Sub(runStartTime).Seconds()
+			runBytes := bytes - runStartBytes
+			runMbps := 0.0
+			if elapsed > 0 {
+				runMbps = math.Round((float64(runBytes)*8)/(elapsed*1024*1024)*100) / 100
+			}
+			log.Printf("SOCKET_DRAIN_DONE port=%d run_bytes=%d elapsed_s=%.3f mbps=%.2f", port, runBytes, elapsed, runMbps)
+			if runMbps > 0 {
+				a.transferCompleteMu.Lock()
+				a.transferCompleteMbps[port] = runMbps
+				a.transferCompleteAt[port] = sampleTime
+				a.transferCompleteMu.Unlock()
+			}
+			a.segmentRunMu.Lock()
+			a.segmentRun[port] = segmentRunRecord{
+				startTime:  runStartTime,
+				startBytes: runStartBytes,
+				endTime:    runEndTime,
+				endBytes:   bytes,
+			}
+			a.segmentRunMu.Unlock()
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	log.Printf("SOCKET_DRAIN_TIMEOUT port=%d (timed out waiting for port to go idle)", port)
+}
+
+func (a *App) getSegmentFlightInfo(port int) (segmentFlightInfo, bool) {
+	a.segmentFlightMu.Lock()
+	info, ok := a.segmentFlight[port]
+	a.segmentFlightMu.Unlock()
+	return info, ok
+}
+
+func (a *App) getSegmentFlightStart(port int) (time.Time, bool) {
+	info, ok := a.getSegmentFlightInfo(port)
+	return info.startTime, ok
+}
+
+func (a *App) applyFullSegmentNetworkBitrate(session SessionData, startBytes int64, startedAt time.Time) {
+	if session == nil || startBytes <= 0 || startedAt.IsZero() {
+		return
+	}
+	endBytes, _ := a.getSessionWireTCBytesNow(session)
+	if endBytes <= startBytes {
+		// Allow a brief wait for throughput sampler to publish post-transfer bytes.
+		for i := 0; i < 6; i++ {
+			time.Sleep(50 * time.Millisecond)
+			endBytes, _ = a.getSessionWireTCBytesNow(session)
+			if endBytes > startBytes {
+				break
+			}
+		}
+	}
+	if endBytes <= startBytes {
+		return
+	}
+	durationS := time.Since(startedAt).Seconds()
+	if durationS <= 0 {
+		return
+	}
+	bytesDelta := endBytes - startBytes
+	mbps := (float64(bytesDelta) * 8.0) / (durationS * 1024.0 * 1024.0)
+	session["full_segment_network_bitrate_mbps"] = math.Round(mbps*1000) / 1000
+	session["full_segment_network_bytes"] = bytesDelta
+	session["full_segment_network_duration_s"] = math.Round(durationS*1000) / 1000
+}
+
 func (a *App) getSessionThroughput(session SessionData) map[string]interface{} {
 	if session == nil {
 		return nil
 	}
-	port := getString(session, "x_forwarded_port_external")
-	if port == "" {
-		port = getString(session, "x_forwarded_port")
-	}
+	port := getString(session, "x_forwarded_port")
 	if port == "" {
 		return nil
 	}
-	throughputKeys := []string{fmt.Sprintf("throughput_%s", port)}
-	if internalPort := getString(session, "x_forwarded_port"); internalPort != "" && internalPort != port {
-		throughputKeys = append(throughputKeys, fmt.Sprintf("throughput_%s", internalPort))
-	}
 	var best map[string]interface{}
 	bestTimestamp := int64(0)
-	for _, throughputKey := range throughputKeys {
+	for _, throughputKey := range []string{fmt.Sprintf("throughput_%s", port)} {
 		item, err := a.memcache.Get(throughputKey)
 		if err != nil {
 			continue
