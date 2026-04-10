@@ -789,6 +789,10 @@
                     Allow 4K
                 </label>
                 <label>
+                    <input id="disableLiveSyncToggle" type="checkbox">
+                    Disable Live Sync
+                </label>
+                <label>
                     <input id="autoRecoveryToggle" type="checkbox">
                     Auto-Recovery
                 </label>
@@ -2199,6 +2203,14 @@
                     return;
                 }
                 shakaPlayer = new shaka.Player(video);
+                {
+                    const disableLiveSync = document.getElementById('disableLiveSyncToggle')?.checked;
+                    if (disableLiveSync) {
+                        shakaPlayer.configure('streaming.liveSync', false);
+                        shakaPlayer.configure('streaming.safeSeekOffset', 18);
+                        log('LIVE SYNC: disabled — using fixed safe seek offset');
+                    }
+                }
                 shakaPlayer.addEventListener('error', (e) => {
                     log(`ERROR: ${e.detail.code} ${e.detail.message}`);
                     const shakaHttp = extractShakaHttpFailure(e.detail);
@@ -2222,7 +2234,14 @@
                 });
             } else if (playerType === 'hlsjs') {
                 if (Hls.isSupported()) {
-                    hlsInstance = new Hls({ enableWorker: true, lowLatencyMode: false });
+                    const hlsConfig = { enableWorker: true, lowLatencyMode: false };
+                    const disableLiveSync = document.getElementById('disableLiveSyncToggle')?.checked;
+                    if (disableLiveSync) {
+                        hlsConfig.liveSyncDurationCount = 3;
+                        hlsConfig.liveMaxLatencyDurationCount = 6;
+                        log('LIVE SYNC: disabled — using 3x segment duration offset');
+                    }
+                    hlsInstance = new Hls(hlsConfig);
                     hlsInstance.on(Hls.Events.ERROR, (evt, data) => {
                         log(`HLS ERROR: ${data.type} ${data.details}`);
                         const hlsHttp = extractHlsHttpFailure(data);
