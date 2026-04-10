@@ -2638,6 +2638,10 @@
             if (stripAvgBw) {
                 stripAvgBw.checked = !!session.content_strip_average_bandwidth;
             }
+            const overstateBw = card.querySelector('input[data-field="content_overstate_bandwidth"]');
+            if (overstateBw) {
+                overstateBw.checked = !!session.content_overstate_bandwidth;
+            }
             const allowed = Array.isArray(session.content_allowed_variants)
                 ? session.content_allowed_variants.map(String)
                 : [];
@@ -3551,8 +3555,8 @@
                         allBox.checked = true;
                     }
                 }
-                if (event.target.dataset.field === 'content_allowed_variants' || event.target.dataset.field === 'content_strip_codecs' || event.target.dataset.field === 'content_strip_average_bandwidth') {
-                    sendSessionPatch(card, ['content_allowed_variants', 'content_strip_codecs', 'content_strip_average_bandwidth']);
+                if (event.target.dataset.field === 'content_allowed_variants' || event.target.dataset.field === 'content_strip_codecs' || event.target.dataset.field === 'content_strip_average_bandwidth' || event.target.dataset.field === 'content_overstate_bandwidth') {
+                    sendSessionPatch(card, ['content_allowed_variants', 'content_strip_codecs', 'content_strip_average_bandwidth', 'content_overstate_bandwidth']);
                     return;
                 }
                 if (event.target.dataset.field && event.target.dataset.field.startsWith('shaping_')) {
