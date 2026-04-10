@@ -99,7 +99,7 @@ tests/integration/
 ### Server Settings
 
 ```bash
-# Default (uses lenovo:30000/30081)
+# Default (uses $K3S_HOST:30000/30081)
 pytest
 
 # Custom server
@@ -142,10 +142,10 @@ pytest
 ### Tests fail to find stream
 ```bash
 # Check server is running
-curl http://lenovo:30000/api/content
+curl http://$K3S_HOST:30000/api/content
 
 # Specify correct host
-pytest --host=your-server-name
+pytest --host=$K3S_HOST
 ```
 
 ### Need to see what's happening

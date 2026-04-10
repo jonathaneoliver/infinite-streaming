@@ -391,10 +391,10 @@ def pytest_configure(config):
 
 ```bash
 # Ensure server is running
-curl http://lenovo:30000/api/content
+curl http://$K3S_HOST:30000/api/content
 
 # Check connectivity
-pytest --host=your-server --api-port=30000
+pytest --host=$K3S_HOST --api-port=30000
 ```
 
 ### Session Not Found
@@ -404,7 +404,7 @@ pytest --host=your-server --api-port=30000
 pytest --timeout=30
 
 # Check session endpoint
-curl http://lenovo:30000/api/sessions
+curl http://$K3S_HOST:30000/api/sessions
 ```
 
 ### Import Errors

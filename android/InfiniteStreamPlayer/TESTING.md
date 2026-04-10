@@ -120,7 +120,7 @@ Test connectivity to both servers:
 
 ```bash
 # Dev server
-curl -I http://100.111.190.54:40081/go-live/bbb/master.m3u8
+curl -I http://$K3S_HOST:40081/go-live/bbb/master.m3u8
 
 # Release server
 curl -I http://infinitestreaming.jeoliver.com:30081/go-live/bbb/master.m3u8

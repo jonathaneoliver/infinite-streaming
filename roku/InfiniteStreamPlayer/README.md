@@ -32,7 +32,7 @@ This Roku channel replicates the functionality of the iOS app, providing:
 - **Auto**: Automatic codec selection
 
 ### Server Environments
-- **Dev**: Development server (100.111.190.54:40000)
+- **Dev**: Development server ($K3S_HOST:40000)
 - **Release**: Production server (infinitestreaming.jeoliver.com:30000)
 
 ## Remote Control Navigation
@@ -77,7 +77,7 @@ roku/InfiniteStreamPlayer/
 
 2. **Configure Network Access**
    - Ensure your Roku device can reach the InfiniteStream server
-   - Default Dev server: `100.111.190.54:40000`
+   - Default Dev server: `$K3S_HOST:40000`
    - Default Release server: `infinitestreaming.jeoliver.com:30000`
 
 3. **Package the Channel**

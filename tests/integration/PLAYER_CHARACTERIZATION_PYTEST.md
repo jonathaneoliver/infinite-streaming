@@ -50,7 +50,7 @@ Notes:
 
 ```bash
 pytest tests/integration/test_player_characterization_pytest.py -m abrchar -v \
-  --host lenovo --scheme http --api-port 30000 --hls-port 30081 --follow-redirects
+  --host $K3S_HOST --scheme http --api-port 30000 --hls-port 30081 --follow-redirects
 ```
 
 Or against local Docker compose:
@@ -64,15 +64,15 @@ If auto-discovery returns HTTP 429, provide a known-good URL directly:
 
 ```bash
 pytest tests/integration/test_player_characterization_pytest.py -m abrchar -v \
-  --host lenovo --scheme http --api-port 40000 --hls-port 40081 \
-  --url "http://lenovo:40081/go-live/redbull_p200_h264/master_6s.m3u8" --follow-redirects
+  --host $K3S_HOST --scheme http --api-port 40000 --hls-port 40081 \
+  --url "http://$K3S_HOST:40081/go-live/redbull_p200_h264/master_6s.m3u8" --follow-redirects
 ```
 
 Run step-jump mode (10 cycles of down then up):
 
 ```bash
 pytest tests/integration/test_player_characterization_pytest.py -m abrchar -v \
-  --host lenovo --scheme http --api-port 40000 --hls-port 40081 \
+  --host $K3S_HOST --scheme http --api-port 40000 --hls-port 40081 \
   --abrchar-test-mode steps --abrchar-repeat-count 10
 ```
 
@@ -80,7 +80,7 @@ Run transient-shock mode:
 
 ```bash
 pytest tests/integration/test_player_characterization_pytest.py -m abrchar -v \
-  --host lenovo --scheme http --api-port 40000 --hls-port 40081 \
+  --host $K3S_HOST --scheme http --api-port 40000 --hls-port 40081 \
   --abrchar-test-mode transient-shock
 ```
 
@@ -88,7 +88,7 @@ Run startup-caps mode:
 
 ```bash
 pytest tests/integration/test_player_characterization_pytest.py -m abrchar -v \
-  --host lenovo --scheme http --api-port 40000 --hls-port 40081 \
+  --host $K3S_HOST --scheme http --api-port 40000 --hls-port 40081 \
   --abrchar-test-mode startup-caps
 ```
 
@@ -96,7 +96,7 @@ Run downshift-severity mode:
 
 ```bash
 pytest tests/integration/test_player_characterization_pytest.py -m abrchar -v \
-  --host lenovo --scheme http --api-port 40000 --hls-port 40081 \
+  --host $K3S_HOST --scheme http --api-port 40000 --hls-port 40081 \
   --abrchar-test-mode downshift-severity
 ```
 
@@ -104,7 +104,7 @@ Run hysteresis-gap mode:
 
 ```bash
 pytest tests/integration/test_player_characterization_pytest.py -m abrchar -v \
-  --host lenovo --scheme http --api-port 40000 --hls-port 40081 \
+  --host $K3S_HOST --scheme http --api-port 40000 --hls-port 40081 \
   --abrchar-test-mode hysteresis-gap
 ```
 
@@ -112,7 +112,7 @@ Run emergency-downshift mode:
 
 ```bash
 pytest tests/integration/test_player_characterization_pytest.py -m abrchar -v \
-  --host lenovo --scheme http --api-port 40000 --hls-port 40081 \
+  --host $K3S_HOST --scheme http --api-port 40000 --hls-port 40081 \
   --abrchar-test-mode emergency-downshift
 ```
 
@@ -153,7 +153,7 @@ Attach by `player_id`:
 
 ```bash
 pytest tests/integration/test_player_characterization_pytest.py -m abrchar -v \
-  --host lenovo --scheme http --api-port 40000 --hls-port 40081 \
+  --host $K3S_HOST --scheme http --api-port 40000 --hls-port 40081 \
   --abrchar-player-id "<simulator-player-id>" \
   --abrchar-launch-ios-simulator \
   --abrchar-attach-timeout 90
@@ -163,7 +163,7 @@ Attach by known `session_id`:
 
 ```bash
 pytest tests/integration/test_player_characterization_pytest.py -m abrchar -v \
-  --host lenovo --scheme http --api-port 40000 --hls-port 40081 \
+  --host $K3S_HOST --scheme http --api-port 40000 --hls-port 40081 \
   --abrchar-session-id "<existing-session-id>"
 ```
 

@@ -10,9 +10,9 @@ services:
     ports:
       - "30000:30000"
     volumes:
-      #- /home/jonathanoliver/smashing/content:/content
-      - /home/jonathanoliver/boss:/boss
-      - /home/jonathanoliver/smashing/certs:/etc/nginx/certs:ro
+      #- ./content:/content
+      - ${BOSS_CONTENT_DIR:-./sample-content}:/boss
+      - ${K3S_CERTS_DIR:-./certs}:/etc/nginx/certs:ro
     environment:
       # Path Configuration - Single source of truth for all path references
       - INFINITE_STREAM_ROOT=/boss

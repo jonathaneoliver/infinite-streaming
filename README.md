@@ -22,20 +22,20 @@ make run
 
 Open the UI:
 - Docker Compose: http://localhost:21081/
-- k3s (Lenovo): http://lenovo.local:30000/
+- k3s: http://$K3S_HOST:30000/
 
-## Lenovo k3s: release vs dev
+## k3s: release vs dev
 
 Run release and dev side-by-side by using separate NodePort ranges and image tags.
 
 Release (stable):
-- UI: http://lenovo.local:30000/
+- UI: http://$K3S_HOST:30000/
 - Ports: 30000 (UI), 30081 (initial proxy), 30181-30881 (session ports)
 - Images: `:latest` (or your pinned release tag)
 - Deploy: `make deploy-release`
 
 Dev (active development):
-- UI: http://lenovo.local:40000/
+- UI: http://$K3S_HOST:40000/
 - Ports: 40000 (UI), 40081 (initial proxy), 40181-40881 (session ports)
 - Images: `:dev`
 - Deploy: `make deploy`
@@ -49,14 +49,14 @@ Use an immutable tag for releases (for example, `v1.2.3` or a commit SHA) and ke
 Suggested flow:
 1) Create a tag and push it (example: `git tag v1.2.3 && git push origin v1.2.3`).
 2) Build/push images with that tag (example: `:v1.2.3`).
-3) Deploy release using the pinned tag (set `LENOVO_SERVER_IMAGE` and `LENOVO_PROXY_IMAGE` to the release tag).
+3) Deploy release using the pinned tag (set `K3S_SERVER_IMAGE` and `K3S_PROXY_IMAGE` to the release tag).
 
 Example deploy (release tag `v1.2.3`):
 
 ```bash
 make deploy-release \
-  LENOVO_SERVER_IMAGE=100.111.190.54:5000/infinite-streaming:v1.2.3 \
-  LENOVO_PROXY_IMAGE=100.111.190.54:5000/go-proxy:v1.2.3
+  K3S_SERVER_IMAGE=$K3S_REGISTRY/infinite-streaming:v1.2.3 \
+  K3S_PROXY_IMAGE=$K3S_REGISTRY/go-proxy:v1.2.3
 ```
 
 ## GitHub Container Registry (GHCR)
@@ -128,21 +128,21 @@ Directory layout inside `/boss`:
 - **go-upload** (port 8003): upload API, job orchestration, content discovery
 - **nginx**: routing + static dashboard
   - **Host UI (docker-compose)**: `http://localhost:21081/`
-  - **Host UI (k3s/NodePort)**: `http://lenovo.local:30000/`
+  - **Host UI (k3s/NodePort)**: `http://$K3S_HOST:30000/`
 
 ## Primary endpoints (host)
 
 ### HLS (LL/2s/6s)
 - Docker Compose: `http://localhost:21081/go-live/{content}/master.m3u8`
-- k3s NodePort: `http://lenovo.local:30081/go-live/{content}/master.m3u8`
-- k3s NodePort: `http://lenovo.local:30081/go-live/{content}/master_2s.m3u8`
-- k3s NodePort: `http://lenovo.local:30081/go-live/{content}/master_6s.m3u8`
+- k3s NodePort: `http://$K3S_HOST:30081/go-live/{content}/master.m3u8`
+- k3s NodePort: `http://$K3S_HOST:30081/go-live/{content}/master_2s.m3u8`
+- k3s NodePort: `http://$K3S_HOST:30081/go-live/{content}/master_6s.m3u8`
 
 ### DASH (LL/2s/6s)
 - Docker Compose: `http://localhost:21081/go-live/{content}/manifest.mpd`
-- k3s NodePort: `http://lenovo.local:30081/go-live/{content}/manifest.mpd`
-- k3s NodePort: `http://lenovo.local:30081/go-live/{content}/manifest_2s.mpd`
-- k3s NodePort: `http://lenovo.local:30081/go-live/{content}/manifest_6s.mpd`
+- k3s NodePort: `http://$K3S_HOST:30081/go-live/{content}/manifest.mpd`
+- k3s NodePort: `http://$K3S_HOST:30081/go-live/{content}/manifest_2s.mpd`
+- k3s NodePort: `http://$K3S_HOST:30081/go-live/{content}/manifest_6s.mpd`
 
 ### APIs
 - `GET /api/content`
@@ -193,7 +193,7 @@ Open via the Mosaic (Grid) right‑click menu → “Open in Testing Window”, 
 http://localhost:21081/dashboard/testing-session.html?player_id=<uuid>&url=<encoded-stream-url>
 
 # k3s
-http://lenovo.local:30000/dashboard/testing-session.html?player_id=<uuid>&url=<encoded-stream-url>
+http://$K3S_HOST:30000/dashboard/testing-session.html?player_id=<uuid>&url=<encoded-stream-url>
 ```
 
 The `player_id` is required. The proxy uses it to bind the playback session to a dedicated port, so requests to the original port are redirected to a session‑specific port. This allows per‑session failure injection and traffic shaping without affecting other sessions.

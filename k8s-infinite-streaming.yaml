@@ -16,7 +16,7 @@ spec:
     spec:
       containers:
       - name: go-server
-        image: 192.168.0.189:5000/infinite-streaming:latest
+        image: ${K3S_REGISTRY}/infinite-streaming:latest
         command: ["/sbin/launch.sh", "1"]
         ports:
         - containerPort: 30000
@@ -57,7 +57,7 @@ spec:
           mountPath: /var/cache/nginx/live_playlists
 
       - name: go-proxy
-        image: 192.168.0.189:5000/go-proxy:latest
+        image: ${K3S_REGISTRY}/go-proxy:latest
         ports:
         - containerPort: 30081
         - containerPort: 30181
@@ -92,11 +92,11 @@ spec:
       volumes:
       - name: boss-vol
         hostPath:
-          path: /home/jonathanoliver/boss
+          path: ${K3S_BOSS_DIR}
           type: Directory
       - name: certs-vol
         hostPath:
-          path: /home/jonathanoliver/smashing/certs
+          path: ${K3S_CERTS_DIR}
           type: Directory
       - name: go-live-tmpfs
         emptyDir:

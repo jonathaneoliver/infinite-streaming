@@ -11,7 +11,7 @@ Docker-based HLS/DASH media server for testing video players under various netwo
 - **Stop**: `make stop` or `./boss.sh 1 stop` or `docker compose down`
 - **Logs**: `docker compose logs -f boss-codex` (when using docker-compose)
 - **Shell**: `make shell` (access running container)
-- **Test**: Manual testing via browser at `http://localhost:21081/` (Docker Compose) or `http://lenovo.local:30000/` (k3s)
+- **Test**: Manual testing via browser at `http://localhost:21081/` (Docker Compose) or `http://$K3S_HOST:30000/` (k3s)
 
 ## Development Workflow
 
@@ -55,8 +55,8 @@ Go-live manages all live generation and updates internally (no external Python p
 ## Skills
 A skill is a set of local instructions to follow that is stored in a `SKILL.md` file. Below is the list of skills that can be used. Each entry includes a name, description, and file path so you can open the source for full instructions when using a specific skill.
 ### Available skills
-- skill-creator: Guide for creating effective skills. This skill should be used when users want to create a new skill (or update an existing skill) that extends Codex's capabilities with specialized knowledge, workflows, or tool integrations. (file: /Users/jonathanoliver/.codex/skills/.system/skill-creator/SKILL.md)
-- skill-installer: Install Codex skills into $CODEX_HOME/skills from a curated list or a GitHub repo path. Use when a user asks to list installable skills, install a curated skill, or install a skill from another repo (including private repos). (file: /Users/jonathanoliver/.codex/skills/.system/skill-installer/SKILL.md)
+- skill-creator: Guide for creating effective skills. This skill should be used when users want to create a new skill (or update an existing skill) that extends Codex's capabilities with specialized knowledge, workflows, or tool integrations. (file: $CODEX_HOME/skills/.system/skill-creator/SKILL.md)
+- skill-installer: Install Codex skills into $CODEX_HOME/skills from a curated list or a GitHub repo path. Use when a user asks to list installable skills, install a curated skill, or install a skill from another repo (including private repos). (file: $CODEX_HOME/skills/.system/skill-installer/SKILL.md)
 ### How to use skills
 - Discovery: The list above is the skills available in this session (name + description + file path). Skill bodies live on disk at the listed paths.
 - Trigger rules: If the user names a skill (with `$SkillName` or plain text) OR the task clearly matches a skill's description shown above, you must use that skill for that turn. Multiple mentions mean use them all. Do not carry skills across turns unless re-mentioned.

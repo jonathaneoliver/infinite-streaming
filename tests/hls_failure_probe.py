@@ -1604,7 +1604,7 @@ def run_failure_tests(url, api_base, session, args, manifest_url=None, master_ur
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("url", nargs="?", help="master or media m3u8 URL")
-    ap.add_argument("--host", default="lenovo", help="server host (default: lenovo)")
+    ap.add_argument("--host", default="localhost", help="server host (default: localhost)")
     ap.add_argument("--scheme", default="http", help="http or https")
     ap.add_argument("--api-port", type=int, default=30000, help="API/UI port")
     ap.add_argument("--hls-port", type=int, default=30081, help="HLS port")

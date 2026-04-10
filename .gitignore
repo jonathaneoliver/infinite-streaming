@@ -5,12 +5,24 @@ content/myshows
 content/skatedog/**
 content/skatedog_drm_fixed/**
 
-# generate_abr output files
+# generate_abr output files and encoding artifacts
 generate_abr/**/*.mp4
 generate_abr/**/*.log
 generate_abr/**/__pycache__/
 generate_abr/*_hevc/
 generate_abr/*_hevc_*/
+generate_abr/output/
+generate_abr/*.csv
+
+# Encoding output directories
+*_h264/
+*_hevc/
+*_tmp/
+resume_*/
+
+# Build temporaries
+.tmp-*/
+buildcheck-*/
 
 # hlstools
 hlstools/
@@ -21,6 +33,12 @@ certs/
 # macOS system files
 .DS_Store
 **/.DS_Store
+
+# Python virtual environments
+venv/
+.venv/
+**/venv/
+**/.venv/
 
 # Python cache
 __pycache__/
@@ -35,8 +53,23 @@ __pycache__/
 # macOS Internet Location shortcuts
 *.webloc
 
+# IDE / editor
 .vscode/
+
+# Test artifacts
 tests/.hls_failure_probe_last_failed
+tests/integration/test_run.log
+
+# Go module files (generated in Docker build)
 go-proxy/go.mod
 go-proxy/go.sum
-apple/InfiniteStreamPlayer/InfiniteStreamPlayer.xcodeproj/project.xcworkspace/xcuserdata/jonathanoliver.xcuserdatad/UserInterfaceState.xcuserstate
+
+# Xcode user state
+apple/InfiniteStreamPlayer/InfiniteStreamPlayer.xcodeproj/project.xcworkspace/xcuserdata/
+
+# Environment config (contains local paths/IPs)
+.env
+
+# Private documents (do not commit)
+BusinessPlan.md
+Sponsors.md

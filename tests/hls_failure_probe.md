@@ -11,12 +11,12 @@ python3 tests/hls_failure_probe.py
 With an explicit URL:
 
 ```bash
-python3 tests/hls_failure_probe.py http://lenovo:30081/go-live/<content>/master_6s.m3u8
+python3 tests/hls_failure_probe.py http://$K3S_HOST:30081/go-live/<content>/master_6s.m3u8
 ```
 
 ## Auto-selection behavior
 
-If no URL is provided, the script calls `http://lenovo:30000/api/content`, sorts by `name`, and selects the first item that:
+If no URL is provided, the script calls `http://$K3S_HOST:30000/api/content`, sorts by `name`, and selects the first item that:
 
 - has HLS content
 - has a reachable `master_6s.m3u8`
@@ -74,7 +74,7 @@ The probe treats `master.m3u8` as the one-time **master manifest** fetch and med
 
 ```bash
 # Override ports or base URLs
-python3 tests/hls_failure_probe.py --host lenovo --api-port 30000 --hls-port 30081
+python3 tests/hls_failure_probe.py --host $K3S_HOST --api-port 30000 --hls-port 30081
 
 # Provide a specific player_id
 python3 tests/hls_failure_probe.py --player-id my-debug-session

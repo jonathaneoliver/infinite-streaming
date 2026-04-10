@@ -6,7 +6,7 @@ This document records measured encoding results produced by:
 
 Source used for this run:
 
-- `/Volumes/4TB/Boss/originals/INSANE_FPV_SHOTS：_Hydrofoil_Windsurfing.mkv`
+- `your-source-video.mkv`
 
 Run shape:
 
@@ -36,7 +36,7 @@ Important:
 
 The combined CSV below includes baseline `sw`, baseline `hw`, and `hwmatch` rows:
 
-- `/Users/jonathanoliver/Projects/smashing/generate_abr/output/crf_sweep_vmaf/crf_bandwidth_sweep_new.csv`
+- `generate_abr/output/crf_sweep_vmaf/crf_bandwidth_sweep_new.csv`
 
 Coverage:
 
@@ -69,7 +69,7 @@ Observed behavior:
 
 Source of truth for the latest combined run (including `sw`, `hw`, and `hwmatch`) is:
 
-- `/Users/jonathanoliver/Projects/smashing/generate_abr/output/crf_sweep_vmaf/crf_bandwidth_sweep_new.csv`
+- `generate_abr/output/crf_sweep_vmaf/crf_bandwidth_sweep_new.csv`
 
 This file contains all 180 rows:
 
@@ -78,7 +78,7 @@ This file contains all 180 rows:
 To view the full raw results:
 
 ```bash
-cat /Users/jonathanoliver/Projects/smashing/generate_abr/output/crf_sweep_vmaf/crf_bandwidth_sweep_new.csv
+cat generate_abr/output/crf_sweep_vmaf/crf_bandwidth_sweep_new.csv
 ```
 
 Preview (header + first 15 rows):

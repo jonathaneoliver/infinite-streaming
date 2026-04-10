@@ -33,7 +33,7 @@ def pytest_configure(config):
 
 def pytest_addoption(parser):
     """Add custom command-line options."""
-    parser.addoption("--host", default="lenovo", help="Server host")
+    parser.addoption("--host", default="localhost", help="Server host")
     parser.addoption("--scheme", default="http", help="http or https")
     parser.addoption("--api-port", type=int, default=30000, help="API/UI port")
     parser.addoption("--hls-port", type=int, default=30081, help="HLS port")
