@@ -3913,6 +3913,9 @@ func shouldApplyContentManipulation(session SessionData) bool {
 	if getBool(session, "content_strip_codecs") {
 		return true
 	}
+	if getBool(session, "content_strip_average_bandwidth") {
+		return true
+	}
 	allowedVariants := getStringSlice(session, "content_allowed_variants")
 	if len(allowedVariants) > 0 {
 		return true
@@ -3923,23 +3926,24 @@ func shouldApplyContentManipulation(session SessionData) bool {
 // applyContentManipulation modifies master playlist/manifest content based on session settings
 func (a *App) applyContentManipulation(body []byte, session SessionData, contentType string) ([]byte, error) {
 	stripCodecs := getBool(session, "content_strip_codecs")
+	stripAvgBandwidth := getBool(session, "content_strip_average_bandwidth")
 	allowedVariants := getStringSlice(session, "content_allowed_variants")
 
 	// Handle HLS master playlists
 	if strings.Contains(strings.ToLower(contentType), "mpegurl") || strings.Contains(strings.ToLower(contentType), "m3u8") {
-		return manipulateHLSMaster(body, stripCodecs, allowedVariants)
+		return manipulateHLSMaster(body, stripCodecs, stripAvgBandwidth, allowedVariants)
 	}
 
 	// Handle DASH manifests
 	if strings.Contains(strings.ToLower(contentType), "dash") || strings.Contains(strings.ToLower(contentType), "mpd") {
-		return manipulateDASHManifest(body, stripCodecs, allowedVariants)
+		return manipulateDASHManifest(body, stripCodecs, stripAvgBandwidth, allowedVariants)
 	}
 
 	return body, nil
 }
 
 // manipulateHLSMaster modifies an HLS master playlist
-func manipulateHLSMaster(body []byte, stripCodecs bool, allowedVariants []string) ([]byte, error) {
+func manipulateHLSMaster(body []byte, stripCodecs bool, stripAvgBandwidth bool, allowedVariants []string) ([]byte, error) {
 	playlist, listType, err := m3u8.DecodeFrom(bufio.NewReader(bytes.NewReader(body)), true)
 	if err != nil {
 		return nil, fmt.Errorf("failed to decode HLS playlist: %w", err)
@@ -3987,6 +3991,16 @@ func manipulateHLSMaster(body []byte, stripCodecs bool, allowedVariants []string
 		}
 	}
 
+	// Strip AVERAGE-BANDWIDTH if requested
+	if stripAvgBandwidth {
+		for _, variant := range master.Variants {
+			if variant != nil && variant.AverageBandwidth > 0 {
+				variant.AverageBandwidth = 0
+				modified = true
+			}
+		}
+	}
+
 	if !modified {
 		return body, nil
 	}
@@ -4003,17 +4017,13 @@ func manipulateHLSMaster(body []byte, stripCodecs bool, allowedVariants []string
 
 // manipulateDASHManifest modifies a DASH manifest
 // Note: stripCodecs and allowedVariants parameters are reserved for future DASH implementation
-func manipulateDASHManifest(body []byte, stripCodecs bool, allowedVariants []string) ([]byte, error) {
+func manipulateDASHManifest(body []byte, stripCodecs bool, stripAvgBandwidth bool, allowedVariants []string) ([]byte, error) {
 	// DASH manifest manipulation would require XML parsing and manipulation
 	// using libraries like encoding/xml or third-party XML processors.
 	// This is deferred to keep the initial implementation focused on HLS.
-	// When implemented, this function should:
-	// 1. Parse the MPD XML
-	// 2. Filter AdaptationSet/Representation elements based on allowedVariants
-	// 3. Remove codecs attributes from Representation elements if stripCodecs is true
-	// 4. Re-serialize and return the modified XML
-	_ = stripCodecs     // Silence unused parameter warning
-	_ = allowedVariants // Silence unused parameter warning
+	_ = stripCodecs        // Silence unused parameter warning
+	_ = stripAvgBandwidth  // Silence unused parameter warning
+	_ = allowedVariants    // Silence unused parameter warning
 	log.Printf("[GO-PROXY][CONTENT] DASH manifest manipulation not yet implemented")
 	return body, nil
 }
