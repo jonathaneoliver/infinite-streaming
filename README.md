@@ -269,22 +269,30 @@ See `PRD.md` for the full list.
 - Session grouping controls (group/ungroup/merge) that propagate failure settings and network shaping.
 
 ### Wire metric implementation notes
-- Sampling cadence is 100ms and metrics are computed from `tc` class counters per session port.
-- Scope clarification: these counters include packet-level transport/application overhead that traverses the measured interface (for example TCP/IP headers and TLS/HTTP bytes), but do not include physical link-layer overhead (for example Ethernet preamble/IFG/FCS).
-- `mbps_wire_sustained` and `mbps_wire_sustained_18s` are equivalent 18s wall‑time sustained rates: total bytes / wall time in the window.
-- `mbps_wire_active` reports active‑only throughput for the 18s window (idle periods excluded).
-- `mbps_wire_sustained_6s` and `mbps_wire_sustained_1s` are wall‑time sustained variants for shorter windows.
-- `mbps_wire_throughput` is the rolling max over the last 6 seconds of `mbps_wire_active_1s`.
-- Session hydration selects the freshest throughput sample across external/internal session ports to avoid stale values.
+- TC class byte/backlog counters are read via netlink (vishvananda/netlink) — no subprocess fork per poll.
+- Per-port TC stats are cached with a 5ms TTL to deduplicate concurrent readers.
+- Only one `awaitSocketDrain` goroutine runs per port at a time (singleton guard).
+- Scope clarification: TC counters include packet-level transport/application overhead (TCP/IP headers, TLS/HTTP bytes) but not physical link-layer overhead (Ethernet preamble/IFG/FCS).
+
+### Throughput metrics
+
+| Metric | Update cadence | What it measures |
+|---|---|---|
+| `mbps_shaper_rate` | 100ms | Instantaneous shaped rate during active queue drain (1s contiguous backlog-active run) |
+| `mbps_shaper_avg` | 100ms | Rolling 6s average of `mbps_shaper_rate` values |
+| `mbps_transfer_rate` | 250ms | Byte-change-gated rate during segment transfer, aligned to HTB burst edges. Reports at drain/refill boundaries |
+| `mbps_transfer_complete` | per segment | Total bytes / total time for one completed segment transfer (backlog drained to 0) |
 
 ### Metric semantics (expected differences)
 - **Limit value** (`nftables` shaping rate): configured ceiling for the session port; this is the control target, not a measured throughput.
-- **Wire throughput value** (`mbps_wire_*`, especially `mbps_wire_throughput`): measured bytes on the shaped interface over time windows; includes transport/application overhead seen by `tc` counters.
-- **Player estimate value** (`player_metrics_network_bitrate_mbps`): player-side ABR estimate inferred by the player algorithm; this is model-based and can lag/lead observed wire metrics.
+- **Shaper metrics** (`mbps_shaper_rate`, `mbps_shaper_avg`): measured from TC class byte counters on the 100ms updatePort loop. Only active when TC shaping is configured (backlog > 0). `shaper_rate` goes to 0 on drain; `shaper_avg` smooths across segments.
+- **Transfer metrics** (`mbps_transfer_rate`, `mbps_transfer_complete`): measured from the 10ms awaitSocketDrain goroutine. `transfer_rate` aligns to actual TC burst edges (250ms min gap, drain/refill boundaries). `transfer_complete` is the ground-truth per-segment rate.
+- **Player estimate** (`player_metrics_network_bitrate_mbps`): player-side ABR estimate; model-based and can lag/lead observed wire metrics.
 
 Expected behavior under steady conditions:
-- `wire throughput` should approach but usually stay below `limit`.
-- `player estimate` should broadly track `wire throughput` trends but may be smoother/noisier depending on player.
+- `shaper_rate` and `transfer_rate` should track near the configured limit.
+- `transfer_complete` is the most trustworthy single number — it spans the full transfer.
+- `player estimate` should broadly track shaper/transfer trends but may be smoother/noisier depending on player.
 - Temporary divergence is normal during startup, stalls, retransmissions, or step transitions.
 
 ## Why unified error injection?
