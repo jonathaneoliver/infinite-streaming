@@ -1922,6 +1922,7 @@
             ladder: [],
             limitMbps: null,
             throughputMbps: null,
+            wireActive1sMbps: null,
             wireThroughputMbps: null,
             playerEstimateMbps: null,
             currentVariantMbps: null
@@ -1937,6 +1938,7 @@
             });
             const limit = toNumber(rulerState.limitMbps, null);
             const throughput = toNumber(rulerState.throughputMbps, null);
+            const wireActive1s = toNumber(rulerState.wireActive1sMbps, null);
             const wireThroughput = toNumber(rulerState.wireThroughputMbps, null);
             const playerEstimate = toNumber(rulerState.playerEstimateMbps, null);
             const currentVariant = toNumber(rulerState.currentVariantMbps, null);
@@ -1944,6 +1946,7 @@
             const topRangeLimit = topVariant !== null ? (topVariant * 2) : null;
             if (limit !== null) values.push(limit);
             if (throughput !== null) values.push(throughput);
+            if (wireActive1s !== null) values.push(wireActive1s);
             if (wireThroughput !== null) values.push(wireThroughput);
             if (playerEstimate !== null) values.push(playerEstimate);
             if (currentVariant !== null) values.push(currentVariant);
@@ -2007,6 +2010,14 @@
                     markerType: 'throughput'
                 });
             }
+            if (wireActive1s !== null) {
+                markers.push({
+                    cls: 'wire-active-1s',
+                    left: toPct(wireActive1s),
+                    label: `Active 1s ${wireActive1s.toFixed(2)} Mbps`,
+                    markerType: 'wire-active-1s'
+                });
+            }
             if (wireThroughput !== null) {
                 markers.push({
                     cls: 'wire-throughput',
@@ -2040,9 +2051,10 @@
                 'limit': 1,
                 'current-variant': 2,
                 'throughput': 3,
-                'wire-throughput': 4,
-                'player-estimate': 5,
-                'top-range': 6
+                'wire-active-1s': 4,
+                'wire-throughput': 5,
+                'player-estimate': 6,
+                'top-range': 7
             };
             const markersWithLanes = markers.map((marker) => ({
                 ...marker,
@@ -2090,6 +2102,9 @@
             }
             if (Object.prototype.hasOwnProperty.call(partial, 'throughputMbps')) {
                 rulerState.throughputMbps = toNumber(partial.throughputMbps, null);
+            }
+            if (Object.prototype.hasOwnProperty.call(partial, 'wireActive1sMbps')) {
+                rulerState.wireActive1sMbps = toNumber(partial.wireActive1sMbps, null);
             }
             if (Object.prototype.hasOwnProperty.call(partial, 'wireThroughputMbps')) {
                 rulerState.wireThroughputMbps = toNumber(partial.wireThroughputMbps, null);
@@ -2824,6 +2839,7 @@
 
                 const recordSample = (latest, index, step) => {
                     const throughput = extractThroughput(latest);
+                    const wireActive1s = toNumber(latest.mbps_wire_active_1s, null);
                     const active6sThroughput = toNumber(latest.mbps_wire_active_6s, null);
                     const wireThroughput = toNumber(latest.mbps_wire_throughput, null);
                     const playerEstimate = toNumber(latest.player_metrics_network_bitrate_mbps, null);
@@ -2835,6 +2851,7 @@
                         stepTargetMbps: step.targetMbps,
                         stepDirection: step.direction,
                         throughputMbps: throughput,
+                        wireActive1sMbps: wireActive1s,
                         active6sThroughputMbps: active6sThroughput,
                         wireThroughputMbps: wireThroughput,
                         playerEstimateMbps: playerEstimate,
@@ -2880,6 +2897,7 @@
                     updateRuler({
                         limitMbps: step.targetMbps,
                         throughputMbps: throughput,
+                        wireActive1sMbps: wireActive1s,
                         wireThroughputMbps: wireThroughput,
                         playerEstimateMbps: playerEstimate,
                         currentVariantMbps: variant
@@ -3076,6 +3094,7 @@
                             continue;
                         }
                         const throughput = extractThroughput(latest);
+                        const wireActive1s = toNumber(latest.mbps_wire_active_1s, null);
                         const wireThroughput = toNumber(latest.mbps_wire_throughput, null);
                         const playerEstimate = toNumber(latest.player_metrics_network_bitrate_mbps, null);
                         const variant = extractVariant(latest);
@@ -3092,6 +3111,7 @@
                             updateRuler({
                                 limitMbps: step.targetMbps,
                                 throughputMbps: throughput,
+                                wireActive1sMbps: wireActive1s,
                                 wireThroughputMbps: wireThroughput,
                                 playerEstimateMbps: playerEstimate,
                                 currentVariantMbps: variant

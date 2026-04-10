@@ -601,12 +601,24 @@ maybe a histogram of b
         })();
     </script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2.0.1/dist/chartjs-plugin-zoom.min.js"></script>
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/vis-timeline@7.7.3/styles/vis-timeline-graph2d.min.css">
     <script src="https://cdn.jsdelivr.net/npm/vis-timeline@7.7.3/standalone/umd/vis-timeline-graph2d.min.js"></script>
     <link rel="stylesheet" href="/dashboard/testing-session-refactored.css">
     <script src="/dashboard/testing-session-ui.js"></script>
     <script src="/dashboard/player-characterization.js"></script>
     <script>
+        if (window.Chart && window['chartjs-plugin-zoom']) {
+            const zoomPlugin = window['chartjs-plugin-zoom'].default || window['chartjs-plugin-zoom'];
+            if (zoomPlugin && typeof Chart.register === 'function') {
+                try {
+                    Chart.register(zoomPlugin);
+                } catch (_) {
+                    // Ignore duplicate registration errors.
+                }
+            }
+        }
+
         const failureTypes = [
             { value: 'none', text: 'None' },
             { value: '404', text: '404' },
@@ -641,8 +653,9 @@ maybe a histogram of b
         const bandwidthCharts = new Map();
         const bufferDepthCharts = new Map();
         const videoFpsCharts = new Map();
+        const chartViewportBySession = new Map();
+        const chartPausedBySession = new Map();
         const bandwidthVisibility = new Map();
-        const bandwidthVariantsEnabledBySession = new Map();
         const bitrateAxisMaxBySession = new Map();
         const lastRecordedPlayerEventBySession = new Map();
         const pendingShaping = new Map();
@@ -1115,12 +1128,10 @@ maybe a histogram of b
             setField('session_master_manifest_url', session.master_manifest_url || '—');
             setField('session_last_request_url', session.last_request_url || '—');
             setField('session_measured_mbps', session.measured_mbps ?? '—');
-            setField('session_mbps_wire_sustained', session.mbps_wire_sustained ?? '—');
-            setField('session_mbps_wire_active', session.mbps_wire_active ?? '—');
-            setField('session_mbps_wire_sustained_6s', session.mbps_wire_sustained_6s ?? '—');
-            setField('session_mbps_wire_active_6s', session.mbps_wire_active_6s ?? '—');
-            setField('session_mbps_wire_sustained_1s', session.mbps_wire_sustained_1s ?? '—');
-            setField('session_mbps_wire_throughput', session.mbps_wire_throughput ?? '—');
+            setField('session_mbps_shaper_rate', session.mbps_shaper_rate ?? '—');
+            setField('session_mbps_shaper_avg', session.mbps_shaper_avg ?? '—');
+            setField('session_mbps_transfer_rate', session.mbps_transfer_rate ?? '—');
+            setField('session_mbps_transfer_complete', session.mbps_transfer_complete ?? '—');
             const counts = card.querySelector('[data-field="session_detail_counts"]');
             if (counts) {
                 const masterCount = session.master_manifest_requests_count || 0;
@@ -1659,9 +1670,7 @@ maybe a histogram of b
             return String(label || '').replace(/\s*\(V\d+\)$/, '');
         }
 
-        function isVariantSeriesLabel(label) {
-            return /^Variant V\d+$/.test(String(label || ''));
-        }
+
 
         function buildVariantLadder(variants) {
             if (!Array.isArray(variants) || !variants.length) return [];
@@ -1718,15 +1727,212 @@ maybe a histogram of b
             return `Window: ${start} → ${end}`;
         }
 
+        function pinBitrateChartToLiveEdge(chartRef) {
+            const xScale = chartRef?.scales?.x;
+            if (!xScale) return;
+            const domainMin = 0;
+            const domainMax = 600;
+            const currentMin = Number(xScale.min);
+            const currentMax = Number(xScale.max);
+            if (!Number.isFinite(currentMin) || !Number.isFinite(currentMax)) return;
+            const span = Math.max(2, Math.min(domainMax - domainMin, currentMax - currentMin));
+            const nextMax = domainMax;
+            const nextMin = Math.max(domainMin, nextMax - span);
+            if (typeof chartRef.zoomScale === 'function') {
+                chartRef.zoomScale('x', { min: nextMin, max: nextMax }, 'none');
+            } else if (chartRef.options?.scales?.x) {
+                chartRef.options.scales.x.min = nextMin;
+                chartRef.options.scales.x.max = nextMax;
+            }
+        }
+
+        function normalizeChartViewport(minValue, maxValue) {
+            const domainMin = 0;
+            const domainMax = 600;
+            let min = Number(minValue);
+            let max = Number(maxValue);
+            if (!Number.isFinite(min) || !Number.isFinite(max)) return null;
+            if (max < min) { const tmp = min; min = max; max = tmp; }
+            let span = max - min;
+            if (!Number.isFinite(span) || span <= 0) return { min: domainMin, max: domainMax };
+            span = Math.max(2, Math.min(domainMax - domainMin, span));
+            max = Math.min(domainMax, max);
+            min = Math.max(domainMin, max - span);
+            max = min + span;
+            if (max > domainMax) { max = domainMax; min = domainMax - span; }
+            if (min < domainMin) { min = domainMin; max = domainMin + span; }
+            return { min, max };
+        }
+
+        function readChartViewport(chartRef) {
+            const xScale = chartRef?.scales?.x;
+            if (!xScale) return null;
+            return normalizeChartViewport(xScale.min, xScale.max);
+        }
+
+        function applyChartViewport(chartRef, viewport) {
+            if (!chartRef || !viewport) return;
+            if (typeof chartRef.zoomScale === 'function') {
+                chartRef.zoomScale('x', { min: viewport.min, max: viewport.max }, 'none');
+            } else if (chartRef.options?.scales?.x) {
+                chartRef.options.scales.x.min = viewport.min;
+                chartRef.options.scales.x.max = viewport.max;
+            }
+        }
+
+        function applyStoredChartViewport(sessionId, chartRef) {
+            const viewport = chartViewportBySession.get(String(sessionId || ''));
+            if (!viewport) return false;
+            applyChartViewport(chartRef, viewport);
+            return true;
+        }
+
+        function getChartsForSession(sessionId) {
+            const key = String(sessionId || '');
+            return [
+                bandwidthCharts.get(key),
+                bufferDepthCharts.get(key),
+                videoFpsCharts.get(key)
+            ].filter((chartRef) => !!chartRef);
+        }
+
+        function syncChartViewportAcrossSession(sessionId, sourceChart) {
+            const key = String(sessionId || '');
+            const viewport = readChartViewport(sourceChart);
+            if (!viewport) return;
+            chartViewportBySession.set(key, viewport);
+            for (const chartRef of getChartsForSession(key)) {
+                if (!chartRef || chartRef === sourceChart) continue;
+                applyChartViewport(chartRef, viewport);
+                if (typeof chartRef.zoomScale !== 'function') {
+                    chartRef.update('none');
+                }
+            }
+        }
+
+        function buildUnifiedChartZoomOptions(sessionId) {
+            const key = String(sessionId || '');
+            return {
+                pan: {
+                    enabled: true,
+                    mode: 'x',
+                    threshold: 2,
+                    onPanComplete: ({ chart: chartRef }) => {
+                        syncChartViewportAcrossSession(key, chartRef);
+                    }
+                },
+                limits: {
+                    x: { min: 0, max: 600, minRange: 2 }
+                },
+                zoom: {
+                    wheel: { enabled: true },
+                    drag: {
+                        enabled: true,
+                        modifierKey: 'alt',
+                        borderColor: '#1d4ed8',
+                        borderWidth: 1,
+                        backgroundColor: 'rgba(37, 99, 235, 0.12)'
+                    },
+                    mode: 'x',
+                    onZoomComplete: ({ chart: chartRef }) => {
+                        pinBitrateChartToLiveEdge(chartRef);
+                        syncChartViewportAcrossSession(key, chartRef);
+                    }
+                }
+            };
+        }
+
+        let rightPanDragState = null;
+        let rightPanListenersInstalled = false;
+
+        function installRightMousePanHandlers(sessionId, chartRef) {
+            const canvas = chartRef?.canvas;
+            if (!canvas || canvas.dataset.rightPanBound === '1') return;
+            canvas.dataset.rightPanBound = '1';
+            const key = String(sessionId || '');
+            canvas.addEventListener('contextmenu', (event) => { event.preventDefault(); });
+            canvas.addEventListener('mousedown', (event) => {
+                if (event.button !== 2) return;
+                event.preventDefault();
+                const viewport = readChartViewport(chartRef) || { min: 0, max: 600 };
+                rightPanDragState = { sessionId: key, sourceChart: chartRef, startClientX: event.clientX, startViewport: viewport };
+            });
+            if (rightPanListenersInstalled) return;
+            rightPanListenersInstalled = true;
+            window.addEventListener('mousemove', (event) => {
+                if (!rightPanDragState) return;
+                const sourceChart = rightPanDragState.sourceChart;
+                const chartArea = sourceChart?.chartArea;
+                if (!sourceChart || !chartArea) return;
+                const widthPx = Math.max(1, chartArea.right - chartArea.left);
+                const span = rightPanDragState.startViewport.max - rightPanDragState.startViewport.min;
+                if (!Number.isFinite(span) || span <= 0) return;
+                const deltaPx = event.clientX - rightPanDragState.startClientX;
+                const deltaValue = (deltaPx / widthPx) * span;
+                const viewport = normalizeChartViewport(
+                    rightPanDragState.startViewport.min - deltaValue,
+                    rightPanDragState.startViewport.max - deltaValue
+                );
+                if (!viewport) return;
+                chartViewportBySession.set(rightPanDragState.sessionId, viewport);
+                for (const chart of getChartsForSession(rightPanDragState.sessionId)) {
+                    applyChartViewport(chart, viewport);
+                    if (typeof chart.zoomScale !== 'function') { chart.update('none'); }
+                }
+            });
+            window.addEventListener('mouseup', (event) => {
+                if (!rightPanDragState) return;
+                if (event.button === 2) { rightPanDragState = null; }
+            });
+            window.addEventListener('blur', () => { rightPanDragState = null; });
+        }
+
+        function isChartPaused(sessionId) {
+            return chartPausedBySession.get(String(sessionId || '')) === true;
+        }
+
+        function toggleChartPause(sessionId) {
+            const key = String(sessionId || '');
+            const wasPaused = isChartPaused(key);
+            chartPausedBySession.set(key, !wasPaused);
+            if (wasPaused) { renderBandwidthChart(key); }
+        }
+
+        function installChartClickPauseHandler(sessionId, chartRef) {
+            const canvas = chartRef?.canvas;
+            if (!canvas || canvas.dataset.pauseHandlerBound === '1') return;
+            canvas.dataset.pauseHandlerBound = '1';
+            let startX = 0;
+            let startY = 0;
+            canvas.addEventListener('mousedown', (e) => {
+                if (e.button !== 0) return;
+                startX = e.clientX;
+                startY = e.clientY;
+            });
+            canvas.addEventListener('click', (e) => {
+                if (e.altKey) return;
+                if (Math.abs(e.clientX - startX) > 5 || Math.abs(e.clientY - startY) > 5) return;
+                const chartArea = chartRef.chartArea;
+                if (chartArea) {
+                    const rect = canvas.getBoundingClientRect();
+                    const cx = e.clientX - rect.left;
+                    const cy = e.clientY - rect.top;
+                    if (cx < chartArea.left || cx > chartArea.right || cy < chartArea.top || cy > chartArea.bottom) return;
+                }
+                toggleChartPause(sessionId);
+            });
+        }
+
         function pushBandwidthSample(session) {
             const now = Date.now();
             const windowMs = 10 * 60 * 1000;
-            const wireSustained = Number.isFinite(Number(session.mbps_wire_sustained)) ? Number(session.mbps_wire_sustained) : null;
-            const wireActive = Number.isFinite(Number(session.mbps_wire_active)) ? Number(session.mbps_wire_active) : null;
-            const wireSustained6s = Number.isFinite(Number(session.mbps_wire_sustained_6s)) ? Number(session.mbps_wire_sustained_6s) : null;
-            const wireActive6s = Number.isFinite(Number(session.mbps_wire_active_6s)) ? Number(session.mbps_wire_active_6s) : null;
-            const wireSustained1s = Number.isFinite(Number(session.mbps_wire_sustained_1s)) ? Number(session.mbps_wire_sustained_1s) : null;
-            const wireThroughput = Number.isFinite(Number(session.mbps_wire_throughput)) ? Number(session.mbps_wire_throughput) : null;
+            const shaperRate = Number.isFinite(Number(session.mbps_shaper_rate)) ? Number(session.mbps_shaper_rate) : null;
+            const shaperAvg = Number.isFinite(Number(session.mbps_shaper_avg)) ? Number(session.mbps_shaper_avg) : null;
+            const transferRate = session.mbps_transfer_rate != null && Number.isFinite(Number(session.mbps_transfer_rate)) ? Number(session.mbps_transfer_rate) : null;
+            const transferComplete = session.mbps_transfer_complete != null && Number.isFinite(Number(session.mbps_transfer_complete)) ? Number(session.mbps_transfer_complete) : null;
+            const metricsAtMs = session.player_metrics_event_time
+                ? Date.parse(session.player_metrics_event_time) || null
+                : null;
             const bufferDepth = Number.isFinite(Number(session.player_metrics_buffer_depth_s))
                 ? Number(session.player_metrics_buffer_depth_s)
                 : null;
@@ -1788,12 +1994,11 @@ maybe a histogram of b
             }
             series.push({
                 ts: now,
-                wireSustained,
-                wireActive,
-                wireSustained6s,
-                wireActive6s,
-                wireSustained1s,
-                wireThroughput,
+                shaperRate,
+                shaperAvg,
+                transferRate,
+                transferComplete,
+                metricsAtMs,
                 bufferDepth,
                 playerEstimate,
                 currentRendition,
@@ -1810,6 +2015,7 @@ maybe a histogram of b
         }
 
         function renderBandwidthChart(sessionId) {
+            if (isChartPaused(sessionId)) return;
             const series = bandwidthHistory.get(sessionId) || [];
             const eventSeries = bandwidthEventHistory.get(sessionId) || [];
             const card = document.querySelector(`.session-card[data-session-id="${sessionId}"]`);
@@ -1827,12 +2033,11 @@ maybe a histogram of b
                 .filter(point => point.ts >= windowStart)
                 .map(point => ({
                     x: (point.ts - windowStart) / 1000,
-                    wireSustained: point.wireSustained,
-                    wireActive: point.wireActive,
-                    wireSustained6s: point.wireSustained6s,
-                    wireActive6s: point.wireActive6s,
-                    wireSustained1s: point.wireSustained1s,
-                    wireThroughput: point.wireThroughput,
+                    shaperRate: point.shaperRate,
+                    shaperAvg: point.shaperAvg,
+                    transferRate: point.transferRate,
+                    transferComplete: point.transferComplete,
+                    metricsAtMs: point.metricsAtMs,
                     bufferDepth: point.bufferDepth,
                     playerEstimate: point.playerEstimate,
                     currentRendition: point.currentRendition,
@@ -1849,18 +2054,16 @@ maybe a histogram of b
                     type: event.type
                 }))
                 .filter((event) => Number.isFinite(event.x) && event.x >= 0 && event.x <= 600);
-            const wireSustainedData = points.map(point => ({ x: point.x, y: point.wireSustained }));
-            const wireActiveData = points.map(point => ({ x: point.x, y: point.wireActive }));
-            const wireSustained6sData = points.map(point => ({ x: point.x, y: point.wireSustained6s }));
-            const wireActive6sData = points.map(point => ({ x: point.x, y: point.wireActive6s }));
-            const wireSustained1sData = points.map(point => ({ x: point.x, y: point.wireSustained1s }));
-            const wireThroughputData = points.map(point => ({ x: point.x, y: point.wireThroughput }));
+            const shaperRateData = points.map(point => ({ x: point.x, y: point.shaperRate }));
+            const shaperAvgData = points.map(point => ({ x: point.x, y: point.shaperAvg }));
+            const transferRateData = points.map(point => ({ x: point.x, y: point.transferRate }));
+            const transferCompleteData = points.map(point => ({ x: point.x, y: point.transferComplete }));
             const bufferDepthData = points.map(point => ({ x: point.x, y: Number.isFinite(point.bufferDepth) ? point.bufferDepth : null }));
             const estimateData = points.map(point => ({ x: point.x, y: point.playerEstimate || null }));
             const renditionData = points.map(point => ({ x: point.x, y: point.currentRendition || null }));
             const serverRenditionData = points.map(point => ({ x: point.x, y: point.serverRendition || null }));
-            const framesDisplayedData = points.map(point => ({ x: point.x, y: Number.isFinite(point.framesDisplayed) ? point.framesDisplayed : null }));
-            const framesDroppedData = points.map(point => ({ x: point.x, y: Number.isFinite(point.framesDropped) ? point.framesDropped : null }));
+            const framesDisplayedData = points.map(point => ({ x: point.x, y: Number.isFinite(point.framesDisplayed) ? point.framesDisplayed : null, atMs: point.metricsAtMs || null }));
+            const framesDroppedData = points.map(point => ({ x: point.x, y: Number.isFinite(point.framesDropped) ? point.framesDropped : null, atMs: point.metricsAtMs || null }));
             const targetData = points.map(point => ({ x: point.x, y: point.target }));
 
             let variantLadder = [];
@@ -1872,35 +2075,26 @@ maybe a histogram of b
             }
 
             const visibility = bandwidthVisibility.get(sessionId) || {};
-            const variantsEnabled = bandwidthVariantsEnabledBySession.get(String(sessionId)) !== false;
-            const variantToggleButton = card.querySelector('button[data-action="toggle-variants"]');
-            if (variantToggleButton) {
-                variantToggleButton.textContent = variantsEnabled ? 'Hide Variants' : 'Show Variants';
-                variantToggleButton.setAttribute('aria-pressed', variantsEnabled ? 'true' : 'false');
-            }
             const defaultVisibleLabels = new Set([
-                'Wire Sustained (6s)',
-                'Wire Throughput',
+                'mbps_shaper_rate',
+                'mbps_shaper_avg',
+                'mbps_transfer_rate',
+                'mbps_transfer_complete',
                 'Player est.',
                 'Rendition',
                 'Server Rendition',
+                'Variants',
                 'Limit',
                 'STALL',
                 'RESTART'
             ]);
             const isSeriesHidden = (label) => {
                 const key = bandwidthSeriesKey(label);
-                if (isVariantSeriesLabel(key) && !variantsEnabled) {
-                    return true;
-                }
                 if (Object.prototype.hasOwnProperty.call(visibility, label)) {
                     return visibility[label] === true;
                 }
                 if (Object.prototype.hasOwnProperty.call(visibility, key)) {
                     return visibility[key] === true;
-                }
-                if (isVariantSeriesLabel(key)) {
-                    return false;
                 }
                 return !defaultVisibleLabels.has(key);
             };
@@ -1912,12 +2106,10 @@ maybe a histogram of b
             bitrateAxisMaxBySession.set(String(sessionId), axisMode);
             const maxFor = (hidden, data) => (hidden ? [0] : data.map(point => point.y || 0));
             const maxYAutoRaw = Math.max(1,
-                ...maxFor(isSeriesHidden('Wire Sustained (18s)'), wireSustainedData),
-                ...maxFor(isSeriesHidden('Wire Active'), wireActiveData),
-                ...maxFor(isSeriesHidden('Wire Sustained (6s)'), wireSustained6sData),
-                ...maxFor(isSeriesHidden('Wire Active (6s)'), wireActive6sData),
-                ...maxFor(isSeriesHidden('Wire Sustained (1s)'), wireSustained1sData),
-                ...maxFor(isSeriesHidden('Wire Throughput'), wireThroughputData),
+                ...maxFor(isSeriesHidden('mbps_shaper_rate'), shaperRateData),
+                ...maxFor(isSeriesHidden('mbps_shaper_avg'), shaperAvgData),
+                ...maxFor(isSeriesHidden('mbps_transfer_rate'), transferRateData),
+                ...maxFor(isSeriesHidden('mbps_transfer_complete'), transferCompleteData),
                 ...maxFor(isSeriesHidden('Player est.'), estimateData),
                 ...maxFor(isSeriesHidden('Rendition'), renditionData),
                 ...maxFor(isSeriesHidden('Server Rendition'), serverRenditionData),
@@ -1939,87 +2131,66 @@ maybe a histogram of b
             const stallMarkerData = buildEventMarkerData('STALL');
             const restartMarkerData = buildEventMarkerData('RESTART');
 
+            const variantsHidden = isSeriesHidden('Variants');
             const variantDatasets = variantLadder.map((variant, index) => {
-                const label = `Variant ${variant.vx}`;
                 return {
-                    label,
+                    label: index === 0 ? 'Variants' : `_Variant ${variant.vx}`,
                     data: points.map(point => ({ x: point.x, y: variant.mbps })),
                     borderColor: '#9ca3af',
                     backgroundColor: 'rgba(156,163,175,0.12)',
                     borderWidth: 1,
                     pointRadius: 0,
                     tension: 0,
-                    borderDash: [4, 4],
-                    hidden: isSeriesHidden(label)
+                    borderDash: index % 2 === 0 ? [2, 6] : [6, 3],
+                    hidden: variantsHidden
                 };
             });
 
             const datasets = [
                 {
-                    label: 'Wire Sustained (18s)',
-                    data: wireSustainedData,
-                    borderColor: '#0891b2',
-                    backgroundColor: 'rgba(8,145,178,0.12)',
-                    borderWidth: 1.5,
-                    pointRadius: 0,
-                    tension: 0.2,
-                    borderDash: [6, 3],
-                    hidden: isSeriesHidden('Wire Sustained (18s)')
-                },
-                {
-                    label: 'Wire Active',
-                    data: wireActiveData,
+                    label: 'mbps_shaper_rate',
+                    data: shaperRateData,
                     borderColor: '#0f766e',
                     backgroundColor: 'rgba(15,118,110,0.12)',
-                    borderWidth: 1.5,
+                    borderWidth: 1.7,
                     pointRadius: 0,
-                    tension: 0.2,
-                    borderDash: [2, 4],
-                    hidden: isSeriesHidden('Wire Active')
+                    tension: 0.15,
+                    borderDash: [8, 2],
+                    hidden: isSeriesHidden('mbps_shaper_rate')
                 },
                 {
-                    label: 'Wire Sustained (6s)',
-                    data: wireSustained6sData,
-                    borderColor: '#155e75',
-                    backgroundColor: 'rgba(21,94,117,0.12)',
-                    borderWidth: 1.5,
-                    pointRadius: 0,
-                    tension: 0.2,
-                    borderDash: [8, 3],
-                    hidden: isSeriesHidden('Wire Sustained (6s)')
-                },
-                {
-                    label: 'Wire Active (6s)',
-                    data: wireActive6sData,
-                    borderColor: '#115e59',
-                    backgroundColor: 'rgba(17,94,89,0.12)',
-                    borderWidth: 1.5,
-                    pointRadius: 0,
-                    tension: 0.2,
-                    borderDash: [3, 5],
-                    hidden: isSeriesHidden('Wire Active (6s)')
-                },
-                {
-                    label: 'Wire Sustained (1s)',
-                    data: wireSustained1sData,
-                    borderColor: '#0e7490',
-                    backgroundColor: 'rgba(14,116,144,0.12)',
-                    borderWidth: 1.5,
-                    pointRadius: 0,
-                    tension: 0.2,
-                    borderDash: [4, 4],
-                    hidden: isSeriesHidden('Wire Sustained (1s)')
-                },
-                {
-                    label: 'Wire Throughput',
-                    data: wireThroughputData,
+                    label: 'mbps_shaper_avg',
+                    data: shaperAvgData,
                     borderColor: '#0d9488',
                     backgroundColor: 'rgba(13,148,136,0.12)',
-                    borderWidth: 1.5,
+                    borderWidth: 1.7,
                     pointRadius: 0,
-                    tension: 0.2,
-                    borderDash: [1, 3],
-                    hidden: isSeriesHidden('Wire Throughput')
+                    tension: 0.15,
+                    borderDash: [10, 3],
+                    hidden: isSeriesHidden('mbps_shaper_avg')
+                },
+                {
+                    label: 'mbps_transfer_rate',
+                    data: transferRateData,
+                    borderColor: '#f97316',
+                    backgroundColor: 'rgba(249,115,22,0.12)',
+                    borderWidth: 2,
+                    pointRadius: 0,
+                    tension: 0,
+                    borderDash: [4, 2],
+                    hidden: isSeriesHidden('mbps_transfer_rate')
+                },
+                {
+                    label: 'mbps_transfer_complete',
+                    data: transferCompleteData,
+                    borderColor: '#dc2626',
+                    backgroundColor: 'rgba(220,38,38,0.15)',
+                    borderWidth: 3,
+                    pointRadius: 3,
+                    pointBackgroundColor: '#dc2626',
+                    tension: 0,
+                    stepped: 'after',
+                    hidden: isSeriesHidden('mbps_transfer_complete')
                 },
                 {
                     label: 'Player est.',
@@ -2120,7 +2291,8 @@ maybe a histogram of b
                                 position: 'bottom',
                                 labels: {
                                     color: '#6b7280',
-                                    font: { family: 'Courier New, monospace', size: 10 }
+                                    font: { family: 'Courier New, monospace', size: 10 },
+                                    filter: (item) => !item.text.startsWith('_')
                                 },
                                 onClick: (evt, item, legend) => {
                                     const index = item.datasetIndex;
@@ -2129,10 +2301,30 @@ maybe a histogram of b
                                     if (!label) return;
                                     const state = bandwidthVisibility.get(sessionId) || {};
                                     const isVisible = chartRef.isDatasetVisible(index);
-                                    chartRef.setDatasetVisibility(index, !isVisible);
-                                    state[label] = isVisible;
-                                    state[bandwidthSeriesKey(label)] = isVisible;
+                                    if (label === 'Variants') {
+                                        const newVisible = !isVisible;
+                                        chartRef.data.datasets.forEach((ds, i) => {
+                                            if (ds.label === 'Variants' || (ds.label && ds.label.startsWith('_Variant'))) {
+                                                chartRef.setDatasetVisibility(i, newVisible);
+                                            }
+                                        });
+                                        state['Variants'] = !newVisible;
+                                    } else {
+                                        chartRef.setDatasetVisibility(index, !isVisible);
+                                        state[label] = isVisible;
+                                        state[bandwidthSeriesKey(label)] = isVisible;
+                                    }
                                     bandwidthVisibility.set(sessionId, state);
+                                    const currentAxisMode = normalizeBitrateAxisMaxMode(
+                                        bitrateAxisMaxBySession.get(String(sessionId)) || 'auto'
+                                    );
+                                    if (currentAxisMode === 'auto') {
+                                        const visibleMax = chartRef.data.datasets
+                                            .filter((_, i) => chartRef.isDatasetVisible(i))
+                                            .flatMap(ds => ds.data.map(pt => Number(pt.y) || 0))
+                                            .reduce((m, v) => Math.max(m, v), 1);
+                                        chartRef.options.scales.y.max = Math.min(100, Math.max(1, Math.ceil(visibleMax * 1.05 * 10) / 10));
+                                    }
                                     chartRef.update('none');
                                 }
                             },
@@ -2146,7 +2338,8 @@ maybe a histogram of b
                                         return formatBitrateChartAbsoluteTick(startMs, xValue);
                                     }
                                 }
-                            }
+                            },
+                            zoom: buildUnifiedChartZoomOptions(sessionId)
                         },
                         scales: {
                             x: {
@@ -2188,11 +2381,17 @@ maybe a histogram of b
                     }
                 });
                 chart.$windowStartMs = windowStart;
+                applyStoredChartViewport(sessionId, chart);
+                installRightMousePanHandlers(sessionId, chart);
+                installChartClickPauseHandler(sessionId, chart);
                 bandwidthCharts.set(sessionId, chart);
             } else {
                 chart.data.datasets = datasets;
                 chart.data.datasets.forEach((dataset, idx) => {
-                    const hidden = isSeriesHidden(dataset.label);
+                    const label = dataset.label;
+                    const hidden = (label && label.startsWith('_Variant'))
+                        ? isSeriesHidden('Variants')
+                        : isSeriesHidden(label);
                     dataset.hidden = hidden;
                     chart.setDatasetVisibility(idx, !hidden);
                 });
@@ -2238,7 +2437,14 @@ maybe a histogram of b
                         maintainAspectRatio: false,
                         animation: false,
                         plugins: {
-                            legend: { display: false },
+                            legend: {
+                                display: true,
+                                position: 'bottom',
+                                labels: {
+                                    color: '#6b7280',
+                                    font: { family: 'Courier New, monospace', size: 10 }
+                                }
+                            },
                             tooltip: {
                                 callbacks: {
                                     title: (items) => {
@@ -2249,7 +2455,8 @@ maybe a histogram of b
                                         return formatBitrateChartAbsoluteTick(startMs, xValue);
                                     }
                                 }
-                            }
+                            },
+                            zoom: buildUnifiedChartZoomOptions(sessionId)
                         },
                         scales: {
                             x: {
@@ -2291,6 +2498,9 @@ maybe a histogram of b
                     }
                 });
                 bufferChart.$windowStartMs = windowStart;
+                applyStoredChartViewport(sessionId, bufferChart);
+                installRightMousePanHandlers(sessionId, bufferChart);
+                installChartClickPauseHandler(sessionId, bufferChart);
                 bufferDepthCharts.set(sessionId, bufferChart);
             } else {
                 bufferChart.data.datasets[0].data = bufferDepthData;
@@ -2304,81 +2514,59 @@ maybe a histogram of b
             const fpsChartRangeLabel = card.querySelector('[data-field="video_fps_chart_range"]');
             const fpsData = [];
             const droppedFpsDataRaw = [];
-            let fpsAnchor = null;
-            let droppedAnchor = null;
-            const minFpsWindowSeconds = 0.75;
+            const fpsWindowSeconds = 2.0;
             const maxReasonableFps = 120;
-            for (let idx = 0; idx < framesDisplayedData.length; idx += 1) {
-                const currentPoint = framesDisplayedData[idx];
-                const currentFrames = Number(currentPoint.y);
-                const currentX = Number(currentPoint.x);
-                if (!Number.isFinite(currentFrames) || !Number.isFinite(currentX)) {
-                    fpsData.push({ x: currentPoint.x, y: null });
-                    continue;
+            const buildRateSeries = (counterSeries) => {
+                const out = [];
+                for (let idx = 0; idx < counterSeries.length; idx += 1) {
+                    const currentPoint = counterSeries[idx];
+                    const currentCount = Number(currentPoint.y);
+                    const currentX = Number(currentPoint.x);
+                    if (!Number.isFinite(currentCount) || !Number.isFinite(currentX)) {
+                        out.push({ x: currentPoint.x, y: null });
+                        continue;
+                    }
+                    const targetX = currentX - fpsWindowSeconds;
+                    let anchorPoint = null;
+                    for (let j = idx - 1; j >= 0; j -= 1) {
+                        const candidateX = Number(counterSeries[j]?.x);
+                        if (!Number.isFinite(candidateX)) continue;
+                        if (candidateX <= targetX) {
+                            anchorPoint = counterSeries[j];
+                            break;
+                        }
+                    }
+                    if (!anchorPoint) {
+                        out.push({ x: currentPoint.x, y: null });
+                        continue;
+                    }
+                    const anchorCount = Number(anchorPoint.y);
+                    const currentMs = Number(currentPoint.atMs);
+                    const anchorMs = Number(anchorPoint.atMs);
+                    const deltaSeconds = (Number.isFinite(currentMs) && Number.isFinite(anchorMs) && currentMs > anchorMs)
+                        ? (currentMs - anchorMs) / 1000
+                        : currentX - Number(anchorPoint.x);
+                    const deltaCount = currentCount - anchorCount;
+                    if (!Number.isFinite(anchorCount) || deltaSeconds <= 0 || deltaCount < 0) {
+                        out.push({ x: currentPoint.x, y: null });
+                        continue;
+                    }
+                    const rate = deltaCount / deltaSeconds;
+                    if (!Number.isFinite(rate) || rate < 0 || rate > maxReasonableFps) {
+                        out.push({ x: currentPoint.x, y: null });
+                        continue;
+                    }
+                    out.push({ x: currentPoint.x, y: rate });
                 }
-                if (!fpsAnchor) {
-                    fpsAnchor = { x: currentX, frames: currentFrames };
-                    fpsData.push({ x: currentPoint.x, y: null });
-                    continue;
-                }
-                const deltaSeconds = currentX - fpsAnchor.x;
-                const deltaFrames = currentFrames - fpsAnchor.frames;
-                if (!Number.isFinite(deltaSeconds) || deltaSeconds <= 0 || deltaFrames < 0) {
-                    fpsAnchor = { x: currentX, frames: currentFrames };
-                    fpsData.push({ x: currentPoint.x, y: null });
-                    continue;
-                }
-                if (deltaSeconds < minFpsWindowSeconds) {
-                    fpsData.push({ x: currentPoint.x, y: null });
-                    continue;
-                }
-                const fps = deltaFrames / deltaSeconds;
-                if (!Number.isFinite(fps) || fps < 0 || fps > maxReasonableFps) {
-                    fpsAnchor = { x: currentX, frames: currentFrames };
-                    fpsData.push({ x: currentPoint.x, y: null });
-                    continue;
-                }
-                fpsData.push({ x: currentPoint.x, y: fps });
-                fpsAnchor = { x: currentX, frames: currentFrames };
-            }
-            for (let idx = 0; idx < framesDroppedData.length; idx += 1) {
-                const currentPoint = framesDroppedData[idx];
-                const currentDropped = Number(currentPoint.y);
-                const currentX = Number(currentPoint.x);
-                if (!Number.isFinite(currentDropped) || !Number.isFinite(currentX)) {
-                    droppedFpsDataRaw.push({ x: currentPoint.x, y: null });
-                    continue;
-                }
-                if (!droppedAnchor) {
-                    droppedAnchor = { x: currentX, frames: currentDropped };
-                    droppedFpsDataRaw.push({ x: currentPoint.x, y: null });
-                    continue;
-                }
-                const deltaSeconds = currentX - droppedAnchor.x;
-                const deltaDropped = currentDropped - droppedAnchor.frames;
-                if (!Number.isFinite(deltaSeconds) || deltaSeconds <= 0 || deltaDropped < 0) {
-                    droppedAnchor = { x: currentX, frames: currentDropped };
-                    droppedFpsDataRaw.push({ x: currentPoint.x, y: null });
-                    continue;
-                }
-                if (deltaSeconds < minFpsWindowSeconds) {
-                    droppedFpsDataRaw.push({ x: currentPoint.x, y: null });
-                    continue;
-                }
-                const droppedFps = deltaDropped / deltaSeconds;
-                if (!Number.isFinite(droppedFps) || droppedFps < 0 || droppedFps > maxReasonableFps) {
-                    droppedAnchor = { x: currentX, frames: currentDropped };
-                    droppedFpsDataRaw.push({ x: currentPoint.x, y: null });
-                    continue;
-                }
-                droppedFpsDataRaw.push({ x: currentPoint.x, y: droppedFps });
-                droppedAnchor = { x: currentX, frames: currentDropped };
-            }
+                return out;
+            };
+            fpsData.push(...buildRateSeries(framesDisplayedData));
+            droppedFpsDataRaw.push(...buildRateSeries(framesDroppedData));
             const fpsValues = fpsData.map((point) => Number(point.y)).filter((value) => Number.isFinite(value) && value >= 0);
             const droppedFpsValues = droppedFpsDataRaw.map((point) => Number(point.y)).filter((value) => Number.isFinite(value) && value >= 0);
             const fpsSmoothedData = [];
             let smooth = null;
-            const smoothingAlpha = 0.3;
+            const smoothingAlpha = 0.15;
             for (const point of fpsData) {
                 const y = Number(point.y);
                 if (!Number.isFinite(y) || y < 0) {
@@ -2511,7 +2699,8 @@ maybe a histogram of b
                                         return formatBitrateChartAbsoluteTick(startMs, xValue);
                                     }
                                 }
-                            }
+                            },
+                            zoom: buildUnifiedChartZoomOptions(sessionId)
                         },
                         scales: {
                             x: {
@@ -2569,6 +2758,9 @@ maybe a histogram of b
                     }
                 });
                 fpsChart.$windowStartMs = windowStart;
+                applyStoredChartViewport(sessionId, fpsChart);
+                installRightMousePanHandlers(sessionId, fpsChart);
+                installChartClickPauseHandler(sessionId, fpsChart);
                 videoFpsCharts.set(sessionId, fpsChart);
             } else {
                 fpsChart.data.datasets[0].data = fpsSmoothedData;
@@ -3189,13 +3381,6 @@ maybe a histogram of b
             const card = button.closest('.session-card');
             if (!card) return;
             const sessionId = card.dataset.sessionId;
-            if (button.dataset.action === 'toggle-variants') {
-                const key = String(sessionId || '');
-                const variantsEnabled = bandwidthVariantsEnabledBySession.get(key) !== false;
-                bandwidthVariantsEnabledBySession.set(key, !variantsEnabled);
-                renderBandwidthChart(sessionId);
-                return;
-            }
             if (button.dataset.action === 'apply-pattern') {
                 scheduleShapingApply(card);
                 return;
