@@ -794,6 +794,15 @@
                                             </div>
                                         </div>
                                         <div class="fault-control-row">
+                                            <label>Strip AVERAGE-BANDWIDTH</label>
+                                            <div class="checkbox-group">
+                                                <label>
+                                                    <input type="checkbox" data-field="content_strip_average_bandwidth" ${getBool(session, 'content_strip_average_bandwidth') ? 'checked' : ''}>
+                                                    Remove AVERAGE-BANDWIDTH from master playlist
+                                                </label>
+                                            </div>
+                                        </div>
+                                        <div class="fault-control-row">
                                             <label>Allowed Variants</label>
                                             <div class="checkbox-group">
                                                 ${renderContentVariantOptions(sessionId, manifestVariants, getStringSlice(session, 'content_allowed_variants'))}
@@ -1082,6 +1091,7 @@
         
         // Content manipulation settings
         const contentStripCodecs = !!card.querySelector('input[data-field="content_strip_codecs"]')?.checked;
+        const contentStripAvgBandwidth = !!card.querySelector('input[data-field="content_strip_average_bandwidth"]')?.checked;
         const contentAllowedVariants = Array.from(card.querySelectorAll('input[data-field="content_allowed_variants"]:checked'))
             .map(input => input.value);
 
@@ -1131,6 +1141,7 @@
             transport_fault_off_seconds: getRangeValue('transport_failure_frequency'),
             // Content manipulation
             content_strip_codecs: contentStripCodecs,
+            content_strip_average_bandwidth: contentStripAvgBandwidth,
             content_allowed_variants: contentAllowedVariants.length > 0 ? contentAllowedVariants : []
         };
     }
