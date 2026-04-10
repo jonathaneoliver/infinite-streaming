@@ -3919,6 +3919,9 @@ func shouldApplyContentManipulation(session SessionData) bool {
 	if getBool(session, "content_overstate_bandwidth") {
 		return true
 	}
+	if getInt(session, "content_live_offset") > 0 {
+		return true
+	}
 	allowedVariants := getStringSlice(session, "content_allowed_variants")
 	if len(allowedVariants) > 0 {
 		return true
@@ -3931,23 +3934,24 @@ func (a *App) applyContentManipulation(body []byte, session SessionData, content
 	stripCodecs := getBool(session, "content_strip_codecs")
 	stripAvgBandwidth := getBool(session, "content_strip_average_bandwidth")
 	overstateBandwidth := getBool(session, "content_overstate_bandwidth")
+	liveOffset := getInt(session, "content_live_offset")
 	allowedVariants := getStringSlice(session, "content_allowed_variants")
 
 	// Handle HLS master playlists
 	if strings.Contains(strings.ToLower(contentType), "mpegurl") || strings.Contains(strings.ToLower(contentType), "m3u8") {
-		return manipulateHLSMaster(body, stripCodecs, stripAvgBandwidth, overstateBandwidth, allowedVariants)
+		return manipulateHLSMaster(body, stripCodecs, stripAvgBandwidth, overstateBandwidth, liveOffset, allowedVariants)
 	}
 
 	// Handle DASH manifests
 	if strings.Contains(strings.ToLower(contentType), "dash") || strings.Contains(strings.ToLower(contentType), "mpd") {
-		return manipulateDASHManifest(body, stripCodecs, stripAvgBandwidth, overstateBandwidth, allowedVariants)
+		return manipulateDASHManifest(body, stripCodecs, stripAvgBandwidth, overstateBandwidth, liveOffset, allowedVariants)
 	}
 
 	return body, nil
 }
 
 // manipulateHLSMaster modifies an HLS master playlist
-func manipulateHLSMaster(body []byte, stripCodecs bool, stripAvgBandwidth bool, overstateBandwidth bool, allowedVariants []string) ([]byte, error) {
+func manipulateHLSMaster(body []byte, stripCodecs bool, stripAvgBandwidth bool, overstateBandwidth bool, liveOffset int, allowedVariants []string) ([]byte, error) {
 	playlist, listType, err := m3u8.DecodeFrom(bufio.NewReader(bytes.NewReader(body)), true)
 	if err != nil {
 		return nil, fmt.Errorf("failed to decode HLS playlist: %w", err)
@@ -4022,6 +4026,11 @@ func manipulateHLSMaster(body []byte, stripCodecs bool, stripAvgBandwidth bool, 
 		}
 	}
 
+	// Inject #EXT-X-START with negative offset for live edge positioning
+	if liveOffset > 0 {
+		modified = true
+	}
+
 	if !modified {
 		return body, nil
 	}
@@ -4033,18 +4042,28 @@ func manipulateHLSMaster(body []byte, stripCodecs bool, stripAvgBandwidth bool, 
 		return nil, fmt.Errorf("failed to encode HLS playlist: %w", err)
 	}
 
+	// Inject EXT-X-START tag (not supported by m3u8 library) after #EXTM3U
+	if liveOffset > 0 {
+		encoded := buf.String()
+		startTag := fmt.Sprintf("#EXT-X-START:TIME-OFFSET=-%d\n", liveOffset)
+		encoded = strings.Replace(encoded, "#EXTM3U\n", "#EXTM3U\n"+startTag, 1)
+		buf.Reset()
+		buf.WriteString(encoded)
+	}
+
 	return buf.Bytes(), nil
 }
 
 // manipulateDASHManifest modifies a DASH manifest
 // Note: stripCodecs and allowedVariants parameters are reserved for future DASH implementation
-func manipulateDASHManifest(body []byte, stripCodecs bool, stripAvgBandwidth bool, overstateBandwidth bool, allowedVariants []string) ([]byte, error) {
+func manipulateDASHManifest(body []byte, stripCodecs bool, stripAvgBandwidth bool, overstateBandwidth bool, liveOffset int, allowedVariants []string) ([]byte, error) {
 	// DASH manifest manipulation would require XML parsing and manipulation
 	// using libraries like encoding/xml or third-party XML processors.
 	// This is deferred to keep the initial implementation focused on HLS.
 	_ = stripCodecs        // Silence unused parameter warning
 	_ = stripAvgBandwidth  // Silence unused parameter warning
 	_ = overstateBandwidth // Silence unused parameter warning
+	_ = liveOffset         // Silence unused parameter warning
 	_ = allowedVariants    // Silence unused parameter warning
 	log.Printf("[GO-PROXY][CONTENT] DASH manifest manipulation not yet implemented")
 	return body, nil

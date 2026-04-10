@@ -1215,6 +1215,10 @@ maybe a histogram of b
             if (strip) {
                 strip.checked = !!session.content_strip_codecs;
             }
+            const liveOffsetVal = String(session.content_live_offset || 'none');
+            card.querySelectorAll('input[data-field="content_live_offset"]').forEach(radio => {
+                radio.checked = (radio.value === liveOffsetVal) || (liveOffsetVal === '0' && radio.value === 'none');
+            });
             const allowed = Array.isArray(session.content_allowed_variants)
                 ? session.content_allowed_variants.map(String)
                 : [];
@@ -3233,8 +3237,8 @@ maybe a histogram of b
                     allBox.checked = true;
                 }
             }
-            if (target.dataset.field === 'content_allowed_variants' || target.dataset.field === 'content_strip_codecs') {
-                sendSessionPatch(card, ['content_allowed_variants', 'content_strip_codecs']);
+            if (target.dataset.field === 'content_allowed_variants' || target.dataset.field === 'content_strip_codecs' || target.dataset.field === 'content_live_offset') {
+                sendSessionPatch(card, ['content_allowed_variants', 'content_strip_codecs', 'content_live_offset']);
                 return;
             }
             if (target.dataset.field === 'shaping_step_enabled') {

@@ -817,8 +817,17 @@
                                                 ${renderContentVariantOptions(sessionId, manifestVariants, getStringSlice(session, 'content_allowed_variants'))}
                                             </div>
                                         </div>
+                                        <div class="fault-control-row">
+                                            <label>Live Offset</label>
+                                            <div class="radio-group">
+                                                <label><input type="radio" name="content_live_offset_${sessionId}" data-field="content_live_offset" value="none" ${!session.content_live_offset || session.content_live_offset === 'none' ? 'checked' : ''}> None</label>
+                                                <label><input type="radio" name="content_live_offset_${sessionId}" data-field="content_live_offset" value="6" ${String(session.content_live_offset) === '6' ? 'checked' : ''}> 6s</label>
+                                                <label><input type="radio" name="content_live_offset_${sessionId}" data-field="content_live_offset" value="18" ${String(session.content_live_offset) === '18' ? 'checked' : ''}> 18s</label>
+                                                <label><input type="radio" name="content_live_offset_${sessionId}" data-field="content_live_offset" value="24" ${String(session.content_live_offset) === '24' ? 'checked' : ''}> 24s</label>
+                                            </div>
+                                        </div>
                                         <div class="content-tab-note">
-                                            <strong>Note:</strong> Content modifications apply to master playlist requests. 
+                                            <strong>Note:</strong> Content modifications apply to master playlist requests.
                                             For HLS, play content once to populate variant list, configure settings, then replay to apply changes.
                                         </div>
                                     </div>
@@ -1104,6 +1113,8 @@
         const contentOverstateBandwidth = !!card.querySelector('input[data-field="content_overstate_bandwidth"]')?.checked;
         const contentAllowedVariants = Array.from(card.querySelectorAll('input[data-field="content_allowed_variants"]:checked'))
             .map(input => input.value);
+        const liveOffsetRaw = card.querySelector('input[data-field="content_live_offset"]:checked')?.value || 'none';
+        const contentLiveOffset = liveOffsetRaw === 'none' ? 0 : Number(liveOffsetRaw) || 0;
 
         return {
             session_id: sessionId,
@@ -1153,6 +1164,7 @@
             content_strip_codecs: contentStripCodecs,
             content_strip_average_bandwidth: contentStripAvgBandwidth,
             content_overstate_bandwidth: contentOverstateBandwidth,
+            content_live_offset: contentLiveOffset,
             content_allowed_variants: contentAllowedVariants.length > 0 ? contentAllowedVariants : []
         };
     }
