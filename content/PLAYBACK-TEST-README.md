@@ -17,3 +17,16 @@
 - `/dashboard/segment-duration-comparison.html`
 - `/dashboard/grid.html`
 - `/dashboard/quartet.html`
+
+## Player Characterization Overhead Model
+
+When using Player Characterization in the testing dashboard:
+
+- Network overhead can be selected as `5%` or `10%`.
+- ABR limit ramps are generated from overhead-adjusted wire bitrate targets, not raw media bitrates.
+- For each adjacent ladder pair, interpolation points are:
+	- `0%, 5%, 10%, 25%, 50%, 75%, 90%, 95%`
+
+Formula:
+
+- `wire_variant_mbps = media_variant_mbps / (1 - overhead_pct)`

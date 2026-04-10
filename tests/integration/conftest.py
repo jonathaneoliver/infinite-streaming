@@ -1,8 +1,10 @@
 """Pytest configuration and shared fixtures for HLS failure injection tests."""
 import json
 import os
+import subprocess
 import time
 import uuid
+import webbrowser
 from typing import Optional
 
 import pytest
@@ -25,6 +27,7 @@ def pytest_configure(config):
     config.addinivalue_line("markers", "slow: Slow-running tests (>30s)")
     config.addinivalue_line("markers", "smoke: Quick smoke tests")
     config.addinivalue_line("markers", "regression: Regression tests")
+    config.addinivalue_line("markers", "abrchar: Player ABR characterization tests")
 
 
 def pytest_addoption(parser):
@@ -46,6 +49,95 @@ def pytest_addoption(parser):
     parser.addoption("--expect-throttle", type=int, default=1, help="Min throttle count")
     parser.addoption("--expect-corrupted", type=int, default=1, help="Min corrupted segment count")
     parser.addoption("--url", help="Specific stream URL to test")
+    parser.addoption(
+        "--follow-redirects",
+        action="store_true",
+        default=True,
+        help="Follow HTTP redirects during stream/API probing (default: enabled)",
+    )
+    parser.addoption("--abrchar-hold-seconds", type=int, default=8, help="Hold seconds per characterization step")
+    parser.addoption(
+        "--abrchar-smooth-step-seconds",
+        type=int,
+        default=None,
+        help="Smooth mode only: seconds each smooth step should last (overrides --abrchar-hold-seconds for smooth mode)",
+    )
+    parser.addoption(
+        "--abrchar-step-gap-seconds",
+        type=float,
+        default=0.0,
+        help="Extra seconds to wait between consecutive limit changes",
+    )
+    parser.addoption("--abrchar-settle-timeout", type=int, default=30, help="Seconds to wait for throughput settle per step")
+    parser.addoption("--abrchar-settle-tolerance", type=float, default=0.25, help="Settle tolerance ratio (e.g. 0.25 = ±25%%)")
+    parser.addoption(
+        "--abrchar-test-mode",
+        default="smooth",
+        choices=[
+            "smooth",
+            "steps",
+            "transient-shock",
+            "startup-caps",
+            "downshift-severity",
+            "hysteresis-gap",
+            "emergency-downshift",
+        ],
+        help="Characterization schedule mode",
+    )
+    parser.addoption(
+        "--net-overhead",
+        type=int,
+        choices=[5, 10],
+        help="Network overhead percent used for shaping target conversion (JS parity: 5 or 10)",
+    )
+    parser.addoption("--abrchar-overhead-pct", type=float, default=10.0, help="Network overhead percent used to convert ladder Mbps to wire Mbps")
+    parser.addoption("--abrchar-max-steps", type=int, default=0, help="Maximum number of characterization steps (0 = unlimited)")
+    parser.addoption(
+        "--abrchar-repeat-count",
+        type=int,
+        default=10,
+        help="How many times to repeat the characterization step schedule",
+    )
+    parser.addoption("--abrchar-run-name", default="", help="Optional user-friendly name for this characterization run")
+    parser.addoption(
+        "--abrchar-plot-logs",
+        action="store_true",
+        default=False,
+        help="Emit ABRCHAR_PLOT structured telemetry lines for offline charting (default: disabled)",
+    )
+    parser.addoption(
+        "--abrchar-open-browser",
+        action="store_true",
+        dest="abrchar_open_browser",
+        default=True,
+        help="Open dashboard testing-session page to start browser playback session (default: enabled)",
+    )
+    parser.addoption(
+        "--no-abrchar-open-browser",
+        action="store_false",
+        dest="abrchar_open_browser",
+        help="Disable browser launch and attach to an existing player/session",
+    )
+    parser.addoption(
+        "--abrchar-browser-wait",
+        type=float,
+        default=2.5,
+        help="Seconds to wait after opening browser before polling /api/sessions",
+    )
+    parser.addoption("--abrchar-session-id", default="", help="Attach ABR characterization to an existing session_id")
+    parser.addoption("--abrchar-player-id", default="", help="Attach ABR characterization to an existing player_id (e.g. iPad simulator app)")
+    parser.addoption(
+        "--abrchar-attach-timeout",
+        type=float,
+        default=60.0,
+        help="Seconds to wait when attaching to an existing player/session",
+    )
+    parser.addoption(
+        "--abrchar-launch-ios-simulator",
+        action="store_true",
+        default=False,
+        help="If attach IDs are not found, try launching InfiniteStreamPlayer in iOS Simulator before browser fallback",
+    )
 
 
 @pytest.fixture(scope="session")
@@ -69,6 +161,25 @@ def config(request):
         'expect_throttle': request.config.getoption("--expect-throttle"),
         'expect_corrupted': request.config.getoption("--expect-corrupted"),
         'url': request.config.getoption("--url"),
+        'follow_redirects': request.config.getoption("--follow-redirects"),
+        'abrchar_hold_seconds': request.config.getoption("--abrchar-hold-seconds"),
+        'abrchar_smooth_step_seconds': request.config.getoption("--abrchar-smooth-step-seconds"),
+        'abrchar_step_gap_seconds': request.config.getoption("--abrchar-step-gap-seconds"),
+        'abrchar_settle_timeout': request.config.getoption("--abrchar-settle-timeout"),
+        'abrchar_settle_tolerance': request.config.getoption("--abrchar-settle-tolerance"),
+        'abrchar_test_mode': request.config.getoption("--abrchar-test-mode"),
+        'net_overhead_pct': request.config.getoption("--net-overhead"),
+        'abrchar_overhead_pct': request.config.getoption("--abrchar-overhead-pct"),
+        'abrchar_max_steps': request.config.getoption("--abrchar-max-steps"),
+        'abrchar_repeat_count': request.config.getoption("--abrchar-repeat-count"),
+        'abrchar_run_name': request.config.getoption("--abrchar-run-name"),
+        'abrchar_plot_logs': request.config.getoption("--abrchar-plot-logs"),
+        'abrchar_open_browser': request.config.getoption("abrchar_open_browser"),
+        'abrchar_browser_wait': request.config.getoption("--abrchar-browser-wait"),
+        'abrchar_session_id': request.config.getoption("--abrchar-session-id"),
+        'abrchar_player_id': request.config.getoption("--abrchar-player-id"),
+        'abrchar_attach_timeout': request.config.getoption("--abrchar-attach-timeout"),
+        'abrchar_launch_ios_simulator': request.config.getoption("--abrchar-launch-ios-simulator"),
         'verbose': request.config.getoption("-v") > 0,
     })()
 
@@ -90,8 +201,11 @@ def hls_base(config):
 
 
 @pytest.fixture(scope="session")
-def player_id():
+def player_id(config):
     """Generate unique player ID for this test session."""
+    override = str(getattr(config, "abrchar_player_id", "") or "").strip()
+    if override:
+        return override
     return str(uuid.uuid4())
 
 
@@ -108,31 +222,66 @@ def stream_info(config, api_base, hls_base, player_id):
     - variants: List of variant info
     """
     if config.url:
-        return _prepare_provided_url(config.url, player_id)
+        return _prepare_provided_url(
+            config.url,
+            player_id,
+            config.timeout,
+            config.verbose,
+            config.follow_redirects,
+        )
 
-    return _auto_select_stream(api_base, hls_base, player_id, config.timeout, config.verbose)
+    return _auto_select_stream(
+        api_base,
+        hls_base,
+        player_id,
+        config.timeout,
+        config.verbose,
+        config.follow_redirects,
+    )
 
 
-def _prepare_provided_url(url, player_id):
+def _prepare_provided_url(url, player_id, timeout, verbose, follow_redirects):
     """Prepare provided URL for testing."""
     from .helpers import ensure_player_id, http_get_text, parse_master_variants, pick_best_variant
 
-    url = ensure_player_id(url, player_id)
-    status, text, _, err = http_get_text(url, timeout=20, verbose=False)
+    def force_player_id(input_url):
+        split = urllib.parse.urlsplit(str(input_url or ""))
+        query = urllib.parse.parse_qs(split.query, keep_blank_values=True)
+        query["player_id"] = [player_id]
+        return urllib.parse.urlunsplit(
+            (split.scheme, split.netloc, split.path, urllib.parse.urlencode(query, doseq=True), split.fragment)
+        )
+
+    provided_url = force_player_id(url)
+    status, text, _, err = http_get_text(
+        provided_url,
+        timeout=timeout,
+        verbose=verbose,
+        follow_redirects=follow_redirects,
+    )
 
     if status != 200:
-        pytest.exit(f"Failed to fetch provided URL: {url}")
+        reason = f"status={status}"
+        if err:
+            reason = f"{reason} err={err}"
+        if status == 429:
+            pytest.exit(
+                f"Failed to fetch provided URL due to rate limiting ({reason}): {provided_url}. "
+                "Try again shortly or provide a less-loaded stream URL."
+            )
+        pytest.exit(f"Failed to fetch provided URL ({reason}): {provided_url}")
 
     master_url = None
-    media_url = url
+    media_url = force_player_id(provided_url)
     variants = []
 
     if "#EXT-X-STREAM-INF" in text:
-        master_url = url
-        variants = parse_master_variants(text, url, player_id)
-        media_url, _ = pick_best_variant(text, url)
+        master_url = force_player_id(provided_url)
+        variants = parse_master_variants(text, master_url, player_id)
+        media_url, _ = pick_best_variant(text, master_url)
         if not media_url:
             pytest.exit("Could not select variant from master manifest")
+        media_url = force_player_id(media_url)
 
     return {
         'master_url': master_url,
@@ -143,12 +292,17 @@ def _prepare_provided_url(url, player_id):
     }
 
 
-def _auto_select_stream(api_base, hls_base, player_id, timeout, verbose):
+def _auto_select_stream(api_base, hls_base, player_id, timeout, verbose, follow_redirects):
     """Auto-select H264 HLS stream from content API."""
     from .helpers import ensure_player_id, http_get_text, parse_master_variants, is_h264_master
 
     content_url = f"{api_base}/api/content"
-    status, text, _, err = http_get_text(content_url, timeout=timeout, verbose=verbose)
+    status, text, _, err = http_get_text(
+        content_url,
+        timeout=timeout,
+        verbose=verbose,
+        follow_redirects=follow_redirects,
+    )
 
     if status != 200:
         pytest.exit(f"Failed to fetch content list from {content_url}")
@@ -167,21 +321,34 @@ def _auto_select_stream(api_base, hls_base, player_id, timeout, verbose):
     if not candidates:
         pytest.exit("No HLS content found")
 
-    # Find first H264 6s content
+    # Find first H264 6s content.
+    # Probe without player_id to avoid creating many player-bound sessions during
+    # discovery (which can trigger HTTP 429 rate limiting on busy hosts).
     for item in candidates:
         name = item.get("name")
         if not name:
             continue
 
         safe_name = urllib.parse.quote(name, safe="")
-        master_url = f"{hls_base}/go-live/{safe_name}/master_6s.m3u8"
-        master_url = ensure_player_id(master_url, player_id)
+        master_probe_url = f"{hls_base}/go-live/{safe_name}/master_6s.m3u8"
 
-        status, master_text, _, _ = http_get_text(master_url, timeout=timeout, verbose=verbose)
+        status, master_text, _, _ = http_get_text(
+            master_probe_url,
+            timeout=timeout,
+            verbose=verbose,
+            follow_redirects=follow_redirects,
+        )
+        if status == 429:
+            # Gentle backoff while searching to avoid amplifying throttling.
+            time.sleep(0.05)
+            continue
         if status != 200 or not is_h264_master(master_text):
             continue
 
         from .helpers import pick_best_variant, parse_master_variants
+
+        # Once a candidate is selected, bind player_id for actual playback/test traffic.
+        master_url = ensure_player_id(master_probe_url, player_id)
 
         variants = parse_master_variants(master_text, master_url, player_id)
         media_url, _ = pick_best_variant(master_text, master_url)
@@ -197,27 +364,165 @@ def _auto_select_stream(api_base, hls_base, player_id, timeout, verbose):
             'variants': variants,
         }
 
-    pytest.exit("No suitable H264 HLS content found")
+    pytest.exit(
+        "No suitable H264 HLS content found (or discovery was throttled with HTTP 429). "
+        "Try passing --url with a known-good master/variant URL."
+    )
 
 
 @pytest.fixture(scope="session")
-def session_id(api_base, stream_info, player_id, config):
+def session_id(api_base, hls_base, stream_info, player_id, config):
     """
     Find or create test session by making initial request.
 
     Returns session_id string.
     """
-    from .helpers import http_get_text, find_session_by_player_id
+    from .helpers import http_get_text, find_session_by_player_id, find_session_by_player_id_sse
+    from .helpers import fetch_session_snapshot
 
-    # Warm up session
-    http_get_text(stream_info['media_url'], timeout=config.timeout, verbose=config.verbose)
-    time.sleep(1)
+    attach_session_id = str(getattr(config, "abrchar_session_id", "") or "").strip()
+    attach_player_id = str(getattr(config, "abrchar_player_id", "") or "").strip()
+    explicit_attach_requested = bool(attach_session_id or attach_player_id)
+    attach_timeout = max(5.0, float(getattr(config, "abrchar_attach_timeout", 60.0) or 60.0))
+    launch_ios_sim = bool(getattr(config, "abrchar_launch_ios_simulator", False))
+    ios_bundle_id = "com.jeoliver.InfiniteStreamPlayer"
 
-    # Find session
-    session = find_session_by_player_id(api_base, player_id, timeout=12, verbose=config.verbose)
+    def find_by_player(pid: str, timeout_s: float):
+        if not pid:
+            return None
+        found = find_session_by_player_id_sse(api_base, pid, timeout=timeout_s, verbose=config.verbose)
+        if not found:
+            found = find_session_by_player_id(api_base, pid, timeout=timeout_s, verbose=config.verbose)
+        return found
+
+    def try_launch_ios_simulator() -> bool:
+        try:
+            cmd = ["xcrun", "simctl", "launch", "booted", ios_bundle_id]
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=20, check=False)
+            if config.verbose:
+                stdout = (proc.stdout or "").strip()
+                stderr = (proc.stderr or "").strip()
+                print(f"iOS simulator launch exit={proc.returncode} bundle={ios_bundle_id}", flush=True)
+                if stdout:
+                    print(f"iOS simulator launch stdout: {stdout}", flush=True)
+                if stderr:
+                    print(f"iOS simulator launch stderr: {stderr}", flush=True)
+            return proc.returncode == 0
+        except Exception as exc:
+            if config.verbose:
+                print(f"iOS simulator launch failed: {exc}", flush=True)
+            return False
+
+    if attach_session_id:
+        snap = fetch_session_snapshot(api_base, attach_session_id, verbose=config.verbose)
+        if snap and snap.get("session_id"):
+            if config.verbose:
+                print(f"Attached to existing session_id={attach_session_id}", flush=True)
+            return str(snap.get("session_id"))
+        if config.verbose:
+            print(f"session_id={attach_session_id} not found", flush=True)
+
+    if attach_player_id:
+        if config.verbose:
+            print(
+                f"Attempting attach by player_id={attach_player_id} (timeout={attach_timeout}s)",
+                flush=True,
+            )
+        session = find_by_player(attach_player_id, attach_timeout)
+        if session and session.get("session_id"):
+            if config.verbose:
+                print(f"Attached to existing player_id={attach_player_id}", flush=True)
+            return session["session_id"]
+        if config.verbose:
+            print(f"player_id={attach_player_id} not found", flush=True)
+
+    if launch_ios_sim:
+        launched = try_launch_ios_simulator()
+        candidate_player = attach_player_id or player_id
+        if launched and candidate_player:
+            if config.verbose:
+                print(
+                    f"Waiting for simulator session via player_id={candidate_player} (timeout={attach_timeout}s)",
+                    flush=True,
+                )
+            session = find_by_player(candidate_player, attach_timeout)
+            if session and session.get("session_id"):
+                if config.verbose:
+                    print(f"Attached after simulator launch via player_id={candidate_player}", flush=True)
+                return session["session_id"]
+            if config.verbose:
+                print("No session found after simulator launch; continuing with browser fallback", flush=True)
+        elif config.verbose:
+            print("Simulator launch not successful; continuing with browser fallback", flush=True)
+
+    if explicit_attach_requested:
+        pytest.exit(
+            "Attach target was not found (session/player). Refusing browser fallback to avoid creating extra playback sessions. "
+            "Verify --abrchar-session-id/--abrchar-player-id or run without attach flags."
+        )
+
+    # Warm up session by opening dashboard playback page (matches real UI flow).
+    def force_player_id(input_url):
+        split = urllib.parse.urlsplit(str(input_url or ""))
+        query = urllib.parse.parse_qs(split.query, keep_blank_values=True)
+        query["player_id"] = [player_id]
+        return urllib.parse.urlunsplit(
+            (split.scheme, split.netloc, split.path, urllib.parse.urlencode(query, doseq=True), split.fragment)
+        )
+
+    raw_playback_url = stream_info.get('master_url') or stream_info['media_url']
+    playback_url = force_player_id(raw_playback_url)
+    if config.abrchar_open_browser and playback_url:
+        open_folds = 'network-shaping,bitrate-chart,player-characterization'
+        launch_query = urllib.parse.urlencode({
+            'player_id': player_id,
+            'url': playback_url,
+            'open_folds': open_folds,
+            'auto_recovery': '1',
+        })
+        browser_url = (
+            f"{hls_base}/dashboard/testing-session.html?{launch_query}"
+        )
+        if config.verbose:
+            print(f"Opening browser playback URL: {browser_url}", flush=True)
+            existing_pid = urllib.parse.parse_qs(urllib.parse.urlsplit(str(raw_playback_url or '')).query).get('player_id', [''])[0]
+            launch_pid = urllib.parse.parse_qs(urllib.parse.urlsplit(playback_url).query).get('player_id', [''])[0]
+            print(
+                f"Playback URL player_id normalization raw={existing_pid or '-'} normalized={launch_pid or '-'} expected={player_id}",
+                flush=True,
+            )
+        try:
+            opened = webbrowser.open(browser_url, new=2, autoraise=True)
+            if config.verbose:
+                print(f"Browser open result: {opened}", flush=True)
+        except Exception as exc:
+            if config.verbose:
+                print(f"Browser open failed ({exc}); falling back to HTTP warmup", flush=True)
+            http_get_text(
+                stream_info['media_url'],
+                timeout=config.timeout,
+                verbose=config.verbose,
+                follow_redirects=config.follow_redirects,
+            )
+        time.sleep(max(0.5, float(config.abrchar_browser_wait)))
+    else:
+        http_get_text(
+            stream_info['media_url'],
+            timeout=config.timeout,
+            verbose=config.verbose,
+            follow_redirects=config.follow_redirects,
+        )
+        time.sleep(1)
+
+    # Find session (prefer SSE stream subscription, then fallback polling API list).
+    if config.verbose:
+        print(f"Session discovery base (SSE + polling): {api_base}", flush=True)
+    session = find_session_by_player_id_sse(api_base, player_id, timeout=12, verbose=config.verbose)
+    if not session:
+        session = find_session_by_player_id(api_base, player_id, timeout=12, verbose=config.verbose)
 
     if not session or not session.get('session_id'):
-        pytest.exit("Failed to locate session via /api/sessions")
+        pytest.exit("Failed to locate session via SSE or /api/sessions")
 
     return session['session_id']
 

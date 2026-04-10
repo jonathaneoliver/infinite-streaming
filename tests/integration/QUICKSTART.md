@@ -218,6 +218,7 @@ pytest --collect-only
 ## Resources
 
 - **Full Documentation**: [README.md](README.md)
+- **Player Characterization Matrix**: [PLAYER_CHARACTERIZATION_PYTEST.md](PLAYER_CHARACTERIZATION_PYTEST.md)
 - **Example Commands**: [examples.sh](examples.sh)
 - **Test Improvement Plan**: [../testing_improvement_plan.md](../testing_improvement_plan.md)
 - **Pytest Docs**: https://docs.pytest.org/

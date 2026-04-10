@@ -56,7 +56,13 @@ struct ContentView: View {
         let saved = UserDefaults.standard.string(forKey: "server_environment") ?? ServerEnvironment.dev.rawValue
         let env = ServerEnvironment(rawValue: saved) ?? .dev
         let controlURL = URL(string: "http://\(env.host):\(env.contentPort)") ?? URL(string: "http://localhost:40000")!
-        _testingViewModel = StateObject(wrappedValue: TestingSessionViewModel(playerId: playback.playerId, controlBaseURL: controlURL))
+        _testingViewModel = StateObject(wrappedValue: TestingSessionViewModel(
+            playerId: playback.playerId,
+            controlBaseURL: controlURL,
+            onRemoteRestartRequested: { reason in
+                playback.restartPlayback(reason: reason)
+            }
+        ))
     }
 
     var body: some View {
@@ -92,6 +98,12 @@ struct ContentView: View {
                             .labelsHidden()
                             .toggleStyle(.switch)
                         Text("Allow 4K")
+                    }
+                    HStack(spacing: 6) {
+                        Toggle("", isOn: $viewModel.autoRecoveryEnabled)
+                            .labelsHidden()
+                            .toggleStyle(.switch)
+                        Text("Auto-Recovery")
                     }
                 }
 

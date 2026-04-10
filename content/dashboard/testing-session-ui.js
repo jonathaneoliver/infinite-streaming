@@ -556,6 +556,8 @@
                     </div>
                     <div class="collapsible-content" data-content="session-details" style="display: ${sessionDetailsOpen ? 'block' : 'none'};">
                         <div class="session-grid">
+                            <div class="session-item"><span class="label">Session ID</span><span class="value" data-field="session_session_id">${session.session_id || '—'}</span></div>
+                            <div class="session-item"><span class="label">Player ID</span><span class="value" data-field="session_player_id">${session.player_id || '—'}</span></div>
                             <div class="session-item"><span class="label">User Agent</span><span class="value" data-field="session_user_agent">${session.user_agent || '—'}</span></div>
                             <div class="session-item"><span class="label">Player IP</span><span class="value" data-field="session_player_ip">${session.player_ip || '—'}</span></div>
                             <div class="session-item"><span class="label">Origination IP</span><span class="value" data-field="session_origination_ip">${session.origination_ip || '—'}${session.is_external_ip ? ' <span class="badge external-badge">External</span>' : ''}</span></div>
@@ -567,6 +569,8 @@
                             <div class="session-item"><span class="label">Manifest URL</span><span class="value" data-field="session_manifest_url">${session.manifest_url || '—'}</span></div>
                             <div class="session-item"><span class="label">Master Manifest URL</span><span class="value" data-field="session_master_manifest_url">${session.master_manifest_url || '—'}</span></div>
                             <div class="session-item"><span class="label">Last Request URL</span><span class="value" data-field="session_last_request_url">${session.last_request_url || '—'}</span></div>
+                            <div class="session-item"><span class="label">Loop Count (Server)</span><span class="value" data-field="session_loop_count_server">${session.loop_count_server ?? '0'}</span></div>
+                            <div class="session-item"><span class="label">Loop Count (Player)</span><span class="value" data-field="session_loop_count_player">${session.player_metrics_loop_count_player ?? '0'}</span></div>
                             <div class="session-item"><span class="label">Measured Mbps</span><span class="value" data-field="session_measured_mbps">${session.measured_mbps || '—'}</span></div>
                             <div class="session-item"><span class="label">mbps_in</span><span class="value" data-field="session_mbps_in">${session.mbps_in ?? '—'}</span></div>
                             <div class="session-item"><span class="label">mbps_out</span><span class="value" data-field="session_mbps_out">${session.mbps_out ?? '—'}</span></div>
@@ -622,10 +626,17 @@
                             <div class="session-item"><span class="label">First Frame Time</span><span class="value" data-field="player_metrics_video_first_frame_time_s">${formatSeconds(session.player_metrics_video_first_frame_time_s)}</span></div>
                             <div class="session-item"><span class="label">Video Start Time</span><span class="value" data-field="player_metrics_video_start_time_s">${formatSeconds(session.player_metrics_video_start_time_s)}</span></div>
                             <div class="session-item"><span class="label">Video Bitrate Mbps</span><span class="value" data-field="player_metrics_video_bitrate_mbps">${session.player_metrics_video_bitrate_mbps ?? '—'}</span></div>
+                            <div class="session-item"><span class="label">Server Rendition</span><span class="value" data-field="server_video_rendition">${session.server_video_rendition || '—'}</span></div>
+                            <div class="session-item"><span class="label">Server Rendition Mbps</span><span class="value" data-field="server_video_rendition_mbps">${session.server_video_rendition_mbps ?? '—'}</span></div>
                             <div class="session-item"><span class="label">Video Quality</span><span class="value" data-field="player_metrics_video_quality_pct">${formatPercent(session.player_metrics_video_quality_pct)}</span></div>
                             <div class="session-item"><span class="label">Network Bitrate Mbps</span><span class="value" data-field="player_metrics_network_bitrate_mbps">${session.player_metrics_network_bitrate_mbps ?? '—'}</span></div>
+                            <div class="session-item"><span class="label">Loop Count</span><span class="value" data-field="player_metrics_loop_count">${session.player_metrics_loop_count_player ?? '0'}</span></div>
+                            <div class="session-item"><span class="label">Loop Count Increment</span><span class="value" data-field="player_metrics_loop_count_increment">${session.player_metrics_loop_count_increment ?? '0'}</span></div>
+                            <div class="session-item"><span class="label">Profile Shifts</span><span class="value" data-field="player_metrics_profile_shift_count">${session.player_metrics_profile_shift_count ?? '0'}</span></div>
+                            <div class="session-item"><span class="label">Frames Displayed</span><span class="value" data-field="player_metrics_frames_displayed">${session.player_metrics_frames_displayed ?? '—'}</span></div>
                             <div class="session-item"><span class="label">Dropped Frames</span><span class="value" data-field="player_metrics_dropped_frames">${session.player_metrics_dropped_frames ?? '—'}</span></div>
                             <div class="session-item"><span class="label">Stalls</span><span class="value" data-field="player_metrics_stall_count">${session.player_metrics_stall_count ?? '—'}</span></div>
+                            <div class="session-item"><span class="label">Player Restarts</span><span class="value" data-field="player_restarts">${session.player_restarts ?? '0'}</span></div>
                             <div class="session-item"><span class="label">Stall Time</span><span class="value" data-field="player_metrics_stall_time_s">${formatSeconds(session.player_metrics_stall_time_s)}</span></div>
                             <div class="session-item"><span class="label">Last Stall Time</span><span class="value" data-field="player_metrics_last_stall_time_s">${formatSeconds(session.player_metrics_last_stall_time_s)}</span></div>
                             <div class="session-item"><span class="label">Last Error</span><span class="value" data-field="player_metrics_error">${session.player_metrics_error || '—'}</span></div>
@@ -953,17 +964,36 @@
                                     <span>50 Mbps</span>
                                 </label>
                             </div>
+                            <button type="button" class="btn btn-secondary btn-mini" data-action="toggle-variants">Hide Variants</button>
                         </div>
+                        <div data-field="bandwidth_chart_range">Window: —</div>
                         <div class="chart-wrap">
                             <canvas class="bandwidth-chart" data-field="bandwidth_chart"></canvas>
                         </div>
                         ${showBufferDepthChart ? `
+                        <div data-field="buffer_depth_chart_range">Window: —</div>
                         <div class="chart-wrap">
                             <canvas class="buffer-depth-chart" data-field="buffer_depth_chart"></canvas>
+                        </div>
+                        <div data-field="video_fps_chart_range">Window: —</div>
+                        <div class="chart-wrap">
+                            <canvas class="video-fps-chart" data-field="video_fps_chart"></canvas>
                         </div>
                         ` : ''}
                     </div>
                 </div>
+
+                ${developerMode ? `
+                <div class="collapsible-section" data-section="player-characterization" data-default-open="false">
+                    <div class="collapsible-header" data-toggle="player-characterization">
+                        <span class="collapsible-icon">▶</span>
+                        <span class="collapsible-title">Player Characterization</span>
+                    </div>
+                    <div class="collapsible-content" data-content="player-characterization" style="display: none;">
+                        <div data-field="player_characterization_host"></div>
+                    </div>
+                </div>
+                ` : ''}
 
                 ${developerMode ? `
                 <!-- Collapsible Network Log -->
@@ -1245,7 +1275,15 @@
     // Initialize collapsible sections and tabs
     function initializeUI() {
         document.addEventListener('click', (e) => {
-            const actionButton = e.target.closest('[data-action]');
+            const eventTarget = e && e.target;
+            const targetElement = eventTarget instanceof Element
+                ? eventTarget
+                : (eventTarget && eventTarget.parentElement ? eventTarget.parentElement : null);
+            if (!targetElement) {
+                return;
+            }
+
+            const actionButton = targetElement.closest('[data-action]');
             if (actionButton) {
                 const action = actionButton.dataset.action;
                 if (action === 'network-log-follow') {
@@ -1282,7 +1320,7 @@
             }
 
             // Handle collapsible toggles
-            const toggle = e.target.closest('[data-toggle]');
+            const toggle = targetElement.closest('[data-toggle]');
             if (toggle) {
                 const section = toggle.dataset.toggle;
                 const sectionEl = toggle.closest('.collapsible-section');
@@ -1348,7 +1386,7 @@
             }
 
             // Handle tab switches
-            const tabButton = e.target.closest('.tab-button');
+            const tabButton = targetElement.closest('.tab-button');
             if (tabButton) {
                 const tabName = tabButton.dataset.tab;
                 const container = tabButton.closest('.tabs-container');

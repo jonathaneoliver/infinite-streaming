@@ -6,7 +6,7 @@
     <title>Testing Playback - InfiniteStream</title>
     <link rel="stylesheet" href="/shared-styles.css">
     <link href="https://vjs.zencdn.net/8.21.1/video-js.css" rel="stylesheet" />
-    <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.7"></script>
+    <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.7/dist/hls.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/shaka-player@4.7.0/dist/shaka-player.compiled.js"></script>
     <script src="https://vjs.zencdn.net/8.21.1/video.min.js"></script>
     <style>
@@ -514,6 +514,209 @@
             height: 170px;
             display: block;
         }
+
+        .video-fps-chart {
+            width: 100%;
+            height: 170px;
+            display: block;
+        }
+
+        .abrchar-panel {
+            margin-bottom: 12px;
+            border: 1px solid var(--border-color);
+            border-radius: 10px;
+            background: var(--bg-secondary);
+            padding: 8px;
+        }
+
+        .abrchar-summary {
+            cursor: pointer;
+            font-weight: 600;
+            color: var(--text-primary);
+        }
+
+        .abrchar-body {
+            margin-top: 8px;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        .abrchar-controls {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            align-items: flex-end;
+        }
+
+        .abrchar-controls label {
+            font-size: 12px;
+            color: var(--text-secondary);
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }
+
+        .abrchar-controls input,
+        .abrchar-controls select {
+            min-width: 96px;
+            border: 1px solid var(--border-color);
+            border-radius: 6px;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            padding: 4px 6px;
+            font-size: 12px;
+        }
+
+        .abrchar-actions {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .abrchar-progress {
+            max-height: 180px;
+            overflow-y: auto;
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            background: var(--bg-primary);
+            padding: 8px;
+            font-size: 12px;
+            font-family: 'Courier New', monospace;
+        }
+
+        .abrchar-summary-box {
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            background: var(--bg-primary);
+            padding: 8px;
+            font-size: 12px;
+            color: var(--text-primary);
+        }
+
+        .abrchar-report-box {
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            background: var(--bg-primary);
+            padding: 8px;
+            font-size: 12px;
+            color: var(--text-primary);
+            white-space: pre-wrap;
+            max-height: 260px;
+            overflow: auto;
+        }
+
+        .abrchar-downloads {
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+        }
+
+        .abrchar-ruler-wrap {
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            background: var(--bg-primary);
+            padding: 8px;
+        }
+
+        .abrchar-ruler-head {
+            font-size: 12px;
+            color: var(--text-secondary);
+            margin-bottom: 6px;
+        }
+
+        .abrchar-ruler {
+            position: relative;
+            height: 124px;
+            overflow: visible;
+        }
+
+        .abrchar-ruler-track {
+            position: absolute;
+            left: 0;
+            right: 0;
+            top: 70px;
+            height: 2px;
+            background: var(--border-color);
+        }
+
+        .abrchar-ruler-marker {
+            position: absolute;
+            top: 18px;
+            transform: translateX(-50%);
+            pointer-events: none;
+            z-index: 2;
+        }
+
+        .abrchar-ruler-line {
+            width: 2px;
+            margin-top: 14px;
+            height: calc(54px + (var(--label-lane, 0) * 16px));
+            margin-left: auto;
+            margin-right: auto;
+            background: #64748b;
+        }
+
+        .abrchar-ruler-marker.variant .abrchar-ruler-line { background: #64748b; }
+        .abrchar-ruler-marker.limit .abrchar-ruler-line { background: #f59e0b; }
+        .abrchar-ruler-marker.throughput .abrchar-ruler-line { background: #14b8a6; }
+        .abrchar-ruler-marker.wire-throughput .abrchar-ruler-line { background: #2563eb; }
+        .abrchar-ruler-marker.player-estimate .abrchar-ruler-line { background: #0ea5e9; }
+        .abrchar-ruler-marker.top-range .abrchar-ruler-line { background: #dc2626; }
+        .abrchar-ruler-marker.current-variant { z-index: 5; }
+        .abrchar-ruler-marker.current-variant .abrchar-ruler-line {
+            background: #7c3aed;
+            width: 4px;
+            margin-top: 14px;
+            height: calc(60px + (var(--label-lane, 0) * 16px));
+            box-shadow: 0 0 0 2px rgba(124, 58, 237, 0.2);
+        }
+
+        .abrchar-ruler-label {
+            margin-top: calc(2px + (var(--label-lane, 0) * 16px));
+            font-size: 10px;
+            color: var(--text-primary);
+            white-space: nowrap;
+            transform: translateY(2px);
+        }
+        .abrchar-ruler-marker.variant .abrchar-ruler-label {
+            position: absolute;
+            left: 50%;
+            top: calc(-2px - (var(--label-lane, 0) * 16px));
+            margin-top: 0;
+            transform: translateX(-50%);
+            color: #64748b;
+        }
+        .abrchar-ruler-marker.limit .abrchar-ruler-label { color: #b45309; }
+        .abrchar-ruler-marker.throughput .abrchar-ruler-label { color: #0f766e; }
+        .abrchar-ruler-marker.wire-throughput .abrchar-ruler-label { color: #1d4ed8; }
+        .abrchar-ruler-marker.player-estimate .abrchar-ruler-label { color: #0369a1; }
+        .abrchar-ruler-marker.top-range .abrchar-ruler-label { color: #b91c1c; }
+        .abrchar-ruler-marker.current-variant .abrchar-ruler-label {
+            font-weight: 800;
+            color: #5b21b6;
+        }
+
+        .abrchar-ruler-max,
+        .abrchar-ruler-min {
+            position: absolute;
+            bottom: 0;
+            font-size: 10px;
+            color: var(--text-secondary);
+        }
+
+        .abrchar-ruler-min { left: 0; }
+        .abrchar-ruler-max { right: 0; }
+
+        .abrchar-line {
+            margin-bottom: 4px;
+        }
+
+        .abrchar-event { color: #0f766e; }
+        .abrchar-warn { color: #b45309; }
+        .abrchar-error { color: #b91c1c; }
+        .abrchar-success { color: #166534; }
     </style>
 </head>
 <body data-boss-no-sidebar data-boss-no-header data-boss-active-page="testing-session">
@@ -544,6 +747,10 @@
                 <label>
                     <input id="prefer4kToggle" type="checkbox">
                     Allow 4K
+                </label>
+                <label>
+                    <input id="autoRecoveryToggle" type="checkbox">
+                    Auto-Recovery
                 </label>
             </div>
             <div class="player-frame">
@@ -588,12 +795,14 @@
     <script src="https://cdn.jsdelivr.net/npm/vis-timeline@7.7.3/standalone/umd/vis-timeline-graph2d.min.js"></script>
     <link rel="stylesheet" href="/dashboard/testing-session-refactored.css">
     <script src="/dashboard/testing-session-ui.js"></script>
+    <script src="/dashboard/player-characterization.js"></script>
     <script>
         const logEl = document.getElementById('debugLog');
         const sseMissedEl = document.getElementById('statSseMissed');
         const video = document.getElementById('player');
         const isDeveloperMode = new URLSearchParams(window.location.search).get('developer') === '1';
         const NATIVE_4K_KEY = 'bossPrefer4kNative';
+        const AUTO_RECOVERY_KEY = 'bossAutoRecovery';
         const UHD_HEIGHT_THRESHOLD = 2160; // 4K/UHD resolution threshold
         let hlsInstance = null;
         let shakaPlayer = null;
@@ -603,6 +812,7 @@
         let lastStallDurationS = 0;
         let stallStartAt = null;
         let lastRenditionMbps = null;
+        let profileShiftCount = 0;
         let lastRateShiftAt = 0;
         let lastPlayerState = null;
         let playbackStartAt = null;
@@ -613,6 +823,11 @@
         let currentSessionId = null;
         let currentPlayerId = '';
         let currentUrl = '';
+        let autoRecoveryEnabled = false;
+        let autoRecoveryZeroStartedAtMs = null;
+        let autoRecoveryLastRestartAtMs = 0;
+        let playerRestartCount = 0;
+        let playerLoopCount = 0;
         let autoRetryCount = 0;
         let autoRetryTimer = null;
         const pendingShaping = new Map();
@@ -620,10 +835,18 @@
         const pendingFailureEdits = new Map();
         const controlRevisionBySession = new Map();
         const bandwidthHistory = new Map();
+        const bandwidthEventHistory = new Map();
         const bandwidthCharts = new Map();
         const bufferDepthCharts = new Map();
+        const videoFpsCharts = new Map();
         const bandwidthVisibility = new Map();
+        const bandwidthVariantsEnabledBySession = new Map();
         const bitrateAxisMaxBySession = new Map();
+        const lastRecordedPlayerEventBySession = new Map();
+        const lastRecordedLoopCountBySession = new Map();
+        const lastRecordedServerLoopCountBySession = new Map();
+        const lastRecordedLoopEventStampBySession = new Map();
+        const lastRecordedServerLoopEventStampBySession = new Map();
         let lastSessionsList = [];
         let groupSessionsFetchInFlight = false;
         let groupSelectValue = '';
@@ -680,6 +903,111 @@
         let lastStepRateLogged = null;
         let lastStepIndexLogged = null;
         let metricsHeartbeatTimer = null;
+        let lastAppliedSnapshotVersion = 0;
+        var lastHandledRemoteRestartRequestId = '';
+        var remoteRestartInFlight = false;
+
+        function isTruthySessionFlag(value) {
+            if (value === true || value === 1) return true;
+            const text = String(value || '').trim().toLowerCase();
+            return text === 'true' || text === '1' || text === 'yes' || text === 'on';
+        }
+
+        function maybeHandleRemoteRestartRequest(session) {
+            if (!session || !currentSessionId) return;
+            const requestId = String(session.player_restart_request_id || '').trim();
+            const requested = isTruthySessionFlag(session.player_restart_requested);
+            if (!requested || !requestId) return;
+            if (remoteRestartInFlight) return;
+            if (requestId === lastHandledRemoteRestartRequestId) return;
+
+            remoteRestartInFlight = true;
+            lastHandledRemoteRestartRequestId = requestId;
+            const reasonRaw = String(session.player_restart_request_reason || '').trim();
+            const reason = reasonRaw || 'remote_command';
+            performPlaybackRestart(reason);
+
+            const handledAt = new Date().toISOString();
+            fetch(`/api/session/${currentSessionId}`, {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    set: {
+                        player_restart_requested: false,
+                        player_restart_request_state: 'completed',
+                        player_restart_request_handled_at: handledAt,
+                        player_restart_request_handled_by: `web:${currentPlayerId || 'unknown'}`,
+                        player_restart_request_error: '',
+                        player_restart_request_id: requestId
+                    },
+                    fields: [
+                        'player_restart_requested',
+                        'player_restart_request_state',
+                        'player_restart_request_handled_at',
+                        'player_restart_request_handled_by',
+                        'player_restart_request_error',
+                        'player_restart_request_id'
+                    ],
+                    base_revision: getSessionBaseRevision()
+                })
+            }).catch((err) => {
+                console.warn('Remote restart ack failed', err);
+            }).finally(() => {
+                remoteRestartInFlight = false;
+            });
+        }
+
+        function getSessionSnapshotVersion(session) {
+            const uiVersion = Number(session?.ui_state_version);
+            if (Number.isFinite(uiVersion) && uiVersion > 0) {
+                return uiVersion;
+            }
+            const controlRevisionMs = Date.parse(String(session?.control_revision || ''));
+            if (Number.isFinite(controlRevisionMs) && controlRevisionMs > 0) {
+                return controlRevisionMs;
+            }
+            return 0;
+        }
+
+        function mergeSessionsBySnapshotVersion(incomingSessions) {
+            const incomingList = Array.isArray(incomingSessions) ? incomingSessions : [];
+            const incomingMaxVersion = incomingList.reduce((max, session) => {
+                const version = getSessionSnapshotVersion(session);
+                return version > max ? version : max;
+            }, 0);
+            if (
+                incomingMaxVersion > 0
+                && lastAppliedSnapshotVersion > 0
+                && incomingMaxVersion < lastAppliedSnapshotVersion
+            ) {
+                return lastSessionsList;
+            }
+
+            const nextById = new Map();
+            incomingList.forEach((incomingSession) => {
+                const key = String(incomingSession?.session_id || '');
+                if (!key) return;
+                const existingSession = lastSessionsList.find((item) => String(item?.session_id || '') === key);
+                if (!existingSession) {
+                    nextById.set(key, incomingSession);
+                    return;
+                }
+                const incomingVersion = getSessionSnapshotVersion(incomingSession);
+                const existingVersion = getSessionSnapshotVersion(existingSession);
+                if (incomingVersion === 0 && existingVersion > 0) {
+                    nextById.set(key, existingSession);
+                } else if (existingVersion === 0 || incomingVersion >= existingVersion) {
+                    nextById.set(key, incomingSession);
+                } else {
+                    nextById.set(key, existingSession);
+                }
+            });
+
+            if (incomingMaxVersion > lastAppliedSnapshotVersion) {
+                lastAppliedSnapshotVersion = incomingMaxVersion;
+            }
+            return Array.from(nextById.values());
+        }
 
         function getStoredCollapseState(key) {
             try {
@@ -698,6 +1026,28 @@
                 collapseState.set(key, !!value);
             }
         }
+
+        function applyOpenFoldsFromQuery() {
+            let params;
+            try {
+                params = new URLSearchParams(window.location.search);
+            } catch (err) {
+                return;
+            }
+            const raw = params.get('open_folds') || params.get('open') || '';
+            if (!raw) return;
+            const requested = raw
+                .split(',')
+                .map((item) => item.trim().toLowerCase())
+                .filter(Boolean);
+            if (!requested.length) return;
+            requested.forEach((section) => {
+                collapseState.set(section, true);
+                setStoredCollapseState(section, true);
+            });
+        }
+
+        applyOpenFoldsFromQuery();
 
         window.TestingSessionUICollapseState = {
             get: (key) => {
@@ -803,6 +1153,11 @@
             if (!Number.isFinite(numeric)) return null;
             return Math.round(numeric * 1000) / 1000;
         }
+        function bpsToMbps(value) {
+            const numeric = Number(value);
+            if (!Number.isFinite(numeric) || numeric <= 0) return null;
+            return Math.round((numeric / 1000000) * 100) / 100;
+        }
 
         function formatResolution(width, height) {
             const w = Number(width);
@@ -811,12 +1166,147 @@
             return `${Math.round(w)}x${Math.round(h)}`;
         }
 
+        function detectBrowserFamily() {
+            const ua = String(navigator.userAgent || '').toLowerCase();
+            if (!ua) return null;
+            const isSafari = ua.includes('safari')
+                && !ua.includes('chrome')
+                && !ua.includes('crios')
+                && !ua.includes('fxios')
+                && !ua.includes('edgios')
+                && !ua.includes('opr/')
+                && !ua.includes('android');
+            if (isSafari) return 'safari';
+            if (ua.includes('firefox') || ua.includes('fxios')) return 'firefox';
+            if (ua.includes('edg') || ua.includes('edgios')) return 'edge';
+            if (ua.includes('chrome') || ua.includes('crios')) return 'chrome';
+            return 'other';
+        }
+
+        function isNativeSafariPlaybackMode() {
+            const browser = detectBrowserFamily();
+            if (browser !== 'safari') return false;
+            const playerType = resolvePlayerChoice(currentUrl, getPlayerChoice());
+            return playerType === 'native';
+        }
+
+        function parseVariantResolution(resolution) {
+            const value = String(resolution || '').trim().toLowerCase();
+            if (!value) return { width: null, height: null };
+            const dimensions = value.match(/(\d{3,4})\s*x\s*(\d{3,4})/i);
+            if (dimensions) {
+                return {
+                    width: Number(dimensions[1]),
+                    height: Number(dimensions[2])
+                };
+            }
+            const progressive = value.match(/(\d{3,4})\s*p$/i);
+            if (progressive) {
+                return {
+                    width: null,
+                    height: Number(progressive[1])
+                };
+            }
+            const numeric = Number(value);
+            if (Number.isFinite(numeric) && numeric > 0) {
+                return {
+                    width: null,
+                    height: numeric
+                };
+            }
+            return { width: null, height: null };
+        }
+
+        function inferNativeRenditionBandwidth(session, videoEl) {
+            const variants = Array.isArray(session?.manifest_variants) ? session.manifest_variants : [];
+            if (!variants.length) return null;
+            const videoWidth = Number(videoEl?.videoWidth || 0);
+            const videoHeight = Number(videoEl?.videoHeight || 0);
+            if (!Number.isFinite(videoHeight) || videoHeight <= 0) return null;
+
+            let best = null;
+            variants.forEach((variant) => {
+                const bandwidth = Number(variant?.bandwidth || 0);
+                if (!Number.isFinite(bandwidth) || bandwidth <= 0) return;
+                const parsed = parseVariantResolution(variant?.resolution);
+                const height = Number(parsed.height || 0);
+                const width = Number(parsed.width || 0);
+                if (!Number.isFinite(height) || height <= 0) return;
+
+                const heightDelta = Math.abs(height - videoHeight);
+                const hasWidth = Number.isFinite(width) && width > 0 && Number.isFinite(videoWidth) && videoWidth > 0;
+                const widthDelta = hasWidth ? Math.abs(width - videoWidth) : 0;
+                const score = (heightDelta * 10000) + widthDelta;
+
+                if (!best || score < best.score || (score === best.score && bandwidth > best.bandwidth)) {
+                    best = { score, bandwidth };
+                }
+            });
+
+            return best ? best.bandwidth : null;
+        }
+
         function markPlaybackStart() {
             playbackStartAt = performance.now();
             videoFirstFrameS = null;
             videoPlayingTimeS = null;
             firstFrameReported = false;
             playingReported = false;
+            profileShiftCount = 0;
+            lastRenditionMbps = null;
+            playerLoopCount = 0;
+        }
+
+        function extractLoopCountFromManifestText(manifestText) {
+            const text = String(manifestText || '');
+            if (!text) return null;
+            const regex = /#EXT-X-DATERANGE:[^\n]*X-LOOP-COUNT\s*=\s*"?(\d+)"?/ig;
+            let match = null;
+            let loopCount = null;
+            while ((match = regex.exec(text)) !== null) {
+                const parsed = Number(match[1]);
+                if (Number.isFinite(parsed)) {
+                    loopCount = Math.max(0, Math.round(parsed));
+                }
+            }
+            return loopCount;
+        }
+
+        function applyDetectedPlayerLoopCount(nextCount, source = 'hls_daterange') {
+            const numeric = Number(nextCount);
+            if (!Number.isFinite(numeric) || numeric < 0) return;
+            const normalized = Math.max(0, Math.round(numeric));
+            const previous = Math.max(0, Math.round(Number(playerLoopCount || 0)));
+            const increment = Math.max(0, normalized - previous);
+            if (normalized === previous) return;
+            playerLoopCount = normalized;
+            console.log('[HLS LOOP MARKER]', {
+                source,
+                previous,
+                current: normalized,
+                increment
+            });
+            sendSessionMetrics('loop_marker', {
+                player_metrics_loop_count_player: normalized,
+                player_metrics_loop_count_increment: increment,
+                player_metrics_loop_source: source
+            });
+        }
+
+        async function detectLoopCountFromHlsLevel(data) {
+            const details = data && data.details ? data.details : null;
+            const mediaUrl = details && details.url ? details.url : null;
+            if (!mediaUrl) return;
+            try {
+                const response = await fetch(mediaUrl, { cache: 'no-store' });
+                if (!response.ok) return;
+                const manifestText = await response.text();
+                const loopCount = extractLoopCountFromManifestText(manifestText);
+                if (loopCount === null || loopCount === undefined) return;
+                applyDetectedPlayerLoopCount(loopCount, 'hls_daterange');
+            } catch (err) {
+                console.warn('HLS loop marker fetch failed', err);
+            }
         }
 
         function buildMetricsPayload(eventType, extra = {}) {
@@ -838,9 +1328,15 @@
                 seekableEnd = toMetricSeconds(end);
             }
             const quality = video.getVideoPlaybackQuality ? video.getVideoPlaybackQuality() : null;
+            const totalFrames = quality ? Number(quality.totalVideoFrames || 0) : null;
             const droppedFrames = quality ? Number(quality.droppedVideoFrames || 0) : null;
+            const displayedFrames = (totalFrames !== null && droppedFrames !== null)
+                ? Math.max(0, totalFrames - droppedFrames)
+                : null;
             const base = {
                 player_metrics_source: 'web',
+                player_metrics_browser_family: detectBrowserFamily(),
+                player_metrics_playback_engine: resolvePlayerChoice(currentUrl, getPlayerChoice()),
                 player_metrics_last_event: eventType,
                 player_metrics_trigger_type: eventType,
                 player_metrics_last_event_at: new Date().toISOString(),
@@ -859,6 +1355,13 @@
                 player_metrics_video_start_time_s: toMetricSeconds(videoPlayingTimeS),
                 player_metrics_video_bitrate_mbps: toMetricNumber(currentRenditionMbps),
                 player_metrics_network_bitrate_mbps: toMetricNumber(playerEstimatedMbps),
+                player_auto_recovery_enabled: autoRecoveryEnabled,
+                player_restarts: Math.max(0, Math.round(playerRestartCount || 0)),
+                player_metrics_profile_shift_count: Math.max(0, Math.round(profileShiftCount || 0)),
+                player_metrics_loop_count_player: Math.max(0, Math.round(Number(playerLoopCount || 0))),
+                player_metrics_loop_count_increment: 0,
+                player_metrics_frames_displayed: toMetricNumber(displayedFrames),
+                player_metrics_total_video_frames: toMetricNumber(totalFrames),
                 player_metrics_dropped_frames: droppedFrames,
                 player_metrics_stall_count: stallCount,
                 player_metrics_stall_time_s: toMetricSeconds(stallTimeS),
@@ -871,6 +1374,21 @@
                 compact[key] = value;
             });
             return compact;
+        }
+
+        function performPlaybackRestart(reason = 'manual') {
+            if (!currentUrl) return;
+            const nowMs = Date.now();
+            playerRestartCount = Math.max(0, Number(playerRestartCount || 0)) + 1;
+            autoRecoveryLastRestartAtMs = nowMs;
+            autoRecoveryZeroStartedAtMs = null;
+            log(`RESTART: playback (${reason})`);
+            sendSessionMetrics('restart', {
+                player_restarts: playerRestartCount,
+                player_metrics_restart_reason: String(reason || 'manual')
+            });
+            resetPlayback();
+            loadStream(currentUrl);
         }
 
         function sendSessionMetrics(eventType, extra = {}) {
@@ -1121,7 +1639,8 @@
             return {
                 playerId: playerId,
                 url: url,
-                player: params.get('player') || ''
+                player: params.get('player') || '',
+                autoRecovery: params.get('auto_recovery')
             };
         }
 
@@ -1392,6 +1911,7 @@
             const current = video.currentTime || 0;
             let bufferedEnd = '--';
             let bufferDepth = '--';
+            const bitrateEl = document.getElementById('statBitrate');
             if (buffered && buffered.length > 0) {
                 const end = buffered.end(buffered.length - 1);
                 bufferedEnd = `${end.toFixed(2)}s`;
@@ -1410,18 +1930,16 @@
 
             if (hlsInstance && hlsInstance.currentLevel >= 0 && hlsInstance.levels[hlsInstance.currentLevel]) {
                 const bitrate = hlsInstance.levels[hlsInstance.currentLevel].bitrate;
-                document.getElementById('statBitrate').textContent = `${Math.round(bitrate / 1000)} kbps`;
-                currentRenditionMbps = bitrate ? Math.round((bitrate / 1024 / 1024) * 100) / 100 : null;
-                playerEstimatedMbps = hlsInstance.bandwidthEstimate
-                    ? Math.round((hlsInstance.bandwidthEstimate / 1024 / 1024) * 100) / 100
-                    : null;
+                bitrateEl.textContent = `${Math.round(bitrate / 1000)} kbps`;
+                currentRenditionMbps = bpsToMbps(bitrate);
+                playerEstimatedMbps = bpsToMbps(hlsInstance.bandwidthEstimate);
             } else if (shakaPlayer) {
                 const stats = shakaPlayer.getStats();
                 if (stats && stats.estimatedBandwidth) {
-                    document.getElementById('statBitrate').textContent = `${Math.round(stats.estimatedBandwidth / 1000)} kbps`;
-                    playerEstimatedMbps = Math.round((stats.estimatedBandwidth / 1024 / 1024) * 100) / 100;
+                    bitrateEl.textContent = `${Math.round(stats.estimatedBandwidth / 1000)} kbps`;
+                    playerEstimatedMbps = bpsToMbps(stats.estimatedBandwidth);
                     if (stats.streamBandwidth) {
-                        currentRenditionMbps = Math.round((stats.streamBandwidth / 1024 / 1024) * 100) / 100;
+                        currentRenditionMbps = bpsToMbps(stats.streamBandwidth);
                     }
                 }
             } else if (videojsPlayer) {
@@ -1429,15 +1947,24 @@
                 const vhs = tech && tech.vhs ? tech.vhs : (videojsPlayer.vhs || null);
                 const bandwidth = vhs && vhs.bandwidth ? vhs.bandwidth : null;
                 if (bandwidth) {
-                    document.getElementById('statBitrate').textContent = `${Math.round(bandwidth / 1000)} kbps`;
-                    playerEstimatedMbps = Math.round((bandwidth / 1024 / 1024) * 100) / 100;
+                    bitrateEl.textContent = `${Math.round(bandwidth / 1000)} kbps`;
+                    playerEstimatedMbps = bpsToMbps(bandwidth);
                     const media = vhs.playlists && vhs.playlists.media ? vhs.playlists.media() : null;
                     const rendition = media && media.attributes ? media.attributes.BANDWIDTH : null;
-                    currentRenditionMbps = rendition ? Math.round((rendition / 1024 / 1024) * 100) / 100 : null;
+                    currentRenditionMbps = bpsToMbps(rendition);
                 }
             } else {
                 playerEstimatedMbps = null;
-                currentRenditionMbps = null;
+                const inferredRenditionBps = isNativeSafariPlaybackMode()
+                    ? inferNativeRenditionBandwidth(lastServerSession, video)
+                    : null;
+                if (Number.isFinite(inferredRenditionBps) && inferredRenditionBps > 0) {
+                    currentRenditionMbps = bpsToMbps(inferredRenditionBps);
+                    bitrateEl.textContent = `~${Math.round(inferredRenditionBps / 1000)} kbps`;
+                } else {
+                    currentRenditionMbps = null;
+                    bitrateEl.textContent = '--';
+                }
             }
 
             if (currentRenditionMbps !== null && currentRenditionMbps !== undefined) {
@@ -1446,9 +1973,11 @@
                     if (lastRenditionMbps !== null && lastRenditionMbps !== undefined) {
                         const prev = Number(lastRenditionMbps);
                         if (numeric !== prev) {
+                            profileShiftCount = Math.max(0, Number(profileShiftCount || 0)) + 1;
                             sendSessionMetrics('video_bitrate_change', {
                                 player_metrics_video_bitrate_from_mbps: Math.round(prev * 100) / 100,
-                                player_metrics_video_bitrate_to_mbps: Math.round(numeric * 100) / 100
+                                player_metrics_video_bitrate_to_mbps: Math.round(numeric * 100) / 100,
+                                player_metrics_profile_shift_count: Math.max(0, Math.round(profileShiftCount || 0))
                             });
                         }
                         const delta = numeric - prev;
@@ -1610,6 +2139,9 @@
                             scheduleAutoRetry('hls play error');
                         });
                     });
+                    hlsInstance.on(Hls.Events.LEVEL_LOADED, (_evt, data) => {
+                        detectLoopCountFromHlsLevel(data);
+                    });
                     hlsInstance.loadSource(url);
                     hlsInstance.attachMedia(video);
                 } else {
@@ -1687,6 +2219,15 @@
             });
             TestingSessionUI.applyCollapsibleState(container);
             const card = container.querySelector('.session-card');
+            const charHost = card ? card.querySelector('[data-field="player_characterization_host"]') : null;
+            if (isDeveloperMode && charHost && window.PlayerCharacterization && typeof window.PlayerCharacterization.mount === 'function') {
+                window.PlayerCharacterization.mount({
+                    hostElement: charHost,
+                    instanceKey: `session-${session?.session_id || 'active'}`,
+                    getSession: () => lastServerSession,
+                    getCurrentUrl: () => currentUrl
+                });
+            }
             if (card) {
                 applyActiveFaultTab(card, activeTab);
                 const presetsRaw = card.dataset.shapingPresets || '';
@@ -1706,6 +2247,28 @@
                         shapingVideoPresetsRaw: videoPresetsRaw
                     });
                 }
+            }
+
+            const depthValue = (buffered && buffered.length > 0)
+                ? Math.max(0, Number(buffered.end(buffered.length - 1) || 0) - Number(current || 0))
+                : 0;
+            if (autoRecoveryEnabled && currentUrl && !video.paused) {
+                if (Number.isFinite(depthValue) && depthValue <= 0.01) {
+                    if (autoRecoveryZeroStartedAtMs === null) {
+                        autoRecoveryZeroStartedAtMs = Date.now();
+                    } else {
+                        const zeroMs = Date.now() - autoRecoveryZeroStartedAtMs;
+                        const cooldownOk = (Date.now() - autoRecoveryLastRestartAtMs) >= 60000;
+                        if (zeroMs >= 60000 && cooldownOk) {
+                            performPlaybackRestart('auto_recovery_zero_buffer');
+                            return;
+                        }
+                    }
+                } else {
+                    autoRecoveryZeroStartedAtMs = null;
+                }
+            } else {
+                autoRecoveryZeroStartedAtMs = null;
             }
         }
 
@@ -2146,6 +2709,36 @@
             }
         }
 
+        function getShapingPresets(card) {
+            const raw = card?.dataset?.shapingPresets || '';
+            if (!raw) return [];
+            try {
+                const parsed = JSON.parse(decodeURIComponent(raw));
+                return Array.isArray(parsed) ? parsed : [];
+            } catch (err) {
+                console.warn('Failed to parse shaping presets', err);
+                return [];
+            }
+        }
+
+        function getShapingVideoPresets(card) {
+            const raw = card?.dataset?.shapingVideoPresets || '';
+            if (!raw) return [];
+            try {
+                const parsed = JSON.parse(decodeURIComponent(raw));
+                return Array.isArray(parsed) ? parsed : [];
+            } catch (err) {
+                console.warn('Failed to parse shaping video presets', err);
+                return [];
+            }
+        }
+
+        function getShapingOverheadMbps(card) {
+            const parsed = Number(card?.dataset?.shapingOverheadMbps || 0);
+            if (!Number.isFinite(parsed) || parsed < 0) return 0;
+            return parsed;
+        }
+
         function syncNetworkShapingControls(card, session) {
             if (!card || !session) return;
             const sessionId = String(card.dataset.sessionId || session.session_id || '');
@@ -2244,6 +2837,21 @@
                 return '';
             }
             return String(revision);
+        }
+
+        function isAbrcharRunLocked(sessionId) {
+            const key = String(sessionId || '');
+            if (!key) return false;
+            const fromCurrent = (lastServerSession && String(lastServerSession.session_id || '') === key)
+                ? lastServerSession
+                : null;
+            const session = fromCurrent || (Array.isArray(lastSessionsList)
+                ? lastSessionsList.find((item) => String(item?.session_id || '') === key)
+                : null);
+            if (!session) return false;
+            return session.abrchar_run_lock === true
+                || session.abrchar_run_lock === 1
+                || session.abrchar_run_lock === 'true';
         }
 
         function queuePendingFailureEdits(sessionId, values) {
@@ -2408,6 +3016,10 @@
             };
             const scheduleShapingApply = (card) => {
                 const sessionId = card.dataset.sessionId;
+                if (sessionId && isAbrcharRunLocked(sessionId)) {
+                    console.warn('[NETSHAPE] Ignoring manual shaping update while ABR characterization lock is active.');
+                    return;
+                }
                 if (sessionId) {
                     const getValue = (field) => {
                         const input = card.querySelector(`input[data-field="${field}"]`);
@@ -2811,6 +3423,13 @@
                 if (!button) return;
                 const card = button.closest('.session-card');
                 if (!card) return;
+                if (button.dataset.action === 'toggle-variants') {
+                    const sessionId = String(card.dataset.sessionId || '');
+                    const variantsEnabled = bandwidthVariantsEnabledBySession.get(sessionId) !== false;
+                    bandwidthVariantsEnabledBySession.set(sessionId, !variantsEnabled);
+                    renderBandwidthChart(sessionId);
+                    return;
+                }
                 if (button.dataset.action === 'apply-pattern') {
                     scheduleShapingApply(card);
                     return;
@@ -2885,8 +3504,12 @@
         }
 
         function applyNetworkShaping(card) {
-            const port = card.dataset.sessionPort;
-            if (!port) return;
+            const sessionId = card.dataset.sessionId;
+            if (!sessionId) return;
+            if (sessionId && isAbrcharRunLocked(sessionId)) {
+                console.warn('[NETSHAPE] Manual shaping apply blocked because ABR characterization is running.');
+                return;
+            }
             const getValue = (field) => {
                 const input = card.querySelector(`input[data-field="${field}"]`);
                 return input ? Number(input.value) : 0;
@@ -2901,59 +3524,46 @@
                 delay_ms: getValue('shaping_delay_ms'),
                 loss_pct: getValue('shaping_loss_pct')
             };
-            const sessionId = card.dataset.sessionId;
-            if (sessionId) {
-                pendingShaping.set(sessionId, {
-                    timestamp: Date.now(),
-                    values: {
-                        nftables_bandwidth_mbps: payload.rate_mbps,
-                        nftables_delay_ms: payload.delay_ms,
-                        nftables_packet_loss: payload.loss_pct,
-                        nftables_pattern_enabled: usePattern,
-                        nftables_pattern_steps: patternSteps,
-                        nftables_pattern_segment_duration_seconds: pattern.segment_duration_seconds,
-                        nftables_pattern_default_segments: pattern.default_segments,
-                        nftables_pattern_default_step_seconds: pattern.default_step_seconds,
-                        nftables_pattern_template_mode: pattern.template_mode,
-                        nftables_pattern_margin_pct: pattern.template_margin_pct
-                    }
-                });
-                lastAppliedShaping.set(sessionId, {
-                    timestamp: Date.now(),
-                    rate: payload.rate_mbps,
-                    delay: payload.delay_ms,
-                    loss: payload.loss_pct
-                });
-                setTimeout(() => {
-                    const pending = pendingShaping.get(sessionId);
-                    if (pending && Date.now() - pending.timestamp > 4500) {
-                        pendingShaping.delete(sessionId);
-                    }
-                }, 5000);
-            }
-            fetch(`/api/nftables/shape/${port}`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(payload)
-            })
-                .then(() => {
-                    const patternPayload = {
-                        steps: patternSteps,
-                        segment_duration_seconds: pattern.segment_duration_seconds,
-                        default_segments: pattern.default_segments,
-                        default_step_seconds: pattern.default_step_seconds,
-                        template_mode: pattern.template_mode,
-                        template_margin_pct: pattern.template_margin_pct,
-                        delay_ms: payload.delay_ms,
-                        loss_pct: payload.loss_pct
-                    };
-                    return fetch(`/api/nftables/pattern/${port}`, {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify(patternPayload)
-                    });
-                })
-                .catch(err => console.error('Error applying network shaping', err));
+            pendingShaping.set(sessionId, {
+                timestamp: Date.now(),
+                values: {
+                    nftables_bandwidth_mbps: payload.rate_mbps,
+                    nftables_delay_ms: payload.delay_ms,
+                    nftables_packet_loss: payload.loss_pct,
+                    nftables_pattern_enabled: usePattern,
+                    nftables_pattern_steps: patternSteps,
+                    nftables_pattern_segment_duration_seconds: pattern.segment_duration_seconds,
+                    nftables_pattern_default_segments: pattern.default_segments,
+                    nftables_pattern_default_step_seconds: pattern.default_step_seconds,
+                    nftables_pattern_template_mode: pattern.template_mode,
+                    nftables_pattern_margin_pct: pattern.template_margin_pct
+                }
+            });
+            lastAppliedShaping.set(sessionId, {
+                timestamp: Date.now(),
+                rate: payload.rate_mbps,
+                delay: payload.delay_ms,
+                loss: payload.loss_pct
+            });
+            setTimeout(() => {
+                const pending = pendingShaping.get(sessionId);
+                if (pending && Date.now() - pending.timestamp > 4500) {
+                    pendingShaping.delete(sessionId);
+                }
+            }, 5000);
+            const fields = [
+                'nftables_bandwidth_mbps',
+                'nftables_delay_ms',
+                'nftables_packet_loss',
+                'nftables_pattern_enabled',
+                'nftables_pattern_steps',
+                'nftables_pattern_segment_duration_seconds',
+                'nftables_pattern_default_segments',
+                'nftables_pattern_default_step_seconds',
+                'nftables_pattern_template_mode',
+                'nftables_pattern_margin_pct'
+            ];
+            sendSessionPatch(card, fields);
         }
 
         function findSessionByPlayerId(playerId, signal) {
@@ -3010,7 +3620,7 @@
                     return response.json();
                 })
                 .then(sessions => {
-                    lastSessionsList = Array.isArray(sessions) ? sessions : [];
+                    lastSessionsList = mergeSessionsBySnapshotVersion(sessions);
                     return selectSessionForPlayer(lastSessionsList, playerId);
                 });
         }
@@ -3086,6 +3696,8 @@
                 return Math.round(numeric).toLocaleString();
             };
             const portDisplay = session.x_forwarded_port_external || session.x_forwarded_port || '—';
+            setText('[data-field="session_session_id"]', session.session_id || '—');
+            setText('[data-field="session_player_id"]', session.player_id || '—');
             setText('[data-field="session_user_agent"]', session.user_agent || '—');
             setText('[data-field="session_player_ip"]', session.player_ip || '—');
             setText('[data-field="session_port_display"]', portDisplay);
@@ -3095,6 +3707,8 @@
             setText('[data-field="session_manifest_url"]', session.manifest_url || '—');
             setText('[data-field="session_master_manifest_url"]', session.master_manifest_url || '—');
             setText('[data-field="session_last_request_url"]', session.last_request_url || '—');
+            setText('[data-field="session_loop_count_server"]', formatMetricNumber(session.loop_count_server ?? 0));
+            setText('[data-field="session_loop_count_player"]', formatMetricNumber(session.player_metrics_loop_count_player ?? 0));
             setText('[data-field="session_measured_mbps"]', formatMetricNumber(session.measured_mbps, ' Mbps'));
             setText('[data-field="session_mbps_in"]', formatMetricNumber(session.mbps_in, ' Mbps'));
             setText('[data-field="session_mbps_out"]', formatMetricNumber(session.mbps_out, ' Mbps'));
@@ -3143,19 +3757,90 @@
             setText('[data-field="player_metrics_video_first_frame_time_s"]', formatSeconds(session.player_metrics_video_first_frame_time_s));
             setText('[data-field="player_metrics_video_start_time_s"]', formatSeconds(session.player_metrics_video_start_time_s));
             setText('[data-field="player_metrics_video_bitrate_mbps"]', formatMetricNumber(session.player_metrics_video_bitrate_mbps, ' Mbps'));
+            setText('[data-field="server_video_rendition"]', session.server_video_rendition || '—');
+            setText('[data-field="server_video_rendition_mbps"]', formatMetricNumber(session.server_video_rendition_mbps, ' Mbps'));
             setText('[data-field="player_metrics_video_quality_pct"]', formatMetricNumber(session.player_metrics_video_quality_pct, '%'));
             setText('[data-field="player_metrics_network_bitrate_mbps"]', formatMetricNumber(session.player_metrics_network_bitrate_mbps, ' Mbps'));
+            setText('[data-field="player_metrics_loop_count"]', formatMetricNumber(session.player_metrics_loop_count_player ?? 0));
+            setText('[data-field="player_metrics_loop_count_increment"]', formatMetricNumber(session.player_metrics_loop_count_increment ?? 0));
+            setText('[data-field="player_metrics_profile_shift_count"]', formatMetricNumber(session.player_metrics_profile_shift_count));
+            setText('[data-field="player_metrics_frames_displayed"]', formatMetricNumber(session.player_metrics_frames_displayed));
             setText('[data-field="player_metrics_dropped_frames"]', formatMetricNumber(session.player_metrics_dropped_frames));
             setText('[data-field="player_metrics_stall_count"]', formatMetricNumber(session.player_metrics_stall_count));
+            setText('[data-field="player_restarts"]', formatMetricNumber(session.player_restarts));
             setText('[data-field="player_metrics_stall_time_s"]', formatSeconds(session.player_metrics_stall_time_s));
             setText('[data-field="player_metrics_last_stall_time_s"]', formatSeconds(session.player_metrics_last_stall_time_s));
             setText('[data-field="player_metrics_error"]', session.player_metrics_error || '—');
             setText('[data-field="player_metrics_source"]', session.player_metrics_source || '—');
         }
 
+        function bandwidthSeriesKey(label) {
+            return String(label || '').replace(/\s*\(V\d+\)$/, '');
+        }
+
+        function isVariantSeriesLabel(label) {
+            return /^Variant V\d+$/.test(String(label || ''));
+        }
+
+        function buildVariantLadder(variants) {
+            if (!Array.isArray(variants) || !variants.length) return [];
+            const ladder = variants
+                .map((variant) => Number(variant?.bandwidth || 0))
+                .filter((bandwidth) => Number.isFinite(bandwidth) && bandwidth > 0)
+                .map((bandwidth) => Math.round((bandwidth / 1000000) * 1000) / 1000)
+                .filter((value, index, array) => array.indexOf(value) === index)
+                .sort((a, b) => a - b);
+            return ladder.map((mbps, index) => ({
+                vx: `V${index + 1}`,
+                mbps
+            }));
+        }
+
+        function parseBandwidthChartEventType(rawEventType) {
+            const eventType = String(rawEventType || '').trim().toLowerCase();
+            if (!eventType) return null;
+            if (eventType.includes('stall')) return 'STALL';
+            if (eventType.includes('restart')) return 'RESTART';
+            if (eventType.includes('loop')) return 'LOOP';
+            return null;
+        }
+
+        function getBandwidthChartEventTimestampMs(session, fallbackMs) {
+            const candidates = [
+                session?.player_metrics_last_event_at,
+                session?.player_metrics_event_time,
+                session?.control_revision
+            ];
+            for (const candidate of candidates) {
+                const parsed = Date.parse(String(candidate || ''));
+                if (Number.isFinite(parsed) && parsed > 0) {
+                    return parsed;
+                }
+            }
+            return fallbackMs;
+        }
+
+        function formatBitrateChartAbsoluteTick(windowStartMs, offsetSeconds) {
+            const ts = Number(windowStartMs) + (Number(offsetSeconds) * 1000);
+            if (!Number.isFinite(ts)) return '';
+            return new Date(ts).toLocaleTimeString([], {
+                hour12: false,
+                hour: '2-digit',
+                minute: '2-digit',
+                second: '2-digit'
+            });
+        }
+
+        function formatBitrateChartRange(windowStartMs, windowEndMs) {
+            const start = formatBitrateChartAbsoluteTick(windowStartMs, 0);
+            const end = formatBitrateChartAbsoluteTick(windowStartMs, (Number(windowEndMs) - Number(windowStartMs)) / 1000);
+            if (!start || !end) return 'Window: —';
+            return `Window: ${start} → ${end}`;
+        }
+
         function pushBandwidthSample(session) {
             const now = Date.now();
-            const windowMs = 5 * 60 * 1000;
+            const windowMs = 10 * 60 * 1000;
             const wireSustained = Number.isFinite(Number(session.mbps_wire_sustained)) ? Number(session.mbps_wire_sustained) : null;
             const wireActive = Number.isFinite(Number(session.mbps_wire_active)) ? Number(session.mbps_wire_active) : null;
             const wireSustained6s = Number.isFinite(Number(session.mbps_wire_sustained_6s)) ? Number(session.mbps_wire_sustained_6s) : null;
@@ -3173,6 +3858,16 @@
             }
             const playerEstimate = Number(playerEstimatedMbps || 0);
             const currentRendition = Number(currentRenditionMbps || 0);
+            const framesDisplayed = Number.isFinite(Number(session.player_metrics_frames_displayed))
+                ? Number(session.player_metrics_frames_displayed)
+                : null;
+            const framesDropped = Number.isFinite(Number(session.player_metrics_dropped_frames))
+                ? Number(session.player_metrics_dropped_frames)
+                : null;
+            const serverRendition = Number.isFinite(Number(session.server_video_rendition_mbps))
+                ? Number(session.server_video_rendition_mbps)
+                : null;
+            const variantLadder = buildVariantLadder(session.manifest_variants);
             const patternSteps = Array.isArray(session.nftables_pattern_steps) ? session.nftables_pattern_steps : [];
             const patternStepIndex = Number(session.nftables_pattern_step_runtime || session.nftables_pattern_step || 0);
             const bandwidthTarget = Number(session.nftables_bandwidth_mbps);
@@ -3238,6 +3933,57 @@
                 }
             }
             if (!key) return;
+
+            const numericLoopCount = Number(session.player_metrics_loop_count_player);
+            if (Number.isFinite(numericLoopCount) && numericLoopCount >= 0) {
+                const loopCount = Math.max(0, Math.round(numericLoopCount));
+                const prevLoopCount = lastRecordedLoopCountBySession.get(String(key));
+                if (Number.isFinite(prevLoopCount) && loopCount > prevLoopCount) {
+                    const stamp = `${String(key)}|player|${loopCount}`;
+                    if (lastRecordedLoopEventStampBySession.get(String(key)) !== stamp) {
+                        const eventSeries = bandwidthEventHistory.get(key) || [];
+                        const loopEventAtMs = getBandwidthChartEventTimestampMs(session, now);
+                        eventSeries.push({ ts: loopEventAtMs, type: 'LOOP_PLAYER' });
+                        const eventCutoff = now - windowMs;
+                        bandwidthEventHistory.set(key, eventSeries.filter((event) => Number(event.ts) >= eventCutoff));
+                        lastRecordedLoopEventStampBySession.set(String(key), stamp);
+                    }
+                }
+                lastRecordedLoopCountBySession.set(String(key), loopCount);
+            }
+
+            const numericServerLoopCount = Number(session.loop_count_server);
+            if (Number.isFinite(numericServerLoopCount) && numericServerLoopCount >= 0) {
+                const serverLoopCount = Math.max(0, Math.round(numericServerLoopCount));
+                const prevServerLoopCount = lastRecordedServerLoopCountBySession.get(String(key));
+                if (Number.isFinite(prevServerLoopCount) && serverLoopCount > prevServerLoopCount) {
+                    const stamp = `${String(key)}|server|${serverLoopCount}`;
+                    if (lastRecordedServerLoopEventStampBySession.get(String(key)) !== stamp) {
+                        const eventSeries = bandwidthEventHistory.get(key) || [];
+                        const loopEventAtMs = getBandwidthChartEventTimestampMs(session, now);
+                        eventSeries.push({ ts: loopEventAtMs, type: 'LOOP_SERVER' });
+                        const eventCutoff = now - windowMs;
+                        bandwidthEventHistory.set(key, eventSeries.filter((event) => Number(event.ts) >= eventCutoff));
+                        lastRecordedServerLoopEventStampBySession.set(String(key), stamp);
+                    }
+                }
+                lastRecordedServerLoopCountBySession.set(String(key), serverLoopCount);
+            }
+
+            const eventType = parseBandwidthChartEventType(session.player_metrics_last_event || session.player_metrics_trigger_type);
+            if (eventType) {
+                const eventAtMs = getBandwidthChartEventTimestampMs(session, now);
+                const eventStamp = `${eventType}|${session.player_metrics_last_event_at || session.player_metrics_event_time || eventAtMs}`;
+                const lastStamp = lastRecordedPlayerEventBySession.get(String(key));
+                if (eventStamp !== lastStamp) {
+                    const eventSeries = bandwidthEventHistory.get(key) || [];
+                    eventSeries.push({ ts: eventAtMs, type: eventType });
+                    const eventCutoff = now - windowMs;
+                    bandwidthEventHistory.set(key, eventSeries.filter((event) => Number(event.ts) >= eventCutoff));
+                    lastRecordedPlayerEventBySession.set(String(key), eventStamp);
+                }
+            }
+
             const series = bandwidthHistory.get(key) || [];
             if (!Number.isFinite(target)) {
                 const lastTarget = series.length > 0 ? series[series.length - 1].target : null;
@@ -3247,7 +3993,23 @@
                     target = 0;
                 }
             }
-            series.push({ ts: now, wireSustained, wireActive, wireSustained6s, wireActive6s, wireSustained1s, wireThroughput, bufferDepth, playerEstimate, currentRendition, target });
+            series.push({
+                ts: now,
+                wireSustained,
+                wireActive,
+                wireSustained6s,
+                wireActive6s,
+                wireSustained1s,
+                wireThroughput,
+                bufferDepth,
+                playerEstimate,
+                currentRendition,
+                framesDisplayed,
+                framesDropped,
+                serverRendition,
+                target,
+                variantLadder
+            });
             const cutoff = now - windowMs;
             const filtered = series.filter(point => point.ts >= cutoff);
             bandwidthHistory.set(key, filtered);
@@ -3256,14 +4018,19 @@
 
         function renderBandwidthChart(sessionId) {
             const series = bandwidthHistory.get(sessionId) || [];
+            const eventSeries = bandwidthEventHistory.get(sessionId) || [];
             const card = document.querySelector(`.session-card[data-session-id="${sessionId}"]`);
             if (!card) return;
             const canvas = card.querySelector('canvas.bandwidth-chart');
             if (!canvas) return;
-            const windowMs = 5 * 60 * 1000;
+            const windowMs = 10 * 60 * 1000;
             if (series.length === 0) return;
             const maxTs = series[series.length - 1].ts;
             const windowStart = maxTs - windowMs;
+            const bitrateChartRangeLabel = card.querySelector('[data-field="bandwidth_chart_range"]');
+            if (bitrateChartRangeLabel) {
+                bitrateChartRangeLabel.textContent = formatBitrateChartRange(windowStart, maxTs);
+            }
             const points = series
                 .filter(point => point.ts >= windowStart)
                 .map(point => ({
@@ -3277,8 +4044,19 @@
                     bufferDepth: point.bufferDepth,
                     playerEstimate: point.playerEstimate,
                     currentRendition: point.currentRendition,
-                    target: point.target
+                    framesDisplayed: point.framesDisplayed,
+                    framesDropped: point.framesDropped,
+                    serverRendition: point.serverRendition,
+                    target: point.target,
+                    variantLadder: point.variantLadder
                 }));
+            const chartEvents = eventSeries
+                .filter((event) => Number(event.ts) >= windowStart)
+                .map((event) => ({
+                    x: (event.ts - windowStart) / 1000,
+                    type: event.type
+                }))
+                .filter((event) => Number.isFinite(event.x) && event.x >= 0 && event.x <= 600);
             const wireSustainedData = points.map(point => ({ x: point.x, y: point.wireSustained }));
             const wireActiveData = points.map(point => ({ x: point.x, y: point.wireActive }));
             const wireSustained6sData = points.map(point => ({ x: point.x, y: point.wireSustained6s }));
@@ -3286,22 +4064,53 @@
             const wireSustained1sData = points.map(point => ({ x: point.x, y: point.wireSustained1s }));
             const wireThroughputData = points.map(point => ({ x: point.x, y: point.wireThroughput }));
             const bufferDepthData = points.map(point => ({ x: point.x, y: Number.isFinite(point.bufferDepth) ? point.bufferDepth : null }));
+            const framesDisplayedData = points.map(point => ({ x: point.x, y: Number.isFinite(point.framesDisplayed) ? point.framesDisplayed : null }));
+            const framesDroppedData = points.map(point => ({ x: point.x, y: Number.isFinite(point.framesDropped) ? point.framesDropped : null }));
             const estimateData = points.map(point => ({ x: point.x, y: point.playerEstimate || null }));
             const renditionData = points.map(point => ({ x: point.x, y: point.currentRendition || null }));
+            const serverRenditionData = points.map(point => ({ x: point.x, y: point.serverRendition || null }));
             const targetData = points.map(point => ({ x: point.x, y: point.target }));
+            let variantLadder = [];
+            for (let idx = points.length - 1; idx >= 0; idx -= 1) {
+                if (Array.isArray(points[idx].variantLadder) && points[idx].variantLadder.length) {
+                    variantLadder = points[idx].variantLadder;
+                    break;
+                }
+            }
             const visibility = bandwidthVisibility.get(sessionId) || {};
+            const variantsEnabled = bandwidthVariantsEnabledBySession.get(String(sessionId)) !== false;
+            const variantToggleButton = card.querySelector('button[data-action="toggle-variants"]');
+            if (variantToggleButton) {
+                variantToggleButton.textContent = variantsEnabled ? 'Hide Variants' : 'Show Variants';
+                variantToggleButton.setAttribute('aria-pressed', variantsEnabled ? 'true' : 'false');
+            }
             const defaultVisibleLabels = new Set([
                 'Wire Sustained (6s)',
                 'Wire Throughput',
                 'Player est.',
                 'Rendition',
-                'Limit'
+                'Server Rendition',
+                'Limit',
+                'STALL',
+                'RESTART',
+                'LOOP PLAYER',
+                'LOOP SERVER'
             ]);
             const isSeriesHidden = (label) => {
+                const key = bandwidthSeriesKey(label);
+                if (isVariantSeriesLabel(key) && !variantsEnabled) {
+                    return true;
+                }
                 if (Object.prototype.hasOwnProperty.call(visibility, label)) {
                     return visibility[label] === true;
                 }
-                return !defaultVisibleLabels.has(label);
+                if (Object.prototype.hasOwnProperty.call(visibility, key)) {
+                    return visibility[key] === true;
+                }
+                if (isVariantSeriesLabel(key)) {
+                    return false;
+                }
+                return !defaultVisibleLabels.has(key);
             };
             const axisMode = normalizeBitrateAxisMaxMode(
                 bitrateAxisMaxBySession.get(String(sessionId)) ||
@@ -3310,7 +4119,7 @@
             );
             bitrateAxisMaxBySession.set(String(sessionId), axisMode);
             const maxFor = (hidden, data) => (hidden ? [0] : data.map(point => point.y || 0));
-            const maxYAuto = Math.min(100, Math.max(1,
+            const maxYAutoRaw = Math.max(1,
                 ...maxFor(isSeriesHidden('Wire Sustained (18s)'), wireSustainedData),
                 ...maxFor(isSeriesHidden('Wire Active'), wireActiveData),
                 ...maxFor(isSeriesHidden('Wire Sustained (6s)'), wireSustained6sData),
@@ -3319,9 +4128,191 @@
                 ...maxFor(isSeriesHidden('Wire Throughput'), wireThroughputData),
                 ...maxFor(isSeriesHidden('Player est.'), estimateData),
                 ...maxFor(isSeriesHidden('Rendition'), renditionData),
+                ...maxFor(isSeriesHidden('Server Rendition'), serverRenditionData),
                 ...maxFor(isSeriesHidden('Limit'), targetData)
-            ));
+            );
+            const maxYAuto = Math.min(100, Math.max(1, (Math.ceil((maxYAutoRaw * 1.05) * 10) / 10)));
             const maxY = axisMode === 'auto' ? maxYAuto : Number(axisMode);
+            const buildEventMarkerData = (type) => {
+                const markerData = [];
+                chartEvents.forEach((event) => {
+                    if (event.type !== type) return;
+                    markerData.push({ x: event.x, y: 0 });
+                    markerData.push({ x: event.x, y: maxY });
+                    markerData.push({ x: event.x, y: null });
+                });
+                return markerData;
+            };
+            const stallMarkerData = buildEventMarkerData('STALL');
+            const restartMarkerData = buildEventMarkerData('RESTART');
+            const loopPlayerMarkerData = buildEventMarkerData('LOOP_PLAYER');
+            const loopServerMarkerData = buildEventMarkerData('LOOP_SERVER');
+            const variantDatasets = variantLadder.map((variant, index) => {
+                const label = `Variant ${variant.vx}`;
+                return {
+                    label,
+                    data: points.map(point => ({ x: point.x, y: variant.mbps })),
+                    borderColor: '#9ca3af',
+                    backgroundColor: 'rgba(156,163,175,0.12)',
+                    borderWidth: 1,
+                    pointRadius: 0,
+                    tension: 0,
+                    borderDash: index % 2 === 0 ? [2, 6] : [6, 3],
+                    hidden: isSeriesHidden(label)
+                };
+            });
+            const datasets = [
+                {
+                    label: 'Wire Sustained (18s)',
+                    data: wireSustainedData,
+                    borderColor: '#0891b2',
+                    backgroundColor: 'rgba(8,145,178,0.12)',
+                    borderWidth: 1.5,
+                    pointRadius: 0,
+                    tension: 0.2,
+                    borderDash: [6, 3],
+                    hidden: isSeriesHidden('Wire Sustained (18s)')
+                },
+                {
+                    label: 'Wire Active',
+                    data: wireActiveData,
+                    borderColor: '#0f766e',
+                    backgroundColor: 'rgba(15,118,110,0.12)',
+                    borderWidth: 1.5,
+                    pointRadius: 0,
+                    tension: 0.2,
+                    borderDash: [2, 4],
+                    hidden: isSeriesHidden('Wire Active')
+                },
+                {
+                    label: 'Wire Sustained (6s)',
+                    data: wireSustained6sData,
+                    borderColor: '#155e75',
+                    backgroundColor: 'rgba(21,94,117,0.12)',
+                    borderWidth: 1.5,
+                    pointRadius: 0,
+                    tension: 0.2,
+                    borderDash: [8, 3],
+                    hidden: isSeriesHidden('Wire Sustained (6s)')
+                },
+                {
+                    label: 'Wire Active (6s)',
+                    data: wireActive6sData,
+                    borderColor: '#115e59',
+                    backgroundColor: 'rgba(17,94,89,0.12)',
+                    borderWidth: 1.5,
+                    pointRadius: 0,
+                    tension: 0.2,
+                    borderDash: [3, 5],
+                    hidden: isSeriesHidden('Wire Active (6s)')
+                },
+                {
+                    label: 'Wire Sustained (1s)',
+                    data: wireSustained1sData,
+                    borderColor: '#0e7490',
+                    backgroundColor: 'rgba(14,116,144,0.12)',
+                    borderWidth: 1.5,
+                    pointRadius: 0,
+                    tension: 0.2,
+                    borderDash: [4, 4],
+                    hidden: isSeriesHidden('Wire Sustained (1s)')
+                },
+                {
+                    label: 'Wire Throughput',
+                    data: wireThroughputData,
+                    borderColor: '#0d9488',
+                    backgroundColor: 'rgba(13,148,136,0.12)',
+                    borderWidth: 1.5,
+                    pointRadius: 0,
+                    tension: 0.2,
+                    borderDash: [1, 3],
+                    hidden: isSeriesHidden('Wire Throughput')
+                },
+                {
+                    label: 'Player est.',
+                    data: estimateData,
+                    borderColor: '#6366f1',
+                    backgroundColor: 'rgba(99,102,241,0.12)',
+                    borderWidth: 1.5,
+                    pointRadius: 0,
+                    tension: 0.2,
+                    borderDash: [6, 4],
+                    hidden: isSeriesHidden('Player est.')
+                },
+                {
+                    label: 'Rendition',
+                    data: renditionData,
+                    borderColor: '#ef4444',
+                    backgroundColor: 'rgba(239,68,68,0.12)',
+                    borderWidth: 1.5,
+                    pointRadius: 0,
+                    tension: 0.2,
+                    borderDash: [3, 3],
+                    hidden: isSeriesHidden('Rendition')
+                },
+                {
+                    label: 'Server Rendition',
+                    data: serverRenditionData,
+                    borderColor: '#b45309',
+                    backgroundColor: 'rgba(180,83,9,0.12)',
+                    borderWidth: 1.5,
+                    pointRadius: 0,
+                    tension: 0.2,
+                    borderDash: [10, 4],
+                    hidden: isSeriesHidden('Server Rendition')
+                },
+                ...variantDatasets,
+                {
+                    label: 'Limit',
+                    data: targetData,
+                    borderColor: '#f59e0b',
+                    backgroundColor: 'rgba(245,158,11,0.12)',
+                    borderWidth: 1.5,
+                    pointRadius: 0,
+                    stepped: true,
+                    hidden: isSeriesHidden('Limit')
+                },
+                {
+                    label: 'STALL',
+                    data: stallMarkerData,
+                    borderColor: '#dc2626',
+                    backgroundColor: 'rgba(220,38,38,0.12)',
+                    borderWidth: 1.25,
+                    pointRadius: 0,
+                    tension: 0,
+                    hidden: isSeriesHidden('STALL')
+                },
+                {
+                    label: 'RESTART',
+                    data: restartMarkerData,
+                    borderColor: '#7c3aed',
+                    backgroundColor: 'rgba(124,58,237,0.12)',
+                    borderWidth: 1.25,
+                    pointRadius: 0,
+                    tension: 0,
+                    hidden: isSeriesHidden('RESTART')
+                },
+                {
+                    label: 'LOOP PLAYER',
+                    data: loopPlayerMarkerData,
+                    borderColor: '#16a34a',
+                    backgroundColor: 'rgba(22,163,74,0.12)',
+                    borderWidth: 1.25,
+                    pointRadius: 0,
+                    tension: 0,
+                    hidden: isSeriesHidden('LOOP PLAYER')
+                },
+                {
+                    label: 'LOOP SERVER',
+                    data: loopServerMarkerData,
+                    borderColor: '#0ea5e9',
+                    backgroundColor: 'rgba(14,165,233,0.12)',
+                    borderWidth: 1.25,
+                    pointRadius: 0,
+                    tension: 0,
+                    hidden: isSeriesHidden('LOOP SERVER')
+                }
+            ];
             let chart = bandwidthCharts.get(sessionId);
             if (chart && chart.canvas !== canvas) {
                 chart.destroy();
@@ -3332,106 +4323,7 @@
                 chart = new Chart(canvas, {
                     type: 'line',
                     data: {
-                        datasets: [
-                            {
-                                label: 'Wire Sustained (18s)',
-                                data: wireSustainedData,
-                                borderColor: '#0891b2',
-                                backgroundColor: 'rgba(8,145,178,0.12)',
-                                borderWidth: 1.5,
-                                pointRadius: 0,
-                                tension: 0.2,
-                                borderDash: [6, 3],
-                                hidden: isSeriesHidden('Wire Sustained (18s)')
-                            },
-                            {
-                                label: 'Wire Active',
-                                data: wireActiveData,
-                                borderColor: '#0f766e',
-                                backgroundColor: 'rgba(15,118,110,0.12)',
-                                borderWidth: 1.5,
-                                pointRadius: 0,
-                                tension: 0.2,
-                                borderDash: [2, 4],
-                                hidden: isSeriesHidden('Wire Active')
-                            },
-                            {
-                                label: 'Wire Sustained (6s)',
-                                data: wireSustained6sData,
-                                borderColor: '#155e75',
-                                backgroundColor: 'rgba(21,94,117,0.12)',
-                                borderWidth: 1.5,
-                                pointRadius: 0,
-                                tension: 0.2,
-                                borderDash: [8, 3],
-                                hidden: isSeriesHidden('Wire Sustained (6s)')
-                            },
-                            {
-                                label: 'Wire Active (6s)',
-                                data: wireActive6sData,
-                                borderColor: '#115e59',
-                                backgroundColor: 'rgba(17,94,89,0.12)',
-                                borderWidth: 1.5,
-                                pointRadius: 0,
-                                tension: 0.2,
-                                borderDash: [3, 5],
-                                hidden: isSeriesHidden('Wire Active (6s)')
-                            },
-                            {
-                                label: 'Wire Sustained (1s)',
-                                data: wireSustained1sData,
-                                borderColor: '#0e7490',
-                                backgroundColor: 'rgba(14,116,144,0.12)',
-                                borderWidth: 1.5,
-                                pointRadius: 0,
-                                tension: 0.2,
-                                borderDash: [4, 4],
-                                hidden: isSeriesHidden('Wire Sustained (1s)')
-                            },
-                            {
-                                label: 'Wire Throughput',
-                                data: wireThroughputData,
-                                borderColor: '#0d9488',
-                                backgroundColor: 'rgba(13,148,136,0.12)',
-                                borderWidth: 1.5,
-                                pointRadius: 0,
-                                tension: 0.2,
-                                borderDash: [1, 3],
-                                hidden: isSeriesHidden('Wire Throughput')
-                            },
-                            {
-                                label: 'Player est.',
-                                data: estimateData,
-                                borderColor: '#6366f1',
-                                backgroundColor: 'rgba(99,102,241,0.12)',
-                                borderWidth: 1.5,
-                                pointRadius: 0,
-                                tension: 0.2,
-                                borderDash: [6, 4],
-                                hidden: isSeriesHidden('Player est.')
-                            },
-                            {
-                                label: 'Rendition',
-                                data: renditionData,
-                                borderColor: '#ef4444',
-                                backgroundColor: 'rgba(239,68,68,0.12)',
-                                borderWidth: 1.5,
-                                pointRadius: 0,
-                                tension: 0.2,
-                                borderDash: [3, 3],
-                                hidden: isSeriesHidden('Rendition')
-                            },
-                            {
-                                label: 'Limit',
-                                data: targetData,
-                                borderColor: '#f59e0b',
-                                backgroundColor: 'rgba(245,158,11,0.12)',
-                                borderWidth: 1.5,
-                                pointRadius: 0,
-                                stepped: true,
-                                hidden: isSeriesHidden('Limit')
-                            }
-                        ]
+                        datasets
                     },
                     options: {
                         responsive: true,
@@ -3454,8 +4346,20 @@
                                     const isVisible = chartRef.isDatasetVisible(index);
                                     chartRef.setDatasetVisibility(index, !isVisible);
                                     state[label] = isVisible;
+                                    state[bandwidthSeriesKey(label)] = isVisible;
                                     bandwidthVisibility.set(sessionId, state);
                                     chartRef.update('none');
+                                }
+                            },
+                            tooltip: {
+                                callbacks: {
+                                    title: (items) => {
+                                        const first = Array.isArray(items) && items.length ? items[0] : null;
+                                        if (!first) return '';
+                                        const xValue = Number(first.parsed?.x);
+                                        const startMs = Number(chart?.$windowStartMs || windowStart);
+                                        return formatBitrateChartAbsoluteTick(startMs, xValue);
+                                    }
                                 }
                             }
                         },
@@ -3463,16 +4367,20 @@
                             x: {
                                 type: 'linear',
                                 min: 0,
-                                max: 300,
+                                max: 600,
                                 grid: { color: '#e5e7eb' },
                                 ticks: {
                                     color: '#6b7280',
                                     font: { family: 'Courier New, monospace', size: 10 },
+                                    stepSize: 60,
+                                    autoSkip: true,
                                     callback: (value) => {
-                                        if (value === 0) return '-5:00';
-                                        if (value === 150) return '-2:30';
-                                        if (value === 300) return 'now';
-                                        return '';
+                                        const numeric = Number(value);
+                                        if (!Number.isFinite(numeric)) return '';
+                                        const rounded = Math.round(numeric);
+                                        if (rounded % 60 !== 0) return '';
+                                        const startMs = Number(chart?.$windowStartMs || windowStart);
+                                        return formatBitrateChartAbsoluteTick(startMs, rounded);
                                     }
                                 }
                             },
@@ -3494,28 +4402,26 @@
                         }
                     }
                 });
+                chart.$windowStartMs = windowStart;
                 bandwidthCharts.set(sessionId, chart);
             } else {
-                chart.data.datasets[0].data = wireSustainedData;
-                chart.data.datasets[1].data = wireActiveData;
-                chart.data.datasets[2].data = wireSustained6sData;
-                chart.data.datasets[3].data = wireActive6sData;
-                chart.data.datasets[4].data = wireSustained1sData;
-                chart.data.datasets[5].data = wireThroughputData;
-                chart.data.datasets[6].data = estimateData;
-                chart.data.datasets[7].data = renditionData;
-                chart.data.datasets[8].data = targetData;
+                chart.data.datasets = datasets;
                 chart.data.datasets.forEach((dataset, idx) => {
                     const hidden = isSeriesHidden(dataset.label);
                     dataset.hidden = hidden;
                     chart.setDatasetVisibility(idx, !hidden);
                 });
+                chart.$windowStartMs = windowStart;
                 chart.options.scales.y.max = maxY;
                 chart.update('none');
             }
 
             const bufferCanvas = card.querySelector('canvas.buffer-depth-chart');
             if (!bufferCanvas) return;
+            const bufferChartRangeLabel = card.querySelector('[data-field="buffer_depth_chart_range"]');
+            if (bufferChartRangeLabel) {
+                bufferChartRangeLabel.textContent = formatBitrateChartRange(windowStart, maxTs);
+            }
             const bufferValues = bufferDepthData
                 .map((point) => Number(point.y))
                 .filter((value) => Number.isFinite(value) && value >= 0);
@@ -3547,22 +4453,46 @@
                         maintainAspectRatio: false,
                         animation: false,
                         plugins: {
-                            legend: { display: false }
+                            legend: {
+                                display: true,
+                                position: 'bottom',
+                                labels: {
+                                    color: '#6b7280',
+                                    font: { family: 'Courier New, monospace', size: 10 },
+                                    boxWidth: 14,
+                                    usePointStyle: true,
+                                }
+                            },
+                            tooltip: {
+                                callbacks: {
+                                    title: (items) => {
+                                        const first = Array.isArray(items) && items.length ? items[0] : null;
+                                        if (!first) return '';
+                                        const xValue = Number(first.parsed?.x);
+                                        const startMs = Number(bufferChart?.$windowStartMs || windowStart);
+                                        return formatBitrateChartAbsoluteTick(startMs, xValue);
+                                    }
+                                }
+                            }
                         },
                         scales: {
                             x: {
                                 type: 'linear',
                                 min: 0,
-                                max: 300,
+                                max: 600,
                                 grid: { color: '#e5e7eb' },
                                 ticks: {
                                     color: '#6b7280',
                                     font: { family: 'Courier New, monospace', size: 10 },
+                                    stepSize: 60,
+                                    autoSkip: true,
                                     callback: (value) => {
-                                        if (value === 0) return '-5:00';
-                                        if (value === 150) return '-2:30';
-                                        if (value === 300) return 'now';
-                                        return '';
+                                        const numeric = Number(value);
+                                        if (!Number.isFinite(numeric)) return '';
+                                        const rounded = Math.round(numeric);
+                                        if (rounded % 60 !== 0) return '';
+                                        const startMs = Number(bufferChart?.$windowStartMs || windowStart);
+                                        return formatBitrateChartAbsoluteTick(startMs, rounded);
                                     }
                                 }
                             },
@@ -3584,11 +4514,273 @@
                         }
                     }
                 });
+                bufferChart.$windowStartMs = windowStart;
                 bufferDepthCharts.set(sessionId, bufferChart);
             } else {
                 bufferChart.data.datasets[0].data = bufferDepthData;
+                bufferChart.$windowStartMs = windowStart;
                 bufferChart.options.scales.y.max = maxBufferDepth;
                 bufferChart.update('none');
+            }
+
+            const fpsCanvas = card.querySelector('canvas.video-fps-chart');
+            if (!fpsCanvas) return;
+            const fpsChartRangeLabel = card.querySelector('[data-field="video_fps_chart_range"]');
+            if (fpsChartRangeLabel) {
+                fpsChartRangeLabel.textContent = formatBitrateChartRange(windowStart, maxTs);
+            }
+            const fpsData = [];
+            const droppedFpsDataRaw = [];
+            const fpsWindowSeconds = 1.0;
+            const maxReasonableFps = 120;
+            const buildRateSeries = (counterSeries) => {
+                const out = [];
+                for (let idx = 0; idx < counterSeries.length; idx += 1) {
+                    const currentPoint = counterSeries[idx];
+                    const currentCount = Number(currentPoint.y);
+                    const currentX = Number(currentPoint.x);
+                    if (!Number.isFinite(currentCount) || !Number.isFinite(currentX)) {
+                        out.push({ x: currentPoint.x, y: null });
+                        continue;
+                    }
+                    const targetX = currentX - fpsWindowSeconds;
+                    let anchorPoint = null;
+                    for (let j = idx - 1; j >= 0; j -= 1) {
+                        const candidateX = Number(counterSeries[j]?.x);
+                        if (!Number.isFinite(candidateX)) continue;
+                        if (candidateX <= targetX) {
+                            anchorPoint = counterSeries[j];
+                            break;
+                        }
+                    }
+                    if (!anchorPoint) {
+                        out.push({ x: currentPoint.x, y: null });
+                        continue;
+                    }
+                    const anchorCount = Number(anchorPoint.y);
+                    const anchorX = Number(anchorPoint.x);
+                    const deltaSeconds = currentX - anchorX;
+                    const deltaCount = currentCount - anchorCount;
+                    if (!Number.isFinite(anchorCount) || !Number.isFinite(anchorX) || deltaSeconds <= 0 || deltaCount < 0) {
+                        out.push({ x: currentPoint.x, y: null });
+                        continue;
+                    }
+                    const rate = deltaCount / deltaSeconds;
+                    if (!Number.isFinite(rate) || rate < 0 || rate > maxReasonableFps) {
+                        out.push({ x: currentPoint.x, y: null });
+                        continue;
+                    }
+                    out.push({ x: currentPoint.x, y: rate });
+                }
+                return out;
+            };
+
+            fpsData.push(...buildRateSeries(framesDisplayedData));
+            droppedFpsDataRaw.push(...buildRateSeries(framesDroppedData));
+
+            const fpsValues = fpsData
+                .map((point) => Number(point.y))
+                .filter((value) => Number.isFinite(value) && value >= 0);
+            const droppedFpsValues = droppedFpsDataRaw
+                .map((point) => Number(point.y))
+                .filter((value) => Number.isFinite(value) && value >= 0);
+            const fpsSmoothedData = [];
+            let smooth = null;
+            const smoothingAlpha = 0.3;
+            for (const point of fpsData) {
+                const y = Number(point.y);
+                if (!Number.isFinite(y) || y < 0) {
+                    fpsSmoothedData.push({ x: point.x, y: null });
+                    continue;
+                }
+                if (smooth === null) {
+                    smooth = y;
+                } else {
+                    smooth = (smoothingAlpha * y) + ((1 - smoothingAlpha) * smooth);
+                }
+                fpsSmoothedData.push({ x: point.x, y: smooth });
+            }
+
+            const droppedFpsSmoothedData = [];
+            let droppedSmooth = null;
+            const droppedSmoothingAlpha = 0.35;
+            for (const point of droppedFpsDataRaw) {
+                const y = Number(point.y);
+                if (!Number.isFinite(y) || y < 0) {
+                    droppedFpsSmoothedData.push({ x: point.x, y: null });
+                    continue;
+                }
+                if (droppedSmooth === null) {
+                    droppedSmooth = y;
+                } else {
+                    droppedSmooth = (droppedSmoothingAlpha * y) + ((1 - droppedSmoothingAlpha) * droppedSmooth);
+                }
+                droppedFpsSmoothedData.push({ x: point.x, y: droppedSmooth });
+            }
+
+            const fpsSorted = [...fpsValues].sort((a, b) => a - b);
+            const baselineIdx = fpsSorted.length
+                ? Math.max(0, Math.min(fpsSorted.length - 1, Math.floor(fpsSorted.length * 0.75)))
+                : -1;
+            const baselineFps = baselineIdx >= 0 ? fpsSorted[baselineIdx] : 30;
+            const lowFpsThreshold = Math.max(8, baselineFps * 0.75);
+            const baselineData = points.map(point => ({ x: point.x, y: baselineFps }));
+            const lowThresholdData = points.map(point => ({ x: point.x, y: lowFpsThreshold }));
+            const lowFpsData = fpsSmoothedData.map(point => {
+                const y = Number(point.y);
+                return { x: point.x, y: (Number.isFinite(y) && y < lowFpsThreshold) ? y : null };
+            });
+            const maxFps = Math.min(120, Math.max(10, baselineFps * 1.2, ...fpsValues, 0));
+            const maxDroppedFps = Math.min(30, Math.max(2, ...droppedFpsValues, 0));
+            if (fpsChartRangeLabel) {
+                fpsChartRangeLabel.textContent = `${formatBitrateChartRange(windowStart, maxTs)} | baseline ${baselineFps.toFixed(1)} fps, low < ${lowFpsThreshold.toFixed(1)}, dropped max ${maxDroppedFps.toFixed(2)}/s`;
+            }
+            let fpsChart = videoFpsCharts.get(sessionId);
+            if (fpsChart && fpsChart.canvas !== fpsCanvas) {
+                fpsChart.destroy();
+                fpsChart = null;
+                videoFpsCharts.delete(sessionId);
+            }
+            if (!fpsChart) {
+                fpsChart = new Chart(fpsCanvas, {
+                    type: 'line',
+                    data: {
+                        datasets: [
+                            {
+                                label: 'FPS (smoothed)',
+                                data: fpsSmoothedData,
+                                borderColor: '#7e22ce',
+                                backgroundColor: 'rgba(126,34,206,0.10)',
+                                borderWidth: 2.2,
+                                pointRadius: 0,
+                                tension: 0.2
+                            },
+                            {
+                                label: 'Low FPS',
+                                data: lowFpsData,
+                                borderColor: '#dc2626',
+                                backgroundColor: 'rgba(220,38,38,0.22)',
+                                borderWidth: 2,
+                                pointRadius: 0,
+                                tension: 0.2,
+                                spanGaps: false
+                            },
+                            {
+                                label: 'FPS Baseline',
+                                data: baselineData,
+                                borderColor: '#475569',
+                                borderWidth: 1,
+                                pointRadius: 0,
+                                tension: 0,
+                                borderDash: [6, 4]
+                            },
+                            {
+                                label: 'Low Threshold',
+                                data: lowThresholdData,
+                                borderColor: '#b91c1c',
+                                borderWidth: 1,
+                                pointRadius: 0,
+                                tension: 0,
+                                borderDash: [3, 4]
+                            },
+                            {
+                                label: 'Dropped Frames/s',
+                                data: droppedFpsSmoothedData,
+                                yAxisID: 'yDrop',
+                                borderColor: '#ea580c',
+                                backgroundColor: 'rgba(234,88,12,0.14)',
+                                borderWidth: 1.8,
+                                pointRadius: 0,
+                                tension: 0.2,
+                                borderDash: [5, 3]
+                            }
+                        ]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        animation: false,
+                        plugins: {
+                            legend: { display: false },
+                            tooltip: {
+                                callbacks: {
+                                    title: (items) => {
+                                        const first = Array.isArray(items) && items.length ? items[0] : null;
+                                        if (!first) return '';
+                                        const xValue = Number(first.parsed?.x);
+                                        const startMs = Number(fpsChart?.$windowStartMs || windowStart);
+                                        return formatBitrateChartAbsoluteTick(startMs, xValue);
+                                    }
+                                }
+                            }
+                        },
+                        scales: {
+                            x: {
+                                type: 'linear',
+                                min: 0,
+                                max: 600,
+                                grid: { color: '#e5e7eb' },
+                                ticks: {
+                                    color: '#6b7280',
+                                    font: { family: 'Courier New, monospace', size: 10 },
+                                    stepSize: 60,
+                                    autoSkip: true,
+                                    callback: (value) => {
+                                        const numeric = Number(value);
+                                        if (!Number.isFinite(numeric)) return '';
+                                        const rounded = Math.round(numeric);
+                                        if (rounded % 60 !== 0) return '';
+                                        const startMs = Number(fpsChart?.$windowStartMs || windowStart);
+                                        return formatBitrateChartAbsoluteTick(startMs, rounded);
+                                    }
+                                }
+                            },
+                            y: {
+                                min: 0,
+                                max: maxFps,
+                                grid: { color: '#e5e7eb' },
+                                ticks: {
+                                    color: '#6b7280',
+                                    font: { family: 'Courier New, monospace', size: 10 }
+                                },
+                                title: {
+                                    display: true,
+                                    text: 'Frames/s',
+                                    color: '#6b7280',
+                                    font: { family: 'Courier New, monospace', size: 10 }
+                                }
+                            },
+                            yDrop: {
+                                position: 'right',
+                                min: 0,
+                                max: maxDroppedFps,
+                                grid: { drawOnChartArea: false },
+                                ticks: {
+                                    color: '#9a3412',
+                                    font: { family: 'Courier New, monospace', size: 10 }
+                                },
+                                title: {
+                                    display: true,
+                                    text: 'Dropped/s',
+                                    color: '#9a3412',
+                                    font: { family: 'Courier New, monospace', size: 10 }
+                                }
+                            }
+                        }
+                    }
+                });
+                fpsChart.$windowStartMs = windowStart;
+                videoFpsCharts.set(sessionId, fpsChart);
+            } else {
+                fpsChart.data.datasets[0].data = fpsSmoothedData;
+                fpsChart.data.datasets[1].data = lowFpsData;
+                fpsChart.data.datasets[2].data = baselineData;
+                fpsChart.data.datasets[3].data = lowThresholdData;
+                fpsChart.data.datasets[4].data = droppedFpsSmoothedData;
+                fpsChart.$windowStartMs = windowStart;
+                fpsChart.options.scales.y.max = maxFps;
+                fpsChart.options.scales.yDrop.max = maxDroppedFps;
+                fpsChart.update('none');
             }
         }
 
@@ -3600,6 +4792,15 @@
 
         function applySessionUpdate(session) {
             if (!session) return;
+            const incomingVersion = getSessionSnapshotVersion(session);
+            const currentVersion = getSessionSnapshotVersion(lastServerSession);
+            if (
+                incomingVersion > 0
+                && currentVersion > 0
+                && incomingVersion < currentVersion
+            ) {
+                return;
+            }
             const container = document.getElementById('sessionControls');
             const existingCard = container ? container.querySelector('.session-card') : null;
             const serverSession = session;
@@ -3615,6 +4816,11 @@
                 console.warn('Failed to compare session metadata', e);
             }
             lastServerSession = serverSession;
+            const serverRestarts = Number(serverSession?.player_restarts);
+            if (Number.isFinite(serverRestarts) && serverRestarts >= 0) {
+                playerRestartCount = Math.max(playerRestartCount, Math.round(serverRestarts));
+            }
+            maybeHandleRemoteRestartRequest(serverSession);
             // If server session metadata explicitly indicates 4K, persist that immediately
             try {
                 if (serverSession) {
@@ -3766,8 +4972,8 @@
             source.addEventListener('sessions', (event) => {
                 try {
                     const payload = parseSessionsStreamPayload(event);
-                    const sessions = payload.sessions;
-                    lastSessionsList = Array.isArray(sessions) ? sessions : [];
+                    const sessions = mergeSessionsBySnapshotVersion(payload.sessions);
+                    lastSessionsList = sessions;
                     const revision = Number(payload.revision || 0);
                     const dropped = Number(payload.dropped || 0);
                     let missed = 0;
@@ -3875,10 +5081,7 @@
                 retryPlayback();
             });
             document.getElementById('restartPlayback').addEventListener('click', () => {
-                if (!currentUrl) return;
-                log('RESTART: playback');
-                resetPlayback();
-                loadStream(currentUrl);
+                performPlaybackRestart('manual');
             });
             document.getElementById('reloadPage').addEventListener('click', () => {
                 log('RELOAD: page');
@@ -3903,6 +5106,27 @@
                         resetPlayback();
                         loadStream(currentUrl);
                     }
+                });
+            }
+            const autoRecoveryToggle = document.getElementById('autoRecoveryToggle');
+            if (autoRecoveryToggle) {
+                const requested = String(params.autoRecovery || '').trim().toLowerCase();
+                if (requested === '1' || requested === 'true' || requested === 'yes' || requested === 'on') {
+                    autoRecoveryEnabled = true;
+                } else if (requested === '0' || requested === 'false' || requested === 'no' || requested === 'off') {
+                    autoRecoveryEnabled = false;
+                } else {
+                    autoRecoveryEnabled = localStorage.getItem(AUTO_RECOVERY_KEY) === 'true';
+                }
+                autoRecoveryToggle.checked = autoRecoveryEnabled;
+                localStorage.setItem(AUTO_RECOVERY_KEY, autoRecoveryEnabled ? 'true' : 'false');
+                autoRecoveryToggle.addEventListener('change', () => {
+                    autoRecoveryEnabled = !!autoRecoveryToggle.checked;
+                    autoRecoveryZeroStartedAtMs = null;
+                    localStorage.setItem(AUTO_RECOVERY_KEY, autoRecoveryEnabled ? 'true' : 'false');
+                    sendSessionMetrics('state_change', {
+                        player_auto_recovery_enabled: autoRecoveryEnabled
+                    });
                 });
             }
         }

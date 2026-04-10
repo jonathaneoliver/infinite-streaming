@@ -3,8 +3,10 @@ package generator
 import (
 	"fmt"
 	"math"
+	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/bluenviron/gohlslib/pkg/playlist"
@@ -21,12 +23,36 @@ type rangeSegment struct {
 // RangeHLSGenerator generates virtual 2s/6s playlists without partials.
 type RangeHLSGenerator struct{}
 
+var (
+	logOnceMuRange     sync.Mutex
+	lastLogSecondRange int64
+)
+
+func logOncePerSecondRange(message string) {
+	now := time.Now().Unix()
+	logOnceMuRange.Lock()
+	defer logOnceMuRange.Unlock()
+	if lastLogSecondRange == now {
+		return
+	}
+	lastLogSecondRange = now
+	fmt.Fprintln(os.Stderr, message)
+}
+
+func writeRangeLoopDateRange(sb *strings.Builder, loopCount int, at time.Time, marker string) {
+	timestamp := at.UTC().Format("2006-01-02T15:04:05.000Z")
+	// Loop boundary marker for downstream analytics and loop counters.
+	// sb.WriteString(fmt.Sprintf("#EXT-X-DATERANGE:ID=\"loop-%d-%s\",CLASS=\"com.infinite.loop\",START-DATE=\"%s\",X-LOOP-COUNT=\"%d\"\n", loopCount, marker, timestamp, loopCount))
+	logOncePerSecondRange(fmt.Sprintf("[GO-LIVE:LOOP][RANGE] marker=%s loop_count=%d start_date=%s", marker, loopCount, timestamp))
+}
+
 func (g *RangeHLSGenerator) GenerateVariantPlaylist(
 	pl *playlist.Media,
 	byteranges map[string][]parser.ByteRange,
 	relPath string,
 	segmentMap string,
 	timeNow float64,
+	loopCount int,
 	minDuration float64,
 	maxDuration float64,
 	targetDuration string,
@@ -53,11 +79,10 @@ func (g *RangeHLSGenerator) GenerateVariantPlaylist(
 		return "", fmt.Errorf("no virtual segments available")
 	}
 
+	// Playlist position remains absolute-time based.
 	timeOffset := math.Mod(timeNow, totalDuration)
-	loopCount := int(timeNow / totalDuration)
 	if syncTotalDuration > 0 {
 		timeOffset = math.Mod(syncTimeOffset, syncTotalDuration)
-		loopCount = int(timeNow / syncTotalDuration)
 	}
 
 	var currentIdx, availableIdx, windowStartIdx, startLoop int
@@ -171,9 +196,13 @@ func (g *RangeHLSGenerator) GenerateVariantPlaylist(
 	}
 
 	if wrap {
+		tailDuration := 0.0
 		for i := windowStartIdx; i < len(segments); i++ {
 			writeSegmentRange(segments[i])
+			tailDuration += segments[i].Duration
 		}
+		boundaryAt := pdt.Add(time.Duration(tailDuration * float64(time.Second)))
+		writeRangeLoopDateRange(&sb, loopCount, boundaryAt, "wrap")
 		sb.WriteString("#EXT-X-DISCONTINUITY\n")
 		if segmentMap != "" {
 			sb.WriteString(fmt.Sprintf("#EXT-X-MAP:URI=\"%s\"\n", absoluteSegmentURI(prefix, content, joinRelPath(relPath, segmentMap))))

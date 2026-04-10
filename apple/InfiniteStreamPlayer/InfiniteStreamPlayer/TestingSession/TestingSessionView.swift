@@ -105,6 +105,8 @@ struct TestingSessionView: View {
                 LazyVGrid(columns: [
                     GridItem(.adaptive(minimum: 180), spacing: 16)
                 ], spacing: 14) {
+                    self.statsCell("Session ID", session.sessionId)
+                    self.statsCell("Player ID", session.playerId)
                     self.statsCell("User Agent", session.userAgent)
                     self.statsCell("Player IP", session.playerIP)
                     self.statsCell("Port", portDisplay(session))
@@ -295,6 +297,10 @@ struct TestingSessionView: View {
         let observedSeries = diagnostics.observedBitrateSamples.filter { $0.timestamp >= cutoff }
         let indicatedSeries = diagnostics.indicatedBitrateSamples.filter { $0.timestamp >= cutoff }
         let averageVideoSeries = diagnostics.averageVideoBitrateSamples.filter { $0.timestamp >= cutoff }
+        let serverRenditionSeries = samples.compactMap { sample -> MetricSample? in
+            guard let value = sample.serverRenditionMbps, value.isFinite, value > 0 else { return nil }
+            return MetricSample(timestamp: sample.timestamp, value: value)
+        }
         let targetSeries = viewModel.limitSamples.filter { $0.timestamp >= cutoff }
         let targetRate = targetSeries.last?.value
         var maxCandidates: [Double] = []
@@ -306,6 +312,7 @@ struct TestingSessionView: View {
         maxCandidates.append(contentsOf: observedSeries.map { $0.value })
         maxCandidates.append(contentsOf: indicatedSeries.map { $0.value })
         maxCandidates.append(contentsOf: averageVideoSeries.map { $0.value })
+        maxCandidates.append(contentsOf: serverRenditionSeries.map { $0.value })
         maxCandidates.append(contentsOf: targetSeries.map { $0.value })
         let maxAutoRaw = maxCandidates.max() ?? 1
         let maxAuto = min(100, max(1, maxAutoRaw))
@@ -320,22 +327,110 @@ struct TestingSessionView: View {
         let bufferSamples = diagnostics.bufferDepthSamples.filter { $0.timestamp >= cutoff }
         let liveOffsetSamples = diagnostics.liveOffsetSamples.filter { $0.timestamp >= cutoff }
         let bufferMax = min(60, max(5, max(bufferSamples.map { $0.value }.max() ?? 0, liveOffsetSamples.map { $0.value }.max() ?? 0)))
+
+        let fpsRawSeries = deriveRateSeries(from: samples, cumulative: \ .framesDisplayed, minWindowSeconds: 0.75, maxRate: 120)
+        let fpsSmoothedSeries = smoothMetricSeries(fpsRawSeries, alpha: 0.3)
+        let droppedRawSeries = deriveRateSeries(from: samples, cumulative: \ .framesDropped, minWindowSeconds: 0.75, maxRate: 120)
+        let droppedSmoothedSeries = smoothMetricSeries(droppedRawSeries, alpha: 0.35)
+        let fpsValues = fpsSmoothedSeries.map { $0.value }.filter { $0.isFinite && $0 >= 0 }
+        let droppedValues = droppedSmoothedSeries.map { $0.value }.filter { $0.isFinite && $0 >= 0 }
+        let sortedFps = fpsValues.sorted()
+        let baselineIndex: Int? = sortedFps.isEmpty ? nil : max(0, min(sortedFps.count - 1, Int(Double(sortedFps.count) * 0.75)))
+        let fpsBaseline = baselineIndex != nil ? sortedFps[baselineIndex!] : 30
+        let lowFpsThreshold = max(8, fpsBaseline * 0.75)
+        let fpsLowSeries = fpsSmoothedSeries.filter { $0.value < lowFpsThreshold }
+        let fpsBaselineSeries: [MetricSample] = [
+            MetricSample(timestamp: cutoff, value: fpsBaseline),
+            MetricSample(timestamp: now, value: fpsBaseline)
+        ]
+        let fpsLowThresholdSeries: [MetricSample] = [
+            MetricSample(timestamp: cutoff, value: lowFpsThreshold),
+            MetricSample(timestamp: now, value: lowFpsThreshold)
+        ]
+        let fpsMax = min(120, max(10, fpsBaseline * 1.2, fpsValues.max() ?? 0))
+        let droppedFpsMax = min(30, max(2, droppedValues.max() ?? 0))
+
         return BitrateChartState(
             actualSeries: actualSeries,
             actual1sSeries: actual1sSeries,
             activeSeries: activeSeries,
             playerEstimate: playerEstimate,
             renditionSeries: renditionSeries,
+            serverRenditionSeries: serverRenditionSeries,
             observedSeries: observedSeries,
             indicatedSeries: indicatedSeries,
             averageVideoSeries: averageVideoSeries,
             targetSeries: targetSeries,
             bufferSamples: bufferSamples,
             liveOffsetSamples: liveOffsetSamples,
+            fpsSamples: fpsSmoothedSeries,
+            fpsLowSamples: fpsLowSeries,
+            fpsBaselineSamples: fpsBaselineSeries,
+            fpsLowThresholdSamples: fpsLowThresholdSeries,
+            droppedFramesRateSamples: droppedSmoothedSeries,
             maxY: maxY,
             bufferMax: bufferMax,
+            fpsMax: fpsMax,
+            droppedFpsMax: droppedFpsMax,
+            fpsBaseline: fpsBaseline,
+            fpsLowThreshold: lowFpsThreshold,
             targetRate: targetRate
         )
+    }
+
+    private func deriveRateSeries(
+        from samples: [BandwidthSample],
+        cumulative: KeyPath<BandwidthSample, Double?>,
+        minWindowSeconds: TimeInterval,
+        maxRate: Double
+    ) -> [MetricSample] {
+        var anchorTime: Date?
+        var anchorValue: Double?
+        var out: [MetricSample] = []
+        for sample in samples.sorted(by: { $0.timestamp < $1.timestamp }) {
+            guard let current = sample[keyPath: cumulative], current.isFinite else { continue }
+            guard let previousTime = anchorTime, let previousValue = anchorValue else {
+                anchorTime = sample.timestamp
+                anchorValue = current
+                continue
+            }
+            let dt = sample.timestamp.timeIntervalSince(previousTime)
+            let dv = current - previousValue
+            if !dt.isFinite || dt <= 0 || dv < 0 {
+                anchorTime = sample.timestamp
+                anchorValue = current
+                continue
+            }
+            if dt < minWindowSeconds {
+                continue
+            }
+            let rate = dv / dt
+            if !rate.isFinite || rate < 0 || rate > maxRate {
+                anchorTime = sample.timestamp
+                anchorValue = current
+                continue
+            }
+            out.append(MetricSample(timestamp: sample.timestamp, value: rate))
+            anchorTime = sample.timestamp
+            anchorValue = current
+        }
+        return out
+    }
+
+    private func smoothMetricSeries(_ samples: [MetricSample], alpha: Double) -> [MetricSample] {
+        var smoothed: [MetricSample] = []
+        var last: Double?
+        for sample in samples {
+            if let current = last {
+                let next = (alpha * sample.value) + ((1 - alpha) * current)
+                smoothed.append(MetricSample(timestamp: sample.timestamp, value: next))
+                last = next
+            } else {
+                smoothed.append(sample)
+                last = sample.value
+            }
+        }
+        return smoothed
     }
 
     private var groupControls: some View {
@@ -504,6 +599,11 @@ struct TestingSessionView: View {
             ("Video Bitrate", formatMbpsValue(metricDouble(session, "player_metrics_video_bitrate_mbps"))),
             ("Network Bitrate", formatMbpsValue(metricDouble(session, "player_metrics_network_bitrate_mbps"))),
             ("Video Quality", formatPercentValue(metricDouble(session, "player_metrics_video_quality_pct"))),
+            ("Loop Count", metricInt(session, "player_metrics_loop_count_player").map(String.init) ?? "—"),
+            ("Loop Increment", metricInt(session, "player_metrics_loop_count_increment").map(String.init) ?? "—"),
+            ("Profile Shifts", metricInt(session, "player_metrics_profile_shift_count").map(String.init) ?? "—"),
+            ("Frames Displayed", metricDouble(session, "player_metrics_frames_displayed").map { String(format: "%.0f", $0) } ?? "—"),
+            ("Dropped Frames", metricDouble(session, "player_metrics_dropped_frames").map { String(format: "%.0f", $0) } ?? "—"),
             ("Stalls", metricInt(session, "player_metrics_stall_count").map(String.init) ?? "—"),
             ("Stall Time", formatSeconds3(metricDouble(session, "player_metrics_stall_time_s"))),
             ("Last Stall Time", formatSeconds3(metricDouble(session, "player_metrics_last_stall_time_s"))),
@@ -1535,14 +1635,24 @@ struct BitrateChartState {
     let activeSeries: [MetricSample]
     let playerEstimate: [MetricSample]
     let renditionSeries: [MetricSample]
+    let serverRenditionSeries: [MetricSample]
     let observedSeries: [MetricSample]
     let indicatedSeries: [MetricSample]
     let averageVideoSeries: [MetricSample]
     let targetSeries: [MetricSample]
     let bufferSamples: [MetricSample]
     let liveOffsetSamples: [MetricSample]
+    let fpsSamples: [MetricSample]
+    let fpsLowSamples: [MetricSample]
+    let fpsBaselineSamples: [MetricSample]
+    let fpsLowThresholdSamples: [MetricSample]
+    let droppedFramesRateSamples: [MetricSample]
     let maxY: Double
     let bufferMax: Double
+    let fpsMax: Double
+    let droppedFpsMax: Double
+    let fpsBaseline: Double
+    let fpsLowThreshold: Double
     let targetRate: Double?
 }
 
@@ -1556,14 +1666,21 @@ struct BitrateChartPanel: View {
     private let colorActive = Color(red: 16.0 / 255.0, green: 185.0 / 255.0, blue: 129.0 / 255.0)
     private let colorPlayer = Color(red: 99.0 / 255.0, green: 102.0 / 255.0, blue: 241.0 / 255.0)
     private let colorRendition = Color(red: 239.0 / 255.0, green: 68.0 / 255.0, blue: 68.0 / 255.0)
+    private let colorServerRendition = Color(red: 180.0 / 255.0, green: 83.0 / 255.0, blue: 9.0 / 255.0)
     private let colorLimit = Color(red: 245.0 / 255.0, green: 158.0 / 255.0, blue: 11.0 / 255.0)
     private let colorBuffer = Color(red: 37.0 / 255.0, green: 99.0 / 255.0, blue: 235.0 / 255.0)
     private let colorObserved = Color(red: 20.0 / 255.0, green: 184.0 / 255.0, blue: 166.0 / 255.0)
     private let colorIndicated = Color(red: 232.0 / 255.0, green: 121.0 / 255.0, blue: 249.0 / 255.0)
     private let colorAvgVideo = Color(red: 100.0 / 255.0, green: 116.0 / 255.0, blue: 139.0 / 255.0)
     private let colorLiveOffset = Color(red: 245.0 / 255.0, green: 158.0 / 255.0, blue: 11.0 / 255.0)
+    private let colorFps = Color(red: 126.0 / 255.0, green: 34.0 / 255.0, blue: 206.0 / 255.0)
+    private let colorFpsLow = Color(red: 220.0 / 255.0, green: 38.0 / 255.0, blue: 38.0 / 255.0)
+    private let colorFpsBaseline = Color(red: 71.0 / 255.0, green: 85.0 / 255.0, blue: 105.0 / 255.0)
+    private let colorFpsThreshold = Color(red: 185.0 / 255.0, green: 28.0 / 255.0, blue: 28.0 / 255.0)
+    private let colorDroppedFps = Color(red: 234.0 / 255.0, green: 88.0 / 255.0, blue: 12.0 / 255.0)
     @State private var hiddenSeries: Set<String> = []
     @State private var hiddenBufferSeries: Set<String> = []
+    @State private var hiddenFpsSeries: Set<String> = []
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -1599,6 +1716,7 @@ struct BitrateChartPanel: View {
                 "Active (18s)": colorActive,
                 "Player est.": colorPlayer,
                 "Rendition": colorRendition,
+                "Server Rendition": colorServerRendition,
                 "Observed": colorObserved,
                 "Indicated": colorIndicated,
                 "Avg Video": colorAvgVideo,
@@ -1635,6 +1753,39 @@ struct BitrateChartPanel: View {
             .chartYScale(domain: 0...state.bufferMax)
             .frame(height: 160)
             legendGrid(series: bufferSeries, hiddenSet: $hiddenBufferSeries)
+
+            Text("FPS baseline \(String(format: "%.1f", state.fpsBaseline)) · low < \(String(format: "%.1f", state.fpsLowThreshold)) · dropped max \(String(format: "%.2f", state.droppedFpsMax))/s")
+                .font(.caption2)
+                .foregroundColor(.secondary)
+
+            Chart {
+                ForEach(fpsSeries) { series in
+                    if !hiddenFpsSeries.contains(series.label) {
+                        ForEach(series.samples) { sample in
+                            LineMark(
+                                x: .value("Time", sample.timestamp),
+                                y: .value(series.label, sample.value)
+                            )
+                            .foregroundStyle(by: .value("Series", series.label))
+                            .lineStyle(StrokeStyle(lineWidth: series.lineWidth, dash: series.dash))
+                            .interpolationMethod(series.interpolation)
+                        }
+                    }
+                }
+            }
+            .chartLegend(.hidden)
+            .chartForegroundStyleScale([
+                "FPS (smoothed)": colorFps,
+                "Low FPS": colorFpsLow,
+                "FPS Baseline": colorFpsBaseline,
+                "Low Threshold": colorFpsThreshold,
+                "Dropped Frames/s": colorDroppedFps
+            ])
+            .chartXScale(domain: cutoff...now)
+            .chartYAxisLabel("Frames/s", alignment: .leading)
+            .chartYScale(domain: 0...max(state.fpsMax, state.droppedFpsMax))
+            .frame(height: 170)
+            legendGrid(series: fpsSeries, hiddenSet: $hiddenFpsSeries)
         }
     }
 
@@ -1662,6 +1813,7 @@ struct BitrateChartPanel: View {
             ChartSeries(label: "Active (18s)", samples: state.activeSeries, color: colorActive, lineWidth: 1.5, dash: [], interpolation: .linear),
             ChartSeries(label: "Player est.", samples: state.playerEstimate, color: colorPlayer, lineWidth: 1.5, dash: [6, 4], interpolation: .linear),
             ChartSeries(label: "Rendition", samples: state.renditionSeries, color: colorRendition, lineWidth: 1.5, dash: [3, 3], interpolation: .linear),
+            ChartSeries(label: "Server Rendition", samples: state.serverRenditionSeries, color: colorServerRendition, lineWidth: 1.5, dash: [10, 4], interpolation: .linear),
             ChartSeries(label: "Observed", samples: state.observedSeries, color: colorObserved, lineWidth: 1.5, dash: [], interpolation: .linear),
             ChartSeries(label: "Indicated", samples: state.indicatedSeries, color: colorIndicated, lineWidth: 1.5, dash: [], interpolation: .linear),
             ChartSeries(label: "Avg Video", samples: state.averageVideoSeries, color: colorAvgVideo, lineWidth: 1.5, dash: [], interpolation: .linear),
@@ -1678,6 +1830,16 @@ struct BitrateChartPanel: View {
         [
             ChartSeries(label: "Buffer Depth", samples: state.bufferSamples, color: colorBuffer, lineWidth: 2, dash: [], interpolation: .linear),
             ChartSeries(label: "Live Offset", samples: state.liveOffsetSamples, color: colorLiveOffset, lineWidth: 1.5, dash: [6, 4], interpolation: .linear)
+        ].filter { !$0.samples.isEmpty }
+    }
+
+    private var fpsSeries: [ChartSeries] {
+        [
+            ChartSeries(label: "FPS (smoothed)", samples: state.fpsSamples, color: colorFps, lineWidth: 2.2, dash: [], interpolation: .linear),
+            ChartSeries(label: "Low FPS", samples: state.fpsLowSamples, color: colorFpsLow, lineWidth: 2.0, dash: [], interpolation: .linear),
+            ChartSeries(label: "FPS Baseline", samples: state.fpsBaselineSamples, color: colorFpsBaseline, lineWidth: 1.0, dash: [6, 4], interpolation: .linear),
+            ChartSeries(label: "Low Threshold", samples: state.fpsLowThresholdSamples, color: colorFpsThreshold, lineWidth: 1.0, dash: [3, 4], interpolation: .linear),
+            ChartSeries(label: "Dropped Frames/s", samples: state.droppedFramesRateSamples, color: colorDroppedFps, lineWidth: 1.8, dash: [5, 3], interpolation: .linear)
         ].filter { !$0.samples.isEmpty }
     }
 

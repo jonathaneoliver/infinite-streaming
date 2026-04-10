@@ -273,8 +273,43 @@ def generate_master_playlist(dash_info, output_dir, package_name):
     lines.append("")
     lines.append("# Video variants")
 
+    def rep_average_bandwidth(rep_info):
+        """Compute average bitrate (bps) from rep segments + init map."""
+        total_duration = 0.0
+        total_bytes = 0
+
+        init_segment = rep_info.get("init_segment")
+        if init_segment:
+            init_path = output_dir / init_segment
+            if init_path.exists():
+                total_bytes += init_path.stat().st_size
+
+        for seg in rep_info.get("segments", []):
+            seg_duration = float(seg.get("duration", 0.0) or 0.0)
+            seg_url = seg.get("url")
+            if seg_duration <= 0 or not seg_url:
+                continue
+            seg_path = output_dir / seg_url
+            if not seg_path.exists():
+                continue
+            total_duration += seg_duration
+            total_bytes += seg_path.stat().st_size
+
+        if total_duration <= 0 or total_bytes <= 0:
+            return 0
+        return int(round((total_bytes * 8.0) / total_duration))
+
+    audio_average_bandwidth = 0
+    audio_peak_bandwidth = 0
+    if audio_reps:
+        # Master references a single default audio rendition; use its measured average.
+        audio_average_bandwidth = rep_average_bandwidth(audio_reps[0])
+        audio_peak_bandwidth = max(int(r.get("bandwidth", 0) or 0) for r in audio_reps)
+        if audio_peak_bandwidth <= 0:
+            audio_peak_bandwidth = audio_average_bandwidth
+
     for video_rep in video_reps:
-        bandwidth = video_rep["bandwidth"]
+        video_bandwidth = int(video_rep.get("bandwidth", 0) or 0)
         codecs = video_rep["codecs"]
         width = video_rep["width"]
         height = video_rep["height"]
@@ -286,8 +321,17 @@ def generate_master_playlist(dash_info, output_dir, package_name):
         # Variant playlist goes in resolution subdirectory
         variant_playlist = f"{res_name.lower()}/playlist.m3u8"
 
+        # Include default audio rendition bitrate in both peak and average values.
+        bandwidth = video_bandwidth + audio_peak_bandwidth
+        if bandwidth <= 0:
+            bandwidth = rep_average_bandwidth(video_rep) + audio_average_bandwidth
+
+        average_bandwidth = rep_average_bandwidth(video_rep) + audio_average_bandwidth
+
         # Build stream info
         stream_info = f"#EXT-X-STREAM-INF:BANDWIDTH={bandwidth}"
+        if average_bandwidth > 0:
+            stream_info += f",AVERAGE-BANDWIDTH={average_bandwidth}"
 
         if width and height:
             stream_info += f",RESOLUTION={width}x{height}"

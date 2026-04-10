@@ -28,6 +28,10 @@ final class PlaybackDiagnostics: ObservableObject {
     @Published var observedBitrate: Double?
     @Published var indicatedBitrate: Double?
     @Published var averageVideoBitrate: Double?
+    @Published var droppedVideoFrames: Double?
+    @Published var estimatedDisplayedFrames: Double?
+    @Published var nominalFrameRate: Double?
+    @Published var loopCountPlayer: Int = 0
     @Published var lastSegmentURI: String = ""
     @Published var lastError: String = ""
     @Published var itemStatus: String = "Unknown"
@@ -53,6 +57,8 @@ final class PlaybackDiagnostics: ObservableObject {
     private var lastPlayerSampleAt: Date?
     private var stallStartAt: Date?
     private var hasRenderedFirstFrame: Bool = false
+    private var lastObservedSegmentSequence: Int?
+    private var maxObservedSegmentSequence: Int?
     private let maxSeriesSamples = 600
     private let seriesWindowSeconds: TimeInterval = 300
 
@@ -81,6 +87,10 @@ final class PlaybackDiagnostics: ObservableObject {
         observedBitrate = nil
         indicatedBitrate = nil
         averageVideoBitrate = nil
+        droppedVideoFrames = nil
+        estimatedDisplayedFrames = nil
+        nominalFrameRate = nil
+        loopCountPlayer = 0
         lastSegmentURI = ""
         lastError = ""
         itemStatus = "Unknown"
@@ -102,6 +112,8 @@ final class PlaybackDiagnostics: ObservableObject {
         lastPlayerSampleAt = nil
         stallStartAt = nil
         hasRenderedFirstFrame = false
+        lastObservedSegmentSequence = nil
+        maxObservedSegmentSequence = nil
     }
 
     func markFirstFrameRendered() {
@@ -214,6 +226,14 @@ final class PlaybackDiagnostics: ObservableObject {
         if let itemError = item.error {
             self.itemError = describeError(itemError)
         }
+        if nominalFrameRate == nil || (nominalFrameRate ?? 0) <= 0 {
+            if let track = item.asset.tracks(withMediaType: .video).first {
+                let fps = Double(track.nominalFrameRate)
+                if fps > 0 {
+                    nominalFrameRate = fps
+                }
+            }
+        }
     }
 
     func updateDisplaySize(_ size: CGSize) {
@@ -281,6 +301,23 @@ final class PlaybackDiagnostics: ObservableObject {
         averageVideoBitrate = event.averageVideoBitrate
         if let uri = event.uri {
             lastSegmentURI = uri
+            if let sequence = extractSegmentSequence(from: uri) {
+                if let previous = lastObservedSegmentSequence,
+                   let maxSeen = maxObservedSegmentSequence,
+                   maxSeen >= 5,
+                   sequence+5 < previous {
+                    loopCountPlayer = max(0, loopCountPlayer) + 1
+                }
+                if let maxSeen = maxObservedSegmentSequence {
+                    maxObservedSegmentSequence = max(maxSeen, sequence)
+                } else {
+                    maxObservedSegmentSequence = sequence
+                }
+                lastObservedSegmentSequence = sequence
+            }
+        }
+        if event.numberOfDroppedVideoFrames > 0 {
+            droppedVideoFrames = event.numberOfDroppedVideoFrames
         }
         // Samples are collected on a steady interval in samplePlayerMetrics().
         var parts: [String] = []
@@ -293,6 +330,7 @@ final class PlaybackDiagnostics: ObservableObject {
         if event.averageVideoBitrate > 0 { parts.append("avgVideo=\(formatBps(event.averageVideoBitrate))") }
         if event.transferDuration > 0 { parts.append("xfer=\(String(format: "%.2fs", event.transferDuration))") }
         if event.numberOfBytesTransferred > 0 { parts.append("bytes=\(event.numberOfBytesTransferred)") }
+        if event.numberOfDroppedVideoFrames > 0 { parts.append("dropped=\(Int(event.numberOfDroppedVideoFrames))") }
         // numberOfSegmentsDownloaded is unavailable on iOS/tvOS; omit.
         if let server = event.serverAddress { parts.append("server=\(server)") }
         if let session = event.playbackSessionID { parts.append("session=\(session)") }
@@ -344,6 +382,11 @@ final class PlaybackDiagnostics: ObservableObject {
             if let average = averageVideoBitrate, average > 0 {
                 appendSample(MetricSample(timestamp: now, value: average / 1_000_000), to: &averageVideoBitrateSamples)
             }
+            if let fps = nominalFrameRate, fps > 0 {
+                let dropped = droppedVideoFrames ?? 0
+                let estimated = max(0, (currentTime * fps) - dropped)
+                estimatedDisplayedFrames = estimated
+            }
             let variant = (indicatedBitrate ?? 0) > 0 ? (indicatedBitrate ?? 0) : (averageVideoBitrate ?? 0)
             if variant > 0 {
                 appendSample(MetricSample(timestamp: now, value: variant / 1_000_000), to: &variantBitrateSamples)
@@ -366,6 +409,21 @@ final class PlaybackDiagnostics: ObservableObject {
             return String(format: "%.0fKbps", bps / 1_000)
         }
         return String(format: "%.0fbps", bps)
+    }
+
+    private func extractSegmentSequence(from uri: String) -> Int? {
+        guard let components = URLComponents(string: uri) else { return nil }
+        let path = components.path
+        guard !path.isEmpty else { return nil }
+        var filename = (path as NSString).lastPathComponent
+        guard !filename.isEmpty else { return nil }
+        let stem = (filename as NSString).deletingPathExtension
+        if !stem.isEmpty {
+            filename = stem
+        }
+        let matches = filename.matches(of: /\d+/)
+        guard let token = matches.last else { return nil }
+        return Int(String(token.output))
     }
 
     private func formatURLParts(_ uri: String) -> [String] {

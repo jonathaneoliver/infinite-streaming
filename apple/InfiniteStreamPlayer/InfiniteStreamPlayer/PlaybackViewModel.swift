@@ -5,6 +5,12 @@ import Foundation
 
 @MainActor
 final class PlaybackViewModel: ObservableObject {
+    private static let metricsTimestampFormatter: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
+    }()
+
     @Published var baseURLString: String = "http://100.111.190.54:40081" {
         didSet {
             persist(.baseURL, baseURLString)
@@ -47,6 +53,11 @@ final class PlaybackViewModel: ObservableObject {
     @Published var prefer4kNative: Bool = false {
         didSet { persist(.prefer4kNative, prefer4kNative ? "true" : "false") }
     }
+    @Published var autoRecoveryEnabled: Bool = false {
+        didSet { persist(.autoRecoveryEnabled, autoRecoveryEnabled ? "true" : "false") }
+    }
+    @Published var playerRestarts: Int = 0
+    @Published var profileShiftCount: Int = 0
 
     let player = AVPlayer()
     let diagnostics = PlaybackDiagnostics()
@@ -66,8 +77,13 @@ final class PlaybackViewModel: ObservableObject {
     private var playingReported: Bool = false
     private var lastReportedStallCount: Int = 0
     private var lastReportedStallDuration: Double = 0
+    private var lastReportedLoopCount: Int = 0
     private let metricsHeartbeatSeconds: TimeInterval = 5
     private let metricsSessionLookupSeconds: TimeInterval = 30
+    private let autoRecoveryThresholdSeconds: TimeInterval = 60
+    private let autoRecoveryCooldownSeconds: TimeInterval = 60
+    private var zeroBufferStartedAt: Date?
+    private var lastAutoRecoveryRestartAt: Date?
     private let diagnosticsProbesEnabled = false
     private let logPlaylistsOnPlay = false
     private let masterPreflightEnabled = true
@@ -190,7 +206,19 @@ final class PlaybackViewModel: ObservableObject {
         reload()
     }
 
-    func restartPlayback() {
+    func restartPlayback(reason: String = "manual") {
+        playerRestarts = max(0, playerRestarts) + 1
+        if reason == "auto_recovery_zero_buffer" {
+            lastAutoRecoveryRestartAt = Date()
+            zeroBufferStartedAt = nil
+        }
+        Task {
+            await sendPlayerMetrics(event: "restart", extra: [
+                "player_metrics_restart_reason": reason,
+                "player_restarts": playerRestarts,
+                "player_auto_recovery_enabled": autoRecoveryEnabled
+            ])
+        }
         player.pause()
         player.replaceCurrentItem(with: nil)
         reload()
@@ -317,6 +345,8 @@ final class PlaybackViewModel: ObservableObject {
         lastReportedStallCount = 0
         lastReportedStallDuration = 0
         lastReportedRenditionMbps = nil
+        lastReportedLoopCount = 0
+        profileShiftCount = 0
         metricsSessionId = nil
         metricsLastSessionLookup = nil
         log("AVPlayerItem created for \(url.absoluteString)")
@@ -405,6 +435,7 @@ final class PlaybackViewModel: ObservableObject {
         case playbackBaseURL = "bossPlaybackBaseURL"
         case playerId = "bossPlayerId"
         case prefer4kNative = "bossPrefer4kNative"
+        case autoRecoveryEnabled = "bossAutoRecovery"
     }
 
     private func loadDefaults() {
@@ -446,6 +477,9 @@ final class PlaybackViewModel: ObservableObject {
         }
         if let storedPrefer4k = defaults.string(forKey: DefaultsKey.prefer4kNative.rawValue) {
             prefer4kNative = storedPrefer4k == "true"
+        }
+        if let storedAutoRecovery = defaults.string(forKey: DefaultsKey.autoRecoveryEnabled.rawValue) {
+            autoRecoveryEnabled = storedAutoRecovery == "true"
         }
     }
 
@@ -627,8 +661,49 @@ final class PlaybackViewModel: ObservableObject {
     private func startMetricsHeartbeat() {
         metricsHeartbeatTimer?.invalidate()
         metricsHeartbeatTimer = Timer.scheduledTimer(withTimeInterval: metricsHeartbeatSeconds, repeats: true) { [weak self] _ in
-            Task { await self?.sendPlayerMetrics(event: "heartbeat") }
+            Task {
+                self?.evaluateAutoRecoveryIfNeeded()
+                await self?.sendPlayerMetrics(event: "heartbeat")
+            }
         }
+    }
+
+    private func evaluateAutoRecoveryIfNeeded() {
+        guard autoRecoveryEnabled else {
+            zeroBufferStartedAt = nil
+            return
+        }
+        guard !currentURL.isEmpty else {
+            zeroBufferStartedAt = nil
+            return
+        }
+        guard player.timeControlStatus != .paused else {
+            zeroBufferStartedAt = nil
+            return
+        }
+
+        let depth = diagnostics.bufferDepth ?? -1
+        if depth > 0.01 {
+            zeroBufferStartedAt = nil
+            return
+        }
+
+        let now = Date()
+        if zeroBufferStartedAt == nil {
+            zeroBufferStartedAt = now
+            return
+        }
+        let zeroDuration = now.timeIntervalSince(zeroBufferStartedAt ?? now)
+        if zeroDuration < autoRecoveryThresholdSeconds {
+            return
+        }
+        if let last = lastAutoRecoveryRestartAt,
+           now.timeIntervalSince(last) < autoRecoveryCooldownSeconds {
+            return
+        }
+
+        log("Auto-recovery: restarting playback after \(Int(zeroDuration))s at zero buffer depth")
+        restartPlayback(reason: "auto_recovery_zero_buffer")
     }
 
     private func handleRenditionShift(indicated: Double?, average: Double?) {
@@ -637,10 +712,12 @@ final class PlaybackViewModel: ObservableObject {
         let mbps = roundMetric(bps / 1_000_000)
         if let previous = lastReportedRenditionMbps {
             if mbps != previous {
+                profileShiftCount = max(0, profileShiftCount) + 1
                 Task {
                     await sendPlayerMetrics(event: "video_bitrate_change", extra: [
                         "player_metrics_video_bitrate_from_mbps": previous,
-                        "player_metrics_video_bitrate_to_mbps": mbps
+                        "player_metrics_video_bitrate_to_mbps": mbps,
+                        "player_metrics_profile_shift_count": profileShiftCount
                     ])
                 }
             }
@@ -705,12 +782,16 @@ final class PlaybackViewModel: ObservableObject {
     }
 
     private func buildMetricsPayload(event: String, extra: [String: Any]) -> [String: Any] {
+        let timestamp = Self.metricsTimestampFormatter.string(from: Date())
+        let loopCount = max(0, diagnostics.loopCountPlayer)
+        let loopIncrement = max(0, loopCount - lastReportedLoopCount)
+        lastReportedLoopCount = loopCount
         var payload: [String: Any?] = [
             "player_metrics_source": "ios",
             "player_metrics_last_event": event,
             "player_metrics_trigger_type": event,
-            "player_metrics_last_event_at": ISO8601DateFormatter().string(from: Date()),
-            "player_metrics_event_time": ISO8601DateFormatter().string(from: Date()),
+            "player_metrics_last_event_at": timestamp,
+            "player_metrics_event_time": timestamp,
             "player_metrics_state": diagnostics.state,
             "player_metrics_position_s": roundSeconds(diagnostics.currentTime),
             "player_metrics_playback_rate": roundMetric(Double(diagnostics.playbackRate)),
@@ -726,6 +807,13 @@ final class PlaybackViewModel: ObservableObject {
             "player_metrics_stall_count": diagnostics.stallCount,
             "player_metrics_stall_time_s": roundSeconds(diagnostics.stallTimeSeconds),
             "player_metrics_last_stall_time_s": roundSeconds(diagnostics.lastStallDurationSeconds),
+            "player_metrics_frames_displayed": diagnostics.estimatedDisplayedFrames.map { roundMetric($0) },
+            "player_metrics_dropped_frames": diagnostics.droppedVideoFrames.map { roundMetric($0) },
+            "player_metrics_loop_count_player": loopCount,
+            "player_metrics_loop_count_increment": loopIncrement,
+            "player_metrics_profile_shift_count": profileShiftCount,
+            "player_restarts": playerRestarts,
+            "player_auto_recovery_enabled": autoRecoveryEnabled,
             "player_metrics_video_bitrate_mbps": mbps(from: diagnostics.indicatedBitrate ?? diagnostics.averageVideoBitrate),
             "player_metrics_network_bitrate_mbps": mbps(from: diagnostics.observedBitrate)
         ]

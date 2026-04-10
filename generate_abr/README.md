@@ -10,3 +10,5 @@
 ## Notes
 - Legacy test scripts (avsync, LL-HLS tests, etc.) were removed.
 - Output is written under the target content directory in `dynamic_content`.
+- Encoding characterization runs and raw sweep tables are documented in:
+  - `generate_abr/ENCODING_CHARACTERIZATION.md`

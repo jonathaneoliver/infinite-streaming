@@ -209,6 +209,14 @@ Controls:
 - **Reload Page**: full page reload with current query params.
 - **Player selector**: choose HLS.js, Shaka, Video.js, Native, or Auto.
 
+Player Characterization (ABR ramp testing):
+- Open the **Player Characterization** collapsible in the Testing session card.
+- **Network overhead selector** chooses wire-overhead assumption for limit generation (`5%` or `10%`).
+- Limits are generated from adjacent ladder variants after overhead adjustment:
+  - `wire_variant_mbps = media_variant_mbps / (1 - overhead_pct)`
+  - interpolation points between each adjacent pair: `0%, 5%, 10%, 25%, 50%, 75%, 90%, 95%`
+- This targets realistic wire throughput thresholds for down/up-switch characterization instead of raw media bitrates.
+
 Failure injection (per session):
 - Set **Failure Type** (must be non‑none to activate failures).
 - Set **Units** (Requests / Seconds / Failures‑per‑Seconds).
@@ -262,11 +270,22 @@ See `PRD.md` for the full list.
 
 ### Wire metric implementation notes
 - Sampling cadence is 100ms and metrics are computed from `tc` class counters per session port.
+- Scope clarification: these counters include packet-level transport/application overhead that traverses the measured interface (for example TCP/IP headers and TLS/HTTP bytes), but do not include physical link-layer overhead (for example Ethernet preamble/IFG/FCS).
 - `mbps_wire_sustained` and `mbps_wire_sustained_18s` are equivalent 18s wall‑time sustained rates: total bytes / wall time in the window.
 - `mbps_wire_active` reports active‑only throughput for the 18s window (idle periods excluded).
 - `mbps_wire_sustained_6s` and `mbps_wire_sustained_1s` are wall‑time sustained variants for shorter windows.
 - `mbps_wire_throughput` is the rolling max over the last 6 seconds of `mbps_wire_active_1s`.
 - Session hydration selects the freshest throughput sample across external/internal session ports to avoid stale values.
+
+### Metric semantics (expected differences)
+- **Limit value** (`nftables` shaping rate): configured ceiling for the session port; this is the control target, not a measured throughput.
+- **Wire throughput value** (`mbps_wire_*`, especially `mbps_wire_throughput`): measured bytes on the shaped interface over time windows; includes transport/application overhead seen by `tc` counters.
+- **Player estimate value** (`player_metrics_network_bitrate_mbps`): player-side ABR estimate inferred by the player algorithm; this is model-based and can lag/lead observed wire metrics.
+
+Expected behavior under steady conditions:
+- `wire throughput` should approach but usually stay below `limit`.
+- `player estimate` should broadly track `wire throughput` trends but may be smoother/noisier depending on player.
+- Temporary divergence is normal during startup, stalls, retransmissions, or step transitions.
 
 ## Why unified error injection?
 Many environments already provide failure simulation (player debug tools, OS/Browser dev tools, routers, or lab network appliances). InfiniteStream still ships a unified error injection layer because it:
