@@ -97,29 +97,29 @@ To enable publishing in your fork:
 
 ## Host filesystem & content
 
-InfiniteStream expects a **host-mounted volume** for originals and encoded outputs. In `docker-compose.yml` this is typically mapped to `/boss` inside the container:
+InfiniteStream expects a **host-mounted volume** for originals and encoded outputs. In `docker-compose.yml` this is typically mapped to `/media` inside the container:
 
 - **Host path** (example): `/Volumes/4TB/Boss`
-- **Container path**: `/boss`
+- **Container path**: `/media`
 
-Directory layout inside `/boss`:
+Directory layout inside `/media`:
 
-- `/boss/originals` — source files (MP4, MOV, etc.)
-- `/boss/dynamic_content/{content}` — encoded outputs
+- `/media/originals` — source files (MP4, MOV, etc.)
+- `/media/dynamic_content/{content}` — encoded outputs
 
 ### How to add content
 
 **Option A — Web upload**
 1) Open **Upload Content** in the dashboard.
 2) Choose a file and encoding options.
-3) The server writes the source into `/boss/originals` and the encoded ladder into `/boss/dynamic_content`.
+3) The server writes the source into `/media/originals` and the encoded ladder into `/media/dynamic_content`.
 
 **Option B — Copy directly**
 1) Copy files into the host folder (e.g. `/Volumes/4TB/Boss/originals`).
 2) The content will appear in **Source Library** on refresh.
 3) You can then trigger encodes from the UI or run the encoding scripts manually.
 
-> Tip: If you copy into `/boss/originals` while the server is running, just refresh the Source Library page to see new items.
+> Tip: If you copy into `/media/originals` while the server is running, just refresh the Source Library page to see new items.
 
 
 ## Services

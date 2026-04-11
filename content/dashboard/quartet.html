@@ -293,8 +293,8 @@
     </style>
     <link rel="stylesheet" href="/dashboard/content-control.css">
 </head>
-<body data-boss-active-page="quartet">
-    <div class="boss-content-wide">
+<body data-ism-active-page="quartet">
+    <div class="ism-content-wide">
         <div class="page-header">
             <h1 class="page-title">Quartet - Stream Comparison</h1>
         </div>
@@ -852,7 +852,7 @@
                     view1Content.appendChild(option);
                 });
 
-                const stored = localStorage.getItem('bossSelectedContentBase') || localStorage.getItem('bossSelectedContent');
+                const stored = localStorage.getItem('ismSelectedContentBase') || localStorage.getItem('ismSelectedContent');
                 const normalized = stored
                     ? stored.replace(/_(h264|hevc|av1|dash|ts|hw)$/i, '').replace(/_\d{8}_\d{6}$/i, '')
                     : null;
@@ -872,9 +872,9 @@
                     view3Content.value = defaultContent;
                 }
 
-                const storedProtocol = localStorage.getItem('bossSelectedProtocol') || '';
-                const storedCodec = localStorage.getItem('bossSelectedCodec') || '';
-                const storedSegment = localStorage.getItem('bossSelectedSegment') || '';
+                const storedProtocol = localStorage.getItem('ismSelectedProtocol') || '';
+                const storedCodec = localStorage.getItem('ismSelectedCodec') || '';
+                const storedSegment = localStorage.getItem('ismSelectedSegment') || '';
                 const preferredCodec = storedCodec || 'h264';
                 const preferredProtocol = storedProtocol || 'hls';
                 const preferredSegment = storedSegment || 'll';
@@ -1399,8 +1399,8 @@
             CONFIG.view2.content = content;
             CONFIG.view3.content = content;
             if (content) {
-                localStorage.setItem('bossSelectedContentBase', content);
-                localStorage.setItem('bossSelectedContent', content);
+                localStorage.setItem('ismSelectedContentBase', content);
+                localStorage.setItem('ismSelectedContent', content);
                 if (window.BOSSNav && typeof window.BOSSNav.updateSelectedContentBadge === 'function') {
                     window.BOSSNav.updateSelectedContentBadge();
                 }
@@ -1438,9 +1438,9 @@
             const segment = document.getElementById('view1-segment').value;
             CONFIG.view1.encoding = encodingKey(protocol, codec);
             CONFIG.view1.segment = segment;
-            localStorage.setItem('bossSelectedProtocol', protocol);
-            localStorage.setItem('bossSelectedCodec', codec);
-            localStorage.setItem('bossSelectedSegment', segment);
+            localStorage.setItem('ismSelectedProtocol', protocol);
+            localStorage.setItem('ismSelectedCodec', codec);
+            localStorage.setItem('ismSelectedSegment', segment);
             
             console.log('View 1 changed:', CONFIG.view1);
             
@@ -1565,7 +1565,7 @@
             if (window.BOSSNav && typeof window.BOSSNav.setSelectedUrl === 'function') {
                 window.BOSSNav.setSelectedUrl(masterUrl);
             } else {
-                localStorage.setItem('bossSelectedUrl', masterUrl);
+                localStorage.setItem('ismSelectedUrl', masterUrl);
             }
             
             console.log('View 1: Fetching master playlist:', masterUrl);
@@ -1744,7 +1744,7 @@
             if (window.BOSSNav && typeof window.BOSSNav.setSelectedUrl === 'function') {
                 window.BOSSNav.setSelectedUrl(firstMasterUrl);
             } else {
-                localStorage.setItem('bossSelectedUrl', firstMasterUrl);
+                localStorage.setItem('ismSelectedUrl', firstMasterUrl);
             }
             
             for (let i = 0; i < 4; i++) {
@@ -1801,9 +1801,9 @@
             CONFIG.view3.encoding = encodingKey(selectedProtocol, selectedCodec);
             CONFIG.view3.segment = selectedSegment;
             CONFIG.view3.player = document.getElementById('view3-player').value;
-            localStorage.setItem('bossSelectedProtocol', selectedProtocol);
-            localStorage.setItem('bossSelectedCodec', selectedCodec);
-            localStorage.setItem('bossSelectedSegment', selectedSegment);
+            localStorage.setItem('ismSelectedProtocol', selectedProtocol);
+            localStorage.setItem('ismSelectedCodec', selectedCodec);
+            localStorage.setItem('ismSelectedSegment', selectedSegment);
             
             const encodingConfig = CONFIG.encodingOptions[CONFIG.view3.encoding];
             const protocol = encodingConfig.protocol;
@@ -1827,7 +1827,7 @@
             if (window.BOSSNav && typeof window.BOSSNav.setSelectedUrl === 'function') {
                 window.BOSSNav.setSelectedUrl(masterUrl);
             } else {
-                localStorage.setItem('bossSelectedUrl', masterUrl);
+                localStorage.setItem('ismSelectedUrl', masterUrl);
             }
             
             console.log('View 3: Fetching master playlist:', masterUrl);

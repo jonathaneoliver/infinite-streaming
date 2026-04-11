@@ -7,9 +7,9 @@ Docker-based HLS/DASH media server for testing video players under various netwo
 
 ## Build & Run Commands
 - **Build**: `make build` or `docker build --no-cache -t infinite-streaming .`
-- **Run**: `make run` or `./boss.sh 1 run` or `docker compose up -d`
-- **Stop**: `make stop` or `./boss.sh 1 stop` or `docker compose down`
-- **Logs**: `docker compose logs -f boss-codex` (when using docker-compose)
+- **Run**: `make run` or `./start.sh 1 run` or `docker compose up -d`
+- **Stop**: `make stop` or `./start.sh 1 stop` or `docker compose down`
+- **Logs**: `docker compose logs -f infinite-streaming` (when using docker-compose)
 - **Shell**: `make shell` (access running container)
 - **Test**: Manual testing via browser at `http://localhost:21081/` (Docker Compose) or `http://lenovo.local:30000/` (k3s)
 
@@ -50,7 +50,7 @@ Go-live manages all live generation and updates internally (no external Python p
 - `go-live/`: LL-HLS/LL-DASH generator
 - `go-upload/`: upload, jobs, content discovery
 - `launch.sh`: container entrypoint
-- `boss-content.conf.template`: nginx routing
+- `nginx-content.conf.template`: nginx routing
 
 ## Skills
 A skill is a set of local instructions to follow that is stored in a `SKILL.md` file. Below is the list of skills that can be used. Each entry includes a name, description, and file path so you can open the source for full instructions when using a specific skill.

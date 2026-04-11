@@ -17,18 +17,18 @@
         }
 
         /* When in fullscreen mode (nav hidden), use black background */
-        .boss-fullscreen body {
+        .ism-fullscreen body {
             overflow: hidden;
             background: #000;
         }
 
         /* Content wrapper for grid page */
-        .boss-content-fullwidth {
+        .ism-content-fullwidth {
             width: 100%;
             padding: 0;
         }
 
-        .boss-fullscreen .boss-content-fullwidth {
+        .ism-fullscreen .ism-content-fullwidth {
             margin-left: 0;
         }
         
@@ -102,7 +102,7 @@
             box-shadow: var(--shadow-md);
         }
 
-        .boss-fullscreen .fullscreen-toggle {
+        .ism-fullscreen .fullscreen-toggle {
             top: 20px;
         }
 
@@ -126,12 +126,12 @@
         }
 
         /* Fullscreen mode - takes full viewport */
-        .boss-fullscreen .grid-container {
+        .ism-fullscreen .grid-container {
             height: 100vh;
         }
 
         /* Normal mode with navigation - account for header */
-        body:not(.boss-fullscreen) .grid-container {
+        body:not(.ism-fullscreen) .grid-container {
             height: calc(100vh - 180px);
             margin-left: 0;
         }
@@ -323,9 +323,9 @@
     </style>
     <link rel="stylesheet" href="/dashboard/content-control.css">
 </head>
-<body data-boss-active-page="grid">
+<body data-ism-active-page="grid">
 
-    <div class="boss-content-fullwidth">
+    <div class="ism-content-fullwidth">
         <div class="page-header">
             <h1 class="page-title">Mosaic</h1>
         <div class="content-control">
@@ -444,7 +444,7 @@
                 if (window.BOSSNav && typeof window.BOSSNav.setSelectedUrl === 'function') {
                     window.BOSSNav.setSelectedUrl(url);
                 } else {
-                    localStorage.setItem('bossSelectedUrl', url);
+                    localStorage.setItem('ismSelectedUrl', url);
                 }
             }
         }
@@ -473,7 +473,7 @@
                     has_dash: item.has_dash,
                     has_hls: item.has_hls,
                     max_resolution: item.max_resolution || null,
-                    max_height: (typeof item.max_height === 'number') ? item.max_height : (localStorage.getItem('bossKnown4k:' + item.name) === 'true' ? 2160 : null)
+                    max_height: (typeof item.max_height === 'number') ? item.max_height : (localStorage.getItem('ismKnown4k:' + item.name) === 'true' ? 2160 : null)
                 }));
                 
                 // Debug: log summary of 4K-capable content detected from server
@@ -579,7 +579,7 @@
         // Apply filters and reload
         function applyFiltersAndReload() {
             const segmentValue = document.getElementById('segmentFilter').value;
-            localStorage.setItem('bossSelectedSegment', segmentValue);
+            localStorage.setItem('ismSelectedSegment', segmentValue);
             const filtered = applyFilters();
             selectedContent = selectContent(filtered, false);
             updateContentInfo();
@@ -605,12 +605,12 @@
             const item = selectedContent[index];
             if (!item) return;
             const fullName = item.name;
-            localStorage.setItem('bossSelectedContent', fullName);
-            localStorage.setItem('bossSelectedContentFull', fullName);
+            localStorage.setItem('ismSelectedContent', fullName);
+            localStorage.setItem('ismSelectedContentFull', fullName);
             const baseName = fullName
                 .replace(/_(h264|hevc|av1|dash|ts|hw)$/i, '')
                 .replace(/_\d{8}_\d{6}$/i, '');
-            localStorage.setItem('bossSelectedContentBase', baseName);
+            localStorage.setItem('ismSelectedContentBase', baseName);
             if (window.BOSSNav && typeof window.BOSSNav.updateSelectedContentBadge === 'function') {
                 window.BOSSNav.updateSelectedContentBadge();
             }
@@ -1163,13 +1163,13 @@
             console.log('Initializing dynamic 4x4 grid...');
             initContextMenu();
             const segmentFilter = document.getElementById('segmentFilter');
-            const storedSegment = localStorage.getItem('bossSelectedSegment');
+            const storedSegment = localStorage.getItem('ismSelectedSegment');
             const allowedSegments = new Set(['ll', '2s', '6s']);
             if (storedSegment && allowedSegments.has(storedSegment)) {
                 segmentFilter.value = storedSegment;
             } else {
                 segmentFilter.value = '6s';
-                localStorage.setItem('bossSelectedSegment', '6s');
+                localStorage.setItem('ismSelectedSegment', '6s');
             }
             
             // Fetch content from REST API first

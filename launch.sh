@@ -10,7 +10,7 @@ serverport="${INFINITE_STREAM_LISTEN_PORT:-${INFINITE_LISTEN_PORT:-${BOSS_LISTEN
 # Generate nginx config from template with environment variable substitution
 export INFINITE_STREAM_OUTPUT_DIR="${INFINITE_STREAM_OUTPUT_DIR:-${INFINITE_OUTPUT_DIR:-${BOSS_OUTPUT_DIR}}}"
 export INFINITE_STREAM_PROXY_HOST="${INFINITE_STREAM_PROXY_HOST:-go-proxy}"
-envsubst '${INFINITE_STREAM_OUTPUT_DIR} ${INFINITE_STREAM_PROXY_HOST}' < /etc/nginx/http.d/boss-content.conf.template > /etc/nginx/http.d/boss-content.conf
+envsubst '${INFINITE_STREAM_OUTPUT_DIR} ${INFINITE_STREAM_PROXY_HOST}' < /etc/nginx/http.d/nginx-content.conf.template > /etc/nginx/http.d/nginx-content.conf
 
 # Start background processes and nginx
 # All processes now log to stdout/stderr for proper Docker log interleaving

@@ -1,4 +1,4 @@
-module github.com/boss/go-upload
+module github.com/jonathaneoliver/infinite-streaming/go-upload
 
 go 1.21
 

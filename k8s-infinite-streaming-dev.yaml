@@ -16,28 +16,28 @@ spec:
     spec:
       containers:
       - name: go-server
-        image: 100.111.190.54:5000/infinite-streaming:dev
+        image: ${K3S_REGISTRY}/infinite-streaming:dev
         imagePullPolicy: Always
         command: ["/sbin/launch.sh", "1"]
         ports:
         - containerPort: 30000
         env:
         - name: INFINITE_STREAM_ROOT
-          value: "/boss"
+          value: "/media"
         - name: INFINITE_STREAM_UPLOADS_DIR
-          value: "/boss/boss-uploads"
+          value: "/media/uploads"
         - name: INFINITE_STREAM_SOURCES_DIR
-          value: "/boss/originals"
+          value: "/media/originals"
         - name: INFINITE_STREAM_OUTPUT_DIR
-          value: "/boss/dynamic_content"
+          value: "/media/dynamic_content"
         - name: INFINITE_STREAM_DATABASE_DIR
-          value: "/boss/boss-data"
+          value: "/media/data"
         - name: INFINITE_STREAM_TEMP_DIR
-          value: "/boss/boss-tmp"
+          value: "/media/tmp"
         - name: INFINITE_STREAM_CONTENT_DIR
           value: "/content"
         - name: TMPDIR
-          value: "/boss/boss-tmp"
+          value: "/media/tmp"
         - name: GO_LIVE_OUTPUT_DIR
           value: "/go-live"
         - name: GO_UPLOAD_ADDR
@@ -47,8 +47,8 @@ spec:
         - name: INFINITE_STREAM_PROXY_HOST
           value: "127.0.0.1"
         volumeMounts:
-        - name: boss-vol
-          mountPath: /boss
+        - name: media-vol
+          mountPath: /media
         - name: certs-vol
           mountPath: /etc/nginx/certs
           readOnly: true
@@ -58,7 +58,7 @@ spec:
           mountPath: /var/cache/nginx/live_playlists
 
       - name: go-proxy
-        image: 100.111.190.54:5000/go-proxy:dev
+        image: ${K3S_REGISTRY}/go-proxy:dev
         imagePullPolicy: Always
         ports:
         - containerPort: 30081
@@ -100,13 +100,13 @@ spec:
         - containerPort: 11211
 
       volumes:
-      - name: boss-vol
+      - name: media-vol
         hostPath:
-          path: /home/jonathanoliver/boss
+          path: ${K3S_MEDIA_DIR}
           type: Directory
       - name: certs-vol
         hostPath:
-          path: /home/jonathanoliver/smashing/certs
+          path: ${K3S_CERTS_DIR}
           type: Directory
       - name: go-live-tmpfs
         emptyDir:

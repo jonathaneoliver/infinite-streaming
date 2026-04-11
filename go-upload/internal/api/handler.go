@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 
-	"github.com/boss/go-upload/internal/app"
+	"github.com/jonathaneoliver/infinite-streaming/go-upload/internal/app"
 )
 
 type Handler struct {

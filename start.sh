@@ -21,7 +21,7 @@ elif [[ $CMD == 'stop' ]]; then
 else
 
   echo >/dev/stderr "Unknown cmd: $CMD"
-  echo >/dev/stderr "usage: boss.sh [<server-num> [<cmd>]]"
+  echo >/dev/stderr "usage: start.sh [<server-num> [<cmd>]]"
   echo >/dev/stderr "options:"
   echo >/dev/stderr "  <server-num>   Multiple servers may be run."
   echo >/dev/stderr "                 Provide a number from 1 - 50."

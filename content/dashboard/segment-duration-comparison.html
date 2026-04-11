@@ -312,7 +312,7 @@
     <link rel="stylesheet" href="/dashboard/content-control.css">
 </head>
 <body>
-    <div class="boss-content-wide">
+    <div class="ism-content-wide">
         <!-- Page Header -->
         <div class="page-header">
             <h1 class="page-title">Live Offset Comparison</h1>
@@ -1135,8 +1135,8 @@
                 }
             });
 
-            const storedFull = localStorage.getItem('bossSelectedContentFull') || localStorage.getItem('bossSelectedContent');
-            const storedBase = localStorage.getItem('bossSelectedContentBase');
+            const storedFull = localStorage.getItem('ismSelectedContentFull') || localStorage.getItem('ismSelectedContent');
+            const storedBase = localStorage.getItem('ismSelectedContentBase');
             if (storedFull && availableContent.some(item => item.name === storedFull)) {
                 CONTENT_BASE = storedFull;
             } else if (storedBase) {
@@ -1163,7 +1163,7 @@
                 allContent = allContent.filter(item => {
                     return item.has_hls === true && item.has_dash === true;
                 });
-                const storedFull = localStorage.getItem('bossSelectedContentFull') || localStorage.getItem('bossSelectedContent');
+                const storedFull = localStorage.getItem('ismSelectedContentFull') || localStorage.getItem('ismSelectedContent');
                 if (storedFull) {
                     const codecFromStored = inferCodec(storedFull);
                     const codecSelect = document.getElementById('codecSelect');
@@ -1194,12 +1194,12 @@
             players['dash-6s'].url = `${BASE_URL}/go-live/${CONTENT_BASE}/manifest_6s.mpd`;
 
             const selectedUrl = players['hls-ll-native'].url;
-            const existingSelectedUrl = localStorage.getItem('bossSelectedUrl') || '';
+            const existingSelectedUrl = localStorage.getItem('ismSelectedUrl') || '';
             if (!existingSelectedUrl) {
                 if (window.BOSSNav && typeof window.BOSSNav.setSelectedUrl === 'function') {
                     window.BOSSNav.setSelectedUrl(selectedUrl);
                 } else {
-                    localStorage.setItem('bossSelectedUrl', selectedUrl);
+                    localStorage.setItem('ismSelectedUrl', selectedUrl);
                 }
             }
 
@@ -1220,12 +1220,12 @@
             if (!newContent) return;
             
             CONTENT_BASE = newContent;
-            localStorage.setItem('bossSelectedContentFull', newContent);
-            localStorage.setItem('bossSelectedContent', newContent);
+            localStorage.setItem('ismSelectedContentFull', newContent);
+            localStorage.setItem('ismSelectedContent', newContent);
             const baseName = newContent
                 .replace(/_(h264|hevc|av1|dash|ts|hw)$/i, '')
                 .replace(/_\d{8}_\d{6}$/i, '');
-            localStorage.setItem('bossSelectedContentBase', baseName);
+            localStorage.setItem('ismSelectedContentBase', baseName);
             if (window.BOSSNav && typeof window.BOSSNav.updateSelectedContentBadge === 'function') {
                 window.BOSSNav.updateSelectedContentBadge();
             }

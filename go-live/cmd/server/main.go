@@ -6,8 +6,8 @@ import (
 	"os"
 	"time"
 
-	"github.com/boss/go-live/internal/api"
-	"github.com/boss/go-live/internal/manager"
+	"github.com/jonathaneoliver/infinite-streaming/go-live/internal/api"
+	"github.com/jonathaneoliver/infinite-streaming/go-live/internal/manager"
 	"github.com/gorilla/mux"
 )
 

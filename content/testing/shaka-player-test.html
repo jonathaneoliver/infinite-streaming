@@ -181,7 +181,7 @@
     </style>
 </head>
 <body>
-    <div class="boss-content-standard">
+    <div class="ism-content-standard">
         <div style="margin-bottom: 16px;">
             <h1 style="font-size: 24px; font-weight: 500;">Shaka Player Analysis</h1>
             <p class="small">Local Shaka test harness with live metrics, buffered/seekable visualization, and event logging.</p>
@@ -315,12 +315,12 @@
             if (fromParam) {
                 return fromParam;
             }
-            return localStorage.getItem('bossSelectedUrl') || '';
+            return localStorage.getItem('ismSelectedUrl') || '';
         }
 
         function setSelectedUrl(url) {
             if (url) {
-                localStorage.setItem('bossSelectedUrl', url);
+                localStorage.setItem('ismSelectedUrl', url);
             }
             if (window.BOSSNav && window.BOSSNav.updateSelectedContentBadge) {
                 window.BOSSNav.updateSelectedContentBadge();
@@ -328,7 +328,7 @@
         }
 
         function updateSelectedLabel() {
-            const content = localStorage.getItem('bossSelectedContentFull') || localStorage.getItem('bossSelectedContent') || '—';
+            const content = localStorage.getItem('ismSelectedContentFull') || localStorage.getItem('ismSelectedContent') || '—';
             selectedContentLabel.textContent = `Selected: ${content}`;
         }
 

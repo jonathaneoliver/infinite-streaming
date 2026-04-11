@@ -13,7 +13,7 @@ Before making UI or product-behavior changes, read `PRD.md` and align implementa
 make build
 
 # Run (Docker Compose)
-make run         # uses boss.sh
+make run         # uses start.sh
 make stop
 
 # Shell into running container
@@ -77,7 +77,7 @@ Default server target for tests is `lenovo:30000/30081`. Override with `--host`,
 | `go-proxy` | 30081 | Per-session testing proxy — failure injection, traffic shaping (nftables), SSE session stream |
 | nginx | 21081 (compose) / 30000 (k3s) | Routing, static dashboard |
 
-### nginx routing (`boss-content.conf.template`)
+### nginx routing (`nginx-content.conf.template`)
 
 - `/go-live/{content}/*.m3u8` and `*.mpd` → proxied to `go-live:8010` for dynamic generation
 - `/go-live/{content}/*.m4s`, `*.ts`, `*.mp4`, etc. → served directly from the output directory by nginx
@@ -99,7 +99,7 @@ On the first request for a content item, go-live spawns a per-content worker. Wo
 Handles uploads, encoding job orchestration via ffmpeg/shaka-packager, and content discovery. Internal packages:
 - `internal/api`, `internal/app`, `internal/config`, `internal/store`, `internal/util`
 
-Content is stored at `/boss/dynamic_content/{content}/` inside the container (host-mounted volume).
+Content is stored at `/media/dynamic_content/{content}/` inside the container (host-mounted volume).
 
 ### go-proxy (`go-proxy/`)
 

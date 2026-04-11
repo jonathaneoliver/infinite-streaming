@@ -146,7 +146,7 @@
     }
 
     function getOrCreateTestPlaybackPlayerId() {
-        const storageKey = 'bossTestPlaybackPlayerId';
+        const storageKey = 'ismTestPlaybackPlayerId';
         try {
             const stored = localStorage.getItem(storageKey);
             if (stored) return stored;
@@ -165,8 +165,8 @@
     // Get active page
     function getActivePage() {
         const body = document.body;
-        if (body && body.dataset && body.dataset.bossActivePage) {
-            return body.dataset.bossActivePage;
+        if (body && body.dataset && body.dataset.ismActivePage) {
+            return body.dataset.ismActivePage;
         }
         const path = window.location.pathname;
         const filename = path.split('/').pop() || 'dashboard.html';
@@ -197,18 +197,18 @@
             { title: 'DEVELOPMENT', items: NAVIGATION.development }
         ];
 
-        let html = '<div class="boss-sidebar" id="sidebar">';
+        let html = '<div class="ism-sidebar" id="sidebar">';
         
         // Sidebar header
-        html += '<div class="boss-sidebar-header">';
-        html += '<div class="boss-logo">';
-        html += '<span class="boss-logo-icon">🎬</span>';
+        html += '<div class="ism-sidebar-header">';
+        html += '<div class="ism-logo">';
+        html += '<span class="ism-logo-icon">🎬</span>';
         html += '<span>InfiniteStream</span>';
         html += '</div>';
         html += '</div>';
         
         // Sidebar content
-        html += '<div class="boss-sidebar-content">';
+        html += '<div class="ism-sidebar-content">';
         
         sections.forEach(section => {
             if (section.title === 'DEVELOPMENT' && !isDeveloper) {
@@ -251,7 +251,7 @@
         html += '</div>';
         
         // Sidebar footer
-        html += '<div class="boss-sidebar-footer">';
+        html += '<div class="ism-sidebar-footer">';
         html += '<a href="#" class="nav-item" onclick="window.BOSSNav.showInfo(); return false;">';
         html += '<span class="nav-item-icon">ℹ️</span>';
         html += '<span class="nav-item-text">Server Info</span>';
@@ -271,19 +271,19 @@
 
     // Build header HTML
     function buildHeader() {
-        let html = '<div class="boss-header">';
+        let html = '<div class="ism-header">';
         
         // Left side
-        html += '<div class="boss-header-left">';
-        html += '<div class="boss-header-title">InfiniteStream</div>';
+        html += '<div class="ism-header-left">';
+        html += '<div class="ism-header-title">InfiniteStream</div>';
         html += '</div>';
         
         // Center (reserved for future)
-        html += '<div class="boss-header-center"></div>';
+        html += '<div class="ism-header-center"></div>';
         
         // Right side
-        html += '<div class="boss-header-right">';
-        html += '<div class="boss-selected-content" id="bossSelectedContent" title="Selected content"></div>';
+        html += '<div class="ism-header-right">';
+        html += '<div class="ism-selected-content" id="ismSelectedContent" title="Selected content"></div>';
         html += '</div>';
         
         html += '</div>';
@@ -329,24 +329,24 @@
         
         // Create app wrapper
         const appWrapper = document.createElement('div');
-        appWrapper.className = 'boss-app';
+        appWrapper.className = 'ism-app';
         if (showSidebar) appWrapper.classList.add('has-sidebar');
-        if (fullscreen) appWrapper.classList.add('boss-fullscreen');
+        if (fullscreen) appWrapper.classList.add('ism-fullscreen');
         
         // Build navigation HTML
         let navHTML = '';
         if (showSidebar) navHTML += buildSidebar(activePage);
         
         // Main content wrapper
-        navHTML += '<div class="boss-main">';
+        navHTML += '<div class="ism-main">';
         if (showHeader) navHTML += buildHeader();
-        navHTML += '<div class="boss-content" id="boss-content"></div>';
+        navHTML += '<div class="ism-content" id="ism-content"></div>';
         navHTML += '</div>';
         
         appWrapper.innerHTML = navHTML;
         
         // Move existing body content into content area
-        const contentArea = appWrapper.querySelector('#boss-content');
+        const contentArea = appWrapper.querySelector('#ism-content');
         while (document.body.firstChild) {
             contentArea.appendChild(document.body.firstChild);
         }
@@ -370,11 +370,11 @@
         updateSelectedContentBadge();
         startSelectedContentWatcher();
         window.addEventListener('storage', (event) => {
-            if (event.key === 'bossExpertMode') {
+            if (event.key === 'ismExpertMode') {
                 renderPageHelp(getActivePage());
                 return;
             }
-            if (event.key && event.key.startsWith('bossSelected')) {
+            if (event.key && event.key.startsWith('ismSelected')) {
                 updateSelectedContentBadge();
             }
         });
@@ -385,8 +385,8 @@
     }
 
     const GLOBAL_SELECTIONS = {
-        codec: { key: 'bossSelectedCodec', ids: ['codecSelect', 'codecFilter'] },
-        segment: { key: 'bossSelectedSegment', ids: ['segmentSelect', 'segmentFilter'] }
+        codec: { key: 'ismSelectedCodec', ids: ['codecSelect', 'codecFilter'] },
+        segment: { key: 'ismSelectedSegment', ids: ['segmentSelect', 'segmentFilter'] }
     };
 
     function applyGlobalSelections() {
@@ -429,14 +429,14 @@
     }
 
     function updateSelectedContentBadge() {
-        const badge = document.getElementById('bossSelectedContent');
+        const badge = document.getElementById('ismSelectedContent');
         const demoLink = document.getElementById('nav-hlsjs-demo');
         const shakaLink = document.getElementById('nav-shaka-demo');
         const testPlaybackLink = document.getElementById('nav-test-playback');
         if (!badge) return;
-        const full = localStorage.getItem('bossSelectedContentFull') || localStorage.getItem('bossSelectedContent');
-        const base = localStorage.getItem('bossSelectedContentBase');
-        const url = localStorage.getItem('bossSelectedUrl') || '';
+        const full = localStorage.getItem('ismSelectedContentFull') || localStorage.getItem('ismSelectedContent');
+        const base = localStorage.getItem('ismSelectedContentBase');
+        const url = localStorage.getItem('ismSelectedUrl') || '';
         let label = full || base || '';
         if (!label && url) {
             try {
@@ -465,13 +465,13 @@
 
         badge.textContent = '';
         const labelSpan = document.createElement('span');
-        labelSpan.className = 'boss-selected-label';
+        labelSpan.className = 'ism-selected-label';
         labelSpan.textContent = label ? `Selected : ${label}` : 'Selected :';
         badge.appendChild(labelSpan);
 
         if (url) {
             const urlSpan = document.createElement('span');
-            urlSpan.className = 'boss-selected-url';
+            urlSpan.className = 'ism-selected-url';
             urlSpan.textContent = url;
             badge.appendChild(urlSpan);
             badge.title = `${label ? `Selected: ${label}\n` : ''}${url}`;
@@ -526,9 +526,9 @@
     let lastSelectedSignature = '';
     function startSelectedContentWatcher() {
         setInterval(() => {
-            const full = localStorage.getItem('bossSelectedContentFull') || localStorage.getItem('bossSelectedContent') || '';
-            const base = localStorage.getItem('bossSelectedContentBase') || '';
-            const url = localStorage.getItem('bossSelectedUrl') || '';
+            const full = localStorage.getItem('ismSelectedContentFull') || localStorage.getItem('ismSelectedContent') || '';
+            const base = localStorage.getItem('ismSelectedContentBase') || '';
+            const url = localStorage.getItem('ismSelectedUrl') || '';
             const signature = `${full}|${base}|${url}`;
             if (signature !== lastSelectedSignature) {
                 lastSelectedSignature = signature;
@@ -543,31 +543,31 @@
         }
         const lower = String(url).toLowerCase();
         if (lower.includes('.mpd')) {
-            localStorage.setItem('bossSelectedProtocol', 'dash');
+            localStorage.setItem('ismSelectedProtocol', 'dash');
         } else if (lower.includes('.m3u8')) {
-            localStorage.setItem('bossSelectedProtocol', 'hls');
+            localStorage.setItem('ismSelectedProtocol', 'hls');
         }
         if (lower.includes('manifest_2s.mpd') || lower.includes('master_2s.m3u8') || lower.includes('/2s/')) {
-            localStorage.setItem('bossSelectedSegment', '2s');
+            localStorage.setItem('ismSelectedSegment', '2s');
         } else if (lower.includes('manifest_6s.mpd') || lower.includes('master_6s.m3u8') || lower.includes('/6s/')) {
-            localStorage.setItem('bossSelectedSegment', '6s');
+            localStorage.setItem('ismSelectedSegment', '6s');
         } else if (lower.includes('.mpd') || lower.includes('master.m3u8')) {
-            localStorage.setItem('bossSelectedSegment', 'll');
+            localStorage.setItem('ismSelectedSegment', 'll');
         }
         if (lower.includes('_av1')) {
-            localStorage.setItem('bossSelectedCodec', 'av1');
+            localStorage.setItem('ismSelectedCodec', 'av1');
         } else if (lower.includes('_hevc') || lower.includes('_h265')) {
-            localStorage.setItem('bossSelectedCodec', 'hevc');
+            localStorage.setItem('ismSelectedCodec', 'hevc');
         } else if (lower.includes('_h264')) {
-            localStorage.setItem('bossSelectedCodec', 'h264');
+            localStorage.setItem('ismSelectedCodec', 'h264');
         }
     }
 
     function setSelectedUrl(url) {
         if (url === null || url === undefined) {
-            localStorage.removeItem('bossSelectedUrl');
+            localStorage.removeItem('ismSelectedUrl');
         } else if (String(url).trim().length) {
-            localStorage.setItem('bossSelectedUrl', url);
+            localStorage.setItem('ismSelectedUrl', url);
             inferProtocolSegmentCodecFromUrl(url);
         }
         updateSelectedContentBadge();
@@ -640,9 +640,9 @@ Version: ${version}
 
     // Toggle fullscreen mode
     function toggleFullscreen() {
-        const app = document.querySelector('.boss-app');
+        const app = document.querySelector('.ism-app');
         if (app) {
-            app.classList.toggle('boss-fullscreen');
+            app.classList.toggle('ism-fullscreen');
         }
     }
 
@@ -844,7 +844,7 @@ Version: ${version}
     }
 
     function renderSetupBanner(status, activePage) {
-        const contentArea = document.querySelector('#boss-content');
+        const contentArea = document.querySelector('#ism-content');
         if (!contentArea) return;
 
         const existing = document.getElementById('setupBanner');
@@ -940,7 +940,7 @@ Version: ${version}
         if (!status || !status.content_empty) {
             return;
         }
-        if (sessionStorage.getItem('bossSkipUploadRedirect') === '1') {
+        if (sessionStorage.getItem('ismSkipUploadRedirect') === '1') {
             return;
         }
         const redirectEl = document.getElementById('setupRedirect');
@@ -949,7 +949,7 @@ Version: ${version}
         }
         let seconds = 5;
         const cancel = () => {
-            sessionStorage.setItem('bossSkipUploadRedirect', '1');
+            sessionStorage.setItem('ismSkipUploadRedirect', '1');
             redirectEl.textContent = 'Auto-redirect canceled.';
         };
         const tick = () => {
@@ -975,10 +975,10 @@ Version: ${version}
         if (!status || status.initialized) {
             return;
         }
-        if (sessionStorage.getItem('bossSetupModalShown') === '1') {
+        if (sessionStorage.getItem('ismSetupModalShown') === '1') {
             return;
         }
-        sessionStorage.setItem('bossSetupModalShown', '1');
+        sessionStorage.setItem('ismSetupModalShown', '1');
         showSetupModal(status);
     }
 
@@ -987,7 +987,7 @@ Version: ${version}
         if (existing) {
             existing.remove();
         }
-        const root = (status && status.root) ? status.root : '/boss';
+        const root = (status && status.root) ? status.root : '/media';
         const backdrop = document.createElement('div');
         backdrop.className = 'setup-modal-backdrop';
         backdrop.id = 'setupModalBackdrop';
@@ -1006,7 +1006,7 @@ Version: ${version}
                     <div class="setup-snippet">
                         <div class="setup-snippet-title">Docker Compose example</div>
                         <pre>services:
-  boss:
+  infinite-streaming:
     volumes:
       - /path/to/InfiniteStream:${root}</pre>
                     </div>
@@ -1178,24 +1178,24 @@ Version: ${version}
         if (isExpertUrl()) {
             return true;
         }
-        return localStorage.getItem('bossExpertMode') === '1';
+        return localStorage.getItem('ismExpertMode') === '1';
     }
 
     function attachExpertToggle() {
         const toggle = document.getElementById('expertModeToggle');
         if (!toggle) return;
         const forced = isExpertUrl();
-        toggle.checked = forced || localStorage.getItem('bossExpertMode') === '1';
+        toggle.checked = forced || localStorage.getItem('ismExpertMode') === '1';
         toggle.disabled = forced;
         toggle.title = forced ? 'Disabled via ?expert=1 in the URL' : '';
         toggle.addEventListener('change', () => {
-            localStorage.setItem('bossExpertMode', toggle.checked ? '1' : '0');
+            localStorage.setItem('ismExpertMode', toggle.checked ? '1' : '0');
             renderPageHelp(getActivePage());
         });
     }
 
     function renderPageHelp(activePage) {
-        const contentArea = document.querySelector('#boss-content');
+        const contentArea = document.querySelector('#ism-content');
         if (!contentArea) return;
 
         const help = PANEL_HELP[activePage];
@@ -1211,7 +1211,7 @@ Version: ${version}
             return;
         }
 
-        const helpContainer = document.querySelector('.boss-content-standard, .boss-content-narrow, .boss-content-wide') || contentArea;
+        const helpContainer = document.querySelector('.ism-content-standard, .ism-content-narrow, .ism-content-wide') || contentArea;
 
         const steps = help.steps
             ? help.steps.map((step) => `<li>${step}</li>`).join('')
@@ -1241,7 +1241,7 @@ Version: ${version}
         if (toggle) {
             toggle.checked = expertMode;
             toggle.addEventListener('change', () => {
-                localStorage.setItem('bossExpertMode', toggle.checked ? '1' : '0');
+                localStorage.setItem('ismExpertMode', toggle.checked ? '1' : '0');
                 renderPageHelp(activePage);
             });
         }
@@ -1266,17 +1266,17 @@ Version: ${version}
     // Auto-initialize on DOM ready (unless disabled)
     if (document.readyState === 'loading') {
         document.addEventListener('DOMContentLoaded', function() {
-            if (!document.body.hasAttribute('data-boss-nav-manual')) {
+            if (!document.body.hasAttribute('data-ism-nav-manual')) {
                 const options = {};
                 
                 // Check for page-specific options
-                if (document.body.hasAttribute('data-boss-fullscreen')) {
+                if (document.body.hasAttribute('data-ism-fullscreen')) {
                     options.fullscreen = true;
                 }
-                if (document.body.hasAttribute('data-boss-no-sidebar')) {
+                if (document.body.hasAttribute('data-ism-no-sidebar')) {
                     options.showSidebar = false;
                 }
-                if (document.body.hasAttribute('data-boss-no-header')) {
+                if (document.body.hasAttribute('data-ism-no-header')) {
                     options.showHeader = false;
                 }
                 
@@ -1284,7 +1284,7 @@ Version: ${version}
             }
         });
     } else {
-        if (!document.body.hasAttribute('data-boss-nav-manual')) {
+        if (!document.body.hasAttribute('data-ism-nav-manual')) {
             window.BOSSNav.init();
         }
     }
