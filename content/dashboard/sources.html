@@ -402,7 +402,7 @@
             try {
                 const response = await fetch('/api/sources');
                 const data = await response.json();
-                sources = data.sources || [];
+                sources = Array.isArray(data) ? data : (data.sources || []);
 
                 document.getElementById('loading').style.display = 'none';
 
