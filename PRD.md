@@ -41,8 +41,8 @@ The system is intended for:
 - **nginx**: Routes requests and serves static dashboard assets.
 
 ### Storage & Content
-- **Originals**: source files in `/boss/originals`.
-- **Dynamic content**: encoded outputs under `/boss/dynamic_content/{content}`.
+- **Originals**: source files in `/media/originals`.
+- **Dynamic content**: encoded outputs under `/media/dynamic_content/{content}`.
 - **Generated live outputs**: `/content/go-live/{content}/...` (tmpfs).
 
 ## 6) Streaming Behavior (Functional Requirements)

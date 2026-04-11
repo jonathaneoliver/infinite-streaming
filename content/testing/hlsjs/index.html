@@ -681,7 +681,7 @@
 <script>
 (function() {
   function resolveSelectedUrl() {
-    const url = localStorage.getItem('bossSelectedUrl') || '';
+    const url = localStorage.getItem('ismSelectedUrl') || '';
     if (!url) return '';
     return url.startsWith('http') ? url : (window.location.origin + url);
   }

@@ -15,14 +15,14 @@ type Config struct {
 }
 
 func Load() Config {
-	root := getenvAny([]string{"INFINITE_STREAM_ROOT", "INFINITE_ROOT", "BOSS_ROOT"}, "")
+	root := getenvAny([]string{"INFINITE_STREAM_ROOT", "INFINITE_ROOT"}, "")
 	if root == "" {
-		root = "/boss"
+		root = "/media"
 	}
-	uploads := getenvAny([]string{"INFINITE_STREAM_UPLOADS_DIR", "INFINITE_UPLOADS_DIR", "BOSS_UPLOADS_DIR"}, filepath.Join(root, "boss-uploads"))
-	sources := getenvAny([]string{"INFINITE_STREAM_SOURCES_DIR", "INFINITE_SOURCES_DIR", "BOSS_SOURCES_DIR"}, filepath.Join(root, "originals"))
-	output := getenvAny([]string{"INFINITE_STREAM_OUTPUT_DIR", "INFINITE_OUTPUT_DIR", "BOSS_OUTPUT_DIR"}, filepath.Join(root, "dynamic_content"))
-	dbDir := getenvAny([]string{"INFINITE_STREAM_DATABASE_DIR", "INFINITE_DATABASE_DIR", "BOSS_DATABASE_DIR"}, filepath.Join(root, "boss-data"))
+	uploads := getenvAny([]string{"INFINITE_STREAM_UPLOADS_DIR", "INFINITE_UPLOADS_DIR"}, filepath.Join(root, "uploads"))
+	sources := getenvAny([]string{"INFINITE_STREAM_SOURCES_DIR", "INFINITE_SOURCES_DIR"}, filepath.Join(root, "originals"))
+	output := getenvAny([]string{"INFINITE_STREAM_OUTPUT_DIR", "INFINITE_OUTPUT_DIR"}, filepath.Join(root, "dynamic_content"))
+	dbDir := getenvAny([]string{"INFINITE_STREAM_DATABASE_DIR", "INFINITE_DATABASE_DIR"}, filepath.Join(root, "data"))
 
 	return Config{
 		Root:         root,

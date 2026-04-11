@@ -9,9 +9,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/boss/go-upload/internal/config"
-	"github.com/boss/go-upload/internal/store"
-	"github.com/boss/go-upload/internal/util"
+	"github.com/jonathaneoliver/infinite-streaming/go-upload/internal/config"
+	"github.com/jonathaneoliver/infinite-streaming/go-upload/internal/store"
+	"github.com/jonathaneoliver/infinite-streaming/go-upload/internal/util"
 )
 
 type App struct {

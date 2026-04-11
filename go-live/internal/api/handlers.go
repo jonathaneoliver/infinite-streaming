@@ -14,18 +14,18 @@ import (
 	"sync"
 	"time"
 
-	"github.com/boss/go-live/internal/manager"
-	"github.com/boss/go-live/pkg/dash"
-	"github.com/boss/go-live/pkg/fileutil"
-	"github.com/boss/go-live/pkg/generator"
-	"github.com/boss/go-live/pkg/parser"
+	"github.com/jonathaneoliver/infinite-streaming/go-live/internal/manager"
+	"github.com/jonathaneoliver/infinite-streaming/go-live/pkg/dash"
+	"github.com/jonathaneoliver/infinite-streaming/go-live/pkg/fileutil"
+	"github.com/jonathaneoliver/infinite-streaming/go-live/pkg/generator"
+	"github.com/jonathaneoliver/infinite-streaming/go-live/pkg/parser"
 	"github.com/google/uuid"
 	"github.com/gorilla/mux"
 )
 
 var (
-	infiniteOutputDir  = getEnvAny([]string{"INFINITE_STREAM_OUTPUT_DIR", "INFINITE_OUTPUT_DIR", "BOSS_OUTPUT_DIR"}, "/boss/dynamic_content")
-	infiniteContentDir = getEnvAny([]string{"INFINITE_STREAM_CONTENT_DIR", "INFINITE_CONTENT_DIR", "BOSS_CONTENT_DIR"}, "/content")
+	infiniteOutputDir  = getEnvAny([]string{"INFINITE_STREAM_OUTPUT_DIR", "INFINITE_OUTPUT_DIR"}, "/media/dynamic_content")
+	infiniteContentDir = getEnvAny([]string{"INFINITE_STREAM_CONTENT_DIR", "INFINITE_CONTENT_DIR"}, "/content")
 	goLiveDir          = getEnv("GO_LIVE_OUTPUT_DIR", filepath.Join(infiniteContentDir, "go-live"))
 )
 

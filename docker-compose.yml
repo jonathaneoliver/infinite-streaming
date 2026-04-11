@@ -10,19 +10,19 @@ services:
     ports:
       - "30000:30000"
     volumes:
-      - /Users/jonathanoliver/Projects/smashing/content:/content
-      - /Volumes/4TB/Boss:/boss
-      - /Users/jonathanoliver/Projects/smashing/certs:/etc/nginx/certs:ro
+      - ./content:/content
+      - ${CONTENT_DIR:-./sample-content}:/media
+      - ./certs:/etc/nginx/certs:ro
     environment:
       # Path Configuration - Single source of truth for all path references
-      - INFINITE_STREAM_ROOT=/boss
-      - INFINITE_STREAM_UPLOADS_DIR=/boss/boss-uploads
-      - INFINITE_STREAM_SOURCES_DIR=/boss/originals
-      - INFINITE_STREAM_OUTPUT_DIR=/boss/dynamic_content
-      - INFINITE_STREAM_DATABASE_DIR=/boss/boss-data
-      - INFINITE_STREAM_TEMP_DIR=/boss/boss-tmp
+      - INFINITE_STREAM_ROOT=/media
+      - INFINITE_STREAM_UPLOADS_DIR=/media/uploads
+      - INFINITE_STREAM_SOURCES_DIR=/media/originals
+      - INFINITE_STREAM_OUTPUT_DIR=/media/dynamic_content
+      - INFINITE_STREAM_DATABASE_DIR=/media/data
+      - INFINITE_STREAM_TEMP_DIR=/media/tmp
       - INFINITE_STREAM_CONTENT_DIR=/content
-      - TMPDIR=/boss/boss-tmp
+      - TMPDIR=/media/tmp
       - GO_LIVE_OUTPUT_DIR=/go-live
       - GO_UPLOAD_ADDR=:8003
       - INFINITE_STREAM_LISTEN_PORT=30000

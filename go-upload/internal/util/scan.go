@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/boss/go-upload/internal/store"
+	"github.com/jonathaneoliver/infinite-streaming/go-upload/internal/store"
 )
 
 var videoExtensions = map[string]struct{}{

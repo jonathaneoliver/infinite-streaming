@@ -4,7 +4,7 @@ RUN apk add git
 WORKDIR /build
 COPY go-live /build/go-live
 RUN cd /build/go-live && \
-    go mod init github.com/boss/go-live && \
+    go mod init github.com/jonathaneoliver/infinite-streaming/go-live && \
     go get github.com/gorilla/mux && \
     go get github.com/bluenviron/gohlslib@v1.4.0 && \
     go get github.com/google/uuid && \
@@ -74,7 +74,7 @@ RUN mkdir -p /tmp/uploads /data /data/sources && \
 
 # Copy config and scripts (rarely change)
 COPY mime.types /etc/nginx/mime.types
-COPY boss-content.conf.template /etc/nginx/http.d/
+COPY nginx-content.conf.template /etc/nginx/http.d/
 COPY update-nginx-config.sh launch.sh parse_fmp4_fragments.py /sbin/
 COPY --from=go-builder /out/go-live /usr/local/bin/go-live
 COPY --from=go-builder /out/go-upload /usr/local/bin/go-upload

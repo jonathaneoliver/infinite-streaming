@@ -1,7 +1,7 @@
 # generate_abr Quickstart
 
 ```bash
-./create_abr_ladder.sh --input /boss/originals/video.mp4 --codec h264
+./create_abr_ladder.sh --input /media/originals/video.mp4 --codec h264
 ```
 
 Outputs:

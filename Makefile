@@ -1,22 +1,28 @@
 
+# Load .env if present (provides K3S_SSH_HOST, K3S_REGISTRY, etc.)
+-include .env
+export
 
-LENOVO_HOST ?= jonathanoliver@lenovo
-K3S_KUBECONFIG ?= /home/jonathanoliver/.kube/config
+
+
+
+K3S_SSH_HOST ?= user@your-k3s-host
+K3S_KUBECONFIG ?= /home/user/.kube/config
 GO_SERVER_IMAGE ?= ghcr.io/jonathaneoliver/infinite-streaming:latest
 GO_PROXY_IMAGE ?= ghcr.io/jonathaneoliver/go-proxy:latest
 K8S_MANIFESTS ?= k8s-infinite-streaming.yaml
 K8S_DEPLOYMENT ?= infinite-streaming
 IOS_SIM_DEVICE ?= iPad Pro 13-inch (M5)
 IOS_APP_BUNDLE_ID ?= com.jeoliver.InfiniteStreamPlayer
-IOS_API_BASE ?= http://lenovo:40000
+IOS_API_BASE ?= http://$(K3S_HOST):40000
 IOS_METRICS_DURATION ?= 900
 IOS_SCORE_MIN ?= 60
 
 run:
-	./boss.sh 1 run
+	./start.sh 1 run
 
 stop:
-	./boss.sh 1 stop
+	./start.sh 1 stop
 
 shell:
 	docker compose exec go-server /bin/sh
@@ -40,81 +46,81 @@ buildx-arm64:
 buildx-push:
 	docker buildx build --platform linux/amd64,linux/arm64 -t infinite-streaming:latest --push .
 
-LENOVO_REGISTRY ?= 100.111.190.54:5000
-LENOVO_SERVER_REPO ?= infinite-streaming
-LENOVO_PROXY_REPO ?= go-proxy
+K3S_REGISTRY ?= 100.111.190.54:5000
+K3S_SERVER_REPO ?= infinite-streaming
+K3S_PROXY_REPO ?= go-proxy
 
-build-lenovo:
-	docker build --no-cache --progress=plain -t $(LENOVO_REGISTRY)/$(LENOVO_SERVER_REPO):latest .
+build-k3s:
+	docker build --no-cache --progress=plain -t $(K3S_REGISTRY)/$(K3S_SERVER_REPO):latest .
 
-buildx-lenovo-amd64:
-	docker buildx build --platform linux/amd64 -t $(LENOVO_REGISTRY)/$(LENOVO_SERVER_REPO):amd64 --load .
+buildx-k3s-amd64:
+	docker buildx build --platform linux/amd64 -t $(K3S_REGISTRY)/$(K3S_SERVER_REPO):amd64 --load .
 
-buildx-lenovo-arm64:
-	docker buildx build --platform linux/arm64 -t $(LENOVO_REGISTRY)/$(LENOVO_SERVER_REPO):arm64 --load .
+buildx-k3s-arm64:
+	docker buildx build --platform linux/arm64 -t $(K3S_REGISTRY)/$(K3S_SERVER_REPO):arm64 --load .
 
-buildx-lenovo-all:
-	$(MAKE) buildx-lenovo-amd64
-	$(MAKE) buildx-lenovo-arm64
+buildx-k3s-all:
+	$(MAKE) buildx-k3s-amd64
+	$(MAKE) buildx-k3s-arm64
 
-push-lenovo:
-	docker push $(LENOVO_REGISTRY)/$(LENOVO_SERVER_REPO):latest
+push-k3s:
+	docker push $(K3S_REGISTRY)/$(K3S_SERVER_REPO):latest
 
-push-lenovo-all:
-	docker push $(LENOVO_REGISTRY)/$(LENOVO_SERVER_REPO):amd64
-	docker push $(LENOVO_REGISTRY)/$(LENOVO_SERVER_REPO):arm64
+push-k3s-all:
+	docker push $(K3S_REGISTRY)/$(K3S_SERVER_REPO):amd64
+	docker push $(K3S_REGISTRY)/$(K3S_SERVER_REPO):arm64
 
-build-push-lenovo: build-lenovo push-lenovo
+build-push-k3s: build-k3s push-k3s
 
-build-push-lenovo-all: buildx-lenovo-all push-lenovo-all
+build-push-k3s-all: buildx-k3s-all push-k3s-all
 
-build-go-proxy-lenovo:
-	docker build --no-cache --progress=plain --build-arg VERSION=$(shell cat VERSION) -t $(LENOVO_REGISTRY)/$(LENOVO_PROXY_REPO):latest ./go-proxy
+build-go-proxy-k3s:
+	docker build --no-cache --progress=plain --build-arg VERSION=$(shell cat VERSION) -t $(K3S_REGISTRY)/$(K3S_PROXY_REPO):latest ./go-proxy
 
-push-go-proxy-lenovo:
-	docker push $(LENOVO_REGISTRY)/$(LENOVO_PROXY_REPO):latest
+push-go-proxy-k3s:
+	docker push $(K3S_REGISTRY)/$(K3S_PROXY_REPO):latest
 
-build-push-go-proxy-lenovo: build-go-proxy-lenovo push-go-proxy-lenovo
+build-push-go-proxy-k3s: build-go-proxy-k3s push-go-proxy-k3s
 
-LENOVO_SERVER_IMAGE ?= $(LENOVO_REGISTRY)/$(LENOVO_SERVER_REPO):latest
-LENOVO_PROXY_IMAGE ?= $(LENOVO_REGISTRY)/$(LENOVO_PROXY_REPO):latest
+K3S_SERVER_IMAGE ?= $(K3S_REGISTRY)/$(K3S_SERVER_REPO):latest
+K3S_PROXY_IMAGE ?= $(K3S_REGISTRY)/$(K3S_PROXY_REPO):latest
 
-deploy-lenovo-k3s-local:
+deploy-k3s-local:
 	@set -e; \
 	echo "Cleaning up legacy split deployments/services"; \
-	ssh $(LENOVO_HOST) "export KUBECONFIG=$(K3S_KUBECONFIG); kubectl delete service go-server go-proxy memcached boss-server --ignore-not-found=true"; \
-	ssh $(LENOVO_HOST) "export KUBECONFIG=$(K3S_KUBECONFIG); kubectl delete deployment go-server go-proxy memcached boss-server --ignore-not-found=true"; \
+	ssh $(K3S_SSH_HOST) "export KUBECONFIG=$(K3S_KUBECONFIG); kubectl delete service go-server go-proxy memcached boss-server --ignore-not-found=true"; \
+	ssh $(K3S_SSH_HOST) "export KUBECONFIG=$(K3S_KUBECONFIG); kubectl delete deployment go-server go-proxy memcached boss-server --ignore-not-found=true"; \
 	for manifest in $(K8S_MANIFESTS); do \
-		echo "Applying $$manifest to $(LENOVO_HOST)"; \
-		ssh $(LENOVO_HOST) "export KUBECONFIG=$(K3S_KUBECONFIG); kubectl apply -f -" < $$manifest; \
+		echo "Applying $$manifest to $(K3S_SSH_HOST)"; \
+		envsubst < $$manifest | ssh $(K3S_SSH_HOST) "export KUBECONFIG=$(K3S_KUBECONFIG); kubectl apply -f -"; \
 	done; \
 	echo "Updating deployment images"; \
-	ssh $(LENOVO_HOST) "export KUBECONFIG=$(K3S_KUBECONFIG); kubectl set image deployment/$(K8S_DEPLOYMENT) go-server=$(LENOVO_SERVER_IMAGE)"; \
-	ssh $(LENOVO_HOST) "export KUBECONFIG=$(K3S_KUBECONFIG); kubectl set image deployment/$(K8S_DEPLOYMENT) go-proxy=$(LENOVO_PROXY_IMAGE)"; \
+	ssh $(K3S_SSH_HOST) "export KUBECONFIG=$(K3S_KUBECONFIG); kubectl set image deployment/$(K8S_DEPLOYMENT) go-server=$(K3S_SERVER_IMAGE)"; \
+	ssh $(K3S_SSH_HOST) "export KUBECONFIG=$(K3S_KUBECONFIG); kubectl set image deployment/$(K8S_DEPLOYMENT) go-proxy=$(K3S_PROXY_IMAGE)"; \
 	echo "Restarting deployments explicitly"; \
-	ssh $(LENOVO_HOST) "export KUBECONFIG=$(K3S_KUBECONFIG); kubectl rollout restart deployment/$(K8S_DEPLOYMENT)"; \
+	ssh $(K3S_SSH_HOST) "export KUBECONFIG=$(K3S_KUBECONFIG); kubectl rollout restart deployment/$(K8S_DEPLOYMENT)"; \
 	echo "Waiting for rollout"; \
-	ssh $(LENOVO_HOST) "export KUBECONFIG=$(K3S_KUBECONFIG); kubectl rollout status deployment/$(K8S_DEPLOYMENT) --timeout=180s"; \
+	ssh $(K3S_SSH_HOST) "export KUBECONFIG=$(K3S_KUBECONFIG); kubectl rollout status deployment/$(K8S_DEPLOYMENT) --timeout=180s"; \
 	echo "Deployment status"; \
-	ssh $(LENOVO_HOST) "export KUBECONFIG=$(K3S_KUBECONFIG); kubectl get pods -n default -o wide; echo; kubectl get svc -n default"
+	ssh $(K3S_SSH_HOST) "export KUBECONFIG=$(K3S_KUBECONFIG); kubectl get pods -n default -o wide; echo; kubectl get svc -n default"
 
-deploy-lenovo-k3s: deploy-lenovo-k3s-local
+deploy-k3s: deploy-k3s-local
 
-status-lenovo-k3s:
-	ssh $(LENOVO_HOST) "export KUBECONFIG=$(K3S_KUBECONFIG); kubectl get nodes; echo; kubectl get pods -A"
+status-k3s:
+	ssh $(K3S_SSH_HOST) "export KUBECONFIG=$(K3S_KUBECONFIG); kubectl get nodes; echo; kubectl get pods -A"
 
 deploy:
-	docker buildx build --platform linux/amd64 -t $(LENOVO_REGISTRY)/$(LENOVO_SERVER_REPO):dev --push .
-	docker buildx build --platform linux/amd64 --build-arg VERSION=$(shell cat VERSION) -t $(LENOVO_REGISTRY)/$(LENOVO_PROXY_REPO):dev --push ./go-proxy
-	$(MAKE) deploy-lenovo-k3s K3S_KUBECONFIG=$(K3S_KUBECONFIG) K8S_MANIFESTS=k8s-infinite-streaming-dev.yaml K8S_DEPLOYMENT=infinite-streaming-dev LENOVO_SERVER_IMAGE=$(LENOVO_REGISTRY)/$(LENOVO_SERVER_REPO):dev LENOVO_PROXY_IMAGE=$(LENOVO_REGISTRY)/$(LENOVO_PROXY_REPO):dev
+	docker buildx build --platform linux/amd64 -t $(K3S_REGISTRY)/$(K3S_SERVER_REPO):dev --push .
+	docker buildx build --platform linux/amd64 --build-arg VERSION=$(shell cat VERSION) -t $(K3S_REGISTRY)/$(K3S_PROXY_REPO):dev --push ./go-proxy
+	$(MAKE) deploy-k3s K3S_KUBECONFIG=$(K3S_KUBECONFIG) K8S_MANIFESTS=k8s-infinite-streaming-dev.yaml K8S_DEPLOYMENT=infinite-streaming-dev K3S_SERVER_IMAGE=$(K3S_REGISTRY)/$(K3S_SERVER_REPO):dev K3S_PROXY_IMAGE=$(K3S_REGISTRY)/$(K3S_PROXY_REPO):dev
 
 logs:
-	ssh $(LENOVO_HOST) "export KUBECONFIG=$(K3S_KUBECONFIG); kubectl logs deploy/infinite-streaming-dev --all-containers -f"
+	ssh $(K3S_SSH_HOST) "export KUBECONFIG=$(K3S_KUBECONFIG); kubectl logs deploy/infinite-streaming-dev --all-containers -f"
 
 deploy-release:
-	docker buildx build --platform linux/amd64 -t $(LENOVO_SERVER_IMAGE) --push .
-	docker buildx build --platform linux/amd64 --build-arg VERSION=$(shell cat VERSION) -t $(LENOVO_PROXY_IMAGE) --push ./go-proxy
-	$(MAKE) deploy-lenovo-k3s K3S_KUBECONFIG=$(K3S_KUBECONFIG) LENOVO_SERVER_IMAGE=$(LENOVO_SERVER_IMAGE) LENOVO_PROXY_IMAGE=$(LENOVO_PROXY_IMAGE)
+	docker buildx build --platform linux/amd64 -t $(K3S_SERVER_IMAGE) --push .
+	docker buildx build --platform linux/amd64 --build-arg VERSION=$(shell cat VERSION) -t $(K3S_PROXY_IMAGE) --push ./go-proxy
+	$(MAKE) deploy-k3s K3S_KUBECONFIG=$(K3S_KUBECONFIG) K3S_SERVER_IMAGE=$(K3S_SERVER_IMAGE) K3S_PROXY_IMAGE=$(K3S_PROXY_IMAGE)
 
 test-ios-sim-metrics:
 	PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \

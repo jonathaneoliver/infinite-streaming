@@ -759,8 +759,8 @@
         .abrchar-success { color: #166534; }
     </style>
 </head>
-<body data-boss-no-sidebar data-boss-no-header data-boss-active-page="testing-session">
-    <div class="boss-content-wide">
+<body data-ism-no-sidebar data-ism-no-header data-ism-active-page="testing-session">
+    <div class="ism-content-wide">
         <div class="page-header">
             <div>
                 <div class="page-title" id="pageTitle">Testing Playback</div>
@@ -823,9 +823,9 @@
         (() => {
             const params = new URLSearchParams(window.location.search);
             if (params.get('nav') === '1') {
-                document.body.removeAttribute('data-boss-no-sidebar');
-                document.body.removeAttribute('data-boss-no-header');
-                document.body.dataset.bossActivePage = 'test-playback';
+                document.body.removeAttribute('data-ism-no-sidebar');
+                document.body.removeAttribute('data-ism-no-header');
+                document.body.dataset.ismActivePage = 'test-playback';
             }
         })();
     </script>
@@ -842,7 +842,7 @@
         const sseMissedEl = document.getElementById('statSseMissed');
         const video = document.getElementById('player');
         const isDeveloperMode = new URLSearchParams(window.location.search).get('developer') === '1';
-        const NATIVE_4K_KEY = 'bossPrefer4kNative';
+        const NATIVE_4K_KEY = 'ismPrefer4kNative';
         const AUTO_RECOVERY_KEY = 'bossAutoRecovery';
         const UHD_HEIGHT_THRESHOLD = 2160; // 4K/UHD resolution threshold
         let hlsInstance = null;
@@ -937,7 +937,7 @@
                 persistent4kBySession.set(String(sessionId), true);
             } catch (e) {}
             try {
-                localStorage.setItem('bossKnown4k:session:' + String(sessionId), 'true');
+                localStorage.setItem('ismKnown4k:session:' + String(sessionId), 'true');
             } catch (e) {}
         }
 
@@ -947,7 +947,7 @@
                 if (persistent4kBySession.get(String(sessionId))) return true;
             } catch (e) {}
             try {
-                return localStorage.getItem('bossKnown4k:session:' + String(sessionId)) === 'true';
+                return localStorage.getItem('ismKnown4k:session:' + String(sessionId)) === 'true';
             } catch (e) {
                 return false;
             }
@@ -1695,7 +1695,7 @@
             const params = new URLSearchParams(window.location.search);
             let url = params.get('url') || '';
             if (!url) {
-                url = localStorage.getItem('bossSelectedUrl') || '';
+                url = localStorage.getItem('ismSelectedUrl') || '';
             }
             if (url && window.BOSSNav && typeof window.BOSSNav.normalizeTestingBaseUrl === 'function') {
                 try {
@@ -1706,7 +1706,7 @@
             }
             let playerId = params.get('player_id') || '';
             if (!playerId) {
-                playerId = localStorage.getItem('bossTestPlaybackPlayerId') || '';
+                playerId = localStorage.getItem('ismTestPlaybackPlayerId') || '';
             }
             if (!playerId) {
                 if (window.BOSSNav && typeof window.BOSSNav.createPlayerId === 'function') {
@@ -1715,7 +1715,7 @@
                     playerId = Math.random().toString(36).slice(2, 10);
                 }
                 try {
-                    localStorage.setItem('bossTestPlaybackPlayerId', playerId);
+                    localStorage.setItem('ismTestPlaybackPlayerId', playerId);
                 } catch (err) {
                     console.warn('Failed to persist Testing Playback player id', err);
                 }
@@ -1731,7 +1731,7 @@
                     console.warn('Failed to attach player id to URL', err);
                 }
                 try {
-                    localStorage.setItem('bossSelectedUrl', url);
+                    localStorage.setItem('ismSelectedUrl', url);
                 } catch (err) {
                     console.warn('Failed to persist selected url', err);
                 }

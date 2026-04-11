@@ -237,7 +237,7 @@
     <link rel="stylesheet" href="/dashboard/content-control.css">
 </head>
 <body>
-    <div class="boss-content-wide">
+    <div class="ism-content-wide">
         <div class="page-header">
             <h1 class="page-title">Playback</h1>
             <p class="page-subtitle">Single stream playback based on the selected content and segmentation settings.</p>
@@ -330,11 +330,11 @@
         const playerState = { instance: null, type: null, url: null };
         let availableContent = [];
         const AUDIO_MUTED_KEY = 'bossAudioMuted';
-        const NATIVE_4K_KEY = 'bossPrefer4kNative';
+        const NATIVE_4K_KEY = 'ismPrefer4kNative';
         const UHD_HEIGHT_THRESHOLD = 2160; // 4K/UHD resolution threshold
 
         function getStoredContent() {
-            return localStorage.getItem('bossSelectedContentFull') || localStorage.getItem('bossSelectedContent') || '';
+            return localStorage.getItem('ismSelectedContentFull') || localStorage.getItem('ismSelectedContent') || '';
         }
 
         function inferCodec(name = '') {
@@ -552,12 +552,12 @@
                 if (candidate && candidate !== contentName) {
                     contentName = candidate;
                     contentSelect.value = candidate;
-                    localStorage.setItem('bossSelectedContentFull', candidate);
-                    localStorage.setItem('bossSelectedContent', candidate);
+                    localStorage.setItem('ismSelectedContentFull', candidate);
+                    localStorage.setItem('ismSelectedContent', candidate);
                     const baseName = candidate
                         .replace(/_(h264|hevc|av1|dash|ts|hw)$/i, '')
                         .replace(/_\\d{8}_\\d{6}$/i, '');
-                    localStorage.setItem('bossSelectedContentBase', baseName);
+                    localStorage.setItem('ismSelectedContentBase', baseName);
                     if (window.BOSSNav && typeof window.BOSSNav.updateSelectedContentBadge === 'function') {
                         window.BOSSNav.updateSelectedContentBadge();
                     }
@@ -568,7 +568,7 @@
             if (window.BOSSNav && typeof window.BOSSNav.setSelectedUrl === 'function') {
                 window.BOSSNav.setSelectedUrl(url);
             } else {
-                localStorage.setItem('bossSelectedUrl', url);
+                localStorage.setItem('ismSelectedUrl', url);
             }
 
             document.getElementById('selectedRow').innerHTML = `Selected: <strong>${contentName || 'None'}</strong>`;
@@ -623,12 +623,12 @@
             const select = document.getElementById('contentSelect');
             if (!select || !select.value) return;
             const content = select.value;
-            localStorage.setItem('bossSelectedContentFull', content);
-            localStorage.setItem('bossSelectedContent', content);
+            localStorage.setItem('ismSelectedContentFull', content);
+            localStorage.setItem('ismSelectedContent', content);
             const baseName = content
                 .replace(/_(h264|hevc|av1|dash|ts|hw)$/i, '')
                 .replace(/_\\d{8}_\\d{6}$/i, '');
-            localStorage.setItem('bossSelectedContentBase', baseName);
+            localStorage.setItem('ismSelectedContentBase', baseName);
             if (window.BOSSNav && typeof window.BOSSNav.updateSelectedContentBadge === 'function') {
                 window.BOSSNav.updateSelectedContentBadge();
             }
@@ -768,10 +768,10 @@
                 console.warn('Failed to load content list:', error);
             }
 
-            const storedCodec = localStorage.getItem('bossSelectedCodec');
-            const storedSegment = localStorage.getItem('bossSelectedSegment');
-            const storedProtocol = localStorage.getItem('bossSelectedProtocol');
-            const storedUrl = localStorage.getItem('bossSelectedUrl') || '';
+            const storedCodec = localStorage.getItem('ismSelectedCodec');
+            const storedSegment = localStorage.getItem('ismSelectedSegment');
+            const storedProtocol = localStorage.getItem('ismSelectedProtocol');
+            const storedUrl = localStorage.getItem('ismSelectedUrl') || '';
             const codecSelect = document.getElementById('codecSelect');
             const segmentSelect = document.getElementById('segmentSelect');
             const protocolSelect = document.getElementById('protocolSelect');

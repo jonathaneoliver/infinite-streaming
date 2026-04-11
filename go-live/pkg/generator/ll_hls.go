@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/bluenviron/gohlslib/pkg/playlist"
-	"github.com/boss/go-live/pkg/parser"
+	"github.com/jonathaneoliver/infinite-streaming/go-live/pkg/parser"
 )
 
 const (

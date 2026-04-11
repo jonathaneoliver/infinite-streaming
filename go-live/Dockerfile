@@ -2,7 +2,7 @@ FROM golang:1.21-alpine as build
 WORKDIR /app
 
 # Initialize go module
-RUN go mod init github.com/boss/go-live
+RUN go mod init github.com/jonathaneoliver/infinite-streaming/go-live
 
 # Copy source and install dependencies
 COPY . .

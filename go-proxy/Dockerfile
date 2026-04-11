@@ -3,7 +3,7 @@ WORKDIR /app
 
 ARG VERSION=unknown
 
-RUN go mod init github.com/boss/go-proxy
+RUN go mod init github.com/jonathaneoliver/infinite-streaming/go-proxy
 
 COPY . .
 

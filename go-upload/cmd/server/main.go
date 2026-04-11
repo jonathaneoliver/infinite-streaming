@@ -7,10 +7,10 @@ import (
 	"os"
 	"time"
 
-	"github.com/boss/go-upload/internal/api"
-	"github.com/boss/go-upload/internal/app"
-	"github.com/boss/go-upload/internal/config"
-	"github.com/boss/go-upload/internal/store"
+	"github.com/jonathaneoliver/infinite-streaming/go-upload/internal/api"
+	"github.com/jonathaneoliver/infinite-streaming/go-upload/internal/app"
+	"github.com/jonathaneoliver/infinite-streaming/go-upload/internal/config"
+	"github.com/jonathaneoliver/infinite-streaming/go-upload/internal/store"
 	"github.com/gorilla/mux"
 )
 

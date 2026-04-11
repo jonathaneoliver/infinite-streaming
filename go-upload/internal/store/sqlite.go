@@ -62,7 +62,7 @@ func DatabasePathFromEnv() string {
 		base = os.Getenv("BOSS_DATABASE_DIR")
 	}
 	if base == "" {
-		base = "/boss/boss-data"
+		base = "/media/data"
 	}
 	return filepath.Join(base, "encoding_jobs.db")
 }
