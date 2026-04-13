@@ -34,7 +34,7 @@ FROM alpine:3.19
 # Install dependencies first (expensive, rarely changes - gets cached)
 RUN \
   apk update && \
-  apk add iproute2 iperf nftables && \
+  apk add iproute2 iperf nftables memcached && \
   apk add nginx nginx-mod-http-vod nginx-mod-http-lua && \
   apk add ffmpeg && \
   apk add python3 py3-pip && \
