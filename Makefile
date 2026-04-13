@@ -128,6 +128,60 @@ deploy-release:
 	docker buildx build --platform linux/amd64 --build-arg VERSION=$(shell cat VERSION) -t $(K3S_PROXY_IMAGE) --push ./go-proxy
 	$(MAKE) deploy-k3s K3S_KUBECONFIG=$(K3S_KUBECONFIG) K3S_SERVER_IMAGE=$(K3S_SERVER_IMAGE) K3S_PROXY_IMAGE=$(K3S_PROXY_IMAGE)
 
+# ── Remote deployment testing ──────────────────────────────────────────
+# Deploy all 4 installation methods to a remote Docker host for parallel testing.
+# Configure TEST_SSH and TEST_MEDIA_DIR in .env.
+
+TEST_SSH ?= user@test-host
+TEST_MEDIA_DIR ?= /home/user/media
+REPO_URL ?= https://github.com/jonathaneoliver/infinite-streaming.git
+
+test-deploy-all: test-deploy-compose test-deploy-run test-deploy-ghcr test-deploy-registry
+
+test-clean:
+	ssh $(TEST_SSH) 'docker rm -f test-compose-server test-compose-memcached-1 test-docker-run test-ghcr-server test-ghcr-memcached-1 test-registry-server 2>/dev/null; docker network prune -f 2>/dev/null'
+
+test-status:
+	@ssh $(TEST_SSH) 'for p in 22000 23000 24000 25000; do \
+		proxy=$$((p / 1000 * 1000 + 81)); \
+		ui=$$(curl -s -o /dev/null -w "%{http_code}" http://localhost:$$p/); \
+		px=$$(curl -s -o /dev/null -w "%{http_code}" http://localhost:$$proxy/api/sessions 2>/dev/null); \
+		echo "Port $$p: UI=$$ui Proxy=$$proxy=$$px"; \
+	done'
+
+test-deploy-compose:
+	@echo "=== Option 1: Docker Compose from source (port 22000) ==="
+	ssh $(TEST_SSH) 'if [ -d ~/test-compose/.git ]; then cd ~/test-compose && git checkout -- . && git pull; else git clone $(REPO_URL) ~/test-compose; fi'
+	ssh $(TEST_SSH) 'echo "CONTENT_DIR=$(TEST_MEDIA_DIR)" > ~/test-compose/.env'
+	scp tests/deploy/override-compose.yml $(TEST_SSH):~/test-compose/docker-compose.override.yml
+	ssh $(TEST_SSH) 'cd ~/test-compose && docker compose build && docker compose up -d'
+
+test-deploy-run:
+	@echo "=== Option 2: Docker run (port 23000) ==="
+	ssh $(TEST_SSH) 'docker rm -f test-docker-run 2>/dev/null; \
+		docker run -d --name test-docker-run --cap-add NET_ADMIN --privileged \
+		-p 23000:30000 -p 23081:30081 -p 23181:30181 -p 23281:30281 -p 23381:30381 -p 23481:30481 \
+		-p 23581:30581 -p 23681:30681 -p 23781:30781 -p 23881:30881 \
+		-v $(TEST_MEDIA_DIR):/media \
+		infinite-streaming:latest /sbin/launch.sh 1'
+
+test-deploy-ghcr:
+	@echo "=== Option 3: GHCR pre-built (port 24000) ==="
+	ssh $(TEST_SSH) 'mkdir -p ~/test-ghcr'
+	ssh $(TEST_SSH) 'if [ -d ~/test-compose ]; then cp ~/test-compose/docker-compose.ghcr.yml ~/test-ghcr/docker-compose.yml; fi'
+	ssh $(TEST_SSH) 'echo "CONTENT_DIR=$(TEST_MEDIA_DIR)" > ~/test-ghcr/.env'
+	scp tests/deploy/override-ghcr.yml $(TEST_SSH):~/test-ghcr/docker-compose.override.yml
+	ssh $(TEST_SSH) 'cd ~/test-ghcr && docker compose up -d'
+
+test-deploy-registry:
+	@echo "=== Option 4: Private registry (port 25000) ==="
+	ssh $(TEST_SSH) 'mkdir -p ~/test-registry'
+	scp tests/deploy/docker-compose.registry.yml $(TEST_SSH):~/test-registry/docker-compose.yml
+	ssh $(TEST_SSH) 'echo "CONTENT_DIR=$(TEST_MEDIA_DIR)" > ~/test-registry/.env && echo "K3S_REGISTRY=$(K3S_REGISTRY)" >> ~/test-registry/.env'
+	ssh $(TEST_SSH) 'cd ~/test-registry && docker compose up -d'
+
+# ── iOS testing ────────────────────────────────────────────────────────
+
 test-ios-sim-metrics:
 	PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \
 	IOS_SIM_TEST_RUN=1 \
