@@ -875,6 +875,7 @@
         let autoRetryCount = 0;
         let autoRetryTimer = null;
         const pendingShaping = new Map();
+        const shapingPatternDirty = new Map();
         const lastAppliedShaping = new Map();
         const pendingFailureEdits = new Map();
         const controlRevisionBySession = new Map();
@@ -1472,7 +1473,7 @@
             }
             metricsHeartbeatTimer = setInterval(() => {
                 sendSessionMetrics('heartbeat');
-            }, 5000);
+            }, 1000);
         }
 
         function normalizeBitrateAxisMaxMode(value) {
@@ -2859,6 +2860,8 @@
             if (!card || !session) return;
             const sessionId = String(card.dataset.sessionId || session.session_id || '');
             if (!sessionId) return;
+            // Skip overwriting local pattern edits the user hasn't applied yet
+            if (shapingPatternDirty.get(sessionId)) return;
             const templateModeRaw = String(session.nftables_pattern_template_mode || '').toLowerCase();
             const templateMode = ['sliders', 'square_wave', 'ramp_up', 'ramp_down', 'pyramid'].includes(templateModeRaw)
                 ? templateModeRaw
@@ -3496,6 +3499,7 @@
                     } else {
                         // In pattern mode, regenerate UI only — wait for Apply Pattern button
                         applyTemplatePattern(card, false, resetState);
+                        shapingPatternDirty.set(card.dataset.sessionId, true);
                     }
                     return;
                 }
@@ -3506,6 +3510,7 @@
                     } else {
                         // In pattern mode, regenerate UI only — wait for Apply Pattern button
                         applyTemplatePattern(card, false, false, false);
+                        shapingPatternDirty.set(card.dataset.sessionId, true);
                     }
                     return;
                 }
@@ -3560,6 +3565,8 @@
                     const templateMode = getTemplateMode(card);
                     if (templateMode === 'sliders') {
                         scheduleShapingApply(card);
+                    } else {
+                        shapingPatternDirty.set(card.dataset.sessionId, true);
                     }
                     return;
                 }
@@ -3605,6 +3612,7 @@
                     return;
                 }
                 if (button.dataset.action === 'apply-pattern') {
+                    shapingPatternDirty.delete(card.dataset.sessionId);
                     scheduleShapingApply(card);
                     return;
                 }
@@ -4323,6 +4331,9 @@
             const serverRendition = Number.isFinite(Number(session.server_video_rendition_mbps))
                 ? Number(session.server_video_rendition_mbps)
                 : null;
+            const metricsAtMs = session.player_metrics_event_time
+                ? Date.parse(session.player_metrics_event_time) || null
+                : null;
             const variantLadder = buildVariantLadder(session.manifest_variants);
             const patternSteps = Array.isArray(session.nftables_pattern_steps) ? session.nftables_pattern_steps : [];
             const patternStepIndex = Number(session.nftables_pattern_step_runtime || session.nftables_pattern_step || 0);
@@ -4460,6 +4471,7 @@
                 currentRendition,
                 framesDisplayed,
                 framesDropped,
+                metricsAtMs,
                 serverRendition,
                 target,
                 variantLadder
@@ -4500,6 +4512,7 @@
                     currentRendition: point.currentRendition,
                     framesDisplayed: point.framesDisplayed,
                     framesDropped: point.framesDropped,
+                    metricsAtMs: point.metricsAtMs,
                     serverRendition: point.serverRendition,
                     target: point.target,
                     variantLadder: point.variantLadder
@@ -4517,8 +4530,8 @@
             const segmentDrainData = points.map(point => ({ x: point.x, y: point.segmentDrain }));
             const fullSegmentNetworkBitrateData = points.map(point => ({ x: point.x, y: point.fullSegmentNetworkBitrate }));
             const bufferDepthData = points.map(point => ({ x: point.x, y: Number.isFinite(point.bufferDepth) ? point.bufferDepth : null }));
-            const framesDisplayedData = points.map(point => ({ x: point.x, y: Number.isFinite(point.framesDisplayed) ? point.framesDisplayed : null }));
-            const framesDroppedData = points.map(point => ({ x: point.x, y: Number.isFinite(point.framesDropped) ? point.framesDropped : null }));
+            const framesDisplayedData = points.map(point => ({ x: point.x, y: Number.isFinite(point.framesDisplayed) ? point.framesDisplayed : null, atMs: point.metricsAtMs || null }));
+            const framesDroppedData = points.map(point => ({ x: point.x, y: Number.isFinite(point.framesDropped) ? point.framesDropped : null, atMs: point.metricsAtMs || null }));
             const estimateData = points.map(point => ({ x: point.x, y: point.playerEstimate || null }));
             const renditionData = points.map(point => ({ x: point.x, y: point.currentRendition || null }));
             const serverRenditionData = points.map(point => ({ x: point.x, y: point.serverRendition || null }));
@@ -4585,7 +4598,7 @@
                 ...maxFor(isSeriesHidden('Server Rendition'), serverRenditionData),
                 ...maxFor(isSeriesHidden('Limit'), targetData)
             );
-            const maxYAuto = Math.max(1, (Math.ceil((maxYAutoRaw * 1.05) * 10) / 10));
+            const maxYAuto = Math.min(100, Math.max(1, (Math.ceil((maxYAutoRaw * 1.05) * 10) / 10)));
             const maxY = axisMode === 'auto' ? maxYAuto : Number(axisMode);
             const buildEventMarkerData = (type) => {
                 const markerData = [];
@@ -4786,6 +4799,7 @@
                                             }
                                         });
                                         state['Variants'] = !newVisible;
+                                        bandwidthVariantsEnabledBySession.set(sessionId, newVisible);
                                     } else {
                                         chartRef.setDatasetVisibility(index, !isVisible);
                                         state[label] = isVisible;
@@ -5003,7 +5017,7 @@
             }
             const fpsData = [];
             const droppedFpsDataRaw = [];
-            const fpsWindowSeconds = 1.0;
+            const fpsWindowSeconds = 2.0;
             const maxReasonableFps = 120;
             const buildRateSeries = (counterSeries) => {
                 const out = [];
@@ -5030,10 +5044,13 @@
                         continue;
                     }
                     const anchorCount = Number(anchorPoint.y);
-                    const anchorX = Number(anchorPoint.x);
-                    const deltaSeconds = currentX - anchorX;
+                    const currentMs = Number(currentPoint.atMs);
+                    const anchorMs = Number(anchorPoint.atMs);
+                    const deltaSeconds = (Number.isFinite(currentMs) && Number.isFinite(anchorMs) && currentMs > anchorMs)
+                        ? (currentMs - anchorMs) / 1000
+                        : currentX - Number(anchorPoint.x);
                     const deltaCount = currentCount - anchorCount;
-                    if (!Number.isFinite(anchorCount) || !Number.isFinite(anchorX) || deltaSeconds <= 0 || deltaCount < 0) {
+                    if (!Number.isFinite(anchorCount) || deltaSeconds <= 0 || deltaCount < 0) {
                         out.push({ x: currentPoint.x, y: null });
                         continue;
                     }
