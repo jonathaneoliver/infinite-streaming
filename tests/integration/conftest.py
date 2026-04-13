@@ -188,6 +188,11 @@ def pytest_addoption(parser):
         default=False,
         help="If attach IDs are not found, try launching InfiniteStreamPlayer in iOS Simulator before browser fallback",
     )
+    # Loop health monitoring
+    parser.addoption("--loop-count", type=int, default=3, help="Number of loops to observe before reporting")
+    parser.addoption("--loop-timeout", type=int, default=300, help="Max seconds to wait for loops")
+    parser.addoption("--loop-player-id", default="", help="Filter by player_id (default: first active session)")
+    parser.addoption("--loop-session-id", default="", help="Filter by session_id")
 
 
 @pytest.fixture(scope="session")
@@ -238,6 +243,10 @@ def config(request):
         'abrchar_player_id': request.config.getoption("--abrchar-player-id"),
         'abrchar_attach_timeout': request.config.getoption("--abrchar-attach-timeout"),
         'abrchar_launch_ios_simulator': request.config.getoption("--abrchar-launch-ios-simulator"),
+        'loop_count': request.config.getoption("--loop-count"),
+        'loop_timeout': request.config.getoption("--loop-timeout"),
+        'loop_player_id': request.config.getoption("--loop-player-id") or None,
+        'loop_session_id': request.config.getoption("--loop-session-id") or None,
         'verbose': request.config.getoption("-v") > 0,
     })()
 
