@@ -3778,13 +3778,10 @@
                     const lastRequest = Date.parse(session.last_request || '') || 0;
                     const firstRequest = Date.parse(session.first_request_time || '') || 0;
                     const wireScore =
-                        Number.isFinite(Number(session.mbps_wire_sustained)) ||
-                        Number.isFinite(Number(session.mbps_wire_active)) ||
-                        Number.isFinite(Number(session.mbps_wire_sustained_6s)) ||
-                        Number.isFinite(Number(session.mbps_wire_active_6s)) ||
-                        Number.isFinite(Number(session.mbps_wire_sustained_1s)) ||
-                        Number.isFinite(Number(session.mbps_wire_active_1s)) ||
-                        Number.isFinite(Number(session.mbps_wire_throughput))
+                        Number.isFinite(Number(session.mbps_shaper_rate)) ||
+                        Number.isFinite(Number(session.mbps_shaper_avg)) ||
+                        Number.isFinite(Number(session.mbps_transfer_rate)) ||
+                        Number.isFinite(Number(session.mbps_transfer_complete))
                             ? 1
                             : 0;
                     return { wireScore, lastRequest, firstRequest };
@@ -3913,7 +3910,6 @@
             setText('[data-field="session_mbps_estimate_1s"]', formatMetricNumber(session.mbps_estimate_1s, ' Mbps'));
             setText('[data-field="session_mbps_estimate_10s"]', formatMetricNumber(session.mbps_estimate_10s, ' Mbps'));
             setText('[data-field="session_mbps_estimate_p25"]', formatMetricNumber(session.mbps_estimate_p25, ' Mbps'));
-            setText('[data-field="session_mbps_segment_active"]', formatMetricNumber(session.mbps_segment_active, ' Mbps'));
             setText('[data-field="session_bytes_in_total"]', formatCounter(session.bytes_in_total));
             setText('[data-field="session_bytes_out_total"]', formatCounter(session.bytes_out_total));
             setText('[data-field="session_bytes_in_last"]', formatCounter(session.bytes_in_last));
@@ -3922,13 +3918,7 @@
             setText('[data-field="session_measurement_window_io"]', formatMetricNumber(session.measurement_window_io, 's'));
             setText('[data-field="session_measurement_window_io_1s"]', formatMetricNumber(session.measurement_window_io_1s, 's'));
             setText('[data-field="session_measurement_window_active"]', formatMetricNumber(session.measurement_window_active, 's'));
-            setText('[data-field="session_measurement_window_segment_active"]', formatMetricNumber(session.measurement_window_segment_active, 's'));
-            setText('[data-field="session_mbps_wire_sustained"]', formatMetricNumber(session.mbps_wire_sustained, ' Mbps'));
-            setText('[data-field="session_mbps_wire_active"]', formatMetricNumber(session.mbps_wire_active, ' Mbps'));
-            setText('[data-field="session_mbps_wire_sustained_6s"]', formatMetricNumber(session.mbps_wire_sustained_6s, ' Mbps'));
-            setText('[data-field="session_mbps_wire_active_6s"]', formatMetricNumber(session.mbps_wire_active_6s, ' Mbps'));
-            setText('[data-field="session_mbps_wire_sustained_1s"]', formatMetricNumber(session.mbps_wire_sustained_1s, ' Mbps'));
-            setText('[data-field="session_mbps_wire_throughput"]', formatMetricNumber(session.mbps_wire_throughput, ' Mbps'));
+            setText('[data-field="session_mbps_shaper_rate"]', formatMetricNumber(session.mbps_shaper_rate, ' Mbps'));
             const masterCount = session.master_manifest_requests_count || 0;
             const manifestCount = session.manifest_requests_count || 0;
             const segmentCount = session.segments_count || 0;
@@ -4303,27 +4293,10 @@
             const now = Date.now();
             const windowMs = 10 * 60 * 1000;
             const key = session.session_id;
-            const wireSustained = Number.isFinite(Number(session.mbps_wire_sustained)) ? Number(session.mbps_wire_sustained) : null;
-            const wireActive = Number.isFinite(Number(session.mbps_wire_active)) ? Number(session.mbps_wire_active) : null;
-            const wireSustained6s = Number.isFinite(Number(session.mbps_wire_sustained_6s)) ? Number(session.mbps_wire_sustained_6s) : null;
-            const wireActive6s = Number.isFinite(Number(session.mbps_wire_active_6s)) ? Number(session.mbps_wire_active_6s) : null;
-            const wireActive1s = Number.isFinite(Number(session.mbps_wire_active_1s)) ? Number(session.mbps_wire_active_1s) : null;
-            const wireA1s = Number.isFinite(Number(session.mbps_wire_a1s)) ? Number(session.mbps_wire_a1s) : null;
-            const wireA6s = Number.isFinite(Number(session.mbps_wire_a6s)) ? Number(session.mbps_wire_a6s) : null;
-            const segmentWire = session.mbps_segment_wire != null && Number.isFinite(Number(session.mbps_segment_wire)) ? Number(session.mbps_segment_wire) : null;
-            const segmentDrain = session.mbps_segment_drain != null && Number.isFinite(Number(session.mbps_segment_drain)) ? Number(session.mbps_segment_drain) : null;
-            const videoApp = session.mbps_video_app != null && Number.isFinite(Number(session.mbps_video_app)) ? Number(session.mbps_video_app) : null;
-            const wireActiveShort = Number.isFinite(Number(session.mbps_wire_active_short_ewma))
-                ? Number(session.mbps_wire_active_short_ewma)
-                : null;
-            const wireActiveLong = Number.isFinite(Number(session.mbps_wire_active_long_ewma))
-                ? Number(session.mbps_wire_active_long_ewma)
-                : null;
-            const wireActiveNetwork = Number.isFinite(Number(session.mbps_wire_active_network))
-                ? Number(session.mbps_wire_active_network)
-                : null;
-            const wireSustained1s = Number.isFinite(Number(session.mbps_wire_sustained_1s)) ? Number(session.mbps_wire_sustained_1s) : null;
-            const wireThroughput = Number.isFinite(Number(session.mbps_wire_throughput)) ? Number(session.mbps_wire_throughput) : null;
+            const wireActive6s = Number.isFinite(Number(session.mbps_shaper_rate)) ? Number(session.mbps_shaper_rate) : null;
+            const wireActive1s = Number.isFinite(Number(session.mbps_shaper_avg)) ? Number(session.mbps_shaper_avg) : null;
+            const segmentWire = session.mbps_transfer_rate != null && Number.isFinite(Number(session.mbps_transfer_rate)) ? Number(session.mbps_transfer_rate) : null;
+            const segmentDrain = session.mbps_transfer_complete != null && Number.isFinite(Number(session.mbps_transfer_complete)) ? Number(session.mbps_transfer_complete) : null;
             const fullSegmentNetworkBitrate = Number.isFinite(Number(session.full_segment_network_bitrate_mbps))
                 ? Number(session.full_segment_network_bitrate_mbps)
                 : null;
@@ -4474,21 +4447,10 @@
             }
             series.push({
                 ts: now,
-                wireSustained,
-                wireActive,
-                wireSustained6s,
                 wireActive6s,
                 wireActive1s,
-                wireA1s,
-                wireA6s,
                 segmentWire,
                 segmentDrain,
-                videoApp,
-                wireActiveShort,
-                wireActiveLong,
-                wireActiveNetwork,
-                wireSustained1s,
-                wireThroughput,
                 fullSegmentNetworkBitrate,
                 bufferDepth,
                 playerEstimate,
@@ -4525,21 +4487,10 @@
                 .filter(point => point.ts >= windowStart)
                 .map(point => ({
                     x: (point.ts - windowStart) / 1000,
-                    wireSustained: point.wireSustained,
-                    wireActive: point.wireActive,
-                    wireSustained6s: point.wireSustained6s,
                     wireActive6s: point.wireActive6s,
                     wireActive1s: point.wireActive1s,
-                    wireA1s: point.wireA1s,
-                    wireA6s: point.wireA6s,
                     segmentWire: point.segmentWire,
                     segmentDrain: point.segmentDrain,
-                    videoApp: point.videoApp,
-                    wireActiveShort: point.wireActiveShort,
-                    wireActiveLong: point.wireActiveLong,
-                    wireActiveNetwork: point.wireActiveNetwork,
-                    wireSustained1s: point.wireSustained1s,
-                    wireThroughput: point.wireThroughput,
                     fullSegmentNetworkBitrate: point.fullSegmentNetworkBitrate,
                     bufferDepth: point.bufferDepth,
                     playerEstimate: point.playerEstimate,
@@ -4557,21 +4508,10 @@
                     type: event.type
                 }))
                 .filter((event) => Number.isFinite(event.x) && event.x >= 0 && event.x <= 600);
-            const wireSustainedData = points.map(point => ({ x: point.x, y: point.wireSustained }));
-            const wireActiveData = points.map(point => ({ x: point.x, y: point.wireActive }));
-            const wireSustained6sData = points.map(point => ({ x: point.x, y: point.wireSustained6s }));
             const wireActive6sData = points.map(point => ({ x: point.x, y: point.wireActive6s }));
             const wireActive1sData = points.map(point => ({ x: point.x, y: point.wireActive1s }));
-            const wireA1sData = points.map(point => ({ x: point.x, y: point.wireA1s }));
-            const wireA6sData = points.map(point => ({ x: point.x, y: point.wireA6s }));
             const segmentWireData = points.map(point => ({ x: point.x, y: point.segmentWire }));
             const segmentDrainData = points.map(point => ({ x: point.x, y: point.segmentDrain }));
-            const videoAppData = points.map(point => ({ x: point.x, y: point.videoApp }));
-            const wireActiveShortData = points.map(point => ({ x: point.x, y: point.wireActiveShort }));
-            const wireActiveLongData = points.map(point => ({ x: point.x, y: point.wireActiveLong }));
-            const wireActiveNetworkData = points.map(point => ({ x: point.x, y: point.wireActiveNetwork }));
-            const wireSustained1sData = points.map(point => ({ x: point.x, y: point.wireSustained1s }));
-            const wireThroughputData = points.map(point => ({ x: point.x, y: point.wireThroughput }));
             const fullSegmentNetworkBitrateData = points.map(point => ({ x: point.x, y: point.fullSegmentNetworkBitrate }));
             const bufferDepthData = points.map(point => ({ x: point.x, y: Number.isFinite(point.bufferDepth) ? point.bufferDepth : null }));
             const framesDisplayedData = points.map(point => ({ x: point.x, y: Number.isFinite(point.framesDisplayed) ? point.framesDisplayed : null }));
@@ -4595,16 +4535,10 @@
                 variantToggleButton.setAttribute('aria-pressed', variantsEnabled ? 'true' : 'false');
             }
             const defaultVisibleLabels = new Set([
-                'mbps_wire_active_6s',
-                'mbps_wire_active_1s',
-                'mbps_wire_a1s',
-                'mbps_wire_a6s',
-                'mbps_segment_wire',
-                'mbps_video_app',
-                'mbps_wire_throughput',
-                'mbps_wire_active_short_ewma',
-                'mbps_wire_active_long_ewma',
-                'mbps_wire_active_network',
+                'mbps_shaper_rate',
+                'mbps_shaper_avg',
+                'mbps_transfer_rate',
+                'mbps_transfer_complete',
                 'Player est.',
                 'Rendition',
                 'Server Rendition',
@@ -4638,18 +4572,10 @@
             bitrateAxisMaxBySession.set(String(sessionId), axisMode);
             const maxFor = (hidden, data) => (hidden ? [0] : data.map(point => point.y || 0));
             const maxYAutoRaw = Math.max(1,
-                ...maxFor(isSeriesHidden('mbps_wire_active'), wireActiveData),
-                ...maxFor(isSeriesHidden('mbps_wire_active_6s'), wireActive6sData),
-                ...maxFor(isSeriesHidden('mbps_wire_active_1s'), wireActive1sData),
-                ...maxFor(isSeriesHidden('mbps_wire_a1s'), wireA1sData),
-                ...maxFor(isSeriesHidden('mbps_wire_a6s'), wireA6sData),
-                ...maxFor(isSeriesHidden('mbps_segment_wire'), segmentWireData),
-                ...maxFor(isSeriesHidden('mbps_segment_drain'), segmentDrainData),
-                ...maxFor(isSeriesHidden('mbps_video_app'), videoAppData),
-                ...maxFor(isSeriesHidden('mbps_wire_throughput'), wireThroughputData),
-                ...maxFor(isSeriesHidden('mbps_wire_active_short_ewma'), wireActiveShortData),
-                ...maxFor(isSeriesHidden('mbps_wire_active_long_ewma'), wireActiveLongData),
-                ...maxFor(isSeriesHidden('mbps_wire_active_network'), wireActiveNetworkData),
+                ...maxFor(isSeriesHidden('mbps_shaper_rate'), wireActive6sData),
+                ...maxFor(isSeriesHidden('mbps_shaper_avg'), wireActive1sData),
+                ...maxFor(isSeriesHidden('mbps_transfer_rate'), segmentWireData),
+                ...maxFor(isSeriesHidden('mbps_transfer_complete'), segmentDrainData),
                 ...maxFor(isSeriesHidden('Player est.'), estimateData),
                 ...maxFor(isSeriesHidden('Rendition'), renditionData),
                 ...maxFor(isSeriesHidden('Server Rendition'), serverRenditionData),
@@ -4687,18 +4613,7 @@
             });
             const datasets = [
                 {
-                    label: 'mbps_wire_active',
-                    data: wireActiveData,
-                    borderColor: '#0f766e',
-                    backgroundColor: 'rgba(15,118,110,0.12)',
-                    borderWidth: 1.5,
-                    pointRadius: 0,
-                    tension: 0.2,
-                    borderDash: [2, 4],
-                    hidden: isSeriesHidden('mbps_wire_active')
-                },
-                {
-                    label: 'mbps_wire_active_6s',
+                    label: 'mbps_shaper_rate',
                     data: wireActive6sData,
                     borderColor: '#115e59',
                     backgroundColor: 'rgba(17,94,89,0.12)',
@@ -4706,10 +4621,10 @@
                     pointRadius: 0,
                     tension: 0.2,
                     borderDash: [3, 5],
-                    hidden: isSeriesHidden('mbps_wire_active_6s')
+                    hidden: isSeriesHidden('mbps_shaper_rate')
                 },
                 {
-                    label: 'mbps_wire_active_1s',
+                    label: 'mbps_shaper_avg',
                     data: wireActive1sData,
                     borderColor: '#047857',
                     backgroundColor: 'rgba(4,120,87,0.12)',
@@ -4717,32 +4632,10 @@
                     pointRadius: 0,
                     tension: 0.2,
                     borderDash: [1, 2],
-                    hidden: isSeriesHidden('mbps_wire_active_1s')
+                    hidden: isSeriesHidden('mbps_shaper_avg')
                 },
                 {
-                    label: 'mbps_wire_a1s',
-                    data: wireA1sData,
-                    borderColor: '#0f766e',
-                    backgroundColor: 'rgba(15,118,110,0.12)',
-                    borderWidth: 1.7,
-                    pointRadius: 0,
-                    tension: 0.15,
-                    borderDash: [8, 2],
-                    hidden: isSeriesHidden('mbps_wire_a1s')
-                },
-                {
-                    label: 'mbps_wire_a6s',
-                    data: wireA6sData,
-                    borderColor: '#0d9488',
-                    backgroundColor: 'rgba(13,148,136,0.12)',
-                    borderWidth: 1.7,
-                    pointRadius: 0,
-                    tension: 0.15,
-                    borderDash: [10, 3],
-                    hidden: isSeriesHidden('mbps_wire_a6s')
-                },
-                {
-                    label: 'mbps_segment_wire',
+                    label: 'mbps_transfer_rate',
                     data: segmentWireData,
                     borderColor: '#f97316',
                     backgroundColor: 'rgba(249,115,22,0.12)',
@@ -4750,10 +4643,10 @@
                     pointRadius: 0,
                     tension: 0,
                     borderDash: [4, 2],
-                    hidden: isSeriesHidden('mbps_segment_wire')
+                    hidden: isSeriesHidden('mbps_transfer_rate')
                 },
                 {
-                    label: 'mbps_segment_drain',
+                    label: 'mbps_transfer_complete',
                     data: segmentDrainData,
                     borderColor: '#dc2626',
                     backgroundColor: 'rgba(220,38,38,0.15)',
@@ -4762,62 +4655,7 @@
                     pointBackgroundColor: '#dc2626',
                     tension: 0,
                     stepped: 'after',
-                    hidden: isSeriesHidden('mbps_segment_drain')
-                },
-                {
-                    label: 'mbps_video_app',
-                    data: videoAppData,
-                    borderColor: '#a855f7',
-                    backgroundColor: 'rgba(168,85,247,0.12)',
-                    borderWidth: 2,
-                    pointRadius: 0,
-                    tension: 0,
-                    borderDash: [3, 3],
-                    hidden: isSeriesHidden('mbps_video_app')
-                },
-                {
-                    label: 'mbps_wire_throughput',
-                    data: wireThroughputData,
-                    borderColor: '#166534',
-                    backgroundColor: 'rgba(22,101,52,0.12)',
-                    borderWidth: 1.8,
-                    pointRadius: 0,
-                    tension: 0.2,
-                    borderDash: [1, 0],
-                    hidden: isSeriesHidden('mbps_wire_throughput')
-                },
-                {
-                    label: 'mbps_wire_active_short_ewma',
-                    data: wireActiveShortData,
-                    borderColor: '#16a34a',
-                    backgroundColor: 'rgba(22,163,74,0.12)',
-                    borderWidth: 1.6,
-                    pointRadius: 0,
-                    tension: 0.2,
-                    borderDash: [2, 2],
-                    hidden: isSeriesHidden('mbps_wire_active_short_ewma')
-                },
-                {
-                    label: 'mbps_wire_active_long_ewma',
-                    data: wireActiveLongData,
-                    borderColor: '#15803d',
-                    backgroundColor: 'rgba(21,128,61,0.12)',
-                    borderWidth: 1.6,
-                    pointRadius: 0,
-                    tension: 0.2,
-                    borderDash: [6, 2],
-                    hidden: isSeriesHidden('mbps_wire_active_long_ewma')
-                },
-                {
-                    label: 'mbps_wire_active_network',
-                    data: wireActiveNetworkData,
-                    borderColor: '#166534',
-                    backgroundColor: 'rgba(22,101,52,0.12)',
-                    borderWidth: 1.8,
-                    pointRadius: 0,
-                    tension: 0.2,
-                    borderDash: [1, 0],
-                    hidden: isSeriesHidden('mbps_wire_active_network')
+                    hidden: isSeriesHidden('mbps_transfer_complete')
                 },
                 {
                     label: 'Player est.',

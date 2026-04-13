@@ -3444,6 +3444,12 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 	internalPort := externalPort
 	if mapped, ok := a.portMap.MapExternalPort(externalPort); ok {
 		internalPort = mapped
+	} else {
+		// No explicit port mapping — derive internal port from known listening ports (30081-30881)
+		sessionNum := thirdFromLastDigit(externalPort)
+		if n, err := strconv.Atoi(sessionNum); err == nil && n >= 0 && n <= 8 {
+			internalPort = replaceThirdFromLastDigit("30081", n)
+		}
 	}
 	log.Printf("Original URL: %s", r.URL.String())
 	log.Printf("Original Host: %s", r.Host)
@@ -3500,6 +3506,10 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 		assignedInternalPort := assignedExternalPort
 		if mapped, ok := a.portMap.MapExternalPort(assignedExternalPort); ok {
 			assignedInternalPort = mapped
+		} else {
+			// No explicit port mapping — derive internal port from known listening ports (30081-30881)
+			assignedInternalPort = replaceThirdFromLastDigit("30081", allocated)
+			log.Printf("PORT_MAP_DERIVE external=%s internal=%s allocated=%d", assignedExternalPort, assignedInternalPort, allocated)
 		}
 		groupID := extractGroupId(playerID)
 		sessionData := SessionData{
