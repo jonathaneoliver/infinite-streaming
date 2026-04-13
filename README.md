@@ -6,19 +6,9 @@ This project is primarily an **AI No‑Code** build. The Go services and web das
 
 InfiniteStream is a Docker‑based HLS/DASH media server for testing video players under deterministic live‑like conditions. It generates LL‑HLS and LL‑DASH streams alongside 2s/6s segment variants and includes a rich dashboard for playback comparison, diagnostics, and monitoring.
 
-## Prerequisites
+## TLS Certificates
 
-TLS certificates are required for nginx. Generate them once in your media directory:
-
-```bash
-mkdir -p /path/to/your/media/certs
-openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
-  -keyout /path/to/your/media/certs/localhost-key.pem \
-  -out /path/to/your/media/certs/localhost.pem \
-  -subj "/CN=localhost"
-```
-
-All deployment methods read certs from `$CONTENT_DIR/certs`.
+Self-signed TLS certificates are auto-generated on first startup if none exist in `$CONTENT_DIR/certs`. To provide your own certificates, place `localhost.pem` and `localhost-key.pem` in your media directory's `certs/` folder before starting — the container will use them instead of generating new ones.
 
 ## Quick start
 

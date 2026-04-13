@@ -12,13 +12,15 @@ export INFINITE_STREAM_OUTPUT_DIR="${INFINITE_STREAM_OUTPUT_DIR:-${INFINITE_OUTP
 
 # Auto-generate self-signed TLS certs if missing
 certdir="/media/certs"
-if [ ! -f "$certdir/localhost.pem" ] || [ ! -f "$certdir/localhost-key.pem" ]; then
+if [ -f "$certdir/localhost.pem" ] && [ -f "$certdir/localhost-key.pem" ]; then
+  echo "Using existing TLS certificates from $certdir"
+else
   mkdir -p "$certdir"
   openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
     -keyout "$certdir/localhost-key.pem" \
     -out "$certdir/localhost.pem" \
     -subj "/CN=localhost" 2>/dev/null
-  echo "Generated self-signed TLS certificates in $certdir"
+  echo "Auto-generated self-signed TLS certificates in $certdir"
 fi
 # Ensure nginx can find the certs
 mkdir -p /etc/nginx/certs
