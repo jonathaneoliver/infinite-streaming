@@ -759,8 +759,8 @@
         .abrchar-success { color: #166534; }
     </style>
 </head>
-<body data-ism-no-sidebar data-ism-no-header data-ism-active-page="testing-session">
-    <div class="ism-content-wide">
+<body data-boss-no-sidebar data-boss-no-header data-boss-active-page="testing-session">
+    <div class="boss-content-wide">
         <div class="page-header">
             <div>
                 <div class="page-title" id="pageTitle">Testing Playback</div>
@@ -823,9 +823,9 @@
         (() => {
             const params = new URLSearchParams(window.location.search);
             if (params.get('nav') === '1') {
-                document.body.removeAttribute('data-ism-no-sidebar');
-                document.body.removeAttribute('data-ism-no-header');
-                document.body.dataset.ismActivePage = 'test-playback';
+                document.body.removeAttribute('data-boss-no-sidebar');
+                document.body.removeAttribute('data-boss-no-header');
+                document.body.dataset.bossActivePage = 'test-playback';
             }
         })();
     </script>
@@ -842,7 +842,7 @@
         const sseMissedEl = document.getElementById('statSseMissed');
         const video = document.getElementById('player');
         const isDeveloperMode = new URLSearchParams(window.location.search).get('developer') === '1';
-        const NATIVE_4K_KEY = 'ismPrefer4kNative';
+        const NATIVE_4K_KEY = 'bossPrefer4kNative';
         const AUTO_RECOVERY_KEY = 'bossAutoRecovery';
         const UHD_HEIGHT_THRESHOLD = 2160; // 4K/UHD resolution threshold
         let hlsInstance = null;
@@ -886,6 +886,7 @@
         const chartViewportBySession = new Map();
         const chartPausedBySession = new Map();
         const bandwidthVisibility = new Map();
+        const bandwidthVariantsEnabledBySession = new Map();
         const bitrateAxisMaxBySession = new Map();
         const lastRecordedPlayerEventBySession = new Map();
         const lastRecordedLoopCountBySession = new Map();
@@ -937,7 +938,7 @@
                 persistent4kBySession.set(String(sessionId), true);
             } catch (e) {}
             try {
-                localStorage.setItem('ismKnown4k:session:' + String(sessionId), 'true');
+                localStorage.setItem('bossKnown4k:session:' + String(sessionId), 'true');
             } catch (e) {}
         }
 
@@ -947,7 +948,7 @@
                 if (persistent4kBySession.get(String(sessionId))) return true;
             } catch (e) {}
             try {
-                return localStorage.getItem('ismKnown4k:session:' + String(sessionId)) === 'true';
+                return localStorage.getItem('bossKnown4k:session:' + String(sessionId)) === 'true';
             } catch (e) {
                 return false;
             }
@@ -1452,12 +1453,17 @@
         function sendSessionMetrics(eventType, extra = {}) {
             if (!currentSessionId) return;
             const payload = buildMetricsPayload(eventType, extra);
-            if (!Object.keys(payload).length) return;
-            fetch(`/api/session/${currentSessionId}/metrics`, {
-                method: 'POST',
+            const fields = Object.keys(payload);
+            if (!fields.length) return;
+            fetch(`/api/session/${currentSessionId}`, {
+                method: 'PATCH',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ set: payload })
-            }).catch(err => console.warn('Metrics post failed', err));
+                body: JSON.stringify({
+                    set: payload,
+                    fields,
+                    base_revision: getSessionBaseRevision()
+                })
+            }).catch(err => console.warn('Metrics patch failed', err));
         }
 
         function scheduleMetricsHeartbeat() {
@@ -1466,7 +1472,7 @@
             }
             metricsHeartbeatTimer = setInterval(() => {
                 sendSessionMetrics('heartbeat');
-            }, 1000);
+            }, 5000);
         }
 
         function normalizeBitrateAxisMaxMode(value) {
@@ -1481,12 +1487,17 @@
             return Math.random().toString(36).slice(2, 10);
         }
 
+        function getProxyPort() {
+            const uiPort = window.location.port || '30000';
+            return uiPort.slice(0, -3) + '081';
+        }
+
         function normalizeTestingBase(url) {
             if (window.BOSSNav && typeof window.BOSSNav.normalizeTestingBaseUrl === 'function') {
                 return window.BOSSNav.normalizeTestingBaseUrl(url);
             }
             const parsed = new URL(url, window.location.origin);
-            parsed.port = '30081';
+            parsed.port = getProxyPort();
             return parsed.toString();
         }
 
@@ -1690,7 +1701,7 @@
             const params = new URLSearchParams(window.location.search);
             let url = params.get('url') || '';
             if (!url) {
-                url = localStorage.getItem('ismSelectedUrl') || '';
+                url = localStorage.getItem('bossSelectedUrl') || '';
             }
             if (url && window.BOSSNav && typeof window.BOSSNav.normalizeTestingBaseUrl === 'function') {
                 try {
@@ -1701,7 +1712,7 @@
             }
             let playerId = params.get('player_id') || '';
             if (!playerId) {
-                playerId = localStorage.getItem('ismTestPlaybackPlayerId') || '';
+                playerId = localStorage.getItem('bossTestPlaybackPlayerId') || '';
             }
             if (!playerId) {
                 if (window.BOSSNav && typeof window.BOSSNav.createPlayerId === 'function') {
@@ -1710,7 +1721,7 @@
                     playerId = Math.random().toString(36).slice(2, 10);
                 }
                 try {
-                    localStorage.setItem('ismTestPlaybackPlayerId', playerId);
+                    localStorage.setItem('bossTestPlaybackPlayerId', playerId);
                 } catch (err) {
                     console.warn('Failed to persist Testing Playback player id', err);
                 }
@@ -1726,7 +1737,7 @@
                     console.warn('Failed to attach player id to URL', err);
                 }
                 try {
-                    localStorage.setItem('ismSelectedUrl', url);
+                    localStorage.setItem('bossSelectedUrl', url);
                 } catch (err) {
                     console.warn('Failed to persist selected url', err);
                 }
@@ -2629,18 +2640,6 @@
             if (strip) {
                 strip.checked = !!session.content_strip_codecs;
             }
-            const stripAvgBw = card.querySelector('input[data-field="content_strip_average_bandwidth"]');
-            if (stripAvgBw) {
-                stripAvgBw.checked = !!session.content_strip_average_bandwidth;
-            }
-            const overstateBw = card.querySelector('input[data-field="content_overstate_bandwidth"]');
-            if (overstateBw) {
-                overstateBw.checked = !!session.content_overstate_bandwidth;
-            }
-            const liveOffsetVal = String(session.content_live_offset || 'none');
-            card.querySelectorAll('input[data-field="content_live_offset"]').forEach(radio => {
-                radio.checked = (radio.value === liveOffsetVal) || (liveOffsetVal === '0' && radio.value === 'none');
-            });
             const allowed = Array.isArray(session.content_allowed_variants)
                 ? session.content_allowed_variants.map(String)
                 : [];
@@ -3495,8 +3494,9 @@
                         // In sliders mode, apply immediately as before
                         applyTemplatePattern(card, true, resetState);
                     } else {
-                        // In pattern mode, regenerate UI but wait for Apply Pattern button
+                        // In pattern mode, regenerate UI then persist selection
                         applyTemplatePattern(card, false, resetState);
+                        scheduleShapingApply(card);
                     }
                     return;
                 }
@@ -3505,8 +3505,9 @@
                     if (templateMode === 'sliders') {
                         scheduleShapingApply(card);
                     } else {
-                        // In pattern mode, regenerate UI but wait for Apply Pattern button
+                        // In pattern mode, regenerate UI then persist selection
                         applyTemplatePattern(card, false, false, false);
+                        scheduleShapingApply(card);
                     }
                     return;
                 }
@@ -3552,8 +3553,8 @@
                         allBox.checked = true;
                     }
                 }
-                if (event.target.dataset.field === 'content_allowed_variants' || event.target.dataset.field === 'content_strip_codecs' || event.target.dataset.field === 'content_strip_average_bandwidth' || event.target.dataset.field === 'content_overstate_bandwidth' || event.target.dataset.field === 'content_live_offset') {
-                    sendSessionPatch(card, ['content_allowed_variants', 'content_strip_codecs', 'content_strip_average_bandwidth', 'content_overstate_bandwidth', 'content_live_offset']);
+                if (event.target.dataset.field === 'content_allowed_variants' || event.target.dataset.field === 'content_strip_codecs') {
+                    sendSessionPatch(card, ['content_allowed_variants', 'content_strip_codecs']);
                     return;
                 }
                 if (event.target.dataset.field && event.target.dataset.field.startsWith('shaping_')) {
@@ -3576,6 +3577,13 @@
                 if (!button) return;
                 const card = button.closest('.session-card');
                 if (!card) return;
+                if (button.dataset.action === 'toggle-variants') {
+                    const sessionId = String(card.dataset.sessionId || '');
+                    const variantsEnabled = bandwidthVariantsEnabledBySession.get(sessionId) !== false;
+                    bandwidthVariantsEnabledBySession.set(sessionId, !variantsEnabled);
+                    renderBandwidthChart(sessionId);
+                    return;
+                }
                 if (button.dataset.action === 'reset-bitrate-zoom') {
                     const sessionId = String(card.dataset.sessionId || '');
                     chartViewportBySession.delete(sessionId);
@@ -3770,8 +3778,13 @@
                     const lastRequest = Date.parse(session.last_request || '') || 0;
                     const firstRequest = Date.parse(session.first_request_time || '') || 0;
                     const wireScore =
-                        Number.isFinite(Number(session.mbps_shaper_rate)) ||
-                        Number.isFinite(Number(session.mbps_transfer_rate))
+                        Number.isFinite(Number(session.mbps_wire_sustained)) ||
+                        Number.isFinite(Number(session.mbps_wire_active)) ||
+                        Number.isFinite(Number(session.mbps_wire_sustained_6s)) ||
+                        Number.isFinite(Number(session.mbps_wire_active_6s)) ||
+                        Number.isFinite(Number(session.mbps_wire_sustained_1s)) ||
+                        Number.isFinite(Number(session.mbps_wire_active_1s)) ||
+                        Number.isFinite(Number(session.mbps_wire_throughput))
                             ? 1
                             : 0;
                     return { wireScore, lastRequest, firstRequest };
@@ -3910,6 +3923,12 @@
             setText('[data-field="session_measurement_window_io_1s"]', formatMetricNumber(session.measurement_window_io_1s, 's'));
             setText('[data-field="session_measurement_window_active"]', formatMetricNumber(session.measurement_window_active, 's'));
             setText('[data-field="session_measurement_window_segment_active"]', formatMetricNumber(session.measurement_window_segment_active, 's'));
+            setText('[data-field="session_mbps_wire_sustained"]', formatMetricNumber(session.mbps_wire_sustained, ' Mbps'));
+            setText('[data-field="session_mbps_wire_active"]', formatMetricNumber(session.mbps_wire_active, ' Mbps'));
+            setText('[data-field="session_mbps_wire_sustained_6s"]', formatMetricNumber(session.mbps_wire_sustained_6s, ' Mbps'));
+            setText('[data-field="session_mbps_wire_active_6s"]', formatMetricNumber(session.mbps_wire_active_6s, ' Mbps'));
+            setText('[data-field="session_mbps_wire_sustained_1s"]', formatMetricNumber(session.mbps_wire_sustained_1s, ' Mbps'));
+            setText('[data-field="session_mbps_wire_throughput"]', formatMetricNumber(session.mbps_wire_throughput, ' Mbps'));
             const masterCount = session.master_manifest_requests_count || 0;
             const manifestCount = session.manifest_requests_count || 0;
             const segmentCount = session.segments_count || 0;
@@ -3953,7 +3972,9 @@
             return String(label || '').replace(/\s*\(V\d+\)$/, '');
         }
 
-
+        function isVariantSeriesLabel(label) {
+            return /^Variant V\d+$/.test(String(label || ''));
+        }
 
         function buildVariantLadder(variants) {
             if (!Array.isArray(variants) || !variants.length) return [];
@@ -4282,10 +4303,27 @@
             const now = Date.now();
             const windowMs = 10 * 60 * 1000;
             const key = session.session_id;
-            const shaperRate = Number.isFinite(Number(session.mbps_shaper_rate)) ? Number(session.mbps_shaper_rate) : null;
-            const shaperAvg = Number.isFinite(Number(session.mbps_shaper_avg)) ? Number(session.mbps_shaper_avg) : null;
-            const transferRate = session.mbps_transfer_rate != null && Number.isFinite(Number(session.mbps_transfer_rate)) ? Number(session.mbps_transfer_rate) : null;
-            const transferComplete = session.mbps_transfer_complete != null && Number.isFinite(Number(session.mbps_transfer_complete)) ? Number(session.mbps_transfer_complete) : null;
+            const wireSustained = Number.isFinite(Number(session.mbps_wire_sustained)) ? Number(session.mbps_wire_sustained) : null;
+            const wireActive = Number.isFinite(Number(session.mbps_wire_active)) ? Number(session.mbps_wire_active) : null;
+            const wireSustained6s = Number.isFinite(Number(session.mbps_wire_sustained_6s)) ? Number(session.mbps_wire_sustained_6s) : null;
+            const wireActive6s = Number.isFinite(Number(session.mbps_wire_active_6s)) ? Number(session.mbps_wire_active_6s) : null;
+            const wireActive1s = Number.isFinite(Number(session.mbps_wire_active_1s)) ? Number(session.mbps_wire_active_1s) : null;
+            const wireA1s = Number.isFinite(Number(session.mbps_wire_a1s)) ? Number(session.mbps_wire_a1s) : null;
+            const wireA6s = Number.isFinite(Number(session.mbps_wire_a6s)) ? Number(session.mbps_wire_a6s) : null;
+            const segmentWire = session.mbps_segment_wire != null && Number.isFinite(Number(session.mbps_segment_wire)) ? Number(session.mbps_segment_wire) : null;
+            const segmentDrain = session.mbps_segment_drain != null && Number.isFinite(Number(session.mbps_segment_drain)) ? Number(session.mbps_segment_drain) : null;
+            const videoApp = session.mbps_video_app != null && Number.isFinite(Number(session.mbps_video_app)) ? Number(session.mbps_video_app) : null;
+            const wireActiveShort = Number.isFinite(Number(session.mbps_wire_active_short_ewma))
+                ? Number(session.mbps_wire_active_short_ewma)
+                : null;
+            const wireActiveLong = Number.isFinite(Number(session.mbps_wire_active_long_ewma))
+                ? Number(session.mbps_wire_active_long_ewma)
+                : null;
+            const wireActiveNetwork = Number.isFinite(Number(session.mbps_wire_active_network))
+                ? Number(session.mbps_wire_active_network)
+                : null;
+            const wireSustained1s = Number.isFinite(Number(session.mbps_wire_sustained_1s)) ? Number(session.mbps_wire_sustained_1s) : null;
+            const wireThroughput = Number.isFinite(Number(session.mbps_wire_throughput)) ? Number(session.mbps_wire_throughput) : null;
             const fullSegmentNetworkBitrate = Number.isFinite(Number(session.full_segment_network_bitrate_mbps))
                 ? Number(session.full_segment_network_bitrate_mbps)
                 : null;
@@ -4302,9 +4340,6 @@
             const currentRendition = Number(currentRenditionMbps || 0);
             const framesDisplayed = Number.isFinite(Number(session.player_metrics_frames_displayed))
                 ? Number(session.player_metrics_frames_displayed)
-                : null;
-            const metricsAtMs = session.player_metrics_event_time
-                ? Date.parse(session.player_metrics_event_time) || null
                 : null;
             const framesDropped = Number.isFinite(Number(session.player_metrics_dropped_frames))
                 ? Number(session.player_metrics_dropped_frames)
@@ -4439,16 +4474,26 @@
             }
             series.push({
                 ts: now,
-                shaperRate,
-                shaperAvg,
-                transferRate,
-                transferComplete,
+                wireSustained,
+                wireActive,
+                wireSustained6s,
+                wireActive6s,
+                wireActive1s,
+                wireA1s,
+                wireA6s,
+                segmentWire,
+                segmentDrain,
+                videoApp,
+                wireActiveShort,
+                wireActiveLong,
+                wireActiveNetwork,
+                wireSustained1s,
+                wireThroughput,
                 fullSegmentNetworkBitrate,
                 bufferDepth,
                 playerEstimate,
                 currentRendition,
                 framesDisplayed,
-                metricsAtMs,
                 framesDropped,
                 serverRendition,
                 target,
@@ -4480,16 +4525,26 @@
                 .filter(point => point.ts >= windowStart)
                 .map(point => ({
                     x: (point.ts - windowStart) / 1000,
-                    shaperRate: point.shaperRate,
-                    shaperAvg: point.shaperAvg,
-                    transferRate: point.transferRate,
-                    transferComplete: point.transferComplete,
+                    wireSustained: point.wireSustained,
+                    wireActive: point.wireActive,
+                    wireSustained6s: point.wireSustained6s,
+                    wireActive6s: point.wireActive6s,
+                    wireActive1s: point.wireActive1s,
+                    wireA1s: point.wireA1s,
+                    wireA6s: point.wireA6s,
+                    segmentWire: point.segmentWire,
+                    segmentDrain: point.segmentDrain,
+                    videoApp: point.videoApp,
+                    wireActiveShort: point.wireActiveShort,
+                    wireActiveLong: point.wireActiveLong,
+                    wireActiveNetwork: point.wireActiveNetwork,
+                    wireSustained1s: point.wireSustained1s,
+                    wireThroughput: point.wireThroughput,
                     fullSegmentNetworkBitrate: point.fullSegmentNetworkBitrate,
                     bufferDepth: point.bufferDepth,
                     playerEstimate: point.playerEstimate,
                     currentRendition: point.currentRendition,
                     framesDisplayed: point.framesDisplayed,
-                    metricsAtMs: point.metricsAtMs,
                     framesDropped: point.framesDropped,
                     serverRendition: point.serverRendition,
                     target: point.target,
@@ -4502,14 +4557,25 @@
                     type: event.type
                 }))
                 .filter((event) => Number.isFinite(event.x) && event.x >= 0 && event.x <= 600);
-            const shaperRateData = points.map(point => ({ x: point.x, y: point.shaperRate }));
-            const shaperAvgData = points.map(point => ({ x: point.x, y: point.shaperAvg }));
-            const transferRateData = points.map(point => ({ x: point.x, y: point.transferRate }));
-            const transferCompleteData = points.map(point => ({ x: point.x, y: point.transferComplete }));
+            const wireSustainedData = points.map(point => ({ x: point.x, y: point.wireSustained }));
+            const wireActiveData = points.map(point => ({ x: point.x, y: point.wireActive }));
+            const wireSustained6sData = points.map(point => ({ x: point.x, y: point.wireSustained6s }));
+            const wireActive6sData = points.map(point => ({ x: point.x, y: point.wireActive6s }));
+            const wireActive1sData = points.map(point => ({ x: point.x, y: point.wireActive1s }));
+            const wireA1sData = points.map(point => ({ x: point.x, y: point.wireA1s }));
+            const wireA6sData = points.map(point => ({ x: point.x, y: point.wireA6s }));
+            const segmentWireData = points.map(point => ({ x: point.x, y: point.segmentWire }));
+            const segmentDrainData = points.map(point => ({ x: point.x, y: point.segmentDrain }));
+            const videoAppData = points.map(point => ({ x: point.x, y: point.videoApp }));
+            const wireActiveShortData = points.map(point => ({ x: point.x, y: point.wireActiveShort }));
+            const wireActiveLongData = points.map(point => ({ x: point.x, y: point.wireActiveLong }));
+            const wireActiveNetworkData = points.map(point => ({ x: point.x, y: point.wireActiveNetwork }));
+            const wireSustained1sData = points.map(point => ({ x: point.x, y: point.wireSustained1s }));
+            const wireThroughputData = points.map(point => ({ x: point.x, y: point.wireThroughput }));
             const fullSegmentNetworkBitrateData = points.map(point => ({ x: point.x, y: point.fullSegmentNetworkBitrate }));
             const bufferDepthData = points.map(point => ({ x: point.x, y: Number.isFinite(point.bufferDepth) ? point.bufferDepth : null }));
-            const framesDisplayedData = points.map(point => ({ x: point.x, y: Number.isFinite(point.framesDisplayed) ? point.framesDisplayed : null, atMs: point.metricsAtMs || null }));
-            const framesDroppedData = points.map(point => ({ x: point.x, y: Number.isFinite(point.framesDropped) ? point.framesDropped : null, atMs: point.metricsAtMs || null }));
+            const framesDisplayedData = points.map(point => ({ x: point.x, y: Number.isFinite(point.framesDisplayed) ? point.framesDisplayed : null }));
+            const framesDroppedData = points.map(point => ({ x: point.x, y: Number.isFinite(point.framesDropped) ? point.framesDropped : null }));
             const estimateData = points.map(point => ({ x: point.x, y: point.playerEstimate || null }));
             const renditionData = points.map(point => ({ x: point.x, y: point.currentRendition || null }));
             const serverRenditionData = points.map(point => ({ x: point.x, y: point.serverRendition || null }));
@@ -4522,15 +4588,26 @@
                 }
             }
             const visibility = bandwidthVisibility.get(sessionId) || {};
+            const variantsEnabled = bandwidthVariantsEnabledBySession.get(String(sessionId)) !== false;
+            const variantToggleButton = card.querySelector('button[data-action="toggle-variants"]');
+            if (variantToggleButton) {
+                variantToggleButton.textContent = variantsEnabled ? 'Hide Variants' : 'Show Variants';
+                variantToggleButton.setAttribute('aria-pressed', variantsEnabled ? 'true' : 'false');
+            }
             const defaultVisibleLabels = new Set([
-                'mbps_shaper_rate',
-                'mbps_shaper_avg',
-                'mbps_transfer_rate',
-                'mbps_transfer_complete',
+                'mbps_wire_active_6s',
+                'mbps_wire_active_1s',
+                'mbps_wire_a1s',
+                'mbps_wire_a6s',
+                'mbps_segment_wire',
+                'mbps_video_app',
+                'mbps_wire_throughput',
+                'mbps_wire_active_short_ewma',
+                'mbps_wire_active_long_ewma',
+                'mbps_wire_active_network',
                 'Player est.',
                 'Rendition',
                 'Server Rendition',
-                'Variants',
                 'Limit',
                 'STALL',
                 'RESTART',
@@ -4539,11 +4616,17 @@
             ]);
             const isSeriesHidden = (label) => {
                 const key = bandwidthSeriesKey(label);
+                if (isVariantSeriesLabel(key) && !variantsEnabled) {
+                    return true;
+                }
                 if (Object.prototype.hasOwnProperty.call(visibility, label)) {
                     return visibility[label] === true;
                 }
                 if (Object.prototype.hasOwnProperty.call(visibility, key)) {
                     return visibility[key] === true;
+                }
+                if (isVariantSeriesLabel(key)) {
+                    return false;
                 }
                 return !defaultVisibleLabels.has(key);
             };
@@ -4555,16 +4638,24 @@
             bitrateAxisMaxBySession.set(String(sessionId), axisMode);
             const maxFor = (hidden, data) => (hidden ? [0] : data.map(point => point.y || 0));
             const maxYAutoRaw = Math.max(1,
-                ...maxFor(isSeriesHidden('mbps_shaper_rate'), shaperRateData),
-                ...maxFor(isSeriesHidden('mbps_shaper_avg'), shaperAvgData),
-                ...maxFor(isSeriesHidden('mbps_transfer_rate'), transferRateData),
-                ...maxFor(isSeriesHidden('mbps_transfer_complete'), transferCompleteData),
+                ...maxFor(isSeriesHidden('mbps_wire_active'), wireActiveData),
+                ...maxFor(isSeriesHidden('mbps_wire_active_6s'), wireActive6sData),
+                ...maxFor(isSeriesHidden('mbps_wire_active_1s'), wireActive1sData),
+                ...maxFor(isSeriesHidden('mbps_wire_a1s'), wireA1sData),
+                ...maxFor(isSeriesHidden('mbps_wire_a6s'), wireA6sData),
+                ...maxFor(isSeriesHidden('mbps_segment_wire'), segmentWireData),
+                ...maxFor(isSeriesHidden('mbps_segment_drain'), segmentDrainData),
+                ...maxFor(isSeriesHidden('mbps_video_app'), videoAppData),
+                ...maxFor(isSeriesHidden('mbps_wire_throughput'), wireThroughputData),
+                ...maxFor(isSeriesHidden('mbps_wire_active_short_ewma'), wireActiveShortData),
+                ...maxFor(isSeriesHidden('mbps_wire_active_long_ewma'), wireActiveLongData),
+                ...maxFor(isSeriesHidden('mbps_wire_active_network'), wireActiveNetworkData),
                 ...maxFor(isSeriesHidden('Player est.'), estimateData),
                 ...maxFor(isSeriesHidden('Rendition'), renditionData),
                 ...maxFor(isSeriesHidden('Server Rendition'), serverRenditionData),
                 ...maxFor(isSeriesHidden('Limit'), targetData)
             );
-            const maxYAuto = Math.min(100, Math.max(1, (Math.ceil((maxYAutoRaw * 1.05) * 10) / 10)));
+            const maxYAuto = Math.max(1, (Math.ceil((maxYAutoRaw * 1.05) * 10) / 10));
             const maxY = axisMode === 'auto' ? maxYAuto : Number(axisMode);
             const buildEventMarkerData = (type) => {
                 const markerData = [];
@@ -4580,10 +4671,10 @@
             const restartMarkerData = buildEventMarkerData('RESTART');
             const loopPlayerMarkerData = buildEventMarkerData('LOOP_PLAYER');
             const loopServerMarkerData = buildEventMarkerData('LOOP_SERVER');
-            const variantsHidden = isSeriesHidden('Variants');
             const variantDatasets = variantLadder.map((variant, index) => {
+                const label = `Variant ${variant.vx}`;
                 return {
-                    label: index === 0 ? 'Variants' : `_Variant ${variant.vx}`,
+                    label,
                     data: points.map(point => ({ x: point.x, y: variant.mbps })),
                     borderColor: '#9ca3af',
                     backgroundColor: 'rgba(156,163,175,0.12)',
@@ -4591,46 +4682,79 @@
                     pointRadius: 0,
                     tension: 0,
                     borderDash: index % 2 === 0 ? [2, 6] : [6, 3],
-                    hidden: variantsHidden
+                    hidden: isSeriesHidden(label)
                 };
             });
             const datasets = [
                 {
-                    label: 'mbps_shaper_rate',
-                    data: shaperRateData,
+                    label: 'mbps_wire_active',
+                    data: wireActiveData,
+                    borderColor: '#0f766e',
+                    backgroundColor: 'rgba(15,118,110,0.12)',
+                    borderWidth: 1.5,
+                    pointRadius: 0,
+                    tension: 0.2,
+                    borderDash: [2, 4],
+                    hidden: isSeriesHidden('mbps_wire_active')
+                },
+                {
+                    label: 'mbps_wire_active_6s',
+                    data: wireActive6sData,
+                    borderColor: '#115e59',
+                    backgroundColor: 'rgba(17,94,89,0.12)',
+                    borderWidth: 1.5,
+                    pointRadius: 0,
+                    tension: 0.2,
+                    borderDash: [3, 5],
+                    hidden: isSeriesHidden('mbps_wire_active_6s')
+                },
+                {
+                    label: 'mbps_wire_active_1s',
+                    data: wireActive1sData,
+                    borderColor: '#047857',
+                    backgroundColor: 'rgba(4,120,87,0.12)',
+                    borderWidth: 1.5,
+                    pointRadius: 0,
+                    tension: 0.2,
+                    borderDash: [1, 2],
+                    hidden: isSeriesHidden('mbps_wire_active_1s')
+                },
+                {
+                    label: 'mbps_wire_a1s',
+                    data: wireA1sData,
                     borderColor: '#0f766e',
                     backgroundColor: 'rgba(15,118,110,0.12)',
                     borderWidth: 1.7,
                     pointRadius: 0,
                     tension: 0.15,
                     borderDash: [8, 2],
-                    hidden: isSeriesHidden('mbps_shaper_rate')
+                    hidden: isSeriesHidden('mbps_wire_a1s')
                 },
                 {
-                    label: 'mbps_shaper_avg',
-                    data: shaperAvgData,
+                    label: 'mbps_wire_a6s',
+                    data: wireA6sData,
                     borderColor: '#0d9488',
                     backgroundColor: 'rgba(13,148,136,0.12)',
                     borderWidth: 1.7,
                     pointRadius: 0,
                     tension: 0.15,
                     borderDash: [10, 3],
-                    hidden: isSeriesHidden('mbps_shaper_avg')
+                    hidden: isSeriesHidden('mbps_wire_a6s')
                 },
                 {
-                    label: 'mbps_transfer_rate',
-                    data: transferRateData,
+                    label: 'mbps_segment_wire',
+                    data: segmentWireData,
                     borderColor: '#f97316',
                     backgroundColor: 'rgba(249,115,22,0.12)',
                     borderWidth: 2,
                     pointRadius: 0,
                     tension: 0,
                     borderDash: [4, 2],
-                    hidden: isSeriesHidden('mbps_transfer_rate')
+                    hidden: isSeriesHidden('mbps_segment_wire')
                 },
                 {
-                    label: 'mbps_transfer_complete',
-                    data: transferCompleteData,
+                    label: 'mbps_segment_drain',
+                    data: segmentDrainData,
                     borderColor: '#dc2626',
                     backgroundColor: 'rgba(220,38,38,0.15)',
                     borderWidth: 3,
@@ -4638,7 +4762,62 @@
                     pointBackgroundColor: '#dc2626',
                     tension: 0,
                     stepped: 'after',
-                    hidden: isSeriesHidden('mbps_transfer_complete')
+                    hidden: isSeriesHidden('mbps_segment_drain')
+                },
+                {
+                    label: 'mbps_video_app',
+                    data: videoAppData,
+                    borderColor: '#a855f7',
+                    backgroundColor: 'rgba(168,85,247,0.12)',
+                    borderWidth: 2,
+                    pointRadius: 0,
+                    tension: 0,
+                    borderDash: [3, 3],
+                    hidden: isSeriesHidden('mbps_video_app')
+                },
+                {
+                    label: 'mbps_wire_throughput',
+                    data: wireThroughputData,
+                    borderColor: '#166534',
+                    backgroundColor: 'rgba(22,101,52,0.12)',
+                    borderWidth: 1.8,
+                    pointRadius: 0,
+                    tension: 0.2,
+                    borderDash: [1, 0],
+                    hidden: isSeriesHidden('mbps_wire_throughput')
+                },
+                {
+                    label: 'mbps_wire_active_short_ewma',
+                    data: wireActiveShortData,
+                    borderColor: '#16a34a',
+                    backgroundColor: 'rgba(22,163,74,0.12)',
+                    borderWidth: 1.6,
+                    pointRadius: 0,
+                    tension: 0.2,
+                    borderDash: [2, 2],
+                    hidden: isSeriesHidden('mbps_wire_active_short_ewma')
+                },
+                {
+                    label: 'mbps_wire_active_long_ewma',
+                    data: wireActiveLongData,
+                    borderColor: '#15803d',
+                    backgroundColor: 'rgba(21,128,61,0.12)',
+                    borderWidth: 1.6,
+                    pointRadius: 0,
+                    tension: 0.2,
+                    borderDash: [6, 2],
+                    hidden: isSeriesHidden('mbps_wire_active_long_ewma')
+                },
+                {
+                    label: 'mbps_wire_active_network',
+                    data: wireActiveNetworkData,
+                    borderColor: '#166534',
+                    backgroundColor: 'rgba(22,101,52,0.12)',
+                    borderWidth: 1.8,
+                    pointRadius: 0,
+                    tension: 0.2,
+                    borderDash: [1, 0],
+                    hidden: isSeriesHidden('mbps_wire_active_network')
                 },
                 {
                     label: 'Player est.',
@@ -4747,8 +4926,7 @@
                                 position: 'bottom',
                                 labels: {
                                     color: '#6b7280',
-                                    font: { family: 'Courier New, monospace', size: 10 },
-                                    filter: (item) => !item.text.startsWith('_')
+                                    font: { family: 'Courier New, monospace', size: 10 }
                                 },
                                 onClick: (evt, item, legend) => {
                                     const index = item.datasetIndex;
@@ -4757,31 +4935,23 @@
                                     if (!label) return;
                                     const state = bandwidthVisibility.get(sessionId) || {};
                                     const isVisible = chartRef.isDatasetVisible(index);
-                                    if (label === 'Variants') {
-                                        // Toggle all variant datasets together.
-                                        const newVisible = !isVisible;
-                                        chartRef.data.datasets.forEach((ds, i) => {
-                                            if (ds.label === 'Variants' || (ds.label && ds.label.startsWith('_Variant'))) {
-                                                chartRef.setDatasetVisibility(i, newVisible);
-                                            }
-                                        });
-                                        state['Variants'] = !newVisible;
-                                    } else {
-                                        chartRef.setDatasetVisibility(index, !isVisible);
-                                        state[label] = isVisible;
-                                        state[bandwidthSeriesKey(label)] = isVisible;
-                                    }
+                                    chartRef.setDatasetVisibility(index, !isVisible);
+                                    state[label] = isVisible;
+                                    state[bandwidthSeriesKey(label)] = isVisible;
                                     bandwidthVisibility.set(sessionId, state);
-                                    // Recalculate Y-axis max from visible datasets.
-                                    const currentAxisMode = normalizeBitrateAxisMaxMode(
-                                        bitrateAxisMaxBySession.get(String(sessionId)) || 'auto'
-                                    );
-                                    if (currentAxisMode === 'auto') {
-                                        const visibleMax = chartRef.data.datasets
-                                            .filter((_, i) => chartRef.isDatasetVisible(i))
-                                            .flatMap(ds => ds.data.map(pt => Number(pt.y) || 0))
-                                            .reduce((m, v) => Math.max(m, v), 1);
-                                        chartRef.options.scales.y.max = Math.min(100, Math.max(1, Math.ceil(visibleMax * 1.05 * 10) / 10));
+                                    // When paused, renderBandwidthChart is a no-op, so
+                                    // recalculate Y-axis max directly from visible datasets.
+                                    if (isChartPaused(sessionId)) {
+                                        const currentAxisMode = normalizeBitrateAxisMaxMode(
+                                            bitrateAxisMaxBySession.get(String(sessionId)) || 'auto'
+                                        );
+                                        if (currentAxisMode === 'auto') {
+                                            const visibleMax = chartRef.data.datasets
+                                                .filter((_, i) => chartRef.isDatasetVisible(i))
+                                                .flatMap(ds => ds.data.map(pt => Number(pt.y) || 0))
+                                                .reduce((m, v) => Math.max(m, v), 1);
+                                            chartRef.options.scales.y.max = Math.min(100, Math.max(1, Math.ceil(visibleMax * 1.05 * 10) / 10));
+                                        }
                                     }
                                     chartRef.update('none');
                                 }
@@ -4849,10 +5019,7 @@
             } else {
                 chart.data.datasets = datasets;
                 chart.data.datasets.forEach((dataset, idx) => {
-                    const label = dataset.label;
-                    const hidden = (label && label.startsWith('_Variant'))
-                        ? isSeriesHidden('Variants')
-                        : isSeriesHidden(label);
+                    const hidden = isSeriesHidden(dataset.label);
                     dataset.hidden = hidden;
                     chart.setDatasetVisibility(idx, !hidden);
                 });
@@ -4983,7 +5150,7 @@
             }
             const fpsData = [];
             const droppedFpsDataRaw = [];
-            const fpsWindowSeconds = 2.0;
+            const fpsWindowSeconds = 1.0;
             const maxReasonableFps = 120;
             const buildRateSeries = (counterSeries) => {
                 const out = [];
@@ -5010,15 +5177,10 @@
                         continue;
                     }
                     const anchorCount = Number(anchorPoint.y);
-                    // Use actual measurement timestamps (atMs) when available,
-                    // falling back to chart x-axis positions.
-                    const currentMs = Number(currentPoint.atMs);
-                    const anchorMs = Number(anchorPoint.atMs);
-                    const deltaSeconds = (Number.isFinite(currentMs) && Number.isFinite(anchorMs) && currentMs > anchorMs)
-                        ? (currentMs - anchorMs) / 1000
-                        : currentX - Number(anchorPoint.x);
+                    const anchorX = Number(anchorPoint.x);
+                    const deltaSeconds = currentX - anchorX;
                     const deltaCount = currentCount - anchorCount;
-                    if (!Number.isFinite(anchorCount) || deltaSeconds <= 0 || deltaCount < 0) {
+                    if (!Number.isFinite(anchorCount) || !Number.isFinite(anchorX) || deltaSeconds <= 0 || deltaCount < 0) {
                         out.push({ x: currentPoint.x, y: null });
                         continue;
                     }
@@ -5043,7 +5205,7 @@
                 .filter((value) => Number.isFinite(value) && value >= 0);
             const fpsSmoothedData = [];
             let smooth = null;
-            const smoothingAlpha = 0.15;
+            const smoothingAlpha = 0.3;
             for (const point of fpsData) {
                 const y = Number(point.y);
                 if (!Number.isFinite(y) || y < 0) {
@@ -5158,14 +5320,7 @@
                         maintainAspectRatio: false,
                         animation: false,
                         plugins: {
-                            legend: {
-                                display: true,
-                                position: 'bottom',
-                                labels: {
-                                    color: '#6b7280',
-                                    font: { family: 'Courier New, monospace', size: 10 }
-                                }
-                            },
+                            legend: { display: false },
                             tooltip: {
                                 callbacks: {
                                     title: (items) => {
