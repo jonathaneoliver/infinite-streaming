@@ -21,6 +21,15 @@ spec:
         command: ["/sbin/launch.sh", "1"]
         ports:
         - containerPort: 30000
+        - containerPort: 30081
+        - containerPort: 30181
+        - containerPort: 30281
+        - containerPort: 30381
+        - containerPort: 30481
+        - containerPort: 30581
+        - containerPort: 30681
+        - containerPort: 30781
+        - containerPort: 30881
         env:
         - name: INFINITE_STREAM_ROOT
           value: "/media"
@@ -44,33 +53,6 @@ spec:
           value: ":8003"
         - name: INFINITE_STREAM_LISTEN_PORT
           value: "30000"
-        - name: INFINITE_STREAM_PROXY_HOST
-          value: "127.0.0.1"
-        volumeMounts:
-        - name: media-vol
-          mountPath: /media
-        - name: certs-vol
-          mountPath: /etc/nginx/certs
-          readOnly: true
-        - name: go-live-tmpfs
-          mountPath: /go-live
-        - name: nginx-tmpfs
-          mountPath: /var/cache/nginx/live_playlists
-
-      - name: go-proxy
-        image: ${K3S_REGISTRY}/go-proxy:dev
-        imagePullPolicy: Always
-        ports:
-        - containerPort: 30081
-        - containerPort: 30181
-        - containerPort: 30281
-        - containerPort: 30381
-        - containerPort: 30481
-        - containerPort: 30581
-        - containerPort: 30681
-        - containerPort: 30781
-        - containerPort: 30881
-        env:
         - name: MEMCACHED_ADDR
           value: "127.0.0.1:11211"
         - name: INFINITE_STREAM_UPSTREAM_HOST
@@ -93,6 +75,16 @@ spec:
           privileged: true
           capabilities:
             add: ["NET_ADMIN"]
+        volumeMounts:
+        - name: media-vol
+          mountPath: /media
+        - name: certs-vol
+          mountPath: /etc/nginx/certs
+          readOnly: true
+        - name: go-live-tmpfs
+          mountPath: /go-live
+        - name: nginx-tmpfs
+          mountPath: /var/cache/nginx/live_playlists
 
       - name: memcached
         image: memcached:latest
