@@ -6,79 +6,123 @@ This project is primarily an **AI No‑Code** build. The Go services and web das
 
 InfiniteStream is a Docker‑based HLS/DASH media server for testing video players under deterministic live‑like conditions. It generates LL‑HLS and LL‑DASH streams alongside 2s/6s segment variants and includes a rich dashboard for playback comparison, diagnostics, and monitoring.
 
+## Prerequisites
+
+TLS certificates are required for nginx. Generate self-signed certs before starting:
+
+```bash
+mkdir -p certs
+openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+  -keyout certs/localhost-key.pem \
+  -out certs/localhost.pem \
+  -subj "/CN=localhost"
+```
+
 ## Quick start
 
-### Option 1: Run from pre-built image (fastest)
+### Option 1: Docker Compose (simplest)
+
+Clone the repo, generate certs, and start:
 
 ```bash
-# Pull and run — no build required
-docker run -d --name infinite-streaming \
-  --cap-add NET_ADMIN \
-  -p 21081:30000 \
-  -v ${CONTENT_DIR:-./sample-content}:/media \
-  ghcr.io/jonathaneoliver/infinite-streaming:latest \
-  /sbin/launch.sh 1
-
-# Open the UI
-open http://localhost:21081/
-```
-
-To use your own media library, set `CONTENT_DIR` in `.env` or pass it directly:
-
-```bash
-CONTENT_DIR=/path/to/your/media docker run -d --name infinite-streaming \
-  --cap-add NET_ADMIN \
-  -p 21081:30000 \
-  -v $CONTENT_DIR:/media \
-  ghcr.io/jonathaneoliver/infinite-streaming:latest \
-  /sbin/launch.sh 1
-```
-
-Or use the Makefile target:
-
-```bash
-make run-image
-```
-
-### Option 2: Build from source
-
-```bash
-# Clone and configure
 git clone https://github.com/jonathaneoliver/infinite-streaming.git
 cd infinite-streaming
-cp .env.example .env    # edit .env with your paths
 
-# Build and run
-make build
-make run
-```
+# Generate TLS certs (see Prerequisites above)
+mkdir -p certs
+openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+  -keyout certs/localhost-key.pem -out certs/localhost.pem -subj "/CN=localhost"
 
-### Option 3: Docker Compose
+# (Optional) Point to your media library
+cp .env.example .env    # edit CONTENT_DIR with your media path
 
-```bash
-# Configure
-cp .env.example .env    # edit .env with your paths
-
-# Run
+# Start — images build automatically on first run
 docker compose up -d
 ```
 
-Open the UI:
-- Docker Compose: http://localhost:21081/
-- k3s: http://$K3S_HOST:30000/
+Open the UI: http://localhost:30000/
 
-## Lenovo k3s: release vs dev
+### Option 2: Docker run (single container)
+
+Run a single container with no compose file needed:
+
+```bash
+mkdir -p certs
+openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+  -keyout certs/localhost-key.pem -out certs/localhost.pem -subj "/CN=localhost"
+
+docker run -d --name infinite-streaming \
+  --cap-add NET_ADMIN --privileged \
+  -p 30000:30000 -p 30081:30081 \
+  -v $(pwd)/certs:/etc/nginx/certs:ro \
+  -v ${CONTENT_DIR:-./sample-content}:/media \
+  ghcr.io/jonathaneoliver/infinite-streaming:latest \
+  /sbin/launch.sh 1
+```
+
+Open the UI: http://localhost:30000/
+
+To use your own media library, set `CONTENT_DIR` before running:
+
+```bash
+export CONTENT_DIR=/path/to/your/media
+```
+
+To stop: `docker stop infinite-streaming && docker rm infinite-streaming`
+
+### Option 3: Pre-built images from GHCR (no build)
+
+Use the pre-built images from GitHub Container Registry — no source checkout or build required:
+
+```bash
+mkdir infinite-streaming && cd infinite-streaming
+
+# Generate TLS certs (see Prerequisites above)
+mkdir -p certs
+openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+  -keyout certs/localhost-key.pem -out certs/localhost.pem -subj "/CN=localhost"
+
+# Download the GHCR compose file
+curl -fsSL https://raw.githubusercontent.com/jonathaneoliver/infinite-streaming/main/docker-compose.ghcr.yml \
+  -o docker-compose.yml
+
+# (Optional) Point to your media library
+echo "CONTENT_DIR=/path/to/your/media" > .env
+
+# Start
+docker compose up -d
+```
+
+Open the UI: http://localhost:30000/
+
+### Option 4: k3s deployment
+
+For remote deployment to a k3s cluster, configure `.env` with your cluster details:
+
+```bash
+cp .env.example .env    # set K3S_HOST, K3S_SSH_HOST, K3S_REGISTRY, etc.
+
+# Deploy dev stack
+make deploy
+
+# Deploy release stack
+make deploy-release
+```
+
+Open the UI: `http://$K3S_HOST:30000/` (release) or `http://$K3S_HOST:40000/` (dev)
+
+## k3s: release vs dev
 
 Run release and dev side-by-side by using separate NodePort ranges and image tags.
 
 Release (stable):
-- UI: http://lenovo.local:30000/
+- UI: `http://$K3S_HOST:30000/`
 - Ports: 30000 (UI), 30081 (initial proxy), 30181-30881 (session ports)
 - Images: `:latest` (or your pinned release tag)
 - Deploy: `make deploy-release`
 
 Dev (active development):
-- UI: http://lenovo.local:40000/
+- UI: `http://$K3S_HOST:40000/`
 - Ports: 40000 (UI), 40081 (initial proxy), 40181-40881 (session ports)
 - Images: `:dev`
 - Deploy: `make deploy`
@@ -92,24 +136,29 @@ Use an immutable tag for releases (for example, `v1.2.3` or a commit SHA) and ke
 Suggested flow:
 1) Create a tag and push it (example: `git tag v1.2.3 && git push origin v1.2.3`).
 2) Build/push images with that tag (example: `:v1.2.3`).
-3) Deploy release using the pinned tag (set `LENOVO_SERVER_IMAGE` and `LENOVO_PROXY_IMAGE` to the release tag).
+3) Deploy release using the pinned tag (set `K3S_SERVER_IMAGE` and `K3S_PROXY_IMAGE` to the release tag).
 
 Example deploy (release tag `v1.2.3`):
 
 ```bash
 make deploy-release \
-  LENOVO_SERVER_IMAGE=100.111.190.54:5000/infinite-streaming:v1.2.3 \
-  LENOVO_PROXY_IMAGE=100.111.190.54:5000/go-proxy:v1.2.3
+  K3S_SERVER_IMAGE=$K3S_REGISTRY/infinite-streaming:v1.2.3 \
+  K3S_PROXY_IMAGE=$K3S_REGISTRY/go-proxy:v1.2.3
 ```
 
 ## GitHub Container Registry (GHCR)
 
-This repo ships a GitHub Actions workflow that builds and publishes images to GHCR on pushes to `main`.
+This repo ships a GitHub Actions workflow that builds and publishes both images to GHCR on pushes to `main`.
 
-Image tags:
-- `ghcr.io/<owner>/<repo>:main`
-- `ghcr.io/<owner>/<repo>:latest`
-- `ghcr.io/<owner>/<repo>:sha-<short>`
+Server image tags:
+- `ghcr.io/<owner>/infinite-streaming:latest`
+- `ghcr.io/<owner>/infinite-streaming:main`
+- `ghcr.io/<owner>/infinite-streaming:sha-<short>`
+
+Proxy image tags:
+- `ghcr.io/<owner>/go-proxy:latest`
+- `ghcr.io/<owner>/go-proxy:main`
+- `ghcr.io/<owner>/go-proxy:sha-<short>`
 
 To enable publishing in your fork:
 1) Set the default branch to `main`.
@@ -142,7 +191,7 @@ To enable publishing in your fork:
 
 InfiniteStream expects a **host-mounted volume** for originals and encoded outputs. In `docker-compose.yml` this is typically mapped to `/media` inside the container:
 
-- **Host path** (example): `/Volumes/4TB/Boss`
+- **Host path** (example): `/path/to/your/media`
 - **Container path**: `/media`
 
 Directory layout inside `/media`:
@@ -158,7 +207,7 @@ Directory layout inside `/media`:
 3) The server writes the source into `/media/originals` and the encoded ladder into `/media/dynamic_content`.
 
 **Option B — Copy directly**
-1) Copy files into the host folder (e.g. `/Volumes/4TB/Boss/originals`).
+1) Copy files into the host folder (e.g. `$CONTENT_DIR/originals`).
 2) The content will appear in **Source Library** on refresh.
 3) You can then trigger encodes from the UI or run the encoding scripts manually.
 
@@ -170,22 +219,22 @@ Directory layout inside `/media`:
 - **go-live** (port 8010): LL‑HLS + LL‑DASH generation, plus 2s/6s variants
 - **go-upload** (port 8003): upload API, job orchestration, content discovery
 - **nginx**: routing + static dashboard
-  - **Host UI (docker-compose)**: `http://localhost:21081/`
-  - **Host UI (k3s/NodePort)**: `http://lenovo.local:30000/`
+  - **Host UI (Docker Compose)**: `http://localhost:30000/`
+  - **Host UI (k3s/NodePort)**: `http://$K3S_HOST:30000/`
 
 ## Primary endpoints (host)
 
 ### HLS (LL/2s/6s)
-- Docker Compose: `http://localhost:21081/go-live/{content}/master.m3u8`
-- k3s NodePort: `http://lenovo.local:30081/go-live/{content}/master.m3u8`
-- k3s NodePort: `http://lenovo.local:30081/go-live/{content}/master_2s.m3u8`
-- k3s NodePort: `http://lenovo.local:30081/go-live/{content}/master_6s.m3u8`
+- Docker Compose: `http://localhost:30000/go-live/{content}/master.m3u8`
+- k3s NodePort: `http://$K3S_HOST:30081/go-live/{content}/master.m3u8`
+- k3s NodePort: `http://$K3S_HOST:30081/go-live/{content}/master_2s.m3u8`
+- k3s NodePort: `http://$K3S_HOST:30081/go-live/{content}/master_6s.m3u8`
 
 ### DASH (LL/2s/6s)
-- Docker Compose: `http://localhost:21081/go-live/{content}/manifest.mpd`
-- k3s NodePort: `http://lenovo.local:30081/go-live/{content}/manifest.mpd`
-- k3s NodePort: `http://lenovo.local:30081/go-live/{content}/manifest_2s.mpd`
-- k3s NodePort: `http://lenovo.local:30081/go-live/{content}/manifest_6s.mpd`
+- Docker Compose: `http://localhost:30000/go-live/{content}/manifest.mpd`
+- k3s NodePort: `http://$K3S_HOST:30081/go-live/{content}/manifest.mpd`
+- k3s NodePort: `http://$K3S_HOST:30081/go-live/{content}/manifest_2s.mpd`
+- k3s NodePort: `http://$K3S_HOST:30081/go-live/{content}/manifest_6s.mpd`
 
 ### APIs
 - `GET /api/content`
@@ -233,10 +282,10 @@ Open via the Mosaic (Grid) right‑click menu → “Open in Testing Window”, 
 
 ```text
 # Docker Compose
-http://localhost:21081/dashboard/testing-session.html?player_id=<uuid>&url=<encoded-stream-url>
+http://localhost:30000/dashboard/testing-session.html?player_id=<uuid>&url=<encoded-stream-url>
 
 # k3s
-http://lenovo.local:30000/dashboard/testing-session.html?player_id=<uuid>&url=<encoded-stream-url>
+http://$K3S_HOST:30000/dashboard/testing-session.html?player_id=<uuid>&url=<encoded-stream-url>
 ```
 
 The `player_id` is required. The proxy uses it to bind the playback session to a dedicated port, so requests to the original port are redirected to a session‑specific port. This allows per‑session failure injection and traffic shaping without affecting other sessions.
