@@ -19,14 +19,14 @@ make stop
 # Shell into running container
 make shell
 
-# Deploy to Lenovo k3s (dev stack)
+# Deploy to k3s (dev stack)
 make deploy
 
-# Deploy to Lenovo k3s (release)
+# Deploy to k3s (release)
 make deploy-release
 ```
 
-UI is available at `http://localhost:21081/` (Docker Compose) or `http://lenovo.local:30000/` (k3s release) / `http://lenovo.local:40000/` (k3s dev).
+UI is available at `http://localhost:30000/` (Docker Compose) or `http://$K3S_HOST:30000/` (k3s release) / `http://$K3S_HOST:40000/` (k3s dev).
 
 ## Testing
 
@@ -46,11 +46,11 @@ pytest -k test_name
 
 # Run player ABR characterization tests
 pytest test_player_characterization_pytest.py -m abrchar -v \
-  --host lenovo --scheme http --api-port 40000 --hls-port 40081
+  --host $K3S_HOST --scheme http --api-port 40000 --hls-port 40081
 
 # Run against local Docker Compose
 pytest test_player_characterization_pytest.py -m abrchar -v \
-  --host localhost --scheme http --api-port 21081 --hls-port 21081
+  --host localhost --scheme http --api-port 30000 --hls-port 30081
 
 # Available abrchar test modes: smooth, steps, transient-shock, startup-caps,
 #   downshift-severity, hysteresis-gap, emergency-downshift
@@ -58,7 +58,7 @@ pytest test_player_characterization_pytest.py -m abrchar -v \
   --abrchar-test-mode steps --abrchar-repeat-count 10
 ```
 
-Default server target for tests is `lenovo:30000/30081`. Override with `--host`, `--api-port`, `--hls-port`, or `--api-base`.
+Default server target for tests is `$K3S_HOST:30000/30081`. Override with `--host`, `--api-port`, `--hls-port`, or `--api-base`.
 
 ## Code Style
 
@@ -75,7 +75,8 @@ Default server target for tests is `lenovo:30000/30081`. Override with `--host`,
 | `go-live` | 8010 | LL-HLS + LL-DASH generator (2s/6s/LL variants) |
 | `go-upload` | 8003 | Upload API, encoding job orchestration, content discovery |
 | `go-proxy` | 30081 | Per-session testing proxy — failure injection, traffic shaping (nftables), SSE session stream |
-| nginx | 21081 (compose) / 30000 (k3s) | Routing, static dashboard |
+| `memcached` | 11211 | Session state storage (embedded in container) |
+| nginx | 30000 | Routing, static dashboard |
 
 ### nginx routing (`nginx-content.conf.template`)
 
@@ -140,8 +141,8 @@ When creating issues/PRs/comments with `gh`, pass the body using a heredoc or `-
 
 | Environment | UI | HLS/Proxy |
 |---|---|---|
-| Docker Compose | `localhost:21081` | `localhost:21081` |
-| k3s release | `lenovo.local:30000` | `lenovo.local:30081` |
-| k3s dev | `lenovo.local:40000` | `lenovo.local:40081` |
+| Docker Compose | `localhost:30000` | `localhost:30081` |
+| k3s release | `$K3S_HOST:30000` | `$K3S_HOST:30081` |
+| k3s dev | `$K3S_HOST:40000` | `$K3S_HOST:40081` |
 
-k3s images are pushed to `100.111.190.54:5000` (Lenovo local registry) or GHCR (`ghcr.io/jonathaneoliver/`).
+k3s images are pushed to `$K3S_REGISTRY` (local registry) or GHCR (`ghcr.io/jonathaneoliver/`).

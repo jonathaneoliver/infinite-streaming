@@ -18,12 +18,23 @@ RUN cd /build/go-upload && \
     go mod download && \
     go build -o /out/go-upload ./cmd/server
 
+ARG VERSION=unknown
+COPY go-proxy /build/go-proxy
+RUN cd /build/go-proxy && \
+    go mod init github.com/jonathaneoliver/infinite-streaming/go-proxy && \
+    go get github.com/gorilla/mux && \
+    go get github.com/bradfitz/gomemcache/memcache && \
+    go get github.com/grafov/m3u8 && \
+    go get modernc.org/sqlite@v1.29.0 && \
+    go get github.com/vishvananda/netlink@v1.3.0 && \
+    go build -ldflags "-X main.versionString=${VERSION}" -o /out/go-proxy cmd/server/main.go
+
 FROM alpine:3.19
 
 # Install dependencies first (expensive, rarely changes - gets cached)
 RUN \
   apk update && \
-  apk add iproute2 iperf && \
+  apk add iproute2 iperf nftables memcached && \
   apk add nginx nginx-mod-http-vod nginx-mod-http-lua && \
   apk add ffmpeg && \
   apk add python3 py3-pip && \
@@ -78,6 +89,7 @@ COPY nginx-content.conf.template /etc/nginx/http.d/
 COPY update-nginx-config.sh launch.sh parse_fmp4_fragments.py /sbin/
 COPY --from=go-builder /out/go-live /usr/local/bin/go-live
 COPY --from=go-builder /out/go-upload /usr/local/bin/go-upload
+COPY --from=go-builder /out/go-proxy /usr/local/bin/go-proxy
 
 # Copy generate_abr tools into container and make writable for encoding output
 RUN mkdir -p /generate_abr

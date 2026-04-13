@@ -89,30 +89,24 @@
 
     function isTestingPort(port) {
         const parsed = Number(port);
-        if (!Number.isInteger(parsed)) return false;
-        return (parsed >= 20081 && parsed <= 20881)
-            || (parsed >= 30081 && parsed <= 30881)
-            || (parsed >= 40081 && parsed <= 40881);
+        if (!Number.isInteger(parsed) || parsed < 1000) return false;
+        const suffix = parsed % 1000;
+        return suffix >= 81 && suffix <= 881 && suffix % 100 === 81;
+    }
+
+    function deriveProxyPort(uiPort) {
+        return uiPort.slice(0, -3) + '081';
     }
 
     function resolveTestingPort(sourcePort) {
         const currentPort = window.location.port || (window.location.protocol === 'https:' ? '443' : '80');
-        if (currentPort === '40000') {
-            return '40081';
-        }
         if (isTestingPort(currentPort)) {
             return String(currentPort);
         }
         if (isTestingPort(sourcePort)) {
             return String(sourcePort);
         }
-        if (currentPort === '30000') {
-            return '30081';
-        }
-        if (currentPort === '20080' || currentPort === '20081' || currentPort === '21081') {
-            return '20081';
-        }
-        return '30081';
+        return deriveProxyPort(currentPort);
     }
 
     function normalizeTestingBaseUrl(url) {

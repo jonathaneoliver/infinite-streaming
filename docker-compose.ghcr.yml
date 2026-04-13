@@ -1,7 +1,6 @@
 services:
   go-server:
-    build: .
-    image: infinite-streaming
+    image: ghcr.io/jonathaneoliver/infinite-streaming:latest
     container_name: infinite-streaming
     cap_add:
       - NET_ADMIN
@@ -20,11 +19,9 @@ services:
       - "30781:30781"
       - "30881:30881"
     volumes:
-      - ./content:/content
       - ${CONTENT_DIR:-./sample-content}:/media
       - ./certs:/etc/nginx/certs:ro
     environment:
-      # Path Configuration - Single source of truth for all path references
       - INFINITE_STREAM_ROOT=/media
       - INFINITE_STREAM_UPLOADS_DIR=/media/uploads
       - INFINITE_STREAM_SOURCES_DIR=/media/originals

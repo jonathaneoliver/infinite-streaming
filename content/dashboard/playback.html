@@ -702,12 +702,17 @@
             return Math.random().toString(36).slice(2, 10);
         }
 
+        function getProxyPort() {
+            const uiPort = window.location.port || '30000';
+            return uiPort.slice(0, -3) + '081';
+        }
+
         function normalizeTestingBase(url) {
             if (window.BOSSNav && typeof window.BOSSNav.normalizeTestingBaseUrl === 'function') {
                 return window.BOSSNav.normalizeTestingBaseUrl(url);
             }
             const parsed = new URL(url, window.location.origin);
-            parsed.port = '30081';
+            parsed.port = getProxyPort();
             return parsed.toString();
         }
 
