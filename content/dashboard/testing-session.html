@@ -3965,7 +3965,8 @@
         }
 
         function isVariantSeriesLabel(label) {
-            return /^Variant V\d+$/.test(String(label || ''));
+            const s = String(label || '');
+            return s === 'Variants' || /^_?Variant V?\d+$/.test(s);
         }
 
         function buildVariantLadder(variants) {
@@ -4541,6 +4542,7 @@
                 'mbps_shaper_avg',
                 'mbps_transfer_rate',
                 'mbps_transfer_complete',
+                'Variants',
                 'Player est.',
                 'Rendition',
                 'Server Rendition',
@@ -4599,10 +4601,10 @@
             const restartMarkerData = buildEventMarkerData('RESTART');
             const loopPlayerMarkerData = buildEventMarkerData('LOOP_PLAYER');
             const loopServerMarkerData = buildEventMarkerData('LOOP_SERVER');
+            const variantsHidden = isSeriesHidden('Variants');
             const variantDatasets = variantLadder.map((variant, index) => {
-                const label = `Variant ${variant.vx}`;
                 return {
-                    label,
+                    label: index === 0 ? 'Variants' : `_Variant ${variant.vx}`,
                     data: points.map(point => ({ x: point.x, y: variant.mbps })),
                     borderColor: '#9ca3af',
                     backgroundColor: 'rgba(156,163,175,0.12)',
@@ -4610,7 +4612,7 @@
                     pointRadius: 0,
                     tension: 0,
                     borderDash: index % 2 === 0 ? [2, 6] : [6, 3],
-                    hidden: isSeriesHidden(label)
+                    hidden: variantsHidden
                 };
             });
             const datasets = [
@@ -4766,7 +4768,8 @@
                                 position: 'bottom',
                                 labels: {
                                     color: '#6b7280',
-                                    font: { family: 'Courier New, monospace', size: 10 }
+                                    font: { family: 'Courier New, monospace', size: 10 },
+                                    filter: (item) => !item.text.startsWith('_')
                                 },
                                 onClick: (evt, item, legend) => {
                                     const index = item.datasetIndex;
@@ -4775,9 +4778,19 @@
                                     if (!label) return;
                                     const state = bandwidthVisibility.get(sessionId) || {};
                                     const isVisible = chartRef.isDatasetVisible(index);
-                                    chartRef.setDatasetVisibility(index, !isVisible);
-                                    state[label] = isVisible;
-                                    state[bandwidthSeriesKey(label)] = isVisible;
+                                    if (label === 'Variants') {
+                                        const newVisible = !isVisible;
+                                        chartRef.data.datasets.forEach((ds, i) => {
+                                            if (ds.label === 'Variants' || (ds.label && ds.label.startsWith('_Variant'))) {
+                                                chartRef.setDatasetVisibility(i, newVisible);
+                                            }
+                                        });
+                                        state['Variants'] = !newVisible;
+                                    } else {
+                                        chartRef.setDatasetVisibility(index, !isVisible);
+                                        state[label] = isVisible;
+                                        state[bandwidthSeriesKey(label)] = isVisible;
+                                    }
                                     bandwidthVisibility.set(sessionId, state);
                                     // When paused, renderBandwidthChart is a no-op, so
                                     // recalculate Y-axis max directly from visible datasets.
