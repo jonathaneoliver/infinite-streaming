@@ -21,6 +21,17 @@ IOS_SCORE_MIN ?= 60
 run:
 	./start.sh 1 run
 
+run-image:
+	docker run -d --name infinite-streaming \
+		--cap-add NET_ADMIN \
+		-p 21081:30000 \
+		-v $${CONTENT_DIR:-./sample-content}:/media \
+		ghcr.io/jonathaneoliver/infinite-streaming:latest \
+		/sbin/launch.sh 1
+
+stop-image:
+	docker stop infinite-streaming && docker rm infinite-streaming
+
 stop:
 	./start.sh 1 stop
 

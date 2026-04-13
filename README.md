@@ -8,21 +8,64 @@ InfiniteStream is a Docker‑based HLS/DASH media server for testing video playe
 
 ## Quick start
 
+### Option 1: Run from pre-built image (fastest)
+
 ```bash
-# Build
+# Pull and run — no build required
+docker run -d --name infinite-streaming \
+  --cap-add NET_ADMIN \
+  -p 21081:30000 \
+  -v ${CONTENT_DIR:-./sample-content}:/media \
+  ghcr.io/jonathaneoliver/infinite-streaming:latest \
+  /sbin/launch.sh 1
+
+# Open the UI
+open http://localhost:21081/
+```
+
+To use your own media library, set `CONTENT_DIR` in `.env` or pass it directly:
+
+```bash
+CONTENT_DIR=/path/to/your/media docker run -d --name infinite-streaming \
+  --cap-add NET_ADMIN \
+  -p 21081:30000 \
+  -v $CONTENT_DIR:/media \
+  ghcr.io/jonathaneoliver/infinite-streaming:latest \
+  /sbin/launch.sh 1
+```
+
+Or use the Makefile target:
+
+```bash
+make run-image
+```
+
+### Option 2: Build from source
+
+```bash
+# Clone and configure
+git clone https://github.com/jonathaneoliver/infinite-streaming.git
+cd infinite-streaming
+cp .env.example .env    # edit .env with your paths
+
+# Build and run
 make build
-# or
-# docker build --no-cache -t infinite-streaming .
+make run
+```
+
+### Option 3: Docker Compose
+
+```bash
+# Configure
+cp .env.example .env    # edit .env with your paths
 
 # Run
-make run
-# or
-# docker compose up -d
+docker compose up -d
 ```
 
 Open the UI:
 - Docker Compose: http://localhost:21081/
-- k3s (Lenovo): http://lenovo.local:30000/
+- k3s: http://$K3S_HOST:30000/
 
 ## Lenovo k3s: release vs dev
 
