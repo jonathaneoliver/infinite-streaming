@@ -1452,17 +1452,12 @@
         function sendSessionMetrics(eventType, extra = {}) {
             if (!currentSessionId) return;
             const payload = buildMetricsPayload(eventType, extra);
-            const fields = Object.keys(payload);
-            if (!fields.length) return;
-            fetch(`/api/session/${currentSessionId}`, {
-                method: 'PATCH',
+            if (!Object.keys(payload).length) return;
+            fetch(`/api/session/${currentSessionId}/metrics`, {
+                method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    set: payload,
-                    fields,
-                    base_revision: getSessionBaseRevision()
-                })
-            }).catch(err => console.warn('Metrics patch failed', err));
+                body: JSON.stringify({ set: payload })
+            }).catch(err => console.warn('Metrics post failed', err));
         }
 
         function scheduleMetricsHeartbeat() {
@@ -3500,9 +3495,8 @@
                         // In sliders mode, apply immediately as before
                         applyTemplatePattern(card, true, resetState);
                     } else {
-                        // In pattern mode, regenerate UI then persist selection
+                        // In pattern mode, regenerate UI but wait for Apply Pattern button
                         applyTemplatePattern(card, false, resetState);
-                        scheduleShapingApply(card);
                     }
                     return;
                 }
@@ -3511,9 +3505,8 @@
                     if (templateMode === 'sliders') {
                         scheduleShapingApply(card);
                     } else {
-                        // In pattern mode, regenerate UI then persist selection
+                        // In pattern mode, regenerate UI but wait for Apply Pattern button
                         applyTemplatePattern(card, false, false, false);
-                        scheduleShapingApply(card);
                     }
                     return;
                 }

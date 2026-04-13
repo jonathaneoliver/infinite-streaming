@@ -1106,6 +1106,7 @@ func main() {
 	router.HandleFunc("/api/session/{id}/update", app.handleUpdateSessionSettings).Methods(http.MethodPost)
 	router.HandleFunc("/api/session/{id}", app.handleSession).Methods(http.MethodGet, http.MethodDelete)
 	router.HandleFunc("/api/session/{id}", app.handlePatchSession).Methods(http.MethodPatch)
+	router.HandleFunc("/api/session/{id}/metrics", app.handlePostSessionMetrics).Methods(http.MethodPost)
 	router.HandleFunc("/api/session/{id}/network", app.handleGetNetworkLog).Methods(http.MethodGet)
 	router.HandleFunc("/api/external-ips", app.handleGetExternalIPs).Methods(http.MethodGet)
 	router.HandleFunc("/api/clear-sessions", app.handleClearSessions).Methods(http.MethodPost)
@@ -1290,6 +1291,54 @@ func (a *App) handlePatchSession(w http.ResponseWriter, r *http.Request) {
 		"control_revision": getString(normalized, "control_revision"),
 	})
 }
+
+// handlePostSessionMetrics updates player-reported observational data (frames,
+// buffer depth, playback state) without bumping control_revision or triggering
+// shaping/transport logic. This avoids revision conflicts with user-driven
+// control changes (rate limit, failure settings).
+func (a *App) handlePostSessionMetrics(w http.ResponseWriter, r *http.Request) {
+	id := mux.Vars(r)["id"]
+	var payload SessionPatchRequest
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		writeJSON(w, map[string]string{"error": "invalid json"})
+		return
+	}
+	set := payload.Set
+	if set == nil || len(set) == 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		writeJSON(w, map[string]string{"error": "no fields provided"})
+		return
+	}
+	sessions := a.getSessionList()
+	var target SessionData
+	for _, session := range sessions {
+		if getString(session, "session_id") == id {
+			target = session
+			break
+		}
+	}
+	if target == nil {
+		w.WriteHeader(http.StatusNotFound)
+		writeJSON(w, map[string]string{"error": "session not found"})
+		return
+	}
+	for key, value := range set {
+		target[key] = value
+	}
+	allSessions := a.getSessionList()
+	for i, s := range allSessions {
+		if getString(s, "session_id") == id {
+			allSessions[i] = target
+			break
+		}
+	}
+	a.saveSessionList(allSessions)
+	a.queueSessionsBroadcast(allSessions)
+	w.WriteHeader(http.StatusOK)
+	writeJSON(w, map[string]string{"status": "ok"})
+}
+
 
 func (a *App) handleUpdateFailureSettings(w http.ResponseWriter, r *http.Request) {
 	id := mux.Vars(r)["id"]
@@ -1587,7 +1636,11 @@ func (a *App) applySessionSettingsUpdate(id string, payload map[string]interface
 	if targetGroupID == "" {
 		log.Printf("SESSION GROUP UPDATE no group for session_id=%s", id)
 	}
-	if shapeRateUpdated {
+	// Only clear pattern state when shaping fields are updated WITHOUT a pattern
+	// being enabled. If the payload includes both shaping fields and pattern_enabled=true,
+	// the pattern takes ownership of the rate.
+	patternInPayload := getBool(payload, "nftables_pattern_enabled")
+	if shapeRateUpdated && !patternInPayload {
 		for _, session := range updatedSessions {
 			if session == nil {
 				continue
@@ -1607,7 +1660,7 @@ func (a *App) applySessionSettingsUpdate(id string, payload map[string]interface
 			a.armTransportFaultLoop(portNum, transportFaultType, transportConsecutive, transportConsecutiveUnits, transportFrequency)
 		}
 	}
-	if shapeRateUpdated {
+	if shapeRateUpdated && !patternInPayload {
 		portsApplied := map[int]struct{}{}
 		skippedNil := 0
 		skippedNoPort := 0
@@ -1664,7 +1717,65 @@ func (a *App) applySessionSettingsUpdate(id string, payload map[string]interface
 			skippedDuplicatePort,
 		)
 	}
+	// Start or stop the pattern loop if pattern fields were included in the PATCH.
+	if _, hasPatternEnabled := payload["nftables_pattern_enabled"]; hasPatternEnabled {
+		patternEnabled := getBool(target, "nftables_pattern_enabled")
+		portStr := getString(target, "x_forwarded_port")
+		if portNum, err := strconv.Atoi(portStr); err == nil && portNum > 0 {
+			if patternEnabled {
+				steps := parseShapeStepsFromSession(target)
+				if len(steps) > 0 {
+					delayMs := getInt(target, "nftables_delay_ms")
+					loss := getFloat(target, "nftables_packet_loss")
+					log.Printf("SESSION_PATTERN_START source=session_patch session_id=%s port=%d steps=%d", id, portNum, len(steps))
+					if err := a.applyShapePattern(portNum, steps, delayMs, loss); err != nil {
+						log.Printf("SESSION_PATTERN_START_FAILED session_id=%s port=%d: %v", id, portNum, err)
+					}
+				}
+			} else {
+				log.Printf("SESSION_PATTERN_STOP source=session_patch session_id=%s port=%d", id, portNum)
+				a.stopShapeLoop(portNum)
+			}
+		}
+	}
+
 	return target, http.StatusOK, ""
+}
+
+// parseShapeStepsFromSession extracts []NftShapeStep from the session's
+// nftables_pattern_steps field (stored as []interface{} from JSON).
+func parseShapeStepsFromSession(session SessionData) []NftShapeStep {
+	raw, ok := session["nftables_pattern_steps"]
+	if !ok {
+		return nil
+	}
+	switch steps := raw.(type) {
+	case []NftShapeStep:
+		return steps
+	case []interface{}:
+		out := make([]NftShapeStep, 0, len(steps))
+		for _, item := range steps {
+			m, ok := item.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			step := NftShapeStep{
+				RateMbps:        getFloat(m, "rate_mbps"),
+				DurationSeconds: getFloat(m, "duration_seconds"),
+				Enabled:         true,
+			}
+			if v, ok := m["enabled"]; ok {
+				if b, ok := v.(bool); ok {
+					step.Enabled = b
+				}
+			}
+			if step.RateMbps > 0 && step.DurationSeconds > 0 {
+				out = append(out, step)
+			}
+		}
+		return out
+	}
+	return nil
 }
 
 func (a *App) handleUpdateSessionSettings(w http.ResponseWriter, r *http.Request) {
@@ -3555,11 +3666,6 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 	requestBytes := int64(0)
 	if r.ContentLength > 0 {
 		requestBytes = r.ContentLength
-	}
-
-	portNum, _ := strconv.Atoi(internalPort)
-	if portNum > 0 {
-		a.applySessionShaping(sessionData, portNum)
 	}
 
 	if _, ok := sessionData["session_start_time"]; !ok {
