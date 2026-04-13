@@ -11,7 +11,7 @@ Docker-based HLS/DASH media server for testing video players under various netwo
 - **Stop**: `make stop` or `./start.sh 1 stop` or `docker compose down`
 - **Logs**: `docker compose logs -f infinite-streaming` (when using docker-compose)
 - **Shell**: `make shell` (access running container)
-- **Test**: Manual testing via browser at `http://localhost:21081/` (Docker Compose) or `http://lenovo.local:30000/` (k3s)
+- **Test**: Manual testing via browser at `http://localhost:30000/` (Docker Compose) or `http://$K3S_HOST:30000/` (k3s)
 
 ## Development Workflow
 

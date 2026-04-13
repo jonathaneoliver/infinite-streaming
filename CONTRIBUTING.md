@@ -29,4 +29,4 @@ any redistribution.
 
 ## Testing
 
-Use the UI at `http://localhost:21081/` (Docker Compose) or `http://lenovo.local:30000/` (k3s) and verify playback for HLS and DASH.
+Use the UI at `http://localhost:30000/` (Docker Compose) or `http://$K3S_HOST:30000/` (k3s) and verify playback for HLS and DASH.
