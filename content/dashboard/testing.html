@@ -3274,9 +3274,8 @@ maybe a histogram of b
                     // In sliders mode, apply immediately as before
                     applyTemplatePattern(card, true, resetState);
                 } else {
-                    // In pattern mode, regenerate UI then persist selection
+                    // In pattern mode, regenerate UI only — wait for Apply Pattern button
                     applyTemplatePattern(card, false, resetState);
-                    scheduleShapingApply(card);
                 }
                 return;
             }
@@ -3285,9 +3284,8 @@ maybe a histogram of b
                 if (templateMode === 'sliders') {
                     scheduleShapingApply(card);
                 } else {
-                    // In pattern mode, regenerate UI then persist selection
+                    // In pattern mode, regenerate UI only — wait for Apply Pattern button
                     applyTemplatePattern(card, false, false, false);
-                    scheduleShapingApply(card);
                 }
                 return;
             }
@@ -3300,7 +3298,11 @@ maybe a histogram of b
                 }
             }
             if (target.dataset.field && target.dataset.field.startsWith('shaping_')) {
-                scheduleShapingApply(card);
+                // In pattern mode, only apply from the Apply Pattern button
+                const templateMode = getTemplateMode(card);
+                if (templateMode === 'sliders') {
+                    scheduleShapingApply(card);
+                }
                 return;
             }
             if (isFailureRangeField(target.dataset.field)) {
