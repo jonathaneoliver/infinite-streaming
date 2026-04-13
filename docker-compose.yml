@@ -22,7 +22,6 @@ services:
     volumes:
       - ./content:/content
       - ${CONTENT_DIR:-./sample-content}:/media
-      - ./certs:/etc/nginx/certs:ro
     environment:
       # Path Configuration - Single source of truth for all path references
       - INFINITE_STREAM_ROOT=/media

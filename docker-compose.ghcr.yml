@@ -20,7 +20,6 @@ services:
       - "30881:30881"
     volumes:
       - ${CONTENT_DIR:-./sample-content}:/media
-      - ./certs:/etc/nginx/certs:ro
     environment:
       - INFINITE_STREAM_ROOT=/media
       - INFINITE_STREAM_UPLOADS_DIR=/media/uploads

@@ -8,32 +8,29 @@ InfiniteStream is a Docker‑based HLS/DASH media server for testing video playe
 
 ## Prerequisites
 
-TLS certificates are required for nginx. Generate self-signed certs before starting:
+TLS certificates are required for nginx. Generate them once in your media directory:
 
 ```bash
-mkdir -p certs
+mkdir -p /path/to/your/media/certs
 openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
-  -keyout certs/localhost-key.pem \
-  -out certs/localhost.pem \
+  -keyout /path/to/your/media/certs/localhost-key.pem \
+  -out /path/to/your/media/certs/localhost.pem \
   -subj "/CN=localhost"
 ```
+
+All deployment methods read certs from `$CONTENT_DIR/certs`.
 
 ## Quick start
 
 ### Option 1: Docker Compose (simplest)
 
-Clone the repo, generate certs, and start:
+Clone the repo and start:
 
 ```bash
 git clone https://github.com/jonathaneoliver/infinite-streaming.git
 cd infinite-streaming
 
-# Generate TLS certs (see Prerequisites above)
-mkdir -p certs
-openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
-  -keyout certs/localhost-key.pem -out certs/localhost.pem -subj "/CN=localhost"
-
-# (Optional) Point to your media library
+# Set your media directory (must contain certs/ — see Prerequisites)
 cp .env.example .env    # edit CONTENT_DIR with your media path
 
 # Start — images build automatically on first run
@@ -47,26 +44,17 @@ Open the UI: http://localhost:30000/
 Run a single container with no compose file needed:
 
 ```bash
-mkdir -p certs
-openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
-  -keyout certs/localhost-key.pem -out certs/localhost.pem -subj "/CN=localhost"
+export CONTENT_DIR=/path/to/your/media
 
 docker run -d --name infinite-streaming \
   --cap-add NET_ADMIN --privileged \
   -p 30000:30000 -p 30081:30081 \
-  -v $(pwd)/certs:/etc/nginx/certs:ro \
-  -v ${CONTENT_DIR:-./sample-content}:/media \
+  -v $CONTENT_DIR:/media \
   ghcr.io/jonathaneoliver/infinite-streaming:latest \
   /sbin/launch.sh 1
 ```
 
 Open the UI: http://localhost:30000/
-
-To use your own media library, set `CONTENT_DIR` before running:
-
-```bash
-export CONTENT_DIR=/path/to/your/media
-```
 
 To stop: `docker stop infinite-streaming && docker rm infinite-streaming`
 
@@ -77,16 +65,11 @@ Use the pre-built images from GitHub Container Registry — no source checkout o
 ```bash
 mkdir infinite-streaming && cd infinite-streaming
 
-# Generate TLS certs (see Prerequisites above)
-mkdir -p certs
-openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
-  -keyout certs/localhost-key.pem -out certs/localhost.pem -subj "/CN=localhost"
-
 # Download the GHCR compose file
 curl -fsSL https://raw.githubusercontent.com/jonathaneoliver/infinite-streaming/main/docker-compose.ghcr.yml \
   -o docker-compose.yml
 
-# (Optional) Point to your media library
+# Set your media directory (must contain certs/ — see Prerequisites)
 echo "CONTENT_DIR=/path/to/your/media" > .env
 
 # Start
