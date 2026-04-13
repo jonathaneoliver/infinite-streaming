@@ -138,11 +138,29 @@ REPO_URL ?= https://github.com/jonathaneoliver/infinite-streaming.git
 
 test-deploy-all: test-deploy-compose test-deploy-run test-deploy-ghcr test-deploy-registry
 
+test-deploy-dev:
+	@echo "=== Dev: uncommitted changes (port 21000) ==="
+	ssh $(TEST_SSH) 'if [ -d ~/test-dev/.git ]; then cd ~/test-dev && git checkout -- . && git pull; else git clone $(REPO_URL) ~/test-dev; fi'
+	ssh $(TEST_SSH) 'echo "CONTENT_DIR=$(TEST_MEDIA_DIR)" > ~/test-dev/.env'
+	scp tests/deploy/override-dev.yml $(TEST_SSH):~/test-dev/docker-compose.override.yml
+	@echo "Copying uncommitted changes..."
+	@git diff --name-only | while read f; do \
+		if [ -f "$$f" ]; then \
+			ssh $(TEST_SSH) "mkdir -p ~/test-dev/$$(dirname $$f)"; \
+			scp "$$f" "$(TEST_SSH):~/test-dev/$$f"; \
+			echo "  $$f"; \
+		fi; \
+	done
+	ssh $(TEST_SSH) 'cd ~/test-dev && docker compose build && docker compose up -d'
+
+test-clean-dev:
+	ssh $(TEST_SSH) 'docker rm -f test-dev-server test-dev-memcached-1 2>/dev/null'
+
 test-clean:
-	ssh $(TEST_SSH) 'docker rm -f test-compose-server test-compose-memcached-1 test-docker-run test-ghcr-server test-ghcr-memcached-1 test-registry-server 2>/dev/null; docker network prune -f 2>/dev/null'
+	ssh $(TEST_SSH) 'docker rm -f test-dev-server test-dev-memcached-1 test-compose-server test-compose-memcached-1 test-docker-run test-ghcr-server test-ghcr-memcached-1 test-registry-server 2>/dev/null; docker network prune -f 2>/dev/null'
 
 test-status:
-	@ssh $(TEST_SSH) 'for p in 22000 23000 24000 25000; do \
+	@ssh $(TEST_SSH) 'for p in 21000 22000 23000 24000 25000; do \
 		proxy=$$((p / 1000 * 1000 + 81)); \
 		ui=$$(curl -s -o /dev/null -w "%{http_code}" http://localhost:$$p/); \
 		px=$$(curl -s -o /dev/null -w "%{http_code}" http://localhost:$$proxy/api/sessions 2>/dev/null); \
