@@ -142,23 +142,17 @@ Example deploy (release tag `v1.2.3`):
 
 ```bash
 make deploy-release \
-  K3S_SERVER_IMAGE=$K3S_REGISTRY/infinite-streaming:v1.2.3 \
-  K3S_PROXY_IMAGE=$K3S_REGISTRY/go-proxy:v1.2.3
+  K3S_SERVER_IMAGE=$K3S_REGISTRY/infinite-streaming:v1.2.3
 ```
 
 ## GitHub Container Registry (GHCR)
 
-This repo ships a GitHub Actions workflow that builds and publishes both images to GHCR on pushes to `main`.
+This repo ships a GitHub Actions workflow that builds and publishes the Docker image to GHCR on pushes to `main`.
 
-Server image tags:
+Image tags:
 - `ghcr.io/<owner>/infinite-streaming:latest`
 - `ghcr.io/<owner>/infinite-streaming:main`
 - `ghcr.io/<owner>/infinite-streaming:sha-<short>`
-
-Proxy image tags:
-- `ghcr.io/<owner>/go-proxy:latest`
-- `ghcr.io/<owner>/go-proxy:main`
-- `ghcr.io/<owner>/go-proxy:sha-<short>`
 
 To enable publishing in your fork:
 1) Set the default branch to `main`.
@@ -406,16 +400,6 @@ Located in `apple/InfiniteStreamPlayer/`, this SwiftUI app provides:
 - Content selection and auto-play
 - Detailed playback diagnostics
 - Testing session integration
-
-### Android App
-Located in `android/InfiniteStreamPlayer/`, this ExoPlayer-based app provides:
-- Minimal single-page interface
-- HLS and DASH playback support
-- Protocol, segment, and codec selection
-- Server environment switching (Dev/Release)
-- Content selection and auto-play
-- Essential playback controls (retry fetch, restart playback)
-- Clean UI modeled after the iOS app
 
 ### Roku Channel
 Located in `roku/InfiniteStreamPlayer/`, this BrightScript channel provides:
