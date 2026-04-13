@@ -81,7 +81,7 @@ The system is intended for:
 ## 7) Dashboard Application (Functional Requirements)
 ### 7.1 Global selection state
 - A global selection is stored in localStorage:
-  - `bossSelectedContent`, `bossSelectedUrl`, `bossSelectedProtocol`, `bossSelectedSegment`, `bossSelectedCodec`.
+  - `ismSelectedContent`, `ismSelectedUrl`, `ismSelectedProtocol`, `ismSelectedSegment`, `ismSelectedCodec`.
 - Selection persists across pages; selecting a content item updates the global state and should not be overridden by other pages.
 
 ### 7.2 Core pages
