@@ -26,6 +26,7 @@ Player bugs are usually environmental — a network blip, a truncated segment, a
 - **Master-playlist manipulation.** Rewrite the HLS master on the fly — strip CODEC / AVERAGE-BANDWIDTH, overstate BANDWIDTH, allowlist specific rungs, change the live hold-back offset. Explore how ladder shape and optional HLS attributes affect startup, ABR, and live-edge latency **without re-encoding**.
 - **Transport faults too.** Port-level DROP/REJECT via nftables, rate shaping via `tc`, composable with HTTP-layer faults.
 - **Per-session isolation.** Each browser session binds to a dedicated proxy port via `player_id`, so concurrent testers don't collide.
+- **Session grouping for differential testing** *(a top-level feature)* — link two or more independent sessions so fault injection and network shaping apply to all of them simultaneously, while everything else (player engine, codec, live offset, platform, ladder constraints) stays independent per session. One bandwidth collapse, two `live_offset` values, instant apples-to-apples comparison of which setting rebuffers. Or iOS vs Android reacting to the exact same throughput curve. See [Session grouping](#session-grouping-differential-testing).
 - **Side-by-side comparison UI.** Mosaic and quartet views for watching multiple players or encodings against the same source simultaneously.
 - **Everything is a REST API.** No UI-only controls — anything a tester can do, a CI job can do.
 
@@ -34,6 +35,7 @@ Player bugs are usually environmental — a network blip, a truncated segment, a
 - Regression-test a player release against a known fault schedule before shipping.
 - Reproduce a customer-reported stall by replaying the exact fault sequence.
 - Compare HLS.js vs Shaka vs Video.js vs native on identical content under identical faults.
+- **Differential testing via session grouping.** Link N independent sessions so one fault or throughput change hits all of them at the same moment — while each session keeps its own player, platform, codec, ladder, or live-offset. See [Session grouping](#session-grouping-differential-testing).
 - Validate loop-boundary and discontinuity handling.
 - Characterize a player's ABR algorithm under controlled bandwidth steps.
 - Pre-validate ladder and HLS parameter decisions ("what if we dropped the 4K rung?", "what if we removed AVERAGE-BANDWIDTH?") without re-encoding.
@@ -103,6 +105,8 @@ All of the testing features are accessible through the built-in web dashboard. A
    - **Network Shaping** — delay / loss / throughput sliders or scripted patterns (square wave, ramp up/down, pyramid).
 
 6. **Watch the reaction.** The **Bitrate Chart** stacks three time-series charts (bitrate, buffer depth, FPS) on a shared 10-minute timeline. A bandwidth dip, buffer drop, and FPS stutter all line up visually, so root-causing is a matter of eyeballing the three charts together.
+
+7. **Group two sessions for a side-by-side.** Open a second Testing Session for the same source but with a different player engine, live offset, or device — then link the two as a group. From then on, any fault or throughput change applies to **both** simultaneously, while each session keeps its own player config. See [Session grouping](#session-grouping-differential-testing) below for the canonical use cases.
 
 That walkthrough exercises the majority of the system. The sections below describe each part in depth.
 
@@ -199,6 +203,34 @@ The session card has a collapsible **Bitrate Chart** that stacks up to three tim
 - **FPS chart** — rendered and dropped frames/s from `player_metrics_frames_displayed` / `_dropped_frames`, 2 s sliding window, exponential smoothing (α = 0.15). Series: `FPS (smoothed)`, `Low FPS` (red below threshold), `FPS Baseline` (75th percentile), `Low Threshold` (`0.75 × baseline`), `Dropped Frames/s` (right Y-axis).
 
 Buffer and FPS charts render when `showBufferDepthChart: true` on the session. All three share a timeline, so a bandwidth dip lines up visually with its buffer/FPS impact.
+
+---
+
+## Session grouping (differential testing)
+
+Link two or more independent Testing Sessions into a **group**. Faults and network shaping applied to any group member are applied to **all** members simultaneously — while everything else stays independent per session. This is the single highest-leverage feature for *differential* testing: change exactly one variable and watch several targets react to an identical stimulus.
+
+### What propagates vs what stays independent
+
+| Propagates to all group members | Stays per-session |
+|---|---|
+| HTTP fault configuration (segment / manifest / master — type, mode, consecutive, frequency, URL allowlist) | Player engine (HLS.js / Shaka / Video.js / Native) |
+| Transport faults (DROP / REJECT, timing) | Stream URL (protocol / codec / segment duration) |
+| Network shaping — delay, loss, throughput, pattern mode, step duration, margin | Content-tab manipulations (strip CODEC, allowed variants, live offset, etc.) |
+| Shaping patterns (square wave, ramps, pyramid) and their step schedules | Player selector and URL parameters |
+
+Max 10 sessions per group. Endpoints: `POST /api/session-group/link`, `POST /api/session-group/unlink`, `GET /api/session-group/{groupId}` — see [`docs/FAULT_INJECTION.md`](docs/FAULT_INJECTION.md#session-grouping).
+
+### Canonical use cases
+
+- **Same stream, two live offsets.** Session A at `live_offset=6s`, session B at `live_offset=24s`. Apply a 3-second throughput collapse to the group. A rebuffers, B absorbs it — now you know exactly how much headroom the larger offset is buying you.
+- **iOS vs Android under identical conditions.** Open one testing window driving an iOS simulator, another driving the Android player, group them, and drive a `ramp_down` pattern. The Bitrate / Buffer / FPS charts side by side show how each platform's ABR algorithm responds to the same wire-rate curve, with zero variance from network timing.
+- **HLS.js vs Shaka on the same packet-loss schedule.** One click, two engines, identical 2% loss + 80 ms delay — does one rebuffer and the other ride it out?
+- **H.264 vs HEVC under identical throttle.** Same variants on the ladder, different codec, grouped session — how does each codec's bitrate-for-quality affect rebuffer frequency when throughput drops below the 720p rung?
+- **Sparse ladder vs full ladder.** Session A with everything enabled, session B with the 4K rung removed via the Content tab, group them, drive a slow ramp down. The point at which each session rebuffers tells you exactly what the 4K rung is costing (or saving) under constrained networks.
+- **Same player, different Content-tab settings.** Identical engine, identical stream, grouped — but A has `Strip CODEC` on and B doesn't. Watch startup time diverge under the same network conditions.
+
+The pattern is always: **change one variable per session, apply the same fault or shaping change to all of them, compare charts side by side.** The Bitrate / Buffer / FPS charts share a timeline across sessions, so you see effect alignment by eye.
 
 ---
 
