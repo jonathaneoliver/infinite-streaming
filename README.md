@@ -276,13 +276,15 @@ Controls:
 - **Reload Page**: full page reload with current query params.
 - **Player selector**: choose HLS.js, Shaka, Video.js, Native, or Auto.
 
-Player Characterization (ABR ramp testing):
-- Open the **Player Characterization** collapsible in the Testing session card.
-- **Network overhead selector** chooses wire-overhead assumption for limit generation (`5%` or `10%`).
-- Limits are generated from adjacent ladder variants after overhead adjustment:
-  - `wire_variant_mbps = media_variant_mbps / (1 - overhead_pct)`
-  - interpolation points between each adjacent pair: `0%, 5%, 10%, 25%, 50%, 75%, 90%, 95%`
-- This targets realistic wire throughput thresholds for down/up-switch characterization instead of raw media bitrates.
+Network Shaping (per session):
+- Open the **Network Shaping** section in the Testing session card.
+- **Delay**, **Loss**, and **Throughput** sliders set steady-state shaping (0–250 ms, 0–10%, 0–50 Mbps). The Throughput slider is disabled when a pattern mode other than `sliders` is active.
+- **Pattern mode**: `sliders` (static), `square_wave`, `ramp_up`, `ramp_down`, `pyramid`. Non-`sliders` modes drive throughput through a scripted sequence of steps.
+- **Step duration**: `6s` / `12s` / `18s` / `24s` — how long each pattern step holds before advancing.
+- **Margin**: `Exact` / `+10%` / `+25%` / `+50%` — headroom added on top of each ladder bitrate when picking preset rates.
+- **Throughput presets** are generated from the current manifest's variants (video + audio, deduped). The effective rate for each preset is:
+  `shaping_mbps = variant_mbps × (1 + margin_pct/100) + overhead_mbps`
+  where `overhead_mbps` is computed automatically from the audio playlist bandwidth plus a fixed `0.05 Mbps` playlist allowance. Presets below the lowest video variant bitrate (stall-risk threshold) are flagged in the UI.
 
 Failure injection (per session):
 - Set **Failure Type** (must be non‑none to activate failures).
