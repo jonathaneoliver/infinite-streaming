@@ -198,6 +198,17 @@ test-deploy-registry:
 	ssh $(TEST_SSH) 'echo "CONTENT_DIR=$(TEST_MEDIA_DIR)" > ~/test-registry/.env && echo "K3S_REGISTRY=$(K3S_REGISTRY)" >> ~/test-registry/.env'
 	ssh $(TEST_SSH) 'cd ~/test-registry && docker compose up -d'
 
+# ── Screenshots ────────────────────────────────────────────────────────
+
+SCREENSHOT_HOST ?= http://localhost:30000
+SCREENSHOT_VENV ?= /tmp/ism-shot-venv
+
+screenshots:
+	@[ -d "$(SCREENSHOT_VENV)" ] || (python3 -m venv "$(SCREENSHOT_VENV)" \
+		&& "$(SCREENSHOT_VENV)/bin/pip" install -q -r scripts/requirements.txt \
+		&& "$(SCREENSHOT_VENV)/bin/playwright" install chrome)
+	"$(SCREENSHOT_VENV)/bin/python" scripts/capture-screenshots.py --base-url=$(SCREENSHOT_HOST)
+
 # ── iOS testing ────────────────────────────────────────────────────────
 
 test-ios-sim-metrics:
