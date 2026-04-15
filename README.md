@@ -6,6 +6,8 @@ Built for player QA, SDK development, and side-by-side comparison across HLS.js,
 
 Everything is driven by a REST API (the dashboard is a thin client over it), so every fault, every shaping change, every session control available in the UI is also available to test scripts and CI.
 
+![Dashboard](screenshots/dashboard.png)
+
 ---
 
 ## Why you might want this
@@ -129,6 +131,8 @@ Selected content and URL persist across pages in `localStorage` (`ismSelected*`)
 ---
 
 ## Testing session in depth
+
+![Testing session](screenshots/testing-player.png)
 
 Open directly if you don't want to come from Mosaic:
 
@@ -458,6 +462,18 @@ docker compose up -d
 ### k3s, release tagging, GHCR publishing
 
 See [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) for running in a k3s cluster (release + dev side by side), pinning immutable release tags, and configuring GHCR publishing from a fork.
+
+---
+
+## Screenshots
+
+Captured from the live dashboard; files live in [`screenshots/`](screenshots/).
+
+| | |
+|---|---|
+| **Playback** — single-stream view ![Playback](screenshots/playback.png) | **Mosaic** — multi-tile comparison ![Mosaic](screenshots/mosaic.png) |
+| **Source Library** — content intake ![Source Library](screenshots/source-library.png) | **Upload Content** ![Upload Content](screenshots/upload-content.png) |
+| **Encoding Jobs** ![Encoding Jobs](screenshots/encoding-jobs.png) | **Live Offset** — cross-variant comparison ![Live Offset](screenshots/live-offset.png) |
 
 ---
 
