@@ -6,7 +6,7 @@ InfiniteStream runs as a **single Docker container** with four cooperating proce
 
 | Process | Internal port | Responsibility |
 |---|---|---|
-| `go-live` | 8010 | Dynamic HLS/DASH manifest generation (LL + 2s + 6s segment variants) from looping VOD |
+| `go-live` | 8010 | Dynamic HLS/DASH manifest generation (LL + 2s + 6s segment variants) from short VOD content |
 | `go-upload` | 8003 | Upload API, encoding job orchestration, content discovery |
 | `go-proxy` | 30081 (base) + per-session ports | Failure-injection proxy and traffic shaping |
 | `nginx` | 30000 | Static dashboard + routing to the three Go services |
