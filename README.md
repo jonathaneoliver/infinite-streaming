@@ -12,11 +12,13 @@ Everything is driven by a REST API (the dashboard is a thin client over it), so 
 
 This project is primarily an **AI No‑Code** build. The Go services and web dashboard were generated using Codex / OpenCode and Claude Sonnet 4.5, with human direction and iterative testing.
 
-## TLS Certificates
-
-Self-signed TLS certificates are auto-generated on first startup if none exist in `$CONTENT_DIR/certs`. To provide your own certificates, place `localhost.pem` and `localhost-key.pem` in your media directory's `certs/` folder before starting — the container will use them instead of generating new ones.
-
 ## Quick start
+
+### Prerequisites
+
+- Docker (and Docker Compose for Options 1 and 3).
+- A **media directory** on the host (`CONTENT_DIR`) for source files and encoded output. It will be mounted into the container as `/media`.
+- **TLS certificates** in `$CONTENT_DIR/certs/`. Self-signed certs are auto-generated on first startup if none exist. To provide your own, drop `localhost.pem` and `localhost-key.pem` into `$CONTENT_DIR/certs/` before starting — the container will use those instead.
 
 ### Option 1: Docker Compose (simplest)
 
