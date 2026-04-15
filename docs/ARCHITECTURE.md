@@ -102,6 +102,17 @@ Live manifests generated on the fly live in tmpfs at `/content/go-live/{content}
 
 go-live only **reads** `/media/dynamic_content`. go-upload **writes** to both `/media/originals` and `/media/dynamic_content` and shells out to ffmpeg + shaka-packager for encoding jobs. go-proxy is stateless for content — it just proxies requests to nginx's internal port and overlays fault behavior.
 
+## Wire metric implementation
+
+go-proxy's throughput metrics (`mbps_shaper_rate`, `mbps_shaper_avg`, `mbps_transfer_rate`, `mbps_transfer_complete`) are read directly from the kernel rather than via subprocess calls to `tc`:
+
+- TC class byte/backlog counters are read via netlink (`vishvananda/netlink`) — no subprocess fork per poll.
+- Per-port TC stats are cached with a 5 ms TTL to deduplicate concurrent readers.
+- Only one `awaitSocketDrain` goroutine runs per port at a time (singleton guard).
+- TC counters include packet-level transport/application overhead (TCP/IP + TLS/HTTP headers) but **not** physical link-layer overhead (Ethernet preamble / IFG / FCS).
+
+Semantics and expected behaviour of the metrics themselves (what each series means, how they relate to the configured limit and the player's own estimate) are documented in [`README.md`'s Metrics reference](../README.md#metrics-reference).
+
 ## Dashboard
 
 Static HTML/JS/CSS served by nginx from `content/dashboard/`:
