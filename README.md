@@ -502,7 +502,7 @@ Captured from the live dashboard; files live in [`screenshots/`](screenshots/).
 
 ## AI No-Code note
 
-This project is primarily an **AI No-Code** build. The Go services and web dashboard were generated using Codex / OpenCode, GitHub Copilot, Claude Code, and Claude Sonnet 4.5, with human direction and iterative testing.
+This project is primarily an **AI No-Code** build. The Go services and web dashboard were generated using Codex / OpenCode, GitHub Copilot, and Claude Code, with human direction and iterative testing.
 
 ## License
 
