@@ -31,6 +31,7 @@ Existing options each fall short:
 - **Per-session isolation.** Each browser session binds to a dedicated proxy port via `player_id`, so concurrent testers don't collide and each session has its own fault schedule.
 - **Side-by-side comparison UI.** Mosaic and quartet views let you watch multiple players or encodings against the same source simultaneously.
 - **Player characterization.** Scripted ABR ramp sweeps with wire-overhead-adjusted bandwidth limits, for measuring how a player responds to bandwidth changes.
+- **Everything is a REST API.** The dashboard is a thin client over HTTP + SSE — every fault, every shaping change, every session action the UI can do is available to test scripts and CI. No hidden controls, no UI-only paths. See [`API.md`](API.md).
 - **Repeatable in CI.** The same fault schedule, same stream, same clock — portable across developer machines, shared QA rigs, and CI runners.
 
 ## Use cases

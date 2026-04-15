@@ -4,6 +4,8 @@ InfiniteStream is a Docker-based HLS/DASH test server for video players. It gene
 
 It is built for player QA, SDK development, and side-by-side comparison across HLS.js, Shaka, Video.js, native, iOS/tvOS, Android, and Roku. It is not a production streaming origin.
 
+Everything is driven by a REST API (the dashboard is a thin client over it), so every fault, every shaping change, every session control the UI exposes is available to test scripts and CI too.
+
 **Start here:** [`docs/WHY.md`](docs/WHY.md) — why this exists, use cases, and how it compares to alternatives.
 
 ## AI No‑Code project
