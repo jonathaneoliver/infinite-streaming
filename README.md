@@ -132,7 +132,7 @@ Selected content and URL persist across pages in `localStorage` (`ismSelected*`)
 
 ## Testing session in depth
 
-![Testing session](screenshots/testing-player.png)
+![Testing session](screenshots/testing-playback.png)
 
 Open directly if you don't want to come from Mosaic:
 
