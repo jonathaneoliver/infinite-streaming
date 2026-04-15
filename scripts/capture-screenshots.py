@@ -182,9 +182,9 @@ def main() -> int:
     ap.add_argument("--base-url", default="http://localhost:30000",
                     help="Base URL of the running server (default: http://localhost:30000)")
     ap.add_argument("--only", help="Capture only the named page (e.g. 'mosaic')")
-    ap.add_argument("--session-id", help="Use this player_id or session_id for testing-playback capture")
-    ap.add_argument("--skip-testing-playback", action="store_true",
-                    help="Skip testing-playback.png even if an active session is found")
+    ap.add_argument("--session-id", help="Use this player_id or session_id for testing-session capture")
+    ap.add_argument("--skip-testing-session", action="store_true",
+                    help="Skip testing-session.png even if an active session is found")
     ap.add_argument("--output-dir", default=str(SCREENSHOT_DIR),
                     help=f"Where to write .png files (default: {SCREENSHOT_DIR})")
     args = ap.parse_args()
@@ -195,20 +195,20 @@ def main() -> int:
     print(f"base_url: {base_url}")
     print(f"output:   {out_dir}\n")
 
-    # Build page list, optionally appending the testing-playback spec.
+    # Build page list, optionally appending the testing-session spec.
     specs = list(PAGES)
     if not args.skip_testing_player:
         session = pick_active_session(base_url, args.session_id)
         if session:
             path = build_testing_session_path(session)
-            print(f"[testing-playback] using live session player_id={session.get('player_id')}")
+            print(f"[testing-session] using live session player_id={session.get('player_id')}")
             specs.append(PageSpec(
-                "testing-playback", path,
+                "testing-session", path,
                 ready=lambda p: wait_bandwidth_chart_has_data(p, min_points=3, timeout_ms=30000),
                 settle_seconds=5.0,
             ))
         else:
-            print("[testing-playback] no active session found — skipping. "
+            print("[testing-session] no active session found — skipping. "
                   "Start a testing session and re-run to capture this one.")
 
     if args.only:

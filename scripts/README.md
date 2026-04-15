@@ -42,21 +42,21 @@ make screenshots SCREENSHOT_HOST=http://jonathanoliver-ubuntu.local:22000
 
 - `dashboard`, `upload-content`, `source-library`, `encoding-jobs` — static pages
 - `playback`, `mosaic`, `live-offset` — pages with active video; the script waits for at least one `<video>` to reach `readyState>=2` before capturing so frames are rendered
-- `testing-playback` — requires an **active testing session**. The script calls `/api/sessions`, picks the first active session, builds the testing-session URL from its `player_id` + manifest URL, waits for the Bitrate chart to accumulate ≥3 data points, then captures. If no session is active, this one is skipped with a warning.
+- `testing-session` — requires an **active testing session**. The script calls `/api/sessions`, picks the first active session, builds the testing-session URL from its `player_id` + manifest URL, waits for the Bitrate chart to accumulate ≥3 data points, then captures. If no session is active, this one is skipped with a warning.
 
 ### Prerequisites for meaningful captures
 
 - Server running and reachable from the Mac.
 - At least one content item encoded (otherwise Mosaic / Playback will be empty).
-- At least one testing session active with some fault or shaping applied (otherwise `testing-playback.png` is skipped).
+- At least one testing session active with some fault or shaping applied (otherwise `testing-session.png` is skipped).
 
 ### Regenerating just one page
 
 Pass `--only <name>` to capture a single page without redoing the rest:
 
 ```bash
-/tmp/ism-shot-venv/bin/python capture-screenshots.py --only testing-playback \
+/tmp/ism-shot-venv/bin/python capture-screenshots.py --only testing-session \
   --base-url=http://jonathanoliver-ubuntu.local:22000
 ```
 
-The valid names are: `dashboard`, `upload-content`, `source-library`, `encoding-jobs`, `playback`, `mosaic`, `live-offset`, `testing-playback`.
+The valid names are: `dashboard`, `upload-content`, `source-library`, `encoding-jobs`, `playback`, `mosaic`, `live-offset`, `testing-session`.
