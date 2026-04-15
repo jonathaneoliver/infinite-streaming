@@ -99,6 +99,22 @@ Bandwidth can also be driven by a **step pattern** (`nftables_pattern_*`), where
 
 Linux-only. The capabilities endpoint (`GET /api/nftables/capabilities`) reports whether shaping is available.
 
+## Manifest content manipulation
+
+Under the **Content** tab of the Fault Injection card, you can rewrite the HLS master playlist on the fly to explore how a player reacts to unusual ladder shapes and missing or altered HLS metadata — without re-encoding anything. This is the fast feedback loop for pre-validating ladder decisions and stress-testing assumptions about optional HLS attributes.
+
+Two-phase workflow: play the stream once with your `player_id` to populate the variant list, then configure the Content tab and replay with the **same `player_id`** for the changes to apply.
+
+| Control | Server field | What it does | How it typically affects playback |
+|---|---|---|---|
+| **Strip CODEC** | `content_strip_codecs` | Remove `CODECS=` from every `EXT-X-STREAM-INF` | Players can't use "chunkless prepare" and fall back to probing — usually longer startup and extra segment fetches during init |
+| **Strip AVERAGE-BANDWIDTH** | `content_strip_average_bandwidth` | Remove `AVERAGE-BANDWIDTH=` from variant tags | Players that weight average over peak when picking an initial rung may select a different variant |
+| **Overstate Bandwidth** | `content_overstate_bandwidth` | Inflate `BANDWIDTH` and `AVERAGE-BANDWIDTH` by 10% | Simulates an over-conservative encoder declaration; players may under-utilise available throughput and sit on lower rungs |
+| **Allowed variants** | `content_allowed_variants[]` | Allowlist specific rungs — rungs not listed are removed from the master | Explore what happens with a sparse ladder, a top-heavy ladder, or a single-rung ladder. Players may rebuffer when the constrained ladder can't match available bandwidth |
+| **Live offset** | `content_live_offset` | Rewrites live hold-back hints in the master. Options: `None`, `6s`, `18s`, `24s` | Sets how far from the live edge the player starts. Lower values (6s) push closer to the edge — lower latency but higher rebuffer risk on jitter. Higher values (24s) give the buffer more room at the cost of latency. `None` leaves the player to its own default |
+
+**Scope:** HLS only (DASH is a placeholder). Manipulations apply to the **master playlist** only — variant playlists and segments pass through untouched. The target is exploring how ladder/parameter decisions manifest at the player, not corrupting media.
+
 ## Timing model
 
 Every fault configuration has the same six-field shape. Field names are prefixed by request kind (`segment_`, `manifest_`, `master_manifest_`, `transport_`):

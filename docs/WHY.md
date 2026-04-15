@@ -27,6 +27,7 @@ Existing options each fall short:
 - **Deterministic looping live.** The sliding window moves on a stable clock and wraps on loop boundaries. The same test run produces the same timing.
 - **All variants from one worker.** LL-HLS, LL-DASH, 2s, and 6s segment variants are generated from a single per-content worker on a shared clock, so cross-protocol comparisons are apples-to-apples.
 - **Streaming-aware fault injection.** Inject HTTP errors, hangs, and payload corruption at the segment, playlist, or manifest layer — not just generic TCP faults.
+- **Master-playlist manipulation.** The Content tab of the Fault Injection card rewrites the HLS master on the fly — strip CODEC / AVERAGE-BANDWIDTH, overstate BANDWIDTH, allowlist specific rungs, change the live hold-back offset. Explore how ladder shape and optional HLS attributes affect startup, ABR behavior, and live-edge latency **without re-encoding**.
 - **Transport faults too.** Port-level DROP/REJECT via nftables and rate shaping via `tc`, composable with HTTP-layer faults.
 - **Per-session isolation.** Each browser session binds to a dedicated proxy port via `player_id`, so concurrent testers don't collide and each session has its own fault schedule.
 - **Side-by-side comparison UI.** Mosaic and quartet views let you watch multiple players or encodings against the same source simultaneously.
@@ -41,6 +42,7 @@ Existing options each fall short:
 - Compare HLS.js vs Shaka vs Video.js vs native playback on identical content under identical faults.
 - Validate loop-boundary and discontinuity handling.
 - Characterize a player's ABR algorithm under controlled bandwidth steps.
+- **Pre-validate ladder and HLS parameter decisions.** Before committing to an encode, use the Content tab to serve a manipulated master playlist — hide rungs, strip CODECS, inflate BANDWIDTH, change the live offset — and watch the player's startup, adaptation, and live-edge behavior. Fast feedback loop for "what if we dropped the 4K rung" or "what if we removed AVERAGE-BANDWIDTH".
 - Smoke-test a new encoding ladder before promoting to staging.
 - Demonstrate what LL-HLS and the 2s and 6s segment variants actually look like to a player.
 
