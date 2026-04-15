@@ -1,10 +1,14 @@
 # InfiniteStream
 
+InfiniteStream is a Docker-based HLS/DASH test server for video players. It generates LL-HLS and LL-DASH streams (plus 2s and 6s variants) from looping VOD on a shared clock, and lets you inject deterministic, streaming-aware failures — HTTP errors, hung responses, corrupted segments, transport drops, bandwidth limits — on a per-session basis so player bugs become reproducible.
+
+It is built for player QA, SDK development, and side-by-side comparison across HLS.js, Shaka, Video.js, native, iOS/tvOS, Android, and Roku. It is not a production streaming origin.
+
+**Start here:** [`docs/WHY.md`](docs/WHY.md) — why this exists, use cases, and how it compares to alternatives.
+
 ## AI No‑Code project
 
 This project is primarily an **AI No‑Code** build. The Go services and web dashboard were generated using Codex / OpenCode and Claude Sonnet 4.5, with human direction and iterative testing.
-
-InfiniteStream is a Docker‑based HLS/DASH media server for testing video players under deterministic live‑like conditions. It generates LL‑HLS and LL‑DASH streams alongside 2s/6s segment variants and includes a rich dashboard for playback comparison, diagnostics, and monitoring.
 
 ## TLS Certificates
 
@@ -387,22 +391,37 @@ See the README in each directory for platform-specific setup and usage instructi
 
 ## Documentation index
 
-- `PRD.md`
-- `TESTING_GUIDE.md`
-- `UPLOAD_BACKGROUND_IMPLEMENTATION.md`
-- `LOOP_TEST_PLAN.md`
-- `content/PLAYBACK-TEST-README.md`
-- `content/AUTOMATIC-DETECTIONS.md`
-- `go-live/IMPLEMENTATION_SUMMARY.md`
-- `go-live/PLAN.md`
-- `generate_abr/README.md`
-- `generate_abr/QUICKSTART.md`
-- `generate_abr/SEGMENTLIST_VS_TEMPLATE.md`
-- `generate_abr/ENCODER_BURNIN_LABELS.md`
-- `generate_abr/HARDWARE_ENCODING_QUICKREF.md`
-- `generate_abr/HARDWARE_ENCODER_VALIDATION.md`
-- `generate_abr/PACKAGER_COMPARISON.md`
-- `generate_abr/DASH_PACKAGING_COMPARISON.md`
+### Start here
+- [`docs/WHY.md`](docs/WHY.md) — positioning, use cases, and comparison to alternatives
+- [`PRD.md`](PRD.md) — product behavior source of truth
+- [`CONTRIBUTING.md`](CONTRIBUTING.md) — development workflow
+
+### Reference
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — services, routing, port map, request flow
+- [`docs/API.md`](docs/API.md) — HTTP endpoints across go-live, go-upload, go-proxy
+- [`docs/FAULT_INJECTION.md`](docs/FAULT_INJECTION.md) — full reference for HTTP, socket, corruption, transport faults, and rate shaping
+- [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md) — common issues and fixes
+
+### Encoding
+- [`generate_abr/README.md`](generate_abr/README.md) — pipeline overview
+- [`generate_abr/QUICKSTART.md`](generate_abr/QUICKSTART.md)
+- [`docs/CLOUD_ENCODING.md`](docs/CLOUD_ENCODING.md) — offload ABR encoding to AWS EC2 spot instances
+- [`generate_abr/SEGMENTLIST_VS_TEMPLATE.md`](generate_abr/SEGMENTLIST_VS_TEMPLATE.md)
+- [`generate_abr/ENCODER_BURNIN_LABELS.md`](generate_abr/ENCODER_BURNIN_LABELS.md)
+- [`generate_abr/HARDWARE_ENCODING_QUICKREF.md`](generate_abr/HARDWARE_ENCODING_QUICKREF.md)
+- [`generate_abr/HARDWARE_ENCODER_VALIDATION.md`](generate_abr/HARDWARE_ENCODER_VALIDATION.md)
+- [`generate_abr/PACKAGER_COMPARISON.md`](generate_abr/PACKAGER_COMPARISON.md)
+- [`generate_abr/DASH_PACKAGING_COMPARISON.md`](generate_abr/DASH_PACKAGING_COMPARISON.md)
+
+### Subsystem notes
+- [`go-live/IMPLEMENTATION_SUMMARY.md`](go-live/IMPLEMENTATION_SUMMARY.md) and [`go-live/PLAN.md`](go-live/PLAN.md)
+- [`content/PLAYBACK-TEST-README.md`](content/PLAYBACK-TEST-README.md)
+- [`tests/integration/README.md`](tests/integration/README.md), [`tests/integration/QUICKSTART.md`](tests/integration/QUICKSTART.md), [`tests/integration/PLAYER_CHARACTERIZATION_PYTEST.md`](tests/integration/PLAYER_CHARACTERIZATION_PYTEST.md)
+
+### Client apps
+- [`apple/InfiniteStreamPlayer/`](apple/InfiniteStreamPlayer/) — iOS/tvOS
+- [`android/InfiniteStreamPlayer/README.md`](android/InfiniteStreamPlayer/README.md)
+- [`roku/InfiniteStreamPlayer/README.md`](roku/InfiniteStreamPlayer/README.md)
 
 ## License
 
