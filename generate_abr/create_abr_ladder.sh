@@ -2604,8 +2604,13 @@ package_dash() {
         
         # Look for the largest packager temp file created after this encode started
         # (largest = most complete, as partial manifests are smaller)
-        local temp_manifest=$(find "${TEMP_BASE}/encoding" -name "packager-tempfile-*" -type f -newer "$output_dir" 2>/dev/null | xargs ls -S 2>/dev/null | head -1)
-        
+        local temp_matches
+        temp_matches=$(find "${TEMP_BASE}/encoding" -name "packager-tempfile-*" -type f -newer "$output_dir" 2>/dev/null)
+        local temp_manifest=""
+        if [[ -n "$temp_matches" ]]; then
+            temp_manifest=$(printf '%s\n' "$temp_matches" | xargs ls -S 2>/dev/null | head -1)
+        fi
+
         if [[ -n "$temp_manifest" ]] && [[ -f "$temp_manifest" ]]; then
             log "Found temp manifest: $temp_manifest"
             cp "$temp_manifest" "$output_dir/manifest.mpd"
