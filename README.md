@@ -302,6 +302,28 @@ Transport faults (per session port):
 - **Frequency (secs)**: cycle spacing (0 means one-shot/manual behavior based on consecutive).
 - **Counters**: UI shows current/last `Drop pkts` and `Reject pkts`.
 
+Bitrate chart (and buffer depth, FPS):
+
+Each session card has a collapsible **Bitrate Chart** that stacks up to three time-series charts sharing a 10-minute rolling window and unified zoom/pan. Legend entries toggle series, scroll zooms, drag pans, `⏸` pauses live updates.
+
+- **Bitrate chart** — up to ten series; server-measured and player-reported:
+  - **Server metrics**: `mbps_shaper_rate` (100 ms), `mbps_shaper_avg` (6 s rolling), `mbps_transfer_rate` (250 ms, byte-gated), `mbps_transfer_complete` (per segment). Definitions in the [Throughput metrics](#throughput-metrics) table below.
+  - **Player metrics**: `Player est.` — the player's own ABR bandwidth estimate; `Rendition` — measured bitrate of the currently-playing video variant.
+  - **Reference lines**: `Limit` — configured shaping ceiling (stepped when a pattern mode is active); `Server Rendition` — what the server thinks it delivered; one line per ladder `Variant` (hidden by default, toggle via the group legend entry).
+  - **Events**: `STALL` and `RESTART` markers annotate player stalls and session restarts.
+  - **Y-axis**: `Auto` (default) or fixed `5 / 10 / 20 / 30 / 40 / 50` Mbps via the radio selector — pin the scale when comparing two sessions side by side.
+
+- **Buffer depth chart** — plots the player's buffered duration (from the `buffered` TimeRanges API, exposed as `player_metrics_buffer_depth_s`) on a second-unit axis that auto-scales between 5 s and 60 s. One series, no toggles.
+
+- **FPS chart** — rendered and dropped frames per second, derived from `player_metrics_frames_displayed` and `player_metrics_dropped_frames` over a 2 s sliding window with exponential smoothing (α = 0.15). Series:
+  - `FPS (smoothed)` — the live trace.
+  - `Low FPS` — the same trace in red below the low threshold.
+  - `FPS Baseline` — 75th percentile of observed FPS in the window (what this session "should" be delivering).
+  - `Low Threshold` — `0.75 × baseline`; any dip below flags red on the `FPS (smoothed)` trace.
+  - `Dropped Frames/s` — on a right-hand Y-axis.
+
+The buffer and FPS charts render only when the session config has `showBufferDepthChart: true`. All three charts share the same timeline, so a dip in buffer depth or FPS lines up visually with the bandwidth moment that caused it.
+
 ## Encoding pipeline
 
 Encoding is driven by the bash pipeline:
