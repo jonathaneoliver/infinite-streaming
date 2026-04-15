@@ -6,7 +6,7 @@ InfiniteStream runs as a **single Docker container** with four cooperating proce
 
 | Process | Internal port | Responsibility |
 |---|---|---|
-| `go-live` | 8010 | Dynamic HLS/DASH manifest generation (LL + 2s + 6s variants) from looping VOD |
+| `go-live` | 8010 | Dynamic HLS/DASH manifest generation (LL + 2s + 6s segment variants) from looping VOD |
 | `go-upload` | 8003 | Upload API, encoding job orchestration, content discovery |
 | `go-proxy` | 30081 (base) + per-session ports | Failure-injection proxy and traffic shaping |
 | `nginx` | 30000 | Static dashboard + routing to the three Go services |
@@ -38,7 +38,7 @@ All four run in the same container — there's no external service dependency at
                  /media/dynamic_content/{content}/...   (host-mounted volume)
 ```
 
-When a player requests a manifest, nginx routes to `go-live`, which spawns a **per-content worker** on first request. The worker generates every manifest variant (LL, 2s, 6s for both HLS and DASH) from a shared clock, so cross-variant comparisons stay aligned. Workers shut down after an idle timeout.
+When a player requests a manifest, nginx routes to `go-live`, which spawns a **per-content worker** on first request. The worker generates every segment variant (LL, 2s, 6s for both HLS and DASH) from a shared clock, so cross-variant comparisons stay aligned. Workers shut down after an idle timeout.
 
 Segment files (`.m4s`, `.ts`, `.mp4`) are **served directly by nginx** from the host-mounted output directory — go-live never sees segment traffic. Only manifest generation is dynamic.
 

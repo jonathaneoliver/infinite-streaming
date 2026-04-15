@@ -1,6 +1,6 @@
 # Why InfiniteStream?
 
-InfiniteStream is a purpose-built test server for HLS and DASH video players. It exists so that player bugs that are hard to reproduce — stalls, ABR misbehavior, recovery failures, loop-boundary glitches — can be triggered on demand, from the same source, against any player engine, in a deterministic way.
+InfiniteStream is a purpose-built test server for HLS and DASH video players. It generates LL-HLS and LL-DASH plus 2s and 6s segment variants from looping VOD on a shared clock, so player bugs that are hard to reproduce — stalls, ABR misbehavior, recovery failures, loop-boundary glitches — can be triggered on demand, from the same source, against any player engine, in a deterministic way.
 
 ## Who this is for
 
@@ -25,7 +25,7 @@ Existing options each fall short:
 ## What makes InfiniteStream different
 
 - **Deterministic looping live.** The sliding window moves on a stable clock and wraps on loop boundaries. The same test run produces the same timing.
-- **All variants from one worker.** LL-HLS, LL-DASH, 2s, and 6s variants are generated from a single per-content worker on a shared clock, so cross-protocol comparisons are apples-to-apples.
+- **All variants from one worker.** LL-HLS, LL-DASH, 2s, and 6s segment variants are generated from a single per-content worker on a shared clock, so cross-protocol comparisons are apples-to-apples.
 - **Streaming-aware fault injection.** Inject HTTP errors, hangs, and payload corruption at the segment, playlist, or manifest layer — not just generic TCP faults.
 - **Transport faults too.** Port-level DROP/REJECT via nftables and rate shaping via `tc`, composable with HTTP-layer faults.
 - **Per-session isolation.** Each browser session binds to a dedicated proxy port via `player_id`, so concurrent testers don't collide and each session has its own fault schedule.
@@ -41,7 +41,7 @@ Existing options each fall short:
 - Validate loop-boundary and discontinuity handling.
 - Characterize a player's ABR algorithm under controlled bandwidth steps.
 - Smoke-test a new encoding ladder before promoting to staging.
-- Demonstrate what LL-HLS, 2s, and 6s segmentation actually look like to a player.
+- Demonstrate what LL-HLS and the 2s and 6s segment variants actually look like to a player.
 
 ## Comparison to alternatives
 

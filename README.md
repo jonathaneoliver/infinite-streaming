@@ -1,6 +1,6 @@
 # InfiniteStream
 
-InfiniteStream is a Docker-based HLS/DASH test server for video players. It generates LL-HLS and LL-DASH streams (plus 2s and 6s variants) from looping VOD on a shared clock, and lets you inject deterministic, streaming-aware failures — HTTP errors, hung responses, corrupted segments, transport drops, bandwidth limits — on a per-session basis so player bugs become reproducible.
+InfiniteStream is a Docker-based HLS/DASH test server for video players. It generates LL-HLS and LL-DASH streams (plus 2s and 6s segment variants) from looping VOD on a shared clock, and lets you inject deterministic, streaming-aware failures — HTTP errors, hung responses, corrupted segments, transport drops, bandwidth limits — on a per-session basis so player bugs become reproducible.
 
 It is built for player QA, SDK development, and side-by-side comparison across HLS.js, Shaka, Video.js, native, iOS/tvOS, Android, and Roku. It is not a production streaming origin.
 
@@ -141,7 +141,7 @@ To enable publishing in your fork:
 - **On‑demand**: the first request for a piece of content starts a per‑content worker.
 - **Single worker, shared clock**: each content worker generates all HLS + DASH manifests (LL + 2s + 6s) in sync.
 - **Low‑latency**: LL‑HLS and LL‑DASH update on partial boundaries (default 200ms).
-- **Segmented variants**: 2s and 6s variants update on their segment boundaries only.
+- **Segment variants**: 2s and 6s segment variants update on their segment boundaries only.
 - **Sliding window**: fixed window (e.g., 36s) that moves forward and wraps on loop boundaries.
 - **Auto shutdown**: workers stop after an idle timeout when no requests are active.
 
@@ -187,7 +187,7 @@ Directory layout inside `/media`:
 
 ## Services
 
-- **go-live** (port 8010): LL‑HLS + LL‑DASH generation, plus 2s/6s variants
+- **go-live** (port 8010): LL‑HLS + LL‑DASH generation, plus 2s/6s segment variants
 - **go-upload** (port 8003): upload API, job orchestration, content discovery
 - **nginx**: routing + static dashboard
   - **Host UI (Docker Compose)**: `http://localhost:30000/`
