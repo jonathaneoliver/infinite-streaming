@@ -235,6 +235,80 @@ The pattern is always: **change one variable per session, apply the same fault o
 
 ---
 
+## Third-party players
+
+The Testing Session flow isn't limited to the built-in browser players. Any HTTP client — a native iOS/tvOS/Android app, a Roku channel, a set-top-box player, a CI harness — can be the video engine inside a session, get the same faults and shaping applied to it, and optionally stream metrics back into the dashboard's charts.
+
+### The easy way: grab a session URL from Mosaic
+
+Inside the dashboard, right-click any tile in **Mosaic (Grid)** → **Open in Testing Window**. That builds the session URL:
+
+```
+http://<host>:30000/dashboard/testing-session.html?url=<stream-url>&player_id=<uuid>&nav=1
+```
+
+For 3rd-party integrations you want the `player_id` and `url` values — those are the only two pieces of state a session needs. Paste the stream URL into your player and use the `player_id` on everything described below.
+
+### Programmatic integration pattern
+
+A native app integrates in four steps, all plain HTTP:
+
+1. **List content.** `GET /api/content` returns the encoded library — content names, protocol flags (`has_hls` / `has_dash`), codec metadata. Stream URLs are **not** embedded in the response; you build them from the content name.
+
+2. **Generate a `player_id`.** Any stable string unique to your session — a UUID, `"roku_<timestamp>"`, `"android-rig-03"`. Reuse the same id across the session's lifetime.
+
+3. **Build the stream URL and play it.** Append `?player_id=<id>` to the manifest path:
+
+   ```
+   http://<host>:30081/go-live/<content>/master.m3u8?player_id=<id>       # HLS LL
+   http://<host>:30081/go-live/<content>/master_2s.m3u8?player_id=<id>    # HLS 2s
+   http://<host>:30081/go-live/<content>/master_6s.m3u8?player_id=<id>    # HLS 6s
+   http://<host>:30081/go-live/<content>/manifest.mpd?player_id=<id>      # LL-DASH
+   ```
+
+   The proxy allocates a dedicated session port on first request and responds with `302` to the allocated port (e.g. `30081` → `30281`). **Follow the redirect** — all subsequent segment and playlist requests must stay on that port so faults and shaping apply. Every HLS.js/Shaka/AVPlayer/ExoPlayer/Roku player handles 302 redirects natively; this is zero work for the client.
+
+4. **Optional: subscribe to session updates.** Open a Server-Sent Events stream at `GET /api/sessions/stream` to receive live updates when the dashboard operator changes faults, shaping, or group membership affecting your session. The iOS app uses this to mirror the operator's actions into its own testing UI.
+
+That's it. The app is now a first-class Testing Session — any operator who opens the dashboard sees the session appear in the session list and can inject faults / shape bandwidth / group it alongside other sessions.
+
+### Reporting metrics back (optional but recommended)
+
+To make your 3rd-party player show up on the **Bitrate / Buffer / FPS charts** alongside the built-in web players, `POST /api/session/{player_id}/metrics` periodically with a `set` payload:
+
+```json
+{
+  "set": {
+    "player_metrics_video_bitrate_mbps": 4.2,
+    "player_metrics_network_bitrate_mbps": 5.1,
+    "player_metrics_buffer_depth_s": 18.4,
+    "player_metrics_frames_displayed": 12345,
+    "player_metrics_dropped_frames": 7,
+    "player_metrics_last_event": "playing",
+    "player_metrics_loop_count_player": 2,
+    "player_metrics_profile_shift_count": 4
+  }
+}
+```
+
+Post cadence: 1–2 Hz is fine. The endpoint doesn't bump the session's control revision (it's observational data), so you won't fight with the operator's configuration changes. Report what your platform can measure — any subset is fine.
+
+The full field catalogue and payload reference is in [`docs/API.md`](docs/API.md#go-proxy-sessions--faults).
+
+### What the bundled clients do
+
+The iOS, Android, and Roku apps in this repo are reference implementations of the pattern above:
+
+| App | Content list | URL build | Session redirect | SSE | Metrics |
+|---|:---:|:---:|:---:|:---:|:---:|
+| [`apple/InfiniteStreamPlayer/`](apple/InfiniteStreamPlayer/) | yes (`/api/content`) | `?player_id=UUID` | auto-follow | yes | yes |
+| [`android/InfiniteStreamPlayer/`](android/InfiniteStreamPlayer/) | yes (`/api/content`) | `?player_id=UUID` | auto-follow (ExoPlayer) | — | — |
+| [`roku/InfiniteStreamPlayer/`](roku/InfiniteStreamPlayer/) | yes (`/api/content`) | `?player_id=roku_<ts>` | auto-follow | — | — |
+
+Point at any of them as a starting template for a new platform.
+
+---
+
 ## How it works
 
 ### Services (all run inside one Docker container)
