@@ -434,11 +434,16 @@ export CONTENT_DIR=/path/to/your/media
 
 docker run -d --name infinite-streaming \
   --cap-add NET_ADMIN --privileged \
-  -p 30000:30000 -p 30081:30081 \
+  -p 30000:30000 \
+  -p 30081:30081 \
+  -p 30181:30181 -p 30281:30281 -p 30381:30381 -p 30481:30481 \
+  -p 30581:30581 -p 30681:30681 -p 30781:30781 -p 30881:30881 \
   -v $CONTENT_DIR:/media \
   ghcr.io/jonathaneoliver/infinite-streaming:latest \
   /sbin/launch.sh 1
 ```
+
+Ports 30181–30881 are the per-session proxy ports that testing sessions get redirected to. Without mapping them, `testing-session.html` works but segments never load because the allocated session port is unreachable from the host.
 
 ### Pre-built images from GHCR (no source checkout)
 
