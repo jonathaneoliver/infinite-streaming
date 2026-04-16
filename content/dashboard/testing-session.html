@@ -186,11 +186,11 @@
         }
 
         .session-panel {
-            margin-top: 12px;
+            margin-top: 8px;
             background: var(--bg-primary);
-            border-radius: 12px;
+            border-radius: 10px;
             box-shadow: var(--shadow-md);
-            padding: 12px;
+            padding: 8px;
         }
 
         .session-panel h3 {
@@ -202,8 +202,8 @@
 
         .session-card {
             background: var(--bg-secondary);
-            border-radius: 10px;
-            padding: 10px;
+            border-radius: 8px;
+            padding: 6px;
             border: 1px solid var(--border-color);
         }
 
@@ -322,6 +322,18 @@
             font-size: 11px;
             padding: 4px 8px;
             min-height: 28px;
+        }
+
+        .chart-hint {
+            font-size: 10px;
+            color: var(--text-secondary, #888);
+            font-style: italic;
+            margin-left: auto;
+            align-self: center;
+            opacity: 0.7;
+        }
+        .chart-hint:hover {
+            opacity: 1;
         }
 
         .shape-pattern-block {
@@ -456,6 +468,7 @@
             margin-bottom: 8px;
         }
 
+
         .chart-axis-row {
             display: flex;
             align-items: center;
@@ -557,6 +570,15 @@
             width: 100%;
             height: 170px;
             display: block;
+        }
+
+        .events-chart {
+            width: 100%;
+            height: 120px;
+            display: block;
+        }
+        .events-chart-wrap {
+            margin-bottom: 0 !important;
         }
 
         .abrchar-panel {
@@ -758,17 +780,8 @@
         .abrchar-error { color: #b91c1c; }
         .abrchar-success { color: #166534; }
 
-        /* ── Picture-in-Picture support ─────────────────────────────── */
-        #videoPipBtn {
-            font-size: 12px;
-            padding: 4px 10px;
-        }
-        #videoPipBtn.active {
-            background: #0f766e;
-            color: #fff;
-            border-color: #0f766e;
-        }
-        /* When video is in PiP mode, collapse the frame to a thin strip so
+        /* ── Picture-in-Picture ─────────────────────────────────────
+           When video is in PiP mode, collapse the frame to a thin strip so
            the main page reclaims space for shaping controls and chart. */
         .player-frame.pip-active {
             display: flex;
@@ -800,7 +813,6 @@
                 <div class="page-subtitle" id="playerUrl">Loading…</div>
             </div>
             <div class="panel-badges" id="playerBadges"></div>
-            <button class="btn btn-secondary" id="videoPipBtn" title="Pop video into a floating window (Picture-in-Picture)" style="margin-left: 12px;">📺 PiP</button>
         </div>
 
         <div class="player-card">
@@ -825,6 +837,10 @@
                 <label>
                     <input id="autoRecoveryToggle" type="checkbox">
                     Auto-Recovery
+                </label>
+                <label title="Pop video into a floating Picture-in-Picture window">
+                    <input id="videoPipToggle" type="checkbox">
+                    PiP
                 </label>
             </div>
             <div class="player-frame">
@@ -918,6 +934,7 @@
         const bandwidthCharts = new Map();
         const bufferDepthCharts = new Map();
         const videoFpsCharts = new Map();
+        const eventsCharts = new Map();
         const chartViewportBySession = new Map();
         const chartPausedBySession = new Map();
         const bandwidthVisibility = new Map();
@@ -1512,7 +1529,7 @@
 
         function normalizeBitrateAxisMaxMode(value) {
             const normalized = String(value || 'auto').toLowerCase();
-            return ['auto', '5', '10', '20', '30', '40', '50'].includes(normalized) ? normalized : 'auto';
+            return ['auto', '5', '10', '20', '30', '40', '50', '100'].includes(normalized) ? normalized : 'auto';
         }
 
         function createTestingPlayerId() {
@@ -2488,6 +2505,7 @@
             return `
                 ${banner}
                 <div class="group-select-row">
+                    <button class="btn btn-danger" data-action="delete-session">Delete Session</button>
                     <label>
                         ${selectLabel}
                         <select id="groupWithSelect" ${selectDisabled ? 'disabled' : ''}>
@@ -2585,6 +2603,16 @@
                 if (!button) return;
                 const session = lastServerSession;
                 if (!session || !session.session_id) return;
+                if (button.dataset.action === 'delete-session') {
+                    const sessionId = String(session.session_id);
+                    fetch(`/api/session/${sessionId}`, { method: 'DELETE' })
+                        .then(() => {
+                            const sc = document.getElementById('sessionControls');
+                            if (sc) sc.innerHTML = '<div class="status-message">Session deleted.</div>';
+                        })
+                        .catch(err => console.error('Error deleting session', err));
+                    return;
+                }
                 if (button.dataset.action === 'group-with') {
                     const select = container.querySelector('#groupWithSelect');
                     const targetId = select ? String(select.value || '') : '';
@@ -3531,7 +3559,26 @@
                         // In sliders mode, apply immediately as before
                         applyTemplatePattern(card, true, resetState);
                     } else {
-                        // In pattern mode, regenerate UI only — wait for Apply Pattern button
+                        // In pattern mode, any template change (mode/margin) reopens
+                        // the edit view and stops the currently-running pattern so
+                        // the user can review before applying the new settings.
+                        const group = card.querySelector('.shaping-pattern-group');
+                        const wasApplied = group && group.classList.contains('pattern-applied');
+                        if (group) group.classList.remove('pattern-applied');
+                        if (wasApplied) {
+                            const sessionId = card.dataset.sessionId;
+                            if (sessionId) {
+                                fetch(`/api/session/${sessionId}`, {
+                                    method: 'PATCH',
+                                    headers: { 'Content-Type': 'application/json' },
+                                    body: JSON.stringify({
+                                        set: { nftables_pattern_enabled: false },
+                                        fields: ['nftables_pattern_enabled']
+                                    })
+                                }).catch(err => console.warn('Failed to stop pattern on template change', err));
+                            }
+                        }
+                        // Regenerate UI for the new template — wait for Apply Pattern button
                         applyTemplatePattern(card, false, resetState);
                         shapingPatternDirty.set(card.dataset.sessionId, true);
                     }
@@ -3542,7 +3589,23 @@
                     if (templateMode === 'sliders') {
                         scheduleShapingApply(card);
                     } else {
-                        // In pattern mode, regenerate UI only — wait for Apply Pattern button
+                        // In pattern mode, reopen edit view and stop any running pattern
+                        const group = card.querySelector('.shaping-pattern-group');
+                        const wasApplied = group && group.classList.contains('pattern-applied');
+                        if (group) group.classList.remove('pattern-applied');
+                        if (wasApplied) {
+                            const sessionId = card.dataset.sessionId;
+                            if (sessionId) {
+                                fetch(`/api/session/${sessionId}`, {
+                                    method: 'PATCH',
+                                    headers: { 'Content-Type': 'application/json' },
+                                    body: JSON.stringify({
+                                        set: { nftables_pattern_enabled: false },
+                                        fields: ['nftables_pattern_enabled']
+                                    })
+                                }).catch(err => console.warn('Failed to stop pattern on step-seconds change', err));
+                            }
+                        }
                         applyTemplatePattern(card, false, false, false);
                         shapingPatternDirty.set(card.dataset.sessionId, true);
                     }
@@ -3648,6 +3711,13 @@
                 if (button.dataset.action === 'apply-pattern') {
                     shapingPatternDirty.delete(card.dataset.sessionId);
                     scheduleShapingApply(card);
+                    const group = card.querySelector('.shaping-pattern-group');
+                    if (group) group.classList.add('pattern-applied');
+                    return;
+                }
+                if (button.dataset.action === 'edit-pattern') {
+                    const group = card.querySelector('.shaping-pattern-group');
+                    if (group) group.classList.remove('pattern-applied');
                     return;
                 }
                 if (button.dataset.action === 'add-shaping-step') {
@@ -3687,17 +3757,6 @@
                     }
                     return;
                 }
-                if (button.dataset.action === 'save-session') {
-                    saveSession(card);
-                }
-                if (button.dataset.action === 'delete-session') {
-                    const sessionId = card.dataset.sessionId;
-                    fetch(`/api/session/${sessionId}`, { method: 'DELETE' })
-                        .then(() => {
-                            container.innerHTML = '<div class="status-message">Session deleted.</div>';
-                        })
-                        .catch(err => console.error('Error deleting session', err));
-                }
             });
             container.querySelectorAll('.shape-step-row').forEach((row) => {
                 const enabled = !!row.querySelector('input[data-field="shaping_step_enabled"]')?.checked;
@@ -3711,12 +3770,6 @@
                 updateAllStepRiskUi(card);
                 TestingSessionUI.updateTransportModeUi(card);
             });
-        }
-
-        function saveSession(card) {
-            const data = TestingSessionUI.readSessionSettings(card);
-            const fields = Object.keys(data || {}).filter(field => field !== 'session_id');
-            sendSessionPatch(card, fields);
         }
 
         function applyNetworkShaping(card) {
@@ -3945,24 +3998,20 @@
             setText('[data-field="session_loop_count_server"]', formatMetricNumber(session.loop_count_server ?? 0));
             setText('[data-field="session_loop_count_player"]', formatMetricNumber(session.player_metrics_loop_count_player ?? 0));
             setText('[data-field="session_measured_mbps"]', formatMetricNumber(session.measured_mbps, ' Mbps'));
+            setText('[data-field="session_mbps_shaper_rate"]', formatMetricNumber(session.mbps_shaper_rate, ' Mbps'));
+            setText('[data-field="session_mbps_shaper_avg"]', formatMetricNumber(session.mbps_shaper_avg, ' Mbps'));
+            setText('[data-field="session_mbps_transfer_rate"]', formatMetricNumber(session.mbps_transfer_rate, ' Mbps'));
+            setText('[data-field="session_mbps_transfer_complete"]', formatMetricNumber(session.mbps_transfer_complete, ' Mbps'));
             setText('[data-field="session_mbps_in"]', formatMetricNumber(session.mbps_in, ' Mbps'));
             setText('[data-field="session_mbps_out"]', formatMetricNumber(session.mbps_out, ' Mbps'));
             setText('[data-field="session_mbps_in_avg"]', formatMetricNumber(session.mbps_in_avg, ' Mbps'));
-            setText('[data-field="session_mbps_in_1s"]', formatMetricNumber(session.mbps_in_1s, ' Mbps'));
             setText('[data-field="session_mbps_in_active"]', formatMetricNumber(session.mbps_in_active, ' Mbps'));
-            setText('[data-field="session_mbps_estimate"]', formatMetricNumber(session.mbps_estimate, ' Mbps'));
-            setText('[data-field="session_mbps_estimate_1s"]', formatMetricNumber(session.mbps_estimate_1s, ' Mbps'));
-            setText('[data-field="session_mbps_estimate_10s"]', formatMetricNumber(session.mbps_estimate_10s, ' Mbps'));
-            setText('[data-field="session_mbps_estimate_p25"]', formatMetricNumber(session.mbps_estimate_p25, ' Mbps'));
             setText('[data-field="session_bytes_in_total"]', formatCounter(session.bytes_in_total));
             setText('[data-field="session_bytes_out_total"]', formatCounter(session.bytes_out_total));
             setText('[data-field="session_bytes_in_last"]', formatCounter(session.bytes_in_last));
             setText('[data-field="session_bytes_out_last"]', formatCounter(session.bytes_out_last));
-            setText('[data-field="session_mbps_estimate_completed_bytes"]', formatCounter(session.mbps_estimate_completed_bytes));
             setText('[data-field="session_measurement_window_io"]', formatMetricNumber(session.measurement_window_io, 's'));
-            setText('[data-field="session_measurement_window_io_1s"]', formatMetricNumber(session.measurement_window_io_1s, 's'));
             setText('[data-field="session_measurement_window_active"]', formatMetricNumber(session.measurement_window_active, 's'));
-            setText('[data-field="session_mbps_shaper_rate"]', formatMetricNumber(session.mbps_shaper_rate, ' Mbps'));
             const masterCount = session.master_manifest_requests_count || 0;
             const manifestCount = session.manifest_requests_count || 0;
             const segmentCount = session.segments_count || 0;
@@ -3990,7 +4039,6 @@
             setText('[data-field="player_metrics_video_quality_pct"]', formatMetricNumber(session.player_metrics_video_quality_pct, '%'));
             setText('[data-field="player_metrics_network_bitrate_mbps"]', formatMetricNumber(session.player_metrics_network_bitrate_mbps, ' Mbps'));
             setText('[data-field="player_metrics_loop_count"]', formatMetricNumber(session.player_metrics_loop_count_player ?? 0));
-            setText('[data-field="player_metrics_loop_count_increment"]', formatMetricNumber(session.player_metrics_loop_count_increment ?? 0));
             setText('[data-field="player_metrics_profile_shift_count"]', formatMetricNumber(session.player_metrics_profile_shift_count));
             setText('[data-field="player_metrics_frames_displayed"]', formatMetricNumber(session.player_metrics_frames_displayed));
             setText('[data-field="player_metrics_dropped_frames"]', formatMetricNumber(session.player_metrics_dropped_frames));
@@ -4065,6 +4113,40 @@
             const end = formatBitrateChartAbsoluteTick(windowStartMs, (Number(windowEndMs) - Number(windowStartMs)) / 1000);
             if (!start || !end) return 'Window: —';
             return `Window: ${start} → ${end}`;
+        }
+
+        // In live (not paused) mode, intercept Alt+wheel and apply a custom
+        // zoom anchored at the right edge (live point), ignoring mouse position.
+        // The default chartjs-plugin-zoom wheel is mouse-centered. We pre-empt
+        // it in capture phase so our anchored zoom wins in live mode; in paused
+        // mode we let the plugin do its normal mouse-centered zoom.
+        function installLiveWheelAnchor(sessionId, chartRef, canvas) {
+            if (!chartRef || !canvas) return;
+            canvas.addEventListener('wheel', (event) => {
+                if (!event.altKey) return; // plugin only zooms with Alt anyway
+                if (isChartPaused(String(sessionId))) return; // paused → let plugin handle (mouse-centered)
+                event.preventDefault();
+                event.stopPropagation();
+                const xScale = chartRef.scales && chartRef.scales.x;
+                if (!xScale) return;
+                const currentMin = Number(xScale.min);
+                const currentMax = Number(xScale.max);
+                if (!Number.isFinite(currentMin) || !Number.isFinite(currentMax)) return;
+                const span = currentMax - currentMin;
+                // Zoom factor — match plugin's default speed of ~0.1
+                const factor = event.deltaY < 0 ? 0.9 : 1 / 0.9;
+                let newSpan = Math.max(2, Math.min(600, span * factor));
+                const nextMax = 600;
+                const nextMin = Math.max(0, nextMax - newSpan);
+                if (typeof chartRef.zoomScale === 'function') {
+                    chartRef.zoomScale('x', { min: nextMin, max: nextMax }, 'none');
+                } else if (chartRef.options && chartRef.options.scales && chartRef.options.scales.x) {
+                    chartRef.options.scales.x.min = nextMin;
+                    chartRef.options.scales.x.max = nextMax;
+                    chartRef.update('none');
+                }
+                syncChartViewportAcrossSession(String(sessionId), chartRef);
+            }, { capture: true, passive: false });
         }
 
         function pinBitrateChartToLiveEdge(chartRef) {
@@ -4147,6 +4229,7 @@
         function getChartsForSession(sessionId) {
             const key = String(sessionId || '');
             return [
+                eventsCharts.get(key),
                 bandwidthCharts.get(key),
                 bufferDepthCharts.get(key),
                 videoFpsCharts.get(key)
@@ -4186,7 +4269,8 @@
                 },
                 zoom: {
                     wheel: {
-                        enabled: true
+                        enabled: true,
+                        modifierKey: 'alt'
                     },
                     drag: {
                         enabled: true,
@@ -4196,9 +4280,7 @@
                         backgroundColor: 'rgba(37, 99, 235, 0.12)'
                     },
                     mode: 'x',
-                    // Must be inside zoom{} in chartjs-plugin-zoom v2
                     onZoomComplete: ({ chart: chartRef }) => {
-                        pinBitrateChartToLiveEdge(chartRef);
                         syncChartViewportAcrossSession(key, chartRef);
                     }
                 }
@@ -4516,6 +4598,114 @@
             renderBandwidthChart(key);
         }
 
+        // Swim-lane events chart showing STALL / RESTART / LOOP_PLAYER / LOOP_SERVER
+        // Each event type has a fixed Y row; shares the same X-axis as the bitrate chart.
+        // Event lane colors are deliberately chosen to be visually distinct
+        // from the bitrate chart palette (which uses #ef4444/#f97316/#dc2626/
+        // #f59e0b/#6366f1/#115e59 etc.). Hot pink, deep purple, cyan, and lime
+        // don't collide with any of the throughput/rendition/limit colors.
+        const EVENT_LANES = {
+            'STALL':       { y: 4, color: '#000000', label: 'STALL' },
+            'RESTART':     { y: 3, color: '#a855f7', label: 'RESTART' },
+            'LOOP_PLAYER': { y: 2, color: '#06b6d4', label: 'LOOP PLAYER' },
+            'LOOP_SERVER': { y: 1, color: '#84cc16', label: 'LOOP SERVER' }
+        };
+        function renderEventsChart(sessionId, windowStart, eventSeries) {
+            const card = document.querySelector(`.session-card[data-session-id="${sessionId}"]`);
+            if (!card) return;
+            const canvas = card.querySelector('canvas.events-chart');
+            if (!canvas) return;
+            if (isChartPaused(sessionId)) return;
+
+            const chartEvents = (eventSeries || [])
+                .filter((e) => Number(e.ts) >= windowStart)
+                .map((e) => ({ x: (e.ts - windowStart) / 1000, type: e.type }))
+                .filter((e) => Number.isFinite(e.x) && e.x >= 0 && e.x <= 600);
+
+            const datasets = Object.entries(EVENT_LANES).map(([type, cfg]) => ({
+                label: cfg.label,
+                data: chartEvents.filter((e) => e.type === type).map((e) => ({ x: e.x, y: cfg.y })),
+                backgroundColor: cfg.color,
+                borderColor: cfg.color,
+                pointRadius: 5,
+                pointHoverRadius: 7,
+                showLine: false,
+            }));
+
+            let chart = eventsCharts.get(sessionId);
+            if (chart && chart.canvas !== canvas) {
+                chart.destroy();
+                chart = null;
+                eventsCharts.delete(sessionId);
+            }
+            if (!chart) {
+                chart = new Chart(canvas, {
+                    type: 'scatter',
+                    data: { datasets },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        animation: false,
+                        plugins: {
+                            legend: { display: true, position: 'bottom',
+                                labels: { color: '#6b7280', font: { family: 'Courier New, monospace', size: 10 }, boxWidth: 8, usePointStyle: true }
+                            },
+                            tooltip: {
+                                callbacks: {
+                                    label: (ctx) => ctx.dataset.label
+                                }
+                            },
+                            zoom: buildUnifiedChartZoomOptions(sessionId)
+                        },
+                        scales: {
+                            x: {
+                                type: 'linear', min: 0, max: 600,
+                                ticks: {
+                                    callback: (value) => {
+                                        const startMs = Number(chart && chart.$windowStartMs) || 0;
+                                        return formatBitrateChartAbsoluteTick(startMs, value);
+                                    },
+                                    font: { family: 'Courier New, monospace', size: 9 },
+                                    color: '#6b7280',
+                                    maxTicksLimit: 8
+                                },
+                                grid: { color: 'rgba(0,0,0,0.05)' }
+                            },
+                            y: {
+                                type: 'linear', min: 0.5, max: 4.5,
+                                title: {
+                                    display: true,
+                                    text: 'Events',
+                                    font: { family: 'Courier New, monospace', size: 11, weight: 'bold' },
+                                    color: '#4b5563'
+                                },
+                                ticks: {
+                                    stepSize: 1,
+                                    callback: (value) => {
+                                        const entry = Object.values(EVENT_LANES).find((l) => l.y === value);
+                                        return entry ? entry.label : '';
+                                    },
+                                    font: { family: 'Courier New, monospace', size: 9 },
+                                    color: '#6b7280'
+                                },
+                                grid: { color: 'rgba(0,0,0,0.05)' }
+                            }
+                        }
+                    }
+                });
+                chart.$windowStartMs = windowStart;
+                applyStoredChartViewport(sessionId, chart);
+                installRightMousePanHandlers(sessionId, chart);
+                installChartClickPauseHandler(sessionId, chart);
+                installLiveWheelAnchor(sessionId, chart, canvas);
+                eventsCharts.set(sessionId, chart);
+            } else {
+                chart.data.datasets = datasets;
+                chart.$windowStartMs = windowStart;
+                chart.update('none');
+            }
+        }
+
         function renderBandwidthChart(sessionId) {
             if (isChartPaused(sessionId)) return;
             const series = bandwidthHistory.get(sessionId) || [];
@@ -4558,6 +4748,8 @@
                     type: event.type
                 }))
                 .filter((event) => Number.isFinite(event.x) && event.x >= 0 && event.x <= 600);
+            // Render the separate events swim-lane chart with the same window
+            renderEventsChart(sessionId, windowStart, eventSeries);
             const wireActive6sData = points.map(point => ({ x: point.x, y: point.wireActive6s }));
             const wireActive1sData = points.map(point => ({ x: point.x, y: point.wireActive1s }));
             const segmentWireData = points.map(point => ({ x: point.x, y: point.segmentWire }));
@@ -4591,8 +4783,8 @@
                 'mbps_transfer_complete',
                 'Variants',
                 'Player est.',
-                'Rendition',
-                'Server Rendition',
+                'Player Variant',
+                'Server Variant',
                 'Limit',
                 'STALL',
                 'RESTART',
@@ -4622,32 +4814,20 @@
             );
             bitrateAxisMaxBySession.set(String(sessionId), axisMode);
             const maxFor = (hidden, data) => (hidden ? [0] : data.map(point => point.y || 0));
+            // Auto-size the Y-axis to observed data (throughput, bitrate, variants).
+            // Exclude the Limit — it can be set arbitrarily high (e.g. 10 Gbps when
+            // shaping is off) and would otherwise saturate auto-mode at the 100 cap.
             const maxYAutoRaw = Math.max(1,
                 ...maxFor(isSeriesHidden('mbps_shaper_rate'), wireActive6sData),
                 ...maxFor(isSeriesHidden('mbps_shaper_avg'), wireActive1sData),
                 ...maxFor(isSeriesHidden('mbps_transfer_rate'), segmentWireData),
                 ...maxFor(isSeriesHidden('mbps_transfer_complete'), segmentDrainData),
                 ...maxFor(isSeriesHidden('Player est.'), estimateData),
-                ...maxFor(isSeriesHidden('Rendition'), renditionData),
-                ...maxFor(isSeriesHidden('Server Rendition'), serverRenditionData),
-                ...maxFor(isSeriesHidden('Limit'), targetData)
+                ...maxFor(isSeriesHidden('Player Variant'), renditionData),
+                ...maxFor(isSeriesHidden('Server Variant'), serverRenditionData)
             );
             const maxYAuto = Math.min(100, Math.max(1, (Math.ceil((maxYAutoRaw * 1.05) * 10) / 10)));
             const maxY = axisMode === 'auto' ? maxYAuto : Number(axisMode);
-            const buildEventMarkerData = (type) => {
-                const markerData = [];
-                chartEvents.forEach((event) => {
-                    if (event.type !== type) return;
-                    markerData.push({ x: event.x, y: 0 });
-                    markerData.push({ x: event.x, y: maxY });
-                    markerData.push({ x: event.x, y: null });
-                });
-                return markerData;
-            };
-            const stallMarkerData = buildEventMarkerData('STALL');
-            const restartMarkerData = buildEventMarkerData('RESTART');
-            const loopPlayerMarkerData = buildEventMarkerData('LOOP_PLAYER');
-            const loopServerMarkerData = buildEventMarkerData('LOOP_SERVER');
             const variantsHidden = isSeriesHidden('Variants');
             const variantDatasets = variantLadder.map((variant, index) => {
                 return {
@@ -4720,7 +4900,7 @@
                     hidden: isSeriesHidden('Player est.')
                 },
                 {
-                    label: 'Rendition',
+                    label: 'Player Variant',
                     data: renditionData,
                     borderColor: '#ef4444',
                     backgroundColor: 'rgba(239,68,68,0.12)',
@@ -4728,10 +4908,10 @@
                     pointRadius: 0,
                     tension: 0.2,
                     borderDash: [3, 3],
-                    hidden: isSeriesHidden('Rendition')
+                    hidden: isSeriesHidden('Player Variant')
                 },
                 {
-                    label: 'Server Rendition',
+                    label: 'Server Variant',
                     data: serverRenditionData,
                     borderColor: '#b45309',
                     backgroundColor: 'rgba(180,83,9,0.12)',
@@ -4739,7 +4919,7 @@
                     pointRadius: 0,
                     tension: 0.2,
                     borderDash: [10, 4],
-                    hidden: isSeriesHidden('Server Rendition')
+                    hidden: isSeriesHidden('Server Variant')
                 },
                 ...variantDatasets,
                 {
@@ -4752,46 +4932,6 @@
                     stepped: true,
                     hidden: isSeriesHidden('Limit')
                 },
-                {
-                    label: 'STALL',
-                    data: stallMarkerData,
-                    borderColor: '#dc2626',
-                    backgroundColor: 'rgba(220,38,38,0.12)',
-                    borderWidth: 1.25,
-                    pointRadius: 0,
-                    tension: 0,
-                    hidden: isSeriesHidden('STALL')
-                },
-                {
-                    label: 'RESTART',
-                    data: restartMarkerData,
-                    borderColor: '#7c3aed',
-                    backgroundColor: 'rgba(124,58,237,0.12)',
-                    borderWidth: 1.25,
-                    pointRadius: 0,
-                    tension: 0,
-                    hidden: isSeriesHidden('RESTART')
-                },
-                {
-                    label: 'LOOP PLAYER',
-                    data: loopPlayerMarkerData,
-                    borderColor: '#16a34a',
-                    backgroundColor: 'rgba(22,163,74,0.12)',
-                    borderWidth: 1.25,
-                    pointRadius: 0,
-                    tension: 0,
-                    hidden: isSeriesHidden('LOOP PLAYER')
-                },
-                {
-                    label: 'LOOP SERVER',
-                    data: loopServerMarkerData,
-                    borderColor: '#0ea5e9',
-                    backgroundColor: 'rgba(14,165,233,0.12)',
-                    borderWidth: 1.25,
-                    pointRadius: 0,
-                    tension: 0,
-                    hidden: isSeriesHidden('LOOP SERVER')
-                }
             ];
             let chart = bandwidthCharts.get(sessionId);
             if (chart && chart.canvas !== canvas) {
@@ -4842,13 +4982,14 @@
                                     bandwidthVisibility.set(sessionId, state);
                                     // When paused, renderBandwidthChart is a no-op, so
                                     // recalculate Y-axis max directly from visible datasets.
+                                    // Exclude Limit (can be 10 Gbps when shaping is off).
                                     if (isChartPaused(sessionId)) {
                                         const currentAxisMode = normalizeBitrateAxisMaxMode(
                                             bitrateAxisMaxBySession.get(String(sessionId)) || 'auto'
                                         );
                                         if (currentAxisMode === 'auto') {
                                             const visibleMax = chartRef.data.datasets
-                                                .filter((_, i) => chartRef.isDatasetVisible(i))
+                                                .filter((ds, i) => chartRef.isDatasetVisible(i) && ds.label !== 'Limit')
                                                 .flatMap(ds => ds.data.map(pt => Number(pt.y) || 0))
                                                 .reduce((m, v) => Math.max(m, v), 1);
                                             chartRef.options.scales.y.max = Math.min(100, Math.max(1, Math.ceil(visibleMax * 1.05 * 10) / 10));
@@ -4879,15 +5020,10 @@
                                 ticks: {
                                     color: '#6b7280',
                                     font: { family: 'Courier New, monospace', size: 10 },
-                                    stepSize: 60,
-                                    autoSkip: true,
+                                    maxTicksLimit: 8,
                                     callback: (value) => {
-                                        const numeric = Number(value);
-                                        if (!Number.isFinite(numeric)) return '';
-                                        const rounded = Math.round(numeric);
-                                        if (rounded % 60 !== 0) return '';
                                         const startMs = Number(chart?.$windowStartMs || windowStart);
-                                        return formatBitrateChartAbsoluteTick(startMs, rounded);
+                                        return formatBitrateChartAbsoluteTick(startMs, Number(value));
                                     }
                                 }
                             },
@@ -4913,6 +5049,7 @@
                 const restoredBitrateViewport = applyStoredChartViewport(sessionId, chart);
                 installRightMousePanHandlers(sessionId, chart);
                 installChartClickPauseHandler(sessionId, chart);
+                installLiveWheelAnchor(sessionId, chart, canvas);
                 if (restoredBitrateViewport) {
                     chart.update('none');
                 }
@@ -4998,15 +5135,10 @@
                                 ticks: {
                                     color: '#6b7280',
                                     font: { family: 'Courier New, monospace', size: 10 },
-                                    stepSize: 60,
-                                    autoSkip: true,
+                                    maxTicksLimit: 8,
                                     callback: (value) => {
-                                        const numeric = Number(value);
-                                        if (!Number.isFinite(numeric)) return '';
-                                        const rounded = Math.round(numeric);
-                                        if (rounded % 60 !== 0) return '';
                                         const startMs = Number(bufferChart?.$windowStartMs || windowStart);
-                                        return formatBitrateChartAbsoluteTick(startMs, rounded);
+                                        return formatBitrateChartAbsoluteTick(startMs, Number(value));
                                     }
                                 }
                             },
@@ -5032,6 +5164,7 @@
                 const restoredBufferViewport = applyStoredChartViewport(sessionId, bufferChart);
                 installRightMousePanHandlers(sessionId, bufferChart);
                 installChartClickPauseHandler(sessionId, bufferChart);
+                installLiveWheelAnchor(sessionId, bufferChart, bufferCanvas);
                 if (restoredBufferViewport) {
                     bufferChart.update('none');
                 }
@@ -5247,15 +5380,10 @@
                                 ticks: {
                                     color: '#6b7280',
                                     font: { family: 'Courier New, monospace', size: 10 },
-                                    stepSize: 60,
-                                    autoSkip: true,
+                                    maxTicksLimit: 8,
                                     callback: (value) => {
-                                        const numeric = Number(value);
-                                        if (!Number.isFinite(numeric)) return '';
-                                        const rounded = Math.round(numeric);
-                                        if (rounded % 60 !== 0) return '';
                                         const startMs = Number(fpsChart?.$windowStartMs || windowStart);
-                                        return formatBitrateChartAbsoluteTick(startMs, rounded);
+                                        return formatBitrateChartAbsoluteTick(startMs, Number(value));
                                     }
                                 }
                             },
@@ -5297,6 +5425,7 @@
                 const restoredFpsViewport = applyStoredChartViewport(sessionId, fpsChart);
                 installRightMousePanHandlers(sessionId, fpsChart);
                 installChartClickPauseHandler(sessionId, fpsChart);
+                installLiveWheelAnchor(sessionId, fpsChart, fpsCanvas);
                 if (restoredFpsViewport) {
                     fpsChart.update('none');
                 }
@@ -5682,40 +5811,41 @@
         // The video element stays in the DOM, so all metrics collection
         // (buffered end, frames, stalls, etc.) keeps working unchanged.
         function initVideoPip() {
-            const btn = document.getElementById('videoPipBtn');
+            const toggle = document.getElementById('videoPipToggle');
             const video = document.getElementById('player');
             const frame = document.querySelector('.player-frame');
-            if (!btn || !video || !frame) return;
+            if (!toggle || !video || !frame) return;
 
             const pipSupported = 'pictureInPictureEnabled' in document && !video.disablePictureInPicture;
             if (!pipSupported) {
-                btn.disabled = true;
-                btn.title = 'Picture-in-Picture not supported in this browser';
-                btn.style.opacity = '0.5';
+                toggle.disabled = true;
+                toggle.parentElement.title = 'Picture-in-Picture not supported in this browser';
+                toggle.parentElement.style.opacity = '0.5';
                 return;
             }
 
-            btn.addEventListener('click', async () => {
+            toggle.addEventListener('change', async () => {
                 try {
-                    if (document.pictureInPictureElement === video) {
-                        await document.exitPictureInPicture();
-                    } else {
+                    if (toggle.checked) {
                         await video.requestPictureInPicture();
+                    } else if (document.pictureInPictureElement === video) {
+                        await document.exitPictureInPicture();
                     }
                 } catch (err) {
                     console.warn('PiP toggle failed:', err);
+                    // Revert checkbox state on failure
+                    toggle.checked = document.pictureInPictureElement === video;
                 }
             });
 
+            // Sync checkbox with actual PiP state (e.g. user clicks close in the floating window)
             video.addEventListener('enterpictureinpicture', () => {
                 frame.classList.add('pip-active');
-                btn.classList.add('active');
-                btn.textContent = '📺 Exit PiP';
+                toggle.checked = true;
             });
             video.addEventListener('leavepictureinpicture', () => {
                 frame.classList.remove('pip-active');
-                btn.classList.remove('active');
-                btn.textContent = '📺 PiP';
+                toggle.checked = false;
             });
         }
         document.addEventListener('DOMContentLoaded', initVideoPip);

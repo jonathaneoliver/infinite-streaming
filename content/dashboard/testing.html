@@ -653,6 +653,7 @@ maybe a histogram of b
         const bandwidthCharts = new Map();
         const bufferDepthCharts = new Map();
         const videoFpsCharts = new Map();
+        const eventsCharts = new Map();
         const chartViewportBySession = new Map();
         const chartPausedBySession = new Map();
         const bandwidthVisibility = new Map();
@@ -808,7 +809,7 @@ maybe a histogram of b
 
         function normalizeBitrateAxisMaxMode(value) {
             const normalized = String(value || 'auto').toLowerCase();
-            return ['auto', '5', '10', '20', '30', '40', '50'].includes(normalized) ? normalized : 'auto';
+            return ['auto', '5', '10', '20', '30', '40', '50', '100'].includes(normalized) ? normalized : 'auto';
         }
 
         function updateStepRiskUi(card, row) {
@@ -1762,6 +1763,37 @@ maybe a histogram of b
             return `Window: ${start} → ${end}`;
         }
 
+        // In live (not paused) mode, intercept Alt+wheel and apply a custom
+        // zoom anchored at the right edge (live point), ignoring mouse position.
+        // In paused mode we let the plugin do its normal mouse-centered zoom.
+        function installLiveWheelAnchor(sessionId, chartRef, canvas) {
+            if (!chartRef || !canvas) return;
+            canvas.addEventListener('wheel', (event) => {
+                if (!event.altKey) return;
+                if (isChartPaused(String(sessionId))) return;
+                event.preventDefault();
+                event.stopPropagation();
+                const xScale = chartRef.scales && chartRef.scales.x;
+                if (!xScale) return;
+                const currentMin = Number(xScale.min);
+                const currentMax = Number(xScale.max);
+                if (!Number.isFinite(currentMin) || !Number.isFinite(currentMax)) return;
+                const span = currentMax - currentMin;
+                const factor = event.deltaY < 0 ? 0.9 : 1 / 0.9;
+                let newSpan = Math.max(2, Math.min(600, span * factor));
+                const nextMax = 600;
+                const nextMin = Math.max(0, nextMax - newSpan);
+                if (typeof chartRef.zoomScale === 'function') {
+                    chartRef.zoomScale('x', { min: nextMin, max: nextMax }, 'none');
+                } else if (chartRef.options && chartRef.options.scales && chartRef.options.scales.x) {
+                    chartRef.options.scales.x.min = nextMin;
+                    chartRef.options.scales.x.max = nextMax;
+                    chartRef.update('none');
+                }
+                syncChartViewportAcrossSession(String(sessionId), chartRef);
+            }, { capture: true, passive: false });
+        }
+
         function pinBitrateChartToLiveEdge(chartRef) {
             const xScale = chartRef?.scales?.x;
             if (!xScale) return;
@@ -1825,6 +1857,7 @@ maybe a histogram of b
         function getChartsForSession(sessionId) {
             const key = String(sessionId || '');
             return [
+                eventsCharts.get(key),
                 bandwidthCharts.get(key),
                 bufferDepthCharts.get(key),
                 videoFpsCharts.get(key)
@@ -1860,7 +1893,7 @@ maybe a histogram of b
                     x: { min: 0, max: 600, minRange: 2 }
                 },
                 zoom: {
-                    wheel: { enabled: true },
+                    wheel: { enabled: true, modifierKey: 'alt' },
                     drag: {
                         enabled: true,
                         modifierKey: 'alt',
@@ -1870,7 +1903,6 @@ maybe a histogram of b
                     },
                     mode: 'x',
                     onZoomComplete: ({ chart: chartRef }) => {
-                        pinBitrateChartToLiveEdge(chartRef);
                         syncChartViewportAcrossSession(key, chartRef);
                     }
                 }
@@ -2049,6 +2081,95 @@ maybe a histogram of b
             renderBandwidthChart(key);
         }
 
+        // Swim-lane events chart (STALL / RESTART / LOOP_PLAYER / LOOP_SERVER).
+        // Shares x-axis with bitrate chart via syncChartViewportAcrossSession.
+        const EVENT_LANES = {
+            'STALL':       { y: 4, color: '#000000', label: 'STALL' },
+            'RESTART':     { y: 3, color: '#a855f7', label: 'RESTART' },
+            'LOOP_PLAYER': { y: 2, color: '#06b6d4', label: 'LOOP PLAYER' },
+            'LOOP_SERVER': { y: 1, color: '#84cc16', label: 'LOOP SERVER' }
+        };
+        function renderEventsChart(sessionId, windowStart, eventSeries) {
+            const card = document.querySelector(`.session-card[data-session-id="${sessionId}"]`);
+            if (!card) return;
+            const canvas = card.querySelector('canvas.events-chart');
+            if (!canvas) return;
+            if (isChartPaused(sessionId)) return;
+            const chartEvents = (eventSeries || [])
+                .filter((e) => Number(e.ts) >= windowStart)
+                .map((e) => ({ x: (e.ts - windowStart) / 1000, type: e.type }))
+                .filter((e) => Number.isFinite(e.x) && e.x >= 0 && e.x <= 600);
+            const datasets = Object.entries(EVENT_LANES).map(([type, cfg]) => ({
+                label: cfg.label,
+                data: chartEvents.filter((e) => e.type === type).map((e) => ({ x: e.x, y: cfg.y })),
+                backgroundColor: cfg.color,
+                borderColor: cfg.color,
+                pointRadius: 5,
+                pointHoverRadius: 7,
+                showLine: false,
+            }));
+            let chart = eventsCharts.get(sessionId);
+            if (chart && chart.canvas !== canvas) {
+                chart.destroy();
+                chart = null;
+                eventsCharts.delete(sessionId);
+            }
+            if (!chart) {
+                chart = new Chart(canvas, {
+                    type: 'scatter',
+                    data: { datasets },
+                    options: {
+                        responsive: true, maintainAspectRatio: false, animation: false,
+                        plugins: {
+                            legend: { display: true, position: 'bottom',
+                                labels: { color: '#6b7280', font: { family: 'Courier New, monospace', size: 10 }, boxWidth: 8, usePointStyle: true } },
+                            tooltip: { callbacks: { label: (ctx) => ctx.dataset.label } },
+                            zoom: buildUnifiedChartZoomOptions(sessionId)
+                        },
+                        scales: {
+                            x: {
+                                type: 'linear', min: 0, max: 600,
+                                ticks: {
+                                    maxTicksLimit: 8,
+                                    callback: (value) => {
+                                        const startMs = Number(chart && chart.$windowStartMs) || 0;
+                                        return formatBitrateChartAbsoluteTick(startMs, Number(value));
+                                    },
+                                    font: { family: 'Courier New, monospace', size: 9 },
+                                    color: '#6b7280'
+                                },
+                                grid: { color: 'rgba(0,0,0,0.05)' }
+                            },
+                            y: {
+                                type: 'linear', min: 0.5, max: 4.5,
+                                title: { display: true, text: 'Events', font: { family: 'Courier New, monospace', size: 11, weight: 'bold' }, color: '#4b5563' },
+                                ticks: {
+                                    stepSize: 1,
+                                    callback: (value) => {
+                                        const entry = Object.values(EVENT_LANES).find((l) => l.y === value);
+                                        return entry ? entry.label : '';
+                                    },
+                                    font: { family: 'Courier New, monospace', size: 9 },
+                                    color: '#6b7280'
+                                },
+                                grid: { color: 'rgba(0,0,0,0.05)' }
+                            }
+                        }
+                    }
+                });
+                chart.$windowStartMs = windowStart;
+                applyStoredChartViewport(sessionId, chart);
+                installRightMousePanHandlers(sessionId, chart);
+                installChartClickPauseHandler(sessionId, chart);
+                installLiveWheelAnchor(sessionId, chart, canvas);
+                eventsCharts.set(sessionId, chart);
+            } else {
+                chart.data.datasets = datasets;
+                chart.$windowStartMs = windowStart;
+                chart.update('none');
+            }
+        }
+
         function renderBandwidthChart(sessionId) {
             if (isChartPaused(sessionId)) return;
             const series = bandwidthHistory.get(sessionId) || [];
@@ -2089,6 +2210,7 @@ maybe a histogram of b
                     type: event.type
                 }))
                 .filter((event) => Number.isFinite(event.x) && event.x >= 0 && event.x <= 600);
+            renderEventsChart(sessionId, windowStart, eventSeries);
             const shaperRateData = points.map(point => ({ x: point.x, y: point.shaperRate }));
             const shaperAvgData = points.map(point => ({ x: point.x, y: point.shaperAvg }));
             const transferRateData = points.map(point => ({ x: point.x, y: point.transferRate }));
@@ -2116,8 +2238,8 @@ maybe a histogram of b
                 'mbps_transfer_rate',
                 'mbps_transfer_complete',
                 'Player est.',
-                'Rendition',
-                'Server Rendition',
+                'Player Variant',
+                'Server Variant',
                 'Variants',
                 'Limit',
                 'STALL',
@@ -2140,31 +2262,19 @@ maybe a histogram of b
             );
             bitrateAxisMaxBySession.set(String(sessionId), axisMode);
             const maxFor = (hidden, data) => (hidden ? [0] : data.map(point => point.y || 0));
+            // Exclude Limit — it can be set arbitrarily high (e.g. 10 Gbps when
+            // shaping is off) and would otherwise saturate auto-mode at the 100 cap.
             const maxYAutoRaw = Math.max(1,
                 ...maxFor(isSeriesHidden('mbps_shaper_rate'), shaperRateData),
                 ...maxFor(isSeriesHidden('mbps_shaper_avg'), shaperAvgData),
                 ...maxFor(isSeriesHidden('mbps_transfer_rate'), transferRateData),
                 ...maxFor(isSeriesHidden('mbps_transfer_complete'), transferCompleteData),
                 ...maxFor(isSeriesHidden('Player est.'), estimateData),
-                ...maxFor(isSeriesHidden('Rendition'), renditionData),
-                ...maxFor(isSeriesHidden('Server Rendition'), serverRenditionData),
-                ...maxFor(isSeriesHidden('Limit'), targetData)
+                ...maxFor(isSeriesHidden('Player Variant'), renditionData),
+                ...maxFor(isSeriesHidden('Server Variant'), serverRenditionData)
             );
             const maxYAuto = Math.min(100, Math.max(1, (Math.ceil((maxYAutoRaw * 1.05) * 10) / 10)));
             const maxY = axisMode === 'auto' ? maxYAuto : Number(axisMode);
-
-            const buildEventMarkerData = (type) => {
-                const markerData = [];
-                chartEvents.forEach((event) => {
-                    if (event.type !== type) return;
-                    markerData.push({ x: event.x, y: 0 });
-                    markerData.push({ x: event.x, y: maxY });
-                    markerData.push({ x: event.x, y: null });
-                });
-                return markerData;
-            };
-            const stallMarkerData = buildEventMarkerData('STALL');
-            const restartMarkerData = buildEventMarkerData('RESTART');
 
             const variantsHidden = isSeriesHidden('Variants');
             const variantDatasets = variantLadder.map((variant, index) => {
@@ -2239,7 +2349,7 @@ maybe a histogram of b
                     hidden: isSeriesHidden('Player est.')
                 },
                 {
-                    label: 'Rendition',
+                    label: 'Player Variant',
                     data: renditionData,
                     borderColor: '#ef4444',
                     backgroundColor: 'rgba(239,68,68,0.12)',
@@ -2247,10 +2357,10 @@ maybe a histogram of b
                     pointRadius: 0,
                     tension: 0.2,
                     borderDash: [3, 3],
-                    hidden: isSeriesHidden('Rendition')
+                    hidden: isSeriesHidden('Player Variant')
                 },
                 {
-                    label: 'Server Rendition',
+                    label: 'Server Variant',
                     data: serverRenditionData,
                     borderColor: '#b45309',
                     backgroundColor: 'rgba(180,83,9,0.12)',
@@ -2258,7 +2368,7 @@ maybe a histogram of b
                     pointRadius: 0,
                     tension: 0.2,
                     borderDash: [10, 4],
-                    hidden: isSeriesHidden('Server Rendition')
+                    hidden: isSeriesHidden('Server Variant')
                 },
                 ...variantDatasets,
                 {
@@ -2271,26 +2381,6 @@ maybe a histogram of b
                     stepped: true,
                     hidden: isSeriesHidden('Limit')
                 },
-                {
-                    label: 'STALL',
-                    data: stallMarkerData,
-                    borderColor: '#dc2626',
-                    backgroundColor: 'rgba(220,38,38,0.12)',
-                    borderWidth: 1.25,
-                    pointRadius: 0,
-                    tension: 0,
-                    hidden: isSeriesHidden('STALL')
-                },
-                {
-                    label: 'RESTART',
-                    data: restartMarkerData,
-                    borderColor: '#7c3aed',
-                    backgroundColor: 'rgba(124,58,237,0.12)',
-                    borderWidth: 1.25,
-                    pointRadius: 0,
-                    tension: 0,
-                    hidden: isSeriesHidden('RESTART')
-                }
             ];
 
             let chart = bandwidthCharts.get(sessionId);
@@ -2385,15 +2475,10 @@ maybe a histogram of b
                                 ticks: {
                                     color: '#6b7280',
                                     font: { family: 'Courier New, monospace', size: 10 },
-                                    stepSize: 60,
-                                    autoSkip: true,
+                                    maxTicksLimit: 8,
                                     callback: (value) => {
-                                        const numeric = Number(value);
-                                        if (!Number.isFinite(numeric)) return '';
-                                        const rounded = Math.round(numeric);
-                                        if (rounded % 60 !== 0) return '';
                                         const startMs = Number(chart?.$windowStartMs || windowStart);
-                                        return formatBitrateChartAbsoluteTick(startMs, rounded);
+                                        return formatBitrateChartAbsoluteTick(startMs, Number(value));
                                     }
                                 }
                             },
@@ -2419,6 +2504,7 @@ maybe a histogram of b
                 applyStoredChartViewport(sessionId, chart);
                 installRightMousePanHandlers(sessionId, chart);
                 installChartClickPauseHandler(sessionId, chart);
+                installLiveWheelAnchor(sessionId, chart, canvas);
                 bandwidthCharts.set(sessionId, chart);
             } else {
                 chart.data.datasets = datasets;
@@ -2502,15 +2588,10 @@ maybe a histogram of b
                                 ticks: {
                                     color: '#6b7280',
                                     font: { family: 'Courier New, monospace', size: 10 },
-                                    stepSize: 60,
-                                    autoSkip: true,
+                                    maxTicksLimit: 8,
                                     callback: (value) => {
-                                        const numeric = Number(value);
-                                        if (!Number.isFinite(numeric)) return '';
-                                        const rounded = Math.round(numeric);
-                                        if (rounded % 60 !== 0) return '';
                                         const startMs = Number(bufferChart?.$windowStartMs || windowStart);
-                                        return formatBitrateChartAbsoluteTick(startMs, rounded);
+                                        return formatBitrateChartAbsoluteTick(startMs, Number(value));
                                     }
                                 }
                             },
@@ -2536,6 +2617,7 @@ maybe a histogram of b
                 applyStoredChartViewport(sessionId, bufferChart);
                 installRightMousePanHandlers(sessionId, bufferChart);
                 installChartClickPauseHandler(sessionId, bufferChart);
+                installLiveWheelAnchor(sessionId, bufferChart, bufferCanvas);
                 bufferDepthCharts.set(sessionId, bufferChart);
             } else {
                 bufferChart.data.datasets[0].data = bufferDepthData;
@@ -2746,15 +2828,10 @@ maybe a histogram of b
                                 ticks: {
                                     color: '#6b7280',
                                     font: { family: 'Courier New, monospace', size: 10 },
-                                    stepSize: 60,
-                                    autoSkip: true,
+                                    maxTicksLimit: 8,
                                     callback: (value) => {
-                                        const numeric = Number(value);
-                                        if (!Number.isFinite(numeric)) return '';
-                                        const rounded = Math.round(numeric);
-                                        if (rounded % 60 !== 0) return '';
                                         const startMs = Number(fpsChart?.$windowStartMs || windowStart);
-                                        return formatBitrateChartAbsoluteTick(startMs, rounded);
+                                        return formatBitrateChartAbsoluteTick(startMs, Number(value));
                                     }
                                 }
                             },
@@ -2796,6 +2873,7 @@ maybe a histogram of b
                 applyStoredChartViewport(sessionId, fpsChart);
                 installRightMousePanHandlers(sessionId, fpsChart);
                 installChartClickPauseHandler(sessionId, fpsChart);
+                installLiveWheelAnchor(sessionId, fpsChart, fpsCanvas);
                 videoFpsCharts.set(sessionId, fpsChart);
             } else {
                 fpsChart.data.datasets[0].data = fpsSmoothedData;
@@ -3308,7 +3386,24 @@ maybe a histogram of b
                     // In sliders mode, apply immediately as before
                     applyTemplatePattern(card, true, resetState);
                 } else {
-                    // In pattern mode, regenerate UI only — wait for Apply Pattern button
+                    // In pattern mode, any template change (mode/margin) reopens
+                    // the edit view and stops the currently-running pattern.
+                    const group = card.querySelector('.shaping-pattern-group');
+                    const wasApplied = group && group.classList.contains('pattern-applied');
+                    if (group) group.classList.remove('pattern-applied');
+                    if (wasApplied) {
+                        const sessionId = card.dataset.sessionId;
+                        if (sessionId) {
+                            fetch(`/api/session/${sessionId}`, {
+                                method: 'PATCH',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({
+                                    set: { nftables_pattern_enabled: false },
+                                    fields: ['nftables_pattern_enabled']
+                                })
+                            }).catch(err => console.warn('Failed to stop pattern on template change', err));
+                        }
+                    }
                     applyTemplatePattern(card, false, resetState);
                 }
                 return;
@@ -3318,7 +3413,22 @@ maybe a histogram of b
                 if (templateMode === 'sliders') {
                     scheduleShapingApply(card);
                 } else {
-                    // In pattern mode, regenerate UI only — wait for Apply Pattern button
+                    const group = card.querySelector('.shaping-pattern-group');
+                    const wasApplied = group && group.classList.contains('pattern-applied');
+                    if (group) group.classList.remove('pattern-applied');
+                    if (wasApplied) {
+                        const sessionId = card.dataset.sessionId;
+                        if (sessionId) {
+                            fetch(`/api/session/${sessionId}`, {
+                                method: 'PATCH',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({
+                                    set: { nftables_pattern_enabled: false },
+                                    fields: ['nftables_pattern_enabled']
+                                })
+                            }).catch(err => console.warn('Failed to stop pattern on step-seconds change', err));
+                        }
+                    }
                     applyTemplatePattern(card, false, false, false);
                 }
                 return;
@@ -3423,6 +3533,13 @@ maybe a histogram of b
             const sessionId = card.dataset.sessionId;
             if (button.dataset.action === 'apply-pattern') {
                 scheduleShapingApply(card);
+                const group = card.querySelector('.shaping-pattern-group');
+                if (group) group.classList.add('pattern-applied');
+                return;
+            }
+            if (button.dataset.action === 'edit-pattern') {
+                const group = card.querySelector('.shaping-pattern-group');
+                if (group) group.classList.remove('pattern-applied');
                 return;
             }
             if (button.dataset.action === 'add-shaping-step') {

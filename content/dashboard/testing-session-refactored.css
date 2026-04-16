@@ -5,19 +5,20 @@
    ============================================================================ */
 
 .collapsible-section {
-    margin: 10px 0;
+    margin: 6px 0;
     border: 1px solid #e0e0e0;
-    border-radius: 6px;
+    border-radius: 5px;
     background: #fafafa;
 }
 
 .collapsible-header {
     display: flex;
     align-items: center;
-    padding: 8px 12px;
+    padding: 4px 10px;
     cursor: pointer;
     user-select: none;
     transition: background-color 0.2s;
+    min-height: 24px;
 }
 
 .collapsible-header:hover {
@@ -25,30 +26,30 @@
 }
 
 .collapsible-icon {
-    font-size: 12px;
-    margin-right: 8px;
+    font-size: 10px;
+    margin-right: 6px;
     transition: transform 0.2s;
     color: #666;
 }
 
 .collapsible-title {
     font-weight: 600;
-    font-size: 13px;
+    font-size: 12px;
     color: #333;
     flex: 1;
 }
 
 .collapsible-badge {
-    font-size: 11px;
+    font-size: 10px;
     color: #666;
     background: #e8e8e8;
-    padding: 4px 10px;
-    border-radius: 12px;
+    padding: 2px 8px;
+    border-radius: 10px;
     font-family: 'Monaco', 'Menlo', monospace;
 }
 
 .collapsible-content {
-    padding: 12px;
+    padding: 8px;
     border-top: 1px solid #e0e0e0;
 }
 
@@ -797,4 +798,15 @@
     font-size: 12px;
     color: #888;
     font-style: italic;
+}
+
+/* After Apply Pattern is clicked, collapse the step table + Add/Clear buttons
+   so the pattern area isn't taking up space. Edit Pattern button reopens it. */
+.shaping-pattern-group.pattern-applied .shape-step-list,
+.shaping-pattern-group.pattern-applied .shape-step-actions,
+.shaping-pattern-group.pattern-applied [data-action="apply-pattern"] {
+    display: none !important;
+}
+.shaping-pattern-group.pattern-applied [data-action="edit-pattern"] {
+    display: inline-block !important;
 }
