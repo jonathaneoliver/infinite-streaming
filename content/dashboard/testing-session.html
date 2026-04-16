@@ -758,17 +758,8 @@
         .abrchar-error { color: #b91c1c; }
         .abrchar-success { color: #166534; }
 
-        /* ── Picture-in-Picture support ─────────────────────────────── */
-        #videoPipBtn {
-            font-size: 12px;
-            padding: 4px 10px;
-        }
-        #videoPipBtn.active {
-            background: #0f766e;
-            color: #fff;
-            border-color: #0f766e;
-        }
-        /* When video is in PiP mode, collapse the frame to a thin strip so
+        /* ── Picture-in-Picture ─────────────────────────────────────
+           When video is in PiP mode, collapse the frame to a thin strip so
            the main page reclaims space for shaping controls and chart. */
         .player-frame.pip-active {
             display: flex;
@@ -800,7 +791,6 @@
                 <div class="page-subtitle" id="playerUrl">Loading…</div>
             </div>
             <div class="panel-badges" id="playerBadges"></div>
-            <button class="btn btn-secondary" id="videoPipBtn" title="Pop video into a floating window (Picture-in-Picture)" style="margin-left: 12px;">📺 PiP</button>
         </div>
 
         <div class="player-card">
@@ -825,6 +815,10 @@
                 <label>
                     <input id="autoRecoveryToggle" type="checkbox">
                     Auto-Recovery
+                </label>
+                <label title="Pop video into a floating Picture-in-Picture window">
+                    <input id="videoPipToggle" type="checkbox">
+                    PiP
                 </label>
             </div>
             <div class="player-frame">
@@ -5682,40 +5676,41 @@
         // The video element stays in the DOM, so all metrics collection
         // (buffered end, frames, stalls, etc.) keeps working unchanged.
         function initVideoPip() {
-            const btn = document.getElementById('videoPipBtn');
+            const toggle = document.getElementById('videoPipToggle');
             const video = document.getElementById('player');
             const frame = document.querySelector('.player-frame');
-            if (!btn || !video || !frame) return;
+            if (!toggle || !video || !frame) return;
 
             const pipSupported = 'pictureInPictureEnabled' in document && !video.disablePictureInPicture;
             if (!pipSupported) {
-                btn.disabled = true;
-                btn.title = 'Picture-in-Picture not supported in this browser';
-                btn.style.opacity = '0.5';
+                toggle.disabled = true;
+                toggle.parentElement.title = 'Picture-in-Picture not supported in this browser';
+                toggle.parentElement.style.opacity = '0.5';
                 return;
             }
 
-            btn.addEventListener('click', async () => {
+            toggle.addEventListener('change', async () => {
                 try {
-                    if (document.pictureInPictureElement === video) {
-                        await document.exitPictureInPicture();
-                    } else {
+                    if (toggle.checked) {
                         await video.requestPictureInPicture();
+                    } else if (document.pictureInPictureElement === video) {
+                        await document.exitPictureInPicture();
                     }
                 } catch (err) {
                     console.warn('PiP toggle failed:', err);
+                    // Revert checkbox state on failure
+                    toggle.checked = document.pictureInPictureElement === video;
                 }
             });
 
+            // Sync checkbox with actual PiP state (e.g. user clicks close in the floating window)
             video.addEventListener('enterpictureinpicture', () => {
                 frame.classList.add('pip-active');
-                btn.classList.add('active');
-                btn.textContent = '📺 Exit PiP';
+                toggle.checked = true;
             });
             video.addEventListener('leavepictureinpicture', () => {
                 frame.classList.remove('pip-active');
-                btn.classList.remove('active');
-                btn.textContent = '📺 PiP';
+                toggle.checked = false;
             });
         }
         document.addEventListener('DOMContentLoaded', initVideoPip);
