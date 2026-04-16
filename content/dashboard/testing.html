@@ -659,6 +659,33 @@ maybe a histogram of b
         const bitrateAxisMaxBySession = new Map();
         const lastRecordedPlayerEventBySession = new Map();
         const pendingShaping = new Map();
+
+        function shapingValuesMatch(serverSession, pendingValues) {
+            if (!serverSession || !pendingValues) return false;
+            const sameNumber = (a, b, tolerance = 0.001) => {
+                const left = Number(a);
+                const right = Number(b);
+                if (!Number.isFinite(left) || !Number.isFinite(right)) return false;
+                return Math.abs(left - right) <= tolerance;
+            };
+            const sameBool = (a, b) => {
+                const toBool = (value) => value === true || value === 1 || value === 'true';
+                return toBool(a) === toBool(b);
+            };
+            const sameJson = (a, b) => {
+                try {
+                    return JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
+                } catch {
+                    return false;
+                }
+            };
+            if (!sameNumber(serverSession.nftables_bandwidth_mbps, pendingValues.nftables_bandwidth_mbps, 0.01)) return false;
+            if (!sameNumber(serverSession.nftables_delay_ms, pendingValues.nftables_delay_ms, 0.1)) return false;
+            if (!sameNumber(serverSession.nftables_packet_loss, pendingValues.nftables_packet_loss, 0.01)) return false;
+            if (!sameBool(serverSession.nftables_pattern_enabled, pendingValues.nftables_pattern_enabled)) return false;
+            if (!sameJson(serverSession.nftables_pattern_steps, pendingValues.nftables_pattern_steps)) return false;
+            return true;
+        }
         const shapingTimers = new Map();
         const collapseState = new Map();
         const collapseDefaults = {
@@ -1591,11 +1618,15 @@ maybe a histogram of b
             const sessionKey = String(activeSession?.session_id || '');
             const existingCard = container.querySelector('.session-card');
             const pending = activeSession ? pendingShaping.get(String(activeSession.session_id)) : null;
-            if (activeSession && pending && Date.now() - pending.timestamp < 5000) {
-                activeSession = {
-                    ...activeSession,
-                    ...pending.values
-                };
+            if (activeSession && pending) {
+                if (shapingValuesMatch(activeSession, pending.values)) {
+                    pendingShaping.delete(String(activeSession.session_id));
+                } else {
+                    activeSession = {
+                        ...activeSession,
+                        ...pending.values
+                    };
+                }
             }
             const pendingFailure = activeSession ? pendingFailureEdits.get(String(activeSession.session_id)) : null;
             if (activeSession && pendingFailure && Date.now() - pendingFailure.timestamp < 5000) {
@@ -2821,12 +2852,15 @@ maybe a histogram of b
                     nftables_pattern_margin_pct: pattern.template_margin_pct
                 }
             });
+            // Belt-and-suspenders cleanup: if the SSE handler hasn't already
+            // cleared the pending state once values match, drop it after 60s
+            // so we don't hold stale overrides forever.
             setTimeout(() => {
                 const pending = pendingShaping.get(sessionId);
-                if (pending && Date.now() - pending.timestamp > 4500) {
+                if (pending && Date.now() - pending.timestamp > 55000) {
                     pendingShaping.delete(sessionId);
                 }
-            }, 5000);
+            }, 60000);
             const fields = [
                 'nftables_bandwidth_mbps',
                 'nftables_delay_ms',

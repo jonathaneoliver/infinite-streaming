@@ -197,8 +197,9 @@
         html += '<div class="ism-sidebar-header">';
         html += '<div class="ism-logo">';
         html += '<span class="ism-logo-icon">🎬</span>';
-        html += '<span>InfiniteStream</span>';
+        html += '<span class="ism-logo-text">InfiniteStream</span>';
         html += '</div>';
+        html += '<button class="ism-sidebar-collapse" id="sidebarCollapseBtn" title="Collapse sidebar" aria-label="Collapse sidebar">⇤</button>';
         html += '</div>';
         
         // Sidebar content
@@ -351,6 +352,7 @@
         // Setup mobile menu
         setupMobileMenu();
         attachExpertToggle();
+        setupSidebarCollapse();
 
         // Apply global selection state (codec/segment) across pages
         applyGlobalSelections();
@@ -420,6 +422,39 @@
                 }
             }
         });
+    }
+
+    function setupSidebarCollapse() {
+        const app = document.querySelector('.ism-app');
+        const btn = document.getElementById('sidebarCollapseBtn');
+        if (!app) return;
+        const collapsed = localStorage.getItem('ismSidebarCollapsed') === '1';
+        if (collapsed) app.classList.add('sidebar-collapsed');
+        if (!btn) return;
+        const updateBtn = () => {
+            const isCollapsed = app.classList.contains('sidebar-collapsed');
+            btn.textContent = isCollapsed ? '⇥' : '⇤';
+            btn.title = isCollapsed ? 'Expand sidebar' : 'Collapse sidebar';
+            btn.setAttribute('aria-label', btn.title);
+        };
+        updateBtn();
+        btn.addEventListener('click', () => {
+            const nowCollapsed = !app.classList.contains('sidebar-collapsed');
+            app.classList.toggle('sidebar-collapsed', nowCollapsed);
+            localStorage.setItem('ismSidebarCollapsed', nowCollapsed ? '1' : '0');
+            updateBtn();
+        });
+        // When collapsed, clicking anywhere on the sidebar peek expands it briefly
+        const sidebar = document.getElementById('sidebar');
+        if (sidebar) {
+            sidebar.addEventListener('click', (e) => {
+                if (!app.classList.contains('sidebar-collapsed')) return;
+                if (e.target.closest('#sidebarCollapseBtn')) return;
+                app.classList.remove('sidebar-collapsed');
+                localStorage.setItem('ismSidebarCollapsed', '0');
+                updateBtn();
+            });
+        }
     }
 
     function updateSelectedContentBadge() {

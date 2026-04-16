@@ -233,6 +233,46 @@ body {
 .ism-sidebar-header {
     padding: 20px 16px 16px;
     border-bottom: 1px solid var(--border-light);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+}
+
+.ism-sidebar-collapse {
+    background: transparent;
+    border: 1px solid transparent;
+    color: var(--text-secondary, #888);
+    font-size: 14px;
+    cursor: pointer;
+    padding: 4px 8px;
+    border-radius: 4px;
+    line-height: 1;
+}
+.ism-sidebar-collapse:hover {
+    background: var(--bg-hover, rgba(255,255,255,0.05));
+    border-color: var(--border-light);
+    color: var(--text-primary, #fff);
+}
+
+/* Collapsed sidebar — shrink to a thin rail */
+.ism-app.sidebar-collapsed .ism-sidebar {
+    width: 48px;
+}
+.ism-app.sidebar-collapsed .ism-sidebar-content,
+.ism-app.sidebar-collapsed .ism-sidebar-footer,
+.ism-app.sidebar-collapsed .ism-logo-text {
+    display: none;
+}
+.ism-app.sidebar-collapsed .ism-sidebar-header {
+    padding: 14px 8px;
+    justify-content: center;
+}
+.ism-app.sidebar-collapsed .ism-logo {
+    display: none;
+}
+.ism-app.sidebar-collapsed .ism-sidebar-collapse {
+    font-size: 16px;
 }
 
 .ism-sidebar-content {
