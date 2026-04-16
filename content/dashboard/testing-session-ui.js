@@ -569,34 +569,24 @@
                             <div class="session-item"><span class="label">Manifest URL</span><span class="value" data-field="session_manifest_url">${session.manifest_url || '—'}</span></div>
                             <div class="session-item"><span class="label">Master Manifest URL</span><span class="value" data-field="session_master_manifest_url">${session.master_manifest_url || '—'}</span></div>
                             <div class="session-item"><span class="label">Last Request URL</span><span class="value" data-field="session_last_request_url">${session.last_request_url || '—'}</span></div>
-                            <div class="session-item"><span class="label">Loop Count (Server)</span><span class="value" data-field="session_loop_count_server">${session.loop_count_server ?? '0'}</span></div>
-                            <div class="session-item"><span class="label">Loop Count (Player)</span><span class="value" data-field="session_loop_count_player">${session.player_metrics_loop_count_player ?? '0'}</span></div>
-                            <div class="session-item"><span class="label">Measured Mbps</span><span class="value" data-field="session_measured_mbps">${session.measured_mbps || '—'}</span></div>
+                            <div class="session-item"><span class="label">Loop Count</span><span class="value" data-field="session_loop_count_server">${session.loop_count_server ?? '0'}</span></div>
+                            <div class="session-item"><span class="label">Shaper Avg</span><span class="value" data-field="session_mbps_shaper_avg">${session.mbps_shaper_avg ?? '—'}</span></div>
+                            ${developerMode ? `
+                            <div class="session-item"><span class="label">mbps_shaper_rate</span><span class="value" data-field="session_mbps_shaper_rate">${session.mbps_shaper_rate ?? '—'}</span></div>
+                            <div class="session-item"><span class="label">mbps_transfer_rate</span><span class="value" data-field="session_mbps_transfer_rate">${session.mbps_transfer_rate ?? '—'}</span></div>
+                            <div class="session-item"><span class="label">mbps_transfer_complete</span><span class="value" data-field="session_mbps_transfer_complete">${session.mbps_transfer_complete ?? '—'}</span></div>
                             <div class="session-item"><span class="label">mbps_in</span><span class="value" data-field="session_mbps_in">${session.mbps_in ?? '—'}</span></div>
                             <div class="session-item"><span class="label">mbps_out</span><span class="value" data-field="session_mbps_out">${session.mbps_out ?? '—'}</span></div>
                             <div class="session-item"><span class="label">mbps_in_avg</span><span class="value" data-field="session_mbps_in_avg">${session.mbps_in_avg ?? '—'}</span></div>
-                            <div class="session-item"><span class="label">mbps_in_1s</span><span class="value" data-field="session_mbps_in_1s">${session.mbps_in_1s ?? '—'}</span></div>
                             <div class="session-item"><span class="label">mbps_in_active</span><span class="value" data-field="session_mbps_in_active">${session.mbps_in_active ?? '—'}</span></div>
-                            <div class="session-item"><span class="label">mbps_estimate</span><span class="value" data-field="session_mbps_estimate">${session.mbps_estimate ?? '—'}</span></div>
-                            <div class="session-item"><span class="label">mbps_estimate_1s</span><span class="value" data-field="session_mbps_estimate_1s">${session.mbps_estimate_1s ?? '—'}</span></div>
-                            <div class="session-item"><span class="label">mbps_estimate_10s</span><span class="value" data-field="session_mbps_estimate_10s">${session.mbps_estimate_10s ?? '—'}</span></div>
-                            <div class="session-item"><span class="label">mbps_estimate_p25</span><span class="value" data-field="session_mbps_estimate_p25">${session.mbps_estimate_p25 ?? '—'}</span></div>
-                            <div class="session-item"><span class="label">mbps_segment_active</span><span class="value" data-field="session_mbps_segment_active">${session.mbps_segment_active ?? '—'}</span></div>
                             <div class="session-item"><span class="label">bytes_in_total</span><span class="value" data-field="session_bytes_in_total">${session.bytes_in_total ?? '—'}</span></div>
                             <div class="session-item"><span class="label">bytes_out_total</span><span class="value" data-field="session_bytes_out_total">${session.bytes_out_total ?? '—'}</span></div>
                             <div class="session-item"><span class="label">bytes_in_last</span><span class="value" data-field="session_bytes_in_last">${session.bytes_in_last ?? '—'}</span></div>
                             <div class="session-item"><span class="label">bytes_out_last</span><span class="value" data-field="session_bytes_out_last">${session.bytes_out_last ?? '—'}</span></div>
-                            <div class="session-item"><span class="label">mbps_estimate_completed_bytes</span><span class="value" data-field="session_mbps_estimate_completed_bytes">${session.mbps_estimate_completed_bytes ?? '—'}</span></div>
+                            <div class="session-item"><span class="label">measured_mbps</span><span class="value" data-field="session_measured_mbps">${session.measured_mbps ?? '—'}</span></div>
                             <div class="session-item"><span class="label">measurement_window_io</span><span class="value" data-field="session_measurement_window_io">${session.measurement_window_io ?? '—'}</span></div>
-                            <div class="session-item"><span class="label">measurement_window_io_1s</span><span class="value" data-field="session_measurement_window_io_1s">${session.measurement_window_io_1s ?? '—'}</span></div>
                             <div class="session-item"><span class="label">measurement_window_active</span><span class="value" data-field="session_measurement_window_active">${session.measurement_window_active ?? '—'}</span></div>
-                            <div class="session-item"><span class="label">measurement_window_segment_active</span><span class="value" data-field="session_measurement_window_segment_active">${session.measurement_window_segment_active ?? '—'}</span></div>
-                            <div class="session-item"><span class="label">mbps_wire_sustained</span><span class="value" data-field="session_mbps_wire_sustained">${session.mbps_wire_sustained ?? '—'}</span></div>
-                            <div class="session-item"><span class="label">mbps_wire_active</span><span class="value" data-field="session_mbps_wire_active">${session.mbps_wire_active ?? '—'}</span></div>
-                            <div class="session-item"><span class="label">mbps_wire_sustained_6s</span><span class="value" data-field="session_mbps_wire_sustained_6s">${session.mbps_wire_sustained_6s ?? '—'}</span></div>
-                            <div class="session-item"><span class="label">mbps_wire_active_6s</span><span class="value" data-field="session_mbps_wire_active_6s">${session.mbps_wire_active_6s ?? '—'}</span></div>
-                            <div class="session-item"><span class="label">mbps_wire_sustained_1s</span><span class="value" data-field="session_mbps_wire_sustained_1s">${session.mbps_wire_sustained_1s ?? '—'}</span></div>
-                            <div class="session-item"><span class="label">wire_throughput</span><span class="value" data-field="session_mbps_wire_throughput">${session.mbps_wire_throughput ?? '—'}</span></div>
+                            ` : ''}
                         </div>
                     </div>
                 </div>
@@ -631,7 +621,6 @@
                             <div class="session-item"><span class="label">Video Quality</span><span class="value" data-field="player_metrics_video_quality_pct">${formatPercent(session.player_metrics_video_quality_pct)}</span></div>
                             <div class="session-item"><span class="label">Network Bitrate Mbps</span><span class="value" data-field="player_metrics_network_bitrate_mbps">${session.player_metrics_network_bitrate_mbps ?? '—'}</span></div>
                             <div class="session-item"><span class="label">Loop Count</span><span class="value" data-field="player_metrics_loop_count">${session.player_metrics_loop_count_player ?? '0'}</span></div>
-                            <div class="session-item"><span class="label">Loop Count Increment</span><span class="value" data-field="player_metrics_loop_count_increment">${session.player_metrics_loop_count_increment ?? '0'}</span></div>
                             <div class="session-item"><span class="label">Profile Shifts</span><span class="value" data-field="player_metrics_profile_shift_count">${session.player_metrics_profile_shift_count ?? '0'}</span></div>
                             <div class="session-item"><span class="label">Frames Displayed</span><span class="value" data-field="player_metrics_frames_displayed">${session.player_metrics_frames_displayed ?? '—'}</span></div>
                             <div class="session-item"><span class="label">Dropped Frames</span><span class="value" data-field="player_metrics_dropped_frames">${session.player_metrics_dropped_frames ?? '—'}</span></div>
@@ -945,6 +934,7 @@
                                 </div>
                                 <div class="shape-apply-pattern" data-field="shaping_apply_pattern_row" style="display:none;">
                                     <button type="button" class="btn btn-primary" data-action="apply-pattern">Apply Pattern</button>
+                                    <button type="button" class="btn btn-secondary btn-mini" data-action="edit-pattern" style="display:none;">Edit Pattern</button>
                                 </div>
 
                             </div>
@@ -990,20 +980,25 @@
                                     <input type="radio" name="bitrate_chart_max_mbps_${sessionId}" value="50" data-field="bitrate_chart_max_mbps" ${chartMaxMode === '50' ? 'checked' : ''}>
                                     <span>50 Mbps</span>
                                 </label>
+                                <label class="shape-pattern-mode">
+                                    <input type="radio" name="bitrate_chart_max_mbps_${sessionId}" value="100" data-field="bitrate_chart_max_mbps" ${chartMaxMode === '100' ? 'checked' : ''}>
+                                    <span>100 Mbps</span>
+                                </label>
                             </div>
                             <button type="button" class="btn btn-secondary btn-mini" data-action="reset-bitrate-zoom">Reset Zoom</button>
                             <button type="button" class="btn btn-secondary btn-mini" data-action="pause-bitrate-chart">⏸ Pause</button>
+                            <span class="chart-hint" title="Hold Alt (Option on Mac) while scrolling or dragging to zoom; right-click-drag to pan">Alt/⌥+scroll/drag to zoom · right-drag to pan</span>
                         </div>
-                        <div data-field="bandwidth_chart_range">Window: —</div>
+                        <div class="chart-wrap events-chart-wrap">
+                            <canvas class="events-chart" data-field="events_chart"></canvas>
+                        </div>
                         <div class="chart-wrap">
                             <canvas class="bandwidth-chart" data-field="bandwidth_chart"></canvas>
                         </div>
                         ${showBufferDepthChart ? `
-                        <div data-field="buffer_depth_chart_range">Window: —</div>
                         <div class="chart-wrap">
                             <canvas class="buffer-depth-chart" data-field="buffer_depth_chart"></canvas>
                         </div>
-                        <div data-field="video_fps_chart_range">Window: —</div>
                         <div class="chart-wrap">
                             <canvas class="video-fps-chart" data-field="video_fps_chart"></canvas>
                         </div>
@@ -1061,10 +1056,6 @@
                 </div>
                 ` : ''}
 
-                <div class="session-actions">
-                    <button class="btn btn-secondary" data-action="save-session">Save Settings</button>
-                    <button class="btn btn-danger" data-action="delete-session">Delete Session</button>
-                </div>
             </div>
         `;
     }

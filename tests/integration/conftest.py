@@ -40,7 +40,7 @@ def pytest_addoption(parser):
     parser.addoption("--api-base", help="Override API base URL")
     parser.addoption("--hls-base", help="Override HLS base URL")
     parser.addoption("--test-seconds", type=int, default=12, help="Per-test duration")
-    parser.addoption("--timeout", type=int, default=20, help="Request timeout seconds")
+    parser.addoption("--req-timeout", type=int, default=20, help="Request timeout seconds")
     parser.addoption("--restore-mbps", type=float, default=1000.0, help="Rate to restore after throttle")
     parser.addoption("--throttle-mbps", type=float, default=1.0, help="Mbps threshold for throttle test")
     parser.addoption("--expect-http", type=int, default=1, help="Min HTTP 4xx/5xx count")
@@ -206,7 +206,7 @@ def config(request):
         'api_base': request.config.getoption("--api-base"),
         'hls_base': request.config.getoption("--hls-base"),
         'test_seconds': request.config.getoption("--test-seconds"),
-        'timeout': request.config.getoption("--timeout"),
+        'timeout': request.config.getoption("--req-timeout"),
         'restore_mbps': request.config.getoption("--restore-mbps"),
         'throttle_mbps': request.config.getoption("--throttle-mbps"),
         'expect_http': request.config.getoption("--expect-http"),
