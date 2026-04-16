@@ -139,18 +139,16 @@ REPO_URL ?= https://github.com/jonathaneoliver/infinite-streaming.git
 test-deploy-all: test-deploy-compose test-deploy-run test-deploy-ghcr test-deploy-registry
 
 test-deploy-dev:
-	@echo "=== Dev: uncommitted changes (port 21000) ==="
-	ssh $(TEST_SSH) 'if [ -d ~/test-dev/.git ]; then cd ~/test-dev && git checkout -- . && git pull; else git clone $(REPO_URL) ~/test-dev; fi'
-	ssh $(TEST_SSH) 'echo "CONTENT_DIR=$(TEST_MEDIA_DIR)" > ~/test-dev/.env'
+	@echo "=== Dev: local working tree (port 21000) ==="
+	ssh -n $(TEST_SSH) 'mkdir -p ~/test-dev'
+	@echo "Syncing local working tree (excluding .git and .gitignore matches)..."
+	rsync -az --delete \
+		--filter=':- .gitignore' \
+		--exclude='.git/' \
+		--exclude='.env' \
+		./ $(TEST_SSH):~/test-dev/
+	ssh -n $(TEST_SSH) 'echo "CONTENT_DIR=$(TEST_MEDIA_DIR)" > ~/test-dev/.env'
 	scp tests/deploy/override-dev.yml $(TEST_SSH):~/test-dev/docker-compose.override.yml
-	@echo "Copying uncommitted changes..."
-	@git diff --name-only | while read f; do \
-		if [ -f "$$f" ]; then \
-			ssh $(TEST_SSH) "mkdir -p ~/test-dev/$$(dirname $$f)"; \
-			scp "$$f" "$(TEST_SSH):~/test-dev/$$f"; \
-			echo "  $$f"; \
-		fi; \
-	done
 	ssh $(TEST_SSH) 'cd ~/test-dev && docker compose build && docker compose up -d'
 
 test-clean-dev:
