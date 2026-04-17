@@ -53,10 +53,7 @@ services:
       - "30881:30881"
     networks:
       - app_network
-    depends_on:
-      - memcached
     environment:
-      - MEMCACHED_ADDR=memcached:11211
       - INFINITE_STREAM_UPSTREAM_HOST=go-server
       - INFINITE_STREAM_UPSTREAM_PORT=30000
       - INFINITE_STREAM_MAX_SESSIONS=8
@@ -64,13 +61,6 @@ services:
     cap_add:
       - NET_ADMIN
     privileged: true
-
-  memcached:
-    image: memcached:latest
-    ports:
-      - "11211:11211"
-    networks:
-      - app_network
 
 networks:
   app_network:
