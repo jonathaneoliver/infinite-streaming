@@ -102,7 +102,6 @@ deploy-k3s-local:
 	done; \
 	echo "Updating deployment images"; \
 	ssh $(K3S_SSH_HOST) "export KUBECONFIG=$(K3S_KUBECONFIG); kubectl set image deployment/$(K8S_DEPLOYMENT) go-server=$(K3S_SERVER_IMAGE)"; \
-	ssh $(K3S_SSH_HOST) "export KUBECONFIG=$(K3S_KUBECONFIG); kubectl set image deployment/$(K8S_DEPLOYMENT) go-proxy=$(K3S_PROXY_IMAGE)"; \
 	echo "Restarting deployments explicitly"; \
 	ssh $(K3S_SSH_HOST) "export KUBECONFIG=$(K3S_KUBECONFIG); kubectl rollout restart deployment/$(K8S_DEPLOYMENT)"; \
 	echo "Waiting for rollout"; \
@@ -116,17 +115,15 @@ status-k3s:
 	ssh $(K3S_SSH_HOST) "export KUBECONFIG=$(K3S_KUBECONFIG); kubectl get nodes; echo; kubectl get pods -A"
 
 deploy:
-	docker buildx build --platform linux/amd64 -t $(K3S_REGISTRY)/$(K3S_SERVER_REPO):dev --push .
-	docker buildx build --platform linux/amd64 --build-arg VERSION=$(shell cat VERSION) -t $(K3S_REGISTRY)/$(K3S_PROXY_REPO):dev --push ./go-proxy
-	$(MAKE) deploy-k3s K3S_KUBECONFIG=$(K3S_KUBECONFIG) K8S_MANIFESTS=k8s-infinite-streaming-dev.yaml K8S_DEPLOYMENT=infinite-streaming-dev K3S_SERVER_IMAGE=$(K3S_REGISTRY)/$(K3S_SERVER_REPO):dev K3S_PROXY_IMAGE=$(K3S_REGISTRY)/$(K3S_PROXY_REPO):dev
+	docker buildx build --platform linux/amd64 --build-arg VERSION=$(shell cat VERSION) -t $(K3S_REGISTRY)/$(K3S_SERVER_REPO):dev --push .
+	$(MAKE) deploy-k3s K3S_KUBECONFIG=$(K3S_KUBECONFIG) K8S_MANIFESTS=k8s-infinite-streaming-dev.yaml K8S_DEPLOYMENT=infinite-streaming-dev K3S_SERVER_IMAGE=$(K3S_REGISTRY)/$(K3S_SERVER_REPO):dev
 
 logs:
 	ssh $(K3S_SSH_HOST) "export KUBECONFIG=$(K3S_KUBECONFIG); kubectl logs deploy/infinite-streaming-dev --all-containers -f"
 
 deploy-release:
-	docker buildx build --platform linux/amd64 -t $(K3S_SERVER_IMAGE) --push .
-	docker buildx build --platform linux/amd64 --build-arg VERSION=$(shell cat VERSION) -t $(K3S_PROXY_IMAGE) --push ./go-proxy
-	$(MAKE) deploy-k3s K3S_KUBECONFIG=$(K3S_KUBECONFIG) K3S_SERVER_IMAGE=$(K3S_SERVER_IMAGE) K3S_PROXY_IMAGE=$(K3S_PROXY_IMAGE)
+	docker buildx build --platform linux/amd64 --build-arg VERSION=$(shell cat VERSION) -t $(K3S_SERVER_IMAGE) --push .
+	$(MAKE) deploy-k3s K3S_KUBECONFIG=$(K3S_KUBECONFIG) K3S_SERVER_IMAGE=$(K3S_SERVER_IMAGE)
 
 # ── Remote deployment testing ──────────────────────────────────────────
 # Deploy all 4 installation methods to a remote Docker host for parallel testing.
