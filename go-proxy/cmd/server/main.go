@@ -39,6 +39,14 @@ var indexHTML string
 
 var versionString = "unknown"
 var segmentSequenceDigitsRegex = regexp.MustCompile(`\d+`)
+var netemDelayRegex = regexp.MustCompile(`delay ([0-9.]+)ms`)
+var netemLossRegex = regexp.MustCompile(`loss ([0-9.]+)%`)
+var tcSentBytesRegex = regexp.MustCompile(`Sent (\d+) bytes`)
+var tcBacklogRegex = regexp.MustCompile(`backlog\s+(\d+)b`)
+var nftHandleRegex = regexp.MustCompile(`handle\s+([0-9]+)`)
+var nftCommentPortRegex = regexp.MustCompile(`comment\s+"go_proxy_transport_port_([0-9]+)"`)
+var nftCounterRegex = regexp.MustCompile(`counter packets ([0-9]+) bytes ([0-9]+)`)
+var segmentGroupRegex = regexp.MustCompile(`_G(\d+)$`)
 
 type SessionData map[string]interface{}
 
@@ -166,8 +174,8 @@ func (rb *NetworkLogRingBuffer) GetAll() []NetworkLogEntry {
 }
 
 type App struct {
-	sessionsMu               sync.RWMutex
-	sessionsData             []SessionData
+	sessionsMu               sync.Mutex
+	sessionsSnap             atomic.Pointer[[]SessionData]
 	throughputMu             sync.RWMutex
 	throughputData           map[int]map[string]interface{}
 	sessionEvents            *SessionEventStore
@@ -230,15 +238,24 @@ type SessionClient struct {
 }
 
 type SessionsEvent struct {
-	Sessions []SessionData
-	Revision uint64
-	Dropped  uint64
+	Sessions     []SessionData
+	Revision     uint64
+	Dropped      uint64
+	PreMarshaled string
 }
 
 type SessionsStreamPayload struct {
-	Revision uint64        `json:"revision"`
-	Dropped  uint64        `json:"dropped"`
-	Sessions []SessionData `json:"sessions"`
+	Revision       uint64              `json:"revision"`
+	Dropped        uint64              `json:"dropped"`
+	Sessions       []SessionData       `json:"sessions"`
+	ActiveSessions []ActiveSessionInfo `json:"active_sessions,omitempty"`
+}
+
+type ActiveSessionInfo struct {
+	SessionID string `json:"session_id"`
+	PlayerID  string `json:"player_id"`
+	GroupID   string `json:"group_id"`
+	Port      string `json:"port"`
 }
 
 type SessionEventStore struct {
@@ -283,7 +300,7 @@ func (h *SessionEventHub) RemoveClient(id int) {
 	}
 }
 
-func (h *SessionEventHub) Broadcast(sessions []SessionData, revision uint64) {
+func (h *SessionEventHub) Broadcast(sessions []SessionData, revision uint64, preMarshaled string) {
 	h.mu.Lock()
 	for id, client := range h.clients {
 		if len(client.ch) == cap(client.ch) {
@@ -295,7 +312,11 @@ func (h *SessionEventHub) Broadcast(sessions []SessionData, revision uint64) {
 			log.Printf("SSE drop client=%d dropped=%d", id, client.dropped)
 		}
 		dropped := client.dropped
-		event := SessionsEvent{Sessions: sessions, Revision: revision, Dropped: dropped}
+		pm := preMarshaled
+		if dropped > 0 || client.playerIDFilter != "" {
+			pm = ""
+		}
+		event := SessionsEvent{Sessions: sessions, Revision: revision, Dropped: dropped, PreMarshaled: pm}
 		select {
 		case client.ch <- event:
 			client.dropped = 0
@@ -963,8 +984,7 @@ func rateToMbps(rateStr string) interface{} {
 }
 
 func parseNetemDelay(line string) int {
-	re := regexp.MustCompile(`delay ([0-9.]+)ms`)
-	match := re.FindStringSubmatch(line)
+	match := netemDelayRegex.FindStringSubmatch(line)
 	if len(match) == 2 {
 		val, _ := strconv.ParseFloat(match[1], 64)
 		return int(math.Round(val))
@@ -973,8 +993,7 @@ func parseNetemDelay(line string) int {
 }
 
 func parseNetemLoss(line string) float64 {
-	re := regexp.MustCompile(`loss ([0-9.]+)%`)
-	match := re.FindStringSubmatch(line)
+	match := netemLossRegex.FindStringSubmatch(line)
 	if len(match) == 2 {
 		val, _ := strconv.ParseFloat(match[1], 64)
 		return val
@@ -983,8 +1002,7 @@ func parseNetemLoss(line string) float64 {
 }
 
 func parseTcBytes(line string) int64 {
-	re := regexp.MustCompile(`Sent (\d+) bytes`)
-	match := re.FindStringSubmatch(line)
+	match := tcSentBytesRegex.FindStringSubmatch(line)
 	if len(match) == 2 {
 		val, _ := strconv.ParseInt(match[1], 10, 64)
 		return val
@@ -998,8 +1016,7 @@ func parseTcBytes(line string) int64 {
 //
 // Returns -1 if the pattern is not found (so callers can distinguish zero-backlog from absent).
 func parseTcBacklog(line string) int64 {
-	re := regexp.MustCompile(`backlog\s+(\d+)b`)
-	match := re.FindStringSubmatch(line)
+	match := tcBacklogRegex.FindStringSubmatch(line)
 	if len(match) == 2 {
 		val, _ := strconv.ParseInt(match[1], 10, 64)
 		return val
@@ -1063,8 +1080,8 @@ func main() {
 		log.Printf("session event store disabled: %v", eventStoreErr)
 	}
 
+	emptySessions := []SessionData{}
 	app := &App{
-		sessionsData:   []SessionData{},
 		throughputData: map[int]map[string]interface{}{},
 		sessionEvents: eventStore,
 		traffic:       NewTcTrafficManager(interfaceName, tcDebug),
@@ -1094,6 +1111,8 @@ func main() {
 		transferCompleteMbps:    map[int]float64{},
 		transferCompleteAt:      map[int]time.Time{},
 	}
+
+	app.sessionsSnap.Store(&emptySessions)
 
 	go app.trackPortThroughput()
 	app.restoreTransportFaultSchedules()
@@ -1214,11 +1233,13 @@ func (a *App) handleSessionStream(w http.ResponseWriter, r *http.Request) {
 	a.removeInactiveSessions()
 	sessions := a.getSessionList()
 	normalized := a.normalizeSessionsForResponse(sessions)
+	var initActive []ActiveSessionInfo
 	if playerIDFilter != "" {
+		initActive = buildActiveSessionsSummary(normalized)
 		normalized = filterSessionsByPlayerID(normalized, playerIDFilter)
 	}
 	rev := atomic.AddUint64(&a.sessionsBroadcastSeq, 1)
-	payload := a.buildSessionsEvent(normalized, rev, 0)
+	payload := a.buildSessionsEvent(normalized, rev, 0, initActive)
 	if payload != "" {
 		_, _ = w.Write([]byte(payload))
 		flusher.Flush()
@@ -1235,14 +1256,21 @@ func (a *App) handleSessionStream(w http.ResponseWriter, r *http.Request) {
 			if !ok {
 				return
 			}
-			filtered := event.Sessions
-			if playerIDFilter != "" {
-				filtered = filterSessionsByPlayerID(filtered, playerIDFilter)
-				if len(filtered) == 0 {
-					continue
+			var payload string
+			if event.PreMarshaled != "" {
+				payload = event.PreMarshaled
+			} else {
+				filtered := event.Sessions
+				var active []ActiveSessionInfo
+				if playerIDFilter != "" {
+					active = buildActiveSessionsSummary(filtered)
+					filtered = filterSessionsByPlayerID(filtered, playerIDFilter)
+					if len(filtered) == 0 {
+						continue
+					}
 				}
+				payload = a.buildSessionsEvent(filtered, event.Revision, event.Dropped, active)
 			}
-			payload := a.buildSessionsEvent(filtered, event.Revision, event.Dropped)
 			if payload == "" {
 				continue
 			}
@@ -2461,12 +2489,11 @@ func clearTransportFaultRule(port int) error {
 		return fmt.Errorf("list transport fault chain failed: %s", strings.TrimSpace(string(out)))
 	}
 	comment := transportRuleComment(port)
-	handleRe := regexp.MustCompile(`handle\s+([0-9]+)`)
 	for _, line := range strings.Split(string(out), "\n") {
 		if !strings.Contains(line, comment) {
 			continue
 		}
-		match := handleRe.FindStringSubmatch(line)
+		match := nftHandleRegex.FindStringSubmatch(line)
 		if len(match) != 2 {
 			continue
 		}
@@ -2494,13 +2521,11 @@ func getTransportFaultRuleCounters() map[int]TransportFaultRuleCounters {
 		return countersByPort
 	}
 
-	commentRe := regexp.MustCompile(`comment\s+"go_proxy_transport_port_([0-9]+)"`)
-	counterRe := regexp.MustCompile(`counter packets ([0-9]+) bytes ([0-9]+)`)
 	for _, line := range strings.Split(string(out), "\n") {
 		if !strings.Contains(line, "go_proxy_transport_port_") {
 			continue
 		}
-		commentMatch := commentRe.FindStringSubmatch(line)
+		commentMatch := nftCommentPortRegex.FindStringSubmatch(line)
 		if len(commentMatch) != 2 {
 			continue
 		}
@@ -2508,7 +2533,7 @@ func getTransportFaultRuleCounters() map[int]TransportFaultRuleCounters {
 		if convErr != nil {
 			continue
 		}
-		counterMatch := counterRe.FindStringSubmatch(line)
+		counterMatch := nftCounterRegex.FindStringSubmatch(line)
 		if len(counterMatch) != 3 {
 			continue
 		}
@@ -2895,9 +2920,10 @@ func (a *App) handleNftPattern(w http.ResponseWriter, r *http.Request) {
 	}, "")
 
 	// Propagate to group members
-	groupID := a.getGroupIdByPort(port)
+	snap := a.getSessionList()
+	groupID := a.getGroupIdByPort(port, snap)
 	if groupID != "" {
-		groupPorts := a.getPortsForGroup(groupID)
+		groupPorts := a.getPortsForGroup(groupID, snap)
 		for _, groupPort := range groupPorts {
 			if groupPort == port {
 				continue // Skip the original port
@@ -3103,9 +3129,10 @@ func (a *App) handleNftShape(w http.ResponseWriter, r *http.Request) {
 	}, "")
 
 	// Propagate to group members
-	groupID := a.getGroupIdByPort(port)
+	snap2 := a.getSessionList()
+	groupID := a.getGroupIdByPort(port, snap2)
 	if groupID != "" {
-		groupPorts := a.getPortsForGroup(groupID)
+		groupPorts := a.getPortsForGroup(groupID, snap2)
 		for _, groupPort := range groupPorts {
 			if groupPort == port {
 				continue // Skip the original port
@@ -4631,8 +4658,7 @@ func (a *App) trackPortThroughput() {
 }
 
 func parseNftBytes(output string) int64 {
-	re := regexp.MustCompile(`counter packets (\d+) bytes (\d+)`)
-	match := re.FindStringSubmatch(output)
+	match := nftCounterRegex.FindStringSubmatch(output)
 	if len(match) == 3 {
 		val, _ := strconv.ParseInt(match[2], 10, 64)
 		return val
@@ -5033,42 +5059,47 @@ func (a *App) updateSessionsByPort(port int, updates map[string]interface{}) {
 }
 
 func (a *App) getSessionList() []SessionData {
-	a.sessionsMu.RLock()
-	defer a.sessionsMu.RUnlock()
-	return cloneSessionList(a.sessionsData)
+	snap := a.sessionsSnap.Load()
+	if snap == nil {
+		return []SessionData{}
+	}
+	return cloneSessionList(*snap)
 }
 
-func (a *App) stampAndBroadcast() {
+func (a *App) publishSnapshot(sessions []SessionData) {
 	uiVersion := atomic.AddUint64(&a.uiStateVersionSeq, 1)
 	uiRevision := newControlRevision()
-	for _, session := range a.sessionsData {
+	for _, session := range sessions {
 		session["ui_state_version"] = uiVersion
 		session["ui_state_revision"] = uiRevision
 	}
-	a.queueSessionsBroadcast(a.sessionsData)
+	a.sessionsSnap.Store(&sessions)
+	a.queueSessionsBroadcast(sessions)
 }
 
 func (a *App) saveSessionList(sessions []SessionData) {
 	a.sessionsMu.Lock()
-	a.sessionsData = cloneSessionList(sessions)
-	a.stampAndBroadcast()
+	a.publishSnapshot(cloneSessionList(sessions))
 	a.sessionsMu.Unlock()
 }
 
 func (a *App) saveSessionByID(sessionID string, session SessionData) {
 	a.sessionsMu.Lock()
-	for i, s := range a.sessionsData {
+	snap := a.getSessionList()
+	updated := make([]SessionData, len(snap))
+	copy(updated, snap)
+	for i, s := range updated {
 		if getString(s, "session_id") == sessionID {
 			existingRevision := getString(s, "control_revision")
 			incomingRevision := getString(session, "control_revision")
 			if isControlRevisionNewer(existingRevision, incomingRevision) {
 				copySessionControlState(session, s)
 			}
-			a.sessionsData[i] = cloneSession(session)
+			updated[i] = cloneSession(session)
 			break
 		}
 	}
-	a.stampAndBroadcast()
+	a.publishSnapshot(updated)
 	a.sessionsMu.Unlock()
 }
 
@@ -5653,11 +5684,12 @@ func (a *App) normalizeSessionPorts(session SessionData) {
 	}
 }
 
-func (a *App) buildSessionsEvent(normalized []SessionData, revision uint64, dropped uint64) string {
+func (a *App) buildSessionsEvent(normalized []SessionData, revision uint64, dropped uint64, activeSessions []ActiveSessionInfo) string {
 	payload := SessionsStreamPayload{
-		Revision: revision,
-		Dropped:  dropped,
-		Sessions: normalized,
+		Revision:       revision,
+		Dropped:        dropped,
+		Sessions:       normalized,
+		ActiveSessions: activeSessions,
 	}
 	data, err := json.Marshal(payload)
 	if err != nil {
@@ -5742,7 +5774,8 @@ func (a *App) flushSessionsBroadcast() {
 	}
 	normalized := a.normalizeSessionsForResponse(sessions)
 	rev := atomic.AddUint64(&a.sessionsBroadcastSeq, 1)
-	a.sessionsHub.Broadcast(normalized, rev)
+	preMarshaled := a.buildSessionsEvent(normalized, rev, 0, nil)
+	a.sessionsHub.Broadcast(normalized, rev, preMarshaled)
 }
 
 func (a *App) removeInactiveSessions() {
@@ -6200,6 +6233,19 @@ func filterSessionsByPlayerID(sessions []SessionData, playerID string) []Session
 	return filtered
 }
 
+func buildActiveSessionsSummary(sessions []SessionData) []ActiveSessionInfo {
+	out := make([]ActiveSessionInfo, 0, len(sessions))
+	for _, s := range sessions {
+		out = append(out, ActiveSessionInfo{
+			SessionID: getString(s, "session_id"),
+			PlayerID:  getString(s, "player_id"),
+			GroupID:   getString(s, "group_id"),
+			Port:      getString(s, "x_forwarded_port_external"),
+		})
+	}
+	return out
+}
+
 func filterSessionsByOriginationIP(sessions []SessionData, requesterIP string) []SessionData {
 	requesterIP = strings.TrimSpace(requesterIP)
 	if requesterIP == "" {
@@ -6598,8 +6644,7 @@ func extractGroupId(playerID string) string {
 		return ""
 	}
 	// Look for _G### pattern
-	re := regexp.MustCompile(`_G(\d+)$`)
-	matches := re.FindStringSubmatch(playerID)
+	matches := segmentGroupRegex.FindStringSubmatch(playerID)
 	if len(matches) > 1 {
 		return "G" + matches[1]
 	}
@@ -6622,10 +6667,11 @@ func (a *App) getSessionsByGroupId(groupID string) []SessionData {
 	return groupSessions
 }
 
-// getGroupIdByPort returns the group ID for sessions on the specified port
-func (a *App) getGroupIdByPort(port int) string {
-	sessions := a.getSessionList()
-	for _, session := range sessions {
+// getGroupIdByPort returns the group ID for sessions on the specified port.
+// If sessions is nil, fetches from the canonical list.
+func (a *App) getGroupIdByPort(port int, sessions ...[]SessionData) string {
+	list := a.resolveSessionList(sessions)
+	for _, session := range list {
 		if !a.sessionMatchesPort(session, port) {
 			continue
 		}
@@ -6637,14 +6683,15 @@ func (a *App) getGroupIdByPort(port int) string {
 	return ""
 }
 
-// getPortsForGroup returns all ports used by sessions in the specified group
-func (a *App) getPortsForGroup(groupID string) []int {
+// getPortsForGroup returns all ports used by sessions in the specified group.
+// If sessions is nil, fetches from the canonical list.
+func (a *App) getPortsForGroup(groupID string, sessions ...[]SessionData) []int {
 	if groupID == "" {
 		return []int{}
 	}
-	sessions := a.getSessionList()
+	list := a.resolveSessionList(sessions)
 	portMap := make(map[int]bool)
-	for _, session := range sessions {
+	for _, session := range list {
 		if getString(session, "group_id") == groupID {
 			if portStr := getString(session, "x_forwarded_port"); portStr != "" {
 				if port, ok := a.sessionPortToInternal(portStr); ok {
@@ -6663,6 +6710,13 @@ func (a *App) getPortsForGroup(groupID string) []int {
 		ports = append(ports, port)
 	}
 	return ports
+}
+
+func (a *App) resolveSessionList(sessions [][]SessionData) []SessionData {
+	if len(sessions) > 0 && sessions[0] != nil {
+		return sessions[0]
+	}
+	return a.getSessionList()
 }
 
 // updateSessionGroup updates all sessions in a group with the given updates
