@@ -224,8 +224,9 @@ type SessionEventHub struct {
 }
 
 type SessionClient struct {
-	ch      chan SessionsEvent
-	dropped uint64
+	ch             chan SessionsEvent
+	dropped        uint64
+	playerIDFilter string
 }
 
 type SessionsEvent struct {
@@ -260,12 +261,12 @@ func NewSessionEventHub() *SessionEventHub {
 	return &SessionEventHub{clients: map[int]*SessionClient{}}
 }
 
-func (h *SessionEventHub) AddClient() (int, <-chan SessionsEvent) {
+func (h *SessionEventHub) AddClient(playerIDFilter string) (int, <-chan SessionsEvent) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.nextID++
 	id := h.nextID
-	client := &SessionClient{ch: make(chan SessionsEvent, 1)}
+	client := &SessionClient{ch: make(chan SessionsEvent, 1), playerIDFilter: playerIDFilter}
 	h.clients[id] = client
 	return id, client.ch
 }
@@ -1208,9 +1209,14 @@ func (a *App) handleSessionStream(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("X-Accel-Buffering", "no")
 
+	playerIDFilter := r.URL.Query().Get("player_id")
+
 	a.removeInactiveSessions()
 	sessions := a.getSessionList()
 	normalized := a.normalizeSessionsForResponse(sessions)
+	if playerIDFilter != "" {
+		normalized = filterSessionsByPlayerID(normalized, playerIDFilter)
+	}
 	rev := atomic.AddUint64(&a.sessionsBroadcastSeq, 1)
 	payload := a.buildSessionsEvent(normalized, rev, 0)
 	if payload != "" {
@@ -1218,7 +1224,7 @@ func (a *App) handleSessionStream(w http.ResponseWriter, r *http.Request) {
 		flusher.Flush()
 	}
 
-	clientID, ch := a.sessionsHub.AddClient()
+	clientID, ch := a.sessionsHub.AddClient(playerIDFilter)
 	defer a.sessionsHub.RemoveClient(clientID)
 
 	for {
@@ -1229,7 +1235,14 @@ func (a *App) handleSessionStream(w http.ResponseWriter, r *http.Request) {
 			if !ok {
 				return
 			}
-			payload := a.buildSessionsEvent(event.Sessions, event.Revision, event.Dropped)
+			filtered := event.Sessions
+			if playerIDFilter != "" {
+				filtered = filterSessionsByPlayerID(filtered, playerIDFilter)
+				if len(filtered) == 0 {
+					continue
+				}
+			}
+			payload := a.buildSessionsEvent(filtered, event.Revision, event.Dropped)
 			if payload == "" {
 				continue
 			}
@@ -6172,6 +6185,19 @@ func hostPortOrDefault(hostport, fallback string) string {
 func shouldScopeSessionsByRequesterIP(r *http.Request) bool {
 	host := strings.ToLower(hostWithoutPort(r.Host))
 	return host == "infinitestreaming.jeoliver.com"
+}
+
+func filterSessionsByPlayerID(sessions []SessionData, playerID string) []SessionData {
+	if playerID == "" {
+		return sessions
+	}
+	filtered := make([]SessionData, 0, 1)
+	for _, session := range sessions {
+		if getString(session, "player_id") == playerID {
+			filtered = append(filtered, session)
+		}
+	}
+	return filtered
 }
 
 func filterSessionsByOriginationIP(sessions []SessionData, requesterIP string) []SessionData {

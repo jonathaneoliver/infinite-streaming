@@ -5631,7 +5631,7 @@
         function startSessionStream(playerId) {
             if (!window.EventSource) return false;
             if (!playerId) return false;
-            const source = new EventSource('/api/sessions/stream');
+            const source = new EventSource('/api/sessions/stream?player_id=' + encodeURIComponent(playerId));
             sessionsStream = source;
             source.addEventListener('sessions', (event) => {
                 try {
