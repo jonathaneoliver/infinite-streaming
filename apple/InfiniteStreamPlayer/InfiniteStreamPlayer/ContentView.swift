@@ -54,6 +54,7 @@ struct ContentView: View {
     @State private var segmentSelection: SegmentOption = .s6
     @State private var codecSelection: CodecOption = .h264
     @AppStorage("server_environment") private var serverEnvironmentRaw: String = ServerEnvironment.dev.rawValue
+    @State private var showContentPicker = false
 
     init() {
         let playback = PlaybackViewModel()
@@ -177,32 +178,14 @@ struct ContentView: View {
                                 Text(option.label).tag(option)
                             }
                         }
-                        let contentSelection = Binding<String>(
-                            get: {
-                                let current = viewModel.selectedContent
-                                if viewModel.availableContent.contains(where: { $0.name == current }) {
-                                    return current
-                                }
-                                return ""
-                            },
-                            set: { value in
-                                viewModel.selectedContent = value
-                            }
-                        )
-                        Picker("Content", selection: contentSelection) {
-                            if viewModel.availableContent.isEmpty {
-                                Text("No content found").tag("")
-                            } else {
-                                Text("Select content").tag("")
-                                ForEach(viewModel.availableContent) { item in
-                                    Text(item.name)
-                                        .tag(item.name)
-                                        .foregroundColor(isPlayable(item) ? .primary : .secondary)
-                                        .opacity(isPlayable(item) ? 1.0 : 0.4)
-                                        .disabled(!isPlayable(item))
-                                }
-                            }
+                        Button {
+                            showContentPicker = true
+                        } label: {
+                            let display = viewModel.selectedContent.isEmpty ? "Select content" : viewModel.selectedContent
+                            Text(display)
+                                .lineLimit(1)
                         }
+                        .buttonStyle(.bordered)
                     }
                     .controlSize(.small)
 
@@ -258,6 +241,32 @@ struct ContentView: View {
         }
         .onChange(of: codecSelection) { value in
             viewModel.codecOption = value
+        }
+        .sheet(isPresented: $showContentPicker) {
+            NavigationView {
+                List {
+                    ForEach(viewModel.availableContent) { item in
+                        Button {
+                            viewModel.selectedContent = item.name
+                            showContentPicker = false
+                        } label: {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(item.name)
+                                    .foregroundColor(isPlayable(item) ? .primary : .secondary)
+                                    .opacity(isPlayable(item) ? 1.0 : 0.5)
+                            }
+                        }
+                        .disabled(!isPlayable(item))
+                    }
+                }
+                .navigationTitle("Select Content (\(viewModel.availableContent.count))")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("Cancel") { showContentPicker = false }
+                    }
+                }
+            }
         }
     }
 
