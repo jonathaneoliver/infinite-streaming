@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<network-security-config>
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="true">100.111.190.54</domain>
+        <domain includeSubdomains="true">infinitestreaming.jeoliver.com</domain>
+        <domain includeSubdomains="true">jonathanoliver-ubuntu.local</domain>
+        <domain includeSubdomains="true">192.168.0.106</domain>
+        <domain includeSubdomains="true">10.0.2.2</domain>
+    </domain-config>
+</network-security-config>
