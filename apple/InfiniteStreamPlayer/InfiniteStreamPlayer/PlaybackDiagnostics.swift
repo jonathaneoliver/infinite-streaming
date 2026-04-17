@@ -473,6 +473,8 @@ final class PlaybackDiagnostics: ObservableObject {
             // Add human-readable interpretation of common error codes
             if ns.domain == AVFoundationErrorDomain {
                 parts.append("(\(interpretAVErrorCode(ns.code)))")
+            } else if ns.domain == "CoreMediaErrorDomain" {
+                parts.append("(\(interpretCoreMediaErrorCode(ns.code)))")
             }
         }
         if let reason = ns.userInfo[NSLocalizedFailureReasonErrorKey] as? String, !reason.isEmpty {
@@ -562,6 +564,41 @@ final class PlaybackDiagnostics: ObservableObject {
         case -12786: return "AVErrorSandboxExtensionDenied"
         case -12900: return "AVErrorUnknown/Generic"
         default: return "Unknown(\(code))"
+        }
+    }
+    
+    private func interpretCoreMediaErrorCode(_ code: Int) -> String {
+        switch code {
+        case -12640: return "kCMFormatDescriptionError_InvalidParameter"
+        case -12641: return "kCMFormatDescriptionError_AllocationFailed"
+        case -12642: return "kCMFormatDescriptionError_ValueNotAvailable"
+        case -12710: return "kCMSampleBufferError_AllocationFailed"
+        case -12711: return "kCMSampleBufferError_RequiredParameterMissing"
+        case -12712: return "kCMSampleBufferError_AlreadyHasDataBuffer"
+        case -12713: return "kCMSampleBufferError_BufferNotReady"
+        case -12714: return "kCMSampleBufferError_SampleIndexOutOfRange"
+        case -12715: return "kCMSampleBufferError_BufferHasNoSampleSizes"
+        case -12716: return "kCMSampleBufferError_BufferHasNoSampleTimingInfo"
+        case -12717: return "kCMSampleBufferError_ArrayTooSmall"
+        case -12718: return "kCMSampleBufferError_InvalidEntryCount"
+        case -12719: return "kCMSampleBufferError_CannotSubdivide"
+        case -12720: return "kCMSampleBufferError_SampleTimingInfoInvalid"
+        case -12721: return "kCMSampleBufferError_InvalidMediaTypeForOperation"
+        case -12722: return "kCMSampleBufferError_InvalidSampleData"
+        case -12723: return "kCMSampleBufferError_InvalidMediaFormat"
+        case -12724: return "kCMSampleBufferError_Invalidated"
+        case -12730: return "kCMSimpleQueueError_AllocationFailed"
+        case -12731: return "kCMSimpleQueueError_RequiredParameterMissing"
+        case -12732: return "kCMSimpleQueueError_ParameterOutOfRange"
+        case -12733: return "kCMSimpleQueueError_QueueIsFull"
+        case -12760: return "kCMMemoryPoolError_AllocationFailed"
+        case -12761: return "kCMMemoryPoolError_InvalidParameter"
+        case -12770: return "kCMTimeRangeError_InvalidParameter"
+        case -12780: return "kCMSyncError_MissingRequiredParameter"
+        case -12781: return "kCMSyncError_InvalidParameter"
+        case -12782: return "kCMSyncError_AllocationFailed"
+        case -12783: return "kCMSyncError_RateMismatch"
+        default: return "CoreMediaError(\(code))"
         }
     }
 }
