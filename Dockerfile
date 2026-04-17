@@ -23,7 +23,6 @@ COPY go-proxy /build/go-proxy
 RUN cd /build/go-proxy && \
     go mod init github.com/jonathaneoliver/infinite-streaming/go-proxy && \
     go get github.com/gorilla/mux && \
-    go get github.com/bradfitz/gomemcache/memcache && \
     go get github.com/grafov/m3u8 && \
     go get modernc.org/sqlite@v1.29.0 && \
     go get github.com/vishvananda/netlink@v1.3.0 && \
@@ -34,7 +33,7 @@ FROM alpine:3.19
 # Install dependencies first (expensive, rarely changes - gets cached)
 RUN \
   apk update && \
-  apk add iproute2 iperf nftables memcached openssl && \
+  apk add iproute2 iperf nftables openssl && \
   apk add nginx nginx-mod-http-vod nginx-mod-http-lua && \
   apk add ffmpeg && \
   apk add python3 py3-pip && \

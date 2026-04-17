@@ -32,7 +32,6 @@ envsubst '${INFINITE_STREAM_OUTPUT_DIR} ${INFINITE_STREAM_PROXY_HOST}' < /etc/ng
 # Start background processes and nginx
 # All processes now log to stdout/stderr for proper Docker log interleaving
 ( echo "Go mode." ) && \
-( /usr/bin/memcached -u nobody -l 127.0.0.1 -p 11211 & ) && \
 ( /usr/local/bin/go-upload & ) && \
 ( /usr/local/bin/go-live & ) && \
 ( /usr/local/bin/go-proxy & ) && \

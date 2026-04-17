@@ -35,7 +35,6 @@ services:
       - GO_LIVE_OUTPUT_DIR=/go-live
       - GO_UPLOAD_ADDR=:8003
       - INFINITE_STREAM_LISTEN_PORT=30000
-      - MEMCACHED_ADDR=memcached:11211
       - INFINITE_STREAM_UPSTREAM_HOST=127.0.0.1
       - INFINITE_STREAM_UPSTREAM_PORT=30000
       - INFINITE_STREAM_MAX_SESSIONS=8
@@ -45,17 +44,8 @@ services:
       - /go-live:size=4G,mode=755
     networks:
       - app_network
-    depends_on:
-      - memcached
     restart: unless-stopped
     stop_grace_period: 1s
-
-  memcached:
-    image: memcached:latest
-    ports:
-      - "11211:11211"
-    networks:
-      - app_network
 
 networks:
   app_network:

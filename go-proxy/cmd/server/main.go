@@ -27,7 +27,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/bradfitz/gomemcache/memcache"
 	"github.com/gorilla/mux"
 	"github.com/grafov/m3u8"
 	"github.com/vishvananda/netlink"
@@ -167,7 +166,10 @@ func (rb *NetworkLogRingBuffer) GetAll() []NetworkLogEntry {
 }
 
 type App struct {
-	memcache                 *memcache.Client
+	sessionsMu               sync.RWMutex
+	sessionsData             []SessionData
+	throughputMu             sync.RWMutex
+	throughputData           map[int]map[string]interface{}
 	sessionEvents            *SessionEventStore
 	traffic                  *TcTrafficManager
 	upstreamHost             string
@@ -222,8 +224,9 @@ type SessionEventHub struct {
 }
 
 type SessionClient struct {
-	ch      chan SessionsEvent
-	dropped uint64
+	ch             chan SessionsEvent
+	dropped        uint64
+	playerIDFilter string
 }
 
 type SessionsEvent struct {
@@ -258,12 +261,12 @@ func NewSessionEventHub() *SessionEventHub {
 	return &SessionEventHub{clients: map[int]*SessionClient{}}
 }
 
-func (h *SessionEventHub) AddClient() (int, <-chan SessionsEvent) {
+func (h *SessionEventHub) AddClient(playerIDFilter string) (int, <-chan SessionsEvent) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.nextID++
 	id := h.nextID
-	client := &SessionClient{ch: make(chan SessionsEvent, 1)}
+	client := &SessionClient{ch: make(chan SessionsEvent, 1), playerIDFilter: playerIDFilter}
 	h.clients[id] = client
 	return id, client.ch
 }
@@ -1050,20 +1053,19 @@ func (m PortMapping) MapExternalPort(port string) (string, bool) {
 
 func main() {
 	log.SetFlags(log.Ldate | log.Ltime | log.Lmicroseconds)
-	memcachedAddr := getenv("MEMCACHED_ADDR", "127.0.0.1:11211")
 	upstreamHost := getenvAny([]string{"INFINITE_STREAM_UPSTREAM_HOST", "INFINITE_UPSTREAM_HOST", "BOSS_UPSTREAM_HOST"}, "127.0.0.1")
 	upstreamPort := getenvAny([]string{"INFINITE_STREAM_UPSTREAM_PORT", "INFINITE_UPSTREAM_PORT", "BOSS_UPSTREAM_PORT"}, "30000")
 	maxSessions := getenvIntAny([]string{"INFINITE_STREAM_MAX_SESSIONS", "INFINITE_MAX_SESSIONS", "BOSS_MAX_SESSIONS"}, 8)
 	interfaceName := getenvAny([]string{"INFINITE_STREAM_TC_INTERFACE", "INFINITE_TC_INTERFACE", "TC_INTERFACE"}, "eth0")
 	tcDebug := getenvBoolAny([]string{"INFINITE_STREAM_TC_DEBUG", "INFINITE_TC_DEBUG", "TC_DEBUG"}, false)
-	mc := memcache.New(memcachedAddr)
 	eventStore, eventStoreErr := newSessionEventStore(getenv("GO_PROXY_SESSION_EVENTS_DB", defaultSessionEventsDB))
 	if eventStoreErr != nil {
 		log.Printf("session event store disabled: %v", eventStoreErr)
 	}
 
 	app := &App{
-		memcache:      mc,
+		sessionsData:   []SessionData{},
+		throughputData: map[int]map[string]interface{}{},
 		sessionEvents: eventStore,
 		traffic:       NewTcTrafficManager(interfaceName, tcDebug),
 		upstreamHost:  upstreamHost,
@@ -1207,9 +1209,14 @@ func (a *App) handleSessionStream(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("X-Accel-Buffering", "no")
 
+	playerIDFilter := r.URL.Query().Get("player_id")
+
 	a.removeInactiveSessions()
 	sessions := a.getSessionList()
 	normalized := a.normalizeSessionsForResponse(sessions)
+	if playerIDFilter != "" {
+		normalized = filterSessionsByPlayerID(normalized, playerIDFilter)
+	}
 	rev := atomic.AddUint64(&a.sessionsBroadcastSeq, 1)
 	payload := a.buildSessionsEvent(normalized, rev, 0)
 	if payload != "" {
@@ -1217,7 +1224,7 @@ func (a *App) handleSessionStream(w http.ResponseWriter, r *http.Request) {
 		flusher.Flush()
 	}
 
-	clientID, ch := a.sessionsHub.AddClient()
+	clientID, ch := a.sessionsHub.AddClient(playerIDFilter)
 	defer a.sessionsHub.RemoveClient(clientID)
 
 	for {
@@ -1228,7 +1235,14 @@ func (a *App) handleSessionStream(w http.ResponseWriter, r *http.Request) {
 			if !ok {
 				return
 			}
-			payload := a.buildSessionsEvent(event.Sessions, event.Revision, event.Dropped)
+			filtered := event.Sessions
+			if playerIDFilter != "" {
+				filtered = filterSessionsByPlayerID(filtered, playerIDFilter)
+				if len(filtered) == 0 {
+					continue
+				}
+			}
+			payload := a.buildSessionsEvent(filtered, event.Revision, event.Dropped)
 			if payload == "" {
 				continue
 			}
@@ -1949,7 +1963,7 @@ func (a *App) handleClearSessions(w http.ResponseWriter, r *http.Request) {
 		a.disablePatternForPort(port)
 		a.armTransportFaultLoop(port, "none", 1, transportUnitsSeconds, 0)
 	}
-	_ = a.memcache.FlushAll()
+	a.saveSessionList([]SessionData{})
 	writeJSON(w, map[string]string{"message": "All sessions cleared successfully"})
 }
 
@@ -2713,6 +2727,13 @@ func (a *App) runTransportFaultLoop(ctx context.Context, port int, faultType str
 		if session := a.getFirstSessionByPort(port); session != nil {
 			bumpFaultCounter(session, "transport_"+faultType)
 			logFaultEvent(session, strconv.Itoa(port), "transport_"+faultType, "control", "transport_arm")
+			counterKey := faultCounterKey("transport_" + faultType)
+			if counterKey != "" {
+				a.updateSessionsByPort(port, map[string]interface{}{
+					counterKey:          session[counterKey],
+					"fault_count_total": session["fault_count_total"],
+				})
+			}
 		}
 		if consecutiveThreshold <= 0 {
 			<-ctx.Done()
@@ -3208,12 +3229,19 @@ func logFaultEvent(session SessionData, port, faultType, requestKind, actionTake
 	)
 }
 
-func bumpFaultCounter(session SessionData, faultType string) {
+func faultCounterKey(faultType string) string {
 	faultType = strings.TrimSpace(strings.ToLower(faultType))
 	if faultType == "" || faultType == "none" {
+		return ""
+	}
+	return "fault_count_" + strings.ReplaceAll(faultType, "-", "_")
+}
+
+func bumpFaultCounter(session SessionData, faultType string) {
+	key := faultCounterKey(faultType)
+	if key == "" {
 		return
 	}
-	key := "fault_count_" + strings.ReplaceAll(faultType, "-", "_")
 	session[key] = getInt(session, key) + 1
 	session["fault_count_total"] = getInt(session, "fault_count_total") + 1
 }
@@ -3719,11 +3747,7 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 	handler := NewRequestHandler(isSegment, isManifest, isMasterManifest, sessionData)
 	failureType := handler.HandleRequest(filename)
 
-	sessionList[index] = sessionData
-	a.saveSessionList(sessionList)
-	if playerID := getString(sessionData, "player_id"); playerID != "" {
-		a.saveSession(playerID, sessionData)
-	}
+	a.saveSessionByID(sessionNumber, sessionData)
 
 	if failureType != "none" {
 		log.Printf("FAILURE! Identifier: %s, %s, %s", sessionNumber, upstreamURL, failureType)
@@ -4020,8 +4044,7 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 	netEntry.BytesIn = requestBytes
 	netEntry.BytesOut = bytesOut
 	a.addNetworkLogEntry(sessionID, *netEntry)
-	sessionList[index] = sessionData
-	a.saveSessionList(sessionList)
+	a.saveSessionByID(sessionNumber, sessionData)
 }
 
 // shouldApplyContentManipulation checks if any content manipulation settings are enabled
@@ -4528,9 +4551,9 @@ func (a *App) trackPortThroughput() {
 			"mbps_transfer_rate":           mbpsTransferRate,
 			"mbps_transfer_complete":          mbpsTransferComplete,
 		}
-		if bytes, err := json.Marshal(payload); err == nil {
-			_ = a.memcache.Set(&memcache.Item{Key: fmt.Sprintf("throughput_%d", port), Value: bytes, Expiration: 30})
-		}
+		a.throughputMu.Lock()
+		a.throughputData[port] = payload
+		a.throughputMu.Unlock()
 		log.Printf(
 			"WIRE_TC_METRIC port=%d bytes_now=%d delta_bytes=%d dt_s=%.3f active=%t",
 			port,
@@ -4627,12 +4650,6 @@ func (a *App) getSessionData(identifier string) SessionData {
 			return session
 		}
 	}
-	if item, err := a.memcache.Get(identifier); err == nil {
-		var session SessionData
-		if err := json.Unmarshal(item.Value, &session); err == nil {
-			return session
-		}
-	}
 	return nil
 }
 
@@ -4704,7 +4721,7 @@ func cloneSession(session SessionData) SessionData {
 	}
 	clone := make(SessionData, len(session))
 	for key, value := range session {
-		clone[key] = value
+		clone[key] = cloneInterface(value)
 	}
 	return clone
 }
@@ -5016,55 +5033,43 @@ func (a *App) updateSessionsByPort(port int, updates map[string]interface{}) {
 }
 
 func (a *App) getSessionList() []SessionData {
-	item, err := a.memcache.Get("session_list")
-	if err != nil {
-		return []SessionData{}
-	}
-	var sessions []SessionData
-	if err := json.Unmarshal(item.Value, &sessions); err != nil {
-		return []SessionData{}
-	}
-	return sessions
+	a.sessionsMu.RLock()
+	defer a.sessionsMu.RUnlock()
+	return cloneSessionList(a.sessionsData)
 }
 
-func (a *App) saveSessionList(sessions []SessionData) {
-	existing := a.getSessionList()
-	if len(existing) > 0 && len(sessions) > 0 {
-		existingByID := map[string]SessionData{}
-		for _, session := range existing {
-			id := getString(session, "session_id")
-			if id == "" {
-				continue
-			}
-			existingByID[id] = session
-		}
-		for _, session := range sessions {
-			id := getString(session, "session_id")
-			if id == "" {
-				continue
-			}
-			existingSession, ok := existingByID[id]
-			if !ok {
-				continue
-			}
-			existingRevision := getString(existingSession, "control_revision")
-			incomingRevision := getString(session, "control_revision")
-			if isControlRevisionNewer(existingRevision, incomingRevision) {
-				copySessionControlState(session, existingSession)
-			}
-		}
-	}
-
+func (a *App) stampAndBroadcast() {
 	uiVersion := atomic.AddUint64(&a.uiStateVersionSeq, 1)
 	uiRevision := newControlRevision()
-	for _, session := range sessions {
+	for _, session := range a.sessionsData {
 		session["ui_state_version"] = uiVersion
 		session["ui_state_revision"] = uiRevision
 	}
-	if data, err := json.Marshal(sessions); err == nil {
-		_ = a.memcache.Set(&memcache.Item{Key: "session_list", Value: data})
+	a.queueSessionsBroadcast(a.sessionsData)
+}
+
+func (a *App) saveSessionList(sessions []SessionData) {
+	a.sessionsMu.Lock()
+	a.sessionsData = cloneSessionList(sessions)
+	a.stampAndBroadcast()
+	a.sessionsMu.Unlock()
+}
+
+func (a *App) saveSessionByID(sessionID string, session SessionData) {
+	a.sessionsMu.Lock()
+	for i, s := range a.sessionsData {
+		if getString(s, "session_id") == sessionID {
+			existingRevision := getString(s, "control_revision")
+			incomingRevision := getString(session, "control_revision")
+			if isControlRevisionNewer(existingRevision, incomingRevision) {
+				copySessionControlState(session, s)
+			}
+			a.sessionsData[i] = cloneSession(session)
+			break
+		}
 	}
-	a.queueSessionsBroadcast(sessions)
+	a.stampAndBroadcast()
+	a.sessionsMu.Unlock()
 }
 
 func applySessionThroughput(session SessionData, throughput map[string]interface{}) {
@@ -5397,28 +5402,21 @@ func (a *App) getSessionThroughput(session SessionData) map[string]interface{} {
 	if session == nil {
 		return nil
 	}
-	port := getString(session, "x_forwarded_port")
-	if port == "" {
+	portStr := getString(session, "x_forwarded_port")
+	if portStr == "" {
 		return nil
 	}
-	var best map[string]interface{}
-	bestTimestamp := int64(0)
-	for _, throughputKey := range []string{fmt.Sprintf("throughput_%s", port)} {
-		item, err := a.memcache.Get(throughputKey)
-		if err != nil {
-			continue
-		}
-		var throughput map[string]interface{}
-		if err := json.Unmarshal(item.Value, &throughput); err != nil {
-			continue
-		}
-		timestamp := int64FromInterface(throughput["timestamp"])
-		if best == nil || timestamp > bestTimestamp {
-			best = throughput
-			bestTimestamp = timestamp
-		}
+	portNum, err := strconv.Atoi(portStr)
+	if err != nil {
+		return nil
 	}
-	return best
+	a.throughputMu.RLock()
+	data, ok := a.throughputData[portNum]
+	a.throughputMu.RUnlock()
+	if !ok {
+		return nil
+	}
+	return data
 }
 
 func (a *App) hydrateSessionThroughput(session SessionData) {
@@ -5672,8 +5670,15 @@ func (a *App) queueSessionsBroadcast(sessions []SessionData) {
 	if a.sessionsHub == nil {
 		return
 	}
+	// Snapshot before stashing. The broadcast pipeline runs asynchronously
+	// (250ms timer → normalizeSessionsForResponse mutates the maps → SSE
+	// clients marshal them). Without this snapshot the pipeline shares maps
+	// with the calling handler, which continues to mutate sessionData
+	// between successive saveSessionList calls — that's the race that
+	// triggers `concurrent map iteration and map write` in json.Marshal.
+	snapshot := cloneSessionList(sessions)
 	a.sessionsBroadcastMu.Lock()
-	a.sessionsBroadcastLatest = sessions
+	a.sessionsBroadcastLatest = snapshot
 	if a.sessionsBroadcastPending {
 		a.sessionsBroadcastMu.Unlock()
 		return
@@ -5683,6 +5688,47 @@ func (a *App) queueSessionsBroadcast(sessions []SessionData) {
 	time.AfterFunc(250*time.Millisecond, func() {
 		a.flushSessionsBroadcast()
 	})
+}
+
+// cloneSessionList deep-copies the maps inside the slice so the result can
+// be iterated/mutated independently of the input. Primitives are shared by
+// value; nested map[string]interface{} and []interface{} are recursively
+// cloned. Other slice/value types (e.g. []PlaylistInfo) are treated as
+// immutable from this point on.
+func cloneSessionList(sessions []SessionData) []SessionData {
+	if sessions == nil {
+		return nil
+	}
+	out := make([]SessionData, len(sessions))
+	for i, session := range sessions {
+		out[i] = cloneSession(session)
+	}
+	return out
+}
+
+func cloneInterface(v interface{}) interface{} {
+	switch t := v.(type) {
+	case nil:
+		return nil
+	case SessionData:
+		return cloneSession(t)
+	case map[string]interface{}:
+		out := make(map[string]interface{}, len(t))
+		for k, vv := range t {
+			out[k] = cloneInterface(vv)
+		}
+		return out
+	case []interface{}:
+		out := make([]interface{}, len(t))
+		for i, vv := range t {
+			out[i] = cloneInterface(vv)
+		}
+		return out
+	case []SessionData:
+		return cloneSessionList(t)
+	default:
+		return v
+	}
 }
 
 func (a *App) flushSessionsBroadcast() {
@@ -5697,15 +5743,6 @@ func (a *App) flushSessionsBroadcast() {
 	normalized := a.normalizeSessionsForResponse(sessions)
 	rev := atomic.AddUint64(&a.sessionsBroadcastSeq, 1)
 	a.sessionsHub.Broadcast(normalized, rev)
-}
-
-func (a *App) saveSession(identifier string, session SessionData) {
-	if identifier == "" {
-		return
-	}
-	if data, err := json.Marshal(session); err == nil {
-		_ = a.memcache.Set(&memcache.Item{Key: identifier, Value: data})
-	}
 }
 
 func (a *App) removeInactiveSessions() {
@@ -5732,7 +5769,7 @@ func (a *App) removeInactiveSessions() {
 			if port, err := strconv.Atoi(getString(session, "x_forwarded_port")); err == nil {
 				removedPorts[port] = struct{}{}
 			}
-			_ = a.memcache.Delete(getString(session, "session_id"))
+			// session removed from active list — no separate cleanup needed
 		}
 	}
 	a.saveSessionList(active)
@@ -6148,6 +6185,19 @@ func hostPortOrDefault(hostport, fallback string) string {
 func shouldScopeSessionsByRequesterIP(r *http.Request) bool {
 	host := strings.ToLower(hostWithoutPort(r.Host))
 	return host == "infinitestreaming.jeoliver.com"
+}
+
+func filterSessionsByPlayerID(sessions []SessionData, playerID string) []SessionData {
+	if playerID == "" {
+		return sessions
+	}
+	filtered := make([]SessionData, 0, 1)
+	for _, session := range sessions {
+		if getString(session, "player_id") == playerID {
+			filtered = append(filtered, session)
+		}
+	}
+	return filtered
 }
 
 func filterSessionsByOriginationIP(sessions []SessionData, requesterIP string) []SessionData {

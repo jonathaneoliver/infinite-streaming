@@ -53,8 +53,6 @@ spec:
           value: ":8003"
         - name: INFINITE_STREAM_LISTEN_PORT
           value: "30000"
-        - name: MEMCACHED_ADDR
-          value: "127.0.0.1:11211"
         - name: INFINITE_STREAM_UPSTREAM_HOST
           value: "127.0.0.1"
         - name: INFINITE_STREAM_UPSTREAM_PORT
@@ -85,11 +83,6 @@ spec:
           mountPath: /go-live
         - name: nginx-tmpfs
           mountPath: /var/cache/nginx/live_playlists
-
-      - name: memcached
-        image: memcached:latest
-        ports:
-        - containerPort: 11211
 
       volumes:
       - name: media-vol

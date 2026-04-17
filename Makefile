@@ -94,8 +94,8 @@ K3S_PROXY_IMAGE ?= $(K3S_REGISTRY)/$(K3S_PROXY_REPO):latest
 deploy-k3s-local:
 	@set -e; \
 	echo "Cleaning up legacy split deployments/services"; \
-	ssh $(K3S_SSH_HOST) "export KUBECONFIG=$(K3S_KUBECONFIG); kubectl delete service go-server go-proxy memcached boss-server --ignore-not-found=true"; \
-	ssh $(K3S_SSH_HOST) "export KUBECONFIG=$(K3S_KUBECONFIG); kubectl delete deployment go-server go-proxy memcached boss-server --ignore-not-found=true"; \
+	ssh $(K3S_SSH_HOST) "export KUBECONFIG=$(K3S_KUBECONFIG); kubectl delete service go-server go-proxy boss-server --ignore-not-found=true"; \
+	ssh $(K3S_SSH_HOST) "export KUBECONFIG=$(K3S_KUBECONFIG); kubectl delete deployment go-server go-proxy boss-server --ignore-not-found=true"; \
 	for manifest in $(K8S_MANIFESTS); do \
 		echo "Applying $$manifest to $(K3S_SSH_HOST)"; \
 		envsubst < $$manifest | ssh $(K3S_SSH_HOST) "export KUBECONFIG=$(K3S_KUBECONFIG); kubectl apply -f -"; \
@@ -152,10 +152,10 @@ test-deploy-dev:
 	ssh $(TEST_SSH) 'cd ~/test-dev && docker compose build && docker compose up -d'
 
 test-clean-dev:
-	ssh $(TEST_SSH) 'docker rm -f test-dev-server test-dev-memcached-1 2>/dev/null'
+	ssh $(TEST_SSH) 'docker rm -f test-dev-server 2>/dev/null'
 
 test-clean:
-	ssh $(TEST_SSH) 'docker rm -f test-dev-server test-dev-memcached-1 test-compose-server test-compose-memcached-1 test-docker-run test-ghcr-server test-ghcr-memcached-1 test-registry-server 2>/dev/null; docker network prune -f 2>/dev/null'
+	ssh $(TEST_SSH) 'docker rm -f test-dev-server test-compose-server test-docker-run test-ghcr-server test-registry-server 2>/dev/null; docker network prune -f 2>/dev/null'
 
 test-status:
 	@ssh $(TEST_SSH) 'for p in 21000 22000 23000 24000 25000; do \
