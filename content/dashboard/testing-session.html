@@ -1209,7 +1209,8 @@
             const sessions = Array.isArray(data.sessions) ? data.sessions : [];
             const revision = Number(data.revision || event.lastEventId || 0);
             const dropped = Number(data.dropped || 0);
-            return { sessions, revision, dropped };
+            const active_sessions = Array.isArray(data.active_sessions) ? data.active_sessions : null;
+            return { sessions, revision, dropped, active_sessions };
         }
 
         function logHttpFailure(source, status, url) {
@@ -2519,9 +2520,16 @@
             `;
         }
 
+        let lastGroupFingerprint = '';
         function updateGroupControls(session, sessions) {
             const container = document.getElementById('sessionGroupControls');
             if (!container) return;
+            const groupId = session ? (session.group_id || '') : '';
+            const sessionIds = (Array.isArray(sessions) ? sessions : [])
+                .map(s => String(s.session_id || '')).sort().join(',');
+            const fingerprint = groupId + '|' + sessionIds;
+            if (fingerprint === lastGroupFingerprint) return;
+            lastGroupFingerprint = fingerprint;
             container.innerHTML = renderGroupControls(session, sessions);
             const select = container.querySelector('#groupWithSelect');
             if (select) {
@@ -2529,26 +2537,6 @@
                 if (groupSelectSessionId && currentId === groupSelectSessionId && groupSelectValue) {
                     select.value = groupSelectValue;
                 }
-            }
-            if (session && session.session_id && (!Array.isArray(sessions) || sessions.length <= 1) && !groupSessionsFetchInFlight) {
-                groupSessionsFetchInFlight = true;
-                fetch('/api/sessions', { cache: 'no-store' })
-                    .then(res => res.json())
-                    .then(all => {
-                        lastSessionsList = Array.isArray(all) ? all : [];
-                        container.innerHTML = renderGroupControls(session, lastSessionsList);
-                        const retrySelect = container.querySelector('#groupWithSelect');
-                        if (retrySelect) {
-                            const currentId = String(session.session_id || '');
-                            if (groupSelectSessionId && currentId === groupSelectSessionId && groupSelectValue) {
-                                retrySelect.value = groupSelectValue;
-                            }
-                        }
-                    })
-                    .catch(err => console.error('Error fetching sessions for grouping', err))
-                    .finally(() => {
-                        groupSessionsFetchInFlight = false;
-                    });
             }
         }
 
@@ -5637,7 +5625,20 @@
                 try {
                     const payload = parseSessionsStreamPayload(event);
                     const sessions = mergeSessionsBySnapshotVersion(payload.sessions);
-                    lastSessionsList = sessions;
+                    if (Array.isArray(payload.active_sessions)) {
+                        lastSessionsList = payload.active_sessions.map(s => ({
+                            ...s,
+                            x_forwarded_port_external: s.port || s.x_forwarded_port_external || '',
+                        }));
+                    } else if (lastSessionsList.length > sessions.length) {
+                        for (const s of sessions) {
+                            const idx = lastSessionsList.findIndex(e => e.session_id === s.session_id);
+                            if (idx >= 0) lastSessionsList[idx] = s;
+                            else lastSessionsList.push(s);
+                        }
+                    } else {
+                        lastSessionsList = sessions;
+                    }
                     const revision = Number(payload.revision || 0);
                     const dropped = Number(payload.dropped || 0);
                     let missed = 0;
