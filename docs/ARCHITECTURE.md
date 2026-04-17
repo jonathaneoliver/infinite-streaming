@@ -110,6 +110,7 @@ go-proxy's throughput metrics (`mbps_shaper_rate`, `mbps_shaper_avg`, `mbps_tran
 - Per-port TC stats are cached with a 5 ms TTL to deduplicate concurrent readers.
 - Only one `awaitSocketDrain` goroutine runs per port at a time (singleton guard).
 - TC counters include packet-level transport/application overhead (TCP/IP + TLS/HTTP headers) but **not** physical link-layer overhead (Ethernet preamble / IFG / FCS).
+- **Docker Desktop (macOS):** TC shaping works with `--cap-add NET_ADMIN` but the VM translation layer makes TC stats polling (100ms interval per session) significantly more expensive than on native Linux. On an M5 MacBook Pro, even a single session causes noticeable fan spin-up. This is inherent to Docker Desktop's Linux VM architecture, not a code issue. For sustained shaping tests, use a native Linux host.
 
 Semantics and expected behaviour of the metrics themselves (what each series means, how they relate to the configured limit and the player's own estimate) are documented in [`README.md`'s Metrics reference](../README.md#metrics-reference).
 
