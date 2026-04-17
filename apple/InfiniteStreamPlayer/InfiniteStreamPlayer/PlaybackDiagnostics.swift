@@ -317,7 +317,7 @@ final class PlaybackDiagnostics: ObservableObject {
             }
         }
         if event.numberOfDroppedVideoFrames > 0 {
-            droppedVideoFrames = event.numberOfDroppedVideoFrames
+            droppedVideoFrames = Double(event.numberOfDroppedVideoFrames)
         }
         // Samples are collected on a steady interval in samplePlayerMetrics().
         var parts: [String] = []
@@ -468,13 +468,100 @@ final class PlaybackDiagnostics: ObservableObject {
         let ns = error as NSError
         var parts: [String] = [ns.localizedDescription]
         if !ns.domain.isEmpty { parts.append("domain=\(ns.domain)") }
-        if ns.code != 0 { parts.append("code=\(ns.code)") }
+        if ns.code != 0 { 
+            parts.append("code=\(ns.code)")
+            // Add human-readable interpretation of common error codes
+            if ns.domain == AVFoundationErrorDomain {
+                parts.append("(\(interpretAVErrorCode(ns.code)))")
+            }
+        }
         if let reason = ns.userInfo[NSLocalizedFailureReasonErrorKey] as? String, !reason.isEmpty {
             parts.append("reason=\(reason)")
         }
         if let suggestion = ns.userInfo[NSLocalizedRecoverySuggestionErrorKey] as? String, !suggestion.isEmpty {
             parts.append("suggestion=\(suggestion)")
         }
+        if let underlyingError = ns.userInfo[NSUnderlyingErrorKey] as? NSError {
+            parts.append("underlying=[\(underlyingError.domain) \(underlyingError.code)]")
+        }
         return parts.joined(separator: " ")
+    }
+    
+    private func interpretAVErrorCode(_ code: Int) -> String {
+        switch code {
+        case -11800: return "AVErrorUnknown"
+        case -11801: return "AVErrorOutOfMemory"
+        case -11802: return "AVErrorSessionNotRunning"
+        case -11803: return "AVErrorDeviceAlreadyUsedByAnotherSession"
+        case -11804: return "AVErrorNoDataCaptured"
+        case -11805: return "AVErrorSessionConfigurationChanged"
+        case -11806: return "AVErrorDiskFull"
+        case -11807: return "AVErrorDeviceWasDisconnected"
+        case -11808: return "AVErrorMediaChanged"
+        case -11809: return "AVErrorMaximumDurationReached"
+        case -11810: return "AVErrorMaximumFileSizeReached"
+        case -11811: return "AVErrorMediaDiscontinuity"
+        case -11812: return "AVErrorMaximumNumberOfSamplesForFileFormatReached"
+        case -11813: return "AVErrorDeviceNotConnected"
+        case -11814: return "AVErrorDeviceInUseByAnotherApplication"
+        case -11815: return "AVErrorDeviceLockedForConfigurationByAnotherProcess"
+        case -11816: return "AVErrorSessionWasInterrupted"
+        case -11817: return "AVErrorMediaServicesWereReset"
+        case -11818: return "AVErrorExportFailed"
+        case -11819: return "AVErrorDecodeFailed"
+        case -11820: return "AVErrorInvalidSourceMedia"
+        case -11821: return "AVErrorFileAlreadyExists"
+        case -11822: return "AVErrorCompositionTrackSegmentsNotContiguous"
+        case -11823: return "AVErrorInvalidCompositionTrackSegmentDuration"
+        case -11824: return "AVErrorInvalidCompositionTrackSegmentSourceStartTime"
+        case -11825: return "AVErrorInvalidCompositionTrackSegmentSourceDuration"
+        case -11826: return "AVErrorFileFormatNotRecognized"
+        case -11827: return "AVErrorFileFailedToParse"
+        case -11828: return "AVErrorMaximumStillImageCaptureRequestsExceeded"
+        case -11829: return "AVErrorContentIsProtected"
+        case -11830: return "AVErrorNoImageAtTime"
+        case -11831: return "AVErrorDecoderNotFound"
+        case -11832: return "AVErrorEncoderNotFound"
+        case -11833: return "AVErrorContentIsNotAuthorized"
+        case -11834: return "AVErrorApplicationIsNotAuthorized"
+        case -11835: return "AVErrorDeviceIsNotAvailableInBackground"
+        case -11836: return "AVErrorOperationNotSupportedForAsset"
+        case -11837: return "AVErrorDecoderTemporarilyUnavailable"
+        case -11838: return "AVErrorEncoderTemporarilyUnavailable"
+        case -11839: return "AVErrorInvalidVideoComposition"
+        case -11840: return "AVErrorReferenceForbiddenByReferencePolicy"
+        case -11841: return "AVErrorInvalidOutputURLPathExtension"
+        case -11842: return "AVErrorScreenCaptureFailed"
+        case -11843: return "AVErrorDisplayWasDisabled"
+        case -11844: return "AVErrorTorchLevelUnavailable"
+        case -11845: return "AVErrorOperationInterrupted"
+        case -11846: return "AVErrorIncompatibleAsset"
+        case -11847: return "AVErrorFailedToLoadMediaData"
+        case -11848: return "AVErrorServerIncorrectlyConfigured"
+        case -11849: return "AVErrorApplicationIsNotAuthorizedForPlayback"
+        case -11850: return "AVErrorContentIsUnavailable"
+        case -11851: return "AVErrorFormatUnsupported"
+        case -11852: return "AVErrorAirPlayControllerRequiresInternet"
+        case -11853: return "AVErrorAirPlayReceiverRequiresInternet"
+        case -11854: return "AVErrorVideoCompositorFailed"
+        case -11855: return "AVErrorRecordingAlreadyInProgress"
+        case -11856: return "AVErrorUnsupportedOutputSettings"
+        case -11857: return "AVErrorOperationNotAllowed"
+        case -11858: return "AVErrorContentNotUpdated"
+        case -11859: return "AVErrorNoLongerPlayable"
+        case -11860: return "AVErrorNoCompatibleAlternatesForExternalDisplay"
+        case -11861: return "AVErrorNoSourceTrack"
+        case -11862: return "AVErrorExternalPlaybackNotSupportedForAsset"
+        case -11863: return "AVErrorOperationNotSupportedForPreset"
+        case -11864: return "AVErrorSessionHardwareCostOverage"
+        case -11865: return "AVErrorUnsupportedDeviceActiveFormat"
+        case -12782: return "AVErrorInvalidSampleCursor"
+        case -12783: return "AVErrorFailedToLoadSampleData"
+        case -12784: return "AVErrorAirPlayReceiverTemporarilyUnavailable"
+        case -12785: return "AVErrorEncodeFailed"
+        case -12786: return "AVErrorSandboxExtensionDenied"
+        case -12900: return "AVErrorUnknown/Generic"
+        default: return "Unknown(\(code))"
+        }
     }
 }

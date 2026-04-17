@@ -830,14 +830,13 @@ final class PlaybackViewModel: ObservableObject {
     }
 
     private func patchSessionMetrics(sessionId: String, baseURL: URL, payload: [String: Any]) async {
-        let url = baseURL.appendingPathComponent("api/session").appendingPathComponent(sessionId)
+        let url = baseURL.appendingPathComponent("api/session").appendingPathComponent(sessionId).appendingPathComponent("metrics")
         var request = URLRequest(url: url)
-        request.httpMethod = "PATCH"
+        request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         let body: [String: Any] = [
             "set": payload,
-            "fields": Array(payload.keys),
-            "base_revision": ""
+            "fields": Array(payload.keys)
         ]
         do {
             request.httpBody = try JSONSerialization.data(withJSONObject: body, options: [])
