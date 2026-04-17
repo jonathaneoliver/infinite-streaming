@@ -56,13 +56,13 @@ __pycache__/
 # IDE / editor
 .vscode/
 
+# Go build output
+go-proxy/server
+go-live/server
+
 # Test artifacts
 tests/.hls_failure_probe_last_failed
 tests/integration/test_run.log
-
-# Go module files (generated in Docker build)
-go-proxy/go.mod
-go-proxy/go.sum
 
 # Xcode user state
 apple/InfiniteStreamPlayer/InfiniteStreamPlayer.xcodeproj/project.xcworkspace/xcuserdata/

@@ -136,6 +136,14 @@ TEST_SSH ?= user@test-host
 TEST_MEDIA_DIR ?= /home/user/media
 REPO_URL ?= https://github.com/jonathaneoliver/infinite-streaming.git
 
+test-go:
+	@echo "=== go-proxy ==="
+	cd go-proxy && go vet ./... && go test -race ./...
+	@echo "=== go-live ==="
+	cd go-live && go vet ./... && go test -race ./...
+	@echo "=== go-upload ==="
+	cd go-upload && go vet ./... && go test -race ./...
+
 test-deploy-all: test-deploy-compose test-deploy-run test-deploy-ghcr test-deploy-registry
 
 test-deploy-dev:
