@@ -29,6 +29,8 @@ var (
 	goLiveDir          = getEnv("GO_LIVE_OUTPUT_DIR", filepath.Join(infiniteContentDir, "go-live"))
 )
 
+var llhlsGen = &generator.LLHLSGenerator{}
+
 type dashCacheEntry struct {
 	data    []byte
 	updated time.Time
@@ -534,8 +536,7 @@ func runUnifiedHLSWorker(ctx context.Context, worker *hlsWorker) {
 				}
 				variantOutputPath := filepath.Join(goLiveDir, content, variantFilename)
 				os.MkdirAll(filepath.Dir(variantOutputPath), 0755)
-				llhls := &generator.LLHLSGenerator{}
-				playlistContent, err := llhls.GenerateVariantPlaylist(
+				playlistContent, err := llhlsGen.GenerateVariantPlaylist(
 					variantInfo.MediaPlaylist,
 					byteranges,
 					variantInfo.RelPath,
@@ -562,8 +563,7 @@ func runUnifiedHLSWorker(ctx context.Context, worker *hlsWorker) {
 				}
 				audioOutputPath := filepath.Join(goLiveDir, content, audioURI)
 				os.MkdirAll(filepath.Dir(audioOutputPath), 0755)
-				llhls := &generator.LLHLSGenerator{}
-				playlistContent, err := llhls.GenerateVariantPlaylist(
+				playlistContent, err := llhlsGen.GenerateVariantPlaylist(
 					variantInfo.MediaPlaylist,
 					byteranges,
 					variantInfo.RelPath,
@@ -1065,6 +1065,11 @@ func (h *Handler) OnDemandDashManifest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	inputPath := filepath.Join(infiniteOutputDir, content, "master.m3u8")
+	ensureDashWorker(h, content, inputPath, mpdRelPath, mpdData)
+	h.trackRequest(r, content, "dash-"+variant)
+	h.ensureTracked(content, "dash-"+variant, "hls-worker-"+content)
+
 	cacheKey := dashCacheKey(content, mpdRelPath, variant)
 	dashCacheMu.Lock()
 	entry := dashCache[cacheKey]
@@ -1072,30 +1077,20 @@ func (h *Handler) OnDemandDashManifest(w http.ResponseWriter, r *http.Request) {
 		entry = &dashCacheEntry{}
 		dashCache[cacheKey] = entry
 	}
-	dashCacheMu.Unlock()
-
-	inputPath := filepath.Join(infiniteOutputDir, content, "master.m3u8")
-	ensureDashWorker(h, content, inputPath, mpdRelPath, mpdData)
-	h.trackRequest(r, content, "dash-"+variant)
-	h.ensureTracked(content, "dash-"+variant, "hls-worker-"+content)
-
-	dashCacheMu.Lock()
 	cached := entry.data
-	dashCacheMu.Unlock()
-
 	if cached == nil {
 		liveMPD, genErr := dash.GenerateLiveMPD(mpdData, time.Now(), r.URL.Path, duration, llMode)
 		if genErr != nil {
+			dashCacheMu.Unlock()
 			http.Error(w, fmt.Sprintf("Failed to generate MPD: %v", genErr), http.StatusInternalServerError)
 			return
 		}
 		logf("[GO-LIVE:DASH] Generated MPD content=%s duration=%ds bytes=%d\n", content, duration, len(liveMPD))
-		dashCacheMu.Lock()
 		entry.data = liveMPD
 		entry.updated = time.Now()
 		cached = liveMPD
-		dashCacheMu.Unlock()
 	}
+	dashCacheMu.Unlock()
 
 	w.Header().Set("Content-Type", "application/dash+xml")
 	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(cached)))
