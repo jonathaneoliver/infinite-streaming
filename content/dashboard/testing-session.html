@@ -1508,15 +1508,14 @@
             const payload = buildMetricsPayload(eventType, extra);
             const fields = Object.keys(payload);
             if (!fields.length) return;
-            fetch(`/api/session/${currentSessionId}`, {
-                method: 'PATCH',
+            fetch(`/api/session/${currentSessionId}/metrics`, {
+                method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     set: payload,
-                    fields,
-                    base_revision: getSessionBaseRevision()
+                    fields
                 })
-            }).catch(err => console.warn('Metrics patch failed', err));
+            }).catch(err => console.warn('Metrics post failed', err));
         }
 
         function scheduleMetricsHeartbeat() {
@@ -3241,6 +3240,24 @@
                     applyNetworkShaping(card);
                 }, 250));
             };
+            const scheduleSingleShapingApply = (card, serverField, value) => {
+                const sessionId = card.dataset.sessionId;
+                if (!sessionId) return;
+                if (isAbrcharRunLocked(sessionId)) return;
+                const existing = pendingShaping.get(sessionId);
+                const values = existing ? { ...existing.values } : {};
+                values[serverField] = value;
+                pendingShaping.set(sessionId, { timestamp: Date.now(), values });
+                if (shapingTimers.has(sessionId)) {
+                    clearTimeout(shapingTimers.get(sessionId));
+                }
+                shapingTimers.set(sessionId, setTimeout(() => {
+                    const pending = pendingShaping.get(sessionId);
+                    if (!pending) return;
+                    const fields = Object.keys(pending.values);
+                    sendSessionPatch(card, fields);
+                }, 250));
+            };
             const getShapingPresets = (card) => {
                 const raw = card.dataset.shapingPresets || '';
                 if (!raw) {
@@ -3646,10 +3663,19 @@
                     return;
                 }
                 if (event.target.dataset.field && event.target.dataset.field.startsWith('shaping_')) {
-                    // In pattern mode, only apply from the Apply Pattern button
                     const templateMode = getTemplateMode(card);
                     if (templateMode === 'sliders') {
-                        scheduleShapingApply(card);
+                        const sliderFieldMap = {
+                            'shaping_throughput_mbps': 'nftables_bandwidth_mbps',
+                            'shaping_delay_ms': 'nftables_delay_ms',
+                            'shaping_loss_pct': 'nftables_packet_loss'
+                        };
+                        const serverField = sliderFieldMap[event.target.dataset.field];
+                        if (serverField) {
+                            scheduleSingleShapingApply(card, serverField, Number(event.target.value));
+                        } else {
+                            scheduleShapingApply(card);
+                        }
                     } else {
                         shapingPatternDirty.set(card.dataset.sessionId, true);
                     }
@@ -5434,7 +5460,18 @@
         document.addEventListener('testing-session:charts-resize', (event) => {
             const sessionId = event.detail && event.detail.sessionId;
             if (!sessionId) return;
-            requestAnimationFrame(() => renderBandwidthChart(sessionId));
+            requestAnimationFrame(() => {
+                for (const chart of getChartsForSession(sessionId)) {
+                    if (chart && typeof chart.destroy === 'function') {
+                        chart.destroy();
+                    }
+                }
+                eventsCharts.delete(sessionId);
+                bandwidthCharts.delete(sessionId);
+                bufferDepthCharts.delete(sessionId);
+                videoFpsCharts.delete(sessionId);
+                renderBandwidthChart(sessionId);
+            });
         });
 
         function applySessionUpdate(session) {

@@ -1040,6 +1040,25 @@ maybe a histogram of b
             }, 250));
         }
 
+        function scheduleSingleShapingApply(card, serverField, value) {
+            const sessionId = card.dataset.sessionId;
+            if (!sessionId) return;
+            if (isAbrcharRunLocked(sessionId)) return;
+            const existing = pendingShaping.get(sessionId);
+            const values = existing ? { ...existing.values } : {};
+            values[serverField] = value;
+            pendingShaping.set(sessionId, { timestamp: Date.now(), values });
+            if (shapingTimers.has(sessionId)) {
+                clearTimeout(shapingTimers.get(sessionId));
+            }
+            shapingTimers.set(sessionId, setTimeout(() => {
+                const pending = pendingShaping.get(sessionId);
+                if (!pending) return;
+                const fields = Object.keys(pending.values);
+                sendSessionPatch(card, fields);
+            }, 250));
+        }
+
         function renderSessionTabs(sessions) {
             if (!sessions.length) return '';
             const hasMultipleSessions = sessions.length > 1;
@@ -1603,7 +1622,13 @@ maybe a histogram of b
             updateTemplateModeUi(card);
         }
 
+        let deferredRender = false;
         function renderSessions() {
+            if (activeSliderSessionId) {
+                deferredRender = true;
+                return;
+            }
+            deferredRender = false;
             const container = document.getElementById('sessionsContainer');
             if (!sessionsById.size) {
                 container.innerHTML = '<div class="status-message">No active sessions.</div>';
@@ -2169,6 +2194,23 @@ maybe a histogram of b
                 chart.update('none');
             }
         }
+
+        document.addEventListener('testing-session:charts-resize', (event) => {
+            const sessionId = event.detail && event.detail.sessionId;
+            if (!sessionId) return;
+            requestAnimationFrame(() => {
+                for (const chart of getChartsForSession(sessionId)) {
+                    if (chart && typeof chart.destroy === 'function') {
+                        chart.destroy();
+                    }
+                }
+                eventsCharts.delete(sessionId);
+                bandwidthCharts.delete(sessionId);
+                bufferDepthCharts.delete(sessionId);
+                videoFpsCharts.delete(sessionId);
+                renderBandwidthChart(sessionId);
+            });
+        });
 
         function renderBandwidthChart(sessionId) {
             if (isChartPaused(sessionId)) return;
@@ -3087,9 +3129,29 @@ maybe a histogram of b
         function buildSessionPatch(card, fields) {
             const data = TestingSessionUI.readSessionSettings(card);
             const set = {};
+            const getShapingNumber = (field, fallback = 0) => {
+                const input = card.querySelector(`input[data-field="${field}"]`);
+                const value = input ? Number(input.value) : fallback;
+                return Number.isFinite(value) ? value : fallback;
+            };
+            const shapingPattern = TestingSessionUI.readShapingPattern(card);
+            const shapingFieldValues = {
+                nftables_bandwidth_mbps: getShapingNumber('shaping_throughput_mbps', 0),
+                nftables_delay_ms: getShapingNumber('shaping_delay_ms', 0),
+                nftables_packet_loss: getShapingNumber('shaping_loss_pct', 0),
+                nftables_pattern_enabled: shapingPattern.template_mode !== 'sliders' && Array.isArray(shapingPattern.steps) && shapingPattern.steps.length > 0,
+                nftables_pattern_steps: Array.isArray(shapingPattern.steps) ? shapingPattern.steps : [],
+                nftables_pattern_segment_duration_seconds: shapingPattern.segment_duration_seconds,
+                nftables_pattern_default_segments: shapingPattern.default_segments,
+                nftables_pattern_default_step_seconds: shapingPattern.default_step_seconds,
+                nftables_pattern_template_mode: shapingPattern.template_mode,
+                nftables_pattern_margin_pct: shapingPattern.template_margin_pct
+            };
             (fields || []).forEach(field => {
                 if (Object.prototype.hasOwnProperty.call(data, field)) {
                     set[field] = data[field];
+                } else if (Object.prototype.hasOwnProperty.call(shapingFieldValues, field)) {
+                    set[field] = shapingFieldValues[field];
                 }
             });
             return {
@@ -3210,12 +3272,13 @@ maybe a histogram of b
         function parseSessionsStreamPayload(event) {
             const data = JSON.parse(event.data);
             if (Array.isArray(data)) {
-                return { sessions: data, revision: Number(event.lastEventId || 0), dropped: 0 };
+                return { sessions: data, revision: Number(event.lastEventId || 0), dropped: 0, active_sessions: null };
             }
             const sessions = Array.isArray(data.sessions) ? data.sessions : [];
             const revision = Number(data.revision || event.lastEventId || 0);
             const dropped = Number(data.dropped || 0);
-            return { sessions, revision, dropped };
+            const active_sessions = Array.isArray(data.active_sessions) ? data.active_sessions : null;
+            return { sessions, revision, dropped, active_sessions };
         }
 
         function startSessionsPolling() {
@@ -3272,6 +3335,18 @@ maybe a histogram of b
             fetch('/api/clear-sessions', { method: 'POST' })
                 .then(() => fetchSessions())
                 .catch(error => console.error('Error clearing sessions:', error));
+        });
+
+        let activeSliderSessionId = null;
+        document.getElementById('sessionsContainer').addEventListener('pointerdown', (event) => {
+            if (event.target.matches('input[type="range"]')) {
+                const card = event.target.closest('.session-card');
+                if (card) activeSliderSessionId = card.dataset.sessionId;
+            }
+        });
+        document.addEventListener('pointerup', () => {
+            activeSliderSessionId = null;
+            if (deferredRender) renderSessions();
         });
 
         document.getElementById('sessionsContainer').addEventListener('input', (event) => {
@@ -3442,10 +3517,19 @@ maybe a histogram of b
                 }
             }
             if (target.dataset.field && target.dataset.field.startsWith('shaping_')) {
-                // In pattern mode, only apply from the Apply Pattern button
                 const templateMode = getTemplateMode(card);
                 if (templateMode === 'sliders') {
-                    scheduleShapingApply(card);
+                    const sliderFieldMap = {
+                        'shaping_throughput_mbps': 'nftables_bandwidth_mbps',
+                        'shaping_delay_ms': 'nftables_delay_ms',
+                        'shaping_loss_pct': 'nftables_packet_loss'
+                    };
+                    const serverField = sliderFieldMap[target.dataset.field];
+                    if (serverField) {
+                        scheduleSingleShapingApply(card, serverField, Number(target.value));
+                    } else {
+                        scheduleShapingApply(card);
+                    }
                 }
                 return;
             }
