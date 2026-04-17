@@ -2713,6 +2713,13 @@ func (a *App) runTransportFaultLoop(ctx context.Context, port int, faultType str
 		if session := a.getFirstSessionByPort(port); session != nil {
 			bumpFaultCounter(session, "transport_"+faultType)
 			logFaultEvent(session, strconv.Itoa(port), "transport_"+faultType, "control", "transport_arm")
+			counterKey := faultCounterKey("transport_" + faultType)
+			if counterKey != "" {
+				a.updateSessionsByPort(port, map[string]interface{}{
+					counterKey:          session[counterKey],
+					"fault_count_total": session["fault_count_total"],
+				})
+			}
 		}
 		if consecutiveThreshold <= 0 {
 			<-ctx.Done()
@@ -3208,12 +3215,19 @@ func logFaultEvent(session SessionData, port, faultType, requestKind, actionTake
 	)
 }
 
-func bumpFaultCounter(session SessionData, faultType string) {
+func faultCounterKey(faultType string) string {
 	faultType = strings.TrimSpace(strings.ToLower(faultType))
 	if faultType == "" || faultType == "none" {
+		return ""
+	}
+	return "fault_count_" + strings.ReplaceAll(faultType, "-", "_")
+}
+
+func bumpFaultCounter(session SessionData, faultType string) {
+	key := faultCounterKey(faultType)
+	if key == "" {
 		return
 	}
-	key := "fault_count_" + strings.ReplaceAll(faultType, "-", "_")
 	session[key] = getInt(session, key) + 1
 	session["fault_count_total"] = getInt(session, "fault_count_total") + 1
 }
