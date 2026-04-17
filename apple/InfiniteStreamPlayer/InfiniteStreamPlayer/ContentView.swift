@@ -5,6 +5,7 @@ import Charts
 enum ServerEnvironment: String, CaseIterable, Identifiable {
     case dev
     case release
+    case ubuntu
 
     var id: String { rawValue }
 
@@ -12,6 +13,7 @@ enum ServerEnvironment: String, CaseIterable, Identifiable {
         switch self {
         case .dev: return "Dev (40000)"
         case .release: return "Release (30000)"
+        case .ubuntu: return "Ubuntu (21000)"
         }
     }
 
@@ -19,6 +21,7 @@ enum ServerEnvironment: String, CaseIterable, Identifiable {
         switch self {
         case .dev: return "100.111.190.54"
         case .release: return "infinitestreaming.jeoliver.com"
+        case .ubuntu: return "jonathanoliver-ubuntu.local"
         }
     }
 
@@ -26,6 +29,7 @@ enum ServerEnvironment: String, CaseIterable, Identifiable {
         switch self {
         case .dev: return "40000"
         case .release: return "30000"
+        case .ubuntu: return "21000"
         }
     }
 
@@ -33,6 +37,7 @@ enum ServerEnvironment: String, CaseIterable, Identifiable {
         switch self {
         case .dev: return "40081"
         case .release: return "30081"
+        case .ubuntu: return "21081"
         }
     }
 }

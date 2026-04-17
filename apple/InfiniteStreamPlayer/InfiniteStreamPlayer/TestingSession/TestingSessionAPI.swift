@@ -7,8 +7,14 @@ final class TestingSessionAPI {
         self.controlBaseURL = controlBaseURL
     }
 
-    func sessionsStreamURL() -> URL {
-        controlBaseURL.appendingPathComponent("api/sessions/stream")
+    func sessionsStreamURL(playerIdFilter: String? = nil) -> URL {
+        let base = controlBaseURL.appendingPathComponent("api/sessions/stream")
+        guard let playerId = playerIdFilter, !playerId.isEmpty,
+              var components = URLComponents(url: base, resolvingAgainstBaseURL: false) else {
+            return base
+        }
+        components.queryItems = [URLQueryItem(name: "player_id", value: playerId)]
+        return components.url ?? base
     }
 
     func listSessions() async throws -> [SessionData] {

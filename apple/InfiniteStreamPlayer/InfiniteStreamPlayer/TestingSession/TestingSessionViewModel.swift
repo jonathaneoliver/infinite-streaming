@@ -215,7 +215,7 @@ final class TestingSessionViewModel: ObservableObject {
     }
 
     private func startSSE() {
-        let url = api.sessionsStreamURL()
+        let url = api.sessionsStreamURL(playerIdFilter: playerId)
         sse = SSEClient(url: url, onEvent: { [weak self] event in
             self?.handleSSE(event)
         }, onError: { [weak self] error in

@@ -32,6 +32,13 @@
                 <key>NSIncludesSubdomains</key>
                 <true/>
             </dict>
+            <key>jonathanoliver-ubuntu.local</key>
+            <dict>
+                <key>NSExceptionAllowsInsecureHTTPLoads</key>
+                <true/>
+                <key>NSIncludesSubdomains</key>
+                <true/>
+            </dict>
         </dict>
     </dict>
 </dict>
