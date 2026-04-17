@@ -1352,31 +1352,12 @@ func (a *App) handlePostSessionMetrics(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]string{"error": "no fields provided"})
 		return
 	}
-	sessions := a.getSessionList()
-	var target SessionData
-	for _, session := range sessions {
-		if getString(session, "session_id") == id {
-			target = session
-			break
-		}
-	}
-	if target == nil {
-		w.WriteHeader(http.StatusNotFound)
-		writeJSON(w, map[string]string{"error": "session not found"})
-		return
-	}
+	metricsOnly := make(SessionData, len(set))
 	for key, value := range set {
-		target[key] = value
+		metricsOnly[key] = value
 	}
-	allSessions := a.getSessionList()
-	for i, s := range allSessions {
-		if getString(s, "session_id") == id {
-			allSessions[i] = target
-			break
-		}
-	}
-	a.saveSessionList(allSessions)
-	a.queueSessionsBroadcast(allSessions)
+	metricsOnly["session_id"] = id
+	a.saveSessionByID(id, metricsOnly)
 	w.WriteHeader(http.StatusOK)
 	writeJSON(w, map[string]string{"status": "ok"})
 }
@@ -1696,7 +1677,12 @@ func (a *App) applySessionSettingsUpdate(id string, payload map[string]interface
 		}
 	}
 
-	a.saveSessionList(sessions)
+	for _, session := range updatedSessions {
+		if session == nil {
+			continue
+		}
+		a.saveSessionByID(getString(session, "session_id"), session)
+	}
 	if transportShouldApply {
 		if portNum, err := strconv.Atoi(targetPort); err == nil {
 			a.armTransportFaultLoop(portNum, transportFaultType, transportConsecutive, transportConsecutiveUnits, transportFrequency)
@@ -5090,12 +5076,16 @@ func (a *App) saveSessionByID(sessionID string, session SessionData) {
 	copy(updated, snap)
 	for i, s := range updated {
 		if getString(s, "session_id") == sessionID {
+			merged := cloneSession(s)
+			for k, v := range session {
+				merged[k] = v
+			}
 			existingRevision := getString(s, "control_revision")
 			incomingRevision := getString(session, "control_revision")
 			if isControlRevisionNewer(existingRevision, incomingRevision) {
-				copySessionControlState(session, s)
+				copySessionControlState(merged, s)
 			}
-			updated[i] = cloneSession(session)
+			updated[i] = merged
 			break
 		}
 	}
