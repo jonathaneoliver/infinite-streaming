@@ -4704,7 +4704,7 @@ func cloneSession(session SessionData) SessionData {
 	}
 	clone := make(SessionData, len(session))
 	for key, value := range session {
-		clone[key] = value
+		clone[key] = cloneInterface(value)
 	}
 	return clone
 }
@@ -5672,8 +5672,15 @@ func (a *App) queueSessionsBroadcast(sessions []SessionData) {
 	if a.sessionsHub == nil {
 		return
 	}
+	// Snapshot before stashing. The broadcast pipeline runs asynchronously
+	// (250ms timer → normalizeSessionsForResponse mutates the maps → SSE
+	// clients marshal them). Without this snapshot the pipeline shares maps
+	// with the calling handler, which continues to mutate sessionData
+	// between successive saveSessionList calls — that's the race that
+	// triggers `concurrent map iteration and map write` in json.Marshal.
+	snapshot := cloneSessionList(sessions)
 	a.sessionsBroadcastMu.Lock()
-	a.sessionsBroadcastLatest = sessions
+	a.sessionsBroadcastLatest = snapshot
 	if a.sessionsBroadcastPending {
 		a.sessionsBroadcastMu.Unlock()
 		return
@@ -5683,6 +5690,47 @@ func (a *App) queueSessionsBroadcast(sessions []SessionData) {
 	time.AfterFunc(250*time.Millisecond, func() {
 		a.flushSessionsBroadcast()
 	})
+}
+
+// cloneSessionList deep-copies the maps inside the slice so the result can
+// be iterated/mutated independently of the input. Primitives are shared by
+// value; nested map[string]interface{} and []interface{} are recursively
+// cloned. Other slice/value types (e.g. []PlaylistInfo) are treated as
+// immutable from this point on.
+func cloneSessionList(sessions []SessionData) []SessionData {
+	if sessions == nil {
+		return nil
+	}
+	out := make([]SessionData, len(sessions))
+	for i, session := range sessions {
+		out[i] = cloneSession(session)
+	}
+	return out
+}
+
+func cloneInterface(v interface{}) interface{} {
+	switch t := v.(type) {
+	case nil:
+		return nil
+	case SessionData:
+		return cloneSession(t)
+	case map[string]interface{}:
+		out := make(map[string]interface{}, len(t))
+		for k, vv := range t {
+			out[k] = cloneInterface(vv)
+		}
+		return out
+	case []interface{}:
+		out := make([]interface{}, len(t))
+		for i, vv := range t {
+			out[i] = cloneInterface(vv)
+		}
+		return out
+	case []SessionData:
+		return cloneSessionList(t)
+	default:
+		return v
+	}
 }
 
 func (a *App) flushSessionsBroadcast() {
