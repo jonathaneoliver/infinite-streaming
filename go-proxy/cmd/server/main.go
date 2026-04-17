@@ -5037,7 +5037,7 @@ func (a *App) stampAndBroadcast() {
 
 func (a *App) saveSessionList(sessions []SessionData) {
 	a.sessionsMu.Lock()
-	a.sessionsData = sessions
+	a.sessionsData = cloneSessionList(sessions)
 	a.stampAndBroadcast()
 	a.sessionsMu.Unlock()
 }
@@ -5051,7 +5051,7 @@ func (a *App) saveSessionByID(sessionID string, session SessionData) {
 			if isControlRevisionNewer(existingRevision, incomingRevision) {
 				copySessionControlState(session, s)
 			}
-			a.sessionsData[i] = session
+			a.sessionsData[i] = cloneSession(session)
 			break
 		}
 	}
