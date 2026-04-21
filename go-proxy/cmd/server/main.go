@@ -1358,8 +1358,19 @@ func (a *App) handlePostSessionMetrics(w http.ResponseWriter, r *http.Request) {
 	}
 	metricsOnly["session_id"] = id
 	a.saveSessionByID(id, metricsOnly)
+	if isSignificantPlayerEvent(getString(metricsOnly, "player_metrics_last_event")) {
+		a.flushSessionsBroadcast()
+	}
 	w.WriteHeader(http.StatusOK)
 	writeJSON(w, map[string]string{"status": "ok"})
+}
+
+func isSignificantPlayerEvent(event string) bool {
+	switch strings.ToLower(strings.TrimSpace(event)) {
+	case "stall_start", "stall_end", "segment_stall", "restart", "frozen", "error", "loop_marker":
+		return true
+	}
+	return false
 }
 
 
@@ -4036,8 +4047,21 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 				externalPort,
 			)
 		}
-		bytesOut, _ = io.Copy(writer, resp.Body)
-		_ = writer.Flush()
+		var copyErr error
+		bytesOut, copyErr = io.Copy(writer, resp.Body)
+		flushErr := writer.Flush()
+		if copyErr != nil || flushErr != nil {
+			writeErr := copyErr
+			if writeErr == nil {
+				writeErr = flushErr
+			}
+			log.Printf("[GO-PROXY][ABANDONED] client disconnected mid-transfer url=%s bytes_sent=%d content_length=%s request_kind=%s session_id=%s external_port=%s err=%v",
+				upstreamURL, bytesOut, resp.Header.Get("Content-Length"), requestKind, getString(sessionData, "session_id"), externalPort, writeErr)
+		}
+		if isManifest || isMasterManifest {
+			log.Printf("[GO-PROXY][MANIFEST] url=%s bytes_sent=%d upstream_content_length=%s status=%d session_id=%s external_port=%s",
+				upstreamURL, bytesOut, resp.Header.Get("Content-Length"), resp.StatusCode, getString(sessionData, "session_id"), externalPort)
+		}
 		// On the segment success path, hand flight-end off to the socket drain goroutine
 		// so it waits for the TC backlog to drain before marking the flight as done.
 		// Only launch on Linux where a.traffic is available (TC backlog polling requires TC).
