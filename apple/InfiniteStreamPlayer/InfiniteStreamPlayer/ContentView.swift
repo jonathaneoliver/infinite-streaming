@@ -21,7 +21,7 @@ enum ServerEnvironment: String, CaseIterable, Identifiable {
         switch self {
         case .dev: return "100.111.190.54"
         case .release: return "infinitestreaming.jeoliver.com"
-        case .ubuntu: return "jonathanoliver-ubuntu.local"
+        case .ubuntu: return "192.168.0.106"
         }
     }
 
@@ -55,6 +55,7 @@ struct ContentView: View {
     @State private var codecSelection: CodecOption = .h264
     @AppStorage("server_environment") private var serverEnvironmentRaw: String = ServerEnvironment.dev.rawValue
     @State private var showContentPicker = false
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
 
     init() {
         let playback = PlaybackViewModel()
@@ -77,45 +78,97 @@ struct ContentView: View {
                 Text("InfiniteStream Player")
                     .font(.title)
 
-                HStack(spacing: 12) {
-                    Button("Retry Fetch") {
-                        viewModel.logAction("Retry Fetch")
-                        applyEnvironment()
-                        viewModel.retryFetch()
-                    }
-                    .buttonStyle(.bordered)
-                    Button("Restart Playback") {
-                        viewModel.logAction("Restart Playback")
-                        applyEnvironment()
-                        viewModel.restartPlayback()
-                    }
-                    .buttonStyle(.bordered)
-                    Button("Reload Page") {
-                        viewModel.logAction("Reload Page")
-                        Task {
-                            applyEnvironment()
-                            await viewModel.reloadPage()
+                let compact = horizontalSizeClass == .compact
+                if compact {
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack(spacing: 8) {
+                            Button("Retry") {
+                                viewModel.logAction("Retry Fetch")
+                                applyEnvironment()
+                                viewModel.retryFetch()
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                            Button("Restart") {
+                                viewModel.logAction("Restart Playback")
+                                applyEnvironment()
+                                viewModel.restartPlayback()
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                            Button("Reload") {
+                                viewModel.logAction("Reload Page")
+                                Task {
+                                    applyEnvironment()
+                                    await viewModel.reloadPage()
+                                }
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
                         }
+                        HStack(spacing: 12) {
+                            Toggle("4K", isOn: $viewModel.prefer4kNative)
+                                .toggleStyle(.switch)
+                                .fixedSize()
+                            Toggle("Auto-Recovery", isOn: $viewModel.autoRecoveryEnabled)
+                                .toggleStyle(.switch)
+                                .fixedSize()
+                            Toggle("Go Live", isOn: $viewModel.goLiveMode)
+                                .toggleStyle(.switch)
+                                .fixedSize()
+                            Toggle("Local Proxy", isOn: $viewModel.localProxyEnabled)
+                                .toggleStyle(.switch)
+                                .fixedSize()
+                        }
+                        .font(.caption)
                     }
-                    .buttonStyle(.bordered)
-                    Spacer()
-                    HStack(spacing: 6) {
-                        Toggle("", isOn: $viewModel.prefer4kNative)
-                            .labelsHidden()
-                            .toggleStyle(.switch)
-                        Text("Allow 4K")
-                    }
-                    HStack(spacing: 6) {
-                        Toggle("", isOn: $viewModel.autoRecoveryEnabled)
-                            .labelsHidden()
-                            .toggleStyle(.switch)
-                        Text("Auto-Recovery")
-                    }
-                    HStack(spacing: 6) {
-                        Toggle("", isOn: $viewModel.localProxyEnabled)
-                            .labelsHidden()
-                            .toggleStyle(.switch)
-                        Text("Local Proxy")
+                } else {
+                    HStack(spacing: 12) {
+                        Button("Retry Fetch") {
+                            viewModel.logAction("Retry Fetch")
+                            applyEnvironment()
+                            viewModel.retryFetch()
+                        }
+                        .buttonStyle(.bordered)
+                        Button("Restart Playback") {
+                            viewModel.logAction("Restart Playback")
+                            applyEnvironment()
+                            viewModel.restartPlayback()
+                        }
+                        .buttonStyle(.bordered)
+                        Button("Reload Page") {
+                            viewModel.logAction("Reload Page")
+                            Task {
+                                applyEnvironment()
+                                await viewModel.reloadPage()
+                            }
+                        }
+                        .buttonStyle(.bordered)
+                        Spacer()
+                        HStack(spacing: 6) {
+                            Toggle("", isOn: $viewModel.prefer4kNative)
+                                .labelsHidden()
+                                .toggleStyle(.switch)
+                            Text("Allow 4K")
+                        }
+                        HStack(spacing: 6) {
+                            Toggle("", isOn: $viewModel.autoRecoveryEnabled)
+                                .labelsHidden()
+                                .toggleStyle(.switch)
+                            Text("Auto-Recovery")
+                        }
+                        HStack(spacing: 6) {
+                            Toggle("", isOn: $viewModel.goLiveMode)
+                                .labelsHidden()
+                                .toggleStyle(.switch)
+                            Text("Go Live")
+                        }
+                        HStack(spacing: 6) {
+                            Toggle("", isOn: $viewModel.localProxyEnabled)
+                                .labelsHidden()
+                                .toggleStyle(.switch)
+                            Text("Local Proxy")
+                        }
                     }
                 }
 
@@ -164,36 +217,69 @@ struct ContentView: View {
                             viewModel.baseURLString = baseURLText
                         }
 
-                    HStack(spacing: 8) {
-                        Picker("Protocol", selection: $protocolSelection) {
-                            ForEach(ProtocolOption.allCases) { option in
-                                Text(option.label)
-                                    .tag(option)
-                                    .foregroundColor(option == .dash ? .secondary : .primary)
-                                    .opacity(option == .dash ? 0.4 : 1.0)
-                                    .disabled(option == .dash)
+                    if compact {
+                        VStack(alignment: .leading, spacing: 6) {
+                            HStack(spacing: 8) {
+                                Picker("Protocol", selection: $protocolSelection) {
+                                    ForEach(ProtocolOption.allCases) { option in
+                                        Text(option.label).tag(option)
+                                    }
+                                }
+                                Picker("Segment", selection: $segmentSelection) {
+                                    ForEach(SegmentOption.allCases) { option in
+                                        Text(option.label).tag(option)
+                                    }
+                                }
+                                Picker("Codec", selection: $codecSelection) {
+                                    ForEach(CodecOption.allCases) { option in
+                                        Text(option.label).tag(option)
+                                    }
+                                }
                             }
-                        }
-                        Picker("Segment", selection: $segmentSelection) {
-                            ForEach(SegmentOption.allCases) { option in
-                                Text(option.label).tag(option)
+                            .controlSize(.small)
+                            Button {
+                                showContentPicker = true
+                            } label: {
+                                let display = viewModel.selectedContent.isEmpty ? "Select content" : viewModel.selectedContent
+                                Text(display)
+                                    .lineLimit(1)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
                             }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
                         }
-                        Picker("Codec", selection: $codecSelection) {
-                            ForEach(CodecOption.allCases) { option in
-                                Text(option.label).tag(option)
+                    } else {
+                        HStack(spacing: 8) {
+                            Picker("Protocol", selection: $protocolSelection) {
+                                ForEach(ProtocolOption.allCases) { option in
+                                    Text(option.label)
+                                        .tag(option)
+                                        .foregroundColor(option == .dash ? .secondary : .primary)
+                                        .opacity(option == .dash ? 0.4 : 1.0)
+                                        .disabled(option == .dash)
+                                }
                             }
+                            Picker("Segment", selection: $segmentSelection) {
+                                ForEach(SegmentOption.allCases) { option in
+                                    Text(option.label).tag(option)
+                                }
+                            }
+                            Picker("Codec", selection: $codecSelection) {
+                                ForEach(CodecOption.allCases) { option in
+                                    Text(option.label).tag(option)
+                                }
+                            }
+                            Button {
+                                showContentPicker = true
+                            } label: {
+                                let display = viewModel.selectedContent.isEmpty ? "Select content" : viewModel.selectedContent
+                                Text(display)
+                                    .lineLimit(1)
+                            }
+                            .buttonStyle(.bordered)
                         }
-                        Button {
-                            showContentPicker = true
-                        } label: {
-                            let display = viewModel.selectedContent.isEmpty ? "Select content" : viewModel.selectedContent
-                            Text(display)
-                                .lineLimit(1)
-                        }
-                        .buttonStyle(.bordered)
+                        .controlSize(.small)
                     }
-                    .controlSize(.small)
 
                     if !viewModel.lastMasterRequestLine.isEmpty {
                         Text(viewModel.lastMasterRequestLine)
@@ -247,6 +333,14 @@ struct ContentView: View {
         }
         .onChange(of: codecSelection) { value in
             viewModel.codecOption = value
+        }
+        .onChange(of: viewModel.goLiveMode) { _ in
+            applyEnvironment()
+            if !viewModel.selectedContent.isEmpty {
+                viewModel.logAction("Go Live mode \(viewModel.goLiveMode ? "ON" : "OFF") — restarting playback")
+                viewModel.applySelection()
+                viewModel.play()
+            }
         }
         .sheet(isPresented: $showContentPicker) {
             NavigationView {
@@ -365,12 +459,17 @@ struct ContentView: View {
         let contentPort = env.contentPort
         let playbackPort = env.playbackPort
         viewModel.baseURLString = "http://\(host):\(contentPort)"
-        viewModel.playbackBaseURLString = "http://\(host):\(playbackPort)"
+        if viewModel.goLiveMode {
+            viewModel.playbackBaseURLString = "http://\(host):\(contentPort)"
+            viewModel.includePlayerIdInURL = false
+        } else {
+            viewModel.playbackBaseURLString = "http://\(host):\(playbackPort)"
+            viewModel.includePlayerIdInURL = true
+        }
         if let controlURL = URL(string: viewModel.baseURLString) {
             testingViewModel.updateControlBaseURL(controlURL)
         }
         viewModel.primePlayback = false
-        viewModel.includePlayerIdInURL = true
         viewModel.forcePlayerIdOnPlayback = false
         viewModel.allowPlayerIdOnContentPort = false
     }
