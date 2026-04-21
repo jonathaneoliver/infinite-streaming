@@ -2016,22 +2016,15 @@ func (a *App) handleLinkSessions(w http.ResponseWriter, r *http.Request) {
 		groupID = fmt.Sprintf("G%d", time.Now().Unix()%10000)
 	}
 
-	sessions := a.getSessionList()
 	linkedCount := 0
-	for _, session := range sessions {
-		sessionID := getString(session, "session_id")
-		for _, targetID := range payload.SessionIds {
-			if sessionID == targetID {
-				session["group_id"] = groupID
-				applyControlRevision(session, controlRevision)
-				linkedCount++
-				break
-			}
+	for _, targetID := range payload.SessionIds {
+		update := SessionData{
+			"session_id":       targetID,
+			"group_id":         groupID,
+			"control_revision": controlRevision,
 		}
-	}
-
-	if linkedCount > 0 {
-		a.saveSessionList(sessions)
+		a.saveSessionByID(targetID, update)
+		linkedCount++
 	}
 	log.Printf("SESSION GROUP LINK result group_id=%s linked=%d", groupID, linkedCount)
 
@@ -2066,29 +2059,31 @@ func (a *App) handleUnlinkSession(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	controlRevision := newControlRevision()
 	if payload.UnlinkGroup && groupID != "" {
 		for _, session := range sessions {
 			if getString(session, "group_id") == groupID {
-				session["group_id"] = ""
-				applyControlRevision(session, newControlRevision())
+				sid := getString(session, "session_id")
+				a.saveSessionByID(sid, SessionData{
+					"session_id":       sid,
+					"group_id":         "",
+					"control_revision": controlRevision,
+				})
 				updated++
 				found = true
 			}
 		}
 	} else if payload.SessionId != "" {
-		for _, session := range sessions {
-			if getString(session, "session_id") == payload.SessionId {
-				session["group_id"] = ""
-				applyControlRevision(session, newControlRevision())
-				updated++
-				found = true
-				break
-			}
-		}
+		a.saveSessionByID(payload.SessionId, SessionData{
+			"session_id":       payload.SessionId,
+			"group_id":         "",
+			"control_revision": controlRevision,
+		})
+		updated++
+		found = true
 	}
 
 	if found {
-		a.saveSessionList(sessions)
 		writeJSON(w, map[string]interface{}{
 			"message":        "Session group updated successfully",
 			"group_id":       groupID,
@@ -5823,6 +5818,22 @@ func (a *App) removeInactiveSessions() {
 	for port := range removedPorts {
 		a.disablePatternForPort(port)
 		a.armTransportFaultLoop(port, "none", 1, transportUnitsSeconds, 0)
+	}
+	// Auto-ungroup single-member groups
+	groupMembers := map[string][]string{}
+	for _, session := range active {
+		gid := getString(session, "group_id")
+		if gid != "" {
+			groupMembers[gid] = append(groupMembers[gid], getString(session, "session_id"))
+		}
+	}
+	for _, members := range groupMembers {
+		if len(members) == 1 {
+			a.saveSessionByID(members[0], SessionData{
+				"session_id": members[0],
+				"group_id":   "",
+			})
+		}
 	}
 }
 
