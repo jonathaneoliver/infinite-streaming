@@ -2548,7 +2548,7 @@ maybe a histogram of b
                     'mbps_transfer_rate',
                     'mbps_transfer_complete',
                     'Player est.',
-                    'Player Wire Bitrate',
+                    'Player Network Rate',
                     'Player Variant',
                     'Server Variant',
                     'Variants',
@@ -2581,7 +2581,7 @@ maybe a histogram of b
                 ...maxFor(isSeriesHidden('mbps_transfer_rate'), transferRateData),
                 ...maxFor(isSeriesHidden('mbps_transfer_complete'), transferCompleteData),
                 ...maxFor(isSeriesHidden('Player est.'), estimateData),
-                ...maxFor(isSeriesHidden('Player Wire Bitrate'), playerWireBitrateData),
+                ...maxFor(isSeriesHidden('Player Network Rate'), playerWireBitrateData),
                 ...maxFor(isSeriesHidden('Player Variant'), renditionData),
                 ...maxFor(isSeriesHidden('Server Variant'), serverRenditionData)
             );
@@ -2661,7 +2661,7 @@ maybe a histogram of b
                     hidden: isSeriesHidden('Player est.')
                 },
                 {
-                    label: 'Player Wire Bitrate',
+                    label: 'Player Network Rate',
                     data: playerWireBitrateData,
                     borderColor: '#059669',
                     backgroundColor: 'rgba(5,150,105,0.15)',
@@ -2669,7 +2669,7 @@ maybe a histogram of b
                     pointRadius: 0,
                     tension: 0.2,
                     spanGaps: false,
-                    hidden: isSeriesHidden('Player Wire Bitrate')
+                    hidden: isSeriesHidden('Player Network Rate')
                 },
                 {
                     label: 'Player Variant',
