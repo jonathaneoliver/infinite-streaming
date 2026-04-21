@@ -179,7 +179,7 @@
     function renderManifestOptions(sessionId, variants, selected) {
         const selectedSet = new Set(selected || []);
         const list = sortedPlaylists(variants);
-        const allChecked = selectedSet.size === 0 || selectedSet.has('All');
+        const allChecked = selected == null ? true : selectedSet.has('All');
         const checkbox = (value, label) => {
             const checked = allChecked || selectedSet.has(value) ? 'checked' : '';
             return `<label><input type="checkbox" data-field="manifest_failure_urls" value="${value}" ${checked}>${label}</label>`;
@@ -211,7 +211,7 @@
     function renderSegmentOptions(sessionId, playlists, selected) {
         const selectedSet = new Set(selected || []);
         const list = sortedPlaylists(playlists);
-        const allChecked = selectedSet.size === 0 || selectedSet.has('All');
+        const allChecked = selected == null ? true : selectedSet.has('All');
         const checkbox = (value, label) => {
             const checked = allChecked || selectedSet.has(value) ? 'checked' : '';
             return `<label><input type="checkbox" data-field="segment_failure_urls" value="${value}" ${checked}>${label}</label>`;
@@ -474,8 +474,8 @@
     function renderSessionCard(session, options = {}) {
         const sessionId = session.session_id;
         const manifestVariants = session.manifest_variants || [];
-        const manifestSelected = session.manifest_failure_urls || [];
-        const segmentSelected = session.segment_failure_urls || [];
+        const manifestSelected = session.manifest_failure_urls;
+        const segmentSelected = session.segment_failure_urls;
         const inlineHost = options.inlineHost || false;
         const hideTitle = options.hideTitle || false;
         const showPortItem = options.showPortItem || false;
@@ -1300,6 +1300,24 @@
 
     // Initialize collapsible sections and tabs
     function initializeUI() {
+        // "All" checkbox toggles all sibling scope checkboxes
+        document.addEventListener('change', (e) => {
+            const cb = e.target;
+            if (!cb || cb.type !== 'checkbox' || !cb.dataset.field) return;
+            const field = cb.dataset.field;
+            if (field !== 'segment_failure_urls' && field !== 'manifest_failure_urls') return;
+            const group = cb.closest('.checkbox-group');
+            if (!group) return;
+            const allCheckboxes = group.querySelectorAll(`input[data-field="${field}"]`);
+            const allCb = group.querySelector(`input[data-field="${field}"][value="All"]`);
+            if (cb.value === 'All') {
+                allCheckboxes.forEach(c => { c.checked = cb.checked; });
+            } else if (allCb) {
+                const others = Array.from(allCheckboxes).filter(c => c.value !== 'All');
+                allCb.checked = others.every(c => c.checked);
+            }
+        });
+
         document.addEventListener('click', (e) => {
             const eventTarget = e && e.target;
             const targetElement = eventTarget instanceof Element

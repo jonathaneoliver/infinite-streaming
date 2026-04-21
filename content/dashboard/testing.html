@@ -561,6 +561,44 @@ maybe a histogram of b
         .abrchar-warn { color: #b45309; }
         .abrchar-error { color: #b91c1c; }
         .abrchar-success { color: #166534; }
+
+        .chart-wrap {
+            position: relative;
+        }
+        .chart-paused-badge {
+            display: none;
+            position: absolute;
+            top: 8px;
+            right: 12px;
+            background: rgba(220, 38, 38, 0.85);
+            color: #fff;
+            font-size: 11px;
+            font-weight: 700;
+            padding: 2px 8px;
+            border-radius: 4px;
+            letter-spacing: 0.5px;
+            pointer-events: none;
+            z-index: 10;
+        }
+        .chart-wrap.chart-paused .chart-paused-badge {
+            display: block;
+        }
+        .chart-wrap.chart-paused {
+            cursor: pointer;
+        }
+        button[data-action="pause-bitrate-chart"].chart-live {
+            color: #16a34a;
+            border-color: #16a34a;
+            font-weight: 600;
+        }
+        @keyframes chart-pulse-dot {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.35; }
+        }
+        button[data-action="pause-bitrate-chart"].chart-live::before {
+            content: '● ';
+            animation: chart-pulse-dot 1.2s ease-in-out infinite;
+        }
     </style>
 </head>
 <body>
@@ -659,6 +697,10 @@ maybe a histogram of b
         const bandwidthVisibility = new Map();
         const bitrateAxisMaxBySession = new Map();
         const lastRecordedPlayerEventBySession = new Map();
+        const lastRecordedLoopCountBySession = new Map();
+        const lastRecordedServerLoopCountBySession = new Map();
+        const lastRecordedLoopEventStampBySession = new Map();
+        const lastRecordedServerLoopEventStampBySession = new Map();
         const pendingShaping = new Map();
 
         function shapingValuesMatch(serverSession, pendingValues) {
@@ -1062,25 +1104,13 @@ maybe a histogram of b
         function renderSessionTabs(sessions) {
             if (!sessions.length) return '';
             const hasMultipleSessions = sessions.length > 1;
-            const hasUngroupedSessions = sessions.some(s => !s.group_id);
-            const showGroupControls = hasMultipleSessions && hasUngroupedSessions;
-            if (!showGroupControls) {
-                selectedSessionIds.clear();
-            } else {
-                const eligible = new Set(
-                    sessions
-                        .filter(session => !session.group_id)
-                        .map(session => String(session.session_id))
-                );
-                Array.from(selectedSessionIds).forEach(id => {
-                    if (!eligible.has(String(id))) {
-                        selectedSessionIds.delete(id);
-                    }
-                });
-            }
-            
+            const validIds = new Set(sessions.map(s => String(s.session_id)));
+            Array.from(selectedSessionIds).forEach(id => {
+                if (!validIds.has(String(id))) selectedSessionIds.delete(id);
+            });
+
             return `
-                ${showGroupControls ? `
+                ${hasMultipleSessions ? `
                 <div class="group-controls">
                     <button class="btn btn-sm btn-secondary" id="linkSelectedSessions">Group Selected Sessions</button>
                     <span class="status-message" data-role="link-status">Select 2+ sessions to group</span>
@@ -1096,7 +1126,7 @@ maybe a histogram of b
                         const label = `Session ${id}${portSuffix} · ${session.player_id || 'Unknown Player'}`;
                         const groupBadge = session.group_id ? `<span class="group-badge">${session.group_id}</span>` : '';
                         const isChecked = selectedSessionIds.has(String(id)) ? 'checked' : '';
-                        const checkbox = showGroupControls && !session.group_id ? 
+                        const checkbox = hasMultipleSessions ?
                             `<input type="checkbox" class="session-checkbox" data-session-id="${id}" ${isChecked}>` : '';
                         return `<button class="session-tab ${isActive} ${isGrouped}" data-session-tab="${id}">
                             ${checkbox}${label}${groupBadge}
@@ -1137,7 +1167,7 @@ maybe a histogram of b
             }
             const groupHost = document.createElement('div');
             groupHost.innerHTML = activeSession ? renderGroupInfo(activeSession, sessions) : '';
-            const nextGroupInfo = groupHost.firstElementChild;
+            const nextGroupInfo = groupHost.querySelector('.group-info');
             const existingGroupInfo = container.querySelector('.group-info');
             if (nextGroupInfo) {
                 if (existingGroupInfo) {
@@ -1295,11 +1325,11 @@ maybe a histogram of b
                 const valueEl = input.parentElement?.querySelector('.range-value');
                 if (valueEl) valueEl.textContent = input.value;
             };
-            const syncFailureScope = (field, values, allWhenEmpty) => {
+            const syncFailureScope = (field, values) => {
                 const selected = Array.isArray(values) ? values.map(String) : [];
                 const selectedSet = new Set(selected);
-                const allChecked = allWhenEmpty
-                    ? (selected.length === 0 || selectedSet.has('All'))
+                const allChecked = values == null
+                    ? true
                     : selectedSet.has('All');
                 card.querySelectorAll(`input[data-field="${field}"]`).forEach(input => {
                     if (input.value === 'All') {
@@ -1455,6 +1485,31 @@ maybe a histogram of b
 
             if (!best) return null;
             return Math.round((best.bandwidth / 1000000) * 1000) / 1000;
+        }
+
+        function updateThroughputSlider(card, session) {
+            if (!card || !session) return;
+            const patternEnabled = session.nftables_pattern_enabled === true
+                || session.nftables_pattern_enabled === 1
+                || session.nftables_pattern_enabled === 'true';
+            if (!patternEnabled) return;
+            const runtimeRate = Number(session.nftables_pattern_rate_runtime_mbps);
+            const stepIndex = Number(session.nftables_pattern_step_runtime || session.nftables_pattern_step || 0);
+            const steps = Array.isArray(session.nftables_pattern_steps) ? session.nftables_pattern_steps : [];
+            let stepRate = NaN;
+            if (stepIndex > 0 && stepIndex <= steps.length) {
+                stepRate = Number(steps[stepIndex - 1]?.rate_mbps);
+            }
+            const baseRate = Number(session.nftables_bandwidth_mbps);
+            let target = runtimeRate;
+            if (!Number.isFinite(target)) target = stepRate;
+            if (!Number.isFinite(target)) target = baseRate;
+            if (Number.isFinite(target) && target >= 0) {
+                const throughputInput = card.querySelector('input[data-field="shaping_throughput_mbps"]');
+                const throughputValue = card.querySelector('[data-field="shaping_throughput_row"] .range-value');
+                if (throughputInput) throughputInput.value = String(target);
+                if (throughputValue) throughputValue.textContent = String(target);
+            }
         }
 
         function updateSessionDetailData(card, session) {
@@ -1671,19 +1726,36 @@ maybe a histogram of b
                 };
             }
             if (activeSession && existingCard && String(existingCard.dataset.sessionId || '') === sessionKey) {
-                updateTabsAndGroupInfo(container, sessions, activeSession);
-                updateSessionDetailFields(existingCard, activeSession);
-                const shouldSync = shouldSyncControls(sessionKey, activeSession);
-                if (shouldSync) {
-                    syncServerFaultControls(existingCard, activeSession);
-                    syncNetworkShapingControls(existingCard, activeSession);
-                    syncContentControls(existingCard, activeSession);
+                // Check if manifest_variants just became available - need full re-render for presets
+                const hasVariants = Array.isArray(activeSession.manifest_variants) && activeSession.manifest_variants.length > 0;
+                let hadPresets = false;
+                const presetsRaw = existingCard.dataset.shapingPresets || '';
+                if (presetsRaw) {
+                    try {
+                        const decoded = JSON.parse(decodeURIComponent(presetsRaw));
+                        hadPresets = Array.isArray(decoded) && decoded.length > 0;
+                    } catch (err) {
+                        hadPresets = presetsRaw !== 'W10%3D' && presetsRaw !== '%5B%5D';
+                    }
                 }
-                syncServerFaultData(existingCard, activeSession);
-                updateSessionDetailData(existingCard, activeSession);
-                mountPlayerCharacterizationForCard(existingCard, activeSession);
-                pushBandwidthSample(activeSession);
-                return;
+                if (hasVariants && !hadPresets) {
+                    // Fall through to full re-render below
+                } else {
+                    updateTabsAndGroupInfo(container, sessions, activeSession);
+                    updateSessionDetailFields(existingCard, activeSession);
+                    const shouldSync = shouldSyncControls(sessionKey, activeSession);
+                    if (shouldSync) {
+                        syncServerFaultControls(existingCard, activeSession);
+                        syncNetworkShapingControls(existingCard, activeSession);
+                        syncContentControls(existingCard, activeSession);
+                    }
+                    syncServerFaultData(existingCard, activeSession);
+                    updateSessionDetailData(existingCard, activeSession);
+                    updateThroughputSlider(existingCard, activeSession);
+                    mountPlayerCharacterizationForCard(existingCard, activeSession);
+                    pushBandwidthSamplesForAllSessions();
+                    return;
+                }
             }
             const activeTab = existingCard?.querySelector('.tab-button.active')?.dataset?.tab || '';
             container.innerHTML = renderSessionTabs(sessions) + (activeSession ? 
@@ -1704,27 +1776,66 @@ maybe a histogram of b
                     updateAllStepRiskUi(restoredCard);
                     TestingSessionUI.updateTransportModeUi(restoredCard);
                     updateSessionDetailData(restoredCard, activeSession);
+                    updateThroughputSlider(restoredCard, activeSession);
                     mountPlayerCharacterizationForCard(restoredCard, activeSession);
                 }
-                pushBandwidthSample(activeSession);
+                pushBandwidthSamplesForAllSessions();
             }
+        }
+
+        let compareMode = false;
+
+        const SESSION_COLORS = [
+            { main: '#2563eb', light: '#93c5fd' },  // blue
+            { main: '#ea580c', light: '#fdba74' },  // orange
+            { main: '#16a34a', light: '#86efac' },  // green
+            { main: '#9333ea', light: '#c4b5fd' },  // purple
+            { main: '#dc2626', light: '#fca5a5' },  // red
+            { main: '#0891b2', light: '#67e8f9' },  // cyan
+        ];
+
+        function getGroupSessionIds(session, allSessions) {
+            if (!session || !session.group_id) return [session?.session_id].filter(Boolean);
+            return allSessions
+                .filter(s => s.group_id === session.group_id)
+                .map(s => s.session_id);
+        }
+
+        function sessionColorIndex(sessionId, groupIds) {
+            const idx = groupIds.indexOf(sessionId);
+            return idx >= 0 ? idx % SESSION_COLORS.length : 0;
         }
 
         function renderGroupInfo(session, allSessions) {
             if (!session.group_id) return '';
             const groupMembers = allSessions.filter(s => s.group_id === session.group_id && s.session_id !== session.session_id);
-            if (groupMembers.length === 0) return '';
-            const memberLabels = groupMembers.map(s => {
-                const portValue = s.x_forwarded_port_external || s.x_forwarded_port || '';
-                const portSuffix = portValue ? ` (Port ${portValue})` : '';
-                return `Session ${s.session_id}${portSuffix}`;
-            }).join(', ');
+            const memberLabels = groupMembers.length > 0
+                ? groupMembers.map(s => {
+                    const portValue = s.x_forwarded_port_external || s.x_forwarded_port || '';
+                    const portSuffix = portValue ? ` (Port ${portValue})` : '';
+                    return `Session ${s.session_id}${portSuffix}`;
+                }).join(', ')
+                : 'no other members';
+            const compareChecked = compareMode ? 'checked' : '';
+            const showCompare = groupMembers.length > 0;
             return `
                 <div class="group-info">
                     🔗 Grouped with: ${memberLabels}
+                    ${showCompare ? `<label style="margin-left:12px;cursor:pointer;">
+                        <input type="checkbox" id="compareModeToggle" ${compareChecked}> Compare Charts
+                    </label>` : ''}
                     <button class="unlink-btn" data-session-id="${session.session_id}" data-group-id="${session.group_id}">Ungroup</button>
                 </div>
             `;
+        }
+
+        function getCompareGroupIds() {
+            if (!compareMode || !activeSessionId) return [];
+            const session = sessionsById.get(activeSessionId);
+            if (!session?.group_id) return [];
+            const allSessions = Array.from(sessionsById.values());
+            const ids = getGroupSessionIds(session, allSessions);
+            return ids.length >= 2 ? ids : [];
         }
 
         function bandwidthSeriesKey(label) {
@@ -1750,8 +1861,8 @@ maybe a histogram of b
         function parseBandwidthChartEventType(rawEventType) {
             const eventType = String(rawEventType || '').trim().toLowerCase();
             if (!eventType) return null;
-            if (eventType.includes('stall')) return 'STALL';
-            if (eventType.includes('restart')) return 'RESTART';
+            if (eventType === 'stall_start' || eventType === 'segment_stall' || eventType === 'frozen') return 'STALL';
+            if (eventType === 'restart') return 'RESTART';
             return null;
         }
 
@@ -1983,10 +2094,38 @@ maybe a histogram of b
             return chartPausedBySession.get(String(sessionId || '')) === true;
         }
 
+        function updatePauseButtonAndOverlays(sessionId) {
+            const key = String(sessionId || '');
+            const paused = isChartPaused(key);
+            const card = document.querySelector(`.session-card[data-session-id="${key}"]`);
+            if (!card) return;
+            const btn = card.querySelector('button[data-action="pause-bitrate-chart"]');
+            if (btn) {
+                if (paused) {
+                    btn.textContent = 'Live';
+                    btn.classList.add('chart-live');
+                } else {
+                    btn.textContent = '⏸ Pause';
+                    btn.classList.remove('chart-live');
+                }
+            }
+            for (const wrap of card.querySelectorAll('.chart-wrap')) {
+                let badge = wrap.querySelector('.chart-paused-badge');
+                if (!badge) {
+                    badge = document.createElement('div');
+                    badge.className = 'chart-paused-badge';
+                    badge.textContent = 'PAUSED';
+                    wrap.appendChild(badge);
+                }
+                wrap.classList.toggle('chart-paused', paused);
+            }
+        }
+
         function toggleChartPause(sessionId) {
             const key = String(sessionId || '');
             const wasPaused = isChartPaused(key);
             chartPausedBySession.set(key, !wasPaused);
+            updatePauseButtonAndOverlays(key);
             if (wasPaused) { renderBandwidthChart(key); }
         }
 
@@ -2036,6 +2175,11 @@ maybe a histogram of b
             const playerEstimate = Number.isFinite(Number(session.player_metrics_network_bitrate_mbps))
                 ? Number(session.player_metrics_network_bitrate_mbps)
                 : null;
+            const rawPlayerWireBitrate = session.player_metrics_network_wire_mbps;
+            const playerWireBitrate = (rawPlayerWireBitrate === null || rawPlayerWireBitrate === undefined
+                || !Number.isFinite(Number(rawPlayerWireBitrate)))
+                ? null
+                : Number(rawPlayerWireBitrate);
             const serverRendition = Number.isFinite(Number(session.server_video_rendition_mbps))
                 ? Number(session.server_video_rendition_mbps)
                 : null;
@@ -2055,6 +2199,42 @@ maybe a histogram of b
             const bandwidthTarget = Number(session.nftables_bandwidth_mbps);
             const key = session.session_id;
             if (!key) return;
+
+            const numericLoopCount = Number(session.player_metrics_loop_count_player);
+            if (Number.isFinite(numericLoopCount) && numericLoopCount >= 0) {
+                const loopCount = Math.max(0, Math.round(numericLoopCount));
+                const prevLoopCount = lastRecordedLoopCountBySession.get(String(key));
+                if (Number.isFinite(prevLoopCount) && loopCount > prevLoopCount) {
+                    const stamp = `${String(key)}|player|${loopCount}`;
+                    if (lastRecordedLoopEventStampBySession.get(String(key)) !== stamp) {
+                        const eventSeries = bandwidthEventHistory.get(key) || [];
+                        const loopEventAtMs = getBandwidthChartEventTimestampMs(session, now);
+                        eventSeries.push({ ts: loopEventAtMs, type: 'LOOP_PLAYER' });
+                        const eventCutoff = now - windowMs;
+                        bandwidthEventHistory.set(key, eventSeries.filter((event) => Number(event.ts) >= eventCutoff));
+                        lastRecordedLoopEventStampBySession.set(String(key), stamp);
+                    }
+                }
+                lastRecordedLoopCountBySession.set(String(key), loopCount);
+            }
+
+            const numericServerLoopCount = Number(session.loop_count_server);
+            if (Number.isFinite(numericServerLoopCount) && numericServerLoopCount >= 0) {
+                const serverLoopCount = Math.max(0, Math.round(numericServerLoopCount));
+                const prevServerLoopCount = lastRecordedServerLoopCountBySession.get(String(key));
+                if (Number.isFinite(prevServerLoopCount) && serverLoopCount > prevServerLoopCount) {
+                    const stamp = `${String(key)}|server|${serverLoopCount}`;
+                    if (lastRecordedServerLoopEventStampBySession.get(String(key)) !== stamp) {
+                        const eventSeries = bandwidthEventHistory.get(key) || [];
+                        const loopEventAtMs = getBandwidthChartEventTimestampMs(session, now);
+                        eventSeries.push({ ts: loopEventAtMs, type: 'LOOP_SERVER' });
+                        const eventCutoff = now - windowMs;
+                        bandwidthEventHistory.set(key, eventSeries.filter((event) => Number(event.ts) >= eventCutoff));
+                        lastRecordedServerLoopEventStampBySession.set(String(key), stamp);
+                    }
+                }
+                lastRecordedServerLoopCountBySession.set(String(key), serverLoopCount);
+            }
 
             const eventType = parseBandwidthChartEventType(session.player_metrics_last_event || session.player_metrics_trigger_type);
             if (eventType) {
@@ -2093,6 +2273,7 @@ maybe a histogram of b
                 metricsAtMs,
                 bufferDepth,
                 playerEstimate,
+                playerWireBitrate,
                 currentRendition,
                 serverRendition,
                 framesDisplayed,
@@ -2103,7 +2284,15 @@ maybe a histogram of b
             const cutoff = now - windowMs;
             const filtered = series.filter(point => point.ts >= cutoff);
             bandwidthHistory.set(key, filtered);
-            renderBandwidthChart(key);
+            if (key === activeSessionId) {
+                renderBandwidthChart(key);
+            }
+        }
+
+        function pushBandwidthSamplesForAllSessions() {
+            for (const [sid, session] of sessionsById) {
+                pushBandwidthSample(session);
+            }
         }
 
         // Swim-lane events chart (STALL / RESTART / LOOP_PLAYER / LOOP_SERVER).
@@ -2114,6 +2303,34 @@ maybe a histogram of b
             'LOOP_PLAYER': { y: 2, color: '#06b6d4', label: 'LOOP PLAYER' },
             'LOOP_SERVER': { y: 1, color: '#84cc16', label: 'LOOP SERVER' }
         };
+        let legendHoverIndex = null;
+        let legendHoverChartId = null;
+        const legendHoverCallbacks = {
+            onHover: (event, legendItem, legend) => {
+                legendHoverIndex = legendItem.datasetIndex;
+                legendHoverChartId = legend.chart.id;
+                const ds = legend.chart.data.datasets[legendItem.datasetIndex];
+                if (!ds._origWidth) ds._origWidth = ds.borderWidth;
+                ds.borderWidth = ds._origWidth + 3;
+                legend.chart.update('none');
+            },
+            onLeave: (event, legendItem, legend) => {
+                legendHoverIndex = null;
+                legendHoverChartId = null;
+                const ds = legend.chart.data.datasets[legendItem.datasetIndex];
+                if (ds._origWidth) { ds.borderWidth = ds._origWidth; delete ds._origWidth; }
+                legend.chart.update('none');
+            }
+        };
+        function applyLegendHover(chart) {
+            if (legendHoverChartId !== chart.id || legendHoverIndex == null) return;
+            const ds = chart.data.datasets[legendHoverIndex];
+            if (ds) {
+                if (!ds._origWidth) ds._origWidth = ds.borderWidth;
+                ds.borderWidth = ds._origWidth + 3;
+            }
+        }
+
         function renderEventsChart(sessionId, windowStart, eventSeries) {
             const card = document.querySelector(`.session-card[data-session-id="${sessionId}"]`);
             if (!card) return;
@@ -2122,11 +2339,11 @@ maybe a histogram of b
             if (isChartPaused(sessionId)) return;
             const chartEvents = (eventSeries || [])
                 .filter((e) => Number(e.ts) >= windowStart)
-                .map((e) => ({ x: (e.ts - windowStart) / 1000, type: e.type }))
+                .map((e) => ({ x: (e.ts - windowStart) / 1000, type: e.type, ts: Number(e.ts) }))
                 .filter((e) => Number.isFinite(e.x) && e.x >= 0 && e.x <= 600);
             const datasets = Object.entries(EVENT_LANES).map(([type, cfg]) => ({
                 label: cfg.label,
-                data: chartEvents.filter((e) => e.type === type).map((e) => ({ x: e.x, y: cfg.y })),
+                data: chartEvents.filter((e) => e.type === type).map((e) => ({ x: e.x, y: cfg.y, ts: e.ts })),
                 backgroundColor: cfg.color,
                 borderColor: cfg.color,
                 pointRadius: 5,
@@ -2148,7 +2365,29 @@ maybe a histogram of b
                         plugins: {
                             legend: { display: true, position: 'bottom',
                                 labels: { color: '#6b7280', font: { family: 'Courier New, monospace', size: 10 }, boxWidth: 8, usePointStyle: true } },
-                            tooltip: { callbacks: { label: (ctx) => ctx.dataset.label } },
+                            tooltip: {
+                                callbacks: {
+                                    title: (items) => {
+                                        const first = Array.isArray(items) && items.length ? items[0] : null;
+                                        const ts = Number(first && first.raw && first.raw.ts);
+                                        if (!Number.isFinite(ts)) return '';
+                                        const d = new Date(ts);
+                                        const hh = String(d.getHours()).padStart(2, '0');
+                                        const mm = String(d.getMinutes()).padStart(2, '0');
+                                        const ss = String(d.getSeconds()).padStart(2, '0');
+                                        const ms = String(d.getMilliseconds()).padStart(3, '0');
+                                        return `${hh}:${mm}:${ss}.${ms}`;
+                                    },
+                                    label: (ctx) => {
+                                        const ts = Number(ctx && ctx.raw && ctx.raw.ts);
+                                        const startMs = Number(ctx.chart && ctx.chart.$windowStartMs) || 0;
+                                        const offset = Number.isFinite(ts) && startMs > 0
+                                            ? `  (+${((ts - startMs) / 1000).toFixed(3)}s)`
+                                            : '';
+                                        return `${ctx.dataset.label}${offset}`;
+                                    }
+                                }
+                            },
                             zoom: buildUnifiedChartZoomOptions(sessionId)
                         },
                         scales: {
@@ -2238,6 +2477,7 @@ maybe a histogram of b
                     metricsAtMs: point.metricsAtMs,
                     bufferDepth: point.bufferDepth,
                     playerEstimate: point.playerEstimate,
+                    playerWireBitrate: point.playerWireBitrate,
                     currentRendition: point.currentRendition,
                     serverRendition: point.serverRendition,
                     framesDisplayed: point.framesDisplayed,
@@ -2259,6 +2499,10 @@ maybe a histogram of b
             const transferCompleteData = points.map(point => ({ x: point.x, y: point.transferComplete }));
             const bufferDepthData = points.map(point => ({ x: point.x, y: Number.isFinite(point.bufferDepth) ? point.bufferDepth : null }));
             const estimateData = points.map(point => ({ x: point.x, y: point.playerEstimate || null }));
+            const playerWireBitrateData = points.map(point => ({
+                x: point.x,
+                y: (point.playerWireBitrate === null || point.playerWireBitrate === undefined) ? null : point.playerWireBitrate
+            }));
             const renditionData = points.map(point => ({ x: point.x, y: point.currentRendition || null }));
             const serverRenditionData = points.map(point => ({ x: point.x, y: point.serverRendition || null }));
             const framesDisplayedData = points.map(point => ({ x: point.x, y: Number.isFinite(point.framesDisplayed) ? point.framesDisplayed : null, atMs: point.metricsAtMs || null }));
@@ -2274,19 +2518,44 @@ maybe a histogram of b
             }
 
             const visibility = bandwidthVisibility.get(sessionId) || {};
-            const defaultVisibleLabels = new Set([
-                'mbps_shaper_rate',
-                'mbps_shaper_avg',
-                'mbps_transfer_rate',
-                'mbps_transfer_complete',
+            const compareGroupIdsForDefaults = getCompareGroupIds();
+            const compareActive = compareGroupIdsForDefaults.length >= 2;
+            const compareVisibleLabels = new Set([
                 'Player est.',
                 'Player Variant',
                 'Server Variant',
                 'Variants',
                 'Limit',
+                'mbps_shaper_avg',
                 'STALL',
                 'RESTART'
             ]);
+            if (compareActive) {
+                for (const sid of compareGroupIdsForDefaults) {
+                    if (sid === sessionId) continue;
+                    const tag = `S${sid}`;
+                    compareVisibleLabels.add(`Player Variant (${tag})`);
+                    compareVisibleLabels.add(`Player Est (${tag})`);
+                    compareVisibleLabels.add(`Server Variant (${tag})`);
+                    compareVisibleLabels.add(`Shaper Avg (${tag})`);
+                }
+            }
+            const defaultVisibleLabels = compareActive
+                ? compareVisibleLabels
+                : new Set([
+                    'mbps_shaper_rate',
+                    'mbps_shaper_avg',
+                    'mbps_transfer_rate',
+                    'mbps_transfer_complete',
+                    'Player est.',
+                    'Player Wire Bitrate',
+                    'Player Variant',
+                    'Server Variant',
+                    'Variants',
+                    'Limit',
+                    'STALL',
+                    'RESTART'
+                ]);
             const isSeriesHidden = (label) => {
                 const key = bandwidthSeriesKey(label);
                 if (Object.prototype.hasOwnProperty.call(visibility, label)) {
@@ -2312,6 +2581,7 @@ maybe a histogram of b
                 ...maxFor(isSeriesHidden('mbps_transfer_rate'), transferRateData),
                 ...maxFor(isSeriesHidden('mbps_transfer_complete'), transferCompleteData),
                 ...maxFor(isSeriesHidden('Player est.'), estimateData),
+                ...maxFor(isSeriesHidden('Player Wire Bitrate'), playerWireBitrateData),
                 ...maxFor(isSeriesHidden('Player Variant'), renditionData),
                 ...maxFor(isSeriesHidden('Server Variant'), serverRenditionData)
             );
@@ -2391,6 +2661,17 @@ maybe a histogram of b
                     hidden: isSeriesHidden('Player est.')
                 },
                 {
+                    label: 'Player Wire Bitrate',
+                    data: playerWireBitrateData,
+                    borderColor: '#059669',
+                    backgroundColor: 'rgba(5,150,105,0.15)',
+                    borderWidth: 2,
+                    pointRadius: 0,
+                    tension: 0.2,
+                    spanGaps: false,
+                    hidden: isSeriesHidden('Player Wire Bitrate')
+                },
+                {
                     label: 'Player Variant',
                     data: renditionData,
                     borderColor: '#ef4444',
@@ -2425,6 +2706,64 @@ maybe a histogram of b
                 },
             ];
 
+            // Compare mode: overlay grouped sessions' key metrics
+            const compareGroupIds = getCompareGroupIds();
+            if (compareGroupIds.length >= 2) {
+                const otherIds = compareGroupIds.filter(sid => sid !== sessionId);
+                otherIds.forEach((sid, idx) => {
+                    const ci = sessionColorIndex(sid, compareGroupIds);
+                    const color = SESSION_COLORS[ci];
+                    const otherSeries = (bandwidthHistory.get(sid) || [])
+                        .filter(p => p.ts >= windowStart)
+                        .map(p => ({ x: (p.ts - windowStart) / 1000, y: p }));
+                    const tag = `S${sid}`;
+                    // Player Variant (visible by default in compare)
+                    datasets.push({
+                        label: `Player Variant (${tag})`,
+                        data: otherSeries.map(p => ({ x: p.x, y: p.y.currentRendition || null })),
+                        borderColor: color.main,
+                        borderWidth: 2,
+                        pointRadius: 0,
+                        tension: 0.2,
+                        borderDash: [3, 3],
+                        hidden: isSeriesHidden(`Player Variant (${tag})`)
+                    });
+                    // Player Estimate (visible by default in compare)
+                    datasets.push({
+                        label: `Player Est (${tag})`,
+                        data: otherSeries.map(p => ({ x: p.x, y: p.y.playerEstimate || null })),
+                        borderColor: color.light,
+                        borderWidth: 1.5,
+                        pointRadius: 0,
+                        tension: 0.2,
+                        borderDash: [6, 4],
+                        hidden: isSeriesHidden(`Player Est (${tag})`)
+                    });
+                    // Server Variant (hidden by default)
+                    datasets.push({
+                        label: `Server Variant (${tag})`,
+                        data: otherSeries.map(p => ({ x: p.x, y: p.y.serverRendition || null })),
+                        borderColor: color.main,
+                        borderWidth: 1,
+                        pointRadius: 0,
+                        tension: 0.2,
+                        borderDash: [10, 4],
+                        hidden: true
+                    });
+                    // Shaper Avg (visible by default in compare)
+                    datasets.push({
+                        label: `Shaper Avg (${tag})`,
+                        data: otherSeries.map(p => ({ x: p.x, y: p.y.shaperAvg || null })),
+                        borderColor: color.light,
+                        borderWidth: 1.5,
+                        pointRadius: 0,
+                        tension: 0.15,
+                        borderDash: [10, 3],
+                        hidden: isSeriesHidden(`Shaper Avg (${tag})`)
+                    });
+                });
+            }
+
             let chart = bandwidthCharts.get(sessionId);
             if (chart && chart.canvas !== canvas) {
                 chart.destroy();
@@ -2456,6 +2795,7 @@ maybe a histogram of b
                             legend: {
                                 display: true,
                                 position: 'bottom',
+                                ...legendHoverCallbacks,
                                 labels: {
                                     color: '#6b7280',
                                     font: { family: 'Courier New, monospace', size: 10 },
@@ -2560,6 +2900,7 @@ maybe a histogram of b
                 });
                 chart.$windowStartMs = windowStart;
                 chart.options.scales.y.max = maxY;
+                applyLegendHover(chart);
                 chart.update('none');
             }
 
@@ -2579,21 +2920,41 @@ maybe a histogram of b
                 bufferChart = null;
                 bufferDepthCharts.delete(sessionId);
             }
+            const bufferDatasets = [
+                {
+                    label: 'Buffer Depth',
+                    data: bufferDepthData,
+                    borderColor: '#2563eb',
+                    backgroundColor: 'rgba(37,99,235,0.12)',
+                    borderWidth: 2,
+                    pointRadius: 0,
+                    tension: 0.2
+                }
+            ];
+            if (compareGroupIds.length >= 2) {
+                const otherIds = compareGroupIds.filter(sid => sid !== sessionId);
+                otherIds.forEach((sid) => {
+                    const ci = sessionColorIndex(sid, compareGroupIds);
+                    const color = SESSION_COLORS[ci];
+                    const otherSeries = (bandwidthHistory.get(sid) || [])
+                        .filter(p => p.ts >= windowStart)
+                        .map(p => ({ x: (p.ts - windowStart) / 1000, y: Number.isFinite(p.bufferDepth) ? p.bufferDepth : null }));
+                    bufferDatasets.push({
+                        label: `Buffer (S${sid})`,
+                        data: otherSeries,
+                        borderColor: color.main,
+                        borderWidth: 1.5,
+                        pointRadius: 0,
+                        tension: 0.2,
+                        borderDash: [4, 3]
+                    });
+                });
+            }
             if (!bufferChart) {
                 bufferChart = new Chart(bufferCanvas, {
                     type: 'line',
                     data: {
-                        datasets: [
-                            {
-                                label: 'Buffer Depth',
-                                data: bufferDepthData,
-                                borderColor: '#2563eb',
-                                backgroundColor: 'rgba(37,99,235,0.12)',
-                                borderWidth: 2,
-                                pointRadius: 0,
-                                tension: 0.2
-                            }
-                        ]
+                        datasets: bufferDatasets
                     },
                     options: {
                         responsive: true,
@@ -2603,6 +2964,7 @@ maybe a histogram of b
                             legend: {
                                 display: true,
                                 position: 'bottom',
+                                ...legendHoverCallbacks,
                                 labels: {
                                     color: '#6b7280',
                                     font: { family: 'Courier New, monospace', size: 10 }
@@ -2662,9 +3024,19 @@ maybe a histogram of b
                 installLiveWheelAnchor(sessionId, bufferChart, bufferCanvas);
                 bufferDepthCharts.set(sessionId, bufferChart);
             } else {
-                bufferChart.data.datasets[0].data = bufferDepthData;
+                const oldHidden = {};
+                bufferChart.data.datasets.forEach((ds, i) => {
+                    if (bufferChart.getDatasetMeta(i).hidden != null) {
+                        oldHidden[ds.label] = bufferChart.getDatasetMeta(i).hidden;
+                    }
+                });
+                bufferDatasets.forEach(ds => {
+                    if (ds.label in oldHidden) ds.hidden = oldHidden[ds.label];
+                });
+                bufferChart.data.datasets = bufferDatasets;
                 bufferChart.$windowStartMs = windowStart;
                 bufferChart.options.scales.y.max = maxBufferDepth;
+                applyLegendHover(bufferChart);
                 bufferChart.update('none');
             }
 
@@ -2778,60 +3150,108 @@ maybe a histogram of b
                 fpsChart = null;
                 videoFpsCharts.delete(sessionId);
             }
+            const fpsDatasets = [
+                {
+                    label: 'FPS (smoothed)',
+                    data: fpsSmoothedData,
+                    borderColor: '#7e22ce',
+                    backgroundColor: 'rgba(126,34,206,0.10)',
+                    borderWidth: 2.2,
+                    pointRadius: 0,
+                    tension: 0.2
+                },
+                {
+                    label: 'Low FPS',
+                    data: lowFpsData,
+                    borderColor: '#dc2626',
+                    backgroundColor: 'rgba(220,38,38,0.22)',
+                    borderWidth: 2,
+                    pointRadius: 0,
+                    tension: 0.2,
+                    spanGaps: false
+                },
+                {
+                    label: 'FPS Baseline',
+                    data: baselineData,
+                    borderColor: '#475569',
+                    borderWidth: 1,
+                    pointRadius: 0,
+                    tension: 0,
+                    borderDash: [6, 4]
+                },
+                {
+                    label: 'Low Threshold',
+                    data: lowThresholdData,
+                    borderColor: '#b91c1c',
+                    borderWidth: 1,
+                    pointRadius: 0,
+                    tension: 0,
+                    borderDash: [3, 4]
+                },
+                {
+                    label: 'Dropped Frames/s',
+                    data: droppedFpsSmoothedData,
+                    yAxisID: 'yDrop',
+                    borderColor: '#ea580c',
+                    backgroundColor: 'rgba(234,88,12,0.14)',
+                    borderWidth: 1.8,
+                    pointRadius: 0,
+                    tension: 0.2,
+                    borderDash: [5, 3]
+                }
+            ];
+            if (compareGroupIds.length >= 2) {
+                const otherIds = compareGroupIds.filter(sid => sid !== sessionId);
+                otherIds.forEach((sid) => {
+                    const ci = sessionColorIndex(sid, compareGroupIds);
+                    const color = SESSION_COLORS[ci];
+                    const otherSeries = (bandwidthHistory.get(sid) || []).filter(p => p.ts >= windowStart);
+                    // Compute FPS for other session
+                    const otherFps = [];
+                    const otherDropped = [];
+                    for (let i = 1; i < otherSeries.length; i++) {
+                        const dt = (otherSeries[i].ts - otherSeries[i - 1].ts) / 1000;
+                        if (dt <= 0) continue;
+                        if (otherSeries[i].framesDisplayed != null && otherSeries[i - 1].framesDisplayed != null) {
+                            const dFrames = otherSeries[i].framesDisplayed - otherSeries[i - 1].framesDisplayed;
+                            if (dFrames >= 0) {
+                                otherFps.push({ x: (otherSeries[i].ts - windowStart) / 1000, y: Math.round(dFrames / dt * 10) / 10 });
+                            }
+                        }
+                        if (otherSeries[i].framesDropped != null && otherSeries[i - 1].framesDropped != null) {
+                            const dDropped = otherSeries[i].framesDropped - otherSeries[i - 1].framesDropped;
+                            if (dDropped >= 0) {
+                                otherDropped.push({ x: (otherSeries[i].ts - windowStart) / 1000, y: Math.round(dDropped / dt * 100) / 100 });
+                            }
+                        }
+                    }
+                    const tag = `S${sid}`;
+                    fpsDatasets.push({
+                        label: `FPS (${tag})`,
+                        data: otherFps,
+                        borderColor: color.main,
+                        borderWidth: 1.5,
+                        pointRadius: 0,
+                        tension: 0.2,
+                        borderDash: [4, 3]
+                    });
+                    fpsDatasets.push({
+                        label: `Dropped (${tag})`,
+                        data: otherDropped,
+                        yAxisID: 'yDrop',
+                        borderColor: color.light,
+                        borderWidth: 1.5,
+                        pointRadius: 0,
+                        tension: 0.2,
+                        borderDash: [5, 3]
+                    });
+                });
+            }
             if (!fpsChart) {
                 fpsChart = new Chart(fpsCanvas, {
                     type: 'line',
                     data: {
-                        datasets: [
-                            {
-                                label: 'FPS (smoothed)',
-                                data: fpsSmoothedData,
-                                borderColor: '#7e22ce',
-                                backgroundColor: 'rgba(126,34,206,0.10)',
-                                borderWidth: 2.2,
-                                pointRadius: 0,
-                                tension: 0.2
-                            },
-                            {
-                                label: 'Low FPS',
-                                data: lowFpsData,
-                                borderColor: '#dc2626',
-                                backgroundColor: 'rgba(220,38,38,0.22)',
-                                borderWidth: 2,
-                                pointRadius: 0,
-                                tension: 0.2,
-                                spanGaps: false
-                            },
-                            {
-                                label: 'FPS Baseline',
-                                data: baselineData,
-                                borderColor: '#475569',
-                                borderWidth: 1,
-                                pointRadius: 0,
-                                tension: 0,
-                                borderDash: [6, 4]
-                            },
-                            {
-                                label: 'Low Threshold',
-                                data: lowThresholdData,
-                                borderColor: '#b91c1c',
-                                borderWidth: 1,
-                                pointRadius: 0,
-                                tension: 0,
-                                borderDash: [3, 4]
-                            },
-                            {
-                                label: 'Dropped Frames/s',
-                                data: droppedFpsSmoothedData,
-                                yAxisID: 'yDrop',
-                                borderColor: '#ea580c',
-                                backgroundColor: 'rgba(234,88,12,0.14)',
-                                borderWidth: 1.8,
-                                pointRadius: 0,
-                                tension: 0.2,
-                                borderDash: [5, 3]
-                            }
-                        ]
+                        datasets: fpsDatasets
                     },
                     options: {
                         responsive: true,
@@ -2841,6 +3261,7 @@ maybe a histogram of b
                             legend: {
                                 display: true,
                                 position: 'bottom',
+                                ...legendHoverCallbacks,
                                 labels: {
                                     color: '#6b7280',
                                     font: { family: 'Courier New, monospace', size: 10 },
@@ -2918,14 +3339,20 @@ maybe a histogram of b
                 installLiveWheelAnchor(sessionId, fpsChart, fpsCanvas);
                 videoFpsCharts.set(sessionId, fpsChart);
             } else {
-                fpsChart.data.datasets[0].data = fpsSmoothedData;
-                fpsChart.data.datasets[1].data = lowFpsData;
-                fpsChart.data.datasets[2].data = baselineData;
-                fpsChart.data.datasets[3].data = lowThresholdData;
-                fpsChart.data.datasets[4].data = droppedFpsSmoothedData;
+                const oldHidden = {};
+                fpsChart.data.datasets.forEach((ds, i) => {
+                    if (fpsChart.getDatasetMeta(i).hidden != null) {
+                        oldHidden[ds.label] = fpsChart.getDatasetMeta(i).hidden;
+                    }
+                });
+                fpsDatasets.forEach(ds => {
+                    if (ds.label in oldHidden) ds.hidden = oldHidden[ds.label];
+                });
+                fpsChart.data.datasets = fpsDatasets;
                 fpsChart.$windowStartMs = windowStart;
                 fpsChart.options.scales.y.max = maxFps;
                 fpsChart.options.scales.yDrop.max = maxDroppedFps;
+                applyLegendHover(fpsChart);
                 fpsChart.update('none');
             }
         }
@@ -3337,6 +3764,24 @@ maybe a histogram of b
                 .catch(error => console.error('Error clearing sessions:', error));
         });
 
+        document.getElementById('sessionsContainer').addEventListener('change', (event) => {
+            if (event.target.id === 'compareModeToggle') {
+                compareMode = event.target.checked;
+                // Destroy existing charts so they rebuild with/without compare datasets
+                if (activeSessionId) {
+                    for (const chart of getChartsForSession(activeSessionId)) {
+                        if (chart && typeof chart.destroy === 'function') chart.destroy();
+                    }
+                    eventsCharts.delete(activeSessionId);
+                    bandwidthCharts.delete(activeSessionId);
+                    bufferDepthCharts.delete(activeSessionId);
+                    videoFpsCharts.delete(activeSessionId);
+                }
+                renderSessions();
+                return;
+            }
+        }, true);
+
         let activeSliderSessionId = null;
         document.getElementById('sessionsContainer').addEventListener('pointerdown', (event) => {
             if (event.target.matches('input[type="range"]')) {
@@ -3379,10 +3824,30 @@ maybe a histogram of b
             if (target.classList.contains('session-checkbox')) {
                 const sessionId = target.dataset.sessionId;
                 if (sessionId) {
+                    const session = sessionsById.get(sessionId);
+                    const groupId = session?.group_id || '';
                     if (target.checked) {
                         selectedSessionIds.add(String(sessionId));
+                        // Auto-select all group members
+                        if (groupId) {
+                            for (const [sid, s] of sessionsById) {
+                                if (s.group_id === groupId) {
+                                    selectedSessionIds.add(String(sid));
+                                    const cb = document.querySelector(`.session-checkbox[data-session-id="${sid}"]`);
+                                    if (cb) cb.checked = true;
+                                }
+                            }
+                        }
                     } else {
                         selectedSessionIds.delete(String(sessionId));
+                        // Uncheck removes from group
+                        if (groupId) {
+                            fetch('/api/session-group/unlink', {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({ session_id: sessionId, group_id: groupId })
+                            }).then(() => fetchSessions()).catch(err => console.error('Unlink failed:', err));
+                        }
                     }
                 }
                 event.stopPropagation();
@@ -3400,11 +3865,8 @@ maybe a histogram of b
                 const checks = Array.from(card.querySelectorAll('input[data-field="manifest_failure_urls"]'));
                 const allBox = checks.find(input => input.value === 'All');
                 const scopedChecks = checks.filter(input => input.value !== 'All');
-                if (allBox && allBox.checked) {
-                    allBox.checked = false;
-                }
-                if (!scopedChecks.some(input => input.checked) && allBox) {
-                    allBox.checked = true;
+                if (allBox) {
+                    allBox.checked = scopedChecks.every(input => input.checked);
                 }
             }
             if (target.dataset.field === 'segment_failure_urls' && target.value === 'All') {
@@ -3417,11 +3879,8 @@ maybe a histogram of b
                 const checks = Array.from(card.querySelectorAll('input[data-field="segment_failure_urls"]'));
                 const allBox = checks.find(input => input.value === 'All');
                 const scopedChecks = checks.filter(input => input.value !== 'All');
-                if (allBox && allBox.checked) {
-                    allBox.checked = false;
-                }
-                if (!scopedChecks.some(input => input.checked) && allBox) {
-                    allBox.checked = true;
+                if (allBox) {
+                    allBox.checked = scopedChecks.every(input => input.checked);
                 }
             }
             if (target.dataset.field === 'content_allowed_variants' || target.dataset.field === 'content_strip_codecs' || target.dataset.field === 'content_live_offset') {
@@ -3446,11 +3905,28 @@ maybe a histogram of b
                 return;
             }
             if (target.dataset.field === 'bitrate_chart_max_mbps') {
-                bitrateAxisMaxBySession.set(
-                    String(card.dataset.sessionId || ''),
-                    normalizeBitrateAxisMaxMode(target.value)
-                );
-                renderBandwidthChart(card.dataset.sessionId);
+                const sessionId = String(card.dataset.sessionId || '');
+                const axisMode = normalizeBitrateAxisMaxMode(target.value);
+                bitrateAxisMaxBySession.set(sessionId, axisMode);
+                if (isChartPaused(sessionId)) {
+                    const chart = bandwidthCharts.get(sessionId);
+                    if (chart) {
+                        let maxY;
+                        if (axisMode === 'auto') {
+                            const visibleMax = chart.data.datasets
+                                .filter((_, idx) => chart.isDatasetVisible(idx))
+                                .flatMap(ds => ds.data.map(pt => Number(pt.y) || 0))
+                                .reduce((m, v) => Math.max(m, v), 1);
+                            maxY = Math.min(100, Math.max(1, Math.ceil(visibleMax * 1.05 * 10) / 10));
+                        } else {
+                            maxY = Number(axisMode);
+                        }
+                        chart.options.scales.y.max = maxY;
+                        chart.update('none');
+                    }
+                } else {
+                    renderBandwidthChart(sessionId);
+                }
                 return;
             }
             if (target.dataset.field && target.dataset.field.startsWith('shaping_template_')) {
@@ -3678,6 +4154,81 @@ maybe a histogram of b
                     .then(() => fetchSessions())
                     .catch(error => console.error('Error deleting session:', error));
             }
+        });
+
+        // Right-click context menu on session tabs
+        let ctxMenu = null;
+        function hideContextMenu() { if (ctxMenu) { ctxMenu.remove(); ctxMenu = null; } }
+        document.addEventListener('click', hideContextMenu);
+        document.getElementById('sessionsContainer').addEventListener('contextmenu', (event) => {
+            const tab = event.target.closest('.session-tab');
+            if (!tab) return;
+            event.preventDefault();
+            hideContextMenu();
+            const sessionId = tab.dataset.sessionTab;
+            if (!sessionId) return;
+            const session = sessionsById.get(sessionId);
+            if (!session) return;
+            const allSessions = Array.from(sessionsById.values());
+            const groupId = session.group_id || '';
+            const existingGroups = [...new Set(allSessions.map(s => s.group_id).filter(Boolean))];
+
+            const menu = document.createElement('div');
+            menu.style.cssText = 'position:fixed;background:#fff;border:1px solid #ccc;border-radius:6px;padding:4px 0;box-shadow:0 4px 12px rgba(0,0,0,0.15);z-index:9999;min-width:180px;font-size:13px;';
+            menu.style.left = event.clientX + 'px';
+            menu.style.top = event.clientY + 'px';
+
+            const addItem = (text, onClick) => {
+                const item = document.createElement('div');
+                item.textContent = text;
+                item.style.cssText = 'padding:6px 16px;cursor:pointer;';
+                item.addEventListener('mouseenter', () => item.style.background = '#f0f0f0');
+                item.addEventListener('mouseleave', () => item.style.background = '');
+                item.addEventListener('click', () => { hideContextMenu(); onClick(); });
+                menu.appendChild(item);
+            };
+
+            if (groupId) {
+                addItem('Remove from Group', () => {
+                    fetch('/api/session-group/unlink', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ session_id: sessionId, group_id: groupId })
+                    }).then(() => fetchSessions()).catch(err => console.error('Unlink failed:', err));
+                });
+            }
+
+            if (!groupId) {
+                existingGroups.forEach(gid => {
+                    const members = allSessions.filter(s => s.group_id === gid);
+                    const memberLabel = members.map(s => `S${s.session_id}`).join(', ');
+                    addItem(`Add to ${gid} (${memberLabel})`, () => {
+                        const ids = [...members.map(s => s.session_id), sessionId];
+                        fetch('/api/session-group/link', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ session_ids: ids, group_id: gid })
+                        }).then(() => fetchSessions()).catch(err => console.error('Link failed:', err));
+                    });
+                });
+                const ungroupedOthers = allSessions.filter(s => s.session_id !== sessionId && !s.group_id);
+                ungroupedOthers.forEach(other => {
+                    addItem(`Group with Session ${other.session_id}`, () => {
+                        fetch('/api/session-group/link', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ session_ids: [sessionId, other.session_id] })
+                        }).then(() => fetchSessions()).catch(err => console.error('Link failed:', err));
+                    });
+                });
+            }
+
+            if (menu.children.length === 0) {
+                addItem('No group actions available', () => {});
+            }
+
+            document.body.appendChild(menu);
+            ctxMenu = menu;
         });
 
         fetchSessions();
