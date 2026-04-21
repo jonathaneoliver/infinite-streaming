@@ -56,6 +56,12 @@ final class PlaybackViewModel: ObservableObject {
     @Published var autoRecoveryEnabled: Bool = false {
         didSet { persist(.autoRecoveryEnabled, autoRecoveryEnabled ? "true" : "false") }
     }
+    @Published var goLiveMode: Bool = false {
+        didSet { persist(.goLiveMode, goLiveMode ? "true" : "false") }
+    }
+    @Published var localProxyEnabled: Bool = true {
+        didSet { persist(.localProxyEnabled, localProxyEnabled ? "true" : "false") }
+    }
     @Published var playerRestarts: Int = 0
     @Published var profileShiftCount: Int = 0
 
@@ -78,12 +84,16 @@ final class PlaybackViewModel: ObservableObject {
     private var lastReportedStallCount: Int = 0
     private var lastReportedStallDuration: Double = 0
     private var lastReportedLoopCount: Int = 0
-    private let metricsHeartbeatSeconds: TimeInterval = 5
+    private let metricsHeartbeatSeconds: TimeInterval = 1
     private let metricsSessionLookupSeconds: TimeInterval = 30
     private let autoRecoveryThresholdSeconds: TimeInterval = 60
-    private let autoRecoveryCooldownSeconds: TimeInterval = 60
+    private let autoRecoveryBaseDelaySeconds: TimeInterval = 2
+    private let autoRecoveryMaxAttempts: Int = 3
+    private let autoRecoveryVerifyDelaySeconds: TimeInterval = 10
+    private var autoRecoveryAttempts: Int = 0
+    private var autoRecoveryRestartTimer: Timer?
+    private var autoRecoveryVerifyTimer: Timer?
     private var zeroBufferStartedAt: Date?
-    private var lastAutoRecoveryRestartAt: Date?
     private let diagnosticsProbesEnabled = false
     private let logPlaylistsOnPlay = false
     private let masterPreflightEnabled = true
@@ -92,6 +102,9 @@ final class PlaybackViewModel: ObservableObject {
 
     init() {
         loadDefaults()
+        if localProxyEnabled {
+            LocalHTTPProxy.shared.startIfNeeded()
+        }
         diagnostics.bind(to: player)
         if playerId.isEmpty {
             playerId = UUID().uuidString
@@ -208,9 +221,14 @@ final class PlaybackViewModel: ObservableObject {
 
     func restartPlayback(reason: String = "manual") {
         playerRestarts = max(0, playerRestarts) + 1
-        if reason == "auto_recovery_zero_buffer" {
-            lastAutoRecoveryRestartAt = Date()
+        if reason.hasPrefix("auto_recovery") {
             zeroBufferStartedAt = nil
+        } else {
+            autoRecoveryAttempts = 0
+            autoRecoveryRestartTimer?.invalidate()
+            autoRecoveryRestartTimer = nil
+            autoRecoveryVerifyTimer?.invalidate()
+            autoRecoveryVerifyTimer = nil
         }
         Task {
             await sendPlayerMetrics(event: "restart", extra: [
@@ -219,6 +237,7 @@ final class PlaybackViewModel: ObservableObject {
                 "player_auto_recovery_enabled": autoRecoveryEnabled
             ])
         }
+        diagnostics.snapshotForRestart()
         player.pause()
         player.replaceCurrentItem(with: nil)
         reload()
@@ -330,7 +349,21 @@ final class PlaybackViewModel: ObservableObject {
             statusMessage = "Playing \(contentName)"
         }
 
-        let asset = AVURLAsset(url: url, options: nil)
+        let assetURL: URL
+        if localProxyEnabled {
+            LocalHTTPProxy.shared.startIfNeeded()
+            assetURL = LocalHTTPProxy.shared.rewrite(originURL: url) ?? url
+            if assetURL != url {
+                log("Intercept ON — asset URL: \(assetURL.absoluteString)")
+            } else {
+                log("Intercept OFF (proxy unavailable) — asset URL: \(assetURL.absoluteString)")
+            }
+        } else {
+            assetURL = url
+            log("Intercept OFF (disabled) — asset URL: \(assetURL.absoluteString)")
+        }
+        let asset = AVURLAsset(url: assetURL, options: nil)
+        RequestTracker.shared.reset()
         let item = AVPlayerItem(asset: asset)
         apply4kPreference(to: item)
         playbackStartAt = Date()
@@ -436,6 +469,8 @@ final class PlaybackViewModel: ObservableObject {
         case playerId = "bossPlayerId"
         case prefer4kNative = "bossPrefer4kNative"
         case autoRecoveryEnabled = "bossAutoRecovery"
+        case goLiveMode = "bossGoLiveMode"
+        case localProxyEnabled = "bossLocalProxyEnabled"
     }
 
     private func loadDefaults() {
@@ -481,6 +516,12 @@ final class PlaybackViewModel: ObservableObject {
         if let storedAutoRecovery = defaults.string(forKey: DefaultsKey.autoRecoveryEnabled.rawValue) {
             autoRecoveryEnabled = storedAutoRecovery == "true"
         }
+        if let storedGoLive = defaults.string(forKey: DefaultsKey.goLiveMode.rawValue) {
+            goLiveMode = storedGoLive == "true"
+        }
+        if let storedLocalProxy = defaults.string(forKey: DefaultsKey.localProxyEnabled.rawValue) {
+            localProxyEnabled = storedLocalProxy == "true"
+        }
     }
 
     private func persist(_ key: DefaultsKey, _ value: String) {
@@ -496,12 +537,11 @@ final class PlaybackViewModel: ObservableObject {
 
     private func log(_ message: String) {
         let stamp = ISO8601DateFormatter().string(from: Date())
-        let line = "[\(stamp)] \(message)"
-        logLines.append(line)
+        logLines.append("[\(stamp)] \(message)")
         if logLines.count > 200 {
             logLines.removeFirst(logLines.count - 200)
         }
-        print(line)
+        print(message)
     }
 
 
@@ -519,8 +559,13 @@ final class PlaybackViewModel: ObservableObject {
             .removeDuplicates()
             .filter { !$0.isEmpty }
             .sink { [weak self] value in
-                self?.log("Playback failure: \(value)")
-                Task { await self?.sendPlayerMetrics(event: "error", extra: ["player_metrics_error": value]) }
+                guard let self else { return }
+                self.log("Playback failure: \(value)")
+                Task { await self.sendPlayerMetrics(event: "error", extra: ["player_metrics_error": value]) }
+                if self.autoRecoveryEnabled {
+                    print("[AUTO_RECOVERY] triggered failure=\(value) state=\(self.diagnostics.state) bufferEmpty=\(self.diagnostics.bufferEmpty) time=\(String(format: "%.2f", self.diagnostics.currentTime))")
+                    self.scheduleAutoRecoveryRestart(reason: "auto_recovery_failure")
+                }
             }
             .store(in: &cancellables)
 
@@ -569,6 +614,40 @@ final class PlaybackViewModel: ObservableObject {
             .filter { !$0.isEmpty }
             .sink { [weak self] value in
                 self?.log("Waiting reason: \(value)")
+            }
+            .store(in: &cancellables)
+
+        diagnostics.$frozenDetected
+            .removeDuplicates()
+            .sink { [weak self] frozen in
+                guard let self else { return }
+                if frozen {
+                    self.log("FROZEN: video time stopped advancing while state=\(self.diagnostics.state) bufferEmpty=\(self.diagnostics.bufferEmpty) likelyToKeepUp=\(self.diagnostics.likelyToKeepUp)")
+                    Task { await self.sendPlayerMetrics(event: "frozen") }
+                    if self.autoRecoveryEnabled {
+                        print("[AUTO_RECOVERY] triggered frozen state=\(self.diagnostics.state) bufferEmpty=\(self.diagnostics.bufferEmpty) time=\(String(format: "%.2f", self.diagnostics.currentTime))")
+                        self.scheduleAutoRecoveryRestart(reason: "auto_recovery_frozen")
+                    }
+                } else if self.diagnostics.state == "Playing" {
+                    self.log("UNFROZEN: video time advancing again")
+                }
+            }
+            .store(in: &cancellables)
+
+        diagnostics.$segmentStallDetected
+            .removeDuplicates()
+            .sink { [weak self] stalled in
+                guard let self else { return }
+                if stalled {
+                    self.log("SEGMENT_STALL: no new segments downloading while playing")
+                    Task { await self.sendPlayerMetrics(event: "segment_stall") }
+                    if self.autoRecoveryEnabled {
+                        print("[AUTO_RECOVERY] triggered segment_stall time=\(String(format: "%.2f", self.diagnostics.currentTime))")
+                        self.scheduleAutoRecoveryRestart(reason: "auto_recovery_segment_stall")
+                    }
+                } else {
+                    self.log("SEGMENT_STALL resolved: segments downloading again")
+                }
             }
             .store(in: &cancellables)
 
@@ -626,7 +705,9 @@ final class PlaybackViewModel: ObservableObject {
             .sink { [weak self] currentTime in
                 guard let self else { return }
                 guard let startAt = self.playbackStartAt else { return }
-                if !self.firstFrameReported && currentTime > 0 {
+                let isActivelyPlaying = self.diagnostics.state == "Playing"
+                    && self.diagnostics.playbackRate > 0
+                if !self.firstFrameReported && currentTime > 0 && isActivelyPlaying {
                     let elapsed = self.roundSeconds(Date().timeIntervalSince(startAt))
                     self.videoFirstFrameSeconds = elapsed
                     self.firstFrameReported = true
@@ -637,7 +718,7 @@ final class PlaybackViewModel: ObservableObject {
                         ])
                     }
                 }
-                if !self.playingReported && currentTime >= 0.1 && self.diagnostics.playbackRate > 0 {
+                if !self.playingReported && currentTime >= 0.1 && isActivelyPlaying {
                     let elapsed = self.roundSeconds(Date().timeIntervalSince(startAt))
                     self.videoPlayingTimeSeconds = elapsed
                     self.playingReported = true
@@ -661,9 +742,72 @@ final class PlaybackViewModel: ObservableObject {
     private func startMetricsHeartbeat() {
         metricsHeartbeatTimer?.invalidate()
         metricsHeartbeatTimer = Timer.scheduledTimer(withTimeInterval: metricsHeartbeatSeconds, repeats: true) { [weak self] _ in
-            Task {
+            Task { @MainActor [weak self] in
                 self?.evaluateAutoRecoveryIfNeeded()
                 await self?.sendPlayerMetrics(event: "heartbeat")
+            }
+        }
+    }
+
+    private func scheduleAutoRecoveryRestart(reason: String) {
+        if autoRecoveryRestartTimer != nil {
+            print("[AUTO_RECOVERY] ignoring \(reason) — restart already scheduled")
+            return
+        }
+        if autoRecoveryAttempts >= autoRecoveryMaxAttempts {
+            print("[AUTO_RECOVERY] exhausted — \(autoRecoveryAttempts) attempts in a row — giving up on \(reason)")
+            log("Auto-recovery: exhausted after \(autoRecoveryAttempts) consecutive attempts — giving up")
+            return
+        }
+        let attempt = autoRecoveryAttempts + 1
+        let delay = autoRecoveryBaseDelaySeconds * pow(2, Double(attempt - 1))
+        let scheduledAtTime = diagnostics.currentTime
+        log("Auto-recovery: attempt \(attempt)/\(autoRecoveryMaxAttempts) scheduled in \(Int(delay))s (\(reason))")
+        print("[AUTO_RECOVERY] scheduling attempt \(attempt)/\(autoRecoveryMaxAttempts) in \(Int(delay))s reason=\(reason) state=\(diagnostics.state) time=\(String(format: "%.2f", scheduledAtTime))")
+        autoRecoveryRestartTimer = Timer.scheduledTimer(withTimeInterval: delay, repeats: false) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.autoRecoveryRestartTimer = nil
+                let timeAdvanced = self.diagnostics.currentTime > scheduledAtTime + 0.5
+                let recovered = self.diagnostics.state == "Playing"
+                    && !self.diagnostics.frozenDetected
+                    && !self.diagnostics.segmentStallDetected
+                    && timeAdvanced
+                if recovered {
+                    self.log("Auto-recovery: cancelled — recovered naturally (\(reason))")
+                    print("[AUTO_RECOVERY] cancelled — recovered reason=\(reason) state=\(self.diagnostics.state) time=\(String(format: "%.2f", self.diagnostics.currentTime))")
+                    self.autoRecoveryAttempts = 0
+                    return
+                }
+                self.autoRecoveryAttempts = attempt
+                self.log("Auto-recovery: attempt \(attempt)/\(self.autoRecoveryMaxAttempts) restarting (\(reason))")
+                print("[AUTO_RECOVERY] executing attempt \(attempt)/\(self.autoRecoveryMaxAttempts) reason=\(reason) state=\(self.diagnostics.state) time=\(String(format: "%.2f", self.diagnostics.currentTime))")
+                self.restartPlayback(reason: reason)
+                self.scheduleAutoRecoverySuccessCheck()
+            }
+        }
+    }
+
+    private func scheduleAutoRecoverySuccessCheck() {
+        autoRecoveryVerifyTimer?.invalidate()
+        autoRecoveryVerifyTimer = Timer.scheduledTimer(withTimeInterval: autoRecoveryVerifyDelaySeconds, repeats: false) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.autoRecoveryVerifyTimer = nil
+                if self.autoRecoveryRestartTimer != nil {
+                    print("[AUTO_RECOVERY] verify: another restart pending — keeping attempts=\(self.autoRecoveryAttempts)")
+                    return
+                }
+                let playingCleanly = self.diagnostics.state == "Playing"
+                    && !self.diagnostics.frozenDetected
+                    && !self.diagnostics.segmentStallDetected
+                if playingCleanly {
+                    self.log("Auto-recovery: restart succeeded — resetting attempt counter (was \(self.autoRecoveryAttempts))")
+                    print("[AUTO_RECOVERY] verify: playing cleanly — resetting attempts (was \(self.autoRecoveryAttempts))")
+                    self.autoRecoveryAttempts = 0
+                } else {
+                    print("[AUTO_RECOVERY] verify: not clean — keeping attempts=\(self.autoRecoveryAttempts) state=\(self.diagnostics.state) frozen=\(self.diagnostics.frozenDetected) segStall=\(self.diagnostics.segmentStallDetected)")
+                }
             }
         }
     }
@@ -697,13 +841,9 @@ final class PlaybackViewModel: ObservableObject {
         if zeroDuration < autoRecoveryThresholdSeconds {
             return
         }
-        if let last = lastAutoRecoveryRestartAt,
-           now.timeIntervalSince(last) < autoRecoveryCooldownSeconds {
-            return
-        }
 
-        log("Auto-recovery: restarting playback after \(Int(zeroDuration))s at zero buffer depth")
-        restartPlayback(reason: "auto_recovery_zero_buffer")
+        print("[AUTO_RECOVERY] triggered zero_buffer after \(Int(zeroDuration))s time=\(String(format: "%.2f", diagnostics.currentTime))")
+        scheduleAutoRecoveryRestart(reason: "auto_recovery_zero_buffer")
     }
 
     private func handleRenditionShift(indicated: Double?, average: Double?) {
@@ -825,6 +965,19 @@ final class PlaybackViewModel: ObservableObject {
             if let value {
                 compact[key] = value
             }
+        }
+        // Always include network_window_mbps — send explicit null when unknown
+        // so the chart shows a gap instead of carrying the previous value.
+        if let mbpsValue = mbps(from: diagnostics.networkWindowBitrate) {
+            compact["player_metrics_network_window_mbps"] = mbpsValue
+        } else {
+            compact["player_metrics_network_window_mbps"] = NSNull()
+        }
+        // Same treatment for the wire bitrate (from local HTTP proxy).
+        if let mbpsValue = mbps(from: diagnostics.networkWireBitrate) {
+            compact["player_metrics_network_wire_mbps"] = mbpsValue
+        } else {
+            compact["player_metrics_network_wire_mbps"] = NSNull()
         }
         return compact
     }
