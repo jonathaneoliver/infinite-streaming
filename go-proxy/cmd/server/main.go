@@ -6880,7 +6880,7 @@ func (h *RequestHandler) handleSegmentFailure(filename string) string {
 
 func shouldApplyFailure(entries []string, filename, variant string) bool {
 	if len(entries) == 0 {
-		return true
+		return false
 	}
 	decodedFilename := filename
 	if unescaped, err := url.PathUnescape(filename); err == nil {
