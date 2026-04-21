@@ -35,6 +35,7 @@ class PlayerViewModel : ViewModel() {
 
     var player: ExoPlayer? = null
         private set
+    private var appContext: android.content.Context? = null
 
     private var sessionId: String? = null
     private var metricsReporter: MetricsReporter? = null
@@ -64,12 +65,10 @@ class PlayerViewModel : ViewModel() {
 
     fun initPlayer(context: Context) {
         if (player != null) return
+        appContext = context.applicationContext
         player = ExoPlayer.Builder(context).build().apply {
             playWhenReady = true
             addListener(playerListener)
-            trackSelectionParameters = trackSelectionParameters.buildUpon()
-                .setMaxVideoSize(1280, 720)
-                .build()
         }
     }
 
@@ -134,7 +133,7 @@ class PlayerViewModel : ViewModel() {
         metricsJob?.cancel()
         metricsJob = viewModelScope.launch {
             while (isActive) {
-                delay(5000)
+                delay(1000)
                 sendMetrics("heartbeat")
             }
         }
@@ -157,6 +156,7 @@ class PlayerViewModel : ViewModel() {
         val playbackState: Int
         val playWhenReady: Boolean
         val speed: Float
+        val bandwidthEstimate: Long
 
         withContext(Dispatchers.Main) {
             positionMs = p.currentPosition
@@ -166,6 +166,7 @@ class PlayerViewModel : ViewModel() {
             playbackState = p.playbackState
             playWhenReady = p.playWhenReady
             speed = p.playbackParameters.speed
+            bandwidthEstimate = appContext?.let { androidx.media3.exoplayer.upstream.DefaultBandwidthMeter.getSingletonInstance(it).bitrateEstimate } ?: 0L
         }
 
         val state = when (playbackState) {
@@ -190,7 +191,7 @@ class PlayerViewModel : ViewModel() {
             "player_metrics_buffer_end_s" to round3(bufferedMs / 1000.0),
             "player_metrics_video_bitrate_mbps" to videoFormat?.bitrate?.let { round3(it / 1_000_000.0) },
             "player_metrics_video_resolution" to videoFormat?.let { "${it.width}x${it.height}" },
-            "player_metrics_network_bitrate_mbps" to null,
+            "player_metrics_network_bitrate_mbps" to if (bandwidthEstimate > 0) round3(bandwidthEstimate / 1_000_000.0) else null,
             "player_metrics_frames_displayed" to (counters?.renderedOutputBufferCount ?: 0),
             "player_metrics_dropped_frames" to (counters?.droppedBufferCount ?: 0),
             "player_metrics_total_video_frames" to ((counters?.renderedOutputBufferCount ?: 0) + (counters?.droppedBufferCount ?: 0)),
