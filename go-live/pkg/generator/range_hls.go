@@ -207,16 +207,25 @@ func (g *RangeHLSGenerator) GenerateVariantPlaylist(
 		if segmentMap != "" {
 			sb.WriteString(fmt.Sprintf("#EXT-X-MAP:URI=\"%s\"\n", absoluteSegmentURI(prefix, content, joinRelPath(relPath, segmentMap))))
 		}
-		for i := 0; i <= availableIdx; i++ {
+		remainingDuration := MAX_LIVE_WINDOW_DURATION - tailDuration
+		for i := 0; i <= availableIdx && remainingDuration > 0; i++ {
 			writeSegmentRange(segments[i])
+			remainingDuration -= segments[i].Duration
 		}
 	} else {
-		for i := windowStartIdx; i <= availableIdx; i++ {
+		windowDuration := 0.0
+		for i := windowStartIdx; i <= availableIdx && windowDuration < MAX_LIVE_WINDOW_DURATION; i++ {
 			writeSegmentRange(segments[i])
+			windowDuration += segments[i].Duration
 		}
 	}
 
-	return sb.String(), nil
+	result := sb.String()
+	if len(result) > 5000 {
+		fmt.Fprintf(os.Stderr, "WARNING: large range playlist (%d bytes) wrap=%t tailCount=%d availableIdx=%d segments=%d\n",
+			len(result), wrap, len(segments)-windowStartIdx, availableIdx, len(segments))
+	}
+	return result, nil
 }
 
 func parseDurationSeconds(raw string) (float64, error) {
