@@ -4090,9 +4090,9 @@
         function parseBandwidthChartEventType(rawEventType) {
             const eventType = String(rawEventType || '').trim().toLowerCase();
             if (!eventType) return null;
-            if (eventType.includes('stall')) return 'STALL';
-            if (eventType.includes('restart')) return 'RESTART';
-            if (eventType.includes('loop')) return 'LOOP';
+            if (eventType === 'stall_start' || eventType === 'segment_stall' || eventType === 'frozen') return 'STALL';
+            if (eventType === 'restart') return 'RESTART';
+            if (eventType === 'loop_marker') return 'LOOP';
             return null;
         }
 
@@ -4624,6 +4624,34 @@
             'LOOP_PLAYER': { y: 2, color: '#06b6d4', label: 'LOOP PLAYER' },
             'LOOP_SERVER': { y: 1, color: '#84cc16', label: 'LOOP SERVER' }
         };
+        let legendHoverIndex = null;
+        let legendHoverChartId = null;
+        const legendHoverCallbacks = {
+            onHover: (event, legendItem, legend) => {
+                legendHoverIndex = legendItem.datasetIndex;
+                legendHoverChartId = legend.chart.id;
+                const ds = legend.chart.data.datasets[legendItem.datasetIndex];
+                if (!ds._origWidth) ds._origWidth = ds.borderWidth;
+                ds.borderWidth = ds._origWidth + 3;
+                legend.chart.update('none');
+            },
+            onLeave: (event, legendItem, legend) => {
+                legendHoverIndex = null;
+                legendHoverChartId = null;
+                const ds = legend.chart.data.datasets[legendItem.datasetIndex];
+                if (ds._origWidth) { ds.borderWidth = ds._origWidth; delete ds._origWidth; }
+                legend.chart.update('none');
+            }
+        };
+        function applyLegendHover(chart) {
+            if (legendHoverChartId !== chart.id || legendHoverIndex == null) return;
+            const ds = chart.data.datasets[legendHoverIndex];
+            if (ds) {
+                if (!ds._origWidth) ds._origWidth = ds.borderWidth;
+                ds.borderWidth = ds._origWidth + 3;
+            }
+        }
+
         function renderEventsChart(sessionId, windowStart, eventSeries) {
             const card = document.querySelector(`.session-card[data-session-id="${sessionId}"]`);
             if (!card) return;
@@ -4633,12 +4661,12 @@
 
             const chartEvents = (eventSeries || [])
                 .filter((e) => Number(e.ts) >= windowStart)
-                .map((e) => ({ x: (e.ts - windowStart) / 1000, type: e.type }))
+                .map((e) => ({ x: (e.ts - windowStart) / 1000, type: e.type, ts: Number(e.ts) }))
                 .filter((e) => Number.isFinite(e.x) && e.x >= 0 && e.x <= 600);
 
             const datasets = Object.entries(EVENT_LANES).map(([type, cfg]) => ({
                 label: cfg.label,
-                data: chartEvents.filter((e) => e.type === type).map((e) => ({ x: e.x, y: cfg.y })),
+                data: chartEvents.filter((e) => e.type === type).map((e) => ({ x: e.x, y: cfg.y, ts: e.ts })),
                 backgroundColor: cfg.color,
                 borderColor: cfg.color,
                 pointRadius: 5,
@@ -4666,7 +4694,25 @@
                             },
                             tooltip: {
                                 callbacks: {
-                                    label: (ctx) => ctx.dataset.label
+                                    title: (items) => {
+                                        const first = Array.isArray(items) && items.length ? items[0] : null;
+                                        const ts = Number(first && first.raw && first.raw.ts);
+                                        if (!Number.isFinite(ts)) return '';
+                                        const d = new Date(ts);
+                                        const hh = String(d.getHours()).padStart(2, '0');
+                                        const mm = String(d.getMinutes()).padStart(2, '0');
+                                        const ss = String(d.getSeconds()).padStart(2, '0');
+                                        const ms = String(d.getMilliseconds()).padStart(3, '0');
+                                        return `${hh}:${mm}:${ss}.${ms}`;
+                                    },
+                                    label: (ctx) => {
+                                        const ts = Number(ctx && ctx.raw && ctx.raw.ts);
+                                        const startMs = Number(ctx.chart && ctx.chart.$windowStartMs) || 0;
+                                        const offset = Number.isFinite(ts) && startMs > 0
+                                            ? `  (+${((ts - startMs) / 1000).toFixed(3)}s)`
+                                            : '';
+                                        return `${ctx.dataset.label}${offset}`;
+                                    }
                                 }
                             },
                             zoom: buildUnifiedChartZoomOptions(sessionId)
@@ -4967,6 +5013,7 @@
                             legend: {
                                 display: true,
                                 position: 'bottom',
+                                ...legendHoverCallbacks,
                                 labels: {
                                     color: '#6b7280',
                                     font: { family: 'Courier New, monospace', size: 10 },
@@ -5077,6 +5124,7 @@
                 });
                 chart.$windowStartMs = windowStart;
                 chart.options.scales.y.max = maxY;
+                applyLegendHover(chart);
                 chart.update('none');
             }
 
@@ -5120,6 +5168,7 @@
                             legend: {
                                 display: true,
                                 position: 'bottom',
+                                ...legendHoverCallbacks,
                                 labels: {
                                     color: '#6b7280',
                                     font: { family: 'Courier New, monospace', size: 10 },
@@ -5187,6 +5236,7 @@
                 bufferChart.data.datasets[0].data = bufferDepthData;
                 bufferChart.$windowStartMs = windowStart;
                 bufferChart.options.scales.y.max = maxBufferDepth;
+                applyLegendHover(bufferChart);
                 bufferChart.update('none');
             }
 
@@ -5453,6 +5503,7 @@
                 fpsChart.$windowStartMs = windowStart;
                 fpsChart.options.scales.y.max = maxFps;
                 fpsChart.options.scales.yDrop.max = maxDroppedFps;
+                applyLegendHover(fpsChart);
                 fpsChart.update('none');
             }
         }
