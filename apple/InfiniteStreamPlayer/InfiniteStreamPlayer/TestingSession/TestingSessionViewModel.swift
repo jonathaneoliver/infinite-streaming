@@ -351,12 +351,11 @@ final class TestingSessionViewModel: ObservableObject {
 
     private func log(_ message: String) {
         let stamp = ISO8601DateFormatter().string(from: Date())
-        let line = "[\(stamp)] \(message)"
-        logs.append(line)
+        logs.append("[\(stamp)] \(message)")
         if logs.count > 200 {
             logs.removeFirst(logs.count - 200)
         }
-        print(line)
+        print(message)
     }
 
     private func appendLimitSample(from session: SessionData, now: Date) {
