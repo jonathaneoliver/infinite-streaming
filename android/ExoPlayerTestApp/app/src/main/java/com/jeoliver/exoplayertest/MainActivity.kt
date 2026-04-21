@@ -3,14 +3,20 @@ package com.jeoliver.exoplayertest
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.focusable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.key.*
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -21,6 +27,19 @@ import androidx.media3.ui.PlayerView
 enum class ProtocolFilter(val label: String) { HLS("HLS"), DASH("DASH") }
 enum class SegmentFilter(val label: String) { ALL("All"), S2("2s"), S6("6s") }
 enum class CodecFilter(val label: String) { ALL("Auto"), H264("H264"), HEVC("HEVC"), AV1("AV1") }
+
+// TV-friendly modifier: thick yellow border when focused
+@Composable
+fun Modifier.tvFocusHighlight(): Modifier {
+    var focused by remember { mutableStateOf(false) }
+    return this
+        .onFocusChanged { focused = it.isFocused }
+        .then(
+            if (focused) Modifier.border(3.dp, Color(0xFFFFD600), RoundedCornerShape(8.dp))
+            else Modifier
+        )
+        .focusable()
+}
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -74,8 +93,8 @@ fun AppScreen(vm: PlayerViewModel = viewModel()) {
         Dialog(onDismissRequest = { showContentPicker = false }) {
             Card(
                 modifier = Modifier
-                    .fillMaxWidth()
-                    .fillMaxHeight(0.7f)
+                    .fillMaxWidth(0.6f)
+                    .fillMaxHeight(0.8f)
             ) {
                 Column {
                     Text(
@@ -84,21 +103,37 @@ fun AppScreen(vm: PlayerViewModel = viewModel()) {
                         modifier = Modifier.padding(16.dp)
                     )
                     HorizontalDivider()
-                    LazyColumn(
-                        modifier = Modifier.fillMaxSize()
-                    ) {
+                    LazyColumn(modifier = Modifier.fillMaxSize()) {
                         items(filteredContent) { item ->
                             val isPlaying = item.name == currentContent
+                            var itemFocused by remember { mutableStateOf(false) }
                             ListItem(
-                                modifier = Modifier.clickable {
-                                    vm.playContent(item.name, protocolFilter, segmentFilter)
-                                    showContentPicker = false
-                                },
+                                modifier = Modifier
+                                    .onFocusChanged { itemFocused = it.isFocused }
+                                    .then(
+                                        if (itemFocused) Modifier.border(2.dp, Color(0xFFFFD600))
+                                        else Modifier
+                                    )
+                                    .focusable()
+                                    .clickable {
+                                        vm.playContent(item.name, protocolFilter, segmentFilter)
+                                        showContentPicker = false
+                                    }
+                                    .onKeyEvent { event ->
+                                        if (event.type == KeyEventType.KeyUp && (event.key == Key.Enter || event.key == Key.DirectionCenter)) {
+                                            vm.playContent(item.name, protocolFilter, segmentFilter)
+                                            showContentPicker = false
+                                            true
+                                        } else false
+                                    },
                                 headlineContent = {
                                     Text(
                                         item.name.replace("_", " "),
-                                        color = if (isPlaying) MaterialTheme.colorScheme.primary
-                                                else MaterialTheme.colorScheme.onSurface,
+                                        color = when {
+                                            itemFocused -> Color(0xFFFFD600)
+                                            isPlaying -> MaterialTheme.colorScheme.primary
+                                            else -> MaterialTheme.colorScheme.onSurface
+                                        },
                                         style = MaterialTheme.typography.bodyMedium
                                     )
                                 },
@@ -108,7 +143,7 @@ fun AppScreen(vm: PlayerViewModel = viewModel()) {
                                         if (item.has_dash) "DASH" else null
                                     ).joinToString(" · ")
                                     Text(
-                                        "$formats · ${item.max_resolution} · ${item.segment_duration}s",
+                                        "$formats · ${item.max_resolution}${item.segment_duration?.let { " · ${it}s" } ?: ""}",
                                         style = MaterialTheme.typography.bodySmall
                                     )
                                 }
@@ -120,71 +155,15 @@ fun AppScreen(vm: PlayerViewModel = viewModel()) {
         }
     }
 
-    Column(modifier = Modifier.fillMaxSize()) {
-        // Server picker
+    // TV layout: video left, controls right
+    Column(modifier = Modifier.fillMaxSize().padding(24.dp)) {
+        // Title + status bar
         Row(
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp),
-            horizontalArrangement = Arrangement.spacedBy(4.dp),
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Text("Server:", style = MaterialTheme.typography.labelMedium)
-            ServerEnvironment.entries.forEach { serverEnv ->
-                FilterChip(
-                    selected = serverEnv == env,
-                    onClick = { vm.setEnvironment(serverEnv) },
-                    label = { Text(serverEnv.label, style = MaterialTheme.typography.labelSmall) }
-                )
-            }
-        }
-
-        // Filters row
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text("Protocol:", style = MaterialTheme.typography.labelSmall)
-            ProtocolFilter.entries.forEach { pf ->
-                FilterChip(
-                    selected = pf == protocolFilter,
-                    onClick = { protocolFilter = pf },
-                    label = { Text(pf.label, style = MaterialTheme.typography.labelSmall) }
-                )
-            }
-            Text("Seg:", style = MaterialTheme.typography.labelSmall)
-            SegmentFilter.entries.forEach { sf ->
-                FilterChip(
-                    selected = sf == segmentFilter,
-                    onClick = { segmentFilter = sf },
-                    label = { Text(sf.label, style = MaterialTheme.typography.labelSmall) }
-                )
-            }
-            Text("Codec:", style = MaterialTheme.typography.labelSmall)
-            CodecFilter.entries.forEach { cf ->
-                FilterChip(
-                    selected = cf == codecFilter,
-                    onClick = { codecFilter = cf },
-                    label = { Text(cf.label, style = MaterialTheme.typography.labelSmall) }
-                )
-            }
-        }
-
-        // Content selector + status
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Button(onClick = { showContentPicker = true }) {
-                Text(currentContent?.replace("_", " ")?.take(30) ?: "Select Content")
-            }
-            if (currentContent != null) {
-                OutlinedButton(onClick = {
-                    currentContent?.let { vm.playContent(it, protocolFilter, segmentFilter) }
-                }) { Text("Restart") }
-                OutlinedButton(onClick = { vm.stopPlayback() }) { Text("Stop") }
-            }
-            Spacer(Modifier.weight(1f))
+            Text("InfiniteStream Player", style = MaterialTheme.typography.titleLarge)
             Text(
                 "ID: ${vm.playerId} · $playerState",
                 style = MaterialTheme.typography.bodySmall,
@@ -192,43 +171,142 @@ fun AppScreen(vm: PlayerViewModel = viewModel()) {
             )
         }
 
-        // Status message
-        if (statusMessage.isNotEmpty()) {
-            Text(
-                statusMessage,
-                style = MaterialTheme.typography.bodySmall,
-                modifier = Modifier.padding(horizontal = 8.dp)
-            )
-        }
+        Spacer(Modifier.height(12.dp))
 
-        // Player view — fills remaining space
-        val player = vm.player
-        if (currentContent != null && player != null) {
-            AndroidView(
-                factory = { ctx ->
-                    PlayerView(ctx).apply {
-                        this.player = player
-                        useController = true
-                    }
-                },
-                update = { view ->
-                    view.player = player
-                },
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .weight(1f)
-                    .padding(8.dp)
-            )
-        } else {
+        // Main content: video left, controls right
+        Row(
+            modifier = Modifier.weight(1f).fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(20.dp)
+        ) {
+            // Left: video player
             Box(
-                modifier = Modifier.fillMaxWidth().weight(1f),
+                modifier = Modifier
+                    .weight(1.4f)
+                    .fillMaxHeight(),
                 contentAlignment = Alignment.Center
             ) {
-                Text(
-                    if (contentList.isEmpty()) "Loading content..." else "Select content to play",
-                    style = MaterialTheme.typography.bodyLarge,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
+                val player = vm.player
+                if (currentContent != null && player != null) {
+                    AndroidView(
+                        factory = { ctx ->
+                            PlayerView(ctx).apply {
+                                this.player = player
+                                useController = true
+                            }
+                        },
+                        update = { view ->
+                            view.player = player
+                        },
+                        modifier = Modifier.fillMaxSize()
+                    )
+                } else {
+                    Text(
+                        if (contentList.isEmpty()) "Loading content..." else "Select content to play",
+                        style = MaterialTheme.typography.bodyLarge,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+
+            // Right: controls panel
+            Column(
+                modifier = Modifier.weight(0.6f).fillMaxHeight(),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                // Action buttons
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(
+                        onClick = { vm.loadContent() },
+                        modifier = Modifier.tvFocusHighlight()
+                    ) { Text("Retry") }
+                    OutlinedButton(
+                        onClick = { currentContent?.let { vm.playContent(it, protocolFilter, segmentFilter) } },
+                        enabled = currentContent != null,
+                        modifier = Modifier.tvFocusHighlight()
+                    ) { Text("Restart") }
+                    OutlinedButton(
+                        onClick = { vm.stopPlayback() },
+                        enabled = currentContent != null,
+                        modifier = Modifier.tvFocusHighlight()
+                    ) { Text("Stop") }
+                }
+
+                // Status
+                if (statusMessage.isNotEmpty()) {
+                    Text(statusMessage, style = MaterialTheme.typography.bodySmall, maxLines = 2)
+                }
+
+                HorizontalDivider()
+
+                // Server picker
+                Text("Server", style = MaterialTheme.typography.labelLarge)
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    ServerEnvironment.entries.forEach { serverEnv ->
+                        FilterChip(
+                            selected = serverEnv == env,
+                            onClick = { vm.setEnvironment(serverEnv) },
+                            label = { Text(serverEnv.label) },
+                            modifier = Modifier.tvFocusHighlight()
+                        )
+                    }
+                }
+
+                // Protocol
+                Text("Protocol", style = MaterialTheme.typography.labelLarge)
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    ProtocolFilter.entries.forEach { pf ->
+                        FilterChip(
+                            selected = pf == protocolFilter,
+                            onClick = { protocolFilter = pf },
+                            label = { Text(pf.label) },
+                            modifier = Modifier.tvFocusHighlight()
+                        )
+                    }
+                }
+
+                // Segment + Codec
+                Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                    Column {
+                        Text("Segment", style = MaterialTheme.typography.labelLarge)
+                        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                            SegmentFilter.entries.forEach { sf ->
+                                FilterChip(
+                                    selected = sf == segmentFilter,
+                                    onClick = { segmentFilter = sf },
+                                    label = { Text(sf.label) },
+                                    modifier = Modifier.tvFocusHighlight()
+                                )
+                            }
+                        }
+                    }
+                    Column {
+                        Text("Codec", style = MaterialTheme.typography.labelLarge)
+                        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                            CodecFilter.entries.forEach { cf ->
+                                FilterChip(
+                                    selected = cf == codecFilter,
+                                    onClick = { codecFilter = cf },
+                                    label = { Text(cf.label) },
+                                    modifier = Modifier.tvFocusHighlight()
+                                )
+                            }
+                        }
+                    }
+                }
+
+                Spacer(Modifier.weight(1f))
+
+                // Content selector
+                Button(
+                    onClick = { showContentPicker = true },
+                    modifier = Modifier.fillMaxWidth().tvFocusHighlight()
+                ) {
+                    Text(
+                        currentContent?.replace("_", " ") ?: "Select Content (${filteredContent.size})",
+                        maxLines = 1,
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                }
             }
         }
     }
