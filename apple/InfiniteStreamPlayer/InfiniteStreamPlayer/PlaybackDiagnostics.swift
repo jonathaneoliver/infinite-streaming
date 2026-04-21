@@ -2,6 +2,21 @@ import AVFoundation
 import Combine
 import Foundation
 
+fileprivate let consoleTimestampFormatter: DateFormatter = {
+    let f = DateFormatter()
+    f.dateFormat = "HH:mm:ss.SSS"
+    f.locale = Locale(identifier: "en_US_POSIX")
+    return f
+}()
+
+// Shadows Swift.print for this target — every print() call in the module
+// gets a [HH:mm:ss.SSS] prefix in the Xcode console.
+func print(_ items: Any..., separator: String = " ", terminator: String = "\n") {
+    let stamp = consoleTimestampFormatter.string(from: Date())
+    let body = items.map { String(describing: $0) }.joined(separator: separator)
+    Swift.print("[\(stamp)] \(body)", terminator: terminator)
+}
+
 struct MetricSample: Identifiable {
     let id = UUID()
     let timestamp: Date
@@ -27,6 +42,8 @@ final class PlaybackDiagnostics: ObservableObject {
     @Published var lastStallDurationSeconds: Double = 0
     @Published var observedBitrate: Double?
     @Published var indicatedBitrate: Double?
+    @Published var networkWindowBitrate: Double?
+    @Published var networkWireBitrate: Double?
     @Published var averageVideoBitrate: Double?
     @Published var droppedVideoFrames: Double?
     @Published var estimatedDisplayedFrames: Double?
@@ -50,21 +67,168 @@ final class PlaybackDiagnostics: ObservableObject {
     @Published var bufferDepthSamples: [MetricSample] = []
     @Published var liveOffsetSamples: [MetricSample] = []
 
+    @Published var frozenDetected: Bool = false
+    @Published var segmentStallDetected: Bool = false
+
     private var timeObserverToken: Any?
+    private var bitrateSampleTimer: Timer?
     private var cancellables: Set<AnyCancellable> = []
     private weak var player: AVPlayer?
     private var lastBufferSampleAt: Date?
     private var lastPlayerSampleAt: Date?
     private var stallStartAt: Date?
     private var hasRenderedFirstFrame: Bool = false
+    private var lastAdvancingTime: Double = 0
+    private var lastAdvancingAt: Date?
+    private var frozenLoggedAt: Date?
     private var lastObservedSegmentSequence: Int?
     private var maxObservedSegmentSequence: Int?
     private let maxSeriesSamples = 600
+    private var variantDwellSeconds: [String: Double] = [:]  // variant label -> total seconds (prior + current)
+    private var priorVariantDwellSeconds: [String: Double] = [:]  // accumulated across restarts
+    private var priorDroppedVideoFrames: Double = 0
+    private var priorEstimatedDisplayedFrames: Double = 0
+    private var knownVariants: Set<String> = []
+    private var lastVariantSummaryAt: Date?
+    private var lastAccessLogEventCount: Int = 0
+    private var lastVariantDwellTotal: Double = 0
+    private var lastVariantDwellChangeAt: Date?
+    private let segmentStallThresholdSeconds: TimeInterval = 30
     private let seriesWindowSeconds: TimeInterval = 300
+    private let networkWindowSeconds: TimeInterval = 6
+    private var networkByteSamples: [(timestamp: Date, bytes: Int64, xfer: Double)] = []
+    // Rolling samples for the proxy-based bitrate. `flowingMs` is cumulative
+    // ms during which a chunk arrived within the last 100 ms (from RequestTracker).
+    // Using flowingMs as the denominator gives a transfer-time rate that tracks
+    // the actual wire delivery rate instead of being diluted by idle gaps
+    // between segment requests.
+    private var wireByteSamples: [(timestamp: Date, bytes: Int64, flowingMs: Double)] = []
+    private let wireWindowSeconds: TimeInterval = 6
+    private let wireMinFlowingSeconds: TimeInterval = 0.3
+    private static let bitrateSampleFormatter: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return f
+    }()
 
     func bind(to player: AVPlayer) {
         self.player = player
         observePlayer(player)
+        startBitrateSampleTimer()
+    }
+
+    deinit {
+        bitrateSampleTimer?.invalidate()
+    }
+
+    private func startBitrateSampleTimer() {
+        bitrateSampleTimer?.invalidate()
+        bitrateSampleTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
+            self?.emitBitrateSample()
+        }
+    }
+
+    private func emitBitrateSample() {
+        guard let item = player?.currentItem,
+              let events = item.accessLog()?.events, !events.isEmpty else { return }
+        var totalBytes: Int64 = 0
+        var totalXfer: Double = 0
+        for ev in events {
+            if ev.numberOfBytesTransferred > 0 { totalBytes += ev.numberOfBytesTransferred }
+            if ev.transferDuration > 0 { totalXfer += ev.transferDuration }
+        }
+        let observedBps = events.last?.observedBitrate ?? 0
+        let now = Date()
+        let ts = Self.bitrateSampleFormatter.string(from: now)
+        let windowBps = networkWindowBitrate ?? -1
+        let approxBps = computeApproxActiveBitrate(now: now) ?? -1
+        let wire = RequestTracker.shared.snapshot(now: now)
+        let wireLastChunkMsAgo = wire.wireLastChunkMsAgo ?? -1
+        updateNetworkWireBitrate(wire: wire, now: now)
+        // BITRATE_SAMPLE logging disabled — re-enable when offline analysis needed.
+        // let line = String(
+        //     format: "[BITRATE_SAMPLE] {\"t\":\"%@\",\"bytes\":%lld,\"xfer\":%.3f,\"observed_bps\":%.0f,\"network_window_bps\":%.0f,\"approx_xfer_bps\":%.0f,\"wire_bytes\":%lld,\"wire_active_ms\":%.1f,\"wire_flowing_ms\":%.1f,\"wire_inflight\":%d,\"wire_last_chunk_ms_ago\":%.1f,\"network_wire_bps\":%.0f}",
+        //     ts, totalBytes, totalXfer, observedBps, windowBps, approxBps,
+        //     wire.wireBytesTotal, wire.wireActiveMsTotal, wire.wireFlowingMsTotal,
+        //     wire.wireInflightCount, wireLastChunkMsAgo,
+        //     networkWireBitrate ?? -1
+        // )
+        // Swift.print(line)
+        _ = (ts, totalBytes, totalXfer, observedBps, windowBps, approxBps, wireLastChunkMsAgo)
+    }
+
+    // Rolling wire-bytes bitrate: like `networkWindowBitrate`, but fed from
+    // the LocalHTTPProxy's per-chunk accounting. Report nil when there are no
+    // outstanding requests AND no new bytes arrived since the previous sample —
+    // this gives the chart a clean gap during idle gaps between segment fetches.
+    private func updateNetworkWireBitrate(wire: RequestTracker.Snapshot, now: Date) {
+        wireByteSamples.append((timestamp: now, bytes: wire.wireBytesTotal, flowingMs: wire.wireFlowingMsTotal))
+        let cutoff = now.addingTimeInterval(-(wireWindowSeconds + 1))
+        wireByteSamples.removeAll { $0.timestamp < cutoff }
+        // Idle gate: no requests in flight AND last chunk arrived > 250ms ago.
+        // Covers the ~200ms gap between LL-HLS partials but goes nil promptly
+        // when the player truly stops fetching (buffer full) — otherwise the
+        // flowing-ms denominator would trail a stale rate for up to 6s as
+        // the window rolls off.
+        if wire.wireInflightCount == 0,
+           (wire.wireLastChunkMsAgo ?? .infinity) > 250 {
+            networkWireBitrate = nil
+            return
+        }
+        let windowStart = now.addingTimeInterval(-wireWindowSeconds)
+        guard let oldest = wireByteSamples.first(where: { $0.timestamp >= windowStart })
+                ?? wireByteSamples.first,
+              oldest.timestamp < now else {
+            networkWireBitrate = nil
+            return
+        }
+        // Transfer-time denominator: count only ms during which bytes were
+        // actually flowing on the wire. This matches the shaper limit during
+        // bursty fetches instead of diluting by idle gaps between segments.
+        let flowingSec = max(0, (wire.wireFlowingMsTotal - oldest.flowingMs) / 1000.0)
+        let dBytes = Double(max(0, wire.wireBytesTotal - oldest.bytes))
+        guard flowingSec >= wireMinFlowingSeconds, dBytes > 0 else {
+            networkWireBitrate = nil
+            return
+        }
+        networkWireBitrate = dBytes * 8.0 / flowingSec
+    }
+
+    // Approximate "active transfer" rate: sum wall time of 100ms sub-intervals
+    // where cumulative bytes grew (i.e. data was flowing). Denominator is that
+    // active time only, so idle gaps between segments don't dilute the rate.
+    // Result tends to match the TCP burst delivery rate rather than the
+    // sustained shaper rate. Returns nil while warming up.
+    private func computeApproxActiveBitrate(now: Date) -> Double? {
+        let windowStart = now.addingTimeInterval(-networkWindowSeconds)
+        let recent = networkByteSamples.filter { $0.timestamp >= windowStart }
+        guard recent.count >= 2, let oldest = recent.first, let newest = recent.last,
+              newest.timestamp > oldest.timestamp else {
+            return nil
+        }
+        let wall = newest.timestamp.timeIntervalSince(oldest.timestamp)
+        let dBytes = Double(max(0, newest.bytes - oldest.bytes))
+        if wall >= networkWindowSeconds && dBytes == 0 { return 0 }
+        guard wall >= 1.0 else { return nil }
+        var activeTime: TimeInterval = 0
+        for i in 1..<recent.count {
+            let dt = recent[i].timestamp.timeIntervalSince(recent[i-1].timestamp)
+            let db = recent[i].bytes - recent[i-1].bytes
+            if db > 0 { activeTime += dt }
+        }
+        guard activeTime >= 0.1 else { return 0 }
+        return dBytes * 8.0 / activeTime
+    }
+
+    /// Call before replacing the player item to preserve cumulative stats across restarts.
+    func snapshotForRestart() {
+        // Accumulate variant dwell times
+        for (label, seconds) in variantDwellSeconds {
+            priorVariantDwellSeconds[label, default: 0] = seconds
+        }
+        // Accumulate frame counters
+        priorDroppedVideoFrames = droppedVideoFrames ?? 0
+        priorEstimatedDisplayedFrames = estimatedDisplayedFrames ?? 0
     }
 
     func reset() {
@@ -86,6 +250,10 @@ final class PlaybackDiagnostics: ObservableObject {
         lastStallDurationSeconds = 0
         observedBitrate = nil
         indicatedBitrate = nil
+        networkWindowBitrate = nil
+        networkByteSamples = []
+        networkWireBitrate = nil
+        wireByteSamples = []
         averageVideoBitrate = nil
         droppedVideoFrames = nil
         estimatedDisplayedFrames = nil
@@ -114,6 +282,19 @@ final class PlaybackDiagnostics: ObservableObject {
         hasRenderedFirstFrame = false
         lastObservedSegmentSequence = nil
         maxObservedSegmentSequence = nil
+        frozenDetected = false
+        lastAdvancingTime = 0
+        lastAdvancingAt = nil
+        frozenLoggedAt = nil
+        // Reset current-item tracking but keep prior accumulators
+        variantDwellSeconds = priorVariantDwellSeconds
+        lastVariantSummaryAt = nil
+        lastAccessLogEventCount = 0
+        segmentStallDetected = false
+        lastVariantDwellTotal = priorVariantDwellSeconds.values.reduce(0, +)
+        lastVariantDwellChangeAt = nil
+        // Don't clear: priorVariantDwellSeconds, priorDroppedVideoFrames,
+        // priorEstimatedDisplayedFrames, knownVariants
     }
 
     func markFirstFrameRendered() {
@@ -126,17 +307,24 @@ final class PlaybackDiagnostics: ObservableObject {
         player.publisher(for: \.timeControlStatus)
             .receive(on: DispatchQueue.main)
             .sink { [weak self] status in
+                guard let self else { return }
+                let prev = self.state
+                let item = self.player?.currentItem
+                let bufEmpty = item?.isPlaybackBufferEmpty ?? false
+                let keepUp = item?.isPlaybackLikelyToKeepUp ?? false
+                let rate = self.player?.rate ?? 0
                 switch status {
                 case .paused:
-                    self?.state = "Paused"
+                    self.state = "Paused"
                 case .waitingToPlayAtSpecifiedRate:
-                    self?.state = "Buffering"
-                    self?.startStallIfNeeded()
+                    self.state = "Buffering"
+                    self.startStallIfNeeded()
                 case .playing:
-                    self?.state = "Playing"
-                    self?.endStallIfNeeded()
-                @unknown default: self?.state = "Unknown"
+                    self.state = "Playing"
+                    self.endStallIfNeeded()
+                @unknown default: self.state = "Unknown"
                 }
+                print("[STATE] \(prev) -> \(self.state) rate=\(rate) bufferEmpty=\(bufEmpty) likelyToKeepUp=\(keepUp) time=\(String(format: "%.2f", self.currentTime))")
             }
             .store(in: &cancellables)
 
@@ -145,7 +333,11 @@ final class PlaybackDiagnostics: ObservableObject {
             .sink { [weak self] reason in
                 if let reason = reason {
                     self?.waitingReason = reason.rawValue
+                    print("[WAITING] reason=\(reason.rawValue) state=\(self?.state ?? "?") time=\(String(format: "%.2f", self?.currentTime ?? 0))")
                 } else {
+                    if !(self?.waitingReason.isEmpty ?? true) {
+                        print("[WAITING] reason=cleared state=\(self?.state ?? "?") time=\(String(format: "%.2f", self?.currentTime ?? 0))")
+                    }
                     self?.waitingReason = ""
                 }
             }
@@ -153,12 +345,25 @@ final class PlaybackDiagnostics: ObservableObject {
 
         player.publisher(for: \.rate)
             .receive(on: DispatchQueue.main)
-            .assign(to: &$playbackRate)
+            .sink { [weak self] rate in
+                guard let self else { return }
+                let prev = self.playbackRate
+                self.playbackRate = rate
+                if abs(rate - prev) > 0.001 {
+                    print("[RATE] \(prev) -> \(rate) state=\(self.state) time=\(String(format: "%.2f", self.currentTime))")
+                }
+            }
+            .store(in: &cancellables)
 
         NotificationCenter.default.publisher(for: .AVPlayerItemPlaybackStalled)
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in
-                self?.startStallIfNeeded()
+                guard let self else { return }
+                let item = self.player?.currentItem
+                let bufEmpty = item?.isPlaybackBufferEmpty ?? false
+                let keepUp = item?.isPlaybackLikelyToKeepUp ?? false
+                print("[STALL] bufferEmpty=\(bufEmpty) likelyToKeepUp=\(keepUp) state=\(self.state) time=\(String(format: "%.2f", self.currentTime))")
+                self.startStallIfNeeded()
             }
             .store(in: &cancellables)
 
@@ -166,8 +371,10 @@ final class PlaybackDiagnostics: ObservableObject {
             .receive(on: DispatchQueue.main)
             .sink { [weak self] notification in
                 if let error = notification.userInfo?[AVPlayerItemFailedToPlayToEndTimeErrorKey] as? Error {
+                    print("[FAILURE] \(error.localizedDescription) state=\(self?.state ?? "?") time=\(String(format: "%.2f", self?.currentTime ?? 0))")
                     self?.lastFailure = error.localizedDescription
                 } else {
+                    print("[FAILURE] Playback failed state=\(self?.state ?? "?") time=\(String(format: "%.2f", self?.currentTime ?? 0))")
                     self?.lastFailure = "Playback failed"
                 }
             }
@@ -205,6 +412,8 @@ final class PlaybackDiagnostics: ObservableObject {
             self.currentTime = time.seconds
             self.updateBufferMetrics()
             self.updateItemState()
+            self.checkFrozenState()
+            self.periodicVariantSummary()
         }
     }
 
@@ -234,6 +443,19 @@ final class PlaybackDiagnostics: ObservableObject {
                 }
             }
         }
+        // Fallback: try async track load if sync method returned nothing
+        if nominalFrameRate == nil || (nominalFrameRate ?? 0) <= 0 {
+            Task { @MainActor [weak self] in
+                guard let self, let item = self.player?.currentItem else { return }
+                if let tracks = try? await item.asset.loadTracks(withMediaType: .video),
+                   let track = tracks.first {
+                    let fps = try? await track.load(.nominalFrameRate)
+                    if let fps, fps > 0 {
+                        self.nominalFrameRate = Double(fps)
+                    }
+                }
+            }
+        }
     }
 
     func updateDisplaySize(_ size: CGSize) {
@@ -249,13 +471,18 @@ final class PlaybackDiagnostics: ObservableObject {
     private func updateBufferMetrics() {
         guard let item = player?.currentItem else { return }
         let ranges = item.loadedTimeRanges
-        if let range = ranges.last?.timeRangeValue {
+        if item.isPlaybackBufferEmpty {
+            bufferDepth = 0
+            if let range = ranges.last?.timeRangeValue {
+                bufferedEnd = range.start.seconds + range.duration.seconds
+            }
+        } else if let range = ranges.last?.timeRangeValue {
             let end = range.start.seconds + range.duration.seconds
             bufferedEnd = end
             bufferDepth = max(0, end - currentTime)
         } else {
             bufferedEnd = nil
-            bufferDepth = nil
+            bufferDepth = 0
         }
         if let depth = bufferDepth {
             let now = Date()
@@ -286,6 +513,47 @@ final class PlaybackDiagnostics: ObservableObject {
         stallCount += 1
     }
 
+    private func checkFrozenState() {
+        let now = Date()
+        let time = currentTime
+        if abs(time - lastAdvancingTime) > 0.01 {
+            lastAdvancingTime = time
+            lastAdvancingAt = now
+            if frozenDetected {
+                frozenDetected = false
+            }
+            return
+        }
+        guard state != "Idle" && state != "Paused" else {
+            lastAdvancingAt = now
+            return
+        }
+        guard let advancedAt = lastAdvancingAt else {
+            lastAdvancingAt = now
+            return
+        }
+        let stalledFor = now.timeIntervalSince(advancedAt)
+        if stalledFor >= 3.0 && !frozenDetected {
+            frozenDetected = true
+            let item = player?.currentItem
+            let bufEmpty = item?.isPlaybackBufferEmpty ?? false
+            let keepUp = item?.isPlaybackLikelyToKeepUp ?? false
+            let rate = player?.rate ?? 0
+            let status = player?.timeControlStatus.rawValue ?? -1
+            let reason = player?.reasonForWaitingToPlay?.rawValue ?? "none"
+            let ranges = item?.loadedTimeRanges.map { $0.timeRangeValue }
+            let rangeDesc = ranges?.map { String(format: "%.1f-%.1f", $0.start.seconds, $0.start.seconds + $0.duration.seconds) }.joined(separator: ", ") ?? "none"
+            print("[FROZEN] time=\(String(format: "%.2f", time)) stalled_for=\(String(format: "%.1fs", stalledFor)) state=\(state) rate=\(rate) timeControlStatus=\(status) waitingReason=\(reason) bufferEmpty=\(bufEmpty) likelyToKeepUp=\(keepUp) loadedRanges=[\(rangeDesc)]")
+        }
+        if stalledFor >= 3.0 && frozenDetected {
+            // Log every 3 seconds while frozen
+            if frozenLoggedAt == nil || now.timeIntervalSince(frozenLoggedAt!) >= 3.0 {
+                frozenLoggedAt = now
+                print("[FROZEN] still frozen at time=\(String(format: "%.2f", time)) for \(String(format: "%.0fs", stalledFor)) state=\(state) rate=\(player?.rate ?? 0)")
+            }
+        }
+    }
+
     private func endStallIfNeeded() {
         guard let start = stallStartAt else { return }
         let duration = max(0, Date().timeIntervalSince(start))
@@ -294,7 +562,7 @@ final class PlaybackDiagnostics: ObservableObject {
         stallStartAt = nil
     }
 
-    private func updateAccessLog(from item: AVPlayerItem) {
+    private func refreshLiveAccessLogMetrics(from item: AVPlayerItem) {
         guard let event = item.accessLog()?.events.last else { return }
         observedBitrate = event.observedBitrate
         indicatedBitrate = event.indicatedBitrate
@@ -302,12 +570,6 @@ final class PlaybackDiagnostics: ObservableObject {
         if let uri = event.uri {
             lastSegmentURI = uri
             if let sequence = extractSegmentSequence(from: uri) {
-                if let previous = lastObservedSegmentSequence,
-                   let maxSeen = maxObservedSegmentSequence,
-                   maxSeen >= 5,
-                   sequence+5 < previous {
-                    loopCountPlayer = max(0, loopCountPlayer) + 1
-                }
                 if let maxSeen = maxObservedSegmentSequence {
                     maxObservedSegmentSequence = max(maxSeen, sequence)
                 } else {
@@ -316,10 +578,70 @@ final class PlaybackDiagnostics: ObservableObject {
                 lastObservedSegmentSequence = sequence
             }
         }
-        if event.numberOfDroppedVideoFrames > 0 {
-            droppedVideoFrames = Double(event.numberOfDroppedVideoFrames)
+        if let events = item.accessLog()?.events {
+            var totalDropped: Double = 0
+            var totalBytes: Int64 = 0
+            var totalXfer: Double = 0
+            for ev in events {
+                if ev.numberOfDroppedVideoFrames > 0 {
+                    totalDropped += Double(ev.numberOfDroppedVideoFrames)
+                }
+                if ev.numberOfBytesTransferred > 0 {
+                    totalBytes += ev.numberOfBytesTransferred
+                }
+                if ev.transferDuration > 0 {
+                    totalXfer += ev.transferDuration
+                }
+            }
+            droppedVideoFrames = priorDroppedVideoFrames + totalDropped
+            updateNetworkWindowBitrate(totalBytes: totalBytes, totalXfer: totalXfer, now: Date())
         }
-        // Samples are collected on a steady interval in samplePlayerMetrics().
+        updateVariantDwellTimes(from: item)
+    }
+
+    private func updateNetworkWindowBitrate(totalBytes: Int64, totalXfer: Double, now: Date) {
+        // Detect access-log purge (cumulative bytes decreased) — AVFoundation
+        // can retire old events, which resets our running totals. Drop all
+        // prior samples in that case so deltas aren't computed against stale
+        // baselines.
+        if let last = networkByteSamples.last,
+           totalBytes < last.bytes || totalXfer < last.xfer {
+            networkByteSamples.removeAll()
+        }
+        networkByteSamples.append((timestamp: now, bytes: totalBytes, xfer: totalXfer))
+        let cutoff = now.addingTimeInterval(-(networkWindowSeconds + 1))
+        networkByteSamples.removeAll { $0.timestamp < cutoff }
+        // Oldest sample within the 6s wall-clock window.
+        let windowStart = now.addingTimeInterval(-networkWindowSeconds)
+        let withinWindow = networkByteSamples.filter { $0.timestamp >= windowStart }
+        guard let oldest = withinWindow.first ?? networkByteSamples.first,
+              oldest.timestamp < now else {
+            networkWindowBitrate = nil
+            return
+        }
+        let wall = now.timeIntervalSince(oldest.timestamp)
+        let dBytes = Double(max(0, totalBytes - oldest.bytes))
+        // Idle detection — full window with zero byte growth means no data
+        // made it through for the entire window: report a genuine 0 Mbps.
+        if wall >= networkWindowSeconds && dBytes == 0 {
+            networkWindowBitrate = 0
+            return
+        }
+        // Warmup — need at least 1s of wall-clock history for a stable rate.
+        guard wall >= 1.0 else {
+            networkWindowBitrate = nil
+            return
+        }
+        // Wall-time denominator: the rate cannot exceed the shaper limit
+        // because over wall time, bytes that arrive must have passed through
+        // the shaper. xfer-time denominator, by contrast, only counts active
+        // transfer duration and can overshoot during TCP bursts.
+        networkWindowBitrate = dBytes * 8.0 / wall
+    }
+
+    private func updateAccessLog(from item: AVPlayerItem) {
+        refreshLiveAccessLogMetrics(from: item)
+        guard let event = item.accessLog()?.events.last else { return }
         var parts: [String] = []
         if let uri = event.uri {
             parts.append("uri=\(uri)")
@@ -331,10 +653,112 @@ final class PlaybackDiagnostics: ObservableObject {
         if event.transferDuration > 0 { parts.append("xfer=\(String(format: "%.2fs", event.transferDuration))") }
         if event.numberOfBytesTransferred > 0 { parts.append("bytes=\(event.numberOfBytesTransferred)") }
         if event.numberOfDroppedVideoFrames > 0 { parts.append("dropped=\(Int(event.numberOfDroppedVideoFrames))") }
-        // numberOfSegmentsDownloaded is unavailable on iOS/tvOS; omit.
         if let server = event.serverAddress { parts.append("server=\(server)") }
         if let session = event.playbackSessionID { parts.append("session=\(session)") }
         lastAccessLog = parts.joined(separator: " ")
+    }
+
+    private func variantLabel(from uri: String) -> String {
+        // Extract resolution label like "360p", "1080p", "2160p" from playlist URI
+        let base = (uri as NSString).lastPathComponent
+            .replacingOccurrences(of: ".m3u8", with: "")
+            .replacingOccurrences(of: "playlist_6s_", with: "")
+            .replacingOccurrences(of: "playlist_2s_", with: "")
+            .replacingOccurrences(of: "playlist_", with: "")
+        return base.isEmpty ? uri : base
+    }
+
+    private func updateVariantDwellTimes(from item: AVPlayerItem) {
+        guard let events = item.accessLog()?.events else { return }
+        // Discover new variant labels
+        let newEvents = events.dropFirst(lastAccessLogEventCount)
+        for event in newEvents {
+            guard let uri = event.uri else { continue }
+            let label = variantLabel(from: uri)
+            if label == "audio" { continue }
+            knownVariants.insert(label)
+        }
+        // Sum dwell from current item's access log
+        var currentDwell: [String: Double] = [:]
+        for event in events {
+            guard let uri = event.uri else { continue }
+            let label = variantLabel(from: uri)
+            if label == "audio" { continue }
+            let watched = event.durationWatched
+            if watched > 0 {
+                currentDwell[label, default: 0] += watched
+            }
+        }
+        lastAccessLogEventCount = events.count
+        // Merge prior + current
+        var merged = priorVariantDwellSeconds
+        for (label, seconds) in currentDwell {
+            merged[label, default: 0] += seconds
+        }
+        variantDwellSeconds = merged
+    }
+
+    private func periodicVariantSummary() {
+        if let item = player?.currentItem {
+            refreshLiveAccessLogMetrics(from: item)
+        }
+        guard !knownVariants.isEmpty else { return }
+        let now = Date()
+        if lastVariantSummaryAt == nil || now.timeIntervalSince(lastVariantSummaryAt!) >= 10.0 {
+            lastVariantSummaryAt = now
+            logVariantSummary()
+        }
+        checkSegmentStall(now: now)
+    }
+
+    private func checkSegmentStall(now: Date) {
+        let total = variantDwellSeconds.values.reduce(0, +)
+        if abs(total - lastVariantDwellTotal) > 0.1 {
+            lastVariantDwellTotal = total
+            lastVariantDwellChangeAt = now
+            if segmentStallDetected {
+                segmentStallDetected = false
+                print("[SEGMENT_STALL] resolved — segments downloading again total=\(String(format: "%.1f", total))")
+            }
+            return
+        }
+        guard state == "Playing" else {
+            lastVariantDwellChangeAt = now
+            return
+        }
+        guard let changeAt = lastVariantDwellChangeAt else {
+            lastVariantDwellChangeAt = now
+            return
+        }
+        let stalledFor = now.timeIntervalSince(changeAt)
+        if stalledFor >= segmentStallThresholdSeconds && !segmentStallDetected {
+            segmentStallDetected = true
+            print("[SEGMENT_STALL] no new segments for \(String(format: "%.0fs", stalledFor)) while state=\(state) time=\(String(format: "%.2f", currentTime)) variantTotal=\(String(format: "%.1f", total))")
+        }
+    }
+
+    private func logVariantSummary() {
+        let allLabels = knownVariants.sorted { a, b in
+            let aNum = Int(a.replacingOccurrences(of: "p", with: "")) ?? 0
+            let bNum = Int(b.replacingOccurrences(of: "p", with: "")) ?? 0
+            return aNum < bNum
+        }
+        let total = variantDwellSeconds.values.reduce(0, +)
+        let parts = allLabels.map { label in
+            let secs = variantDwellSeconds[label] ?? 0
+            let pct = total > 0 ? (secs / total) * 100 : 0
+            return "\(label)=\(String(format: "%.1fs", secs))(\(String(format: "%.0f%%", pct)))"
+        }
+        print("[VARIANTS] total=\(String(format: "%.1fs", total)) \(parts.joined(separator: " "))")
+        logBitrateSummary()
+    }
+
+    private func logBitrateSummary() {
+        // [BITRATE] summary print disabled — uncomment when investigating ABR.
+        // let observedMbps = (observedBitrate ?? 0) / 1_000_000
+        // let indicatedMbps = (indicatedBitrate ?? 0) / 1_000_000
+        // let windowMbps = (networkWindowBitrate ?? 0) / 1_000_000
+        // print("[BITRATE] observed=\(String(format: "%.2fMbps", observedMbps)) window\(Int(networkWindowSeconds))s=\(String(format: "%.2fMbps", windowMbps)) indicated=\(String(format: "%.2fMbps", indicatedMbps))")
     }
 
     private func updateErrorLog(from item: AVPlayerItem) {
@@ -384,7 +808,7 @@ final class PlaybackDiagnostics: ObservableObject {
             }
             if let fps = nominalFrameRate, fps > 0 {
                 let dropped = droppedVideoFrames ?? 0
-                let estimated = max(0, (currentTime * fps) - dropped)
+                let estimated = priorEstimatedDisplayedFrames + max(0, (currentTime * fps) - (dropped - priorDroppedVideoFrames))
                 estimatedDisplayedFrames = estimated
             }
             let variant = (indicatedBitrate ?? 0) > 0 ? (indicatedBitrate ?? 0) : (averageVideoBitrate ?? 0)
@@ -450,16 +874,21 @@ final class PlaybackDiagnostics: ObservableObject {
         item.publisher(for: \.status)
             .receive(on: DispatchQueue.main)
             .sink { [weak self] status in
+                guard let self else { return }
+                let prev = self.itemStatus
                 switch status {
-                case .unknown: self?.itemStatus = "Unknown"
-                case .readyToPlay: self?.itemStatus = "Ready"
+                case .unknown: self.itemStatus = "Unknown"
+                case .readyToPlay: self.itemStatus = "Ready"
                 case .failed:
-                    self?.itemStatus = "Failed"
+                    self.itemStatus = "Failed"
                     if let err = item.error {
-                        self?.itemError = self?.describeError(err) ?? err.localizedDescription
+                        self.itemError = self.describeError(err)
                     }
-                @unknown default: self?.itemStatus = "Unknown"
+                @unknown default: self.itemStatus = "Unknown"
                 }
+                let bufEmpty = item.isPlaybackBufferEmpty
+                let keepUp = item.isPlaybackLikelyToKeepUp
+                print("[ITEM_STATUS] \(prev) -> \(self.itemStatus) bufferEmpty=\(bufEmpty) likelyToKeepUp=\(keepUp) error=\(item.error?.localizedDescription ?? "none") time=\(String(format: "%.2f", self.currentTime))")
             }
             .store(in: &cancellables)
     }

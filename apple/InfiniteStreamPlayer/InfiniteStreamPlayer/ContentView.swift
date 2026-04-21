@@ -111,6 +111,12 @@ struct ContentView: View {
                             .toggleStyle(.switch)
                         Text("Auto-Recovery")
                     }
+                    HStack(spacing: 6) {
+                        Toggle("", isOn: $viewModel.localProxyEnabled)
+                            .labelsHidden()
+                            .toggleStyle(.switch)
+                        Text("Local Proxy")
+                    }
                 }
 
                 PlayerView(player: viewModel.player)

@@ -20,6 +20,8 @@
     <dict/>
     <key>NSAppTransportSecurity</key>
     <dict>
+        <key>NSAllowsLocalNetworking</key>
+        <true/>
         <key>NSExceptionDomains</key>
         <dict>
             <key>infinitestreaming.jeoliver.com</key>
@@ -37,6 +39,13 @@
                 <true/>
             </dict>
             <key>jonathanoliver-ubuntu.local</key>
+            <dict>
+                <key>NSExceptionAllowsInsecureHTTPLoads</key>
+                <true/>
+                <key>NSIncludesSubdomains</key>
+                <true/>
+            </dict>
+            <key>192.168.0.106</key>
             <dict>
                 <key>NSExceptionAllowsInsecureHTTPLoads</key>
                 <true/>

@@ -19,6 +19,8 @@
 		A1A1A1A1A1A1A1A1A1A1000A /* TestingSessionAPI.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A1100A /* TestingSessionAPI.swift */; };
 		A1A1A1A1A1A1A1A1A1A1000B /* TestingSessionViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A1100B /* TestingSessionViewModel.swift */; };
 		A1A1A1A1A1A1A1A1A1A1000C /* TestingSessionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A1100C /* TestingSessionView.swift */; };
+		A1A1A1A1A1A1A1A1A1A1000D /* RequestTracker.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A1100D /* RequestTracker.swift */; };
+		A1A1A1A1A1A1A1A1A1A1000F /* LocalHTTPProxy.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A1100F /* LocalHTTPProxy.swift */; };
 		A1A1A1A1A1A1A1A1A1A12001 /* AVKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A13001 /* AVKit.framework */; };
 		A1A1A1A1A1A1A1A1A1A12002 /* AVFoundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A13002 /* AVFoundation.framework */; };
 		A2A2A2A2A2A2A2A2A2A20001 /* InfiniteStreamPlayerApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A11001 /* InfiniteStreamPlayerApp.swift */; };
@@ -33,6 +35,8 @@
 		A2A2A2A2A2A2A2A2A2A2000A /* TestingSessionAPI.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A1100A /* TestingSessionAPI.swift */; };
 		A2A2A2A2A2A2A2A2A2A2000B /* TestingSessionViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A1100B /* TestingSessionViewModel.swift */; };
 		A2A2A2A2A2A2A2A2A2A2000C /* TestingSessionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A1100C /* TestingSessionView.swift */; };
+		A2A2A2A2A2A2A2A2A2A2000D /* RequestTracker.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A1100D /* RequestTracker.swift */; };
+		A2A2A2A2A2A2A2A2A2A2000F /* LocalHTTPProxy.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A1100F /* LocalHTTPProxy.swift */; };
 		A2A2A2A2A2A2A2A2A2A22001 /* AVKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A13001 /* AVKit.framework */; };
 		A2A2A2A2A2A2A2A2A2A22002 /* AVFoundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A13002 /* AVFoundation.framework */; };
 /* End PBXBuildFile section */
@@ -50,6 +54,8 @@
 		A1A1A1A1A1A1A1A1A1A1100A /* TestingSessionAPI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TestingSession/TestingSessionAPI.swift; sourceTree = "<group>"; };
 		A1A1A1A1A1A1A1A1A1A1100B /* TestingSessionViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TestingSession/TestingSessionViewModel.swift; sourceTree = "<group>"; };
 		A1A1A1A1A1A1A1A1A1A1100C /* TestingSessionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TestingSession/TestingSessionView.swift; sourceTree = "<group>"; };
+		A1A1A1A1A1A1A1A1A1A1100D /* RequestTracker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RequestTracker.swift; sourceTree = "<group>"; };
+		A1A1A1A1A1A1A1A1A1A1100F /* LocalHTTPProxy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalHTTPProxy.swift; sourceTree = "<group>"; };
 		A1A1A1A1A1A1A1A1A1A11010 /* InfiniteStreamPlayer-iOS/Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = "InfiniteStreamPlayer-iOS/Info.plist"; sourceTree = "<group>"; };
 		A1A1A1A1A1A1A1A1A1A11011 /* InfiniteStreamPlayer-tvOS/Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = "InfiniteStreamPlayer-tvOS/Info.plist"; sourceTree = "<group>"; };
 		A1A1A1A1A1A1A1A1A1A11020 /* InfiniteStreamPlayer.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; path = InfiniteStreamPlayer.app; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -105,6 +111,8 @@
 				A1A1A1A1A1A1A1A1A1A1100A /* TestingSessionAPI.swift */,
 				A1A1A1A1A1A1A1A1A1A1100B /* TestingSessionViewModel.swift */,
 				A1A1A1A1A1A1A1A1A1A1100C /* TestingSessionView.swift */,
+				A1A1A1A1A1A1A1A1A1A1100D /* RequestTracker.swift */,
+				A1A1A1A1A1A1A1A1A1A1100F /* LocalHTTPProxy.swift */,
 			);
 			path = InfiniteStreamPlayer;
 			sourceTree = "<group>";
@@ -243,6 +251,8 @@
 				A1A1A1A1A1A1A1A1A1A1000A /* TestingSessionAPI.swift in Sources */,
 				A1A1A1A1A1A1A1A1A1A1000B /* TestingSessionViewModel.swift in Sources */,
 				A1A1A1A1A1A1A1A1A1A1000C /* TestingSessionView.swift in Sources */,
+				A1A1A1A1A1A1A1A1A1A1000D /* RequestTracker.swift in Sources */,
+				A1A1A1A1A1A1A1A1A1A1000F /* LocalHTTPProxy.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -262,6 +272,8 @@
 				A2A2A2A2A2A2A2A2A2A2000A /* TestingSessionAPI.swift in Sources */,
 				A2A2A2A2A2A2A2A2A2A2000B /* TestingSessionViewModel.swift in Sources */,
 				A2A2A2A2A2A2A2A2A2A2000C /* TestingSessionView.swift in Sources */,
+				A2A2A2A2A2A2A2A2A2A2000D /* RequestTracker.swift in Sources */,
+				A2A2A2A2A2A2A2A2A2A2000F /* LocalHTTPProxy.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

@@ -16,6 +16,8 @@
     <string>1</string>
     <key>NSAppTransportSecurity</key>
     <dict>
+        <key>NSAllowsLocalNetworking</key>
+        <true/>
         <key>NSExceptionDomains</key>
         <dict>
             <key>infinitestreaming.jeoliver.com</key>
