@@ -76,3 +76,6 @@ Sponsors.md
 
 # Internal working docs (not for public consumption)
 docs/internal/
+
+# Claude Code project-local state (per-developer)
+.claude/
