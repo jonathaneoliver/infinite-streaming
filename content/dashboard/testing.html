@@ -2932,7 +2932,10 @@ maybe a histogram of b
             const bufferValues = bufferDepthData
                 .map((point) => Number(point.y))
                 .filter((value) => Number.isFinite(value) && value >= 0);
-            const maxBufferDepth = Math.min(60, Math.max(5, ...bufferValues, 0));
+            // Round up to the next 5-second step so the chart y-axis maxes
+            // land on 5, 10, 15, ..., 60. Cap at 60, floor at 5.
+            const maxBufferDepthRaw = Math.max(5, ...bufferValues, 0);
+            const maxBufferDepth = Math.min(60, Math.ceil(maxBufferDepthRaw / 5) * 5);
             let bufferChart = bufferDepthCharts.get(sessionId);
             if (bufferChart && bufferChart.canvas !== bufferCanvas) {
                 bufferChart.destroy();
