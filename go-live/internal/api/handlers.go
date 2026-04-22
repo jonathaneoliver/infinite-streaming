@@ -19,7 +19,6 @@ import (
 	"github.com/jonathaneoliver/infinite-streaming/go-live/pkg/fileutil"
 	"github.com/jonathaneoliver/infinite-streaming/go-live/pkg/generator"
 	"github.com/jonathaneoliver/infinite-streaming/go-live/pkg/parser"
-	"github.com/google/uuid"
 	"github.com/gorilla/mux"
 )
 
@@ -1346,32 +1345,6 @@ func (h *Handler) ServeDashSegment(w http.ResponseWriter, r *http.Request) {
 	http.ServeFile(w, r, segmentPath)
 }
 
-func (h *Handler) Spawn(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		Input  string `json:"input"`
-		Output string `json:"output"`
-		Mode   string `json:"mode"` // "continuous" or "once"
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		w.WriteHeader(http.StatusBadRequest)
-		w.Write([]byte("invalid request"))
-		return
-	}
-
-	id := uuid.New().String()
-	ctx, cancel := context.WithCancel(context.Background())
-	h.Manager.Spawn(id, req.Input, req.Output, cancel)
-
-	if req.Mode == "continuous" {
-		go runContinuous(ctx, req.Input, req.Output)
-	} else {
-		go runOnce(ctx, req.Input, req.Output)
-	}
-
-	w.Header().Set("X-Served-By", "go-live")
-	json.NewEncoder(w).Encode(map[string]string{"id": id, "status": "running"})
-}
-
 // OnDemandMasterPlaylist handles requests like /go-live/{content}/master.m3u8
 // This is the main entry point matching Python's lazy continuous mode
 func (h *Handler) OnDemandMasterPlaylist(w http.ResponseWriter, r *http.Request) {
@@ -2036,8 +2009,8 @@ func injectMasterStartTag(data []byte, offsetSeconds float64) []byte {
 	}
 	// Insert after the #EXT-X-VERSION line so AVPlayer sees the version
 	// declaration before any higher-version tags. Inserting between #EXTM3U
-	// and #EXT-X-VERSION (as a naive after-#EXTM3U approach does) triggers
-	// AVPlayer's -12646 "playlist parse error".
+	// and #EXT-X-VERSION (as the previous approach did) triggers AVPlayer's
+	// -12646 "playlist parse error".
 	if idx := strings.Index(text, "#EXT-X-VERSION:"); idx >= 0 {
 		end := strings.Index(text[idx:], "\n")
 		if end >= 0 {
@@ -2071,17 +2044,6 @@ func masterStartOffsetForDuration(duration string) float64 {
 	}
 }
 
-// Legacy functions for backwards compatibility (not used in LL-HLS mode)
-
-func runContinuous(ctx context.Context, input, output string) {
-	// Legacy continuous mode - not used for LL-HLS
-	fmt.Fprintf(os.Stderr, "WARN: Legacy runContinuous called\n")
-}
-
-func runOnce(ctx context.Context, input, output string) {
-	// Legacy once mode - not used for LL-HLS
-	fmt.Fprintf(os.Stderr, "WARN: Legacy runOnce called\n")
-}
 
 func (h *Handler) trackRequest(r *http.Request, content, mode string) {
 	if h == nil || h.Tracker == nil || r == nil {
