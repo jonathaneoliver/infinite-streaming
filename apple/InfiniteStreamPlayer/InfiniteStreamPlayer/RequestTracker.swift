@@ -23,6 +23,16 @@ final class RequestTracker {
     private var flowingStartAt: Date?
     private var cumulativeFlowingMs: Double = 0
     private var lastChunkAt: Date?
+    // Last media-segment URI + sequence seen flowing through the proxy.
+    // AVPlayer's access log URIs are per-variant playlist, not per segment,
+    // so we capture segment identity here at the one place that actually
+    // sees every segment fetch. Video and audio are tracked separately
+    // because audio segments interleave with video — reporting a single
+    // "last" would flip-flop between "audio" and the real video variant.
+    private var lastSegmentURIValue: String?
+    private var lastVideoSegmentURIValue: String?
+    private var lastSegmentSequenceValue: Int?
+    private var maxSegmentSequenceValue: Int?
 
     private let flowingGap: TimeInterval = 0.1
 
@@ -32,6 +42,10 @@ final class RequestTracker {
         let wireFlowingMsTotal: Double
         let wireInflightCount: Int
         let wireLastChunkMsAgo: Double?
+        let lastSegmentURI: String?
+        let lastVideoSegmentURI: String?
+        let lastSegmentSequence: Int?
+        let maxSegmentSequence: Int?
     }
 
     func requestStarted() {
@@ -40,6 +54,46 @@ final class RequestTracker {
             activeStartAt = Date()
         }
         inflightCount += 1
+    }
+
+    /// Record a media-segment fetch. Non-segment URLs (playlists, init data) are
+    /// filtered out so that seg/max reflect only real sequence progression.
+    /// Returns `(sequence, priorMax, isWrap)` for the caller to emit a log if
+    /// the sequence dropped sharply (loop wrap / discontinuity).
+    @discardableResult
+    func recordRequestURL(_ url: URL) -> (sequence: Int, priorMax: Int, isWrap: Bool)? {
+        let path = url.path
+        let isSegment = path.hasSuffix(".m4s") || path.hasSuffix(".ts") || path.hasSuffix(".mp4") || path.hasSuffix(".cmfv") || path.hasSuffix(".cmfa")
+        guard isSegment else { return nil }
+        guard let sequence = Self.extractSegmentSequence(from: path) else { return nil }
+        lock.lock(); defer { lock.unlock() }
+        lastSegmentURIValue = url.absoluteString
+        // Audio segment paths contain "/audio/"; anything else is video for
+        // our content. Only video URIs count toward the "current variant".
+        if !path.contains("/audio/") {
+            lastVideoSegmentURIValue = url.absoluteString
+        }
+        lastSegmentSequenceValue = sequence
+        let priorMax = maxSegmentSequenceValue ?? -1
+        let isWrap = priorMax >= 5 && sequence <= 2
+        if isWrap {
+            maxSegmentSequenceValue = sequence
+        } else {
+            maxSegmentSequenceValue = max(priorMax, sequence)
+        }
+        return (sequence, priorMax, isWrap)
+    }
+
+    private static func extractSegmentSequence(from path: String) -> Int? {
+        var filename = (path as NSString).lastPathComponent
+        if filename.isEmpty { return nil }
+        filename = (filename as NSString).deletingPathExtension
+        // Accept either "segment_00006" (authoritative pattern) or any trailing
+        // digit run as a fallback. Trailing match avoids picking up resolution
+        // numbers embedded earlier in the path.
+        let matches = filename.matches(of: /\d+/)
+        guard let token = matches.last else { return nil }
+        return Int(String(token.output))
     }
 
     func chunkReceived(byteCount: Int) {
@@ -86,7 +140,11 @@ final class RequestTracker {
             wireActiveMsTotal: active,
             wireFlowingMsTotal: flowing,
             wireInflightCount: inflightCount,
-            wireLastChunkMsAgo: msAgo
+            wireLastChunkMsAgo: msAgo,
+            lastSegmentURI: lastSegmentURIValue,
+            lastVideoSegmentURI: lastVideoSegmentURIValue,
+            lastSegmentSequence: lastSegmentSequenceValue,
+            maxSegmentSequence: maxSegmentSequenceValue
         )
     }
 
@@ -100,5 +158,9 @@ final class RequestTracker {
         flowingStartAt = nil
         cumulativeFlowingMs = 0
         lastChunkAt = nil
+        lastSegmentURIValue = nil
+        lastVideoSegmentURIValue = nil
+        lastSegmentSequenceValue = nil
+        maxSegmentSequenceValue = nil
     }
 }
