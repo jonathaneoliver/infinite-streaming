@@ -312,6 +312,9 @@ final class ConnectionSession {
         upstreamTask = task
         proxy.registerTask(task.taskIdentifier, session: self)
         proxy.tracker.requestStarted()
+        if let result = proxy.tracker.recordRequestURL(originURL), result.isWrap {
+            print("[DISCONTINUITY_FETCHED] seq=\(result.sequence) priorMax=\(result.priorMax) uri=\(originURL.absoluteString)")
+        }
         didEmitStart = true
         task.resume()
     }
