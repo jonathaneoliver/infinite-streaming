@@ -2030,7 +2030,7 @@
                 markers.push({
                     cls: 'player-estimate',
                     left: toPct(playerEstimate),
-                    label: `Player est. network ${playerEstimate.toFixed(2)} Mbps`,
+                    label: `Player avg_network_bitrate ${playerEstimate.toFixed(2)} Mbps`,
                     markerType: 'player-estimate'
                 });
             }
@@ -2842,7 +2842,7 @@
                     const wireActive1s = toNumber(latest.mbps_wire_active_1s, null);
                     const active6sThroughput = toNumber(latest.mbps_wire_active_6s, null);
                     const wireThroughput = toNumber(latest.mbps_wire_throughput, null);
-                    const playerEstimate = toNumber(latest.player_metrics_network_bitrate_mbps, null);
+                    const playerEstimate = toNumber(latest.player_metrics_avg_network_bitrate_mbps, null);
                     const framesDisplayed = toNumber(latest.player_metrics_frames_displayed, null);
                     const variant = extractVariant(latest);
                     const sample = {
@@ -3096,7 +3096,7 @@
                         const throughput = extractThroughput(latest);
                         const wireActive1s = toNumber(latest.mbps_wire_active_1s, null);
                         const wireThroughput = toNumber(latest.mbps_wire_throughput, null);
-                        const playerEstimate = toNumber(latest.player_metrics_network_bitrate_mbps, null);
+                        const playerEstimate = toNumber(latest.player_metrics_avg_network_bitrate_mbps, null);
                         const variant = extractVariant(latest);
                         const bufferSeconds = extractBufferDepth(latest);
                         latestBufferDepthSeconds = bufferSeconds;

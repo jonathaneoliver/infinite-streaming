@@ -44,8 +44,8 @@ final class PlaybackDiagnostics: ObservableObject {
     @Published var lastStallDurationSeconds: Double = 0
     @Published var observedBitrate: Double?
     @Published var indicatedBitrate: Double?
-    @Published var networkWindowBitrate: Double?
-    @Published var networkWireBitrate: Double?
+    @Published var avgNetworkBitrate: Double?
+    @Published var networkBitrate: Double?
     @Published var averageVideoBitrate: Double?
     @Published var droppedVideoFrames: Double?
     @Published var estimatedDisplayedFrames: Double?
@@ -142,7 +142,7 @@ final class PlaybackDiagnostics: ObservableObject {
         let observedBps = events.last?.observedBitrate ?? 0
         let now = Date()
         let ts = Self.bitrateSampleFormatter.string(from: now)
-        let windowBps = networkWindowBitrate ?? -1
+        let windowBps = avgNetworkBitrate ?? -1
         let approxBps = computeApproxActiveBitrate(now: now) ?? -1
         let wire = RequestTracker.shared.snapshot(now: now)
         let wireLastChunkMsAgo = wire.wireLastChunkMsAgo ?? -1
@@ -153,13 +153,13 @@ final class PlaybackDiagnostics: ObservableObject {
         //     ts, totalBytes, totalXfer, observedBps, windowBps, approxBps,
         //     wire.wireBytesTotal, wire.wireActiveMsTotal, wire.wireFlowingMsTotal,
         //     wire.wireInflightCount, wireLastChunkMsAgo,
-        //     networkWireBitrate ?? -1
+        //     networkBitrate ?? -1
         // )
         // Swift.print(line)
         _ = (ts, totalBytes, totalXfer, observedBps, windowBps, approxBps, wireLastChunkMsAgo)
     }
 
-    // Rolling wire-bytes bitrate: like `networkWindowBitrate`, but fed from
+    // Rolling wire-bytes bitrate: like `avgNetworkBitrate`, but fed from
     // the LocalHTTPProxy's per-chunk accounting. Report nil when there are no
     // outstanding requests AND no new bytes arrived since the previous sample —
     // this gives the chart a clean gap during idle gaps between segment fetches.
@@ -174,14 +174,14 @@ final class PlaybackDiagnostics: ObservableObject {
         // the window rolls off.
         if wire.wireInflightCount == 0,
            (wire.wireLastChunkMsAgo ?? .infinity) > 250 {
-            networkWireBitrate = nil
+            networkBitrate = nil
             return
         }
         let windowStart = now.addingTimeInterval(-wireWindowSeconds)
         guard let oldest = wireByteSamples.first(where: { $0.timestamp >= windowStart })
                 ?? wireByteSamples.first,
               oldest.timestamp < now else {
-            networkWireBitrate = nil
+            networkBitrate = nil
             return
         }
         // Transfer-time denominator: count only ms during which bytes were
@@ -190,10 +190,10 @@ final class PlaybackDiagnostics: ObservableObject {
         let flowingSec = max(0, (wire.wireFlowingMsTotal - oldest.flowingMs) / 1000.0)
         let dBytes = Double(max(0, wire.wireBytesTotal - oldest.bytes))
         guard flowingSec >= wireMinFlowingSeconds, dBytes > 0 else {
-            networkWireBitrate = nil
+            networkBitrate = nil
             return
         }
-        networkWireBitrate = dBytes * 8.0 / flowingSec
+        networkBitrate = dBytes * 8.0 / flowingSec
     }
 
     // Approximate "active transfer" rate: sum wall time of 100ms sub-intervals
@@ -252,9 +252,9 @@ final class PlaybackDiagnostics: ObservableObject {
         lastStallDurationSeconds = 0
         observedBitrate = nil
         indicatedBitrate = nil
-        networkWindowBitrate = nil
+        avgNetworkBitrate = nil
         networkByteSamples = []
-        networkWireBitrate = nil
+        networkBitrate = nil
         wireByteSamples = []
         averageVideoBitrate = nil
         droppedVideoFrames = nil
@@ -636,7 +636,7 @@ final class PlaybackDiagnostics: ObservableObject {
         let withinWindow = networkByteSamples.filter { $0.timestamp >= windowStart }
         guard let oldest = withinWindow.first ?? networkByteSamples.first,
               oldest.timestamp < now else {
-            networkWindowBitrate = nil
+            avgNetworkBitrate = nil
             return
         }
         let wall = now.timeIntervalSince(oldest.timestamp)
@@ -644,19 +644,19 @@ final class PlaybackDiagnostics: ObservableObject {
         // Idle detection — full window with zero byte growth means no data
         // made it through for the entire window: report a genuine 0 Mbps.
         if wall >= networkWindowSeconds && dBytes == 0 {
-            networkWindowBitrate = 0
+            avgNetworkBitrate = 0
             return
         }
         // Warmup — need at least 1s of wall-clock history for a stable rate.
         guard wall >= 1.0 else {
-            networkWindowBitrate = nil
+            avgNetworkBitrate = nil
             return
         }
         // Wall-time denominator: the rate cannot exceed the shaper limit
         // because over wall time, bytes that arrive must have passed through
         // the shaper. xfer-time denominator, by contrast, only counts active
         // transfer duration and can overshoot during TCP bursts.
-        networkWindowBitrate = dBytes * 8.0 / wall
+        avgNetworkBitrate = dBytes * 8.0 / wall
     }
 
     private func updateAccessLog(from item: AVPlayerItem) {
@@ -778,7 +778,7 @@ final class PlaybackDiagnostics: ObservableObject {
         // [BITRATE] summary print disabled — uncomment when investigating ABR.
         // let observedMbps = (observedBitrate ?? 0) / 1_000_000
         // let indicatedMbps = (indicatedBitrate ?? 0) / 1_000_000
-        // let windowMbps = (networkWindowBitrate ?? 0) / 1_000_000
+        // let windowMbps = (avgNetworkBitrate ?? 0) / 1_000_000
         // print("[BITRATE] observed=\(String(format: "%.2fMbps", observedMbps)) window\(Int(networkWindowSeconds))s=\(String(format: "%.2fMbps", windowMbps)) indicated=\(String(format: "%.2fMbps", indicatedMbps))")
     }
 

@@ -1545,6 +1545,7 @@ maybe a histogram of b
             setText('[data-field="server_video_rendition"]', session.server_video_rendition || '—');
             setText('[data-field="server_video_rendition_mbps"]', formatMetricNumber(session.server_video_rendition_mbps, ' Mbps'));
             setText('[data-field="player_metrics_video_quality_pct"]', formatMetricNumber(session.player_metrics_video_quality_pct, '%'));
+            setText('[data-field="player_metrics_avg_network_bitrate_mbps"]', formatMetricNumber(session.player_metrics_avg_network_bitrate_mbps, ' Mbps'));
             setText('[data-field="player_metrics_network_bitrate_mbps"]', formatMetricNumber(session.player_metrics_network_bitrate_mbps, ' Mbps'));
             setText('[data-field="player_metrics_frames_displayed"]', formatMetricNumber(session.player_metrics_frames_displayed));
             setText('[data-field="player_metrics_dropped_frames"]', formatMetricNumber(session.player_metrics_dropped_frames));
@@ -2172,10 +2173,16 @@ maybe a histogram of b
             const currentRendition = (Number.isFinite(measuredVideoBitrate) && measuredVideoBitrate > 0)
                 ? measuredVideoBitrate
                 : (Number.isFinite(inferredVideoBitrate) ? inferredVideoBitrate : null);
-            const playerEstimate = Number.isFinite(Number(session.player_metrics_network_bitrate_mbps))
-                ? Number(session.player_metrics_network_bitrate_mbps)
+            // Renamed fields (issue #146):
+            //  - player_metrics_avg_network_bitrate_mbps: long-window AVG
+            //    (iOS observedBitrate; Android DefaultBandwidthMeter)
+            //  - player_metrics_network_bitrate_mbps: short-window INSTANT
+            //    (iOS LocalHTTPProxy wire bytes; null on clients without
+            //    per-request wire visibility)
+            const playerEstimate = Number.isFinite(Number(session.player_metrics_avg_network_bitrate_mbps))
+                ? Number(session.player_metrics_avg_network_bitrate_mbps)
                 : null;
-            const rawPlayerWireBitrate = session.player_metrics_network_wire_mbps;
+            const rawPlayerWireBitrate = session.player_metrics_network_bitrate_mbps;
             const playerWireBitrate = (rawPlayerWireBitrate === null || rawPlayerWireBitrate === undefined
                 || !Number.isFinite(Number(rawPlayerWireBitrate)))
                 ? null
@@ -2521,8 +2528,8 @@ maybe a histogram of b
             const compareGroupIdsForDefaults = getCompareGroupIds();
             const compareActive = compareGroupIdsForDefaults.length >= 2;
             const compareVisibleLabels = new Set([
-                'Player est.',
-                'Player Network Rate',
+                'Player avg_network_bitrate',
+                'Player network_bitrate',
                 'Player Variant',
                 'Server Variant',
                 'Variants',
@@ -2537,7 +2544,7 @@ maybe a histogram of b
                     const tag = `S${sid}`;
                     compareVisibleLabels.add(`Player Variant (${tag})`);
                     compareVisibleLabels.add(`Player Est (${tag})`);
-                    compareVisibleLabels.add(`Player Network Rate (${tag})`);
+                    compareVisibleLabels.add(`Player network_bitrate (${tag})`);
                     compareVisibleLabels.add(`Server Variant (${tag})`);
                     compareVisibleLabels.add(`Shaper Avg (${tag})`);
                 }
@@ -2549,8 +2556,8 @@ maybe a histogram of b
                     'mbps_shaper_avg',
                     'mbps_transfer_rate',
                     'mbps_transfer_complete',
-                    'Player est.',
-                    'Player Network Rate',
+                    'Player avg_network_bitrate',
+                    'Player network_bitrate',
                     'Player Variant',
                     'Server Variant',
                     'Variants',
@@ -2582,8 +2589,8 @@ maybe a histogram of b
                 ...maxFor(isSeriesHidden('mbps_shaper_avg'), shaperAvgData),
                 ...maxFor(isSeriesHidden('mbps_transfer_rate'), transferRateData),
                 ...maxFor(isSeriesHidden('mbps_transfer_complete'), transferCompleteData),
-                ...maxFor(isSeriesHidden('Player est.'), estimateData),
-                ...maxFor(isSeriesHidden('Player Network Rate'), playerWireBitrateData),
+                ...maxFor(isSeriesHidden('Player avg_network_bitrate'), estimateData),
+                ...maxFor(isSeriesHidden('Player network_bitrate'), playerWireBitrateData),
                 ...maxFor(isSeriesHidden('Player Variant'), renditionData),
                 ...maxFor(isSeriesHidden('Server Variant'), serverRenditionData)
             );
@@ -2652,7 +2659,7 @@ maybe a histogram of b
                     hidden: isSeriesHidden('mbps_transfer_complete')
                 },
                 {
-                    label: 'Player est.',
+                    label: 'Player avg_network_bitrate',
                     data: estimateData,
                     borderColor: '#6366f1',
                     backgroundColor: 'rgba(99,102,241,0.12)',
@@ -2660,10 +2667,10 @@ maybe a histogram of b
                     pointRadius: 0,
                     tension: 0.2,
                     borderDash: [6, 4],
-                    hidden: isSeriesHidden('Player est.')
+                    hidden: isSeriesHidden('Player avg_network_bitrate')
                 },
                 {
-                    label: 'Player Network Rate',
+                    label: 'Player network_bitrate',
                     data: playerWireBitrateData,
                     borderColor: '#059669',
                     backgroundColor: 'rgba(5,150,105,0.15)',
@@ -2671,7 +2678,7 @@ maybe a histogram of b
                     pointRadius: 0,
                     tension: 0.2,
                     spanGaps: false,
-                    hidden: isSeriesHidden('Player Network Rate')
+                    hidden: isSeriesHidden('Player network_bitrate')
                 },
                 {
                     label: 'Player Variant',
@@ -2743,7 +2750,7 @@ maybe a histogram of b
                     });
                     // Player Network Rate (visible by default in compare; null when session has no wire metric)
                     datasets.push({
-                        label: `Player Network Rate (${tag})`,
+                        label: `Player network_bitrate (${tag})`,
                         data: otherSeries.map(p => ({
                             x: p.x,
                             y: (p.y.playerWireBitrate === null || p.y.playerWireBitrate === undefined)
@@ -2756,7 +2763,7 @@ maybe a histogram of b
                         tension: 0.2,
                         borderDash: [4, 2],
                         spanGaps: false,
-                        hidden: isSeriesHidden(`Player Network Rate (${tag})`)
+                        hidden: isSeriesHidden(`Player network_bitrate (${tag})`)
                     });
                     // Server Variant (hidden by default)
                     datasets.push({
