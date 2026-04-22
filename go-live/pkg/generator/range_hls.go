@@ -178,7 +178,10 @@ func (g *RangeHLSGenerator) GenerateVariantPlaylist(
 
 	var sb strings.Builder
 	sb.WriteString("#EXTM3U\n")
-	sb.WriteString("#EXT-X-VERSION:7\n")
+	// Version 9 is required because the playlist emits EXT-X-SERVER-CONTROL
+	// (below). AVPlayer rejects v7 playlists that carry v9-era tags with
+	// -12646 "playlist parse error".
+	sb.WriteString("#EXT-X-VERSION:9\n")
 	sb.WriteString(fmt.Sprintf("#EXT-X-TARGETDURATION:%d\n", int(math.Ceil(maxSegDuration))))
 	sb.WriteString(fmt.Sprintf("#EXT-X-MEDIA-SEQUENCE:%d\n", firstSeq))
 	// EXT-X-DISCONTINUITY-SEQUENCE is REQUIRED by RFC 8216 §4.3.3.3 whenever
@@ -190,6 +193,17 @@ func (g *RangeHLSGenerator) GenerateVariantPlaylist(
 	// the first segment in this window — i.e. the count of discontinuities
 	// that have occurred before that first segment.
 	sb.WriteString(fmt.Sprintf("#EXT-X-DISCONTINUITY-SEQUENCE:%d\n", startLoop))
+	// EXT-X-SERVER-CONTROL HOLD-BACK is a media-playlist-only tag (RFC 8216
+	// §4.3.3.8). HLS spec requires HOLD-BACK >= 3× TARGETDURATION — note
+	// TARGETDURATION is the integer ceiling (7 for 6.006s segments), not the
+	// exact segment duration, so using 3× maxSegDuration would fall below
+	// the minimum (18.018 < 21) and AVPlayer rejects with -12646 "playlist
+	// parse error". Explicit declaration is preferred over relying on
+	// player defaults; other players (hls.js, ExoPlayer, Shaka) may default
+	// differently.
+	targetDurationSecs := int(math.Ceil(maxSegDuration))
+	liveHoldBack := 3.0 * float64(targetDurationSecs)
+	sb.WriteString(fmt.Sprintf("#EXT-X-SERVER-CONTROL:HOLD-BACK=%.3f\n", liveHoldBack))
 	sb.WriteString(fmt.Sprintf("#EXT-X-PROGRAM-DATE-TIME:%s\n", pdt.Format("2006-01-02T15:04:05.000Z")))
 
 	if segmentMap != "" {
