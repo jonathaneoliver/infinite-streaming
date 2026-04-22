@@ -13,7 +13,14 @@ import (
 )
 
 const (
-	MAX_LIVE_WINDOW_DURATION = 36.0 // 36 seconds
+	// Sliding live window. Must be comfortably larger than the player's
+	// forward buffer so a throttled/stalled player doesn't fall off the
+	// oldest edge before it can catch up. With a ~20s forward buffer,
+	// 36s left only ~16s of real slack — any drift triggered
+	// `-12642 No matching mediaFile found from playlist` on speculative
+	// ABR playlist polls. 120s keeps the window well ahead of realistic
+	// drift while staying bounded.
+	MAX_LIVE_WINDOW_DURATION = 120.0 // 120 seconds
 )
 
 var (
@@ -95,6 +102,21 @@ func (g *LLHLSGenerator) GenerateVariantPlaylist(
 	// Calculate media sequence (segment number)
 	sequence := (loopCount * numSegments) + currentSegmentIdx
 
+	// Pre-compute the window wrap decision here so we can emit the correct
+	// EXT-X-DISCONTINUITY-SEQUENCE in the playlist header below. The actual
+	// window-building logic further down uses the same computation.
+	segmentsNeededForDiscSeq := int(MAX_LIVE_WINDOW_DURATION / idealSegmentDuration)
+	wrapAroundForDiscSeq := currentSegmentIdx < segmentsNeededForDiscSeq-1
+	firstSegLoop := loopCount
+	if wrapAroundForDiscSeq {
+		// Wrapping: first segment in window comes from the previous loop,
+		// and this playlist contains the discontinuity marker itself.
+		firstSegLoop = loopCount - 1
+		if firstSegLoop < 0 {
+			firstSegLoop = 0
+		}
+	}
+
 	// Build playlist
 	var sb strings.Builder
 
@@ -103,6 +125,11 @@ func (g *LLHLSGenerator) GenerateVariantPlaylist(
 	sb.WriteString("#EXT-X-VERSION:10\n") // Version 10 for LL-HLS
 	sb.WriteString(fmt.Sprintf("#EXT-X-TARGETDURATION:%d\n", int(segmentDuration)))
 	sb.WriteString(fmt.Sprintf("#EXT-X-MEDIA-SEQUENCE:%d\n", sequence))
+	// EXT-X-DISCONTINUITY-SEQUENCE is REQUIRED by RFC 8216 §4.3.3.3 when the
+	// playlist contains an EXT-X-DISCONTINUITY tag. Required for cross-variant
+	// synchronization during ABR evaluation; absence causes AVPlayer -12642
+	// "No matching mediaFile found from playlist".
+	sb.WriteString(fmt.Sprintf("#EXT-X-DISCONTINUITY-SEQUENCE:%d\n", firstSegLoop))
 
 	// LL-HLS specific tags
 	sb.WriteString(fmt.Sprintf("#EXT-X-PART-INF:PART-TARGET=%.3f\n", partialDuration))

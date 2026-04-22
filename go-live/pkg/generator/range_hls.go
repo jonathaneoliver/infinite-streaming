@@ -181,6 +181,15 @@ func (g *RangeHLSGenerator) GenerateVariantPlaylist(
 	sb.WriteString("#EXT-X-VERSION:7\n")
 	sb.WriteString(fmt.Sprintf("#EXT-X-TARGETDURATION:%d\n", int(math.Ceil(maxSegDuration))))
 	sb.WriteString(fmt.Sprintf("#EXT-X-MEDIA-SEQUENCE:%d\n", firstSeq))
+	// EXT-X-DISCONTINUITY-SEQUENCE is REQUIRED by RFC 8216 §4.3.3.3 whenever
+	// the playlist contains an EXT-X-DISCONTINUITY tag (see `wrap` path
+	// below). It allows the player to synchronize across variant switches
+	// over discontinuity boundaries; its absence causes AVPlayer to emit
+	// -12642 "No matching mediaFile found from playlist" when probing a
+	// higher variant during ABR evaluation. startLoop is the loop number of
+	// the first segment in this window — i.e. the count of discontinuities
+	// that have occurred before that first segment.
+	sb.WriteString(fmt.Sprintf("#EXT-X-DISCONTINUITY-SEQUENCE:%d\n", startLoop))
 	sb.WriteString(fmt.Sprintf("#EXT-X-PROGRAM-DATE-TIME:%s\n", pdt.Format("2006-01-02T15:04:05.000Z")))
 
 	if segmentMap != "" {
