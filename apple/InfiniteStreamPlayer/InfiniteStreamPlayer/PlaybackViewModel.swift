@@ -365,6 +365,12 @@ final class PlaybackViewModel: ObservableObject {
         let asset = AVURLAsset(url: assetURL, options: nil)
         RequestTracker.shared.reset()
         let item = AVPlayerItem(asset: asset)
+        // Preserve the server-advertised live offset (EXT-X-SERVER-CONTROL
+        // HOLD-BACK / PART-HOLD-BACK) across stall recoveries. Default is
+        // false, which lets AVPlayer snap back to live edge on every stall —
+        // leaving the player with zero safety margin before the oldest-edge
+        // of the window and setting up the next failure.
+        item.automaticallyPreservesTimeOffsetFromLive = true
         apply4kPreference(to: item)
         playbackStartAt = Date()
         videoFirstFrameSeconds = nil
