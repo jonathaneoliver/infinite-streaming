@@ -2929,13 +2929,6 @@ maybe a histogram of b
             if (bufferChartRangeLabel) {
                 bufferChartRangeLabel.textContent = formatBitrateChartRange(windowStart, maxTs);
             }
-            const bufferValues = bufferDepthData
-                .map((point) => Number(point.y))
-                .filter((value) => Number.isFinite(value) && value >= 0);
-            // Round up to the next 5-second step so the chart y-axis maxes
-            // land on 5, 10, 15, ..., 60. Cap at 60, floor at 5.
-            const maxBufferDepthRaw = Math.max(5, ...bufferValues, 0);
-            const maxBufferDepth = Math.min(60, Math.ceil(maxBufferDepthRaw / 5) * 5);
             let bufferChart = bufferDepthCharts.get(sessionId);
             if (bufferChart && bufferChart.canvas !== bufferCanvas) {
                 bufferChart.destroy();
@@ -2972,6 +2965,14 @@ maybe a histogram of b
                     });
                 });
             }
+            // Compute max across ALL datasets (primary + any comparison
+            // sessions) so grouped-session lines don't clip above the axis.
+            // Round up to the next 5s step, floor 5, cap 60.
+            const bufferValues = bufferDatasets.flatMap(ds => ds.data)
+                .map((point) => Number(point && point.y))
+                .filter((value) => Number.isFinite(value) && value >= 0);
+            const maxBufferDepthRaw = Math.max(5, ...bufferValues, 0);
+            const maxBufferDepth = Math.min(60, Math.ceil(maxBufferDepthRaw / 5) * 5);
             if (!bufferChart) {
                 bufferChart = new Chart(bufferCanvas, {
                     type: 'line',
