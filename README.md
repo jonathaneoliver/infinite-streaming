@@ -200,7 +200,7 @@ The session card has a collapsible **Bitrate Chart** that stacks up to three tim
 
 - **Bitrate chart** — up to ten series:
   - **Server metrics**: `mbps_shaper_rate` (100 ms), `mbps_shaper_avg` (6 s rolling), `mbps_transfer_rate` (250 ms, byte-gated), `mbps_transfer_complete` (per segment). See the [Metrics reference](#metrics-reference) below.
-  - **Player metrics**: `Player est.` (player's own ABR estimate), `Rendition` (bitrate of the current playing variant).
+  - **Player metrics**: `Player avg_network_bitrate` (averaged ABR bandwidth estimate — iOS `observedBitrate`, Android `DefaultBandwidthMeter`), `Player network_bitrate` (short-window instantaneous throughput — iOS only, from LocalHTTPProxy wire-byte accounting), `Rendition` (bitrate of the current playing variant).
   - **Reference lines**: `Limit` (shaping ceiling, stepped when a pattern is active), `Server Rendition` (what the server believes it delivered), one line per ladder `Variant` (hidden by default).
   - **Events**: `STALL` and `RESTART` markers annotate player stalls and restarts.
   - **Y-axis**: `Auto` or fixed `5 / 10 / 20 / 30 / 40 / 50` Mbps — pin the scale when comparing two sessions side by side.
@@ -284,7 +284,8 @@ To make your 3rd-party player show up on the **Bitrate / Buffer / FPS charts** a
 {
   "set": {
     "player_metrics_video_bitrate_mbps": 4.2,
-    "player_metrics_network_bitrate_mbps": 5.1,
+    "player_metrics_avg_network_bitrate_mbps": 5.1,
+    "player_metrics_network_bitrate_mbps": 4.9,
     "player_metrics_buffer_depth_s": 18.4,
     "player_metrics_frames_displayed": 12345,
     "player_metrics_dropped_frames": 7,
@@ -385,9 +386,10 @@ Full API (`/api/content`, `/api/jobs`, `/api/sessions/*`, `/api/nftables/*`, etc
 - **Limit value** (`nftables` shaping rate): configured ceiling for the session port; a control target, not a measured throughput.
 - **Shaper metrics** (`mbps_shaper_rate`, `mbps_shaper_avg`): from TC class byte counters on the 100 ms updatePort loop. Only active when TC shaping is configured (backlog > 0). `shaper_rate` goes to 0 on drain; `shaper_avg` smooths across segments.
 - **Transfer metrics** (`mbps_transfer_rate`, `mbps_transfer_complete`): from the 10 ms awaitSocketDrain goroutine. `transfer_rate` aligns to actual TC burst edges (250 ms min gap). `transfer_complete` is the ground-truth per-segment rate.
-- **Player estimate** (`player_metrics_network_bitrate_mbps`): player-side ABR estimate; model-based, can lag or lead observed wire metrics.
+- **Player averaged bandwidth** (`player_metrics_avg_network_bitrate_mbps`): player-side averaged ABR estimate; slow-moving, model-based; intended for ladder analysis, initial variant pick, and comparison against shaper average. Populated by iOS (AVPlayer `observedBitrate`), Android (`DefaultBandwidthMeter.bitrateEstimate`), and browser players (HLS.js / Shaka / native) — i.e., the one signal every player can provide.
+- **Player instantaneous bandwidth** (`player_metrics_network_bitrate_mbps`): short-window near-instantaneous wire throughput; reacts quickly to sudden rate drops. Requires per-request wire visibility, so currently iOS-only (via LocalHTTPProxy); null on clients without that plumbing.
 
-Under steady conditions: `shaper_rate` and `transfer_rate` track near the configured limit; `transfer_complete` is the most trustworthy single number. Player estimate broadly tracks wire metrics but may be smoother/noisier.
+Under steady conditions: `shaper_rate` and `transfer_rate` track near the configured limit; `transfer_complete` is the most trustworthy single number. The player averaged bandwidth broadly tracks wire metrics but is smoother; the instantaneous version catches rate drops fastest.
 
 Implementation details (netlink counters, caching, scope of overhead inclusion) are in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md#wire-metric-implementation).
 

@@ -1466,7 +1466,10 @@
                 player_metrics_video_first_frame_time_s: toMetricSeconds(videoFirstFrameS),
                 player_metrics_video_start_time_s: toMetricSeconds(videoPlayingTimeS),
                 player_metrics_video_bitrate_mbps: toMetricNumber(currentRenditionMbps),
-                player_metrics_network_bitrate_mbps: toMetricNumber(playerEstimatedMbps),
+                // Browser-side HLS.js/Shaka/native only expose an averaged
+                // bandwidth estimate, no per-chunk wire visibility — so it
+                // maps to the AVG field. The INSTANT field stays unreported.
+                player_metrics_avg_network_bitrate_mbps: toMetricNumber(playerEstimatedMbps),
                 player_auto_recovery_enabled: autoRecoveryEnabled,
                 player_restarts: Math.max(0, Math.round(playerRestartCount || 0)),
                 player_metrics_profile_shift_count: Math.max(0, Math.round(profileShiftCount || 0)),
@@ -4051,6 +4054,7 @@
             setText('[data-field="server_video_rendition"]', session.server_video_rendition || '—');
             setText('[data-field="server_video_rendition_mbps"]', formatMetricNumber(session.server_video_rendition_mbps, ' Mbps'));
             setText('[data-field="player_metrics_video_quality_pct"]', formatMetricNumber(session.player_metrics_video_quality_pct, '%'));
+            setText('[data-field="player_metrics_avg_network_bitrate_mbps"]', formatMetricNumber(session.player_metrics_avg_network_bitrate_mbps, ' Mbps'));
             setText('[data-field="player_metrics_network_bitrate_mbps"]', formatMetricNumber(session.player_metrics_network_bitrate_mbps, ' Mbps'));
             setText('[data-field="player_metrics_loop_count"]', formatMetricNumber(session.player_metrics_loop_count_player ?? 0));
             setText('[data-field="player_metrics_profile_shift_count"]', formatMetricNumber(session.player_metrics_profile_shift_count));
@@ -4842,7 +4846,7 @@
                 'mbps_transfer_rate',
                 'mbps_transfer_complete',
                 'Variants',
-                'Player est.',
+                'Player avg_network_bitrate',
                 'Player Variant',
                 'Server Variant',
                 'Limit',
@@ -4882,7 +4886,7 @@
                 ...maxFor(isSeriesHidden('mbps_shaper_avg'), wireActive1sData),
                 ...maxFor(isSeriesHidden('mbps_transfer_rate'), segmentWireData),
                 ...maxFor(isSeriesHidden('mbps_transfer_complete'), segmentDrainData),
-                ...maxFor(isSeriesHidden('Player est.'), estimateData),
+                ...maxFor(isSeriesHidden('Player avg_network_bitrate'), estimateData),
                 ...maxFor(isSeriesHidden('Player Variant'), renditionData),
                 ...maxFor(isSeriesHidden('Server Variant'), serverRenditionData)
             );
@@ -4949,7 +4953,7 @@
                     hidden: isSeriesHidden('mbps_transfer_complete')
                 },
                 {
-                    label: 'Player est.',
+                    label: 'Player avg_network_bitrate',
                     data: estimateData,
                     borderColor: '#6366f1',
                     backgroundColor: 'rgba(99,102,241,0.12)',
@@ -4957,7 +4961,7 @@
                     pointRadius: 0,
                     tension: 0.2,
                     borderDash: [6, 4],
-                    hidden: isSeriesHidden('Player est.')
+                    hidden: isSeriesHidden('Player avg_network_bitrate')
                 },
                 {
                     label: 'Player Variant',

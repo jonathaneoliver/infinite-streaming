@@ -2888,7 +2888,13 @@ def test_player_characterization_host_runner(
             "variant_mbps": player_variant,
             "server_variant_mbps": server_variant,
             "timing_variant_mbps": timing_variant,
-            "network_bitrate_mbps": _to_number(snap.get("player_metrics_network_bitrate_mbps"), None),
+            # Renamed (#146): player_metrics_network_bitrate_mbps used to
+            # carry the averaged ABR bandwidth estimate; it now carries the
+            # instantaneous wire-derived signal. The averaged signal is in
+            # player_metrics_avg_network_bitrate_mbps. The internal shorthand
+            # below still means "the averaged signal" — only the source
+            # field name changes.
+            "network_bitrate_mbps": _to_number(snap.get("player_metrics_avg_network_bitrate_mbps"), None),
             "mbps_wire_active_1s": _to_number(snap.get("mbps_wire_active_1s"), None),
             "mbps_wire_active_short_ewma": _to_number(snap.get("mbps_wire_active_short_ewma"), None),
             "mbps_wire_active_long_ewma": _to_number(snap.get("mbps_wire_active_long_ewma"), None),

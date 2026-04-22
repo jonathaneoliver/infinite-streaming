@@ -191,7 +191,11 @@ class PlayerViewModel : ViewModel() {
             "player_metrics_buffer_end_s" to round3(bufferedMs / 1000.0),
             "player_metrics_video_bitrate_mbps" to videoFormat?.bitrate?.let { round3(it / 1_000_000.0) },
             "player_metrics_video_resolution" to videoFormat?.let { "${it.width}x${it.height}" },
-            "player_metrics_network_bitrate_mbps" to if (bandwidthEstimate > 0) round3(bandwidthEstimate / 1_000_000.0) else null,
+            // ExoPlayer's DefaultBandwidthMeter.bitrateEstimate is an averaged
+            // ABR estimate — maps to the AVG field. Android does not have a
+            // per-chunk wire-level signal, so `player_metrics_network_bitrate_mbps`
+            // (the instantaneous field) stays unreported.
+            "player_metrics_avg_network_bitrate_mbps" to if (bandwidthEstimate > 0) round3(bandwidthEstimate / 1_000_000.0) else null,
             "player_metrics_frames_displayed" to (counters?.renderedOutputBufferCount ?: 0),
             "player_metrics_dropped_frames" to (counters?.droppedBufferCount ?: 0),
             "player_metrics_total_video_frames" to ((counters?.renderedOutputBufferCount ?: 0) + (counters?.droppedBufferCount ?: 0)),

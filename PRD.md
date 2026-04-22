@@ -174,10 +174,12 @@ Many platforms already expose their own failure tools (player debug features, br
 - **Metric semantics**:
    - **Limit**: shaping target configured by control plane (`/api/nftables/shape/{port}`); prescriptive, not measured.
    - **Wire throughput**: measured interface throughput from `tc` counters (`mbps_wire_*`), including packet-level transport/application overhead visible at that interface.
-   - **Player estimate**: player-reported ABR network estimate (`player_metrics_network_bitrate_mbps`), algorithmic and client-side.
+   - **Player averaged bandwidth**: long-window averaged ABR estimate (`player_metrics_avg_network_bitrate_mbps`), algorithmic and client-side; every player can provide this.
+   - **Player instantaneous bandwidth**: short-window near-instantaneous wire throughput (`player_metrics_network_bitrate_mbps`), requires per-request wire visibility (currently iOS-only via LocalHTTPProxy); null otherwise.
 - **Expected differences**:
    - `wire throughput` generally converges toward but does not exceed `limit` for sustained intervals.
-   - `player estimate` should follow `wire throughput` trends over time but may diverge transiently due to smoothing, startup bias, rebuffering, or adaptation hysteresis.
+   - `player averaged bandwidth` should follow `wire throughput` trends over time but may diverge transiently due to smoothing, startup bias, rebuffering, or adaptation hysteresis.
+   - `player instantaneous bandwidth` tracks the shaper rate more tightly than the averaged signal and drops faster when the rate is cut.
 
 ## 8) Encoding & Packaging (Functional Requirements)
 - `generate_abr/create_abr_ladder.sh` builds ladders for H.264/H.265/AV1.

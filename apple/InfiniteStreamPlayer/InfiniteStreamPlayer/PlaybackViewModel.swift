@@ -960,8 +960,7 @@ final class PlaybackViewModel: ObservableObject {
             "player_metrics_profile_shift_count": profileShiftCount,
             "player_restarts": playerRestarts,
             "player_auto_recovery_enabled": autoRecoveryEnabled,
-            "player_metrics_video_bitrate_mbps": mbps(from: diagnostics.indicatedBitrate ?? diagnostics.averageVideoBitrate),
-            "player_metrics_network_bitrate_mbps": mbps(from: diagnostics.observedBitrate)
+            "player_metrics_video_bitrate_mbps": mbps(from: diagnostics.indicatedBitrate ?? diagnostics.averageVideoBitrate)
         ]
         extra.forEach { key, value in
             payload[key] = value
@@ -972,18 +971,23 @@ final class PlaybackViewModel: ObservableObject {
                 compact[key] = value
             }
         }
-        // Always include network_window_mbps — send explicit null when unknown
-        // so the chart shows a gap instead of carrying the previous value.
-        if let mbpsValue = mbps(from: diagnostics.networkWindowBitrate) {
-            compact["player_metrics_network_window_mbps"] = mbpsValue
+        // avgNetworkBitrate: long-window / slow-moving. iOS uses AVPlayer's
+        // observedBitrate (already an averaged ABR estimate). Clients that
+        // can only provide a single averaged bandwidth signal (Android's
+        // DefaultBandwidthMeter, etc.) populate *this* field.
+        if let mbpsValue = mbps(from: diagnostics.observedBitrate) {
+            compact["player_metrics_avg_network_bitrate_mbps"] = mbpsValue
         } else {
-            compact["player_metrics_network_window_mbps"] = NSNull()
+            compact["player_metrics_avg_network_bitrate_mbps"] = NSNull()
         }
-        // Same treatment for the wire bitrate (from local HTTP proxy).
-        if let mbpsValue = mbps(from: diagnostics.networkWireBitrate) {
-            compact["player_metrics_network_wire_mbps"] = mbpsValue
+        // networkBitrate: short-window / near-instantaneous. iOS derives this
+        // from LocalHTTPProxy per-chunk wire-byte accounting. Clients without
+        // wire visibility should leave this null rather than synthesize it
+        // from an averaged signal — the whole point is to react fast.
+        if let mbpsValue = mbps(from: diagnostics.networkBitrate) {
+            compact["player_metrics_network_bitrate_mbps"] = mbpsValue
         } else {
-            compact["player_metrics_network_wire_mbps"] = NSNull()
+            compact["player_metrics_network_bitrate_mbps"] = NSNull()
         }
         return compact
     }
