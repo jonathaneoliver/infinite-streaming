@@ -30,6 +30,8 @@ final class PlaybackDiagnostics: ObservableObject {
     @Published var bufferDepth: Double?
     @Published var seekableEnd: Double?
     @Published var liveOffset: Double?
+    @Published var windowDuration: Double?
+    @Published var windowSlack: Double?
     @Published var displayWidth: Double?
     @Published var displayHeight: Double?
     @Published var videoWidth: Double?
@@ -309,9 +311,6 @@ final class PlaybackDiagnostics: ObservableObject {
             .sink { [weak self] status in
                 guard let self else { return }
                 let prev = self.state
-                let item = self.player?.currentItem
-                let bufEmpty = item?.isPlaybackBufferEmpty ?? false
-                let keepUp = item?.isPlaybackLikelyToKeepUp ?? false
                 let rate = self.player?.rate ?? 0
                 switch status {
                 case .paused:
@@ -324,21 +323,22 @@ final class PlaybackDiagnostics: ObservableObject {
                     self.endStallIfNeeded()
                 @unknown default: self.state = "Unknown"
                 }
-                print("[STATE] \(prev) -> \(self.state) rate=\(rate) bufferEmpty=\(bufEmpty) likelyToKeepUp=\(keepUp) time=\(String(format: "%.2f", self.currentTime))")
+                print("[STATE] \(prev) -> \(self.state) rate=\(rate) time=\(String(format: "%.2f", self.currentTime)) \(self.playbackSnapshot())")
             }
             .store(in: &cancellables)
 
         player.publisher(for: \.reasonForWaitingToPlay)
             .receive(on: DispatchQueue.main)
             .sink { [weak self] reason in
+                guard let self else { return }
                 if let reason = reason {
-                    self?.waitingReason = reason.rawValue
-                    print("[WAITING] reason=\(reason.rawValue) state=\(self?.state ?? "?") time=\(String(format: "%.2f", self?.currentTime ?? 0))")
+                    self.waitingReason = reason.rawValue
+                    print("[WAITING] reason=\(reason.rawValue) state=\(self.state) time=\(String(format: "%.2f", self.currentTime)) \(self.playbackSnapshot())")
                 } else {
-                    if !(self?.waitingReason.isEmpty ?? true) {
-                        print("[WAITING] reason=cleared state=\(self?.state ?? "?") time=\(String(format: "%.2f", self?.currentTime ?? 0))")
+                    if !self.waitingReason.isEmpty {
+                        print("[WAITING] reason=cleared state=\(self.state) time=\(String(format: "%.2f", self.currentTime)) \(self.playbackSnapshot())")
                     }
-                    self?.waitingReason = ""
+                    self.waitingReason = ""
                 }
             }
             .store(in: &cancellables)
@@ -350,8 +350,23 @@ final class PlaybackDiagnostics: ObservableObject {
                 let prev = self.playbackRate
                 self.playbackRate = rate
                 if abs(rate - prev) > 0.001 {
-                    print("[RATE] \(prev) -> \(rate) state=\(self.state) time=\(String(format: "%.2f", self.currentTime))")
+                    print("[RATE] \(prev) -> \(rate) state=\(self.state) time=\(String(format: "%.2f", self.currentTime)) \(self.playbackSnapshot())")
                 }
+            }
+            .store(in: &cancellables)
+
+        // Closest public signal to "HLS discontinuity handled" — also fires on
+        // live-edge catchup seeks and explicit seeks. Disambiguate by context
+        // in the snapshot (loadedTimeRanges often splits around a discontinuity,
+        // and the access log will show the segment straddling the boundary).
+        NotificationCenter.default.publisher(for: .AVPlayerItemTimeJumped)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] notification in
+                guard let self else { return }
+                let item = notification.object as? AVPlayerItem
+                let original = (notification.userInfo?[AVPlayerItem.timeJumpedOriginatingParticipantKey] as? String) ?? "unknown"
+                let newTime = item?.currentTime().seconds ?? self.currentTime
+                print("[TIMEJUMP] origin=\(original) time=\(String(format: "%.2f", newTime)) state=\(self.state) \(self.playbackSnapshot())")
             }
             .store(in: &cancellables)
 
@@ -359,10 +374,7 @@ final class PlaybackDiagnostics: ObservableObject {
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in
                 guard let self else { return }
-                let item = self.player?.currentItem
-                let bufEmpty = item?.isPlaybackBufferEmpty ?? false
-                let keepUp = item?.isPlaybackLikelyToKeepUp ?? false
-                print("[STALL] bufferEmpty=\(bufEmpty) likelyToKeepUp=\(keepUp) state=\(self.state) time=\(String(format: "%.2f", self.currentTime))")
+                print("[STALL] state=\(self.state) time=\(String(format: "%.2f", self.currentTime)) \(self.playbackSnapshot())")
                 self.startStallIfNeeded()
             }
             .store(in: &cancellables)
@@ -370,12 +382,13 @@ final class PlaybackDiagnostics: ObservableObject {
         NotificationCenter.default.publisher(for: .AVPlayerItemFailedToPlayToEndTime)
             .receive(on: DispatchQueue.main)
             .sink { [weak self] notification in
+                guard let self else { return }
                 if let error = notification.userInfo?[AVPlayerItemFailedToPlayToEndTimeErrorKey] as? Error {
-                    print("[FAILURE] \(error.localizedDescription) state=\(self?.state ?? "?") time=\(String(format: "%.2f", self?.currentTime ?? 0))")
-                    self?.lastFailure = error.localizedDescription
+                    print("[FAILURE] \(error.localizedDescription) state=\(self.state) time=\(String(format: "%.2f", self.currentTime)) \(self.playbackSnapshot())")
+                    self.lastFailure = error.localizedDescription
                 } else {
-                    print("[FAILURE] Playback failed state=\(self?.state ?? "?") time=\(String(format: "%.2f", self?.currentTime ?? 0))")
-                    self?.lastFailure = "Playback failed"
+                    print("[FAILURE] Playback failed state=\(self.state) time=\(String(format: "%.2f", self.currentTime)) \(self.playbackSnapshot())")
+                    self.lastFailure = "Playback failed"
                 }
             }
             .store(in: &cancellables)
@@ -493,11 +506,20 @@ final class PlaybackDiagnostics: ObservableObject {
         }
         if let liveRange = item.seekableTimeRanges.last?.timeRangeValue {
             let liveEdge = liveRange.start.seconds + liveRange.duration.seconds
+            let window = liveRange.duration.seconds
             seekableEnd = liveEdge
             liveOffset = max(0, liveEdge - currentTime)
+            windowDuration = window
+            // Slack = how much media time until currentTime falls off the
+            // oldest edge of the server's sliding window. Near zero / negative
+            // means the next segment the player asks for has likely rotated
+            // out, producing "-12642 No matching mediaFile found from playlist".
+            windowSlack = window - (liveOffset ?? 0)
         } else {
             seekableEnd = nil
             liveOffset = nil
+            windowDuration = nil
+            windowSlack = nil
         }
         samplePlayerMetrics(now: Date())
     }
@@ -567,17 +589,15 @@ final class PlaybackDiagnostics: ObservableObject {
         observedBitrate = event.observedBitrate
         indicatedBitrate = event.indicatedBitrate
         averageVideoBitrate = event.averageVideoBitrate
+        // Segment identity/sequence is tracked in RequestTracker (the proxy
+        // sees every segment fetch; AVPlayer's access log URIs are playlists).
+        // We only use access-log URIs here for variant inference and metrics.
         if let uri = event.uri {
             lastSegmentURI = uri
-            if let sequence = extractSegmentSequence(from: uri) {
-                if let maxSeen = maxObservedSegmentSequence {
-                    maxObservedSegmentSequence = max(maxSeen, sequence)
-                } else {
-                    maxObservedSegmentSequence = sequence
-                }
-                lastObservedSegmentSequence = sequence
-            }
         }
+        let tSnap = RequestTracker.shared.snapshot()
+        lastObservedSegmentSequence = tSnap.lastSegmentSequence
+        maxObservedSegmentSequence = tSnap.maxSegmentSequence
         if let events = item.accessLog()?.events {
             var totalDropped: Double = 0
             var totalBytes: Int64 = 0
@@ -655,6 +675,7 @@ final class PlaybackDiagnostics: ObservableObject {
         if event.numberOfDroppedVideoFrames > 0 { parts.append("dropped=\(Int(event.numberOfDroppedVideoFrames))") }
         if let server = event.serverAddress { parts.append("server=\(server)") }
         if let session = event.playbackSessionID { parts.append("session=\(session)") }
+        parts.append(playbackSnapshot())
         lastAccessLog = parts.joined(separator: " ")
     }
 
@@ -772,7 +793,7 @@ final class PlaybackDiagnostics: ObservableObject {
         if let session = event.playbackSessionID { parts.append("session=\(session)") }
         lastErrorLog = parts.joined(separator: " ")
         if !lastErrorLog.isEmpty {
-            print("Error log: \(lastErrorLog)")
+            print("Error log: \(lastErrorLog) \(playbackSnapshot())")
         }
 
         let comment = event.errorComment ?? ""
@@ -786,7 +807,7 @@ final class PlaybackDiagnostics: ObservableObject {
             if !event.errorDomain.isEmpty { playlistParts.append("domain=\(event.errorDomain)") }
             lastPlaylistError = playlistParts.joined(separator: " ")
             if !lastPlaylistError.isEmpty {
-                print("Playlist error: \(lastPlaylistError)")
+                print("Playlist error: \(lastPlaylistError) \(playbackSnapshot())")
             }
         }
     }
@@ -823,6 +844,71 @@ final class PlaybackDiagnostics: ObservableObject {
             }
             lastPlayerSampleAt = now
         }
+    }
+
+    // Compact one-line snapshot of playback state for log correlation.
+    // `netBuf` is the network/segment buffer (loadedTimeRanges ahead of currentTime).
+    // `empty/full/keepUp` are AVPlayer's decoder-buffer judgments — the only public
+    // decoder-buffer signal available; there is no decoded-frames-ready count.
+    // `seg` is the most recent media-segment sequence number: low values indicate
+    // we're shortly after a discontinuity (sequence wraps to 0 at the loop point).
+    private func playbackSnapshot() -> String {
+        guard let item = player?.currentItem else { return "no-item" }
+        let bufEmpty = item.isPlaybackBufferEmpty
+        let bufFull = item.isPlaybackBufferFull
+        let keepUp = item.isPlaybackLikelyToKeepUp
+        // Compute netBuf inline from the same loadedTimeRanges we're about to
+        // format as `ranges`, so the two always agree. The periodic timer's
+        // cached `bufferDepth` can lag by up to 500ms, which previously left
+        // log lines where ranges=[214.1-214.4] but netBuf=0.0s — confusing.
+        let liveTime = item.currentTime().seconds
+        let rangeValues = item.loadedTimeRanges.map { $0.timeRangeValue }
+        let ranges = rangeValues
+            .map { String(format: "%.1f-%.1f", $0.start.seconds, $0.start.seconds + $0.duration.seconds) }
+            .joined(separator: ",")
+        let depthStr: String
+        if let last = rangeValues.last {
+            let end = last.start.seconds + last.duration.seconds
+            let depth = max(0, end - liveTime)
+            depthStr = String(format: "%.1fs", depth)
+        } else {
+            depthStr = "0.0s"
+        }
+        let variant = currentVariantLabel() ?? "?"
+        let segStr = lastObservedSegmentSequence.map { String($0) } ?? "?"
+        let maxStr = maxObservedSegmentSequence.map { String($0) } ?? "?"
+        let indMbps = (indicatedBitrate ?? 0) / 1_000_000
+        let obsMbps = (observedBitrate ?? 0) / 1_000_000
+        let liveStr = liveOffset.map { String(format: "%.1fs", $0) } ?? "nil"
+        let slackStr = windowSlack.map { String(format: "%.1fs", $0) } ?? "nil"
+        let winStr = windowDuration.map { String(format: "%.1fs", $0) } ?? "nil"
+        return "variant=\(variant) seg=\(segStr)/max=\(maxStr) netBuf=\(depthStr) empty=\(bufEmpty) full=\(bufFull) keepUp=\(keepUp) ranges=[\(ranges)] liveOff=\(liveStr) window=\(winStr) slack=\(slackStr) ind=\(String(format: "%.1fMbps", indMbps)) obs=\(String(format: "%.1fMbps", obsMbps))"
+    }
+
+    // AVPlayer's access log URIs are per-variant playlists, not per-segment,
+    // so segment-keyed info comes from RequestTracker (the proxy sees every
+    // real segment fetch). Segment paths look like .../2160p/segment_00006.m4s.
+    private func currentVariantLabel() -> String? {
+        // Use the last *video* segment URI — audio interleaves and would
+        // otherwise cause the reported variant to flip to "audio".
+        if let uri = RequestTracker.shared.snapshot().lastVideoSegmentURI,
+           let label = variantLabelFromURI(uri) {
+            return label
+        }
+        return nil
+    }
+
+    // Pull the resolution label ("720p", "2160p", "audio") out of a segment URI
+    // by walking path components from the end.
+    private func variantLabelFromURI(_ uri: String) -> String? {
+        guard let url = URL(string: uri) else { return nil }
+        for p in url.pathComponents.reversed() {
+            if p == "audio" { return p }
+            if p.hasSuffix("p"), Int(p.dropLast()) != nil {
+                return p
+            }
+        }
+        return nil
     }
 
     private func formatBps(_ bps: Double) -> String {
@@ -886,9 +972,36 @@ final class PlaybackDiagnostics: ObservableObject {
                     }
                 @unknown default: self.itemStatus = "Unknown"
                 }
-                let bufEmpty = item.isPlaybackBufferEmpty
-                let keepUp = item.isPlaybackLikelyToKeepUp
-                print("[ITEM_STATUS] \(prev) -> \(self.itemStatus) bufferEmpty=\(bufEmpty) likelyToKeepUp=\(keepUp) error=\(item.error?.localizedDescription ?? "none") time=\(String(format: "%.2f", self.currentTime))")
+                print("[ITEM_STATUS] \(prev) -> \(self.itemStatus) error=\(item.error?.localizedDescription ?? "none") time=\(String(format: "%.2f", self.currentTime)) \(self.playbackSnapshot())")
+            }
+            .store(in: &cancellables)
+
+        // Decoder-buffer booleans. `dropFirst()` skips the initial value so we
+        // only log genuine transitions, not the startup snapshot.
+        item.publisher(for: \.isPlaybackBufferEmpty)
+            .dropFirst()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] empty in
+                guard let self else { return }
+                print("[DECODER] bufferEmpty -> \(empty) state=\(self.state) time=\(String(format: "%.2f", self.currentTime)) \(self.playbackSnapshot())")
+            }
+            .store(in: &cancellables)
+
+        item.publisher(for: \.isPlaybackBufferFull)
+            .dropFirst()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] full in
+                guard let self else { return }
+                print("[DECODER] bufferFull -> \(full) state=\(self.state) time=\(String(format: "%.2f", self.currentTime)) \(self.playbackSnapshot())")
+            }
+            .store(in: &cancellables)
+
+        item.publisher(for: \.isPlaybackLikelyToKeepUp)
+            .dropFirst()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] keepUp in
+                guard let self else { return }
+                print("[DECODER] likelyToKeepUp -> \(keepUp) state=\(self.state) time=\(String(format: "%.2f", self.currentTime)) \(self.playbackSnapshot())")
             }
             .store(in: &cancellables)
     }
