@@ -4213,11 +4213,35 @@ func manipulateHLSMaster(body []byte, stripCodecs bool, stripAvgBandwidth bool, 
 		return nil, fmt.Errorf("failed to encode HLS playlist: %w", err)
 	}
 
-	// Inject EXT-X-START tag (not supported by m3u8 library) after #EXTM3U
+	// Replace (or inject) EXT-X-START when a session live_offset is set.
+	// As of the go-live master playlist injection, master.m3u8 already
+	// contains a default EXT-X-START tag. When the session specifies a
+	// liveOffset, we must *replace* that existing value — not append a
+	// second one — so the playlist ends up with exactly one tag carrying
+	// the user's requested offset. A negative/zero liveOffset means "no
+	// override, pass through go-live's default". Injection goes AFTER
+	// #EXT-X-VERSION so AVPlayer sees the version before any higher-version
+	// tags — inserting between #EXTM3U and #EXT-X-VERSION triggers -12646
+	// "playlist parse error".
 	if liveOffset > 0 {
 		encoded := buf.String()
-		startTag := fmt.Sprintf("#EXT-X-START:TIME-OFFSET=-%d\n", liveOffset)
-		encoded = strings.Replace(encoded, "#EXTM3U\n", "#EXTM3U\n"+startTag, 1)
+		startTag := fmt.Sprintf("#EXT-X-START:TIME-OFFSET=-%d,PRECISE=YES\n", liveOffset)
+		if idx := strings.Index(encoded, "#EXT-X-START:"); idx >= 0 {
+			end := strings.Index(encoded[idx:], "\n")
+			if end < 0 {
+				encoded = encoded[:idx] + strings.TrimRight(startTag, "\n")
+			} else {
+				encoded = encoded[:idx] + startTag + encoded[idx+end+1:]
+			}
+		} else if idx := strings.Index(encoded, "#EXT-X-VERSION:"); idx >= 0 {
+			end := strings.Index(encoded[idx:], "\n")
+			if end >= 0 {
+				insertAt := idx + end + 1
+				encoded = encoded[:insertAt] + startTag + encoded[insertAt:]
+			}
+		} else {
+			encoded = strings.Replace(encoded, "#EXTM3U\n", "#EXTM3U\n"+startTag, 1)
+		}
 		buf.Reset()
 		buf.WriteString(encoded)
 	}
