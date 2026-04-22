@@ -50,7 +50,6 @@ func main() {
 	router.HandleFunc("/go-live/healthz", h.Healthz).Methods(http.MethodGet, http.MethodHead)
 	router.HandleFunc("/go-live/api/status", h.Status).Methods(http.MethodGet, http.MethodHead)
 	router.HandleFunc("/go-live/api/stop/{id}", h.Stop).Methods("DELETE")
-	router.HandleFunc("/go-live/api/spawn", h.Spawn).Methods("POST")
 	router.HandleFunc("/go-live/api/tick-stats/{content}", h.TickStats).Methods(http.MethodGet, http.MethodHead)
 	router.HandleFunc("/go-live/api/dash-tick-stats/{content}", h.DashTickStats).Methods(http.MethodGet, http.MethodHead)
 
@@ -78,7 +77,6 @@ func main() {
 	fmt.Println("  GET  /health - Health check")
 	fmt.Println("  GET  /go-live/healthz - LL-HLS service health")
 	fmt.Println("  GET  /go-live/api/status - Active processes status")
-	fmt.Println("  POST /go-live/api/spawn - Spawn continuous generator")
 	fmt.Println("  DEL  /go-live/api/stop/{id} - Stop generator")
 	fmt.Println("  GET  /go-live/{content}/master.m3u8 - On-demand master playlist")
 	fmt.Println("  GET  /go-live/{content}/{variant}.m3u8 - On-demand variant playlist")

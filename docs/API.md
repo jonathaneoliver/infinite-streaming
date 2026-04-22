@@ -16,7 +16,6 @@ Prefix: `/go-live/`
 | GET | `/go-live/api/status` | All active workers, streams, and per-stream stats |
 | GET | `/go-live/api/tick-stats/{content}` | LL-HLS tick cadence for one content worker (last tick, 5m avg, variant/audio counts) |
 | GET | `/go-live/api/dash-tick-stats/{content}?duration=ll\|2s\|6s` | DASH tick stats per window |
-| POST | `/go-live/api/spawn` | Explicitly start a worker. Body: `{input_path, output_dir, prefix}` |
 | DELETE | `/go-live/api/stop/{id}` | Stop a running worker |
 
 Streaming URLs (generated on demand):

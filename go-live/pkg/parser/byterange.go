@@ -151,20 +151,3 @@ func loadByterangesFile(path string) ([]ByteRange, error) {
 	return data.Fragments, nil
 }
 
-// LoadByteranges is the legacy function for backwards compatibility
-// Deprecated: Use LoadByterangesForPlaylist instead
-func LoadByteranges(path string) (map[string][]ByteRange, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-
-	var m map[string][]ByteRange
-	err = json.NewDecoder(f).Decode(&m)
-	if err != nil {
-		return nil, err
-	}
-
-	return m, nil
-}
