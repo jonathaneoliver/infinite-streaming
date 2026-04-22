@@ -1415,6 +1415,9 @@ func (h *Handler) OnDemandMasterPlaylist(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	// LL-HLS master: match ll_hls.go's per-media TIME-OFFSET of -3s.
+	data = injectMasterStartTag(data, 3.0)
+
 	w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
@@ -1466,6 +1469,10 @@ func (h *Handler) OnDemandMasterPlaylistDuration(w http.ResponseWriter, r *http.
 			return
 		}
 	}
+
+	// Duration-specific master (2s/6s): scale the live-edge offset to 3× the
+	// segment duration so each variant flavor gets an appropriate hint.
+	data = injectMasterStartTag(data, masterStartOffsetForDuration(duration))
 
 	w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
@@ -2006,6 +2013,62 @@ func writeMasterPlaylist(sourcePath, outputPath string) error {
 		return err
 	}
 	return os.WriteFile(outputPath, data, 0644)
+}
+
+// injectMasterStartTag inserts (or replaces) a #EXT-X-START:TIME-OFFSET tag in
+// a master playlist. Kept in the master so the hint applies uniformly across
+// all variants without duplicating per-media-playlist. offsetSeconds is
+// positive — the resulting tag is TIME-OFFSET=-<offsetSeconds>.
+// go-proxy may later rewrite this value based on a session's configured
+// liveOffset; it detects and replaces the existing tag rather than appending,
+// so playlists always contain exactly one EXT-X-START.
+func injectMasterStartTag(data []byte, offsetSeconds float64) []byte {
+	tag := fmt.Sprintf("#EXT-X-START:TIME-OFFSET=-%.3f,PRECISE=YES\n", offsetSeconds)
+
+	text := string(data)
+	// If one already exists, replace it line-wise.
+	if idx := strings.Index(text, "#EXT-X-START:"); idx >= 0 {
+		end := strings.Index(text[idx:], "\n")
+		if end < 0 {
+			return []byte(text[:idx] + tag)
+		}
+		return []byte(text[:idx] + tag + text[idx+end+1:])
+	}
+	// Insert after the #EXT-X-VERSION line so AVPlayer sees the version
+	// declaration before any higher-version tags. Inserting between #EXTM3U
+	// and #EXT-X-VERSION (as a naive after-#EXTM3U approach does) triggers
+	// AVPlayer's -12646 "playlist parse error".
+	if idx := strings.Index(text, "#EXT-X-VERSION:"); idx >= 0 {
+		end := strings.Index(text[idx:], "\n")
+		if end >= 0 {
+			insertAt := idx + end + 1
+			return []byte(text[:insertAt] + tag + text[insertAt:])
+		}
+	}
+	// Fallback: no #EXT-X-VERSION found — insert after #EXTM3U.
+	if strings.HasPrefix(text, "#EXTM3U\n") {
+		return []byte("#EXTM3U\n" + tag + text[len("#EXTM3U\n"):])
+	}
+	if strings.HasPrefix(text, "#EXTM3U\r\n") {
+		return []byte("#EXTM3U\r\n" + tag + text[len("#EXTM3U\r\n"):])
+	}
+	return []byte(tag + text)
+}
+
+// masterStartOffsetForDuration converts a "2s"/"6s" duration string into the
+// recommended live-edge TIME-OFFSET. Must match the media playlists'
+// HOLD-BACK (3× TARGETDURATION), where TARGETDURATION is the integer
+// ceiling of actual segment duration — 2s segments round to 2 (→6s offset),
+// 6s segments actually encode at 6.006s and round to 7 (→21s offset).
+func masterStartOffsetForDuration(duration string) float64 {
+	switch duration {
+	case "2s":
+		return 6.0
+	case "6s":
+		return 21.0
+	default:
+		return 21.0
+	}
 }
 
 // Legacy functions for backwards compatibility (not used in LL-HLS mode)
