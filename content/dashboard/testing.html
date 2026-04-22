@@ -2522,6 +2522,7 @@ maybe a histogram of b
             const compareActive = compareGroupIdsForDefaults.length >= 2;
             const compareVisibleLabels = new Set([
                 'Player est.',
+                'Player Network Rate',
                 'Player Variant',
                 'Server Variant',
                 'Variants',
@@ -2536,6 +2537,7 @@ maybe a histogram of b
                     const tag = `S${sid}`;
                     compareVisibleLabels.add(`Player Variant (${tag})`);
                     compareVisibleLabels.add(`Player Est (${tag})`);
+                    compareVisibleLabels.add(`Player Network Rate (${tag})`);
                     compareVisibleLabels.add(`Server Variant (${tag})`);
                     compareVisibleLabels.add(`Shaper Avg (${tag})`);
                 }
@@ -2738,6 +2740,23 @@ maybe a histogram of b
                         tension: 0.2,
                         borderDash: [6, 4],
                         hidden: isSeriesHidden(`Player Est (${tag})`)
+                    });
+                    // Player Network Rate (visible by default in compare; null when session has no wire metric)
+                    datasets.push({
+                        label: `Player Network Rate (${tag})`,
+                        data: otherSeries.map(p => ({
+                            x: p.x,
+                            y: (p.y.playerWireBitrate === null || p.y.playerWireBitrate === undefined)
+                                ? null
+                                : p.y.playerWireBitrate
+                        })),
+                        borderColor: color.main,
+                        borderWidth: 2,
+                        pointRadius: 0,
+                        tension: 0.2,
+                        borderDash: [4, 2],
+                        spanGaps: false,
+                        hidden: isSeriesHidden(`Player Network Rate (${tag})`)
                     });
                     // Server Variant (hidden by default)
                     datasets.push({
