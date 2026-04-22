@@ -1272,13 +1272,7 @@ final class PlaybackViewModel: ObservableObject {
                 item.preferredMaximumResolution = CGSize(width: 3840, height: 2160)
             }
         } else if #available(iOS 15.0, tvOS 15.0, *) {
-            // Cap at 1080p when 4K is not explicitly allowed. .zero means
-            // "no preference" — on capable targets like iPad simulator that
-            // lets AVPlayer pick the 2160p variant, which the simulator's
-            // software decoder cannot keep up with and which spams the
-            // console with URLAsset err=-12174 / Fig err=-12900 back-pressure
-            // signals. The toggle is named "Allow 4K" — OFF should mean cap.
-            item.preferredMaximumResolution = CGSize(width: 1920, height: 1080)
+            item.preferredMaximumResolution = .zero
         }
     }
 
