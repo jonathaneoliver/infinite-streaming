@@ -190,6 +190,7 @@ final class ConnectionSession {
     private var finished = false
     private var method = "GET"
     private var headersSentToClient = false
+    private var upstreamTask: URLSessionDataTask?
     // Queued writes back to the client — we process sequentially to avoid
     // overlapping sends on the same NWConnection.
     private var writeQueue: [Data] = []
@@ -307,6 +308,7 @@ final class ConnectionSession {
             if let v = clientHeaders[key] { req.setValue(v, forHTTPHeaderField: key.capitalized) }
         }
         let task = proxy.session.dataTask(with: req)
+        upstreamTask = task
         proxy.registerTask(task.taskIdentifier, session: self)
         proxy.tracker.requestStarted()
         didEmitStart = true
@@ -325,6 +327,9 @@ final class ConnectionSession {
 
     fileprivate func onUpstreamChunk(_ data: Data) {
         guard !data.isEmpty else { return }
+        // If the client has gone away, drop the chunk — enqueueing would
+        // produce one ECANCELED-failed send per chunk, flooding logs.
+        if finished { return }
         proxy.tracker.chunkReceived(byteCount: data.count)
         if method != "HEAD" {
             enqueueWrite(data)
@@ -400,7 +405,16 @@ final class ConnectionSession {
             guard let self else { return }
             self.writing = false
             if let error = error {
-                Swift.print("[LOCAL_PROXY] send error: \(error)")
+                // ECANCELED is expected — AVPlayer routinely abandons LL-HLS
+                // partial fetches and variant-switch races, which cancels the
+                // NWConnection. Log only unexpected errors.
+                let isCancel: Bool = {
+                    if case let .posix(code) = error { return code == .ECANCELED }
+                    return false
+                }()
+                if !isCancel {
+                    Swift.print("[LOCAL_PROXY] send error: \(error)")
+                }
                 self.finishAndClose()
                 return
             }
@@ -422,6 +436,10 @@ final class ConnectionSession {
     private func finishAndClose(afterDrain: Bool = false) {
         guard !finished else { return }
         finished = true
+        // Cancel the upstream task so URLSession stops delivering chunks we'd
+        // only fail to forward and log noise about.
+        upstreamTask?.cancel()
+        upstreamTask = nil
         if didEmitStart { proxy.tracker.requestFinished() }
         if headersSentToClient && method != "HEAD" {
             // Flush the chunked-encoding terminator so the client sees a clean
