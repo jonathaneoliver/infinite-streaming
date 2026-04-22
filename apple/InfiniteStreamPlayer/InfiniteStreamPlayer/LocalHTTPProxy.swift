@@ -190,6 +190,7 @@ final class ConnectionSession {
     private var finished = false
     private var method = "GET"
     private var headersSentToClient = false
+    private var usingChunkedTE = false
     private var upstreamTask: URLSessionDataTask?
     // Queued writes back to the client — we process sequentially to avoid
     // overlapping sends on the same NWConnection.
@@ -354,20 +355,35 @@ final class ConnectionSession {
     private func writeHeaders(status: Int, headers: [AnyHashable: Any], responseURL: URL?) {
         var lines: [String] = ["HTTP/1.1 \(status) \(Self.reason(for: status))"]
         var headersOut: [String: String] = [:]
+        var upstreamContentLength: String?
         for (k, v) in headers {
             guard let key = k as? String, let value = v as? String else { continue }
             let lower = key.lowercased()
-            // Drop hop-by-hop and Content-Length / Transfer-Encoding — we'll use
-            // chunked TE for the body so AVPlayer can start consuming before we
-            // know the total size.
-            if ["connection", "keep-alive", "transfer-encoding", "content-length",
+            if lower == "content-length" {
+                upstreamContentLength = value
+                continue
+            }
+            // Drop hop-by-hop framing/encoding headers; URLSession has already
+            // decoded any Content-Encoding (e.g. gzip) before handing bytes to us.
+            if ["connection", "keep-alive", "transfer-encoding",
                 "content-encoding", "te", "trailer", "upgrade",
                 "proxy-authenticate", "proxy-authorization"].contains(lower) {
                 continue
             }
             headersOut[key] = value
         }
-        headersOut["Transfer-Encoding"] = "chunked"
+        // Prefer Content-Length framing when upstream told us the size — AVURLAsset
+        // is sensitive to chunked TE on 206 Partial Content responses (the byte-range
+        // path used for HLS partials), and emits err=-12174 in its URLAsset internals
+        // when it sees chunked framing where it expected a sized body. Fall back to
+        // chunked only when the size is unknown (e.g. upstream itself used chunked TE).
+        if let len = upstreamContentLength {
+            headersOut["Content-Length"] = len
+            usingChunkedTE = false
+        } else {
+            headersOut["Transfer-Encoding"] = "chunked"
+            usingChunkedTE = true
+        }
         headersOut["Connection"] = "close"
         for (k, v) in headersOut { lines.append("\(k): \(v)") }
         lines.append("")
@@ -378,13 +394,17 @@ final class ConnectionSession {
     }
 
     private func enqueueWrite(_ chunk: Data) {
-        // HTTP/1.1 chunked-transfer framing: "<hex-size>\r\n<bytes>\r\n"
-        let size = String(chunk.count, radix: 16)
-        var framed = Data()
-        framed.append((size + "\r\n").data(using: .utf8) ?? Data())
-        framed.append(chunk)
-        framed.append("\r\n".data(using: .utf8) ?? Data())
-        enqueueRaw(framed)
+        if usingChunkedTE {
+            // HTTP/1.1 chunked-transfer framing: "<hex-size>\r\n<bytes>\r\n"
+            let size = String(chunk.count, radix: 16)
+            var framed = Data()
+            framed.append((size + "\r\n").data(using: .utf8) ?? Data())
+            framed.append(chunk)
+            framed.append("\r\n".data(using: .utf8) ?? Data())
+            enqueueRaw(framed)
+        } else {
+            enqueueRaw(chunk)
+        }
     }
 
     private func enqueueTerminator() {
@@ -441,9 +461,11 @@ final class ConnectionSession {
         upstreamTask?.cancel()
         upstreamTask = nil
         if didEmitStart { proxy.tracker.requestFinished() }
-        if headersSentToClient && method != "HEAD" {
+        if headersSentToClient && method != "HEAD" && usingChunkedTE {
             // Flush the chunked-encoding terminator so the client sees a clean
-            // end-of-body before we tear the socket down.
+            // end-of-body before we tear the socket down. Only needed for
+            // chunked TE — Content-Length-framed responses end implicitly when
+            // the byte count is reached.
             let terminator = Data("0\r\n\r\n".utf8)
             writeQueue.append(terminator)
             drainWrites()
