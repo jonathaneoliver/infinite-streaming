@@ -208,7 +208,10 @@ func (a *App) resolveJobInput(job *store.Job) (string, string, error) {
 		if err != nil || src == nil {
 			return "", "", util.Errf("Source not found: %s", *job.SourceID)
 		}
-		return src.FilePath, filepath.Join(a.Cfg.UploadsDir, job.JobID, "encoding.log"), nil
+		// Recompute the path against the current SourcesDir so legacy stored
+		// paths (e.g. /boss/originals/...) resolve correctly without migration.
+		filePath := filepath.Join(a.Cfg.SourcesDir, filepath.Base(src.FilePath))
+		return filePath, filepath.Join(a.Cfg.UploadsDir, job.JobID, "encoding.log"), nil
 	}
 	jobDir := filepath.Join(a.Cfg.UploadsDir, job.JobID)
 	return filepath.Join(jobDir, "input.mp4"), filepath.Join(jobDir, "encoding.log"), nil

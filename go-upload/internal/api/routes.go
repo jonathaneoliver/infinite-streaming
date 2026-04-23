@@ -71,12 +71,39 @@ func (h *Handler) DeleteJob(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) ListSources(w http.ResponseWriter, _ *http.Request) {
-	sources, err := h.App.Store.ListSources()
+	// Disk is the source of truth for which files exist. Scan first so any
+	// scp'd files appear in the cache, then return rows joined to disk
+	// presence (and recompute FilePath from current SourcesDir so legacy
+	// /boss/ paths resolve correctly without a DB migration).
+	_ = util.ScanOriginals(h.App.Store, h.App.Cfg.SourcesDir)
+
+	cached, err := h.App.Store.ListSources()
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"detail": err.Error()})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"sources": sources})
+
+	// Build the on-disk filename set for join + presence filtering.
+	diskFiles := map[string]bool{}
+	if entries, err := os.ReadDir(h.App.Cfg.SourcesDir); err == nil {
+		for _, e := range entries {
+			if e.IsDir() {
+				continue
+			}
+			diskFiles[e.Name()] = true
+		}
+	}
+
+	visible := make([]store.Source, 0, len(cached))
+	for _, src := range cached {
+		name := filepath.Base(src.FilePath)
+		if !diskFiles[name] {
+			continue // file removed from disk → hide row (don't delete in case of jobs)
+		}
+		src.FilePath = filepath.Join(h.App.Cfg.SourcesDir, name)
+		visible = append(visible, src)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"sources": visible})
 }
 
 func (h *Handler) GetSource(w http.ResponseWriter, r *http.Request) {
