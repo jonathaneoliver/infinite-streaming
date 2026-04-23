@@ -123,6 +123,13 @@ func (s *SQLiteStore) InitSchema() error {
 			return err
 		}
 	}
+
+	// One-shot migration: rewrite legacy /boss/ paths to /media/ for source
+	// records created before the BOSS→ISM rename. Idempotent.
+	if _, err := s.db.Exec(`UPDATE sources SET file_path = REPLACE(file_path, '/boss/', '/media/') WHERE file_path LIKE '/boss/%'`); err != nil {
+		return err
+	}
+
 	return nil
 }
 

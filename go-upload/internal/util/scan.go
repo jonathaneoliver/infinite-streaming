@@ -78,7 +78,7 @@ func ScanOriginals(st *store.SQLiteStore, root string) ScanStats {
 		sourceID := NewUUID()
 		src := store.Source{
 			SourceID:         sourceID,
-			Name:             strings.TrimSuffix(filepath.Base(path), filepath.Ext(path)),
+			Name:             SanitizeName(strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))),
 			OriginalFilename: filepath.Base(path),
 			FilePath:         path,
 			FileSize:         fileInfo.Size(),

@@ -1,6 +1,7 @@
 package util
 
 import (
+	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -17,12 +18,19 @@ func SanitizeName(name string) string {
 	return safe
 }
 
-func HybridFilename(original, sourceID string) string {
+// ResolveUploadFilename returns a sanitized filename for an uploaded file.
+// Prefers the clean sanitized name when nothing of the same name exists in dir.
+// On collision, appends the first 8 chars of sourceID to disambiguate.
+func ResolveUploadFilename(dir, original, sourceID string) string {
 	stem := strings.TrimSuffix(filepath.Base(original), filepath.Ext(original))
 	ext := strings.ToLower(filepath.Ext(original))
 	if ext == "" {
 		ext = ".mp4"
 	}
-	safe := SanitizeName(stem)
-	return safe + "_" + sourceID[:8] + ext
+	safeStem := SanitizeName(stem)
+	clean := safeStem + ext
+	if _, err := os.Stat(filepath.Join(dir, clean)); os.IsNotExist(err) {
+		return clean
+	}
+	return safeStem + "_" + sourceID[:8] + ext
 }
