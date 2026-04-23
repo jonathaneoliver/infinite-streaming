@@ -29,7 +29,7 @@ Player bugs are usually environmental — a network blip, a truncated segment, a
 - **Transport faults too.** Port-level DROP/REJECT via nftables, rate shaping via `tc`, composable with HTTP-layer faults.
 - **Per-session isolation.** Each browser session binds to a dedicated proxy port via `player_id`, so concurrent testers don't collide.
 - **Session grouping for differential testing.** Link two or more independent sessions so fault injection and network shaping apply to all of them simultaneously, while everything else (player engine, codec, live offset, platform, ladder constraints) stays independent per session. One bandwidth collapse, two `live_offset` values, instant apples-to-apples comparison of which setting rebuffers. Or iOS vs Android reacting to the exact same throughput curve. See [Session grouping](#session-grouping-differential-testing).
-- **Side-by-side comparison UI.** Mosaic and quartet views for watching multiple players or encodings against the same source simultaneously.
+- **Side-by-side comparison UI.** Mosaic view for watching multiple players or encodings against the same source simultaneously. Quartet (alpha) extends this to four-panel layouts.
 - **Accessible to non-programmers.** The whole surface is a web UI — click a fault type, drag a throttle slider, flip a Content-tab toggle, watch the bitrate / buffer / FPS charts react in real time. No Python addons, no YAML, no CLI. A QA analyst, a producer, or a support engineer can run real experiments and see cause-and-effect without writing any code.
 - **Everything is a REST API.** No UI-only controls — anything a tester can do, a CI job can do.
 
@@ -119,8 +119,8 @@ That walkthrough exercises the majority of the system. The sections below descri
 
 - **Playback** — single-stream view with protocol, codec, segment, and player selection. Auto-plays on change.
 - **Mosaic (Grid)** — multi-tile view with filters (protocol / codec / segment). Right-click a tile to open a Testing Session.
-- **Quartet** — four-panel side-by-side comparison across encodings or players.
-- **Live Offset** — compares live offset, buffer depth, and seekable ranges across variants.
+- **Quartet** *(alpha)* — four-panel side-by-side comparison across encodings or players.
+- **Live Offset** *(alpha)* — compares live offset, buffer depth, and seekable ranges across variants.
 - **Testing Session** — per-session failure injection, traffic shaping, content manipulation, metrics charts. See below.
 - **Go-Monitor** — active workers, request counts, last-request time, idle timeout, tick timings.
 - **Upload Content** — web upload + encoding job tracking.
@@ -477,7 +477,7 @@ Captured from the live dashboard; files live in [`docs/screenshots/`](docs/scree
 |---|---|
 | **Playback** — single-stream view ![Playback](docs/screenshots/playback.png) | **Mosaic** — multi-tile comparison ![Mosaic](docs/screenshots/mosaic.png) |
 | **Source Library** — content intake ![Source Library](docs/screenshots/source-library.png) | **Upload Content** ![Upload Content](docs/screenshots/upload-content.png) |
-| **Encoding Jobs** ![Encoding Jobs](docs/screenshots/encoding-jobs.png) | **Live Offset** — cross-variant comparison ![Live Offset](docs/screenshots/live-offset.png) |
+| **Encoding Jobs** ![Encoding Jobs](docs/screenshots/encoding-jobs.png) | **Live Offset** *(alpha)* — cross-variant comparison ![Live Offset](docs/screenshots/live-offset.png) |
 
 ---
 
