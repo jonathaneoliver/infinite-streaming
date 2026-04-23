@@ -48,6 +48,12 @@ final class LocalHTTPProxy: NSObject {
 
     // MARK: - Lifecycle
 
+    func stop() {
+        listener?.cancel()
+        listener = nil
+        port = 0
+    }
+
     func startIfNeeded() {
         guard listener == nil else { return }
         do {

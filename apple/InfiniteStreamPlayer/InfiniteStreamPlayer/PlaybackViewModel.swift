@@ -50,7 +50,7 @@ final class PlaybackViewModel: ObservableObject {
     @Published var primePlayback: Bool = true
     @Published var forcePlayerIdOnPlayback: Bool = false
     @Published var allowPlayerIdOnContentPort: Bool = false
-    @Published var prefer4kNative: Bool = false {
+    @Published var prefer4kNative: Bool = true {
         didSet { persist(.prefer4kNative, prefer4kNative ? "true" : "false") }
     }
     @Published var autoRecoveryEnabled: Bool = false {
@@ -60,7 +60,14 @@ final class PlaybackViewModel: ObservableObject {
         didSet { persist(.goLiveMode, goLiveMode ? "true" : "false") }
     }
     @Published var localProxyEnabled: Bool = true {
-        didSet { persist(.localProxyEnabled, localProxyEnabled ? "true" : "false") }
+        didSet {
+            persist(.localProxyEnabled, localProxyEnabled ? "true" : "false")
+            if localProxyEnabled {
+                LocalHTTPProxy.shared.startIfNeeded()
+            } else {
+                LocalHTTPProxy.shared.stop()
+            }
+        }
     }
     @Published var playerRestarts: Int = 0
     @Published var profileShiftCount: Int = 0

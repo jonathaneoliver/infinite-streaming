@@ -212,6 +212,72 @@ screenshots:
 		&& "$(SCREENSHOT_VENV)/bin/playwright" install chrome)
 	"$(SCREENSHOT_VENV)/bin/python" scripts/capture-screenshots.py --base-url=$(SCREENSHOT_HOST)
 
+# ── Android TV ─────────────────────────────────────────────────────────
+
+ANDROIDTV_DIR ?= android/InfiniteStreamPlayer
+JAVA_HOME_ANDROID ?= /Applications/Android Studio.app/Contents/jbr/Contents/Home
+ANDROID_SDK_HOME ?= $(HOME)/Library/Android/sdk
+
+APPLETV_PROJECT ?= apple/InfiniteStreamPlayer/InfiniteStreamPlayer.xcodeproj
+APPLETV_SCHEME ?= InfiniteStreamPlayer (tvOS)
+APPLETV_BUNDLE_ID ?= com.jeoliver.InfiniteStreamPlayerTV
+APPLETV_DEVICE_ID ?=
+APPLETV_XCODE_ID ?=
+APPLETV_DERIVED_DATA ?= /tmp/appletv-build
+
+IPHONE_SCHEME ?= InfiniteStreamPlayer (iOS)
+IPHONE_BUNDLE_ID ?= com.jeoliver.InfiniteStreamPlayer
+IPHONE_DEVICE_ID ?=
+IPHONE_XCODE_ID ?=
+IPHONE_DERIVED_DATA ?= /tmp/iphone-build
+
+deploy-appletv:
+	@if [ -z "$(APPLETV_DEVICE_ID)" ] || [ -z "$(APPLETV_XCODE_ID)" ]; then \
+		echo "APPLETV_DEVICE_ID / APPLETV_XCODE_ID not set in .env" >&2; \
+		exit 1; \
+	fi
+	xcodebuild \
+		-project "$(APPLETV_PROJECT)" \
+		-scheme "$(APPLETV_SCHEME)" \
+		-destination "id=$(APPLETV_XCODE_ID)" \
+		-configuration Debug \
+		-derivedDataPath "$(APPLETV_DERIVED_DATA)" \
+		build
+	xcrun devicectl device install app \
+		--device "$(APPLETV_DEVICE_ID)" \
+		"$(APPLETV_DERIVED_DATA)/Build/Products/Debug-appletvos/InfiniteStreamPlayerTV.app"
+	xcrun devicectl device process launch \
+		--device "$(APPLETV_DEVICE_ID)" \
+		"$(APPLETV_BUNDLE_ID)"
+
+deploy-iphone:
+	@if [ -z "$(IPHONE_DEVICE_ID)" ] || [ -z "$(IPHONE_XCODE_ID)" ]; then \
+		echo "IPHONE_DEVICE_ID / IPHONE_XCODE_ID not set in .env" >&2; \
+		exit 1; \
+	fi
+	xcodebuild \
+		-project "$(APPLETV_PROJECT)" \
+		-scheme "$(IPHONE_SCHEME)" \
+		-destination "id=$(IPHONE_XCODE_ID)" \
+		-configuration Debug \
+		-derivedDataPath "$(IPHONE_DERIVED_DATA)" \
+		build
+	xcrun devicectl device install app \
+		--device "$(IPHONE_DEVICE_ID)" \
+		"$(IPHONE_DERIVED_DATA)/Build/Products/Debug-iphoneos/InfiniteStreamPlayer.app"
+	xcrun devicectl device process launch \
+		--device "$(IPHONE_DEVICE_ID)" \
+		"$(IPHONE_BUNDLE_ID)"
+
+deploy-androidtv:
+	$(ANDROID_SDK_HOME)/platform-tools/adb uninstall com.infinitestream.player 2>/dev/null || true
+	cd $(ANDROIDTV_DIR) && \
+		JAVA_HOME="$(JAVA_HOME_ANDROID)" \
+		ANDROID_HOME="$(ANDROID_SDK_HOME)" \
+		PATH="$(ANDROID_SDK_HOME)/platform-tools:$$PATH" \
+		./gradlew installDebug
+	$(ANDROID_SDK_HOME)/platform-tools/adb shell am start -n com.infinitestream.player/.MainActivity
+
 # ── iOS testing ────────────────────────────────────────────────────────
 
 test-ios-sim-metrics:
