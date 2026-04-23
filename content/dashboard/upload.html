@@ -299,7 +299,7 @@
 
         if (supportsSharedWorker) {
             try {
-                uploadWorker = new SharedWorker('/upload-worker.js');
+                uploadWorker = new SharedWorker('/shared/upload-worker.js');
                 uploadWorker.port.start();
                 
                 console.log('SharedWorker initialized successfully');
@@ -631,6 +631,6 @@
         // Initialize
         submitBtn.disabled = true;
     </script>
-    <script src="/shared-nav.js"></script>
+    <script src="/shared/shared-nav.js"></script>
 </body>
 </html>

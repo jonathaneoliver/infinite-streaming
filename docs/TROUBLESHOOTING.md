@@ -14,7 +14,7 @@ docker stop infinite-streaming         # stop it
 lsof -i :30000                         # or find what else is holding the port
 ```
 
-If a different app needs port 30000, override with `SERVER_PORT` in `.env` and update any bookmarks.
+If a different app needs port 30000, override with `INFINITE_STREAM_LISTEN_PORT` in `.env` and update any bookmarks.
 
 ### Container exits immediately or loops on restart
 

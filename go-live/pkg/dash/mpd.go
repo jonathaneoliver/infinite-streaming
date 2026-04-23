@@ -730,7 +730,7 @@ func GenerateLiveMPD(data *MPDData, timeNow time.Time, streamName string, durati
 	}
 	root.CreateAttr("timeShiftBufferDepth", formatDuration(maxLiveWindowDurationSec))
 
-	// BaseURL creation intentionally omitted to match python behavior (no insert).
+	// BaseURL creation intentionally omitted (no insert).
 	removeServiceDescriptions(root)
 	if llMode {
 		insertServiceDescription(root, llDashTargetDelaySec, llDashTargetDelaySec*0.5, llDashTargetDelaySec*1.5)

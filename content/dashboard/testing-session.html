@@ -805,8 +805,8 @@
         }
     </style>
 </head>
-<body data-boss-no-sidebar data-boss-no-header data-boss-active-page="testing-session">
-    <div class="boss-content-wide">
+<body data-ism-no-sidebar data-ism-no-header data-ism-active-page="testing-session">
+    <div class="ism-content-wide">
         <div class="page-header">
             <div>
                 <div class="page-title" id="pageTitle">Testing Playback</div>
@@ -873,13 +873,13 @@
         (() => {
             const params = new URLSearchParams(window.location.search);
             if (params.get('nav') === '1') {
-                document.body.removeAttribute('data-boss-no-sidebar');
-                document.body.removeAttribute('data-boss-no-header');
-                document.body.dataset.bossActivePage = 'test-playback';
+                document.body.removeAttribute('data-ism-no-sidebar');
+                document.body.removeAttribute('data-ism-no-header');
+                document.body.dataset.ismActivePage = 'test-playback';
             }
         })();
     </script>
-    <script src="/shared-nav.js"></script>
+    <script src="/shared/shared-nav.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2.0.1/dist/chartjs-plugin-zoom.min.js"></script>
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/vis-timeline@7.7.3/styles/vis-timeline-graph2d.min.css">
@@ -892,8 +892,8 @@
         const sseMissedEl = document.getElementById('statSseMissed');
         const video = document.getElementById('player');
         const isDeveloperMode = new URLSearchParams(window.location.search).get('developer') === '1';
-        const NATIVE_4K_KEY = 'bossPrefer4kNative';
-        const AUTO_RECOVERY_KEY = 'bossAutoRecovery';
+        const NATIVE_4K_KEY = 'ismPrefer4kNative';
+        const AUTO_RECOVERY_KEY = 'ismAutoRecovery';
         const UHD_HEIGHT_THRESHOLD = 2160; // 4K/UHD resolution threshold
         let hlsInstance = null;
         let shakaPlayer = null;
@@ -990,7 +990,7 @@
                 persistent4kBySession.set(String(sessionId), true);
             } catch (e) {}
             try {
-                localStorage.setItem('bossKnown4k:session:' + String(sessionId), 'true');
+                localStorage.setItem('ismKnown4k:session:' + String(sessionId), 'true');
             } catch (e) {}
         }
 
@@ -1000,7 +1000,7 @@
                 if (persistent4kBySession.get(String(sessionId))) return true;
             } catch (e) {}
             try {
-                return localStorage.getItem('bossKnown4k:session:' + String(sessionId)) === 'true';
+                return localStorage.getItem('ismKnown4k:session:' + String(sessionId)) === 'true';
             } catch (e) {
                 return false;
             }
@@ -1536,8 +1536,8 @@
         }
 
         function createTestingPlayerId() {
-            if (window.BOSSNav && typeof window.BOSSNav.createPlayerId === 'function') {
-                return window.BOSSNav.createPlayerId();
+            if (window.ISMNav && typeof window.ISMNav.createPlayerId === 'function') {
+                return window.ISMNav.createPlayerId();
             }
             return Math.random().toString(36).slice(2, 10);
         }
@@ -1548,8 +1548,8 @@
         }
 
         function normalizeTestingBase(url) {
-            if (window.BOSSNav && typeof window.BOSSNav.normalizeTestingBaseUrl === 'function') {
-                return window.BOSSNav.normalizeTestingBaseUrl(url);
+            if (window.ISMNav && typeof window.ISMNav.normalizeTestingBaseUrl === 'function') {
+                return window.ISMNav.normalizeTestingBaseUrl(url);
             }
             const parsed = new URL(url, window.location.origin);
             parsed.port = getProxyPort();
@@ -1557,8 +1557,8 @@
         }
 
         function buildTestingUrl(url, playerId) {
-            if (window.BOSSNav && typeof window.BOSSNav.buildTestingUrl === 'function') {
-                return window.BOSSNav.buildTestingUrl(url, playerId);
+            if (window.ISMNav && typeof window.ISMNav.buildTestingUrl === 'function') {
+                return window.ISMNav.buildTestingUrl(url, playerId);
             }
             const base = normalizeTestingBase(url);
             const separator = base.includes('?') ? '&' : '?';
@@ -1756,27 +1756,27 @@
             const params = new URLSearchParams(window.location.search);
             let url = params.get('url') || '';
             if (!url) {
-                url = localStorage.getItem('bossSelectedUrl') || '';
+                url = localStorage.getItem('ismSelectedUrl') || '';
             }
-            if (url && window.BOSSNav && typeof window.BOSSNav.normalizeTestingBaseUrl === 'function') {
+            if (url && window.ISMNav && typeof window.ISMNav.normalizeTestingBaseUrl === 'function') {
                 try {
-                    url = window.BOSSNav.normalizeTestingBaseUrl(url);
+                    url = window.ISMNav.normalizeTestingBaseUrl(url);
                 } catch (err) {
                     console.warn('Failed to normalize Testing Playback URL', err);
                 }
             }
             let playerId = params.get('player_id') || '';
             if (!playerId) {
-                playerId = localStorage.getItem('bossTestPlaybackPlayerId') || '';
+                playerId = localStorage.getItem('ismTestPlaybackPlayerId') || '';
             }
             if (!playerId) {
-                if (window.BOSSNav && typeof window.BOSSNav.createPlayerId === 'function') {
-                    playerId = window.BOSSNav.createPlayerId();
+                if (window.ISMNav && typeof window.ISMNav.createPlayerId === 'function') {
+                    playerId = window.ISMNav.createPlayerId();
                 } else {
                     playerId = Math.random().toString(36).slice(2, 10);
                 }
                 try {
-                    localStorage.setItem('bossTestPlaybackPlayerId', playerId);
+                    localStorage.setItem('ismTestPlaybackPlayerId', playerId);
                 } catch (err) {
                     console.warn('Failed to persist Testing Playback player id', err);
                 }
@@ -1792,7 +1792,7 @@
                     console.warn('Failed to attach player id to URL', err);
                 }
                 try {
-                    localStorage.setItem('bossSelectedUrl', url);
+                    localStorage.setItem('ismSelectedUrl', url);
                 } catch (err) {
                     console.warn('Failed to persist selected url', err);
                 }

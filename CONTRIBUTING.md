@@ -19,8 +19,7 @@ Before starting:
 
 - Read [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the service topology.
 - Read [`PRD.md`](PRD.md) — product behavior source of truth. If you're changing user-facing behavior, align with PRD or update it as part of the PR.
-- Read [`AGENTS.md`](AGENTS.md) if you're using an AI coding assistant; it overrides PRD on conflicts.
-- Skim [`CLAUDE.md`](CLAUDE.md) for repo-specific conventions.
+- Skim [`CLAUDE.md`](CLAUDE.md) for repo-specific conventions (also used by AI coding assistants).
 
 ## Development loop
 
@@ -57,7 +56,7 @@ UI is static files under `content/dashboard/`. Edits take effect on page reload 
 
 ### Iterating on nginx config
 
-`nginx-content.conf.template` is rendered at container start by `launch.sh`. Edit and rebuild (or call `update-nginx-config.sh` inside the container).
+`nginx-content.conf.template` is rendered at container start by `launch.sh` via `envsubst`. Edit and rebuild.
 
 ### Iterating on the encoding pipeline
 

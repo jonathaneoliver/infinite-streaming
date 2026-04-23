@@ -267,7 +267,7 @@
         </div>
     </div>
 
-    <script src="/shared-nav.js"></script>
+    <script src="/shared/shared-nav.js"></script>
     <script>
         const video = document.getElementById('video');
         const streamUrlInput = document.getElementById('streamUrl');
@@ -322,8 +322,8 @@
             if (url) {
                 localStorage.setItem('ismSelectedUrl', url);
             }
-            if (window.BOSSNav && window.BOSSNav.updateSelectedContentBadge) {
-                window.BOSSNav.updateSelectedContentBadge();
+            if (window.ISMNav && window.ISMNav.updateSelectedContentBadge) {
+                window.ISMNav.updateSelectedContentBadge();
             }
         }
 

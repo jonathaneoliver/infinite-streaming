@@ -40,7 +40,6 @@ services:
       - INFINITE_STREAM_MAX_SESSIONS=8
       - INFINITE_STREAM_TC_INTERFACE=eth0
     tmpfs:
-      - /var/cache/nginx/live_playlists:size=100M,mode=755
       - /go-live:size=4G,mode=755
     networks:
       - app_network

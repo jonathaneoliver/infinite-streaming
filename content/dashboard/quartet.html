@@ -1050,8 +1050,8 @@
         }
 
         function createPlayerId() {
-            if (window.BOSSNav && typeof window.BOSSNav.createPlayerId === 'function') {
-                return window.BOSSNav.createPlayerId();
+            if (window.ISMNav && typeof window.ISMNav.createPlayerId === 'function') {
+                return window.ISMNav.createPlayerId();
             }
             return Math.random().toString(36).slice(2, 10);
         }
@@ -1062,8 +1062,8 @@
         }
 
         function normalizeTestingBase(url) {
-            if (window.BOSSNav && typeof window.BOSSNav.normalizeTestingBaseUrl === 'function') {
-                return window.BOSSNav.normalizeTestingBaseUrl(url);
+            if (window.ISMNav && typeof window.ISMNav.normalizeTestingBaseUrl === 'function') {
+                return window.ISMNav.normalizeTestingBaseUrl(url);
             }
             const parsed = new URL(url, window.location.origin);
             parsed.port = getProxyPort();
@@ -1071,8 +1071,8 @@
         }
 
         function buildTestingUrl(url, playerId) {
-            if (window.BOSSNav && typeof window.BOSSNav.buildTestingUrl === 'function') {
-                return window.BOSSNav.buildTestingUrl(url, playerId);
+            if (window.ISMNav && typeof window.ISMNav.buildTestingUrl === 'function') {
+                return window.ISMNav.buildTestingUrl(url, playerId);
             }
             const base = normalizeTestingBase(url);
             const separator = base.includes('?') ? '&' : '?';
@@ -1406,8 +1406,8 @@
             if (content) {
                 localStorage.setItem('ismSelectedContentBase', content);
                 localStorage.setItem('ismSelectedContent', content);
-                if (window.BOSSNav && typeof window.BOSSNav.updateSelectedContentBadge === 'function') {
-                    window.BOSSNav.updateSelectedContentBadge();
+                if (window.ISMNav && typeof window.ISMNav.updateSelectedContentBadge === 'function') {
+                    window.ISMNav.updateSelectedContentBadge();
                 }
             }
             
@@ -1567,8 +1567,8 @@
             const protocol = encodingConfig.protocol;
             const masterUrl = buildMasterUrl(content, encodingConfig, segment);
 
-            if (window.BOSSNav && typeof window.BOSSNav.setSelectedUrl === 'function') {
-                window.BOSSNav.setSelectedUrl(masterUrl);
+            if (window.ISMNav && typeof window.ISMNav.setSelectedUrl === 'function') {
+                window.ISMNav.setSelectedUrl(masterUrl);
             } else {
                 localStorage.setItem('ismSelectedUrl', masterUrl);
             }
@@ -1746,8 +1746,8 @@
             // Show HLS/DASH encodings (4 boxes: 2x H264, 2x HEVC)
             const encodingKeys = ['hls_h264', 'dash_h264', 'hls_hevc', 'dash_hevc'];
             const firstMasterUrl = buildMasterUrl(content, CONFIG.encodingOptions[encodingKeys[0]], segment || 'll');
-            if (window.BOSSNav && typeof window.BOSSNav.setSelectedUrl === 'function') {
-                window.BOSSNav.setSelectedUrl(firstMasterUrl);
+            if (window.ISMNav && typeof window.ISMNav.setSelectedUrl === 'function') {
+                window.ISMNav.setSelectedUrl(firstMasterUrl);
             } else {
                 localStorage.setItem('ismSelectedUrl', firstMasterUrl);
             }
@@ -1829,8 +1829,8 @@
             const protocol = encodingConfig.protocol;
             const masterUrl = buildMasterUrl(content, encodingConfig, segment);
 
-            if (window.BOSSNav && typeof window.BOSSNav.setSelectedUrl === 'function') {
-                window.BOSSNav.setSelectedUrl(masterUrl);
+            if (window.ISMNav && typeof window.ISMNav.setSelectedUrl === 'function') {
+                window.ISMNav.setSelectedUrl(masterUrl);
             } else {
                 localStorage.setItem('ismSelectedUrl', masterUrl);
             }
@@ -2097,6 +2097,6 @@
         });
     </script>
     </div>
-    <script src="/shared-nav.js"></script>
+    <script src="/shared/shared-nav.js"></script>
 </body>
 </html>

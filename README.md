@@ -6,7 +6,7 @@ Built for player QA, SDK development, and side-by-side comparison across HLS.js,
 
 Everything is driven by a REST API (the dashboard is a thin client over it), so every fault, every shaping change, every session control available in the UI is also available to test scripts and CI.
 
-![Dashboard](screenshots/dashboard.png)
+![Dashboard](docs/screenshots/dashboard.png)
 
 ---
 
@@ -132,7 +132,7 @@ Selected content and URL persist across pages in `localStorage` (`ismSelected*`)
 
 ## Testing session in depth
 
-![Testing session](screenshots/testing-session.png)
+![Testing session](docs/screenshots/testing-session.png)
 
 Open directly if you don't want to come from Mosaic:
 
@@ -471,13 +471,13 @@ See [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) for running in a k3s cluster (rel
 
 ## Screenshots
 
-Captured from the live dashboard; files live in [`screenshots/`](screenshots/).
+Captured from the live dashboard; files live in [`docs/screenshots/`](docs/screenshots/).
 
 | | |
 |---|---|
-| **Playback** — single-stream view ![Playback](screenshots/playback.png) | **Mosaic** — multi-tile comparison ![Mosaic](screenshots/mosaic.png) |
-| **Source Library** — content intake ![Source Library](screenshots/source-library.png) | **Upload Content** ![Upload Content](screenshots/upload-content.png) |
-| **Encoding Jobs** ![Encoding Jobs](screenshots/encoding-jobs.png) | **Live Offset** — cross-variant comparison ![Live Offset](screenshots/live-offset.png) |
+| **Playback** — single-stream view ![Playback](docs/screenshots/playback.png) | **Mosaic** — multi-tile comparison ![Mosaic](docs/screenshots/mosaic.png) |
+| **Source Library** — content intake ![Source Library](docs/screenshots/source-library.png) | **Upload Content** ![Upload Content](docs/screenshots/upload-content.png) |
+| **Encoding Jobs** ![Encoding Jobs](docs/screenshots/encoding-jobs.png) | **Live Offset** — cross-variant comparison ![Live Offset](docs/screenshots/live-offset.png) |
 
 ---
 

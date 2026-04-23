@@ -73,8 +73,6 @@ spec:
           readOnly: true
         - name: go-live-tmpfs
           mountPath: /go-live
-        - name: nginx-tmpfs
-          mountPath: /var/cache/nginx/live_playlists
 
       volumes:
       - name: media-vol
@@ -89,10 +87,6 @@ spec:
         emptyDir:
           medium: Memory
           sizeLimit: 4Gi
-      - name: nginx-tmpfs
-        emptyDir:
-          medium: Memory
-          sizeLimit: 100Mi
 ---
 apiVersion: v1
 kind: Service

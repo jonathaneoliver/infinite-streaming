@@ -620,15 +620,15 @@ maybe a histogram of b
         </div>
     </div>
 
-    <script src="/shared-nav.js"></script>
+    <script src="/shared/shared-nav.js"></script>
     <script>
         (() => {
             const subtitle = document.getElementById('testingSubtitle');
             if (!subtitle) return;
             let port = window.location.port || (window.location.protocol === 'https:' ? '443' : '80');
-            if (window.BOSSNav && typeof window.BOSSNav.normalizeTestingBaseUrl === 'function') {
+            if (window.ISMNav && typeof window.ISMNav.normalizeTestingBaseUrl === 'function') {
                 try {
-                    const normalized = window.BOSSNav.normalizeTestingBaseUrl(window.location.origin);
+                    const normalized = window.ISMNav.normalizeTestingBaseUrl(window.location.origin);
                     const parsed = new URL(normalized);
                     port = parsed.port || port;
                 } catch (err) {

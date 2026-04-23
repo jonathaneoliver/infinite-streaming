@@ -59,7 +59,7 @@ func DatabasePathFromEnv() string {
 		base = os.Getenv("INFINITE_DATABASE_DIR")
 	}
 	if base == "" {
-		base = os.Getenv("BOSS_DATABASE_DIR")
+		base = os.Getenv("ISM_DATABASE_DIR")
 	}
 	if base == "" {
 		base = "/media/data"

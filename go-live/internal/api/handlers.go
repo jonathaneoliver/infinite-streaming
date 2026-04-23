@@ -1346,7 +1346,6 @@ func (h *Handler) ServeDashSegment(w http.ResponseWriter, r *http.Request) {
 }
 
 // OnDemandMasterPlaylist handles requests like /go-live/{content}/master.m3u8
-// This is the main entry point matching Python's lazy continuous mode
 func (h *Handler) OnDemandMasterPlaylist(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	content := vars["content"]
@@ -1554,7 +1553,6 @@ func (h *Handler) OnDemandVariantPlaylistDuration(w http.ResponseWriter, r *http
 }
 
 // runContinuousLLHLS runs the continuous LL-HLS playlist generator
-// This matches Python generate_main() function in continuous mode
 func runContinuousLLHLS(ctx context.Context, inputPath, outputPath, content string) {
 	fmt.Fprintf(os.Stderr, "LL-HLS generator started for %s\n", content)
 	fmt.Fprintf(os.Stderr, "  Input: %s\n", inputPath)
@@ -1618,7 +1616,6 @@ func runContinuousLLHLS(ctx context.Context, inputPath, outputPath, content stri
 		}
 
 		// Generate variant playlists (regenerated every loop)
-		// Use Unix timestamp with fractional seconds (like Python's time.time())
 		timeNow := float64(startTime.UnixNano()) / 1e9
 		loopCount := int(timeNow / minDuration)
 

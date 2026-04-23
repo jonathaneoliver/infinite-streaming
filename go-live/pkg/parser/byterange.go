@@ -22,7 +22,6 @@ type ByteRangeFile struct {
 }
 
 // LoadByterangesForPlaylist loads byte-range metadata for all segments in a playlist.
-// This matches Python load_byterange_metadata() function.
 //
 // Sources (in priority order):
 // 1. #EXT-X-PART tags in source playlist (preferred - authoritative source)
