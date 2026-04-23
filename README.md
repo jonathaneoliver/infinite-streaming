@@ -303,13 +303,15 @@ The full field catalogue and payload reference is in [`docs/API.md`](docs/API.md
 
 ### What the bundled clients do
 
-The iOS, Android, and Roku apps in this repo are reference implementations of the pattern above:
+The iOS, tvOS, Android, and Roku apps in this repo are reference implementations of the pattern above:
 
 | App | Content list | URL build | Session redirect | SSE | Metrics |
 |---|:---:|:---:|:---:|:---:|:---:|
-| [`apple/InfiniteStreamPlayer/`](apple/InfiniteStreamPlayer/) | yes (`/api/content`) | `?player_id=UUID` | auto-follow | yes | yes |
+| [`apple/InfiniteStreamPlayer/`](apple/InfiniteStreamPlayer/) — iOS + tvOS | yes (`/api/content`) | `?player_id=UUID` | auto-follow | yes | yes |
 | [`android/InfiniteStreamPlayer/`](android/InfiniteStreamPlayer/) | yes (`/api/content`) | `?player_id=UUID` | auto-follow (ExoPlayer) | — | — |
 | [`roku/InfiniteStreamPlayer/`](roku/InfiniteStreamPlayer/) | yes (`/api/content`) | `?player_id=roku_<ts>` | auto-follow | — | — |
+
+They're all intended as very simple video consumption devices, each with slightly different ABR characteristics and error-recovery implementations. The web players (HLS.js / Shaka / Video.js) are the simplest to use and very handy to confirm everything is wired up — but they're also the least reliable for stress testing. Most of the validation of the server's content generation is done against iOS and tvOS.
 
 Point at any of them as a starting template for a new platform.
 
