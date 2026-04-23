@@ -2607,7 +2607,6 @@ maybe a histogram of b
             ]);
             if (compareActive) {
                 for (const sid of compareGroupIdsForDefaults) {
-                    if (sid === sessionId) continue;
                     const tag = `S${sid}`;
                     compareVisibleLabels.add(`Player Variant (${tag})`);
                     compareVisibleLabels.add(`Player avg_network_bitrate (${tag})`);
@@ -2692,7 +2691,7 @@ maybe a histogram of b
                     hidden: isSeriesHidden('mbps_shaper_rate')
                 },
                 {
-                    label: 'mbps_shaper_avg',
+                    label: compareActive ? `Shaper Avg (S${sessionId})` : 'mbps_shaper_avg',
                     data: shaperAvgData,
                     borderColor: '#0d9488',
                     backgroundColor: 'rgba(13,148,136,0.12)',
@@ -2700,7 +2699,7 @@ maybe a histogram of b
                     pointRadius: 0,
                     tension: 0.15,
                     borderDash: [10, 3],
-                    hidden: isSeriesHidden('mbps_shaper_avg')
+                    hidden: isSeriesHidden(compareActive ? `Shaper Avg (S${sessionId})` : 'mbps_shaper_avg')
                 },
                 {
                     label: 'mbps_transfer_rate',
@@ -2726,7 +2725,7 @@ maybe a histogram of b
                     hidden: isSeriesHidden('mbps_transfer_complete')
                 },
                 {
-                    label: 'Player avg_network_bitrate',
+                    label: compareActive ? `Player avg_network_bitrate (S${sessionId})` : 'Player avg_network_bitrate',
                     data: estimateData,
                     borderColor: '#6366f1',
                     backgroundColor: 'rgba(99,102,241,0.12)',
@@ -2734,10 +2733,10 @@ maybe a histogram of b
                     pointRadius: 0,
                     tension: 0.2,
                     borderDash: [6, 4],
-                    hidden: isSeriesHidden('Player avg_network_bitrate')
+                    hidden: isSeriesHidden(compareActive ? `Player avg_network_bitrate (S${sessionId})` : 'Player avg_network_bitrate')
                 },
                 {
-                    label: 'Player network_bitrate',
+                    label: compareActive ? `Player network_bitrate (S${sessionId})` : 'Player network_bitrate',
                     data: playerWireBitrateData,
                     borderColor: '#059669',
                     backgroundColor: 'rgba(5,150,105,0.15)',
@@ -2745,10 +2744,10 @@ maybe a histogram of b
                     pointRadius: 0,
                     tension: 0.2,
                     spanGaps: false,
-                    hidden: isSeriesHidden('Player network_bitrate')
+                    hidden: isSeriesHidden(compareActive ? `Player network_bitrate (S${sessionId})` : 'Player network_bitrate')
                 },
                 {
-                    label: 'Player Variant',
+                    label: compareActive ? `Player Variant (S${sessionId})` : 'Player Variant',
                     data: renditionData,
                     borderColor: '#ef4444',
                     backgroundColor: 'rgba(239,68,68,0.12)',
@@ -2756,10 +2755,10 @@ maybe a histogram of b
                     pointRadius: 0,
                     tension: 0.2,
                     borderDash: [3, 3],
-                    hidden: isSeriesHidden('Player Variant')
+                    hidden: isSeriesHidden(compareActive ? `Player Variant (S${sessionId})` : 'Player Variant')
                 },
                 {
-                    label: 'Server Variant',
+                    label: compareActive ? `Server Variant (S${sessionId})` : 'Server Variant',
                     data: serverRenditionData,
                     borderColor: '#b45309',
                     backgroundColor: 'rgba(180,83,9,0.12)',
@@ -2767,7 +2766,7 @@ maybe a histogram of b
                     pointRadius: 0,
                     tension: 0.2,
                     borderDash: [10, 4],
-                    hidden: isSeriesHidden('Server Variant')
+                    hidden: isSeriesHidden(compareActive ? `Server Variant (S${sessionId})` : 'Server Variant')
                 },
                 ...variantDatasets,
                 {
@@ -3011,7 +3010,7 @@ maybe a histogram of b
             }
             const bufferDatasets = [
                 {
-                    label: 'Buffer Depth',
+                    label: compareActive ? `Buffer (S${sessionId})` : 'Buffer Depth',
                     data: bufferDepthData,
                     borderColor: '#2563eb',
                     backgroundColor: 'rgba(37,99,235,0.12)',
@@ -3249,7 +3248,7 @@ maybe a histogram of b
             }
             const fpsDatasets = [
                 {
-                    label: 'FPS (smoothed)',
+                    label: compareActive ? `FPS (S${sessionId})` : 'FPS (smoothed)',
                     data: fpsSmoothedData,
                     borderColor: '#7e22ce',
                     backgroundColor: 'rgba(126,34,206,0.10)',
@@ -3286,7 +3285,7 @@ maybe a histogram of b
                     borderDash: [3, 4]
                 },
                 {
-                    label: 'Dropped Frames/s',
+                    label: compareActive ? `Dropped (S${sessionId})` : 'Dropped Frames/s',
                     data: droppedFpsSmoothedData,
                     yAxisID: 'yDrop',
                     borderColor: '#ea580c',
