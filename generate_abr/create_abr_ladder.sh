@@ -1276,6 +1276,41 @@ validate_input() {
         log_success "Audio stream detected"
         SKIP_AUDIO=false
     fi
+
+    # Default to first audio stream; refine below if multiple are available.
+    INPUT_AUDIO_STREAM_INDEX=0
+    MULTIPLE_AUDIO_STREAMS=false
+    if [[ "$SKIP_AUDIO" != "true" ]]; then
+        # Probe all audio streams: index,channels[,language]
+        local audio_streams_info
+        audio_streams_info=$(ffprobe -v error -select_streams a \
+            -show_entries stream=index,channels:stream_tags=language \
+            -of csv=p=0 "$input" 2>/dev/null)
+        local audio_count
+        audio_count=$(echo "$audio_streams_info" | /usr/bin/grep -c '^[0-9]')
+        if [[ "$audio_count" -gt 1 ]]; then
+            MULTIPLE_AUDIO_STREAMS=true
+            log "Source has $audio_count audio streams — preferring 2-channel (stereo)"
+            # Find the first audio stream with channels=2 (logical index in :a sequence)
+            local logical_idx=0
+            local stereo_logical_idx=""
+            while IFS=, read -r abs_idx channels lang; do
+                # ffprobe csv yields trailing fields; accept any line starting with a number
+                [[ ! "$abs_idx" =~ ^[0-9]+$ ]] && continue
+                if [[ "$channels" = "2" && -z "$stereo_logical_idx" ]]; then
+                    stereo_logical_idx=$logical_idx
+                fi
+                log "  a:$logical_idx (abs $abs_idx) channels=$channels lang=${lang:-und}"
+                logical_idx=$((logical_idx + 1))
+            done <<< "$audio_streams_info"
+            if [[ -n "$stereo_logical_idx" ]]; then
+                INPUT_AUDIO_STREAM_INDEX=$stereo_logical_idx
+                log_success "Selected audio a:$INPUT_AUDIO_STREAM_INDEX (stereo)"
+            else
+                log "No 2-channel audio found; falling back to a:0"
+            fi
+        fi
+    fi
     
     # Get input details
     # If using master playlist with separate audio, probe the specific video stream
@@ -1422,8 +1457,13 @@ create_mezzanine() {
     
     # If using master playlist with separate audio, map specific streams
     if [[ "$USE_MASTER_PLAYLIST" == "true" ]] && [[ -n "$HIGHEST_VIDEO_STREAM_INDEX" ]]; then
-        log "Mapping audio stream and highest quality video stream (v:${HIGHEST_VIDEO_STREAM_INDEX})"
-        ffmpeg_cmd="$ffmpeg_cmd -map 0:a:0 -map 0:v:${HIGHEST_VIDEO_STREAM_INDEX}"
+        log "Mapping audio stream a:${INPUT_AUDIO_STREAM_INDEX:-0} and highest quality video stream (v:${HIGHEST_VIDEO_STREAM_INDEX})"
+        ffmpeg_cmd="$ffmpeg_cmd -map 0:a:${INPUT_AUDIO_STREAM_INDEX:-0} -map 0:v:${HIGHEST_VIDEO_STREAM_INDEX}"
+    elif [[ "$MULTIPLE_AUDIO_STREAMS" == "true" ]]; then
+        # Source has multiple audio streams; explicitly pick the chosen one
+        # (default ffmpeg stream selection prefers highest channel count).
+        log "Mapping audio stream a:${INPUT_AUDIO_STREAM_INDEX} (stereo) from multi-track source"
+        ffmpeg_cmd="$ffmpeg_cmd -map 0:v -map 0:a:${INPUT_AUDIO_STREAM_INDEX}"
     fi
     
     if [[ -n "$TIME_LIMIT" ]]; then
@@ -1621,7 +1661,7 @@ apply_padding() {
             -filter_complex "[0:v]${video_filter}[v];[0:a]${audio_filter}[a]" \
             -map "[v]" -map "[a]" \
             -c:v libx264 -preset slow -crf 18 -g 48 -keyint_min 48 -sc_threshold 0 \
-            -c:a aac -b:a 192k \
+            -c:a aac -b:a 192k -ac 2 \
             -movflags +faststart \
             "$padded_file"
     else
@@ -2134,26 +2174,39 @@ create_audio_mezzanine() {
     print_header "Phase 4: Creating Audio Mezzanine"
     
     log "Extracting audio from mezzanine file..."
-    
-    # Detect audio codec
+
+    # Detect audio codec and channel count
     AUDIO_CODEC=$(ffprobe -v error -select_streams a:0 -show_entries stream=codec_name \
                   -of default=noprint_wrappers=1:nokey=1 "$MEZZANINE" 2>/dev/null | head -1)
-    
-    log "Source audio codec: $AUDIO_CODEC"
-    
+    AUDIO_CHANNELS=$(ffprobe -v error -select_streams a:0 -show_entries stream=channels \
+                  -of default=noprint_wrappers=1:nokey=1 "$MEZZANINE" 2>/dev/null | head -1)
+
+    log "Source audio codec: $AUDIO_CODEC, channels: ${AUDIO_CHANNELS:-?}"
+
     START_TIME=$(date +%s)
-    
+
     # Determine if we need to apply padding
     local needs_padding=$(awk -v pad="$AUDIO_PADDING_DURATION" 'BEGIN {print (pad > 0) ? 1 : 0}')
-    
+
     if [ "$needs_padding" -eq 1 ]; then
         log "Audio padding: ${AUDIO_PADDING_DURATION}s will be applied to reach aligned duration"
     fi
-    
-    # Transcode codecs that Shaka Packager doesn't support
+
+    # Force stereo output for player compatibility (HLS.js and several other
+    # players have trouble with multichannel AAC). Triggers a transcode whenever
+    # the source has more than 2 channels.
+    local needs_downmix=0
+    if [[ -n "$AUDIO_CHANNELS" && "$AUDIO_CHANNELS" =~ ^[0-9]+$ && "$AUDIO_CHANNELS" -gt 2 ]]; then
+        needs_downmix=1
+        log "Downmixing ${AUDIO_CHANNELS}-channel source to 2-channel stereo for player compatibility"
+        ENCODING_INFOS+=("Audio downmixed from ${AUDIO_CHANNELS}-channel to stereo")
+    fi
+
+    # Transcode codecs that Shaka Packager doesn't support, OR force-downmix
+    # multichannel sources to stereo even when the codec is compatible.
     # Shaka Packager supports: AAC, MP3, Opus, Vorbis
     # Shaka Packager does NOT support: AC-3, DTS, PCM, etc.
-    if [[ "$AUDIO_CODEC" == "ac3" ]] || [[ "$AUDIO_CODEC" == "eac3" ]] || [[ "$AUDIO_CODEC" == "dts" ]] || [[ "$AUDIO_CODEC" == "truehd" ]] || [[ "$AUDIO_CODEC" =~ ^pcm ]]; then
+    if [[ "$needs_downmix" -eq 1 ]] || [[ "$AUDIO_CODEC" == "ac3" ]] || [[ "$AUDIO_CODEC" == "eac3" ]] || [[ "$AUDIO_CODEC" == "dts" ]] || [[ "$AUDIO_CODEC" == "truehd" ]] || [[ "$AUDIO_CODEC" =~ ^pcm ]]; then
         log "Transcoding $AUDIO_CODEC to AAC (Shaka Packager doesn't support $AUDIO_CODEC)"
         ENCODING_WARNINGS+=("Audio transcoded from ${AUDIO_CODEC} to AAC (Shaka Packager compatibility)")
         
@@ -2161,7 +2214,7 @@ create_audio_mezzanine() {
         if [ "$needs_padding" -eq 1 ]; then
             # When padding: don't use -t, apply apad filter
             ffmpeg -i "$MEZZANINE" \
-                   -vn -c:a aac -b:a 192k -ar 48000 \
+                   -vn -c:a aac -b:a 192k -ar 48000 -ac 2 \
                    -af "apad=pad_dur=${AUDIO_PADDING_DURATION}" \
                    -movflags empty_moov+default_base_moof -frag_duration 1000000 \
                    "$TEMP_DIR/audio.mp4" \
@@ -2169,7 +2222,7 @@ create_audio_mezzanine() {
         else
             # When not padding: no special filter needed
             ffmpeg -i "$MEZZANINE" \
-                   -vn -c:a aac -b:a 192k -ar 48000 \
+                   -vn -c:a aac -b:a 192k -ar 48000 -ac 2 \
                    -movflags empty_moov+default_base_moof -frag_duration 1000000 \
                    "$TEMP_DIR/audio.mp4" \
                    -loglevel error -stats 2>&1 | tee -a "$LOG_FILE"
@@ -2180,7 +2233,7 @@ create_audio_mezzanine() {
             # When padding: must transcode (can't use filters with -c copy)
             log "Adding ${AUDIO_PADDING_DURATION}s padding to audio (requires transcode to AAC)"
             ffmpeg -i "$MEZZANINE" \
-                   -vn -c:a aac -b:a 192k -ar 48000 \
+                   -vn -c:a aac -b:a 192k -ar 48000 -ac 2 \
                    -af "apad=pad_dur=${AUDIO_PADDING_DURATION}" \
                    -movflags empty_moov+default_base_moof -frag_duration 1000000 \
                    "$TEMP_DIR/audio.mp4" \
@@ -2910,7 +2963,7 @@ generate_hls_ts_segments() {
         # Re-encode audio to AAC to ensure perfect segment boundary alignment
         # Using -c copy can cause fractional frame misalignment issues
         ffmpeg -i "$temp_dir/audio.mp4" \
-            -c:a aac -b:a 192k -ar 48000 \
+            -c:a aac -b:a 192k -ar 48000 -ac 2 \
             -f hls \
             -hls_time $SEGMENT_DURATION \
             -hls_segment_type mpegts \
