@@ -17,12 +17,12 @@
             { id: 'jobs', icon: '💼', text: 'Encoding Jobs', href: '/dashboard/jobs.html' }
         ],
         testing: [
+            { id: 'grid', icon: '🎮', text: 'Mosaic', href: '/dashboard/grid.html', warning: true },
             { id: 'playback', icon: '▶️', text: 'Playback', href: '/dashboard/playback.html' },
             { id: 'test-playback', icon: '🧭', text: 'Testing Playback', href: '/dashboard/testing-session.html?nav=1' },
             { id: 'testing', icon: '🧪', text: 'Testing Monitor', href: '/dashboard/testing.html' },
-            { id: 'quartet', icon: '🎬', text: 'Quartet', href: '/dashboard/quartet.html' },
-            { id: 'grid', icon: '🎮', text: 'Mosaic', href: '/dashboard/grid.html', warning: true },
-            { id: 'segment-duration', icon: '⏱️', text: 'Live Offset', href: '/dashboard/segment-duration-comparison.html' }
+            { id: 'quartet', icon: '🎬', text: 'Quartet', href: '/dashboard/quartet.html', alpha: true },
+            { id: 'segment-duration', icon: '⏱️', text: 'Live Offset', href: '/dashboard/segment-duration-comparison.html', alpha: true }
         ],
         live: [
             { id: 'monitor', icon: '📡', text: 'Monitor', href: '/dashboard/go-monitor.html' }
@@ -227,6 +227,7 @@
                 const isActive = item.id === activePage ? 'active' : '';
                 const isDisabled = isRestrictedItem ? 'disabled' : '';
                 const warning = item.warning ? '<span class="nav-item-warning">⚠️</span>' : '';
+                const alpha = item.alpha ? '<span class="nav-item-alpha">ALPHA</span>' : '';
                 const external = item.external ? ' target="_blank" rel="noopener"' : '';
                 const href = isRestrictedItem ? '#' : item.href;
                 const disabledAttrs = isRestrictedItem
@@ -237,6 +238,7 @@
                 html += `<span class="nav-item-icon">${item.icon}</span>`;
                 html += `<span class="nav-item-text">${item.text}</span>`;
                 html += warning;
+                html += alpha;
                 html += '</a>';
             });
             

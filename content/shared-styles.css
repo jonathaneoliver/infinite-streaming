@@ -358,6 +358,30 @@ body {
     color: var(--warning);
 }
 
+.nav-item-alpha {
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+    padding: 2px 5px;
+    border-radius: var(--radius-full);
+    background: var(--warning);
+    color: white;
+}
+
+.alpha-banner {
+    background: var(--warning);
+    color: white;
+    padding: 8px 16px;
+    text-align: center;
+    font-size: 13px;
+    font-weight: 500;
+}
+
+.alpha-banner strong {
+    font-weight: 700;
+    letter-spacing: 0.5px;
+}
+
 .nav-item-toggle {
     padding: 8px 12px;
 }
