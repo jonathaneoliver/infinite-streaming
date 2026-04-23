@@ -121,7 +121,7 @@
     </style>
 </head>
 <body data-ism-active-page="sources">
-    <div class="ism-content-standard">
+    <div class="ism-content-wide">
         <div class="card">
             <div class="card-header">
                 <div class="header-actions">
@@ -184,56 +184,64 @@
                     </select>
                 </div>
 
-                <div class="form-group">
-    <label>Partial Segment Durations</label>
-    <div style="display: flex; gap: 20px; flex-wrap: wrap; margin-top: 8px;">
-        <label style="display: flex; align-items: center; font-weight: normal; cursor: pointer;">
-            <input type="checkbox" name="batchPartialDuration" value="1000" style="margin-right: 5px;">
-            1s partials (p1000)
-        </label>
-        <label style="display: flex; align-items: center; font-weight: normal; cursor: pointer;">
-            <input type="checkbox" name="batchPartialDuration" value="200" checked style="margin-right: 5px;">
-            200ms partials (p200)
-        </label>
-    </div>
-</div>
-<div class="form-group">
-    <label for="batchHlsFormat">HLS Format</label>
-    <select id="batchHlsFormat" name="hls_format" class="form-select">
-        <option value="fmp4">fMP4 segments (modern)</option>
-        <option value="ts">MPEG-TS segments (legacy)</option>
-        <option value="both">Both formats</option>
-    </select>
-</div>
+                <!-- Advanced Options Toggle -->
+                <button type="button" class="advanced-toggle" id="batchAdvancedToggle">
+                    Show Advanced Options ▼
+                </button>
 
-                <div class="form-group">
-                    <label for="batchDurationLimit">Duration Limit (seconds)</label>
-                    <input type="number" id="batchDurationLimit" name="duration_limit" class="form-input" min="1" placeholder="Leave empty for full video">
-                    <small>Optionally trim videos to the first N seconds</small>
-                </div>
-                <div class="form-group">
-                    <label>Segment Duration</label>
-                    <label class="form-checkbox"><input type="radio" name="batchSegmentDuration" value="2"> 2s segments</label>
-                    <label class="form-checkbox"><input type="radio" name="batchSegmentDuration" value="6" checked> 6s segments</label>
-                </div>
+                <div class="advanced-options" id="batchAdvancedOptions">
+                    <div class="form-group">
+                        <label>Partial Segment Durations</label>
+                        <div style="display: flex; gap: 20px; flex-wrap: wrap; margin-top: 8px;">
+                            <label style="display: flex; align-items: center; font-weight: normal; cursor: pointer;">
+                                <input type="checkbox" name="batchPartialDuration" value="1000" style="margin-right: 5px;">
+                                1s partials (p1000)
+                            </label>
+                            <label style="display: flex; align-items: center; font-weight: normal; cursor: pointer;">
+                                <input type="checkbox" name="batchPartialDuration" value="200" checked style="margin-right: 5px;">
+                                200ms partials (p200)
+                            </label>
+                        </div>
+                    </div>
 
-                <div class="form-group">
-                    <label>GOP Duration</label>
-                    <label class="form-checkbox"><input type="radio" name="batchGopDuration" value="1.0" checked> 1s GOPs</label>
-                    <label class="form-checkbox"><input type="radio" name="batchGopDuration" value="2.0"> 2s GOPs</label>
-                </div>
+                    <div class="form-group">
+                        <label for="batchHlsFormat">HLS Format</label>
+                        <select id="batchHlsFormat" name="hls_format" class="form-select">
+                            <option value="fmp4">fMP4 segments (modern)</option>
+                            <option value="ts">MPEG-TS segments (legacy)</option>
+                            <option value="both">Both formats</option>
+                        </select>
+                    </div>
 
-                <div class="form-group">
-                    <label class="form-checkbox">
-                        <input type="checkbox" id="batchForceSoftware" name="force_software" checked>
-                        Force software encoding (disable hardware acceleration)
-                    </label>
-                </div>
+                    <div class="form-group">
+                        <label>Segment Duration</label>
+                        <label class="form-checkbox"><input type="radio" name="batchSegmentDuration" value="2"> 2s segments</label>
+                        <label class="form-checkbox"><input type="radio" name="batchSegmentDuration" value="6" checked> 6s segments</label>
+                    </div>
 
-                <div class="form-group">
-                    <label style="display: block; margin-bottom: 8px; font-weight: 500;">
-                        Padding to Segment Boundaries:
-                    </label>
+                    <div class="form-group">
+                        <label>GOP Duration</label>
+                        <label class="form-checkbox"><input type="radio" name="batchGopDuration" value="1.0" checked> 1s GOPs</label>
+                        <label class="form-checkbox"><input type="radio" name="batchGopDuration" value="2.0"> 2s GOPs</label>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="batchDurationLimit">Duration Limit (seconds)</label>
+                        <input type="number" id="batchDurationLimit" name="duration_limit" class="form-input" min="1" placeholder="Leave empty for full video">
+                        <small>Optionally trim videos to the first N seconds</small>
+                    </div>
+
+                    <div class="form-group">
+                        <label class="form-checkbox">
+                            <input type="checkbox" id="batchForceSoftware" name="force_software" checked>
+                            Force software encoding (disable hardware acceleration)
+                        </label>
+                    </div>
+
+                    <div class="form-group">
+                        <label style="display: block; margin-bottom: 8px; font-weight: 500;">
+                            Padding to Segment Boundaries:
+                        </label>
                     <label class="form-checkbox" style="margin-bottom: 6px;">
                         <input type="radio" id="batchPaddingNone" name="batchPadding" value="none" checked>
                         No padding (default)
@@ -246,6 +254,7 @@
                         <input type="radio" id="batchPaddingPink" name="batchPadding" value="pink">
                         Pink padding frames with "PADDING" label
                     </label>
+                    </div>
                 </div>
 
                 <div class="form-actions">
@@ -303,56 +312,60 @@
                     <small>Limit the highest resolution tier to save time and storage</small>
                 </div>
 
-                <div class="form-group">
-    <label>Partial Segment Durations</label>
-    <div style="display: flex; gap: 20px; flex-wrap: wrap; margin-top: 8px;">
-        <label style="display: flex; align-items: center; font-weight: normal; cursor: pointer;">
-            <input type="checkbox" name="reencodePartialDuration" value="1000" style="margin-right: 5px;">
-            1s partials (p1000)
-        </label>
-        <label style="display: flex; align-items: center; font-weight: normal; cursor: pointer;">
-            <input type="checkbox" name="reencodePartialDuration" value="200" checked style="margin-right: 5px;">
-            200ms partials (p200)
-        </label>
-    </div>
-</div>
-<div class="form-group">
-    <label>Segment Duration</label>
-    <label class="form-checkbox"><input type="radio" name="reencodeSegmentDuration" value="2"> 2s segments</label>
-    <label class="form-checkbox"><input type="radio" name="reencodeSegmentDuration" value="6" checked> 6s segments</label>
-</div>
-<div class="form-group">
-    <label>GOP Duration</label>
-    <label class="form-checkbox"><input type="radio" name="reencodeGopDuration" value="1.0" checked> 1s GOPs</label>
-    <label class="form-checkbox"><input type="radio" name="reencodeGopDuration" value="2.0"> 2s GOPs</label>
-</div>
-<div class="form-group">
-    <label style="display: flex; align-items: center; gap: 8px;">
-        <input type="checkbox" id="reencodeKeepMezzanine" name="keep_mezzanine" checked>
-        Preserve intermediate mezzanine files
-    </label>
-</div>
-<div class="form-group">
-    <label>HLS Format</label>
-    <div style="display: flex; gap: 20px; flex-wrap: wrap; margin-top: 8px;">
-        <label style="display: flex; align-items: center; font-weight: normal; cursor: pointer;">
-            <input type="checkbox" name="reencodeHlsFormat" value="fmp4" checked style="margin-right: 5px;">
-            fMP4 (modern)
-        </label>
-        <label style="display: flex; align-items: center; font-weight: normal; cursor: pointer;">
-            <input type="checkbox" name="reencodeHlsFormat" value="ts" style="margin-right: 5px;">
-            MPEG-TS (legacy)
-        </label>
-    </div>
-    <small>Select which HLS segment formats to generate</small>
-</div>
-
                 <!-- Advanced Options Toggle -->
                 <button type="button" class="advanced-toggle" id="reencodeAdvancedToggle">
                     Show Advanced Options ▼
                 </button>
-                
+
                 <div class="advanced-options" id="reencodeAdvancedOptions">
+                    <div class="form-group">
+                        <label style="display: flex; align-items: center; gap: 8px;">
+                            <input type="checkbox" id="reencodeKeepMezzanine" name="keep_mezzanine" checked>
+                            Preserve intermediate mezzanine files
+                        </label>
+                    </div>
+
+                    <div class="form-group">
+                        <label>Partial Segment Durations</label>
+                        <div style="display: flex; gap: 20px; flex-wrap: wrap; margin-top: 8px;">
+                            <label style="display: flex; align-items: center; font-weight: normal; cursor: pointer;">
+                                <input type="checkbox" name="reencodePartialDuration" value="1000" style="margin-right: 5px;">
+                                1s partials (p1000)
+                            </label>
+                            <label style="display: flex; align-items: center; font-weight: normal; cursor: pointer;">
+                                <input type="checkbox" name="reencodePartialDuration" value="200" checked style="margin-right: 5px;">
+                                200ms partials (p200)
+                            </label>
+                        </div>
+                    </div>
+
+                    <div class="form-group">
+                        <label>Segment Duration</label>
+                        <label class="form-checkbox"><input type="radio" name="reencodeSegmentDuration" value="2"> 2s segments</label>
+                        <label class="form-checkbox"><input type="radio" name="reencodeSegmentDuration" value="6" checked> 6s segments</label>
+                    </div>
+
+                    <div class="form-group">
+                        <label>GOP Duration</label>
+                        <label class="form-checkbox"><input type="radio" name="reencodeGopDuration" value="1.0" checked> 1s GOPs</label>
+                        <label class="form-checkbox"><input type="radio" name="reencodeGopDuration" value="2.0"> 2s GOPs</label>
+                    </div>
+
+                    <div class="form-group">
+                        <label>HLS Format</label>
+                        <div style="display: flex; gap: 20px; flex-wrap: wrap; margin-top: 8px;">
+                            <label style="display: flex; align-items: center; font-weight: normal; cursor: pointer;">
+                                <input type="checkbox" name="reencodeHlsFormat" value="fmp4" checked style="margin-right: 5px;">
+                                fMP4 (modern)
+                            </label>
+                            <label style="display: flex; align-items: center; font-weight: normal; cursor: pointer;">
+                                <input type="checkbox" name="reencodeHlsFormat" value="ts" style="margin-right: 5px;">
+                                MPEG-TS (legacy)
+                            </label>
+                        </div>
+                        <small>Select which HLS segment formats to generate</small>
+                    </div>
+
                     <div class="form-group">
                         <label for="reencodeDurationLimit">Duration Limit (seconds)</label>
                         <input type="number" id="reencodeDurationLimit" name="duration_limit" class="form-input" min="1" placeholder="Leave empty for full video">
@@ -514,6 +527,8 @@
             }
 
             document.getElementById('selectedCount').textContent = selectedSourceIds.size;
+            document.getElementById('batchAdvancedOptions').classList.remove('show');
+            document.getElementById('batchAdvancedToggle').textContent = 'Show Advanced Options ▼';
             document.getElementById('batchModal').classList.add('active');
         }
 
@@ -529,6 +544,18 @@
         document.getElementById('reencodeAdvancedToggle').addEventListener('click', () => {
             const advancedOptions = document.getElementById('reencodeAdvancedOptions');
             const toggle = document.getElementById('reencodeAdvancedToggle');
+            advancedOptions.classList.toggle('show');
+            if (advancedOptions.classList.contains('show')) {
+                toggle.textContent = 'Hide Advanced Options ▲';
+            } else {
+                toggle.textContent = 'Show Advanced Options ▼';
+            }
+        });
+
+        // Advanced options toggle for batch re-encode modal
+        document.getElementById('batchAdvancedToggle').addEventListener('click', () => {
+            const advancedOptions = document.getElementById('batchAdvancedOptions');
+            const toggle = document.getElementById('batchAdvancedToggle');
             advancedOptions.classList.toggle('show');
             if (advancedOptions.classList.contains('show')) {
                 toggle.textContent = 'Hide Advanced Options ▲';

@@ -132,15 +132,6 @@ server {
         add_header Pragma "no-cache" always;
         add_header Expires "0" always;
     }
-    
-    # Back-compat: older dashboards call /api/sources
-    location = /api/sources {
-        proxy_pass http://go_upload_service/api/content;
-        add_header Access-Control-Allow-Origin * always;
-        add_header Cache-Control "no-cache, no-store, must-revalidate" always;
-        add_header Pragma "no-cache" always;
-        add_header Expires "0" always;
-    }
 
     location = /api/sessions {
         proxy_pass http://go_proxy;

@@ -128,8 +128,14 @@ func (a *App) ExecuteEncodingJob(ctx context.Context, jobID string) error {
 		return a.failJob(jobID, err.Error())
 	}
 
-	logLines, err := util.StreamLines(stdout, func(line string) {
-		a.LogHub.Broadcast(jobID, line)
+	var humanLines []string
+	_, err = util.StreamLines(stdout, func(line string) {
+		// Always feed the parser so `-progress pipe:1` lines (out_time=...) drive
+		// the meter; only broadcast/persist the human-readable lines.
+		if !isFFmpegProgressLine(line) {
+			a.LogHub.Broadcast(jobID, line)
+			humanLines = append(humanLines, line+"\n")
+		}
 		if progress := a.Progress.Parse(jobID, line, cfg); progress != nil {
 			_ = a.Store.UpdateJobStatus(jobID, store.JobStatusUpdate{
 				Status:   "encoding",
@@ -145,7 +151,7 @@ func (a *App) ExecuteEncodingJob(ctx context.Context, jobID string) error {
 	}
 
 	waitErr := cmd.Wait()
-	util.WriteLines(logFile, logLines)
+	util.WriteLines(logFile, humanLines)
 
 	a.ActiveMu.Lock()
 	delete(a.ActiveProcs, jobID)

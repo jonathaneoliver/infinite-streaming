@@ -593,7 +593,21 @@ log_warn() {
 
 ffmpeg() {
     log "FFmpeg command: ffmpeg $*"
-    command ffmpeg "$@"
+    # For encoding calls (those with -i input), add -progress pipe:1 so progress
+    # lines are emitted unbuffered. ffmpeg's normal stderr progress is block-
+    # buffered when piped, which makes the dashboard meter jump in chunks.
+    local has_input=false
+    for arg in "$@"; do
+        if [ "$arg" = "-i" ]; then
+            has_input=true
+            break
+        fi
+    done
+    if $has_input; then
+        command ffmpeg -progress pipe:1 -stats_period 0.5 "$@"
+    else
+        command ffmpeg "$@"
+    fi
     local rc=$?
     if [[ $rc -eq 0 ]]; then
         log "FFmpeg finished (rc=0)"
