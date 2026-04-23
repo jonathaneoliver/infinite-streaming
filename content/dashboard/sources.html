@@ -447,7 +447,7 @@
                 card.innerHTML = `
                     <input type="checkbox" class="source-checkbox" data-source-id="${source.source_id}" 
                            onchange="toggleSourceSelection('${source.source_id}')">
-                    <div class="source-name">${escapeHtml(source.name)}</div>
+                    <div class="source-name">${escapeHtml((source.name || '').replace(/\s+/g, '_'))}</div>
                     <div class="source-meta">
                         <div class="source-meta-item"><strong>File:</strong> ${escapeHtml((source.file_path || '').split('/').pop() || source.original_filename)}</div>
                         <div class="source-meta-item"><strong>Size:</strong> ${fileSize}</div>
