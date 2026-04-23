@@ -22,7 +22,7 @@ FROM alpine:3.19
 RUN \
   apk update && \
   apk add iproute2 iperf nftables openssl && \
-  apk add nginx nginx-mod-http-vod nginx-mod-http-lua && \
+  apk add nginx && \
   apk add ffmpeg && \
   apk add python3 py3-pip && \
   apk add libxml2-dev libxslt-dev python3-dev gcc musl-dev bash && \
@@ -58,10 +58,6 @@ RUN set -eux; \
       -o /usr/local/bin/packager; \
     chmod +x /usr/local/bin/packager
 
-# Create nginx proxy cache directory for on-demand live streaming
-# (Will be mounted as tmpfs via docker-compose.yml)
-RUN mkdir -p /var/cache/nginx/live_playlists && \
-    chown -R nginx:nginx /var/cache/nginx
 
 # Configure nginx to log to stderr for interleaved Docker logs
 RUN sed -i 's|error_log /var/log/nginx/error.log warn;|error_log stderr warn;|g' /etc/nginx/nginx.conf
@@ -71,9 +67,10 @@ RUN mkdir -p /tmp/uploads /data /data/sources && \
     chmod 777 /tmp/uploads /data /data/sources
 
 # Copy config and scripts (rarely change)
-COPY mime.types /etc/nginx/mime.types
-COPY nginx-content.conf.template /etc/nginx/http.d/
-COPY update-nginx-config.sh launch.sh parse_fmp4_fragments.py /sbin/
+COPY docker/mime.types /etc/nginx/mime.types
+COPY docker/nginx-content.conf.template /etc/nginx/http.d/
+COPY docker/launch.sh /sbin/
+COPY generate_abr/parse_fmp4_fragments.py /sbin/
 COPY --from=go-builder /out/go-live /usr/local/bin/go-live
 COPY --from=go-builder /out/go-upload /usr/local/bin/go-upload
 COPY --from=go-builder /out/go-proxy /usr/local/bin/go-proxy
@@ -89,8 +86,8 @@ RUN chmod -R 777 /generate_abr
 
 # Copy HTML files last (changes frequently during development)
 COPY content/*.css /content/
-COPY content/*.js /content/
 COPY content/*.html /content/
+COPY content/shared/ /content/shared/
 COPY content/dashboard/ /content/dashboard/
 COPY content/testing/ /content/testing/
 

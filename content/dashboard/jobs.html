@@ -192,7 +192,7 @@
                 // Notify SharedWorker if connected
                 if (typeof SharedWorker !== 'undefined') {
                     try {
-                        const worker = new SharedWorker('/upload-worker.js');
+                        const worker = new SharedWorker('/shared/upload-worker.js');
                         worker.port.start();
                         worker.port.postMessage({
                             type: 'CANCEL_UPLOAD',
@@ -261,6 +261,6 @@
             }
         });
     </script>
-    <script src="/shared-nav.js"></script>
+    <script src="/shared/shared-nav.js"></script>
 </body>
 </html>

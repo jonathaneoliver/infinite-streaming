@@ -396,7 +396,7 @@
         const videoElements = [];
         const playerUrls = [];
         let activeAudioIndex = null;
-        const AUDIO_MUTED_KEY = 'bossAudioMuted';
+        const AUDIO_MUTED_KEY = 'ismAudioMuted';
 
         function updateAudioHighlight(index, active) {
             const cell = document.getElementById(`cell-${index}`);
@@ -441,8 +441,8 @@
             persistSelectedContentFromIndex(index);
             const url = playerUrls[index];
             if (url) {
-                if (window.BOSSNav && typeof window.BOSSNav.setSelectedUrl === 'function') {
-                    window.BOSSNav.setSelectedUrl(url);
+                if (window.ISMNav && typeof window.ISMNav.setSelectedUrl === 'function') {
+                    window.ISMNav.setSelectedUrl(url);
                 } else {
                     localStorage.setItem('ismSelectedUrl', url);
                 }
@@ -611,8 +611,8 @@
                 .replace(/_(h264|hevc|av1|dash|ts|hw)$/i, '')
                 .replace(/_\d{8}_\d{6}$/i, '');
             localStorage.setItem('ismSelectedContentBase', baseName);
-            if (window.BOSSNav && typeof window.BOSSNav.updateSelectedContentBadge === 'function') {
-                window.BOSSNav.updateSelectedContentBadge();
+            if (window.ISMNav && typeof window.ISMNav.updateSelectedContentBadge === 'function') {
+                window.ISMNav.updateSelectedContentBadge();
             }
         }
         
@@ -965,8 +965,8 @@
         }
 
         function createPlayerId() {
-            if (window.BOSSNav && typeof window.BOSSNav.createPlayerId === 'function') {
-                return window.BOSSNav.createPlayerId();
+            if (window.ISMNav && typeof window.ISMNav.createPlayerId === 'function') {
+                return window.ISMNav.createPlayerId();
             }
             return Math.random().toString(36).slice(2, 10);
         }
@@ -1030,8 +1030,8 @@
         }
 
         function normalizeTestingBase(url) {
-            if (window.BOSSNav && typeof window.BOSSNav.normalizeTestingBaseUrl === 'function') {
-                return window.BOSSNav.normalizeTestingBaseUrl(url);
+            if (window.ISMNav && typeof window.ISMNav.normalizeTestingBaseUrl === 'function') {
+                return window.ISMNav.normalizeTestingBaseUrl(url);
             }
             const parsed = new URL(url, window.location.origin);
             parsed.port = getProxyPort();
@@ -1039,8 +1039,8 @@
         }
 
         function buildTestingUrl(url, playerId) {
-            if (window.BOSSNav && typeof window.BOSSNav.buildTestingUrl === 'function') {
-                return window.BOSSNav.buildTestingUrl(url, playerId);
+            if (window.ISMNav && typeof window.ISMNav.buildTestingUrl === 'function') {
+                return window.ISMNav.buildTestingUrl(url, playerId);
             }
             const base = normalizeTestingBase(url);
             const separator = base.includes('?') ? '&' : '?';
@@ -1207,6 +1207,6 @@
             }
         });
     </script>
-    <script src="/shared-nav.js"></script>
+    <script src="/shared/shared-nav.js"></script>
 </body>
 </html>

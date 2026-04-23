@@ -39,7 +39,7 @@ func logOncePerSecondLL(message string) {
 	fmt.Fprintln(os.Stderr, message)
 }
 
-// LLHLSGenerator generates LL-HLS playlists matching Python ll_live.py behavior
+// LLHLSGenerator generates LL-HLS playlists
 type LLHLSGenerator struct{}
 
 func writeLoopDateRange(sb *strings.Builder, loopCount int, at time.Time, marker string) {
@@ -50,7 +50,6 @@ func writeLoopDateRange(sb *strings.Builder, loopCount int, at time.Time, marker
 }
 
 // GenerateVariantPlaylist generates a single variant playlist with byte-range partials
-// This matches the Python generate_ll_playlist() function exactly
 func (g *LLHLSGenerator) GenerateVariantPlaylist(
 	pl *playlist.Media,
 	byteranges map[string][]parser.ByteRange,
@@ -296,7 +295,6 @@ func baseURI(uri string) string {
 }
 
 // detectContentCharacteristics auto-detects segment duration, fragment count, and partial duration
-// Matches Python detect_content_characteristics()
 func detectContentCharacteristics(pl *playlist.Media, byteranges map[string][]parser.ByteRange) (float64, int, float64) {
 	const DEFAULT_SEGMENT_DURATION = 6.0
 	const DEFAULT_PARTIALS_PER_SEGMENT = 6

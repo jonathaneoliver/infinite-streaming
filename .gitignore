@@ -59,6 +59,7 @@ __pycache__/
 # Go build output
 go-proxy/server
 go-live/server
+go-upload/server
 
 # Test artifacts
 tests/.hls_failure_probe_last_failed
@@ -70,12 +71,3 @@ apple/InfiniteStreamPlayer/InfiniteStreamPlayer.xcodeproj/project.xcworkspace/xc
 # Environment config (contains local paths/IPs)
 .env
 
-# Private documents (do not commit)
-BusinessPlan.md
-Sponsors.md
-
-# Internal working docs (not for public consumption)
-docs/internal/
-
-# Claude Code project-local state (per-developer)
-.claude/

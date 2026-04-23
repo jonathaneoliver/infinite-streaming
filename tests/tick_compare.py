@@ -46,7 +46,7 @@ def main():
 
     time.sleep(1)
     go_lines = tail_logs("go-live", seconds)
-    py_lines = tail_logs("boss1", seconds)
+    py_lines = tail_logs("ism1", seconds)
 
     go_samples = parse(go_lines, GO_RE)
     py_samples = parse(py_lines, PY_RE)

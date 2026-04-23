@@ -547,7 +547,7 @@
             uploadContinuationText.textContent = 'Background upload in progress...';
             
             try {
-                uploadWorkerConnection = new SharedWorker('/upload-worker.js');
+                uploadWorkerConnection = new SharedWorker('/shared/upload-worker.js');
                 uploadWorkerConnection.port.start();
                 
                 console.log('[JobDetail] Connected to SharedWorker');
@@ -704,6 +704,6 @@
             return Math.round(bytes / Math.pow(k, i) * 100) / 100 + ' ' + sizes[i];
         }
     </script>
-    <script src="/shared-nav.js"></script>
+    <script src="/shared/shared-nav.js"></script>
 </body>
 </html>

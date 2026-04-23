@@ -44,7 +44,7 @@ Segment files (`.m4s`, `.ts`, `.mp4`) are **served directly by nginx** from the 
 
 ## nginx routing
 
-Defined in [`nginx-content.conf.template`](../nginx-content.conf.template). Summary:
+Defined in [`nginx-content.conf.template`](../docker/nginx-content.conf.template). Summary:
 
 | Path | Target | Notes |
 |---|---|---|

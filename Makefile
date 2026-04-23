@@ -19,7 +19,7 @@ IOS_METRICS_DURATION ?= 900
 IOS_SCORE_MIN ?= 60
 
 run:
-	./start.sh 1 run
+	docker compose up -d
 
 run-ghcr:
 	docker compose -f docker-compose.ghcr.yml up -d
@@ -28,7 +28,7 @@ stop-ghcr:
 	docker compose -f docker-compose.ghcr.yml down
 
 stop:
-	./start.sh 1 stop
+	docker compose down
 
 shell:
 	docker compose exec go-server /bin/sh
@@ -202,15 +202,6 @@ test-deploy-registry:
 	ssh $(TEST_SSH) 'cd ~/test-registry && docker compose up -d'
 
 # ── Screenshots ────────────────────────────────────────────────────────
-
-SCREENSHOT_HOST ?= http://localhost:30000
-SCREENSHOT_VENV ?= /tmp/ism-shot-venv
-
-screenshots:
-	@[ -d "$(SCREENSHOT_VENV)" ] || (python3 -m venv "$(SCREENSHOT_VENV)" \
-		&& "$(SCREENSHOT_VENV)/bin/pip" install -q -r scripts/requirements.txt \
-		&& "$(SCREENSHOT_VENV)/bin/playwright" install chrome)
-	"$(SCREENSHOT_VENV)/bin/python" scripts/capture-screenshots.py --base-url=$(SCREENSHOT_HOST)
 
 # ── Android TV ─────────────────────────────────────────────────────────
 

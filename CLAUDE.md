@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Product Behavior Source of Truth
 
-Before making UI or product-behavior changes, read `PRD.md` and align implementation to it. If `AGENTS.md` and `PRD.md` conflict, follow `AGENTS.md` and explicitly call out the conflict in your summary/PR notes.
+Before making UI or product-behavior changes, read `PRD.md` and align implementation to it.
 
 ## Build & Run Commands
 
@@ -13,7 +13,7 @@ Before making UI or product-behavior changes, read `PRD.md` and align implementa
 make build
 
 # Run (Docker Compose)
-make run         # uses start.sh
+make run         # docker compose up -d
 make stop
 
 # Shell into running container

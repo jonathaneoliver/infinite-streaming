@@ -73,7 +73,6 @@ func (pl *PlaylistLoader) LoadMaster(path string) ([]byte, error) {
 }
 
 // LoadPlaylistInfo loads a playlist (master or media) and returns comprehensive info
-// This matches Python load_ll_playlist() function
 func (pl *PlaylistLoader) LoadPlaylistInfo(folder, uri string) (*PlaylistInfo, error) {
 	path := filepath.Join(folder, filepath.FromSlash(uri))
 
@@ -124,7 +123,6 @@ func (pl *PlaylistLoader) LoadPlaylistInfo(folder, uri string) (*PlaylistInfo, e
 }
 
 // LoadPlaylistInfoWithByteranges loads playlist info and byterange metadata together
-// This is a convenience function that matches Python workflow
 func (pl *PlaylistLoader) LoadPlaylistInfoWithByteranges(folder, uri string) (*PlaylistInfo, map[string][]ByteRange, error) {
 	info, err := pl.LoadPlaylistInfo(folder, uri)
 	if err != nil {
@@ -184,7 +182,6 @@ func (pl *PlaylistLoader) LoadPlaylistInfoWithByteranges(folder, uri string) (*P
 }
 
 // GetVariantsDuration gets min and max duration across all variants in master playlist
-// This matches Python get_variants_duration() function
 func (pl *PlaylistLoader) GetVariantsDuration(folder, uri string) (float64, float64, error) {
 	masterInfo, err := pl.LoadPlaylistInfo(folder, uri)
 	if err != nil {

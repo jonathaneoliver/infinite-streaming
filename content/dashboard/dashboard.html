@@ -182,7 +182,7 @@
         </div>
     </div>
 
-    <script src="/shared-nav.js"></script>
+    <script src="/shared/shared-nav.js"></script>
     <script>
         // Fetch and display statistics
         async function loadStats() {
@@ -318,9 +318,9 @@
             });
         }
 
-        const restrictContent = window.BOSSNav
-            && typeof window.BOSSNav.isContentManagementRestricted === 'function'
-            && window.BOSSNav.isContentManagementRestricted();
+        const restrictContent = window.ISMNav
+            && typeof window.ISMNav.isContentManagementRestricted === 'function'
+            && window.ISMNav.isContentManagementRestricted();
         if (restrictContent) {
             document.querySelectorAll('.content-management-link').forEach((link) => {
                 link.classList.add('is-disabled');
@@ -330,9 +330,9 @@
             });
         }
 
-        const restrictMonitor = window.BOSSNav
-            && typeof window.BOSSNav.isMonitorRestricted === 'function'
-            && window.BOSSNav.isMonitorRestricted();
+        const restrictMonitor = window.ISMNav
+            && typeof window.ISMNav.isMonitorRestricted === 'function'
+            && window.ISMNav.isMonitorRestricted();
         if (restrictMonitor) {
             document.querySelectorAll('.monitor-link').forEach((link) => {
                 link.classList.add('is-disabled');
