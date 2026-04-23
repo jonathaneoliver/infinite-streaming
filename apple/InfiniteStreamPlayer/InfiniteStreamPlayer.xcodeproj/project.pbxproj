@@ -7,18 +7,16 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		B1B1B1030101010101010101 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = B1B1B1010101010101010101 /* Assets.xcassets */; };
+		B1B1B1040101010101010101 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = B1B1B1010101010101010101 /* Assets.xcassets */; };
+		B1B1B1050101010101010101 /* InfiniteStreamLogo.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1B1B1020101010101010101 /* InfiniteStreamLogo.swift */; };
+		B1B1B1060101010101010101 /* InfiniteStreamLogo.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1B1B1020101010101010101 /* InfiniteStreamLogo.swift */; };
 		A1A1A1A1A1A1A1A1A1A10001 /* InfiniteStreamPlayerApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A11001 /* InfiniteStreamPlayerApp.swift */; };
 		A1A1A1A1A1A1A1A1A1A10002 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A11002 /* ContentView.swift */; };
 		A1A1A1A1A1A1A1A1A1A10003 /* PlaybackViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A11003 /* PlaybackViewModel.swift */; };
 		A1A1A1A1A1A1A1A1A1A10004 /* PlaybackDiagnostics.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A11004 /* PlaybackDiagnostics.swift */; };
 		A1A1A1A1A1A1A1A1A1A10005 /* PlayerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A11005 /* PlayerView.swift */; };
 		A1A1A1A1A1A1A1A1A1A10006 /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A11006 /* Models.swift */; };
-		A1A1A1A1A1A1A1A1A1A10007 /* JSONValue.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A11007 /* JSONValue.swift */; };
-		A1A1A1A1A1A1A1A1A1A10008 /* TestingSessionModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A11008 /* TestingSessionModels.swift */; };
-		A1A1A1A1A1A1A1A1A1A10009 /* SSEClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A11009 /* SSEClient.swift */; };
-		A1A1A1A1A1A1A1A1A1A1000A /* TestingSessionAPI.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A1100A /* TestingSessionAPI.swift */; };
-		A1A1A1A1A1A1A1A1A1A1000B /* TestingSessionViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A1100B /* TestingSessionViewModel.swift */; };
-		A1A1A1A1A1A1A1A1A1A1000C /* TestingSessionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A1100C /* TestingSessionView.swift */; };
 		A1A1A1A1A1A1A1A1A1A1000D /* RequestTracker.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A1100D /* RequestTracker.swift */; };
 		A1A1A1A1A1A1A1A1A1A1000F /* LocalHTTPProxy.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A1100F /* LocalHTTPProxy.swift */; };
 		A1A1A1A1A1A1A1A1A1A12001 /* AVKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A13001 /* AVKit.framework */; };
@@ -29,12 +27,6 @@
 		A2A2A2A2A2A2A2A2A2A20004 /* PlaybackDiagnostics.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A11004 /* PlaybackDiagnostics.swift */; };
 		A2A2A2A2A2A2A2A2A2A20005 /* PlayerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A11005 /* PlayerView.swift */; };
 		A2A2A2A2A2A2A2A2A2A20006 /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A11006 /* Models.swift */; };
-		A2A2A2A2A2A2A2A2A2A20007 /* JSONValue.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A11007 /* JSONValue.swift */; };
-		A2A2A2A2A2A2A2A2A2A20008 /* TestingSessionModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A11008 /* TestingSessionModels.swift */; };
-		A2A2A2A2A2A2A2A2A2A20009 /* SSEClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A11009 /* SSEClient.swift */; };
-		A2A2A2A2A2A2A2A2A2A2000A /* TestingSessionAPI.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A1100A /* TestingSessionAPI.swift */; };
-		A2A2A2A2A2A2A2A2A2A2000B /* TestingSessionViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A1100B /* TestingSessionViewModel.swift */; };
-		A2A2A2A2A2A2A2A2A2A2000C /* TestingSessionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A1100C /* TestingSessionView.swift */; };
 		A2A2A2A2A2A2A2A2A2A2000D /* RequestTracker.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A1100D /* RequestTracker.swift */; };
 		A2A2A2A2A2A2A2A2A2A2000F /* LocalHTTPProxy.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A1100F /* LocalHTTPProxy.swift */; };
 		A2A2A2A2A2A2A2A2A2A22001 /* AVKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A13001 /* AVKit.framework */; };
@@ -42,18 +34,14 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
+		B1B1B1010101010101010101 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		B1B1B1020101010101010101 /* InfiniteStreamLogo.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InfiniteStreamLogo.swift; sourceTree = "<group>"; };
 		A1A1A1A1A1A1A1A1A1A11001 /* InfiniteStreamPlayerApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InfiniteStreamPlayerApp.swift; sourceTree = "<group>"; };
 		A1A1A1A1A1A1A1A1A1A11002 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
 		A1A1A1A1A1A1A1A1A1A11003 /* PlaybackViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaybackViewModel.swift; sourceTree = "<group>"; };
 		A1A1A1A1A1A1A1A1A1A11004 /* PlaybackDiagnostics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaybackDiagnostics.swift; sourceTree = "<group>"; };
 		A1A1A1A1A1A1A1A1A1A11005 /* PlayerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlayerView.swift; sourceTree = "<group>"; };
 		A1A1A1A1A1A1A1A1A1A11006 /* Models.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models.swift; sourceTree = "<group>"; };
-		A1A1A1A1A1A1A1A1A1A11007 /* JSONValue.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TestingSession/JSONValue.swift; sourceTree = "<group>"; };
-		A1A1A1A1A1A1A1A1A1A11008 /* TestingSessionModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TestingSession/TestingSessionModels.swift; sourceTree = "<group>"; };
-		A1A1A1A1A1A1A1A1A1A11009 /* SSEClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TestingSession/SSEClient.swift; sourceTree = "<group>"; };
-		A1A1A1A1A1A1A1A1A1A1100A /* TestingSessionAPI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TestingSession/TestingSessionAPI.swift; sourceTree = "<group>"; };
-		A1A1A1A1A1A1A1A1A1A1100B /* TestingSessionViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TestingSession/TestingSessionViewModel.swift; sourceTree = "<group>"; };
-		A1A1A1A1A1A1A1A1A1A1100C /* TestingSessionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TestingSession/TestingSessionView.swift; sourceTree = "<group>"; };
 		A1A1A1A1A1A1A1A1A1A1100D /* RequestTracker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RequestTracker.swift; sourceTree = "<group>"; };
 		A1A1A1A1A1A1A1A1A1A1100F /* LocalHTTPProxy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalHTTPProxy.swift; sourceTree = "<group>"; };
 		A1A1A1A1A1A1A1A1A1A11010 /* InfiniteStreamPlayer-iOS/Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = "InfiniteStreamPlayer-iOS/Info.plist"; sourceTree = "<group>"; };
@@ -105,14 +93,10 @@
 				A1A1A1A1A1A1A1A1A1A11004 /* PlaybackDiagnostics.swift */,
 				A1A1A1A1A1A1A1A1A1A11005 /* PlayerView.swift */,
 				A1A1A1A1A1A1A1A1A1A11006 /* Models.swift */,
-				A1A1A1A1A1A1A1A1A1A11007 /* JSONValue.swift */,
-				A1A1A1A1A1A1A1A1A1A11008 /* TestingSessionModels.swift */,
-				A1A1A1A1A1A1A1A1A1A11009 /* SSEClient.swift */,
-				A1A1A1A1A1A1A1A1A1A1100A /* TestingSessionAPI.swift */,
-				A1A1A1A1A1A1A1A1A1A1100B /* TestingSessionViewModel.swift */,
-				A1A1A1A1A1A1A1A1A1A1100C /* TestingSessionView.swift */,
 				A1A1A1A1A1A1A1A1A1A1100D /* RequestTracker.swift */,
 				A1A1A1A1A1A1A1A1A1A1100F /* LocalHTTPProxy.swift */,
+				B1B1B1020101010101010101 /* InfiniteStreamLogo.swift */,
+				B1B1B1010101010101010101 /* Assets.xcassets */,
 			);
 			path = InfiniteStreamPlayer;
 			sourceTree = "<group>";
@@ -222,6 +206,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				B1B1B1030101010101010101 /* Assets.xcassets in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -229,6 +214,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				B1B1B1040101010101010101 /* Assets.xcassets in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -245,14 +231,9 @@
 				A1A1A1A1A1A1A1A1A1A10004 /* PlaybackDiagnostics.swift in Sources */,
 				A1A1A1A1A1A1A1A1A1A10005 /* PlayerView.swift in Sources */,
 				A1A1A1A1A1A1A1A1A1A10006 /* Models.swift in Sources */,
-				A1A1A1A1A1A1A1A1A1A10007 /* JSONValue.swift in Sources */,
-				A1A1A1A1A1A1A1A1A1A10008 /* TestingSessionModels.swift in Sources */,
-				A1A1A1A1A1A1A1A1A1A10009 /* SSEClient.swift in Sources */,
-				A1A1A1A1A1A1A1A1A1A1000A /* TestingSessionAPI.swift in Sources */,
-				A1A1A1A1A1A1A1A1A1A1000B /* TestingSessionViewModel.swift in Sources */,
-				A1A1A1A1A1A1A1A1A1A1000C /* TestingSessionView.swift in Sources */,
 				A1A1A1A1A1A1A1A1A1A1000D /* RequestTracker.swift in Sources */,
 				A1A1A1A1A1A1A1A1A1A1000F /* LocalHTTPProxy.swift in Sources */,
+				B1B1B1050101010101010101 /* InfiniteStreamLogo.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -266,14 +247,9 @@
 				A2A2A2A2A2A2A2A2A2A20004 /* PlaybackDiagnostics.swift in Sources */,
 				A2A2A2A2A2A2A2A2A2A20005 /* PlayerView.swift in Sources */,
 				A2A2A2A2A2A2A2A2A2A20006 /* Models.swift in Sources */,
-				A2A2A2A2A2A2A2A2A2A20007 /* JSONValue.swift in Sources */,
-				A2A2A2A2A2A2A2A2A2A20008 /* TestingSessionModels.swift in Sources */,
-				A2A2A2A2A2A2A2A2A2A20009 /* SSEClient.swift in Sources */,
-				A2A2A2A2A2A2A2A2A2A2000A /* TestingSessionAPI.swift in Sources */,
-				A2A2A2A2A2A2A2A2A2A2000B /* TestingSessionViewModel.swift in Sources */,
-				A2A2A2A2A2A2A2A2A2A2000C /* TestingSessionView.swift in Sources */,
 				A2A2A2A2A2A2A2A2A2A2000D /* RequestTracker.swift in Sources */,
 				A2A2A2A2A2A2A2A2A2A2000F /* LocalHTTPProxy.swift in Sources */,
+				B1B1B1060101010101010101 /* InfiniteStreamLogo.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -283,14 +259,14 @@
 		A1A1A1A1A1A1A1A1A1A17100 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
-				ASSETCATALOG_COMPILER_APPICON_NAME = "";
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CLANG_ENABLE_MODULES = YES;
 				CLANG_ENABLE_OBJC_WEAK = YES;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = 63328J83Q8;
 				INFOPLIST_FILE = "InfiniteStreamPlayer-iOS/Info.plist";
-				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
@@ -307,14 +283,14 @@
 		A1A1A1A1A1A1A1A1A1A17101 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
-				ASSETCATALOG_COMPILER_APPICON_NAME = "";
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CLANG_ENABLE_MODULES = YES;
 				CLANG_ENABLE_OBJC_WEAK = YES;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = 63328J83Q8;
 				INFOPLIST_FILE = "InfiniteStreamPlayer-iOS/Info.plist";
-				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
@@ -413,7 +389,7 @@
 				CLANG_ENABLE_OBJC_WEAK = YES;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = "";
+				DEVELOPMENT_TEAM = 63328J83Q8;
 				INFOPLIST_FILE = "InfiniteStreamPlayer-tvOS/Info.plist";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -425,7 +401,7 @@
 				SDKROOT = appletvos;
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = 3;
-				TVOS_DEPLOYMENT_TARGET = 16.0;
+				TVOS_DEPLOYMENT_TARGET = 26.0;
 			};
 			name = Debug;
 		};
@@ -437,7 +413,7 @@
 				CLANG_ENABLE_OBJC_WEAK = YES;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = "";
+				DEVELOPMENT_TEAM = 63328J83Q8;
 				INFOPLIST_FILE = "InfiniteStreamPlayer-tvOS/Info.plist";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -449,7 +425,7 @@
 				SDKROOT = appletvos;
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = 3;
-				TVOS_DEPLOYMENT_TARGET = 16.0;
+				TVOS_DEPLOYMENT_TARGET = 26.0;
 			};
 			name = Release;
 		};

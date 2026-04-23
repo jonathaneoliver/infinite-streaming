@@ -448,15 +448,7 @@ final class PlaybackDiagnostics: ObservableObject {
         if let itemError = item.error {
             self.itemError = describeError(itemError)
         }
-        if nominalFrameRate == nil || (nominalFrameRate ?? 0) <= 0 {
-            if let track = item.asset.tracks(withMediaType: .video).first {
-                let fps = Double(track.nominalFrameRate)
-                if fps > 0 {
-                    nominalFrameRate = fps
-                }
-            }
-        }
-        // Fallback: try async track load if sync method returned nothing
+        // Load nominal frame rate asynchronously using modern API
         if nominalFrameRate == nil || (nominalFrameRate ?? 0) <= 0 {
             Task { @MainActor [weak self] in
                 guard let self, let item = self.player?.currentItem else { return }
