@@ -449,7 +449,7 @@
                            onchange="toggleSourceSelection('${source.source_id}')">
                     <div class="source-name">${escapeHtml(source.name)}</div>
                     <div class="source-meta">
-                        <div class="source-meta-item"><strong>File:</strong> ${escapeHtml(source.original_filename)}</div>
+                        <div class="source-meta-item"><strong>File:</strong> ${escapeHtml((source.file_path || '').split('/').pop() || source.original_filename)}</div>
                         <div class="source-meta-item"><strong>Size:</strong> ${fileSize}</div>
                         <div class="source-meta-item"><strong>Duration:</strong> ${duration}</div>
                         <div class="source-meta-item"><strong>Resolution:</strong> ${resolution}</div>

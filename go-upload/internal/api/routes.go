@@ -188,7 +188,7 @@ func (h *Handler) UploadInit(w http.ResponseWriter, r *http.Request) {
 
 	sourceID := util.NewUUID()
 	jobID := util.NewUUID()
-	hybridFilename := util.HybridFilename(filename, sourceID)
+	hybridFilename := util.ResolveUploadFilename(h.App.Cfg.SourcesDir, filename, sourceID)
 
 	jobIDs := []string{jobID}
 	for i, pdur := range partialDurations {
@@ -376,7 +376,7 @@ func (h *Handler) UploadFile(w http.ResponseWriter, r *http.Request) {
 	if outputName == "" {
 		outputName = util.SanitizeName(strings.TrimSuffix(header.Filename, filepath.Ext(header.Filename)))
 	}
-	filename := util.HybridFilename(header.Filename, sourceID)
+	filename := util.ResolveUploadFilename(h.App.Cfg.SourcesDir, header.Filename, sourceID)
 	targetPath := filepath.Join(h.App.Cfg.SourcesDir, filename)
 
 	uploadJobID := jobID + "_upload"
