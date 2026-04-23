@@ -12,4 +12,6 @@
     <string name="content">Content</string>
     <string name="select_content">Select content</string>
     <string name="ready">Ready</string>
+    <string name="fullscreen">Fullscreen</string>
+    <string name="exit_fullscreen">Exit Fullscreen</string>
 </resources>

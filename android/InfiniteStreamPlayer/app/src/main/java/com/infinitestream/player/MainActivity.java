@@ -13,6 +13,8 @@ import android.widget.LinearLayout;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import androidx.constraintlayout.widget.ConstraintLayout;
+
 import androidx.annotation.OptIn;
 import androidx.appcompat.app.AlertDialog;
 import androidx.appcompat.app.AppCompatActivity;
@@ -61,6 +63,10 @@ public class MainActivity extends AppCompatActivity {
     private MaterialButtonToggleGroup codecToggle;
     private MaterialButton contentButton;
     private TextView statusText;
+    private MaterialButton fullscreenButton;
+    private View rightPanel;
+    private View panelGuideline;
+    private boolean isFullscreen = false;
 
     private String currentUrl = "";
     private final String playerId = UUID.randomUUID().toString();
@@ -80,7 +86,7 @@ public class MainActivity extends AppCompatActivity {
         }
 
         String label() {
-            return name + " (" + port + ")";
+            return name;
         }
     }
 
@@ -135,8 +141,20 @@ public class MainActivity extends AppCompatActivity {
         codecToggle = findViewById(R.id.codec_toggle);
         contentButton = findViewById(R.id.content_button);
         statusText = findViewById(R.id.status_text);
+        fullscreenButton = findViewById(R.id.fullscreen_button);
+        rightPanel = findViewById(R.id.right_panel);
+        panelGuideline = findViewById(R.id.panel_guideline);
+
+        fullscreenButton.setOnClickListener(v -> toggleFullscreen());
+
+        styleActionButton(retryButton);
+        styleActionButton(restartButton);
+        styleActionButton(reloadButton);
+        styleActionButton(contentButton);
+        styleActionButton(fullscreenButton);
 
         initializePlayer();
+        retryButton.requestFocus(); // start focus top-left of left panel
         setupToggles();
 
         retryButton.setOnClickListener(v -> retryFetch());
@@ -248,6 +266,14 @@ public class MainActivity extends AppCompatActivity {
             addToggleButton(codecToggle, i, codecs[i]);
         }
 
+        // Only the leftmost button in each group escapes to the left panel
+        for (MaterialButtonToggleGroup group :
+                new MaterialButtonToggleGroup[]{ serverToggle, protocolToggle, segmentToggle, codecToggle }) {
+            if (group.getChildCount() > 0) {
+                group.getChildAt(0).setNextFocusLeftId(R.id.fullscreen_button);
+            }
+        }
+
         serverToggle.check(serverToggle.getChildAt(0).getId());
         protocolToggle.check(protocolToggle.getChildAt(0).getId());
         segmentToggle.check(segmentToggle.getChildAt(DEFAULT_SEGMENT_INDEX).getId());
@@ -269,6 +295,19 @@ public class MainActivity extends AppCompatActivity {
         fetchContentList();
     }
 
+    private void styleActionButton(MaterialButton button) {
+        int[][] states = {
+            { android.R.attr.state_focused },
+            { -android.R.attr.state_focused }
+        };
+        button.setTextColor(new ColorStateList(states,
+            new int[]{ 0xFFFFFFFF, 0xFFFFFFFF }));
+        button.setBackgroundTintList(new ColorStateList(states,
+            new int[]{ 0xFF1A3A4A, 0x00000000 }));
+        button.setStrokeColor(new ColorStateList(states,
+            new int[]{ 0xFF00B4D8, 0xFF555555 }));
+    }
+
     private void addToggleButton(MaterialButtonToggleGroup group, int index, String text) {
         MaterialButton button = new MaterialButton(
             new androidx.appcompat.view.ContextThemeWrapper(this,
@@ -276,9 +315,22 @@ public class MainActivity extends AppCompatActivity {
             null, com.google.android.material.R.attr.materialButtonOutlinedStyle);
         button.setId(View.generateViewId());
         button.setText(text);
-        button.setTextColor(0xFFFFFFFF);
-        button.setStrokeColor(ColorStateList.valueOf(0xFFFFFFFF));
         button.setCheckable(true);
+        button.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 12);
+
+        int[][] states = {
+            { android.R.attr.state_focused,  android.R.attr.state_checked },
+            {                                android.R.attr.state_checked },
+            { android.R.attr.state_focused, -android.R.attr.state_checked },
+            {                               -android.R.attr.state_checked }
+        };
+        button.setTextColor(new ColorStateList(states,
+            new int[]{ 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFF888888 }));
+        button.setBackgroundTintList(new ColorStateList(states,
+            new int[]{ 0xFF00B4D8, 0xFF0077B6, 0xFF1A3A4A, 0x00000000 }));
+        button.setStrokeColor(new ColorStateList(states,
+            new int[]{ 0xFFFFFFFF, 0xFF00B4D8, 0xFF00B4D8, 0xFF444444 }));
+
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.WRAP_CONTENT,
             ViewGroup.LayoutParams.WRAP_CONTENT);
@@ -465,6 +517,27 @@ public class MainActivity extends AppCompatActivity {
             player.stop();
             player.clearMediaItems();
             buildUrlAndLoad();
+        }
+    }
+
+    private void toggleFullscreen() {
+        isFullscreen = !isFullscreen;
+        ConstraintLayout.LayoutParams params =
+            (ConstraintLayout.LayoutParams) panelGuideline.getLayoutParams();
+        params.guidePercent = isFullscreen ? 1.0f : 0.65f;
+        panelGuideline.setLayoutParams(params);
+        rightPanel.setVisibility(isFullscreen ? View.GONE : View.VISIBLE);
+        fullscreenButton.setText(isFullscreen
+            ? getString(R.string.exit_fullscreen)
+            : getString(R.string.fullscreen));
+    }
+
+    @Override
+    public void onBackPressed() {
+        if (isFullscreen) {
+            toggleFullscreen();
+        } else {
+            super.onBackPressed();
         }
     }
 
