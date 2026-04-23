@@ -368,6 +368,26 @@ body {
     color: white;
 }
 
+.advanced-toggle {
+    background: none;
+    border: none;
+    color: var(--primary-color);
+    cursor: pointer;
+    font-size: 1em;
+    padding: 10px 0;
+    text-decoration: underline;
+    font-weight: 500;
+}
+
+.advanced-options {
+    display: none;
+    padding-top: 10px;
+}
+
+.advanced-options.show {
+    display: block;
+}
+
 .alpha-banner {
     background: var(--warning);
     color: white;

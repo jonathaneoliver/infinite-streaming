@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	_ "modernc.org/sqlite"
 )
@@ -68,7 +69,11 @@ func DatabasePathFromEnv() string {
 }
 
 func NewSQLiteStore(dbPath string) (*SQLiteStore, error) {
-	db, err := sql.Open("sqlite", dbPath)
+	// WAL mode allows concurrent reads alongside a single writer.
+	// busy_timeout makes writers wait briefly on contention instead of failing
+	// immediately with SQLITE_BUSY.
+	dsn := dbPath + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)"
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err
 	}
@@ -122,7 +127,14 @@ func (s *SQLiteStore) InitSchema() error {
 }
 
 func (s *SQLiteStore) ListJobs() ([]Job, error) {
-	rows, err := s.db.Query(`SELECT job_id, name, status, progress, config, created_at, started_at, completed_at, error_message, log_path, output_paths, source_id FROM jobs ORDER BY created_at DESC`)
+	// Hide completed/failed jobs older than 48h. Always keep active jobs
+	// (queued/uploading/encoding) regardless of age so a long-running encode
+	// never disappears from the list mid-run.
+	cutoff := time.Now().Add(-48 * time.Hour).UTC().Format(time.RFC3339Nano)
+	rows, err := s.db.Query(`SELECT job_id, name, status, progress, config, created_at, started_at, completed_at, error_message, log_path, output_paths, source_id
+		FROM jobs
+		WHERE created_at >= ? OR status IN ('queued','uploading','encoding')
+		ORDER BY created_at DESC`, cutoff)
 	if err != nil {
 		return nil, err
 	}

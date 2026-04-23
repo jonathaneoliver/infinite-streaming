@@ -58,26 +58,6 @@
             font-weight: 500;
         }
 
-        .advanced-toggle {
-            background: none;
-            border: none;
-            color: var(--primary-color);
-            cursor: pointer;
-            font-size: 1em;
-            padding: 10px 0;
-            text-decoration: underline;
-            font-weight: 500;
-        }
-
-        .advanced-options {
-            display: none;
-            padding-top: 10px;
-        }
-
-        .advanced-options.show {
-            display: block;
-        }
-
         .progress-container {
             display: none;
             margin-top: 24px;
@@ -117,7 +97,7 @@
     </style>
 </head>
 <body data-ism-active-page="upload">
-    <div class="ism-content-standard">
+    <div class="ism-content-wide">
         <div class="card">
             <div class="card-header">
                 <h1>Upload Content</h1>
@@ -139,24 +119,6 @@
                 </div>
 
                 <!-- Configuration -->
-                <div class="form-group">
-                    <label>Partial Segment Durations</label>
-                    <div style="display: flex; gap: 20px; flex-wrap: wrap; margin-top: 8px;">
-                        <label style="display: flex; align-items: center; font-weight: normal; cursor: pointer;">
-                            <input type="checkbox" name="partialDuration" value="1000" style="margin-right: 5px;">
-                            1s partials (p1000)
-                        </label>
-                        <label style="display: flex; align-items: center; font-weight: normal; cursor: pointer;">
-                            <input type="checkbox" name="partialDuration" value="200" checked style="margin-right: 5px;">
-                            200ms partials (p200)
-                        </label>
-                    </div>
-                </div>
-                <div class="form-group">
-                    <label>Segment Duration</label>
-                    <label class="form-checkbox"><input type="radio" name="segmentDuration" value="2"> 2s segments</label>
-                    <label class="form-checkbox"><input type="radio" name="segmentDuration" value="6" checked> 6s segments</label>
-                </div>
                 <div class="form-group">
                     <label>Codec Selection</label>
                     <div style="display: flex; gap: 15px; margin-top: 8px;">
@@ -197,27 +159,47 @@
                     <small>Limit the highest resolution tier to save time and storage</small>
                 </div>
 
-                <div class="form-group">
-                    <label>HLS Format</label>
-                    <div style="display: flex; gap: 20px; flex-wrap: wrap; margin-top: 8px;">
-                        <label style="display: flex; align-items: center; font-weight: normal; cursor: pointer;">
-                            <input type="checkbox" name="hlsFormat" value="fmp4" checked style="margin-right: 5px;">
-                            fMP4 (modern)
-                        </label>
-                        <label style="display: flex; align-items: center; font-weight: normal; cursor: pointer;">
-                            <input type="checkbox" name="hlsFormat" value="ts" style="margin-right: 5px;">
-                            MPEG-TS (legacy)
-                        </label>
-                    </div>
-                    <small>Select which HLS segment formats to generate</small>
-                </div>
-
                 <!-- Advanced Options -->
                 <button type="button" class="advanced-toggle" id="advancedToggle">
                     Show Advanced Options ▼
                 </button>
-                
+
                 <div class="advanced-options" id="advancedOptions">
+                    <div class="form-group">
+                        <label>Partial Segment Durations</label>
+                        <div style="display: flex; gap: 20px; flex-wrap: wrap; margin-top: 8px;">
+                            <label style="display: flex; align-items: center; font-weight: normal; cursor: pointer;">
+                                <input type="checkbox" name="partialDuration" value="1000" style="margin-right: 5px;">
+                                1s partials (p1000)
+                            </label>
+                            <label style="display: flex; align-items: center; font-weight: normal; cursor: pointer;">
+                                <input type="checkbox" name="partialDuration" value="200" checked style="margin-right: 5px;">
+                                200ms partials (p200)
+                            </label>
+                        </div>
+                    </div>
+
+                    <div class="form-group">
+                        <label>Segment Duration</label>
+                        <label class="form-checkbox"><input type="radio" name="segmentDuration" value="2"> 2s segments</label>
+                        <label class="form-checkbox"><input type="radio" name="segmentDuration" value="6" checked> 6s segments</label>
+                    </div>
+
+                    <div class="form-group">
+                        <label>HLS Format</label>
+                        <div style="display: flex; gap: 20px; flex-wrap: wrap; margin-top: 8px;">
+                            <label style="display: flex; align-items: center; font-weight: normal; cursor: pointer;">
+                                <input type="checkbox" name="hlsFormat" value="fmp4" checked style="margin-right: 5px;">
+                                fMP4 (modern)
+                            </label>
+                            <label style="display: flex; align-items: center; font-weight: normal; cursor: pointer;">
+                                <input type="checkbox" name="hlsFormat" value="ts" style="margin-right: 5px;">
+                                MPEG-TS (legacy)
+                            </label>
+                        </div>
+                        <small>Select which HLS segment formats to generate</small>
+                    </div>
+
                     <div class="form-group">
                         <label for="durationLimit">Duration Limit (seconds)</label>
                         <input type="number" id="durationLimit" name="durationLimit" class="form-input" min="1" placeholder="Leave empty for full video">

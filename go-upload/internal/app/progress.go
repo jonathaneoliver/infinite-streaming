@@ -15,6 +15,32 @@ func NewProgressTracker() *ProgressTracker {
 	return &ProgressTracker{trackers: make(map[string]*EncodingProgressTracker)}
 }
 
+// isFFmpegProgressLine reports whether line looks like a single key=value pair
+// emitted by ffmpeg's `-progress pipe:1` output (e.g. "out_time=00:00:00.44",
+// "frame=11", "progress=continue"). Used to filter the noisy progress stream
+// out of human-readable encoding logs while still allowing the parser to read
+// `out_time=` for smooth meter updates.
+func isFFmpegProgressLine(line string) bool {
+	trimmed := strings.TrimSpace(line)
+	if trimmed == "" {
+		return false
+	}
+	eq := strings.Index(trimmed, "=")
+	if eq <= 0 || eq == len(trimmed)-1 {
+		return false
+	}
+	for i := 0; i < eq; i++ {
+		c := trimmed[i]
+		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_') {
+			return false
+		}
+	}
+	// Value must not contain spaces (ffmpeg's normal stderr lines have multiple
+	// space-separated key=value pairs and would fail this check).
+	value := trimmed[eq+1:]
+	return !strings.ContainsAny(value, " \t")
+}
+
 func (p *ProgressTracker) tracker(jobID string, cfg map[string]interface{}) *EncodingProgressTracker {
 	p.mu.Lock()
 	defer p.mu.Unlock()
