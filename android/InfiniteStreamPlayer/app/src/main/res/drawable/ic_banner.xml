@@ -1,0 +1,70 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="320dp"
+    android:height="180dp"
+    android:viewportWidth="320"
+    android:viewportHeight="180">
+
+    <!-- Background -->
+    <path android:fillColor="#091929"
+        android:pathData="M0,0 L320,0 L320,180 L0,180 Z" />
+
+    <!-- Subtle centre band -->
+    <path android:fillColor="#0A2040"
+        android:pathData="M0,55 L320,55 L320,125 L0,125 Z" />
+
+    <!-- Right lobe centred at (115,90) — wavy -->
+    <path android:strokeColor="#012E47" android:strokeWidth="22"
+        android:strokeLineCap="round" android:strokeLineJoin="round"
+        android:fillColor="#00000000"
+        android:pathData="M90,90 C98,72 112,58 124,63 C136,68 142,80 142,90 C142,100 136,112 124,117 C112,122 98,108 90,90 Z" />
+    <path android:strokeColor="#0077B6" android:strokeWidth="15"
+        android:strokeLineCap="round" android:strokeLineJoin="round"
+        android:fillColor="#00000000"
+        android:pathData="M90,90 C98,72 112,58 124,63 C136,68 142,80 142,90 C142,100 136,112 124,117 C112,122 98,108 90,90 Z" />
+    <path android:strokeColor="#00B4D8" android:strokeWidth="8"
+        android:strokeLineCap="round" android:strokeLineJoin="round"
+        android:fillColor="#00000000"
+        android:pathData="M90,90 C98,72 112,58 124,63 C136,68 142,80 142,90 C142,100 136,112 124,117 C112,122 98,108 90,90 Z" />
+    <path android:strokeColor="#ADE8F4" android:strokeWidth="2.5"
+        android:strokeLineCap="round" android:strokeLineJoin="round"
+        android:fillColor="#00000000"
+        android:pathData="M90,90 C98,72 112,58 124,63 C136,68 142,80 142,90 C142,100 136,112 124,117 C112,122 98,108 90,90 Z" />
+
+    <!-- Left lobe — mirror -->
+    <path android:strokeColor="#012E47" android:strokeWidth="22"
+        android:strokeLineCap="round" android:strokeLineJoin="round"
+        android:fillColor="#00000000"
+        android:pathData="M90,90 C82,72 68,58 56,63 C44,68 38,80 38,90 C38,100 44,112 56,117 C68,122 82,108 90,90 Z" />
+    <path android:strokeColor="#0077B6" android:strokeWidth="15"
+        android:strokeLineCap="round" android:strokeLineJoin="round"
+        android:fillColor="#00000000"
+        android:pathData="M90,90 C82,72 68,58 56,63 C44,68 38,80 38,90 C38,100 44,112 56,117 C68,122 82,108 90,90 Z" />
+    <path android:strokeColor="#00B4D8" android:strokeWidth="8"
+        android:strokeLineCap="round" android:strokeLineJoin="round"
+        android:fillColor="#00000000"
+        android:pathData="M90,90 C82,72 68,58 56,63 C44,68 38,80 38,90 C38,100 44,112 56,117 C68,122 82,108 90,90 Z" />
+    <path android:strokeColor="#ADE8F4" android:strokeWidth="2.5"
+        android:strokeLineCap="round" android:strokeLineJoin="round"
+        android:fillColor="#00000000"
+        android:pathData="M90,90 C82,72 68,58 56,63 C44,68 38,80 38,90 C38,100 44,112 56,117 C68,122 82,108 90,90 Z" />
+
+    <!-- Foam dots at wave crests -->
+    <path android:fillColor="#90E0EF"
+        android:pathData="M114,59m-4,0a4,4 0,1 1,8 0a4,4 0,1 1,-8 0" />
+    <path android:fillColor="#90E0EF"
+        android:pathData="M66,59m-4,0a4,4 0,1 1,8 0a4,4 0,1 1,-8 0" />
+
+    <!-- Centre node -->
+    <path android:fillColor="#0077B6"
+        android:pathData="M90,90m-9,0a9,9 0,1 1,18 0a9,9 0,1 1,-18 0" />
+    <path android:fillColor="#48CAE4"
+        android:pathData="M90,90m-5,0a5,5 0,1 1,10 0a5,5 0,1 1,-10 0" />
+
+    <!-- Accent lines flanking logo -->
+    <path android:strokeColor="#0077B6" android:strokeWidth="1"
+        android:pathData="M0,90 L25,90" />
+    <path android:strokeColor="#0077B6" android:strokeWidth="1"
+        android:pathData="M155,90 L320,90" />
+
+</vector>
