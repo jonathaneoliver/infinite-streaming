@@ -1276,6 +1276,41 @@ validate_input() {
         log_success "Audio stream detected"
         SKIP_AUDIO=false
     fi
+
+    # Default to first audio stream; refine below if multiple are available.
+    INPUT_AUDIO_STREAM_INDEX=0
+    MULTIPLE_AUDIO_STREAMS=false
+    if [[ "$SKIP_AUDIO" != "true" ]]; then
+        # Probe all audio streams: index,channels[,language]
+        local audio_streams_info
+        audio_streams_info=$(ffprobe -v error -select_streams a \
+            -show_entries stream=index,channels:stream_tags=language \
+            -of csv=p=0 "$input" 2>/dev/null)
+        local audio_count
+        audio_count=$(echo "$audio_streams_info" | /usr/bin/grep -c '^[0-9]')
+        if [[ "$audio_count" -gt 1 ]]; then
+            MULTIPLE_AUDIO_STREAMS=true
+            log "Source has $audio_count audio streams — preferring 2-channel (stereo)"
+            # Find the first audio stream with channels=2 (logical index in :a sequence)
+            local logical_idx=0
+            local stereo_logical_idx=""
+            while IFS=, read -r abs_idx channels lang; do
+                # ffprobe csv yields trailing fields; accept any line starting with a number
+                [[ ! "$abs_idx" =~ ^[0-9]+$ ]] && continue
+                if [[ "$channels" = "2" && -z "$stereo_logical_idx" ]]; then
+                    stereo_logical_idx=$logical_idx
+                fi
+                log "  a:$logical_idx (abs $abs_idx) channels=$channels lang=${lang:-und}"
+                logical_idx=$((logical_idx + 1))
+            done <<< "$audio_streams_info"
+            if [[ -n "$stereo_logical_idx" ]]; then
+                INPUT_AUDIO_STREAM_INDEX=$stereo_logical_idx
+                log_success "Selected audio a:$INPUT_AUDIO_STREAM_INDEX (stereo)"
+            else
+                log "No 2-channel audio found; falling back to a:0"
+            fi
+        fi
+    fi
     
     # Get input details
     # If using master playlist with separate audio, probe the specific video stream
@@ -1422,8 +1457,13 @@ create_mezzanine() {
     
     # If using master playlist with separate audio, map specific streams
     if [[ "$USE_MASTER_PLAYLIST" == "true" ]] && [[ -n "$HIGHEST_VIDEO_STREAM_INDEX" ]]; then
-        log "Mapping audio stream and highest quality video stream (v:${HIGHEST_VIDEO_STREAM_INDEX})"
-        ffmpeg_cmd="$ffmpeg_cmd -map 0:a:0 -map 0:v:${HIGHEST_VIDEO_STREAM_INDEX}"
+        log "Mapping audio stream a:${INPUT_AUDIO_STREAM_INDEX:-0} and highest quality video stream (v:${HIGHEST_VIDEO_STREAM_INDEX})"
+        ffmpeg_cmd="$ffmpeg_cmd -map 0:a:${INPUT_AUDIO_STREAM_INDEX:-0} -map 0:v:${HIGHEST_VIDEO_STREAM_INDEX}"
+    elif [[ "$MULTIPLE_AUDIO_STREAMS" == "true" ]]; then
+        # Source has multiple audio streams; explicitly pick the chosen one
+        # (default ffmpeg stream selection prefers highest channel count).
+        log "Mapping audio stream a:${INPUT_AUDIO_STREAM_INDEX} (stereo) from multi-track source"
+        ffmpeg_cmd="$ffmpeg_cmd -map 0:v -map 0:a:${INPUT_AUDIO_STREAM_INDEX}"
     fi
     
     if [[ -n "$TIME_LIMIT" ]]; then
