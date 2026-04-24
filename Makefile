@@ -300,21 +300,23 @@ TEST_PATTERN_OUTPUT_DIR  ?= $(CONTENT_DIR)/originals
 TEST_PATTERN_OUTPUT      ?= $(TEST_PATTERN_OUTPUT_DIR)/$(TEST_PATTERN_OUTPUT_NAME)
 TEST_PATTERN_SIZE        ?= 3840x2160
 TEST_PATTERN_RATE        ?= 60
-# 60s divides cleanly into both 4s (create_abr_ladder.sh segments) and
-# 6s (go-live LL-HLS segments), so the mezzanine chops without boundary
-# leftovers. Override if you want a longer source.
-TEST_PATTERN_DURATION    ?= 60
-TEST_PATTERN_CRF         ?= 18
-TEST_PATTERN_FONT        ?= /System/Library/Fonts/Menlo.ttc
+# 120s total = 119s testsrc2 + 1s solid-white flash at the tail.
+# Divides cleanly into both 4s (create_abr_ladder.sh segments) and
+# 6s (go-live LL-HLS segments). Override if you want a longer source.
+TEST_PATTERN_DURATION       ?= 120
+TEST_PATTERN_FLASH_DURATION ?= 1
+TEST_PATTERN_CRF            ?= 18
+TEST_PATTERN_FONT           ?= /System/Library/Fonts/Menlo.ttc
 
 test-pattern:
 	@mkdir -p "$(TEST_PATTERN_OUTPUT_DIR)"
 	ffmpeg -y \
-		-f lavfi -i "testsrc2=size=$(TEST_PATTERN_SIZE):rate=$(TEST_PATTERN_RATE):duration=$(TEST_PATTERN_DURATION)" \
+		-f lavfi -i "testsrc2=size=$(TEST_PATTERN_SIZE):rate=$(TEST_PATTERN_RATE):duration=$$(( $(TEST_PATTERN_DURATION) - $(TEST_PATTERN_FLASH_DURATION) ))" \
+		-f lavfi -i "color=c=white:size=$(TEST_PATTERN_SIZE):rate=$(TEST_PATTERN_RATE):duration=$(TEST_PATTERN_FLASH_DURATION)" \
 		-f lavfi -i "sine=frequency=1000:duration=0.05:sample_rate=48000,volume=0.4,apad=pad_dur=0.95,aloop=loop=-1:size=48000,atrim=duration=$(TEST_PATTERN_DURATION)" \
-		-vf "drawtext=fontfile=$(TEST_PATTERN_FONT):text='%{pts\:hms}  f=%{n}  $(TEST_PATTERN_SIZE)':fontcolor=white:fontsize=96:box=1:boxcolor=black@0.6:x=80:y=80" \
+		-filter_complex "[0:v]drawtext=fontfile=$(TEST_PATTERN_FONT):text='%{pts\:hms}  f=%{n}  $(TEST_PATTERN_SIZE)':fontcolor=white:fontsize=96:box=1:boxcolor=black@0.6:x=80:y=80,format=yuv420p[labeled];[1:v]format=yuv420p[flash];[labeled][flash]concat=n=2:v=1:a=0[vout]" \
+		-map "[vout]" -map "2:a" \
 		-c:v libx264 -preset medium -crf $(TEST_PATTERN_CRF) \
-		-pix_fmt yuv420p \
 		-g $(TEST_PATTERN_RATE) -keyint_min $(TEST_PATTERN_RATE) -sc_threshold 0 \
 		-c:a aac -ar 48000 -b:a 192k \
 		-movflags +faststart \
