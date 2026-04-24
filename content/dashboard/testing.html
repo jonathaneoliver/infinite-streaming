@@ -1864,6 +1864,7 @@ maybe a histogram of b
             if (!eventType) return null;
             if (eventType === 'stall_start' || eventType === 'segment_stall' || eventType === 'frozen') return 'STALL';
             if (eventType === 'restart') return 'RESTART';
+            if (eventType === 'playing') return 'PLAYING';
             return null;
         }
 
@@ -2305,6 +2306,7 @@ maybe a histogram of b
         // Swim-lane events chart (STALL / RESTART / LOOP_PLAYER / LOOP_SERVER).
         // Shares x-axis with bitrate chart via syncChartViewportAcrossSession.
         const EVENT_LANES = {
+            'PLAYING':     { y: 5, color: '#16a34a', label: 'PLAYING' },
             'STALL':       { y: 4, color: '#000000', label: 'STALL' },
             'RESTART':     { y: 3, color: '#a855f7', label: 'RESTART' },
             'LOOP_PLAYER': { y: 2, color: '#06b6d4', label: 'LOOP PLAYER' },
@@ -2479,7 +2481,7 @@ maybe a histogram of b
                                 grid: { color: 'rgba(0,0,0,0.05)' }
                             },
                             y: {
-                                type: 'linear', min: 0.5, max: 4.5,
+                                type: 'linear', min: 0.5, max: 5.5,
                                 title: { display: true, text: 'Events', font: { family: 'Courier New, monospace', size: 11, weight: 'bold' }, color: '#4b5563' },
                                 ticks: {
                                     stepSize: 1,

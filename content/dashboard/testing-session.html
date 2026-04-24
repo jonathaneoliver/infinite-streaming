@@ -4097,6 +4097,7 @@
             if (eventType === 'stall_start' || eventType === 'segment_stall' || eventType === 'frozen') return 'STALL';
             if (eventType === 'restart') return 'RESTART';
             if (eventType === 'loop_marker') return 'LOOP';
+            if (eventType === 'playing') return 'PLAYING';
             return null;
         }
 
@@ -4623,6 +4624,7 @@
         // #f59e0b/#6366f1/#115e59 etc.). Hot pink, deep purple, cyan, and lime
         // don't collide with any of the throughput/rendition/limit colors.
         const EVENT_LANES = {
+            'PLAYING':     { y: 5, color: '#16a34a', label: 'PLAYING' },
             'STALL':       { y: 4, color: '#000000', label: 'STALL' },
             'RESTART':     { y: 3, color: '#a855f7', label: 'RESTART' },
             'LOOP_PLAYER': { y: 2, color: '#06b6d4', label: 'LOOP PLAYER' },
@@ -4736,7 +4738,7 @@
                                 grid: { color: 'rgba(0,0,0,0.05)' }
                             },
                             y: {
-                                type: 'linear', min: 0.5, max: 4.5,
+                                type: 'linear', min: 0.5, max: 5.5,
                                 title: {
                                     display: true,
                                     text: 'Events',
