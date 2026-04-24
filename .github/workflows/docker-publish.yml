@@ -3,6 +3,7 @@ name: Build and publish Docker image
 on:
   push:
     branches: [ main ]
+    tags: [ 'v*' ]
   workflow_dispatch:
 
 permissions:
@@ -32,6 +33,10 @@ jobs:
             type=ref,event=branch
             type=sha
             type=raw,value=latest,enable={{is_default_branch}}
+            # Semver tags: v1.2.3 → :v1.2.3, :v1.2, :v1
+            type=semver,pattern={{version}},prefix=v
+            type=semver,pattern={{major}}.{{minor}},prefix=v
+            type=semver,pattern={{major}},prefix=v
 
       - name: Build and push server
         uses: docker/build-push-action@v5
@@ -50,6 +55,9 @@ jobs:
             type=ref,event=branch
             type=sha
             type=raw,value=latest,enable={{is_default_branch}}
+            type=semver,pattern={{version}},prefix=v
+            type=semver,pattern={{major}}.{{minor}},prefix=v
+            type=semver,pattern={{major}},prefix=v
 
       - name: Build and push go-proxy
         uses: docker/build-push-action@v5

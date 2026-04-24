@@ -1,0 +1,27 @@
+name: Release Drafter
+
+# Drafts the next release on every push to main and on every PR (so the
+# autolabeler can tag PRs as they're opened/edited). Publishing the draft
+# is still manual via the GitHub UI ("Releases → Draft → Edit → Publish")
+# or `gh release edit … --draft=false`.
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    types: [ opened, reopened, synchronize, edited ]
+  workflow_dispatch:
+
+permissions:
+  contents: write       # to create/update the draft release
+  pull-requests: write  # to apply autolabeler labels
+
+jobs:
+  update_release_draft:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: release-drafter/release-drafter@v6
+        with:
+          config-name: release-drafter.yml
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -127,7 +127,11 @@ logs:
 	ssh $(K3S_SSH_HOST) "export KUBECONFIG=$(K3S_KUBECONFIG); kubectl logs deploy/infinite-streaming-dev --all-containers -f"
 
 deploy-release:
-	docker buildx build --platform linux/amd64 --build-arg VERSION=$(shell cat VERSION) -t $(K3S_SERVER_IMAGE) --push .
+	docker buildx build --platform linux/amd64 \
+		--build-arg VERSION=$(shell cat VERSION) \
+		-t $(K3S_SERVER_IMAGE) \
+		-t $(K3S_REGISTRY)/$(K3S_SERVER_REPO):$(shell cat VERSION) \
+		--push .
 	$(MAKE) deploy-k3s K3S_KUBECONFIG=$(K3S_KUBECONFIG) K3S_SERVER_IMAGE=$(K3S_SERVER_IMAGE)
 
 # ── Remote deployment testing ──────────────────────────────────────────

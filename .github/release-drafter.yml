@@ -1,0 +1,56 @@
+name-template: 'v$RESOLVED_VERSION'
+tag-template: 'v$RESOLVED_VERSION'
+
+# Bump major/minor/patch based on PR labels (or commit-message conventional
+# prefixes if no label is set). Labels win — add `breaking` to a PR for a
+# major bump, `feat` for minor, `fix`/`chore`/`docs` for patch.
+version-resolver:
+  major:
+    labels: ['breaking', 'major']
+  minor:
+    labels: ['enhancement', 'feat', 'minor']
+  patch:
+    labels: ['bug', 'fix', 'chore', 'docs', 'patch']
+  default: patch
+
+# Group merged PRs into sections in the changelog. Anything without a
+# matching label falls under "Other changes".
+categories:
+  - title: '🚀 Features'
+    labels: ['enhancement', 'feat']
+  - title: '🐛 Fixes'
+    labels: ['bug', 'fix']
+  - title: '📚 Documentation'
+    labels: ['documentation', 'docs']
+  - title: '🧰 Maintenance'
+    labels: ['chore', 'ci', 'refactor']
+  - title: '⚠️ Breaking changes'
+    labels: ['breaking']
+    collapse-after: 0
+
+# Auto-detect labels from conventional-commit prefixes in PR titles.
+# Lets you skip manually labelling every PR.
+autolabeler:
+  - label: 'enhancement'
+    title: ['/^feat[\\(:]/']
+  - label: 'bug'
+    title: ['/^fix[\\(:]/']
+  - label: 'documentation'
+    title: ['/^docs[\\(:]/']
+  - label: 'chore'
+    title: ['/^chore[\\(:]/']
+  - label: 'ci'
+    title: ['/^ci[\\(:]/']
+  - label: 'refactor'
+    title: ['/^refactor[\\(:]/']
+
+change-template: '- $TITLE @$AUTHOR (#$NUMBER)'
+change-title-escapes: '\<*_&'
+
+# Top of the release notes — short summary line + a render of the categories.
+template: |
+  ## What's changed since $PREVIOUS_TAG
+
+  $CHANGES
+
+  **Full changelog:** https://github.com/$OWNER/$REPOSITORY/compare/$PREVIOUS_TAG...v$RESOLVED_VERSION
