@@ -94,8 +94,8 @@ K3S_PROXY_IMAGE ?= $(K3S_REGISTRY)/$(K3S_PROXY_REPO):latest
 deploy-k3s-local:
 	@set -e; \
 	echo "Cleaning up legacy split deployments/services"; \
-	ssh $(K3S_SSH_HOST) "export KUBECONFIG=$(K3S_KUBECONFIG); kubectl delete service go-server go-proxy boss-server --ignore-not-found=true"; \
-	ssh $(K3S_SSH_HOST) "export KUBECONFIG=$(K3S_KUBECONFIG); kubectl delete deployment go-server go-proxy boss-server --ignore-not-found=true"; \
+	ssh $(K3S_SSH_HOST) "export KUBECONFIG=$(K3S_KUBECONFIG); kubectl delete service go-server go-proxy --ignore-not-found=true"; \
+	ssh $(K3S_SSH_HOST) "export KUBECONFIG=$(K3S_KUBECONFIG); kubectl delete deployment go-server go-proxy --ignore-not-found=true"; \
 	for manifest in $(K8S_MANIFESTS); do \
 		echo "Applying $$manifest to $(K3S_SSH_HOST)"; \
 		INFINITE_STREAM_RENDEZVOUS_URL='$(INFINITE_STREAM_RENDEZVOUS_URL)' \

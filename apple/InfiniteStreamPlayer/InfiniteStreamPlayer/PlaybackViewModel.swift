@@ -469,24 +469,59 @@ final class PlaybackViewModel: ObservableObject {
     }
 
     private enum DefaultsKey: String {
-        case selectedContentFull = "bossSelectedContentFull"
-        case selectedContent = "bossSelectedContent"
-        case selectedContentBase = "bossSelectedContentBase"
-        case selectedCodec = "bossSelectedCodec"
-        case selectedSegment = "bossSelectedSegment"
-        case selectedProtocol = "bossSelectedProtocol"
-        case selectedUrl = "bossSelectedUrl"
-        case audioMuted = "bossAudioMuted"
-        case baseURL = "bossBaseURL"
-        case playbackBaseURL = "bossPlaybackBaseURL"
-        case playerId = "bossPlayerId"
-        case prefer4kNative = "bossPrefer4kNative"
-        case autoRecoveryEnabled = "bossAutoRecovery"
-        case goLiveMode = "bossGoLiveMode"
-        case localProxyEnabled = "bossLocalProxyEnabled"
+        case selectedContentFull = "isSelectedContentFull"
+        case selectedContent = "isSelectedContent"
+        case selectedContentBase = "isSelectedContentBase"
+        case selectedCodec = "isSelectedCodec"
+        case selectedSegment = "isSelectedSegment"
+        case selectedProtocol = "isSelectedProtocol"
+        case selectedUrl = "isSelectedUrl"
+        case audioMuted = "isAudioMuted"
+        case baseURL = "isBaseURL"
+        case playbackBaseURL = "isPlaybackBaseURL"
+        case playerId = "isPlayerId"
+        case prefer4kNative = "isPrefer4kNative"
+        case autoRecoveryEnabled = "isAutoRecovery"
+        case goLiveMode = "isGoLiveMode"
+        case localProxyEnabled = "isLocalProxyEnabled"
+    }
+
+    /// One-shot rename of the legacy `boss…`-prefixed UserDefaults keys
+    /// from when the project was called Boss. For each key, copy any
+    /// existing legacy value to the new `is…` key (only if the new key
+    /// isn't already set) and then delete the legacy key. Idempotent —
+    /// runs at the top of loadDefaults() but does nothing once migrated.
+    private func migrateLegacyBossDefaultsKeys() {
+        let defaults = UserDefaults.standard
+        let migrations: [(legacy: String, current: String)] = [
+            ("bossSelectedContentFull", "isSelectedContentFull"),
+            ("bossSelectedContent",     "isSelectedContent"),
+            ("bossSelectedContentBase", "isSelectedContentBase"),
+            ("bossSelectedCodec",       "isSelectedCodec"),
+            ("bossSelectedSegment",     "isSelectedSegment"),
+            ("bossSelectedProtocol",    "isSelectedProtocol"),
+            ("bossSelectedUrl",         "isSelectedUrl"),
+            ("bossAudioMuted",          "isAudioMuted"),
+            ("bossBaseURL",             "isBaseURL"),
+            ("bossPlaybackBaseURL",     "isPlaybackBaseURL"),
+            ("bossPlayerId",            "isPlayerId"),
+            ("bossPrefer4kNative",      "isPrefer4kNative"),
+            ("bossAutoRecovery",        "isAutoRecovery"),
+            ("bossGoLiveMode",          "isGoLiveMode"),
+            ("bossLocalProxyEnabled",   "isLocalProxyEnabled"),
+        ]
+        for m in migrations {
+            if let legacy = defaults.object(forKey: m.legacy) {
+                if defaults.object(forKey: m.current) == nil {
+                    defaults.set(legacy, forKey: m.current)
+                }
+                defaults.removeObject(forKey: m.legacy)
+            }
+        }
     }
 
     private func loadDefaults() {
+        migrateLegacyBossDefaultsKeys()
         let defaults = UserDefaults.standard
         if let storedBase = defaults.string(forKey: DefaultsKey.baseURL.rawValue), !storedBase.isEmpty {
             baseURLString = storedBase
