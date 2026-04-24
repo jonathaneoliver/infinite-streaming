@@ -274,13 +274,21 @@ deploy-iphone:
 		"$(IPHONE_BUNDLE_ID)"
 
 deploy-androidtv:
-	$(ANDROID_SDK_HOME)/platform-tools/adb uninstall com.infinitestream.player 2>/dev/null || true
+	# Don't `adb uninstall` first — gradlew installDebug performs an
+	# in-place upgrade that preserves SharedPreferences (server list,
+	# selected protocol/segment/codec, etc.) since the local debug
+	# keystore signature is stable across rebuilds. Use
+	# `make uninstall-androidtv` if a real reset is needed (e.g. after
+	# a signature change).
 	cd $(ANDROIDTV_DIR) && \
 		JAVA_HOME="$(JAVA_HOME_ANDROID)" \
 		ANDROID_HOME="$(ANDROID_SDK_HOME)" \
 		PATH="$(ANDROID_SDK_HOME)/platform-tools:$$PATH" \
 		./gradlew installDebug
 	$(ANDROID_SDK_HOME)/platform-tools/adb shell am start -n com.infinitestream.player/.MainActivity
+
+uninstall-androidtv:
+	$(ANDROID_SDK_HOME)/platform-tools/adb uninstall com.infinitestream.player 2>/dev/null || true
 
 # ── Synthetic test pattern ─────────────────────────────────────────────
 # Generate a 4K mezzanine file from FFmpeg's `testsrc` source (colour
