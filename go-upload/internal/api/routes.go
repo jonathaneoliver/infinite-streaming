@@ -74,7 +74,7 @@ func (h *Handler) ListSources(w http.ResponseWriter, _ *http.Request) {
 	// Disk is the source of truth for which files exist. Scan first so any
 	// scp'd files appear in the cache, then return rows joined to disk
 	// presence (and recompute FilePath from current SourcesDir so legacy
-	// /boss/ paths resolve correctly without a DB migration).
+	// stored paths resolve correctly without a DB migration).
 	_ = util.ScanOriginals(h.App.Store, h.App.Cfg.SourcesDir)
 
 	cached, err := h.App.Store.ListSources()

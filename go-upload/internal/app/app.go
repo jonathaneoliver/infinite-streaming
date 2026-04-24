@@ -209,7 +209,8 @@ func (a *App) resolveJobInput(job *store.Job) (string, string, error) {
 			return "", "", util.Errf("Source not found: %s", *job.SourceID)
 		}
 		// Recompute the path against the current SourcesDir so legacy stored
-		// paths (e.g. /boss/originals/...) resolve correctly without migration.
+		// paths (from older content-root layouts) resolve correctly without
+		// requiring a DB migration.
 		filePath := filepath.Join(a.Cfg.SourcesDir, filepath.Base(src.FilePath))
 		return filePath, filepath.Join(a.Cfg.UploadsDir, job.JobID, "encoding.log"), nil
 	}

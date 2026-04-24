@@ -6,7 +6,7 @@ This document records measured encoding results produced by:
 
 Source used for this run:
 
-- `/Volumes/4TB/Boss/originals/INSANE_FPV_SHOTS：_Hydrofoil_Windsurfing.mkv`
+- `<your-content-dir>/originals/INSANE_FPV_SHOTS：_Hydrofoil_Windsurfing.mkv` (a 4K FPV clip)
 
 Run shape:
 
