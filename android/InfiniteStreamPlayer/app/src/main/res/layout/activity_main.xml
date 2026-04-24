@@ -155,9 +155,10 @@
 
             <com.google.android.material.button.MaterialButtonToggleGroup
                 android:id="@+id/server_toggle"
-                android:layout_width="wrap_content"
+                android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="4dp"
+                android:orientation="vertical"
                 app:selectionRequired="true"
                 app:singleSelection="true" />
 
