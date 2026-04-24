@@ -788,7 +788,23 @@ public class MainActivity extends AppCompatActivity {
 
     private void loadStream(String url) {
         if (player != null && !url.isEmpty()) {
-            MediaItem mediaItem = MediaItem.fromUri(url);
+            // Target offset + min/max offsets stay UNSET so the manifest's
+            // EXT-X-SERVER-CONTROL HOLD-BACK / PART-HOLD-BACK picks the start
+            // point — same first-play position as Apple tvOS. Narrow the
+            // playback-speed window so ExoPlayer catches up via rate
+            // adjustment after a stall instead of seeking toward the live
+            // edge, mirroring AVPlayer's automaticallyPreservesTimeOffsetFromLive.
+            MediaItem.LiveConfiguration liveConfig = new MediaItem.LiveConfiguration.Builder()
+                .setTargetOffsetMs(C.TIME_UNSET)
+                .setMinOffsetMs(C.TIME_UNSET)
+                .setMaxOffsetMs(C.TIME_UNSET)
+                .setMinPlaybackSpeed(0.97f)
+                .setMaxPlaybackSpeed(1.03f)
+                .build();
+            MediaItem mediaItem = new MediaItem.Builder()
+                .setUri(url)
+                .setLiveConfiguration(liveConfig)
+                .build();
             player.setMediaItem(mediaItem);
             player.prepare();
             player.setPlayWhenReady(true);
