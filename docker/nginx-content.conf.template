@@ -133,6 +133,18 @@ server {
         add_header Expires "0" always;
     }
 
+    # API: Pairing rendezvous URL (for the dashboard's "Pair a TV" widget)
+    location = /api/rendezvous {
+        proxy_pass http://go_upload_service;
+        add_header Access-Control-Allow-Origin * always;
+    }
+
+    # API: Force an immediate announce to the rendezvous (Server Info modal).
+    location = /api/announce-now {
+        proxy_pass http://go_upload_service;
+        add_header Access-Control-Allow-Origin * always;
+    }
+
     location = /api/sessions {
         proxy_pass http://go_proxy;
         proxy_set_header Host $host;

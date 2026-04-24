@@ -14,4 +14,7 @@
     <string name="ready">Ready</string>
     <string name="fullscreen">Fullscreen</string>
     <string name="exit_fullscreen">Exit Fullscreen</string>
+    <string name="discover_servers">+ Add server</string>
+    <string name="discovering">Looking for servers…</string>
+    <string name="no_servers_found">No servers detected on your network. Make sure the server is running and INFINITE_STREAM_ANNOUNCE_URL is set.</string>
 </resources>

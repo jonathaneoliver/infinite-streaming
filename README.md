@@ -432,6 +432,45 @@ Each has its own README for platform-specific setup.
 
 ---
 
+## Server discovery
+
+The native client apps need a way to find your server URL on first launch — they can't ship a hardcoded address. There are four ways to add a server, each suited to a different network situation:
+
+| Method | When to use | What it needs |
+|---|---|---|
+| **Same-WAN auto-discovery** | Phone/TV on the same Wi-Fi as the server | Server announces to the rendezvous; client lists it |
+| **QR scan** (iOS only) | Same-LAN, you have a phone with a camera | Open Server Info on the dashboard, scan the QR |
+| **Pair with code** | Cellular, VPN, hotel Wi-Fi — TV on a *different* network than the dashboard | Dashboard publishes its URL keyed by a 6-character code shown on the TV |
+| **Manual entry** | Always works as a fallback | Type host:port |
+
+### How auto-discovery works
+
+A small Cloudflare Worker (`cloudflare/pair-rendezvous/`) acts as a public rendezvous point. Every server with `INFINITE_STREAM_ANNOUNCE_URL` set heartbeats `{server_id, url, label}` to the Worker on boot, again every 12 hours, and on demand when the dashboard's Server Info modal is opened.
+
+Each announce is keyed by the server's public IP (hashed for privacy). When a client app opens its "+ Add server" / "Pair…" screen, it asks the Worker which servers are visible from *its* public IP. Cloudflare's edge sees both sides' IPs and only returns servers that match — so the list is implicitly scoped to "servers on the same WAN as you".
+
+> **Why not Bonjour/mDNS?** The obvious LAN-discovery answer is mDNS (`_infinitestream._tcp`), and we tried it. It doesn't work when the server runs inside a Docker container: Docker's default bridge network filters multicast, so the advertisement never reaches the host's network. Even host-network mode is fragile across Linux/macOS/Windows. Cloudflare's same-public-IP check gives us the same "show me servers on my network" answer without depending on multicast working through the container.
+
+### How code-based pairing works
+
+Camera-less TVs (Apple TV, Android TV) can't scan a QR. Instead the TV shows a 6-character code; the user types it into the **Pair with code** widget on the dashboard, which publishes the dashboard's URL keyed by that code. The TV is polling the rendezvous for that code and picks up the URL within a couple of seconds. Cross-network pairing only works if the dashboard URL is reachable from the TV (the Server Info modal warns you when the URL looks LAN-only).
+
+### External services
+
+- **Cloudflare Workers + KV** for the rendezvous. Fits comfortably in the free plan: each server costs ~2 KV writes/day at the default cadence (1,000 writes/day total budget, account-wide). The default Worker is at `https://pair-infinitestream.jeoliver.com` — to self-host, follow [`cloudflare/pair-rendezvous/README.md`](cloudflare/pair-rendezvous/README.md) and override `INFINITE_STREAM_RENDEZVOUS_URL` (server) plus `InfiniteStreamRendezvousURL` (UserDefaults / SharedPreferences on the clients).
+
+That's it — no third-party services beyond a Cloudflare account.
+
+### Server-side env
+
+| Var | Purpose |
+|---|---|
+| `INFINITE_STREAM_RENDEZVOUS_URL` | Rendezvous Worker base URL. Required to enable any pairing. |
+| `INFINITE_STREAM_ANNOUNCE_URL` | URL that clients should use to reach this server (e.g. `http://lenovo.local:30000`). When set, this server appears in same-WAN auto-discovery. |
+| `INFINITE_STREAM_ANNOUNCE_LABEL` | Optional friendly label. Defaults to `host:port` from the announce URL. |
+
+---
+
 ## Other ways to run it
 
 Most users should stick with Docker Compose from the [Quick start](#quick-start). These variants are for specific scenarios.

@@ -18,41 +18,14 @@
     <true/>
     <key>UILaunchScreen</key>
     <dict/>
+    <key>NSCameraUsageDescription</key>
+    <string>Scan a QR code from the InfiniteStream dashboard's Server Info to set the server URL automatically.</string>
     <key>NSAppTransportSecurity</key>
     <dict>
+        <!-- Allow http to local-network addresses (RFC 1918, link-local, .local). -->
+        <!-- Add specific exception domains here for non-LAN hosts (Tailscale, public DNS, etc.). -->
         <key>NSAllowsLocalNetworking</key>
         <true/>
-        <key>NSExceptionDomains</key>
-        <dict>
-            <key>infinitestreaming.jeoliver.com</key>
-            <dict>
-                <key>NSExceptionAllowsInsecureHTTPLoads</key>
-                <true/>
-                <key>NSIncludesSubdomains</key>
-                <true/>
-            </dict>
-            <key>100.111.190.54</key>
-            <dict>
-                <key>NSExceptionAllowsInsecureHTTPLoads</key>
-                <true/>
-                <key>NSIncludesSubdomains</key>
-                <true/>
-            </dict>
-            <key>jonathanoliver-ubuntu.local</key>
-            <dict>
-                <key>NSExceptionAllowsInsecureHTTPLoads</key>
-                <true/>
-                <key>NSIncludesSubdomains</key>
-                <true/>
-            </dict>
-            <key>192.168.0.106</key>
-            <dict>
-                <key>NSExceptionAllowsInsecureHTTPLoads</key>
-                <true/>
-                <key>NSIncludesSubdomains</key>
-                <true/>
-            </dict>
-        </dict>
     </dict>
     <key>UISupportedInterfaceOrientations</key>
     <array>

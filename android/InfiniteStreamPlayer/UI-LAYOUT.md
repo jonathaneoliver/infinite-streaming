@@ -30,7 +30,7 @@ This document describes the visual layout of the InfiniteStream Android Player a
 │                                                                     │
 │ Content:   [bbb                       ▼]                           │
 │                                                                     │
-│ Status: Ready - http://100.111.190.54:40081/go-live/bbb/master... │
+│ Status: Ready - http://localhost:40081/go-live/bbb/master...        │
 │                                                                     │
 └─────────────────────────────────────────────────────────────────────┘
 ```

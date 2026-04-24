@@ -19,6 +19,11 @@
 		A1A1A1A1A1A1A1A1A1A10006 /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A11006 /* Models.swift */; };
 		A1A1A1A1A1A1A1A1A1A1000D /* RequestTracker.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A1100D /* RequestTracker.swift */; };
 		A1A1A1A1A1A1A1A1A1A1000F /* LocalHTTPProxy.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A1100F /* LocalHTTPProxy.swift */; };
+		A1A1A1A1A1A1A1A1A1A10020 /* QRScannerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A11030 /* QRScannerView.swift */; };
+		A1A1A1A1A1A1A1A1A1A10031 /* ServerProfile.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A11031 /* ServerProfile.swift */; };
+		A1A1A1A1A1A1A1A1A1A10032 /* AddServerSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A11032 /* AddServerSheet.swift */; };
+		A1A1A1A1A1A1A1A1A1A10033 /* RendezvousService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A11033 /* RendezvousService.swift */; };
+		A1A1A1A1A1A1A1A1A1A10034 /* PairingView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A11034 /* PairingView.swift */; };
 		A1A1A1A1A1A1A1A1A1A12001 /* AVKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A13001 /* AVKit.framework */; };
 		A1A1A1A1A1A1A1A1A1A12002 /* AVFoundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A13002 /* AVFoundation.framework */; };
 		A2A2A2A2A2A2A2A2A2A20001 /* InfiniteStreamPlayerApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A11001 /* InfiniteStreamPlayerApp.swift */; };
@@ -29,6 +34,11 @@
 		A2A2A2A2A2A2A2A2A2A20006 /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A11006 /* Models.swift */; };
 		A2A2A2A2A2A2A2A2A2A2000D /* RequestTracker.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A1100D /* RequestTracker.swift */; };
 		A2A2A2A2A2A2A2A2A2A2000F /* LocalHTTPProxy.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A1100F /* LocalHTTPProxy.swift */; };
+		A2A2A2A2A2A2A2A2A2A20020 /* QRScannerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A11030 /* QRScannerView.swift */; };
+		A2A2A2A2A2A2A2A2A2A20031 /* ServerProfile.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A11031 /* ServerProfile.swift */; };
+		A2A2A2A2A2A2A2A2A2A20032 /* AddServerSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A11032 /* AddServerSheet.swift */; };
+		A2A2A2A2A2A2A2A2A2A20033 /* RendezvousService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A11033 /* RendezvousService.swift */; };
+		A2A2A2A2A2A2A2A2A2A20034 /* PairingView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A11034 /* PairingView.swift */; };
 		A2A2A2A2A2A2A2A2A2A22001 /* AVKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A13001 /* AVKit.framework */; };
 		A2A2A2A2A2A2A2A2A2A22002 /* AVFoundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A13002 /* AVFoundation.framework */; };
 /* End PBXBuildFile section */
@@ -44,6 +54,11 @@
 		A1A1A1A1A1A1A1A1A1A11006 /* Models.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models.swift; sourceTree = "<group>"; };
 		A1A1A1A1A1A1A1A1A1A1100D /* RequestTracker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RequestTracker.swift; sourceTree = "<group>"; };
 		A1A1A1A1A1A1A1A1A1A1100F /* LocalHTTPProxy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalHTTPProxy.swift; sourceTree = "<group>"; };
+		A1A1A1A1A1A1A1A1A1A11030 /* QRScannerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QRScannerView.swift; sourceTree = "<group>"; };
+		A1A1A1A1A1A1A1A1A1A11031 /* ServerProfile.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ServerProfile.swift; sourceTree = "<group>"; };
+		A1A1A1A1A1A1A1A1A1A11032 /* AddServerSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AddServerSheet.swift; sourceTree = "<group>"; };
+		A1A1A1A1A1A1A1A1A1A11033 /* RendezvousService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RendezvousService.swift; sourceTree = "<group>"; };
+		A1A1A1A1A1A1A1A1A1A11034 /* PairingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PairingView.swift; sourceTree = "<group>"; };
 		A1A1A1A1A1A1A1A1A1A11010 /* InfiniteStreamPlayer-iOS/Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = "InfiniteStreamPlayer-iOS/Info.plist"; sourceTree = "<group>"; };
 		A1A1A1A1A1A1A1A1A1A11011 /* InfiniteStreamPlayer-tvOS/Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = "InfiniteStreamPlayer-tvOS/Info.plist"; sourceTree = "<group>"; };
 		A1A1A1A1A1A1A1A1A1A11020 /* InfiniteStreamPlayer.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; path = InfiniteStreamPlayer.app; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -95,6 +110,11 @@
 				A1A1A1A1A1A1A1A1A1A11006 /* Models.swift */,
 				A1A1A1A1A1A1A1A1A1A1100D /* RequestTracker.swift */,
 				A1A1A1A1A1A1A1A1A1A1100F /* LocalHTTPProxy.swift */,
+				A1A1A1A1A1A1A1A1A1A11030 /* QRScannerView.swift */,
+				A1A1A1A1A1A1A1A1A1A11031 /* ServerProfile.swift */,
+				A1A1A1A1A1A1A1A1A1A11032 /* AddServerSheet.swift */,
+				A1A1A1A1A1A1A1A1A1A11033 /* RendezvousService.swift */,
+				A1A1A1A1A1A1A1A1A1A11034 /* PairingView.swift */,
 				B1B1B1020101010101010101 /* InfiniteStreamLogo.swift */,
 				B1B1B1010101010101010101 /* Assets.xcassets */,
 			);
@@ -233,6 +253,11 @@
 				A1A1A1A1A1A1A1A1A1A10006 /* Models.swift in Sources */,
 				A1A1A1A1A1A1A1A1A1A1000D /* RequestTracker.swift in Sources */,
 				A1A1A1A1A1A1A1A1A1A1000F /* LocalHTTPProxy.swift in Sources */,
+				A1A1A1A1A1A1A1A1A1A10020 /* QRScannerView.swift in Sources */,
+				A1A1A1A1A1A1A1A1A1A10031 /* ServerProfile.swift in Sources */,
+				A1A1A1A1A1A1A1A1A1A10032 /* AddServerSheet.swift in Sources */,
+				A1A1A1A1A1A1A1A1A1A10033 /* RendezvousService.swift in Sources */,
+				A1A1A1A1A1A1A1A1A1A10034 /* PairingView.swift in Sources */,
 				B1B1B1050101010101010101 /* InfiniteStreamLogo.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -249,6 +274,11 @@
 				A2A2A2A2A2A2A2A2A2A20006 /* Models.swift in Sources */,
 				A2A2A2A2A2A2A2A2A2A2000D /* RequestTracker.swift in Sources */,
 				A2A2A2A2A2A2A2A2A2A2000F /* LocalHTTPProxy.swift in Sources */,
+				A2A2A2A2A2A2A2A2A2A20020 /* QRScannerView.swift in Sources */,
+				A2A2A2A2A2A2A2A2A2A20031 /* ServerProfile.swift in Sources */,
+				A2A2A2A2A2A2A2A2A2A20032 /* AddServerSheet.swift in Sources */,
+				A2A2A2A2A2A2A2A2A2A20033 /* RendezvousService.swift in Sources */,
+				A2A2A2A2A2A2A2A2A2A20034 /* PairingView.swift in Sources */,
 				B1B1B1060101010101010101 /* InfiniteStreamLogo.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

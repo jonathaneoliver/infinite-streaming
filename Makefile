@@ -52,7 +52,7 @@ buildx-arm64:
 buildx-push:
 	docker buildx build --platform linux/amd64,linux/arm64 -t infinite-streaming:latest --push .
 
-K3S_REGISTRY ?= 100.111.190.54:5000
+K3S_REGISTRY ?= localhost:5000
 K3S_SERVER_REPO ?= infinite-streaming
 K3S_PROXY_REPO ?= go-proxy
 
@@ -98,6 +98,11 @@ deploy-k3s-local:
 	ssh $(K3S_SSH_HOST) "export KUBECONFIG=$(K3S_KUBECONFIG); kubectl delete deployment go-server go-proxy boss-server --ignore-not-found=true"; \
 	for manifest in $(K8S_MANIFESTS); do \
 		echo "Applying $$manifest to $(K3S_SSH_HOST)"; \
+		INFINITE_STREAM_RENDEZVOUS_URL='$(INFINITE_STREAM_RENDEZVOUS_URL)' \
+		INFINITE_STREAM_ANNOUNCE_URL_K3S_DEV='$(INFINITE_STREAM_ANNOUNCE_URL_K3S_DEV)' \
+		INFINITE_STREAM_ANNOUNCE_LABEL_K3S_DEV='$(INFINITE_STREAM_ANNOUNCE_LABEL_K3S_DEV)' \
+		INFINITE_STREAM_ANNOUNCE_URL_K3S_RELEASE='$(INFINITE_STREAM_ANNOUNCE_URL_K3S_RELEASE)' \
+		INFINITE_STREAM_ANNOUNCE_LABEL_K3S_RELEASE='$(INFINITE_STREAM_ANNOUNCE_LABEL_K3S_RELEASE)' \
 		envsubst < $$manifest | ssh $(K3S_SSH_HOST) "export KUBECONFIG=$(K3S_KUBECONFIG); kubectl apply -f -"; \
 	done; \
 	echo "Updating deployment images"; \
@@ -132,6 +137,8 @@ deploy-release:
 TEST_SSH ?= user@test-host
 TEST_MEDIA_DIR ?= /home/user/media
 REPO_URL ?= https://github.com/jonathaneoliver/infinite-streaming.git
+# Bare hostname for announce URLs (TEST_SSH = user@host).
+TEST_HOST ?= $(lastword $(subst @, ,$(TEST_SSH)))
 
 test-go:
 	@echo "=== go-proxy ==="
@@ -152,7 +159,7 @@ test-deploy-dev:
 		--exclude='.git/' \
 		--exclude='.env' \
 		./ $(TEST_SSH):~/test-dev/
-	ssh -n $(TEST_SSH) 'echo "CONTENT_DIR=$(TEST_MEDIA_DIR)" > ~/test-dev/.env'
+	ssh -n $(TEST_SSH) 'printf "CONTENT_DIR=%s\nINFINITE_STREAM_RENDEZVOUS_URL=%s\nINFINITE_STREAM_ANNOUNCE_URL=%s\nINFINITE_STREAM_ANNOUNCE_LABEL=%s\n" "$(TEST_MEDIA_DIR)" "$(INFINITE_STREAM_RENDEZVOUS_URL)" "$(INFINITE_STREAM_ANNOUNCE_URL)" "$(INFINITE_STREAM_ANNOUNCE_LABEL)" > ~/test-dev/.env'
 	scp tests/deploy/override-dev.yml $(TEST_SSH):~/test-dev/docker-compose.override.yml
 	ssh $(TEST_SSH) 'cd ~/test-dev && docker compose build && docker compose up -d'
 
@@ -173,7 +180,7 @@ test-status:
 test-deploy-compose:
 	@echo "=== Option 1: Docker Compose from source (port 22000) ==="
 	ssh $(TEST_SSH) 'if [ -d ~/test-compose/.git ]; then cd ~/test-compose && git checkout -- . && git pull; else git clone $(REPO_URL) ~/test-compose; fi'
-	ssh $(TEST_SSH) 'echo "CONTENT_DIR=$(TEST_MEDIA_DIR)" > ~/test-compose/.env'
+	ssh -n $(TEST_SSH) 'printf "CONTENT_DIR=%s\nINFINITE_STREAM_RENDEZVOUS_URL=%s\nINFINITE_STREAM_ANNOUNCE_URL=http://%s:22000\n" "$(TEST_MEDIA_DIR)" "$(INFINITE_STREAM_RENDEZVOUS_URL)" "$(TEST_HOST)" > ~/test-compose/.env'
 	scp tests/deploy/override-compose.yml $(TEST_SSH):~/test-compose/docker-compose.override.yml
 	ssh $(TEST_SSH) 'cd ~/test-compose && docker compose build && docker compose up -d'
 
@@ -183,6 +190,8 @@ test-deploy-run:
 		docker run -d --name test-docker-run --cap-add NET_ADMIN --privileged \
 		-p 23000:30000 -p 23081:30081 -p 23181:30181 -p 23281:30281 -p 23381:30381 -p 23481:30481 \
 		-p 23581:30581 -p 23681:30681 -p 23781:30781 -p 23881:30881 \
+		-e INFINITE_STREAM_RENDEZVOUS_URL=$(INFINITE_STREAM_RENDEZVOUS_URL) \
+		-e INFINITE_STREAM_ANNOUNCE_URL=http://$(TEST_HOST):23000 \
 		-v $(TEST_MEDIA_DIR):/media \
 		infinite-streaming:latest /sbin/launch.sh 1'
 
@@ -190,7 +199,7 @@ test-deploy-ghcr:
 	@echo "=== Option 3: GHCR pre-built (port 24000) ==="
 	ssh $(TEST_SSH) 'mkdir -p ~/test-ghcr'
 	ssh $(TEST_SSH) 'if [ -d ~/test-compose ]; then cp ~/test-compose/docker-compose.ghcr.yml ~/test-ghcr/docker-compose.yml; fi'
-	ssh $(TEST_SSH) 'echo "CONTENT_DIR=$(TEST_MEDIA_DIR)" > ~/test-ghcr/.env'
+	ssh -n $(TEST_SSH) 'printf "CONTENT_DIR=%s\nINFINITE_STREAM_RENDEZVOUS_URL=%s\nINFINITE_STREAM_ANNOUNCE_URL=http://%s:24000\n" "$(TEST_MEDIA_DIR)" "$(INFINITE_STREAM_RENDEZVOUS_URL)" "$(TEST_HOST)" > ~/test-ghcr/.env'
 	scp tests/deploy/override-ghcr.yml $(TEST_SSH):~/test-ghcr/docker-compose.override.yml
 	ssh $(TEST_SSH) 'cd ~/test-ghcr && docker compose up -d'
 
@@ -198,7 +207,7 @@ test-deploy-registry:
 	@echo "=== Option 4: Private registry (port 25000) ==="
 	ssh $(TEST_SSH) 'mkdir -p ~/test-registry'
 	scp tests/deploy/docker-compose.registry.yml $(TEST_SSH):~/test-registry/docker-compose.yml
-	ssh $(TEST_SSH) 'echo "CONTENT_DIR=$(TEST_MEDIA_DIR)" > ~/test-registry/.env && echo "K3S_REGISTRY=$(K3S_REGISTRY)" >> ~/test-registry/.env'
+	ssh -n $(TEST_SSH) 'printf "CONTENT_DIR=%s\nK3S_REGISTRY=%s\nINFINITE_STREAM_RENDEZVOUS_URL=%s\nINFINITE_STREAM_ANNOUNCE_URL=http://%s:25000\n" "$(TEST_MEDIA_DIR)" "$(K3S_REGISTRY)" "$(INFINITE_STREAM_RENDEZVOUS_URL)" "$(TEST_HOST)" > ~/test-registry/.env'
 	ssh $(TEST_SSH) 'cd ~/test-registry && docker compose up -d'
 
 # ── Screenshots ────────────────────────────────────────────────────────

@@ -11,12 +11,12 @@ final class PlaybackViewModel: ObservableObject {
         return formatter
     }()
 
-    @Published var baseURLString: String = "http://100.111.190.54:40081" {
+    @Published var baseURLString: String = "http://localhost:30000" {
         didSet {
             persist(.baseURL, baseURLString)
         }
     }
-    @Published var playbackBaseURLString: String = "http://100.111.190.54:40081" {
+    @Published var playbackBaseURLString: String = "http://localhost:30081" {
         didSet { persist(.playbackBaseURL, playbackBaseURLString) }
     }
     @Published var availableContent: [ContentItem] = []
@@ -491,13 +491,13 @@ final class PlaybackViewModel: ObservableObject {
         if let storedBase = defaults.string(forKey: DefaultsKey.baseURL.rawValue), !storedBase.isEmpty {
             baseURLString = storedBase
         } else {
-            baseURLString = "http://100.111.190.54:40000"
+            baseURLString = "http://localhost:30000"
             defaults.setValue(baseURLString, forKey: DefaultsKey.baseURL.rawValue)
         }
         if let storedPlayback = defaults.string(forKey: DefaultsKey.playbackBaseURL.rawValue), !storedPlayback.isEmpty {
             playbackBaseURLString = storedPlayback
         } else {
-            playbackBaseURLString = "http://100.111.190.54:40081"
+            playbackBaseURLString = "http://localhost:30081"
             defaults.setValue(playbackBaseURLString, forKey: DefaultsKey.playbackBaseURL.rawValue)
         }
         if let stored = defaults.string(forKey: DefaultsKey.selectedContentFull.rawValue) {

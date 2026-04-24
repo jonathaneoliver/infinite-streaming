@@ -1,49 +1,56 @@
 import SwiftUI
 
+// Neutral starting presets. The user is expected to override via the
+// "Base URL" text field or the QR scanner; the value persists in
+// UserDefaults. The .custom case means "leave the URLs alone" — used
+// after a QR scan or a manual edit so applyEnvironment() doesn't
+// clobber the user's chosen host.
 enum ServerEnvironment: String, CaseIterable, Identifiable {
-    case dev
-    case release
-    case ubuntu
+    case local        // standard local install (Docker Compose / k3s release)
+    case localDev     // optional second port for a parallel dev deployment
+    case localTest    // optional third port for ad-hoc test deployment
+    case custom       // user-provided URL (QR scan or manual entry)
 
     var id: String { rawValue }
 
     var label: String {
         switch self {
-        case .dev: return "Dev (40000)"
-        case .release: return "Release (30000)"
-        case .ubuntu: return "Ubuntu (21000)"
+        case .local: return "Local (30000)"
+        case .localDev: return "Local Dev (40000)"
+        case .localTest: return "Local Test (21000)"
+        case .custom: return "Custom"
         }
     }
 
     var shortLabel: String {
         switch self {
-        case .dev: return "Dev"
-        case .release: return "Release"
-        case .ubuntu: return "Ubuntu"
+        case .local: return "Local"
+        case .localDev: return "Dev"
+        case .localTest: return "Test"
+        case .custom: return "Custom"
         }
     }
 
     var host: String {
-        switch self {
-        case .dev: return "100.111.190.54"
-        case .release: return "infinitestreaming.jeoliver.com"
-        case .ubuntu: return "192.168.0.106"
-        }
+        // Default to localhost; user overrides via the Base URL field.
+        return "localhost"
     }
 
     var contentPort: String {
         switch self {
-        case .dev: return "40000"
-        case .release: return "30000"
-        case .ubuntu: return "21000"
+        case .local: return "30000"
+        case .localDev: return "40000"
+        case .localTest: return "21000"
+        case .custom: return "30000"
         }
     }
 
     var playbackPort: String {
         switch self {
-        case .dev: return "40081"
-        case .release: return "30081"
-        case .ubuntu: return "21081"
+        case .local: return "30081"
+        case .localDev: return "40081"
+        case .localTest: return "21081"
+        case .custom: return "30081"
         }
     }
 }
@@ -56,10 +63,17 @@ struct ContentView: View {
     @State private var protocolSelection: ProtocolOption = .hls
     @State private var segmentSelection: SegmentOption = .s6
     @State private var codecSelection: CodecOption = .h264
-    @AppStorage("server_environment") private var serverEnvironmentRaw: String = ServerEnvironment.dev.rawValue
+    @AppStorage("server_environment") private var serverEnvironmentRaw: String = ServerEnvironment.local.rawValue
     @State private var showContentPicker = false
     @State private var isTVFullscreen = false
+    @State private var showQRScanner = false
+    @State private var showAddServer = false
+    @State private var showPairing = false
+    @StateObject private var serverStore = ServerProfileStore.shared
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    #if os(iOS)
+    @Environment(\.verticalSizeClass) private var verticalSizeClass
+    #endif
     #if os(tvOS)
     private enum TVFocus: Hashable { case retryFetch, fullscreen, serverDev, serverUbuntu, contentButton, allow4k }
     @FocusState private var tvFocus: TVFocus?
@@ -120,6 +134,58 @@ struct ContentView: View {
             .sheet(isPresented: $showContentPicker) {
                 contentPickerSheet
             }
+            .sheet(isPresented: $showPairing) {
+                PairingView(
+                    onPaired: { serverURL in
+                        if let profile = ServerProfile.fromDashboardURL(serverURL) {
+                            serverStore.add(profile, makeActive: true)
+                            applyActiveProfile()
+                            baseURLText = viewModel.baseURLString
+                            Task {
+                                await viewModel.refreshContentList()
+                                if !viewModel.selectedContent.isEmpty {
+                                    viewModel.reload()
+                                }
+                            }
+                        }
+                        showPairing = false
+                    },
+                    onCancel: { showPairing = false }
+                )
+            }
+            #if os(iOS)
+            .sheet(isPresented: $showQRScanner) {
+                QRScannerView { scanned in
+                    if let profile = ServerProfile.fromDashboardURL(scanned) {
+                        serverStore.add(profile, makeActive: true)
+                        applyActiveProfile()
+                        baseURLText = viewModel.baseURLString
+                        Task {
+                            await viewModel.refreshContentList()
+                            if !viewModel.selectedContent.isEmpty {
+                                viewModel.reload()
+                            }
+                        }
+                    }
+                    showQRScanner = false
+                }
+            }
+            .sheet(isPresented: $showAddServer) {
+                AddServerSheet(store: serverStore) { added in
+                    if added != nil {
+                        applyActiveProfile()
+                        baseURLText = viewModel.baseURLString
+                        Task {
+                            await viewModel.refreshContentList()
+                            if !viewModel.selectedContent.isEmpty {
+                                viewModel.reload()
+                            }
+                        }
+                    }
+                    showAddServer = false
+                }
+            }
+            #endif
     }
 
     @ViewBuilder
@@ -140,8 +206,15 @@ struct ContentView: View {
                 Text("InfiniteStream Player")
                     .font(.title)
 
-                let compact = horizontalSizeClass == .compact
-                if compact {
+                // Three layout modes:
+                //  - portrait: narrow & tall → wrap toggles 2×2, stacked pickers.
+                //  - phoneLandscape: narrow & short → short button labels +
+                //    single-row toggles (the regular branch's full labels
+                //    overflow at iPhone landscape widths ~750-844pt).
+                //  - regular: wide (iPad / Mac) → full labels, single row.
+                let isPortrait = horizontalSizeClass == .compact && verticalSizeClass == .regular
+                let isPhoneLandscape = horizontalSizeClass == .compact && verticalSizeClass == .compact
+                if isPortrait || isPhoneLandscape {
                     VStack(alignment: .leading, spacing: 8) {
                         HStack(spacing: 8) {
                             Button("Retry") {
@@ -168,21 +241,41 @@ struct ContentView: View {
                             .buttonStyle(.bordered)
                             .controlSize(.small)
                         }
-                        HStack(spacing: 12) {
-                            Toggle("4K", isOn: $viewModel.prefer4kNative)
-                                .toggleStyle(.switch)
-                                .fixedSize()
-                            Toggle("Local Proxy", isOn: $viewModel.localProxyEnabled)
-                                .toggleStyle(.switch)
-                                .fixedSize()
-                            Toggle("Auto-Recovery", isOn: $viewModel.autoRecoveryEnabled)
-                                .toggleStyle(.switch)
-                                .fixedSize()
-                            Toggle("Go Live", isOn: $viewModel.goLiveMode)
-                                .toggleStyle(.switch)
-                                .fixedSize()
+                        if isPhoneLandscape {
+                            // Single row — landscape has the width for it.
+                            HStack(spacing: 16) {
+                                Toggle("4K", isOn: $viewModel.prefer4kNative)
+                                    .toggleStyle(.switch).fixedSize()
+                                Toggle("Local Proxy", isOn: $viewModel.localProxyEnabled)
+                                    .toggleStyle(.switch).fixedSize()
+                                Toggle("Auto-Recovery", isOn: $viewModel.autoRecoveryEnabled)
+                                    .toggleStyle(.switch).fixedSize()
+                                Toggle("Go Live", isOn: $viewModel.goLiveMode)
+                                    .toggleStyle(.switch).fixedSize()
+                                Spacer(minLength: 0)
+                            }
+                            .font(.caption)
+                        } else {
+                            // 2×2 grid for portrait so all four fit without
+                            // overflowing the iPhone-portrait screen edge.
+                            VStack(alignment: .leading, spacing: 6) {
+                                HStack(spacing: 16) {
+                                    Toggle("4K", isOn: $viewModel.prefer4kNative)
+                                        .toggleStyle(.switch).fixedSize()
+                                    Toggle("Local Proxy", isOn: $viewModel.localProxyEnabled)
+                                        .toggleStyle(.switch).fixedSize()
+                                    Spacer(minLength: 0)
+                                }
+                                HStack(spacing: 16) {
+                                    Toggle("Auto-Recovery", isOn: $viewModel.autoRecoveryEnabled)
+                                        .toggleStyle(.switch).fixedSize()
+                                    Toggle("Go Live", isOn: $viewModel.goLiveMode)
+                                        .toggleStyle(.switch).fixedSize()
+                                    Spacer(minLength: 0)
+                                }
+                            }
+                            .font(.caption)
                         }
-                        .font(.caption)
                     }
                 } else {
                     HStack(spacing: 12) {
@@ -259,42 +352,94 @@ struct ContentView: View {
                     Text("Content Control")
                         .font(.headline)
 
-                    Picker("Server", selection: $serverEnvironmentRaw) {
-                        ForEach(ServerEnvironment.allCases) { env in
-                            Text(env.label).tag(env.rawValue)
+                    // Server profile picker: one button per known server + "+" to add.
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 6) {
+                            ForEach(serverStore.profiles) { profile in
+                                Button {
+                                    serverStore.setActive(profile.id)
+                                    applyActiveProfile()
+                                    baseURLText = viewModel.baseURLString
+                                    Task {
+                                        await viewModel.refreshContentList()
+                                        if !viewModel.selectedContent.isEmpty {
+                                            viewModel.reload()
+                                        }
+                                    }
+                                } label: {
+                                    Text(profile.label)
+                                        .font(.caption)
+                                        .lineLimit(1)
+                                        .padding(.horizontal, 10)
+                                        .padding(.vertical, 6)
+                                        .background(serverStore.activeID == profile.id ? Color.accentColor.opacity(0.25) : Color.gray.opacity(0.15))
+                                        .foregroundColor(serverStore.activeID == profile.id ? .accentColor : .primary)
+                                        .cornerRadius(6)
+                                }
+                                .buttonStyle(.plain)
+                                .contextMenu {
+                                    Button(role: .destructive) {
+                                        forgetServer(profile)
+                                    } label: {
+                                        Label("Forget \"\(profile.label)\"", systemImage: "trash")
+                                    }
+                                }
+                            }
+                            Button {
+                                showAddServer = true
+                            } label: {
+                                Image(systemName: "plus.circle")
+                                    .padding(.horizontal, 6)
+                                    .padding(.vertical, 6)
+                            }
+                            .buttonStyle(.plain)
                         }
                     }
-                    .pickerStyle(.segmented)
-                    .onChange(of: serverEnvironmentRaw) {
-                        applyEnvironment()
-                        baseURLText = viewModel.baseURLString
+
+                    HStack(spacing: 8) {
+                        TextField("Base URL", text: $baseURLText)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled(true)
+                            .onSubmit {
+                                viewModel.baseURLString = baseURLText
+                            }
                     }
 
-                    TextField("Base URL", text: $baseURLText)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled(true)
-                        .onSubmit {
-                            viewModel.baseURLString = baseURLText
-                        }
-
-                    if compact {
+                    if isPortrait {
                         VStack(alignment: .leading, spacing: 6) {
-                            HStack(spacing: 8) {
+                            // Stack pickers vertically with explicit row labels
+                            // so they fit on iPhone portrait widths without
+                            // their menu titles getting clipped. Landscape
+                            // and iPad use the single-row branch below.
+                            HStack(spacing: 12) {
+                                Text("Protocol").frame(width: 70, alignment: .leading)
                                 Picker("Protocol", selection: $protocolSelection) {
                                     ForEach(ProtocolOption.allCases) { option in
                                         Text(option.label).tag(option)
                                     }
                                 }
+                                .labelsHidden()
+                                Spacer(minLength: 0)
+                            }
+                            HStack(spacing: 12) {
+                                Text("Segment").frame(width: 70, alignment: .leading)
                                 Picker("Segment", selection: $segmentSelection) {
                                     ForEach(SegmentOption.allCases) { option in
                                         Text(option.label).tag(option)
                                     }
                                 }
+                                .labelsHidden()
+                                Spacer(minLength: 0)
+                            }
+                            HStack(spacing: 12) {
+                                Text("Codec").frame(width: 70, alignment: .leading)
                                 Picker("Codec", selection: $codecSelection) {
                                     ForEach(CodecOption.allCases) { option in
                                         Text(option.label).tag(option)
                                     }
                                 }
+                                .labelsHidden()
+                                Spacer(minLength: 0)
                             }
                             .controlSize(.small)
                             Button {
@@ -512,21 +657,35 @@ struct ContentView: View {
     private let tvSelectedTint = Color(red: 0, green: 0.706, blue: 0.847)
 
     private var tvServerRow: some View {
-        HStack(spacing: 4) {
-            tvOptionButton(label: ServerEnvironment.dev.shortLabel,
-                           selected: serverEnvironmentRaw == ServerEnvironment.dev.rawValue,
-                           action: { serverEnvironmentRaw = ServerEnvironment.dev.rawValue; applyEnvironment(); baseURLText = viewModel.baseURLString },
+        HStack(spacing: 8) {
+            ForEach(serverStore.profiles) { profile in
+                tvOptionButton(label: profile.label,
+                               selected: serverStore.activeID == profile.id,
+                               action: {
+                                   serverStore.setActive(profile.id)
+                                   applyActiveProfile()
+                                   baseURLText = viewModel.baseURLString
+                                   Task {
+                                       await viewModel.refreshContentList()
+                                       if !viewModel.selectedContent.isEmpty {
+                                           viewModel.reload()
+                                       }
+                                   }
+                               },
+                               onMove: { if $0 == .up { tvFocus = .allow4k } })
+                    .contextMenu {
+                        Button(role: .destructive) {
+                            forgetServer(profile)
+                        } label: {
+                            Label("Forget \"\(profile.label)\"", systemImage: "trash")
+                        }
+                        .disabled(serverStore.profiles.count <= 1)
+                    }
+            }
+            tvOptionButton(label: "Pair…",
+                           selected: false,
+                           action: { showPairing = true },
                            onMove: { if $0 == .up { tvFocus = .allow4k } })
-            .focused($tvFocus, equals: .serverDev)
-            tvOptionButton(label: ServerEnvironment.release.shortLabel,
-                           selected: serverEnvironmentRaw == ServerEnvironment.release.rawValue,
-                           action: { serverEnvironmentRaw = ServerEnvironment.release.rawValue; applyEnvironment(); baseURLText = viewModel.baseURLString },
-                           onMove: { if $0 == .up { tvFocus = .allow4k } })
-            tvOptionButton(label: ServerEnvironment.ubuntu.shortLabel,
-                           selected: serverEnvironmentRaw == ServerEnvironment.ubuntu.rawValue,
-                           action: { serverEnvironmentRaw = ServerEnvironment.ubuntu.rawValue; applyEnvironment(); baseURLText = viewModel.baseURLString },
-                           onMove: { if $0 == .up { tvFocus = .allow4k } })
-            .focused($tvFocus, equals: .serverUbuntu)
         }
     }
 
@@ -604,22 +763,42 @@ struct ContentView: View {
         }
     }
 
-    private func applyEnvironment() {
-        let env = ServerEnvironment(rawValue: serverEnvironmentRaw) ?? .dev
-        let host = env.host
-        let contentPort = env.contentPort
-        let playbackPort = env.playbackPort
-        viewModel.baseURLString = "http://\(host):\(contentPort)"
+    /// Reads the URLs from the active ServerProfile and writes them to the view model.
+    /// Replaces the old preset-enum based applyEnvironment.
+    private func applyActiveProfile() {
+        guard let profile = serverStore.active else { return }
+        viewModel.baseURLString = profile.contentURL
         if viewModel.goLiveMode {
-            viewModel.playbackBaseURLString = "http://\(host):\(contentPort)"
+            viewModel.playbackBaseURLString = profile.contentURL
             viewModel.includePlayerIdInURL = false
         } else {
-            viewModel.playbackBaseURLString = "http://\(host):\(playbackPort)"
+            viewModel.playbackBaseURLString = profile.playbackURL
             viewModel.includePlayerIdInURL = true
         }
         viewModel.primePlayback = false
         viewModel.forcePlayerIdOnPlayback = false
         viewModel.allowPlayerIdOnContentPort = false
+    }
+
+    /// Compatibility shim: tvOS code still calls applyEnvironment() in many
+    /// places. Funnel them into the new profile-based path.
+    private func applyEnvironment() { applyActiveProfile() }
+
+    /// Forget a server profile from the picker. Refuses to remove the last
+    /// remaining profile (matching ServerProfileStore.remove guard). If the
+    /// removed profile was active, the store reassigns active to the first
+    /// remaining profile and we re-apply it so playback follows.
+    private func forgetServer(_ profile: ServerProfile) {
+        let wasActive = (serverStore.activeID == profile.id)
+        serverStore.remove(profile.id)
+        if wasActive {
+            applyActiveProfile()
+            baseURLText = viewModel.baseURLString
+            Task {
+                await viewModel.refreshContentList()
+                if !viewModel.selectedContent.isEmpty { viewModel.reload() }
+            }
+        }
     }
 
     private func isPlayable(_ item: ContentItem) -> Bool {

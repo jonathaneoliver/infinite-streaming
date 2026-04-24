@@ -32,8 +32,10 @@ This Roku channel replicates the functionality of the iOS app, providing:
 - **Auto**: Automatic codec selection
 
 ### Server Environments
-- **Dev**: Development server (100.111.190.54:40000)
-- **Release**: Production server (infinitestreaming.jeoliver.com:30000)
+- **Local**: Same-host server (localhost:30000) — Docker Compose / k3s release default
+- **Dev**: Same-host dev server (localhost:40000) — k3s dev default
+
+Edit `components/MainScene.brs` to point at your actual server address.
 
 ## Remote Control Navigation
 
@@ -77,8 +79,7 @@ roku/InfiniteStreamPlayer/
 
 2. **Configure Network Access**
    - Ensure your Roku device can reach the InfiniteStream server
-   - Default Dev server: `100.111.190.54:40000`
-   - Default Release server: `infinitestreaming.jeoliver.com:30000`
+   - Default presets are `localhost:30000` / `localhost:40000`. Edit `components/MainScene.brs` to point at your server.
 
 3. **Package the Channel**
    ```bash

@@ -1,0 +1,31 @@
+# Wrangler config for the InfiniteStream pairing rendezvous Worker.
+#
+# Deploy:
+#   1. cd cloudflare/pair-rendezvous
+#   2. npm install -g wrangler   (if not installed)
+#   3. wrangler login
+#   4. wrangler kv namespace create PAIRING
+#      → copy the printed `id = "..."` into kv_namespaces.id below
+#   5. wrangler deploy
+#
+# Custom domain is bound below via routes; the *.workers.dev URL also
+# stays live in parallel. To use a different host, change the pattern
+# (zone_name must match the parent zone in your Cloudflare account).
+
+name = "infinitestream-pair"
+main = "src/index.js"
+compatibility_date = "2024-09-01"
+# Disable the *.workers.dev URL — clients use the custom domain below.
+workers_dev = false
+
+# Brandable hostname for clients. Wrangler creates the DNS record + cert
+# automatically on deploy (free on Workers Free plan).
+routes = [
+  { pattern = "pair-infinitestream.jeoliver.com", custom_domain = true }
+]
+
+# Replace `id` after `wrangler kv namespace create PAIRING`.
+# Optionally add `preview_id` for `wrangler dev` (not required for prod).
+[[kv_namespaces]]
+binding = "PAIRING"
+id = "b87aeef458ce4ca8b7febf61dea9ee8a"

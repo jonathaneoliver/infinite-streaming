@@ -10,16 +10,16 @@ it only watches SSE data.
 Usage:
     # Monitor any active session on the Ubuntu test instance
     pytest test_loop_health.py -m loop -v \
-      --host jonathanoliver-ubuntu.local --api-port 22000
+      --host your-test-host --api-port 22000
 
     # Monitor a specific player_id
     pytest test_loop_health.py -m loop -v \
-      --host jonathanoliver-ubuntu.local --api-port 22000 \
+      --host your-test-host --api-port 22000 \
       --loop-player-id abc123
 
     # Wait for 5 loops with 10 minute timeout
     pytest test_loop_health.py -m loop -v \
-      --host jonathanoliver-ubuntu.local --api-port 22000 \
+      --host your-test-host --api-port 22000 \
       --loop-count 5 --loop-timeout 600
 """
 
