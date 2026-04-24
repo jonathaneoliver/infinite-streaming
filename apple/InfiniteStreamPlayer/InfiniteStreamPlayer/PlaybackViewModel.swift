@@ -397,6 +397,13 @@ final class PlaybackViewModel: ObservableObject {
         metricsLastSessionLookup = nil
         log("AVPlayerItem created for \(url.absoluteString)")
         player.play()
+        Task {
+            await sendPlayerMetrics(event: "playing", extra: [
+                "player_metrics_content_url": url.absoluteString,
+                "player_metrics_content_name": contentName,
+                "player_metrics_codec_fallback": codecFallback
+            ])
+        }
         log("AVPlayer play() called")
     }
 

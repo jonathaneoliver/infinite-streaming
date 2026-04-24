@@ -1367,7 +1367,7 @@ func (a *App) handlePostSessionMetrics(w http.ResponseWriter, r *http.Request) {
 
 func isSignificantPlayerEvent(event string) bool {
 	switch strings.ToLower(strings.TrimSpace(event)) {
-	case "stall_start", "stall_end", "segment_stall", "restart", "frozen", "error", "loop_marker":
+	case "stall_start", "stall_end", "segment_stall", "restart", "frozen", "error", "loop_marker", "playing":
 		return true
 	}
 	return false

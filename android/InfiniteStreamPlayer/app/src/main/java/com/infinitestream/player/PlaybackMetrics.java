@@ -168,6 +168,9 @@ final class PlaybackMetrics {
         frozenReported = false;
         segmentStallReported = false;
         lastVideoLoadCompletedAtMs = System.currentTimeMillis();
+        Map<String, Object> extra = new HashMap<>();
+        extra.put("player_metrics_content_url", urlProvider.currentStreamUrl());
+        sendEvent("playing", extra);
     }
 
     /**
