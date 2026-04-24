@@ -283,7 +283,7 @@ deploy-androidtv:
 	$(ANDROID_SDK_HOME)/platform-tools/adb shell am start -n com.infinitestream.player/.MainActivity
 
 # ── Synthetic test pattern ─────────────────────────────────────────────
-# Generate a 4K mezzanine file from FFmpeg's `testsrc2` source (colour
+# Generate a 4K mezzanine file from FFmpeg's `testsrc` source (colour
 # chart + scrolling gradient + built-in timestamp) with a solid-colour
 # flash at the tail to mark the loop boundary, and a per-second 1 kHz
 # audio pulse for A/V sync checking. Output lands under CONTENT_DIR's
@@ -312,7 +312,7 @@ TEST_PATTERN_CRF            ?= 18
 test-pattern:
 	@mkdir -p "$(TEST_PATTERN_OUTPUT_DIR)"
 	ffmpeg -y \
-		-f lavfi -i "testsrc2=size=$(TEST_PATTERN_SIZE):rate=$(TEST_PATTERN_RATE):duration=$$(( $(TEST_PATTERN_DURATION) - $(TEST_PATTERN_FLASH_DURATION) ))" \
+		-f lavfi -i "testsrc=size=$(TEST_PATTERN_SIZE):rate=$(TEST_PATTERN_RATE):duration=$$(( $(TEST_PATTERN_DURATION) - $(TEST_PATTERN_FLASH_DURATION) ))" \
 		-f lavfi -i "color=c=$(TEST_PATTERN_FLASH_COLOR):size=$(TEST_PATTERN_SIZE):rate=$(TEST_PATTERN_RATE):duration=$(TEST_PATTERN_FLASH_DURATION)" \
 		-f lavfi -i "sine=frequency=1000:duration=0.05:sample_rate=48000,volume=0.4,apad=pad_dur=0.95,aloop=loop=-1:size=48000,atrim=duration=$(TEST_PATTERN_DURATION)" \
 		-filter_complex "[0:v]format=yuv420p[main];[1:v]format=yuv420p[flash];[main][flash]concat=n=2:v=1:a=0[vout]" \
