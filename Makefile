@@ -282,6 +282,42 @@ deploy-androidtv:
 		./gradlew installDebug
 	$(ANDROID_SDK_HOME)/platform-tools/adb shell am start -n com.infinitestream.player/.MainActivity
 
+# ── Synthetic test pattern ─────────────────────────────────────────────
+# Generate a 4K mezzanine file from FFmpeg's `testsrc2` source — colour
+# chart, scrolling gradient, and built-in timestamp — with a burn-in
+# overlay (wallclock timecode, frame number, resolution) and a 1 kHz
+# sine + per-second beep audio track. Output lands under CONTENT_DIR's
+# originals/ subdir so go-upload picks it up via INFINITE_STREAM_SOURCES_DIR.
+#
+# Usage:
+#   make test-pattern
+#   make test-pattern TEST_PATTERN_DURATION=120
+#   make test-pattern TEST_PATTERN_SIZE=1920x1080 TEST_PATTERN_RATE=30
+
+CONTENT_DIR ?= ./sample-content
+TEST_PATTERN_OUTPUT_NAME ?= testpattern_2160p60.mp4
+TEST_PATTERN_OUTPUT_DIR  ?= $(CONTENT_DIR)/originals
+TEST_PATTERN_OUTPUT      ?= $(TEST_PATTERN_OUTPUT_DIR)/$(TEST_PATTERN_OUTPUT_NAME)
+TEST_PATTERN_SIZE        ?= 3840x2160
+TEST_PATTERN_RATE        ?= 60
+TEST_PATTERN_DURATION    ?= 600
+TEST_PATTERN_CRF         ?= 18
+TEST_PATTERN_FONT        ?= /System/Library/Fonts/Menlo.ttc
+
+test-pattern:
+	@mkdir -p "$(TEST_PATTERN_OUTPUT_DIR)"
+	ffmpeg -y \
+		-f lavfi -i "testsrc2=size=$(TEST_PATTERN_SIZE):rate=$(TEST_PATTERN_RATE):duration=$(TEST_PATTERN_DURATION)" \
+		-f lavfi -i "sine=frequency=1000:beep_factor=$(TEST_PATTERN_RATE):sample_rate=48000:duration=$(TEST_PATTERN_DURATION)" \
+		-vf "drawtext=fontfile=$(TEST_PATTERN_FONT):text='%{pts\:hms}  f=%{n}  $(TEST_PATTERN_SIZE)':fontcolor=white:fontsize=96:box=1:boxcolor=black@0.6:x=80:y=80" \
+		-c:v libx264 -preset medium -crf $(TEST_PATTERN_CRF) \
+		-pix_fmt yuv420p \
+		-g $(TEST_PATTERN_RATE) -keyint_min $(TEST_PATTERN_RATE) -sc_threshold 0 \
+		-c:a aac -ar 48000 -b:a 192k \
+		-movflags +faststart \
+		"$(TEST_PATTERN_OUTPUT)"
+	@echo "Wrote $(TEST_PATTERN_OUTPUT)"
+
 # ── iOS testing ────────────────────────────────────────────────────────
 
 test-ios-sim-metrics:
