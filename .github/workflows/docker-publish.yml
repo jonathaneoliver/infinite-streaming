@@ -45,7 +45,7 @@ jobs:
 
       - name: Extract metadata (server, GHCR)
         id: meta-server-ghcr
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: ghcr.io/${{ github.repository }}
           tags: |
@@ -60,7 +60,7 @@ jobs:
       - name: Extract metadata (server, Docker Hub)
         if: ${{ vars.DOCKERHUB_NAMESPACE != '' }}
         id: meta-server-dh
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: docker.io/${{ vars.DOCKERHUB_NAMESPACE }}/infinite-streaming
           tags: |
@@ -87,7 +87,7 @@ jobs:
 
       - name: Extract metadata (go-proxy, GHCR)
         id: meta-proxy-ghcr
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: ghcr.io/${{ github.repository_owner }}/go-proxy
           tags: |
@@ -101,7 +101,7 @@ jobs:
       - name: Extract metadata (go-proxy, Docker Hub)
         if: ${{ vars.DOCKERHUB_NAMESPACE != '' }}
         id: meta-proxy-dh
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: docker.io/${{ vars.DOCKERHUB_NAMESPACE }}/go-proxy
           tags: |
