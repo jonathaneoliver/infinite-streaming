@@ -30,7 +30,14 @@ public final class RendezvousService {
 
     /** Default Worker URL baked into the build. Override in SharedPreferences
      *  ("InfiniteStreamRendezvousURL") if you self-host the Worker. Empty
-     *  disables discovery. */
+     *  disables discovery.
+     *
+     *  NOTE FOR FORKS: this points at the upstream maintainer's personal
+     *  Cloudflare Worker. If you fork this repo and ship your own builds,
+     *  please change this to your own Worker URL (or set it to "" to
+     *  require runtime configuration) so your users don't accidentally
+     *  hammer someone else's free-tier KV write budget. See
+     *  cloudflare/pair-rendezvous/ for how to deploy your own. */
     public static final String DEFAULT_URL =
         "https://pair-infinitestream.jeoliver.com";
 

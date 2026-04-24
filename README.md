@@ -459,6 +459,8 @@ Camera-less TVs (Apple TV, Android TV) can't scan a QR. Instead the TV shows a 6
 
 - **Cloudflare Workers + KV** for the rendezvous. Fits comfortably in the free plan: each server costs ~2 KV writes/day at the default cadence (1,000 writes/day total budget, account-wide). The default Worker is at `https://pair-infinitestream.jeoliver.com` — to self-host, follow [`cloudflare/pair-rendezvous/README.md`](cloudflare/pair-rendezvous/README.md) and override `INFINITE_STREAM_RENDEZVOUS_URL` (server) plus `InfiniteStreamRendezvousURL` (UserDefaults / SharedPreferences on the clients).
 
+> **Forking?** That default URL is the upstream maintainer's personal Worker. Please deploy your own Worker and change the `defaultURL` constant in `apple/.../RendezvousService.swift` and `android/.../RendezvousService.java` (plus the `routes` block in `wrangler.toml`) before shipping builds — otherwise your users hammer someone else's free-tier KV budget.
+
 That's it — no third-party services beyond a Cloudflare account.
 
 ### Server-side env
