@@ -748,6 +748,16 @@ final class PlaybackViewModel: ObservableObject {
                             "player_metrics_state_to": state
                         ])
                     }
+                    // buffering_start/buffering_end are distinct from
+                    // stall_*: they fire on every transition into/out of
+                    // the Buffering AVPlayer state, regardless of whether
+                    // playback was previously interrupted. stall_* is
+                    // gated on first-frame and stall threshold.
+                    if state == "Buffering" {
+                        Task { await self.sendPlayerMetrics(event: "buffering_start") }
+                    } else if previous == "Buffering" {
+                        Task { await self.sendPlayerMetrics(event: "buffering_end") }
+                    }
                 } else if previous == nil {
                     Task { await self.sendPlayerMetrics(event: "state_change") }
                 }

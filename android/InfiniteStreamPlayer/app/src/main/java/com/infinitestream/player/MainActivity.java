@@ -221,10 +221,13 @@ public class MainActivity extends AppCompatActivity {
 
             @Override
             public void onPlaybackStateChanged(int state) {
-                if (state == Player.STATE_BUFFERING
-                    && player.getPlayWhenReady()
-                    && !player.isPlaying()) {
-                    metrics.onStallStart();
+                if (state == Player.STATE_BUFFERING) {
+                    metrics.onBufferingStart();
+                    if (player.getPlayWhenReady() && !player.isPlaying()) {
+                        metrics.onStallStart();
+                    }
+                } else {
+                    metrics.onBufferingEnd();
                 }
             }
         });

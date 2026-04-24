@@ -98,6 +98,9 @@ final class PlaybackMetrics {
     private double lastStallDurationS;
     private long stallStartAtMs = -1;
 
+    // Buffering tracking (broader than stall — every BUFFERING transition).
+    private boolean buffering;
+
     // Frozen detection.
     private long lastHeartbeatPositionMs = -1;
     private int frozenTicks;
@@ -197,6 +200,24 @@ final class PlaybackMetrics {
         Map<String, Object> extra = new HashMap<>();
         extra.put("player_metrics_last_stall_time_s", lastStallDurationS);
         sendEvent("stall_end", extra);
+    }
+
+    /**
+     * Called on every transition into ExoPlayer STATE_BUFFERING. Distinct
+     * from onStallStart, which is gated on first-frame + playWhenReady so
+     * initial loads and short pre-roll buffering don't register as stalls.
+     */
+    void onBufferingStart() {
+        if (buffering) return;
+        buffering = true;
+        sendEvent("buffering_start", Collections.<String, Object>emptyMap());
+    }
+
+    /** Called when ExoPlayer leaves STATE_BUFFERING. */
+    void onBufferingEnd() {
+        if (!buffering) return;
+        buffering = false;
+        sendEvent("buffering_end", Collections.<String, Object>emptyMap());
     }
 
     /** Called from AnalyticsListener.onLoadCompleted for video track. */
