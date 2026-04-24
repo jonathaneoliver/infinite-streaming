@@ -300,7 +300,10 @@ TEST_PATTERN_OUTPUT_DIR  ?= $(CONTENT_DIR)/originals
 TEST_PATTERN_OUTPUT      ?= $(TEST_PATTERN_OUTPUT_DIR)/$(TEST_PATTERN_OUTPUT_NAME)
 TEST_PATTERN_SIZE        ?= 3840x2160
 TEST_PATTERN_RATE        ?= 60
-TEST_PATTERN_DURATION    ?= 600
+# 60s divides cleanly into both 4s (create_abr_ladder.sh segments) and
+# 6s (go-live LL-HLS segments), so the mezzanine chops without boundary
+# leftovers. Override if you want a longer source.
+TEST_PATTERN_DURATION    ?= 60
 TEST_PATTERN_CRF         ?= 18
 TEST_PATTERN_FONT        ?= /System/Library/Fonts/Menlo.ttc
 
@@ -308,7 +311,7 @@ test-pattern:
 	@mkdir -p "$(TEST_PATTERN_OUTPUT_DIR)"
 	ffmpeg -y \
 		-f lavfi -i "testsrc2=size=$(TEST_PATTERN_SIZE):rate=$(TEST_PATTERN_RATE):duration=$(TEST_PATTERN_DURATION)" \
-		-f lavfi -i "sine=frequency=1000:beep_factor=$(TEST_PATTERN_RATE):sample_rate=48000:duration=$(TEST_PATTERN_DURATION)" \
+		-f lavfi -i "sine=frequency=1000:duration=0.05:sample_rate=48000,volume=0.4,apad=pad_dur=0.95,aloop=loop=-1:size=48000,atrim=duration=$(TEST_PATTERN_DURATION)" \
 		-vf "drawtext=fontfile=$(TEST_PATTERN_FONT):text='%{pts\:hms}  f=%{n}  $(TEST_PATTERN_SIZE)':fontcolor=white:fontsize=96:box=1:boxcolor=black@0.6:x=80:y=80" \
 		-c:v libx264 -preset medium -crf $(TEST_PATTERN_CRF) \
 		-pix_fmt yuv420p \
