@@ -38,6 +38,13 @@ updates:
     commit-message:
       prefix: "chore(deps)"
       include: "scope"
+    ignore:
+      # gohlslib v1.4.1 removed the pkg/playlist package that 4 files in
+      # pkg/generator and pkg/parser import. PR #229 pinned us back to
+      # v1.4.0 after #217 broke the build. Re-enable by porting our 4
+      # import sites off pkg/playlist (or using a fork that retains it),
+      # then removing this ignore.
+      - dependency-name: "github.com/bluenviron/gohlslib"
 
   - package-ecosystem: "gomod"
     directory: "/go-proxy"
