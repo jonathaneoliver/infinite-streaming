@@ -20,6 +20,12 @@ workers_dev = false
 
 # Brandable hostname for clients. Wrangler creates the DNS record + cert
 # automatically on deploy (free on Workers Free plan).
+#
+# NOTE FOR FORKS: the pattern below is the upstream maintainer's own
+# domain. If you're deploying your own Worker, change it to a hostname
+# in a Cloudflare zone *you* own — wrangler can't create DNS records in
+# someone else's account. Or remove this `routes` block entirely and
+# set `workers_dev = true` to use the auto-assigned *.workers.dev URL.
 routes = [
   { pattern = "pair-infinitestream.jeoliver.com", custom_domain = true }
 ]

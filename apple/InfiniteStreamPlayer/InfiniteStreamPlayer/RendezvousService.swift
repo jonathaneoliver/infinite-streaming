@@ -30,6 +30,13 @@ struct RendezvousService {
     /// Default rendezvous URL baked into the build. Override with the
     /// "InfiniteStreamRendezvousURL" key in UserDefaults (e.g. via Settings).
     /// Empty string means pairing is disabled.
+    ///
+    /// NOTE FOR FORKS: this points at the upstream maintainer's personal
+    /// Cloudflare Worker. If you fork this repo and ship your own builds,
+    /// please change this to your own Worker URL (or set it to "" to
+    /// require runtime configuration) so your users don't accidentally
+    /// hammer someone else's free-tier KV write budget. See
+    /// `cloudflare/pair-rendezvous/` for how to deploy your own.
     static let defaultURL = "https://pair-infinitestream.jeoliver.com"
 
     /// Effective rendezvous URL after applying the UserDefaults override.
