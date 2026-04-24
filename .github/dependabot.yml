@@ -13,6 +13,14 @@ updates:
       interval: "weekly"
     commit-message:
       prefix: "chore(ci)"
+    ignore:
+      # release-drafter v7 splits the autolabeler into a separate action
+      # and changes token handling. Merging a major bump as-is silently
+      # disables our PR autolabeling. Re-enable by removing this entry
+      # and migrating .github/workflows/release-drafter.yml to the v7
+      # two-step pattern (action + autolabeler) plus `with: token`.
+      - dependency-name: "release-drafter/release-drafter"
+        update-types: ["version-update:semver-major"]
 
   # Go modules — one entry per module.
   - package-ecosystem: "gomod"
