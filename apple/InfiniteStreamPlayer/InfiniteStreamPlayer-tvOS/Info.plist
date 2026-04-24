@@ -17,9 +17,23 @@
     <key>NSAppTransportSecurity</key>
     <dict>
         <!-- Allow http to local-network addresses (RFC 1918, link-local, .local). -->
-        <!-- Add specific exception domains here for non-LAN hosts (Tailscale, public DNS, etc.). -->
         <key>NSAllowsLocalNetworking</key>
         <true/>
+        <!-- Per-domain exceptions for non-LAN servers reachable over plain HTTP.
+             NOTE FOR FORKS: this list contains the upstream maintainer's own
+             public hostnames. Add (and remove) entries for *your* deployments;
+             the better long-term answer is to terminate TLS at the server so
+             clients can use HTTPS and no exception is needed. -->
+        <key>NSExceptionDomains</key>
+        <dict>
+            <key>infinitestreaming.jeoliver.com</key>
+            <dict>
+                <key>NSExceptionAllowsInsecureHTTPLoads</key>
+                <true/>
+                <key>NSIncludesSubdomains</key>
+                <true/>
+            </dict>
+        </dict>
     </dict>
 </dict>
 </plist>
