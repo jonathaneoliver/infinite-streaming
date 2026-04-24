@@ -1,5 +1,5 @@
-github.com/beevik/etree v1.2.0 h1:l7WETslUG/T+xOPs47dtd6jov2Ii/8/OjCldk5fYfQw=
-github.com/beevik/etree v1.2.0/go.mod h1:aiPf89g/1k3AShMVAzriilpcE4R/Vuor90y83zVZWFc=
+github.com/beevik/etree v1.6.0 h1:u8Kwy8pp9D9XeITj2Z0XtA5qqZEmtJtuXZRQi+j03eE=
+github.com/beevik/etree v1.6.0/go.mod h1:bh4zJxiIr62SOf9pRzN7UUYaEDa9HEKafK25+sLc0Gc=
 github.com/bluenviron/gohlslib v1.4.0 h1:3a9W1x8eqlxJUKt1sJCunPGtti5ALIY2ik4GU0RVe7E=
 github.com/bluenviron/gohlslib v1.4.0/go.mod h1:q5ZElzNw5GRbV1VEI45qkcPbKBco6BP58QEY5HyFsmo=
 github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c=
