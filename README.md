@@ -472,6 +472,21 @@ That's it — no third-party services beyond a Cloudflare account.
 | `INFINITE_STREAM_ANNOUNCE_LABEL` | Optional friendly label. Defaults to `host:port` from the announce URL. |
 | `INFINITE_STREAM_SERVER_ID` | Optional explicit announce ID (4–64 chars `[A-Za-z0-9_-]`). Defaults to a stable random ID persisted at `<data_dir>/server_id`. Set this when multiple deployments share the same data directory (e.g. dev + release pods on the same k3s node), otherwise their announces overwrite each other on the rendezvous. |
 
+### HTTP, HTTPS, and iOS App Transport Security
+
+The server defaults to plain HTTP on its dashboard / API / playback ports. That's fine for **LAN use** and **HTTPS-fronted public deployments**, but **plain HTTP to a public hostname** trips the platform-specific cleartext-traffic rules baked into modern OSes:
+
+| Client | Cleartext to LAN (`localhost`, `*.local`, RFC1918) | Cleartext to public hostname |
+|---|---|---|
+| iOS / tvOS | ✅ via `NSAllowsLocalNetworking` in `Info.plist` | ❌ — rejected by App Transport Security unless the domain is in `NSExceptionDomains` |
+| Android | ✅ via `usesCleartextTraffic="true"` (currently set) | ✅ same flag covers all hosts |
+| Roku | ✅ | ✅ no cleartext restriction |
+| Browser dashboard | ✅ | ⚠️ mixed-content warnings if the dashboard itself is HTTPS |
+
+The iOS/tvOS Info.plist files in this repo include an explicit `NSExceptionDomains` entry for `infinitestreaming.jeoliver.com` (the upstream maintainer's public domain). **If you fork and ship apps that talk to a different public-HTTP hostname** (your own server, a Tailscale MagicDNS name like `*.ts.net`, a Tailscale CGNAT IP in `100.64.0.0/10`, etc.) you must add it to both Info.plists or those clients will silently fail to load anything.
+
+The cleaner long-term answer is to terminate TLS at the server so all clients use HTTPS and no per-domain ATS / cleartext exceptions are needed. The k3s manifests already mount a `certs-vol` for this; flipping the nginx template to `listen … ssl` and pointing it at a Let's Encrypt cert (or whichever cert lives in `K3S_CERTS_DIR`) gets you there.
+
 ---
 
 ## Other ways to run it

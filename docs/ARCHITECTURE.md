@@ -181,4 +181,6 @@ The native client apps (iOS/tvOS, Android TV, Roku) need a way to *find* the ser
 
 **Distinct `server_id` per deployment.** Multiple deployments sharing a data directory (typical of dev + release pods on the same k3s host that both mount `/media`) end up with the same persisted `<data_dir>/server_id` and overwrite each other on the rendezvous. Set `INFINITE_STREAM_SERVER_ID` explicitly per deployment (e.g. `infinite-streaming-dev` / `infinite-streaming-release`) to make them appear as independent entries in the announce list.
 
+**Cleartext HTTP and ATS.** The server defaults to plain HTTP on every listening port. iOS/tvOS' App Transport Security blocks plain HTTP to public hostnames unless the domain is in the app's `NSExceptionDomains`; the iOS/tvOS Info.plists in this repo include an exception for `infinitestreaming.jeoliver.com` so the upstream public deployment is reachable. Forks that ship apps pointing at a different public-HTTP host need to add their own exception (or — better — terminate TLS at the server so HTTPS works without exceptions; the `certs-vol` mount in the k3s manifests is the hook for that). Android has `usesCleartextTraffic="true"` so it isn't affected.
+
 See the [Server discovery section in the README](../README.md#server-discovery) for the user-facing summary.
