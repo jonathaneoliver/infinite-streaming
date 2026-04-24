@@ -106,8 +106,7 @@ The app automatically rebuilds the stream URL when you change any selection:
 - The app requires an active internet connection
 - Cleartext traffic is enabled for testing (HTTP URLs)
 - Ensure your device can reach the InfiniteStream server:
-  - Dev: `http://100.111.190.54:40081`
-  - Release: `http://infinitestreaming.jeoliver.com:30081`
+  - Default presets: `http://localhost:30081` / `http://localhost:40081`. Edit `MainActivity.java` to point at your actual host.
 
 ### Troubleshooting
 

@@ -73,7 +73,7 @@ The app should launch in landscape mode with:
 
 1. Change Server to "Release (30081)"
 2. Video should reload from the release server
-3. **Expected**: Playback from `infinitestreaming.jeoliver.com:30081`
+3. **Expected**: Playback from `your-public-host.example.com:30081`
 
 ### Test 5: Codec Selection
 
@@ -120,10 +120,10 @@ Test connectivity to both servers:
 
 ```bash
 # Dev server
-curl -I http://100.111.190.54:40081/go-live/bbb/master.m3u8
+curl -I http://localhost:40081/go-live/bbb/master.m3u8
 
 # Release server
-curl -I http://infinitestreaming.jeoliver.com:30081/go-live/bbb/master.m3u8
+curl -I http://your-public-host.example.com:30081/go-live/bbb/master.m3u8
 ```
 
 Both should return `200 OK` with `Content-Type: application/x-mpegURL` or `application/vnd.apple.mpegurl`

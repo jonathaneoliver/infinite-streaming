@@ -44,12 +44,6 @@
         return urlParams.get('expert') === '1';
     }
 
-    function isJeoliverHost(hostname) {
-        if (!hostname) return false;
-        const host = String(hostname).toLowerCase();
-        return host === 'jeoliver.com' || host.endsWith('.jeoliver.com');
-    }
-
     function isInternalNetworkHost(hostname) {
         if (!hostname) return false;
         const host = String(hostname).toLowerCase();
@@ -64,8 +58,9 @@
     }
 
     function shouldRestrictContentManagement() {
+        // Hide content-management UI on public-facing hosts; only show it on
+        // local-network deployments where the operator can be trusted.
         const host = window.location.hostname || '';
-        if (isJeoliverHost(host)) return true;
         return !isInternalNetworkHost(host);
     }
 
@@ -76,15 +71,7 @@
     function resolvePreferredStreamHost(sourceHostname) {
         const currentHost = (window.location.hostname || '').toLowerCase();
         const sourceHost = (sourceHostname || '').toLowerCase();
-        const baseHost = currentHost || sourceHost;
-        if (!baseHost) return '';
-        if (isJeoliverHost(baseHost)) {
-            if (baseHost === 'jeoliver.com' || baseHost === 'www.jeoliver.com') {
-                return 'infinitestreaming.jeoliver.com';
-            }
-            return baseHost;
-        }
-        return baseHost;
+        return currentHost || sourceHost || '';
     }
 
     function isTestingPort(port) {
@@ -645,28 +632,236 @@
         return cachedServerVersion;
     }
 
-    // Show server info modal
+    // Lazy-load the bundled qrcode-generator lib once.
+    let qrcodeLibPromise = null;
+    function loadQRCodeLib() {
+        if (typeof window.qrcode === 'function') return Promise.resolve(window.qrcode);
+        if (qrcodeLibPromise) return qrcodeLibPromise;
+        qrcodeLibPromise = new Promise((resolve, reject) => {
+            const script = document.createElement('script');
+            script.src = '/shared/qrcode.min.js';
+            script.onload = () => resolve(window.qrcode);
+            script.onerror = () => reject(new Error('Failed to load qrcode.min.js'));
+            document.head.appendChild(script);
+        });
+        return qrcodeLibPromise;
+    }
+
+    // Render a QR code into an existing <canvas> element.
+    function renderQRToCanvas(canvas, text, sizePx) {
+        // qrcode-generator: typeNumber=0 = auto, errorCorrection 'L'/'M'/'Q'/'H'.
+        const qr = window.qrcode(0, 'M');
+        qr.addData(text);
+        qr.make();
+        const moduleCount = qr.getModuleCount();
+        const cell = Math.floor(sizePx / moduleCount);
+        const dim = cell * moduleCount;
+        canvas.width = dim;
+        canvas.height = dim;
+        canvas.style.width = dim + 'px';
+        canvas.style.height = dim + 'px';
+        const ctx = canvas.getContext('2d');
+        ctx.fillStyle = '#fff';
+        ctx.fillRect(0, 0, dim, dim);
+        ctx.fillStyle = '#000';
+        for (let r = 0; r < moduleCount; r++) {
+            for (let c = 0; c < moduleCount; c++) {
+                if (qr.isDark(r, c)) {
+                    ctx.fillRect(c * cell, r * cell, cell, cell);
+                }
+            }
+        }
+    }
+
+    // Show server info modal with a QR code so reference-client devices on the
+    // same network (or reachable via the same hostname) can pair without typing
+    // an IP. The encoded URL is window.location.origin — i.e. whatever the user
+    // is already using to reach the dashboard.
     async function showInfo() {
         const version = await fetchServerVersion();
-        const info = `
-InfiniteStream - Media Testing Platform
+        const url = window.location.origin;
 
-Port: ${window.location.port || '80'}
-Host: ${window.location.hostname}
-Protocol: ${window.location.protocol}
+        // Fire-and-forget re-announce so the user can recover from a missed
+        // boot announce just by opening Server Info. Server-side is rate-
+        // safe (the announce loop coalesces simultaneous triggers).
+        fetch('/api/announce-now', { method: 'POST' }).catch(() => {});
 
-Features:
-• Video content upload & transcoding
-• Multi-codec ABR ladder generation
-• Source content library & re-encoding
-• 16-player grid testing
-• Live streaming simulation
-• Network shaping & throttling
+        const overlay = document.createElement('div');
+        overlay.id = 'ismInfoOverlay';
+        overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:10000;display:flex;align-items:center;justify-content:center;';
+        overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
 
-Version: ${version}
-        `.trim();
-        
-        alert(info);
+        const panel = document.createElement('div');
+        panel.style.cssText = 'background:#fff;border-radius:12px;padding:28px;max-width:520px;width:90%;max-height:90vh;overflow:auto;box-shadow:0 10px 40px rgba(0,0,0,0.3);';
+        panel.innerHTML = `
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
+                <h2 id="ismInfoTitle" style="margin:0;font-size:1.4em;">Server Info</h2>
+                <button id="ismInfoClose" style="background:none;border:none;font-size:1.6em;cursor:pointer;line-height:1;">&times;</button>
+            </div>
+            <div style="display:flex;gap:24px;align-items:flex-start;flex-wrap:wrap;">
+                <div style="flex:1;min-width:200px;">
+                    <div id="ismInfoNameRow" style="margin-bottom:8px;display:none;"><strong>Name:</strong> <span id="ismInfoName"></span></div>
+                    <div style="margin-bottom:8px;"><strong>URL:</strong> <code style="user-select:all;">${url}</code></div>
+                    <div style="margin-bottom:8px;"><strong>Host:</strong> ${window.location.hostname || '(none)'}</div>
+                    <div style="margin-bottom:8px;"><strong>Port:</strong> ${window.location.port || '80'}</div>
+                    <div style="margin-bottom:8px;"><strong>Protocol:</strong> ${window.location.protocol}</div>
+                    <div style="margin-bottom:8px;"><strong>Version:</strong> ${version}</div>
+                </div>
+                <div style="text-align:center;">
+                    <canvas id="ismInfoQR" style="background:#fff;padding:8px;border:1px solid #ddd;border-radius:4px;"></canvas>
+                    <div style="font-size:0.8em;color:#666;margin-top:6px;">Scan from a phone or TV app<br>to pair with this server</div>
+                </div>
+            </div>
+            <p style="margin-top:20px;font-size:0.85em;color:#666;">
+                The QR encodes the URL you used to reach this dashboard. Devices that scan it must be able
+                to reach the same URL (same LAN, Tailscale, public DNS, etc.).
+            </p>
+            <hr style="margin:20px 0;border:none;border-top:1px solid #eee;">
+            <div id="ismDiscoveryNote" style="margin-bottom:18px;padding:10px 12px;background:#ecfdf5;border-left:3px solid #10b981;border-radius:4px;font-size:0.85em;color:#065f46;">
+                <strong>Cloud discovery (no code needed)</strong><br>
+                This server is announcing itself to the pairing rendezvous (Cloudflare Worker).
+                TVs and phones whose <em>public IP matches this server's public IP</em> — i.e. on
+                the same WAN — will see this server in their app's "+ Add server" / "Pair…"
+                screen automatically. Just tap to add. Opening this panel triggers a fresh
+                announce, so the server should be visible within a few seconds.
+            </div>
+            <div id="ismPairWidget">
+                <h3 style="margin:0 0 8px 0;font-size:1em;">Pair with code</h3>
+                <p style="margin:0 0 12px 0;font-size:0.85em;color:#666;">
+                    Enter the 6-character code shown on the TV here; the TV will receive
+                    <em>this dashboard's URL</em> via the rendezvous and connect.
+                </p>
+                <div id="ismPairReachWarn" style="display:none;margin:0 0 12px 0;padding:8px 10px;background:#fef3c7;border-left:3px solid #f59e0b;border-radius:4px;font-size:0.8em;color:#78350f;">
+                    <strong>Heads up:</strong> the URL above looks LAN-only
+                    (<code id="ismPairReachWarnURL"></code>). Pairing will only work if the TV
+                    can resolve and reach that URL on its network. For cross-network pairing
+                    (cellular, VPN, etc.) you'd need a publicly reachable URL — port forward,
+                    Tailscale MagicDNS name, a tunnel, etc.
+                </div>
+                <div id="ismPairForm" style="display:none;">
+                    <div style="display:flex;gap:8px;align-items:center;">
+                        <input id="ismPairCode" type="text" placeholder="ABC123" maxlength="12" style="flex:1;padding:8px 10px;font-family:ui-monospace,monospace;text-transform:uppercase;letter-spacing:3px;border:1px solid #ccc;border-radius:6px;font-size:1em;">
+                        <button id="ismPairBtn" style="padding:8px 16px;background:#2563eb;color:#fff;border:0;border-radius:6px;cursor:pointer;font-size:0.9em;">Pair</button>
+                    </div>
+                    <div id="ismPairMsg" style="margin-top:10px;font-size:0.85em;"></div>
+                </div>
+                <div id="ismPairUnconfigured" style="display:none;font-size:0.85em;color:#888;font-style:italic;">
+                    Pairing rendezvous URL not configured. Set <code>INFINITE_STREAM_RENDEZVOUS_URL</code>
+                    on the server to enable. See <a href="https://github.com/jonathaneoliver/infinite-streaming/tree/main/cloudflare/pair-rendezvous" target="_blank">cloudflare/pair-rendezvous/</a>.
+                </div>
+            </div>
+        `;
+        overlay.appendChild(panel);
+        document.body.appendChild(overlay);
+        panel.querySelector('#ismInfoClose').addEventListener('click', () => overlay.remove());
+
+        try {
+            await loadQRCodeLib();
+            renderQRToCanvas(panel.querySelector('#ismInfoQR'), url, 180);
+        } catch (err) {
+            const canvas = panel.querySelector('#ismInfoQR');
+            if (canvas) {
+                const ctx = canvas.getContext('2d');
+                canvas.width = 180; canvas.height = 180;
+                ctx.fillStyle = '#f5f5f5'; ctx.fillRect(0, 0, 180, 180);
+                ctx.fillStyle = '#999'; ctx.font = '12px sans-serif';
+                ctx.textAlign = 'center';
+                ctx.fillText('QR unavailable', 90, 90);
+            }
+        }
+
+        // Wire up pair widget — show form only when server has a rendezvous URL configured.
+        try {
+            const rzRes = await fetch('/api/rendezvous');
+            const rz = rzRes.ok ? await rzRes.json() : { url: '', label: '' };
+            const rendezvousURL = (rz && rz.url) || '';
+            const label = (rz && rz.label) || '';
+            if (label) {
+                const titleEl = panel.querySelector('#ismInfoTitle');
+                if (titleEl) titleEl.textContent = `Server Info — ${label}`;
+                const nameEl = panel.querySelector('#ismInfoName');
+                const nameRow = panel.querySelector('#ismInfoNameRow');
+                if (nameEl && nameRow) {
+                    nameEl.textContent = label;
+                    nameRow.style.display = 'block';
+                }
+            }
+            if (rendezvousURL) {
+                panel.querySelector('#ismPairForm').style.display = 'block';
+                wirePairForm(panel, rendezvousURL, url);
+                maybeWarnLanOnlyURL(panel, url);
+            } else {
+                panel.querySelector('#ismPairUnconfigured').style.display = 'block';
+            }
+        } catch (_e) {
+            panel.querySelector('#ismPairUnconfigured').style.display = 'block';
+        }
+    }
+
+    // Heuristic: if the dashboard URL is a .local mDNS name or an RFC1918
+    // / loopback / link-local IP, surface a warning. Cross-network code
+    // pairing won't work because the TV can't reach this URL from outside
+    // the LAN. Plain hostnames + public DNS pass through silently.
+    function maybeWarnLanOnlyURL(panel, urlString) {
+        let host = '';
+        try { host = new URL(urlString).hostname.toLowerCase(); } catch (_e) { return; }
+        const lanOnly =
+            host === 'localhost' ||
+            host.endsWith('.local') ||
+            /^127\./.test(host) ||
+            /^10\./.test(host) ||
+            /^192\.168\./.test(host) ||
+            /^172\.(1[6-9]|2\d|3[0-1])\./.test(host) ||
+            /^169\.254\./.test(host) ||
+            host === '::1' ||
+            host.startsWith('fe80:') ||
+            host.startsWith('fc') || host.startsWith('fd');
+        if (!lanOnly) return;
+        const warn = panel.querySelector('#ismPairReachWarn');
+        const code = panel.querySelector('#ismPairReachWarnURL');
+        if (warn && code) {
+            code.textContent = host;
+            warn.style.display = 'block';
+        }
+    }
+
+    function wirePairForm(panel, rendezvousURL, dashboardURL) {
+        const codeInput = panel.querySelector('#ismPairCode');
+        const btn = panel.querySelector('#ismPairBtn');
+        const msg = panel.querySelector('#ismPairMsg');
+        codeInput.addEventListener('input', () => { codeInput.value = codeInput.value.toUpperCase(); });
+        btn.addEventListener('click', async () => {
+            const code = (codeInput.value || '').trim().toUpperCase();
+            if (!/^[A-Z0-9]{4,12}$/.test(code)) {
+                msg.style.color = '#991b1b';
+                msg.textContent = 'Code must be 4–12 alphanumeric characters.';
+                return;
+            }
+            btn.disabled = true; btn.textContent = 'Pairing…';
+            msg.style.color = '#666';
+            msg.textContent = '';
+            try {
+                const url = `${rendezvousURL.replace(/\/$/, '')}/pair?code=${encodeURIComponent(code)}`;
+                const res = await fetch(url, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ server_url: dashboardURL }),
+                });
+                const body = await res.json().catch(() => ({}));
+                if (res.ok) {
+                    msg.style.color = '#065f46';
+                    msg.textContent = 'Paired. Your TV should pick this up within a couple of seconds.';
+                } else {
+                    msg.style.color = '#991b1b';
+                    msg.textContent = body.error || `HTTP ${res.status}`;
+                }
+            } catch (err) {
+                msg.style.color = '#991b1b';
+                msg.textContent = err.message || 'Network error';
+            } finally {
+                btn.disabled = false; btn.textContent = 'Pair';
+            }
+        });
     }
 
     // Toggle fullscreen mode

@@ -69,6 +69,13 @@ spec:
           value: "9"
         - name: INFINITE_STREAM_TC_DEBUG
           value: "1"
+        # Pairing rendezvous (substituted by envsubst at deploy time).
+        - name: INFINITE_STREAM_RENDEZVOUS_URL
+          value: "${INFINITE_STREAM_RENDEZVOUS_URL}"
+        - name: INFINITE_STREAM_ANNOUNCE_URL
+          value: "${INFINITE_STREAM_ANNOUNCE_URL_K3S_DEV}"
+        - name: INFINITE_STREAM_ANNOUNCE_LABEL
+          value: "${INFINITE_STREAM_ANNOUNCE_LABEL_K3S_DEV}"
         securityContext:
           privileged: true
           capabilities:

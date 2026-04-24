@@ -6264,9 +6264,15 @@ func hostPortOrDefault(hostport, fallback string) string {
 	return port
 }
 
+// shouldScopeSessionsByRequesterIP scopes per-requester sessions on
+// public-facing deployments (set via INFINITE_STREAM_PUBLIC_HOST). Off by
+// default so single-tenant local installs see all sessions.
 func shouldScopeSessionsByRequesterIP(r *http.Request) bool {
-	host := strings.ToLower(hostWithoutPort(r.Host))
-	return host == "infinitestreaming.jeoliver.com"
+	publicHost := strings.ToLower(strings.TrimSpace(os.Getenv("INFINITE_STREAM_PUBLIC_HOST")))
+	if publicHost == "" {
+		return false
+	}
+	return strings.ToLower(hostWithoutPort(r.Host)) == publicHost
 }
 
 func filterSessionsByPlayerID(sessions []SessionData, playerID string) []SessionData {

@@ -39,6 +39,14 @@ services:
       - INFINITE_STREAM_UPSTREAM_PORT=30000
       - INFINITE_STREAM_MAX_SESSIONS=8
       - INFINITE_STREAM_TC_INTERFACE=eth0
+      # Set this to your deployed Cloudflare Worker URL to enable the
+      # dashboard's "Pair a TV" widget (cloudflare/pair-rendezvous/).
+      - INFINITE_STREAM_RENDEZVOUS_URL=${INFINITE_STREAM_RENDEZVOUS_URL:-}
+      # Set this to the URL clients should use to reach this server (e.g.
+      # http://lenovo.local:30000) to publish it to the rendezvous so the
+      # standalone /pair page lists it. Optional label overrides hostname.
+      - INFINITE_STREAM_ANNOUNCE_URL=${INFINITE_STREAM_ANNOUNCE_URL:-}
+      - INFINITE_STREAM_ANNOUNCE_LABEL=${INFINITE_STREAM_ANNOUNCE_LABEL:-}
     tmpfs:
       - /go-live:size=4G,mode=755
     networks:

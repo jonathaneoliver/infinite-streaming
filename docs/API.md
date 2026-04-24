@@ -76,6 +76,15 @@ Two flavours: single-shot (small files) and chunked (large files).
 | POST | `/api/setup/initialize` | Create storage layout + indexes |
 | POST | `/api/setup/seed` | Seed a demo content item |
 
+### Server discovery (pairing rendezvous)
+
+These let the dashboard and the native client apps work with a Cloudflare Worker rendezvous (`cloudflare/pair-rendezvous/`). See [`README.md`](../README.md#server-discovery) for the user-facing flow.
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/api/rendezvous` | Returns `{url, label}` — the configured rendezvous Worker URL and this server's announce label. Used by the dashboard's "Pair a TV" widget and Server Info title. |
+| POST | `/api/announce-now` | Triggers an immediate, coalesced announce to the rendezvous (in addition to the periodic loop). Called by the dashboard's Server Info modal so users can recover from a missed boot announce. Returns `{ok:true}`. |
+
 ## go-proxy (sessions + faults)
 
 ### Session listing and lifecycle

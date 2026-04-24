@@ -5,13 +5,15 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"time"
 
+	"github.com/gorilla/mux"
+	"github.com/jonathaneoliver/infinite-streaming/go-upload/internal/announce"
 	"github.com/jonathaneoliver/infinite-streaming/go-upload/internal/api"
 	"github.com/jonathaneoliver/infinite-streaming/go-upload/internal/app"
 	"github.com/jonathaneoliver/infinite-streaming/go-upload/internal/config"
 	"github.com/jonathaneoliver/infinite-streaming/go-upload/internal/store"
-	"github.com/gorilla/mux"
 )
 
 func main() {
@@ -40,6 +42,8 @@ func main() {
 
 	r.HandleFunc("/", h.Health).Methods(http.MethodGet)
 	r.HandleFunc("/health", h.Health).Methods(http.MethodGet)
+	r.HandleFunc("/api/rendezvous", h.RendezvousURL).Methods(http.MethodGet)
+	r.HandleFunc("/api/announce-now", h.AnnounceNow).Methods(http.MethodPost)
 	// Jobs
 	r.HandleFunc("/api/jobs", h.ListJobs).Methods(http.MethodGet)
 	r.HandleFunc("/api/jobs/{job_id}", h.GetJob).Methods(http.MethodGet)
@@ -73,8 +77,17 @@ func main() {
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
+	// Optional: announce this server's URL to the pairing rendezvous so the
+	// standalone /pair page lists us. Opt-in via INFINITE_STREAM_ANNOUNCE_URL.
+	// (Replaces an earlier mDNS/Bonjour attempt that didn't work through
+	// Docker bridge networking.)
+	announceMgr := announce.New(filepath.Dir(cfg.DatabasePath))
+	go announceMgr.Run(context.Background())
+	h.Announce = announceMgr
+
 	log.Printf("go-upload listening on %s (db=%s)", addr, cfg.DatabasePath)
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("server error: %v", err)
 	}
 }
+

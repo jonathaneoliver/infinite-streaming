@@ -1,10 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
 <network-security-config>
+    <!-- Cleartext (http) is permitted to localhost (10.0.2.2 = host loopback   -->
+    <!-- from the Android emulator) so the demo "out of the box" works against -->
+    <!-- a Docker Compose / k3s release on the same machine.                  -->
+    <!-- Add your own LAN/Tailscale/public hosts here for real device testing. -->
     <domain-config cleartextTrafficPermitted="true">
-        <domain includeSubdomains="true">100.111.190.54</domain>
-        <domain includeSubdomains="true">infinitestreaming.jeoliver.com</domain>
-        <domain includeSubdomains="true">jonathanoliver-ubuntu.local</domain>
-        <domain includeSubdomains="true">192.168.0.106</domain>
+        <domain includeSubdomains="true">localhost</domain>
         <domain includeSubdomains="true">10.0.2.2</domain>
     </domain-config>
 </network-security-config>

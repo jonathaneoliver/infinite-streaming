@@ -17,10 +17,11 @@ sub init()
     m.contentTask = m.top.findNode("contentFetchTask")
     
     ' Initialize state
-    ' Note: These server addresses match the iOS app defaults
+    ' Default presets — edit these or sideload a build with your own host(s).
+    ' TODO: add a manual host-entry dialog (issue #202).
     m.serverEnvironments = [
-        {label: "Dev (40000)", host: "100.111.190.54", contentPort: "40000", playbackPort: "40081"},
-        {label: "Release (30000)", host: "infinitestreaming.jeoliver.com", contentPort: "30000", playbackPort: "30081"}
+        {label: "Local (30000)", host: "localhost", contentPort: "30000", playbackPort: "30081"},
+        {label: "Dev (40000)", host: "localhost", contentPort: "40000", playbackPort: "40081"}
     ]
     m.currentServerIndex = m.defaultServerIndex
     

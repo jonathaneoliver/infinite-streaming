@@ -12,7 +12,7 @@ InfiniteStream runs as a **single Docker container** with four cooperating proce
 | `nginx` | 30000 | Static dashboard + routing to the three Go services |
 | `memcached` | 11211 (internal only) | Session state for go-proxy |
 
-All four run in the same container — there's no external service dependency at runtime.
+All four run in the same container. The only optional external dependency at runtime is a Cloudflare Worker for client-side server discovery (see [Server discovery](#server-discovery) below) — disable it by leaving `INFINITE_STREAM_RENDEZVOUS_URL` unset.
 
 ## High-level flow
 
@@ -140,3 +140,43 @@ Global selection (content, URL, protocol, codec, segment) is kept in `localStora
 | GHCR compose | Pull `ghcr.io/jonathaneoliver/infinite-streaming:<tag>` | `localhost:30000` | No local build |
 
 All modes mount the same content layout. See [`README.md`](../README.md#quick-start) for commands and [`docs/TROUBLESHOOTING.md`](TROUBLESHOOTING.md) for common operational issues.
+
+## Server discovery
+
+The native client apps (iOS/tvOS, Android TV, Roku) need a way to *find* the server URL on first launch — they can't ship hardcoded addresses. InfiniteStream uses a small **Cloudflare Worker + KV** acting as a public rendezvous, plus a server-side announce loop that publishes its URL there. Clients query the rendezvous and only see servers that share their public IP (the rendezvous filters by `CF-Connecting-IP`), giving same-WAN auto-discovery without LAN multicast.
+
+> **Why not mDNS / Bonjour?** This was the first thing we tried (`_infinitestream._tcp` advertised via `github.com/grandcat/zeroconf` from `go-upload`). Docker's default bridge network filters multicast, so the advertisement never escapes the container — `dns-sd -B` on the host found nothing. Host-network mode is fragile across Linux/macOS/Windows and isn't available on every deployment target (k3s, Docker Desktop). The Cloudflare same-public-IP check delivers the same "servers on my network" semantics without needing multicast to survive the container boundary, so the mDNS advertiser was removed.
+
+```
+                                    Cloudflare Worker
+                                  (pair-rendezvous + KV)
+                                  ┌──────────────────────┐
+            POST /announce        │                      │       GET /announce
+   ┌──────► server_id, url ──────►│ keyed by hashed IP   │◄────── (same WAN ─►)
+   │                              │                      │       returns matching
+   │  POST /api/announce-now      │ POST /pair?code=XXX  │       servers
+   │  ◄─ dashboard "Server Info"  │ GET  /pair?code=XXX  │
+   │                              └──────────────────────┘                │
+┌──┴────────┐                                                ┌────────────┴────┐
+│  server   │                                                │   client app    │
+│ go-upload │                                                │ iOS/tvOS/AndTV  │
+│ announce  │                                                │ "+ Add server"  │
+│   loop    │                                                │  "Pair…"        │
+└───────────┘                                                └─────────────────┘
+```
+
+**Components**
+
+| Piece | Path | Role |
+|---|---|---|
+| Worker | [`cloudflare/pair-rendezvous/`](../cloudflare/pair-rendezvous/) | `POST/GET/DELETE /pair?code=` for code-based pairing; `POST/GET /announce` for same-WAN discovery; standalone HTML pair page at `/` |
+| Server announce | [`go-upload/internal/announce/`](../go-upload/internal/announce/) | Heartbeats `{server_id, url, label}` on boot, every 12h, and on demand. Persists `server_id` at `<data_dir>/server_id`. Opt-in via `INFINITE_STREAM_ANNOUNCE_URL`. |
+| `POST /api/announce-now` | [`go-upload/internal/api/handler.go`](../go-upload/internal/api/handler.go) | Dashboard's Server Info modal pokes this on open so the user can recover from a missed boot announce. Coalesced. |
+| Dashboard pair widget | [`content/shared/shared-nav.js`](../content/shared/shared-nav.js) | Server Info modal: shows host:port + QR, "Pair with code" form, LAN-only-URL warning, cloud-discovery callout. |
+| Client discovery | iOS `RendezvousService.swift`, Android `RendezvousService.java` | `discoverServers()` calls `GET /announce`. Pairing UI lists discovered servers tap-to-add and falls back to a 6-char pairing code. |
+
+**Cadence and cost.** Each server costs ~2 KV writes/day at the default cadence (12h heartbeat, 24h TTL, plus boot + on-demand from Server Info). Cloudflare KV's free plan allows 1,000 writes/day across the account.
+
+**Same-WAN check.** The rendezvous derives a stable hash from `CF-Connecting-IP`; entries are stored under `announce:<ip-hash>:<server_id>`. A `GET /announce` from the client only lists entries with the caller's same IP hash, so the discovery list is automatically scoped to "servers visible from your public IP". Code-based pairing uses the same check (different public IP → 403, with `RENDEZVOUS_ALLOW_CROSS_NETWORK=1` to opt out).
+
+See the [Server discovery section in the README](../README.md#server-discovery) for the user-facing summary.
