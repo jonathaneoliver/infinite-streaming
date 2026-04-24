@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Discussions / Q&A
+    url: https://github.com/jonathaneoliver/infinite-streaming/discussions
+    about: For usage questions, design discussions, or anything that isn't a clear bug or feature request.
+  - name: Security report
+    url: https://github.com/jonathaneoliver/infinite-streaming/security/advisories/new
+    about: Report a security vulnerability privately. See SECURITY.md for the full policy.

@@ -1,0 +1,90 @@
+name: Bug report
+description: Something is broken or behaves unexpectedly
+title: "[bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a bug. The more reproducible the report, the faster it can be fixed.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: A clear, concrete description. Screenshots / log snippets welcome.
+      placeholder: e.g. "Player stalls forever after a 503 fault is injected on segment 5."
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+      placeholder: e.g. "Player should retry the failed segment and resume playback."
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: Be specific — content name, fault settings, player, browser/OS.
+      value: |
+        1. Start the server with `make run`
+        2. Open `http://localhost:30000/dashboard/testing-session.html?player_id=...`
+        3. Inject fault: ...
+        4. Observe ...
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Output of `cat VERSION` or the GHCR image tag you're running.
+      placeholder: e.g. v1.0.0
+    validations:
+      required: true
+
+  - type: dropdown
+    id: deployment
+    attributes:
+      label: Deployment mode
+      options:
+        - Docker Compose (local)
+        - Docker run (single container)
+        - k3s release
+        - k3s dev
+        - Pre-built GHCR image
+        - Other (describe in "What happened")
+    validations:
+      required: true
+
+  - type: input
+    id: client
+    attributes:
+      label: Client
+      description: Browser + OS, or native app version (iOS / tvOS / Android TV / Roku).
+      placeholder: e.g. Chrome 147 on macOS 26.3
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: |
+        Paste the smallest possible log snippet that shows the issue.
+        Container logs: `docker logs <container>` or `kubectl logs deploy/<name>`.
+      render: shell
+
+  - type: checkboxes
+    id: checked
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched existing issues and didn't find a duplicate.
+          required: true
+        - label: I'm running the latest release (or `main`) and the bug still reproduces.
+          required: false
