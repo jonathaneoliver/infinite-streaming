@@ -76,6 +76,11 @@ spec:
           value: "${INFINITE_STREAM_ANNOUNCE_URL_K3S_DEV}"
         - name: INFINITE_STREAM_ANNOUNCE_LABEL
           value: "${INFINITE_STREAM_ANNOUNCE_LABEL_K3S_DEV}"
+        # Distinct from k8s-infinite-streaming.yaml so dev + release don't
+        # share the persisted /media/data/server_id and overwrite each
+        # other's announces on the rendezvous.
+        - name: INFINITE_STREAM_SERVER_ID
+          value: "infinite-streaming-dev"
         securityContext:
           privileged: true
           capabilities:

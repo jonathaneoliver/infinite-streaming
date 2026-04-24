@@ -179,4 +179,6 @@ The native client apps (iOS/tvOS, Android TV, Roku) need a way to *find* the ser
 
 **Same-WAN check.** The rendezvous derives a stable hash from `CF-Connecting-IP`; entries are stored under `announce:<ip-hash>:<server_id>`. A `GET /announce` from the client only lists entries with the caller's same IP hash, so the discovery list is automatically scoped to "servers visible from your public IP". Code-based pairing uses the same check (different public IP → 403, with `RENDEZVOUS_ALLOW_CROSS_NETWORK=1` to opt out).
 
+**Distinct `server_id` per deployment.** Multiple deployments sharing a data directory (typical of dev + release pods on the same k3s host that both mount `/media`) end up with the same persisted `<data_dir>/server_id` and overwrite each other on the rendezvous. Set `INFINITE_STREAM_SERVER_ID` explicitly per deployment (e.g. `infinite-streaming-dev` / `infinite-streaming-release`) to make them appear as independent entries in the announce list.
+
 See the [Server discovery section in the README](../README.md#server-discovery) for the user-facing summary.
