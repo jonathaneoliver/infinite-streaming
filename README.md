@@ -1,5 +1,11 @@
 # InfiniteStream
 
+[![Release](https://img.shields.io/github/v/release/jonathaneoliver/infinite-streaming?label=release&color=blue)](https://github.com/jonathaneoliver/infinite-streaming/releases/latest)
+[![Build](https://img.shields.io/github/actions/workflow/status/jonathaneoliver/infinite-streaming/docker-publish.yml?branch=main&label=build)](https://github.com/jonathaneoliver/infinite-streaming/actions/workflows/docker-publish.yml)
+[![License](https://img.shields.io/badge/license-InfiniteStream-lightgrey)](LICENSE)
+[![GHCR](https://img.shields.io/badge/ghcr.io-infinite--streaming-2496ED?logo=docker&logoColor=white)](https://github.com/jonathaneoliver/infinite-streaming/pkgs/container/infinite-streaming)
+[![Stars](https://img.shields.io/github/stars/jonathaneoliver/infinite-streaming?style=flat&color=yellow)](https://github.com/jonathaneoliver/infinite-streaming/stargazers)
+
 A Docker-based HLS/DASH test server for video players. Generates LL-HLS and LL-DASH streams (plus 2s and 6s segment variants) from short VOD content on a shared clock, and lets you inject deterministic, streaming-aware failures — HTTP errors, hung responses, corrupted segments, transport drops, bandwidth limits — on a per-session basis so player bugs become reproducible.
 
 Built for player QA, SDK development, and side-by-side comparison across HLS.js, Shaka, Video.js, native, iOS/tvOS, Android, and Roku. Or for anyone interested in how ABR interacts with content, networking, and players. **Not** a production streaming origin.
