@@ -10,12 +10,21 @@ permissions:
   contents: read
   packages: write
 
+# To also publish to Docker Hub, set the following on the repo:
+#   - vars.DOCKERHUB_NAMESPACE — e.g. "jonathaneoliver" (your Docker Hub user/org)
+#   - secrets.DOCKERHUB_USERNAME — Docker Hub username
+#   - secrets.DOCKERHUB_TOKEN — a Docker Hub access token (Account → Security)
+# When DOCKERHUB_NAMESPACE is empty the Docker Hub steps are skipped entirely
+# (so forks that don't want it pay no cost).
+
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      # ── Logins ─────────────────────────────────────────────────────────
 
       - name: Log in to GHCR
         uses: docker/login-action@v3
@@ -24,8 +33,18 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Extract metadata (server)
-        id: meta-server
+      - name: Log in to Docker Hub
+        if: ${{ vars.DOCKERHUB_NAMESPACE != '' }}
+        uses: docker/login-action@v3
+        with:
+          registry: docker.io
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # ── Server image ───────────────────────────────────────────────────
+
+      - name: Extract metadata (server, GHCR)
+        id: meta-server-ghcr
         uses: docker/metadata-action@v5
         with:
           images: ghcr.io/${{ github.repository }}
@@ -38,19 +57,53 @@ jobs:
             type=semver,pattern={{major}}.{{minor}},prefix=v
             type=semver,pattern={{major}},prefix=v
 
+      - name: Extract metadata (server, Docker Hub)
+        if: ${{ vars.DOCKERHUB_NAMESPACE != '' }}
+        id: meta-server-dh
+        uses: docker/metadata-action@v5
+        with:
+          images: docker.io/${{ vars.DOCKERHUB_NAMESPACE }}/infinite-streaming
+          tags: |
+            type=ref,event=branch
+            type=sha
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=semver,pattern={{version}},prefix=v
+            type=semver,pattern={{major}}.{{minor}},prefix=v
+            type=semver,pattern={{major}},prefix=v
+
       - name: Build and push server
         uses: docker/build-push-action@v5
         with:
           context: .
           push: true
-          tags: ${{ steps.meta-server.outputs.tags }}
-          labels: ${{ steps.meta-server.outputs.labels }}
+          # Concatenate both tag lists (Docker Hub portion is empty when
+          # DOCKERHUB_NAMESPACE is unset, so only GHCR is published).
+          tags: |
+            ${{ steps.meta-server-ghcr.outputs.tags }}
+            ${{ steps.meta-server-dh.outputs.tags }}
+          labels: ${{ steps.meta-server-ghcr.outputs.labels }}
 
-      - name: Extract metadata (go-proxy)
-        id: meta-proxy
+      # ── go-proxy image ─────────────────────────────────────────────────
+
+      - name: Extract metadata (go-proxy, GHCR)
+        id: meta-proxy-ghcr
         uses: docker/metadata-action@v5
         with:
           images: ghcr.io/${{ github.repository_owner }}/go-proxy
+          tags: |
+            type=ref,event=branch
+            type=sha
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=semver,pattern={{version}},prefix=v
+            type=semver,pattern={{major}}.{{minor}},prefix=v
+            type=semver,pattern={{major}},prefix=v
+
+      - name: Extract metadata (go-proxy, Docker Hub)
+        if: ${{ vars.DOCKERHUB_NAMESPACE != '' }}
+        id: meta-proxy-dh
+        uses: docker/metadata-action@v5
+        with:
+          images: docker.io/${{ vars.DOCKERHUB_NAMESPACE }}/go-proxy
           tags: |
             type=ref,event=branch
             type=sha
@@ -64,7 +117,9 @@ jobs:
         with:
           context: ./go-proxy
           push: true
-          tags: ${{ steps.meta-proxy.outputs.tags }}
-          labels: ${{ steps.meta-proxy.outputs.labels }}
+          tags: |
+            ${{ steps.meta-proxy-ghcr.outputs.tags }}
+            ${{ steps.meta-proxy-dh.outputs.tags }}
+          labels: ${{ steps.meta-proxy-ghcr.outputs.labels }}
           build-args: |
             VERSION=${{ github.sha }}
