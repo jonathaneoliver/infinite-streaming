@@ -1,0 +1,50 @@
+name: CodeQL
+
+# GitHub-hosted SAST. Scans Go (the primary attack surface — three Go
+# binaries + the Cloudflare Worker JS), and JavaScript (the dashboard
+# UI + the rendezvous Worker). Results land in the Security tab.
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  schedule:
+    # Weekly safety net catches issues from new CodeQL queries that
+    # didn't exist when the code was last pushed.
+    - cron: "37 6 * * 1"
+
+permissions:
+  contents: read
+  security-events: write
+  actions: read
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [ go, javascript-typescript ]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: ${{ matrix.language }}
+          # `security-extended` adds a slightly broader query set than the
+          # default `security-and-quality` minus the noisy maintainability
+          # rules. Switch to `security-and-quality` if you want lint-style
+          # findings too.
+          queries: security-extended
+
+      - name: Build (autobuild)
+        uses: github/codeql-action/autobuild@v3
+
+      - name: Perform CodeQL analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:${{ matrix.language }}"
