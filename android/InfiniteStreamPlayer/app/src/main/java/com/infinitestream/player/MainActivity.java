@@ -460,54 +460,49 @@ public class MainActivity extends AppCompatActivity {
      *  - Enter manually (always works as a fallback)
      */
      private void showAddServerMenu() {
-        String[] options = {
-            "Discover on this network…",
-            "Pair with code…",
-            "Enter host/port manually…"
-        };
-        new AlertDialog.Builder(this)
-            .setTitle("Add a server")
-            .setItems(options, (dialog, which) -> {
-                switch (which) {
-                    case 0: showDiscoverDialog(); break;
-                    case 1: showPairWithCodeDialog(); break;
-                    case 2: showManualEntryDialog(); break;
-                }
-            })
-            .setNegativeButton("Cancel", null)
-            .show();
-    }
-
-    private void showDiscoverDialog() {
+        // Kick off discovery immediately and surface results inline above
+        // pair-with-code / manual-entry. 95% of the time the TV is on the
+        // same network as the server and the user picks the first hit, so
+        // the previous "Discover on this network…" sub-dialog was an extra
+        // tap for the common case.
         statusText.setText(R.string.discovering);
         discoverButton.setEnabled(false);
         RendezvousService.discoverServers(this, (found, error) -> {
             discoverButton.setEnabled(true);
             if (error != null) {
-                Toast.makeText(this, "Discovery failed: " + error, Toast.LENGTH_LONG).show();
                 statusText.setText("Discovery failed: " + error);
-                return;
+            } else {
+                statusText.setText("");
             }
-            if (found.isEmpty()) {
-                new AlertDialog.Builder(this)
-                    .setTitle("Discover servers")
-                    .setMessage(R.string.no_servers_found)
-                    .setPositiveButton(android.R.string.ok, null)
-                    .show();
-                statusText.setText("No servers detected.");
-                return;
-            }
-            String[] labels = new String[found.size()];
-            for (int i = 0; i < found.size(); i++) {
-                RendezvousService.DiscoveredServer s = found.get(i);
-                labels[i] = s.label + "\n" + s.url;
-            }
-            new AlertDialog.Builder(this)
-                .setTitle("Detected servers (" + found.size() + ")")
-                .setItems(labels, (dialog, which) -> addDiscoveredServer(found.get(which)))
-                .setNegativeButton("Cancel", null)
-                .show();
+            showAddServerMenuWith(found != null ? found : new ArrayList<>());
         });
+    }
+
+    private void showAddServerMenuWith(List<RendezvousService.DiscoveredServer> discovered) {
+        final int n = discovered.size();
+        String[] options = new String[n + 2];
+        for (int i = 0; i < n; i++) {
+            RendezvousService.DiscoveredServer s = discovered.get(i);
+            options[i] = s.label + "\n" + s.url;
+        }
+        options[n] = "Pair with code…";
+        options[n + 1] = "Enter host/port manually…";
+        String title = n > 0
+            ? "Add a server (" + n + " found)"
+            : "Add a server (no servers detected)";
+        new AlertDialog.Builder(this)
+            .setTitle(title)
+            .setItems(options, (dialog, which) -> {
+                if (which < n) {
+                    addDiscoveredServer(discovered.get(which));
+                } else if (which == n) {
+                    showPairWithCodeDialog();
+                } else {
+                    showManualEntryDialog();
+                }
+            })
+            .setNegativeButton("Cancel", null)
+            .show();
     }
 
     /**
