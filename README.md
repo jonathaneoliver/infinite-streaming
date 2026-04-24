@@ -470,6 +470,7 @@ That's it — no third-party services beyond a Cloudflare account.
 | `INFINITE_STREAM_RENDEZVOUS_URL` | Rendezvous Worker base URL. Required to enable any pairing. |
 | `INFINITE_STREAM_ANNOUNCE_URL` | URL that clients should use to reach this server (e.g. `http://lenovo.local:30000`). When set, this server appears in same-WAN auto-discovery. |
 | `INFINITE_STREAM_ANNOUNCE_LABEL` | Optional friendly label. Defaults to `host:port` from the announce URL. |
+| `INFINITE_STREAM_SERVER_ID` | Optional explicit announce ID (4–64 chars `[A-Za-z0-9_-]`). Defaults to a stable random ID persisted at `<data_dir>/server_id`. Set this when multiple deployments share the same data directory (e.g. dev + release pods on the same k3s node), otherwise their announces overwrite each other on the rendezvous. |
 
 ---
 

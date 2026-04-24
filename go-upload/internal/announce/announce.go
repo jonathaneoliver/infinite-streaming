@@ -93,10 +93,22 @@ func (m *Manager) Run(ctx context.Context) {
 	}
 	rendezvous = strings.TrimRight(rendezvous, "/")
 
-	serverID, err := loadOrCreateServerID(m.dataDir)
-	if err != nil {
-		log.Printf("announce: cannot persist server_id (%v) — generating ephemeral", err)
-		serverID = randomID()
+	// Allow an explicit server_id override (mainly for k8s deployments
+	// that share a data dir between distinct workloads — without this the
+	// persisted /media/data/server_id collides and the announces overwrite
+	// each other on the rendezvous, leaving only one of them visible).
+	serverID := strings.TrimSpace(os.Getenv("INFINITE_STREAM_SERVER_ID"))
+	if serverID != "" && !isValidID(serverID) {
+		log.Printf("announce: INFINITE_STREAM_SERVER_ID=%q is invalid (need 4-64 chars [A-Za-z0-9_-]); ignoring", serverID)
+		serverID = ""
+	}
+	if serverID == "" {
+		var err error
+		serverID, err = loadOrCreateServerID(m.dataDir)
+		if err != nil {
+			log.Printf("announce: cannot persist server_id (%v) — generating ephemeral", err)
+			serverID = randomID()
+		}
 	}
 
 	label := strings.TrimSpace(os.Getenv("INFINITE_STREAM_ANNOUNCE_LABEL"))
