@@ -1,5 +1,5 @@
 
-FROM golang:1.21-alpine AS go-builder
+FROM golang:1.26-alpine AS go-builder
 RUN apk add git
 WORKDIR /build
 COPY go-live /build/go-live
