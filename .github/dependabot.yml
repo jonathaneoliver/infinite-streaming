@@ -1,0 +1,58 @@
+version: 2
+
+# Dependabot config — opens PRs for security and version updates across
+# every ecosystem in this repo. Weekly cadence keeps the PR volume low.
+# All PRs land via the same squash-merge workflow as everything else.
+
+updates:
+
+  # GitHub Actions used by .github/workflows/*
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "chore(ci)"
+
+  # Go modules — one entry per module.
+  - package-ecosystem: "gomod"
+    directory: "/go-upload"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "chore(deps)"
+      include: "scope"
+
+  - package-ecosystem: "gomod"
+    directory: "/go-live"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "chore(deps)"
+      include: "scope"
+
+  - package-ecosystem: "gomod"
+    directory: "/go-proxy"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "chore(deps)"
+      include: "scope"
+
+  # npm — pair-rendezvous Cloudflare Worker (wrangler etc.)
+  - package-ecosystem: "npm"
+    directory: "/cloudflare/pair-rendezvous"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "chore(deps)"
+      include: "scope"
+
+  # Docker base images in the Dockerfile (alpine, golang).
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "chore(deps)"
+      include: "scope"
