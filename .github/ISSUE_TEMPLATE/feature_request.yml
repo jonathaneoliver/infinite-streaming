@@ -1,0 +1,51 @@
+name: Feature request
+description: Suggest a new capability or enhancement
+title: "[feat] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Heads up: this project is intentionally focused on testing video players under deterministic faults — it's not a production streaming origin. Features that move it toward "production media server" are likely out of scope. See the README "When not to use it" section.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve?
+      description: The user / testing scenario you're trying to support.
+      placeholder: e.g. "I want to characterize how a player handles a 4-rung ladder when the highest rung is suddenly removed mid-stream."
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: What would you change or add? UI? API? Encoding pipeline?
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Existing tools / workarounds you've tried, and why they fall short.
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      multiple: true
+      options:
+        - Dashboard / UI
+        - Failure injection (HTTP)
+        - Failure injection (transport / nftables)
+        - Traffic shaping
+        - Manifest manipulation
+        - Encoding pipeline
+        - Native client app (iOS / tvOS)
+        - Native client app (Android)
+        - Native client app (Roku)
+        - Server discovery / pairing
+        - Documentation
+        - Other
