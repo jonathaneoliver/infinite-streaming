@@ -4918,8 +4918,10 @@
                 const k = `${m}|${v.resolution || ''}`;
                 if (!seenVariants.has(k)) seenVariants.set(k, { mbps: m, resolution: v.resolution || '' });
             }
+            // Ordered DESCENDING — highest bitrate at the top, lowest at
+            // the bottom — so an upshift walks UP the ladder visually.
             const variantOrder = Array.from(seenVariants.entries())
-                .sort((a, b) => Number(a[1].mbps) - Number(b[1].mbps));
+                .sort((a, b) => Number(b[1].mbps) - Number(a[1].mbps));
             const variantGroups = variantOrder.map(([k, v]) => ({
                 id: `VARIANT::${k}`,
                 content: variantLabel(v.mbps, v.resolution)
@@ -4962,8 +4964,9 @@
                 (e) => e.state || 'Unknown',
                 (e) => playerStateColor(e.state));
 
-            // VARIANT: each variant gets its own swim lane; an upshift
-            // visually walks UP the ladder.
+            // VARIANT: each variant gets its own swim lane. Variants are
+            // ordered highest-bitrate-at-top so an upshift visually
+            // walks UP the ladder and a downshift walks DOWN.
             const variantSeq = variantEvents.sort((a, b) => Number(a.ts) - Number(b.ts));
             for (let i = 0; i < variantSeq.length; i++) {
                 const v = variantSeq[i];

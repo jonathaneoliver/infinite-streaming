@@ -2656,8 +2656,9 @@ maybe a histogram of b
             const serverLanes = Object.keys(EVENT_LANES).filter((k) => SERVER_LANES.has(k));
 
             // VARIANT subgroups: one lane per observed variant key in the
-            // current window, ordered by bitrate ascending (so the lowest
-            // sits at the bottom of the VARIANT band, like an ABR ladder).
+            // current window, ordered by bitrate DESCENDING — highest at
+            // the top, lowest at the bottom — so the visual ladder
+            // matches how an ABR ladder is normally drawn.
             const variantEvents = events.filter((e) => e.type === 'VARIANT');
             const seenVariants = new Map(); // key -> {mbps, resolution}
             for (const v of variantEvents) {
@@ -2666,7 +2667,7 @@ maybe a histogram of b
                 if (!seenVariants.has(k)) seenVariants.set(k, { mbps: m, resolution: v.resolution || '' });
             }
             const variantOrder = Array.from(seenVariants.entries())
-                .sort((a, b) => Number(a[1].mbps) - Number(b[1].mbps));
+                .sort((a, b) => Number(b[1].mbps) - Number(a[1].mbps));
             const variantGroups = variantOrder.map(([k, v]) => ({
                 id: `VARIANT::${k}`,
                 content: variantLabel(v.mbps, v.resolution)
@@ -2712,8 +2713,9 @@ maybe a histogram of b
                 (e) => playerStateColor(e.state));
 
             // VARIANT: each variant gets its own swim lane. Render each
-            // active span in the lane that matches its variant key, so an
-            // upshift visually walks UP the ladder.
+            // active span in the lane that matches its variant key.
+            // With variants ordered highest-bitrate-at-top, an upshift
+            // visually walks UP the ladder and a downshift walks DOWN.
             const variantSeq = variantEvents.sort((a, b) => Number(a.ts) - Number(b.ts));
             for (let i = 0; i < variantSeq.length; i++) {
                 const v = variantSeq[i];
