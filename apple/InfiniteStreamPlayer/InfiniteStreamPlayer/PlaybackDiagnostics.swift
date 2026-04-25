@@ -234,7 +234,7 @@ final class PlaybackDiagnostics: ObservableObject {
     }
 
     func reset() {
-        state = "Idle"
+        state = "idle"
         currentTime = 0
         bufferedEnd = nil
         bufferDepth = nil
@@ -314,14 +314,14 @@ final class PlaybackDiagnostics: ObservableObject {
                 let rate = self.player?.rate ?? 0
                 switch status {
                 case .paused:
-                    self.state = "Paused"
+                    self.state = "paused"
                 case .waitingToPlayAtSpecifiedRate:
-                    self.state = "Buffering"
+                    self.state = "buffering"
                     self.startStallIfNeeded()
                 case .playing:
-                    self.state = "Playing"
+                    self.state = "playing"
                     self.endStallIfNeeded()
-                @unknown default: self.state = "Unknown"
+                @unknown default: self.state = "unknown"
                 }
                 print("[STATE] \(prev) -> \(self.state) rate=\(rate) time=\(String(format: "%.2f", self.currentTime)) \(self.playbackSnapshot())")
             }
@@ -735,7 +735,7 @@ final class PlaybackDiagnostics: ObservableObject {
             }
             return
         }
-        guard state == "Playing" else {
+        guard state == "playing" else {
             lastVariantDwellChangeAt = now
             return
         }

@@ -442,14 +442,18 @@ final class PlaybackMetrics {
     }
 
     private String mapState() {
+        // Lowercase canonical names — matches Apple PlaybackDiagnostics,
+        // Android-test ExoPlayerTestApp, web embed, and Roku, so the
+        // dashboard PLAYERSTATE lane shows the same colour for the same
+        // state regardless of source platform.
         switch (player.getPlaybackState()) {
-            case Player.STATE_IDLE: return "Idle";
-            case Player.STATE_ENDED: return "Ended";
-            case Player.STATE_BUFFERING: return "Buffering";
+            case Player.STATE_IDLE: return "idle";
+            case Player.STATE_ENDED: return "ended";
+            case Player.STATE_BUFFERING: return "buffering";
             case Player.STATE_READY:
-                return player.isPlaying() ? "Playing" : "Paused";
+                return player.isPlaying() ? "playing" : "paused";
             default:
-                return "Unknown";
+                return "unknown";
         }
     }
 

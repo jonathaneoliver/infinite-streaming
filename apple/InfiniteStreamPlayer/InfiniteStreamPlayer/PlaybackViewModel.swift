@@ -683,7 +683,7 @@ final class PlaybackViewModel: ObservableObject {
                         print("[AUTO_RECOVERY] triggered frozen state=\(self.diagnostics.state) bufferEmpty=\(self.diagnostics.bufferEmpty) time=\(String(format: "%.2f", self.diagnostics.currentTime))")
                         self.scheduleAutoRecoveryRestart(reason: "auto_recovery_frozen")
                     }
-                } else if self.diagnostics.state == "Playing" {
+                } else if self.diagnostics.state == "playing" {
                     self.log("UNFROZEN: video time advancing again")
                 }
             }
@@ -753,9 +753,9 @@ final class PlaybackViewModel: ObservableObject {
                     // the Buffering AVPlayer state, regardless of whether
                     // playback was previously interrupted. stall_* is
                     // gated on first-frame and stall threshold.
-                    if state == "Buffering" {
+                    if state == "buffering" {
                         Task { await self.sendPlayerMetrics(event: "buffering_start") }
-                    } else if previous == "Buffering" {
+                    } else if previous == "buffering" {
                         Task { await self.sendPlayerMetrics(event: "buffering_end") }
                     }
                 } else if previous == nil {
@@ -770,7 +770,7 @@ final class PlaybackViewModel: ObservableObject {
             .sink { [weak self] currentTime in
                 guard let self else { return }
                 guard let startAt = self.playbackStartAt else { return }
-                let isActivelyPlaying = self.diagnostics.state == "Playing"
+                let isActivelyPlaying = self.diagnostics.state == "playing"
                     && self.diagnostics.playbackRate > 0
                 if !self.firstFrameReported && currentTime > 0 && isActivelyPlaying {
                     let elapsed = self.roundSeconds(Date().timeIntervalSince(startAt))
@@ -834,7 +834,7 @@ final class PlaybackViewModel: ObservableObject {
                 guard let self else { return }
                 self.autoRecoveryRestartTimer = nil
                 let timeAdvanced = self.diagnostics.currentTime > scheduledAtTime + 0.5
-                let recovered = self.diagnostics.state == "Playing"
+                let recovered = self.diagnostics.state == "playing"
                     && !self.diagnostics.frozenDetected
                     && !self.diagnostics.segmentStallDetected
                     && timeAdvanced
@@ -863,7 +863,7 @@ final class PlaybackViewModel: ObservableObject {
                     print("[AUTO_RECOVERY] verify: another restart pending — keeping attempts=\(self.autoRecoveryAttempts)")
                     return
                 }
-                let playingCleanly = self.diagnostics.state == "Playing"
+                let playingCleanly = self.diagnostics.state == "playing"
                     && !self.diagnostics.frozenDetected
                     && !self.diagnostics.segmentStallDetected
                 if playingCleanly {

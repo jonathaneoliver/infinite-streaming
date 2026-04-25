@@ -2379,17 +2379,20 @@ maybe a histogram of b
             'LOOP_PLAYER': { y: 2, color: '#06b6d4', label: 'LOOP PLAYER' },
             'LOOP_SERVER': { y: 1, color: '#84cc16', label: 'LOOP SERVER' }
         };
-        // Per-state colour for the PLAYERSTATE lane — each dot's colour
-        // tells you what the player thought it was doing at that tick.
+        // Per-state colour for the PLAYERSTATE lane. Keys are lowercase
+        // because clients emit a mix of casings ("Playing" on Apple,
+        // "playing" on Android-test/Roku/web) — playerStateColor()
+        // normalises before lookup so all map to the same colour.
         const PLAYER_STATE_COLOR = {
-            'Playing':   '#16a34a',
-            'Buffering': '#f59e0b',
-            'Paused':    '#9333ea',
-            'Idle':      '#6b7280',
-            'Unknown':   '#d1d5db'
+            'playing':   '#16a34a', // green
+            'buffering': '#f59e0b', // amber
+            'paused':    '#9333ea', // purple
+            'idle':      '#6b7280', // gray
+            'ended':     '#1f2937', // near-black
+            'unknown':   '#d1d5db'  // light gray
         };
         function playerStateColor(s) {
-            return PLAYER_STATE_COLOR[String(s || '').trim()] || '#6b7280';
+            return PLAYER_STATE_COLOR[String(s || '').trim().toLowerCase()] || '#d1d5db';
         }
         // Variant colour buckets — lower bitrate = redder, higher = greener.
         // Drives the colour of segments / dots on the VARIANT swim lane so
