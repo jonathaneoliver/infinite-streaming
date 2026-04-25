@@ -2302,18 +2302,21 @@ maybe a histogram of b
                 }
             }
 
-            // VARIANT lane: sample player_metrics_video_bitrate_mbps on
-            // each refresh and emit a marker on every change. Dedup by
-            // BITRATE ONLY (rounded to 0.1 Mbps) — resolution can briefly
-            // be empty/null between samples on some clients, which would
-            // create spurious "new variant" entries with the same bitrate
-            // but different resolution strings. Resolution travels along
-            // for labelling only.
-            const variantMbpsRaw = Number(session.player_metrics_video_bitrate_mbps);
-            if (Number.isFinite(variantMbpsRaw) && variantMbpsRaw > 0) {
-                const variantMbps = Math.round(variantMbpsRaw * 10) / 10;
-                const variantRes = String(session.player_metrics_video_resolution || '').trim();
-                const variantKey = `${variantMbps}`;
+            // VARIANT lane: dedup by RESOLUTION, not bitrate.
+            // player_metrics_video_bitrate_mbps reports the actual
+            // segment bitrate which fluctuates with scene complexity
+            // even within one rendition (a high-motion 1080p segment
+            // can be 3x the bitrate of a low-motion 1080p segment).
+            // Resolution is stable per rendition, so it's the correct
+            // identity for an ABR variant. Skip ticks where resolution
+            // is missing rather than dedupe against an empty value
+            // (would briefly drop the active variant from the lane).
+            const variantRes = String(session.player_metrics_video_resolution || '').trim();
+            if (variantRes) {
+                const variantMbpsRaw = Number(session.player_metrics_video_bitrate_mbps);
+                const variantMbps = Number.isFinite(variantMbpsRaw) && variantMbpsRaw > 0
+                    ? Math.round(variantMbpsRaw * 10) / 10 : 0;
+                const variantKey = variantRes;
                 const prevVariant = lastRecordedVariantBySession.get(String(key));
                 if (prevVariant !== variantKey) {
                     const eventSeries = bandwidthEventHistory.get(key) || [];
@@ -2660,25 +2663,27 @@ maybe a histogram of b
             const playerLanes = Object.keys(EVENT_LANES).filter((k) => !SERVER_LANES.has(k) && k !== 'VARIANT');
             const serverLanes = Object.keys(EVENT_LANES).filter((k) => SERVER_LANES.has(k));
 
-            // VARIANT subgroups: one lane per observed bitrate in the
-            // current window, ordered DESCENDING — highest at the top,
-            // lowest at the bottom — so the visual ladder matches how
-            // an ABR ladder is normally drawn. Lane key is bitrate
-            // alone; we keep the latest non-empty resolution for the
-            // label so a brief empty-resolution sample doesn't spawn
-            // a phantom lane.
+            // VARIANT subgroups: one lane per observed RESOLUTION in
+            // the current window. Lane key is resolution because each
+            // rendition has a unique resolution; bitrate fluctuates per
+            // segment within one rendition and would split into phantom
+            // lanes. Bitrate is kept (latest seen for that resolution)
+            // for sorting and labelling.
             const variantEvents = events.filter((e) => e.type === 'VARIANT');
-            const seenVariants = new Map(); // key (mbps) -> {mbps, resolution}
+            const seenVariants = new Map(); // key (resolution) -> {mbps, resolution}
             for (const v of variantEvents) {
+                const res = String(v.resolution || '').trim();
+                if (!res) continue;
                 const m = Number(v.mbps);
-                const k = `${m}`;
-                const existing = seenVariants.get(k);
+                const existing = seenVariants.get(res);
                 if (!existing) {
-                    seenVariants.set(k, { mbps: m, resolution: v.resolution || '' });
-                } else if (v.resolution && !existing.resolution) {
-                    existing.resolution = v.resolution;
+                    seenVariants.set(res, { mbps: m, resolution: res });
+                } else if (Number.isFinite(m) && m > 0) {
+                    existing.mbps = m; // keep the most recent bitrate for that resolution
                 }
             }
+            // Sort by bitrate DESCENDING (highest at top), so the visual
+            // ladder matches how ABR ladders are normally drawn.
             const variantOrder = Array.from(seenVariants.entries())
                 .sort((a, b) => Number(b[1].mbps) - Number(a[1].mbps));
             const variantGroups = variantOrder.map(([k, v]) => ({
@@ -2725,21 +2730,23 @@ maybe a histogram of b
                 (e) => e.state || 'Unknown',
                 (e) => playerStateColor(e.state));
 
-            // VARIANT: each bitrate gets its own swim lane. Lane key
-            // matches seenVariants — bitrate-only, so the segment goes
-            // into the right row regardless of any flicker on the
-            // resolution string.
+            // VARIANT: each resolution gets its own swim lane. Lane key
+            // matches seenVariants — resolution. Colour is bucketed by
+            // the segment's bitrate so high-motion (high-bitrate) and
+            // low-motion (low-bitrate) segments within one rendition
+            // are visible as colour shifts inside the same row.
             const variantSeq = variantEvents.sort((a, b) => Number(a.ts) - Number(b.ts));
             for (let i = 0; i < variantSeq.length; i++) {
                 const v = variantSeq[i];
+                const res = String(v.resolution || '').trim();
+                if (!res) continue;
                 const start = Number(v.ts);
                 const end = i + 1 < variantSeq.length ? Number(variantSeq[i + 1].ts) : nowMs;
                 const m = Number(v.mbps);
-                const k = `${m}`;
                 const color = variantColor(m);
                 items.push({
                     id: itemId++,
-                    group: `VARIANT::${k}`,
+                    group: `VARIANT::${res}`,
                     content: '',
                     start: new Date(start),
                     end: new Date(end),
