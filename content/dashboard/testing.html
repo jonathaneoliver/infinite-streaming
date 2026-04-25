@@ -611,6 +611,13 @@ maybe a histogram of b
                 0 0 6px rgba(255, 255, 255, 0.85),
                 1px 0 0 rgba(255, 255, 255, 0.75),
                 -1px 0 0 rgba(255, 255, 255, 0.75);
+            /* Neutralise vis-timeline's default label borders (which
+             * inherit currentColor and were rendering as red in this
+             * theme). Subtle gray bottom border keeps row separation. */
+            border-color: rgba(0, 0, 0, 0.06) !important;
+            border-top: none !important;
+            border-left: none !important;
+            border-right: none !important;
         }
         .events-timeline-legend {
             display: none;
