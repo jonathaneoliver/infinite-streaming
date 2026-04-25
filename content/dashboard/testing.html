@@ -2765,6 +2765,18 @@ maybe a histogram of b
             const liveStart = new Date(nowMs - liveWindowMs);
             const liveEnd = new Date(nowMs);
 
+            // Compute explicit height from the actual lane count.
+            // vis-timeline's height:'auto' is unreliable when the
+            // container has no intrinsic height (its internal panels
+            // are absolutely positioned, so the wrap can't measure
+            // them). Each group row is ~30px; section parent rows
+            // add their own ~30px. Add headroom for the time axis.
+            const ROW_HEIGHT_PX = 30;
+            const AXIS_AND_PADDING_PX = 60;
+            const computedHeight = groups.length * ROW_HEIGHT_PX + AXIS_AND_PADDING_PX;
+            const heightPx = `${computedHeight}px`;
+            container.style.height = heightPx;
+
             let timeline = eventsTimelines.get(sessionId);
             if (!timeline) {
                 timeline = new vis.Timeline(
@@ -2778,24 +2790,20 @@ maybe a histogram of b
                         moveable: true,
                         margin: { item: 4 },
                         orientation: { axis: 'top' },
-                        // Auto-grow to fit all groups. No min/max
-                        // constraints — they cause vis-timeline to scroll
-                        // internally and hide the top lanes. Let the
-                        // outer page scroll when the chart gets tall.
-                        height: 'auto',
+                        height: heightPx,
                         start: liveStart,
                         end: liveEnd
                     }
                 );
                 eventsTimelines.set(sessionId, timeline);
-                // Container width is sometimes 0 on first paint (ScrollView /
-                // collapsed parent); force a redraw next frame so the
-                // timeline measures its real width.
                 requestAnimationFrame(() => timeline.redraw());
-                console.log('[events-timeline] created for session', sessionId, 'with', items.length, 'items,', groups.length, 'groups');
+                console.log('[events-timeline] created for session', sessionId, 'with', items.length, 'items,', groups.length, 'groups, height', heightPx);
             } else {
                 timeline.setItems(new vis.DataSet(items));
                 timeline.setGroups(new vis.DataSet(groups));
+                // Re-apply height each render — group count changes as
+                // variant lanes appear/disappear.
+                timeline.setOptions({ height: heightPx });
                 // Slide the visible window so "now" stays pinned to the
                 // right edge — matches the bitrate / buffer chart
                 // live-edge behaviour. animation:false avoids per-tick

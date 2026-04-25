@@ -5006,12 +5006,18 @@
                 });
             }
 
-            // Live-edge window: same 10-minute span as the other charts,
-            // right edge anchored to "now" so events scroll left as time
-            // advances. Updated on every render so the view tracks live.
             const liveWindowMs = 10 * 60 * 1000;
             const liveStart = new Date(nowMs - liveWindowMs);
             const liveEnd = new Date(nowMs);
+
+            // Compute explicit height from the actual lane count;
+            // vis-timeline's height:'auto' collapses to 0 when the
+            // container has no intrinsic height.
+            const ROW_HEIGHT_PX = 30;
+            const AXIS_AND_PADDING_PX = 60;
+            const computedHeight = groups.length * ROW_HEIGHT_PX + AXIS_AND_PADDING_PX;
+            const heightPx = `${computedHeight}px`;
+            container.style.height = heightPx;
 
             let timeline = eventsTimelines.get(sessionId);
             if (!timeline) {
@@ -5026,22 +5032,18 @@
                         moveable: true,
                         margin: { item: 4 },
                         orientation: { axis: 'top' },
-                        // Auto-grow with no min/max so all lanes are
-                        // visible; vis-timeline scrolls internally and
-                        // hides top rows whenever a constraint kicks in.
-                        height: 'auto',
+                        height: heightPx,
                         start: liveStart,
                         end: liveEnd
                     }
                 );
                 eventsTimelines.set(sessionId, timeline);
                 requestAnimationFrame(() => timeline.redraw());
-                console.log('[events-timeline] created for session', sessionId, 'with', items.length, 'items,', groups.length, 'groups');
+                console.log('[events-timeline] created for session', sessionId, 'with', items.length, 'items,', groups.length, 'groups, height', heightPx);
             } else {
                 timeline.setItems(new vis.DataSet(items));
                 timeline.setGroups(new vis.DataSet(groups));
-                // Slide the visible window so "now" stays pinned to
-                // the right edge.
+                timeline.setOptions({ height: heightPx });
                 timeline.setWindow(liveStart, liveEnd, { animation: false });
             }
         }
