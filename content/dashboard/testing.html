@@ -2000,6 +2000,18 @@ maybe a histogram of b
         }
 
         function readChartViewport(chartRef) {
+            if (!chartRef) return null;
+            // vis-timeline branch: marker `$isVisTimeline` set when we
+            // construct it. Window is Date objects; convert to the
+            // seconds-from-windowStart convention the Chart.js charts use.
+            if (chartRef.$isVisTimeline && typeof chartRef.getWindow === 'function') {
+                const win = chartRef.getWindow();
+                const startMs = Number(chartRef.$windowStartMs) || 0;
+                if (!startMs) return null;
+                const min = (win.start.getTime() - startMs) / 1000;
+                const max = (win.end.getTime() - startMs) / 1000;
+                return normalizeChartViewport(min, max);
+            }
             const xScale = chartRef?.scales?.x;
             if (!xScale) return null;
             return normalizeChartViewport(xScale.min, xScale.max);
@@ -2007,6 +2019,16 @@ maybe a histogram of b
 
         function applyChartViewport(chartRef, viewport) {
             if (!chartRef || !viewport) return;
+            if (chartRef.$isVisTimeline && typeof chartRef.setWindow === 'function') {
+                const startMs = Number(chartRef.$windowStartMs) || 0;
+                if (!startMs) return;
+                chartRef.setWindow(
+                    new Date(startMs + viewport.min * 1000),
+                    new Date(startMs + viewport.max * 1000),
+                    { animation: false }
+                );
+                return;
+            }
             if (typeof chartRef.zoomScale === 'function') {
                 chartRef.zoomScale('x', { min: viewport.min, max: viewport.max }, 'none');
             } else if (chartRef.options?.scales?.x) {
@@ -2028,7 +2050,8 @@ maybe a histogram of b
                 eventsCharts.get(key),
                 bandwidthCharts.get(key),
                 bufferDepthCharts.get(key),
-                videoFpsCharts.get(key)
+                videoFpsCharts.get(key),
+                eventsTimelines.get(key)
             ].filter((chartRef) => !!chartRef);
         }
 
@@ -2816,15 +2839,26 @@ maybe a histogram of b
                 );
                 eventsTimelines.set(sessionId, timeline);
                 eventsTimelineFollowLive.set(sessionId, true);
+                // Tag for the cross-chart viewport sync helpers, and
+                // anchor the seconds-from-windowStart frame to liveStart
+                // so vis-timeline ranges convert consistently to the
+                // 0–600 units the Chart.js charts use.
+                timeline.$isVisTimeline = true;
+                timeline.$windowStartMs = liveStart.getTime();
+                // If another chart in this session already has a stored
+                // viewport, apply it so the timeline starts in sync.
+                applyStoredChartViewport(sessionId, timeline);
                 // Detect user pan/zoom: rangechanged with byUser=true.
                 // Stop auto-following live so the user's zoom state
                 // sticks across the per-second render. Re-arm follow
-                // when the user pans/zooms back to within 5s of "now".
+                // when they pan back to within 5s of "now". Broadcast
+                // their viewport to every other chart in this session.
                 timeline.on('rangechanged', (props) => {
                     if (!props || !props.byUser) return;
                     const rightEdge = props.end.getTime();
                     const driftMs = Math.abs(Date.now() - rightEdge);
                     eventsTimelineFollowLive.set(sessionId, driftMs < 5000);
+                    syncChartViewportAcrossSession(sessionId, timeline);
                 });
                 requestAnimationFrame(() => timeline.redraw());
                 console.log('[events-timeline] created for session', sessionId, 'with', items.length, 'items,', groups.length, 'groups, height', heightPx);
@@ -2834,6 +2868,9 @@ maybe a histogram of b
                 // Re-apply height each render — group count changes as
                 // variant lanes appear/disappear.
                 timeline.setOptions({ height: heightPx });
+                // Update the windowStart anchor for viewport conversions
+                // so they stay valid as "now" advances.
+                timeline.$windowStartMs = liveStart.getTime();
                 // Only slide back to "now" if the user hasn't manually
                 // panned/zoomed away. Otherwise we'd clobber their
                 // zoom state every render tick.

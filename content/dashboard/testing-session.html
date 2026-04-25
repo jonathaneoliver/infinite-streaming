@@ -4248,6 +4248,16 @@
         }
 
         function readChartViewport(chartRef) {
+            if (!chartRef) return null;
+            // vis-timeline branch (see testing.html for rationale).
+            if (chartRef.$isVisTimeline && typeof chartRef.getWindow === 'function') {
+                const win = chartRef.getWindow();
+                const startMs = Number(chartRef.$windowStartMs) || 0;
+                if (!startMs) return null;
+                const min = (win.start.getTime() - startMs) / 1000;
+                const max = (win.end.getTime() - startMs) / 1000;
+                return normalizeChartViewport(min, max);
+            }
             const xScale = chartRef?.scales?.x;
             if (!xScale) return null;
             return normalizeChartViewport(xScale.min, xScale.max);
@@ -4255,6 +4265,16 @@
 
         function applyChartViewport(chartRef, viewport) {
             if (!chartRef || !viewport) return;
+            if (chartRef.$isVisTimeline && typeof chartRef.setWindow === 'function') {
+                const startMs = Number(chartRef.$windowStartMs) || 0;
+                if (!startMs) return;
+                chartRef.setWindow(
+                    new Date(startMs + viewport.min * 1000),
+                    new Date(startMs + viewport.max * 1000),
+                    { animation: false }
+                );
+                return;
+            }
             if (typeof chartRef.zoomScale === 'function') {
                 // Use the plugin API so the zoom state is stored inside the plugin and
                 // survives future chart.update() calls (direct options writes get overridden
@@ -4279,7 +4299,8 @@
                 eventsCharts.get(key),
                 bandwidthCharts.get(key),
                 bufferDepthCharts.get(key),
-                videoFpsCharts.get(key)
+                videoFpsCharts.get(key),
+                eventsTimelines.get(key)
             ].filter((chartRef) => !!chartRef);
         }
 
@@ -5050,11 +5071,18 @@
                 );
                 eventsTimelines.set(sessionId, timeline);
                 eventsTimelineFollowLive.set(sessionId, true);
+                // Tag for the cross-chart viewport sync; anchor seconds-
+                // from-windowStart so vis-timeline ranges convert to the
+                // 0–600 units the Chart.js charts use.
+                timeline.$isVisTimeline = true;
+                timeline.$windowStartMs = liveStart.getTime();
+                applyStoredChartViewport(sessionId, timeline);
                 timeline.on('rangechanged', (props) => {
                     if (!props || !props.byUser) return;
                     const rightEdge = props.end.getTime();
                     const driftMs = Math.abs(Date.now() - rightEdge);
                     eventsTimelineFollowLive.set(sessionId, driftMs < 5000);
+                    syncChartViewportAcrossSession(sessionId, timeline);
                 });
                 requestAnimationFrame(() => timeline.redraw());
                 console.log('[events-timeline] created for session', sessionId, 'with', items.length, 'items,', groups.length, 'groups, height', heightPx);
@@ -5062,6 +5090,7 @@
                 timeline.setItems(new vis.DataSet(items));
                 timeline.setGroups(new vis.DataSet(groups));
                 timeline.setOptions({ height: heightPx });
+                timeline.$windowStartMs = liveStart.getTime();
                 if (eventsTimelineFollowLive.get(sessionId) !== false) {
                     timeline.setWindow(liveStart, liveEnd, { animation: false });
                 }
