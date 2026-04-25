@@ -711,6 +711,12 @@ maybe a histogram of b
         const videoFpsCharts = new Map();
         const eventsCharts = new Map();
         const eventsTimelines = new Map();
+        // Per-session "follow live" flag. True = right edge tracks "now"
+        // every tick. Flips to false the moment the user zooms or pans
+        // manually, so the zoom state isn't clobbered by the per-second
+        // setWindow call. Re-enabled when the user pans/zooms back to a
+        // window whose right edge is within 5s of "now".
+        const eventsTimelineFollowLive = new Map();
         const chartViewportBySession = new Map();
         const chartPausedBySession = new Map();
         const bandwidthVisibility = new Map();
@@ -2792,10 +2798,34 @@ maybe a histogram of b
                         orientation: { axis: 'top' },
                         height: heightPx,
                         start: liveStart,
-                        end: liveEnd
+                        end: liveEnd,
+                        // Match the Chart.js charts' zoom UX:
+                        //   plain wheel = page scroll (do not intercept)
+                        //   Alt/Option + wheel = zoom in/out
+                        // Pan is left-drag on the timeline (vis-timeline
+                        // doesn't support right-drag natively; close enough
+                        // to the Chart.js right-drag-pan behaviour).
+                        zoomKey: 'altKey',
+                        horizontalScroll: false,
+                        // Reasonable zoom bounds: 1s lower (heavy zoom in)
+                        // to 6h upper (back-out enough to see longer
+                        // sessions if user pans backward).
+                        zoomMin: 1000,
+                        zoomMax: 6 * 60 * 60 * 1000
                     }
                 );
                 eventsTimelines.set(sessionId, timeline);
+                eventsTimelineFollowLive.set(sessionId, true);
+                // Detect user pan/zoom: rangechanged with byUser=true.
+                // Stop auto-following live so the user's zoom state
+                // sticks across the per-second render. Re-arm follow
+                // when the user pans/zooms back to within 5s of "now".
+                timeline.on('rangechanged', (props) => {
+                    if (!props || !props.byUser) return;
+                    const rightEdge = props.end.getTime();
+                    const driftMs = Math.abs(Date.now() - rightEdge);
+                    eventsTimelineFollowLive.set(sessionId, driftMs < 5000);
+                });
                 requestAnimationFrame(() => timeline.redraw());
                 console.log('[events-timeline] created for session', sessionId, 'with', items.length, 'items,', groups.length, 'groups, height', heightPx);
             } else {
@@ -2804,11 +2834,12 @@ maybe a histogram of b
                 // Re-apply height each render — group count changes as
                 // variant lanes appear/disappear.
                 timeline.setOptions({ height: heightPx });
-                // Slide the visible window so "now" stays pinned to the
-                // right edge — matches the bitrate / buffer chart
-                // live-edge behaviour. animation:false avoids per-tick
-                // jitter.
-                timeline.setWindow(liveStart, liveEnd, { animation: false });
+                // Only slide back to "now" if the user hasn't manually
+                // panned/zoomed away. Otherwise we'd clobber their
+                // zoom state every render tick.
+                if (eventsTimelineFollowLive.get(sessionId) !== false) {
+                    timeline.setWindow(liveStart, liveEnd, { animation: false });
+                }
             }
         }
 

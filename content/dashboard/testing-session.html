@@ -954,6 +954,10 @@
         const videoFpsCharts = new Map();
         const eventsCharts = new Map();
         const eventsTimelines = new Map();
+        // Per-session "follow live" flag — see testing.html for the
+        // full rationale. Skips the per-tick setWindow when the user
+        // has zoomed/panned away from the live edge.
+        const eventsTimelineFollowLive = new Map();
         const chartViewportBySession = new Map();
         const chartPausedBySession = new Map();
         const bandwidthVisibility = new Map();
@@ -5034,17 +5038,33 @@
                         orientation: { axis: 'top' },
                         height: heightPx,
                         start: liveStart,
-                        end: liveEnd
+                        end: liveEnd,
+                        // Match Chart.js zoom UX: plain wheel = page
+                        // scroll; Alt/Option + wheel = zoom; left-drag
+                        // = pan.
+                        zoomKey: 'altKey',
+                        horizontalScroll: false,
+                        zoomMin: 1000,
+                        zoomMax: 6 * 60 * 60 * 1000
                     }
                 );
                 eventsTimelines.set(sessionId, timeline);
+                eventsTimelineFollowLive.set(sessionId, true);
+                timeline.on('rangechanged', (props) => {
+                    if (!props || !props.byUser) return;
+                    const rightEdge = props.end.getTime();
+                    const driftMs = Math.abs(Date.now() - rightEdge);
+                    eventsTimelineFollowLive.set(sessionId, driftMs < 5000);
+                });
                 requestAnimationFrame(() => timeline.redraw());
                 console.log('[events-timeline] created for session', sessionId, 'with', items.length, 'items,', groups.length, 'groups, height', heightPx);
             } else {
                 timeline.setItems(new vis.DataSet(items));
                 timeline.setGroups(new vis.DataSet(groups));
                 timeline.setOptions({ height: heightPx });
-                timeline.setWindow(liveStart, liveEnd, { animation: false });
+                if (eventsTimelineFollowLive.get(sessionId) !== false) {
+                    timeline.setWindow(liveStart, liveEnd, { animation: false });
+                }
             }
         }
 
