@@ -724,6 +724,13 @@ maybe a histogram of b
         const lastRecordedPlayerEventBySession = new Map();
         const lastRecordedPlayerStateBySession = new Map();
         const lastRecordedVariantBySession = new Map();
+        // Two-sample debounce for VARIANT: holds the most recent
+        // unconfirmed (res, bitrate) candidate. Only when the same
+        // tuple shows up twice in a row do we commit it as a variant
+        // event — single-sample mismatches between the resolution
+        // observer and the bitrate observer no longer create phantom
+        // lanes (e.g. "3840x2160 @ 3.5 Mbps" mid-upshift).
+        const pendingVariantBySession = new Map();
         const lastRecordedLoopCountBySession = new Map();
         const lastRecordedServerLoopCountBySession = new Map();
         const lastRecordedLoopEventStampBySession = new Map();
@@ -2331,24 +2338,32 @@ maybe a histogram of b
             // VARIANT lane: dedup by (resolution, indicated bitrate).
             // ABR ladders can legitimately have multiple variants at the
             // same resolution but different bitrates (e.g. H.264 + HEVC
-            // at 1080p, or two quality presets), so resolution alone
-            // collapses real variants together. The bitrate is the
-            // manifest BANDWIDTH attribute (player_metrics_video_bitrate_mbps
-            // is iOS indicatedBitrate / Android Format.bitrate, both stable
-            // per rendition), so this is safe to use as identity now.
-            // Skip ticks where either is missing.
+            // at 1080p), so resolution alone collapses real variants.
+            // Two-sample debounce filters out transition skew —
+            // resolution and bitrate come from independent observers
+            // and can be briefly mismatched mid-shift, which would
+            // otherwise create phantom lanes like "3840x2160 @ 3.5 Mbps".
             const variantRes = String(session.player_metrics_video_resolution || '').trim();
             const variantMbpsRaw = Number(session.player_metrics_video_bitrate_mbps);
             if (variantRes && Number.isFinite(variantMbpsRaw) && variantMbpsRaw > 0) {
                 const variantMbps = Math.round(variantMbpsRaw * 10) / 10;
                 const variantKey = `${variantRes}|${variantMbps}`;
                 const prevVariant = lastRecordedVariantBySession.get(String(key));
-                if (prevVariant !== variantKey) {
+                const pending = pendingVariantBySession.get(String(key));
+                if (prevVariant === variantKey) {
+                    // Already-committed variant — clear any stale pending.
+                    if (pending) pendingVariantBySession.delete(String(key));
+                } else if (pending && pending.key === variantKey) {
+                    // Two consecutive matching samples — commit.
                     const eventSeries = bandwidthEventHistory.get(key) || [];
                     eventSeries.push({ ts: now, type: 'VARIANT', mbps: variantMbps, resolution: variantRes });
                     const eventCutoff = now - windowMs;
                     bandwidthEventHistory.set(key, eventSeries.filter((event) => Number(event.ts) >= eventCutoff));
                     lastRecordedVariantBySession.set(String(key), variantKey);
+                    pendingVariantBySession.delete(String(key));
+                } else {
+                    // First-seen candidate — hold it for one sample.
+                    pendingVariantBySession.set(String(key), { key: variantKey, mbps: variantMbps, resolution: variantRes });
                 }
             }
 

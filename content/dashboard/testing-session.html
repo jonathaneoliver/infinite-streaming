@@ -966,6 +966,8 @@
         const lastRecordedPlayerEventBySession = new Map();
         const lastRecordedPlayerStateBySession = new Map();
         const lastRecordedVariantBySession = new Map();
+        // Two-sample debounce for VARIANT — see testing.html for details.
+        const pendingVariantBySession = new Map();
         const lastRecordedLoopCountBySession = new Map();
         const lastRecordedServerLoopCountBySession = new Map();
         const lastRecordedLoopEventStampBySession = new Map();
@@ -4650,24 +4652,29 @@
                 }
             }
 
-            // VARIANT lane: dedup by (resolution, indicated bitrate) so
-            // multi-bitrate-per-resolution variants (e.g. H.264 + HEVC
-            // at 1080p) get distinct lanes. Bitrate is the manifest
-            // BANDWIDTH attribute on both clients (iOS indicatedBitrate,
-            // Android Format.bitrate), stable per rendition. Skip ticks
-            // where either resolution or bitrate is missing.
+            // VARIANT lane: dedup by (resolution, indicated bitrate)
+            // with a two-sample debounce. Resolution and bitrate come
+            // from independent observers and can be briefly mismatched
+            // mid-shift; require a candidate to repeat once before
+            // committing it to avoid phantom lanes.
             const variantRes = String(session.player_metrics_video_resolution || '').trim();
             const variantMbpsRaw = Number(session.player_metrics_video_bitrate_mbps);
             if (variantRes && Number.isFinite(variantMbpsRaw) && variantMbpsRaw > 0) {
                 const variantMbps = Math.round(variantMbpsRaw * 10) / 10;
                 const variantKey = `${variantRes}|${variantMbps}`;
                 const prevVariant = lastRecordedVariantBySession.get(String(key));
-                if (prevVariant !== variantKey) {
+                const pending = pendingVariantBySession.get(String(key));
+                if (prevVariant === variantKey) {
+                    if (pending) pendingVariantBySession.delete(String(key));
+                } else if (pending && pending.key === variantKey) {
                     const eventSeries = bandwidthEventHistory.get(key) || [];
                     eventSeries.push({ ts: now, type: 'VARIANT', mbps: variantMbps, resolution: variantRes });
                     const eventCutoff = now - windowMs;
                     bandwidthEventHistory.set(key, eventSeries.filter((event) => Number(event.ts) >= eventCutoff));
                     lastRecordedVariantBySession.set(String(key), variantKey);
+                    pendingVariantBySession.delete(String(key));
+                } else {
+                    pendingVariantBySession.set(String(key), { key: variantKey, mbps: variantMbps, resolution: variantRes });
                 }
             }
 
