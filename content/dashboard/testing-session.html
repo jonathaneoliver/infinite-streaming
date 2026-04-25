@@ -581,7 +581,6 @@
             margin-bottom: 0 !important;
         }
         .events-timeline-wrap {
-            min-height: 240px;
             margin-bottom: 12px;
             position: relative;
         }
@@ -5027,11 +5026,10 @@
                         moveable: true,
                         margin: { item: 4 },
                         orientation: { axis: 'top' },
-                        // Auto-grow with no maxHeight cap so all lanes
-                        // are visible; vis-timeline's internal scroll
-                        // hides the top rows when capped.
+                        // Auto-grow with no min/max so all lanes are
+                        // visible; vis-timeline scrolls internally and
+                        // hides top rows whenever a constraint kicks in.
                         height: 'auto',
-                        minHeight: '240px',
                         start: liveStart,
                         end: liveEnd
                     }

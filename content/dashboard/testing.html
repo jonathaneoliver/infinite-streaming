@@ -566,7 +566,6 @@ maybe a histogram of b
             position: relative;
         }
         .events-timeline-wrap {
-            min-height: 240px;
             margin-bottom: 12px;
             position: relative;
         }
@@ -2779,14 +2778,11 @@ maybe a histogram of b
                         moveable: true,
                         margin: { item: 4 },
                         orientation: { axis: 'top' },
-                        // Auto-grow to fit all groups (variant lanes are
-                        // added dynamically as the player walks the
-                        // ladder). No maxHeight cap — capping causes
-                        // vis-timeline to scroll internally and hide
-                        // the top lanes; let the page itself scroll
-                        // when the lane count gets large.
+                        // Auto-grow to fit all groups. No min/max
+                        // constraints — they cause vis-timeline to scroll
+                        // internally and hide the top lanes. Let the
+                        // outer page scroll when the chart gets tall.
                         height: 'auto',
-                        minHeight: '240px',
                         start: liveStart,
                         end: liveEnd
                     }
