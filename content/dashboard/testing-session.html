@@ -966,6 +966,7 @@
         const lastRecordedPlayerEventBySession = new Map();
         const lastRecordedPlayerStateBySession = new Map();
         const lastRecordedVariantBySession = new Map();
+        const lastRecordedDisplayResBySession = new Map();
         // Two-sample debounce for VARIANT — see testing.html for details.
         const pendingVariantBySession = new Map();
         const lastRecordedLoopCountBySession = new Map();
@@ -4652,29 +4653,50 @@
                 }
             }
 
-            // VARIANT lane: dedup by (resolution, indicated bitrate)
-            // with a two-sample debounce. Resolution and bitrate come
-            // from independent observers and can be briefly mismatched
-            // mid-shift; require a candidate to repeat once before
-            // committing it to avoid phantom lanes.
-            const variantRes = String(session.player_metrics_video_resolution || '').trim();
+            // VARIANT lane: bitrate is the leading-edge fetch-time
+            // signal; resolution lags. Drive resolution from the
+            // manifest BANDWIDTH lookup keyed off the bitrate. Fall
+            // back to player's reported resolution only when there's
+            // no manifest match. Manifest-validated changes commit
+            // immediately; the pure-player fallback path still uses
+            // the two-sample debounce as a belt.
             const variantMbpsRaw = Number(session.player_metrics_video_bitrate_mbps);
-            if (variantRes && Number.isFinite(variantMbpsRaw) && variantMbpsRaw > 0) {
+            if (Number.isFinite(variantMbpsRaw) && variantMbpsRaw > 0) {
                 const variantMbps = Math.round(variantMbpsRaw * 10) / 10;
-                const variantKey = `${variantRes}|${variantMbps}`;
-                const prevVariant = lastRecordedVariantBySession.get(String(key));
-                const pending = pendingVariantBySession.get(String(key));
-                if (prevVariant === variantKey) {
-                    if (pending) pendingVariantBySession.delete(String(key));
-                } else if (pending && pending.key === variantKey) {
+                const reportedRes = String(session.player_metrics_video_resolution || '').trim();
+                const manifestRes = manifestResolutionForBitrate(session, variantMbps);
+                const variantRes = manifestRes || reportedRes;
+                if (variantRes) {
+                    const variantKey = `${variantRes}|${variantMbps}`;
+                    const prevVariant = lastRecordedVariantBySession.get(String(key));
+                    const pending = pendingVariantBySession.get(String(key));
+                    if (prevVariant === variantKey) {
+                        if (pending) pendingVariantBySession.delete(String(key));
+                    } else if (manifestRes || (pending && pending.key === variantKey)) {
+                        const eventSeries = bandwidthEventHistory.get(key) || [];
+                        eventSeries.push({ ts: now, type: 'VARIANT', mbps: variantMbps, resolution: variantRes });
+                        const eventCutoff = now - windowMs;
+                        bandwidthEventHistory.set(key, eventSeries.filter((event) => Number(event.ts) >= eventCutoff));
+                        lastRecordedVariantBySession.set(String(key), variantKey);
+                        pendingVariantBySession.delete(String(key));
+                    } else {
+                        pendingVariantBySession.set(String(key), { key: variantKey, mbps: variantMbps, resolution: variantRes });
+                    }
+                }
+            }
+
+            // DISPLAY_RES lane: presented frame resolution. Distinct
+            // from VARIANT — the gap between them is the fetch-to-
+            // render lag.
+            const displayRes = String(session.player_metrics_video_resolution || '').trim();
+            if (displayRes) {
+                const prevDisplayRes = lastRecordedDisplayResBySession.get(String(key));
+                if (prevDisplayRes !== displayRes) {
                     const eventSeries = bandwidthEventHistory.get(key) || [];
-                    eventSeries.push({ ts: now, type: 'VARIANT', mbps: variantMbps, resolution: variantRes });
+                    eventSeries.push({ ts: now, type: 'DISPLAY_RES', resolution: displayRes });
                     const eventCutoff = now - windowMs;
                     bandwidthEventHistory.set(key, eventSeries.filter((event) => Number(event.ts) >= eventCutoff));
-                    lastRecordedVariantBySession.set(String(key), variantKey);
-                    pendingVariantBySession.delete(String(key));
-                } else {
-                    pendingVariantBySession.set(String(key), { key: variantKey, mbps: variantMbps, resolution: variantRes });
+                    lastRecordedDisplayResBySession.set(String(key), displayRes);
                 }
             }
 
@@ -4717,7 +4739,8 @@
         // #f59e0b/#6366f1/#115e59 etc.). Hot pink, deep purple, cyan, and lime
         // don't collide with any of the throughput/rendition/limit colors.
         const EVENT_LANES = {
-            'VARIANT':     { y: 10, color: '#16a34a', label: 'VARIANT' },
+            'VARIANT':     { y: 11, color: '#16a34a', label: 'VARIANT' },
+            'DISPLAY_RES': { y: 10, color: '#0ea5e9', label: 'DISPLAY RES' },
             'PLAYERSTATE': { y: 9, color: '#6b7280', label: 'PLAYERSTATE' },
             'PLAYING':     { y: 8, color: '#16a34a', label: 'PLAYING' },
             'BUFFERING':   { y: 7, color: '#f59e0b', label: 'BUFFERING' },
@@ -4760,6 +4783,35 @@
             const res = String(resolution || '').trim();
             if (res && mbpsStr) return `${res} · ${mbpsStr}`;
             return res || mbpsStr || '—';
+        }
+        function manifestResolutionForBitrate(session, mbps) {
+            const variants = Array.isArray(session?.manifest_variants) ? session.manifest_variants : [];
+            if (!variants.length) return null;
+            let best = null;
+            let bestDelta = Infinity;
+            for (const v of variants) {
+                const vMbps = Number(v?.bandwidth || 0) / 1_000_000;
+                if (!Number.isFinite(vMbps) || vMbps <= 0) continue;
+                const delta = Math.abs(vMbps - mbps);
+                const tol = Math.max(0.5, vMbps * 0.05);
+                if (delta < tol && delta < bestDelta) {
+                    bestDelta = delta;
+                    best = String(v.resolution || '').trim() || null;
+                }
+            }
+            return best;
+        }
+        function displayResColor(res) {
+            const m = /(\d+)\s*[xX]\s*(\d+)/.exec(String(res || ''));
+            if (!m) return '#9ca3af';
+            const h = Number(m[2]);
+            if (!Number.isFinite(h) || h <= 0) return '#9ca3af';
+            if (h <= 360)  return '#dc2626';
+            if (h <= 540)  return '#ea580c';
+            if (h <= 720)  return '#f59e0b';
+            if (h <= 1080) return '#84cc16';
+            if (h <= 1440) return '#16a34a';
+            return '#10b981';
         }
         let legendHoverIndex = null;
         let legendHoverChartId = null;
@@ -4807,6 +4859,7 @@
                 let colors = cfg.color;
                 if (type === 'PLAYERSTATE') colors = points.map(p => playerStateColor(p.state));
                 else if (type === 'VARIANT') colors = points.map(p => variantColor(p.mbps));
+                else if (type === 'DISPLAY_RES') colors = points.map(p => displayResColor(p.resolution));
                 return {
                     label: cfg.label,
                     data: points,
@@ -4881,7 +4934,7 @@
                                 grid: { color: 'rgba(0,0,0,0.05)' }
                             },
                             y: {
-                                type: 'linear', min: 0.5, max: 10.5,
+                                type: 'linear', min: 0.5, max: 11.5,
                                 title: {
                                     display: true,
                                     text: 'Events',
@@ -5001,6 +5054,9 @@
             pushRanges('PLAYERSTATE',
                 (e) => e.state || 'Unknown',
                 (e) => playerStateColor(e.state));
+            pushRanges('DISPLAY_RES',
+                (e) => String(e.resolution || '?'),
+                (e) => displayResColor(e.resolution));
 
             // VARIANT: each (resolution, bitrate) tuple gets its own
             // swim lane. Lane key matches seenVariants.
@@ -5025,7 +5081,7 @@
             }
 
             for (const e of events) {
-                if (e.type === 'PLAYERSTATE' || e.type === 'VARIANT') continue;
+                if (e.type === 'PLAYERSTATE' || e.type === 'VARIANT' || e.type === 'DISPLAY_RES') continue;
                 const cfg = EVENT_LANES[e.type];
                 if (!cfg) continue;
                 items.push({
