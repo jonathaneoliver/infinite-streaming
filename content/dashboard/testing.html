@@ -2849,10 +2849,6 @@ maybe a histogram of b
                 // viewport, apply it so the timeline starts in sync.
                 applyStoredChartViewport(sessionId, timeline);
                 // Detect user pan/zoom: rangechanged with byUser=true.
-                // Stop auto-following live so the user's zoom state
-                // sticks across the per-second render. Re-arm follow
-                // when they pan back to within 5s of "now". Broadcast
-                // their viewport to every other chart in this session.
                 timeline.on('rangechanged', (props) => {
                     if (!props || !props.byUser) return;
                     const rightEdge = props.end.getTime();
@@ -2860,7 +2856,26 @@ maybe a histogram of b
                     eventsTimelineFollowLive.set(sessionId, driftMs < 5000);
                     syncChartViewportAcrossSession(sessionId, timeline);
                 });
-                requestAnimationFrame(() => timeline.redraw());
+                // Container width is sometimes 0 on first paint (parent
+                // ScrollView not yet laid out, session card just inserted,
+                // etc). A single requestAnimationFrame isn't reliable —
+                // the next frame can still report width 0. Use a
+                // ResizeObserver that fires redraw() the moment the
+                // container actually has dimensions, then disconnects.
+                if (typeof ResizeObserver !== 'undefined') {
+                    const ro = new ResizeObserver((entries) => {
+                        for (const entry of entries) {
+                            if (entry.contentRect.width > 0) {
+                                timeline.redraw();
+                                ro.disconnect();
+                                return;
+                            }
+                        }
+                    });
+                    ro.observe(container);
+                } else {
+                    requestAnimationFrame(() => timeline.redraw());
+                }
                 console.log('[events-timeline] created for session', sessionId, 'with', items.length, 'items,', groups.length, 'groups, height', heightPx);
             } else {
                 timeline.setItems(new vis.DataSet(items));

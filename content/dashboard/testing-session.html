@@ -5071,9 +5071,6 @@
                 );
                 eventsTimelines.set(sessionId, timeline);
                 eventsTimelineFollowLive.set(sessionId, true);
-                // Tag for the cross-chart viewport sync; anchor seconds-
-                // from-windowStart so vis-timeline ranges convert to the
-                // 0–600 units the Chart.js charts use.
                 timeline.$isVisTimeline = true;
                 timeline.$windowStartMs = liveStart.getTime();
                 applyStoredChartViewport(sessionId, timeline);
@@ -5084,7 +5081,21 @@
                     eventsTimelineFollowLive.set(sessionId, driftMs < 5000);
                     syncChartViewportAcrossSession(sessionId, timeline);
                 });
-                requestAnimationFrame(() => timeline.redraw());
+                // ResizeObserver redraw — see testing.html for rationale.
+                if (typeof ResizeObserver !== 'undefined') {
+                    const ro = new ResizeObserver((entries) => {
+                        for (const entry of entries) {
+                            if (entry.contentRect.width > 0) {
+                                timeline.redraw();
+                                ro.disconnect();
+                                return;
+                            }
+                        }
+                    });
+                    ro.observe(container);
+                } else {
+                    requestAnimationFrame(() => timeline.redraw());
+                }
                 console.log('[events-timeline] created for session', sessionId, 'with', items.length, 'items,', groups.length, 'groups, height', heightPx);
             } else {
                 timeline.setItems(new vis.DataSet(items));
