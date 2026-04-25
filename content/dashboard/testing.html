@@ -2976,15 +2976,21 @@ maybe a histogram of b
             const liveStart = new Date(nowMs - liveWindowMs);
             const liveEnd = new Date(nowMs);
 
-            // Let vis-timeline size itself to its actual content
-            // (rows + items + axis). Earlier we hand-computed the
-            // height to work around an empty-container collapse, but
-            // the resulting estimate over-allocated — vis-timeline's
-            // real row height is smaller than our 30px bucket and
-            // the unused vertical space showed as dead space at the
-            // top of the chart area. Wrap has min-height to prevent
-            // the initial render-before-data collapse.
-            container.style.removeProperty('height');
+            // Compute explicit height. vis-timeline's height:'auto'
+            // collapses to 0 because the wrap has no intrinsic height
+            // (its internal panels are absolutely positioned). Use
+            // measured row sizes — section headers are 18px (set via
+            // CSS), regular lanes are 22px under our slim styling,
+            // axis + padding ≈ 32px. Counts every group in the array
+            // including the section parents.
+            const SECTION_ROW_PX = 18;
+            const LANE_ROW_PX = 22;
+            const AXIS_PAD_PX = 32;
+            const sectionRows = groups.filter((g) => Array.isArray(g.nestedGroups)).length;
+            const laneRows = groups.length - sectionRows;
+            const computedHeight = (sectionRows * SECTION_ROW_PX) + (laneRows * LANE_ROW_PX) + AXIS_PAD_PX;
+            const heightPx = `${computedHeight}px`;
+            container.style.height = heightPx;
 
             // If the session card was rebuilt (innerHTML rewrite, etc.)
             // the cached timeline points at an orphaned div that's no
@@ -3009,7 +3015,7 @@ maybe a histogram of b
                         moveable: true,
                         margin: { item: 4 },
                         orientation: { axis: 'top' },
-                        height: 'auto',
+                        height: heightPx,
                         start: liveStart,
                         end: liveEnd,
                         // Match the Chart.js bitrate chart's HH:MM:SS
@@ -3111,6 +3117,9 @@ maybe a histogram of b
             } else {
                 timeline.setItems(new vis.DataSet(items));
                 timeline.setGroups(new vis.DataSet(groups));
+                // Re-apply height each render — group count changes as
+                // variant lanes appear/disappear.
+                timeline.setOptions({ height: heightPx });
                 timeline.$windowStartMs = liveStart.getTime();
                 // Live-edge tracking: unless the user has explicitly
                 // paused the chart, slide the visible window so its

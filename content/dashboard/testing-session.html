@@ -5187,8 +5187,17 @@
             // Compute explicit height from the actual lane count;
             // vis-timeline's height:'auto' collapses to 0 when the
             // container has no intrinsic height.
-            // Let vis-timeline compute its own height from rows + items.
-            container.style.removeProperty('height');
+            // Compute explicit height — height:'auto' collapses the
+            // container. Section headers are 18px (CSS), regular
+            // lanes ~22px under our slim styling, axis ≈ 32px.
+            const SECTION_ROW_PX = 18;
+            const LANE_ROW_PX = 22;
+            const AXIS_PAD_PX = 32;
+            const sectionRows = groups.filter((g) => Array.isArray(g.nestedGroups)).length;
+            const laneRows = groups.length - sectionRows;
+            const computedHeight = (sectionRows * SECTION_ROW_PX) + (laneRows * LANE_ROW_PX) + AXIS_PAD_PX;
+            const heightPx = `${computedHeight}px`;
+            container.style.height = heightPx;
 
             // If the session card was rebuilt, the cached timeline points
             // at an orphaned div; recreate it against the new container.
@@ -5210,7 +5219,7 @@
                         moveable: true,
                         margin: { item: 4 },
                         orientation: { axis: 'top' },
-                        height: 'auto',
+                        height: heightPx,
                         start: liveStart,
                         end: liveEnd,
                         // Match the Chart.js charts' HH:MM:SS 24-hour
@@ -5288,6 +5297,7 @@
             } else {
                 timeline.setItems(new vis.DataSet(items));
                 timeline.setGroups(new vis.DataSet(groups));
+                timeline.setOptions({ height: heightPx });
                 timeline.$windowStartMs = liveStart.getTime();
                 // Live-edge tracking: unless paused, slide so right
                 // edge stays at "now"; preserve user's zoom width.
