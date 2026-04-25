@@ -598,10 +598,11 @@ maybe a histogram of b
             overflow: visible !important;
         }
         .events-timeline-wrap .vis-label,
-        .events-timeline-wrap .vis-label.vis-nested-group {
+        .events-timeline-wrap .vis-label.vis-nested-group,
+        .events-timeline-wrap .vis-label[class*="vis-group-level"] {
             overflow: visible !important;
             white-space: nowrap !important;
-            padding-left: 4px !important;
+            padding-left: 8px !important;
             z-index: 10;
             position: relative;
             color: #1f2937;
@@ -618,6 +619,16 @@ maybe a histogram of b
             border-top: none !important;
             border-left: none !important;
             border-right: none !important;
+        }
+        /* Top-level section headers (PLAYER / SERVER) sit at the
+         * leftmost edge — no indent. */
+        .events-timeline-wrap .vis-label.vis-group-level-0 {
+            padding-left: 4px !important;
+        }
+        /* vis-timeline applies the per-level indent via inline style
+         * on the inner label cell — override that too. */
+        .events-timeline-wrap .vis-labelset .vis-label .vis-inner {
+            padding-left: 0 !important;
         }
         .events-timeline-legend {
             display: none;
@@ -2846,8 +2857,7 @@ maybe a histogram of b
             const variantGroupIds = variantGroups.map((g) => g.id);
 
             const groups = [
-                { id: 'PLAYER_SECTION', content: 'PLAYER', nestedGroups: ['VARIANT_GROUP', ...playerLanes] },
-                { id: 'VARIANT_GROUP', content: 'VARIANT', nestedGroups: variantGroupIds.length ? variantGroupIds : null },
+                { id: 'PLAYER_SECTION', content: 'PLAYER', nestedGroups: [...variantGroupIds, ...playerLanes] },
                 ...variantGroups,
                 ...playerLanes.map((type) => ({ id: type, content: EVENT_LANES[type].label })),
                 { id: 'SERVER_SECTION', content: 'SERVER', nestedGroups: serverLanes },
