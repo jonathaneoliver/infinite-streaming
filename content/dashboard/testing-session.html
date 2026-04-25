@@ -5098,6 +5098,14 @@
             const items = [];
             let itemId = 0;
 
+            function formatHoverTime(ms) {
+                const d = new Date(ms);
+                const hh = String(d.getHours()).padStart(2, '0');
+                const mm = String(d.getMinutes()).padStart(2, '0');
+                const ss = String(d.getSeconds()).padStart(2, '0');
+                return `${hh}:${mm}:${ss}`;
+            }
+
             function pushRanges(typeKey, getLabel, getColor) {
                 const seq = events.filter((e) => e.type === typeKey)
                     .sort((a, b) => Number(a.ts) - Number(b.ts));
@@ -5106,6 +5114,8 @@
                     const end = i + 1 < seq.length ? Number(seq[i + 1].ts) : nowMs;
                     const label = getLabel(seq[i]);
                     const color = getColor(seq[i]);
+                    const durationSec = ((end - start) / 1000).toFixed(1);
+                    const title = `${EVENT_LANES[typeKey].label}: ${label}\n${formatHoverTime(start)} → ${formatHoverTime(end)} (${durationSec}s)`;
                     items.push({
                         id: itemId++,
                         group: typeKey,
@@ -5113,6 +5123,7 @@
                         start: new Date(start),
                         end: new Date(end),
                         type: 'range',
+                        title: title,
                         style: `background-color: ${color}; border-color: ${color}; color: #fff;`
                     });
                 }
@@ -5125,8 +5136,6 @@
                 (e) => String(e.resolution || '?'),
                 (e) => displayResColor(e.resolution));
 
-            // VARIANT: each (resolution, bitrate) tuple gets its own
-            // swim lane. Lane key matches seenVariants.
             const variantSeq = variantEvents.sort((a, b) => Number(a.ts) - Number(b.ts));
             for (let i = 0; i < variantSeq.length; i++) {
                 const v = variantSeq[i];
@@ -5136,6 +5145,8 @@
                 const start = Number(v.ts);
                 const end = i + 1 < variantSeq.length ? Number(variantSeq[i + 1].ts) : nowMs;
                 const color = variantColor(m);
+                const durationSec = ((end - start) / 1000).toFixed(1);
+                const title = `Variant: ${variantLabel(m, res)}\n${formatHoverTime(start)} → ${formatHoverTime(end)} (${durationSec}s)`;
                 items.push({
                     id: itemId++,
                     group: `VARIANT::${res}|${m}`,
@@ -5143,6 +5154,7 @@
                     start: new Date(start),
                     end: new Date(end),
                     type: 'range',
+                    title: title,
                     style: `background-color: ${color}; border-color: ${color}; color: #fff;`
                 });
             }
@@ -5151,12 +5163,14 @@
                 if (e.type === 'PLAYERSTATE' || e.type === 'VARIANT' || e.type === 'DISPLAY_RES') continue;
                 const cfg = EVENT_LANES[e.type];
                 if (!cfg) continue;
+                const ts = Number(e.ts);
                 items.push({
                     id: itemId++,
                     group: e.type,
                     content: '',
-                    start: new Date(Number(e.ts)),
+                    start: new Date(ts),
                     type: 'point',
+                    title: `${cfg.label}\n${formatHoverTime(ts)}`,
                     style: `background-color: ${cfg.color}; border-color: ${cfg.color};`
                 });
             }
