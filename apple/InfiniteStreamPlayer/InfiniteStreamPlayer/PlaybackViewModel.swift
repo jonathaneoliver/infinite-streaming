@@ -397,6 +397,13 @@ final class PlaybackViewModel: ObservableObject {
         metricsLastSessionLookup = nil
         log("AVPlayerItem created for \(url.absoluteString)")
         player.play()
+        Task {
+            await sendPlayerMetrics(event: "playing", extra: [
+                "player_metrics_content_url": url.absoluteString,
+                "player_metrics_content_name": contentName,
+                "player_metrics_codec_fallback": codecFallback
+            ])
+        }
         log("AVPlayer play() called")
     }
 
@@ -676,7 +683,7 @@ final class PlaybackViewModel: ObservableObject {
                         print("[AUTO_RECOVERY] triggered frozen state=\(self.diagnostics.state) bufferEmpty=\(self.diagnostics.bufferEmpty) time=\(String(format: "%.2f", self.diagnostics.currentTime))")
                         self.scheduleAutoRecoveryRestart(reason: "auto_recovery_frozen")
                     }
-                } else if self.diagnostics.state == "Playing" {
+                } else if self.diagnostics.state == "playing" {
                     self.log("UNFROZEN: video time advancing again")
                 }
             }
@@ -741,6 +748,16 @@ final class PlaybackViewModel: ObservableObject {
                             "player_metrics_state_to": state
                         ])
                     }
+                    // buffering_start/buffering_end are distinct from
+                    // stall_*: they fire on every transition into/out of
+                    // the Buffering AVPlayer state, regardless of whether
+                    // playback was previously interrupted. stall_* is
+                    // gated on first-frame and stall threshold.
+                    if state == "buffering" {
+                        Task { await self.sendPlayerMetrics(event: "buffering_start") }
+                    } else if previous == "buffering" {
+                        Task { await self.sendPlayerMetrics(event: "buffering_end") }
+                    }
                 } else if previous == nil {
                     Task { await self.sendPlayerMetrics(event: "state_change") }
                 }
@@ -753,7 +770,7 @@ final class PlaybackViewModel: ObservableObject {
             .sink { [weak self] currentTime in
                 guard let self else { return }
                 guard let startAt = self.playbackStartAt else { return }
-                let isActivelyPlaying = self.diagnostics.state == "Playing"
+                let isActivelyPlaying = self.diagnostics.state == "playing"
                     && self.diagnostics.playbackRate > 0
                 if !self.firstFrameReported && currentTime > 0 && isActivelyPlaying {
                     let elapsed = self.roundSeconds(Date().timeIntervalSince(startAt))
@@ -783,6 +800,26 @@ final class PlaybackViewModel: ObservableObject {
             .receive(on: DispatchQueue.main)
             .sink { [weak self] indicated, average in
                 self?.handleRenditionShift(indicated: indicated, average: average)
+            }
+            .store(in: &cancellables)
+
+        // Forward AVPlayerItemTimeJumped events as `timejump` metrics
+        // so the dashboard's TIMEJUMP swim lane lights up on HLS
+        // discontinuity boundaries, live-edge catchup seeks, and
+        // explicit seeks. Origin tag (timeJumpedOriginatingParticipant)
+        // lets downstream tell discontinuities apart from explicit seeks.
+        diagnostics.timeJumpSubject
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] event in
+                guard let self else { return }
+                Task {
+                    await self.sendPlayerMetrics(event: "timejump", extra: [
+                        "player_metrics_timejump_from_s": self.roundSeconds(event.from),
+                        "player_metrics_timejump_to_s": self.roundSeconds(event.to),
+                        "player_metrics_timejump_delta_s": self.roundSeconds(event.to - event.from),
+                        "player_metrics_timejump_origin": event.origin
+                    ])
+                }
             }
             .store(in: &cancellables)
     }
@@ -817,7 +854,7 @@ final class PlaybackViewModel: ObservableObject {
                 guard let self else { return }
                 self.autoRecoveryRestartTimer = nil
                 let timeAdvanced = self.diagnostics.currentTime > scheduledAtTime + 0.5
-                let recovered = self.diagnostics.state == "Playing"
+                let recovered = self.diagnostics.state == "playing"
                     && !self.diagnostics.frozenDetected
                     && !self.diagnostics.segmentStallDetected
                     && timeAdvanced
@@ -846,7 +883,7 @@ final class PlaybackViewModel: ObservableObject {
                     print("[AUTO_RECOVERY] verify: another restart pending — keeping attempts=\(self.autoRecoveryAttempts)")
                     return
                 }
-                let playingCleanly = self.diagnostics.state == "Playing"
+                let playingCleanly = self.diagnostics.state == "playing"
                     && !self.diagnostics.frozenDetected
                     && !self.diagnostics.segmentStallDetected
                 if playingCleanly {
@@ -901,6 +938,8 @@ final class PlaybackViewModel: ObservableObject {
         if let previous = lastReportedRenditionMbps {
             if mbps != previous {
                 profileShiftCount = max(0, profileShiftCount) + 1
+                let direction = mbps > previous ? "UP" : "DOWN"
+                print("[SHIFT] \(direction) \(previous) -> \(mbps) Mbps shifts=\(profileShiftCount) state=\(diagnostics.state) time=\(String(format: "%.2f", diagnostics.currentTime))")
                 Task {
                     await sendPlayerMetrics(event: "video_bitrate_change", extra: [
                         "player_metrics_video_bitrate_from_mbps": previous,
@@ -981,6 +1020,11 @@ final class PlaybackViewModel: ObservableObject {
             "player_metrics_last_event_at": timestamp,
             "player_metrics_event_time": timestamp,
             "player_metrics_state": diagnostics.state,
+            // AVPlayer.reasonForWaitingToPlay raw value when present —
+            // disambiguates buffering causes (toMinimizeStalls,
+            // evaluatingBufferingRate, noItemToPlay, interstitialEvent).
+            // Empty string when not waiting.
+            "player_metrics_waiting_reason": diagnostics.waitingReason,
             "player_metrics_position_s": roundSeconds(diagnostics.currentTime),
             "player_metrics_playback_rate": roundMetric(Double(diagnostics.playbackRate)),
             "player_metrics_buffer_depth_s": diagnostics.bufferDepth.map { roundSeconds($0) },
@@ -1002,7 +1046,16 @@ final class PlaybackViewModel: ObservableObject {
             "player_metrics_profile_shift_count": profileShiftCount,
             "player_restarts": playerRestarts,
             "player_auto_recovery_enabled": autoRecoveryEnabled,
-            "player_metrics_video_bitrate_mbps": mbps(from: diagnostics.indicatedBitrate ?? diagnostics.averageVideoBitrate)
+            // Variant identity must be the manifest BANDWIDTH attribute
+            // (AVPlayer's accessLog indicatedBitrate). DO NOT fall back
+            // to averageVideoBitrate — that's measured-bytes-per-second
+            // and fluctuates with scene complexity within a single
+            // rendition, which would make the dashboard's variant lanes
+            // split one rendition into multiple phantom variants.
+            // Anything wanting a measured throughput should read
+            // player_metrics_avg_network_bitrate_mbps or
+            // player_metrics_network_bitrate_mbps instead.
+            "player_metrics_video_bitrate_mbps": mbps(from: diagnostics.indicatedBitrate)
         ]
         extra.forEach { key, value in
             payload[key] = value

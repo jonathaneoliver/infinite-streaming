@@ -565,6 +565,139 @@ maybe a histogram of b
         .chart-wrap {
             position: relative;
         }
+        .events-timeline-wrap {
+            margin-bottom: 12px;
+            position: relative;
+            /* Reserve right padding equal to the FPS chart's right-side
+             * Y-axis (Dropped/s) so the events-timeline plot area's
+             * right edge aligns with the four Chart.js charts below. */
+            padding-right: 60px;
+        }
+        .events-timeline-wrap .events-timeline {
+            /* Match the surrounding .collapsible-section background
+             * (#fafafa) — Chart.js canvases below are transparent so
+             * they show the same #fafafa, and a pure-white events-
+             * timeline stood out. */
+            background: #fafafa;
+        }
+        .events-timeline .vis-item.vis-box,
+        .events-timeline .vis-item.vis-point {
+            font-size: 10px;
+            font-family: 'Courier New', monospace;
+        }
+        .events-timeline .vis-label {
+            font-size: 10px;
+            font-family: 'Courier New', monospace;
+        }
+        /* Keep the left label panel pinned to 90px (matches the
+         * Chart.js charts' Y-axis width via afterFit), so the chart
+         * area's left edge lines up vertically with the
+         * bandwidth/buffer/fps charts. Labels are allowed to overflow
+         * to the right INTO the chart area on top of the swim lane
+         * items — text-shadow halo keeps them readable. The
+         * nested-group indent (PLAYER / SERVER section nesting) is
+         * neutralised so child labels start at the leftmost column. */
+        .events-timeline-wrap .vis-labelset,
+        .events-timeline-wrap .vis-left.vis-panel {
+            width: 90px !important;
+            max-width: 90px !important;
+            overflow: visible !important;
+        }
+        .events-timeline-wrap .vis-label,
+        .events-timeline-wrap .vis-label.vis-nested-group,
+        .events-timeline-wrap .vis-label[class*="vis-group-level"] {
+            overflow: visible !important;
+            white-space: nowrap !important;
+            padding-left: 8px !important;
+            z-index: 10;
+            position: relative;
+            color: #1f2937;
+            font-weight: 600;
+            text-shadow:
+                0 0 3px rgba(255, 255, 255, 0.95),
+                0 0 6px rgba(255, 255, 255, 0.85),
+                1px 0 0 rgba(255, 255, 255, 0.75),
+                -1px 0 0 rgba(255, 255, 255, 0.75);
+            /* Neutralise vis-timeline's default label borders (which
+             * inherit currentColor and were rendering as red in this
+             * theme). Subtle gray bottom border keeps row separation. */
+            border-color: #e5e7eb !important;
+            border-top: none !important;
+            border-left: none !important;
+            border-right: none !important;
+        }
+        /* Match the Chart.js grid colour (#e5e7eb) for the row
+         * separators inside the items panel — they were drawn in
+         * the vis-timeline default red/black and clashed with the
+         * gray grid in the four charts below. */
+        .events-timeline-wrap .vis-foreground .vis-group,
+        .events-timeline-wrap .vis-panel.vis-background .vis-group,
+        .events-timeline-wrap .vis-panel.vis-background .vis-horizontal {
+            border-color: #e5e7eb !important;
+        }
+        /* Slim grey border around the entire timeline matches the
+         * Chart.js charts' gridline tone. */
+        .events-timeline-wrap .vis-timeline {
+            border-color: #e5e7eb !important;
+        }
+        /* Top-level section headers (PLAYER / SERVER) sit at the
+         * leftmost edge — no indent. Don't override row height here:
+         * vis-timeline computes label-row and chart-row positions
+         * together and any CSS-only height override drifts the two
+         * out of alignment. Live with the auto height. */
+        .events-timeline-wrap .vis-label.vis-group-level-0 {
+            padding-left: 4px !important;
+        }
+        /* Slim down the time-axis bar — vis-timeline's default leaves
+         * a lot of vertical padding above and below the tick text. */
+        .events-timeline-wrap .vis-time-axis {
+            font-size: 10px;
+        }
+        .events-timeline-wrap .vis-time-axis .vis-text {
+            padding: 0 4px !important;
+        }
+        /* Hide vis-timeline's calendar-anchored tick labels — we draw
+         * our own right-edge-anchored ones via addCustomTime markers
+         * so the user sees timestamps like 13:34:41 (one minute back
+         * from "now") instead of 13:34:00 (clock-snapped). The grid
+         * lines stay so the chart still has visual structure. */
+        .events-timeline-wrap .vis-time-axis .vis-text.vis-minor {
+            visibility: hidden !important;
+        }
+        /* Hide vis-timeline's own calendar-snapped vertical grid lines —
+         * they slide left independently as time advances and clash with
+         * our right-edge-anchored custom-time markers. Only our markers
+         * should draw vertical lines. */
+        .events-timeline-wrap .vis-time-axis .vis-grid.vis-minor,
+        .events-timeline-wrap .vis-time-axis .vis-grid.vis-major,
+        .events-timeline-wrap .vis-panel.vis-background .vis-vertical {
+            border-color: transparent !important;
+        }
+        /* Style our right-edge-anchored tick markers like the default
+         * grid lines plus a small floating timestamp label. */
+        .events-timeline-wrap .vis-custom-time {
+            background-color: #e5e7eb !important;
+            width: 1px !important;
+            cursor: default !important;
+        }
+        .events-timeline-wrap .vis-custom-time .vis-custom-time-marker {
+            background: transparent !important;
+            border: none !important;
+            color: #4b5563 !important;
+            font-family: 'Courier New', monospace !important;
+            font-size: 10px !important;
+            padding: 0 3px !important;
+            top: auto !important;
+            bottom: 2px !important;
+        }
+        /* vis-timeline applies the per-level indent via inline style
+         * on the inner label cell — override that too. */
+        .events-timeline-wrap .vis-labelset .vis-label .vis-inner {
+            padding-left: 0 !important;
+        }
+        .events-timeline-legend {
+            display: none;
+        }
         .chart-paused-badge {
             display: none;
             position: absolute;
@@ -692,11 +825,32 @@ maybe a histogram of b
         const bufferDepthCharts = new Map();
         const videoFpsCharts = new Map();
         const eventsCharts = new Map();
+        const eventsTimelines = new Map();
+        // Width reserved on the RIGHT side of every chart's plot area
+        // so the four Chart.js charts (bandwidth, buffer, fps, events
+        // scatter) and the vis-timeline events-timeline above all end
+        // at the same X coordinate. Sized to fit the FPS chart's
+        // right-side "Dropped/s" Y-axis (numeric ticks + rotated title).
+        const RIGHT_AXIS_PAD_PX = 60;
+        // Per-session collapse state for the PLAYER / SERVER section
+        // headers. setGroups replaces the entire groups dataset on
+        // every render, which would otherwise reset the user's
+        // collapse choice to default (expanded) every tick. We read
+        // the live state from the timeline before each rebuild and
+        // mirror it here so the choice survives across renders AND
+        // across full timeline re-creations (e.g. orphan-detection
+        // rebuilds when the session card is regenerated).
+        const eventsTimelineSectionCollapsed = new Map();
         const chartViewportBySession = new Map();
         const chartPausedBySession = new Map();
         const bandwidthVisibility = new Map();
         const bitrateAxisMaxBySession = new Map();
         const lastRecordedPlayerEventBySession = new Map();
+        const lastRecordedPlayerStateBySession = new Map();
+        const lastRecordedVariantBySession = new Map();
+        const lastRecordedDisplayResBySession = new Map();
+        // Two-sample debounce belt for VARIANT.
+        const pendingVariantBySession = new Map();
         const lastRecordedLoopCountBySession = new Map();
         const lastRecordedServerLoopCountBySession = new Map();
         const lastRecordedLoopEventStampBySession = new Map();
@@ -1877,8 +2031,18 @@ maybe a histogram of b
         function parseBandwidthChartEventType(rawEventType) {
             const eventType = String(rawEventType || '').trim().toLowerCase();
             if (!eventType) return null;
-            if (eventType === 'stall_start' || eventType === 'segment_stall' || eventType === 'frozen') return 'STALL';
+            if (eventType === 'stall_start') return 'STALL';
+            if (eventType === 'frozen') return 'FROZEN';
+            if (eventType === 'segment_stall') return 'SEGMENT_STALL';
+            if (eventType === 'error') return 'ERROR';
             if (eventType === 'restart') return 'RESTART';
+            if (eventType === 'playing') return 'PLAYING';
+            if (eventType === 'buffering_start') return 'BUFFERING';
+            if (eventType === 'video_first_frame') return 'FIRST_FRAME';
+            if (eventType === 'video_start_time') return 'START_TIME';
+            if (eventType === 'rate_shift_up') return 'SHIFT_UP';
+            if (eventType === 'rate_shift_down') return 'SHIFT_DOWN';
+            if (eventType === 'timejump') return 'TIMEJUMP';
             return null;
         }
 
@@ -1984,6 +2148,18 @@ maybe a histogram of b
         }
 
         function readChartViewport(chartRef) {
+            if (!chartRef) return null;
+            // vis-timeline branch: marker `$isVisTimeline` set when we
+            // construct it. Window is Date objects; convert to the
+            // seconds-from-windowStart convention the Chart.js charts use.
+            if (chartRef.$isVisTimeline && typeof chartRef.getWindow === 'function') {
+                const win = chartRef.getWindow();
+                const startMs = Number(chartRef.$windowStartMs) || 0;
+                if (!startMs) return null;
+                const min = (win.start.getTime() - startMs) / 1000;
+                const max = (win.end.getTime() - startMs) / 1000;
+                return normalizeChartViewport(min, max);
+            }
             const xScale = chartRef?.scales?.x;
             if (!xScale) return null;
             return normalizeChartViewport(xScale.min, xScale.max);
@@ -1991,6 +2167,16 @@ maybe a histogram of b
 
         function applyChartViewport(chartRef, viewport) {
             if (!chartRef || !viewport) return;
+            if (chartRef.$isVisTimeline && typeof chartRef.setWindow === 'function') {
+                const startMs = Number(chartRef.$windowStartMs) || 0;
+                if (!startMs) return;
+                chartRef.setWindow(
+                    new Date(startMs + viewport.min * 1000),
+                    new Date(startMs + viewport.max * 1000),
+                    { animation: false }
+                );
+                return;
+            }
             if (typeof chartRef.zoomScale === 'function') {
                 chartRef.zoomScale('x', { min: viewport.min, max: viewport.max }, 'none');
             } else if (chartRef.options?.scales?.x) {
@@ -2012,7 +2198,8 @@ maybe a histogram of b
                 eventsCharts.get(key),
                 bandwidthCharts.get(key),
                 bufferDepthCharts.get(key),
-                videoFpsCharts.get(key)
+                videoFpsCharts.get(key),
+                eventsTimelines.get(key)
             ].filter((chartRef) => !!chartRef);
         }
 
@@ -2272,6 +2459,80 @@ maybe a histogram of b
                 }
             }
 
+            // PLAYERSTATE lane: sample player_metrics_state on each
+            // refresh tick and emit a marker on every transition. Also
+            // captures the AVFoundation reasonForWaitingToPlay
+            // (player_metrics_waiting_reason) so the tooltip can
+            // disambiguate buffering causes (toMinimizeStalls vs
+            // evaluatingBufferingRate vs noItemToPlay etc.).
+            const stateValue = String(session.player_metrics_state || '').trim();
+            const waitingReason = String(session.player_metrics_waiting_reason || '').trim();
+            if (stateValue) {
+                const prevState = lastRecordedPlayerStateBySession.get(String(key));
+                if (prevState !== stateValue) {
+                    const eventSeries = bandwidthEventHistory.get(key) || [];
+                    eventSeries.push({ ts: now, type: 'PLAYERSTATE', state: stateValue, reason: waitingReason });
+                    const eventCutoff = now - windowMs;
+                    bandwidthEventHistory.set(key, eventSeries.filter((event) => Number(event.ts) >= eventCutoff));
+                    lastRecordedPlayerStateBySession.set(String(key), stateValue);
+                }
+            }
+
+            // VARIANT lane: bitrate is the leading-edge fetch-time
+            // signal (accessLog updates when a segment download
+            // completes). Resolution is the lagging render-time signal
+            // (presentation-size updates when the new frame is shown).
+            // To avoid phantom (new-resolution, old-bitrate) or
+            // (new-bitrate, old-resolution) entries during the shift
+            // window, drive resolution from the manifest BANDWIDTH
+            // lookup keyed off the bitrate. Fall back to the player's
+            // reported resolution only when no manifest match exists.
+            // Two-sample debounce remains as a belt for sessions
+            // without manifest data.
+            const variantMbpsRaw = Number(session.player_metrics_video_bitrate_mbps);
+            if (Number.isFinite(variantMbpsRaw) && variantMbpsRaw > 0) {
+                const variantMbps = Math.round(variantMbpsRaw * 10) / 10;
+                const reportedRes = String(session.player_metrics_video_resolution || '').trim();
+                const manifestRes = manifestResolutionForBitrate(session, variantMbps);
+                const variantRes = manifestRes || reportedRes;
+                if (variantRes) {
+                    const variantKey = `${variantRes}|${variantMbps}`;
+                    const prevVariant = lastRecordedVariantBySession.get(String(key));
+                    const pending = pendingVariantBySession.get(String(key));
+                    if (prevVariant === variantKey) {
+                        if (pending) pendingVariantBySession.delete(String(key));
+                    } else if (manifestRes || (pending && pending.key === variantKey)) {
+                        // Manifest-validated changes commit immediately;
+                        // pure-player fallback still requires two samples.
+                        const eventSeries = bandwidthEventHistory.get(key) || [];
+                        eventSeries.push({ ts: now, type: 'VARIANT', mbps: variantMbps, resolution: variantRes });
+                        const eventCutoff = now - windowMs;
+                        bandwidthEventHistory.set(key, eventSeries.filter((event) => Number(event.ts) >= eventCutoff));
+                        lastRecordedVariantBySession.set(String(key), variantKey);
+                        pendingVariantBySession.delete(String(key));
+                    } else {
+                        pendingVariantBySession.set(String(key), { key: variantKey, mbps: variantMbps, resolution: variantRes });
+                    }
+                }
+            }
+
+            // DISPLAY_RES lane: the player's actually-presented frame
+            // resolution (player_metrics_video_resolution). Distinct
+            // from VARIANT — gap between VARIANT shifting and
+            // DISPLAY_RES shifting is the fetch-to-render lag.
+            const displayRes = String(session.player_metrics_video_resolution || '').trim();
+            if (displayRes) {
+                const prevDisplayRes = lastRecordedDisplayResBySession.get(String(key));
+                if (prevDisplayRes !== displayRes) {
+                    const eventSeries = bandwidthEventHistory.get(key) || [];
+                    eventSeries.push({ ts: now, type: 'DISPLAY_RES', resolution: displayRes });
+                    const eventCutoff = now - windowMs;
+                    bandwidthEventHistory.set(key, eventSeries.filter((event) => Number(event.ts) >= eventCutoff));
+                    lastRecordedDisplayResBySession.set(String(key), displayRes);
+                }
+            }
+
+
             const series = bandwidthHistory.get(key) || [];
             const lastLimit = series.length ? Number(series[series.length - 1].target) : NaN;
             let target = Number.isFinite(bandwidthTarget) ? bandwidthTarget : (Number.isFinite(lastLimit) ? lastLimit : 0);
@@ -2320,11 +2581,124 @@ maybe a histogram of b
         // Swim-lane events chart (STALL / RESTART / LOOP_PLAYER / LOOP_SERVER).
         // Shares x-axis with bitrate chart via syncChartViewportAcrossSession.
         const EVENT_LANES = {
-            'STALL':       { y: 4, color: '#000000', label: 'STALL' },
-            'RESTART':     { y: 3, color: '#a855f7', label: 'RESTART' },
-            'LOOP_PLAYER': { y: 2, color: '#06b6d4', label: 'LOOP PLAYER' },
+            'VARIANT':     { y: 6, color: '#16a34a', label: 'VARIANT' },
+            'DISPLAY_RES': { y: 5, color: '#0ea5e9', label: 'DISPLAY RES' },
+            'PLAYERSTATE': { y: 4, color: '#6b7280', label: 'PLAYERSTATE' },
+            'PLAYBACK':    { y: 3, color: '#16a34a', label: 'PLAYBACK' },
+            'IMPAIRMENT':  { y: 2, color: '#000000', label: 'IMPAIRMENT' },
             'LOOP_SERVER': { y: 1, color: '#84cc16', label: 'LOOP SERVER' }
         };
+        // Subtype → lane mapping. Each event-source string from
+        // parseBandwidthChartEventType resolves to the lane it
+        // appears in. Subtype tooltip labels and per-point colours
+        // live alongside.
+        const EVENT_SUBTYPE_LANE = {
+            'PLAYING': 'PLAYBACK', 'FIRST_FRAME': 'PLAYBACK', 'START_TIME': 'PLAYBACK',
+            'RESTART': 'PLAYBACK', 'TIMEJUMP': 'PLAYBACK',
+            'SHIFT_UP': 'PLAYBACK', 'SHIFT_DOWN': 'PLAYBACK',
+            'STALL': 'IMPAIRMENT', 'FROZEN': 'IMPAIRMENT',
+            'SEGMENT_STALL': 'IMPAIRMENT', 'ERROR': 'IMPAIRMENT',
+            // BUFFERING events still flow on the wire but have no lane
+            // here — buffering is already visible on the PLAYERSTATE
+            // ribbon and the dedicated lane was redundant. LOOP_PLAYER
+            // is omitted while the player-side loop counter is broken
+            // (always 0); LOOP_SERVER is the only meaningful loop lane.
+            'LOOP_SERVER': 'LOOP_SERVER'
+        };
+        const EVENT_SUBTYPE_COLOR = {
+            'PLAYING':       '#16a34a',
+            'FIRST_FRAME':   '#14b8a6',
+            'START_TIME':    '#15803d',
+            'RESTART':       '#a855f7',
+            'TIMEJUMP':      '#d97706',
+            'SHIFT_UP':      '#3b82f6',
+            'SHIFT_DOWN':    '#ef4444',
+            'STALL':         '#000000',
+            'FROZEN':        '#4c1d95',
+            'SEGMENT_STALL': '#c2410c',
+            'ERROR':         '#e11d48',
+            'BUFFERING':     '#f59e0b'
+        };
+        const EVENT_SUBTYPE_LABEL = {
+            'PLAYING': 'PLAYING', 'FIRST_FRAME': 'FIRST FRAME', 'START_TIME': 'START TIME',
+            'RESTART': 'RESTART', 'TIMEJUMP': 'TIMEJUMP',
+            'SHIFT_UP': 'SHIFT UP', 'SHIFT_DOWN': 'SHIFT DOWN',
+            'STALL': 'STALL', 'FROZEN': 'FROZEN',
+            'SEGMENT_STALL': 'SEGMENT STALL', 'ERROR': 'ERROR',
+            'BUFFERING': 'BUFFERING'
+        };
+        // Per-state colour for the PLAYERSTATE lane. Keys are lowercase
+        // because clients emit a mix of casings ("Playing" on Apple,
+        // "playing" on Android-test/Roku/web) — playerStateColor()
+        // normalises before lookup so all map to the same colour.
+        const PLAYER_STATE_COLOR = {
+            'playing':   '#16a34a', // green
+            'buffering': '#f59e0b', // amber — expected refill (pre-roll, post-seek)
+            'stalled':   '#dc2626', // red — unexpected mid-play rebuffer
+            'paused':    '#9333ea', // purple
+            'idle':      '#6b7280', // gray
+            'ended':     '#1f2937', // near-black
+            'unknown':   '#d1d5db'  // light gray
+        };
+        function playerStateColor(s) {
+            return PLAYER_STATE_COLOR[String(s || '').trim().toLowerCase()] || '#d1d5db';
+        }
+        // Variant colour buckets — lower bitrate = redder, higher = greener.
+        // Drives the colour of segments / dots on the VARIANT swim lane so
+        // an upshift/downshift is visually obvious before reading the label.
+        function variantColor(mbps) {
+            const m = Number(mbps);
+            if (!Number.isFinite(m) || m <= 0) return '#9ca3af';
+            if (m < 1)  return '#dc2626'; // red
+            if (m < 2)  return '#ea580c'; // orange
+            if (m < 4)  return '#f59e0b'; // amber
+            if (m < 8)  return '#84cc16'; // lime
+            if (m < 16) return '#16a34a'; // green
+            return '#10b981';             // emerald
+        }
+        function variantLabel(mbps, resolution) {
+            const m = Number(mbps);
+            const mbpsStr = Number.isFinite(m) && m > 0 ? `${m.toFixed(1)}Mbps` : '';
+            const res = String(resolution || '').trim();
+            if (res && mbpsStr) return `${res}:${mbpsStr}`;
+            return res || mbpsStr || '—';
+        }
+        // Look up the manifest variant whose BANDWIDTH best matches the
+        // bitrate the player just reported. Used to drive VARIANT's
+        // resolution from the bitrate (which leads the
+        // presentation-size update by the segment's decode/render delay)
+        // — eliminates phantom (new-resolution, old-bitrate) lanes.
+        function manifestResolutionForBitrate(session, mbps) {
+            const variants = Array.isArray(session?.manifest_variants) ? session.manifest_variants : [];
+            if (!variants.length) return null;
+            let best = null;
+            let bestDelta = Infinity;
+            for (const v of variants) {
+                const vMbps = Number(v?.bandwidth || 0) / 1_000_000;
+                if (!Number.isFinite(vMbps) || vMbps <= 0) continue;
+                const delta = Math.abs(vMbps - mbps);
+                const tol = Math.max(0.5, vMbps * 0.05);
+                if (delta < tol && delta < bestDelta) {
+                    bestDelta = delta;
+                    best = String(v.resolution || '').trim() || null;
+                }
+            }
+            return best;
+        }
+        // DISPLAY RES lane colour scheme — bucketed by frame height so a
+        // 4K presentation reads as green/emerald and a 360p reads as red.
+        function displayResColor(res) {
+            const m = /(\d+)\s*[xX]\s*(\d+)/.exec(String(res || ''));
+            if (!m) return '#9ca3af';
+            const h = Number(m[2]);
+            if (!Number.isFinite(h) || h <= 0) return '#9ca3af';
+            if (h <= 360)  return '#dc2626';
+            if (h <= 540)  return '#ea580c';
+            if (h <= 720)  return '#f59e0b';
+            if (h <= 1080) return '#84cc16';
+            if (h <= 1440) return '#16a34a';
+            return '#10b981';
+        }
         let legendHoverIndex = null;
         let legendHoverChartId = null;
         let legendHoverMetricKind = null;
@@ -2428,17 +2802,37 @@ maybe a histogram of b
             if (isChartPaused(sessionId)) return;
             const chartEvents = (eventSeries || [])
                 .filter((e) => Number(e.ts) >= windowStart)
-                .map((e) => ({ x: (e.ts - windowStart) / 1000, type: e.type, ts: Number(e.ts) }))
+                .map((e) => ({ x: (e.ts - windowStart) / 1000, type: e.type, state: e.state, reason: e.reason, mbps: e.mbps, resolution: e.resolution, ts: Number(e.ts) }))
                 .filter((e) => Number.isFinite(e.x) && e.x >= 0 && e.x <= 600);
-            const datasets = Object.entries(EVENT_LANES).map(([type, cfg]) => ({
-                label: cfg.label,
-                data: chartEvents.filter((e) => e.type === type).map((e) => ({ x: e.x, y: cfg.y, ts: e.ts })),
-                backgroundColor: cfg.color,
-                borderColor: cfg.color,
-                pointRadius: 5,
-                pointHoverRadius: 7,
-                showLine: false,
-            }));
+            const datasets = Object.entries(EVENT_LANES).map(([laneKey, cfg]) => {
+                // An event's lane comes either from a 1:1 mapping
+                // (PLAYERSTATE / VARIANT / DISPLAY_RES / LOOP_*) or
+                // via EVENT_SUBTYPE_LANE for the merged PLAYBACK /
+                // IMPAIRMENT / BUFFERING lanes.
+                const points = chartEvents.filter((e) => {
+                    const lane = EVENT_SUBTYPE_LANE[e.type] || e.type;
+                    return lane === laneKey;
+                }).map((e) => ({
+                    x: e.x, y: cfg.y, ts: e.ts,
+                    type: e.type, state: e.state, reason: e.reason, mbps: e.mbps, resolution: e.resolution
+                }));
+                let colors = cfg.color;
+                if (laneKey === 'PLAYERSTATE') colors = points.map(p => playerStateColor(p.state));
+                else if (laneKey === 'VARIANT') colors = points.map(p => variantColor(p.mbps));
+                else if (laneKey === 'DISPLAY_RES') colors = points.map(p => displayResColor(p.resolution));
+                else if (laneKey === 'PLAYBACK' || laneKey === 'IMPAIRMENT') {
+                    colors = points.map(p => EVENT_SUBTYPE_COLOR[p.type] || cfg.color);
+                }
+                return {
+                    label: cfg.label,
+                    data: points,
+                    backgroundColor: colors,
+                    borderColor: colors,
+                    pointRadius: 5,
+                    pointHoverRadius: 7,
+                    showLine: false,
+                };
+            });
             let chart = eventsCharts.get(sessionId);
             if (chart && chart.canvas !== canvas) {
                 chart.destroy();
@@ -2473,17 +2867,30 @@ maybe a histogram of b
                                         const offset = Number.isFinite(ts) && startMs > 0
                                             ? `  (+${((ts - startMs) / 1000).toFixed(3)}s)`
                                             : '';
-                                        return `${ctx.dataset.label}${offset}`;
+                                        let extra = '';
+                                        let label = ctx.dataset.label;
+                                        if (ctx && ctx.raw) {
+                                            if (ctx.raw.state) {
+                                                extra = ctx.raw.reason
+                                                    ? `: ${ctx.raw.state} (${ctx.raw.reason})`
+                                                    : `: ${ctx.raw.state}`;
+                                            }
+                                            else if (Number.isFinite(Number(ctx.raw.mbps))) extra = `: ${variantLabel(ctx.raw.mbps, ctx.raw.resolution)}`;
+                                            else if (ctx.raw.type && EVENT_SUBTYPE_LABEL[ctx.raw.type]) extra = `: ${EVENT_SUBTYPE_LABEL[ctx.raw.type]}`;
+                                        }
+                                        return `${label}${extra}${offset}`;
                                     }
                                 }
                             },
                             zoom: buildUnifiedChartZoomOptions(sessionId)
                         },
+                        layout: { padding: { right: RIGHT_AXIS_PAD_PX } },
                         scales: {
                             x: {
                                 type: 'linear', min: 0, max: 600,
                                 ticks: {
                                     maxTicksLimit: 8,
+                                    align: 'inner',
                                     callback: (value) => {
                                         const startMs = Number(chart && chart.$windowStartMs) || 0;
                                         return formatBitrateChartAbsoluteTick(startMs, Number(value));
@@ -2494,7 +2901,12 @@ maybe a histogram of b
                                 grid: { color: 'rgba(0,0,0,0.05)' }
                             },
                             y: {
-                                type: 'linear', min: 0.5, max: 4.5,
+                                type: 'linear', min: 0.5, max: 6.5,
+                                // Force a fixed Y-axis width so this chart's
+                                // X-axis lines up vertically with the bandwidth /
+                                // buffer / fps charts below (they all use the
+                                // same afterFit width).
+                                afterFit: (axis) => { axis.width = 90; },
                                 title: { display: true, text: 'Events', font: { family: 'Courier New, monospace', size: 11, weight: 'bold' }, color: '#4b5563' },
                                 ticks: {
                                     stepSize: 1,
@@ -2520,6 +2932,425 @@ maybe a histogram of b
                 chart.data.datasets = datasets;
                 chart.$windowStartMs = windowStart;
                 chart.update('none');
+            }
+        }
+
+        // Real swim-lane chart using vis-timeline. Stacked above the
+        // Chart.js scatter approximation so we can compare. PLAYERSTATE
+        // becomes a continuous coloured ribbon (one segment per state
+        // span). Other lanes remain point markers since their underlying
+        // events are point-in-time. BUFFERING and STALL stay as points
+        // for now — pairing start/end into ranges needs the *_end events
+        // to flow through the dashboard event capture (currently only
+        // *_start variants reach parseBandwidthChartEventType).
+        function renderEventsTimelineChart(sessionId, windowStart, eventSeries) {
+            if (typeof vis === 'undefined' || !vis.Timeline) {
+                console.warn('[events-timeline] vis-timeline not loaded');
+                return;
+            }
+            const card = document.querySelector(`.session-card[data-session-id="${sessionId}"]`);
+            if (!card) return;
+            const container = card.querySelector('.events-timeline');
+            if (!container) {
+                console.warn('[events-timeline] container .events-timeline not in DOM for session', sessionId);
+                return;
+            }
+            // Render the legend strip above the chart. We hide vis-
+            // timeline's left label panel via CSS so the chart area
+            // lines up with the Chart.js charts; the legend gives back
+            // the lane → colour mapping.
+            const legendEl = card.querySelector('.events-timeline-legend');
+            if (legendEl) {
+                const baseLegend = Object.entries(EVENT_LANES)
+                    .map(([type, cfg]) => `<span class="legend-item"><span class="legend-swatch" style="background:${cfg.color}"></span>${cfg.label}</span>`)
+                    .join('');
+                legendEl.innerHTML = baseLegend;
+            }
+
+            const nowMs = Date.now();
+            const events = (eventSeries || []).filter((e) => Number(e.ts) >= windowStart);
+
+            // Two top-level sections so server-originated events (loop
+            // wrap notifications, etc.) don't visually mix with player-side
+            // events. Lane order within each section follows EVENT_LANES.
+            const SERVER_LANES = new Set(['LOOP_SERVER']);
+            const playerLanes = Object.keys(EVENT_LANES).filter((k) => !SERVER_LANES.has(k) && k !== 'VARIANT');
+            const serverLanes = Object.keys(EVENT_LANES).filter((k) => SERVER_LANES.has(k));
+
+            // Sync our collapse-state mirror from the live timeline
+            // BEFORE we rebuild the groups array — captures any user
+            // toggle that happened since the last render.
+            const existingTimeline = eventsTimelines.get(sessionId);
+            if (existingTimeline && existingTimeline.groupsData) {
+                const live = eventsTimelineSectionCollapsed.get(sessionId) || {};
+                const p = existingTimeline.groupsData.get('PLAYER_SECTION');
+                const s = existingTimeline.groupsData.get('SERVER_SECTION');
+                if (p) live.player = (p.showNested === false);
+                if (s) live.server = (s.showNested === false);
+                eventsTimelineSectionCollapsed.set(sessionId, live);
+            }
+            const sectionState = eventsTimelineSectionCollapsed.get(sessionId) || {};
+            const playerShowNested = !sectionState.player; // default true (expanded)
+            const serverShowNested = !sectionState.server;
+
+            // VARIANT subgroups: one lane per observed (resolution,
+            // bitrate) tuple. Multi-bitrate-per-resolution variants are
+            // a real ABR ladder pattern (e.g. H.264 + HEVC at 1080p),
+            // so each gets its own row. Sorted by bitrate DESCENDING,
+            // so the visual ladder runs highest at the top, lowest at
+            // the bottom.
+            const variantEvents = events.filter((e) => e.type === 'VARIANT');
+            const seenVariants = new Map(); // key (res|mbps) -> {mbps, resolution}
+            for (const v of variantEvents) {
+                const res = String(v.resolution || '').trim();
+                const m = Number(v.mbps);
+                if (!res || !Number.isFinite(m) || m <= 0) continue;
+                const k = `${res}|${m}`;
+                if (!seenVariants.has(k)) {
+                    seenVariants.set(k, { mbps: m, resolution: res });
+                }
+            }
+            const variantOrder = Array.from(seenVariants.entries())
+                .sort((a, b) => Number(b[1].mbps) - Number(a[1].mbps));
+            const variantGroups = variantOrder.map(([k, v]) => ({
+                id: `VARIANT::${k}`,
+                content: variantLabel(v.mbps, v.resolution)
+            }));
+            const variantGroupIds = variantGroups.map((g) => g.id);
+
+            const groups = [
+                { id: 'PLAYER_SECTION', content: 'PLAYER', nestedGroups: [...variantGroupIds, ...playerLanes], showNested: playerShowNested },
+                ...variantGroups,
+                ...playerLanes.map((type) => ({ id: type, content: EVENT_LANES[type].label })),
+                { id: 'SERVER_SECTION', content: 'SERVER', nestedGroups: serverLanes, showNested: serverShowNested },
+                ...serverLanes.map((type) => ({ id: type, content: EVENT_LANES[type].label }))
+            ];
+
+            const items = [];
+            let itemId = 0;
+
+            // Format absolute times for hover tooltips (matches the
+            // bitrate chart's HH:MM:SS).
+            function formatHoverTime(ms) {
+                const d = new Date(ms);
+                const hh = String(d.getHours()).padStart(2, '0');
+                const mm = String(d.getMinutes()).padStart(2, '0');
+                const ss = String(d.getSeconds()).padStart(2, '0');
+                return `${hh}:${mm}:${ss}`;
+            }
+
+            // Helper to render an event-series sequence as continuous
+            // ranges (one segment per stable value, transition on change).
+            function pushRanges(typeKey, getLabel, getColor) {
+                const seq = events.filter((e) => e.type === typeKey)
+                    .sort((a, b) => Number(a.ts) - Number(b.ts));
+                for (let i = 0; i < seq.length; i++) {
+                    const start = Number(seq[i].ts);
+                    const end = i + 1 < seq.length ? Number(seq[i + 1].ts) : nowMs;
+                    const label = getLabel(seq[i]);
+                    const color = getColor(seq[i]);
+                    const durationSec = ((end - start) / 1000).toFixed(1);
+                    const title = `${EVENT_LANES[typeKey].label}: ${label}\n${formatHoverTime(start)} → ${formatHoverTime(end)} (${durationSec}s)`;
+                    items.push({
+                        id: itemId++,
+                        group: typeKey,
+                        content: label,
+                        start: new Date(start),
+                        end: new Date(end),
+                        type: 'range',
+                        title: title,
+                        style: `background-color: ${color}; border-color: ${color}; color: #fff;`
+                    });
+                }
+            }
+
+            // PLAYERSTATE label includes the AVPlayer waiting reason
+            // (when present) so the user can disambiguate buffering
+            // causes — e.g. "buffering (toMinimizeStalls)".
+            pushRanges('PLAYERSTATE',
+                (e) => {
+                    const s = e.state || 'Unknown';
+                    return e.reason ? `${s} (${e.reason})` : s;
+                },
+                (e) => playerStateColor(e.state));
+            pushRanges('DISPLAY_RES',
+                (e) => String(e.resolution || '?'),
+                (e) => displayResColor(e.resolution));
+
+            // VARIANT: each (resolution, bitrate) tuple gets its own
+            // swim lane. Lane key matches seenVariants.
+            const variantSeq = variantEvents.sort((a, b) => Number(a.ts) - Number(b.ts));
+            for (let i = 0; i < variantSeq.length; i++) {
+                const v = variantSeq[i];
+                const res = String(v.resolution || '').trim();
+                const m = Number(v.mbps);
+                if (!res || !Number.isFinite(m) || m <= 0) continue;
+                const start = Number(v.ts);
+                const end = i + 1 < variantSeq.length ? Number(variantSeq[i + 1].ts) : nowMs;
+                const color = variantColor(m);
+                const durationSec = ((end - start) / 1000).toFixed(1);
+                const title = `Variant: ${variantLabel(m, res)}\n${formatHoverTime(start)} → ${formatHoverTime(end)} (${durationSec}s)`;
+                items.push({
+                    id: itemId++,
+                    group: `VARIANT::${res}|${m}`,
+                    content: '',
+                    start: new Date(start),
+                    end: new Date(end),
+                    type: 'range',
+                    title: title,
+                    style: `background-color: ${color}; border-color: ${color}; color: #fff;`
+                });
+            }
+
+            for (const e of events) {
+                if (e.type === 'PLAYERSTATE' || e.type === 'VARIANT' || e.type === 'DISPLAY_RES') continue;
+                const lane = EVENT_SUBTYPE_LANE[e.type] || e.type;
+                const cfg = EVENT_LANES[lane];
+                if (!cfg) continue;
+                const color = EVENT_SUBTYPE_COLOR[e.type] || cfg.color;
+                const subLabel = EVENT_SUBTYPE_LABEL[e.type] || e.type;
+                const ts = Number(e.ts);
+                items.push({
+                    id: itemId++,
+                    group: lane,
+                    content: '',
+                    start: new Date(ts),
+                    type: 'point',
+                    title: `${subLabel}\n${formatHoverTime(ts)}`,
+                    style: `background-color: ${color}; border-color: ${color};`
+                });
+            }
+
+            // Live-edge window: same 10-minute span as the other charts,
+            // right edge anchored to "now" so events scroll left as time
+            // advances. Updated on every render so the view tracks live.
+            const liveWindowMs = 10 * 60 * 1000;
+            const liveStart = new Date(nowMs - liveWindowMs);
+            const liveEnd = new Date(nowMs);
+
+            // Compute explicit height. vis-timeline's height:'auto'
+            // collapses to 0 because the wrap has no intrinsic height
+            // (its internal panels are absolutely positioned). Use a
+            // uniform per-row estimate — section headers and lane
+            // rows share the same auto height now that we no longer
+            // CSS-override section-header heights (which broke
+            // label-to-lane alignment). Slight over-estimate is
+            // safer than under (under-estimate hides top rows).
+            const ROW_PX = 28;
+            const AXIS_PAD_PX = 50;
+            const computedHeight = (groups.length * ROW_PX) + AXIS_PAD_PX;
+            const heightPx = `${computedHeight}px`;
+            container.style.height = heightPx;
+
+            // If the session card was rebuilt (innerHTML rewrite, etc.)
+            // the cached timeline points at an orphaned div that's no
+            // longer in the DOM. Detect that and recreate against the
+            // new container — same defence the Chart.js code does
+            // (`if (chart.canvas !== canvas) destroy + recreate`).
+            let timeline = eventsTimelines.get(sessionId);
+            if (timeline && timeline.$container !== container) {
+                timeline.destroy();
+                eventsTimelines.delete(sessionId);
+                timeline = null;
+            }
+            if (!timeline) {
+                timeline = new vis.Timeline(
+                    container,
+                    new vis.DataSet(items),
+                    new vis.DataSet(groups),
+                    {
+                        stack: false,
+                        showCurrentTime: true,
+                        zoomable: true,
+                        moveable: true,
+                        margin: { item: 4 },
+                        orientation: { axis: 'top' },
+                        height: heightPx,
+                        start: liveStart,
+                        end: liveEnd,
+                        // Match the Chart.js bitrate chart's HH:MM:SS
+                        // 24-hour tick format. Suppress the date strip.
+                        // timeAxis.scale='second' + step=60 forces a
+                        // tick every 60 seconds at consistent spacing,
+                        // matching the bitrate chart's tick density.
+                        timeAxis: { scale: 'second', step: 60 },
+                        format: {
+                            minorLabels: {
+                                millisecond: 'HH:mm:ss',
+                                second: 'HH:mm:ss',
+                                minute: 'HH:mm:ss',
+                                hour: 'HH:mm:ss',
+                                weekday: 'HH:mm:ss',
+                                day: 'HH:mm:ss',
+                                week: 'HH:mm:ss',
+                                month: 'HH:mm:ss',
+                                year: 'HH:mm:ss'
+                            },
+                            majorLabels: {
+                                millisecond: '',
+                                second: '',
+                                minute: '',
+                                hour: '',
+                                weekday: '',
+                                day: '',
+                                week: '',
+                                month: '',
+                                year: ''
+                            }
+                        },
+                        // Match the Chart.js charts' zoom UX:
+                        //   plain wheel = page scroll (do not intercept)
+                        //   Alt/Option + wheel = zoom in/out
+                        // Pan is left-drag on the timeline (vis-timeline
+                        // doesn't support right-drag natively; close enough
+                        // to the Chart.js right-drag-pan behaviour).
+                        zoomKey: 'altKey',
+                        horizontalScroll: false,
+                        // Reasonable zoom bounds: 1s lower (heavy zoom in)
+                        // to 6h upper (back-out enough to see longer
+                        // sessions if user pans backward).
+                        zoomMin: 1000,
+                        zoomMax: 6 * 60 * 60 * 1000
+                    }
+                );
+                eventsTimelines.set(sessionId, timeline);
+                // Tag for the cross-chart viewport sync helpers, anchor
+                // the seconds-from-windowStart frame to liveStart so
+                // vis-timeline ranges convert consistently to the 0–600
+                // units the Chart.js charts use, and remember the DOM
+                // container so a session-card rebuild is detected on
+                // the next render.
+                timeline.$isVisTimeline = true;
+                timeline.$windowStartMs = liveStart.getTime();
+                timeline.$container = container;
+                applyStoredChartViewport(sessionId, timeline);
+                // After a user-driven range change (zoom or pan): if
+                // the chart is NOT paused, re-snap the right edge to
+                // "now" while preserving whatever zoom width the user
+                // landed on. This matches the Chart.js charts'
+                // live-mode behaviour — they auto-track live edge
+                // unless the explicit pause button is engaged. When
+                // paused, accept the user's range as-is.
+                timeline.on('rangechanged', (props) => {
+                    if (!props || !props.byUser) return;
+                    syncChartViewportAcrossSession(sessionId, timeline);
+                    if (isChartPaused(sessionId)) return;
+                    const width = props.end.getTime() - props.start.getTime();
+                    const nowMsLocal = Date.now();
+                    timeline.setWindow(
+                        new Date(nowMsLocal - width),
+                        new Date(nowMsLocal),
+                        { animation: false }
+                    );
+                });
+                // Click toggles pause (matches Chart.js
+                // installChartClickPauseHandler). Skip clicks on the
+                // group label / collapse arrow (those expand/collapse
+                // sections) and skip Alt-clicks (Alt is the zoom
+                // modifier). vis-timeline already distinguishes click
+                // from drag — `click` only fires on a real click.
+                timeline.on('click', (props) => {
+                    if (!props) return;
+                    if (props.event && props.event.altKey) return;
+                    if (props.what === 'group-label') return;
+                    toggleChartPause(sessionId);
+                });
+                // Container width is sometimes 0 on first paint (parent
+                // ScrollView not yet laid out, session card just inserted,
+                // etc). A single requestAnimationFrame isn't reliable —
+                // the next frame can still report width 0. Use a
+                // ResizeObserver that fires redraw() the moment the
+                // container actually has dimensions, then disconnects.
+                if (typeof ResizeObserver !== 'undefined') {
+                    const ro = new ResizeObserver((entries) => {
+                        for (const entry of entries) {
+                            if (entry.contentRect.width > 0) {
+                                timeline.redraw();
+                                ro.disconnect();
+                                return;
+                            }
+                        }
+                    });
+                    ro.observe(container);
+                } else {
+                    requestAnimationFrame(() => timeline.redraw());
+                }
+                console.log('[events-timeline] created for session', sessionId, 'with', items.length, 'items,', groups.length, 'groups');
+            } else {
+                timeline.setItems(new vis.DataSet(items));
+                timeline.setGroups(new vis.DataSet(groups));
+                // Re-apply height each render — group count changes as
+                // variant lanes appear/disappear.
+                timeline.setOptions({ height: heightPx });
+                timeline.$windowStartMs = liveStart.getTime();
+                // Live-edge tracking: unless the user has explicitly
+                // paused the chart, slide the visible window so its
+                // right edge stays pinned to "now". Preserve whatever
+                // zoom width the user has set — only the position
+                // moves, not the width.
+                if (!isChartPaused(sessionId)) {
+                    const win = timeline.getWindow();
+                    const width = win.end.getTime() - win.start.getTime();
+                    timeline.setWindow(
+                        new Date(nowMs - width),
+                        new Date(nowMs),
+                        { animation: false }
+                    );
+                }
+            }
+
+            // Right-edge-anchored tick markers placed at the same
+            // wall-clock times as the Chart.js charts' axis ticks
+            // (every 100s for the 10-min window). Items keep their
+            // exact timestamp positions regardless of where these
+            // tick lines fall.
+            //
+            // When the chart is paused, anchor the ticks to the
+            // visible window's right edge (frozen in time) so the
+            // tick lines stay on top of the events that were visible
+            // when the user paused — not slide right with wall-clock
+            // time while the events stay frozen.
+            const tickAnchorMs = isChartPaused(sessionId)
+                ? timeline.getWindow().end.getTime()
+                : nowMs;
+            refreshLiveTickMarkers(timeline, tickAnchorMs, liveWindowMs);
+        }
+
+        // Add vis-timeline custom-time markers at fixed intervals
+        // back from "now" — matches the Chart.js charts' tick spacing
+        // so HH:MM:SS labels line up vertically across events-timeline
+        // / bandwidth / buffer / fps charts. We rebuild every render
+        // (remove all, add fresh) because vis-timeline's setCustomTime
+        // updates internal state but the DOM line element does not
+        // always reposition — leaving labels that move while the
+        // vertical lines stay put.
+        function refreshLiveTickMarkers(timeline, nowMs, windowMs) {
+            // 100s interval matches Chart.js's auto-pick for the
+            // [0, 600] (seconds) range with maxTicksLimit:8 → ticks
+            // every 100s = 7 visible labels in the 10-min window.
+            const TICK_INTERVAL_MS = 100000;
+            const tickCount = Math.floor(windowMs / TICK_INTERVAL_MS) + 1;
+            if (!timeline.$tickIds) timeline.$tickIds = new Set();
+            const fmt = (ms) => {
+                const d = new Date(ms);
+                return `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}:${String(d.getSeconds()).padStart(2,'0')}`;
+            };
+            // Drop every existing tick marker; the DOM line for a
+            // setCustomTime'd marker doesn't always re-render at the
+            // new x even though its label does.
+            for (const id of Array.from(timeline.$tickIds)) {
+                try { timeline.removeCustomTime(id); } catch (e) {}
+            }
+            timeline.$tickIds.clear();
+            // Re-add at the current wall-clock anchored positions.
+            for (let i = 0; i < tickCount; i++) {
+                const id = `live-tick-${i}`;
+                const t = nowMs - i * TICK_INTERVAL_MS;
+                try {
+                    timeline.addCustomTime(new Date(t), id);
+                    timeline.$tickIds.add(id);
+                    try { timeline.setCustomTimeMarker(fmt(t), id, false); } catch (e) {}
+                } catch (e) {}
             }
         }
 
@@ -2582,6 +3413,17 @@ maybe a histogram of b
                 }))
                 .filter((event) => Number.isFinite(event.x) && event.x >= 0 && event.x <= 600);
             renderEventsChart(sessionId, windowStart, eventSeries);
+            // Hide the per-session events swim-lane in compare mode —
+            // it shows events for ONE session only, which is confusing
+            // alongside the multi-session line charts below.
+            const compareActiveForTimeline = getCompareGroupIds().length >= 2;
+            const eventsTimelineWrap = card.querySelector('.events-timeline-wrap');
+            if (eventsTimelineWrap) {
+                eventsTimelineWrap.style.display = compareActiveForTimeline ? 'none' : '';
+            }
+            if (!compareActiveForTimeline) {
+                renderEventsTimelineChart(sessionId, windowStart, eventSeries);
+            }
             const shaperRateData = points.map(point => ({ x: point.x, y: point.shaperRate }));
             const shaperAvgData = points.map(point => ({ x: point.x, y: point.shaperAvg }));
             const transferRateData = points.map(point => ({ x: point.x, y: point.transferRate }));
@@ -2955,6 +3797,12 @@ maybe a histogram of b
                             },
                             zoom: buildUnifiedChartZoomOptions(sessionId)
                         },
+                        // Reserve right padding equal to the FPS chart's
+                        // right-side Y-axis (Dropped/s) width so all four
+                        // charts' plot areas share the same right edge,
+                        // and so vertical tick lines line up across all
+                        // charts and the events-timeline above.
+                        layout: { padding: { right: RIGHT_AXIS_PAD_PX } },
                         scales: {
                             x: {
                                 type: 'linear',
@@ -2965,6 +3813,7 @@ maybe a histogram of b
                                     color: '#6b7280',
                                     font: { family: 'Courier New, monospace', size: 10 },
                                     maxTicksLimit: 8,
+                                    align: 'inner',
                                     callback: (value) => {
                                         const startMs = Number(chart?.$windowStartMs || windowStart);
                                         return formatBitrateChartAbsoluteTick(startMs, Number(value));
@@ -2974,6 +3823,7 @@ maybe a histogram of b
                             y: {
                                 min: 0,
                                 max: maxY,
+                                afterFit: (axis) => { axis.width = 90; },
                                 grid: { color: '#e5e7eb' },
                                 ticks: {
                                     color: '#6b7280',
@@ -2981,7 +3831,7 @@ maybe a histogram of b
                                 },
                                 title: {
                                     display: true,
-                                    text: 'Mbps',
+                                    text: 'Bitrate (Mbps)',
                                     color: '#6b7280',
                                     font: { family: 'Courier New, monospace', size: 10 }
                                 }
@@ -3094,6 +3944,9 @@ maybe a histogram of b
                             },
                             zoom: buildUnifiedChartZoomOptions(sessionId)
                         },
+                        // Match FPS chart's right Y-axis width — see
+                        // bandwidth chart for full rationale.
+                        layout: { padding: { right: RIGHT_AXIS_PAD_PX } },
                         scales: {
                             x: {
                                 type: 'linear',
@@ -3104,6 +3957,7 @@ maybe a histogram of b
                                     color: '#6b7280',
                                     font: { family: 'Courier New, monospace', size: 10 },
                                     maxTicksLimit: 8,
+                                    align: 'inner',
                                     callback: (value) => {
                                         const startMs = Number(bufferChart?.$windowStartMs || windowStart);
                                         return formatBitrateChartAbsoluteTick(startMs, Number(value));
@@ -3113,6 +3967,7 @@ maybe a histogram of b
                             y: {
                                 min: 0,
                                 max: maxBufferDepth,
+                                afterFit: (axis) => { axis.width = 90; },
                                 grid: { color: '#e5e7eb' },
                                 ticks: {
                                     color: '#6b7280',
@@ -3208,7 +4063,7 @@ maybe a histogram of b
             const droppedFpsValues = droppedFpsDataRaw.map((point) => Number(point.y)).filter((value) => Number.isFinite(value) && value >= 0);
             const fpsSmoothedData = [];
             let smooth = null;
-            const smoothingAlpha = 0.15;
+            const smoothingAlpha = 0.4;
             for (const point of fpsData) {
                 const y = Number(point.y);
                 if (!Number.isFinite(y) || y < 0) {
@@ -3403,6 +4258,7 @@ maybe a histogram of b
                                     color: '#6b7280',
                                     font: { family: 'Courier New, monospace', size: 10 },
                                     maxTicksLimit: 8,
+                                    align: 'inner',
                                     callback: (value) => {
                                         const startMs = Number(fpsChart?.$windowStartMs || windowStart);
                                         return formatBitrateChartAbsoluteTick(startMs, Number(value));
@@ -3412,6 +4268,7 @@ maybe a histogram of b
                             y: {
                                 min: 0,
                                 max: maxFps,
+                                afterFit: (axis) => { axis.width = 90; },
                                 grid: { color: '#e5e7eb' },
                                 ticks: {
                                     color: '#6b7280',
@@ -3428,6 +4285,10 @@ maybe a histogram of b
                                 position: 'right',
                                 min: 0,
                                 max: maxDroppedFps,
+                                // Pin width to RIGHT_AXIS_PAD_PX so all
+                                // four chart plot areas (and the events-
+                                // timeline above) end at the same X.
+                                afterFit: (axis) => { axis.width = RIGHT_AXIS_PAD_PX; },
                                 grid: { drawOnChartArea: false },
                                 ticks: {
                                     color: '#9a3412',
