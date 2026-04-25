@@ -2977,6 +2977,36 @@ maybe a histogram of b
                         height: heightPx,
                         start: liveStart,
                         end: liveEnd,
+                        // Match the Chart.js bitrate chart's HH:MM:SS
+                        // 24-hour tick format (formatBitrateChartAbsoluteTick).
+                        // Suppress vis-timeline's "Sat 25 April" major-label
+                        // strip — the Chart.js charts don't show a date row,
+                        // and the timestamps below are unambiguous in the
+                        // live-edge window we render.
+                        format: {
+                            minorLabels: {
+                                millisecond: 'HH:mm:ss',
+                                second: 'HH:mm:ss',
+                                minute: 'HH:mm:ss',
+                                hour: 'HH:mm:ss',
+                                weekday: 'HH:mm:ss',
+                                day: 'HH:mm:ss',
+                                week: 'HH:mm:ss',
+                                month: 'HH:mm:ss',
+                                year: 'HH:mm:ss'
+                            },
+                            majorLabels: {
+                                millisecond: '',
+                                second: '',
+                                minute: '',
+                                hour: '',
+                                weekday: '',
+                                day: '',
+                                week: '',
+                                month: '',
+                                year: ''
+                            }
+                        },
                         // Match the Chart.js charts' zoom UX:
                         //   plain wheel = page scroll (do not intercept)
                         //   Alt/Option + wheel = zoom in/out

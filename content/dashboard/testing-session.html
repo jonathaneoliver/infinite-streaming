@@ -5185,6 +5185,33 @@
                         height: heightPx,
                         start: liveStart,
                         end: liveEnd,
+                        // Match the Chart.js charts' HH:MM:SS 24-hour
+                        // tick format; suppress the "Sat 25 April"
+                        // major-label strip.
+                        format: {
+                            minorLabels: {
+                                millisecond: 'HH:mm:ss',
+                                second: 'HH:mm:ss',
+                                minute: 'HH:mm:ss',
+                                hour: 'HH:mm:ss',
+                                weekday: 'HH:mm:ss',
+                                day: 'HH:mm:ss',
+                                week: 'HH:mm:ss',
+                                month: 'HH:mm:ss',
+                                year: 'HH:mm:ss'
+                            },
+                            majorLabels: {
+                                millisecond: '',
+                                second: '',
+                                minute: '',
+                                hour: '',
+                                weekday: '',
+                                day: '',
+                                week: '',
+                                month: '',
+                                year: ''
+                            }
+                        },
                         // Match Chart.js zoom UX: plain wheel = page
                         // scroll; Alt/Option + wheel = zoom; left-drag
                         // = pan.
