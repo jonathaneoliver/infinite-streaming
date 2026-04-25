@@ -2302,21 +2302,20 @@ maybe a histogram of b
                 }
             }
 
-            // VARIANT lane: dedup by RESOLUTION, not bitrate.
-            // player_metrics_video_bitrate_mbps reports the actual
-            // segment bitrate which fluctuates with scene complexity
-            // even within one rendition (a high-motion 1080p segment
-            // can be 3x the bitrate of a low-motion 1080p segment).
-            // Resolution is stable per rendition, so it's the correct
-            // identity for an ABR variant. Skip ticks where resolution
-            // is missing rather than dedupe against an empty value
-            // (would briefly drop the active variant from the lane).
+            // VARIANT lane: dedup by (resolution, indicated bitrate).
+            // ABR ladders can legitimately have multiple variants at the
+            // same resolution but different bitrates (e.g. H.264 + HEVC
+            // at 1080p, or two quality presets), so resolution alone
+            // collapses real variants together. The bitrate is the
+            // manifest BANDWIDTH attribute (player_metrics_video_bitrate_mbps
+            // is iOS indicatedBitrate / Android Format.bitrate, both stable
+            // per rendition), so this is safe to use as identity now.
+            // Skip ticks where either is missing.
             const variantRes = String(session.player_metrics_video_resolution || '').trim();
-            if (variantRes) {
-                const variantMbpsRaw = Number(session.player_metrics_video_bitrate_mbps);
-                const variantMbps = Number.isFinite(variantMbpsRaw) && variantMbpsRaw > 0
-                    ? Math.round(variantMbpsRaw * 10) / 10 : 0;
-                const variantKey = variantRes;
+            const variantMbpsRaw = Number(session.player_metrics_video_bitrate_mbps);
+            if (variantRes && Number.isFinite(variantMbpsRaw) && variantMbpsRaw > 0) {
+                const variantMbps = Math.round(variantMbpsRaw * 10) / 10;
+                const variantKey = `${variantRes}|${variantMbps}`;
                 const prevVariant = lastRecordedVariantBySession.get(String(key));
                 if (prevVariant !== variantKey) {
                     const eventSeries = bandwidthEventHistory.get(key) || [];
@@ -2663,27 +2662,23 @@ maybe a histogram of b
             const playerLanes = Object.keys(EVENT_LANES).filter((k) => !SERVER_LANES.has(k) && k !== 'VARIANT');
             const serverLanes = Object.keys(EVENT_LANES).filter((k) => SERVER_LANES.has(k));
 
-            // VARIANT subgroups: one lane per observed RESOLUTION in
-            // the current window. Lane key is resolution because each
-            // rendition has a unique resolution; bitrate fluctuates per
-            // segment within one rendition and would split into phantom
-            // lanes. Bitrate is kept (latest seen for that resolution)
-            // for sorting and labelling.
+            // VARIANT subgroups: one lane per observed (resolution,
+            // bitrate) tuple. Multi-bitrate-per-resolution variants are
+            // a real ABR ladder pattern (e.g. H.264 + HEVC at 1080p),
+            // so each gets its own row. Sorted by bitrate DESCENDING,
+            // so the visual ladder runs highest at the top, lowest at
+            // the bottom.
             const variantEvents = events.filter((e) => e.type === 'VARIANT');
-            const seenVariants = new Map(); // key (resolution) -> {mbps, resolution}
+            const seenVariants = new Map(); // key (res|mbps) -> {mbps, resolution}
             for (const v of variantEvents) {
                 const res = String(v.resolution || '').trim();
-                if (!res) continue;
                 const m = Number(v.mbps);
-                const existing = seenVariants.get(res);
-                if (!existing) {
-                    seenVariants.set(res, { mbps: m, resolution: res });
-                } else if (Number.isFinite(m) && m > 0) {
-                    existing.mbps = m; // keep the most recent bitrate for that resolution
+                if (!res || !Number.isFinite(m) || m <= 0) continue;
+                const k = `${res}|${m}`;
+                if (!seenVariants.has(k)) {
+                    seenVariants.set(k, { mbps: m, resolution: res });
                 }
             }
-            // Sort by bitrate DESCENDING (highest at top), so the visual
-            // ladder matches how ABR ladders are normally drawn.
             const variantOrder = Array.from(seenVariants.entries())
                 .sort((a, b) => Number(b[1].mbps) - Number(a[1].mbps));
             const variantGroups = variantOrder.map(([k, v]) => ({
@@ -2730,23 +2725,20 @@ maybe a histogram of b
                 (e) => e.state || 'Unknown',
                 (e) => playerStateColor(e.state));
 
-            // VARIANT: each resolution gets its own swim lane. Lane key
-            // matches seenVariants — resolution. Colour is bucketed by
-            // the segment's bitrate so high-motion (high-bitrate) and
-            // low-motion (low-bitrate) segments within one rendition
-            // are visible as colour shifts inside the same row.
+            // VARIANT: each (resolution, bitrate) tuple gets its own
+            // swim lane. Lane key matches seenVariants.
             const variantSeq = variantEvents.sort((a, b) => Number(a.ts) - Number(b.ts));
             for (let i = 0; i < variantSeq.length; i++) {
                 const v = variantSeq[i];
                 const res = String(v.resolution || '').trim();
-                if (!res) continue;
+                const m = Number(v.mbps);
+                if (!res || !Number.isFinite(m) || m <= 0) continue;
                 const start = Number(v.ts);
                 const end = i + 1 < variantSeq.length ? Number(variantSeq[i + 1].ts) : nowMs;
-                const m = Number(v.mbps);
                 const color = variantColor(m);
                 items.push({
                     id: itemId++,
-                    group: `VARIANT::${res}`,
+                    group: `VARIANT::${res}|${m}`,
                     content: '',
                     start: new Date(start),
                     end: new Date(end),

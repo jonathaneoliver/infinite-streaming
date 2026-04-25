@@ -1019,7 +1019,16 @@ final class PlaybackViewModel: ObservableObject {
             "player_metrics_profile_shift_count": profileShiftCount,
             "player_restarts": playerRestarts,
             "player_auto_recovery_enabled": autoRecoveryEnabled,
-            "player_metrics_video_bitrate_mbps": mbps(from: diagnostics.indicatedBitrate ?? diagnostics.averageVideoBitrate)
+            // Variant identity must be the manifest BANDWIDTH attribute
+            // (AVPlayer's accessLog indicatedBitrate). DO NOT fall back
+            // to averageVideoBitrate — that's measured-bytes-per-second
+            // and fluctuates with scene complexity within a single
+            // rendition, which would make the dashboard's variant lanes
+            // split one rendition into multiple phantom variants.
+            // Anything wanting a measured throughput should read
+            // player_metrics_avg_network_bitrate_mbps or
+            // player_metrics_network_bitrate_mbps instead.
+            "player_metrics_video_bitrate_mbps": mbps(from: diagnostics.indicatedBitrate)
         ]
         extra.forEach { key, value in
             payload[key] = value

@@ -4628,18 +4628,17 @@
                 }
             }
 
-            // VARIANT lane: dedup by RESOLUTION, not bitrate.
-            // player_metrics_video_bitrate_mbps reports the actual
-            // segment bitrate which fluctuates with scene complexity
-            // even within one rendition. Resolution is stable per
-            // rendition, so it's the correct identity for an ABR
-            // variant. Skip ticks where resolution is missing.
+            // VARIANT lane: dedup by (resolution, indicated bitrate) so
+            // multi-bitrate-per-resolution variants (e.g. H.264 + HEVC
+            // at 1080p) get distinct lanes. Bitrate is the manifest
+            // BANDWIDTH attribute on both clients (iOS indicatedBitrate,
+            // Android Format.bitrate), stable per rendition. Skip ticks
+            // where either resolution or bitrate is missing.
             const variantRes = String(session.player_metrics_video_resolution || '').trim();
-            if (variantRes) {
-                const variantMbpsRaw = Number(session.player_metrics_video_bitrate_mbps);
-                const variantMbps = Number.isFinite(variantMbpsRaw) && variantMbpsRaw > 0
-                    ? Math.round(variantMbpsRaw * 10) / 10 : 0;
-                const variantKey = variantRes;
+            const variantMbpsRaw = Number(session.player_metrics_video_bitrate_mbps);
+            if (variantRes && Number.isFinite(variantMbpsRaw) && variantMbpsRaw > 0) {
+                const variantMbps = Math.round(variantMbpsRaw * 10) / 10;
+                const variantKey = `${variantRes}|${variantMbps}`;
                 const prevVariant = lastRecordedVariantBySession.get(String(key));
                 if (prevVariant !== variantKey) {
                     const eventSeries = bandwidthEventHistory.get(key) || [];
@@ -4915,24 +4914,21 @@
             const playerLanes = Object.keys(EVENT_LANES).filter((k) => !SERVER_LANES.has(k) && k !== 'VARIANT');
             const serverLanes = Object.keys(EVENT_LANES).filter((k) => SERVER_LANES.has(k));
 
-            // Lane key is RESOLUTION (each rendition has a unique
-            // resolution); bitrate fluctuates per segment within one
-            // rendition and is kept only for sorting / labelling.
+            // VARIANT subgroups: one lane per (resolution, bitrate).
+            // Multi-bitrate-per-resolution is a real ladder pattern.
             const variantEvents = events.filter((e) => e.type === 'VARIANT');
-            const seenVariants = new Map(); // resolution -> {mbps, resolution}
+            const seenVariants = new Map(); // res|mbps -> {mbps, resolution}
             for (const v of variantEvents) {
                 const res = String(v.resolution || '').trim();
-                if (!res) continue;
                 const m = Number(v.mbps);
-                const existing = seenVariants.get(res);
-                if (!existing) {
-                    seenVariants.set(res, { mbps: m, resolution: res });
-                } else if (Number.isFinite(m) && m > 0) {
-                    existing.mbps = m;
+                if (!res || !Number.isFinite(m) || m <= 0) continue;
+                const k = `${res}|${m}`;
+                if (!seenVariants.has(k)) {
+                    seenVariants.set(k, { mbps: m, resolution: res });
                 }
             }
-            // Ordered DESCENDING by bitrate so an upshift walks UP the
-            // ladder visually.
+            // Ordered DESCENDING by bitrate so the visual ladder runs
+            // highest at the top, lowest at the bottom.
             const variantOrder = Array.from(seenVariants.entries())
                 .sort((a, b) => Number(b[1].mbps) - Number(a[1].mbps));
             const variantGroups = variantOrder.map(([k, v]) => ({
@@ -4977,22 +4973,20 @@
                 (e) => e.state || 'Unknown',
                 (e) => playerStateColor(e.state));
 
-            // VARIANT: each resolution gets its own swim lane; segment
-            // bitrate drives the segment's colour so motion-driven
-            // bitrate variation within a rendition shows as a colour
-            // shift inside the same row.
+            // VARIANT: each (resolution, bitrate) tuple gets its own
+            // swim lane. Lane key matches seenVariants.
             const variantSeq = variantEvents.sort((a, b) => Number(a.ts) - Number(b.ts));
             for (let i = 0; i < variantSeq.length; i++) {
                 const v = variantSeq[i];
                 const res = String(v.resolution || '').trim();
-                if (!res) continue;
+                const m = Number(v.mbps);
+                if (!res || !Number.isFinite(m) || m <= 0) continue;
                 const start = Number(v.ts);
                 const end = i + 1 < variantSeq.length ? Number(variantSeq[i + 1].ts) : nowMs;
-                const m = Number(v.mbps);
                 const color = variantColor(m);
                 items.push({
                     id: itemId++,
-                    group: `VARIANT::${res}`,
+                    group: `VARIANT::${res}|${m}`,
                     content: '',
                     start: new Date(start),
                     end: new Date(end),
