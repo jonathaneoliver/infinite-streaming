@@ -23,7 +23,23 @@ struct MetricSample: Identifiable {
     let value: Double
 }
 
+/// Discrete time-jump event published from PlaybackDiagnostics for the
+/// ViewModel to forward as a `timejump` metrics event. Fires on HLS
+/// discontinuity boundaries, live-edge catchup seeks, and explicit seeks.
+struct TimeJumpEvent {
+    let from: Double
+    let to: Double
+    let origin: String
+    let at: Date
+}
+
 final class PlaybackDiagnostics: ObservableObject {
+    /// Discrete time-jump events. Subscribers (ViewModel) receive each
+    /// jump exactly once; not a Published property because we don't want
+    /// the deduplication-on-equal-values that an @Published+sink would
+    /// give us if two jumps happen to land at the same `to`.
+    let timeJumpSubject = PassthroughSubject<TimeJumpEvent, Never>()
+
     @Published var state: String = "Idle"
     @Published var currentTime: Double = 0
     @Published var bufferedEnd: Double?
@@ -79,6 +95,12 @@ final class PlaybackDiagnostics: ObservableObject {
     private var lastBufferSampleAt: Date?
     private var lastPlayerSampleAt: Date?
     private var stallStartAt: Date?
+    /// Set when AVPlayerItemPlaybackStalled fires (an unexpected
+    /// mid-play rebuffer); cleared when timeControlStatus returns to
+    /// .playing. Used to pick "stalled" vs "buffering" for the
+    /// PLAYERSTATE lane — the latter being any other waiting state
+    /// (initial pre-roll, post-seek refill, etc.).
+    private var isStalled: Bool = false
     private var hasRenderedFirstFrame: Bool = false
     private var lastAdvancingTime: Double = 0
     private var lastAdvancingAt: Date?
@@ -234,7 +256,7 @@ final class PlaybackDiagnostics: ObservableObject {
     }
 
     func reset() {
-        state = "Idle"
+        state = "idle"
         currentTime = 0
         bufferedEnd = nil
         bufferDepth = nil
@@ -281,6 +303,7 @@ final class PlaybackDiagnostics: ObservableObject {
         lastBufferSampleAt = nil
         lastPlayerSampleAt = nil
         stallStartAt = nil
+        isStalled = false
         hasRenderedFirstFrame = false
         lastObservedSegmentSequence = nil
         maxObservedSegmentSequence = nil
@@ -314,14 +337,23 @@ final class PlaybackDiagnostics: ObservableObject {
                 let rate = self.player?.rate ?? 0
                 switch status {
                 case .paused:
-                    self.state = "Paused"
+                    self.state = "paused"
                 case .waitingToPlayAtSpecifiedRate:
-                    self.state = "Buffering"
-                    self.startStallIfNeeded()
+                    // Distinguish user-induced refill (initial pre-roll,
+                    // post-seek, post-play after a long pause) from an
+                    // unexpected mid-play rebuffer. Only the
+                    // AVPlayerItemPlaybackStalled notification (handled
+                    // below) signals the unexpected case; the
+                    // isStalled flag persists from there until we
+                    // return to .playing. Don't call
+                    // startStallIfNeeded() here — that would conflate
+                    // pre-roll with stalls.
+                    self.state = self.isStalled ? "stalled" : "buffering"
                 case .playing:
-                    self.state = "Playing"
+                    self.state = "playing"
+                    self.isStalled = false
                     self.endStallIfNeeded()
-                @unknown default: self.state = "Unknown"
+                @unknown default: self.state = "unknown"
                 }
                 print("[STATE] \(prev) -> \(self.state) rate=\(rate) time=\(String(format: "%.2f", self.currentTime)) \(self.playbackSnapshot())")
             }
@@ -365,8 +397,16 @@ final class PlaybackDiagnostics: ObservableObject {
                 guard let self else { return }
                 let item = notification.object as? AVPlayerItem
                 let original = (notification.userInfo?[AVPlayerItem.timeJumpedOriginatingParticipantKey] as? String) ?? "unknown"
+                let fromTime = self.currentTime
                 let newTime = item?.currentTime().seconds ?? self.currentTime
                 print("[TIMEJUMP] origin=\(original) time=\(String(format: "%.2f", newTime)) state=\(self.state) \(self.playbackSnapshot())")
+                // Publish for ViewModel to forward as a metrics event.
+                self.timeJumpSubject.send(TimeJumpEvent(
+                    from: fromTime,
+                    to: newTime,
+                    origin: original,
+                    at: Date()
+                ))
             }
             .store(in: &cancellables)
 
@@ -375,6 +415,11 @@ final class PlaybackDiagnostics: ObservableObject {
             .sink { [weak self] _ in
                 guard let self else { return }
                 print("[STALL] state=\(self.state) time=\(String(format: "%.2f", self.currentTime)) \(self.playbackSnapshot())")
+                // Mark the unexpected-rebuffer flag so the
+                // timeControlStatus sink can distinguish stalled vs
+                // pre-roll buffering on the next state read.
+                self.isStalled = true
+                if self.state == "buffering" { self.state = "stalled" }
                 self.startStallIfNeeded()
             }
             .store(in: &cancellables)
@@ -735,7 +780,7 @@ final class PlaybackDiagnostics: ObservableObject {
             }
             return
         }
-        guard state == "Playing" else {
+        guard state == "playing" else {
             lastVariantDwellChangeAt = now
             return
         }

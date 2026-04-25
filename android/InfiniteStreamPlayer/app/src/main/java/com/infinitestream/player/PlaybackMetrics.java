@@ -98,6 +98,9 @@ final class PlaybackMetrics {
     private double lastStallDurationS;
     private long stallStartAtMs = -1;
 
+    // Buffering tracking (broader than stall — every BUFFERING transition).
+    private boolean buffering;
+
     // Frozen detection.
     private long lastHeartbeatPositionMs = -1;
     private int frozenTicks;
@@ -168,6 +171,9 @@ final class PlaybackMetrics {
         frozenReported = false;
         segmentStallReported = false;
         lastVideoLoadCompletedAtMs = System.currentTimeMillis();
+        Map<String, Object> extra = new HashMap<>();
+        extra.put("player_metrics_content_url", urlProvider.currentStreamUrl());
+        sendEvent("playing", extra);
     }
 
     /**
@@ -194,6 +200,40 @@ final class PlaybackMetrics {
         Map<String, Object> extra = new HashMap<>();
         extra.put("player_metrics_last_stall_time_s", lastStallDurationS);
         sendEvent("stall_end", extra);
+    }
+
+    /**
+     * Called on every transition into ExoPlayer STATE_BUFFERING. Distinct
+     * from onStallStart, which is gated on first-frame + playWhenReady so
+     * initial loads and short pre-roll buffering don't register as stalls.
+     */
+    void onBufferingStart() {
+        if (buffering) return;
+        buffering = true;
+        sendEvent("buffering_start", Collections.<String, Object>emptyMap());
+    }
+
+    /** Called when ExoPlayer leaves STATE_BUFFERING. */
+    void onBufferingEnd() {
+        if (!buffering) return;
+        buffering = false;
+        sendEvent("buffering_end", Collections.<String, Object>emptyMap());
+    }
+
+    /**
+     * Called from Player.Listener.onPositionDiscontinuity — fires on
+     * HLS discontinuity boundaries, explicit seeks, auto-transitions
+     * between media items, etc. Equivalent of AVPlayerItemTimeJumped
+     * on iOS; emits a `timejump` metrics event with from/to/delta in
+     * seconds plus the discontinuity reason name.
+     */
+    void onTimeJump(long fromMs, long toMs, String reason) {
+        Map<String, Object> extra = new HashMap<>();
+        extra.put("player_metrics_timejump_from_s", roundSeconds(fromMs / 1000.0));
+        extra.put("player_metrics_timejump_to_s", roundSeconds(toMs / 1000.0));
+        extra.put("player_metrics_timejump_delta_s", roundSeconds((toMs - fromMs) / 1000.0));
+        extra.put("player_metrics_timejump_origin", reason == null ? "unknown" : reason);
+        sendEvent("timejump", extra);
     }
 
     /** Called from AnalyticsListener.onLoadCompleted for video track. */
@@ -348,6 +388,7 @@ final class PlaybackMetrics {
             p.put("player_metrics_last_event_at", timestamp);
             p.put("player_metrics_event_time", timestamp);
             p.put("player_metrics_state", mapState());
+            p.put("player_metrics_waiting_reason", mapWaitingReason());
             p.put("player_metrics_position_s", roundSeconds(player.getCurrentPosition() / 1000.0));
             p.put("player_metrics_playback_rate", round2(player.getPlaybackParameters().speed));
 
@@ -418,15 +459,55 @@ final class PlaybackMetrics {
     }
 
     private String mapState() {
+        // Lowercase canonical names — matches Apple PlaybackDiagnostics,
+        // Android-test ExoPlayerTestApp, web embed, and Roku, so the
+        // dashboard PLAYERSTATE lane shows the same colour for the same
+        // state regardless of source platform.
         switch (player.getPlaybackState()) {
-            case Player.STATE_IDLE: return "Idle";
-            case Player.STATE_ENDED: return "Ended";
-            case Player.STATE_BUFFERING: return "Buffering";
+            case Player.STATE_IDLE: return "idle";
+            case Player.STATE_ENDED: return "ended";
+            case Player.STATE_BUFFERING:
+                // Distinguish unexpected mid-play rebuffer ("stalled")
+                // from initial pre-roll buffering. ExoPlayer doesn't
+                // have a direct AVPlayerItemPlaybackStalled equivalent,
+                // so we use the same first-frame + playWhenReady gate
+                // that onStallStart uses. Initial-load buffering and
+                // explicit-pause buffering stay as "buffering".
+                return (firstFrameReported && player.getPlayWhenReady()) ? "stalled" : "buffering";
             case Player.STATE_READY:
-                return player.isPlaying() ? "Playing" : "Paused";
+                return player.isPlaying() ? "playing" : "paused";
             default:
-                return "Unknown";
+                return "unknown";
         }
+    }
+
+    /**
+     * Synthesise a waiting_reason string mirroring the
+     * AVPlayer.reasonForWaitingToPlay we ship from iOS, so the
+     * dashboard PLAYERSTATE tooltip can disambiguate causes
+     * cross-platform. ExoPlayer doesn't expose an exact analog —
+     * derive from playbackState + playWhenReady + firstFrameReported
+     * + getPlaybackSuppressionReason. Empty string when there's no
+     * meaningful reason (e.g. actively playing).
+     */
+    private String mapWaitingReason() {
+        int state = player.getPlaybackState();
+        if (state == Player.STATE_BUFFERING) {
+            if (!firstFrameReported) return "initial";
+            if (!player.getPlayWhenReady()) return "paused";
+            return "rebuffer";
+        }
+        if (state == Player.STATE_READY && !player.isPlaying()) {
+            int suppression = player.getPlaybackSuppressionReason();
+            if (suppression == Player.PLAYBACK_SUPPRESSION_REASON_TRANSIENT_AUDIO_FOCUS_LOSS) {
+                return "audio_focus_loss";
+            }
+            if (suppression != Player.PLAYBACK_SUPPRESSION_REASON_NONE) {
+                return "suppressed_" + suppression;
+            }
+            if (!player.getPlayWhenReady()) return "paused";
+        }
+        return "";
     }
 
     private String resolveSessionId() {
