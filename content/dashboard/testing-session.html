@@ -598,6 +598,33 @@
             font-size: 10px;
             font-family: 'Courier New', monospace;
         }
+        .events-timeline-wrap .vis-left.vis-panel {
+            display: none !important;
+        }
+        .events-timeline-wrap .vis-center.vis-panel {
+            left: 0 !important;
+            border-left: none !important;
+        }
+        .events-timeline-legend {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px 12px;
+            margin-bottom: 6px;
+            font-size: 10px;
+            font-family: 'Courier New', monospace;
+            color: #4b5563;
+        }
+        .events-timeline-legend .legend-item {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+        }
+        .events-timeline-legend .legend-swatch {
+            width: 10px;
+            height: 10px;
+            border-radius: 2px;
+            display: inline-block;
+        }
 
         .abrchar-panel {
             margin-bottom: 12px;
@@ -4987,6 +5014,13 @@
             if (!container) {
                 console.warn('[events-timeline] container .events-timeline not in DOM for session', sessionId);
                 return;
+            }
+            const legendEl = card.querySelector('.events-timeline-legend');
+            if (legendEl) {
+                const baseLegend = Object.entries(EVENT_LANES)
+                    .map(([type, cfg]) => `<span class="legend-item"><span class="legend-swatch" style="background:${cfg.color}"></span>${cfg.label}</span>`)
+                    .join('');
+                legendEl.innerHTML = baseLegend;
             }
 
             const nowMs = Date.now();

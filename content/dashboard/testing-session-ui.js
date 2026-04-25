@@ -991,6 +991,7 @@
                             <span class="chart-hint" title="Hold Alt (Option on Mac) while scrolling or dragging to zoom; right-click-drag to pan">Alt/⌥+scroll/drag to zoom · right-drag to pan</span>
                         </div>
                         <div class="chart-wrap events-timeline-wrap">
+                            <div class="events-timeline-legend" data-field="events_timeline_legend"></div>
                             <div class="events-timeline" data-field="events_timeline"></div>
                         </div>
                         <div class="chart-wrap events-chart-wrap">
