@@ -697,6 +697,7 @@ maybe a histogram of b
         const bandwidthVisibility = new Map();
         const bitrateAxisMaxBySession = new Map();
         const lastRecordedPlayerEventBySession = new Map();
+        const lastRecordedPlayerStateBySession = new Map();
         const lastRecordedLoopCountBySession = new Map();
         const lastRecordedServerLoopCountBySession = new Map();
         const lastRecordedLoopEventStampBySession = new Map();
@@ -2260,6 +2261,23 @@ maybe a histogram of b
                 }
             }
 
+            // PLAYERSTATE lane: sample player_metrics_state on each refresh
+            // tick and emit a marker on every transition. Derived purely
+            // from heartbeat data, so it works for both Apple (state_change
+            // events) and Android (state_change isn't emitted but the
+            // heartbeat still carries player_metrics_state).
+            const stateValue = String(session.player_metrics_state || '').trim();
+            if (stateValue) {
+                const prevState = lastRecordedPlayerStateBySession.get(String(key));
+                if (prevState !== stateValue) {
+                    const eventSeries = bandwidthEventHistory.get(key) || [];
+                    eventSeries.push({ ts: now, type: 'PLAYERSTATE', state: stateValue });
+                    const eventCutoff = now - windowMs;
+                    bandwidthEventHistory.set(key, eventSeries.filter((event) => Number(event.ts) >= eventCutoff));
+                    lastRecordedPlayerStateBySession.set(String(key), stateValue);
+                }
+            }
+
             const series = bandwidthHistory.get(key) || [];
             const lastLimit = series.length ? Number(series[series.length - 1].target) : NaN;
             let target = Number.isFinite(bandwidthTarget) ? bandwidthTarget : (Number.isFinite(lastLimit) ? lastLimit : 0);
@@ -2308,6 +2326,7 @@ maybe a histogram of b
         // Swim-lane events chart (STALL / RESTART / LOOP_PLAYER / LOOP_SERVER).
         // Shares x-axis with bitrate chart via syncChartViewportAcrossSession.
         const EVENT_LANES = {
+            'PLAYERSTATE': { y: 8, color: '#6b7280', label: 'PLAYERSTATE' },
             'PLAYING':     { y: 7, color: '#16a34a', label: 'PLAYING' },
             'BUFFERING':   { y: 6, color: '#f59e0b', label: 'BUFFERING' },
             'SHIFT':       { y: 5, color: '#3b82f6', label: 'SHIFT' },
@@ -2316,6 +2335,18 @@ maybe a histogram of b
             'LOOP_PLAYER': { y: 2, color: '#06b6d4', label: 'LOOP PLAYER' },
             'LOOP_SERVER': { y: 1, color: '#84cc16', label: 'LOOP SERVER' }
         };
+        // Per-state colour for the PLAYERSTATE lane — each dot's colour
+        // tells you what the player thought it was doing at that tick.
+        const PLAYER_STATE_COLOR = {
+            'Playing':   '#16a34a',
+            'Buffering': '#f59e0b',
+            'Paused':    '#9333ea',
+            'Idle':      '#6b7280',
+            'Unknown':   '#d1d5db'
+        };
+        function playerStateColor(s) {
+            return PLAYER_STATE_COLOR[String(s || '').trim()] || '#6b7280';
+        }
         let legendHoverIndex = null;
         let legendHoverChartId = null;
         let legendHoverMetricKind = null;
@@ -2419,17 +2450,23 @@ maybe a histogram of b
             if (isChartPaused(sessionId)) return;
             const chartEvents = (eventSeries || [])
                 .filter((e) => Number(e.ts) >= windowStart)
-                .map((e) => ({ x: (e.ts - windowStart) / 1000, type: e.type, ts: Number(e.ts) }))
+                .map((e) => ({ x: (e.ts - windowStart) / 1000, type: e.type, state: e.state, ts: Number(e.ts) }))
                 .filter((e) => Number.isFinite(e.x) && e.x >= 0 && e.x <= 600);
-            const datasets = Object.entries(EVENT_LANES).map(([type, cfg]) => ({
-                label: cfg.label,
-                data: chartEvents.filter((e) => e.type === type).map((e) => ({ x: e.x, y: cfg.y, ts: e.ts })),
-                backgroundColor: cfg.color,
-                borderColor: cfg.color,
-                pointRadius: 5,
-                pointHoverRadius: 7,
-                showLine: false,
-            }));
+            const datasets = Object.entries(EVENT_LANES).map(([type, cfg]) => {
+                const points = chartEvents.filter((e) => e.type === type)
+                    .map((e) => ({ x: e.x, y: cfg.y, ts: e.ts, state: e.state }));
+                const isPlayerState = type === 'PLAYERSTATE';
+                const colors = isPlayerState ? points.map(p => playerStateColor(p.state)) : cfg.color;
+                return {
+                    label: cfg.label,
+                    data: points,
+                    backgroundColor: colors,
+                    borderColor: colors,
+                    pointRadius: 5,
+                    pointHoverRadius: 7,
+                    showLine: false,
+                };
+            });
             let chart = eventsCharts.get(sessionId);
             if (chart && chart.canvas !== canvas) {
                 chart.destroy();
@@ -2464,7 +2501,8 @@ maybe a histogram of b
                                         const offset = Number.isFinite(ts) && startMs > 0
                                             ? `  (+${((ts - startMs) / 1000).toFixed(3)}s)`
                                             : '';
-                                        return `${ctx.dataset.label}${offset}`;
+                                        const state = ctx && ctx.raw && ctx.raw.state ? `: ${ctx.raw.state}` : '';
+                                        return `${ctx.dataset.label}${state}${offset}`;
                                     }
                                 }
                             },
@@ -2485,7 +2523,7 @@ maybe a histogram of b
                                 grid: { color: 'rgba(0,0,0,0.05)' }
                             },
                             y: {
-                                type: 'linear', min: 0.5, max: 7.5,
+                                type: 'linear', min: 0.5, max: 8.5,
                                 title: { display: true, text: 'Events', font: { family: 'Courier New, monospace', size: 11, weight: 'bold' }, color: '#4b5563' },
                                 ticks: {
                                     stepSize: 1,
