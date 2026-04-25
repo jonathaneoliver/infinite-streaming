@@ -5044,7 +5044,14 @@
             const heightPx = `${computedHeight}px`;
             container.style.height = heightPx;
 
+            // If the session card was rebuilt, the cached timeline points
+            // at an orphaned div; recreate it against the new container.
             let timeline = eventsTimelines.get(sessionId);
+            if (timeline && timeline.$container !== container) {
+                timeline.destroy();
+                eventsTimelines.delete(sessionId);
+                timeline = null;
+            }
             if (!timeline) {
                 timeline = new vis.Timeline(
                     container,
@@ -5073,6 +5080,7 @@
                 eventsTimelineFollowLive.set(sessionId, true);
                 timeline.$isVisTimeline = true;
                 timeline.$windowStartMs = liveStart.getTime();
+                timeline.$container = container;
                 applyStoredChartViewport(sessionId, timeline);
                 timeline.on('rangechanged', (props) => {
                     if (!props || !props.byUser) return;

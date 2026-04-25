@@ -2806,7 +2806,17 @@ maybe a histogram of b
             const heightPx = `${computedHeight}px`;
             container.style.height = heightPx;
 
+            // If the session card was rebuilt (innerHTML rewrite, etc.)
+            // the cached timeline points at an orphaned div that's no
+            // longer in the DOM. Detect that and recreate against the
+            // new container — same defence the Chart.js code does
+            // (`if (chart.canvas !== canvas) destroy + recreate`).
             let timeline = eventsTimelines.get(sessionId);
+            if (timeline && timeline.$container !== container) {
+                timeline.destroy();
+                eventsTimelines.delete(sessionId);
+                timeline = null;
+            }
             if (!timeline) {
                 timeline = new vis.Timeline(
                     container,
@@ -2839,12 +2849,15 @@ maybe a histogram of b
                 );
                 eventsTimelines.set(sessionId, timeline);
                 eventsTimelineFollowLive.set(sessionId, true);
-                // Tag for the cross-chart viewport sync helpers, and
-                // anchor the seconds-from-windowStart frame to liveStart
-                // so vis-timeline ranges convert consistently to the
-                // 0–600 units the Chart.js charts use.
+                // Tag for the cross-chart viewport sync helpers, anchor
+                // the seconds-from-windowStart frame to liveStart so
+                // vis-timeline ranges convert consistently to the 0–600
+                // units the Chart.js charts use, and remember the DOM
+                // container so a session-card rebuild is detected on
+                // the next render.
                 timeline.$isVisTimeline = true;
                 timeline.$windowStartMs = liveStart.getTime();
+                timeline.$container = container;
                 // If another chart in this session already has a stored
                 // viewport, apply it so the timeline starts in sync.
                 applyStoredChartViewport(sessionId, timeline);
