@@ -4792,23 +4792,45 @@
         // #f59e0b/#6366f1/#115e59 etc.). Hot pink, deep purple, cyan, and lime
         // don't collide with any of the throughput/rendition/limit colors.
         const EVENT_LANES = {
-            'VARIANT':       { y: 17, color: '#16a34a', label: 'VARIANT' },
-            'DISPLAY_RES':   { y: 16, color: '#0ea5e9', label: 'DISPLAY RES' },
-            'PLAYERSTATE':   { y: 15, color: '#6b7280', label: 'PLAYERSTATE' },
-            'PLAYING':       { y: 14, color: '#16a34a', label: 'PLAYING' },
-            'FIRST_FRAME':   { y: 13, color: '#14b8a6', label: 'FIRST FRAME' },
-            'START_TIME':    { y: 12, color: '#15803d', label: 'START TIME' },
-            'BUFFERING':     { y: 11, color: '#f59e0b', label: 'BUFFERING' },
-            'STALL':         { y: 10, color: '#000000', label: 'STALL' },
-            'FROZEN':        { y: 9,  color: '#4c1d95', label: 'FROZEN' },
-            'SEGMENT_STALL': { y: 8,  color: '#c2410c', label: 'SEGMENT STALL' },
-            'SHIFT_UP':      { y: 7,  color: '#3b82f6', label: 'SHIFT UP' },
-            'SHIFT_DOWN':    { y: 6,  color: '#ef4444', label: 'SHIFT DOWN' },
-            'ERROR':         { y: 5,  color: '#e11d48', label: 'ERROR' },
-            'TIMEJUMP':      { y: 4,  color: '#d97706', label: 'TIMEJUMP' },
-            'RESTART':       { y: 3,  color: '#a855f7', label: 'RESTART' },
-            'LOOP_PLAYER':   { y: 2,  color: '#06b6d4', label: 'LOOP PLAYER' },
-            'LOOP_SERVER':   { y: 1,  color: '#84cc16', label: 'LOOP SERVER' }
+            'VARIANT':     { y: 8, color: '#16a34a', label: 'VARIANT' },
+            'DISPLAY_RES': { y: 7, color: '#0ea5e9', label: 'DISPLAY RES' },
+            'PLAYERSTATE': { y: 6, color: '#6b7280', label: 'PLAYERSTATE' },
+            'BUFFERING':   { y: 5, color: '#f59e0b', label: 'BUFFERING' },
+            'PLAYBACK':    { y: 4, color: '#16a34a', label: 'PLAYBACK' },
+            'IMPAIRMENT':  { y: 3, color: '#000000', label: 'IMPAIRMENT' },
+            'LOOP_PLAYER': { y: 2, color: '#06b6d4', label: 'LOOP PLAYER' },
+            'LOOP_SERVER': { y: 1, color: '#84cc16', label: 'LOOP SERVER' }
+        };
+        const EVENT_SUBTYPE_LANE = {
+            'PLAYING': 'PLAYBACK', 'FIRST_FRAME': 'PLAYBACK', 'START_TIME': 'PLAYBACK',
+            'RESTART': 'PLAYBACK', 'TIMEJUMP': 'PLAYBACK',
+            'SHIFT_UP': 'PLAYBACK', 'SHIFT_DOWN': 'PLAYBACK',
+            'STALL': 'IMPAIRMENT', 'FROZEN': 'IMPAIRMENT',
+            'SEGMENT_STALL': 'IMPAIRMENT', 'ERROR': 'IMPAIRMENT',
+            'BUFFERING': 'BUFFERING',
+            'LOOP_PLAYER': 'LOOP_PLAYER', 'LOOP_SERVER': 'LOOP_SERVER'
+        };
+        const EVENT_SUBTYPE_COLOR = {
+            'PLAYING':       '#16a34a',
+            'FIRST_FRAME':   '#14b8a6',
+            'START_TIME':    '#15803d',
+            'RESTART':       '#a855f7',
+            'TIMEJUMP':      '#d97706',
+            'SHIFT_UP':      '#3b82f6',
+            'SHIFT_DOWN':    '#ef4444',
+            'STALL':         '#000000',
+            'FROZEN':        '#4c1d95',
+            'SEGMENT_STALL': '#c2410c',
+            'ERROR':         '#e11d48',
+            'BUFFERING':     '#f59e0b'
+        };
+        const EVENT_SUBTYPE_LABEL = {
+            'PLAYING': 'PLAYING', 'FIRST_FRAME': 'FIRST FRAME', 'START_TIME': 'START TIME',
+            'RESTART': 'RESTART', 'TIMEJUMP': 'TIMEJUMP',
+            'SHIFT_UP': 'SHIFT UP', 'SHIFT_DOWN': 'SHIFT DOWN',
+            'STALL': 'STALL', 'FROZEN': 'FROZEN',
+            'SEGMENT_STALL': 'SEGMENT STALL', 'ERROR': 'ERROR',
+            'BUFFERING': 'BUFFERING'
         };
         // Per-state colour for the PLAYERSTATE lane. Keys are lowercase
         // because clients emit a mix of casings ("Playing" on Apple,
@@ -4912,13 +4934,21 @@
                 .map((e) => ({ x: (e.ts - windowStart) / 1000, type: e.type, state: e.state, mbps: e.mbps, resolution: e.resolution, ts: Number(e.ts) }))
                 .filter((e) => Number.isFinite(e.x) && e.x >= 0 && e.x <= 600);
 
-            const datasets = Object.entries(EVENT_LANES).map(([type, cfg]) => {
-                const points = chartEvents.filter((e) => e.type === type)
-                    .map((e) => ({ x: e.x, y: cfg.y, ts: e.ts, state: e.state, mbps: e.mbps, resolution: e.resolution }));
+            const datasets = Object.entries(EVENT_LANES).map(([laneKey, cfg]) => {
+                const points = chartEvents.filter((e) => {
+                    const lane = EVENT_SUBTYPE_LANE[e.type] || e.type;
+                    return lane === laneKey;
+                }).map((e) => ({
+                    x: e.x, y: cfg.y, ts: e.ts,
+                    type: e.type, state: e.state, mbps: e.mbps, resolution: e.resolution
+                }));
                 let colors = cfg.color;
-                if (type === 'PLAYERSTATE') colors = points.map(p => playerStateColor(p.state));
-                else if (type === 'VARIANT') colors = points.map(p => variantColor(p.mbps));
-                else if (type === 'DISPLAY_RES') colors = points.map(p => displayResColor(p.resolution));
+                if (laneKey === 'PLAYERSTATE') colors = points.map(p => playerStateColor(p.state));
+                else if (laneKey === 'VARIANT') colors = points.map(p => variantColor(p.mbps));
+                else if (laneKey === 'DISPLAY_RES') colors = points.map(p => displayResColor(p.resolution));
+                else if (laneKey === 'PLAYBACK' || laneKey === 'IMPAIRMENT') {
+                    colors = points.map(p => EVENT_SUBTYPE_COLOR[p.type] || cfg.color);
+                }
                 return {
                     label: cfg.label,
                     data: points,
@@ -4971,6 +5001,7 @@
                                         if (ctx && ctx.raw) {
                                             if (ctx.raw.state) extra = `: ${ctx.raw.state}`;
                                             else if (Number.isFinite(Number(ctx.raw.mbps))) extra = `: ${variantLabel(ctx.raw.mbps, ctx.raw.resolution)}`;
+                                            else if (ctx.raw.type && EVENT_SUBTYPE_LABEL[ctx.raw.type]) extra = `: ${EVENT_SUBTYPE_LABEL[ctx.raw.type]}`;
                                         }
                                         return `${ctx.dataset.label}${extra}${offset}`;
                                     }
@@ -4993,7 +5024,7 @@
                                 grid: { color: 'rgba(0,0,0,0.05)' }
                             },
                             y: {
-                                type: 'linear', min: 0.5, max: 17.5,
+                                type: 'linear', min: 0.5, max: 8.5,
                                 afterFit: (axis) => { axis.width = 90; },
                                 title: {
                                     display: true,
@@ -5173,17 +5204,20 @@
 
             for (const e of events) {
                 if (e.type === 'PLAYERSTATE' || e.type === 'VARIANT' || e.type === 'DISPLAY_RES') continue;
-                const cfg = EVENT_LANES[e.type];
+                const lane = EVENT_SUBTYPE_LANE[e.type] || e.type;
+                const cfg = EVENT_LANES[lane];
                 if (!cfg) continue;
+                const color = EVENT_SUBTYPE_COLOR[e.type] || cfg.color;
+                const subLabel = EVENT_SUBTYPE_LABEL[e.type] || e.type;
                 const ts = Number(e.ts);
                 items.push({
                     id: itemId++,
-                    group: e.type,
+                    group: lane,
                     content: '',
                     start: new Date(ts),
                     type: 'point',
-                    title: `${cfg.label}\n${formatHoverTime(ts)}`,
-                    style: `background-color: ${cfg.color}; border-color: ${cfg.color};`
+                    title: `${subLabel}\n${formatHoverTime(ts)}`,
+                    style: `background-color: ${color}; border-color: ${color};`
                 });
             }
 
