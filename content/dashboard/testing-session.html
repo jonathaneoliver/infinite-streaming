@@ -4838,7 +4838,8 @@
         // normalises before lookup so all map to the same colour.
         const PLAYER_STATE_COLOR = {
             'playing':   '#16a34a', // green
-            'buffering': '#f59e0b', // amber
+            'buffering': '#f59e0b', // amber — expected refill
+            'stalled':   '#dc2626', // red — unexpected mid-play rebuffer
             'paused':    '#9333ea', // purple
             'idle':      '#6b7280', // gray
             'ended':     '#1f2937', // near-black

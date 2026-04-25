@@ -1020,6 +1020,11 @@ final class PlaybackViewModel: ObservableObject {
             "player_metrics_last_event_at": timestamp,
             "player_metrics_event_time": timestamp,
             "player_metrics_state": diagnostics.state,
+            // AVPlayer.reasonForWaitingToPlay raw value when present —
+            // disambiguates buffering causes (toMinimizeStalls,
+            // evaluatingBufferingRate, noItemToPlay, interstitialEvent).
+            // Empty string when not waiting.
+            "player_metrics_waiting_reason": diagnostics.waitingReason,
             "player_metrics_position_s": roundSeconds(diagnostics.currentTime),
             "player_metrics_playback_rate": roundMetric(Double(diagnostics.playbackRate)),
             "player_metrics_buffer_depth_s": diagnostics.bufferDepth.map { roundSeconds($0) },

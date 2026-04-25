@@ -95,6 +95,12 @@ final class PlaybackDiagnostics: ObservableObject {
     private var lastBufferSampleAt: Date?
     private var lastPlayerSampleAt: Date?
     private var stallStartAt: Date?
+    /// Set when AVPlayerItemPlaybackStalled fires (an unexpected
+    /// mid-play rebuffer); cleared when timeControlStatus returns to
+    /// .playing. Used to pick "stalled" vs "buffering" for the
+    /// PLAYERSTATE lane — the latter being any other waiting state
+    /// (initial pre-roll, post-seek refill, etc.).
+    private var isStalled: Bool = false
     private var hasRenderedFirstFrame: Bool = false
     private var lastAdvancingTime: Double = 0
     private var lastAdvancingAt: Date?
@@ -297,6 +303,7 @@ final class PlaybackDiagnostics: ObservableObject {
         lastBufferSampleAt = nil
         lastPlayerSampleAt = nil
         stallStartAt = nil
+        isStalled = false
         hasRenderedFirstFrame = false
         lastObservedSegmentSequence = nil
         maxObservedSegmentSequence = nil
@@ -332,10 +339,19 @@ final class PlaybackDiagnostics: ObservableObject {
                 case .paused:
                     self.state = "paused"
                 case .waitingToPlayAtSpecifiedRate:
-                    self.state = "buffering"
-                    self.startStallIfNeeded()
+                    // Distinguish user-induced refill (initial pre-roll,
+                    // post-seek, post-play after a long pause) from an
+                    // unexpected mid-play rebuffer. Only the
+                    // AVPlayerItemPlaybackStalled notification (handled
+                    // below) signals the unexpected case; the
+                    // isStalled flag persists from there until we
+                    // return to .playing. Don't call
+                    // startStallIfNeeded() here — that would conflate
+                    // pre-roll with stalls.
+                    self.state = self.isStalled ? "stalled" : "buffering"
                 case .playing:
                     self.state = "playing"
+                    self.isStalled = false
                     self.endStallIfNeeded()
                 @unknown default: self.state = "unknown"
                 }
@@ -399,6 +415,11 @@ final class PlaybackDiagnostics: ObservableObject {
             .sink { [weak self] _ in
                 guard let self else { return }
                 print("[STALL] state=\(self.state) time=\(String(format: "%.2f", self.currentTime)) \(self.playbackSnapshot())")
+                // Mark the unexpected-rebuffer flag so the
+                // timeControlStatus sink can distinguish stalled vs
+                // pre-roll buffering on the next state read.
+                self.isStalled = true
+                if self.state == "buffering" { self.state = "stalled" }
                 self.startStallIfNeeded()
             }
             .store(in: &cancellables)
