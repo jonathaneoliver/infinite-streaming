@@ -5267,8 +5267,7 @@
                 timeline.$container = container;
                 applyStoredChartViewport(sessionId, timeline);
                 // After a user-driven range change: if not paused,
-                // re-snap right edge to "now" preserving zoom width
-                // (matches the Chart.js charts' live-mode behaviour).
+                // re-snap right edge to "now" preserving zoom width.
                 timeline.on('rangechanged', (props) => {
                     if (!props || !props.byUser) return;
                     syncChartViewportAcrossSession(sessionId, timeline);
@@ -5280,6 +5279,16 @@
                         new Date(nowMsLocal),
                         { animation: false }
                     );
+                });
+                // Click toggles pause (matches Chart.js
+                // installChartClickPauseHandler). Skip group-label
+                // clicks (collapse/expand) and Alt-clicks (zoom
+                // modifier).
+                timeline.on('click', (props) => {
+                    if (!props) return;
+                    if (props.event && props.event.altKey) return;
+                    if (props.what === 'group-label') return;
+                    toggleChartPause(sessionId);
                 });
                 // ResizeObserver redraw — see testing.html for rationale.
                 if (typeof ResizeObserver !== 'undefined') {

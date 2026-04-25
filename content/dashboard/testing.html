@@ -3108,6 +3108,18 @@ maybe a histogram of b
                         { animation: false }
                     );
                 });
+                // Click toggles pause (matches Chart.js
+                // installChartClickPauseHandler). Skip clicks on the
+                // group label / collapse arrow (those expand/collapse
+                // sections) and skip Alt-clicks (Alt is the zoom
+                // modifier). vis-timeline already distinguishes click
+                // from drag — `click` only fires on a real click.
+                timeline.on('click', (props) => {
+                    if (!props) return;
+                    if (props.event && props.event.altKey) return;
+                    if (props.what === 'group-label') return;
+                    toggleChartPause(sessionId);
+                });
                 // Container width is sometimes 0 on first paint (parent
                 // ScrollView not yet laid out, session card just inserted,
                 // etc). A single requestAnimationFrame isn't reliable —
