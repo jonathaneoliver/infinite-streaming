@@ -220,6 +220,22 @@ final class PlaybackMetrics {
         sendEvent("buffering_end", Collections.<String, Object>emptyMap());
     }
 
+    /**
+     * Called from Player.Listener.onPositionDiscontinuity — fires on
+     * HLS discontinuity boundaries, explicit seeks, auto-transitions
+     * between media items, etc. Equivalent of AVPlayerItemTimeJumped
+     * on iOS; emits a `timejump` metrics event with from/to/delta in
+     * seconds plus the discontinuity reason name.
+     */
+    void onTimeJump(long fromMs, long toMs, String reason) {
+        Map<String, Object> extra = new HashMap<>();
+        extra.put("player_metrics_timejump_from_s", roundSeconds(fromMs / 1000.0));
+        extra.put("player_metrics_timejump_to_s", roundSeconds(toMs / 1000.0));
+        extra.put("player_metrics_timejump_delta_s", roundSeconds((toMs - fromMs) / 1000.0));
+        extra.put("player_metrics_timejump_origin", reason == null ? "unknown" : reason);
+        sendEvent("timejump", extra);
+    }
+
     /** Called from AnalyticsListener.onLoadCompleted for video track. */
     void onVideoLoadCompleted() {
         lastVideoLoadCompletedAtMs = System.currentTimeMillis();

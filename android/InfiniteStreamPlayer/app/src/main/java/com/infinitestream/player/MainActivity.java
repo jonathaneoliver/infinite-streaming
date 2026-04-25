@@ -230,6 +230,32 @@ public class MainActivity extends AppCompatActivity {
                     metrics.onBufferingEnd();
                 }
             }
+
+            @Override
+            public void onPositionDiscontinuity(
+                    androidx.media3.common.Player.PositionInfo oldPosition,
+                    androidx.media3.common.Player.PositionInfo newPosition,
+                    int reason) {
+                // Equivalent of AVPlayerItemTimeJumped on iOS — fires
+                // on HLS discontinuity boundaries, explicit seeks,
+                // auto-transitions between media items, etc. Reason
+                // tag lets the dashboard tell them apart.
+                String reasonName;
+                switch (reason) {
+                    case androidx.media3.common.Player.DISCONTINUITY_REASON_AUTO_TRANSITION: reasonName = "auto_transition"; break;
+                    case androidx.media3.common.Player.DISCONTINUITY_REASON_SEEK:            reasonName = "seek"; break;
+                    case androidx.media3.common.Player.DISCONTINUITY_REASON_SEEK_ADJUSTMENT: reasonName = "seek_adjustment"; break;
+                    case androidx.media3.common.Player.DISCONTINUITY_REASON_SKIP:            reasonName = "skip"; break;
+                    case androidx.media3.common.Player.DISCONTINUITY_REASON_REMOVE:          reasonName = "remove"; break;
+                    case androidx.media3.common.Player.DISCONTINUITY_REASON_INTERNAL:        reasonName = "internal"; break;
+                    default:                                                                  reasonName = "unknown"; break;
+                }
+                metrics.onTimeJump(
+                    oldPosition != null ? oldPosition.positionMs : 0L,
+                    newPosition != null ? newPosition.positionMs : 0L,
+                    reasonName
+                );
+            }
         });
 
         player.addAnalyticsListener(new AnalyticsListener() {
