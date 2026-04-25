@@ -2783,6 +2783,15 @@
                 const valueEl = transportFrequencyInput.parentElement?.querySelector('.range-value');
                 if (valueEl) valueEl.textContent = transportFrequencyInput.value;
             }
+            syncRange('transfer_active_timeout_ms', session.transfer_active_timeout_ms, 0);
+            syncRange('transfer_idle_timeout_ms', session.transfer_idle_timeout_ms, 0);
+            const syncTransferCheckbox = (field, value) => {
+                const input = card.querySelector(`input[data-field="${field}"]`);
+                if (input) input.checked = !!value;
+            };
+            syncTransferCheckbox('transfer_timeout_applies_segments', session.transfer_timeout_applies_segments);
+            syncTransferCheckbox('transfer_timeout_applies_manifests', session.transfer_timeout_applies_manifests);
+            syncTransferCheckbox('transfer_timeout_applies_master', session.transfer_timeout_applies_master);
         }
 
         function syncServerFaultData(card, session) {
@@ -2796,6 +2805,12 @@
                 const dropPackets = Number(session.transport_fault_drop_packets || 0);
                 const rejectPackets = Number(session.transport_fault_reject_packets || 0);
                 countersEl.textContent = `Drop ${dropPackets} pkts · Reject ${rejectPackets} pkts`;
+            }
+            const transferCountersEl = card.querySelector('[data-field="transfer_timeout_counters"]');
+            if (transferCountersEl) {
+                const activeCount = Number(session.fault_count_transfer_active_timeout || 0);
+                const idleCount = Number(session.fault_count_transfer_idle_timeout || 0);
+                transferCountersEl.textContent = `Active ${activeCount} · Idle ${idleCount}`;
             }
         }
 
@@ -2998,7 +3013,9 @@
                 'master_manifest_consecutive_failures',
                 'master_manifest_failure_frequency',
                 'transport_consecutive_failures',
-                'transport_failure_frequency'
+                'transport_failure_frequency',
+                'transfer_active_timeout_ms',
+                'transfer_idle_timeout_ms'
             ].includes(field);
         }
 
@@ -3663,6 +3680,16 @@
                 }
                 if (event.target.dataset.field === 'content_allowed_variants' || event.target.dataset.field === 'content_strip_codecs') {
                     sendSessionPatch(card, ['content_allowed_variants', 'content_strip_codecs']);
+                    return;
+                }
+                if (event.target.dataset.field === 'transfer_timeout_applies_segments' ||
+                    event.target.dataset.field === 'transfer_timeout_applies_manifests' ||
+                    event.target.dataset.field === 'transfer_timeout_applies_master') {
+                    sendSessionPatch(card, [
+                        'transfer_timeout_applies_segments',
+                        'transfer_timeout_applies_manifests',
+                        'transfer_timeout_applies_master'
+                    ]);
                     return;
                 }
                 if (event.target.dataset.field && event.target.dataset.field.startsWith('shaping_')) {

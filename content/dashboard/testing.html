@@ -1386,6 +1386,15 @@ maybe a histogram of b
                 const valueEl = transportFrequencyInput.parentElement?.querySelector('.range-value');
                 if (valueEl) valueEl.textContent = transportFrequencyInput.value;
             }
+            syncRange('transfer_active_timeout_ms', session.transfer_active_timeout_ms, 0);
+            syncRange('transfer_idle_timeout_ms', session.transfer_idle_timeout_ms, 0);
+            const syncTransferCheckbox = (field, value) => {
+                const input = card.querySelector(`input[data-field="${field}"]`);
+                if (input) input.checked = !!value;
+            };
+            syncTransferCheckbox('transfer_timeout_applies_segments', session.transfer_timeout_applies_segments);
+            syncTransferCheckbox('transfer_timeout_applies_manifests', session.transfer_timeout_applies_manifests);
+            syncTransferCheckbox('transfer_timeout_applies_master', session.transfer_timeout_applies_master);
         }
 
         function syncServerFaultData(card, session) {
@@ -1399,6 +1408,12 @@ maybe a histogram of b
                 const dropPackets = Number(session.transport_fault_drop_packets || 0);
                 const rejectPackets = Number(session.transport_fault_reject_packets || 0);
                 countersEl.textContent = `Drop ${dropPackets} pkts · Reject ${rejectPackets} pkts`;
+            }
+            const transferCountersEl = card.querySelector('[data-field="transfer_timeout_counters"]');
+            if (transferCountersEl) {
+                const activeCount = Number(session.fault_count_transfer_active_timeout || 0);
+                const idleCount = Number(session.fault_count_transfer_idle_timeout || 0);
+                transferCountersEl.textContent = `Active ${activeCount} · Idle ${idleCount}`;
             }
         }
         function formatDate(value) {
@@ -3598,7 +3613,9 @@ maybe a histogram of b
                 'master_manifest_consecutive_failures',
                 'master_manifest_failure_frequency',
                 'transport_consecutive_failures',
-                'transport_failure_frequency'
+                'transport_failure_frequency',
+                'transfer_active_timeout_ms',
+                'transfer_idle_timeout_ms'
             ].includes(field);
         }
 
@@ -3981,6 +3998,16 @@ maybe a histogram of b
             }
             if (target.dataset.field === 'content_allowed_variants' || target.dataset.field === 'content_strip_codecs' || target.dataset.field === 'content_live_offset') {
                 sendSessionPatch(card, ['content_allowed_variants', 'content_strip_codecs', 'content_live_offset']);
+                return;
+            }
+            if (target.dataset.field === 'transfer_timeout_applies_segments' ||
+                target.dataset.field === 'transfer_timeout_applies_manifests' ||
+                target.dataset.field === 'transfer_timeout_applies_master') {
+                sendSessionPatch(card, [
+                    'transfer_timeout_applies_segments',
+                    'transfer_timeout_applies_manifests',
+                    'transfer_timeout_applies_master'
+                ]);
                 return;
             }
             if (target.dataset.field === 'shaping_step_enabled') {

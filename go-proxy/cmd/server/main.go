@@ -3477,6 +3477,64 @@ func transportModeFromConsecutiveUnits(units string) string {
 	return "failures_per_seconds"
 }
 
+// transferTimeoutsFor returns the active and idle transfer-timeout durations
+// configured for this session, gated by the per-request-kind apply flags.
+// Returns 0 for either value when disabled or when the kind isn't selected.
+func transferTimeoutsFor(session SessionData, isSegment, isManifest, isMasterManifest bool) (active, idle time.Duration) {
+	var applies bool
+	switch {
+	case isMasterManifest:
+		applies = getBool(session, "transfer_timeout_applies_master")
+	case isManifest:
+		applies = getBool(session, "transfer_timeout_applies_manifests")
+	case isSegment:
+		applies = getBool(session, "transfer_timeout_applies_segments")
+	}
+	if !applies {
+		return 0, 0
+	}
+	if v := getInt(session, "transfer_active_timeout_ms"); v > 0 {
+		active = time.Duration(v) * time.Millisecond
+	}
+	if v := getInt(session, "transfer_idle_timeout_ms"); v > 0 {
+		idle = time.Duration(v) * time.Millisecond
+	}
+	return
+}
+
+// idleReader wraps an upstream response body; if no bytes are read for the
+// configured idle timeout, it cancels the request context (which closes the
+// connection mid-transfer) and records that the idle timer fired.
+type idleReader struct {
+	r        io.ReadCloser
+	cancel   context.CancelFunc
+	timeout  time.Duration
+	timer    *time.Timer
+	timedOut atomic.Bool
+}
+
+func newIdleReader(r io.ReadCloser, timeout time.Duration, cancel context.CancelFunc) *idleReader {
+	ir := &idleReader{r: r, cancel: cancel, timeout: timeout}
+	ir.timer = time.AfterFunc(timeout, func() {
+		ir.timedOut.Store(true)
+		cancel()
+	})
+	return ir
+}
+
+func (ir *idleReader) Read(p []byte) (int, error) {
+	n, err := ir.r.Read(p)
+	if n > 0 {
+		ir.timer.Reset(ir.timeout)
+	}
+	return n, err
+}
+
+func (ir *idleReader) Close() error {
+	ir.timer.Stop()
+	return ir.r.Close()
+}
+
 func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 	filename := strings.TrimPrefix(r.URL.Path, "/")
 	escapedPath := strings.TrimPrefix(r.URL.EscapedPath(), "/")
@@ -3638,6 +3696,13 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 			"fault_count_request_body_hang":            0,
 			"fault_count_request_body_reset":           0,
 			"fault_count_request_body_delayed":         0,
+			"transfer_active_timeout_ms":               0,
+			"transfer_idle_timeout_ms":                 0,
+			"transfer_timeout_applies_segments":        true,
+			"transfer_timeout_applies_manifests":       false,
+			"transfer_timeout_applies_master":          false,
+			"fault_count_transfer_active_timeout":      0,
+			"fault_count_transfer_idle_timeout":        0,
 			"x_forwarded_port":                         assignedInternalPort,
 			"x_forwarded_port_external":                assignedExternalPort,
 			"loop_count_server":                        0,
@@ -3943,7 +4008,19 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	proxyReq, err := http.NewRequestWithContext(r.Context(), http.MethodGet, upstreamURL, nil)
+	activeTimeout, idleTimeout := transferTimeoutsFor(sessionData, isSegment, isManifest, isMasterManifest)
+	proxyCtx := r.Context()
+	var proxyCancel context.CancelFunc
+	if activeTimeout > 0 {
+		proxyCtx, proxyCancel = context.WithTimeout(proxyCtx, activeTimeout)
+	} else if idleTimeout > 0 {
+		proxyCtx, proxyCancel = context.WithCancel(proxyCtx)
+	} else {
+		proxyCancel = func() {}
+	}
+	defer proxyCancel()
+
+	proxyReq, err := http.NewRequestWithContext(proxyCtx, http.MethodGet, upstreamURL, nil)
 	if err != nil {
 		w.WriteHeader(http.StatusBadGateway)
 		// Log network entry for error
@@ -3958,12 +4035,16 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 	if ifRange := r.Header.Get("If-Range"); ifRange != "" {
 		proxyReq.Header.Set("If-Range", ifRange)
 	}
-	resp, netEntry, err := a.doRequestWithTracing(r.Context(), proxyReq)
+	resp, netEntry, err := a.doRequestWithTracing(proxyCtx, proxyReq)
 	if err != nil {
 		// Set status before writing header
 		if errors.Is(err, context.DeadlineExceeded) {
 			netEntry.Status = http.StatusGatewayTimeout
 			w.WriteHeader(http.StatusGatewayTimeout)
+			if activeTimeout > 0 {
+				bumpFaultCounter(sessionData, "transfer_active_timeout")
+				logFaultEvent(sessionData, externalPort, "transfer_active_timeout", requestKind, "transfer_active_timeout_pre_headers")
+			}
 		} else {
 			netEntry.Status = http.StatusBadGateway
 			w.WriteHeader(http.StatusBadGateway)
@@ -3976,6 +4057,11 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer resp.Body.Close()
+	var idleBody *idleReader
+	if idleTimeout > 0 {
+		idleBody = newIdleReader(resp.Body, idleTimeout, proxyCancel)
+		resp.Body = idleBody
+	}
 	if resp.StatusCode >= 400 {
 		log.Printf(
 			"PROXY upstream_status status=%d url=%s filename=%s request_kind=%s session_id=%s player_id=%s external_port=%s",
@@ -4008,6 +4094,13 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 		bodyBytes, err := io.ReadAll(resp.Body)
 		if err != nil {
 			log.Printf("ERROR: Failed to read master playlist body: %v", err)
+			if idleBody != nil && idleBody.timedOut.Load() {
+				bumpFaultCounter(sessionData, "transfer_idle_timeout")
+				logFaultEvent(sessionData, externalPort, "transfer_idle_timeout", requestKind, "transfer_idle_timeout_mid_body")
+			} else if errors.Is(err, context.DeadlineExceeded) || errors.Is(proxyCtx.Err(), context.DeadlineExceeded) {
+				bumpFaultCounter(sessionData, "transfer_active_timeout")
+				logFaultEvent(sessionData, externalPort, "transfer_active_timeout", requestKind, "transfer_active_timeout_mid_body")
+			}
 			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
@@ -4052,6 +4145,13 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 			}
 			log.Printf("[GO-PROXY][ABANDONED] client disconnected mid-transfer url=%s bytes_sent=%d content_length=%s request_kind=%s session_id=%s external_port=%s err=%v",
 				upstreamURL, bytesOut, resp.Header.Get("Content-Length"), requestKind, getString(sessionData, "session_id"), externalPort, writeErr)
+			if idleBody != nil && idleBody.timedOut.Load() {
+				bumpFaultCounter(sessionData, "transfer_idle_timeout")
+				logFaultEvent(sessionData, externalPort, "transfer_idle_timeout", requestKind, "transfer_idle_timeout_mid_body")
+			} else if errors.Is(copyErr, context.DeadlineExceeded) || errors.Is(proxyCtx.Err(), context.DeadlineExceeded) {
+				bumpFaultCounter(sessionData, "transfer_active_timeout")
+				logFaultEvent(sessionData, externalPort, "transfer_active_timeout", requestKind, "transfer_active_timeout_mid_body")
+			}
 		}
 		if isManifest || isMasterManifest {
 			log.Printf("[GO-PROXY][MANIFEST] url=%s bytes_sent=%d upstream_content_length=%s status=%d session_id=%s external_port=%s",
