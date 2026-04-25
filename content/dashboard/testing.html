@@ -621,21 +621,28 @@ maybe a histogram of b
             border-right: none !important;
         }
         /* Top-level section headers (PLAYER / SERVER) sit at the
-         * leftmost edge — no indent — and stay compact since they
-         * have no items themselves; they're just visual dividers. */
+         * leftmost edge — no indent — and are compacted to a single
+         * label-height row since they have no items themselves. */
         .events-timeline-wrap .vis-label.vis-group-level-0 {
             padding-left: 4px !important;
-            height: 24px !important;
-            min-height: 24px !important;
-            max-height: 24px !important;
+            height: 18px !important;
+            min-height: 18px !important;
+            max-height: 18px !important;
+            line-height: 18px !important;
         }
-        .events-timeline-wrap .vis-foreground .vis-group.vis-group-level-0 {
-            height: 24px !important;
-            min-height: 24px !important;
-            max-height: 24px !important;
-        }
+        .events-timeline-wrap .vis-foreground .vis-group.vis-group-level-0,
         .events-timeline-wrap .vis-background .vis-group.vis-group-level-0 {
-            height: 24px !important;
+            height: 18px !important;
+            min-height: 18px !important;
+            max-height: 18px !important;
+        }
+        /* Slim down the time-axis bar — vis-timeline's default leaves
+         * a lot of vertical padding above and below the tick text. */
+        .events-timeline-wrap .vis-time-axis {
+            font-size: 10px;
+        }
+        .events-timeline-wrap .vis-time-axis .vis-text {
+            padding: 0 4px !important;
         }
         /* vis-timeline applies the per-level indent via inline style
          * on the inner label cell — override that too. */
@@ -2969,17 +2976,15 @@ maybe a histogram of b
             const liveStart = new Date(nowMs - liveWindowMs);
             const liveEnd = new Date(nowMs);
 
-            // Compute explicit height from the actual lane count.
-            // vis-timeline's height:'auto' is unreliable when the
-            // container has no intrinsic height (its internal panels
-            // are absolutely positioned, so the wrap can't measure
-            // them). Each group row is ~30px; section parent rows
-            // add their own ~30px. Add headroom for the time axis.
-            const ROW_HEIGHT_PX = 30;
-            const AXIS_AND_PADDING_PX = 60;
-            const computedHeight = groups.length * ROW_HEIGHT_PX + AXIS_AND_PADDING_PX;
-            const heightPx = `${computedHeight}px`;
-            container.style.height = heightPx;
+            // Let vis-timeline size itself to its actual content
+            // (rows + items + axis). Earlier we hand-computed the
+            // height to work around an empty-container collapse, but
+            // the resulting estimate over-allocated — vis-timeline's
+            // real row height is smaller than our 30px bucket and
+            // the unused vertical space showed as dead space at the
+            // top of the chart area. Wrap has min-height to prevent
+            // the initial render-before-data collapse.
+            container.style.removeProperty('height');
 
             // If the session card was rebuilt (innerHTML rewrite, etc.)
             // the cached timeline points at an orphaned div that's no
@@ -3004,7 +3009,7 @@ maybe a histogram of b
                         moveable: true,
                         margin: { item: 4 },
                         orientation: { axis: 'top' },
-                        height: heightPx,
+                        height: 'auto',
                         start: liveStart,
                         end: liveEnd,
                         // Match the Chart.js bitrate chart's HH:MM:SS
@@ -3102,13 +3107,10 @@ maybe a histogram of b
                 } else {
                     requestAnimationFrame(() => timeline.redraw());
                 }
-                console.log('[events-timeline] created for session', sessionId, 'with', items.length, 'items,', groups.length, 'groups, height', heightPx);
+                console.log('[events-timeline] created for session', sessionId, 'with', items.length, 'items,', groups.length, 'groups');
             } else {
                 timeline.setItems(new vis.DataSet(items));
                 timeline.setGroups(new vis.DataSet(groups));
-                // Re-apply height each render — group count changes as
-                // variant lanes appear/disappear.
-                timeline.setOptions({ height: heightPx });
                 timeline.$windowStartMs = liveStart.getTime();
                 // Live-edge tracking: unless the user has explicitly
                 // paused the chart, slide the visible window so its

@@ -629,20 +629,25 @@
             border-right: none !important;
         }
         /* Top-level section headers (PLAYER / SERVER) — flush left
-         * and compact since they're just dividers. */
+         * and compacted to a single label-height row. */
         .events-timeline-wrap .vis-label.vis-group-level-0 {
             padding-left: 4px !important;
-            height: 24px !important;
-            min-height: 24px !important;
-            max-height: 24px !important;
+            height: 18px !important;
+            min-height: 18px !important;
+            max-height: 18px !important;
+            line-height: 18px !important;
         }
-        .events-timeline-wrap .vis-foreground .vis-group.vis-group-level-0 {
-            height: 24px !important;
-            min-height: 24px !important;
-            max-height: 24px !important;
-        }
+        .events-timeline-wrap .vis-foreground .vis-group.vis-group-level-0,
         .events-timeline-wrap .vis-background .vis-group.vis-group-level-0 {
-            height: 24px !important;
+            height: 18px !important;
+            min-height: 18px !important;
+            max-height: 18px !important;
+        }
+        .events-timeline-wrap .vis-time-axis {
+            font-size: 10px;
+        }
+        .events-timeline-wrap .vis-time-axis .vis-text {
+            padding: 0 4px !important;
         }
         .events-timeline-wrap .vis-labelset .vis-label .vis-inner {
             padding-left: 0 !important;
@@ -5182,11 +5187,8 @@
             // Compute explicit height from the actual lane count;
             // vis-timeline's height:'auto' collapses to 0 when the
             // container has no intrinsic height.
-            const ROW_HEIGHT_PX = 30;
-            const AXIS_AND_PADDING_PX = 60;
-            const computedHeight = groups.length * ROW_HEIGHT_PX + AXIS_AND_PADDING_PX;
-            const heightPx = `${computedHeight}px`;
-            container.style.height = heightPx;
+            // Let vis-timeline compute its own height from rows + items.
+            container.style.removeProperty('height');
 
             // If the session card was rebuilt, the cached timeline points
             // at an orphaned div; recreate it against the new container.
@@ -5208,7 +5210,7 @@
                         moveable: true,
                         margin: { item: 4 },
                         orientation: { axis: 'top' },
-                        height: heightPx,
+                        height: 'auto',
                         start: liveStart,
                         end: liveEnd,
                         // Match the Chart.js charts' HH:MM:SS 24-hour
@@ -5282,11 +5284,10 @@
                 } else {
                     requestAnimationFrame(() => timeline.redraw());
                 }
-                console.log('[events-timeline] created for session', sessionId, 'with', items.length, 'items,', groups.length, 'groups, height', heightPx);
+                console.log('[events-timeline] created for session', sessionId, 'with', items.length, 'items,', groups.length, 'groups');
             } else {
                 timeline.setItems(new vis.DataSet(items));
                 timeline.setGroups(new vis.DataSet(groups));
-                timeline.setOptions({ height: heightPx });
                 timeline.$windowStartMs = liveStart.getTime();
                 // Live-edge tracking: unless paused, slide so right
                 // edge stays at "now"; preserve user's zoom width.
