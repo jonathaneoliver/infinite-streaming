@@ -583,26 +583,21 @@ maybe a histogram of b
             font-size: 10px;
             font-family: 'Courier New', monospace;
         }
-        /* Float vis-timeline's left label panel on top of the chart's
-         * leftmost column instead of reserving space for it. The chart
-         * area uses the full container width — its time axis lines up
-         * vertically with the Chart.js bandwidth/buffer/fps charts —
-         * and the lane labels overlay on top of the items. */
+        /* Lock vis-timeline's left label panel to a fixed 90px width
+         * so it matches the Chart.js charts' Y-axis width (also 90px
+         * via afterFit). Time axis on this chart now lines up
+         * vertically with the bandwidth/buffer/fps charts below.
+         * Long labels truncate with ellipsis — the legend strip above
+         * (rendered when needed) gives the full names. */
+        .events-timeline-wrap .vis-labelset,
         .events-timeline-wrap .vis-left.vis-panel {
-            position: absolute !important;
-            left: 0 !important;
-            top: 0 !important;
-            z-index: 5;
-            background: rgba(255, 255, 255, 0.85);
-            border-right: 1px solid rgba(0, 0, 0, 0.05);
-            pointer-events: none;
-        }
-        .events-timeline-wrap .vis-center.vis-panel {
-            left: 0 !important;
-            border-left: none !important;
+            width: 90px !important;
+            max-width: 90px !important;
         }
         .events-timeline-wrap .vis-label {
-            background: transparent !important;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
         }
         .events-timeline-legend {
             display: none;
