@@ -772,6 +772,15 @@ maybe a histogram of b
         const videoFpsCharts = new Map();
         const eventsCharts = new Map();
         const eventsTimelines = new Map();
+        // Per-session collapse state for the PLAYER / SERVER section
+        // headers. setGroups replaces the entire groups dataset on
+        // every render, which would otherwise reset the user's
+        // collapse choice to default (expanded) every tick. We read
+        // the live state from the timeline before each rebuild and
+        // mirror it here so the choice survives across renders AND
+        // across full timeline re-creations (e.g. orphan-detection
+        // rebuilds when the session card is regenerated).
+        const eventsTimelineSectionCollapsed = new Map();
         const chartViewportBySession = new Map();
         const chartPausedBySession = new Map();
         const bandwidthVisibility = new Map();
@@ -2842,6 +2851,22 @@ maybe a histogram of b
             const playerLanes = Object.keys(EVENT_LANES).filter((k) => !SERVER_LANES.has(k) && k !== 'VARIANT');
             const serverLanes = Object.keys(EVENT_LANES).filter((k) => SERVER_LANES.has(k));
 
+            // Sync our collapse-state mirror from the live timeline
+            // BEFORE we rebuild the groups array — captures any user
+            // toggle that happened since the last render.
+            const existingTimeline = eventsTimelines.get(sessionId);
+            if (existingTimeline && existingTimeline.groupsData) {
+                const live = eventsTimelineSectionCollapsed.get(sessionId) || {};
+                const p = existingTimeline.groupsData.get('PLAYER_SECTION');
+                const s = existingTimeline.groupsData.get('SERVER_SECTION');
+                if (p) live.player = (p.showNested === false);
+                if (s) live.server = (s.showNested === false);
+                eventsTimelineSectionCollapsed.set(sessionId, live);
+            }
+            const sectionState = eventsTimelineSectionCollapsed.get(sessionId) || {};
+            const playerShowNested = !sectionState.player; // default true (expanded)
+            const serverShowNested = !sectionState.server;
+
             // VARIANT subgroups: one lane per observed (resolution,
             // bitrate) tuple. Multi-bitrate-per-resolution variants are
             // a real ABR ladder pattern (e.g. H.264 + HEVC at 1080p),
@@ -2868,10 +2893,10 @@ maybe a histogram of b
             const variantGroupIds = variantGroups.map((g) => g.id);
 
             const groups = [
-                { id: 'PLAYER_SECTION', content: 'PLAYER', nestedGroups: [...variantGroupIds, ...playerLanes] },
+                { id: 'PLAYER_SECTION', content: 'PLAYER', nestedGroups: [...variantGroupIds, ...playerLanes], showNested: playerShowNested },
                 ...variantGroups,
                 ...playerLanes.map((type) => ({ id: type, content: EVENT_LANES[type].label })),
-                { id: 'SERVER_SECTION', content: 'SERVER', nestedGroups: serverLanes },
+                { id: 'SERVER_SECTION', content: 'SERVER', nestedGroups: serverLanes, showNested: serverShowNested },
                 ...serverLanes.map((type) => ({ id: type, content: EVENT_LANES[type].label }))
             ];
 
