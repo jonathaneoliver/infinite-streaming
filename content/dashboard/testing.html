@@ -2303,13 +2303,17 @@ maybe a histogram of b
             }
 
             // VARIANT lane: sample player_metrics_video_bitrate_mbps on
-            // each refresh and emit a marker on every change. Quantise
-            // to one decimal so micro-fluctuations don't flood the lane.
+            // each refresh and emit a marker on every change. Dedup by
+            // BITRATE ONLY (rounded to 0.1 Mbps) — resolution can briefly
+            // be empty/null between samples on some clients, which would
+            // create spurious "new variant" entries with the same bitrate
+            // but different resolution strings. Resolution travels along
+            // for labelling only.
             const variantMbpsRaw = Number(session.player_metrics_video_bitrate_mbps);
             if (Number.isFinite(variantMbpsRaw) && variantMbpsRaw > 0) {
                 const variantMbps = Math.round(variantMbpsRaw * 10) / 10;
                 const variantRes = String(session.player_metrics_video_resolution || '').trim();
-                const variantKey = `${variantMbps}|${variantRes}`;
+                const variantKey = `${variantMbps}`;
                 const prevVariant = lastRecordedVariantBySession.get(String(key));
                 if (prevVariant !== variantKey) {
                     const eventSeries = bandwidthEventHistory.get(key) || [];
@@ -2319,6 +2323,7 @@ maybe a histogram of b
                     lastRecordedVariantBySession.set(String(key), variantKey);
                 }
             }
+
 
             const series = bandwidthHistory.get(key) || [];
             const lastLimit = series.length ? Number(series[series.length - 1].target) : NaN;
@@ -2655,16 +2660,24 @@ maybe a histogram of b
             const playerLanes = Object.keys(EVENT_LANES).filter((k) => !SERVER_LANES.has(k) && k !== 'VARIANT');
             const serverLanes = Object.keys(EVENT_LANES).filter((k) => SERVER_LANES.has(k));
 
-            // VARIANT subgroups: one lane per observed variant key in the
-            // current window, ordered by bitrate DESCENDING — highest at
-            // the top, lowest at the bottom — so the visual ladder
-            // matches how an ABR ladder is normally drawn.
+            // VARIANT subgroups: one lane per observed bitrate in the
+            // current window, ordered DESCENDING — highest at the top,
+            // lowest at the bottom — so the visual ladder matches how
+            // an ABR ladder is normally drawn. Lane key is bitrate
+            // alone; we keep the latest non-empty resolution for the
+            // label so a brief empty-resolution sample doesn't spawn
+            // a phantom lane.
             const variantEvents = events.filter((e) => e.type === 'VARIANT');
-            const seenVariants = new Map(); // key -> {mbps, resolution}
+            const seenVariants = new Map(); // key (mbps) -> {mbps, resolution}
             for (const v of variantEvents) {
                 const m = Number(v.mbps);
-                const k = `${m}|${v.resolution || ''}`;
-                if (!seenVariants.has(k)) seenVariants.set(k, { mbps: m, resolution: v.resolution || '' });
+                const k = `${m}`;
+                const existing = seenVariants.get(k);
+                if (!existing) {
+                    seenVariants.set(k, { mbps: m, resolution: v.resolution || '' });
+                } else if (v.resolution && !existing.resolution) {
+                    existing.resolution = v.resolution;
+                }
             }
             const variantOrder = Array.from(seenVariants.entries())
                 .sort((a, b) => Number(b[1].mbps) - Number(a[1].mbps));
@@ -2712,17 +2725,17 @@ maybe a histogram of b
                 (e) => e.state || 'Unknown',
                 (e) => playerStateColor(e.state));
 
-            // VARIANT: each variant gets its own swim lane. Render each
-            // active span in the lane that matches its variant key.
-            // With variants ordered highest-bitrate-at-top, an upshift
-            // visually walks UP the ladder and a downshift walks DOWN.
+            // VARIANT: each bitrate gets its own swim lane. Lane key
+            // matches seenVariants — bitrate-only, so the segment goes
+            // into the right row regardless of any flicker on the
+            // resolution string.
             const variantSeq = variantEvents.sort((a, b) => Number(a.ts) - Number(b.ts));
             for (let i = 0; i < variantSeq.length; i++) {
                 const v = variantSeq[i];
                 const start = Number(v.ts);
                 const end = i + 1 < variantSeq.length ? Number(variantSeq[i + 1].ts) : nowMs;
                 const m = Number(v.mbps);
-                const k = `${m}|${v.resolution || ''}`;
+                const k = `${m}`;
                 const color = variantColor(m);
                 items.push({
                     id: itemId++,
