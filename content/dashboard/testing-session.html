@@ -4860,9 +4860,9 @@
         }
         function variantLabel(mbps, resolution) {
             const m = Number(mbps);
-            const mbpsStr = Number.isFinite(m) && m > 0 ? `${m.toFixed(1)} Mbps` : '';
+            const mbpsStr = Number.isFinite(m) && m > 0 ? `${m.toFixed(1)}Mbps` : '';
             const res = String(resolution || '').trim();
-            if (res && mbpsStr) return `${res} · ${mbpsStr}`;
+            if (res && mbpsStr) return `${res}:${mbpsStr}`;
             return res || mbpsStr || '—';
         }
         function manifestResolutionForBitrate(session, mbps) {
