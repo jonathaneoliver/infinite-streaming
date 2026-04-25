@@ -1927,6 +1927,7 @@ maybe a histogram of b
             if (eventType === 'video_start_time') return 'START_TIME';
             if (eventType === 'rate_shift_up') return 'SHIFT_UP';
             if (eventType === 'rate_shift_down') return 'SHIFT_DOWN';
+            if (eventType === 'timejump') return 'TIMEJUMP';
             return null;
         }
 
@@ -2463,19 +2464,20 @@ maybe a histogram of b
         // Swim-lane events chart (STALL / RESTART / LOOP_PLAYER / LOOP_SERVER).
         // Shares x-axis with bitrate chart via syncChartViewportAcrossSession.
         const EVENT_LANES = {
-            'VARIANT':       { y: 16, color: '#16a34a', label: 'VARIANT' },
-            'DISPLAY_RES':   { y: 15, color: '#0ea5e9', label: 'DISPLAY RES' },
-            'PLAYERSTATE':   { y: 14, color: '#6b7280', label: 'PLAYERSTATE' },
-            'PLAYING':       { y: 13, color: '#16a34a', label: 'PLAYING' },
-            'FIRST_FRAME':   { y: 12, color: '#14b8a6', label: 'FIRST FRAME' },
-            'START_TIME':    { y: 11, color: '#15803d', label: 'START TIME' },
-            'BUFFERING':     { y: 10, color: '#f59e0b', label: 'BUFFERING' },
-            'STALL':         { y: 9,  color: '#000000', label: 'STALL' },
-            'FROZEN':        { y: 8,  color: '#4c1d95', label: 'FROZEN' },
-            'SEGMENT_STALL': { y: 7,  color: '#c2410c', label: 'SEGMENT STALL' },
-            'SHIFT_UP':      { y: 6,  color: '#3b82f6', label: 'SHIFT UP' },
-            'SHIFT_DOWN':    { y: 5,  color: '#ef4444', label: 'SHIFT DOWN' },
-            'ERROR':         { y: 4,  color: '#e11d48', label: 'ERROR' },
+            'VARIANT':       { y: 17, color: '#16a34a', label: 'VARIANT' },
+            'DISPLAY_RES':   { y: 16, color: '#0ea5e9', label: 'DISPLAY RES' },
+            'PLAYERSTATE':   { y: 15, color: '#6b7280', label: 'PLAYERSTATE' },
+            'PLAYING':       { y: 14, color: '#16a34a', label: 'PLAYING' },
+            'FIRST_FRAME':   { y: 13, color: '#14b8a6', label: 'FIRST FRAME' },
+            'START_TIME':    { y: 12, color: '#15803d', label: 'START TIME' },
+            'BUFFERING':     { y: 11, color: '#f59e0b', label: 'BUFFERING' },
+            'STALL':         { y: 10, color: '#000000', label: 'STALL' },
+            'FROZEN':        { y: 9,  color: '#4c1d95', label: 'FROZEN' },
+            'SEGMENT_STALL': { y: 8,  color: '#c2410c', label: 'SEGMENT STALL' },
+            'SHIFT_UP':      { y: 7,  color: '#3b82f6', label: 'SHIFT UP' },
+            'SHIFT_DOWN':    { y: 6,  color: '#ef4444', label: 'SHIFT DOWN' },
+            'ERROR':         { y: 5,  color: '#e11d48', label: 'ERROR' },
+            'TIMEJUMP':      { y: 4,  color: '#d97706', label: 'TIMEJUMP' },
             'RESTART':       { y: 3,  color: '#a855f7', label: 'RESTART' },
             'LOOP_PLAYER':   { y: 2,  color: '#06b6d4', label: 'LOOP PLAYER' },
             'LOOP_SERVER':   { y: 1,  color: '#84cc16', label: 'LOOP SERVER' }
@@ -2733,7 +2735,12 @@ maybe a histogram of b
                                 grid: { color: 'rgba(0,0,0,0.05)' }
                             },
                             y: {
-                                type: 'linear', min: 0.5, max: 16.5,
+                                type: 'linear', min: 0.5, max: 17.5,
+                                // Force a fixed Y-axis width so this chart's
+                                // X-axis lines up vertically with the bandwidth /
+                                // buffer / fps charts below (they all use the
+                                // same afterFit width).
+                                afterFit: (axis) => { axis.width = 90; },
                                 title: { display: true, text: 'Events', font: { family: 'Courier New, monospace', size: 11, weight: 'bold' }, color: '#4b5563' },
                                 ticks: {
                                     stepSize: 1,
@@ -3479,6 +3486,7 @@ maybe a histogram of b
                             y: {
                                 min: 0,
                                 max: maxY,
+                                afterFit: (axis) => { axis.width = 90; },
                                 grid: { color: '#e5e7eb' },
                                 ticks: {
                                     color: '#6b7280',
@@ -3618,6 +3626,7 @@ maybe a histogram of b
                             y: {
                                 min: 0,
                                 max: maxBufferDepth,
+                                afterFit: (axis) => { axis.width = 90; },
                                 grid: { color: '#e5e7eb' },
                                 ticks: {
                                     color: '#6b7280',
@@ -3917,6 +3926,7 @@ maybe a histogram of b
                             y: {
                                 min: 0,
                                 max: maxFps,
+                                afterFit: (axis) => { axis.width = 90; },
                                 grid: { color: '#e5e7eb' },
                                 ticks: {
                                     color: '#6b7280',

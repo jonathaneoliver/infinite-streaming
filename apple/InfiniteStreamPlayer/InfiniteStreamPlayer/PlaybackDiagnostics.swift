@@ -23,7 +23,23 @@ struct MetricSample: Identifiable {
     let value: Double
 }
 
+/// Discrete time-jump event published from PlaybackDiagnostics for the
+/// ViewModel to forward as a `timejump` metrics event. Fires on HLS
+/// discontinuity boundaries, live-edge catchup seeks, and explicit seeks.
+struct TimeJumpEvent {
+    let from: Double
+    let to: Double
+    let origin: String
+    let at: Date
+}
+
 final class PlaybackDiagnostics: ObservableObject {
+    /// Discrete time-jump events. Subscribers (ViewModel) receive each
+    /// jump exactly once; not a Published property because we don't want
+    /// the deduplication-on-equal-values that an @Published+sink would
+    /// give us if two jumps happen to land at the same `to`.
+    let timeJumpSubject = PassthroughSubject<TimeJumpEvent, Never>()
+
     @Published var state: String = "Idle"
     @Published var currentTime: Double = 0
     @Published var bufferedEnd: Double?
@@ -365,8 +381,16 @@ final class PlaybackDiagnostics: ObservableObject {
                 guard let self else { return }
                 let item = notification.object as? AVPlayerItem
                 let original = (notification.userInfo?[AVPlayerItem.timeJumpedOriginatingParticipantKey] as? String) ?? "unknown"
+                let fromTime = self.currentTime
                 let newTime = item?.currentTime().seconds ?? self.currentTime
                 print("[TIMEJUMP] origin=\(original) time=\(String(format: "%.2f", newTime)) state=\(self.state) \(self.playbackSnapshot())")
+                // Publish for ViewModel to forward as a metrics event.
+                self.timeJumpSubject.send(TimeJumpEvent(
+                    from: fromTime,
+                    to: newTime,
+                    origin: original,
+                    at: Date()
+                ))
             }
             .store(in: &cancellables)
 

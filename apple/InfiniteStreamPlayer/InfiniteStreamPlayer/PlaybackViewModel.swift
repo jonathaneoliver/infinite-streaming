@@ -802,6 +802,26 @@ final class PlaybackViewModel: ObservableObject {
                 self?.handleRenditionShift(indicated: indicated, average: average)
             }
             .store(in: &cancellables)
+
+        // Forward AVPlayerItemTimeJumped events as `timejump` metrics
+        // so the dashboard's TIMEJUMP swim lane lights up on HLS
+        // discontinuity boundaries, live-edge catchup seeks, and
+        // explicit seeks. Origin tag (timeJumpedOriginatingParticipant)
+        // lets downstream tell discontinuities apart from explicit seeks.
+        diagnostics.timeJumpSubject
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] event in
+                guard let self else { return }
+                Task {
+                    await self.sendPlayerMetrics(event: "timejump", extra: [
+                        "player_metrics_timejump_from_s": self.roundSeconds(event.from),
+                        "player_metrics_timejump_to_s": self.roundSeconds(event.to),
+                        "player_metrics_timejump_delta_s": self.roundSeconds(event.to - event.from),
+                        "player_metrics_timejump_origin": event.origin
+                    ])
+                }
+            }
+            .store(in: &cancellables)
     }
 
     private func startMetricsHeartbeat() {
