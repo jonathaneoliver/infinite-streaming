@@ -583,21 +583,34 @@ maybe a histogram of b
             font-size: 10px;
             font-family: 'Courier New', monospace;
         }
-        /* Lock vis-timeline's left label panel to a fixed 90px width
-         * so it matches the Chart.js charts' Y-axis width (also 90px
-         * via afterFit). Time axis on this chart now lines up
-         * vertically with the bandwidth/buffer/fps charts below.
-         * Long labels truncate with ellipsis — the legend strip above
-         * (rendered when needed) gives the full names. */
+        /* Keep the left label panel pinned to 90px (matches the
+         * Chart.js charts' Y-axis width via afterFit), so the chart
+         * area's left edge lines up vertically with the
+         * bandwidth/buffer/fps charts. Labels are allowed to overflow
+         * to the right INTO the chart area on top of the swim lane
+         * items — text-shadow halo keeps them readable. The
+         * nested-group indent (PLAYER / SERVER section nesting) is
+         * neutralised so child labels start at the leftmost column. */
         .events-timeline-wrap .vis-labelset,
         .events-timeline-wrap .vis-left.vis-panel {
             width: 90px !important;
             max-width: 90px !important;
+            overflow: visible !important;
         }
-        .events-timeline-wrap .vis-label {
-            overflow: hidden;
-            text-overflow: ellipsis;
-            white-space: nowrap;
+        .events-timeline-wrap .vis-label,
+        .events-timeline-wrap .vis-label.vis-nested-group {
+            overflow: visible !important;
+            white-space: nowrap !important;
+            padding-left: 4px !important;
+            z-index: 10;
+            position: relative;
+            color: #1f2937;
+            font-weight: 600;
+            text-shadow:
+                0 0 3px rgba(255, 255, 255, 0.95),
+                0 0 6px rgba(255, 255, 255, 0.85),
+                1px 0 0 rgba(255, 255, 255, 0.75),
+                -1px 0 0 rgba(255, 255, 255, 0.75);
         }
         .events-timeline-legend {
             display: none;
