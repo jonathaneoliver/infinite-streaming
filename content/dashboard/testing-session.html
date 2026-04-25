@@ -580,6 +580,21 @@
         .events-chart-wrap {
             margin-bottom: 0 !important;
         }
+        .events-timeline-wrap .events-timeline {
+            height: 220px;
+            background: #fff;
+            border: 1px solid #e5e7eb;
+            border-radius: 4px;
+        }
+        .events-timeline .vis-item.vis-box,
+        .events-timeline .vis-item.vis-point {
+            font-size: 10px;
+            font-family: 'Courier New', monospace;
+        }
+        .events-timeline .vis-label {
+            font-size: 10px;
+            font-family: 'Courier New', monospace;
+        }
 
         .abrchar-panel {
             margin-bottom: 12px;
@@ -935,6 +950,7 @@
         const bufferDepthCharts = new Map();
         const videoFpsCharts = new Map();
         const eventsCharts = new Map();
+        const eventsTimelines = new Map();
         const chartViewportBySession = new Map();
         const chartPausedBySession = new Map();
         const bandwidthVisibility = new Map();
@@ -4815,6 +4831,91 @@
             }
         }
 
+        // Real swim-lane chart using vis-timeline. Stacked above the
+        // Chart.js scatter approximation so we can compare. PLAYERSTATE
+        // becomes a continuous coloured ribbon (one segment per state
+        // span). Other lanes remain point markers since their underlying
+        // events are point-in-time. BUFFERING and STALL stay as points
+        // for now — pairing start/end into ranges needs the *_end events
+        // to flow through the dashboard event capture (currently only
+        // *_start variants reach parseBandwidthChartEventType).
+        function renderEventsTimelineChart(sessionId, windowStart, eventSeries) {
+            if (typeof vis === 'undefined' || !vis.Timeline) return;
+            const card = document.querySelector(`.session-card[data-session-id="${sessionId}"]`);
+            if (!card) return;
+            const container = card.querySelector('.events-timeline');
+            if (!container) return;
+
+            const windowEndMs = windowStart + 600 * 1000;
+            const nowMs = Date.now();
+            const events = (eventSeries || []).filter((e) => Number(e.ts) >= windowStart);
+
+            const groups = Object.entries(EVENT_LANES).map(([type, cfg]) => ({
+                id: type,
+                content: cfg.label
+            }));
+
+            const items = [];
+            let itemId = 0;
+
+            const stateEvents = events.filter((e) => e.type === 'PLAYERSTATE')
+                .sort((a, b) => Number(a.ts) - Number(b.ts));
+            for (let i = 0; i < stateEvents.length; i++) {
+                const start = Number(stateEvents[i].ts);
+                const end = i + 1 < stateEvents.length ? Number(stateEvents[i + 1].ts) : nowMs;
+                const state = stateEvents[i].state || 'Unknown';
+                const color = playerStateColor(state);
+                items.push({
+                    id: itemId++,
+                    group: 'PLAYERSTATE',
+                    content: state,
+                    start: new Date(start),
+                    end: new Date(end),
+                    type: 'range',
+                    style: `background-color: ${color}; border-color: ${color}; color: #fff;`
+                });
+            }
+
+            for (const e of events) {
+                if (e.type === 'PLAYERSTATE') continue;
+                const cfg = EVENT_LANES[e.type];
+                if (!cfg) continue;
+                items.push({
+                    id: itemId++,
+                    group: e.type,
+                    content: '',
+                    start: new Date(Number(e.ts)),
+                    type: 'point',
+                    style: `background-color: ${cfg.color}; border-color: ${cfg.color};`
+                });
+            }
+
+            let timeline = eventsTimelines.get(sessionId);
+            if (!timeline) {
+                timeline = new vis.Timeline(
+                    container,
+                    new vis.DataSet(items),
+                    new vis.DataSet(groups),
+                    {
+                        stack: false,
+                        showCurrentTime: false,
+                        zoomable: true,
+                        moveable: true,
+                        margin: { item: 4 },
+                        orientation: { axis: 'top' },
+                        min: new Date(windowStart - 60000),
+                        max: new Date(windowEndMs + 60000),
+                        start: new Date(windowStart),
+                        end: new Date(windowEndMs)
+                    }
+                );
+                eventsTimelines.set(sessionId, timeline);
+            } else {
+                timeline.setItems(new vis.DataSet(items));
+                timeline.setGroups(new vis.DataSet(groups));
+            }
+        }
+
         function renderBandwidthChart(sessionId) {
             if (isChartPaused(sessionId)) return;
             const series = bandwidthHistory.get(sessionId) || [];
@@ -4859,6 +4960,7 @@
                 .filter((event) => Number.isFinite(event.x) && event.x >= 0 && event.x <= 600);
             // Render the separate events swim-lane chart with the same window
             renderEventsChart(sessionId, windowStart, eventSeries);
+            renderEventsTimelineChart(sessionId, windowStart, eventSeries);
             const wireActive6sData = points.map(point => ({ x: point.x, y: point.wireActive6s }));
             const wireActive1sData = points.map(point => ({ x: point.x, y: point.wireActive1s }));
             const segmentWireData = points.map(point => ({ x: point.x, y: point.segmentWire }));
