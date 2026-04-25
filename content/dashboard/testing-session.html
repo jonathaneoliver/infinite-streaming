@@ -4791,13 +4791,11 @@
         // #f59e0b/#6366f1/#115e59 etc.). Hot pink, deep purple, cyan, and lime
         // don't collide with any of the throughput/rendition/limit colors.
         const EVENT_LANES = {
-            'VARIANT':     { y: 8, color: '#16a34a', label: 'VARIANT' },
-            'DISPLAY_RES': { y: 7, color: '#0ea5e9', label: 'DISPLAY RES' },
-            'PLAYERSTATE': { y: 6, color: '#6b7280', label: 'PLAYERSTATE' },
-            'BUFFERING':   { y: 5, color: '#f59e0b', label: 'BUFFERING' },
-            'PLAYBACK':    { y: 4, color: '#16a34a', label: 'PLAYBACK' },
-            'IMPAIRMENT':  { y: 3, color: '#000000', label: 'IMPAIRMENT' },
-            'LOOP_PLAYER': { y: 2, color: '#06b6d4', label: 'LOOP PLAYER' },
+            'VARIANT':     { y: 6, color: '#16a34a', label: 'VARIANT' },
+            'DISPLAY_RES': { y: 5, color: '#0ea5e9', label: 'DISPLAY RES' },
+            'PLAYERSTATE': { y: 4, color: '#6b7280', label: 'PLAYERSTATE' },
+            'PLAYBACK':    { y: 3, color: '#16a34a', label: 'PLAYBACK' },
+            'IMPAIRMENT':  { y: 2, color: '#000000', label: 'IMPAIRMENT' },
             'LOOP_SERVER': { y: 1, color: '#84cc16', label: 'LOOP SERVER' }
         };
         const EVENT_SUBTYPE_LANE = {
@@ -4806,8 +4804,9 @@
             'SHIFT_UP': 'PLAYBACK', 'SHIFT_DOWN': 'PLAYBACK',
             'STALL': 'IMPAIRMENT', 'FROZEN': 'IMPAIRMENT',
             'SEGMENT_STALL': 'IMPAIRMENT', 'ERROR': 'IMPAIRMENT',
-            'BUFFERING': 'BUFFERING',
-            'LOOP_PLAYER': 'LOOP_PLAYER', 'LOOP_SERVER': 'LOOP_SERVER'
+            // BUFFERING and LOOP_PLAYER intentionally omitted — see
+            // testing.html for rationale.
+            'LOOP_SERVER': 'LOOP_SERVER'
         };
         const EVENT_SUBTYPE_COLOR = {
             'PLAYING':       '#16a34a',
@@ -5028,7 +5027,7 @@
                                 grid: { color: 'rgba(0,0,0,0.05)' }
                             },
                             y: {
-                                type: 'linear', min: 0.5, max: 8.5,
+                                type: 'linear', min: 0.5, max: 6.5,
                                 afterFit: (axis) => { axis.width = 90; },
                                 title: {
                                     display: true,
