@@ -5259,9 +5259,8 @@
                         height: heightPx,
                         start: liveStart,
                         end: liveEnd,
-                        // Match the Chart.js charts' HH:MM:SS 24-hour
-                        // tick format; suppress the "Sat 25 April"
-                        // major-label strip.
+                        // Match Chart.js HH:MM:SS, fixed 60s spacing.
+                        timeAxis: { scale: 'second', step: 60 },
                         format: {
                             minorLabels: {
                                 millisecond: 'HH:mm:ss',

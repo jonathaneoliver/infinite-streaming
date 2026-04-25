@@ -3077,11 +3077,11 @@ maybe a histogram of b
                         start: liveStart,
                         end: liveEnd,
                         // Match the Chart.js bitrate chart's HH:MM:SS
-                        // 24-hour tick format (formatBitrateChartAbsoluteTick).
-                        // Suppress vis-timeline's "Sat 25 April" major-label
-                        // strip — the Chart.js charts don't show a date row,
-                        // and the timestamps below are unambiguous in the
-                        // live-edge window we render.
+                        // 24-hour tick format. Suppress the date strip.
+                        // timeAxis.scale='second' + step=60 forces a
+                        // tick every 60 seconds at consistent spacing,
+                        // matching the bitrate chart's tick density.
+                        timeAxis: { scale: 'second', step: 60 },
                         format: {
                             minorLabels: {
                                 millisecond: 'HH:mm:ss',
