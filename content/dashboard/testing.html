@@ -636,6 +636,31 @@ maybe a histogram of b
         .events-timeline-wrap .vis-time-axis .vis-text {
             padding: 0 4px !important;
         }
+        /* Hide vis-timeline's calendar-anchored tick labels — we draw
+         * our own right-edge-anchored ones via addCustomTime markers
+         * so the user sees timestamps like 13:34:41 (one minute back
+         * from "now") instead of 13:34:00 (clock-snapped). The grid
+         * lines stay so the chart still has visual structure. */
+        .events-timeline-wrap .vis-time-axis .vis-text.vis-minor {
+            visibility: hidden !important;
+        }
+        /* Style our right-edge-anchored tick markers like the default
+         * grid lines plus a small floating timestamp label. */
+        .events-timeline-wrap .vis-custom-time {
+            background-color: rgba(0, 0, 0, 0.15) !important;
+            width: 1px !important;
+            cursor: default !important;
+        }
+        .events-timeline-wrap .vis-custom-time .vis-custom-time-marker {
+            background: rgba(255, 255, 255, 0.92) !important;
+            border: 1px solid rgba(0, 0, 0, 0.08) !important;
+            border-radius: 2px !important;
+            color: #4b5563 !important;
+            font-family: 'Courier New', monospace !important;
+            font-size: 10px !important;
+            padding: 0 3px !important;
+            top: 2px !important;
+        }
         /* vis-timeline applies the per-level indent via inline style
          * on the inner label cell — override that too. */
         .events-timeline-wrap .vis-labelset .vis-label .vis-inner {
@@ -3220,6 +3245,51 @@ maybe a histogram of b
                         { animation: false }
                     );
                 }
+            }
+
+            // Right-edge-anchored tick LABELS — placed at the
+            // timestamps of the actual events in the visible window
+            // (deduped to 1-second resolution to keep the marker
+            // count manageable). vis-timeline's default minor labels
+            // are hidden via CSS; these custom-time markers replace
+            // them so the user sees real event timestamps like
+            // "13:34:41" instead of clock-snapped "13:34:00".
+            refreshEventTickMarkers(timeline, events, nowMs - liveWindowMs, nowMs);
+        }
+
+        // Add / update / remove vis-timeline custom-time markers so
+        // there's exactly one per unique event-second in the visible
+        // window. Each marker draws a vertical line and a floating
+        // HH:MM:SS label.
+        function refreshEventTickMarkers(timeline, events, windowStartMs, windowEndMs) {
+            if (!timeline.$tickIds) timeline.$tickIds = new Set();
+            const fmt = (ms) => {
+                const d = new Date(ms);
+                return `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}:${String(d.getSeconds()).padStart(2,'0')}`;
+            };
+            const desired = new Map(); // id -> ts
+            for (const e of (events || [])) {
+                const ts = Number(e.ts);
+                if (!Number.isFinite(ts) || ts < windowStartMs || ts > windowEndMs) continue;
+                const sec = Math.floor(ts / 1000) * 1000;
+                const id = `event-tick-${sec}`;
+                if (!desired.has(id)) desired.set(id, sec);
+            }
+            // Remove markers that no longer correspond to a visible event.
+            for (const id of Array.from(timeline.$tickIds)) {
+                if (!desired.has(id)) {
+                    try { timeline.removeCustomTime(id); } catch (e) {}
+                    timeline.$tickIds.delete(id);
+                }
+            }
+            // Add markers for new events.
+            for (const [id, t] of desired) {
+                if (timeline.$tickIds.has(id)) continue;
+                try {
+                    timeline.addCustomTime(new Date(t), id);
+                    timeline.$tickIds.add(id);
+                    try { timeline.setCustomTimeMarker(fmt(t), id, false); } catch (e) {}
+                } catch (e) {}
             }
         }
 

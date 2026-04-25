@@ -640,6 +640,26 @@
         .events-timeline-wrap .vis-time-axis .vis-text {
             padding: 0 4px !important;
         }
+        /* Hide vis-timeline's calendar-anchored tick labels — replaced
+         * by custom-time markers placed at real event timestamps. */
+        .events-timeline-wrap .vis-time-axis .vis-text.vis-minor {
+            visibility: hidden !important;
+        }
+        .events-timeline-wrap .vis-custom-time {
+            background-color: rgba(0, 0, 0, 0.15) !important;
+            width: 1px !important;
+            cursor: default !important;
+        }
+        .events-timeline-wrap .vis-custom-time .vis-custom-time-marker {
+            background: rgba(255, 255, 255, 0.92) !important;
+            border: 1px solid rgba(0, 0, 0, 0.08) !important;
+            border-radius: 2px !important;
+            color: #4b5563 !important;
+            font-family: 'Courier New', monospace !important;
+            font-size: 10px !important;
+            padding: 0 3px !important;
+            top: 2px !important;
+        }
         .events-timeline-wrap .vis-labelset .vis-label .vis-inner {
             padding-left: 0 !important;
         }
@@ -5363,6 +5383,40 @@
                         { animation: false }
                     );
                 }
+            }
+
+            // Tick markers placed at real event timestamps — see
+            // testing.html for full rationale.
+            refreshEventTickMarkers(timeline, events, nowMs - liveWindowMs, nowMs);
+        }
+
+        function refreshEventTickMarkers(timeline, events, windowStartMs, windowEndMs) {
+            if (!timeline.$tickIds) timeline.$tickIds = new Set();
+            const fmt = (ms) => {
+                const d = new Date(ms);
+                return `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}:${String(d.getSeconds()).padStart(2,'0')}`;
+            };
+            const desired = new Map();
+            for (const e of (events || [])) {
+                const ts = Number(e.ts);
+                if (!Number.isFinite(ts) || ts < windowStartMs || ts > windowEndMs) continue;
+                const sec = Math.floor(ts / 1000) * 1000;
+                const id = `event-tick-${sec}`;
+                if (!desired.has(id)) desired.set(id, sec);
+            }
+            for (const id of Array.from(timeline.$tickIds)) {
+                if (!desired.has(id)) {
+                    try { timeline.removeCustomTime(id); } catch (e) {}
+                    timeline.$tickIds.delete(id);
+                }
+            }
+            for (const [id, t] of desired) {
+                if (timeline.$tickIds.has(id)) continue;
+                try {
+                    timeline.addCustomTime(new Date(t), id);
+                    timeline.$tickIds.add(id);
+                    try { timeline.setCustomTimeMarker(fmt(t), id, false); } catch (e) {}
+                } catch (e) {}
             }
         }
 
