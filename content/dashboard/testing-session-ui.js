@@ -845,14 +845,14 @@
                                 </div>
                             </div>
                             <div class="range-row">
-                                <label>Active timeout (ms)</label>
-                                <input type="range" min="0" max="30000" step="100" data-field="transfer_active_timeout_ms" value="${Number.isFinite(Number(session.transfer_active_timeout_ms)) && Number(session.transfer_active_timeout_ms) >= 0 ? Number(session.transfer_active_timeout_ms) : 0}">
-                                <span class="range-value">${Number.isFinite(Number(session.transfer_active_timeout_ms)) && Number(session.transfer_active_timeout_ms) >= 0 ? Number(session.transfer_active_timeout_ms) : 0}</span>
+                                <label>Active timeout (s)</label>
+                                <input type="range" min="0" max="30" step="1" data-field="transfer_active_timeout_seconds" value="${Number.isFinite(Number(session.transfer_active_timeout_seconds)) && Number(session.transfer_active_timeout_seconds) >= 0 ? Number(session.transfer_active_timeout_seconds) : 0}">
+                                <span class="range-value">${Number.isFinite(Number(session.transfer_active_timeout_seconds)) && Number(session.transfer_active_timeout_seconds) >= 0 ? Number(session.transfer_active_timeout_seconds) : 0}</span>
                             </div>
                             <div class="range-row">
-                                <label>Idle timeout (ms)</label>
-                                <input type="range" min="0" max="30000" step="100" data-field="transfer_idle_timeout_ms" value="${Number.isFinite(Number(session.transfer_idle_timeout_ms)) && Number(session.transfer_idle_timeout_ms) >= 0 ? Number(session.transfer_idle_timeout_ms) : 0}">
-                                <span class="range-value">${Number.isFinite(Number(session.transfer_idle_timeout_ms)) && Number(session.transfer_idle_timeout_ms) >= 0 ? Number(session.transfer_idle_timeout_ms) : 0}</span>
+                                <label>Idle timeout (s)</label>
+                                <input type="range" min="0" max="30" step="1" data-field="transfer_idle_timeout_seconds" value="${Number.isFinite(Number(session.transfer_idle_timeout_seconds)) && Number(session.transfer_idle_timeout_seconds) >= 0 ? Number(session.transfer_idle_timeout_seconds) : 0}">
+                                <span class="range-value">${Number.isFinite(Number(session.transfer_idle_timeout_seconds)) && Number(session.transfer_idle_timeout_seconds) >= 0 ? Number(session.transfer_idle_timeout_seconds) : 0}</span>
                             </div>
                             <div class="session-item">
                                 <span class="label">Fault Counters</span>
@@ -1136,8 +1136,8 @@
             .map(input => input.value);
         
         // Transfer timeout settings
-        const transferActiveTimeoutMs = getRangeValue('transfer_active_timeout_ms');
-        const transferIdleTimeoutMs = getRangeValue('transfer_idle_timeout_ms');
+        const transferActiveTimeoutSeconds = getRangeValue('transfer_active_timeout_seconds');
+        const transferIdleTimeoutSeconds = getRangeValue('transfer_idle_timeout_seconds');
         const transferAppliesSegments = !!card.querySelector('input[data-field="transfer_timeout_applies_segments"]')?.checked;
         const transferAppliesManifests = !!card.querySelector('input[data-field="transfer_timeout_applies_manifests"]')?.checked;
         const transferAppliesMaster = !!card.querySelector('input[data-field="transfer_timeout_applies_master"]')?.checked;
@@ -1196,8 +1196,8 @@
             transport_fault_on_seconds: getRangeValue('transport_consecutive_failures'),
             transport_fault_off_seconds: getRangeValue('transport_failure_frequency'),
             // Transfer timeouts
-            transfer_active_timeout_ms: transferActiveTimeoutMs,
-            transfer_idle_timeout_ms: transferIdleTimeoutMs,
+            transfer_active_timeout_seconds: transferActiveTimeoutSeconds,
+            transfer_idle_timeout_seconds: transferIdleTimeoutSeconds,
             transfer_timeout_applies_segments: transferAppliesSegments,
             transfer_timeout_applies_manifests: transferAppliesManifests,
             transfer_timeout_applies_master: transferAppliesMaster,

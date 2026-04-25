@@ -3493,11 +3493,11 @@ func transferTimeoutsFor(session SessionData, isSegment, isManifest, isMasterMan
 	if !applies {
 		return 0, 0
 	}
-	if v := getInt(session, "transfer_active_timeout_ms"); v > 0 {
-		active = time.Duration(v) * time.Millisecond
+	if v := getInt(session, "transfer_active_timeout_seconds"); v > 0 {
+		active = time.Duration(v) * time.Second
 	}
-	if v := getInt(session, "transfer_idle_timeout_ms"); v > 0 {
-		idle = time.Duration(v) * time.Millisecond
+	if v := getInt(session, "transfer_idle_timeout_seconds"); v > 0 {
+		idle = time.Duration(v) * time.Second
 	}
 	return
 }
@@ -3696,8 +3696,8 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 			"fault_count_request_body_hang":            0,
 			"fault_count_request_body_reset":           0,
 			"fault_count_request_body_delayed":         0,
-			"transfer_active_timeout_ms":               0,
-			"transfer_idle_timeout_ms":                 0,
+			"transfer_active_timeout_seconds":          0,
+			"transfer_idle_timeout_seconds":            0,
 			"transfer_timeout_applies_segments":        true,
 			"transfer_timeout_applies_manifests":       false,
 			"transfer_timeout_applies_master":          false,

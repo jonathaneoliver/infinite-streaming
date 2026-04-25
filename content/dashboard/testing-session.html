@@ -2907,8 +2907,8 @@
                 const valueEl = transportFrequencyInput.parentElement?.querySelector('.range-value');
                 if (valueEl) valueEl.textContent = transportFrequencyInput.value;
             }
-            syncRange('transfer_active_timeout_ms', session.transfer_active_timeout_ms, 0);
-            syncRange('transfer_idle_timeout_ms', session.transfer_idle_timeout_ms, 0);
+            syncRange('transfer_active_timeout_seconds', session.transfer_active_timeout_seconds, 0);
+            syncRange('transfer_idle_timeout_seconds', session.transfer_idle_timeout_seconds, 0);
             const syncTransferCheckbox = (field, value) => {
                 const input = card.querySelector(`input[data-field="${field}"]`);
                 if (input) input.checked = !!value;
@@ -3138,8 +3138,8 @@
                 'master_manifest_failure_frequency',
                 'transport_consecutive_failures',
                 'transport_failure_frequency',
-                'transfer_active_timeout_ms',
-                'transfer_idle_timeout_ms'
+                'transfer_active_timeout_seconds',
+                'transfer_idle_timeout_seconds'
             ].includes(field);
         }
 
