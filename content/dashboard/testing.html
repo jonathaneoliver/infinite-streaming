@@ -743,12 +743,6 @@ maybe a histogram of b
         const videoFpsCharts = new Map();
         const eventsCharts = new Map();
         const eventsTimelines = new Map();
-        // Per-session "follow live" flag. True = right edge tracks "now"
-        // every tick. Flips to false the moment the user zooms or pans
-        // manually, so the zoom state isn't clobbered by the per-second
-        // setWindow call. Re-enabled when the user pans/zooms back to a
-        // window whose right edge is within 5s of "now".
-        const eventsTimelineFollowLive = new Map();
         const chartViewportBySession = new Map();
         const chartPausedBySession = new Map();
         const bandwidthVisibility = new Map();
@@ -2982,7 +2976,6 @@ maybe a histogram of b
                     }
                 );
                 eventsTimelines.set(sessionId, timeline);
-                eventsTimelineFollowLive.set(sessionId, true);
                 // Tag for the cross-chart viewport sync helpers, anchor
                 // the seconds-from-windowStart frame to liveStart so
                 // vis-timeline ranges convert consistently to the 0–600
@@ -2992,16 +2985,25 @@ maybe a histogram of b
                 timeline.$isVisTimeline = true;
                 timeline.$windowStartMs = liveStart.getTime();
                 timeline.$container = container;
-                // If another chart in this session already has a stored
-                // viewport, apply it so the timeline starts in sync.
                 applyStoredChartViewport(sessionId, timeline);
-                // Detect user pan/zoom: rangechanged with byUser=true.
+                // After a user-driven range change (zoom or pan): if
+                // the chart is NOT paused, re-snap the right edge to
+                // "now" while preserving whatever zoom width the user
+                // landed on. This matches the Chart.js charts'
+                // live-mode behaviour — they auto-track live edge
+                // unless the explicit pause button is engaged. When
+                // paused, accept the user's range as-is.
                 timeline.on('rangechanged', (props) => {
                     if (!props || !props.byUser) return;
-                    const rightEdge = props.end.getTime();
-                    const driftMs = Math.abs(Date.now() - rightEdge);
-                    eventsTimelineFollowLive.set(sessionId, driftMs < 5000);
                     syncChartViewportAcrossSession(sessionId, timeline);
+                    if (isChartPaused(sessionId)) return;
+                    const width = props.end.getTime() - props.start.getTime();
+                    const nowMsLocal = Date.now();
+                    timeline.setWindow(
+                        new Date(nowMsLocal - width),
+                        new Date(nowMsLocal),
+                        { animation: false }
+                    );
                 });
                 // Container width is sometimes 0 on first paint (parent
                 // ScrollView not yet laid out, session card just inserted,
@@ -3030,14 +3032,20 @@ maybe a histogram of b
                 // Re-apply height each render — group count changes as
                 // variant lanes appear/disappear.
                 timeline.setOptions({ height: heightPx });
-                // Update the windowStart anchor for viewport conversions
-                // so they stay valid as "now" advances.
                 timeline.$windowStartMs = liveStart.getTime();
-                // Only slide back to "now" if the user hasn't manually
-                // panned/zoomed away. Otherwise we'd clobber their
-                // zoom state every render tick.
-                if (eventsTimelineFollowLive.get(sessionId) !== false) {
-                    timeline.setWindow(liveStart, liveEnd, { animation: false });
+                // Live-edge tracking: unless the user has explicitly
+                // paused the chart, slide the visible window so its
+                // right edge stays pinned to "now". Preserve whatever
+                // zoom width the user has set — only the position
+                // moves, not the width.
+                if (!isChartPaused(sessionId)) {
+                    const win = timeline.getWindow();
+                    const width = win.end.getTime() - win.start.getTime();
+                    timeline.setWindow(
+                        new Date(nowMs - width),
+                        new Date(nowMs),
+                        { animation: false }
+                    );
                 }
             }
         }

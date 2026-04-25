@@ -982,10 +982,6 @@
         const videoFpsCharts = new Map();
         const eventsCharts = new Map();
         const eventsTimelines = new Map();
-        // Per-session "follow live" flag — see testing.html for the
-        // full rationale. Skips the per-tick setWindow when the user
-        // has zoomed/panned away from the live edge.
-        const eventsTimelineFollowLive = new Map();
         const chartViewportBySession = new Map();
         const chartPausedBySession = new Map();
         const bandwidthVisibility = new Map();
@@ -5188,17 +5184,24 @@
                     }
                 );
                 eventsTimelines.set(sessionId, timeline);
-                eventsTimelineFollowLive.set(sessionId, true);
                 timeline.$isVisTimeline = true;
                 timeline.$windowStartMs = liveStart.getTime();
                 timeline.$container = container;
                 applyStoredChartViewport(sessionId, timeline);
+                // After a user-driven range change: if not paused,
+                // re-snap right edge to "now" preserving zoom width
+                // (matches the Chart.js charts' live-mode behaviour).
                 timeline.on('rangechanged', (props) => {
                     if (!props || !props.byUser) return;
-                    const rightEdge = props.end.getTime();
-                    const driftMs = Math.abs(Date.now() - rightEdge);
-                    eventsTimelineFollowLive.set(sessionId, driftMs < 5000);
                     syncChartViewportAcrossSession(sessionId, timeline);
+                    if (isChartPaused(sessionId)) return;
+                    const width = props.end.getTime() - props.start.getTime();
+                    const nowMsLocal = Date.now();
+                    timeline.setWindow(
+                        new Date(nowMsLocal - width),
+                        new Date(nowMsLocal),
+                        { animation: false }
+                    );
                 });
                 // ResizeObserver redraw — see testing.html for rationale.
                 if (typeof ResizeObserver !== 'undefined') {
@@ -5221,8 +5224,16 @@
                 timeline.setGroups(new vis.DataSet(groups));
                 timeline.setOptions({ height: heightPx });
                 timeline.$windowStartMs = liveStart.getTime();
-                if (eventsTimelineFollowLive.get(sessionId) !== false) {
-                    timeline.setWindow(liveStart, liveEnd, { animation: false });
+                // Live-edge tracking: unless paused, slide so right
+                // edge stays at "now"; preserve user's zoom width.
+                if (!isChartPaused(sessionId)) {
+                    const win = timeline.getWindow();
+                    const width = win.end.getTime() - win.start.getTime();
+                    timeline.setWindow(
+                        new Date(nowMs - width),
+                        new Date(nowMs),
+                        { animation: false }
+                    );
                 }
             }
         }
