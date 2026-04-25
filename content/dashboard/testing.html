@@ -2384,17 +2384,19 @@ maybe a histogram of b
                 }
             }
 
-            // PLAYERSTATE lane: sample player_metrics_state on each refresh
-            // tick and emit a marker on every transition. Derived purely
-            // from heartbeat data, so it works for both Apple (state_change
-            // events) and Android (state_change isn't emitted but the
-            // heartbeat still carries player_metrics_state).
+            // PLAYERSTATE lane: sample player_metrics_state on each
+            // refresh tick and emit a marker on every transition. Also
+            // captures the AVFoundation reasonForWaitingToPlay
+            // (player_metrics_waiting_reason) so the tooltip can
+            // disambiguate buffering causes (toMinimizeStalls vs
+            // evaluatingBufferingRate vs noItemToPlay etc.).
             const stateValue = String(session.player_metrics_state || '').trim();
+            const waitingReason = String(session.player_metrics_waiting_reason || '').trim();
             if (stateValue) {
                 const prevState = lastRecordedPlayerStateBySession.get(String(key));
                 if (prevState !== stateValue) {
                     const eventSeries = bandwidthEventHistory.get(key) || [];
-                    eventSeries.push({ ts: now, type: 'PLAYERSTATE', state: stateValue });
+                    eventSeries.push({ ts: now, type: 'PLAYERSTATE', state: stateValue, reason: waitingReason });
                     const eventCutoff = now - windowMs;
                     bandwidthEventHistory.set(key, eventSeries.filter((event) => Number(event.ts) >= eventCutoff));
                     lastRecordedPlayerStateBySession.set(String(key), stateValue);
@@ -2723,7 +2725,7 @@ maybe a histogram of b
             if (isChartPaused(sessionId)) return;
             const chartEvents = (eventSeries || [])
                 .filter((e) => Number(e.ts) >= windowStart)
-                .map((e) => ({ x: (e.ts - windowStart) / 1000, type: e.type, state: e.state, mbps: e.mbps, resolution: e.resolution, ts: Number(e.ts) }))
+                .map((e) => ({ x: (e.ts - windowStart) / 1000, type: e.type, state: e.state, reason: e.reason, mbps: e.mbps, resolution: e.resolution, ts: Number(e.ts) }))
                 .filter((e) => Number.isFinite(e.x) && e.x >= 0 && e.x <= 600);
             const datasets = Object.entries(EVENT_LANES).map(([laneKey, cfg]) => {
                 // An event's lane comes either from a 1:1 mapping
@@ -2735,7 +2737,7 @@ maybe a histogram of b
                     return lane === laneKey;
                 }).map((e) => ({
                     x: e.x, y: cfg.y, ts: e.ts,
-                    type: e.type, state: e.state, mbps: e.mbps, resolution: e.resolution
+                    type: e.type, state: e.state, reason: e.reason, mbps: e.mbps, resolution: e.resolution
                 }));
                 let colors = cfg.color;
                 if (laneKey === 'PLAYERSTATE') colors = points.map(p => playerStateColor(p.state));
@@ -2791,7 +2793,11 @@ maybe a histogram of b
                                         let extra = '';
                                         let label = ctx.dataset.label;
                                         if (ctx && ctx.raw) {
-                                            if (ctx.raw.state) extra = `: ${ctx.raw.state}`;
+                                            if (ctx.raw.state) {
+                                                extra = ctx.raw.reason
+                                                    ? `: ${ctx.raw.state} (${ctx.raw.reason})`
+                                                    : `: ${ctx.raw.state}`;
+                                            }
                                             else if (Number.isFinite(Number(ctx.raw.mbps))) extra = `: ${variantLabel(ctx.raw.mbps, ctx.raw.resolution)}`;
                                             else if (ctx.raw.type && EVENT_SUBTYPE_LABEL[ctx.raw.type]) extra = `: ${EVENT_SUBTYPE_LABEL[ctx.raw.type]}`;
                                         }
@@ -2979,8 +2985,14 @@ maybe a histogram of b
                 }
             }
 
+            // PLAYERSTATE label includes the AVPlayer waiting reason
+            // (when present) so the user can disambiguate buffering
+            // causes — e.g. "buffering (toMinimizeStalls)".
             pushRanges('PLAYERSTATE',
-                (e) => e.state || 'Unknown',
+                (e) => {
+                    const s = e.state || 'Unknown';
+                    return e.reason ? `${s} (${e.reason})` : s;
+                },
                 (e) => playerStateColor(e.state));
             pushRanges('DISPLAY_RES',
                 (e) => String(e.resolution || '?'),
