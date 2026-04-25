@@ -2579,13 +2579,18 @@ maybe a histogram of b
         // to flow through the dashboard event capture (currently only
         // *_start variants reach parseBandwidthChartEventType).
         function renderEventsTimelineChart(sessionId, windowStart, eventSeries) {
-            if (typeof vis === 'undefined' || !vis.Timeline) return;
+            if (typeof vis === 'undefined' || !vis.Timeline) {
+                console.warn('[events-timeline] vis-timeline not loaded');
+                return;
+            }
             const card = document.querySelector(`.session-card[data-session-id="${sessionId}"]`);
             if (!card) return;
             const container = card.querySelector('.events-timeline');
-            if (!container) return;
+            if (!container) {
+                console.warn('[events-timeline] container .events-timeline not in DOM for session', sessionId);
+                return;
+            }
 
-            const windowEndMs = windowStart + 600 * 1000;
             const nowMs = Date.now();
             const events = (eventSeries || []).filter((e) => Number(e.ts) >= windowStart);
 
@@ -2637,18 +2642,19 @@ maybe a histogram of b
                     new vis.DataSet(groups),
                     {
                         stack: false,
-                        showCurrentTime: false,
+                        showCurrentTime: true,
                         zoomable: true,
                         moveable: true,
                         margin: { item: 4 },
                         orientation: { axis: 'top' },
-                        min: new Date(windowStart - 60000),
-                        max: new Date(windowEndMs + 60000),
-                        start: new Date(windowStart),
-                        end: new Date(windowEndMs)
+                        // Default visible window = last 10 minutes through now.
+                        // No min/max so panning forward/back works freely.
+                        start: new Date(nowMs - 600 * 1000),
+                        end: new Date(nowMs)
                     }
                 );
                 eventsTimelines.set(sessionId, timeline);
+                console.log('[events-timeline] created for session', sessionId, 'with', items.length, 'items,', groups.length, 'groups');
             } else {
                 timeline.setItems(new vis.DataSet(items));
                 timeline.setGroups(new vis.DataSet(groups));
