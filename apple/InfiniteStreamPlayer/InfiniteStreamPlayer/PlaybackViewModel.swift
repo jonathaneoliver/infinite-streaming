@@ -918,6 +918,8 @@ final class PlaybackViewModel: ObservableObject {
         if let previous = lastReportedRenditionMbps {
             if mbps != previous {
                 profileShiftCount = max(0, profileShiftCount) + 1
+                let direction = mbps > previous ? "UP" : "DOWN"
+                print("[SHIFT] \(direction) \(previous) -> \(mbps) Mbps shifts=\(profileShiftCount) state=\(diagnostics.state) time=\(String(format: "%.2f", diagnostics.currentTime))")
                 Task {
                     await sendPlayerMetrics(event: "video_bitrate_change", extra: [
                         "player_metrics_video_bitrate_from_mbps": previous,
