@@ -621,9 +621,21 @@ maybe a histogram of b
             border-right: none !important;
         }
         /* Top-level section headers (PLAYER / SERVER) sit at the
-         * leftmost edge — no indent. */
+         * leftmost edge — no indent — and stay compact since they
+         * have no items themselves; they're just visual dividers. */
         .events-timeline-wrap .vis-label.vis-group-level-0 {
             padding-left: 4px !important;
+            height: 24px !important;
+            min-height: 24px !important;
+            max-height: 24px !important;
+        }
+        .events-timeline-wrap .vis-foreground .vis-group.vis-group-level-0 {
+            height: 24px !important;
+            min-height: 24px !important;
+            max-height: 24px !important;
+        }
+        .events-timeline-wrap .vis-background .vis-group.vis-group-level-0 {
+            height: 24px !important;
         }
         /* vis-timeline applies the per-level indent via inline style
          * on the inner label cell — override that too. */

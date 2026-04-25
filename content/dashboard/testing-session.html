@@ -628,9 +628,21 @@
             border-left: none !important;
             border-right: none !important;
         }
-        /* Top-level section headers (PLAYER / SERVER) sit flush. */
+        /* Top-level section headers (PLAYER / SERVER) — flush left
+         * and compact since they're just dividers. */
         .events-timeline-wrap .vis-label.vis-group-level-0 {
             padding-left: 4px !important;
+            height: 24px !important;
+            min-height: 24px !important;
+            max-height: 24px !important;
+        }
+        .events-timeline-wrap .vis-foreground .vis-group.vis-group-level-0 {
+            height: 24px !important;
+            min-height: 24px !important;
+            max-height: 24px !important;
+        }
+        .events-timeline-wrap .vis-background .vis-group.vis-group-level-0 {
+            height: 24px !important;
         }
         .events-timeline-wrap .vis-labelset .vis-label .vis-inner {
             padding-left: 0 !important;
