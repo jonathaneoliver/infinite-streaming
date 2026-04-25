@@ -566,16 +566,14 @@ maybe a histogram of b
             position: relative;
         }
         .events-timeline-wrap {
-            height: 240px;
+            min-height: 240px;
             margin-bottom: 12px;
             position: relative;
         }
         .events-timeline-wrap .events-timeline {
-            height: 100%;
             background: #fff;
             border: 1px solid #e5e7eb;
             border-radius: 4px;
-            overflow: hidden;
         }
         .events-timeline .vis-item.vis-box,
         .events-timeline .vis-item.vis-point {
@@ -2774,6 +2772,13 @@ maybe a histogram of b
                         moveable: true,
                         margin: { item: 4 },
                         orientation: { axis: 'top' },
+                        // Auto-grow to fit all groups (variant lanes are
+                        // added dynamically as the player walks the
+                        // ladder), but bounded so a runaway lane count
+                        // doesn't take over the whole page.
+                        height: 'auto',
+                        minHeight: '240px',
+                        maxHeight: '700px',
                         // Default visible window = last 10 minutes through now.
                         // No min/max so panning forward/back works freely.
                         start: new Date(nowMs - 600 * 1000),

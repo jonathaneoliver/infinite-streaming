@@ -581,16 +581,14 @@
             margin-bottom: 0 !important;
         }
         .events-timeline-wrap {
-            height: 240px;
+            min-height: 240px;
             margin-bottom: 12px;
             position: relative;
         }
         .events-timeline-wrap .events-timeline {
-            height: 100%;
             background: #fff;
             border: 1px solid #e5e7eb;
             border-radius: 4px;
-            overflow: hidden;
         }
         .events-timeline .vis-item.vis-box,
         .events-timeline .vis-item.vis-point {
@@ -5022,6 +5020,12 @@
                         moveable: true,
                         margin: { item: 4 },
                         orientation: { axis: 'top' },
+                        // Auto-grow to fit dynamically-added variant
+                        // lanes; bounded so it doesn't take over the
+                        // whole page if the ladder is huge.
+                        height: 'auto',
+                        minHeight: '240px',
+                        maxHeight: '700px',
                         start: new Date(nowMs - 600 * 1000),
                         end: new Date(nowMs)
                     }
