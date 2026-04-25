@@ -583,36 +583,29 @@ maybe a histogram of b
             font-size: 10px;
             font-family: 'Courier New', monospace;
         }
-        /* Hide vis-timeline's built-in left label panel so the chart
-         * area uses the full container width and lines up vertically
-         * with the Chart.js bandwidth/buffer/fps charts below. Lane
-         * legend is rendered as a separate strip above the chart. */
+        /* Float vis-timeline's left label panel on top of the chart's
+         * leftmost column instead of reserving space for it. The chart
+         * area uses the full container width — its time axis lines up
+         * vertically with the Chart.js bandwidth/buffer/fps charts —
+         * and the lane labels overlay on top of the items. */
         .events-timeline-wrap .vis-left.vis-panel {
-            display: none !important;
+            position: absolute !important;
+            left: 0 !important;
+            top: 0 !important;
+            z-index: 5;
+            background: rgba(255, 255, 255, 0.85);
+            border-right: 1px solid rgba(0, 0, 0, 0.05);
+            pointer-events: none;
         }
         .events-timeline-wrap .vis-center.vis-panel {
             left: 0 !important;
             border-left: none !important;
         }
+        .events-timeline-wrap .vis-label {
+            background: transparent !important;
+        }
         .events-timeline-legend {
-            display: flex;
-            flex-wrap: wrap;
-            gap: 6px 12px;
-            margin-bottom: 6px;
-            font-size: 10px;
-            font-family: 'Courier New', monospace;
-            color: #4b5563;
-        }
-        .events-timeline-legend .legend-item {
-            display: inline-flex;
-            align-items: center;
-            gap: 4px;
-        }
-        .events-timeline-legend .legend-swatch {
-            width: 10px;
-            height: 10px;
-            border-radius: 2px;
-            display: inline-block;
+            display: none;
         }
         .chart-paused-badge {
             display: none;
