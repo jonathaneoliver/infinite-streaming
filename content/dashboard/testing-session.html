@@ -4905,10 +4905,28 @@
             const events = (eventSeries || []).filter((e) => Number(e.ts) >= windowStart);
 
             const SERVER_LANES = new Set(['LOOP_SERVER']);
-            const playerLanes = Object.keys(EVENT_LANES).filter((k) => !SERVER_LANES.has(k));
+            const playerLanes = Object.keys(EVENT_LANES).filter((k) => !SERVER_LANES.has(k) && k !== 'VARIANT');
             const serverLanes = Object.keys(EVENT_LANES).filter((k) => SERVER_LANES.has(k));
+
+            const variantEvents = events.filter((e) => e.type === 'VARIANT');
+            const seenVariants = new Map();
+            for (const v of variantEvents) {
+                const m = Number(v.mbps);
+                const k = `${m}|${v.resolution || ''}`;
+                if (!seenVariants.has(k)) seenVariants.set(k, { mbps: m, resolution: v.resolution || '' });
+            }
+            const variantOrder = Array.from(seenVariants.entries())
+                .sort((a, b) => Number(a[1].mbps) - Number(b[1].mbps));
+            const variantGroups = variantOrder.map(([k, v]) => ({
+                id: `VARIANT::${k}`,
+                content: variantLabel(v.mbps, v.resolution)
+            }));
+            const variantGroupIds = variantGroups.map((g) => g.id);
+
             const groups = [
-                { id: 'PLAYER_SECTION', content: 'PLAYER', nestedGroups: playerLanes },
+                { id: 'PLAYER_SECTION', content: 'PLAYER', nestedGroups: ['VARIANT_GROUP', ...playerLanes] },
+                { id: 'VARIANT_GROUP', content: 'VARIANT', nestedGroups: variantGroupIds.length ? variantGroupIds : null },
+                ...variantGroups,
                 ...playerLanes.map((type) => ({ id: type, content: EVENT_LANES[type].label })),
                 { id: 'SERVER_SECTION', content: 'SERVER', nestedGroups: serverLanes },
                 ...serverLanes.map((type) => ({ id: type, content: EVENT_LANES[type].label }))
@@ -4940,9 +4958,27 @@
             pushRanges('PLAYERSTATE',
                 (e) => e.state || 'Unknown',
                 (e) => playerStateColor(e.state));
-            pushRanges('VARIANT',
-                (e) => variantLabel(e.mbps, e.resolution),
-                (e) => variantColor(e.mbps));
+
+            // VARIANT: each variant gets its own swim lane; an upshift
+            // visually walks UP the ladder.
+            const variantSeq = variantEvents.sort((a, b) => Number(a.ts) - Number(b.ts));
+            for (let i = 0; i < variantSeq.length; i++) {
+                const v = variantSeq[i];
+                const start = Number(v.ts);
+                const end = i + 1 < variantSeq.length ? Number(variantSeq[i + 1].ts) : nowMs;
+                const m = Number(v.mbps);
+                const k = `${m}|${v.resolution || ''}`;
+                const color = variantColor(m);
+                items.push({
+                    id: itemId++,
+                    group: `VARIANT::${k}`,
+                    content: '',
+                    start: new Date(start),
+                    end: new Date(end),
+                    type: 'range',
+                    style: `background-color: ${color}; border-color: ${color}; color: #fff;`
+                });
+            }
 
             for (const e of events) {
                 if (e.type === 'PLAYERSTATE' || e.type === 'VARIANT') continue;
