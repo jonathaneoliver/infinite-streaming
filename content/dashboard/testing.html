@@ -2759,6 +2759,13 @@ maybe a histogram of b
                 });
             }
 
+            // Live-edge window: same 10-minute span as the other charts,
+            // right edge anchored to "now" so events scroll left as time
+            // advances. Updated on every render so the view tracks live.
+            const liveWindowMs = 10 * 60 * 1000;
+            const liveStart = new Date(nowMs - liveWindowMs);
+            const liveEnd = new Date(nowMs);
+
             let timeline = eventsTimelines.get(sessionId);
             if (!timeline) {
                 timeline = new vis.Timeline(
@@ -2779,10 +2786,8 @@ maybe a histogram of b
                         height: 'auto',
                         minHeight: '240px',
                         maxHeight: '700px',
-                        // Default visible window = last 10 minutes through now.
-                        // No min/max so panning forward/back works freely.
-                        start: new Date(nowMs - 600 * 1000),
-                        end: new Date(nowMs)
+                        start: liveStart,
+                        end: liveEnd
                     }
                 );
                 eventsTimelines.set(sessionId, timeline);
@@ -2794,6 +2799,11 @@ maybe a histogram of b
             } else {
                 timeline.setItems(new vis.DataSet(items));
                 timeline.setGroups(new vis.DataSet(groups));
+                // Slide the visible window so "now" stays pinned to the
+                // right edge — matches the bitrate / buffer chart
+                // live-edge behaviour. animation:false avoids per-tick
+                // jitter.
+                timeline.setWindow(liveStart, liveEnd, { animation: false });
             }
         }
 
