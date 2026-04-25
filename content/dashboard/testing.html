@@ -621,20 +621,12 @@ maybe a histogram of b
             border-right: none !important;
         }
         /* Top-level section headers (PLAYER / SERVER) sit at the
-         * leftmost edge — no indent — and are compacted to a single
-         * label-height row since they have no items themselves. */
+         * leftmost edge — no indent. Don't override row height here:
+         * vis-timeline computes label-row and chart-row positions
+         * together and any CSS-only height override drifts the two
+         * out of alignment. Live with the auto height. */
         .events-timeline-wrap .vis-label.vis-group-level-0 {
             padding-left: 4px !important;
-            height: 18px !important;
-            min-height: 18px !important;
-            max-height: 18px !important;
-            line-height: 18px !important;
-        }
-        .events-timeline-wrap .vis-foreground .vis-group.vis-group-level-0,
-        .events-timeline-wrap .vis-background .vis-group.vis-group-level-0 {
-            height: 18px !important;
-            min-height: 18px !important;
-            max-height: 18px !important;
         }
         /* Slim down the time-axis bar — vis-timeline's default leaves
          * a lot of vertical padding above and below the tick text. */
@@ -2978,17 +2970,15 @@ maybe a histogram of b
 
             // Compute explicit height. vis-timeline's height:'auto'
             // collapses to 0 because the wrap has no intrinsic height
-            // (its internal panels are absolutely positioned). Use
-            // measured row sizes — section headers are 18px (set via
-            // CSS), regular lanes are 22px under our slim styling,
-            // axis + padding ≈ 32px. Counts every group in the array
-            // including the section parents.
-            const SECTION_ROW_PX = 18;
-            const LANE_ROW_PX = 22;
-            const AXIS_PAD_PX = 32;
-            const sectionRows = groups.filter((g) => Array.isArray(g.nestedGroups)).length;
-            const laneRows = groups.length - sectionRows;
-            const computedHeight = (sectionRows * SECTION_ROW_PX) + (laneRows * LANE_ROW_PX) + AXIS_PAD_PX;
+            // (its internal panels are absolutely positioned). Use a
+            // uniform per-row estimate — section headers and lane
+            // rows share the same auto height now that we no longer
+            // CSS-override section-header heights (which broke
+            // label-to-lane alignment). Slight over-estimate is
+            // safer than under (under-estimate hides top rows).
+            const ROW_PX = 28;
+            const AXIS_PAD_PX = 50;
+            const computedHeight = (groups.length * ROW_PX) + AXIS_PAD_PX;
             const heightPx = `${computedHeight}px`;
             container.style.height = heightPx;
 

@@ -628,20 +628,11 @@
             border-left: none !important;
             border-right: none !important;
         }
-        /* Top-level section headers (PLAYER / SERVER) — flush left
-         * and compacted to a single label-height row. */
+        /* Top-level section headers — flush left, no row-height
+         * override (CSS-only overrides drift labels out of alignment
+         * with chart rows). */
         .events-timeline-wrap .vis-label.vis-group-level-0 {
             padding-left: 4px !important;
-            height: 18px !important;
-            min-height: 18px !important;
-            max-height: 18px !important;
-            line-height: 18px !important;
-        }
-        .events-timeline-wrap .vis-foreground .vis-group.vis-group-level-0,
-        .events-timeline-wrap .vis-background .vis-group.vis-group-level-0 {
-            height: 18px !important;
-            min-height: 18px !important;
-            max-height: 18px !important;
         }
         .events-timeline-wrap .vis-time-axis {
             font-size: 10px;
@@ -5187,15 +5178,11 @@
             // Compute explicit height from the actual lane count;
             // vis-timeline's height:'auto' collapses to 0 when the
             // container has no intrinsic height.
-            // Compute explicit height — height:'auto' collapses the
-            // container. Section headers are 18px (CSS), regular
-            // lanes ~22px under our slim styling, axis ≈ 32px.
-            const SECTION_ROW_PX = 18;
-            const LANE_ROW_PX = 22;
-            const AXIS_PAD_PX = 32;
-            const sectionRows = groups.filter((g) => Array.isArray(g.nestedGroups)).length;
-            const laneRows = groups.length - sectionRows;
-            const computedHeight = (sectionRows * SECTION_ROW_PX) + (laneRows * LANE_ROW_PX) + AXIS_PAD_PX;
+            // Explicit height. Uniform per-row size since section
+            // headers no longer get a CSS row-height override.
+            const ROW_PX = 28;
+            const AXIS_PAD_PX = 50;
+            const computedHeight = (groups.length * ROW_PX) + AXIS_PAD_PX;
             const heightPx = `${computedHeight}px`;
             container.style.height = heightPx;
 
