@@ -2781,11 +2781,12 @@ maybe a histogram of b
                         orientation: { axis: 'top' },
                         // Auto-grow to fit all groups (variant lanes are
                         // added dynamically as the player walks the
-                        // ladder), but bounded so a runaway lane count
-                        // doesn't take over the whole page.
+                        // ladder). No maxHeight cap — capping causes
+                        // vis-timeline to scroll internally and hide
+                        // the top lanes; let the page itself scroll
+                        // when the lane count gets large.
                         height: 'auto',
                         minHeight: '240px',
-                        maxHeight: '700px',
                         start: liveStart,
                         end: liveEnd
                     }

@@ -5027,9 +5027,11 @@
                         moveable: true,
                         margin: { item: 4 },
                         orientation: { axis: 'top' },
+                        // Auto-grow with no maxHeight cap so all lanes
+                        // are visible; vis-timeline's internal scroll
+                        // hides the top rows when capped.
                         height: 'auto',
                         minHeight: '240px',
-                        maxHeight: '700px',
                         start: liveStart,
                         end: liveEnd
                     }
