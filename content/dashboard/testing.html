@@ -846,7 +846,6 @@ maybe a histogram of b
         const bandwidthVisibility = new Map();
         const bitrateAxisMaxBySession = new Map();
         const lastRecordedPlayerEventBySession = new Map();
-        const lastRecordedPlayerStateBySession = new Map();
         const lastRecordedLoopCountBySession = new Map();
         const lastRecordedServerLoopCountBySession = new Map();
         const lastRecordedLoopEventStampBySession = new Map();
@@ -2440,23 +2439,20 @@ maybe a histogram of b
                 }
             }
 
-            // PLAYERSTATE lane: sample player_metrics_state on each
-            // refresh tick and emit a marker on every transition. Also
-            // captures the AVFoundation reasonForWaitingToPlay
-            // (player_metrics_waiting_reason) so the tooltip can
-            // disambiguate buffering causes (toMinimizeStalls vs
-            // evaluatingBufferingRate vs noItemToPlay etc.).
+            // PLAYERSTATE lane: sample player_metrics_state every poll
+            // and let the renderer coalesce same-label runs. The
+            // AVFoundation reasonForWaitingToPlay
+            // (player_metrics_waiting_reason) is part of the rendered
+            // label so reason transitions within a state (e.g.
+            // toMinimizeStalls vs evaluatingBufferingRate) split into
+            // distinct ranges.
             const stateValue = String(session.player_metrics_state || '').trim();
             const waitingReason = String(session.player_metrics_waiting_reason || '').trim();
             if (stateValue) {
-                const prevState = lastRecordedPlayerStateBySession.get(String(key));
-                if (prevState !== stateValue) {
-                    const eventSeries = bandwidthEventHistory.get(key) || [];
-                    eventSeries.push({ ts: now, type: 'PLAYERSTATE', state: stateValue, reason: waitingReason });
-                    const eventCutoff = now - windowMs;
-                    bandwidthEventHistory.set(key, eventSeries.filter((event) => Number(event.ts) >= eventCutoff));
-                    lastRecordedPlayerStateBySession.set(String(key), stateValue);
-                }
+                const eventSeries = bandwidthEventHistory.get(key) || [];
+                eventSeries.push({ ts: now, type: 'PLAYERSTATE', state: stateValue, reason: waitingReason });
+                const eventCutoff = now - windowMs;
+                bandwidthEventHistory.set(key, eventSeries.filter((event) => Number(event.ts) >= eventCutoff));
             }
 
             // VARIANT lane: bitrate is the leading-edge fetch-time

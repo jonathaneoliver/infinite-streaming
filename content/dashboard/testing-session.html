@@ -1060,7 +1060,6 @@
         const bandwidthVariantsEnabledBySession = new Map();
         const bitrateAxisMaxBySession = new Map();
         const lastRecordedPlayerEventBySession = new Map();
-        const lastRecordedPlayerStateBySession = new Map();
         const lastRecordedLoopCountBySession = new Map();
         const lastRecordedServerLoopCountBySession = new Map();
         const lastRecordedLoopEventStampBySession = new Map();
@@ -4735,19 +4734,15 @@
                 }
             }
 
-            // PLAYERSTATE: sample state + AVPlayer waiting reason
-            // (player_metrics_waiting_reason) for tooltip detail.
+            // PLAYERSTATE: sample state + AVPlayer waiting reason every
+            // poll; the renderer coalesces same-label runs.
             const stateValue = String(session.player_metrics_state || '').trim();
             const waitingReason = String(session.player_metrics_waiting_reason || '').trim();
             if (stateValue) {
-                const prevState = lastRecordedPlayerStateBySession.get(String(key));
-                if (prevState !== stateValue) {
-                    const eventSeries = bandwidthEventHistory.get(key) || [];
-                    eventSeries.push({ ts: now, type: 'PLAYERSTATE', state: stateValue, reason: waitingReason });
-                    const eventCutoff = now - windowMs;
-                    bandwidthEventHistory.set(key, eventSeries.filter((event) => Number(event.ts) >= eventCutoff));
-                    lastRecordedPlayerStateBySession.set(String(key), stateValue);
-                }
+                const eventSeries = bandwidthEventHistory.get(key) || [];
+                eventSeries.push({ ts: now, type: 'PLAYERSTATE', state: stateValue, reason: waitingReason });
+                const eventCutoff = now - windowMs;
+                bandwidthEventHistory.set(key, eventSeries.filter((event) => Number(event.ts) >= eventCutoff));
             }
 
             // VARIANT lane: bitrate is the leading-edge fetch-time
