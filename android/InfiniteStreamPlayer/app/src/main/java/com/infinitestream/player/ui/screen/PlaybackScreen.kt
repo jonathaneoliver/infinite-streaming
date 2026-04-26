@@ -180,28 +180,33 @@ fun PlaybackScreen(
             },
         )
 
-        // Hint when HUD is hidden — top-right corner. (Top-left collides
-        // with the source video's burnt-in test overlay on Red Bull / wave
-        // streams.) Suppressed while developer mode is on, since the
-        // diagnostic strip already lives in the same corner.
-        AnimatedVisibility(
-            visible = !state.hudVisible && !state.settingsOpen && !state.developerMode,
-            enter = fadeIn(), exit = fadeOut(),
+        // Top-right corner stack: shortcut hint sits on top, developer
+        // diagnostics sits below it. Stacking (vs. overlapping) means the
+        // hint stays visible when dev mode is on — otherwise the user
+        // loses the only signpost telling them how to get back into
+        // settings. (Top-left is reserved for source-video burnt-in
+        // overlays we don't control.)
+        Column(
             modifier = Modifier.align(Alignment.TopEnd).padding(Space.s5),
+            horizontalAlignment = Alignment.End,
         ) {
-            Text(
-                "▶ SETTINGS  ·  ▲ HUD",
-                style = AppType.monoSm.copy(color = Tokens.fg.copy(alpha = 0.55f)),
-            )
-        }
-
-        // Diagnostic strip — gated behind Developer Mode. Top-right.
-        AnimatedVisibility(
-            visible = state.developerMode && !state.settingsOpen,
-            enter = fadeIn(), exit = fadeOut(),
-            modifier = Modifier.align(Alignment.TopEnd).padding(Space.s5),
-        ) {
-            DeveloperHud(vm)
+            AnimatedVisibility(
+                visible = !state.hudVisible && !state.settingsOpen,
+                enter = fadeIn(), exit = fadeOut(),
+            ) {
+                Text(
+                    "▶ SETTINGS  ·  ▲ HUD",
+                    style = AppType.monoSm.copy(color = Tokens.fg.copy(alpha = 0.55f)),
+                )
+            }
+            AnimatedVisibility(
+                visible = state.developerMode && !state.settingsOpen,
+                enter = fadeIn(), exit = fadeOut(),
+            ) {
+                Box(modifier = Modifier.padding(top = Space.s2)) {
+                    DeveloperHud(vm)
+                }
+            }
         }
 
         // Bottom HUD overlay — gradient + transport.
