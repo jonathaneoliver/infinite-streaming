@@ -24,6 +24,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.grid.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
@@ -32,6 +33,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -83,13 +85,27 @@ fun ServerPickerScreen(
     onServerChosen: () -> Unit,
 ) {
     var showManual by remember { mutableStateOf(false) }
-    // Discover on first composition so cards stream in while the user is still
-    // reading the header.
+    var showPairCode by remember { mutableStateOf(false) }
+    var discovered by remember { mutableStateOf<List<RendezvousService.DiscoveredServer>>(emptyList()) }
+
+    // Run discovery on every entry to the picker, not just when the saved
+    // list is empty. The Rendezvous Worker only knows about servers visible
+    // from the caller's public IP, and that set changes as the user moves
+    // between networks. Cards stream in below as the response arrives.
     LaunchedEffect(Unit) {
-        if (state.servers.isEmpty()) {
-            vm.discoverServers { found ->
-                found.firstOrNull()?.let { vm.addServerFromUrl(it.url) }
-            }
+        vm.discoverServers { found -> discovered = found }
+    }
+
+    // Filter out discovered entries that are already saved (dedupe by host:port).
+    val savedKeys = remember(state.servers) {
+        state.servers.map { "${it.host.lowercase()}:${it.apiPort}" }.toSet()
+    }
+    val newDiscovered = remember(discovered, savedKeys) {
+        discovered.filter { d ->
+            val u = android.net.Uri.parse(d.url)
+            val host = u.host?.lowercase() ?: return@filter false
+            val port = if (u.port >= 0) u.port else if (u.scheme.equals("https", true)) 443 else 80
+            "$host:$port" !in savedKeys
         }
     }
 
@@ -105,7 +121,7 @@ fun ServerPickerScreen(
             Text("Pick a server", style = AppType.displayLg.copy(color = Tokens.fg))
             Spacer(Modifier.height(Space.s1))
             Text(
-                "Auto-discovered servers appear below. Long-press OK to forget.",
+                "Saved servers and any visible to your network appear below.",
                 style = AppType.body.copy(color = Tokens.fgDim),
             )
             Spacer(Modifier.height(Space.s7))
@@ -117,7 +133,8 @@ fun ServerPickerScreen(
                 verticalArrangement = Arrangement.spacedBy(Space.s4),
                 modifier = Modifier.fillMaxWidth().weight(1f),
             ) {
-                itemsIndexed(state.servers, key = { _, s -> "${s.host}:${s.apiPort}" }) { i, server ->
+                // Saved servers first.
+                itemsIndexed(state.servers, key = { _, s -> "saved:${s.host}:${s.apiPort}" }) { i, server ->
                     ServerCard(
                         index = i,
                         server = server,
@@ -126,6 +143,17 @@ fun ServerPickerScreen(
                         onForget = { vm.forgetServer(i) },
                     )
                 }
+                // Newly-discovered (not yet saved) below saved.
+                items(newDiscovered, key = { d -> "found:${d.url}" }) { d ->
+                    DiscoveredServerCard(
+                        discovered = d,
+                        onClick = {
+                            if (vm.addServerFromUrl(d.url) >= 0) onServerChosen()
+                        },
+                    )
+                }
+                // Add-options.
+                item { PairCodeCard(onClick = { showPairCode = true }) }
                 item { AddServerCard(onClick = { showManual = true }) }
             }
 
@@ -158,6 +186,150 @@ fun ServerPickerScreen(
                 if (vm.addServerFromUrl(url) >= 0) onServerChosen()
             },
         )
+    }
+
+    if (showPairCode) {
+        PairCodeSheet(
+            onDismiss = { showPairCode = false },
+            onPaired = { url ->
+                showPairCode = false
+                if (vm.addServerFromUrl(url) >= 0) onServerChosen()
+            },
+        )
+    }
+}
+
+/**
+ * A server discovered via the rendezvous Worker but not yet saved. Tapping
+ * adds it to the saved list and selects it.
+ */
+@Composable
+private fun DiscoveredServerCard(
+    discovered: RendezvousService.DiscoveredServer,
+    onClick: () -> Unit,
+) {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .aspectRatio(1.6f)
+            .tvFocus(cornerRadius = Radius.cardLg)
+            .clip(RoundedCornerShape(Radius.cardLg))
+            .background(Tokens.bgSoft)
+            .border(1.dp, Tokens.accent.copy(alpha = 0.4f), RoundedCornerShape(Radius.cardLg))
+            .clickable(onClick = onClick)
+            .padding(Space.s5),
+    ) {
+        Column(modifier = Modifier.fillMaxSize()) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                StatusDot(color = Tokens.accent)
+                Spacer(Modifier.width(Space.s1))
+                Text("DISCOVERED · TAP TO ADD",
+                    style = AppType.label.copy(color = Tokens.accent))
+            }
+            Spacer(Modifier.weight(1f))
+            Text(
+                discovered.label.ifEmpty { discovered.url },
+                style = AppType.title.copy(color = Tokens.fg),
+            )
+            Spacer(Modifier.height(Space.s1))
+            Text(discovered.url, style = AppType.mono.copy(color = Tokens.fgDim))
+        }
+    }
+}
+
+/**
+ * "Pair with code" card — shows a 6-character code that the user types into
+ * a dashboard's "Server Info → Pair with code" widget. Used to bring a
+ * server in from across networks where rendezvous-discovery can't see it.
+ */
+@Composable
+private fun PairCodeCard(onClick: () -> Unit) {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .aspectRatio(1.6f)
+            .tvFocus(cornerRadius = Radius.cardLg)
+            .clip(RoundedCornerShape(Radius.cardLg))
+            .background(Tokens.bgCard)
+            .border(1.dp, Tokens.line, RoundedCornerShape(Radius.cardLg))
+            .clickable(onClick = onClick)
+            .padding(Space.s5),
+    ) {
+        Column(modifier = Modifier.fillMaxSize()) {
+            Text("CROSS-NETWORK", style = AppType.label.copy(color = Tokens.fgDim))
+            Spacer(Modifier.weight(1f))
+            Text("Pair with code", style = AppType.title.copy(color = Tokens.fg))
+            Spacer(Modifier.height(Space.s1))
+            Text(
+                "Type the code on a dashboard.",
+                style = AppType.mono.copy(color = Tokens.fgDim),
+                maxLines = 2,
+            )
+        }
+    }
+}
+
+/**
+ * Modal sheet that generates a pairing code and polls the rendezvous Worker
+ * until the dashboard publishes a server URL. Cancel button dismisses and
+ * tells the Worker to forget the code.
+ */
+@Composable
+private fun PairCodeSheet(
+    onDismiss: () -> Unit,
+    onPaired: (String) -> Unit,
+) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val code = remember { RendezvousService.generateCode() }
+    var error by remember { mutableStateOf<String?>(null) }
+
+    DisposableEffect(code) {
+        val canceller = RendezvousService.pollForServerURL(
+            context, code,
+            /* pollIntervalMs = */ 2000L,
+            /* timeoutMs = */ 10L * 60L * 1000L,
+        ) { url, err ->
+            if (err != null) error = err
+            else if (url != null) onPaired(url)
+        }
+        onDispose { canceller.cancel() }
+    }
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Tokens.bg.copy(alpha = 0.85f))
+            .clickable(onClick = onDismiss),
+    ) {
+        Column(
+            modifier = Modifier
+                .align(Alignment.Center)
+                .width(620.dp)
+                .clip(RoundedCornerShape(Radius.cardLg))
+                .background(Tokens.bgSoft)
+                .border(1.dp, Tokens.line, RoundedCornerShape(Radius.cardLg))
+                .padding(Space.s7)
+                .clickable(enabled = false) {},
+        ) {
+            Text("Pair with code", style = AppType.title.copy(color = Tokens.fg))
+            Spacer(Modifier.height(Space.s4))
+            Text(
+                "On any device that can reach your server, open the dashboard's " +
+                    "Server Info panel and enter this code:",
+                style = AppType.body.copy(color = Tokens.fgDim),
+            )
+            Spacer(Modifier.height(Space.s5))
+            Text(code, style = AppType.displayLg.copy(color = Tokens.accent))
+            Spacer(Modifier.height(Space.s5))
+            Text(
+                error ?: "Waiting for the dashboard to publish the URL…",
+                style = AppType.mono.copy(color = Tokens.fgDim),
+            )
+            Spacer(Modifier.height(Space.s6))
+            Row(horizontalArrangement = Arrangement.End, modifier = Modifier.fillMaxWidth()) {
+                PrimaryButton("Cancel", onClick = onDismiss, accent = false)
+            }
+        }
     }
 }
 
