@@ -133,6 +133,9 @@ fun PlaybackScreen(
             }
             .onKeyEvent { ev ->
                 if (ev.type != KeyEventType.KeyDown) return@onKeyEvent false
+                // Don't swallow D-pad while the settings drawer is open —
+                // keys must route into the drawer's own focusable rows.
+                if (state.settingsOpen) return@onKeyEvent false
                 when (ev.key) {
                     Key.DirectionUp, Key.Menu -> { vm.setHudVisible(true); true }
                     Key.DirectionCenter, Key.Enter -> {

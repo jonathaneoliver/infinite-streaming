@@ -31,6 +31,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -38,6 +39,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.key.Key
@@ -46,6 +49,7 @@ import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.delay
 import androidx.tv.material3.Icon
 import androidx.tv.material3.Text
 import com.infinitestream.player.state.Codec
@@ -127,6 +131,20 @@ private fun SettingsPanel(
     // in over the list (per spec, "not a popover, same width").
     var picker by remember { mutableStateOf<PickerKind?>(null) }
 
+    // The drawer's own focus owner — pulled onto the first row when the
+    // panel mounts and on every picker push/pop so D-pad has somewhere to
+    // land. Without this the drawer rendered but D-pad fell through to
+    // the playback root and re-revealed the HUD instead.
+    val firstRowFocus = remember { FocusRequester() }
+    LaunchedEffect(picker, state.settingsOpen) {
+        if (state.settingsOpen) {
+            // Drawer slides in over 240ms — wait for the row to be laid out
+            // before requesting focus, otherwise the FocusRequester throws.
+            delay(280)
+            try { firstRowFocus.requestFocus() } catch (_: Throwable) {}
+        }
+    }
+
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -151,10 +169,13 @@ private fun SettingsPanel(
 
             if (picker == null) {
                 MainList(state, vm,
+                    firstRowFocus = firstRowFocus,
                     onPick = { picker = it },
                     onOpenServerPicker = onOpenServerPicker)
             } else {
-                PickerList(picker!!, state, vm, onBack = { picker = null })
+                PickerList(picker!!, state, vm,
+                    firstRowFocus = firstRowFocus,
+                    onBack = { picker = null })
             }
 
             Spacer(Modifier.weight(1f))
@@ -169,6 +190,7 @@ private enum class PickerKind { Stream, Protocol, SegmentLength, Codec, Advanced
 private fun MainList(
     state: UiState,
     vm: PlayerViewModel,
+    firstRowFocus: FocusRequester,
     onPick: (PickerKind) -> Unit,
     onOpenServerPicker: () -> Unit,
 ) {
@@ -182,19 +204,25 @@ private fun MainList(
             onPick(PickerKind.Advanced)
         },
     )
-    LazyColumn(verticalArrangement = Arrangement.spacedBy(Space.s1)) {
-        items(rows, key = { it.label }) { row -> RowView(row) }
+    // Use a non-lazy Column so the first row is laid out immediately —
+    // LazyColumn would defer layout, and FocusRequester throws if the
+    // target isn't on screen yet.
+    Column(verticalArrangement = Arrangement.spacedBy(Space.s1)) {
+        rows.forEachIndexed { i, row ->
+            RowView(row, focusRequester = if (i == 0) firstRowFocus else null)
+        }
     }
 }
 
 private data class SettingRow(val label: String, val value: String, val onClick: () -> Unit)
 
 @Composable
-private fun RowView(row: SettingRow) {
+private fun RowView(row: SettingRow, focusRequester: FocusRequester? = null) {
     Box(
         modifier = Modifier
             .fillMaxWidth()
             .height(56.dp)
+            .let { if (focusRequester != null) it.focusRequester(focusRequester) else it }
             .tvFocus(cornerRadius = Radius.row)
             .clip(RoundedCornerShape(Radius.row))
             .background(Tokens.bgSoft)
@@ -219,6 +247,7 @@ private fun PickerList(
     kind: PickerKind,
     state: UiState,
     vm: PlayerViewModel,
+    firstRowFocus: FocusRequester,
     onBack: () -> Unit,
 ) {
     Column(modifier = Modifier.fillMaxWidth().fillMaxHeight()) {
@@ -227,55 +256,42 @@ private fun PickerList(
             style = AppType.titleSm.copy(color = Tokens.fg),
         )
         Spacer(Modifier.height(Space.s4))
-        when (kind) {
-            PickerKind.Stream -> {
-                LazyColumn(verticalArrangement = Arrangement.spacedBy(Space.s1)) {
-                    items(state.filteredContent, key = { it.name }) { item ->
-                        PickerItem(
-                            label = item.name,
-                            selected = item.name == state.selectedContent,
-                            onClick = { vm.setSelectedContent(item.name); onBack() },
-                        )
+        // Same Column-not-LazyColumn rationale as MainList — first row needs
+        // to be laid out before we can requestFocus on it.
+        Column(verticalArrangement = Arrangement.spacedBy(Space.s1)) {
+            when (kind) {
+                PickerKind.Stream -> state.filteredContent.forEachIndexed { i, item ->
+                    PickerItem(
+                        label = item.name,
+                        selected = item.name == state.selectedContent,
+                        focusRequester = if (i == 0) firstRowFocus else null,
+                        onClick = { vm.setSelectedContent(item.name); onBack() },
+                    )
+                }
+                PickerKind.Protocol -> Protocol.values().forEachIndexed { i, p ->
+                    PickerItem(p.label, p == state.protocol,
+                        focusRequester = if (i == 0) firstRowFocus else null) {
+                        vm.setProtocol(p); onBack()
                     }
                 }
-            }
-            PickerKind.Protocol -> {
-                LazyColumn(verticalArrangement = Arrangement.spacedBy(Space.s1)) {
-                    items(Protocol.values().toList()) { p ->
-                        PickerItem(p.label, p == state.protocol) {
-                            vm.setProtocol(p); onBack()
-                        }
+                PickerKind.SegmentLength -> Segment.values().forEachIndexed { i, s ->
+                    PickerItem(s.label, s == state.segment,
+                        focusRequester = if (i == 0) firstRowFocus else null) {
+                        vm.setSegment(s); onBack()
                     }
                 }
-            }
-            PickerKind.SegmentLength -> {
-                LazyColumn(verticalArrangement = Arrangement.spacedBy(Space.s1)) {
-                    items(Segment.values().toList()) { s ->
-                        PickerItem(s.label, s == state.segment) {
-                            vm.setSegment(s); onBack()
-                        }
+                PickerKind.Codec -> Codec.values().forEachIndexed { i, c ->
+                    PickerItem(c.label, c == state.codec,
+                        focusRequester = if (i == 0) firstRowFocus else null) {
+                        vm.setCodec(c); onBack()
                     }
                 }
-            }
-            PickerKind.Codec -> {
-                LazyColumn(verticalArrangement = Arrangement.spacedBy(Space.s1)) {
-                    items(Codec.values().toList()) { c ->
-                        PickerItem(c.label, c == state.codec) {
-                            vm.setCodec(c); onBack()
-                        }
-                    }
-                }
-            }
-            PickerKind.Advanced -> {
-                LazyColumn(verticalArrangement = Arrangement.spacedBy(Space.s1)) {
-                    item {
-                        PickerItem(
-                            label = "Developer mode (AVG/PEAK overlay)",
-                            selected = state.developerMode,
-                            onClick = { vm.setDeveloperMode(!state.developerMode) },
-                        )
-                    }
-                }
+                PickerKind.Advanced -> PickerItem(
+                    label = "Developer mode (AVG/PEAK overlay)",
+                    selected = state.developerMode,
+                    focusRequester = firstRowFocus,
+                    onClick = { vm.setDeveloperMode(!state.developerMode) },
+                )
             }
         }
         Spacer(Modifier.weight(1f))
@@ -289,11 +305,17 @@ private fun PickerList(
 }
 
 @Composable
-private fun PickerItem(label: String, selected: Boolean, onClick: () -> Unit) {
+private fun PickerItem(
+    label: String,
+    selected: Boolean,
+    focusRequester: FocusRequester? = null,
+    onClick: () -> Unit,
+) {
     Box(
         modifier = Modifier
             .fillMaxWidth()
             .height(48.dp)
+            .let { if (focusRequester != null) it.focusRequester(focusRequester) else it }
             .tvFocus(cornerRadius = Radius.row)
             .clip(RoundedCornerShape(Radius.row))
             .background(if (selected) Tokens.bgCard else Tokens.bgSoft)
