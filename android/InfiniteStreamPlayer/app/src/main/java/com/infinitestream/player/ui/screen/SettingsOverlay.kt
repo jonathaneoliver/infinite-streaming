@@ -130,19 +130,39 @@ private fun SettingsPanel(
     // Picker stack — null = main list, non-null = single-column picker pushed
     // in over the list (per spec, "not a popover, same width").
     var picker by remember { mutableStateOf<PickerKind?>(null) }
+    // Sticky memory of the most-recently-opened picker. When we pop back to
+    // the main list we re-focus the row that pushed it, instead of jumping
+    // to "Server" every time — Apple TV / Android Settings both behave this
+    // way and otherwise navigation feels lossy.
+    var lastPicker by remember { mutableStateOf<PickerKind?>(null) }
 
-    // The drawer's own focus owner — pulled onto the first row when the
-    // panel mounts and on every picker push/pop so D-pad has somewhere to
-    // land. Without this the drawer rendered but D-pad fell through to
-    // the playback root and re-revealed the HUD instead.
-    val firstRowFocus = remember { FocusRequester() }
+    // Per-row FocusRequesters in the main list, plus one shared by every
+    // picker's first item. The LaunchedEffect below picks which to focus
+    // based on whether we're entering the drawer fresh, pushing a picker,
+    // or popping back from one.
+    val serverFocus = remember { FocusRequester() }
+    val streamFocus = remember { FocusRequester() }
+    val protocolFocus = remember { FocusRequester() }
+    val segmentFocus = remember { FocusRequester() }
+    val codecFocus = remember { FocusRequester() }
+    val advancedFocus = remember { FocusRequester() }
+    val pickerFirstFocus = remember { FocusRequester() }
+
     LaunchedEffect(picker, state.settingsOpen) {
-        if (state.settingsOpen) {
-            // Drawer slides in over 240ms — wait for the row to be laid out
-            // before requesting focus, otherwise the FocusRequester throws.
-            delay(280)
-            try { firstRowFocus.requestFocus() } catch (_: Throwable) {}
+        if (!state.settingsOpen) return@LaunchedEffect
+        // Drawer slides in over 240ms — wait for the row to be laid out
+        // before requesting focus, otherwise the FocusRequester throws.
+        delay(280)
+        val target = when {
+            picker != null -> pickerFirstFocus
+            lastPicker == PickerKind.Stream -> streamFocus
+            lastPicker == PickerKind.Protocol -> protocolFocus
+            lastPicker == PickerKind.SegmentLength -> segmentFocus
+            lastPicker == PickerKind.Codec -> codecFocus
+            lastPicker == PickerKind.Advanced -> advancedFocus
+            else -> serverFocus
         }
+        try { target.requestFocus() } catch (_: Throwable) {}
     }
 
     Box(
@@ -169,12 +189,17 @@ private fun SettingsPanel(
 
             if (picker == null) {
                 MainList(state, vm,
-                    firstRowFocus = firstRowFocus,
-                    onPick = { picker = it },
+                    serverFocus = serverFocus,
+                    streamFocus = streamFocus,
+                    protocolFocus = protocolFocus,
+                    segmentFocus = segmentFocus,
+                    codecFocus = codecFocus,
+                    advancedFocus = advancedFocus,
+                    onPick = { kind -> lastPicker = kind; picker = kind },
                     onOpenServerPicker = onOpenServerPicker)
             } else {
                 PickerList(picker!!, state, vm,
-                    firstRowFocus = firstRowFocus,
+                    firstRowFocus = pickerFirstFocus,
                     onBack = { picker = null })
             }
 
@@ -190,27 +215,32 @@ private enum class PickerKind { Stream, Protocol, SegmentLength, Codec, Advanced
 private fun MainList(
     state: UiState,
     vm: PlayerViewModel,
-    firstRowFocus: FocusRequester,
+    serverFocus: FocusRequester,
+    streamFocus: FocusRequester,
+    protocolFocus: FocusRequester,
+    segmentFocus: FocusRequester,
+    codecFocus: FocusRequester,
+    advancedFocus: FocusRequester,
     onPick: (PickerKind) -> Unit,
     onOpenServerPicker: () -> Unit,
 ) {
-    val rows = listOf(
-        SettingRow("Server", state.activeServer?.name ?: "—") { onOpenServerPicker() },
-        SettingRow("Stream", state.selectedContent.ifEmpty { "—" }) { onPick(PickerKind.Stream) },
-        SettingRow("Protocol", state.protocol.label) { onPick(PickerKind.Protocol) },
-        SettingRow("Segment length", state.segment.label) { onPick(PickerKind.SegmentLength) },
-        SettingRow("Codec", state.codec.label) { onPick(PickerKind.Codec) },
-        SettingRow("Advanced", if (state.developerMode) "Developer mode on" else "Default") {
-            onPick(PickerKind.Advanced)
-        },
-    )
-    // Use a non-lazy Column so the first row is laid out immediately —
+    // Use a non-lazy Column so every row is laid out immediately —
     // LazyColumn would defer layout, and FocusRequester throws if the
     // target isn't on screen yet.
     Column(verticalArrangement = Arrangement.spacedBy(Space.s1)) {
-        rows.forEachIndexed { i, row ->
-            RowView(row, focusRequester = if (i == 0) firstRowFocus else null)
-        }
+        RowView(SettingRow("Server", state.activeServer?.name ?: "—") { onOpenServerPicker() },
+            focusRequester = serverFocus)
+        RowView(SettingRow("Stream", state.selectedContent.ifEmpty { "—" }) { onPick(PickerKind.Stream) },
+            focusRequester = streamFocus)
+        RowView(SettingRow("Protocol", state.protocol.label) { onPick(PickerKind.Protocol) },
+            focusRequester = protocolFocus)
+        RowView(SettingRow("Segment length", state.segment.label) { onPick(PickerKind.SegmentLength) },
+            focusRequester = segmentFocus)
+        RowView(SettingRow("Codec", state.codec.label) { onPick(PickerKind.Codec) },
+            focusRequester = codecFocus)
+        RowView(SettingRow("Advanced", if (state.developerMode) "Developer mode on" else "Default") {
+            onPick(PickerKind.Advanced)
+        }, focusRequester = advancedFocus)
     }
 }
 

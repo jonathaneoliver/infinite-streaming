@@ -89,6 +89,8 @@ fun PlaybackScreen(
     vm: PlayerViewModel,
     onOpenSettings: () -> Unit,
 ) {
+    // Local alias so onKeyEvent can call it without re-declaring the param.
+    val openSettings = onOpenSettings
     // Auto-hide HUD after the spec'd timeout. The nonce bumps on every key
     // event while the HUD is visible (see onPreviewKeyEvent below) so users
     // navigating the transport bar don't get the HUD yanked out from under
@@ -138,6 +140,11 @@ fun PlaybackScreen(
                 if (state.settingsOpen) return@onKeyEvent false
                 when (ev.key) {
                     Key.DirectionUp, Key.Menu -> { vm.setHudVisible(true); true }
+                    // D-pad-Right at the bare playback layer mirrors the
+                    // drawer's slide-in direction — most intuitive shortcut.
+                    // (Once the HUD is up, Right is captured by the focused
+                    // transport button instead and walks across them.)
+                    Key.DirectionRight -> { openSettings(); true }
                     Key.DirectionCenter, Key.Enter -> {
                         vm.setHudVisible(true)
                         if (state.hudVisible) togglePlayPause(vm.player)
@@ -173,14 +180,17 @@ fun PlaybackScreen(
             },
         )
 
-        // Hint when HUD is hidden — spec: top-left, mono, 0.55 opacity.
+        // Hint when HUD is hidden — top-right corner. (Top-left collides
+        // with the source video's burnt-in test overlay on Red Bull / wave
+        // streams.) Suppressed while developer mode is on, since the
+        // diagnostic strip already lives in the same corner.
         AnimatedVisibility(
-            visible = !state.hudVisible && !state.settingsOpen,
+            visible = !state.hudVisible && !state.settingsOpen && !state.developerMode,
             enter = fadeIn(), exit = fadeOut(),
-            modifier = Modifier.align(Alignment.TopStart).padding(Space.s5),
+            modifier = Modifier.align(Alignment.TopEnd).padding(Space.s5),
         ) {
             Text(
-                "▲ MENU FOR SETTINGS",
+                "▶ SETTINGS  ·  ▲ HUD",
                 style = AppType.monoSm.copy(color = Tokens.fg.copy(alpha = 0.55f)),
             )
         }
