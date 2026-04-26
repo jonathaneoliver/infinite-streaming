@@ -27,6 +27,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MimeTypes
 import androidx.media3.common.Player
@@ -67,9 +68,13 @@ fun LivePreviewTile(
             repeatMode = Player.REPEAT_MODE_ONE
             // Cap to 360p in case go-live decides to serve a master playlist
             // somewhere — otherwise we accidentally pull 1080 p+ for a tile.
+            // Also disable audio entirely: even with volume = 0 the audio
+            // track still gets decoded and the player grabs audio focus,
+            // which the user heard playing on Home from one of the tiles.
             trackSelectionParameters = trackSelectionParameters.buildUpon()
                 .setMaxVideoSize(640, 360)
                 .setPreferredVideoMimeType(MimeTypes.VIDEO_H264)
+                .setTrackTypeDisabled(C.TRACK_TYPE_AUDIO, true)
                 .build()
             setMediaItem(
                 MediaItem.fromUri(

@@ -21,6 +21,9 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.rememberCoroutineScope
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -57,6 +60,20 @@ fun HomeScreen(
         }
     }
 
+    // Deferred-pick: switch routes immediately so Home unmounts and its 4
+    // tile decoders release, then 300 ms later set the selected content
+    // (which triggers the main player's prepare() and a fresh decoder
+    // allocation). Without the delay the main player races the tile
+    // releases and trips Codec2Client::createComponent NO_MEMORY.
+    val scope = rememberCoroutineScope()
+    val playPicked: (String) -> Unit = { name ->
+        onPlay()
+        scope.launch {
+            delay(300)
+            vm.setSelectedContent(name)
+        }
+    }
+
     val items = state.filteredContent
     val featured = items.firstOrNull()
     // First N *distinct* clips get a live preview tile. The content list
@@ -66,21 +83,34 @@ fun HomeScreen(
     // timestamp suffix; for each distinct clip prefer the H.264 entry
     // (universally hardware-decodable, smallest decoder cost).
     //
-    // N=5 leaves one decoder slot for the main playback player so the
-    // home → playback transition doesn't blow past the chip's hardware
-    // decoder budget. (Previously 6 + the Continue Watching hero video
-    // = 7 concurrent decoders, which exhausted the MTK pool with
-    // NO_MEMORY when the user pressed Resume.)
-    val previewCount = 5
+    // The MTK c2.mtk.avc.decoder on the Google TV Streamer returns
+    // NO_MEMORY beyond 3 simultaneous H.264 hardware decoders for the
+    // preview workload — testing 4 tiles produced reliable
+    // Codec2Client::createComponent NO_MEMORY in logcat at steady state
+    // on Home. Three tiles + the brief 1-decoder peak when the main
+    // playback player allocates during Home → Playback navigation = 4
+    // momentary, the chip's hard ceiling. (`playPicked` below also
+    // defers the main player's loadStream by 300 ms so the three tile
+    // decoders release first.)
+    val previewCount = 3
     // Only H.264 in the preview row — HEVC and AV1 are software-decoded on
     // many TV chips, which would crater the parallel-decode budget. The
     // user's 4K HEVC/AV1 content still appears in the MORE STREAMS row
     // below as static cards.
-    val previews = items
-        .filter { "h264" in it.name.lowercase() }
-        .groupBy { dedupeKey(it.name) }
-        .map { (_, group) -> group.first() }
-        .take(previewCount)
+    //
+    // The preview *content* set is also kept visually distinct: greedy
+    // accept-if-different-enough walk against everything already chosen,
+    // so the row doesn't end up showing four-of-the-same-windsurfer with
+    // slightly different filename suffixes (e.g. INSANE_FPV_NEW and
+    // INSANE_FPV_SHOTS_Hydrofoil_Windsurfing share enough tokens to count
+    // as the same clip for thumbnail-row purposes).
+    val previews = mutableListOf<ContentItem>().apply {
+        for (c in items) {
+            if (size >= previewCount) break
+            if ("h264" !in c.name.lowercase()) continue
+            if (none { similarPreviewKey(it.name, c.name) }) add(c)
+        }
+    }
     val rest = items - previews.toSet()
 
     Box(
@@ -97,10 +127,7 @@ fun HomeScreen(
             Spacer(Modifier.height(Space.s4))
 
             Hero(featured, state, onResume = {
-                if (featured != null) {
-                    vm.setSelectedContent(featured.name)
-                    onPlay()
-                }
+                if (featured != null) playPicked(featured.name)
             })
 
             Spacer(Modifier.height(Space.s7))
@@ -118,9 +145,7 @@ fun HomeScreen(
                         LivePreviewTile(
                             content = c,
                             server = activeServer,
-                            onClick = { picked ->
-                                vm.setSelectedContent(picked.name); onPlay()
-                            },
+                            onClick = { picked -> playPicked(picked.name) },
                         )
                     }
                 }
@@ -131,7 +156,7 @@ fun HomeScreen(
                 Text("MORE STREAMS", style = AppType.label.copy(color = Tokens.fg))
                 Spacer(Modifier.height(Space.s3))
                 ContentRow(items = rest, isLive = false, onClick = { c ->
-                    vm.setSelectedContent(c.name); onPlay()
+                    playPicked(c.name)
                 })
             }
 
@@ -233,25 +258,38 @@ private fun ContentCard(c: ContentItem, isLive: Boolean, onClick: (ContentItem) 
 }
 
 /**
- * Strip per-codec / per-timestamp suffixes so the three encodings of the
- * same clip collapse to a single key. Examples:
- *   "redbull_p200_h264"                                 → "redbull_p200"
- *   "redbull_p200_hevc"                                 → "redbull_p200"
- *   "INSANE_FPV..._p200_h264_20260423_212139"           → "insane_fpv..._p200"
- *   "INSANE_FPV..._p200_hevc_20260423_212139"           → "insane_fpv..._p200"
+ * Reduce a content name to its visual identity — strip the trailing
+ * `_p200_codec[_timestamp]` so we can compare two streams by what they
+ * *show*, not how they're encoded.
+ *
+ *   "redbull_p200_h264"                                 → "redbull"
+ *   "INSANE_FPV..._p200_h264_20260423_212139"           → "insane_fpv..."
  */
-private fun dedupeKey(name: String): String =
-    name.lowercase().replace(Regex("_(h264|hevc|h265|av1)(_\\d{8}_\\d{6})?$"), "")
+private fun previewKey(name: String): String =
+    name.lowercase().substringBefore("_p200")
 
-/** Lower number = preferred. H.264 first because every TV hardware-decodes
- *  it; HEVC second; AV1 last (still software-decoded on many chips). */
-private fun codecPreference(name: String): Int {
-    val lower = name.lowercase()
-    return when {
-        "h264" in lower -> 0
-        "hevc" in lower || "h265" in lower -> 1
-        "av1" in lower -> 2
-        else -> 3
-    }
+/**
+ * Are two content names visually similar enough that we shouldn't show
+ * both in the same preview row? Two heuristics, OR'd:
+ *
+ * 1. Underscore-token overlap ≥ 2 (tokens of length ≥ 3, so noise like
+ *    "of"/"to" doesn't trip it). Catches the structured cases —
+ *    "INSANE_FPV_NEW" vs "INSANE_FPV_SHOTS_Hydrofoil_Windsurfing" share
+ *    {insane, fpv}.
+ * 2. With underscores stripped, one is a prefix of the other (length ≥ 5
+ *    on the shorter side). Catches "redbull" vs "red_bull_storm_chase"
+ *    where token-overlap is empty but the visual identity is the same.
+ */
+private fun similarPreviewKey(a: String, b: String): Boolean {
+    val ka = previewKey(a)
+    val kb = previewKey(b)
+    val tokensA = ka.split("_", "-").filter { it.length >= 3 }.toSet()
+    val tokensB = kb.split("_", "-").filter { it.length >= 3 }.toSet()
+    if ((tokensA intersect tokensB).size >= 2) return true
+    val flatA = ka.replace("_", "").replace("-", "")
+    val flatB = kb.replace("_", "").replace("-", "")
+    if (flatA.length >= 5 && flatB.startsWith(flatA)) return true
+    if (flatB.length >= 5 && flatA.startsWith(flatB)) return true
+    return false
 }
 
