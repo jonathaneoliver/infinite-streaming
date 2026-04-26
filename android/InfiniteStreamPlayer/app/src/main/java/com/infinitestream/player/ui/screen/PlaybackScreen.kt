@@ -13,6 +13,7 @@ import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.focusGroup
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -38,13 +39,17 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -84,9 +89,12 @@ fun PlaybackScreen(
     vm: PlayerViewModel,
     onOpenSettings: () -> Unit,
 ) {
-    // Auto-hide HUD after the spec'd timeout. Any D-pad activity bumps the
-    // visibility flag and re-arms this side-effect.
-    LaunchedEffect(state.hudVisible) {
+    // Auto-hide HUD after the spec'd timeout. The nonce bumps on every key
+    // event while the HUD is visible (see onPreviewKeyEvent below) so users
+    // navigating the transport bar don't get the HUD yanked out from under
+    // them — only true 3 s of inactivity dismisses it.
+    var hudActivityNonce by remember { mutableIntStateOf(0) }
+    LaunchedEffect(state.hudVisible, hudActivityNonce) {
         if (state.hudVisible) {
             delay(HUD_AUTO_HIDE_MS)
             vm.setHudVisible(false)
@@ -114,6 +122,15 @@ fun PlaybackScreen(
             .background(Color.Black)
             .focusRequester(rootFocus)
             .focusable()
+            // Bump the activity nonce on every key event while the HUD is
+            // visible so the auto-hide timer resets — the user navigating
+            // through transport buttons should keep it open.
+            .onPreviewKeyEvent { ev ->
+                if (state.hudVisible && ev.type == KeyEventType.KeyDown) {
+                    hudActivityNonce++
+                }
+                false
+            }
             .onKeyEvent { ev ->
                 if (ev.type != KeyEventType.KeyDown) return@onKeyEvent false
                 when (ev.key) {
@@ -183,6 +200,7 @@ fun PlaybackScreen(
         ) {
             HudBar(state, vm,
                 transportFocus = transportFocus,
+                onActivity = { hudActivityNonce++ },
                 onOpenSettings = {
                     vm.setHudVisible(false)
                     onOpenSettings()
@@ -196,6 +214,7 @@ private fun HudBar(
     state: UiState,
     vm: PlayerViewModel,
     transportFocus: FocusRequester,
+    onActivity: () -> Unit,
     onOpenSettings: () -> Unit,
 ) {
     Box(
@@ -226,26 +245,30 @@ private fun HudBar(
             Spacer(Modifier.height(Space.s4))
             Scrubber(vm.player)
             Spacer(Modifier.height(Space.s4))
+            // Wrapping the row in `.focusGroup()` keeps D-pad-Right/Left
+            // travel restricted to the transport buttons — without this,
+            // Compose's spatial focus search can jump out of the HUD entirely
+            // (e.g. into the embedded PlayerView) before reaching the gear.
             Row(
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier.fillMaxWidth().focusGroup(),
                 horizontalArrangement = Arrangement.Center,
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                TransportButton(Icons.Default.SkipPrevious) { vm.restart() }
+                TransportButton(Icons.Default.SkipPrevious, onActivity) { vm.restart() }
                 Spacer(Modifier.width(Space.s3))
-                TransportButton(Icons.Default.Replay10) {
+                TransportButton(Icons.Default.Replay10, onActivity) {
                     vm.player.seekBack()
                 }
                 Spacer(Modifier.width(Space.s3))
-                BigPlayPause(vm, transportFocus)
+                BigPlayPause(vm, transportFocus, onActivity)
                 Spacer(Modifier.width(Space.s3))
-                TransportButton(Icons.Default.Forward10) {
+                TransportButton(Icons.Default.Forward10, onActivity) {
                     vm.player.seekForward()
                 }
                 Spacer(Modifier.width(Space.s3))
-                TransportButton(Icons.Default.SkipNext) { vm.retry() }
+                TransportButton(Icons.Default.SkipNext, onActivity) { vm.retry() }
                 Spacer(Modifier.width(Space.s5))
-                TransportButton(Icons.Default.Settings, onClick = onOpenSettings)
+                TransportButton(Icons.Default.Settings, onActivity, onClick = onOpenSettings)
             }
         }
     }
@@ -292,7 +315,7 @@ private fun MetaPill(text: String) {
 }
 
 @Composable
-private fun BigPlayPause(vm: PlayerViewModel, focus: FocusRequester) {
+private fun BigPlayPause(vm: PlayerViewModel, focus: FocusRequester, onActivity: () -> Unit) {
     val isPlaying = remember { mutableStateOf(vm.player.isPlaying) }
     DisposableEffect(vm.player) {
         val l = object : Player.Listener {
@@ -305,6 +328,7 @@ private fun BigPlayPause(vm: PlayerViewModel, focus: FocusRequester) {
         modifier = Modifier
             .size(56.dp)
             .focusRequester(focus)
+            .onFocusChanged { if (it.isFocused) onActivity() }
             .tvFocus(cornerRadius = Radius.pill)
             .clip(RoundedCornerShape(Radius.pill))
             .background(Tokens.fg)
@@ -320,10 +344,11 @@ private fun BigPlayPause(vm: PlayerViewModel, focus: FocusRequester) {
 }
 
 @Composable
-private fun TransportButton(icon: ImageVector, onClick: () -> Unit) {
+private fun TransportButton(icon: ImageVector, onActivity: () -> Unit, onClick: () -> Unit) {
     Box(
         modifier = Modifier
             .size(44.dp)
+            .onFocusChanged { if (it.isFocused) onActivity() }
             .tvFocus(cornerRadius = Radius.pill)
             .clip(RoundedCornerShape(Radius.pill))
             .background(Tokens.bgCard.copy(alpha = 0.6f))

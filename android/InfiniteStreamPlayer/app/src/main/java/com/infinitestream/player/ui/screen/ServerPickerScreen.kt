@@ -212,21 +212,27 @@ private fun ServerCard(
                     Text("play ${server.port}", style = AppType.monoSm.copy(color = Tokens.fgFaint))
                 }
             }
-            // Forget chip in the top-right corner — invokes onForget when
-            // focused + OK pressed. Simple way to expose "forget" without a
-            // long-press gesture (which Android TV remotes don't always
-            // surface clearly).
+            // Forget chip — bottom-right so it doesn't fight long server
+            // names that wrap to two lines (e.g. jonathanoliver-ubuntu.local
+            // :21000 fills almost the whole card width). Smaller footprint
+            // (22 dp) since it's a secondary action, but still big enough to
+            // get a visible focus ring.
             Box(
                 modifier = Modifier
-                    .align(Alignment.TopEnd)
-                    .size(28.dp)
-                    .tvFocus(cornerRadius = 14.dp)
-                    .clip(RoundedCornerShape(14.dp))
-                    .background(Tokens.bg)
+                    .align(Alignment.BottomEnd)
+                    .size(22.dp)
+                    .tvFocus(cornerRadius = 11.dp)
+                    .clip(RoundedCornerShape(11.dp))
+                    .background(Tokens.bgCard)
                     .clickable(onClick = onForget),
                 contentAlignment = Alignment.Center,
             ) {
-                Icon(Icons.Default.Close, contentDescription = "Forget", tint = Tokens.fgDim)
+                Icon(
+                    Icons.Default.Close,
+                    contentDescription = "Forget",
+                    tint = Tokens.fgDim,
+                    modifier = Modifier.size(14.dp),
+                )
             }
         }
     }
@@ -243,14 +249,17 @@ private fun AddServerCard(onClick: () -> Unit) {
             .drawBehind {
                 // Dashed outline — draw manually because Compose
                 // doesn't have a stock dashed-border modifier yet.
+                // Stroke is bumped to 3 dp + a fgDim color (vs the previous
+                // 2 dp / fgFaint) because at 1080p on a 4 m couch the old
+                // dashes were nearly invisible against the pure-black bg.
                 val stroke = Stroke(
-                    width = 2.dp.toPx(),
+                    width = 3.dp.toPx(),
                     pathEffect = androidx.compose.ui.graphics.PathEffect.dashPathEffect(
-                        floatArrayOf(12f, 8f), 0f
+                        floatArrayOf(18f, 12f), 0f
                     ),
                 )
                 drawRoundRect(
-                    color = Tokens.fgFaint,
+                    color = Tokens.fgDim,
                     size = Size(size.width, size.height),
                     cornerRadius = CornerRadius(Radius.cardLg.toPx(), Radius.cardLg.toPx()),
                     style = stroke,
