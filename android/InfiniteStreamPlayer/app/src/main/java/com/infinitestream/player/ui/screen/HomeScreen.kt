@@ -27,7 +27,14 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import androidx.compose.ui.Alignment
@@ -89,19 +96,14 @@ fun HomeScreen(
     // timestamp suffix; for each distinct clip prefer the H.264 entry
     // (universally hardware-decodable, smallest decoder cost).
     //
-    // The MTK c2.mtk.avc.decoder on the Streamer maxes out at 3
-    // simultaneous H.264 hardware decoders. Rather than picking 3 clips
-    // and ignoring the rest, we render the *whole* eligible H.264 pool
-    // as cards and only the 3 around the focused index actually decode
-    // (`active = true`). Focus naturally walks the row, LazyRow scrolls
-    // the cards, the active window slides → exactly one decoder dispose
-    // + one alloc per step.
-    //
-    // The pool is also visually deduped: greedy accept-if-different-
-    // enough so we don't show four near-duplicate names from the same
-    // clip family (INSANE_FPV_NEW vs INSANE_FPV_SHOTS_..., redbull vs
-    // red_bull_storm_chase, etc).
-    val activeWindowSize = 3
+    // 3 visible preview slots, but the *pool* of eligible H.264 clips
+    // can be larger. Pressing D-pad-Right past the last slot rotates the
+    // pool forward by one (the leftmost decoder pops off, a new clip
+    // takes the rightmost slot). Same for Left at the first slot.
+    // Because LazyRow is keyed on content.name the persisting slots
+    // re-use their existing ExoPlayer; only the entering and exiting
+    // clips churn — exactly 1 dispose + 1 alloc per rotation step.
+    val visibleSlots = 3
     val previewPool = mutableListOf<ContentItem>().apply {
         for (c in items) {
             if ("h264" !in c.name.lowercase()) continue
@@ -137,22 +139,63 @@ fun HomeScreen(
                     Text("LIVE STREAMS", style = AppType.label.copy(color = Tokens.fg))
                 }
                 Spacer(Modifier.height(Space.s3))
-                // Track which tile in the pool is focused. The 3 around it
-                // get active=true and decode; the rest render as static
-                // QUEUED placeholders. Stepping focus right releases one
-                // decoder on the left and acquires one on the right —
-                // exactly the carousel behaviour the user asked for.
-                var focusedIndex by remember { mutableStateOf(0) }
-                val activeRange = activeRangeAround(focusedIndex, previewPool.size, activeWindowSize)
+                // Carousel offset: the visible window starts here in the
+                // pool. Increment on D-pad-Right past the rightmost slot,
+                // decrement on D-pad-Left past the leftmost. Modulo wraps
+                // at the pool ends so the row keeps cycling.
+                var offset by remember { mutableStateOf(0) }
+                val poolSize = previewPool.size
+                val visible = remember(offset, poolSize) {
+                    if (poolSize <= visibleSlots) previewPool
+                    else (0 until visibleSlots).map { i ->
+                        previewPool[((offset + i) % poolSize + poolSize) % poolSize]
+                    }
+                }
+                // FocusRequester per pool item — used to pin focus to the
+                // item that just slid in after a rotation.
+                val focusReqs = remember(poolSize) {
+                    previewPool.associateWith { FocusRequester() }
+                }
                 LazyRow(horizontalArrangement = Arrangement.spacedBy(Space.s3)) {
-                    itemsIndexed(previewPool, key = { _, c -> c.name }) { i, c ->
+                    itemsIndexed(visible, key = { _, c -> c.name }) { i, c ->
+                        val isFirst = i == 0
+                        val isLast = i == visible.lastIndex
+                        val canRotate = poolSize > visibleSlots
                         LivePreviewTile(
                             content = c,
                             server = activeServer,
-                            active = i in activeRange,
+                            active = true,
                             onClick = { picked -> playPicked(picked.name) },
                             modifier = Modifier
-                                .onFocusChanged { if (it.isFocused) focusedIndex = i },
+                                .focusRequester(focusReqs[c] ?: FocusRequester())
+                                .onPreviewKeyEvent { ev ->
+                                    if (ev.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+                                    when {
+                                        canRotate && ev.key == Key.DirectionRight && isLast -> {
+                                            offset = (offset + 1) % poolSize
+                                            scope.launch {
+                                                delay(60)
+                                                val newLast = previewPool[
+                                                    ((offset + visibleSlots - 1) % poolSize + poolSize) % poolSize
+                                                ]
+                                                runCatching { focusReqs[newLast]?.requestFocus() }
+                                            }
+                                            true
+                                        }
+                                        canRotate && ev.key == Key.DirectionLeft && isFirst -> {
+                                            offset = ((offset - 1) % poolSize + poolSize) % poolSize
+                                            scope.launch {
+                                                delay(60)
+                                                val newFirst = previewPool[
+                                                    ((offset) % poolSize + poolSize) % poolSize
+                                                ]
+                                                runCatching { focusReqs[newFirst]?.requestFocus() }
+                                            }
+                                            true
+                                        }
+                                        else -> false
+                                    }
+                                },
                         )
                     }
                 }
