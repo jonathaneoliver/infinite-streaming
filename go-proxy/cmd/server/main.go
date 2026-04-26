@@ -4111,11 +4111,28 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 
 		w.Header().Set("Content-Length", strconv.Itoa(len(modifiedBody)))
 		w.WriteHeader(resp.StatusCode)
-		writer := bufio.NewWriter(w)
-		_, _ = writer.Write(modifiedBody)
-		_ = writer.Flush()
+		var downstream io.Writer = w
+		if idleTimeout > 0 {
+			idleW = newIdleWriter(w, idleTimeout, proxyCancel)
+			downstream = idleW
+		}
+		writer := bufio.NewWriter(downstream)
+		_, writeErr := writer.Write(modifiedBody)
+		flushErr := writer.Flush()
+		if idleW != nil {
+			idleW.Stop()
+		}
 		bytesOut = int64(len(modifiedBody))
 		log.Printf("[GO-PROXY][CONTENT] Applied content manipulation to master playlist session_id=%s", getString(sessionData, "session_id"))
+		if writeErr != nil || flushErr != nil {
+			if idleW != nil && idleW.timedOut.Load() {
+				bumpFaultCounter(sessionData, "transfer_idle_timeout")
+				logFaultEvent(sessionData, externalPort, "transfer_idle_timeout", requestKind, "transfer_idle_timeout_mid_body")
+			} else if errors.Is(writeErr, context.DeadlineExceeded) || errors.Is(flushErr, context.DeadlineExceeded) || errors.Is(proxyCtx.Err(), context.DeadlineExceeded) {
+				bumpFaultCounter(sessionData, "transfer_active_timeout")
+				logFaultEvent(sessionData, externalPort, "transfer_active_timeout", requestKind, "transfer_active_timeout_mid_body")
+			}
+		}
 	} else {
 		w.WriteHeader(resp.StatusCode)
 		var downstream io.Writer = w
