@@ -89,8 +89,6 @@ fun PlaybackScreen(
     vm: PlayerViewModel,
     onOpenSettings: () -> Unit,
 ) {
-    // Local alias so onKeyEvent can call it without re-declaring the param.
-    val openSettings = onOpenSettings
     // Auto-hide HUD after the spec'd timeout. The nonce bumps on every key
     // event while the HUD is visible (see onPreviewKeyEvent below) so users
     // navigating the transport bar don't get the HUD yanked out from under
@@ -139,12 +137,10 @@ fun PlaybackScreen(
                 // keys must route into the drawer's own focusable rows.
                 if (state.settingsOpen) return@onKeyEvent false
                 when (ev.key) {
-                    Key.DirectionUp, Key.Menu -> { vm.setHudVisible(true); true }
-                    // D-pad-Right at the bare playback layer mirrors the
-                    // drawer's slide-in direction — most intuitive shortcut.
-                    // (Once the HUD is up, Right is captured by the focused
-                    // transport button instead and walks across them.)
-                    Key.DirectionRight -> { openSettings(); true }
+                    // HUD lives at the bottom of the screen, so D-pad-Down
+                    // is the spatially intuitive reveal — reaching toward
+                    // where the chrome will appear.
+                    Key.DirectionDown, Key.Menu -> { vm.setHudVisible(true); true }
                     Key.DirectionCenter, Key.Enter -> {
                         vm.setHudVisible(true)
                         if (state.hudVisible) togglePlayPause(vm.player)
@@ -195,7 +191,7 @@ fun PlaybackScreen(
                 enter = fadeIn(), exit = fadeOut(),
             ) {
                 Text(
-                    "▶ SETTINGS  ·  ▲ HUD",
+                    "▼ HUD",
                     style = AppType.monoSm.copy(color = Tokens.fg.copy(alpha = 0.55f)),
                 )
             }
