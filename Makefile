@@ -35,12 +35,22 @@ shell:
 
 # Generate poster thumbnails for any content that doesn't already have one.
 # Runs inside the running container so it has access to /media/dynamic_content
-# and the ffmpeg already on the image.
+# and the ffmpeg already on the image. Targets the LOCAL Docker Compose
+# stack — for the test-deploy-dev stack on the remote ubuntu host see
+# the thumbnails-test-dev target below.
 thumbnails:
 	docker compose exec go-server /generate_abr/backfill_thumbnails.sh /media/dynamic_content
 
 thumbnails-force:
 	docker compose exec go-server /generate_abr/backfill_thumbnails.sh /media/dynamic_content --force
+
+# Same, but against the test-deploy-dev stack on jonathanoliver-ubuntu.local.
+# Use after `make test-deploy-dev` so the container has the latest script.
+thumbnails-test-dev:
+	ssh jonathanoliver@jonathanoliver-ubuntu.local 'cd ~/test-dev && docker compose exec -T go-server /generate_abr/backfill_thumbnails.sh /media/dynamic_content'
+
+thumbnails-test-dev-force:
+	ssh jonathanoliver@jonathanoliver-ubuntu.local 'cd ~/test-dev && docker compose exec -T go-server /generate_abr/backfill_thumbnails.sh /media/dynamic_content --force'
 
 build:
 	docker build --no-cache --progress=plain -t infinite-streaming .
