@@ -3502,37 +3502,38 @@ func transferTimeoutsFor(session SessionData, isSegment, isManifest, isMasterMan
 	return
 }
 
-// idleReader wraps an upstream response body; if no bytes are read for the
-// configured idle timeout, it cancels the request context (which closes the
-// connection mid-transfer) and records that the idle timer fired.
-type idleReader struct {
-	r        io.ReadCloser
+// idleWriter wraps the downstream io.Writer (proxy → client). If no
+// successful Write completes for the configured idle window, it cancels
+// the request context (which closes the connection mid-transfer) and
+// records that the idle timer fired. This catches a stalled client that
+// has stopped draining bytes — TCP back-pressure surfaces here.
+type idleWriter struct {
+	w        io.Writer
 	cancel   context.CancelFunc
 	timeout  time.Duration
 	timer    *time.Timer
 	timedOut atomic.Bool
 }
 
-func newIdleReader(r io.ReadCloser, timeout time.Duration, cancel context.CancelFunc) *idleReader {
-	ir := &idleReader{r: r, cancel: cancel, timeout: timeout}
-	ir.timer = time.AfterFunc(timeout, func() {
-		ir.timedOut.Store(true)
+func newIdleWriter(w io.Writer, timeout time.Duration, cancel context.CancelFunc) *idleWriter {
+	iw := &idleWriter{w: w, cancel: cancel, timeout: timeout}
+	iw.timer = time.AfterFunc(timeout, func() {
+		iw.timedOut.Store(true)
 		cancel()
 	})
-	return ir
+	return iw
 }
 
-func (ir *idleReader) Read(p []byte) (int, error) {
-	n, err := ir.r.Read(p)
+func (iw *idleWriter) Write(p []byte) (int, error) {
+	n, err := iw.w.Write(p)
 	if n > 0 {
-		ir.timer.Reset(ir.timeout)
+		iw.timer.Reset(iw.timeout)
 	}
 	return n, err
 }
 
-func (ir *idleReader) Close() error {
-	ir.timer.Stop()
-	return ir.r.Close()
+func (iw *idleWriter) Stop() {
+	iw.timer.Stop()
 }
 
 func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
@@ -4057,11 +4058,10 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer resp.Body.Close()
-	var idleBody *idleReader
-	if idleTimeout > 0 {
-		idleBody = newIdleReader(resp.Body, idleTimeout, proxyCancel)
-		resp.Body = idleBody
-	}
+	// idleW wraps the downstream writer below so the timer measures gaps
+	// in proxy-to-client writes (i.e. it fires when the player stops
+	// draining bytes), not gaps in origin-to-proxy reads.
+	var idleW *idleWriter
 	if resp.StatusCode >= 400 {
 		log.Printf(
 			"PROXY upstream_status status=%d url=%s filename=%s request_kind=%s session_id=%s player_id=%s external_port=%s",
@@ -4094,10 +4094,7 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 		bodyBytes, err := io.ReadAll(resp.Body)
 		if err != nil {
 			log.Printf("ERROR: Failed to read master playlist body: %v", err)
-			if idleBody != nil && idleBody.timedOut.Load() {
-				bumpFaultCounter(sessionData, "transfer_idle_timeout")
-				logFaultEvent(sessionData, externalPort, "transfer_idle_timeout", requestKind, "transfer_idle_timeout_mid_body")
-			} else if errors.Is(err, context.DeadlineExceeded) || errors.Is(proxyCtx.Err(), context.DeadlineExceeded) {
+			if errors.Is(err, context.DeadlineExceeded) || errors.Is(proxyCtx.Err(), context.DeadlineExceeded) {
 				bumpFaultCounter(sessionData, "transfer_active_timeout")
 				logFaultEvent(sessionData, externalPort, "transfer_active_timeout", requestKind, "transfer_active_timeout_mid_body")
 			}
@@ -4121,7 +4118,12 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 		log.Printf("[GO-PROXY][CONTENT] Applied content manipulation to master playlist session_id=%s", getString(sessionData, "session_id"))
 	} else {
 		w.WriteHeader(resp.StatusCode)
-		writer := bufio.NewWriter(w)
+		var downstream io.Writer = w
+		if idleTimeout > 0 {
+			idleW = newIdleWriter(w, idleTimeout, proxyCancel)
+			downstream = idleW
+		}
+		writer := bufio.NewWriter(downstream)
 		if isSegment {
 			log.Printf(
 				"[GO-PROXY][REQUEST][SEGMENT] response status=%d content_type=%s content_length=%s accept_ranges=%s content_range=%s url=%s session_id=%s external_port=%s",
@@ -4138,6 +4140,9 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 		var copyErr error
 		bytesOut, copyErr = io.Copy(writer, resp.Body)
 		flushErr := writer.Flush()
+		if idleW != nil {
+			idleW.Stop()
+		}
 		if copyErr != nil || flushErr != nil {
 			writeErr := copyErr
 			if writeErr == nil {
@@ -4145,7 +4150,7 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 			}
 			log.Printf("[GO-PROXY][ABANDONED] client disconnected mid-transfer url=%s bytes_sent=%d content_length=%s request_kind=%s session_id=%s external_port=%s err=%v",
 				upstreamURL, bytesOut, resp.Header.Get("Content-Length"), requestKind, getString(sessionData, "session_id"), externalPort, writeErr)
-			if idleBody != nil && idleBody.timedOut.Load() {
+			if idleW != nil && idleW.timedOut.Load() {
 				bumpFaultCounter(sessionData, "transfer_idle_timeout")
 				logFaultEvent(sessionData, externalPort, "transfer_idle_timeout", requestKind, "transfer_idle_timeout_mid_body")
 			} else if errors.Is(copyErr, context.DeadlineExceeded) || errors.Is(proxyCtx.Err(), context.DeadlineExceeded) {
