@@ -31,7 +31,12 @@ import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MimeTypes
 import androidx.media3.common.Player
+import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.Renderer
+import androidx.media3.exoplayer.audio.AudioRendererEventListener
+import androidx.media3.exoplayer.audio.AudioSink
+import androidx.media3.exoplayer.mediacodec.MediaCodecSelector
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 import androidx.tv.material3.Text
@@ -43,75 +48,53 @@ import com.infinitestream.player.ui.theme.Tokens
 import com.infinitestream.player.ui.theme.tvFocus
 
 /**
- * A small autoplay video card used on the Home screen. Owns its own
- * ExoPlayer hardwired to the 360p HLS rendition, hits the API port directly
- * (not the per-session go-proxy port — these previews shouldn't be subject
- * to failure injection), muted, looping. Several render in parallel.
+ * A small autoplay video card used on the Home screen.
+ *
+ * `active=true`  — owns an ExoPlayer hardwired to the 360p HLS rendition,
+ *                  muted, looping. Hits the API port directly so the
+ *                  per-session go-proxy isn't injecting failures.
+ * `active=false` — static placeholder card, no codec, no network.
+ *                  Used for off-window items in a sliding-decoder
+ *                  carousel: only the 3 tiles around focus actually
+ *                  decode, the rest render as cards.
  *
  * URL: `http://{host}:{apiPort}/go-live/{name}/playlist_6s_360p.m3u8`
  *
- * The 6 s segment variant keeps decoder workload low — at 360 p H.264 that's
- * roughly 1 Mbps and a few % of one ARM core per tile. The Google TV
- * Streamer's hardware decoder advertises enough sessions that 4–6 tiles
- * play simultaneously without falling back to software.
+ * The 6 s segment variant keeps decoder workload low; the MTK c2.mtk.avc
+ * decoder on the Google TV Streamer caps at 3 simultaneous instances,
+ * which is why we gate the active-decoder window.
  */
 @Composable
 fun LivePreviewTile(
     content: ContentItem,
     server: ServerEnvironment,
+    active: Boolean,
     onClick: (ContentItem) -> Unit,
+    modifier: Modifier = Modifier,
 ) {
-    val context = LocalContext.current
-    val player = remember(content.name, server.host, server.apiPort) {
-        ExoPlayer.Builder(context).build().apply {
-            volume = 0f
-            repeatMode = Player.REPEAT_MODE_ONE
-            // Cap to 360p in case go-live decides to serve a master playlist
-            // somewhere — otherwise we accidentally pull 1080 p+ for a tile.
-            // Also disable audio entirely: even with volume = 0 the audio
-            // track still gets decoded and the player grabs audio focus,
-            // which the user heard playing on Home from one of the tiles.
-            trackSelectionParameters = trackSelectionParameters.buildUpon()
-                .setMaxVideoSize(640, 360)
-                .setPreferredVideoMimeType(MimeTypes.VIDEO_H264)
-                .setTrackTypeDisabled(C.TRACK_TYPE_AUDIO, true)
-                .build()
-            setMediaItem(
-                MediaItem.fromUri(
-                    "${server.apiUrl}/go-live/${content.name}/playlist_6s_360p.m3u8"
-                )
-            )
-            prepare()
-            playWhenReady = true
-        }
-    }
-    DisposableEffect(player) { onDispose { player.release() } }
-
     Box(
-        modifier = Modifier
+        modifier = modifier
             .size(width = 220.dp, height = 124.dp)
             .tvFocus(cornerRadius = Radius.card)
             .clip(RoundedCornerShape(Radius.card))
             .background(Tokens.bgSoft)
             .clickable { onClick(content) },
     ) {
-        AndroidView(
-            modifier = Modifier.fillMaxSize(),
-            factory = { ctx ->
-                PlayerView(ctx).apply {
-                    this.player = player
-                    useController = false
-                    setBackgroundColor(android.graphics.Color.BLACK)
-                    isFocusable = false
-                    isFocusableInTouchMode = false
-                    descendantFocusability = ViewGroup.FOCUS_BLOCK_DESCENDANTS
-                    resizeMode = AspectRatioFrameLayout.RESIZE_MODE_ZOOM
-                }
-            },
-        )
+        if (active) {
+            ActivePlayerSurface(content, server)
+        } else {
+            // Inactive placeholder — flat card so the row can show every
+            // available clip without each one consuming a hardware decoder.
+            // The dot+title row below provides identification.
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Tokens.bgCard)
+            )
+        }
 
         // Bottom gradient + title overlay so the name stays legible against
-        // any frame.
+        // any frame (or the placeholder fill).
         Box(
             modifier = Modifier
                 .fillMaxSize()
@@ -128,9 +111,14 @@ fun LivePreviewTile(
             modifier = Modifier.align(Alignment.TopStart).padding(8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            StatusDot(color = Tokens.live)
+            StatusDot(color = if (active) Tokens.live else Tokens.fgFaint)
             Spacer(Modifier.width(4.dp))
-            Text("LIVE", style = AppType.monoSm.copy(color = Tokens.live))
+            Text(
+                if (active) "LIVE" else "QUEUED",
+                style = AppType.monoSm.copy(
+                    color = if (active) Tokens.live else Tokens.fgDim
+                ),
+            )
         }
 
         Text(
@@ -142,4 +130,69 @@ fun LivePreviewTile(
             maxLines = 1,
         )
     }
+}
+
+/**
+ * Inner Composable that actually instantiates an ExoPlayer + PlayerView.
+ * Pulled out so the whole player lifecycle is scoped to the active branch
+ * — entering/leaving active state runs proper enterComposition / dispose
+ * which release the hardware decoder slot back to the chip's pool.
+ */
+@Composable
+private fun ActivePlayerSurface(content: ContentItem, server: ServerEnvironment) {
+    val context = LocalContext.current
+    val player = remember(content.name, server.host, server.apiPort) {
+        // Tile players use a RenderersFactory that builds *no* audio
+        // renderers. Just disabling the audio track via TrackSelection
+        // wasn't enough — go-live emits a sibling Opus audio playlist
+        // (`playlist_6s_audio.m3u8`) and ExoPlayer's HLS source still
+        // span up an audio decoder for it, which the user heard playing
+        // on Home. With no audio renderer the audio track has nowhere
+        // to go and is never decoded.
+        val videoOnlyRenderers = object : DefaultRenderersFactory(context) {
+            override fun buildAudioRenderers(
+                context: android.content.Context,
+                extensionRendererMode: Int,
+                mediaCodecSelector: MediaCodecSelector,
+                enableDecoderFallback: Boolean,
+                audioSink: AudioSink,
+                eventHandler: android.os.Handler,
+                eventListener: AudioRendererEventListener,
+                out: ArrayList<Renderer>,
+            ) { /* nothing — silent previews */ }
+        }
+        ExoPlayer.Builder(context, videoOnlyRenderers).build().apply {
+            volume = 0f
+            repeatMode = Player.REPEAT_MODE_ONE
+            // Cap to 360p in case go-live decides to serve a master playlist
+            // somewhere — otherwise we accidentally pull 1080 p+ for a tile.
+            trackSelectionParameters = trackSelectionParameters.buildUpon()
+                .setMaxVideoSize(640, 360)
+                .setPreferredVideoMimeType(MimeTypes.VIDEO_H264)
+                .setTrackTypeDisabled(C.TRACK_TYPE_AUDIO, true)
+                .build()
+            setMediaItem(
+                MediaItem.fromUri(
+                    "${server.apiUrl}/go-live/${content.name}/playlist_6s_360p.m3u8"
+                )
+            )
+            prepare()
+            playWhenReady = true
+        }
+    }
+    DisposableEffect(player) { onDispose { player.release() } }
+    AndroidView(
+        modifier = Modifier.fillMaxSize(),
+        factory = { ctx ->
+            PlayerView(ctx).apply {
+                this.player = player
+                useController = false
+                setBackgroundColor(android.graphics.Color.BLACK)
+                isFocusable = false
+                isFocusableInTouchMode = false
+                descendantFocusability = ViewGroup.FOCUS_BLOCK_DESCENDANTS
+                resizeMode = AspectRatioFrameLayout.RESIZE_MODE_ZOOM
+            }
+        },
+    )
 }

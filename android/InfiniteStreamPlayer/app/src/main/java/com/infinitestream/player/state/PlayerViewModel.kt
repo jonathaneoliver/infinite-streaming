@@ -296,6 +296,14 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
     private fun applyContentFilter() {
         val s = _state.value
         val filtered = s.filteredContent
+        // Whether to actually re-load the player at the end. Only true when
+        // we already had a stream loaded (user is on Playback or just came
+        // from it). On a cold app launch / Home view, the content list
+        // arrives, this filter runs, and we set a default selection — but
+        // we DON'T silently start the main player and pull the master
+        // playlist (which has audio). That bled audio into Home in the
+        // background.
+        val wasPlaying = s.currentUrl.isNotEmpty()
         if (filtered.isEmpty()) {
             _state.update { it.copy(selectedContent = "", currentUrl = "") }
             player.stop(); player.clearMediaItems()
@@ -306,7 +314,7 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         if (pick != s.selectedContent) {
             _state.update { it.copy(selectedContent = pick) }
         }
-        buildUrlAndLoad()
+        if (wasPlaying) buildUrlAndLoad()
     }
 
     private fun buildUrlAndLoad() {
@@ -349,6 +357,11 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /** Lightest reset: re-load the same stream URL without rebuilding. */
+    /** Clear the "currently playing" URL marker. Called by MainActivity on
+     *  every leave-Playback so applyContentFilter knows we're not actively
+     *  playing and shouldn't reload. */
+    fun clearCurrentUrl() { _state.update { it.copy(currentUrl = "") } }
+
     fun retry() { if (_state.value.currentUrl.isNotEmpty()) loadStream(_state.value.currentUrl) }
 
     /** Medium reset: stop the player, rebuild the URL from the current

@@ -64,12 +64,21 @@ private fun AppRoot() {
     }
 
     // The main vm.player is shared across Playback / Home and keeps its
-    // own lifecycle — when leaving Playback we explicitly pause it,
-    // otherwise the user hears the previous stream's audio bleeding into
-    // Home where only muted preview tiles should be playing.
+    // own lifecycle. When leaving Playback we fully stop it: pause()
+    // alone would leave the audio bleeding into Home AND keep the
+    // hardware decoder allocated, eating one of the chip's four
+    // H.264 slots that we need for tile previews. stop() drops the
+    // codec; entering Playback again calls buildUrlAndLoad() which
+    // re-prepares from scratch.
     androidx.compose.runtime.LaunchedEffect(route) {
         if (route != Route.Playback) {
-            vm.player.pause()
+            vm.player.stop()
+            vm.player.clearMediaItems()
+            // Also clear the URL state so applyContentFilter (triggered by
+            // any later setProtocol / setCodec / re-fetch) treats us as
+            // "not currently playing" and doesn't silently re-spin the
+            // main player on Home.
+            vm.clearCurrentUrl()
         }
     }
 

@@ -259,10 +259,13 @@ private fun HudBar(
             Spacer(Modifier.height(Space.s4))
             Scrubber(vm.player)
             Spacer(Modifier.height(Space.s4))
-            // Wrapping the row in `.focusGroup()` keeps D-pad-Right/Left
-            // travel restricted to the transport buttons — without this,
-            // Compose's spatial focus search can jump out of the HUD entirely
-            // (e.g. into the embedded PlayerView) before reaching the gear.
+            // Single row: transport (-10 / play / +10 / settings) +
+            // recovery (Retry / Restart / Reload). focusGroup() keeps
+            // D-pad-Right/Left contained so the search can't bail out
+            // into the embedded PlayerView before reaching the last
+            // pill. Recovery pills sit to the right of the gear since
+            // they're escalating-severity "fix it" controls, secondary
+            // to the play/scrub primary group on the left.
             Row(
                 modifier = Modifier.fillMaxWidth().focusGroup(),
                 horizontalArrangement = Arrangement.Center,
@@ -279,17 +282,7 @@ private fun HudBar(
                 }
                 Spacer(Modifier.width(Space.s5))
                 TransportButton(Icons.Default.Settings, onActivity, onClick = onOpenSettings)
-            }
-            Spacer(Modifier.height(Space.s4))
-            // Recovery row — three increasing levels of "reset" for a
-            // broken streaming session. Retry just reloads the current URL,
-            // Restart rebuilds the URL from current state (picks up flag
-            // changes), Reload re-fetches the content list (used after
-            // server-side restarts).
-            Row(
-                modifier = Modifier.fillMaxWidth().focusGroup(),
-                horizontalArrangement = Arrangement.Center,
-            ) {
+                Spacer(Modifier.width(Space.s5))
                 RecoveryButton("Retry", onActivity) { vm.retry() }
                 Spacer(Modifier.width(Space.s2))
                 RecoveryButton("Restart", onActivity) { vm.restart() }

@@ -18,10 +18,16 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.focus.onFocusChanged
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import androidx.compose.ui.Alignment
@@ -83,35 +89,26 @@ fun HomeScreen(
     // timestamp suffix; for each distinct clip prefer the H.264 entry
     // (universally hardware-decodable, smallest decoder cost).
     //
-    // The MTK c2.mtk.avc.decoder on the Google TV Streamer returns
-    // NO_MEMORY beyond 3 simultaneous H.264 hardware decoders for the
-    // preview workload — testing 4 tiles produced reliable
-    // Codec2Client::createComponent NO_MEMORY in logcat at steady state
-    // on Home. Three tiles + the brief 1-decoder peak when the main
-    // playback player allocates during Home → Playback navigation = 4
-    // momentary, the chip's hard ceiling. (`playPicked` below also
-    // defers the main player's loadStream by 300 ms so the three tile
-    // decoders release first.)
-    val previewCount = 3
-    // Only H.264 in the preview row — HEVC and AV1 are software-decoded on
-    // many TV chips, which would crater the parallel-decode budget. The
-    // user's 4K HEVC/AV1 content still appears in the MORE STREAMS row
-    // below as static cards.
+    // The MTK c2.mtk.avc.decoder on the Streamer maxes out at 3
+    // simultaneous H.264 hardware decoders. Rather than picking 3 clips
+    // and ignoring the rest, we render the *whole* eligible H.264 pool
+    // as cards and only the 3 around the focused index actually decode
+    // (`active = true`). Focus naturally walks the row, LazyRow scrolls
+    // the cards, the active window slides → exactly one decoder dispose
+    // + one alloc per step.
     //
-    // The preview *content* set is also kept visually distinct: greedy
-    // accept-if-different-enough walk against everything already chosen,
-    // so the row doesn't end up showing four-of-the-same-windsurfer with
-    // slightly different filename suffixes (e.g. INSANE_FPV_NEW and
-    // INSANE_FPV_SHOTS_Hydrofoil_Windsurfing share enough tokens to count
-    // as the same clip for thumbnail-row purposes).
-    val previews = mutableListOf<ContentItem>().apply {
+    // The pool is also visually deduped: greedy accept-if-different-
+    // enough so we don't show four near-duplicate names from the same
+    // clip family (INSANE_FPV_NEW vs INSANE_FPV_SHOTS_..., redbull vs
+    // red_bull_storm_chase, etc).
+    val activeWindowSize = 3
+    val previewPool = mutableListOf<ContentItem>().apply {
         for (c in items) {
-            if (size >= previewCount) break
             if ("h264" !in c.name.lowercase()) continue
             if (none { similarPreviewKey(it.name, c.name) }) add(c)
         }
     }
-    val rest = items - previews.toSet()
+    val rest = items - previewPool.toSet()
 
     Box(
         modifier = Modifier
@@ -133,19 +130,29 @@ fun HomeScreen(
             Spacer(Modifier.height(Space.s7))
 
             val activeServer = state.activeServer
-            if (previews.isNotEmpty() && activeServer != null) {
+            if (previewPool.isNotEmpty() && activeServer != null) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     StatusDot(color = Tokens.live)
                     Spacer(Modifier.width(Space.s1))
                     Text("LIVE STREAMS", style = AppType.label.copy(color = Tokens.fg))
                 }
                 Spacer(Modifier.height(Space.s3))
+                // Track which tile in the pool is focused. The 3 around it
+                // get active=true and decode; the rest render as static
+                // QUEUED placeholders. Stepping focus right releases one
+                // decoder on the left and acquires one on the right —
+                // exactly the carousel behaviour the user asked for.
+                var focusedIndex by remember { mutableStateOf(0) }
+                val activeRange = activeRangeAround(focusedIndex, previewPool.size, activeWindowSize)
                 LazyRow(horizontalArrangement = Arrangement.spacedBy(Space.s3)) {
-                    items(previews, key = { it.name }) { c ->
+                    itemsIndexed(previewPool, key = { _, c -> c.name }) { i, c ->
                         LivePreviewTile(
                             content = c,
                             server = activeServer,
+                            active = i in activeRange,
                             onClick = { picked -> playPicked(picked.name) },
+                            modifier = Modifier
+                                .onFocusChanged { if (it.isFocused) focusedIndex = i },
                         )
                     }
                 }
@@ -255,6 +262,23 @@ private fun ContentCard(c: ContentItem, isLive: Boolean, onClick: (ContentItem) 
             )
         }
     }
+}
+
+/**
+ * Compute the inclusive index range of preview pool entries that should be
+ * actively decoding around the focused index. Returns a window of size
+ * `windowSize` centred on `focused`, clamped to the bounds of `total` so
+ * the count never exceeds `windowSize`. Examples for windowSize=3:
+ *
+ *   focused=0, total=10 → 0..2
+ *   focused=4, total=10 → 3..5
+ *   focused=9, total=10 → 7..9
+ */
+private fun activeRangeAround(focused: Int, total: Int, windowSize: Int): IntRange {
+    if (total <= windowSize) return 0 until total
+    val half = windowSize / 2
+    val start = (focused - half).coerceAtLeast(0).coerceAtMost(total - windowSize)
+    return start until (start + windowSize)
 }
 
 /**
