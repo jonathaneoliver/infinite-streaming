@@ -16,10 +16,16 @@ data class ContentItem(
     val name: String,
     val hasHls: Boolean,
     val hasDash: Boolean,
-    /** Server-relative path to a poster image (e.g.
-     *  `/go-live/{name}/thumbnail.jpg`), or null if the server hasn't
-     *  generated one for this clip yet. */
+    /** Server-relative path to the 640-px-wide poster (default size for
+     *  card / tile surfaces). Null when the server hasn't generated a
+     *  thumbnail for this clip yet. */
     val thumbnailPath: String? = null,
+    /** Server-relative path to the 320-px-wide poster, for small list
+     *  cells / mobile rows. */
+    val thumbnailPathSmall: String? = null,
+    /** Server-relative path to the 1280-px-wide poster, for hero
+     *  surfaces / Continue Watching backgrounds. */
+    val thumbnailPathLarge: String? = null,
 )
 
 enum class Protocol(val label: String) { HLS("HLS"), DASH("DASH") }

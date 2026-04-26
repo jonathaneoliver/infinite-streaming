@@ -1,40 +1,108 @@
 #!/usr/bin/env bash
 #
-# Walk an InfiniteStream content directory and emit a thumbnail.jpg for any
-# entry that's missing one. Skips dirs that already have a thumbnail unless
-# --force is passed.
+# Walk an InfiniteStream content directory and emit thumbnails for any
+# entry that's missing them. Skips dirs that already have a thumbnail
+# unless --force is passed.
 #
-# A "content entry" here is any subdirectory with at least one fMP4 init
-# segment under {res}/init.mp4 — those exist for every encoded clip and
-# avoid touching half-finished uploads.
+# Source preference order (per content):
+#   1. /data/originals/{stem}.{mp4,mov,mkv,...}   — pre-burnin upload,
+#      matched by content-name stem (everything before "_p200_codec").
+#      Set --originals to override the path.
+#   2. {dir}/360p/init.mp4 + segment_00001.m4s    — last-resort fallback;
+#      these segments have the AVG/PEAK/codec burn-in applied.
+#
+# Output per content: thumbnail-small.jpg (320 w), thumbnail.jpg (640 w),
+# thumbnail-large.jpg (1280 w). Single ffmpeg pass via the `thumbnail`
+# filter so we skip black / mostly-black frames.
 #
 # Usage:
-#   ./backfill_thumbnails.sh /path/to/dynamic_content
-#   ./backfill_thumbnails.sh /path/to/dynamic_content --force
-#
-# Run inside the container against /media/dynamic_content, or on the host
-# against the bind-mounted output dir.
+#   ./backfill_thumbnails.sh /media/dynamic_content
+#   ./backfill_thumbnails.sh /media/dynamic_content --force
+#   ./backfill_thumbnails.sh /media/dynamic_content --originals /custom/path
 set -euo pipefail
 
-CONTENT_DIR="${1:-}"
+CONTENT_DIR=""
+ORIGINALS_DIR="${INFINITE_STREAM_SOURCES_DIR:-/data/originals}"
 FORCE="false"
-if [[ "${2:-}" == "--force" || "${1:-}" == "--force" ]]; then
-    FORCE="true"
-    [[ "${1:-}" == "--force" ]] && CONTENT_DIR="${2:-}"
-fi
 
-if [[ -z "$CONTENT_DIR" ]]; then
-    echo "Usage: $0 <content_dir> [--force]" >&2
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --force) FORCE="true"; shift ;;
+        --originals) ORIGINALS_DIR="$2"; shift 2 ;;
+        --help|-h)
+            sed -n '2,18p' "$0"; exit 0 ;;
+        -*)
+            echo "Unknown flag: $1" >&2; exit 64 ;;
+        *)
+            if [[ -z "$CONTENT_DIR" ]]; then CONTENT_DIR="$1"; shift
+            else echo "Unexpected arg: $1" >&2; exit 64; fi ;;
+    esac
+done
+
+if [[ -z "$CONTENT_DIR" || ! -d "$CONTENT_DIR" ]]; then
+    echo "Usage: $0 <content_dir> [--force] [--originals <dir>]" >&2
     exit 64
-fi
-if [[ ! -d "$CONTENT_DIR" ]]; then
-    echo "Not a directory: $CONTENT_DIR" >&2
-    exit 66
 fi
 if ! command -v ffmpeg >/dev/null 2>&1; then
     echo "ffmpeg not found in PATH" >&2
     exit 69
 fi
+
+log() { echo "[backfill] $*"; }
+
+# Strip _p200_{h264|hevc|av1}[_TIMESTAMP] from a content name to recover
+# the original-source stem we'd expect in /data/originals.
+strip_codec() {
+    local n=$1
+    # case-insensitive lowercase first
+    n=$(echo "$n" | tr '[:upper:]' '[:lower:]')
+    # strip optional trailing _YYYYMMDD_HHMMSS, then _h264|_hevc|_av1, then _p200
+    n=$(echo "$n" | sed -E 's/_[0-9]{8}_[0-9]{6}$//')
+    n=$(echo "$n" | sed -E 's/_(h264|hevc|h265|av1)$//')
+    n=$(echo "$n" | sed -E 's/_p200$//')
+    printf '%s' "$n"
+}
+
+# Best-effort lookup of an /originals/ file matching a stripped content stem.
+# Tries exact stem first, then case-insensitive contains-match.
+find_original() {
+    local stem=$1
+    [[ -d "$ORIGINALS_DIR" ]] || return 1
+    local found=""
+    for ext in mp4 mov mkv m4v webm; do
+        for f in "$ORIGINALS_DIR"/"$stem".$ext "$ORIGINALS_DIR"/"$stem".${ext^^}; do
+            [[ -f "$f" ]] && { printf '%s' "$f"; return 0; }
+        done
+    done
+    # Loose match: any file whose lowercased stem contains the content stem.
+    found=$(ls "$ORIGINALS_DIR" 2>/dev/null \
+        | awk -v s="$stem" 'BEGIN{IGNORECASE=1} index(tolower($0), s){print; exit}')
+    if [[ -n "$found" ]]; then
+        printf '%s' "$ORIGINALS_DIR/$found"
+        return 0
+    fi
+    return 1
+}
+
+# Single-decode 3-output ffmpeg pass with the `thumbnail` filter to dodge
+# black / mostly-black frames. Returns 0 on success, 1 on failure.
+extract_thumbs() {
+    local src=$1
+    local dir=$2
+    local seek=${3:-10}
+    local fc="[0:v]thumbnail=300,split=3[a][b][c];"
+    fc+="[a]scale='min(320,iw)':-2[s];"
+    fc+="[b]scale='min(640,iw)':-2[m];"
+    fc+="[c]scale='min(1280,iw)':-2[l]"
+    local seek_args=()
+    [[ "$seek" -gt 0 ]] && seek_args=(-ss "$seek")
+    ffmpeg -nostdin -y -loglevel error \
+        "${seek_args[@]}" -i "$src" \
+        -filter_complex "$fc" \
+        -map "[s]" -frames:v 1 -q:v 4 "${dir}/thumbnail-small.jpg" \
+        -map "[m]" -frames:v 1 -q:v 4 "${dir}/thumbnail.jpg" \
+        -map "[l]" -frames:v 1 -q:v 4 "${dir}/thumbnail-large.jpg"
+}
 
 made=0
 skipped=0
@@ -44,47 +112,53 @@ for dir in "$CONTENT_DIR"/*/; do
     name="$(basename "$dir")"
     case "$name" in .*|_*) continue ;; esac
 
-    thumb="${dir}thumbnail.jpg"
-    if [[ -f "$thumb" && "$FORCE" != "true" ]]; then
+    if [[ -f "${dir}thumbnail.jpg" && "$FORCE" != "true" ]]; then
         skipped=$((skipped+1))
         continue
     fi
 
-    # Pick the smallest available rendition's first segment as input — the
-    # source upload may not be on disk anymore (post-encode cleanup), but
-    # the per-rendition fMP4 fragments always are. Walk the resolutions in
-    # ascending order so we read the cheapest one available.
+    stem=$(strip_codec "$name")
     src=""
-    for res_dir in "${dir}360p" "${dir}540p" "${dir}480p" "${dir}720p" "${dir}1080p" "${dir}2160p"; do
-        init="${res_dir}/init.mp4"
-        seg="${res_dir}/segment_00001.m4s"
-        if [[ -f "$init" && -f "$seg" ]]; then
-            # Concatenate init + first segment for ffmpeg via a temp file
-            # (some ffmpeg builds choke on `concat:` with fMP4).
-            tmp_input="${dir}.thumb.tmp.mp4"
-            cat "$init" "$seg" >"$tmp_input"
-            src="$tmp_input"
-            break
-        fi
-    done
+    src_kind=""
+
+    # 1. Try the pre-burnin original.
+    if original=$(find_original "$stem"); then
+        src="$original"
+        src_kind="original"
+    fi
+
+    # 2. Fall back to the smallest available rendition's first segment.
+    if [[ -z "$src" ]]; then
+        for res_dir in "${dir}360p" "${dir}540p" "${dir}480p" "${dir}720p" "${dir}1080p" "${dir}2160p"; do
+            init="${res_dir}/init.mp4"
+            seg="${res_dir}/segment_00001.m4s"
+            if [[ -f "$init" && -f "$seg" ]]; then
+                tmp_input="${dir}.thumb.tmp.mp4"
+                cat "$init" "$seg" >"$tmp_input"
+                src="$tmp_input"
+                src_kind="segment-fallback"
+                break
+            fi
+        done
+    fi
 
     if [[ -z "$src" ]]; then
-        echo "skip $name (no rendition found)"
+        log "skip $name (no source found)"
         skipped=$((skipped+1))
         continue
     fi
 
-    if ffmpeg -nostdin -y -loglevel error \
-        -i "$src" \
-        -frames:v 1 -vf "scale='min(640,iw)':-2" \
-        -q:v 4 "$thumb"; then
-        echo "made $name"
+    # First attempt with seek=10. If clip is shorter than 10 s it'll fail;
+    # retry from the start.
+    if extract_thumbs "$src" "$dir" 10 || extract_thumbs "$src" "$dir" 0; then
+        log "made $name ($src_kind)"
         made=$((made+1))
     else
-        echo "fail $name"
+        log "fail $name"
         failed=$((failed+1))
     fi
-    rm -f "$src"
+
+    [[ "$src_kind" == "segment-fallback" ]] && rm -f "$src"
 done
 
-echo "thumbnails: $made made, $skipped skipped, $failed failed"
+log "thumbnails: $made made, $skipped skipped, $failed failed"

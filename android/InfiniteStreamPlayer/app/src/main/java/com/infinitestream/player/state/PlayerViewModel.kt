@@ -278,12 +278,13 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
                 val arr = JSONArray(body)
                 val items = (0 until arr.length()).map { i ->
                     val o = arr.getJSONObject(i)
-                    val thumb = o.optString("thumbnail_url", "").ifEmpty { null }
                     ContentItem(
                         name = o.getString("name"),
                         hasHls = o.optBoolean("has_hls", false),
                         hasDash = o.optBoolean("has_dash", false),
-                        thumbnailPath = thumb,
+                        thumbnailPath = o.optString("thumbnail_url", "").ifEmpty { null },
+                        thumbnailPathSmall = o.optString("thumbnail_url_small", "").ifEmpty { null },
+                        thumbnailPathLarge = o.optString("thumbnail_url_large", "").ifEmpty { null },
                     )
                 }
                 items to null

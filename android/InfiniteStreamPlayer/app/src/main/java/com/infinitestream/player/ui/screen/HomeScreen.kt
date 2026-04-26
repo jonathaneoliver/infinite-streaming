@@ -301,11 +301,13 @@ private fun ContentCard(
             .border(1.dp, Tokens.line, RoundedCornerShape(Radius.card))
             .clickable { onClick(c) },
     ) {
-        // Poster thumbnail behind the label — gives the row a real
-        // visual character once the server has run thumbnail backfill.
-        if (c.thumbnailPath != null && apiUrlBase != null) {
+        // Poster thumbnail behind the label. Prefer the 320-wide small
+        // variant since these cards are 174 px wide on screen — saves
+        // bandwidth and gives Coil less to decode at scroll.
+        val thumb = c.thumbnailPathSmall ?: c.thumbnailPath
+        if (thumb != null && apiUrlBase != null) {
             coil.compose.AsyncImage(
-                model = "$apiUrlBase${c.thumbnailPath}",
+                model = "$apiUrlBase$thumb",
                 contentDescription = null,
                 contentScale = androidx.compose.ui.layout.ContentScale.Crop,
                 modifier = Modifier.fillMaxSize(),

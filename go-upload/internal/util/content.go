@@ -12,14 +12,19 @@ import (
 )
 
 type ContentInfo struct {
-	Name            string  `json:"name"`
-	HasDash         bool    `json:"has_dash"`
-	HasHls          bool    `json:"has_hls"`
-	HasThumbnail    bool    `json:"has_thumbnail"`
-	ThumbnailURL    string  `json:"thumbnail_url,omitempty"`
-	SegmentDuration *int    `json:"segment_duration"`
-	MaxResolution   *string `json:"max_resolution"`
-	MaxHeight       *int    `json:"max_height"`
+	Name              string  `json:"name"`
+	HasDash           bool    `json:"has_dash"`
+	HasHls            bool    `json:"has_hls"`
+	HasThumbnail      bool    `json:"has_thumbnail"`
+	// 640 px wide — the default tile size on most clients.
+	ThumbnailURL      string  `json:"thumbnail_url,omitempty"`
+	// 320 px wide — list rows / mobile.
+	ThumbnailURLSmall string  `json:"thumbnail_url_small,omitempty"`
+	// 1280 px wide — Continue Watching hero / large surfaces.
+	ThumbnailURLLarge string  `json:"thumbnail_url_large,omitempty"`
+	SegmentDuration   *int    `json:"segment_duration"`
+	MaxResolution     *string `json:"max_resolution"`
+	MaxHeight         *int    `json:"max_height"`
 }
 
 func ListContent(contentDir string) ([]ContentInfo, error) {
@@ -44,26 +49,32 @@ func ListContent(contentDir string) ([]ContentInfo, error) {
 			continue
 		}
 		// Thumbnail discovery — generate_abr/create_abr_ladder.sh emits
-		// thumbnail.jpg per output dir. Clients use this as a poster
-		// image so non-active tiles don't need to spin up a video
-		// decoder. URL is relative under the same /go-live/{name}/ path
-		// served by nginx as a static file.
+		// three jpegs per output dir (320/640/1280 px wide). Clients pick
+		// the size that fits their surface so we don't pay client-side
+		// rescaling cost. We only stat the 640 default; the script writes
+		// all three in a single ffmpeg pass so any one of them implies
+		// the others.
 		hasThumbnail := fileExists(filepath.Join(itemPath, "thumbnail.jpg"))
-		thumbnailURL := ""
+		thumbnailURL, thumbnailURLSmall, thumbnailURLLarge := "", "", ""
 		if hasThumbnail {
-			thumbnailURL = "/go-live/" + name + "/thumbnail.jpg"
+			base := "/go-live/" + name
+			thumbnailURL = base + "/thumbnail.jpg"
+			thumbnailURLSmall = base + "/thumbnail-small.jpg"
+			thumbnailURLLarge = base + "/thumbnail-large.jpg"
 		}
 		segmentDuration := detectSegmentDuration(itemPath)
 		maxResolution, maxHeight := detectMaxResolution(itemPath)
 		contentList = append(contentList, ContentInfo{
-			Name:            name,
-			HasDash:         hasDash,
-			HasHls:          hasHls,
-			HasThumbnail:    hasThumbnail,
-			ThumbnailURL:    thumbnailURL,
-			SegmentDuration: segmentDuration,
-			MaxResolution:   maxResolution,
-			MaxHeight:       maxHeight,
+			Name:              name,
+			HasDash:           hasDash,
+			HasHls:            hasHls,
+			HasThumbnail:      hasThumbnail,
+			ThumbnailURL:      thumbnailURL,
+			ThumbnailURLSmall: thumbnailURLSmall,
+			ThumbnailURLLarge: thumbnailURLLarge,
+			SegmentDuration:   segmentDuration,
+			MaxResolution:     maxResolution,
+			MaxHeight:         maxHeight,
 		})
 	}
 
