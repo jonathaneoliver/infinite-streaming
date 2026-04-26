@@ -1357,6 +1357,12 @@ func (a *App) handlePostSessionMetrics(w http.ResponseWriter, r *http.Request) {
 		metricsOnly[key] = value
 	}
 	metricsOnly["session_id"] = id
+	// Stamp the moment we received this metrics payload, on the server's
+	// own clock. Pairs with player_metrics_playhead_wallclock_ms (the
+	// encoder's PDT at the playhead) so the dashboard can compute a
+	// ground-truth live offset that's independent of the client's clock:
+	//   trueOffsetMs = server_received_at_ms - playhead_wallclock_ms
+	metricsOnly["server_received_at_ms"] = time.Now().UnixMilli()
 	a.saveSessionByID(id, metricsOnly)
 	if isSignificantPlayerEvent(getString(metricsOnly, "player_metrics_last_event")) {
 		a.flushSessionsBroadcast()
@@ -4232,7 +4238,19 @@ func (a *App) applyContentManipulation(body []byte, session SessionData, content
 
 	// Handle HLS master playlists
 	if strings.Contains(strings.ToLower(contentType), "mpegurl") || strings.Contains(strings.ToLower(contentType), "m3u8") {
-		return manipulateHLSMaster(body, stripCodecs, stripAvgBandwidth, overstateBandwidth, liveOffset, allowedVariants)
+		result, err := manipulateHLSMaster(body, stripCodecs, stripAvgBandwidth, overstateBandwidth, liveOffset, allowedVariants)
+		if err != nil {
+			return nil, err
+		}
+		// Variant playlists carry HOLD-BACK / PART-HOLD-BACK and their own
+		// EXT-X-START tag (not all players honor master-level inheritance —
+		// notably hls.js, which would otherwise park at the oldest segment).
+		// Master EXT-X-START is rewritten inside manipulateHLSMaster; this
+		// pass handles the variant side. No-op on master playlists.
+		if liveOffset > 0 {
+			result = rewriteVariantLiveOffsetTags(result, liveOffset)
+		}
+		return result, nil
 	}
 
 	// Handle DASH manifests
@@ -4369,6 +4387,54 @@ func manipulateHLSMaster(body []byte, stripCodecs bool, stripAvgBandwidth bool, 
 	}
 
 	return buf.Bytes(), nil
+}
+
+// rewriteVariantLiveOffsetTags updates HOLD-BACK inside EXT-X-SERVER-CONTROL
+// lines and TIME-OFFSET inside EXT-X-START lines of a media (variant)
+// playlist. PART-HOLD-BACK is intentionally left alone: it's a sub-second
+// timing parameter (>= 3× partial duration, ~0.6s on our LL playlist), not a
+// window-scale offset, so applying the user's content_live_offset value
+// (typically 6–24s) to it would push LL clients to a deep offset and defeat
+// the LL use case. Other attributes (CAN-SKIP-UNTIL, PRECISE, etc.) are
+// preserved. No clamping: the user is testing spec-violating values too
+// (HLS spec requires HOLD-BACK >= 3× target duration; AVPlayer rejects below
+// that with -12646), so we surface the chosen value verbatim.
+// Master-playlist EXT-X-START is rewritten elsewhere — see manipulateHLSMaster.
+var (
+	serverControlLineRE = regexp.MustCompile(`(?m)^#EXT-X-SERVER-CONTROL:.*$`)
+	extXStartLineRE     = regexp.MustCompile(`(?m)^#EXT-X-START:.*$`)
+)
+
+func rewriteVariantLiveOffsetTags(body []byte, liveOffsetSecs int) []byte {
+	// Master playlists carry #EXT-X-STREAM-INF and have no HOLD-BACK; their
+	// EXT-X-START is already rewritten by manipulateHLSMaster. Skip cleanly
+	// here so we don't double-write (same value, but hidden coupling).
+	if bytes.Contains(body, []byte("#EXT-X-STREAM-INF")) {
+		return body
+	}
+	holdBackValue := fmt.Sprintf("%d.000", liveOffsetSecs)
+	timeOffsetValue := fmt.Sprintf("-%d.000", liveOffsetSecs)
+	body = serverControlLineRE.ReplaceAllFunc(body, func(line []byte) []byte {
+		const prefix = "#EXT-X-SERVER-CONTROL:"
+		attrs := strings.Split(strings.TrimPrefix(string(line), prefix), ",")
+		for i, a := range attrs {
+			if strings.HasPrefix(strings.TrimSpace(a), "HOLD-BACK=") {
+				attrs[i] = "HOLD-BACK=" + holdBackValue
+			}
+		}
+		return []byte(prefix + strings.Join(attrs, ","))
+	})
+	body = extXStartLineRE.ReplaceAllFunc(body, func(line []byte) []byte {
+		const prefix = "#EXT-X-START:"
+		attrs := strings.Split(strings.TrimPrefix(string(line), prefix), ",")
+		for i, a := range attrs {
+			if strings.HasPrefix(strings.TrimSpace(a), "TIME-OFFSET=") {
+				attrs[i] = "TIME-OFFSET=" + timeOffsetValue
+			}
+		}
+		return []byte(prefix + strings.Join(attrs, ","))
+	})
+	return body
 }
 
 // manipulateDASHManifest modifies a DASH manifest

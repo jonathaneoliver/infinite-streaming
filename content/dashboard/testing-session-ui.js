@@ -612,6 +612,7 @@
                             <div class="session-item"><span class="label">Seekable End</span><span class="value" data-field="player_metrics_seekable_end_s">${formatSeconds(session.player_metrics_seekable_end_s)}</span></div>
                             <div class="session-item"><span class="label">Live Edge</span><span class="value" data-field="player_metrics_live_edge_s">${formatSeconds(session.player_metrics_live_edge_s)}</span></div>
                             <div class="session-item"><span class="label">Live Offset</span><span class="value" data-field="player_metrics_live_offset_s">${formatSeconds(session.player_metrics_live_offset_s)}</span></div>
+                            <div class="session-item"><span class="label">Wall-Clock Offset</span><span class="value" data-field="player_metrics_true_offset_s">${formatSeconds(session.player_metrics_true_offset_s)}</span></div>
                             <div class="session-item"><span class="label">Display Resolution</span><span class="value" data-field="player_metrics_display_resolution">${session.player_metrics_display_resolution ?? '—'}</span></div>
                             <div class="session-item"><span class="label">Video Resolution</span><span class="value" data-field="player_metrics_video_resolution">${session.player_metrics_video_resolution ?? '—'}</span></div>
                             <div class="session-item"><span class="label">First Frame Time</span><span class="value" data-field="player_metrics_video_first_frame_time_s">${formatSeconds(session.player_metrics_video_first_frame_time_s)}</span></div>
@@ -815,6 +816,9 @@
                                                 <label><input type="radio" name="content_live_offset_${sessionId}" data-field="content_live_offset" value="6" ${String(session.content_live_offset) === '6' ? 'checked' : ''}> 6s</label>
                                                 <label><input type="radio" name="content_live_offset_${sessionId}" data-field="content_live_offset" value="18" ${String(session.content_live_offset) === '18' ? 'checked' : ''}> 18s</label>
                                                 <label><input type="radio" name="content_live_offset_${sessionId}" data-field="content_live_offset" value="24" ${String(session.content_live_offset) === '24' ? 'checked' : ''}> 24s</label>
+                                            </div>
+                                            <div class="content-tab-note" style="margin-top:4px">
+                                                Drives both the player's <strong>start time</strong> (<code>EXT-X-START:TIME-OFFSET</code>, master and variant) and its steady-state <strong>HOLD-BACK</strong> on 2s/6s variants. <code>PART-HOLD-BACK</code> on the LL variant is left untouched since it's a sub-second LL timing parameter, not a window-scale offset. Values below the spec minimum (3× target duration) may be rejected by AVPlayer.
                                             </div>
                                         </div>
                                         <div class="content-tab-note">
