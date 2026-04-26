@@ -1,8 +1,8 @@
 name: Claude Code
 
 # Triggers Claude in response to `@claude` mentions in issue / PR / review
-# comments. Auth: ANTHROPIC_API_KEY secret + the Claude GitHub App
-# (https://github.com/apps/claude) installed on the repo.
+# comments. Auth: CLAUDE_CODE_OAUTH_TOKEN secret (Max plan) + the Claude
+# GitHub App (https://github.com/apps/claude) installed on the repo.
 
 on:
   issue_comment:
@@ -18,6 +18,7 @@ permissions:
   contents: write
   issues: write
   pull-requests: write
+  id-token: write
 
 jobs:
   claude:
@@ -36,4 +37,4 @@ jobs:
 
       - uses: anthropics/claude-code-action@v1
         with:
-          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}

@@ -1,0 +1,44 @@
+name: Claude PR Review
+
+# Auto-review every non-draft PR via anthropics/claude-code-action.
+# The `prompt:` field flips the action from "wait for @claude mention"
+# into automation mode, so it runs without manual invocation.
+# Auth: CLAUDE_CODE_OAUTH_TOKEN (Max plan) — same secret as claude.yml.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+  id-token: write
+
+jobs:
+  review:
+    if: |
+      !github.event.pull_request.draft &&
+      !contains(github.event.pull_request.labels.*.name, 'skip-review')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          prompt: |
+            Review this pull request for correctness, security, regressions,
+            and adherence to project conventions (see CLAUDE.md and AGENTS.md
+            in the repo root).
+
+            Post specific findings as inline review comments on the changed
+            lines. If you have no concerns, post a single approval comment
+            summarizing what the PR does and why it looks good.
+
+            Focus on: logic errors, race conditions, missing error handling at
+            real boundaries, security issues (command injection, path traversal,
+            etc.), and divergence from existing patterns. Do not flag stylistic
+            nits unless they obscure intent.
+          claude_args: "--max-turns 5 --model claude-opus-4-7"
