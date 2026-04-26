@@ -205,9 +205,12 @@ fun HomeScreen(
             if (rest.isNotEmpty()) {
                 Text("MORE STREAMS", style = AppType.label.copy(color = Tokens.fg))
                 Spacer(Modifier.height(Space.s3))
-                ContentRow(items = rest, isLive = false, onClick = { c ->
-                    playPicked(c.name)
-                })
+                ContentRow(
+                    items = rest,
+                    apiUrlBase = activeServer?.apiUrl,
+                    isLive = false,
+                    onClick = { c -> playPicked(c.name) },
+                )
             }
 
             if (items.isEmpty()) {
@@ -271,14 +274,24 @@ private fun Hero(featured: ContentItem?, state: UiState, onResume: () -> Unit) {
 }
 
 @Composable
-private fun ContentRow(items: List<ContentItem>, isLive: Boolean, onClick: (ContentItem) -> Unit) {
+private fun ContentRow(
+    items: List<ContentItem>,
+    apiUrlBase: String?,
+    isLive: Boolean,
+    onClick: (ContentItem) -> Unit,
+) {
     LazyRow(horizontalArrangement = Arrangement.spacedBy(Space.s3)) {
-        items(items, key = { it.name }) { c -> ContentCard(c, isLive, onClick) }
+        items(items, key = { it.name }) { c -> ContentCard(c, apiUrlBase, isLive, onClick) }
     }
 }
 
 @Composable
-private fun ContentCard(c: ContentItem, isLive: Boolean, onClick: (ContentItem) -> Unit) {
+private fun ContentCard(
+    c: ContentItem,
+    apiUrlBase: String?,
+    isLive: Boolean,
+    onClick: (ContentItem) -> Unit,
+) {
     Box(
         modifier = Modifier
             .size(width = 174.dp, height = 100.dp)
@@ -286,10 +299,31 @@ private fun ContentCard(c: ContentItem, isLive: Boolean, onClick: (ContentItem) 
             .clip(RoundedCornerShape(Radius.card))
             .background(Tokens.bgSoft)
             .border(1.dp, Tokens.line, RoundedCornerShape(Radius.card))
-            .clickable { onClick(c) }
-            .padding(Space.s2),
+            .clickable { onClick(c) },
     ) {
-        Column(modifier = Modifier.fillMaxSize()) {
+        // Poster thumbnail behind the label — gives the row a real
+        // visual character once the server has run thumbnail backfill.
+        if (c.thumbnailPath != null && apiUrlBase != null) {
+            coil.compose.AsyncImage(
+                model = "$apiUrlBase${c.thumbnailPath}",
+                contentDescription = null,
+                contentScale = androidx.compose.ui.layout.ContentScale.Crop,
+                modifier = Modifier.fillMaxSize(),
+            )
+            // Bottom gradient so the title stays legible against any frame.
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(
+                        Brush.verticalGradient(
+                            0f to Color.Transparent,
+                            0.55f to Color.Transparent,
+                            1f to Color.Black.copy(alpha = 0.85f),
+                        )
+                    )
+            )
+        }
+        Column(modifier = Modifier.fillMaxSize().padding(Space.s2)) {
             if (isLive) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     StatusDot(color = Tokens.live)

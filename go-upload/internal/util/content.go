@@ -15,6 +15,8 @@ type ContentInfo struct {
 	Name            string  `json:"name"`
 	HasDash         bool    `json:"has_dash"`
 	HasHls          bool    `json:"has_hls"`
+	HasThumbnail    bool    `json:"has_thumbnail"`
+	ThumbnailURL    string  `json:"thumbnail_url,omitempty"`
 	SegmentDuration *int    `json:"segment_duration"`
 	MaxResolution   *string `json:"max_resolution"`
 	MaxHeight       *int    `json:"max_height"`
@@ -41,12 +43,24 @@ func ListContent(contentDir string) ([]ContentInfo, error) {
 		if !hasDash && !hasHls {
 			continue
 		}
+		// Thumbnail discovery — generate_abr/create_abr_ladder.sh emits
+		// thumbnail.jpg per output dir. Clients use this as a poster
+		// image so non-active tiles don't need to spin up a video
+		// decoder. URL is relative under the same /go-live/{name}/ path
+		// served by nginx as a static file.
+		hasThumbnail := fileExists(filepath.Join(itemPath, "thumbnail.jpg"))
+		thumbnailURL := ""
+		if hasThumbnail {
+			thumbnailURL = "/go-live/" + name + "/thumbnail.jpg"
+		}
 		segmentDuration := detectSegmentDuration(itemPath)
 		maxResolution, maxHeight := detectMaxResolution(itemPath)
 		contentList = append(contentList, ContentInfo{
 			Name:            name,
 			HasDash:         hasDash,
 			HasHls:          hasHls,
+			HasThumbnail:    hasThumbnail,
+			ThumbnailURL:    thumbnailURL,
 			SegmentDuration: segmentDuration,
 			MaxResolution:   maxResolution,
 			MaxHeight:       maxHeight,

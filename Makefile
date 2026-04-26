@@ -33,6 +33,15 @@ stop:
 shell:
 	docker compose exec go-server /bin/sh
 
+# Generate poster thumbnails for any content that doesn't already have one.
+# Runs inside the running container so it has access to /media/dynamic_content
+# and the ffmpeg already on the image.
+thumbnails:
+	docker compose exec go-server /generate_abr/backfill_thumbnails.sh /media/dynamic_content
+
+thumbnails-force:
+	docker compose exec go-server /generate_abr/backfill_thumbnails.sh /media/dynamic_content --force
+
 build:
 	docker build --no-cache --progress=plain -t infinite-streaming .
 

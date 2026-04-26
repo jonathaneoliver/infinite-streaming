@@ -3264,6 +3264,30 @@ EOF
 # ENCODING REPORT GENERATION (PHASE 3)
 # ============================================================================
 
+generate_thumbnail() {
+    # Pull a single representative frame from the source so client apps
+    # have a poster image to render in browse-row tiles + Continue Watching
+    # heroes without spinning up a video decoder. Sampled at 5 s in (early
+    # enough that almost every clip has reached video, late enough to skip
+    # studio bumpers / fade-ins). Output is constrained to 640 px wide so
+    # the file stays small (~50–100 KB) and survives mobile-data fetches.
+    local output_dir=$1
+    local thumb_file="${output_dir}/thumbnail.jpg"
+    if [[ -z "$INPUT_FILE" || ! -f "$INPUT_FILE" ]]; then
+        log "Skipping thumbnail (no INPUT_FILE)"
+        return 0
+    fi
+    log "Generating thumbnail: $thumb_file"
+    if command ffmpeg -nostdin -y -loglevel error \
+        -ss 5 -i "$INPUT_FILE" \
+        -frames:v 1 -vf "scale='min(640,iw)':-2" \
+        -q:v 4 "$thumb_file"; then
+        log "Thumbnail written: $(stat -f%z "$thumb_file" 2>/dev/null || stat -c%s "$thumb_file" 2>/dev/null || echo \?) bytes"
+    else
+        log "Thumbnail extraction failed (non-fatal)"
+    fi
+}
+
 generate_encoding_report() {
     local output_dir=$1
     local codec=$2
@@ -3785,16 +3809,19 @@ main() {
     TOTAL_SECONDS=$((TOTAL_DURATION % 60))
     
     if [[ "$RESUME_MODE" == "false" ]]; then
-        # Generate encoding reports
+        # Generate poster thumbnails + encoding reports
         if [[ "$CODEC_SELECTION" == "both" ]] || [[ "$CODEC_SELECTION" == "all" ]] || [[ "$CODEC_SELECTION" == "hevc" ]]; then
+            generate_thumbnail "$OUTPUT_DIR_HEVC"
             generate_encoding_report "$OUTPUT_DIR_HEVC" "hevc"
         fi
-        
+
         if [[ "$CODEC_SELECTION" == "both" ]] || [[ "$CODEC_SELECTION" == "all" ]] || [[ "$CODEC_SELECTION" == "h264" ]]; then
+            generate_thumbnail "$OUTPUT_DIR_H264"
             generate_encoding_report "$OUTPUT_DIR_H264" "h264"
         fi
-        
+
         if [[ "$CODEC_SELECTION" == "all" ]] || [[ "$CODEC_SELECTION" == "av1" ]]; then
+            generate_thumbnail "$OUTPUT_DIR_AV1"
             generate_encoding_report "$OUTPUT_DIR_AV1" "av1"
         fi
         print_summary

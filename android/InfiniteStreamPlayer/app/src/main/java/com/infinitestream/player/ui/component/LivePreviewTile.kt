@@ -40,6 +40,7 @@ import androidx.media3.exoplayer.mediacodec.MediaCodecSelector
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 import androidx.tv.material3.Text
+import coil.compose.AsyncImage
 import com.infinitestream.player.state.ContentItem
 import com.infinitestream.player.state.ServerEnvironment
 import com.infinitestream.player.ui.theme.AppType
@@ -80,17 +81,27 @@ fun LivePreviewTile(
             .background(Tokens.bgSoft)
             .clickable { onClick(content) },
     ) {
-        if (active) {
-            ActivePlayerSurface(content, server)
+        // Poster thumbnail underneath everything else. Renders for both
+        // active and inactive tiles so the video has something to fade
+        // in over while the first segment buffers (instead of a black
+        // tile). Falls back to a flat fill when the server hasn't yet
+        // generated a thumbnail.jpg for this clip.
+        if (content.thumbnailPath != null) {
+            AsyncImage(
+                model = "${server.apiUrl}${content.thumbnailPath}",
+                contentDescription = null,
+                contentScale = androidx.compose.ui.layout.ContentScale.Crop,
+                modifier = Modifier.fillMaxSize(),
+            )
         } else {
-            // Inactive placeholder — flat card so the row can show every
-            // available clip without each one consuming a hardware decoder.
-            // The dot+title row below provides identification.
             Box(
                 modifier = Modifier
                     .fillMaxSize()
                     .background(Tokens.bgCard)
             )
+        }
+        if (active) {
+            ActivePlayerSurface(content, server)
         }
 
         // Bottom gradient + title overlay so the name stays legible against

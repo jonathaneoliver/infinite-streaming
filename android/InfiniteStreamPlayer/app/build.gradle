@@ -70,6 +70,9 @@ dependencies {
     implementation 'androidx.tv:tv-foundation:1.0.0-alpha10'
     implementation 'androidx.tv:tv-material:1.0.0-alpha10'
 
+    // Async image loading for poster thumbnails (`/go-live/{name}/thumbnail.jpg`).
+    implementation 'io.coil-kt:coil-compose:2.5.0'
+
     // ExoPlayer (Media3)
     implementation 'androidx.media3:media3-exoplayer:1.2.1'
     implementation 'androidx.media3:media3-exoplayer-dash:1.2.1'

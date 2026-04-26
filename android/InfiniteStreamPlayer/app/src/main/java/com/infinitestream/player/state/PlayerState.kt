@@ -16,6 +16,10 @@ data class ContentItem(
     val name: String,
     val hasHls: Boolean,
     val hasDash: Boolean,
+    /** Server-relative path to a poster image (e.g.
+     *  `/go-live/{name}/thumbnail.jpg`), or null if the server hasn't
+     *  generated one for this clip yet. */
+    val thumbnailPath: String? = null,
 )
 
 enum class Protocol(val label: String) { HLS("HLS"), DASH("DASH") }
