@@ -535,6 +535,7 @@
 
         const sessionDetailsOpen = resolveSectionDefault(options, 'session-details', false);
         const faultInjectionOpen = resolveSectionDefault(options, 'fault-injection', true);
+        const serverTimeoutsOpen = resolveSectionDefault(options, 'server-timeouts', false);
         const networkShapingOpen = resolveSectionDefault(options, 'network-shaping', true);
         const bitrateChartOpen = resolveSectionDefault(options, 'bitrate-chart', false);
         const playerMetricsOpen = resolveSectionDefault(options, 'player-metrics', false);
@@ -827,6 +828,40 @@
                     </div>
                 </div>
 
+                <!-- Collapsible Server Timeouts -->
+                <div class="collapsible-section" data-section="server-timeouts" data-default-open="${serverTimeoutsOpen}">
+                    <div class="collapsible-header" data-toggle="server-timeouts">
+                        <span class="collapsible-icon">${serverTimeoutsOpen ? '▼' : '▶'}</span>
+                        <span class="collapsible-title">Server Timeouts</span>
+                    </div>
+                    <div class="collapsible-content" data-content="server-timeouts" style="display: ${serverTimeoutsOpen ? 'block' : 'none'};">
+                        <div class="fault-injection-section">
+                            <div class="fault-control-row">
+                                <label>Apply To</label>
+                                <div class="checkbox-group">
+                                    <label><input type="checkbox" data-field="transfer_timeout_applies_segments" ${getBool(session, 'transfer_timeout_applies_segments') ? 'checked' : ''}>Segments</label>
+                                    <label><input type="checkbox" data-field="transfer_timeout_applies_manifests" ${getBool(session, 'transfer_timeout_applies_manifests') ? 'checked' : ''}>Media manifests</label>
+                                    <label><input type="checkbox" data-field="transfer_timeout_applies_master" ${getBool(session, 'transfer_timeout_applies_master') ? 'checked' : ''}>Master manifest</label>
+                                </div>
+                            </div>
+                            <div class="range-row">
+                                <label>Active timeout (s)</label>
+                                <input type="range" min="0" max="30" step="1" data-field="transfer_active_timeout_seconds" value="${Number.isFinite(Number(session.transfer_active_timeout_seconds)) && Number(session.transfer_active_timeout_seconds) >= 0 ? Number(session.transfer_active_timeout_seconds) : 0}">
+                                <span class="range-value">${Number.isFinite(Number(session.transfer_active_timeout_seconds)) && Number(session.transfer_active_timeout_seconds) >= 0 ? Number(session.transfer_active_timeout_seconds) : 0}</span>
+                            </div>
+                            <div class="range-row">
+                                <label>Idle timeout (s)</label>
+                                <input type="range" min="0" max="30" step="1" data-field="transfer_idle_timeout_seconds" value="${Number.isFinite(Number(session.transfer_idle_timeout_seconds)) && Number(session.transfer_idle_timeout_seconds) >= 0 ? Number(session.transfer_idle_timeout_seconds) : 0}">
+                                <span class="range-value">${Number.isFinite(Number(session.transfer_idle_timeout_seconds)) && Number(session.transfer_idle_timeout_seconds) >= 0 ? Number(session.transfer_idle_timeout_seconds) : 0}</span>
+                            </div>
+                            <div class="session-item">
+                                <span class="label">Fault Counters</span>
+                                <span class="value" data-field="transfer_timeout_counters">Active ${Number(session.fault_count_transfer_active_timeout) || 0} · Idle ${Number(session.fault_count_transfer_idle_timeout) || 0}</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
                 <!-- Collapsible Network Shaping Section -->
                 <div class="collapsible-section" data-section="network-shaping" data-default-open="${networkShapingOpen}" data-net-shaping>
                     <div class="collapsible-header" data-toggle="network-shaping">
@@ -1100,6 +1135,13 @@
         const segmentChecks = Array.from(card.querySelectorAll('input[data-field="segment_failure_urls"]:checked'))
             .map(input => input.value);
         
+        // Transfer timeout settings
+        const transferActiveTimeoutSeconds = getRangeValue('transfer_active_timeout_seconds');
+        const transferIdleTimeoutSeconds = getRangeValue('transfer_idle_timeout_seconds');
+        const transferAppliesSegments = !!card.querySelector('input[data-field="transfer_timeout_applies_segments"]')?.checked;
+        const transferAppliesManifests = !!card.querySelector('input[data-field="transfer_timeout_applies_manifests"]')?.checked;
+        const transferAppliesMaster = !!card.querySelector('input[data-field="transfer_timeout_applies_master"]')?.checked;
+
         // Content manipulation settings
         const contentStripCodecs = !!card.querySelector('input[data-field="content_strip_codecs"]')?.checked;
         const contentStripAvgBandwidth = !!card.querySelector('input[data-field="content_strip_average_bandwidth"]')?.checked;
@@ -1153,6 +1195,12 @@
             transport_frequency_seconds: getRangeValue('transport_failure_frequency'),
             transport_fault_on_seconds: getRangeValue('transport_consecutive_failures'),
             transport_fault_off_seconds: getRangeValue('transport_failure_frequency'),
+            // Transfer timeouts
+            transfer_active_timeout_seconds: transferActiveTimeoutSeconds,
+            transfer_idle_timeout_seconds: transferIdleTimeoutSeconds,
+            transfer_timeout_applies_segments: transferAppliesSegments,
+            transfer_timeout_applies_manifests: transferAppliesManifests,
+            transfer_timeout_applies_master: transferAppliesMaster,
             // Content manipulation
             content_strip_codecs: contentStripCodecs,
             content_strip_average_bandwidth: contentStripAvgBandwidth,
