@@ -318,7 +318,7 @@
                 <div class="stats-item"><span class="label">Current Time</span><span class="value" id="statTime">0.00s</span></div>
                 <div class="stats-item"><span class="label">Buffered End</span><span class="value" id="statBufferedEnd">--</span></div>
                 <div class="stats-item"><span class="label">Buffer Depth</span><span class="value" id="statBufferDepth">--</span></div>
-                <div class="stats-item"><span class="label">Live Offset</span><span class="value" id="statLiveOffset">--</span></div>
+                <div class="stats-item"><span class="label">Wall-Clock Offset</span><span class="value" id="statLiveOffset">--</span></div>
                 <div class="stats-item"><span class="label">URL</span><span class="value" id="statUrl">--</span></div>
             </div>
         </div>
@@ -494,7 +494,16 @@
                     playerState.type = 'native';
                     return;
                 }
-                const hls = new Hls({ liveSyncDurationCount: 3, autoLevelEnabled: true });
+                // Let the manifest's EXT-X-SERVER-CONTROL drive the live
+                // offset (HOLD-BACK on 2s/6s, PART-HOLD-BACK on LL) and
+                // EXT-X-START drive the initial seek (now emitted into
+                // the variant by go-live so hls.js doesn't park at the
+                // oldest segment). lowLatencyMode is only useful on LL.
+                const isLL = !/(_2s|_6s)\.m3u8/.test(url);
+                const hls = new Hls({
+                    lowLatencyMode: isLL,
+                    autoLevelEnabled: true
+                });
                 hls.loadSource(url);
                 hls.attachMedia(video);
                 playerState.instance = hls;
@@ -677,22 +686,97 @@
             setGlobalMuted(nextMuted);
         }
 
+        let lastOffsetLogAt = 0;
+
+        // Pull a Date stamped onto the current playhead — derived from
+        // EXT-X-PROGRAM-DATE-TIME (or DASH availabilityStartTime). Each engine
+        // exposes its own API; native HTML5 video has none.
+        function getPlayheadDate() {
+            if (playerState.type === 'shaka' && playerState.instance) {
+                try {
+                    const d = playerState.instance.getPlayheadTimeAsDate();
+                    return d instanceof Date && !isNaN(d.getTime()) ? d : null;
+                } catch (_) { return null; }
+            }
+            if (playerState.type === 'hlsjs' && playerState.instance) {
+                const d = playerState.instance.playingDate;
+                return d instanceof Date && !isNaN(d.getTime()) ? d : null;
+            }
+            return null;
+        }
+
+        // Engine-reported live offset. Falls back to seekable.end - currentTime.
+        function getLiveOffsetSeconds(currentTime) {
+            if (playerState.type === 'hlsjs' && playerState.instance) {
+                const lat = playerState.instance.latency;
+                if (typeof lat === 'number' && isFinite(lat)) return lat;
+            }
+            if (playerState.type === 'shaka' && playerState.instance) {
+                try {
+                    const stats = playerState.instance.getStats();
+                    const lat = stats && stats.liveLatency;
+                    if (typeof lat === 'number' && isFinite(lat)) return lat;
+                } catch (_) {}
+            }
+            const seekable = video.seekable;
+            if (seekable && seekable.length > 0) {
+                return Math.max(0, seekable.end(seekable.length - 1) - currentTime);
+            }
+            return null;
+        }
+
+        function fmtSec(v) { return v == null ? 'nil' : `${v.toFixed(2)}s`; }
+        function fmtIso(d) { return d == null ? 'nil' : d.toISOString(); }
+
         function updateStats() {
             const buffered = video.buffered;
             const current = video.currentTime || 0;
             let bufferedEnd = '--';
             let bufferDepth = '--';
+            let bufferDepthValue = null;
             if (buffered && buffered.length > 0) {
                 const end = buffered.end(buffered.length - 1);
                 bufferedEnd = `${end.toFixed(2)}s`;
-                bufferDepth = `${Math.max(0, end - current).toFixed(2)}s`;
+                bufferDepthValue = Math.max(0, end - current);
+                bufferDepth = `${bufferDepthValue.toFixed(2)}s`;
             }
+
+            const now = new Date();
+            const pdt = getPlayheadDate();
+            const trueOffSec = pdt ? (now.getTime() - pdt.getTime()) / 1000 : null;
+            const liveOffSec = getLiveOffsetSeconds(current);
+
+            const seekable = video.seekable;
+            let winStart = null;
+            let winDurSec = null;
+            if (seekable && seekable.length > 0) {
+                const seekStart = seekable.start(0);
+                const seekEnd = seekable.end(seekable.length - 1);
+                winDurSec = seekEnd - seekStart;
+                if (pdt) {
+                    winStart = new Date(pdt.getTime() - (current - seekStart) * 1000);
+                }
+            }
+
+            const state = video.paused ? 'paused' : (video.muted ? 'playing-muted' : 'playing');
             document.getElementById('statState').textContent = video.paused ? 'Paused' : (video.muted ? 'Playing (Muted)' : 'Playing');
             document.getElementById('statTime').textContent = `${current.toFixed(2)}s`;
             document.getElementById('statBufferedEnd').textContent = bufferedEnd;
             document.getElementById('statBufferDepth').textContent = bufferDepth;
-            document.getElementById('statLiveOffset').textContent = '--';
+            document.getElementById('statLiveOffset').textContent = trueOffSec != null ? `${trueOffSec.toFixed(2)}s` : (liveOffSec != null ? `${liveOffSec.toFixed(2)}s` : '--');
             update4kBadge();
+
+            // Greppable 1 Hz heartbeat. Tag matches iOS/Android logcat so a
+            // single grep across logs covers all clients.
+            if (now.getTime() - lastOffsetLogAt >= 1000) {
+                lastOffsetLogAt = now.getTime();
+                console.log(
+                    `[OFFSET] state=${state} engine=${playerState.type || 'none'} ` +
+                    `wall=${fmtIso(now)} pdt=${fmtIso(pdt)} trueOff=${fmtSec(trueOffSec)} ` +
+                    `pos=${fmtSec(current)} liveOff=${fmtSec(liveOffSec)} ` +
+                    `bufDepth=${fmtSec(bufferDepthValue)} winStart=${fmtIso(winStart)} winDur=${fmtSec(winDurSec)}`
+                );
+            }
         }
 
         function createPlayerId() {

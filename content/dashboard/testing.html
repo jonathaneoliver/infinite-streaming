@@ -1701,6 +1701,7 @@ maybe a histogram of b
             setText('[data-field="player_metrics_seekable_end_s"]', formatSeconds(session.player_metrics_seekable_end_s));
             setText('[data-field="player_metrics_live_edge_s"]', formatSeconds(session.player_metrics_live_edge_s));
             setText('[data-field="player_metrics_live_offset_s"]', formatSeconds(session.player_metrics_live_offset_s));
+            setText('[data-field="player_metrics_true_offset_s"]', formatSeconds(session.player_metrics_true_offset_s));
             setText('[data-field="player_metrics_display_resolution"]', session.player_metrics_display_resolution || '—');
             setText('[data-field="player_metrics_video_resolution"]', session.player_metrics_video_resolution || '—');
             setText('[data-field="player_metrics_video_first_frame_time_s"]', formatSeconds(session.player_metrics_video_first_frame_time_s));
@@ -2365,6 +2366,23 @@ maybe a histogram of b
             const bufferDepth = Number.isFinite(Number(session.player_metrics_buffer_depth_s))
                 ? Number(session.player_metrics_buffer_depth_s)
                 : null;
+            // Wall-clock offset = (clock authority) − encoded PDT (epoch ms).
+            // Preference order:
+            //   1. server_received_at_ms − playhead_wallclock_ms (no client skew)
+            //   2. player_metrics_true_offset_s (client computed; biased by skew)
+            //   3. Date.now() − playhead_wallclock_ms (browser's clock as authority)
+            let wallClockOffset = null;
+            const reportedPdtMs = Number(session.player_metrics_playhead_wallclock_ms);
+            const serverReceivedAtMs = Number(session.server_received_at_ms);
+            const reportedTrueOff = Number(session.player_metrics_true_offset_s);
+            if (Number.isFinite(reportedPdtMs) && reportedPdtMs > 0
+                && Number.isFinite(serverReceivedAtMs) && serverReceivedAtMs > 0) {
+                wallClockOffset = Math.round((serverReceivedAtMs - reportedPdtMs) / 10) / 100;
+            } else if (Number.isFinite(reportedTrueOff)) {
+                wallClockOffset = reportedTrueOff;
+            } else if (Number.isFinite(reportedPdtMs) && reportedPdtMs > 0) {
+                wallClockOffset = Math.round((Date.now() - reportedPdtMs) / 10) / 100;
+            }
             const measuredVideoBitrate = Number(session.player_metrics_video_bitrate_mbps);
             const inferredVideoBitrate = inferSessionNativeRenditionMbps(session);
             const currentRendition = (Number.isFinite(measuredVideoBitrate) && measuredVideoBitrate > 0)
@@ -2531,6 +2549,7 @@ maybe a histogram of b
                 transferComplete,
                 metricsAtMs,
                 bufferDepth,
+                wallClockOffset,
                 playerEstimate,
                 playerWireBitrate,
                 currentRendition,
@@ -3392,6 +3411,7 @@ maybe a histogram of b
                     transferComplete: point.transferComplete,
                     metricsAtMs: point.metricsAtMs,
                     bufferDepth: point.bufferDepth,
+                    wallClockOffset: point.wallClockOffset,
                     playerEstimate: point.playerEstimate,
                     playerWireBitrate: point.playerWireBitrate,
                     currentRendition: point.currentRendition,
@@ -3425,6 +3445,7 @@ maybe a histogram of b
             const transferRateData = points.map(point => ({ x: point.x, y: point.transferRate }));
             const transferCompleteData = points.map(point => ({ x: point.x, y: point.transferComplete }));
             const bufferDepthData = points.map(point => ({ x: point.x, y: Number.isFinite(point.bufferDepth) ? point.bufferDepth : null }));
+            const wallClockOffsetData = points.map(point => ({ x: point.x, y: Number.isFinite(point.wallClockOffset) ? point.wallClockOffset : null }));
             const estimateData = points.map(point => ({ x: point.x, y: point.playerEstimate || null }));
             const playerWireBitrateData = points.map(point => ({
                 x: point.x,
@@ -3877,7 +3898,22 @@ maybe a histogram of b
                     backgroundColor: 'rgba(37,99,235,0.12)',
                     borderWidth: 2,
                     pointRadius: 0,
-                    tension: 0.2
+                    tension: 0.2,
+                    yAxisID: 'y'
+                },
+                {
+                    // Wall-clock offset shares this chart on a right-side axis.
+                    // The two metrics are related — buffer drains tend to
+                    // coincide with offset jumps — so plotting them together
+                    // makes correlation immediate.
+                    label: compareActive ? `Wall-Clock (S${sessionId})` : 'Wall-Clock Offset',
+                    data: wallClockOffsetData,
+                    borderColor: '#0d9488',
+                    backgroundColor: 'rgba(13,148,136,0.12)',
+                    borderWidth: 2,
+                    pointRadius: 0,
+                    tension: 0.2,
+                    yAxisID: 'y1'
                 }
             ];
             if (compareGroupIds.length >= 2) {
@@ -3885,28 +3921,50 @@ maybe a histogram of b
                 otherIds.forEach((sid) => {
                     const ci = sessionColorIndex(sid, compareGroupIds);
                     const color = SESSION_COLORS[ci];
-                    const otherSeries = (bandwidthHistory.get(sid) || [])
+                    const otherBufferSeries = (bandwidthHistory.get(sid) || [])
                         .filter(p => p.ts >= windowStart)
                         .map(p => ({ x: (p.ts - windowStart) / 1000, y: Number.isFinite(p.bufferDepth) ? p.bufferDepth : null }));
+                    const otherWallSeries = (bandwidthHistory.get(sid) || [])
+                        .filter(p => p.ts >= windowStart)
+                        .map(p => ({ x: (p.ts - windowStart) / 1000, y: Number.isFinite(p.wallClockOffset) ? p.wallClockOffset : null }));
                     bufferDatasets.push({
                         label: `Buffer (S${sid})`,
-                        data: otherSeries,
+                        data: otherBufferSeries,
                         borderColor: color.main,
                         borderWidth: 1.5,
                         pointRadius: 0,
                         tension: 0.2,
-                        borderDash: [4, 3]
+                        borderDash: [4, 3],
+                        yAxisID: 'y'
+                    });
+                    bufferDatasets.push({
+                        label: `Wall-Clock (S${sid})`,
+                        data: otherWallSeries,
+                        borderColor: color.light,
+                        borderWidth: 1.5,
+                        pointRadius: 0,
+                        tension: 0.2,
+                        borderDash: [2, 4],
+                        yAxisID: 'y1'
                     });
                 });
             }
-            // Compute max across ALL datasets (primary + any comparison
-            // sessions) so grouped-session lines don't clip above the axis.
-            // Round up to the next 5s step, floor 5, cap 60.
-            const bufferValues = bufferDatasets.flatMap(ds => ds.data)
+            // Buffer-depth bound (left axis): cap 60.
+            const bufferValues = bufferDatasets
+                .filter(ds => ds.yAxisID === 'y')
+                .flatMap(ds => ds.data)
                 .map((point) => Number(point && point.y))
                 .filter((value) => Number.isFinite(value) && value >= 0);
             const maxBufferDepthRaw = Math.max(5, ...bufferValues, 0);
             const maxBufferDepth = Math.min(60, Math.ceil(maxBufferDepthRaw / 5) * 5);
+            // Wall-clock bound (right axis): cap 120.
+            const wallValues = bufferDatasets
+                .filter(ds => ds.yAxisID === 'y1')
+                .flatMap(ds => ds.data)
+                .map((point) => Number(point && point.y))
+                .filter((value) => Number.isFinite(value));
+            const maxWallClockRaw = Math.max(5, ...wallValues, 0);
+            const maxWallClock = Math.min(120, Math.ceil(maxWallClockRaw / 5) * 5);
             if (!bufferChart) {
                 bufferChart = new Chart(bufferCanvas, {
                     type: 'line',
@@ -3961,6 +4019,7 @@ maybe a histogram of b
                                 }
                             },
                             y: {
+                                position: 'left',
                                 min: 0,
                                 max: maxBufferDepth,
                                 afterFit: (axis) => { axis.width = 90; },
@@ -3972,6 +4031,22 @@ maybe a histogram of b
                                 title: {
                                     display: true,
                                     text: 'Buffer Depth (s)',
+                                    color: '#6b7280',
+                                    font: { family: 'Courier New, monospace', size: 10 }
+                                }
+                            },
+                            y1: {
+                                position: 'right',
+                                min: 0,
+                                max: maxWallClock,
+                                grid: { drawOnChartArea: false },
+                                ticks: {
+                                    color: '#6b7280',
+                                    font: { family: 'Courier New, monospace', size: 10 }
+                                },
+                                title: {
+                                    display: true,
+                                    text: 'Wall-Clock Offset (s)',
                                     color: '#6b7280',
                                     font: { family: 'Courier New, monospace', size: 10 }
                                 }
@@ -3998,6 +4073,7 @@ maybe a histogram of b
                 bufferChart.data.datasets = bufferDatasets;
                 bufferChart.$windowStartMs = windowStart;
                 bufferChart.options.scales.y.max = maxBufferDepth;
+                bufferChart.options.scales.y1.max = maxWallClock;
                 applyLegendHover(bufferChart);
                 bufferChart.update('none');
             }

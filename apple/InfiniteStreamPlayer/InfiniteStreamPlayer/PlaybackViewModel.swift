@@ -1032,6 +1032,19 @@ final class PlaybackViewModel: ObservableObject {
             "player_metrics_seekable_end_s": diagnostics.seekableEnd.map { roundSeconds($0) },
             "player_metrics_live_edge_s": diagnostics.seekableEnd.map { roundSeconds($0) },
             "player_metrics_live_offset_s": diagnostics.liveOffset.map { roundSeconds($0) },
+            // Encoded wall-clock at the playhead (epoch ms) — sourced from
+            // EXT-X-PROGRAM-DATE-TIME via AVPlayerItem.currentDate(). Pairs
+            // with the receiving side's clock to compute a ground-truth live
+            // offset that survives stalls and HOLD-BACK shifts.
+            "player_metrics_playhead_wallclock_ms": diagnostics.playheadWallClock.map {
+                Int64(($0.timeIntervalSince1970 * 1000).rounded())
+            },
+            // Client-side trueOffset = client_now - playhead_wallclock. Used
+            // when the server's received_at stamp isn't available; biased by
+            // client clock skew but useful as a fallback.
+            "player_metrics_true_offset_s": diagnostics.playheadWallClock.map {
+                roundSeconds(Date().timeIntervalSince($0))
+            },
             "player_metrics_display_resolution": formatResolution(width: diagnostics.displayWidth, height: diagnostics.displayHeight),
             "player_metrics_video_resolution": formatResolution(width: diagnostics.videoWidth, height: diagnostics.videoHeight),
             "player_metrics_video_first_frame_time_s": videoFirstFrameSeconds,
