@@ -63,6 +63,16 @@ private fun AppRoot() {
         route = Route.ServerPicker
     }
 
+    // The main vm.player is shared across Playback / Home and keeps its
+    // own lifecycle — when leaving Playback we explicitly pause it,
+    // otherwise the user hears the previous stream's audio bleeding into
+    // Home where only muted preview tiles should be playing.
+    androidx.compose.runtime.LaunchedEffect(route) {
+        if (route != Route.Playback) {
+            vm.player.pause()
+        }
+    }
+
     when (route) {
         Route.ServerPicker -> ServerPickerScreen(
             state = state, vm = vm,
