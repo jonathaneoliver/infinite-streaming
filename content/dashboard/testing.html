@@ -847,10 +847,6 @@ maybe a histogram of b
         const bitrateAxisMaxBySession = new Map();
         const lastRecordedPlayerEventBySession = new Map();
         const lastRecordedPlayerStateBySession = new Map();
-        const lastRecordedVariantBySession = new Map();
-        const lastRecordedDisplayResBySession = new Map();
-        // Two-sample debounce belt for VARIANT.
-        const pendingVariantBySession = new Map();
         const lastRecordedLoopCountBySession = new Map();
         const lastRecordedServerLoopCountBySession = new Map();
         const lastRecordedLoopEventStampBySession = new Map();
@@ -2467,13 +2463,14 @@ maybe a histogram of b
             // signal (accessLog updates when a segment download
             // completes). Resolution is the lagging render-time signal
             // (presentation-size updates when the new frame is shown).
-            // To avoid phantom (new-resolution, old-bitrate) or
-            // (new-bitrate, old-resolution) entries during the shift
-            // window, drive resolution from the manifest BANDWIDTH
-            // lookup keyed off the bitrate. Fall back to the player's
-            // reported resolution only when no manifest match exists.
-            // Two-sample debounce remains as a belt for sessions
-            // without manifest data.
+            // To avoid phantom (new-resolution, old-bitrate) entries
+            // during the shift window, drive resolution from the
+            // manifest BANDWIDTH lookup keyed off the bitrate, falling
+            // back to the player's reported resolution only when no
+            // manifest match exists. The session payload is heartbeat-
+            // style — every poll carries the current values — so push
+            // unconditionally and let the renderer coalesce same-value
+            // runs into single ranges.
             const variantMbpsRaw = Number(session.player_metrics_video_bitrate_mbps);
             if (Number.isFinite(variantMbpsRaw) && variantMbpsRaw > 0) {
                 const variantMbps = Math.round(variantMbpsRaw * 10) / 10;
@@ -2481,23 +2478,10 @@ maybe a histogram of b
                 const manifestRes = manifestResolutionForBitrate(session, variantMbps);
                 const variantRes = manifestRes || reportedRes;
                 if (variantRes) {
-                    const variantKey = `${variantRes}|${variantMbps}`;
-                    const prevVariant = lastRecordedVariantBySession.get(String(key));
-                    const pending = pendingVariantBySession.get(String(key));
-                    if (prevVariant === variantKey) {
-                        if (pending) pendingVariantBySession.delete(String(key));
-                    } else if (manifestRes || (pending && pending.key === variantKey)) {
-                        // Manifest-validated changes commit immediately;
-                        // pure-player fallback still requires two samples.
-                        const eventSeries = bandwidthEventHistory.get(key) || [];
-                        eventSeries.push({ ts: now, type: 'VARIANT', mbps: variantMbps, resolution: variantRes });
-                        const eventCutoff = now - windowMs;
-                        bandwidthEventHistory.set(key, eventSeries.filter((event) => Number(event.ts) >= eventCutoff));
-                        lastRecordedVariantBySession.set(String(key), variantKey);
-                        pendingVariantBySession.delete(String(key));
-                    } else {
-                        pendingVariantBySession.set(String(key), { key: variantKey, mbps: variantMbps, resolution: variantRes });
-                    }
+                    const eventSeries = bandwidthEventHistory.get(key) || [];
+                    eventSeries.push({ ts: now, type: 'VARIANT', mbps: variantMbps, resolution: variantRes });
+                    const eventCutoff = now - windowMs;
+                    bandwidthEventHistory.set(key, eventSeries.filter((event) => Number(event.ts) >= eventCutoff));
                 }
             }
 
@@ -2507,14 +2491,10 @@ maybe a histogram of b
             // DISPLAY_RES shifting is the fetch-to-render lag.
             const displayRes = String(session.player_metrics_video_resolution || '').trim();
             if (displayRes) {
-                const prevDisplayRes = lastRecordedDisplayResBySession.get(String(key));
-                if (prevDisplayRes !== displayRes) {
-                    const eventSeries = bandwidthEventHistory.get(key) || [];
-                    eventSeries.push({ ts: now, type: 'DISPLAY_RES', resolution: displayRes });
-                    const eventCutoff = now - windowMs;
-                    bandwidthEventHistory.set(key, eventSeries.filter((event) => Number(event.ts) >= eventCutoff));
-                    lastRecordedDisplayResBySession.set(String(key), displayRes);
-                }
+                const eventSeries = bandwidthEventHistory.get(key) || [];
+                eventSeries.push({ ts: now, type: 'DISPLAY_RES', resolution: displayRes });
+                const eventCutoff = now - windowMs;
+                bandwidthEventHistory.set(key, eventSeries.filter((event) => Number(event.ts) >= eventCutoff));
             }
 
 
@@ -2955,15 +2935,6 @@ maybe a histogram of b
             const nowMs = Date.now();
             const events = (eventSeries || []).filter((e) => Number(e.ts) >= windowStart);
 
-            // DISPLAY_RES uses the same push-on-change pattern as
-            // VARIANT, so its colored ribbon also drains away after a
-            // long stable run. Synthesize a carry-over at windowStart
-            // when the current value isn't represented in-window.
-            const currentDisplayRes = lastRecordedDisplayResBySession.get(String(sessionId));
-            if (currentDisplayRes && !events.some((e) => e.type === 'DISPLAY_RES' && String(e.resolution || '').trim() === currentDisplayRes)) {
-                events.unshift({ ts: windowStart, type: 'DISPLAY_RES', resolution: currentDisplayRes });
-            }
-
             // Two top-level sections so server-originated events (loop
             // wrap notifications, etc.) don't visually mix with player-side
             // events. Lane order within each section follows EVENT_LANES.
@@ -2994,19 +2965,6 @@ maybe a histogram of b
             // so the visual ladder runs highest at the top, lowest at
             // the bottom.
             const variantEvents = events.filter((e) => e.type === 'VARIANT');
-            // VARIANT events only push on a *change*, so a session that
-            // has been on a single variant for longer than windowMs has
-            // no in-window events. Synthesize a carry-over event at
-            // windowStart from the always-current map so the lane and
-            // its colored ribbon both survive the rolling cutoff.
-            const currentVariantKey = lastRecordedVariantBySession.get(String(sessionId));
-            if (currentVariantKey && !variantEvents.some((e) => `${String(e.resolution || '').trim()}|${Number(e.mbps)}` === currentVariantKey)) {
-                const [curRes, curMbpsStr] = String(currentVariantKey).split('|');
-                const curMbps = Number(curMbpsStr);
-                if (curRes && Number.isFinite(curMbps) && curMbps > 0) {
-                    variantEvents.unshift({ ts: windowStart, type: 'VARIANT', mbps: curMbps, resolution: curRes });
-                }
-            }
             const seenVariants = new Map(); // key (res|mbps) -> {mbps, resolution}
             for (const v of variantEvents) {
                 const res = String(v.resolution || '').trim();
@@ -3047,15 +3005,21 @@ maybe a histogram of b
             }
 
             // Helper to render an event-series sequence as continuous
-            // ranges (one segment per stable value, transition on change).
+            // ranges (one segment per stable value, transition on
+            // change). Heartbeat-style writers emit one event per poll
+            // even when nothing changed, so consecutive same-label
+            // entries are coalesced into a single range.
             function pushRanges(typeKey, getLabel, getColor) {
                 const seq = events.filter((e) => e.type === typeKey)
                     .sort((a, b) => Number(a.ts) - Number(b.ts));
-                for (let i = 0; i < seq.length; i++) {
+                let i = 0;
+                while (i < seq.length) {
                     const start = Number(seq[i].ts);
-                    const end = i + 1 < seq.length ? Number(seq[i + 1].ts) : nowMs;
                     const label = getLabel(seq[i]);
                     const color = getColor(seq[i]);
+                    let j = i + 1;
+                    while (j < seq.length && getLabel(seq[j]) === label) j++;
+                    const end = j < seq.length ? Number(seq[j].ts) : nowMs;
                     const durationSec = ((end - start) / 1000).toFixed(1);
                     const title = `${EVENT_LANES[typeKey].label}: ${label}\n${formatHoverTime(start)} → ${formatHoverTime(end)} (${durationSec}s)`;
                     items.push({
@@ -3068,6 +3032,7 @@ maybe a histogram of b
                         title: title,
                         style: `background-color: ${color}; border-color: ${color}; color: #fff;`
                     });
+                    i = j;
                 }
             }
 
@@ -3085,21 +3050,33 @@ maybe a histogram of b
                 (e) => displayResColor(e.resolution));
 
             // VARIANT: each (resolution, bitrate) tuple gets its own
-            // swim lane. Lane key matches seenVariants.
+            // swim lane. Lane key matches seenVariants. Heartbeat-style
+            // emission means consecutive same-key entries coalesce into
+            // a single range.
             const variantSeq = variantEvents.sort((a, b) => Number(a.ts) - Number(b.ts));
-            for (let i = 0; i < variantSeq.length; i++) {
-                const v = variantSeq[i];
+            let vi = 0;
+            while (vi < variantSeq.length) {
+                const v = variantSeq[vi];
                 const res = String(v.resolution || '').trim();
                 const m = Number(v.mbps);
-                if (!res || !Number.isFinite(m) || m <= 0) continue;
+                if (!res || !Number.isFinite(m) || m <= 0) { vi++; continue; }
+                const k = `${res}|${m}`;
+                let vj = vi + 1;
+                while (vj < variantSeq.length) {
+                    const nv = variantSeq[vj];
+                    const nres = String(nv.resolution || '').trim();
+                    const nm = Number(nv.mbps);
+                    if (`${nres}|${nm}` !== k) break;
+                    vj++;
+                }
                 const start = Number(v.ts);
-                const end = i + 1 < variantSeq.length ? Number(variantSeq[i + 1].ts) : nowMs;
+                const end = vj < variantSeq.length ? Number(variantSeq[vj].ts) : nowMs;
                 const color = variantColor(m);
                 const durationSec = ((end - start) / 1000).toFixed(1);
                 const title = `Variant: ${variantLabel(m, res)}\n${formatHoverTime(start)} → ${formatHoverTime(end)} (${durationSec}s)`;
                 items.push({
                     id: itemId++,
-                    group: `VARIANT::${res}|${m}`,
+                    group: `VARIANT::${k}`,
                     content: '',
                     start: new Date(start),
                     end: new Date(end),
@@ -3107,6 +3084,7 @@ maybe a histogram of b
                     title: title,
                     style: `background-color: ${color}; border-color: ${color}; color: #fff;`
                 });
+                vi = vj;
             }
 
             for (const e of events) {
