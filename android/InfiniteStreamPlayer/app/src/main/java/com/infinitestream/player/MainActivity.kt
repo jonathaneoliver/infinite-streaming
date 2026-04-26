@@ -74,19 +74,19 @@ private fun AppRoot() {
             onOpenServerPicker = { route = Route.ServerPicker },
             onOpenSettings = { vm.setSettingsOpen(true) },
         )
-        Route.Playback -> {
-            PlaybackScreen(
-                state = state, vm = vm,
-                onOpenSettings = { vm.setSettingsOpen(true) },
-            )
-            SettingsOverlay(
-                state = state, vm = vm,
-                onDismiss = { vm.setSettingsOpen(false) },
-                onOpenServerPicker = {
-                    vm.setSettingsOpen(false)
-                    route = Route.ServerPicker
-                },
-            )
-        }
+        Route.Playback -> PlaybackScreen(
+            state = state, vm = vm,
+            onOpenSettings = { vm.setSettingsOpen(true) },
+        )
     }
+    // Settings drawer renders above every route, so the nav-bar's
+    // "Settings" item on Home opens it just like the gear in playback.
+    SettingsOverlay(
+        state = state, vm = vm,
+        onDismiss = { vm.setSettingsOpen(false) },
+        onOpenServerPicker = {
+            vm.setSettingsOpen(false)
+            route = Route.ServerPicker
+        },
+    )
 }

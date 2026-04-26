@@ -31,6 +31,7 @@ import androidx.tv.material3.Text
 import com.infinitestream.player.state.ContentItem
 import com.infinitestream.player.state.PlayerViewModel
 import com.infinitestream.player.state.UiState
+import com.infinitestream.player.ui.component.LivePreviewTile
 import com.infinitestream.player.ui.component.StatusDot
 import com.infinitestream.player.ui.theme.AppType
 import com.infinitestream.player.ui.theme.Radius
@@ -58,8 +59,18 @@ fun HomeScreen(
 
     val items = state.filteredContent
     val featured = items.firstOrNull()
-    val live = items.filter { it.name.lowercase().let { n -> "ll" in n || "live" in n } }
-    val rest = items.drop(1)
+    // First N *distinct* clips get a live preview tile. The content list
+    // typically carries each clip three times (one per codec — h264/hevc/
+    // av1) and we want six different *streams* on the row, not three of
+    // the same windsurfer in different encodings. Dedupe by stripping the
+    // codec/timestamp suffix; for each distinct clip prefer the H.264
+    // entry (universally hardware-decodable, smallest decoder cost).
+    val previewCount = 6
+    val previews = items
+        .groupBy { dedupeKey(it.name) }
+        .map { (_, group) -> group.minByOrNull { codecPreference(it.name) }!! }
+        .take(previewCount)
+    val rest = items - previews.toSet()
 
     Box(
         modifier = Modifier
@@ -79,21 +90,30 @@ fun HomeScreen(
 
             Spacer(Modifier.height(Space.s7))
 
-            if (live.isNotEmpty()) {
+            val activeServer = state.activeServer
+            if (previews.isNotEmpty() && activeServer != null) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     StatusDot(color = Tokens.live)
                     Spacer(Modifier.width(Space.s1))
                     Text("LIVE STREAMS", style = AppType.label.copy(color = Tokens.fg))
                 }
                 Spacer(Modifier.height(Space.s3))
-                ContentRow(items = live, isLive = true, onClick = { c ->
-                    vm.setSelectedContent(c.name); onPlay()
-                })
+                LazyRow(horizontalArrangement = Arrangement.spacedBy(Space.s3)) {
+                    items(previews, key = { it.name }) { c ->
+                        LivePreviewTile(
+                            content = c,
+                            server = activeServer,
+                            onClick = { picked ->
+                                vm.setSelectedContent(picked.name); onPlay()
+                            },
+                        )
+                    }
+                }
                 Spacer(Modifier.height(Space.s7))
             }
 
             if (rest.isNotEmpty()) {
-                Text("RECENT SESSIONS", style = AppType.label.copy(color = Tokens.fg))
+                Text("MORE STREAMS", style = AppType.label.copy(color = Tokens.fg))
                 Spacer(Modifier.height(Space.s3))
                 ContentRow(items = rest, isLive = false, onClick = { c ->
                     vm.setSelectedContent(c.name); onPlay()
@@ -235,3 +255,27 @@ private fun ContentCard(c: ContentItem, isLive: Boolean, onClick: (ContentItem) 
         }
     }
 }
+
+/**
+ * Strip per-codec / per-timestamp suffixes so the three encodings of the
+ * same clip collapse to a single key. Examples:
+ *   "redbull_p200_h264"                                 → "redbull_p200"
+ *   "redbull_p200_hevc"                                 → "redbull_p200"
+ *   "INSANE_FPV..._p200_h264_20260423_212139"           → "insane_fpv..._p200"
+ *   "INSANE_FPV..._p200_hevc_20260423_212139"           → "insane_fpv..._p200"
+ */
+private fun dedupeKey(name: String): String =
+    name.lowercase().replace(Regex("_(h264|hevc|h265|av1)(_\\d{8}_\\d{6})?$"), "")
+
+/** Lower number = preferred. H.264 first because every TV hardware-decodes
+ *  it; HEVC second; AV1 last (still software-decoded on many chips). */
+private fun codecPreference(name: String): Int {
+    val lower = name.lowercase()
+    return when {
+        "h264" in lower -> 0
+        "hevc" in lower || "h265" in lower -> 1
+        "av1" in lower -> 2
+        else -> 3
+    }
+}
+
