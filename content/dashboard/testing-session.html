@@ -5142,6 +5142,15 @@
             const nowMs = Date.now();
             const events = (eventSeries || []).filter((e) => Number(e.ts) >= windowStart);
 
+            // DISPLAY_RES uses the same push-on-change pattern as
+            // VARIANT, so its colored ribbon also drains away after a
+            // long stable run. Synthesize a carry-over at windowStart
+            // when the current value isn't represented in-window.
+            const currentDisplayRes = lastRecordedDisplayResBySession.get(String(sessionId));
+            if (currentDisplayRes && !events.some((e) => e.type === 'DISPLAY_RES' && String(e.resolution || '').trim() === currentDisplayRes)) {
+                events.unshift({ ts: windowStart, type: 'DISPLAY_RES', resolution: currentDisplayRes });
+            }
+
             const SERVER_LANES = new Set(['LOOP_SERVER']);
             const playerLanes = Object.keys(EVENT_LANES).filter((k) => !SERVER_LANES.has(k) && k !== 'VARIANT');
             const serverLanes = Object.keys(EVENT_LANES).filter((k) => SERVER_LANES.has(k));
@@ -5162,6 +5171,19 @@
             // VARIANT subgroups: one lane per (resolution, bitrate).
             // Multi-bitrate-per-resolution is a real ladder pattern.
             const variantEvents = events.filter((e) => e.type === 'VARIANT');
+            // VARIANT events only push on a *change*, so a session that
+            // has been on a single variant for longer than windowMs has
+            // no in-window events. Synthesize a carry-over event at
+            // windowStart from the always-current map so the lane and
+            // its colored ribbon both survive the rolling cutoff.
+            const currentVariantKey = lastRecordedVariantBySession.get(String(sessionId));
+            if (currentVariantKey && !variantEvents.some((e) => `${String(e.resolution || '').trim()}|${Number(e.mbps)}` === currentVariantKey)) {
+                const [curRes, curMbpsStr] = String(currentVariantKey).split('|');
+                const curMbps = Number(curMbpsStr);
+                if (curRes && Number.isFinite(curMbps) && curMbps > 0) {
+                    variantEvents.unshift({ ts: windowStart, type: 'VARIANT', mbps: curMbps, resolution: curRes });
+                }
+            }
             const seenVariants = new Map(); // res|mbps -> {mbps, resolution}
             for (const v of variantEvents) {
                 const res = String(v.resolution || '').trim();
