@@ -61,14 +61,25 @@ fun HomeScreen(
     val featured = items.firstOrNull()
     // First N *distinct* clips get a live preview tile. The content list
     // typically carries each clip three times (one per codec — h264/hevc/
-    // av1) and we want six different *streams* on the row, not three of
-    // the same windsurfer in different encodings. Dedupe by stripping the
-    // codec/timestamp suffix; for each distinct clip prefer the H.264
-    // entry (universally hardware-decodable, smallest decoder cost).
-    val previewCount = 6
+    // av1) and we want N different *streams* on the row, not the same
+    // windsurfer in three encodings. Dedupe by stripping the codec/
+    // timestamp suffix; for each distinct clip prefer the H.264 entry
+    // (universally hardware-decodable, smallest decoder cost).
+    //
+    // N=5 leaves one decoder slot for the main playback player so the
+    // home → playback transition doesn't blow past the chip's hardware
+    // decoder budget. (Previously 6 + the Continue Watching hero video
+    // = 7 concurrent decoders, which exhausted the MTK pool with
+    // NO_MEMORY when the user pressed Resume.)
+    val previewCount = 5
+    // Only H.264 in the preview row — HEVC and AV1 are software-decoded on
+    // many TV chips, which would crater the parallel-decode budget. The
+    // user's 4K HEVC/AV1 content still appears in the MORE STREAMS row
+    // below as static cards.
     val previews = items
+        .filter { "h264" in it.name.lowercase() }
         .groupBy { dedupeKey(it.name) }
-        .map { (_, group) -> group.minByOrNull { codecPreference(it.name) }!! }
+        .map { (_, group) -> group.first() }
         .take(previewCount)
     val rest = items - previews.toSet()
 
@@ -144,6 +155,10 @@ fun HomeScreen(
 @Composable
 private fun Hero(featured: ContentItem?, state: UiState, onResume: () -> Unit) {
     val activeServer = state.activeServer
+    // Hero used to autoplay the featured clip as a 360p video background.
+    // Removed because the combination of (hero + 6 preview tiles + main
+    // playback) blew past the chip's hardware-decode budget on the home →
+    // playback transition. Static gradient + text only now.
     Box(
         modifier = Modifier
             .fillMaxWidth()
@@ -153,31 +168,11 @@ private fun Hero(featured: ContentItem?, state: UiState, onResume: () -> Unit) {
                 Brush.horizontalGradient(
                     listOf(Tokens.bgCard, Tokens.bgSoft)
                 )
-            ),
-    ) {
-        // Live video background — autoplay 360p H.264 of the featured clip,
-        // muted, looping. Sits behind the gradient + text so it never
-        // competes with the foreground.
-        if (featured != null && activeServer != null) {
-            HeroVideo(content = featured, server = activeServer)
-            // Darken the video so the foreground typography stays legible
-            // at 100% — without this the gold "Resume" pill and the title
-            // disappear into bright frames.
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(
-                        Brush.horizontalGradient(
-                            0f to Tokens.bg.copy(alpha = 0.85f),
-                            0.55f to Tokens.bg.copy(alpha = 0.55f),
-                            1f to Tokens.bg.copy(alpha = 0.25f),
-                        )
-                    )
             )
-        }
-
+            .padding(Space.s7),
+    ) {
         Column(
-            modifier = Modifier.fillMaxSize().padding(Space.s7),
+            modifier = Modifier.fillMaxSize(),
             verticalArrangement = Arrangement.SpaceBetween,
         ) {
             Column {
@@ -235,47 +230,6 @@ private fun ContentCard(c: ContentItem, isLive: Boolean, onClick: (ContentItem) 
             )
         }
     }
-}
-
-/** Inline ExoPlayer for the Continue Watching hero — 360p H.264 against the
- *  API port (no failure injection). Mirrors LivePreviewTile but stretched
- *  full-width and behind the foreground text. */
-@androidx.media3.common.util.UnstableApi
-@Composable
-private fun HeroVideo(content: ContentItem, server: com.infinitestream.player.state.ServerEnvironment) {
-    val context = androidx.compose.ui.platform.LocalContext.current
-    val player = androidx.compose.runtime.remember(content.name, server.host, server.apiPort) {
-        androidx.media3.exoplayer.ExoPlayer.Builder(context).build().apply {
-            volume = 0f
-            repeatMode = androidx.media3.common.Player.REPEAT_MODE_ONE
-            trackSelectionParameters = trackSelectionParameters.buildUpon()
-                .setMaxVideoSize(640, 360)
-                .setPreferredVideoMimeType(androidx.media3.common.MimeTypes.VIDEO_H264)
-                .build()
-            setMediaItem(
-                androidx.media3.common.MediaItem.fromUri(
-                    "${server.apiUrl}/go-live/${content.name}/playlist_6s_360p.m3u8"
-                )
-            )
-            prepare()
-            playWhenReady = true
-        }
-    }
-    androidx.compose.runtime.DisposableEffect(player) { onDispose { player.release() } }
-    androidx.compose.ui.viewinterop.AndroidView(
-        modifier = Modifier.fillMaxSize(),
-        factory = { ctx ->
-            androidx.media3.ui.PlayerView(ctx).apply {
-                this.player = player
-                useController = false
-                setBackgroundColor(android.graphics.Color.BLACK)
-                isFocusable = false
-                isFocusableInTouchMode = false
-                descendantFocusability = android.view.ViewGroup.FOCUS_BLOCK_DESCENDANTS
-                resizeMode = androidx.media3.ui.AspectRatioFrameLayout.RESIZE_MODE_ZOOM
-            }
-        },
-    )
 }
 
 /**
