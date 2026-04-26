@@ -41,4 +41,4 @@ jobs:
             real boundaries, security issues (command injection, path traversal,
             etc.), and divergence from existing patterns. Do not flag stylistic
             nits unless they obscure intent.
-          claude_args: "--max-turns 5 --model claude-opus-4-7"
+          claude_args: "--max-turns 20 --model claude-opus-4-7"
