@@ -268,8 +268,6 @@ private fun HudBar(
                 horizontalArrangement = Arrangement.Center,
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                TransportButton(Icons.Default.SkipPrevious, onActivity) { vm.restart() }
-                Spacer(Modifier.width(Space.s3))
                 TransportButton(Icons.Default.Replay10, onActivity) {
                     vm.player.seekBack()
                 }
@@ -279,10 +277,24 @@ private fun HudBar(
                 TransportButton(Icons.Default.Forward10, onActivity) {
                     vm.player.seekForward()
                 }
-                Spacer(Modifier.width(Space.s3))
-                TransportButton(Icons.Default.SkipNext, onActivity) { vm.retry() }
                 Spacer(Modifier.width(Space.s5))
                 TransportButton(Icons.Default.Settings, onActivity, onClick = onOpenSettings)
+            }
+            Spacer(Modifier.height(Space.s4))
+            // Recovery row — three increasing levels of "reset" for a
+            // broken streaming session. Retry just reloads the current URL,
+            // Restart rebuilds the URL from current state (picks up flag
+            // changes), Reload re-fetches the content list (used after
+            // server-side restarts).
+            Row(
+                modifier = Modifier.fillMaxWidth().focusGroup(),
+                horizontalArrangement = Arrangement.Center,
+            ) {
+                RecoveryButton("Retry", onActivity) { vm.retry() }
+                Spacer(Modifier.width(Space.s2))
+                RecoveryButton("Restart", onActivity) { vm.restart() }
+                Spacer(Modifier.width(Space.s2))
+                RecoveryButton("Reload", onActivity) { vm.reload() }
             }
         }
     }
@@ -370,6 +382,26 @@ private fun TransportButton(icon: ImageVector, onActivity: () -> Unit, onClick: 
         contentAlignment = Alignment.Center,
     ) {
         Icon(icon, contentDescription = null, tint = Tokens.fg)
+    }
+}
+
+/** Text pill for the recovery row — Retry / Restart / Reload. Visually
+ *  lighter than the transport buttons so they read as a secondary control
+ *  group, but still focusable + clickable with the standard tvFocus ring. */
+@Composable
+private fun RecoveryButton(label: String, onActivity: () -> Unit, onClick: () -> Unit) {
+    Box(
+        modifier = Modifier
+            .height(36.dp)
+            .onFocusChanged { if (it.isFocused) onActivity() }
+            .tvFocus(cornerRadius = Radius.pill)
+            .clip(RoundedCornerShape(Radius.pill))
+            .background(Tokens.bgCard.copy(alpha = 0.6f))
+            .clickable(onClick = onClick)
+            .padding(horizontal = Space.s4),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(label, style = AppType.label.copy(color = Tokens.fg))
     }
 }
 

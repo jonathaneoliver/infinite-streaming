@@ -61,8 +61,9 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
 
     init {
         loadServers()
-        loadDeveloperMode()
+        loadAdvancedFlags()
         attachPlayerListeners()
+        applyTrackSelectionParameters()
     }
 
     // -- Server list (SharedPreferences-backed) ------------------------------
@@ -159,15 +160,60 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    // -- Developer mode (flag in same prefs file) ----------------------------
+    // -- Advanced flags (persisted alongside developer mode) -----------------
 
-    private fun loadDeveloperMode() {
-        _state.update { it.copy(developerMode = prefs().getBoolean(DEV_MODE_KEY, false)) }
+    private fun loadAdvancedFlags() {
+        val p = prefs()
+        _state.update {
+            it.copy(
+                developerMode = p.getBoolean(DEV_MODE_KEY, false),
+                allow4K       = p.getBoolean(FLAG_4K, true),
+                localProxy    = p.getBoolean(FLAG_LOCAL_PROXY, true),
+                autoRecovery  = p.getBoolean(FLAG_AUTO_RECOVERY, false),
+                goLive        = p.getBoolean(FLAG_GO_LIVE, false),
+            )
+        }
     }
 
     fun setDeveloperMode(on: Boolean) {
         _state.update { it.copy(developerMode = on) }
         prefs().edit().putBoolean(DEV_MODE_KEY, on).apply()
+    }
+
+    fun setAllow4K(on: Boolean) {
+        _state.update { it.copy(allow4K = on) }
+        prefs().edit().putBoolean(FLAG_4K, on).apply()
+        applyTrackSelectionParameters()
+    }
+
+    fun setLocalProxy(on: Boolean) {
+        _state.update { it.copy(localProxy = on) }
+        prefs().edit().putBoolean(FLAG_LOCAL_PROXY, on).apply()
+        // URL is built from current flags — rebuild + reload.
+        buildUrlAndLoad()
+    }
+
+    fun setAutoRecovery(on: Boolean) {
+        _state.update { it.copy(autoRecovery = on) }
+        prefs().edit().putBoolean(FLAG_AUTO_RECOVERY, on).apply()
+    }
+
+    fun setGoLive(on: Boolean) {
+        _state.update { it.copy(goLive = on) }
+        prefs().edit().putBoolean(FLAG_GO_LIVE, on).apply()
+    }
+
+    /**
+     * Push the current flag set into ExoPlayer's track selector. Today only
+     * `allow4K` matters here — when off we cap to 1080 p so the chip's
+     * decoder isn't asked to do 4K H.264 if the network would otherwise
+     * pull the top rung of the ladder.
+     */
+    private fun applyTrackSelectionParameters() {
+        val cap = if (_state.value.allow4K) Int.MAX_VALUE else 1080
+        player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
+            .setMaxVideoSize(if (_state.value.allow4K) Int.MAX_VALUE else 1920, cap)
+            .build()
     }
 
     // -- Selection setters ---------------------------------------------------
@@ -269,7 +315,11 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         if (s.selectedContent.isEmpty()) return
         val manifest = if (s.protocol == Protocol.HLS) "master${s.segment.suffix}.m3u8"
                        else "manifest${s.segment.suffix}.mpd"
-        val url = "${server.baseUrl}/go-live/${s.selectedContent}/$manifest?player_id=$playerId"
+        // Local Proxy ON → playback port (per-session go-proxy with failure
+        // injection). OFF → API/main nginx port (no proxy in front of the
+        // stream). Same /go-live route in both cases.
+        val port = if (s.localProxy) server.port else server.apiPort
+        val url = "http://${server.host}:$port/go-live/${s.selectedContent}/$manifest?player_id=$playerId"
         _state.update { it.copy(currentUrl = url, statusText = url) }
         loadStream(url)
     }
@@ -290,15 +340,31 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         player.setMediaItem(item)
         player.prepare()
         player.playWhenReady = true
+        if (_state.value.goLive) {
+            // Snap to live edge after the manifest finishes parsing — ExoPlayer
+            // honours seekToDefaultPosition() once the period is known.
+            player.seekToDefaultPosition()
+        }
         metrics?.onPlaybackStarted()
     }
 
+    /** Lightest reset: re-load the same stream URL without rebuilding. */
     fun retry() { if (_state.value.currentUrl.isNotEmpty()) loadStream(_state.value.currentUrl) }
 
+    /** Medium reset: stop the player, rebuild the URL from the current
+     *  selection (picks up flag changes), and reload. */
     fun restart() {
         metrics?.onRestart("manual")
         player.stop(); player.clearMediaItems()
         buildUrlAndLoad()
+    }
+
+    /** Heaviest reset: re-fetch the content list from /api/content, then
+     *  reload. Used to recover after the server has restarted or content
+     *  has been added/removed mid-session. */
+    fun reload() {
+        metrics?.onRestart("reload")
+        fetchContentList()
     }
 
     // -- Metrics binding -----------------------------------------------------
@@ -327,6 +393,15 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
             override fun onPlayerError(error: PlaybackException) {
                 _state.update { it.copy(statusText = "Error: ${error.message}") }
                 metrics?.onPlayerError(error.message)
+                // Auto-recovery: if enabled, queue a single retry on the
+                // main thread. We don't loop — if retry also errors the
+                // user sees the next error and decides what to do.
+                if (_state.value.autoRecovery && _state.value.currentUrl.isNotEmpty()) {
+                    viewModelScope.launch {
+                        kotlinx.coroutines.delay(500)
+                        retry()
+                    }
+                }
             }
             override fun onRenderedFirstFrame() { metrics?.onFirstFrameRendered() }
             override fun onIsPlayingChanged(isPlaying: Boolean) {
@@ -388,5 +463,9 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         private const val SERVERS_KEY = "list"
         private const val SERVERS_ACTIVE_KEY = "active_index"
         private const val DEV_MODE_KEY = "developer_mode"
+        private const val FLAG_4K = "advanced_4k"
+        private const val FLAG_LOCAL_PROXY = "advanced_local_proxy"
+        private const val FLAG_AUTO_RECOVERY = "advanced_auto_recovery"
+        private const val FLAG_GO_LIVE = "advanced_go_live"
     }
 }

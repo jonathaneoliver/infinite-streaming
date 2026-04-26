@@ -316,12 +316,34 @@ private fun PickerList(
                         vm.setCodec(c); onBack()
                     }
                 }
-                PickerKind.Advanced -> PickerItem(
-                    label = "Developer mode (AVG/PEAK overlay)",
-                    selected = state.developerMode,
-                    focusRequester = firstRowFocus,
-                    onClick = { vm.setDeveloperMode(!state.developerMode) },
-                )
+                PickerKind.Advanced -> {
+                    PickerItem(
+                        label = "4K (allow renditions above 1080p)",
+                        selected = state.allow4K,
+                        focusRequester = firstRowFocus,
+                        onClick = { vm.setAllow4K(!state.allow4K) },
+                    )
+                    PickerItem(
+                        label = "Local Proxy (route through go-proxy port)",
+                        selected = state.localProxy,
+                        onClick = { vm.setLocalProxy(!state.localProxy) },
+                    )
+                    PickerItem(
+                        label = "Auto-Recovery (retry on player error)",
+                        selected = state.autoRecovery,
+                        onClick = { vm.setAutoRecovery(!state.autoRecovery) },
+                    )
+                    PickerItem(
+                        label = "Go Live (snap to live edge on every load)",
+                        selected = state.goLive,
+                        onClick = { vm.setGoLive(!state.goLive) },
+                    )
+                    PickerItem(
+                        label = "Developer mode (AVG/PEAK overlay)",
+                        selected = state.developerMode,
+                        onClick = { vm.setDeveloperMode(!state.developerMode) },
+                    )
+                }
             }
         }
         Spacer(Modifier.weight(1f))

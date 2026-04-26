@@ -78,8 +78,12 @@ fun HomeScreen(
             .background(Tokens.bg)
     ) {
         Column(modifier = Modifier.fillMaxSize().padding(Space.s7)) {
-            TopNav(state, onOpenServerPicker = onOpenServerPicker, onOpenSettings = onOpenSettings)
-            Spacer(Modifier.height(Space.s7))
+            // Top nav (Home/Streams/Library/Search/server-pill/Settings) was
+            // removed — settings is reachable via Playback HUD → gear and
+            // the server picker via Settings → Server. Brand mark stays as
+            // a quiet anchor.
+            Text("InfiniteStream", style = AppType.bodySm.copy(color = Tokens.fgDim))
+            Spacer(Modifier.height(Space.s4))
 
             Hero(featured, state, onResume = {
                 if (featured != null) {
@@ -136,53 +140,10 @@ fun HomeScreen(
     }
 }
 
-@Composable
-private fun TopNav(state: UiState, onOpenServerPicker: () -> Unit, onOpenSettings: () -> Unit) {
-    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
-        Text("InfiniteStream", style = AppType.titleSm.copy(color = Tokens.fg))
-        Spacer(Modifier.width(Space.s7))
-        NavItem("Home", selected = true) {}
-        Spacer(Modifier.width(Space.s4))
-        NavItem("Streams", selected = false) {}
-        Spacer(Modifier.width(Space.s4))
-        NavItem("Library", selected = false) {}
-        Spacer(Modifier.width(Space.s4))
-        NavItem("Search", selected = false) {}
-        Spacer(Modifier.weight(1f))
-        Text(
-            state.activeServer?.let { "${it.host}:${it.apiPort}" } ?: "no server",
-            style = AppType.mono.copy(color = Tokens.fgDim),
-            modifier = Modifier
-                .clip(RoundedCornerShape(Radius.pill))
-                .tvFocus(cornerRadius = Radius.pill)
-                .clickable(onClick = onOpenServerPicker)
-                .padding(horizontal = Space.s3, vertical = Space.s1),
-        )
-        Spacer(Modifier.width(Space.s2))
-        NavItem("Settings", selected = false, onClick = onOpenSettings)
-    }
-}
-
-@Composable
-private fun NavItem(label: String, selected: Boolean, onClick: () -> Unit) {
-    Box(
-        modifier = Modifier
-            .clip(RoundedCornerShape(Radius.pill))
-            .tvFocus(cornerRadius = Radius.pill)
-            .clickable(onClick = onClick)
-            .padding(horizontal = Space.s3, vertical = Space.s1),
-    ) {
-        Text(
-            label,
-            style = AppType.body.copy(
-                color = if (selected) Tokens.fg else Tokens.fgDim,
-            ),
-        )
-    }
-}
 
 @Composable
 private fun Hero(featured: ContentItem?, state: UiState, onResume: () -> Unit) {
+    val activeServer = state.activeServer
     Box(
         modifier = Modifier
             .fillMaxWidth()
@@ -192,11 +153,31 @@ private fun Hero(featured: ContentItem?, state: UiState, onResume: () -> Unit) {
                 Brush.horizontalGradient(
                     listOf(Tokens.bgCard, Tokens.bgSoft)
                 )
-            )
-            .padding(Space.s7),
+            ),
     ) {
+        // Live video background — autoplay 360p H.264 of the featured clip,
+        // muted, looping. Sits behind the gradient + text so it never
+        // competes with the foreground.
+        if (featured != null && activeServer != null) {
+            HeroVideo(content = featured, server = activeServer)
+            // Darken the video so the foreground typography stays legible
+            // at 100% — without this the gold "Resume" pill and the title
+            // disappear into bright frames.
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(
+                        Brush.horizontalGradient(
+                            0f to Tokens.bg.copy(alpha = 0.85f),
+                            0.55f to Tokens.bg.copy(alpha = 0.55f),
+                            1f to Tokens.bg.copy(alpha = 0.25f),
+                        )
+                    )
+            )
+        }
+
         Column(
-            modifier = Modifier.fillMaxSize(),
+            modifier = Modifier.fillMaxSize().padding(Space.s7),
             verticalArrangement = Arrangement.SpaceBetween,
         ) {
             Column {
@@ -208,7 +189,7 @@ private fun Hero(featured: ContentItem?, state: UiState, onResume: () -> Unit) {
                 )
                 Spacer(Modifier.height(Space.s1))
                 Text(
-                    state.activeServer?.let { "From ${it.name}" } ?: "Pick a server to start",
+                    activeServer?.let { "From ${it.name}" } ?: "Pick a server to start",
                     style = AppType.body.copy(color = Tokens.fgDim),
                 )
             }
@@ -254,6 +235,47 @@ private fun ContentCard(c: ContentItem, isLive: Boolean, onClick: (ContentItem) 
             )
         }
     }
+}
+
+/** Inline ExoPlayer for the Continue Watching hero — 360p H.264 against the
+ *  API port (no failure injection). Mirrors LivePreviewTile but stretched
+ *  full-width and behind the foreground text. */
+@androidx.media3.common.util.UnstableApi
+@Composable
+private fun HeroVideo(content: ContentItem, server: com.infinitestream.player.state.ServerEnvironment) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val player = androidx.compose.runtime.remember(content.name, server.host, server.apiPort) {
+        androidx.media3.exoplayer.ExoPlayer.Builder(context).build().apply {
+            volume = 0f
+            repeatMode = androidx.media3.common.Player.REPEAT_MODE_ONE
+            trackSelectionParameters = trackSelectionParameters.buildUpon()
+                .setMaxVideoSize(640, 360)
+                .setPreferredVideoMimeType(androidx.media3.common.MimeTypes.VIDEO_H264)
+                .build()
+            setMediaItem(
+                androidx.media3.common.MediaItem.fromUri(
+                    "${server.apiUrl}/go-live/${content.name}/playlist_6s_360p.m3u8"
+                )
+            )
+            prepare()
+            playWhenReady = true
+        }
+    }
+    androidx.compose.runtime.DisposableEffect(player) { onDispose { player.release() } }
+    androidx.compose.ui.viewinterop.AndroidView(
+        modifier = Modifier.fillMaxSize(),
+        factory = { ctx ->
+            androidx.media3.ui.PlayerView(ctx).apply {
+                this.player = player
+                useController = false
+                setBackgroundColor(android.graphics.Color.BLACK)
+                isFocusable = false
+                isFocusableInTouchMode = false
+                descendantFocusability = android.view.ViewGroup.FOCUS_BLOCK_DESCENDANTS
+                resizeMode = androidx.media3.ui.AspectRatioFrameLayout.RESIZE_MODE_ZOOM
+            }
+        },
+    )
 }
 
 /**

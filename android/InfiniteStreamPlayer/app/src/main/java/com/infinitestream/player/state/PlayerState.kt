@@ -41,7 +41,21 @@ data class UiState(
     val statusText: String = "",
     val currentUrl: String = "",
 
+    /**
+     * Advanced flags surfaced in Settings → Advanced. All persisted alongside
+     * developerMode.
+     */
     val developerMode: Boolean = false,
+    /** Allow renditions above 1080p. Off = cap at 1080p (saves decode cost). */
+    val allow4K: Boolean = true,
+    /** Stream URL goes through the per-session go-proxy port (failure
+     *  injection). Off = hit the API port directly. */
+    val localProxy: Boolean = true,
+    /** Auto-retry the current stream on player errors. */
+    val autoRecovery: Boolean = false,
+    /** Seek to the live edge on every (re)load instead of letting the
+     *  manifest's EXT-X-SERVER-CONTROL HOLD-BACK pick the start point. */
+    val goLive: Boolean = false,
 
     /** True when HUD is visible on the playback screen. */
     val hudVisible: Boolean = false,
