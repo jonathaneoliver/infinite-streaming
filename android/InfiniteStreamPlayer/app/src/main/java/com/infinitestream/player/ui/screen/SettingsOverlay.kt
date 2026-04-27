@@ -286,17 +286,17 @@ private fun PickerList(
             style = AppType.titleSm.copy(color = Tokens.fg),
         )
         Spacer(Modifier.height(Space.s4))
-        // Stream picker can have 35+ items — needs to scroll, otherwise
-        // anything past the screen height is silently clipped (the bug
-        // that made the user think the picker only knew about 6 items).
-        // Other pickers are short and just use a non-lazy Column so the
-        // FocusRequester can land on a guaranteed-laid-out first row.
-        if (kind == PickerKind.Stream) {
-            LazyColumn(
-                modifier = Modifier.weight(1f, fill = false),
-                verticalArrangement = Arrangement.spacedBy(Space.s1),
-            ) {
-                itemsIndexed(state.filteredContent, key = { _, c -> c.name }) { i, item ->
+        // Every picker uses a weight(1f, fill=false) LazyColumn so it
+        // scrolls if the item count exceeds available height. Previously
+        // only the Stream picker did this; Advanced (6 toggles) was on
+        // a non-scrolling Column and the last toggle was getting crushed
+        // off the bottom of the panel.
+        LazyColumn(
+            modifier = Modifier.weight(1f, fill = false),
+            verticalArrangement = Arrangement.spacedBy(Space.s1),
+        ) {
+            when (kind) {
+                PickerKind.Stream -> itemsIndexed(state.filteredContent, key = { _, c -> c.name }) { i, item ->
                     PickerItem(
                         label = item.name,
                         selected = item.name == state.selectedContent,
@@ -304,56 +304,71 @@ private fun PickerList(
                         onClick = { vm.setSelectedContent(item.name); onBack() },
                     )
                 }
-            }
-        } else {
-            Column(verticalArrangement = Arrangement.spacedBy(Space.s1)) {
-                when (kind) {
-                    PickerKind.Stream -> {} // handled above
-                    PickerKind.Protocol -> Protocol.values().forEachIndexed { i, p ->
+                PickerKind.Protocol -> {
+                    val list = Protocol.values().toList()
+                    itemsIndexed(list) { i, p ->
                         PickerItem(p.label, p == state.protocol,
                             focusRequester = if (i == 0) firstRowFocus else null) {
                             vm.setProtocol(p); onBack()
                         }
                     }
-                    PickerKind.SegmentLength -> Segment.values().forEachIndexed { i, s ->
+                }
+                PickerKind.SegmentLength -> {
+                    val list = Segment.values().toList()
+                    itemsIndexed(list) { i, s ->
                         PickerItem(s.label, s == state.segment,
                             focusRequester = if (i == 0) firstRowFocus else null) {
                             vm.setSegment(s); onBack()
                         }
                     }
-                    PickerKind.Codec -> Codec.values().forEachIndexed { i, c ->
+                }
+                PickerKind.Codec -> {
+                    val list = Codec.values().toList()
+                    itemsIndexed(list) { i, c ->
                         PickerItem(c.label, c == state.codec,
                             focusRequester = if (i == 0) firstRowFocus else null) {
                             vm.setCodec(c); onBack()
                         }
                     }
-                    PickerKind.Advanced -> {
+                }
+                PickerKind.Advanced -> {
+                    item {
                         PickerItem(
                             label = "4K (allow renditions above 1080p)",
                             selected = state.allow4K,
                             focusRequester = firstRowFocus,
                             onClick = { vm.setAllow4K(!state.allow4K) },
                         )
+                    }
+                    item {
                         PickerItem(
                             label = "Local Proxy (route through go-proxy port)",
                             selected = state.localProxy,
                             onClick = { vm.setLocalProxy(!state.localProxy) },
                         )
+                    }
+                    item {
                         PickerItem(
                             label = "Auto-Recovery (retry on player error)",
                             selected = state.autoRecovery,
                             onClick = { vm.setAutoRecovery(!state.autoRecovery) },
                         )
+                    }
+                    item {
                         PickerItem(
                             label = "Go Live (snap to live edge on every load)",
                             selected = state.goLive,
                             onClick = { vm.setGoLive(!state.goLive) },
                         )
+                    }
+                    item {
                         PickerItem(
                             label = "Skip Home on launch (auto-resume last stream)",
                             selected = state.skipHomeOnLaunch,
                             onClick = { vm.setSkipHomeOnLaunch(!state.skipHomeOnLaunch) },
                         )
+                    }
+                    item {
                         PickerItem(
                             label = "Developer mode (AVG/PEAK overlay)",
                             selected = state.developerMode,
