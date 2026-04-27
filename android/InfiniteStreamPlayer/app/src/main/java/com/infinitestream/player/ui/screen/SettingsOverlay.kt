@@ -14,6 +14,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
@@ -211,8 +212,12 @@ private fun SettingsPanel(
 
 private enum class PickerKind { Stream, Protocol, SegmentLength, Codec, Advanced }
 
+// `ColumnScope.MainList` — the function only makes sense in the parent
+// drawer's Column, and being a ColumnScope extension is what unlocks
+// `Modifier.weight(1f, fill = false)` for the inner LazyColumn so the
+// list scrolls when it overflows the panel.
 @Composable
-private fun MainList(
+private fun ColumnScope.MainList(
     state: UiState,
     vm: PlayerViewModel,
     serverFocus: FocusRequester,
@@ -224,23 +229,40 @@ private fun MainList(
     onPick: (PickerKind) -> Unit,
     onOpenServerPicker: () -> Unit,
 ) {
-    // Use a non-lazy Column so every row is laid out immediately —
-    // LazyColumn would defer layout, and FocusRequester throws if the
-    // target isn't on screen yet.
-    Column(verticalArrangement = Arrangement.spacedBy(Space.s1)) {
-        RowView(SettingRow("Server", state.activeServer?.name ?: "—") { onOpenServerPicker() },
-            focusRequester = serverFocus)
-        RowView(SettingRow("Stream", state.selectedContent.ifEmpty { "—" }) { onPick(PickerKind.Stream) },
-            focusRequester = streamFocus)
-        RowView(SettingRow("Protocol", state.protocol.label) { onPick(PickerKind.Protocol) },
-            focusRequester = protocolFocus)
-        RowView(SettingRow("Segment length", state.segment.label) { onPick(PickerKind.SegmentLength) },
-            focusRequester = segmentFocus)
-        RowView(SettingRow("Codec", state.codec.label) { onPick(PickerKind.Codec) },
-            focusRequester = codecFocus)
-        RowView(SettingRow("Advanced", if (state.developerMode) "Developer mode on" else "Default") {
-            onPick(PickerKind.Advanced)
-        }, focusRequester = advancedFocus)
+    // Same scroll-when-overflowed pattern as the picker pages — the
+    // parent settings menu was getting crushed when the panel got tight
+    // (small TV viewport, large fonts, etc.). LazyColumn composes the
+    // first row immediately, so the firstRowFocus FocusRequester still
+    // resolves cleanly through the post-mount delay.
+    LazyColumn(
+        modifier = Modifier.weight(1f, fill = false),
+        verticalArrangement = Arrangement.spacedBy(Space.s1),
+    ) {
+        item {
+            RowView(SettingRow("Server", state.activeServer?.name ?: "—") { onOpenServerPicker() },
+                focusRequester = serverFocus)
+        }
+        item {
+            RowView(SettingRow("Stream", state.selectedContent.ifEmpty { "—" }) { onPick(PickerKind.Stream) },
+                focusRequester = streamFocus)
+        }
+        item {
+            RowView(SettingRow("Protocol", state.protocol.label) { onPick(PickerKind.Protocol) },
+                focusRequester = protocolFocus)
+        }
+        item {
+            RowView(SettingRow("Segment length", state.segment.label) { onPick(PickerKind.SegmentLength) },
+                focusRequester = segmentFocus)
+        }
+        item {
+            RowView(SettingRow("Codec", state.codec.label) { onPick(PickerKind.Codec) },
+                focusRequester = codecFocus)
+        }
+        item {
+            RowView(SettingRow("Advanced", if (state.developerMode) "Developer mode on" else "Default") {
+                onPick(PickerKind.Advanced)
+            }, focusRequester = advancedFocus)
+        }
     }
 }
 
