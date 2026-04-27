@@ -12,7 +12,17 @@ import (
 )
 
 type ContentInfo struct {
-	Name              string  `json:"name"`
+	Name string `json:"name"`
+	// Logical clip identifier — the lowercased name with the
+	// `_p200_<codec>` suffix stripped. The same clip encoded as h264,
+	// hevc, and av1 share a clip_id, so clients can dedupe browse rows
+	// by an exact key instead of fuzzy substring matching. Timestamp
+	// suffixes are preserved (different upload sessions of the same
+	// title remain distinct).
+	ClipID string `json:"clip_id"`
+	// Codec stripped from the name: "h264", "hevc", "av1", or "" if
+	// the name doesn't carry one.
+	Codec             string  `json:"codec"`
 	HasDash           bool    `json:"has_dash"`
 	HasHls            bool    `json:"has_hls"`
 	HasThumbnail      bool    `json:"has_thumbnail"`
@@ -25,6 +35,23 @@ type ContentInfo struct {
 	SegmentDuration   *int    `json:"segment_duration"`
 	MaxResolution     *string `json:"max_resolution"`
 	MaxHeight         *int    `json:"max_height"`
+}
+
+// Strips `_p200_<codec>` from a content name, preserving anything before
+// (the clip stem) and anything after (e.g. a re-encode timestamp). Returns
+// the lowercased stem + the matched codec (empty if the pattern doesn't
+// match).
+var clipIDPattern = regexp.MustCompile(`(?i)_p200_(h264|hevc|h265|av1)(_|$)`)
+
+func splitClipIDAndCodec(name string) (clipID, codec string) {
+	m := clipIDPattern.FindStringSubmatchIndex(name)
+	if m == nil {
+		return strings.ToLower(name), ""
+	}
+	codec = strings.ToLower(name[m[2]:m[3]])
+	stripped := name[:m[0]] + name[m[4]:]
+	stripped = strings.TrimSuffix(stripped, "_")
+	return strings.ToLower(stripped), codec
 }
 
 func ListContent(contentDir string) ([]ContentInfo, error) {
@@ -64,8 +91,11 @@ func ListContent(contentDir string) ([]ContentInfo, error) {
 		}
 		segmentDuration := detectSegmentDuration(itemPath)
 		maxResolution, maxHeight := detectMaxResolution(itemPath)
+		clipID, codec := splitClipIDAndCodec(name)
 		contentList = append(contentList, ContentInfo{
 			Name:              name,
+			ClipID:            clipID,
+			Codec:             codec,
 			HasDash:           hasDash,
 			HasHls:            hasHls,
 			HasThumbnail:      hasThumbnail,

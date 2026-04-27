@@ -278,10 +278,22 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
                 val arr = JSONArray(body)
                 val items = (0 until arr.length()).map { i ->
                     val o = arr.getJSONObject(i)
+                    val name = o.getString("name")
                     ContentItem(
-                        name = o.getString("name"),
+                        name = name,
                         hasHls = o.optBoolean("has_hls", false),
                         hasDash = o.optBoolean("has_dash", false),
+                        // clip_id / codec are emitted by go-upload's
+                        // ContentInfo (server-computed). Old servers
+                        // without those fields fall back to deriving
+                        // a key from the name so the client still
+                        // dedupes sensibly.
+                        clipId = o.optString("clip_id", "").ifEmpty {
+                            name.lowercase().replace(
+                                Regex("_p200_(h264|hevc|h265|av1)(_|$)"), "$2"
+                            ).trimEnd('_')
+                        },
+                        codec = o.optString("codec", "").lowercase(),
                         thumbnailPath = o.optString("thumbnail_url", "").ifEmpty { null },
                         thumbnailPathSmall = o.optString("thumbnail_url_small", "").ifEmpty { null },
                         thumbnailPathLarge = o.optString("thumbnail_url_large", "").ifEmpty { null },

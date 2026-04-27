@@ -89,27 +89,21 @@ fun HomeScreen(
 
     val items = state.filteredContent
     val featured = items.firstOrNull()
-    // First N *distinct* clips get a live preview tile. The content list
-    // typically carries each clip three times (one per codec — h264/hevc/
-    // av1) and we want N different *streams* on the row, not the same
-    // windsurfer in three encodings. Dedupe by stripping the codec/
-    // timestamp suffix; for each distinct clip prefer the H.264 entry
-    // (universally hardware-decodable, smallest decoder cost).
+    // 3 visible preview slots; the pool of eligible clips can be much
+    // larger and the user scrolls through it via D-pad-Left/Right at the
+    // row edges (carousel rotation). Each carousel step is exactly 1
+    // decoder dispose + 1 alloc thanks to the content-keyed LazyRow.
     //
-    // 3 visible preview slots, but the *pool* of eligible H.264 clips
-    // can be larger. Pressing D-pad-Right past the last slot rotates the
-    // pool forward by one (the leftmost decoder pops off, a new clip
-    // takes the rightmost slot). Same for Left at the first slot.
-    // Because LazyRow is keyed on content.name the persisting slots
-    // re-use their existing ExoPlayer; only the entering and exiting
-    // clips churn — exactly 1 dispose + 1 alloc per rotation step.
+    // Dedupe by `clip_id` (server-computed), preferring the H.264 entry
+    // since that's universally hardware-decodable on every TV chip. This
+    // replaces the earlier substring/token heuristic that was over-
+    // collapsing — "redbull" matched "red_bull_storm_chase", every
+    // samsung_* clip merged into one, and the 45-item content list ended
+    // up as 6 visible cards.
     val visibleSlots = 3
-    val previewPool = mutableListOf<ContentItem>().apply {
-        for (c in items) {
-            if ("h264" !in c.name.lowercase()) continue
-            if (none { similarPreviewKey(it.name, c.name) }) add(c)
-        }
-    }
+    val previewPool = items
+        .filter { it.codec.isEmpty() || it.codec == "h264" }
+        .distinctBy { it.clipId }
     val rest = items - previewPool.toSet()
 
     Box(
@@ -341,58 +335,5 @@ private fun ContentCard(
             )
         }
     }
-}
-
-/**
- * Compute the inclusive index range of preview pool entries that should be
- * actively decoding around the focused index. Returns a window of size
- * `windowSize` centred on `focused`, clamped to the bounds of `total` so
- * the count never exceeds `windowSize`. Examples for windowSize=3:
- *
- *   focused=0, total=10 → 0..2
- *   focused=4, total=10 → 3..5
- *   focused=9, total=10 → 7..9
- */
-private fun activeRangeAround(focused: Int, total: Int, windowSize: Int): IntRange {
-    if (total <= windowSize) return 0 until total
-    val half = windowSize / 2
-    val start = (focused - half).coerceAtLeast(0).coerceAtMost(total - windowSize)
-    return start until (start + windowSize)
-}
-
-/**
- * Reduce a content name to its visual identity — strip the trailing
- * `_p200_codec[_timestamp]` so we can compare two streams by what they
- * *show*, not how they're encoded.
- *
- *   "redbull_p200_h264"                                 → "redbull"
- *   "INSANE_FPV..._p200_h264_20260423_212139"           → "insane_fpv..."
- */
-private fun previewKey(name: String): String =
-    name.lowercase().substringBefore("_p200")
-
-/**
- * Are two content names visually similar enough that we shouldn't show
- * both in the same preview row? Two heuristics, OR'd:
- *
- * 1. Underscore-token overlap ≥ 2 (tokens of length ≥ 3, so noise like
- *    "of"/"to" doesn't trip it). Catches the structured cases —
- *    "INSANE_FPV_NEW" vs "INSANE_FPV_SHOTS_Hydrofoil_Windsurfing" share
- *    {insane, fpv}.
- * 2. With underscores stripped, one is a prefix of the other (length ≥ 5
- *    on the shorter side). Catches "redbull" vs "red_bull_storm_chase"
- *    where token-overlap is empty but the visual identity is the same.
- */
-private fun similarPreviewKey(a: String, b: String): Boolean {
-    val ka = previewKey(a)
-    val kb = previewKey(b)
-    val tokensA = ka.split("_", "-").filter { it.length >= 3 }.toSet()
-    val tokensB = kb.split("_", "-").filter { it.length >= 3 }.toSet()
-    if ((tokensA intersect tokensB).size >= 2) return true
-    val flatA = ka.replace("_", "").replace("-", "")
-    val flatB = kb.replace("_", "").replace("-", "")
-    if (flatA.length >= 5 && flatB.startsWith(flatA)) return true
-    if (flatB.length >= 5 && flatA.startsWith(flatB)) return true
-    return false
 }
 

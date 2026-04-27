@@ -16,6 +16,11 @@ data class ContentItem(
     val name: String,
     val hasHls: Boolean,
     val hasDash: Boolean,
+    /** Server-computed logical clip identifier — same value across the
+     *  h264/hevc/av1 encodings of one clip. Browse rows dedupe by this. */
+    val clipId: String,
+    /** "h264" / "hevc" / "av1" / "" — server-stripped codec hint. */
+    val codec: String,
     /** Server-relative path to the 640-px-wide poster (default size for
      *  card / tile surfaces). Null when the server hasn't generated a
      *  thumbnail for this clip yet. */
