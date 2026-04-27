@@ -224,10 +224,11 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         _state.update {
             it.copy(
                 developerMode = p.getBoolean(DEV_MODE_KEY, false),
-                allow4K       = p.getBoolean(FLAG_4K, true),
-                localProxy    = p.getBoolean(FLAG_LOCAL_PROXY, true),
-                autoRecovery  = p.getBoolean(FLAG_AUTO_RECOVERY, false),
-                goLive        = p.getBoolean(FLAG_GO_LIVE, false),
+                allow4K           = p.getBoolean(FLAG_4K, true),
+                localProxy        = p.getBoolean(FLAG_LOCAL_PROXY, true),
+                autoRecovery      = p.getBoolean(FLAG_AUTO_RECOVERY, false),
+                goLive            = p.getBoolean(FLAG_GO_LIVE, false),
+                skipHomeOnLaunch  = p.getBoolean(FLAG_SKIP_HOME, false),
                 lastPlayed    = p.getString(LAST_PLAYED_KEY, "") ?: "",
                 viewCounts    = readViewCounts(p),
             )
@@ -290,6 +291,11 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
     fun setGoLive(on: Boolean) {
         _state.update { it.copy(goLive = on) }
         prefs().edit().putBoolean(FLAG_GO_LIVE, on).apply()
+    }
+
+    fun setSkipHomeOnLaunch(on: Boolean) {
+        _state.update { it.copy(skipHomeOnLaunch = on) }
+        prefs().edit().putBoolean(FLAG_SKIP_HOME, on).apply()
     }
 
     /**
@@ -768,6 +774,7 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         private const val FLAG_LOCAL_PROXY = "advanced_local_proxy"
         private const val FLAG_AUTO_RECOVERY = "advanced_auto_recovery"
         private const val FLAG_GO_LIVE = "advanced_go_live"
+        private const val FLAG_SKIP_HOME = "advanced_skip_home_on_launch"
         private const val LAST_PLAYED_KEY = "last_played_content"
         private const val VIEW_COUNTS_KEY = "view_counts"
         private const val CONTENT_CACHE_PREFIX = "content_cache_"

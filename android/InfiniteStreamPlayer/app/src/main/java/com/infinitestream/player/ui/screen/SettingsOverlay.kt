@@ -350,6 +350,11 @@ private fun PickerList(
                             onClick = { vm.setGoLive(!state.goLive) },
                         )
                         PickerItem(
+                            label = "Skip Home on launch (auto-resume last stream)",
+                            selected = state.skipHomeOnLaunch,
+                            onClick = { vm.setSkipHomeOnLaunch(!state.skipHomeOnLaunch) },
+                        )
+                        PickerItem(
                             label = "Developer mode (AVG/PEAK overlay)",
                             selected = state.developerMode,
                             onClick = { vm.setDeveloperMode(!state.developerMode) },

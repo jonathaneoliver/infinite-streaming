@@ -87,6 +87,12 @@ data class UiState(
     /** Seek to the live edge on every (re)load instead of letting the
      *  manifest's EXT-X-SERVER-CONTROL HOLD-BACK pick the start point. */
     val goLive: Boolean = false,
+    /** Skip the Home screen on cold launch when a saved server and a
+     *  lastPlayed clip both exist — go straight to Playback so the user
+     *  is back inside their stream without waiting for /api/content
+     *  to populate Home. Back from Playback still routes to Home,
+     *  which loads its visuals at that point. Off by default. */
+    val skipHomeOnLaunch: Boolean = false,
 
     /** True when HUD is visible on the playback screen. */
     val hudVisible: Boolean = false,

@@ -54,8 +54,30 @@ private fun AppRoot() {
     val vm: PlayerViewModel = viewModel()
     val state by vm.state.collectAsStateWithLifecycle()
 
+    // Initial route policy:
+    //   - No saved servers → ServerPicker (guided setup).
+    //   - skipHomeOnLaunch ON + we have a lastPlayed → Playback, so the
+    //     user is back inside their stream without waiting for Home's
+    //     /api/content fetch. Home will mount only if Back is pressed
+    //     from Playback, at which point its visuals initialize for the
+    //     first time this session.
+    //   - Otherwise → Home (the previous default).
     var route by remember {
-        mutableStateOf(if (state.servers.isEmpty()) Route.ServerPicker else Route.Home)
+        mutableStateOf(when {
+            state.servers.isEmpty() -> Route.ServerPicker
+            state.skipHomeOnLaunch && state.lastPlayed.isNotEmpty() -> Route.Playback
+            else -> Route.Home
+        })
+    }
+    // One-shot auto-resume when the cold-start route is Playback. Uses
+    // setSelectedContent (not the deferred variant) since there are no
+    // tile decoders to wait on — Home didn't mount.
+    androidx.compose.runtime.LaunchedEffect(Unit) {
+        if (route == Route.Playback
+            && state.selectedContent.isEmpty()
+            && state.lastPlayed.isNotEmpty()) {
+            vm.setSelectedContent(state.lastPlayed)
+        }
     }
 
     BackHandler(enabled = state.settingsOpen) {
