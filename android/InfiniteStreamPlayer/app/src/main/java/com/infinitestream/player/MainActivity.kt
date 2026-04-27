@@ -5,6 +5,7 @@ import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
+import androidx.activity.viewModels
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
@@ -29,6 +30,8 @@ class MainActivity : ComponentActivity() {
     private fun tag(s: String) = android.util.Log.i(
         "InfiniteStream", "T+${android.os.SystemClock.uptimeMillis() - tStart}ms $s")
 
+    private val vm: PlayerViewModel by viewModels()
+
     override fun onCreate(savedInstanceState: Bundle?) {
         tag("MainActivity onCreate begin")
         super.onCreate(savedInstanceState)
@@ -44,6 +47,17 @@ class MainActivity : ComponentActivity() {
             }
         }
         tag("MainActivity onCreate end")
+    }
+
+    override fun onStop() {
+        super.onStop()
+        // User pressed Home / switched apps. Pause the player so we don't
+        // keep decoding audio in the background while another app
+        // (e.g. YouTube) is in the foreground. onStart restores nothing
+        // automatically — the user has to come back and hit play; this
+        // matches what the Android TV system expects of background-
+        // unaware media apps.
+        vm.player.pause()
     }
 }
 

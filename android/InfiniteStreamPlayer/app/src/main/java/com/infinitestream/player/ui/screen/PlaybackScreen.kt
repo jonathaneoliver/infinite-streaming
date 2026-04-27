@@ -289,6 +289,8 @@ private fun HudBar(
                 RecoveryButton("Restart", onActivity) { vm.restart() }
                 Spacer(Modifier.width(Space.s2))
                 RecoveryButton("Reload", onActivity) { vm.reload() }
+                Spacer(Modifier.width(Space.s2))
+                RecoveryButton("Reset", onActivity) { vm.recreatePlayer() }
             }
         }
     }

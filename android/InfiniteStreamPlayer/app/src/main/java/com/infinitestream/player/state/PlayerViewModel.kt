@@ -52,12 +52,22 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
     private val _state = MutableStateFlow(UiState())
     val state: StateFlow<UiState> = _state.asStateFlow()
 
-    val playerId: String = UUID.randomUUID().toString()
+    /** Mutable so [reload] can rotate it and force go-proxy to spin a
+     *  brand-new per-session port for us — i.e. behave exactly as if we
+     *  had never played before, instead of re-binding to whatever
+     *  session the proxy already had wedged for the previous id. */
+    var playerId: String = UUID.randomUUID().toString()
+        private set
 
-    val bandwidthMeter: DefaultBandwidthMeter = DefaultBandwidthMeter.Builder(app).build()
-    val player: ExoPlayer = ExoPlayer.Builder(app)
+    // Mutable so [recreatePlayer] can drop and rebuild them when the
+    // current ExoPlayer instance gets wedged in a state its own retry
+    // logic can't escape. Always non-null after init.
+    var bandwidthMeter: DefaultBandwidthMeter = DefaultBandwidthMeter.Builder(app).build()
+        private set
+    var player: ExoPlayer = ExoPlayer.Builder(app)
         .setBandwidthMeter(bandwidthMeter)
         .build()
+        private set
 
     private var metrics: PlaybackMetrics? = null
 
@@ -598,12 +608,63 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         buildUrlAndLoad()
     }
 
-    /** Heaviest reset: re-fetch the content list from /api/content, then
-     *  reload. Used to recover after the server has restarted or content
-     *  has been added/removed mid-session. */
+    /**
+     * Heavy reset: behave as if we'd never played this stream before.
+     *
+     * Concretely:
+     *   1. Rotate `playerId` to a fresh UUID. The next `/go-live/...`
+     *      request hits go-proxy with an unknown player, so the proxy
+     *      issues a brand-new 302 → per-session port redirect instead
+     *      of re-binding to whatever session was already wedged for
+     *      the previous id.
+     *   2. Stop and clear the player so any in-flight buffers / decoder
+     *      state from the wedged stream don't leak into the new prepare.
+     *   3. Drop currentUrl so applyContentFilter doesn't short-circuit.
+     *   4. Re-fetch /api/content (catches server-side changes too) and
+     *      let the resulting applyContentFilter rebuild the URL with
+     *      the new playerId baked in.
+     */
     fun reload() {
         metrics?.onRestart("reload")
-        fetchContentList()
+        playerId = java.util.UUID.randomUUID().toString()
+        player.stop()
+        player.clearMediaItems()
+        _state.update { it.copy(currentUrl = "") }
+        // Re-fetch and let applyContentFilter (with empty currentUrl =
+        // "wasPlaying = false") set selection without auto-loading; then
+        // explicitly buildUrlAndLoad with the rotated id.
+        viewModelScope.launch {
+            val server = _state.value.activeServer ?: return@launch
+            val (list, err) = withContext(Dispatchers.IO) { fetchContent(server.apiUrl) }
+            if (err == null) {
+                _state.update { it.copy(content = list, statusText = "Loaded ${list.size} items") }
+                writeContentCache(server, list)
+            } else {
+                _state.update { it.copy(statusText = "Refresh failed: $err") }
+            }
+            buildUrlAndLoad()
+        }
+    }
+
+    /**
+     * Heaviest unwedge: tear down the underlying ExoPlayer entirely and
+     * rebuild it. Used when even reload() hasn't recovered — surface or
+     * codec stuck in a state ExoPlayer's own retry can't escape. Loses
+     * the metrics binding for an instant; PlaybackScreen's bindMetrics
+     * call re-attaches on next composition.
+     */
+    fun recreatePlayer() {
+        metrics?.onRestart("recreate")
+        metrics?.release()
+        metrics = null
+        player.release()
+        bandwidthMeter = DefaultBandwidthMeter.Builder(getApplication()).build()
+        player = ExoPlayer.Builder(getApplication<Application>())
+            .setBandwidthMeter(bandwidthMeter)
+            .build()
+        attachPlayerListeners()
+        applyTrackSelectionParameters()
+        buildUrlAndLoad()
     }
 
     // -- Metrics binding -----------------------------------------------------
