@@ -88,7 +88,12 @@ fun HomeScreen(
     }
 
     val items = state.filteredContent
-    val featured = items.firstOrNull()
+    // Continue Watching hero: prefer the most recently *successfully played*
+    // clip (first-frame-rendered, persisted across app restarts). Fall
+    // back to the first item in the catalogue if the persisted entry no
+    // longer exists or hasn't been set yet.
+    val featured = items.firstOrNull { it.name == state.lastPlayed }
+        ?: items.firstOrNull()
     // 3 visible preview slots; the pool of eligible clips can be much
     // larger and the user scrolls through it via D-pad-Left/Right at the
     // row edges (carousel rotation). Each carousel step is exactly 1

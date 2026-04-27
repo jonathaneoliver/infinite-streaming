@@ -171,6 +171,7 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
                 localProxy    = p.getBoolean(FLAG_LOCAL_PROXY, true),
                 autoRecovery  = p.getBoolean(FLAG_AUTO_RECOVERY, false),
                 goLive        = p.getBoolean(FLAG_GO_LIVE, false),
+                lastPlayed    = p.getString(LAST_PLAYED_KEY, "") ?: "",
             )
         }
     }
@@ -294,6 +295,8 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
                             ).trimEnd('_')
                         },
                         codec = o.optString("codec", "").lowercase(),
+                        segmentDuration = if (o.isNull("segment_duration")) null
+                                          else o.optInt("segment_duration", -1).takeIf { it >= 0 },
                         thumbnailPath = o.optString("thumbnail_url", "").ifEmpty { null },
                         thumbnailPathSmall = o.optString("thumbnail_url_small", "").ifEmpty { null },
                         thumbnailPathLarge = o.optString("thumbnail_url_large", "").ifEmpty { null },
@@ -431,7 +434,18 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
                     }
                 }
             }
-            override fun onRenderedFirstFrame() { metrics?.onFirstFrameRendered() }
+            override fun onRenderedFirstFrame() {
+                metrics?.onFirstFrameRendered()
+                // First frame on screen = the stream actually started, so
+                // mark this content as successfully played. Persisted via
+                // SharedPreferences so the Continue Watching hero on Home
+                // can resume it after navigation / app restart.
+                val current = _state.value.selectedContent
+                if (current.isNotEmpty()) {
+                    prefs().edit().putString(LAST_PLAYED_KEY, current).apply()
+                    _state.update { it.copy(lastPlayed = current) }
+                }
+            }
             override fun onIsPlayingChanged(isPlaying: Boolean) {
                 if (isPlaying) metrics?.onStallEnd()
             }
@@ -495,5 +509,6 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         private const val FLAG_LOCAL_PROXY = "advanced_local_proxy"
         private const val FLAG_AUTO_RECOVERY = "advanced_auto_recovery"
         private const val FLAG_GO_LIVE = "advanced_go_live"
+        private const val LAST_PLAYED_KEY = "last_played_content"
     }
 }

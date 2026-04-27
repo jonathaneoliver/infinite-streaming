@@ -21,6 +21,10 @@ data class ContentItem(
     val clipId: String,
     /** "h264" / "hevc" / "av1" / "" — server-stripped codec hint. */
     val codec: String,
+    /** Native segment duration the source was encoded at (seconds). null
+     *  when the server couldn't detect it. Used by the Stream picker to
+     *  honour the Segment Length preference. */
+    val segmentDuration: Int? = null,
     /** Server-relative path to the 640-px-wide poster (default size for
      *  card / tile surfaces). Null when the server hasn't generated a
      *  thumbnail for this clip yet. */
@@ -48,6 +52,9 @@ data class UiState(
 
     val content: List<ContentItem> = emptyList(),
     val selectedContent: String = "",
+    /** Name of the last content the player rendered a first frame on.
+     *  Persisted across app restarts; powers the Continue Watching hero. */
+    val lastPlayed: String = "",
 
     val protocol: Protocol = Protocol.HLS,
     val segment: Segment = Segment.SIX,
@@ -80,13 +87,28 @@ data class UiState(
     val activeServer: ServerEnvironment?
         get() = servers.getOrNull(activeServerIndex)
 
-    /** Apply protocol + codec filter to the raw content list. */
+    /** Apply protocol + codec + segment-length filter to the raw content
+     *  list. Segment length is matched against the *native* encoding
+     *  duration (`segment_duration` from /api/content). go-live can serve
+     *  any segment variant for any source via subsegmentation, but the
+     *  Stream picker filters honour the user's preference so they can
+     *  reproducibly find content encoded at the chosen duration. Items
+     *  with no detected segment_duration (older content) pass through. */
     val filteredContent: List<ContentItem>
         get() = content.filter { c ->
             val protocolOk = if (protocol == Protocol.HLS) c.hasHls else c.hasDash
             if (!protocolOk) return@filter false
-            if (codec == Codec.AUTO) return@filter true
-            inferCodec(c.name) == codec
+            if (codec != Codec.AUTO && inferCodec(c.name) != codec) return@filter false
+            val sd = c.segmentDuration
+            if (sd != null) {
+                val segOk = when (segment) {
+                    Segment.LL -> sd <= 1
+                    Segment.TWO -> sd == 2
+                    Segment.SIX -> sd == 6
+                }
+                if (!segOk) return@filter false
+            }
+            true
         }
 }
 
