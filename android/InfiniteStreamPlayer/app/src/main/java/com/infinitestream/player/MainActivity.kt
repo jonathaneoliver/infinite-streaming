@@ -49,15 +49,20 @@ class MainActivity : ComponentActivity() {
         tag("MainActivity onCreate end")
     }
 
+    override fun onStart() {
+        super.onStart()
+        vm.onActivityStarted()
+    }
+
     override fun onStop() {
         super.onStop()
-        // User pressed Home / switched apps. Pause the player so we don't
-        // keep decoding audio in the background while another app
-        // (e.g. YouTube) is in the foreground. onStart restores nothing
-        // automatically — the user has to come back and hit play; this
-        // matches what the Android TV system expects of background-
-        // unaware media apps.
-        vm.player.pause()
+        // User pressed Home / switched apps. Fully release video-decoding
+        // resources so we don't keep MediaCodec instances allocated in
+        // the background while another app (e.g. YouTube) is in the
+        // foreground. The VM stops + clearMediaItems on the main player
+        // and broadcasts appStopped=true so every LivePreviewTile on
+        // Home releases its decoder too. Re-prepares on onStart.
+        vm.onActivityStopped()
     }
 }
 

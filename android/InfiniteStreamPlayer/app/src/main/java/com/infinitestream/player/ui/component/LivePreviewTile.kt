@@ -79,6 +79,11 @@ fun LivePreviewTile(
     onAcquireDecoderLease: () -> Unit = {},
     /** Called from DisposableEffect.onDispose, after `player.release()`. */
     onReleaseDecoderLease: () -> Unit = {},
+    /** True while the host Activity is in STOPPED. The tile fully tears
+     *  down its ExoPlayer + decoder when this is true so we don't keep
+     *  video decoding resources allocated while the user is in another
+     *  app (Home / YouTube / etc.). Re-prepares when it flips back. */
+    appStopped: Boolean = false,
 ) {
     Box(
         modifier = modifier
@@ -107,7 +112,7 @@ fun LivePreviewTile(
                     .background(Tokens.bgCard)
             )
         }
-        if (active) {
+        if (active && !appStopped) {
             ActivePlayerSurface(
                 content = content,
                 server = server,

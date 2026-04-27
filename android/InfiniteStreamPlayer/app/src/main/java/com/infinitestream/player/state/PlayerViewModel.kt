@@ -82,6 +82,25 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
     private val _decoderLeases = MutableStateFlow(0)
     val decoderLeases: StateFlow<Int> = _decoderLeases.asStateFlow()
 
+    /**
+     * True while the host Activity is in the STOPPED state (user pressed
+     * Home, switched apps, etc.). Tile players observe this and tear
+     * down their ExoPlayer + decoder when it flips true so we don't
+     * keep video decoders allocated in the background. Flipping back
+     * to false on Activity-resumed cues a re-prepare.
+     */
+    private val _appStopped = MutableStateFlow(false)
+    val appStopped: StateFlow<Boolean> = _appStopped.asStateFlow()
+    fun onActivityStopped() {
+        _appStopped.value = true
+        // Drop the main player's hardware decoder too — pause() alone
+        // keeps the codec instance alive, which the user heard as
+        // InfiniteStream audio bleeding into YouTube after homing out.
+        player.stop()
+        player.clearMediaItems()
+    }
+    fun onActivityStarted() { _appStopped.value = false }
+
     fun acquireDecoderLease() { _decoderLeases.update { it + 1 } }
     fun releaseDecoderLease() {
         _decoderLeases.update { (it - 1).coerceAtLeast(0) }

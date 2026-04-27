@@ -22,6 +22,7 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -161,6 +162,7 @@ fun HomeScreen(
                     Text("LIVE STREAMS", style = AppType.label.copy(color = Tokens.fg))
                 }
                 Spacer(Modifier.height(Space.s3))
+                val appStopped by vm.appStopped.collectAsStateWithLifecycle()
                 // Carousel offset: the visible window starts here in the
                 // pool. Increment on D-pad-Right past the rightmost slot,
                 // decrement on D-pad-Left past the leftmost. Modulo wraps
@@ -187,6 +189,7 @@ fun HomeScreen(
                             content = c,
                             server = activeServer,
                             active = true,
+                            appStopped = appStopped,
                             onClick = { picked -> playPicked(picked.name) },
                             onAcquireDecoderLease = vm::acquireDecoderLease,
                             onReleaseDecoderLease = vm::releaseDecoderLease,
