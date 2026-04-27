@@ -101,7 +101,12 @@ fun ServerPickerScreen(
         state.servers.map { "${it.host.lowercase()}:${it.apiPort}" }.toSet()
     }
     val newDiscovered = remember(discovered, savedKeys) {
-        discovered.filter { d ->
+        // distinctBy URL — the Rendezvous Worker can return the same
+        // server multiple times when its `/announce` records carry
+        // different `server_id`s but identical URLs (e.g. multi-NIC
+        // hosts re-announcing). Compose's LazyVerticalGrid throws
+        // IllegalArgumentException when two items share a key.
+        discovered.distinctBy { it.url.lowercase() }.filter { d ->
             val u = android.net.Uri.parse(d.url)
             val host = u.host?.lowercase() ?: return@filter false
             val port = if (u.port >= 0) u.port else if (u.scheme.equals("https", true)) 443 else 80
@@ -168,7 +173,7 @@ fun ServerPickerScreen(
                         "Discovery: ${state.discoveryError}",
                         style = AppType.mono.copy(color = Tokens.fgDim),
                     )
-                } else if (state.servers.isEmpty()) {
+                } else if (state.servers.isEmpty() && newDiscovered.isEmpty()) {
                     Text(
                         "No servers detected — add one manually with the + card.",
                         style = AppType.mono.copy(color = Tokens.fgDim),
