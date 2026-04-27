@@ -110,9 +110,19 @@ fun HomeScreen(
     // samsung_* clip merged into one, and the 45-item content list ended
     // up as 6 visible cards.
     val visibleSlots = 3
-    val previewPool = items
+    // Pool of unique H.264 clips for the carousel. The first slot is
+    // pinned to the same logical clip as the Continue Watching hero so
+    // the user's most-recent stream is always the leftmost preview —
+    // and so resuming from the hero or clicking the leading tile do the
+    // same thing.
+    val rawPool = items
         .filter { it.codec.isEmpty() || it.codec == "h264" }
         .distinctBy { it.clipId }
+    val featuredClipId = featured?.clipId
+    val previewPool = if (featuredClipId != null) {
+        val pinned = rawPool.firstOrNull { it.clipId == featuredClipId }
+        if (pinned != null) listOf(pinned) + rawPool.filter { it !== pinned } else rawPool
+    } else rawPool
     val rest = items - previewPool.toSet()
 
     Box(
