@@ -2,6 +2,7 @@
 
 package com.infinitestream.player.ui.screen
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -14,7 +15,6 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
@@ -149,6 +149,12 @@ private fun SettingsPanel(
     val advancedFocus = remember { FocusRequester() }
     val pickerFirstFocus = remember { FocusRequester() }
 
+    // Back inside a picker pops back to the main list. Sits inside the
+    // MainActivity drawer-close BackHandler so this one consumes Back
+    // first whenever a picker is open; the outer handler closes the
+    // drawer when we're already on the main list.
+    BackHandler(enabled = state.settingsOpen && picker != null) { picker = null }
+
     LaunchedEffect(picker, state.settingsOpen) {
         if (!state.settingsOpen) return@LaunchedEffect
         // Drawer slides in over 240ms — wait for the row to be laid out
@@ -188,23 +194,29 @@ private fun SettingsPanel(
             )
             Spacer(Modifier.height(Space.s7))
 
-            if (picker == null) {
-                MainList(state, vm,
-                    serverFocus = serverFocus,
-                    streamFocus = streamFocus,
-                    protocolFocus = protocolFocus,
-                    segmentFocus = segmentFocus,
-                    codecFocus = codecFocus,
-                    advancedFocus = advancedFocus,
-                    onPick = { kind -> lastPicker = kind; picker = kind },
-                    onOpenServerPicker = onOpenServerPicker)
-            } else {
-                PickerList(picker!!, state, vm,
-                    firstRowFocus = pickerFirstFocus,
-                    onBack = { picker = null })
+            // Body region — fills the panel between the header and the
+            // "Press Back" hint. Without this Box, MainList's weight(1f)
+            // was sharing the leftover height with a sibling Spacer(weight 1f),
+            // so the list could only ever use half the panel height.
+            Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
+                if (picker == null) {
+                    MainList(state, vm,
+                        serverFocus = serverFocus,
+                        streamFocus = streamFocus,
+                        protocolFocus = protocolFocus,
+                        segmentFocus = segmentFocus,
+                        codecFocus = codecFocus,
+                        advancedFocus = advancedFocus,
+                        onPick = { kind -> lastPicker = kind; picker = kind },
+                        onOpenServerPicker = onOpenServerPicker)
+                } else {
+                    PickerList(picker!!, state, vm,
+                        firstRowFocus = pickerFirstFocus,
+                        onBack = { picker = null })
+                }
             }
 
-            Spacer(Modifier.weight(1f))
+            Spacer(Modifier.height(Space.s2))
             Text("◀ Press Back to return", style = AppType.mono.copy(color = Tokens.fgDim))
         }
     }
@@ -212,12 +224,12 @@ private fun SettingsPanel(
 
 private enum class PickerKind { Stream, Protocol, SegmentLength, Codec, Advanced }
 
-// `ColumnScope.MainList` — the function only makes sense in the parent
-// drawer's Column, and being a ColumnScope extension is what unlocks
-// `Modifier.weight(1f, fill = false)` for the inner LazyColumn so the
-// list scrolls when it overflows the panel.
+// Lives inside the panel's body Box, so the LazyColumn fills the full
+// available height and scrolls when its rows overflow. LazyColumn
+// composes the first row immediately, so the row FocusRequesters
+// resolve cleanly through the drawer's post-mount focus delay.
 @Composable
-private fun ColumnScope.MainList(
+private fun MainList(
     state: UiState,
     vm: PlayerViewModel,
     serverFocus: FocusRequester,
@@ -229,13 +241,8 @@ private fun ColumnScope.MainList(
     onPick: (PickerKind) -> Unit,
     onOpenServerPicker: () -> Unit,
 ) {
-    // Same scroll-when-overflowed pattern as the picker pages — the
-    // parent settings menu was getting crushed when the panel got tight
-    // (small TV viewport, large fonts, etc.). LazyColumn composes the
-    // first row immediately, so the firstRowFocus FocusRequester still
-    // resolves cleanly through the post-mount delay.
     LazyColumn(
-        modifier = Modifier.weight(1f, fill = false),
+        modifier = Modifier.fillMaxSize(),
         verticalArrangement = Arrangement.spacedBy(Space.s1),
     ) {
         item {
@@ -308,13 +315,12 @@ private fun PickerList(
             style = AppType.titleSm.copy(color = Tokens.fg),
         )
         Spacer(Modifier.height(Space.s4))
-        // Every picker uses a weight(1f, fill=false) LazyColumn so it
-        // scrolls if the item count exceeds available height. Previously
-        // only the Stream picker did this; Advanced (6 toggles) was on
-        // a non-scrolling Column and the last toggle was getting crushed
-        // off the bottom of the panel.
+        // Fills the available height between the header and the Back
+        // hint, scrolling when items overflow. fill=true so the list
+        // body uses the full panel — fill=false would let the trailing
+        // Back hint eat half the space.
         LazyColumn(
-            modifier = Modifier.weight(1f, fill = false),
+            modifier = Modifier.weight(1f),
             verticalArrangement = Arrangement.spacedBy(Space.s1),
         ) {
             when (kind) {
@@ -400,13 +406,6 @@ private fun PickerList(
                 }
             }
         }
-        Spacer(Modifier.weight(1f))
-        Text("◀ Back", style = AppType.mono.copy(color = Tokens.fgDim),
-            modifier = Modifier
-                .clip(RoundedCornerShape(Radius.row))
-                .clickable(onClick = onBack)
-                .padding(Space.s2)
-        )
     }
 }
 

@@ -157,25 +157,32 @@ fun PlaybackScreen(
         // The video itself — wrap PlayerView so existing PlaybackMetrics keeps
         // working. We disable Media3's built-in controller because the HUD
         // below is the spec'd surface.
-        AndroidView(
-            modifier = Modifier.fillMaxSize(),
-            factory = { ctx ->
-                PlayerView(ctx).apply {
-                    player = vm.player
-                    useController = false
-                    setBackgroundColor(android.graphics.Color.BLACK)
-                    // Don't let the PlayerView steal D-pad focus from the
-                    // Compose root — without this, MENU/UP get absorbed
-                    // before our onKeyEvent runs.
-                    isFocusable = false
-                    isFocusableInTouchMode = false
-                    descendantFocusability = android.view.ViewGroup.FOCUS_BLOCK_DESCENDANTS
-                }
-            },
-            update = { view ->
-                vm.bindMetrics(view)
-            },
-        )
+        //
+        // Keyed on state.playerEpoch so a Reload (which releases and
+        // rebuilds the underlying ExoPlayer) remounts this PlayerView
+        // and binds to the new player — otherwise the view would keep
+        // a reference to the released instance.
+        androidx.compose.runtime.key(state.playerEpoch) {
+            AndroidView(
+                modifier = Modifier.fillMaxSize(),
+                factory = { ctx ->
+                    PlayerView(ctx).apply {
+                        player = vm.player
+                        useController = false
+                        setBackgroundColor(android.graphics.Color.BLACK)
+                        // Don't let the PlayerView steal D-pad focus from the
+                        // Compose root — without this, MENU/UP get absorbed
+                        // before our onKeyEvent runs.
+                        isFocusable = false
+                        isFocusableInTouchMode = false
+                        descendantFocusability = android.view.ViewGroup.FOCUS_BLOCK_DESCENDANTS
+                    }
+                },
+                update = { view ->
+                    vm.bindMetrics(view)
+                },
+            )
+        }
 
         // Top-right corner stack: shortcut hint sits on top, developer
         // diagnostics sits below it. Stacking (vs. overlapping) means the
@@ -286,11 +293,7 @@ private fun HudBar(
                 Spacer(Modifier.width(Space.s5))
                 RecoveryButton("Retry", onActivity) { vm.retry() }
                 Spacer(Modifier.width(Space.s2))
-                RecoveryButton("Restart", onActivity) { vm.restart() }
-                Spacer(Modifier.width(Space.s2))
                 RecoveryButton("Reload", onActivity) { vm.reload() }
-                Spacer(Modifier.width(Space.s2))
-                RecoveryButton("Reset", onActivity) { vm.recreatePlayer() }
             }
         }
     }

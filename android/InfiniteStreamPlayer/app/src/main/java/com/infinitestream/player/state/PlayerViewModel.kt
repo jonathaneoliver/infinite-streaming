@@ -601,11 +601,13 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
      *  playing and shouldn't reload. */
     fun clearCurrentUrl() { _state.update { it.copy(currentUrl = "") } }
 
-    /** Lightest reset: re-load the same stream URL without rebuilding.
-     *  Stops + clears the player first so the audio renderer fully tears
-     *  down before the new prepare(); without this the previous decoder
-     *  can briefly overlap with the new one and you hear the same audio
-     *  twice with a small lag. Same reason restart() does it explicitly. */
+    /**
+     * Manual trigger for the auto-recovery path. Same call the codec-error
+     * handler and the autoRecovery branch make in onPlayerError: stop +
+     * clear + re-prepare the *same* URL on the *same* ExoPlayer. Useful
+     * when the player has stalled or surfaced an error and you want the
+     * built-in retry kicked off without waiting for it.
+     */
     fun retry() {
         val url = _state.value.currentUrl
         if (url.isEmpty()) return
@@ -614,45 +616,24 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         loadStream(url)
     }
 
-    /** Medium reset: stop the player, rebuild the URL from the current
-     *  selection (picks up flag changes), and reload. */
-    fun restart() {
-        metrics?.onRestart("manual")
-        player.stop(); player.clearMediaItems()
-        buildUrlAndLoad()
-    }
-
     /**
-     * Heavy reset: rebuild the stream URL from scratch and re-issue it
-     * — go-proxy serves a fresh 302 → per-session port redirect on the
-     * way through, which ExoPlayer follows cleanly. Behaves "as if we
-     * haven't been playing the URL".
+     * Full tear-down + recreate. Releases the existing ExoPlayer, builds
+     * a fresh one with new BandwidthMeter, re-attaches listeners and
+     * track-selection params, then issues the original go-proxy URL —
+     * the one *before* the per-session 302 redirect — so go-proxy hands
+     * out a fresh redirect target. This is the right button after a
+     * server restart: any cached per-session port the player followed
+     * to earlier may be dead, and a brand-new ExoPlayer + brand-new
+     * GET to the proxy gets us back on a live route.
      *
-     * Same player_id (so the proxy keeps our session) and no catalogue
-     * refetch (use Reset for the heavier reset that drops the player
-     * itself; the dashboard's reload is the way to pick up new
-     * server-side content). Distinct from Restart only by the metrics
-     * tag and the currentUrl drop — the URL drop forces
-     * applyContentFilter / any subsequent flag toggle to treat us as
-     * "not actively playing" until buildUrlAndLoad sets it again.
+     * Bumps `playerEpoch` so the PlayerView in PlaybackScreen remounts
+     * and binds to the new ExoPlayer instance — without that the UI
+     * would still hold a reference to the released player.
+     *
+     * Same player_id (proxy session continuity), no catalogue refetch.
      */
     fun reload() {
         metrics?.onRestart("reload")
-        player.stop()
-        player.clearMediaItems()
-        _state.update { it.copy(currentUrl = "") }
-        buildUrlAndLoad()
-    }
-
-    /**
-     * Heaviest unwedge: tear down the underlying ExoPlayer entirely and
-     * rebuild it. Used when even reload() hasn't recovered — surface or
-     * codec stuck in a state ExoPlayer's own retry can't escape. Loses
-     * the metrics binding for an instant; PlaybackScreen's bindMetrics
-     * call re-attaches on next composition.
-     */
-    fun recreatePlayer() {
-        metrics?.onRestart("recreate")
         metrics?.release()
         metrics = null
         player.release()
@@ -662,6 +643,7 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
             .build()
         attachPlayerListeners()
         applyTrackSelectionParameters()
+        _state.update { it.copy(currentUrl = "", playerEpoch = it.playerEpoch + 1) }
         buildUrlAndLoad()
     }
 

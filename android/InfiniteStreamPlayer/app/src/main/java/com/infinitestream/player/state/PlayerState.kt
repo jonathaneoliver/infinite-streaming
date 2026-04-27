@@ -98,6 +98,11 @@ data class UiState(
     val hudVisible: Boolean = false,
     /** True when the settings drawer is open over the playback screen. */
     val settingsOpen: Boolean = false,
+
+    /** Bumped whenever the underlying ExoPlayer instance is replaced (Reload).
+     *  PlaybackScreen keys its PlayerView AndroidView on this so the view
+     *  remounts and re-binds to the new player. */
+    val playerEpoch: Int = 0,
 ) {
     val activeServer: ServerEnvironment?
         get() = servers.getOrNull(activeServerIndex)
