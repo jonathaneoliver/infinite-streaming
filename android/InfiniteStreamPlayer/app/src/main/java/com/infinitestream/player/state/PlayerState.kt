@@ -55,6 +55,11 @@ data class UiState(
     /** Name of the last content the player rendered a first frame on.
      *  Persisted across app restarts; powers the Continue Watching hero. */
     val lastPlayed: String = "",
+    /** Per-clip_id play counts, incremented on every successful first
+     *  frame (codec-agnostic — h264/hevc/av1 plays of the same logical
+     *  clip share a tally). Persisted as JSON; powers the
+     *  "frequently viewed" ordering of the preview row. */
+    val viewCounts: Map<String, Int> = emptyMap(),
 
     val protocol: Protocol = Protocol.HLS,
     val segment: Segment = Segment.SIX,

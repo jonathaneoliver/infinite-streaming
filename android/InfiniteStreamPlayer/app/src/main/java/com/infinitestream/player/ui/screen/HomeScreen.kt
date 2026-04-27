@@ -110,19 +110,28 @@ fun HomeScreen(
     // samsung_* clip merged into one, and the 45-item content list ended
     // up as 6 visible cards.
     val visibleSlots = 3
-    // Pool of unique H.264 clips for the carousel. The first slot is
-    // pinned to the same logical clip as the Continue Watching hero so
-    // the user's most-recent stream is always the leftmost preview —
-    // and so resuming from the hero or clicking the leading tile do the
-    // same thing.
+    // Pool of unique H.264 clips for the carousel.
+    //
+    // Ordering policy (most-prominent first):
+    //   1. The Continue Watching clip — slot 0, even if it's not the
+    //      most-watched; resume should always be the leftmost.
+    //   2. By view count DESC — "frequently viewed" surfaced near the
+    //      front so the user's most-played content is never more than
+    //      a press or two away.
+    //   3. Catalogue order as the final tiebreaker.
     val rawPool = items
         .filter { it.codec.isEmpty() || it.codec == "h264" }
         .distinctBy { it.clipId }
+    val frequentlyViewed = rawPool.sortedWith(
+        compareByDescending<ContentItem> { state.viewCounts[it.clipId] ?: 0 }
+            .thenBy { rawPool.indexOf(it) }
+    )
     val featuredClipId = featured?.clipId
     val previewPool = if (featuredClipId != null) {
-        val pinned = rawPool.firstOrNull { it.clipId == featuredClipId }
-        if (pinned != null) listOf(pinned) + rawPool.filter { it !== pinned } else rawPool
-    } else rawPool
+        val pinned = frequentlyViewed.firstOrNull { it.clipId == featuredClipId }
+        if (pinned != null) listOf(pinned) + frequentlyViewed.filter { it !== pinned }
+        else frequentlyViewed
+    } else frequentlyViewed
     val rest = items - previewPool.toSet()
 
     Box(

@@ -229,8 +229,39 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
                 autoRecovery  = p.getBoolean(FLAG_AUTO_RECOVERY, false),
                 goLive        = p.getBoolean(FLAG_GO_LIVE, false),
                 lastPlayed    = p.getString(LAST_PLAYED_KEY, "") ?: "",
+                viewCounts    = readViewCounts(p),
             )
         }
+    }
+
+    private fun readViewCounts(p: SharedPreferences): Map<String, Int> {
+        val raw = p.getString(VIEW_COUNTS_KEY, null) ?: return emptyMap()
+        return try {
+            val o = JSONObject(raw)
+            buildMap {
+                o.keys().forEach { k -> put(k, o.optInt(k, 0)) }
+            }
+        } catch (_: Exception) { emptyMap() }
+    }
+
+    private fun writeViewCounts(counts: Map<String, Int>) {
+        val o = JSONObject()
+        counts.forEach { (k, v) -> o.put(k, v) }
+        prefs().edit().putString(VIEW_COUNTS_KEY, o.toString()).apply()
+    }
+
+    /**
+     * Resolve a content name to its clip_id by looking it up in the
+     * current catalogue. Falls back to a string-strip of `_p200_codec`
+     * (case-insensitive) when the lookup misses — covers cold-start
+     * before /api/content has returned.
+     */
+    private fun clipIdForName(name: String): String {
+        val match = _state.value.content.firstOrNull { it.name == name }
+        if (match != null) return match.clipId
+        return name.lowercase().replace(
+            Regex("_p200_(h264|hevc|h265|av1)(_\\d{8}_\\d{6})?$"), ""
+        )
     }
 
     fun setDeveloperMode(on: Boolean) {
@@ -618,13 +649,20 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
                 // fresh budget of attempts.
                 codecRetries = 0
                 // First frame on screen = the stream actually started, so
-                // mark this content as successfully played. Persisted via
-                // SharedPreferences so the Continue Watching hero on Home
-                // can resume it after navigation / app restart.
+                // (a) mark this content as the lastPlayed (powers the
+                // Continue Watching hero) and (b) bump its clip_id's
+                // view count (powers the "frequently viewed" ordering of
+                // the preview row). View counts are codec-agnostic — the
+                // h264, hevc, and av1 encodings of one clip share a
+                // tally so toggling codecs doesn't fragment history.
                 val current = _state.value.selectedContent
                 if (current.isNotEmpty()) {
+                    val clipId = clipIdForName(current)
+                    val newCounts = _state.value.viewCounts.toMutableMap()
+                    newCounts[clipId] = (newCounts[clipId] ?: 0) + 1
                     prefs().edit().putString(LAST_PLAYED_KEY, current).apply()
-                    _state.update { it.copy(lastPlayed = current) }
+                    writeViewCounts(newCounts)
+                    _state.update { it.copy(lastPlayed = current, viewCounts = newCounts) }
                 }
             }
             override fun onIsPlayingChanged(isPlaying: Boolean) {
@@ -731,6 +769,7 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         private const val FLAG_AUTO_RECOVERY = "advanced_auto_recovery"
         private const val FLAG_GO_LIVE = "advanced_go_live"
         private const val LAST_PLAYED_KEY = "last_played_content"
+        private const val VIEW_COUNTS_KEY = "view_counts"
         private const val CONTENT_CACHE_PREFIX = "content_cache_"
     }
 }
