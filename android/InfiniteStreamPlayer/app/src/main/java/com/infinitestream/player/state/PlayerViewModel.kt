@@ -541,6 +541,15 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun loadStream(url: String) {
         if (url.isEmpty()) return
+        // Tear down the previous source first. Without this, switching
+        // streams via setMediaItem() can leave the old audio decoder
+        // alive long enough that you briefly hear two audio tracks with
+        // a small lag while the new prepare() spins up. Stop+clear is
+        // cheap and gives ExoPlayer a clean slate.
+        if (player.mediaItemCount > 0 || player.playbackState != Player.STATE_IDLE) {
+            player.stop()
+            player.clearMediaItems()
+        }
         // Match iOS AVPlayer behaviour: let manifest's EXT-X-SERVER-CONTROL pick
         // the start point, narrow the playback-speed window so ExoPlayer recovers
         // via rate adjustment (not seeks) after a stall.
@@ -563,13 +572,23 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         metrics?.onPlaybackStarted()
     }
 
-    /** Lightest reset: re-load the same stream URL without rebuilding. */
     /** Clear the "currently playing" URL marker. Called by MainActivity on
      *  every leave-Playback so applyContentFilter knows we're not actively
      *  playing and shouldn't reload. */
     fun clearCurrentUrl() { _state.update { it.copy(currentUrl = "") } }
 
-    fun retry() { if (_state.value.currentUrl.isNotEmpty()) loadStream(_state.value.currentUrl) }
+    /** Lightest reset: re-load the same stream URL without rebuilding.
+     *  Stops + clears the player first so the audio renderer fully tears
+     *  down before the new prepare(); without this the previous decoder
+     *  can briefly overlap with the new one and you hear the same audio
+     *  twice with a small lag. Same reason restart() does it explicitly. */
+    fun retry() {
+        val url = _state.value.currentUrl
+        if (url.isEmpty()) return
+        player.stop()
+        player.clearMediaItems()
+        loadStream(url)
+    }
 
     /** Medium reset: stop the player, rebuild the URL from the current
      *  selection (picks up flag changes), and reload. */
