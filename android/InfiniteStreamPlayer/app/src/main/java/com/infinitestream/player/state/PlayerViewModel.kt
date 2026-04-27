@@ -83,13 +83,21 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /**
-     * NO_MEMORY retry counter — incremented in [onPlayerError] when the
-     * cause chain hits a `MediaCodec$CodecException` with NO_MEMORY,
-     * reset to 0 on first-frame-rendered. Each retry waits with linear
-     * backoff before reloading the same URL.
+     * Codec-recovery retry counter — incremented in [onPlayerError] when
+     * the cause chain hits any `MediaCodec$CodecException` or one of
+     * Media3's decoder-exception subclasses (init failure, runtime
+     * decode failure). Reset to 0 on first-frame-rendered. Each retry
+     * waits with linear backoff before reloading the same URL.
+     *
+     * Catches both:
+     *   - NO_MEMORY decoder allocation failures (chip's hw pool
+     *     exhausted while tiles drain).
+     *   - Runtime decoder errors mid-playback (e.g. the AAC decoder
+     *     reporting -14 on the first audio frame, which is usually
+     *     transient and recovers on the next allocation).
      */
-    private var noMemoryRetries = 0
-    private val maxNoMemoryRetries = 3
+    private var codecRetries = 0
+    private val maxCodecRetries = 3
 
     init {
         loadServers()
@@ -483,20 +491,22 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         player.addListener(object : Player.Listener {
             override fun onPlayerError(error: PlaybackException) {
                 metrics?.onPlayerError(error.message)
-                // First: NO_MEMORY decoder-budget retry. The lease-counting
-                // gate in setSelectedContentDeferred is the happy path, but
-                // there are edge cases — a tile player that hasn't quite
-                // finished disposing, the OS taking longer than 50 ms to
-                // free the codec slot, etc. If prepare() trips the chip's
-                // pool we retry up to maxNoMemoryRetries with linear
-                // backoff. Reset noMemoryRetries on first-frame-rendered.
-                if (isCodecNoMemory(error)
-                    && noMemoryRetries < maxNoMemoryRetries
+                // Retry on any MediaCodec decoder failure — covers both
+                // NO_MEMORY init failures (lease-counting in
+                // setSelectedContentDeferred is the happy path; this is
+                // the safety net) and runtime decoder errors mid-playback
+                // (e.g. the audio renderer reporting CodecException -14
+                // on the first AAC frame, which is usually transient and
+                // recovers on the next allocation). Bounded retries so a
+                // genuinely broken stream doesn't loop forever.
+                val classification = classifyCodecError(error)
+                if (classification != null
+                    && codecRetries < maxCodecRetries
                     && _state.value.currentUrl.isNotEmpty()) {
-                    noMemoryRetries++
-                    val backoff = 150L * noMemoryRetries
+                    codecRetries++
+                    val backoff = 150L * codecRetries
                     _state.update {
-                        it.copy(statusText = "Decoder busy — retry $noMemoryRetries/$maxNoMemoryRetries")
+                        it.copy(statusText = "$classification — retry $codecRetries/$maxCodecRetries")
                     }
                     viewModelScope.launch {
                         kotlinx.coroutines.delay(backoff)
@@ -517,11 +527,11 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
             }
             override fun onRenderedFirstFrame() {
                 metrics?.onFirstFrameRendered()
-                // Successful frame = the chip allocated a decoder for us,
-                // so wipe the NO_MEMORY retry counter. Next time we hit
-                // it (e.g. user navigates back to Home and forward again)
-                // we get a fresh budget.
-                noMemoryRetries = 0
+                // Successful frame = the chip allocated decoders for us
+                // and they're functioning, so wipe the codec retry
+                // counter. Next time we hit a decoder fault we get a
+                // fresh budget of attempts.
+                codecRetries = 0
                 // First frame on screen = the stream actually started, so
                 // mark this content as successfully played. Persisted via
                 // SharedPreferences so the Continue Watching hero on Home
@@ -581,33 +591,43 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /**
-     * Walk a [PlaybackException] cause chain looking for evidence that the
-     * underlying problem was the chip refusing a hardware decoder
-     * allocation. Catches both the structured signal (MediaCodec's
-     * CodecException with errno -12) and the diagnostic-string fallback
-     * (some vendor codecs only set the message). Conservatively false-y
-     * if the chain is empty or unrelated.
+     * Walk a [PlaybackException] cause chain to decide whether the
+     * underlying problem is a transient codec fault we should retry.
+     *
+     * Returns a short user-facing tag (used in statusText) when the error
+     * looks codec-related, or null if it's something else (network,
+     * source format, server, etc.) — those follow the autoRecovery
+     * path instead, so a stuck server doesn't get hammered.
      */
-    private fun isCodecNoMemory(error: Throwable): Boolean {
+    private fun classifyCodecError(error: Throwable): String? {
         var cause: Throwable? = error
-        // -12 = ENOMEM in the Linux errno table; that's the value the
-        // mtk codec returns when its decoder pool is exhausted.
+        // -12 = ENOMEM in the Linux errno table — what the MTK chip
+        // returns when its decoder pool is exhausted on init.
         val noMemErrno = -12
         while (cause != null) {
             val current = cause
             if (current is android.media.MediaCodec.CodecException) {
                 val info = (current.diagnosticInfo ?: "") + " " + (current.message ?: "")
-                if ("NO_MEMORY" in info.uppercase()) return true
-                // Some firmwares stash the errno in the message but not
-                // the diagnostic string — also check errorCode if it's
-                // ever a negative errno-style value.
-                if (runCatching { current.errorCode }.getOrNull() == noMemErrno) return true
+                if ("NO_MEMORY" in info.uppercase()
+                    || runCatching { current.errorCode }.getOrNull() == noMemErrno) {
+                    return "Decoder busy"
+                }
+                return "Codec fault"
+            }
+            // Media3-specific subclasses — covers init-time and runtime
+            // decoder failures alike. The class names live under the
+            // mediacodec package; check via simple-name so we don't pin
+            // the import (these are @UnstableApi).
+            val cls = current.javaClass.simpleName
+            if (cls == "DecoderInitializationException"
+                || cls == "MediaCodecDecoderException") {
+                return "Codec fault"
             }
             val msg = current.message ?: ""
-            if ("NO_MEMORY" in msg.uppercase()) return true
+            if ("NO_MEMORY" in msg.uppercase()) return "Decoder busy"
             cause = current.cause
         }
-        return false
+        return null
     }
 
     override fun onCleared() {
