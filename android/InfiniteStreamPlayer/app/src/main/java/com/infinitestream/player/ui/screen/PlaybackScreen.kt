@@ -38,6 +38,7 @@ import androidx.compose.material.icons.filled.SkipPrevious
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -447,6 +448,7 @@ private fun Scrubber(player: ExoPlayer) {
 private fun DeveloperHud(vm: PlayerViewModel) {
     val resolution = remember { mutableStateOf("") }
     val bitrate = remember { mutableStateOf("") }
+    val leases by vm.decoderLeases.collectAsStateWithLifecycle()
     LaunchedEffect(vm.player) {
         while (true) {
             val f = vm.player.videoFormat
@@ -465,6 +467,11 @@ private fun DeveloperHud(vm: PlayerViewModel) {
     Column(horizontalAlignment = Alignment.End) {
         Text(bitrate.value, style = AppType.monoSm.copy(color = Tokens.fgDim))
         Text(resolution.value, style = AppType.monoSm.copy(color = Tokens.fgDim))
+        // Live count of preview-tile decoder leases that the main player
+        // gates on during Home → Playback navigation. 0 on the playback
+        // screen unless something is leaking; non-zero briefly during
+        // the transition window.
+        Text("DECODE LEASES $leases", style = AppType.monoSm.copy(color = Tokens.fgDim))
     }
 }
 

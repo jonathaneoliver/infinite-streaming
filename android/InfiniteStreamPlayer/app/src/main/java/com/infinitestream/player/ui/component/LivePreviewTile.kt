@@ -72,6 +72,13 @@ fun LivePreviewTile(
     active: Boolean,
     onClick: (ContentItem) -> Unit,
     modifier: Modifier = Modifier,
+    /** Called when the inner ExoPlayer is built — the tile is now
+     *  holding a hardware decoder slot. The PlayerViewModel uses this
+     *  signal to gate the main player's prepare() call so it doesn't
+     *  race the chip's codec budget on Home → Playback navigation. */
+    onAcquireDecoderLease: () -> Unit = {},
+    /** Called from DisposableEffect.onDispose, after `player.release()`. */
+    onReleaseDecoderLease: () -> Unit = {},
 ) {
     Box(
         modifier = modifier
@@ -101,7 +108,12 @@ fun LivePreviewTile(
             )
         }
         if (active) {
-            ActivePlayerSurface(content, server)
+            ActivePlayerSurface(
+                content = content,
+                server = server,
+                onAcquireDecoderLease = onAcquireDecoderLease,
+                onReleaseDecoderLease = onReleaseDecoderLease,
+            )
         }
 
         // Bottom gradient + title overlay so the name stays legible against
@@ -150,7 +162,12 @@ fun LivePreviewTile(
  * which release the hardware decoder slot back to the chip's pool.
  */
 @Composable
-private fun ActivePlayerSurface(content: ContentItem, server: ServerEnvironment) {
+private fun ActivePlayerSurface(
+    content: ContentItem,
+    server: ServerEnvironment,
+    onAcquireDecoderLease: () -> Unit,
+    onReleaseDecoderLease: () -> Unit,
+) {
     val context = LocalContext.current
     val player = remember(content.name, server.host, server.apiPort) {
         // Tile players use a RenderersFactory that builds *no* audio
@@ -191,7 +208,19 @@ private fun ActivePlayerSurface(content: ContentItem, server: ServerEnvironment)
             playWhenReady = true
         }
     }
-    DisposableEffect(player) { onDispose { player.release() } }
+    // Publish the lease around the player's actual hardware-decoder
+    // ownership window: acquired here when the Composable enters the
+    // tree (the player has already been built by `remember`), released
+    // *after* `player.release()` returns. The VM gates main playback
+    // start on this count dropping to zero so we don't race the chip's
+    // pool.
+    DisposableEffect(player) {
+        onAcquireDecoderLease()
+        onDispose {
+            player.release()
+            onReleaseDecoderLease()
+        }
+    }
     AndroidView(
         modifier = Modifier.fillMaxSize(),
         factory = { ctx ->

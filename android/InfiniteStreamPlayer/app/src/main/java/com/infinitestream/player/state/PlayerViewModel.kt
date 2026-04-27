@@ -26,9 +26,11 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONArray
 import org.json.JSONObject
 import java.net.HttpURLConnection
@@ -58,6 +60,36 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         .build()
 
     private var metrics: PlaybackMetrics? = null
+
+    /**
+     * Count of "decoder leases" currently held by tile / hero ExoPlayer
+     * instances on Home (or any other surface that decodes video). Each
+     * `ActivePlayerSurface` calls [acquireDecoderLease] when it builds its
+     * ExoPlayer and [releaseDecoderLease] from `DisposableEffect.onDispose`.
+     *
+     * The main playback flow uses this signal so it doesn't allocate its
+     * own decoder while the chip's hardware pool is still draining tile
+     * leases — see [setSelectedContentDeferred].
+     *
+     * Exposed as a public StateFlow so the dev-mode HUD can render the
+     * live count for debugging codec-budget issues.
+     */
+    private val _decoderLeases = MutableStateFlow(0)
+    val decoderLeases: StateFlow<Int> = _decoderLeases.asStateFlow()
+
+    fun acquireDecoderLease() { _decoderLeases.update { it + 1 } }
+    fun releaseDecoderLease() {
+        _decoderLeases.update { (it - 1).coerceAtLeast(0) }
+    }
+
+    /**
+     * NO_MEMORY retry counter — incremented in [onPlayerError] when the
+     * cause chain hits a `MediaCodec$CodecException` with NO_MEMORY,
+     * reset to 0 on first-frame-rendered. Each retry waits with linear
+     * backoff before reloading the same URL.
+     */
+    private var noMemoryRetries = 0
+    private val maxNoMemoryRetries = 3
 
     init {
         loadServers()
@@ -240,17 +272,29 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /**
-     * Set the selected content after `delayMs` so the caller has a window
-     * to unmount Composables holding hardware decoders (the Home preview
-     * tiles) before the main player's prepare() runs. Lives on
-     * viewModelScope so it survives the Home → Playback route change —
-     * a previous version used the calling Composable's coroutine scope
-     * and the delay was cancelled when HomeScreen unmounted, leaving the
-     * main player with no media item to play.
+     * Set the selected content once it's safe to allocate a hardware
+     * decoder for the main player. "Safe" is signalled by all currently-
+     * held tile [decoderLeases] dropping to zero — meaning every Home
+     * preview tile has released its ExoPlayer — plus a small fixed grace
+     * (50 ms) for the OS-level Codec2 teardown that lags the synchronous
+     * `player.release()` call.
+     *
+     * If for any reason leases never drop within `maxWaitMs` (a stuck
+     * tile, an unmount race), proceed anyway — the NO_MEMORY-retry path
+     * in [onPlayerError] will catch us if the decoder allocation actually
+     * fails. Best-effort gating, not a hard barrier.
+     *
+     * Lives on viewModelScope so it survives the Home → Playback route
+     * change — a previous version used the calling Composable's coroutine
+     * scope and the await was cancelled when HomeScreen unmounted,
+     * leaving the main player with no media item to play.
      */
-    fun setSelectedContentDeferred(name: String, delayMs: Long = 300) {
+    fun setSelectedContentDeferred(name: String, maxWaitMs: Long = 1000) {
         viewModelScope.launch {
-            kotlinx.coroutines.delay(delayMs)
+            withTimeoutOrNull(maxWaitMs) {
+                _decoderLeases.first { it == 0 }
+            }
+            kotlinx.coroutines.delay(50)
             setSelectedContent(name)
         }
     }
@@ -438,11 +482,32 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
     private fun attachPlayerListeners() {
         player.addListener(object : Player.Listener {
             override fun onPlayerError(error: PlaybackException) {
-                _state.update { it.copy(statusText = "Error: ${error.message}") }
                 metrics?.onPlayerError(error.message)
-                // Auto-recovery: if enabled, queue a single retry on the
-                // main thread. We don't loop — if retry also errors the
-                // user sees the next error and decides what to do.
+                // First: NO_MEMORY decoder-budget retry. The lease-counting
+                // gate in setSelectedContentDeferred is the happy path, but
+                // there are edge cases — a tile player that hasn't quite
+                // finished disposing, the OS taking longer than 50 ms to
+                // free the codec slot, etc. If prepare() trips the chip's
+                // pool we retry up to maxNoMemoryRetries with linear
+                // backoff. Reset noMemoryRetries on first-frame-rendered.
+                if (isCodecNoMemory(error)
+                    && noMemoryRetries < maxNoMemoryRetries
+                    && _state.value.currentUrl.isNotEmpty()) {
+                    noMemoryRetries++
+                    val backoff = 150L * noMemoryRetries
+                    _state.update {
+                        it.copy(statusText = "Decoder busy — retry $noMemoryRetries/$maxNoMemoryRetries")
+                    }
+                    viewModelScope.launch {
+                        kotlinx.coroutines.delay(backoff)
+                        retry()
+                    }
+                    return
+                }
+                _state.update { it.copy(statusText = "Error: ${error.message}") }
+                // Auto-recovery for non-decoder errors: if enabled, queue
+                // a single retry. We don't loop — if retry also errors
+                // the user sees the next error and decides what to do.
                 if (_state.value.autoRecovery && _state.value.currentUrl.isNotEmpty()) {
                     viewModelScope.launch {
                         kotlinx.coroutines.delay(500)
@@ -452,6 +517,11 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
             }
             override fun onRenderedFirstFrame() {
                 metrics?.onFirstFrameRendered()
+                // Successful frame = the chip allocated a decoder for us,
+                // so wipe the NO_MEMORY retry counter. Next time we hit
+                // it (e.g. user navigates back to Home and forward again)
+                // we get a fresh budget.
+                noMemoryRetries = 0
                 // First frame on screen = the stream actually started, so
                 // mark this content as successfully played. Persisted via
                 // SharedPreferences so the Continue Watching hero on Home
@@ -508,6 +578,36 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         player.setVideoFrameMetadataListener(VideoFrameMetadataListener { _, _, _, _ ->
             metrics?.onFrameRendered()
         })
+    }
+
+    /**
+     * Walk a [PlaybackException] cause chain looking for evidence that the
+     * underlying problem was the chip refusing a hardware decoder
+     * allocation. Catches both the structured signal (MediaCodec's
+     * CodecException with errno -12) and the diagnostic-string fallback
+     * (some vendor codecs only set the message). Conservatively false-y
+     * if the chain is empty or unrelated.
+     */
+    private fun isCodecNoMemory(error: Throwable): Boolean {
+        var cause: Throwable? = error
+        // -12 = ENOMEM in the Linux errno table; that's the value the
+        // mtk codec returns when its decoder pool is exhausted.
+        val noMemErrno = -12
+        while (cause != null) {
+            val current = cause
+            if (current is android.media.MediaCodec.CodecException) {
+                val info = (current.diagnosticInfo ?: "") + " " + (current.message ?: "")
+                if ("NO_MEMORY" in info.uppercase()) return true
+                // Some firmwares stash the errno in the message but not
+                // the diagnostic string — also check errorCode if it's
+                // ever a negative errno-style value.
+                if (runCatching { current.errorCode }.getOrNull() == noMemErrno) return true
+            }
+            val msg = current.message ?: ""
+            if ("NO_MEMORY" in msg.uppercase()) return true
+            cause = current.cause
+        }
+        return false
     }
 
     override fun onCleared() {

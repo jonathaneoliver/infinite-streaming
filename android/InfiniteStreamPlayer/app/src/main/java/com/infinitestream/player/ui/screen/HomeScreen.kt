@@ -169,6 +169,8 @@ fun HomeScreen(
                             server = activeServer,
                             active = true,
                             onClick = { picked -> playPicked(picked.name) },
+                            onAcquireDecoderLease = vm::acquireDecoderLease,
+                            onReleaseDecoderLease = vm::releaseDecoderLease,
                             modifier = Modifier
                                 .focusRequester(focusReqs[c] ?: FocusRequester())
                                 .onPreviewKeyEvent { ev ->
