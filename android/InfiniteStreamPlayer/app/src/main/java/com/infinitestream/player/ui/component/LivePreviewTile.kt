@@ -169,7 +169,9 @@ private fun ActivePlayerSurface(
     onReleaseDecoderLease: () -> Unit,
 ) {
     val context = LocalContext.current
+    val tBuild = androidx.compose.runtime.remember(content.name) { android.os.SystemClock.uptimeMillis() }
     val player = remember(content.name, server.host, server.apiPort) {
+        android.util.Log.i("InfiniteStream", "tile:build '${content.name}'")
         // Tile players use a RenderersFactory that builds *no* audio
         // renderers. Just disabling the audio track via TrackSelection
         // wasn't enough — go-live emits a sibling Opus audio playlist
@@ -206,6 +208,13 @@ private fun ActivePlayerSurface(
             )
             prepare()
             playWhenReady = true
+            addListener(object : Player.Listener {
+                override fun onRenderedFirstFrame() {
+                    val dt = android.os.SystemClock.uptimeMillis() - tBuild
+                    android.util.Log.i("InfiniteStream",
+                        "tile:firstFrame '${content.name}' in ${dt}ms")
+                }
+            })
         }
     }
     // Publish the lease around the player's actual hardware-decoder

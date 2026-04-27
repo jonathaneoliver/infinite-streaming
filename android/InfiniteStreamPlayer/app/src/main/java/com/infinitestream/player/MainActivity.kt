@@ -25,17 +25,25 @@ import com.infinitestream.player.ui.theme.InfiniteStreamTheme
 import com.infinitestream.player.ui.theme.Tokens
 
 class MainActivity : ComponentActivity() {
+    private val tStart = android.os.SystemClock.uptimeMillis()
+    private fun tag(s: String) = android.util.Log.i(
+        "InfiniteStream", "T+${android.os.SystemClock.uptimeMillis() - tStart}ms $s")
+
     override fun onCreate(savedInstanceState: Bundle?) {
+        tag("MainActivity onCreate begin")
         super.onCreate(savedInstanceState)
         // Keep the screen on while playback is active — release in onStop.
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        tag("MainActivity onCreate setContent")
         setContent {
+            androidx.compose.runtime.SideEffect { tag("first composition") }
             InfiniteStreamTheme {
                 Box(modifier = Modifier.fillMaxSize().background(Tokens.bg)) {
                     AppRoot()
                 }
             }
         }
+        tag("MainActivity onCreate end")
     }
 }
 

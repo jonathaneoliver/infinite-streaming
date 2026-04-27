@@ -99,11 +99,28 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
     private var codecRetries = 0
     private val maxCodecRetries = 3
 
+    /** Process-elapsed-millis at VM construction so individual init steps,
+     *  fetches and first-frame events can log offsets relative to "the
+     *  moment the VM started waking up". Read in [tag] below. */
+    private val tStart = android.os.SystemClock.uptimeMillis()
+    fun tag(label: String) {
+        android.util.Log.i("InfiniteStream",
+            "T+${android.os.SystemClock.uptimeMillis() - tStart}ms $label")
+    }
+
     init {
+        tag("vm:init begin")
+        val tA = android.os.SystemClock.uptimeMillis()
         loadServers()
+        val tB = android.os.SystemClock.uptimeMillis()
         loadAdvancedFlags()
+        val tC = android.os.SystemClock.uptimeMillis()
         attachPlayerListeners()
+        val tD = android.os.SystemClock.uptimeMillis()
         applyTrackSelectionParameters()
+        val tE = android.os.SystemClock.uptimeMillis()
+        android.util.Log.i("InfiniteStream",
+            "vm:init steps loadServers=${tB - tA}ms loadAdvancedFlags=${tC - tB}ms attachPlayerListeners=${tD - tC}ms applyTrackSelection=${tE - tD}ms total=${tE - tA}ms")
     }
 
     // -- Server list (SharedPreferences-backed) ------------------------------
@@ -322,28 +339,95 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
             _state.update { it.copy(content = emptyList(), statusText = "No server selected") }
             return
         }
+        // Optimistic cache: paint whatever we saved on the last successful
+        // fetch *immediately*, so the home page populates with no
+        // perceived delay even when the device's Wi-Fi link is slow (the
+        // 19 KB /api/content response was reliably 2 s on the Streamer's
+        // wireless vs 9 ms over Ethernet — it's the link, not the server).
+        val cached = readContentCache(server)
+        if (cached.isNotEmpty()) {
+            _state.update { it.copy(content = cached, statusText = "Loaded ${cached.size} items (cached)") }
+            applyContentFilter()
+        }
         _state.update { it.copy(statusText = "Loading content list…") }
+        tag("fetchContentList:dispatch")
         viewModelScope.launch {
             val (list, err) = withContext(Dispatchers.IO) { fetchContent(server.apiUrl) }
+            tag("fetchContentList:done items=${list.size} err=${err ?: "ok"}")
             if (err != null) {
-                _state.update { it.copy(statusText = "Fetch failed: $err", content = emptyList()) }
+                // Keep the cached list visible if the network fetch failed —
+                // surfacing "no content" because of a flaky link is worse
+                // than a slightly stale catalogue.
+                _state.update { it.copy(statusText = "Refresh failed: $err") }
             } else {
                 _state.update { it.copy(content = list, statusText = "Loaded ${list.size} items") }
+                writeContentCache(server, list)
             }
             applyContentFilter()
         }
     }
 
+    private fun readContentCache(server: ServerEnvironment): List<ContentItem> {
+        val raw = prefs().getString(contentCacheKey(server), null) ?: return emptyList()
+        return try {
+            val arr = JSONArray(raw)
+            (0 until arr.length()).map { i ->
+                val o = arr.getJSONObject(i)
+                ContentItem(
+                    name = o.getString("name"),
+                    hasHls = o.optBoolean("hasHls", false),
+                    hasDash = o.optBoolean("hasDash", false),
+                    clipId = o.optString("clipId", ""),
+                    codec = o.optString("codec", ""),
+                    segmentDuration = if (o.isNull("segmentDuration")) null
+                                      else o.optInt("segmentDuration", -1).takeIf { it >= 0 },
+                    thumbnailPath = o.optString("thumbnailPath", "").ifEmpty { null },
+                    thumbnailPathSmall = o.optString("thumbnailPathSmall", "").ifEmpty { null },
+                    thumbnailPathLarge = o.optString("thumbnailPathLarge", "").ifEmpty { null },
+                )
+            }
+        } catch (_: Exception) { emptyList() }
+    }
+
+    private fun writeContentCache(server: ServerEnvironment, list: List<ContentItem>) {
+        val arr = JSONArray()
+        list.forEach { c ->
+            arr.put(JSONObject().apply {
+                put("name", c.name)
+                put("hasHls", c.hasHls)
+                put("hasDash", c.hasDash)
+                put("clipId", c.clipId)
+                put("codec", c.codec)
+                if (c.segmentDuration != null) put("segmentDuration", c.segmentDuration)
+                c.thumbnailPath?.let { put("thumbnailPath", it) }
+                c.thumbnailPathSmall?.let { put("thumbnailPathSmall", it) }
+                c.thumbnailPathLarge?.let { put("thumbnailPathLarge", it) }
+            })
+        }
+        prefs().edit().putString(contentCacheKey(server), arr.toString()).apply()
+    }
+
+    /** Cache is per-server so switching servers doesn't show stale content
+     *  from a different host. */
+    private fun contentCacheKey(server: ServerEnvironment) =
+        "$CONTENT_CACHE_PREFIX${server.host}:${server.apiPort}"
+
     private fun fetchContent(apiUrl: String): Pair<List<ContentItem>, String?> {
         var conn: HttpURLConnection? = null
+        val tFetchStart = System.currentTimeMillis()
         return try {
             conn = (URL("$apiUrl/api/content").openConnection() as HttpURLConnection).apply {
-                connectTimeout = 5000; readTimeout = 5000
+                connectTimeout = 5000
+                readTimeout = 5000
             }
+            val tConnected = System.currentTimeMillis()
             if (conn.responseCode != 200) {
                 emptyList<ContentItem>() to "HTTP ${conn.responseCode}"
             } else {
                 val body = conn.inputStream.bufferedReader().use { it.readText() }
+                val tBody = System.currentTimeMillis()
+                android.util.Log.i("InfiniteStream",
+                    "fetchContent: connect=${tConnected - tFetchStart}ms read=${tBody - tConnected}ms total=${tBody - tFetchStart}ms (${body.length}B from $apiUrl)")
                 val arr = JSONArray(body)
                 val items = (0 until arr.length()).map { i ->
                     val o = arr.getJSONObject(i)
@@ -526,6 +610,7 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
                 }
             }
             override fun onRenderedFirstFrame() {
+                tag("main player: first frame for '${_state.value.selectedContent}'")
                 metrics?.onFirstFrameRendered()
                 // Successful frame = the chip allocated decoders for us
                 // and they're functioning, so wipe the codec retry
@@ -646,5 +731,6 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         private const val FLAG_AUTO_RECOVERY = "advanced_auto_recovery"
         private const val FLAG_GO_LIVE = "advanced_go_live"
         private const val LAST_PLAYED_KEY = "last_played_content"
+        private const val CONTENT_CACHE_PREFIX = "content_cache_"
     }
 }

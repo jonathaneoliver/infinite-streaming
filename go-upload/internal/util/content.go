@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
 
 type ContentInfo struct {
@@ -35,23 +36,51 @@ type ContentInfo struct {
 	SegmentDuration   *int    `json:"segment_duration"`
 	MaxResolution     *string `json:"max_resolution"`
 	MaxHeight         *int    `json:"max_height"`
+
+	// Internal — used for newest-wins dedup. Lowercase so encoding/json
+	// skips it. Set during ListContent from the encode-timestamp suffix
+	// or directory mtime fallback.
+	encodeTS time.Time
 }
 
-// Strips `_p200_<codec>` from a content name, preserving anything before
-// (the clip stem) and anything after (e.g. a re-encode timestamp). Returns
-// the lowercased stem + the matched codec (empty if the pattern doesn't
-// match).
+// Strips `_p200_<codec>` from a content name, returning (stem-with-any-
+// trailing-timestamp, codec). The stem is then further reduced by
+// stripTimestampSuffix to produce the final clip_id used for dedup.
 var clipIDPattern = regexp.MustCompile(`(?i)_p200_(h264|hevc|h265|av1)(_|$)`)
 
-func splitClipIDAndCodec(name string) (clipID, codec string) {
+// Matches `_YYYYMMDD_HHMMSS` at the end of a string. shaka-packager / the
+// encode pipeline appends this when re-encoding the same source so distinct
+// runs don't overwrite each other on disk. We treat them as the same logical
+// content for catalogue purposes.
+var encodeTimestampPattern = regexp.MustCompile(`_(\d{8})_(\d{6})$`)
+
+func splitClipIDAndCodec(name string) (clipID, codec string, ts time.Time) {
 	m := clipIDPattern.FindStringSubmatchIndex(name)
 	if m == nil {
-		return strings.ToLower(name), ""
+		return strings.ToLower(stripTimestampSuffix(name)), "", time.Time{}
 	}
 	codec = strings.ToLower(name[m[2]:m[3]])
-	stripped := name[:m[0]] + name[m[4]:]
-	stripped = strings.TrimSuffix(stripped, "_")
-	return strings.ToLower(stripped), codec
+	stem := name[:m[0]] + name[m[4]:]
+	stem = strings.TrimSuffix(stem, "_")
+	ts = parseEncodeTimestamp(stem)
+	stem = stripTimestampSuffix(stem)
+	return strings.ToLower(stem), codec, ts
+}
+
+func stripTimestampSuffix(s string) string {
+	return encodeTimestampPattern.ReplaceAllString(s, "")
+}
+
+func parseEncodeTimestamp(s string) time.Time {
+	m := encodeTimestampPattern.FindStringSubmatch(s)
+	if m == nil {
+		return time.Time{}
+	}
+	t, err := time.Parse("20060102_150405", m[1]+"_"+m[2])
+	if err != nil {
+		return time.Time{}
+	}
+	return t
 }
 
 func ListContent(contentDir string) ([]ContentInfo, error) {
@@ -91,7 +120,16 @@ func ListContent(contentDir string) ([]ContentInfo, error) {
 		}
 		segmentDuration := detectSegmentDuration(itemPath)
 		maxResolution, maxHeight := detectMaxResolution(itemPath)
-		clipID, codec := splitClipIDAndCodec(name)
+		clipID, codec, ts := splitClipIDAndCodec(name)
+		// If the name didn't carry an encode timestamp (older content),
+		// fall back to the directory's mtime for tiebreaks. Avoids
+		// silently dropping a clip behind a peer with a parseable date
+		// when both legitimately refer to different encodes.
+		if ts.IsZero() {
+			if info, err := entry.Info(); err == nil {
+				ts = info.ModTime()
+			}
+		}
 		contentList = append(contentList, ContentInfo{
 			Name:              name,
 			ClipID:            clipID,
@@ -105,8 +143,29 @@ func ListContent(contentDir string) ([]ContentInfo, error) {
 			SegmentDuration:   segmentDuration,
 			MaxResolution:     maxResolution,
 			MaxHeight:         maxHeight,
+			encodeTS:          ts,
 		})
 	}
+
+	// Dedup by (clip_id, codec) keeping the newest entry. Re-encodes of
+	// the same source land on disk as `{stem}_p200_{codec}_{TIMESTAMP}`;
+	// without this, every re-encode adds another row to /api/content
+	// even though it's the same logical clip and the older one is just
+	// stale. Newest is decided by the encode-timestamp suffix, falling
+	// back to dir mtime when the name doesn't carry one.
+	type dedupKey struct{ clipID, codec string }
+	groups := map[dedupKey]int{} // index into contentList
+	deduped := contentList[:0]
+	for _, c := range contentList {
+		k := dedupKey{c.ClipID, c.Codec}
+		if existing, ok := groups[k]; !ok {
+			groups[k] = len(deduped)
+			deduped = append(deduped, c)
+		} else if c.encodeTS.After(deduped[existing].encodeTS) {
+			deduped[existing] = c
+		}
+	}
+	contentList = deduped
 
 	sort.Slice(contentList, func(i, j int) bool {
 		return contentList[i].Name < contentList[j].Name
