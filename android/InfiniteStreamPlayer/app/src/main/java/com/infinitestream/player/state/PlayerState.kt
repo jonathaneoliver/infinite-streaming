@@ -58,7 +58,11 @@ data class UiState(
 
     val protocol: Protocol = Protocol.HLS,
     val segment: Segment = Segment.SIX,
-    val codec: Codec = Codec.AUTO,
+    // H.264 is the default codec because every TV chip hardware-decodes it
+    // — that's the surface most likely to give a clean first-launch
+    // experience. AUTO is still selectable from Settings → Codec to widen
+    // the catalogue to HEVC + AV1 once the user has confirmed playback works.
+    val codec: Codec = Codec.H264,
 
     val statusText: String = "",
     val currentUrl: String = "",
