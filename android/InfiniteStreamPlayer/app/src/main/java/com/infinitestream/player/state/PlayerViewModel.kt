@@ -52,12 +52,7 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
     private val _state = MutableStateFlow(UiState())
     val state: StateFlow<UiState> = _state.asStateFlow()
 
-    /** Mutable so [reload] can rotate it and force go-proxy to spin a
-     *  brand-new per-session port for us — i.e. behave exactly as if we
-     *  had never played before, instead of re-binding to whatever
-     *  session the proxy already had wedged for the previous id. */
-    var playerId: String = UUID.randomUUID().toString()
-        private set
+    val playerId: String = UUID.randomUUID().toString()
 
     // Mutable so [recreatePlayer] can drop and rebuild them when the
     // current ExoPlayer instance gets wedged in a state its own retry
@@ -609,41 +604,25 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /**
-     * Heavy reset: behave as if we'd never played this stream before.
+     * Heavy reset: rebuild the stream URL from scratch and re-issue it
+     * — go-proxy serves a fresh 302 → per-session port redirect on the
+     * way through, which ExoPlayer follows cleanly. Behaves "as if we
+     * haven't been playing the URL".
      *
-     * Concretely:
-     *   1. Rotate `playerId` to a fresh UUID. The next `/go-live/...`
-     *      request hits go-proxy with an unknown player, so the proxy
-     *      issues a brand-new 302 → per-session port redirect instead
-     *      of re-binding to whatever session was already wedged for
-     *      the previous id.
-     *   2. Stop and clear the player so any in-flight buffers / decoder
-     *      state from the wedged stream don't leak into the new prepare.
-     *   3. Drop currentUrl so applyContentFilter doesn't short-circuit.
-     *   4. Re-fetch /api/content (catches server-side changes too) and
-     *      let the resulting applyContentFilter rebuild the URL with
-     *      the new playerId baked in.
+     * Same player_id (so the proxy keeps our session) and no catalogue
+     * refetch (use Reset for the heavier reset that drops the player
+     * itself; the dashboard's reload is the way to pick up new
+     * server-side content). Distinct from Restart only by the metrics
+     * tag and the currentUrl drop — the URL drop forces
+     * applyContentFilter / any subsequent flag toggle to treat us as
+     * "not actively playing" until buildUrlAndLoad sets it again.
      */
     fun reload() {
         metrics?.onRestart("reload")
-        playerId = java.util.UUID.randomUUID().toString()
         player.stop()
         player.clearMediaItems()
         _state.update { it.copy(currentUrl = "") }
-        // Re-fetch and let applyContentFilter (with empty currentUrl =
-        // "wasPlaying = false") set selection without auto-loading; then
-        // explicitly buildUrlAndLoad with the rotated id.
-        viewModelScope.launch {
-            val server = _state.value.activeServer ?: return@launch
-            val (list, err) = withContext(Dispatchers.IO) { fetchContent(server.apiUrl) }
-            if (err == null) {
-                _state.update { it.copy(content = list, statusText = "Loaded ${list.size} items") }
-                writeContentCache(server, list)
-            } else {
-                _state.update { it.copy(statusText = "Refresh failed: $err") }
-            }
-            buildUrlAndLoad()
-        }
+        buildUrlAndLoad()
     }
 
     /**
