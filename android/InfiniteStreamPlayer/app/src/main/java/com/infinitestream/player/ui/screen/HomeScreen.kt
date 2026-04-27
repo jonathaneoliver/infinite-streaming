@@ -73,18 +73,22 @@ fun HomeScreen(
         }
     }
 
-    // Deferred-pick: switch routes immediately so Home unmounts and its 4
-    // tile decoders release, then 300 ms later set the selected content
-    // (which triggers the main player's prepare() and a fresh decoder
-    // allocation). Without the delay the main player races the tile
-    // releases and trips Codec2Client::createComponent NO_MEMORY.
+    // Local Composable scope for things that fire while HomeScreen is
+    // still on screen (e.g. carousel-rotation focus restoration).
     val scope = rememberCoroutineScope()
+
+    // Deferred-pick: switch routes immediately so Home unmounts and its
+    // tile decoders release, then 300 ms later set the selected content
+    // (which triggers the main player's prepare() + decoder alloc).
+    // The delay lives on the ViewModel's scope (`viewModelScope`)
+    // because the local rememberCoroutineScope is tied to HomeScreen's
+    // lifetime — the route change unmounts HomeScreen and cancels the
+    // scope before the delay fires, so the main player would never
+    // receive setSelectedContent and the playback screen would just
+    // sit there with nothing to play.
     val playPicked: (String) -> Unit = { name ->
         onPlay()
-        scope.launch {
-            delay(300)
-            vm.setSelectedContent(name)
-        }
+        vm.setSelectedContentDeferred(name)
     }
 
     val items = state.filteredContent

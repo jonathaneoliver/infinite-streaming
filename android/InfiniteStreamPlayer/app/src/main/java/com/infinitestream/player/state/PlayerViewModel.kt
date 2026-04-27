@@ -239,6 +239,22 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         buildUrlAndLoad()
     }
 
+    /**
+     * Set the selected content after `delayMs` so the caller has a window
+     * to unmount Composables holding hardware decoders (the Home preview
+     * tiles) before the main player's prepare() runs. Lives on
+     * viewModelScope so it survives the Home → Playback route change —
+     * a previous version used the calling Composable's coroutine scope
+     * and the delay was cancelled when HomeScreen unmounted, leaving the
+     * main player with no media item to play.
+     */
+    fun setSelectedContentDeferred(name: String, delayMs: Long = 300) {
+        viewModelScope.launch {
+            kotlinx.coroutines.delay(delayMs)
+            setSelectedContent(name)
+        }
+    }
+
     fun setHudVisible(visible: Boolean) {
         _state.update { it.copy(hudVisible = visible) }
     }
