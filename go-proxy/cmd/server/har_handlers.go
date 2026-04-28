@@ -309,11 +309,23 @@ func writeIncidentFile(sessionID, playerID, reason, source string, doc har.HAR) 
 	)
 	full := filepath.Join(dir, filename)
 
+	absDir, err := filepath.Abs(dir)
+	if err != nil {
+		return IncidentFileInfo{}, err
+	}
+	absFull, err := filepath.Abs(full)
+	if err != nil {
+		return IncidentFileInfo{}, err
+	}
+	if absFull != absDir && !strings.HasPrefix(absFull, absDir+string(os.PathSeparator)) {
+		return IncidentFileInfo{}, fmt.Errorf("invalid incident file path")
+	}
+
 	body, err := json.MarshalIndent(doc, "", "  ")
 	if err != nil {
 		return IncidentFileInfo{}, err
 	}
-	if err := os.WriteFile(full, body, 0o644); err != nil {
+	if err := os.WriteFile(absFull, body, 0o644); err != nil {
 		return IncidentFileInfo{}, err
 	}
 
