@@ -1072,7 +1072,7 @@
                             <div class="network-log-controls">
                                 <button type="button" class="btn btn-mini btn-secondary" data-action="refresh-network-log">Refresh</button>
                                 <button type="button" class="btn btn-mini btn-secondary" data-action="save-har-snapshot" title="Save current network timeline as a HAR file (Phase 1 of issue #272)">Save HAR</button>
-                                <a href="/api/incidents" target="_blank" rel="noopener" class="btn btn-mini btn-secondary" title="List saved HAR snapshots (raw JSON)">Incidents</a>
+                                <a href="/dashboard/incidents.html" target="_blank" rel="noopener" class="btn btn-mini btn-secondary" title="Browse saved HAR snapshots">Incidents</a>
                                 <button type="button" class="btn btn-mini btn-secondary" data-action="network-log-jump-first">First</button>
                                 <button type="button" class="btn btn-mini btn-secondary" data-action="network-log-jump-last">Last</button>
                                 <button type="button" class="btn btn-mini btn-secondary" data-action="network-log-jump-fit">Fit</button>
