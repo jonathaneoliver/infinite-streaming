@@ -25,7 +25,7 @@ struct InfiniteStreamPlayerApp: App {
 
     var body: some Scene {
         WindowGroup {
-            ContentView()
+            AppRoot()
         }
     }
 }

@@ -118,14 +118,24 @@ struct RendezvousService {
     /// these to only servers visible from the caller's CF-Connecting-IP,
     /// so the list is implicitly scoped to "same public IP".
     struct DiscoveredServer: Identifiable, Hashable {
-        let id: String      // server_id
+        let id: String       // server_id
         let url: String
         let label: String
+        /// Unix-millisecond timestamp from the Worker's `last_seen`. Used
+        /// to dedupe stale registrations of the same URL — when a server
+        /// re-deploys it gets a fresh `server_id` but the same URL, and
+        /// the Worker keeps both entries until TTL expires.
+        let lastSeenMs: Int64
     }
 
     /// Fetches servers visible on the caller's public IP. Returns an empty
     /// array on missing config or any error — discovery is best-effort and
     /// the UI falls back to manual entry.
+    ///
+    /// Newest-wins dedup by URL: the Worker returns one announcement per
+    /// `server_id`, but a single URL can have multiple if the server was
+    /// re-deployed (new boot → new id). Keep only the entry with the
+    /// highest `last_seen` per URL so the picker doesn't show duplicates.
     static func discoverServers() async -> [DiscoveredServer] {
         guard !url.isEmpty,
               let endpoint = URL(string: "\(url)/announce") else { return [] }
@@ -142,12 +152,30 @@ struct RendezvousService {
                   let arr = obj["servers"] as? [[String: Any]] else {
                 return []
             }
-            return arr.compactMap { entry in
+            let raw: [DiscoveredServer] = arr.compactMap { entry in
                 guard let id = entry["server_id"] as? String, !id.isEmpty,
                       let u = entry["url"] as? String, !u.isEmpty else { return nil }
                 let label = (entry["label"] as? String) ?? ""
-                return DiscoveredServer(id: id, url: u, label: label.isEmpty ? u : label)
+                let last = (entry["last_seen"] as? Int64)
+                    ?? Int64((entry["last_seen"] as? Double) ?? 0)
+                return DiscoveredServer(
+                    id: id,
+                    url: u,
+                    label: label.isEmpty ? u : label,
+                    lastSeenMs: last
+                )
             }
+            // Group by URL (case-insensitive), keep newest per group.
+            var newestByURL: [String: DiscoveredServer] = [:]
+            for entry in raw {
+                let key = entry.url.lowercased()
+                if let existing = newestByURL[key],
+                   existing.lastSeenMs >= entry.lastSeenMs {
+                    continue
+                }
+                newestByURL[key] = entry
+            }
+            return newestByURL.values.sorted { $0.lastSeenMs > $1.lastSeenMs }
         } catch {
             return []
         }
