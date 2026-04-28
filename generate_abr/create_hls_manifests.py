@@ -308,6 +308,19 @@ def generate_master_playlist(dash_info, output_dir, package_name):
         if audio_peak_bandwidth <= 0:
             audio_peak_bandwidth = audio_average_bandwidth
 
+    # Resolve the audio codec string for inclusion in every variant's
+    # CODECS attribute. Per Apple's HLS Authoring Spec, CODECS MUST
+    # list every codec needed to play the variant — both video AND
+    # audio. Default `mp4a.40.2` (AAC-LC) since `create_abr_ladder.sh`
+    # always transcodes to AAC-LC. Pipeline ALSO post-processes the
+    # audio init.mp4 to strip a 5-byte ASC's SBR-extension marker that
+    # ffmpeg's native AAC encoder writes — without that strip the
+    # mp4a.40.2 declaration mismatches what AVPlayer reads from the
+    # init segment and the master fails to start.
+    audio_codec_str = ""
+    if audio_reps:
+        audio_codec_str = audio_reps[0].get("codecs") or "mp4a.40.2"
+
     for video_rep in video_reps:
         video_bandwidth = int(video_rep.get("bandwidth", 0) or 0)
         codecs = video_rep["codecs"]
@@ -336,7 +349,10 @@ def generate_master_playlist(dash_info, output_dir, package_name):
         if width and height:
             stream_info += f",RESOLUTION={width}x{height}"
 
-        stream_info += f',CODECS="{codecs}"'
+        codec_list = [codecs]
+        if audio_codec_str:
+            codec_list.append(audio_codec_str)
+        stream_info += f',CODECS="{",".join(codec_list)}"'
 
         if audio_reps:
             stream_info += ',AUDIO="audio"'
