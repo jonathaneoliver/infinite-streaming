@@ -80,6 +80,7 @@ RUN mkdir -p /generate_abr
 COPY generate_abr/create_abr_ladder.sh \
      generate_abr/create_hls_manifests.py \
      generate_abr/convert_to_segmentlist.py \
+     generate_abr/backfill_thumbnails.sh \
      /generate_abr/
 RUN chmod +x /generate_abr/*.sh /generate_abr/*.py 2>/dev/null || true
 RUN chmod -R 777 /generate_abr

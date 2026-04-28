@@ -61,10 +61,15 @@ public final class RendezvousService {
         public final String serverId;
         public final String url;
         public final String label;
-        public DiscoveredServer(String serverId, String url, String label) {
+        /** Epoch milliseconds the Worker last saw an announce for this URL.
+         *  Used for "newest wins" dedup when two server_ids advertise the
+         *  same URL (e.g. multi-NIC hosts re-announcing). 0 = unknown. */
+        public final long lastSeenMs;
+        public DiscoveredServer(String serverId, String url, String label, long lastSeenMs) {
             this.serverId = serverId;
             this.url = url;
             this.label = label;
+            this.lastSeenMs = lastSeenMs;
         }
     }
 
@@ -109,8 +114,10 @@ public final class RendezvousService {
                             String id = s.optString("server_id", "");
                             String url = s.optString("url", "");
                             String label = s.optString("label", "");
+                            long lastSeen = s.optLong("last_seen", 0L);
                             if (id.isEmpty() || url.isEmpty()) continue;
-                            out.add(new DiscoveredServer(id, url, label.isEmpty() ? url : label));
+                            out.add(new DiscoveredServer(
+                                id, url, label.isEmpty() ? url : label, lastSeen));
                         }
                     }
                 }

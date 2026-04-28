@@ -48,13 +48,13 @@ import java.util.concurrent.atomic.AtomicLong;
  * matches ours, cache session_id for 30s.
  */
 @OptIn(markerClass = UnstableApi.class)
-final class PlaybackMetrics {
+public final class PlaybackMetrics {
 
-    interface BaseUrlProvider {
+    public interface BaseUrlProvider {
         String get();
     }
 
-    interface UrlProvider {
+    public interface UrlProvider {
         String currentStreamUrl();
     }
 
@@ -173,7 +173,7 @@ final class PlaybackMetrics {
             mapState(), wall, pdt, trueOff, pos, liveOff, buf));
     }
 
-    PlaybackMetrics(ExoPlayer player,
+    public PlaybackMetrics(ExoPlayer player,
                     PlayerView playerView,
                     BandwidthMeter bandwidthMeter,
                     String playerId,
@@ -189,18 +189,18 @@ final class PlaybackMetrics {
         this.iso8601.setTimeZone(TimeZone.getTimeZone("UTC"));
     }
 
-    void start() {
+    public void start() {
         if (running) return;
         running = true;
         mainHandler.postDelayed(heartbeatRunnable, HEARTBEAT_INTERVAL_MS);
     }
 
-    void stop() {
+    public void stop() {
         running = false;
         mainHandler.removeCallbacks(heartbeatRunnable);
     }
 
-    void release() {
+    public void release() {
         stop();
         networkExecutor.shutdown();
     }
@@ -208,7 +208,7 @@ final class PlaybackMetrics {
     // --- Event hooks (call from main thread unless noted) ---
 
     /** Called when a new stream starts loading. Resets per-playback state. */
-    void onPlaybackStarted() {
+    public void onPlaybackStarted() {
         playbackStartAtMs = System.currentTimeMillis();
         videoFirstFrameSeconds = null;
         videoStartTimeSeconds = null;
@@ -231,7 +231,7 @@ final class PlaybackMetrics {
      * playWhenReady=true. Gated on firstFrameReported so initial load doesn't
      * register as a stall.
      */
-    void onStallStart() {
+    public void onStallStart() {
         if (!firstFrameReported) return;
         if (stallStartAtMs > 0) return;
         stallStartAtMs = System.currentTimeMillis();
@@ -239,7 +239,7 @@ final class PlaybackMetrics {
     }
 
     /** Called when a stall ends (back to playing). */
-    void onStallEnd() {
+    public void onStallEnd() {
         if (stallStartAtMs <= 0) return;
         double duration = (System.currentTimeMillis() - stallStartAtMs) / 1000.0;
         stallStartAtMs = -1;
@@ -257,14 +257,14 @@ final class PlaybackMetrics {
      * from onStallStart, which is gated on first-frame + playWhenReady so
      * initial loads and short pre-roll buffering don't register as stalls.
      */
-    void onBufferingStart() {
+    public void onBufferingStart() {
         if (buffering) return;
         buffering = true;
         sendEvent("buffering_start", Collections.<String, Object>emptyMap());
     }
 
     /** Called when ExoPlayer leaves STATE_BUFFERING. */
-    void onBufferingEnd() {
+    public void onBufferingEnd() {
         if (!buffering) return;
         buffering = false;
         sendEvent("buffering_end", Collections.<String, Object>emptyMap());
@@ -277,7 +277,7 @@ final class PlaybackMetrics {
      * on iOS; emits a `timejump` metrics event with from/to/delta in
      * seconds plus the discontinuity reason name.
      */
-    void onTimeJump(long fromMs, long toMs, String reason) {
+    public void onTimeJump(long fromMs, long toMs, String reason) {
         Map<String, Object> extra = new HashMap<>();
         extra.put("player_metrics_timejump_from_s", roundSeconds(fromMs / 1000.0));
         extra.put("player_metrics_timejump_to_s", roundSeconds(toMs / 1000.0));
@@ -287,7 +287,7 @@ final class PlaybackMetrics {
     }
 
     /** Called from AnalyticsListener.onLoadCompleted for video track. */
-    void onVideoLoadCompleted() {
+    public void onVideoLoadCompleted() {
         lastVideoLoadCompletedAtMs = System.currentTimeMillis();
         if (segmentStallReported) {
             segmentStallReported = false;
@@ -295,7 +295,7 @@ final class PlaybackMetrics {
     }
 
     /** Called from Player.Listener.onRenderedFirstFrame. */
-    void onFirstFrameRendered() {
+    public void onFirstFrameRendered() {
         if (firstFrameReported) return;
         firstFrameReported = true;
         double elapsed = roundSeconds((System.currentTimeMillis() - playbackStartAtMs) / 1000.0);
@@ -306,7 +306,7 @@ final class PlaybackMetrics {
     }
 
     /** Called from AnalyticsListener.onVideoInputFormatChanged. */
-    void onVideoFormatChanged(Format format) {
+    public void onVideoFormatChanged(Format format) {
         if (format == null) return;
         double mbps = format.bitrate > 0 ? round2(format.bitrate / 1_000_000.0) : 0;
         if (mbps <= 0) return;
@@ -333,7 +333,7 @@ final class PlaybackMetrics {
     }
 
     /** Called from AnalyticsListener.onDroppedVideoFrames. */
-    void onDroppedFrames(int count) {
+    public void onDroppedFrames(int count) {
         if (count <= 0) return;
         droppedFramesTotal += count;
     }
@@ -342,19 +342,19 @@ final class PlaybackMetrics {
      * Called from VideoFrameMetadataListener.onVideoFrameAboutToBeRendered,
      * which runs on the playback thread — atomic counter is safe.
      */
-    void onFrameRendered() {
+    public void onFrameRendered() {
         framesRenderedTotal.incrementAndGet();
     }
 
     /** Called from Player.Listener.onPlayerError. */
-    void onPlayerError(String message) {
+    public void onPlayerError(String message) {
         Map<String, Object> extra = new HashMap<>();
         extra.put("player_metrics_error", message == null ? "" : message);
         sendEvent("error", extra);
     }
 
     /** Called when user triggers a restart (Restart Playback button, etc). */
-    void onRestart(String reason) {
+    public void onRestart(String reason) {
         playerRestarts = Math.max(0, playerRestarts) + 1;
         Map<String, Object> extra = new HashMap<>();
         extra.put("player_metrics_restart_reason", reason);

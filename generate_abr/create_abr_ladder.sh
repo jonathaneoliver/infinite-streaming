@@ -3243,6 +3243,62 @@ EOF
 # ENCODING REPORT GENERATION (PHASE 3)
 # ============================================================================
 
+generate_thumbnail() {
+    # Pull a representative frame from the *pre-burnin* source so client
+    # apps have a poster image without spinning up a video decoder, and
+    # without the AVG/PEAK/codec/timecode overlays that the per-variant
+    # encode burns into the actual playback frames.
+    #
+    # We use:
+    #   -ss 10                 — seek 10 s in, past most studio bumpers /
+    #                             fades / black countdown frames.
+    #   thumbnail=300          — analyse 300 source frames (~10 s @ 30 fps)
+    #                             and emit the most "representative" one;
+    #                             ffmpeg's `thumbnail` filter scores frames
+    #                             on entropy + colour variance and reliably
+    #                             skips solid-black / mostly-black frames.
+    #   split=3 + 3× scale     — single decode pass, three jpeg outputs at
+    #                             320 / 640 / 1280 px wide so cards, tile
+    #                             previews, and hero surfaces can each pull
+    #                             the right size without re-scaling on the
+    #                             client.
+    local output_dir=$1
+    if [[ -z "$INPUT_FILE" || ! -f "$INPUT_FILE" ]]; then
+        log "Skipping thumbnail (no INPUT_FILE)"
+        return 0
+    fi
+    local out_small="${output_dir}/thumbnail-small.jpg"
+    local out_med="${output_dir}/thumbnail.jpg"
+    local out_large="${output_dir}/thumbnail-large.jpg"
+    log "Generating thumbnails (320/640/1280): $output_dir"
+    local fc="[0:v]thumbnail=300,split=3[a][b][c];"
+    fc+="[a]scale='min(320,iw)':-2[s];"
+    fc+="[b]scale='min(640,iw)':-2[m];"
+    fc+="[c]scale='min(1280,iw)':-2[l]"
+    if command ffmpeg -nostdin -y -loglevel error \
+        -ss 10 -i "$INPUT_FILE" \
+        -filter_complex "$fc" \
+        -map "[s]" -frames:v 1 -q:v 4 "$out_small" \
+        -map "[m]" -frames:v 1 -q:v 4 "$out_med" \
+        -map "[l]" -frames:v 1 -q:v 4 "$out_large"; then
+        log "Thumbnails written"
+    else
+        # Short clips might not have 10 s of pre-roll. Retry from the very
+        # start with the same filter so we still produce something.
+        log "Thumbnail at -ss 10 failed; retrying from start"
+        if command ffmpeg -nostdin -y -loglevel error \
+            -i "$INPUT_FILE" \
+            -filter_complex "$fc" \
+            -map "[s]" -frames:v 1 -q:v 4 "$out_small" \
+            -map "[m]" -frames:v 1 -q:v 4 "$out_med" \
+            -map "[l]" -frames:v 1 -q:v 4 "$out_large"; then
+            log "Thumbnails written (start-of-file fallback)"
+        else
+            log "Thumbnail extraction failed (non-fatal)"
+        fi
+    fi
+}
+
 generate_encoding_report() {
     local output_dir=$1
     local codec=$2
@@ -3764,16 +3820,19 @@ main() {
     TOTAL_SECONDS=$((TOTAL_DURATION % 60))
     
     if [[ "$RESUME_MODE" == "false" ]]; then
-        # Generate encoding reports
+        # Generate poster thumbnails + encoding reports
         if [[ "$CODEC_SELECTION" == "both" ]] || [[ "$CODEC_SELECTION" == "all" ]] || [[ "$CODEC_SELECTION" == "hevc" ]]; then
+            generate_thumbnail "$OUTPUT_DIR_HEVC"
             generate_encoding_report "$OUTPUT_DIR_HEVC" "hevc"
         fi
-        
+
         if [[ "$CODEC_SELECTION" == "both" ]] || [[ "$CODEC_SELECTION" == "all" ]] || [[ "$CODEC_SELECTION" == "h264" ]]; then
+            generate_thumbnail "$OUTPUT_DIR_H264"
             generate_encoding_report "$OUTPUT_DIR_H264" "h264"
         fi
-        
+
         if [[ "$CODEC_SELECTION" == "all" ]] || [[ "$CODEC_SELECTION" == "av1" ]]; then
+            generate_thumbnail "$OUTPUT_DIR_AV1"
             generate_encoding_report "$OUTPUT_DIR_AV1" "av1"
         fi
         print_summary
