@@ -41,4 +41,10 @@ jobs:
             real boundaries, security issues (command injection, path traversal,
             etc.), and divergence from existing patterns. Do not flag stylistic
             nits unless they obscure intent.
-          claude_args: "--max-turns 40 --model claude-opus-4-7"
+          # Sonnet on a higher turn budget: routine PR review is the
+          # canonical Sonnet workload (logic / security / pattern
+          # checks), and Opus burns the Max-plan quota fast on big
+          # multi-platform PRs while still hitting --max-turns. Bumped
+          # from 40 → 80 after PRs touching iOS + tvOS + Android +
+          # go-proxy + dashboard ran the tank dry.
+          claude_args: "--max-turns 80 --model claude-sonnet-4-6"
