@@ -1,14 +1,31 @@
 import AVKit
 import SwiftUI
 
+/// SwiftUI wrapper around `AVPlayerViewController`.
+///
+/// **tvOS** uses AVKit's native trickplay bar with Retry / Reload /
+/// Settings appended as inline `transportBarCustomMenuItems` (passed as
+/// `[UIAction]`, not wrapped in a `UIMenu`, so they merge alongside
+/// audio / subtitle pickers without an extra submenu layer).
+///
+/// **iOS / iPadOS** keeps AVKit's chrome off — Apple's iOS HUD has no
+/// equivalent extension API, so `PlaybackScreen` paints a top-right
+/// icon row for the same three actions.
 struct PlayerView: UIViewControllerRepresentable {
     let player: AVPlayer
+    var onRetry: (() -> Void)? = nil
+    var onReload: (() -> Void)? = nil
+    var onOpenSettings: (() -> Void)? = nil
 
     func makeUIViewController(context: Context) -> AVPlayerViewController {
         let controller = AVPlayerViewController()
         controller.player = player
-        controller.showsPlaybackControls = true
         controller.videoGravity = .resizeAspect
+        #if os(tvOS)
+        controller.showsPlaybackControls = true
+        #else
+        controller.showsPlaybackControls = false
+        #endif
         return controller
     }
 
@@ -16,5 +33,31 @@ struct PlayerView: UIViewControllerRepresentable {
         if uiViewController.player !== player {
             uiViewController.player = player
         }
+        #if os(tvOS)
+        // Rebuild every update so each UIAction closure captures the
+        // freshest callback (the parent passes closures that reference
+        // @ObservedObject state).
+        var actions: [UIAction] = []
+        if let onRetry {
+            actions.append(UIAction(
+                title: "Retry",
+                image: UIImage(systemName: "arrow.clockwise")
+            ) { _ in onRetry() })
+        }
+        if let onReload {
+            actions.append(UIAction(
+                title: "Reload",
+                image: UIImage(systemName: "arrow.triangle.2.circlepath")
+            ) { _ in onReload() })
+        }
+        if let onOpenSettings {
+            actions.append(UIAction(
+                title: "Settings",
+                image: UIImage(systemName: "gearshape")
+            ) { _ in onOpenSettings() })
+        }
+        uiViewController.transportBarCustomMenuItems = actions
+        #endif
     }
 }
+

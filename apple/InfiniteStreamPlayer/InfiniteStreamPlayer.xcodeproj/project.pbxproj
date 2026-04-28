@@ -12,31 +12,43 @@
 		B1B1B1050101010101010101 /* InfiniteStreamLogo.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1B1B1020101010101010101 /* InfiniteStreamLogo.swift */; };
 		B1B1B1060101010101010101 /* InfiniteStreamLogo.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1B1B1020101010101010101 /* InfiniteStreamLogo.swift */; };
 		A1A1A1A1A1A1A1A1A1A10001 /* InfiniteStreamPlayerApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A11001 /* InfiniteStreamPlayerApp.swift */; };
-		A1A1A1A1A1A1A1A1A1A10002 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A11002 /* ContentView.swift */; };
-		A1A1A1A1A1A1A1A1A1A10003 /* PlaybackViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A11003 /* PlaybackViewModel.swift */; };
-		A1A1A1A1A1A1A1A1A1A10004 /* PlaybackDiagnostics.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A11004 /* PlaybackDiagnostics.swift */; };
 		A1A1A1A1A1A1A1A1A1A10005 /* PlayerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A11005 /* PlayerView.swift */; };
 		A1A1A1A1A1A1A1A1A1A10006 /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A11006 /* Models.swift */; };
+		A1A1A1A1A1A1A1A1A1A10050 /* DesignTokens.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A11050 /* DesignTokens.swift */; };
+		A1A1A1A1A1A1A1A1A1A10051 /* PlayerViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A11051 /* PlayerViewModel.swift */; };
+		A1A1A1A1A1A1A1A1A1A10052 /* AppRoot.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A11052 /* AppRoot.swift */; };
+		A1A1A1A1A1A1A1A1A1A10053 /* ServerPickerScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A11053 /* ServerPickerScreen.swift */; };
+		A1A1A1A1A1A1A1A1A1A10054 /* HomeScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A11054 /* HomeScreen.swift */; };
+		A1A1A1A1A1A1A1A1A1A10055 /* PlaybackScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A11055 /* PlaybackScreen.swift */; };
+		A1A1A1A1A1A1A1A1A1A10056 /* SettingsOverlay.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A11056 /* SettingsOverlay.swift */; };
+		A1A1A1A1A1A1A1A1A1A10057 /* LivePreviewTile.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A11057 /* LivePreviewTile.swift */; };
+		A1A1A1A1A1A1A1A1A1A10058 /* PlaybackDiagnostics.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A11058 /* PlaybackDiagnostics.swift */; };
+		A1A1A1A1A1A1A1A1A1A10059 /* DecodeBudget.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A11059 /* DecodeBudget.swift */; };
 		A1A1A1A1A1A1A1A1A1A1000D /* RequestTracker.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A1100D /* RequestTracker.swift */; };
 		A1A1A1A1A1A1A1A1A1A1000F /* LocalHTTPProxy.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A1100F /* LocalHTTPProxy.swift */; };
 		A1A1A1A1A1A1A1A1A1A10020 /* QRScannerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A11030 /* QRScannerView.swift */; };
 		A1A1A1A1A1A1A1A1A1A10031 /* ServerProfile.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A11031 /* ServerProfile.swift */; };
-		A1A1A1A1A1A1A1A1A1A10032 /* AddServerSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A11032 /* AddServerSheet.swift */; };
 		A1A1A1A1A1A1A1A1A1A10033 /* RendezvousService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A11033 /* RendezvousService.swift */; };
 		A1A1A1A1A1A1A1A1A1A10034 /* PairingView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A11034 /* PairingView.swift */; };
 		A1A1A1A1A1A1A1A1A1A12001 /* AVKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A13001 /* AVKit.framework */; };
 		A1A1A1A1A1A1A1A1A1A12002 /* AVFoundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A13002 /* AVFoundation.framework */; };
 		A2A2A2A2A2A2A2A2A2A20001 /* InfiniteStreamPlayerApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A11001 /* InfiniteStreamPlayerApp.swift */; };
-		A2A2A2A2A2A2A2A2A2A20002 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A11002 /* ContentView.swift */; };
-		A2A2A2A2A2A2A2A2A2A20003 /* PlaybackViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A11003 /* PlaybackViewModel.swift */; };
-		A2A2A2A2A2A2A2A2A2A20004 /* PlaybackDiagnostics.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A11004 /* PlaybackDiagnostics.swift */; };
 		A2A2A2A2A2A2A2A2A2A20005 /* PlayerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A11005 /* PlayerView.swift */; };
 		A2A2A2A2A2A2A2A2A2A20006 /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A11006 /* Models.swift */; };
+		A2A2A2A2A2A2A2A2A2A20050 /* DesignTokens.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A11050 /* DesignTokens.swift */; };
+		A2A2A2A2A2A2A2A2A2A20051 /* PlayerViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A11051 /* PlayerViewModel.swift */; };
+		A2A2A2A2A2A2A2A2A2A20052 /* AppRoot.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A11052 /* AppRoot.swift */; };
+		A2A2A2A2A2A2A2A2A2A20053 /* ServerPickerScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A11053 /* ServerPickerScreen.swift */; };
+		A2A2A2A2A2A2A2A2A2A20054 /* HomeScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A11054 /* HomeScreen.swift */; };
+		A2A2A2A2A2A2A2A2A2A20055 /* PlaybackScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A11055 /* PlaybackScreen.swift */; };
+		A2A2A2A2A2A2A2A2A2A20056 /* SettingsOverlay.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A11056 /* SettingsOverlay.swift */; };
+		A2A2A2A2A2A2A2A2A2A20057 /* LivePreviewTile.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A11057 /* LivePreviewTile.swift */; };
+		A2A2A2A2A2A2A2A2A2A20058 /* PlaybackDiagnostics.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A11058 /* PlaybackDiagnostics.swift */; };
+		A2A2A2A2A2A2A2A2A2A20059 /* DecodeBudget.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A11059 /* DecodeBudget.swift */; };
 		A2A2A2A2A2A2A2A2A2A2000D /* RequestTracker.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A1100D /* RequestTracker.swift */; };
 		A2A2A2A2A2A2A2A2A2A2000F /* LocalHTTPProxy.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A1100F /* LocalHTTPProxy.swift */; };
 		A2A2A2A2A2A2A2A2A2A20020 /* QRScannerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A11030 /* QRScannerView.swift */; };
 		A2A2A2A2A2A2A2A2A2A20031 /* ServerProfile.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A11031 /* ServerProfile.swift */; };
-		A2A2A2A2A2A2A2A2A2A20032 /* AddServerSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A11032 /* AddServerSheet.swift */; };
 		A2A2A2A2A2A2A2A2A2A20033 /* RendezvousService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A11033 /* RendezvousService.swift */; };
 		A2A2A2A2A2A2A2A2A2A20034 /* PairingView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A11034 /* PairingView.swift */; };
 		A2A2A2A2A2A2A2A2A2A22001 /* AVKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A13001 /* AVKit.framework */; };
@@ -47,16 +59,22 @@
 		B1B1B1010101010101010101 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		B1B1B1020101010101010101 /* InfiniteStreamLogo.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InfiniteStreamLogo.swift; sourceTree = "<group>"; };
 		A1A1A1A1A1A1A1A1A1A11001 /* InfiniteStreamPlayerApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InfiniteStreamPlayerApp.swift; sourceTree = "<group>"; };
-		A1A1A1A1A1A1A1A1A1A11002 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
-		A1A1A1A1A1A1A1A1A1A11003 /* PlaybackViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaybackViewModel.swift; sourceTree = "<group>"; };
-		A1A1A1A1A1A1A1A1A1A11004 /* PlaybackDiagnostics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaybackDiagnostics.swift; sourceTree = "<group>"; };
 		A1A1A1A1A1A1A1A1A1A11005 /* PlayerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlayerView.swift; sourceTree = "<group>"; };
 		A1A1A1A1A1A1A1A1A1A11006 /* Models.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models.swift; sourceTree = "<group>"; };
+		A1A1A1A1A1A1A1A1A1A11050 /* DesignTokens.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DesignTokens.swift; sourceTree = "<group>"; };
+		A1A1A1A1A1A1A1A1A1A11051 /* PlayerViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlayerViewModel.swift; sourceTree = "<group>"; };
+		A1A1A1A1A1A1A1A1A1A11052 /* AppRoot.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppRoot.swift; sourceTree = "<group>"; };
+		A1A1A1A1A1A1A1A1A1A11053 /* ServerPickerScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ServerPickerScreen.swift; sourceTree = "<group>"; };
+		A1A1A1A1A1A1A1A1A1A11054 /* HomeScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeScreen.swift; sourceTree = "<group>"; };
+		A1A1A1A1A1A1A1A1A1A11055 /* PlaybackScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaybackScreen.swift; sourceTree = "<group>"; };
+		A1A1A1A1A1A1A1A1A1A11056 /* SettingsOverlay.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsOverlay.swift; sourceTree = "<group>"; };
+		A1A1A1A1A1A1A1A1A1A11057 /* LivePreviewTile.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LivePreviewTile.swift; sourceTree = "<group>"; };
+		A1A1A1A1A1A1A1A1A1A11058 /* PlaybackDiagnostics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaybackDiagnostics.swift; sourceTree = "<group>"; };
+		A1A1A1A1A1A1A1A1A1A11059 /* DecodeBudget.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DecodeBudget.swift; sourceTree = "<group>"; };
 		A1A1A1A1A1A1A1A1A1A1100D /* RequestTracker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RequestTracker.swift; sourceTree = "<group>"; };
 		A1A1A1A1A1A1A1A1A1A1100F /* LocalHTTPProxy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalHTTPProxy.swift; sourceTree = "<group>"; };
 		A1A1A1A1A1A1A1A1A1A11030 /* QRScannerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QRScannerView.swift; sourceTree = "<group>"; };
 		A1A1A1A1A1A1A1A1A1A11031 /* ServerProfile.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ServerProfile.swift; sourceTree = "<group>"; };
-		A1A1A1A1A1A1A1A1A1A11032 /* AddServerSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AddServerSheet.swift; sourceTree = "<group>"; };
 		A1A1A1A1A1A1A1A1A1A11033 /* RendezvousService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RendezvousService.swift; sourceTree = "<group>"; };
 		A1A1A1A1A1A1A1A1A1A11034 /* PairingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PairingView.swift; sourceTree = "<group>"; };
 		A1A1A1A1A1A1A1A1A1A11010 /* InfiniteStreamPlayer-iOS/Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = "InfiniteStreamPlayer-iOS/Info.plist"; sourceTree = "<group>"; };
@@ -103,16 +121,22 @@
 			isa = PBXGroup;
 			children = (
 				A1A1A1A1A1A1A1A1A1A11001 /* InfiniteStreamPlayerApp.swift */,
-				A1A1A1A1A1A1A1A1A1A11002 /* ContentView.swift */,
-				A1A1A1A1A1A1A1A1A1A11003 /* PlaybackViewModel.swift */,
-				A1A1A1A1A1A1A1A1A1A11004 /* PlaybackDiagnostics.swift */,
+				A1A1A1A1A1A1A1A1A1A11052 /* AppRoot.swift */,
+				A1A1A1A1A1A1A1A1A1A11051 /* PlayerViewModel.swift */,
+				A1A1A1A1A1A1A1A1A1A11050 /* DesignTokens.swift */,
 				A1A1A1A1A1A1A1A1A1A11005 /* PlayerView.swift */,
 				A1A1A1A1A1A1A1A1A1A11006 /* Models.swift */,
+				A1A1A1A1A1A1A1A1A1A11053 /* ServerPickerScreen.swift */,
+				A1A1A1A1A1A1A1A1A1A11054 /* HomeScreen.swift */,
+				A1A1A1A1A1A1A1A1A1A11055 /* PlaybackScreen.swift */,
+				A1A1A1A1A1A1A1A1A1A11056 /* SettingsOverlay.swift */,
+				A1A1A1A1A1A1A1A1A1A11057 /* LivePreviewTile.swift */,
+				A1A1A1A1A1A1A1A1A1A11058 /* PlaybackDiagnostics.swift */,
+				A1A1A1A1A1A1A1A1A1A11059 /* DecodeBudget.swift */,
 				A1A1A1A1A1A1A1A1A1A1100D /* RequestTracker.swift */,
 				A1A1A1A1A1A1A1A1A1A1100F /* LocalHTTPProxy.swift */,
 				A1A1A1A1A1A1A1A1A1A11030 /* QRScannerView.swift */,
 				A1A1A1A1A1A1A1A1A1A11031 /* ServerProfile.swift */,
-				A1A1A1A1A1A1A1A1A1A11032 /* AddServerSheet.swift */,
 				A1A1A1A1A1A1A1A1A1A11033 /* RendezvousService.swift */,
 				A1A1A1A1A1A1A1A1A1A11034 /* PairingView.swift */,
 				B1B1B1020101010101010101 /* InfiniteStreamLogo.swift */,
@@ -246,16 +270,22 @@
 			buildActionMask = 2147483647;
 			files = (
 				A1A1A1A1A1A1A1A1A1A10001 /* InfiniteStreamPlayerApp.swift in Sources */,
-				A1A1A1A1A1A1A1A1A1A10002 /* ContentView.swift in Sources */,
-				A1A1A1A1A1A1A1A1A1A10003 /* PlaybackViewModel.swift in Sources */,
-				A1A1A1A1A1A1A1A1A1A10004 /* PlaybackDiagnostics.swift in Sources */,
 				A1A1A1A1A1A1A1A1A1A10005 /* PlayerView.swift in Sources */,
 				A1A1A1A1A1A1A1A1A1A10006 /* Models.swift in Sources */,
+				A1A1A1A1A1A1A1A1A1A10050 /* DesignTokens.swift in Sources */,
+				A1A1A1A1A1A1A1A1A1A10051 /* PlayerViewModel.swift in Sources */,
+				A1A1A1A1A1A1A1A1A1A10052 /* AppRoot.swift in Sources */,
+				A1A1A1A1A1A1A1A1A1A10053 /* ServerPickerScreen.swift in Sources */,
+				A1A1A1A1A1A1A1A1A1A10054 /* HomeScreen.swift in Sources */,
+				A1A1A1A1A1A1A1A1A1A10055 /* PlaybackScreen.swift in Sources */,
+				A1A1A1A1A1A1A1A1A1A10056 /* SettingsOverlay.swift in Sources */,
+				A1A1A1A1A1A1A1A1A1A10057 /* LivePreviewTile.swift in Sources */,
+				A1A1A1A1A1A1A1A1A1A10058 /* PlaybackDiagnostics.swift in Sources */,
+				A1A1A1A1A1A1A1A1A1A10059 /* DecodeBudget.swift in Sources */,
 				A1A1A1A1A1A1A1A1A1A1000D /* RequestTracker.swift in Sources */,
 				A1A1A1A1A1A1A1A1A1A1000F /* LocalHTTPProxy.swift in Sources */,
 				A1A1A1A1A1A1A1A1A1A10020 /* QRScannerView.swift in Sources */,
 				A1A1A1A1A1A1A1A1A1A10031 /* ServerProfile.swift in Sources */,
-				A1A1A1A1A1A1A1A1A1A10032 /* AddServerSheet.swift in Sources */,
 				A1A1A1A1A1A1A1A1A1A10033 /* RendezvousService.swift in Sources */,
 				A1A1A1A1A1A1A1A1A1A10034 /* PairingView.swift in Sources */,
 				B1B1B1050101010101010101 /* InfiniteStreamLogo.swift in Sources */,
@@ -267,16 +297,22 @@
 			buildActionMask = 2147483647;
 			files = (
 				A2A2A2A2A2A2A2A2A2A20001 /* InfiniteStreamPlayerApp.swift in Sources */,
-				A2A2A2A2A2A2A2A2A2A20002 /* ContentView.swift in Sources */,
-				A2A2A2A2A2A2A2A2A2A20003 /* PlaybackViewModel.swift in Sources */,
-				A2A2A2A2A2A2A2A2A2A20004 /* PlaybackDiagnostics.swift in Sources */,
 				A2A2A2A2A2A2A2A2A2A20005 /* PlayerView.swift in Sources */,
 				A2A2A2A2A2A2A2A2A2A20006 /* Models.swift in Sources */,
+				A2A2A2A2A2A2A2A2A2A20050 /* DesignTokens.swift in Sources */,
+				A2A2A2A2A2A2A2A2A2A20051 /* PlayerViewModel.swift in Sources */,
+				A2A2A2A2A2A2A2A2A2A20052 /* AppRoot.swift in Sources */,
+				A2A2A2A2A2A2A2A2A2A20053 /* ServerPickerScreen.swift in Sources */,
+				A2A2A2A2A2A2A2A2A2A20054 /* HomeScreen.swift in Sources */,
+				A2A2A2A2A2A2A2A2A2A20055 /* PlaybackScreen.swift in Sources */,
+				A2A2A2A2A2A2A2A2A2A20056 /* SettingsOverlay.swift in Sources */,
+				A2A2A2A2A2A2A2A2A2A20057 /* LivePreviewTile.swift in Sources */,
+				A2A2A2A2A2A2A2A2A2A20058 /* PlaybackDiagnostics.swift in Sources */,
+				A2A2A2A2A2A2A2A2A2A20059 /* DecodeBudget.swift in Sources */,
 				A2A2A2A2A2A2A2A2A2A2000D /* RequestTracker.swift in Sources */,
 				A2A2A2A2A2A2A2A2A2A2000F /* LocalHTTPProxy.swift in Sources */,
 				A2A2A2A2A2A2A2A2A2A20020 /* QRScannerView.swift in Sources */,
 				A2A2A2A2A2A2A2A2A2A20031 /* ServerProfile.swift in Sources */,
-				A2A2A2A2A2A2A2A2A2A20032 /* AddServerSheet.swift in Sources */,
 				A2A2A2A2A2A2A2A2A2A20033 /* RendezvousService.swift in Sources */,
 				A2A2A2A2A2A2A2A2A2A20034 /* PairingView.swift in Sources */,
 				B1B1B1060101010101010101 /* InfiniteStreamLogo.swift in Sources */,

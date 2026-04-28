@@ -94,6 +94,13 @@ final class PlaybackDiagnostics: ObservableObject {
     @Published var segmentStallDetected: Bool = false
 
     private var timeObserverToken: Any?
+    /// The exact `AVPlayer` instance that vended `timeObserverToken`.
+    /// AVFoundation requires removing a periodic time observer from the
+    /// same player that added it; using a different instance throws
+    /// `NSInvalidArgumentException`. When `bind(to:)` swaps in a new
+    /// player (Reload / Retry rebuilds the AVPlayer), we must remove
+    /// the token from the *previous* player, not the new one.
+    private weak var timeObserverOwner: AVPlayer?
     private var bitrateSampleTimer: Timer?
     private var cancellables: Set<AnyCancellable> = []
     private weak var player: AVPlayer?
@@ -403,6 +410,17 @@ final class PlaybackDiagnostics: ObservableObject {
             .sink { [weak self] notification in
                 guard let self else { return }
                 let item = notification.object as? AVPlayerItem
+                // Filter notifications down to *our* current item.
+                // AVPlayerItemTimeJumped is process-global — without
+                // this guard the hero + 64 preview tile AVPlayers each
+                // fire jumps the main playback diagnostics pretends are
+                // its own, producing log spam like
+                //   [TIMEJUMP] origin=unknown time=101.12 state=paused no-item
+                // before the main player has even loaded.
+                guard let player = self.player,
+                      let current = player.currentItem,
+                      item === current
+                else { return }
                 let original = (notification.userInfo?[AVPlayerItem.timeJumpedOriginatingParticipantKey] as? String) ?? "unknown"
                 let fromTime = self.currentTime
                 let newTime = item?.currentTime().seconds ?? self.currentTime
@@ -419,8 +437,14 @@ final class PlaybackDiagnostics: ObservableObject {
 
         NotificationCenter.default.publisher(for: .AVPlayerItemPlaybackStalled)
             .receive(on: DispatchQueue.main)
-            .sink { [weak self] _ in
+            .sink { [weak self] notification in
                 guard let self else { return }
+                // Same global-publisher filter as TimeJumped above.
+                guard let player = self.player,
+                      let current = player.currentItem,
+                      let item = notification.object as? AVPlayerItem,
+                      item === current
+                else { return }
                 print("[STALL] state=\(self.state) time=\(String(format: "%.2f", self.currentTime)) \(self.playbackSnapshot())")
                 // Mark the unexpected-rebuffer flag so the
                 // timeControlStatus sink can distinguish stalled vs
@@ -435,6 +459,11 @@ final class PlaybackDiagnostics: ObservableObject {
             .receive(on: DispatchQueue.main)
             .sink { [weak self] notification in
                 guard let self else { return }
+                guard let player = self.player,
+                      let current = player.currentItem,
+                      let item = notification.object as? AVPlayerItem,
+                      item === current
+                else { return }
                 if let error = notification.userInfo?[AVPlayerItemFailedToPlayToEndTimeErrorKey] as? Error {
                     print("[FAILURE] \(error.localizedDescription) state=\(self.state) time=\(String(format: "%.2f", self.currentTime)) \(self.playbackSnapshot())")
                     self.lastFailure = error.localizedDescription
@@ -448,16 +477,26 @@ final class PlaybackDiagnostics: ObservableObject {
         NotificationCenter.default.publisher(for: .AVPlayerItemNewAccessLogEntry)
             .receive(on: DispatchQueue.main)
             .sink { [weak self] notification in
-                guard let item = notification.object as? AVPlayerItem else { return }
-                self?.updateAccessLog(from: item)
+                guard let self,
+                      let player = self.player,
+                      let current = player.currentItem,
+                      let item = notification.object as? AVPlayerItem,
+                      item === current
+                else { return }
+                self.updateAccessLog(from: item)
             }
             .store(in: &cancellables)
 
         NotificationCenter.default.publisher(for: .AVPlayerItemNewErrorLogEntry)
             .receive(on: DispatchQueue.main)
             .sink { [weak self] notification in
-                guard let item = notification.object as? AVPlayerItem else { return }
-                self?.updateErrorLog(from: item)
+                guard let self,
+                      let player = self.player,
+                      let current = player.currentItem,
+                      let item = notification.object as? AVPlayerItem,
+                      item === current
+                else { return }
+                self.updateErrorLog(from: item)
             }
             .store(in: &cancellables)
 
@@ -466,13 +505,17 @@ final class PlaybackDiagnostics: ObservableObject {
     }
 
     private func addTimeObserver(to player: AVPlayer) {
-        if let token = timeObserverToken {
-            player.removeTimeObserver(token)
-            timeObserverToken = nil
+        // Remove any existing observer from the player that vended it,
+        // not from the new player (passed in here). Mismatching the
+        // pair throws NSInvalidArgumentException.
+        if let token = timeObserverToken, let owner = timeObserverOwner {
+            owner.removeTimeObserver(token)
         }
+        timeObserverToken = nil
+        timeObserverOwner = nil
 
         let interval = CMTime(seconds: 0.5, preferredTimescale: 600)
-        timeObserverToken = player.addPeriodicTimeObserver(forInterval: interval, queue: .main) { [weak self] time in
+        let token = player.addPeriodicTimeObserver(forInterval: interval, queue: .main) { [weak self] time in
             guard let self else { return }
             self.currentTime = time.seconds
             self.updateBufferMetrics()
@@ -481,6 +524,8 @@ final class PlaybackDiagnostics: ObservableObject {
             self.periodicVariantSummary()
             self.maybeLogOffsetHeartbeat()
         }
+        timeObserverToken = token
+        timeObserverOwner = player
     }
 
     private func updateItemState() {
