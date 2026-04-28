@@ -2,11 +2,13 @@ package com.infinitestream.player;
 
 import android.os.Handler;
 import android.os.Looper;
+import android.util.Log;
 
 import androidx.annotation.OptIn;
 import androidx.media3.common.C;
 import androidx.media3.common.Format;
 import androidx.media3.common.Player;
+import androidx.media3.common.Timeline;
 import androidx.media3.common.VideoSize;
 import androidx.media3.common.util.UnstableApi;
 import androidx.media3.exoplayer.ExoPlayer;
@@ -56,6 +58,7 @@ public final class PlaybackMetrics {
         String currentStreamUrl();
     }
 
+    private static final String TAG = "InfiniteStream";
     private static final long HEARTBEAT_INTERVAL_MS = 1000;
     private static final long SESSION_LOOKUP_INTERVAL_MS = 30_000;
     private static final int CONNECT_TIMEOUT_MS = 3000;
@@ -113,6 +116,7 @@ public final class PlaybackMetrics {
     private final Runnable heartbeatRunnable = new Runnable() {
         @Override
         public void run() {
+            logOffsetHeartbeat();
             sendEvent("heartbeat", Collections.<String, Object>emptyMap());
             maybeReportVideoStart();
             maybeDetectFrozen();
@@ -122,6 +126,52 @@ public final class PlaybackMetrics {
             }
         }
     };
+
+    /**
+     * Greppable 1 Hz heartbeat for cross-platform live-offset observation.
+     * Field names match iOS PlaybackDiagnostics.playbackSnapshot() so a single
+     * grep across logs covers all clients.
+     *
+     * <p>{@code pdt} is the encoded wall-clock at the playhead, derived from
+     * the timeline window's {@code windowStartTimeMs} (HLS PROGRAM-DATE-TIME)
+     * plus {@code currentPosition}. {@code trueOff} is host-now − pdt — a
+     * ground-truth live offset that survives stalls and HOLD-BACK changes
+     * that fool ExoPlayer's own {@link Player#getCurrentLiveOffset()}.
+     */
+    private void logOffsetHeartbeat() {
+        long nowMs = System.currentTimeMillis();
+        long posMs = player.getCurrentPosition();
+        long bufferedMs = player.getBufferedPosition();
+        double bufferDepthS = Math.max(0, bufferedMs - posMs) / 1000.0;
+        long liveOffsetMs = player.getCurrentLiveOffset();
+        String liveOff = liveOffsetMs == C.TIME_UNSET
+            ? "nil"
+            : String.format(Locale.US, "%.1fs", liveOffsetMs / 1000.0);
+
+        Long pdtMs = null;
+        Timeline timeline = player.getCurrentTimeline();
+        if (!timeline.isEmpty()) {
+            int windowIndex = player.getCurrentMediaItemIndex();
+            if (windowIndex >= 0 && windowIndex < timeline.getWindowCount()) {
+                Timeline.Window window = new Timeline.Window();
+                timeline.getWindow(windowIndex, window);
+                if (window.windowStartTimeMs != C.TIME_UNSET) {
+                    pdtMs = window.windowStartTimeMs + posMs;
+                }
+            }
+        }
+        String pdt = pdtMs == null ? "nil" : iso8601.format(new Date(pdtMs));
+        String trueOff = pdtMs == null
+            ? "nil"
+            : String.format(Locale.US, "%.2fs", (nowMs - pdtMs) / 1000.0);
+        String wall = iso8601.format(new Date(nowMs));
+        String pos = String.format(Locale.US, "%.2fs", posMs / 1000.0);
+        String buf = String.format(Locale.US, "%.1fs", bufferDepthS);
+
+        Log.i(TAG, String.format(Locale.US,
+            "[OFFSET] state=%s wall=%s pdt=%s trueOff=%s pos=%s liveOff=%s bufDepth=%s",
+            mapState(), wall, pdt, trueOff, pos, liveOff, buf));
+    }
 
     public PlaybackMetrics(ExoPlayer player,
                     PlayerView playerView,
@@ -367,7 +417,7 @@ public final class PlaybackMetrics {
         }
     }
 
-    public void sendEvent(String event, Map<String, Object> extra) {
+    void sendEvent(String event, Map<String, Object> extra) {
         if (urlProvider.currentStreamUrl().isEmpty()) return;
         final JSONObject payload = buildPayload(event, extra);
         if (payload == null) return;
@@ -401,6 +451,28 @@ public final class PlaybackMetrics {
             long liveOffsetMs = player.getCurrentLiveOffset();
             if (liveOffsetMs != C.TIME_UNSET) {
                 p.put("player_metrics_live_offset_s", roundSeconds(liveOffsetMs / 1000.0));
+            }
+
+            // Encoded wall-clock at the playhead (epoch ms) — derived from the
+            // HLS timeline window's PROGRAM-DATE-TIME (windowStartTimeMs)
+            // plus currentPosition. Pairs with the receiver's clock to compute
+            // a ground-truth live offset.
+            Timeline tl = player.getCurrentTimeline();
+            if (!tl.isEmpty()) {
+                int windowIndex = player.getCurrentMediaItemIndex();
+                if (windowIndex >= 0 && windowIndex < tl.getWindowCount()) {
+                    Timeline.Window window = new Timeline.Window();
+                    tl.getWindow(windowIndex, window);
+                    if (window.windowStartTimeMs != C.TIME_UNSET) {
+                        long pdtMs = window.windowStartTimeMs + currentPositionMs;
+                        p.put("player_metrics_playhead_wallclock_ms", pdtMs);
+                        // Client-side fallback for receivers that can't pair
+                        // with a server-stamped received_at. Biased by client
+                        // clock skew vs. server clock.
+                        p.put("player_metrics_true_offset_s",
+                            roundSeconds((System.currentTimeMillis() - pdtMs) / 1000.0));
+                    }
+                }
             }
 
             VideoSize vs = player.getVideoSize();

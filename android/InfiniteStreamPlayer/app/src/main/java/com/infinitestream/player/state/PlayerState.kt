@@ -93,6 +93,14 @@ data class UiState(
      *  to populate Home. Back from Playback still routes to Home,
      *  which loads its visuals at that point. Off by default. */
     val skipHomeOnLaunch: Boolean = false,
+    /** Number of simultaneous live-preview ExoPlayer decodes allowed
+     *  on Home. 0 = preview video off (every tile shows its
+     *  thumbnail). Defaults to the platform-specific hardware cap on
+     *  first launch (see `DecodeBudget.maxConcurrent`); users can
+     *  lower the number in Settings → Advanced for thermal /
+     *  battery / network reasons. Cannot exceed the hardware cap.
+     *  Mirrors the Apple `previewVideoSlots` flag. */
+    val previewVideoSlots: Int = -1, // -1 sentinel = "use hardware default"
 
     /** True when HUD is visible on the playback screen. */
     val hudVisible: Boolean = false,

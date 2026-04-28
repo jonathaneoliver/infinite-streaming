@@ -253,6 +253,17 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
                 autoRecovery      = p.getBoolean(FLAG_AUTO_RECOVERY, false),
                 goLive            = p.getBoolean(FLAG_GO_LIVE, false),
                 skipHomeOnLaunch  = p.getBoolean(FLAG_SKIP_HOME, false),
+                previewVideoSlots = run {
+                    // First launch (no key) → hardware default. Otherwise
+                    // clamp the stored value to the device's current cap.
+                    val hwCap = DecodeBudget.maxConcurrent
+                    val stored = if (p.contains(FLAG_PREVIEW_VIDEO_SLOTS)) {
+                        p.getInt(FLAG_PREVIEW_VIDEO_SLOTS, hwCap)
+                    } else {
+                        hwCap
+                    }
+                    stored.coerceIn(0, hwCap)
+                },
                 lastPlayed    = p.getString(LAST_PLAYED_KEY, "") ?: "",
                 viewCounts    = readViewCounts(p),
             )
@@ -320,6 +331,12 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
     fun setSkipHomeOnLaunch(on: Boolean) {
         _state.update { it.copy(skipHomeOnLaunch = on) }
         prefs().edit().putBoolean(FLAG_SKIP_HOME, on).apply()
+    }
+
+    fun setPreviewVideoSlots(value: Int) {
+        val clamped = value.coerceIn(0, DecodeBudget.maxConcurrent)
+        _state.update { it.copy(previewVideoSlots = clamped) }
+        prefs().edit().putInt(FLAG_PREVIEW_VIDEO_SLOTS, clamped).apply()
     }
 
     /**
@@ -835,6 +852,7 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         private const val FLAG_AUTO_RECOVERY = "advanced_auto_recovery"
         private const val FLAG_GO_LIVE = "advanced_go_live"
         private const val FLAG_SKIP_HOME = "advanced_skip_home_on_launch"
+        private const val FLAG_PREVIEW_VIDEO_SLOTS = "advanced_preview_video_slots"
         private const val LAST_PLAYED_KEY = "last_played_content"
         private const val VIEW_COUNTS_KEY = "view_counts"
         private const val CONTENT_CACHE_PREFIX = "content_cache_"

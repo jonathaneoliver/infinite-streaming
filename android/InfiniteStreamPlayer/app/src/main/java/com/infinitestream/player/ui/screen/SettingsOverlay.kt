@@ -54,6 +54,7 @@ import kotlinx.coroutines.delay
 import androidx.tv.material3.Icon
 import androidx.tv.material3.Text
 import com.infinitestream.player.state.Codec
+import com.infinitestream.player.state.DecodeBudget
 import com.infinitestream.player.state.PlayerViewModel
 import com.infinitestream.player.state.Protocol
 import com.infinitestream.player.state.Segment
@@ -397,6 +398,13 @@ private fun PickerList(
                         )
                     }
                     item {
+                        PreviewVideoSlotsRow(
+                            slots = state.previewVideoSlots,
+                            hardwareCap = DecodeBudget.maxConcurrent,
+                            onChange = { vm.setPreviewVideoSlots(it) },
+                        )
+                    }
+                    item {
                         PickerItem(
                             label = "Developer mode (AVG/PEAK overlay)",
                             selected = state.developerMode,
@@ -446,4 +454,70 @@ private fun PickerKind.headerLabel(): String = when (this) {
     PickerKind.SegmentLength -> "Segment length"
     PickerKind.Codec -> "Codec"
     PickerKind.Advanced -> "Advanced"
+}
+
+/**
+ * Numeric stepper for the LIVE preview-row decode budget. 0 = preview
+ * video off (every tile shows its thumbnail). Otherwise the value is
+ * the number of simultaneous decodes allowed; tiles past this number
+ * fall back to the static thumbnail. Capped at the device's hardware
+ * max ([DecodeBudget.maxConcurrent]).
+ */
+@Composable
+private fun PreviewVideoSlotsRow(
+    slots: Int,
+    hardwareCap: Int,
+    onChange: (Int) -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(60.dp)
+            .clip(RoundedCornerShape(Radius.row))
+            .background(Tokens.bgSoft)
+            .padding(horizontal = Space.s4),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                "Preview video (live tiles on Home)",
+                style = AppType.body.copy(color = Tokens.fg),
+            )
+            Spacer(Modifier.height(2.dp))
+            Text(
+                if (slots <= 0) "Off — thumbnails only"
+                else "$slots of $hardwareCap (device max) decoding",
+                style = AppType.monoSm.copy(color = Tokens.fgFaint),
+            )
+        }
+        StepperButton(
+            symbol = "−",
+            enabled = slots > 0,
+            onClick = { onChange(slots - 1) },
+        )
+        Spacer(Modifier.width(Space.s2))
+        StepperButton(
+            symbol = "+",
+            enabled = slots < hardwareCap,
+            onClick = { onChange(slots + 1) },
+        )
+    }
+}
+
+@Composable
+private fun StepperButton(symbol: String, enabled: Boolean, onClick: () -> Unit) {
+    Box(
+        modifier = Modifier
+            .size(40.dp)
+            .clip(RoundedCornerShape(20.dp))
+            .background(Tokens.bgCard)
+            .tvFocus(cornerRadius = 20.dp)
+            .clickable(enabled = enabled, onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            symbol,
+            style = AppType.body.copy(color = if (enabled) Tokens.fg else Tokens.fgFaint),
+        )
+    }
 }

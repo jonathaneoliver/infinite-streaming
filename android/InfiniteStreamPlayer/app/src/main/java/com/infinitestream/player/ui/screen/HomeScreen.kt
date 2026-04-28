@@ -46,6 +46,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import androidx.tv.material3.Text
 import com.infinitestream.player.state.ContentItem
+import com.infinitestream.player.state.DecodeBudget
 import com.infinitestream.player.state.PlayerViewModel
 import com.infinitestream.player.state.UiState
 import com.infinitestream.player.ui.component.LivePreviewTile
@@ -99,18 +100,16 @@ fun HomeScreen(
     // longer exists or hasn't been set yet.
     val featured = items.firstOrNull { it.name == state.lastPlayed }
         ?: items.firstOrNull()
-    // 3 visible preview slots; the pool of eligible clips can be much
-    // larger and the user scrolls through it via D-pad-Left/Right at the
-    // row edges (carousel rotation). Each carousel step is exactly 1
-    // decoder dispose + 1 alloc thanks to the content-keyed LazyRow.
+    // Visible preview slots — capped at min(user pref, hardware AVC
+    // decoder limit). User pref comes from Settings → Advanced and
+    // defaults to the hardware cap on first launch. The pool of
+    // eligible clips can be much larger; user scrolls through it via
+    // D-pad-Left/Right at the row edges (carousel rotation).
     //
     // Dedupe by `clip_id` (server-computed), preferring the H.264 entry
-    // since that's universally hardware-decodable on every TV chip. This
-    // replaces the earlier substring/token heuristic that was over-
-    // collapsing — "redbull" matched "red_bull_storm_chase", every
-    // samsung_* clip merged into one, and the 45-item content list ended
-    // up as 6 visible cards.
-    val visibleSlots = 3
+    // since that's universally hardware-decodable on every TV chip.
+    val hardwareCap = remember { DecodeBudget.maxConcurrent }
+    val visibleSlots = state.previewVideoSlots.coerceIn(0, hardwareCap)
     // Pool of unique H.264 clips for the carousel.
     //
     // Ordering policy (most-prominent first):
@@ -155,7 +154,7 @@ fun HomeScreen(
             Spacer(Modifier.height(Space.s7))
 
             val activeServer = state.activeServer
-            if (previewPool.isNotEmpty() && activeServer != null) {
+            if (previewPool.isNotEmpty() && activeServer != null && visibleSlots > 0) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     StatusDot(color = Tokens.live)
                     Spacer(Modifier.width(Space.s1))
@@ -188,7 +187,10 @@ fun HomeScreen(
                         LivePreviewTile(
                             content = c,
                             server = activeServer,
-                            active = true,
+                            // Settings → Advanced → Preview video slots = 0
+                            // collapses every tile to its static thumbnail
+                            // and skips the per-tile ExoPlayer build.
+                            active = state.previewVideoSlots > 0,
                             appStopped = appStopped,
                             onClick = { picked -> playPicked(picked.name) },
                             onAcquireDecoderLease = vm::acquireDecoderLease,
