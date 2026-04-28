@@ -9,11 +9,21 @@ import (
 
 var sanitizePattern = regexp.MustCompile(`[^\w\-]+`)
 
+// Maximum sanitised name length. Sized so the resulting catalogue
+// directory (`<safe>_p200_<codec>_<YYYYMMDD>_<HHMMSS>`, ~25 chars of
+// suffix) stays well under modern filesystems' 255-byte filename
+// limit (ext4 / btrfs / APFS / NTFS). Older versions used 50, which
+// truncated descriptive titles like
+// "samsung_4k_demo_samsung_and_redbull_see_the_unexpected_hdr_uhd_4k_full_hd_2160p"
+// to "samsung_4k_demo_samsung_and_redbull_see_the_unexpe" — losing the
+// distinguishing tail.
+const maxSanitizedNameLen = 200
+
 func SanitizeName(name string) string {
 	trimmed := strings.TrimSpace(name)
 	safe := sanitizePattern.ReplaceAllString(trimmed, "_")
-	if len(safe) > 50 {
-		safe = safe[:50]
+	if len(safe) > maxSanitizedNameLen {
+		safe = safe[:maxSanitizedNameLen]
 	}
 	return safe
 }

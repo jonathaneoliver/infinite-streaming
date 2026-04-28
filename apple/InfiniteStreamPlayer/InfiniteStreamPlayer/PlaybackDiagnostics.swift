@@ -46,6 +46,11 @@ final class PlaybackDiagnostics: ObservableObject {
     @Published var bufferDepth: Double?
     @Published var seekableEnd: Double?
     @Published var liveOffset: Double?
+    /// Wall-clock time encoded into the manifest at the playhead position
+    /// (AVPlayerItem.currentDate() — derived from EXT-X-PROGRAM-DATE-TIME).
+    /// Pairs with `Date()` at sample time to give ground-truth live offset
+    /// independent of the player's seekable-window estimate.
+    @Published var playheadWallClock: Date?
     @Published var windowDuration: Double?
     @Published var windowSlack: Double?
     @Published var displayWidth: Double?
@@ -93,6 +98,7 @@ final class PlaybackDiagnostics: ObservableObject {
     private var cancellables: Set<AnyCancellable> = []
     private weak var player: AVPlayer?
     private var lastBufferSampleAt: Date?
+    private var lastOffsetLogAt: Date?
     private var lastPlayerSampleAt: Date?
     private var stallStartAt: Date?
     /// Set when AVPlayerItemPlaybackStalled fires (an unexpected
@@ -262,6 +268,7 @@ final class PlaybackDiagnostics: ObservableObject {
         bufferDepth = nil
         seekableEnd = nil
         liveOffset = nil
+        playheadWallClock = nil
         displayWidth = nil
         displayHeight = nil
         videoWidth = nil
@@ -472,6 +479,7 @@ final class PlaybackDiagnostics: ObservableObject {
             self.updateItemState()
             self.checkFrozenState()
             self.periodicVariantSummary()
+            self.maybeLogOffsetHeartbeat()
         }
     }
 
@@ -541,6 +549,10 @@ final class PlaybackDiagnostics: ObservableObject {
                 lastBufferSampleAt = now
             }
         }
+        // Encoded wall-clock at the playhead, sourced from EXT-X-PROGRAM-DATE-TIME
+        // via AVFoundation. Stays valid through stalls and HOLD-BACK shifts that
+        // would mislead a seekableEnd-based offset.
+        playheadWallClock = item.currentDate()
         if let liveRange = item.seekableTimeRanges.last?.timeRangeValue {
             let liveEdge = liveRange.start.seconds + liveRange.duration.seconds
             let window = liveRange.duration.seconds
@@ -918,8 +930,31 @@ final class PlaybackDiagnostics: ObservableObject {
         let obsMbps = (observedBitrate ?? 0) / 1_000_000
         let liveStr = liveOffset.map { String(format: "%.1fs", $0) } ?? "nil"
         let slackStr = windowSlack.map { String(format: "%.1fs", $0) } ?? "nil"
-        let winStr = windowDuration.map { String(format: "%.1fs", $0) } ?? "nil"
-        return "variant=\(variant) seg=\(segStr)/max=\(maxStr) netBuf=\(depthStr) empty=\(bufEmpty) full=\(bufFull) keepUp=\(keepUp) ranges=[\(ranges)] liveOff=\(liveStr) window=\(winStr) slack=\(slackStr) ind=\(String(format: "%.1fMbps", indMbps)) obs=\(String(format: "%.1fMbps", obsMbps))"
+        let bufStr = bufferDepth.map { String(format: "%.1fs", $0) } ?? "nil"
+        let posStr = String(format: "%.2fs", liveTime)
+        let now = Date()
+        let wallStr = Self.snapshotISO8601.string(from: now)
+        let pdt = playheadWallClock
+        let pdtStr = pdt.map { Self.snapshotISO8601.string(from: $0) } ?? "nil"
+        let trueOffStr = pdt.map { String(format: "%.2fs", now.timeIntervalSince($0)) } ?? "nil"
+        return "wall=\(wallStr) pdt=\(pdtStr) trueOff=\(trueOffStr) pos=\(posStr) liveOff=\(liveStr) bufDepth=\(bufStr) variant=\(variant) seg=\(segStr)/max=\(maxStr) netBuf=\(depthStr) empty=\(bufEmpty) full=\(bufFull) keepUp=\(keepUp) ranges=[\(ranges)] slack=\(slackStr) ind=\(String(format: "%.1fMbps", indMbps)) obs=\(String(format: "%.1fMbps", obsMbps))"
+    }
+
+    private static let snapshotISO8601: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return f
+    }()
+
+    // Greppable 1 Hz heartbeat for live-offset observation across throttling,
+    // errors, and stalls. Tag `[OFFSET]` is shared with Android logcat so a
+    // single grep across logs covers all clients.
+    private func maybeLogOffsetHeartbeat() {
+        guard player?.currentItem != nil else { return }
+        let now = Date()
+        if let last = lastOffsetLogAt, now.timeIntervalSince(last) < 1.0 { return }
+        lastOffsetLogAt = now
+        print("[OFFSET] state=\(state) \(playbackSnapshot())")
     }
 
     // AVPlayer's access log URIs are per-variant playlists, not per-segment,

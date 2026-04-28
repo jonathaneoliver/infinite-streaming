@@ -2175,13 +2175,15 @@ create_audio_mezzanine() {
     
     log "Extracting audio from mezzanine file..."
 
-    # Detect audio codec and channel count
+    # Detect audio codec, profile, and channel count.
     AUDIO_CODEC=$(ffprobe -v error -select_streams a:0 -show_entries stream=codec_name \
+                  -of default=noprint_wrappers=1:nokey=1 "$MEZZANINE" 2>/dev/null | head -1)
+    AUDIO_PROFILE=$(ffprobe -v error -select_streams a:0 -show_entries stream=profile \
                   -of default=noprint_wrappers=1:nokey=1 "$MEZZANINE" 2>/dev/null | head -1)
     AUDIO_CHANNELS=$(ffprobe -v error -select_streams a:0 -show_entries stream=channels \
                   -of default=noprint_wrappers=1:nokey=1 "$MEZZANINE" 2>/dev/null | head -1)
 
-    log "Source audio codec: $AUDIO_CODEC, channels: ${AUDIO_CHANNELS:-?}"
+    log "Source audio codec: $AUDIO_CODEC, profile: ${AUDIO_PROFILE:-?}, channels: ${AUDIO_CHANNELS:-?}"
 
     START_TIME=$(date +%s)
 
@@ -2202,52 +2204,29 @@ create_audio_mezzanine() {
         ENCODING_INFOS+=("Audio downmixed from ${AUDIO_CHANNELS}-channel to stereo")
     fi
 
-    # Transcode codecs that Shaka Packager doesn't support, OR force-downmix
-    # multichannel sources to stereo even when the codec is compatible.
-    # Shaka Packager supports: AAC, MP3, Opus, Vorbis
-    # Shaka Packager does NOT support: AC-3, DTS, PCM, etc.
-    if [[ "$needs_downmix" -eq 1 ]] || [[ "$AUDIO_CODEC" == "ac3" ]] || [[ "$AUDIO_CODEC" == "eac3" ]] || [[ "$AUDIO_CODEC" == "dts" ]] || [[ "$AUDIO_CODEC" == "truehd" ]] || [[ "$AUDIO_CODEC" =~ ^pcm ]]; then
-        log "Transcoding $AUDIO_CODEC to AAC (Shaka Packager doesn't support $AUDIO_CODEC)"
-        ENCODING_WARNINGS+=("Audio transcoded from ${AUDIO_CODEC} to AAC (Shaka Packager compatibility)")
-        
-        # Build audio filter with optional padding
-        if [ "$needs_padding" -eq 1 ]; then
-            # When padding: don't use -t, apply apad filter
-            ffmpeg -i "$MEZZANINE" \
-                   -vn -c:a aac -b:a 192k -ar 48000 -ac 2 \
-                   -af "apad=pad_dur=${AUDIO_PADDING_DURATION}" \
-                   -movflags empty_moov+default_base_moof -frag_duration 1000000 \
-                   "$TEMP_DIR/audio.mp4" \
-                   -loglevel error -stats 2>&1 | tee -a "$LOG_FILE"
-        else
-            # When not padding: no special filter needed
-            ffmpeg -i "$MEZZANINE" \
-                   -vn -c:a aac -b:a 192k -ar 48000 -ac 2 \
-                   -movflags empty_moov+default_base_moof -frag_duration 1000000 \
-                   "$TEMP_DIR/audio.mp4" \
-                   -loglevel error -stats 2>&1 | tee -a "$LOG_FILE"
-        fi
+    # Always transcode to AAC-LC 192k stereo 48kHz. Single canonical
+    # audio output for the whole catalogue, no codec/profile gating
+    # decisions, every master.m3u8 carries `CODECS="...,mp4a.40.2"`,
+    # every player on every platform decodes it. Trade is one extra
+    # audio re-encode per clip — cheap (audio is a few MB), worth the
+    # certainty across Apple AVPlayer / Android ExoPlayer / hls.js /
+    # Roku.
+    log "Transcoding audio (source codec: $AUDIO_CODEC, profile: ${AUDIO_PROFILE:-?}) → AAC-LC 192k stereo 48kHz"
+    ENCODING_INFOS+=("Audio transcoded to AAC-LC 192k stereo 48kHz (source: ${AUDIO_CODEC})")
+
+    if [ "$needs_padding" -eq 1 ]; then
+        ffmpeg -i "$MEZZANINE" \
+               -vn -c:a aac -b:a 192k -ar 48000 -ac 2 \
+               -af "apad=pad_dur=${AUDIO_PADDING_DURATION}" \
+               -movflags empty_moov+default_base_moof -frag_duration 1000000 \
+               "$TEMP_DIR/audio.mp4" \
+               -loglevel error -stats 2>&1 | tee -a "$LOG_FILE"
     else
-        # AAC, MP3, or other compatible codecs
-        if [ "$needs_padding" -eq 1 ]; then
-            # When padding: must transcode (can't use filters with -c copy)
-            log "Adding ${AUDIO_PADDING_DURATION}s padding to audio (requires transcode to AAC)"
-            ffmpeg -i "$MEZZANINE" \
-                   -vn -c:a aac -b:a 192k -ar 48000 -ac 2 \
-                   -af "apad=pad_dur=${AUDIO_PADDING_DURATION}" \
-                   -movflags empty_moov+default_base_moof -frag_duration 1000000 \
-                   "$TEMP_DIR/audio.mp4" \
-                   -loglevel error -stats 2>&1 | tee -a "$LOG_FILE"
-        else
-            # When not padding: stream copy for best quality/speed
-            log "Copying audio stream (codec: $AUDIO_CODEC)"
-            ENCODING_INFOS+=("Audio stream copied (codec: ${AUDIO_CODEC})")
-            ffmpeg -i "$MEZZANINE" \
-                   -vn -c:a copy \
-                   -movflags empty_moov+default_base_moof -frag_duration 1000000 \
-                   "$TEMP_DIR/audio.mp4" \
-                   -loglevel error -stats 2>&1 | tee -a "$LOG_FILE"
-        fi
+        ffmpeg -i "$MEZZANINE" \
+               -vn -c:a aac -b:a 192k -ar 48000 -ac 2 \
+               -movflags empty_moov+default_base_moof -frag_duration 1000000 \
+               "$TEMP_DIR/audio.mp4" \
+               -loglevel error -stats 2>&1 | tee -a "$LOG_FILE"
     fi
     
     END_TIME=$(date +%s)
@@ -2469,7 +2448,7 @@ EOF
     
     # Create master playlist
     local master_file="$output_dir/master.m3u8"
-    
+
     cat > "$master_file" << 'EOF'
 #EXTM3U
 #EXT-X-VERSION:7

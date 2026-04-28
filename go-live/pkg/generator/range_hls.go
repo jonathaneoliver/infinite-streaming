@@ -204,6 +204,13 @@ func (g *RangeHLSGenerator) GenerateVariantPlaylist(
 	targetDurationSecs := int(math.Ceil(maxSegDuration))
 	liveHoldBack := 3.0 * float64(targetDurationSecs)
 	sb.WriteString(fmt.Sprintf("#EXT-X-SERVER-CONTROL:HOLD-BACK=%.3f\n", liveHoldBack))
+	// EXT-X-START in the variant matters because hls.js (and some other
+	// players) only honor TIME-OFFSET in the *media* playlist; the master
+	// inheritance is widely under-implemented. Without this, hls.js parks at
+	// the oldest segment in the sliding window and never seeks to live —
+	// the player ends up ~MAX_LIVE_WINDOW_DURATION seconds behind real time.
+	// Match HOLD-BACK so the seek target and steady-state target agree.
+	sb.WriteString(fmt.Sprintf("#EXT-X-START:TIME-OFFSET=-%.3f,PRECISE=YES\n", liveHoldBack))
 	sb.WriteString(fmt.Sprintf("#EXT-X-PROGRAM-DATE-TIME:%s\n", pdt.Format("2006-01-02T15:04:05.000Z")))
 
 	if segmentMap != "" {
