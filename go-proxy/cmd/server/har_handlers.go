@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -33,6 +34,12 @@ const (
 	incidentRetentionMaxFilesPerPlayer = 100
 	incidentRetentionMaxAge            = 7 * 24 * time.Hour
 )
+
+// incidentPathRe whitelists the exact on-disk shape produced by
+// writeIncidentFile: `{YYYY-MM-DD}/{safe-chars}.har`. CodeQL's
+// go/path-injection rule recognises this regex match as a sanitiser,
+// satisfying static analysis on top of the prefix-validate below.
+var incidentPathRe = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}/[A-Za-z0-9._-]+\.har$`)
 
 func resolveIncidentDir() string {
 	incidentDirOnce.Do(func() {
@@ -247,8 +254,11 @@ func (a *App) handleGetIncidentFile(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]string{"error": "path required"})
 		return
 	}
-	// Reject path traversal — only forward-slash-joined components, no `..`.
-	if strings.Contains(relPath, "..") || strings.HasPrefix(relPath, "/") {
+	// Strict whitelist match: incident files are always saved as
+	// `{YYYY-MM-DD}/{safe-chars}.har`. Anything else is rejected before
+	// the path ever reaches filepath.Join. This is the sanitisation
+	// barrier CodeQL's go/path-injection rule looks for.
+	if !incidentPathRe.MatchString(relPath) {
 		w.WriteHeader(http.StatusBadRequest)
 		writeJSON(w, map[string]string{"error": "invalid path"})
 		return
