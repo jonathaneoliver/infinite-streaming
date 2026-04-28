@@ -1071,6 +1071,8 @@
                         <div class="network-log-section">
                             <div class="network-log-controls">
                                 <button type="button" class="btn btn-mini btn-secondary" data-action="refresh-network-log">Refresh</button>
+                                <button type="button" class="btn btn-mini btn-secondary" data-action="save-har-snapshot" title="Save current network timeline as a HAR file (Phase 1 of issue #272)">Save HAR</button>
+                                <a href="/api/incidents" target="_blank" rel="noopener" class="btn btn-mini btn-secondary" title="List saved HAR snapshots (raw JSON)">Incidents</a>
                                 <button type="button" class="btn btn-mini btn-secondary" data-action="network-log-jump-first">First</button>
                                 <button type="button" class="btn btn-mini btn-secondary" data-action="network-log-jump-last">Last</button>
                                 <button type="button" class="btn btn-mini btn-secondary" data-action="network-log-jump-fit">Fit</button>
@@ -1395,6 +1397,29 @@
                             jumpWaterfallView(sessionId, 'last');
                         }
                     }
+                    return;
+                }
+                if (action === 'save-har-snapshot') {
+                    const card = actionButton.closest('.session-card');
+                    const sessionId = card ? String(card.dataset.sessionId || '') : '';
+                    if (!sessionId) return;
+                    const reason = window.prompt('Snapshot reason (e.g. manual, freeze, restart):', 'manual') || 'manual';
+                    actionButton.disabled = true;
+                    fetch(`/api/session/${encodeURIComponent(sessionId)}/har/snapshot`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ reason, source: 'dashboard' })
+                    })
+                        .then(r => r.json())
+                        .then(data => {
+                            if (data && data.incident && data.incident.path) {
+                                window.alert(`HAR saved: ${data.incident.filename}\n\nDownload via /api/incidents/${data.incident.path}`);
+                            } else if (data && data.error) {
+                                window.alert(`HAR save failed: ${data.error}`);
+                            }
+                        })
+                        .catch(err => window.alert(`HAR save failed: ${err}`))
+                        .finally(() => { actionButton.disabled = false; });
                     return;
                 }
                 if (action === 'network-log-jump-first' || action === 'network-log-jump-last' || action === 'network-log-jump-fit') {
