@@ -53,10 +53,12 @@ func resolveIncidentDir() string {
 
 // SnapshotRequest is the body for POST /api/session/{id}/har/snapshot.
 type SnapshotRequest struct {
-	Reason   string                 `json:"reason"`
-	Source   string                 `json:"source"` // "dashboard", "rest", "player"
-	Force    bool                   `json:"force"`  // bypass per-player debounce
-	Metadata map[string]interface{} `json:"metadata,omitempty"`
+	Reason          string                 `json:"reason"`
+	Source          string                 `json:"source"` // "dashboard", "rest", "player"
+	Force           bool                   `json:"force"`  // bypass per-player debounce
+	Metadata        map[string]interface{} `json:"metadata,omitempty"`
+	PlayID          string                 `json:"play_id,omitempty"`           // override the auto-detected most-recent play_id
+	IncludeAllPlays bool                   `json:"include_all_plays,omitempty"` // forensic mode — no scoping
 }
 
 // snapshotDebounceWindow is the minimum gap between auto-driven captures from
@@ -98,20 +100,46 @@ type IncidentFileInfo struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
+// HARBuildFilter controls play_id scoping in buildHARForSession.
+//
+//   - PlayID == "" and IncludeAllPlays == false: filter to the
+//     most-recent play_id in the ring buffer (default — matches what
+//     the player asks for at incident time).
+//   - PlayID != "": filter to that exact play_id.
+//   - IncludeAllPlays == true: no filter — every entry across every
+//     play is included (forensic mode).
+type HARBuildFilter struct {
+	PlayID          string
+	IncludeAllPlays bool
+}
+
 // buildHARForSession reads the session's network ring buffer and returns a HAR
 // document. Caller is expected to have already validated the session exists.
-func (a *App) buildHARForSession(session SessionData, incident *har.Incident) har.HAR {
+func (a *App) buildHARForSession(session SessionData, incident *har.Incident, filter HARBuildFilter) har.HAR {
 	sessionID := getString(session, "session_id")
 
 	a.networkLogsMu.RLock()
 	rb, exists := a.networkLogs[sessionID]
 	a.networkLogsMu.RUnlock()
 
+	// Resolve the play_id we'll filter on, unless the caller opts out.
+	resolvedPlayID := filter.PlayID
+	if !filter.IncludeAllPlays && resolvedPlayID == "" && exists {
+		resolvedPlayID = mostRecentPlayID(rb.GetAll())
+	}
+
 	var sources []har.Source
+	var playStartedAt time.Time
 	if exists {
 		entries := rb.GetAll()
 		sources = make([]har.Source, 0, len(entries))
 		for _, e := range entries {
+			if !filter.IncludeAllPlays && resolvedPlayID != "" && e.PlayID != resolvedPlayID {
+				continue
+			}
+			if playStartedAt.IsZero() || e.Timestamp.Before(playStartedAt) {
+				playStartedAt = e.Timestamp
+			}
 			sources = append(sources, har.Source{
 				Timestamp:       e.Timestamp,
 				Method:          e.Method,
@@ -156,6 +184,21 @@ func (a *App) buildHARForSession(session SessionData, incident *har.Incident) ha
 		if incident.GroupID == "" {
 			incident.GroupID = opts.GroupID
 		}
+		// Surface play_id scope in the incident block so HAR consumers
+		// know what they're looking at without inspecting individual
+		// entries' URLs.
+		if incident.Metadata == nil {
+			incident.Metadata = map[string]interface{}{}
+		}
+		if resolvedPlayID != "" {
+			incident.Metadata["play_id"] = resolvedPlayID
+		}
+		if filter.IncludeAllPlays {
+			incident.Metadata["include_all_plays"] = true
+		}
+		if !playStartedAt.IsZero() {
+			incident.Metadata["play_started_at"] = playStartedAt.UTC().Format(time.RFC3339Nano)
+		}
 	}
 
 	return har.Build(sources, opts)
@@ -173,6 +216,18 @@ func toNameValueSlice(in []HeaderPair) []har.NameValue {
 		out[i] = har.NameValue{Name: p.Name, Value: p.Value}
 	}
 	return out
+}
+
+// mostRecentPlayID walks the ring buffer newest-first looking for the
+// last play_id seen. Empty string if no entry carried one (e.g., older
+// players that don't yet emit play_id query param).
+func mostRecentPlayID(entries []NetworkLogEntry) string {
+	for i := len(entries) - 1; i >= 0; i-- {
+		if entries[i].PlayID != "" {
+			return entries[i].PlayID
+		}
+	}
+	return ""
 }
 
 // findSessionByID returns the session map matching session_id, or nil.
@@ -203,7 +258,13 @@ func (a *App) handleGetSessionTimelineHAR(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	doc := a.buildHARForSession(session, nil)
+	// timeline.har accepts ?play_id=X (specific play) and
+	// ?include_all_plays=1 (forensic). Default: most-recent play_id.
+	filter := HARBuildFilter{
+		PlayID:          strings.TrimSpace(r.URL.Query().Get("play_id")),
+		IncludeAllPlays: strings.EqualFold(r.URL.Query().Get("include_all_plays"), "1") || strings.EqualFold(r.URL.Query().Get("include_all_plays"), "true"),
+	}
+	doc := a.buildHARForSession(session, nil, filter)
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.Header().Set("Content-Disposition",
 		fmt.Sprintf(`attachment; filename="timeline-%s.har"`, safeFilename(playerID)))
@@ -261,7 +322,10 @@ func (a *App) handlePostHARSnapshot(w http.ResponseWriter, r *http.Request) {
 		Metadata:  req.Metadata,
 	}
 
-	doc := a.buildHARForSession(session, incident)
+	doc := a.buildHARForSession(session, incident, HARBuildFilter{
+		PlayID:          strings.TrimSpace(req.PlayID),
+		IncludeAllPlays: req.IncludeAllPlays,
+	})
 	info, err := writeIncidentFile(sessionID, playerID, req.Reason, req.Source, doc)
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)

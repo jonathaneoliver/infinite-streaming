@@ -54,6 +54,31 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
 
     val playerId: String = UUID.randomUUID().toString()
 
+    /**
+     * `play_id` (issue #280) — a UUID regenerated at every fresh
+     * playback episode (loadStream / reload / retry / variant change).
+     * Threaded through every URL the player issues as `?play_id=...`
+     * so go-proxy can scope its NetworkLogEntry ring buffer per play.
+     * HAR snapshots filter to the most-recent play_id by default.
+     */
+    private var currentPlayId: String = UUID.randomUUID().toString()
+
+    private fun regeneratePlayId() {
+        currentPlayId = UUID.randomUUID().toString()
+    }
+
+    /** Replace any existing `play_id` query param with `currentPlayId`. */
+    private fun withPlayId(url: String): String {
+        if (url.isEmpty()) return url
+        val (base, query) = url.split("?", limit = 2).let {
+            if (it.size == 2) it[0] to it[1] else it[0] to ""
+        }
+        val params = if (query.isEmpty()) mutableListOf() else query.split("&").toMutableList()
+        params.removeAll { it.startsWith("play_id=") }
+        params.add("play_id=$currentPlayId")
+        return "$base?${params.joinToString("&")}"
+    }
+
     // Mutable so [recreatePlayer] can drop and rebuild them when the
     // current ExoPlayer instance gets wedged in a state its own retry
     // logic can't escape. Always non-null after init.
@@ -575,7 +600,10 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         // injection). OFF → API/main nginx port (no proxy in front of the
         // stream). Same /go-live route in both cases.
         val port = if (s.localProxy) server.port else server.apiPort
-        val url = "http://${server.host}:$port/go-live/${s.selectedContent}/$manifest?player_id=$playerId"
+        // Fresh play_id at every loadStream boundary (issue #280) so
+        // go-proxy can scope its network log per play.
+        regeneratePlayId()
+        val url = "http://${server.host}:$port/go-live/${s.selectedContent}/$manifest?player_id=$playerId&play_id=$currentPlayId"
         _state.update { it.copy(currentUrl = url, statusText = url) }
         loadStream(url)
     }
@@ -628,11 +656,17 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
     fun retry() {
         val url = _state.value.currentUrl
         if (url.isEmpty()) return
+        // A retry is a new playback episode — fresh play_id so the
+        // proxy's network log scopes the next round of requests
+        // separately from the one that just failed. Issue #280.
+        regeneratePlayId()
+        val refreshed = withPlayId(url)
+        _state.update { it.copy(currentUrl = refreshed, statusText = refreshed) }
         // User-driven Retry deserves its own HAR — bypass per-player debounce.
         metrics?.requestHarSnapshot("user_retry", 0, /* force= */ true)
         player.stop()
         player.clearMediaItems()
-        loadStream(url)
+        loadStream(refreshed)
     }
 
     /**
