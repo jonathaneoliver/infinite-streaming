@@ -3828,17 +3828,34 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 			"last_request":                             createdAt,
 			"first_request_time":                       createdAt,
 			"session_start_time":                       createdAt,
+			// Segment / manifest / master_manifest fault config —
+			// initialise mode + units explicitly so both server
+			// (NewFailureHandler) and dashboard (Mode dropdown) read
+			// the same value from a single source of truth instead
+			// of falling back to duplicated hard-coded defaults.
+			// "failures_per_seconds" mode → consecutive=requests,
+			// frequency=seconds, matching the dashboard's visible
+			// default Mode for a fresh session.
 			"segment_failure_type":                     "none",
 			"segment_failure_frequency":                0,
 			"segment_consecutive_failures":             0,
 			"segment_failure_units":                    "requests",
+			"segment_consecutive_units":                "requests",
+			"segment_frequency_units":                  "seconds",
+			"segment_failure_mode":                     "failures_per_seconds",
 			"manifest_failure_type":                    "none",
 			"manifest_failure_frequency":               0,
 			"manifest_failure_units":                   "requests",
+			"manifest_consecutive_units":               "requests",
+			"manifest_frequency_units":                 "seconds",
+			"manifest_failure_mode":                    "failures_per_seconds",
 			"manifest_consecutive_failures":            0,
 			"master_manifest_failure_type":             "none",
 			"master_manifest_failure_frequency":        0,
 			"master_manifest_failure_units":            "requests",
+			"master_manifest_consecutive_units":        "requests",
+			"master_manifest_frequency_units":          "seconds",
+			"master_manifest_failure_mode":             "failures_per_seconds",
 			"master_manifest_consecutive_failures":     0,
 			"current_failures":                         0,
 			"consecutive_failures_count":               0,

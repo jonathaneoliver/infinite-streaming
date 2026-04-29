@@ -4674,6 +4674,35 @@ maybe a histogram of b
             });
         }
 
+        // Returns the full set of fields the server needs to keep
+        // mode / units / consecutive / frequency in sync for a given
+        // failure prefix. Used by both the slider-change handler and
+        // the Mode-dropdown handler so any single edit ships the
+        // coherent bundle.
+        function failureBundleFields(field) {
+            const prefixes = ['segment', 'manifest', 'master_manifest', 'transport'];
+            for (const prefix of prefixes) {
+                const matches =
+                    field === `${prefix}_failure_mode` ||
+                    field === `${prefix}_failure_units` ||
+                    field === `${prefix}_consecutive_units` ||
+                    field === `${prefix}_frequency_units` ||
+                    field === `${prefix}_consecutive_failures` ||
+                    field === `${prefix}_failure_frequency`;
+                if (matches) {
+                    return [
+                        `${prefix}_failure_mode`,
+                        `${prefix}_failure_units`,
+                        `${prefix}_consecutive_units`,
+                        `${prefix}_frequency_units`,
+                        `${prefix}_consecutive_failures`,
+                        `${prefix}_failure_frequency`,
+                    ];
+                }
+            }
+            return [field];
+        }
+
         function scheduleFailureSave(card, field) {
             const sessionId = card?.dataset?.sessionId;
             if (!sessionId || !field) return;
@@ -4681,7 +4710,10 @@ maybe a histogram of b
             if (!failureSaveFields.has(key)) {
                 failureSaveFields.set(key, new Set());
             }
-            failureSaveFields.get(key).add(field);
+            // Touch any of the 6 related controls and we ship the
+            // whole bundle — keeps the server's view of mode/units/
+            // numbers self-consistent on every interaction.
+            failureBundleFields(field).forEach(f => failureSaveFields.get(key).add(f));
             if (failureSaveTimers.has(key)) {
                 clearTimeout(failureSaveTimers.get(key));
             }
@@ -4712,23 +4744,10 @@ maybe a histogram of b
                 return [prefix];
             }
             if (prefix.endsWith('_failure_mode')) {
-                const base = prefix.replace('_failure_mode', '');
-                if (base === 'transport') {
-                    return [
-                        'transport_failure_mode',
-                        'transport_failure_units',
-                        'transport_consecutive_units',
-                        'transport_frequency_units',
-                        'transport_consecutive_failures',
-                        'transport_failure_frequency'
-                    ];
-                }
-                return [
-                    `${base}_failure_mode`,
-                    `${base}_failure_units`,
-                    `${base}_consecutive_units`,
-                    `${base}_frequency_units`
-                ];
+                // Same coherent bundle for every prefix — Mode change
+                // ships the units AND the slider values so the server
+                // can never end up with mode set but units missing.
+                return failureBundleFields(prefix);
             }
             return [];
         }
