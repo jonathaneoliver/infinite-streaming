@@ -136,21 +136,37 @@ type Timings struct {
 // Source is the minimal NetworkLogEntry shape the builder reads. Defining it
 // here as an interface-free struct keeps the har package decoupled from
 // main.go's full type — the caller copies fields in.
+//
+// Two timing perspectives are carried:
+//
+//   - DNSMs/ConnectMs/TLSMs/TTFBMs are the *upstream* timings (proxy →
+//     origin). They land under the entry's _extensions.upstream block
+//     for forensics ("was latency on our side or the origin's?").
+//
+//   - ClientWaitMs and TransferMs are the *downstream* (proxy → player)
+//     timings — what the player perceived. These map into HAR's
+//     standard timings.wait and timings.receive so a HAR viewer
+//     surfaces them by default.
 type Source struct {
-	Timestamp     time.Time
-	Method        string
-	URL           string
-	RequestKind   string
-	Status        int
-	BytesIn       int64
-	BytesOut      int64
-	ContentType   string
-	DNSMs         float64
-	ConnectMs     float64
-	TLSMs         float64
-	TTFBMs        float64
-	TransferMs    float64
-	TotalMs       float64
+	Timestamp    time.Time
+	Method       string
+	URL          string // player-facing URL
+	RequestKind  string
+	Status       int
+	BytesIn      int64
+	BytesOut     int64
+	ContentType  string
+	ClientWaitMs float64 // request received → first response byte sent to client
+	TransferMs   float64 // first response byte → response complete
+	TotalMs      float64
+
+	// Upstream context, surfaced via _extensions.upstream.
+	UpstreamURL string
+	DNSMs       float64
+	ConnectMs   float64
+	TLSMs       float64
+	TTFBMs      float64
+
 	Faulted       bool
 	FaultType     string
 	FaultAction   string
@@ -219,14 +235,23 @@ func Build(sources []Source, opts BuildOptions) HAR {
 func buildEntry(s Source) Entry {
 	startedDate := s.Timestamp.UTC().Format("2006-01-02T15:04:05.000Z")
 
+	// Map *downstream* timings (proxy → player) into the standard HAR
+	// Timings block — that's what HAR viewers surface as the player's
+	// experience. Upstream timings live under _extensions.upstream below.
+	//
+	// HAR 1.2: -1 means "not applicable / not measured". DNS/Connect/SSL
+	// describe how the *client* reached its server; from go-proxy → player
+	// they're a keepalive HTTP transaction with no client-side connect
+	// to measure here, so they're -1. (Issue #283 will add real client
+	// RTT capture.)
 	timings := Timings{
 		Blocked: -1,
-		DNS:     msOrNeg(s.DNSMs),
-		Connect: msOrNeg(s.ConnectMs),
+		DNS:     -1,
+		Connect: -1,
 		Send:    -1,
-		Wait:    msOrNeg(s.TTFBMs),
+		Wait:    msOrNeg(s.ClientWaitMs),
 		Receive: msOrNeg(s.TransferMs),
-		SSL:     msOrNeg(s.TLSMs),
+		SSL:     -1,
 	}
 
 	statusText := statusTextFor(s.Status)
@@ -269,6 +294,25 @@ func buildEntry(s Source) Entry {
 	ext := map[string]interface{}{}
 	if s.RequestKind != "" {
 		ext["requestKind"] = s.RequestKind
+	}
+	// Upstream context — useful when an analyst wants to answer "was the
+	// wait the origin's fault or go-proxy's processing / fault-injection
+	// delay?", or "did the proxy rewrite the variant URL before fetching?".
+	// Includes the resolved upstream URL (often differs from the player's
+	// URL after proxy rewriting) and the upstream phase timings.
+	hasUpstream := s.UpstreamURL != "" && s.UpstreamURL != s.URL ||
+		s.DNSMs > 0 || s.ConnectMs > 0 || s.TLSMs > 0 || s.TTFBMs > 0
+	if hasUpstream {
+		upstream := map[string]interface{}{
+			"dns_ms":     s.DNSMs,
+			"connect_ms": s.ConnectMs,
+			"tls_ms":     s.TLSMs,
+			"ttfb_ms":    s.TTFBMs,
+		}
+		if s.UpstreamURL != "" && s.UpstreamURL != s.URL {
+			upstream["url"] = s.UpstreamURL
+		}
+		ext["upstream"] = upstream
 	}
 	if s.Faulted {
 		fault := map[string]interface{}{
