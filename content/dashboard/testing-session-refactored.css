@@ -526,15 +526,13 @@
     font-size: 11px;
 }
 
-/* Native scroll on the wrapper. The list of rows is the height of the
- * data; the wrapper clips it. New entries appended at the bottom
- * don't pull the user's scroll position around. Max-height fits the
- * sticky 22px axis row plus 20 data rows (axis stays visible while
- * the rows below scroll). */
+/* Wrapper grows with its content — no inner scroll cap. The page
+ * itself scrolls when the list runs past the viewport, and the
+ * sticky axis row pins to the page-viewport top while the user
+ * scans down. New entries appended at the bottom don't pull the
+ * page's scroll position around. */
 .network-log-waterfall-scroll {
     width: 100%;
-    max-height: 462px; /* 22 (axis) + 20 * 22 (rows) */
-    overflow-y: auto;
     overflow-x: hidden;
 }
 
