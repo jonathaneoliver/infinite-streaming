@@ -2157,9 +2157,19 @@
         sentinel.style.cssText = 'height:1px;width:1px;pointer-events:none;';
         sentinel.dataset.field = 'netwf_follow_sentinel';
         scrollHost.appendChild(sentinel);
+        // IntersectionObserver fires once on observe() to report the
+        // initial state. If the network log section is below the
+        // viewport at that moment (user hasn't scrolled to it yet) we'd
+        // get isIntersecting=false immediately and reset Following
+        // Latest before the user did anything. Only react to the
+        // sentinel leaving the viewport AFTER it has been visible at
+        // least once.
+        let hasBeenVisible = false;
         const io = new IntersectionObserver((entries) => {
             for (const entry of entries) {
-                if (!entry.isIntersecting && isNetworkLogFollowMode(sessionId)) {
+                if (entry.isIntersecting) {
+                    hasBeenVisible = true;
+                } else if (hasBeenVisible && isNetworkLogFollowMode(sessionId)) {
                     setNetworkLogFollowMode(sessionId, false);
                     updateNetworkLogFollowButton(card, sessionId);
                 }
