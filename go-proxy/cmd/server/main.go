@@ -357,6 +357,12 @@ type App struct {
 	transferCompleteMu           sync.Mutex
 	transferCompleteMbps         map[int]float64   // latest completed segment Mbps per port
 	transferCompleteAt           map[int]time.Time // when the drain completed
+	// failureDecisionMu serialises the read-modify-write inside
+	// RequestHandler.HandleRequest. Without it, concurrent segment
+	// requests (e.g. video + audio for the same sequence number) race
+	// on segments_count and segment_failure_at, so a single 1-per-Ns
+	// rule can fire twice in the same window.
+	failureDecisionMu        sync.Mutex
 }
 
 type ServerLoopState struct {
@@ -4004,7 +4010,12 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 	}
 
 	handler := NewRequestHandler(isSegment, isManifest, isMasterManifest, sessionData)
+	// Serialise the failure-decision read-modify-write so video+audio
+	// requests arriving in the same millisecond don't both pass the
+	// "1 per N seconds" filter and double-fire.
+	a.failureDecisionMu.Lock()
 	failureType := handler.HandleRequest(filename)
+	a.failureDecisionMu.Unlock()
 
 	a.saveSessionByID(sessionNumber, sessionData)
 
