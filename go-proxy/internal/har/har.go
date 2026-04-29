@@ -167,6 +167,13 @@ type Source struct {
 	TLSMs       float64
 	TTFBMs      float64
 
+	// HTTP-level metadata captured from the request and upstream
+	// response. Sensitive headers (Cookie / Authorization) are filtered
+	// at the proxy capture site before they reach here.
+	RequestHeaders  []NameValue
+	ResponseHeaders []NameValue
+	QueryString     []NameValue
+
 	Faulted       bool
 	FaultType     string
 	FaultAction   string
@@ -260,6 +267,19 @@ func buildEntry(s Source) Entry {
 		mimeType = "application/octet-stream"
 	}
 
+	requestHeaders := s.RequestHeaders
+	if requestHeaders == nil {
+		requestHeaders = []NameValue{}
+	}
+	responseHeaders := s.ResponseHeaders
+	if responseHeaders == nil {
+		responseHeaders = []NameValue{}
+	}
+	queryString := s.QueryString
+	if queryString == nil {
+		queryString = []NameValue{}
+	}
+
 	entry := Entry{
 		StartedDateTime: startedDate,
 		Time:            s.TotalMs,
@@ -268,8 +288,8 @@ func buildEntry(s Source) Entry {
 			URL:         s.URL,
 			HTTPVersion: "HTTP/1.1",
 			Cookies:     []NameValue{},
-			Headers:     []NameValue{},
-			QueryString: []NameValue{},
+			Headers:     requestHeaders,
+			QueryString: queryString,
 			HeadersSize: -1,
 			BodySize:    s.BytesOut,
 		},
@@ -278,7 +298,7 @@ func buildEntry(s Source) Entry {
 			StatusText:  statusText,
 			HTTPVersion: "HTTP/1.1",
 			Cookies:     []NameValue{},
-			Headers:     []NameValue{},
+			Headers:     responseHeaders,
 			Content: Content{
 				Size:     s.BytesIn,
 				MimeType: mimeType,
