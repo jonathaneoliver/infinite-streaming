@@ -2179,39 +2179,59 @@
 
     // applyWaterfallAutoPan computes the time range covered by the
     // entries list's currently-visible rows and pans the waterfall to it.
+    //
+    // vis-timeline virtualizes vertical scroll via CSS transforms, not
+    // native scroll, so .vis-content's scrollTop/scrollHeight don't
+    // reflect the actual scroll state. Instead we walk the rendered
+    // .vis-group DOM elements and check which ones intersect the
+    // center panel's viewport rect.
     function applyWaterfallAutoPan(state, key) {
         if (!state || !state.timeline || !Array.isArray(state.rows) || state.rows.length === 0) return;
         if (!state.host) return;
-        // Re-check autoPan: the user may have done Alt+scroll/right-drag
-        // between the scroll event and this rAF firing.
         if (!state.autoPan) return;
-        const left = state.host.querySelector('.vis-panel.vis-left .vis-content');
-        if (!left) return;
-        const scrollTop = left.scrollTop;
-        const clientH = left.clientHeight;
-        const scrollH = left.scrollHeight;
-        const rowCount = state.rows.length;
 
-        // When the entries list isn't tall enough to scroll (scrollH ==
-        // clientH), every row is "visible" — pan to cover all of them.
-        // Previously this branch returned early, leaving the time
-        // window at the last Fit/setOptions value (often the full
-        // session range), which made the timeline mostly blank.
-        let startIdx, endIdx;
-        if (scrollH <= clientH || scrollTop <= 0 && clientH >= scrollH) {
-            startIdx = 0;
-            endIdx = rowCount - 1;
-        } else {
-            const rowHeight = scrollH / rowCount;
-            if (!Number.isFinite(rowHeight) || rowHeight <= 0) return;
-            startIdx = Math.max(0, Math.floor(scrollTop / rowHeight));
-            endIdx = Math.min(rowCount - 1, Math.ceil((scrollTop + clientH) / rowHeight) - 1);
+        const center = state.host.querySelector('.vis-panel.vis-center');
+        if (!center) return;
+        const centerRect = center.getBoundingClientRect();
+        if (centerRect.height <= 0) return;
+
+        // Walk the rendered group elements. Each .vis-group has
+        // data-id matching the groupId we assigned (groupId = rowIdx + 1
+        // in updateNetworkWaterfall).
+        const groupEls = state.host.querySelectorAll('.vis-foreground .vis-group');
+        let firstVisibleIdx = -1;
+        let lastVisibleIdx = -1;
+        groupEls.forEach((el) => {
+            const groupIdAttr = el.getAttribute('data-id') || el.dataset.id;
+            const groupId = parseInt(groupIdAttr, 10);
+            if (!Number.isFinite(groupId)) return;
+            const rowIdx = groupId - 1;
+            if (rowIdx < 0 || rowIdx >= state.rows.length) return;
+            const r = el.getBoundingClientRect();
+            if (r.height <= 0) return;
+            // Group at least partially visible if it overlaps the
+            // center panel's viewport rect.
+            if (r.bottom > centerRect.top && r.top < centerRect.bottom) {
+                if (firstVisibleIdx === -1 || rowIdx < firstVisibleIdx) firstVisibleIdx = rowIdx;
+                if (lastVisibleIdx === -1 || rowIdx > lastVisibleIdx) lastVisibleIdx = rowIdx;
+            }
+        });
+
+        // Fallback: if we couldn't read group elements (race, custom
+        // virtualization), pan to cover all rows. Better than leaving a
+        // mostly-blank timeline.
+        if (firstVisibleIdx === -1 || lastVisibleIdx === -1) {
+            firstVisibleIdx = 0;
+            lastVisibleIdx = state.rows.length - 1;
         }
-        if (endIdx < startIdx) return;
-        const startTs = state.rows[startIdx].timestamp;
-        const endRow = state.rows[endIdx];
+
+        const startRow = state.rows[firstVisibleIdx];
+        const endRow = state.rows[lastVisibleIdx];
+        if (!startRow || !endRow) return;
+        const startTs = startRow.timestamp;
         const endTs = endRow.timestamp + Math.max(50, endRow.duration);
         if (!Number.isFinite(startTs) || !Number.isFinite(endTs) || endTs <= startTs) return;
+
         // Tight padding (1%) so adjacent bars peek in at the edges
         // without swamping short bursts. Minimum 25ms so a single
         // sub-millisecond bar doesn't render at zero width.
@@ -2220,7 +2240,6 @@
         let nextStart = startTs - padding;
         let nextEnd = endTs + padding;
         if (fullRange) {
-            // Don't pan past the session's data bounds.
             if (nextStart < fullRange.startMs) nextStart = fullRange.startMs;
             if (nextEnd > fullRange.endMs) nextEnd = fullRange.endMs;
         }
