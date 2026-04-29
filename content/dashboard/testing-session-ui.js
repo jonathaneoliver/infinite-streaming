@@ -42,10 +42,7 @@
         { value: 'failures_per_packets', text: 'Packets / Seconds' }
     ];
     const networkLogEntriesBySession = new Map();
-    const networkWaterfallTimelines = new Map();
-    const networkWaterfallViewBySession = new Map();
     const networkWaterfallFollowModeBySession = new Map();
-    const networkWaterfallFullRangeBySession = new Map();
     const networkWaterfallRenderSignatureBySession = new Map();
     const networkWaterfallRowSignaturesBySession = new Map();
     const networkWaterfallRowsBySession = new Map();
@@ -1938,439 +1935,6 @@
         return ordered.filter((row) => (row.timestamp + row.duration) >= cutoff);
     }
 
-    function ensureWaterfallSelectionBox(state) {
-        if (!state || !state.host) return null;
-        let box = state.host.querySelector('.waterfall-selection-box');
-        if (!box) {
-            box = document.createElement('div');
-            box.className = 'waterfall-selection-box';
-            box.style.display = 'none';
-            state.host.appendChild(box);
-        }
-        return box;
-    }
-
-    function getWaterfallCenterPanel(state) {
-        if (!state || !state.host) return null;
-        return state.host.querySelector('.vis-panel.vis-center');
-    }
-
-    function pixelToTimelineMs(state, clientX, panelRect) {
-        if (!state || !state.timeline || !panelRect || panelRect.width <= 0) return NaN;
-        const x = Math.max(0, Math.min(panelRect.width, clientX - panelRect.left));
-        const currentWindow = state.timeline.getWindow();
-        if (!currentWindow || !currentWindow.start || !currentWindow.end) return NaN;
-        const startMs = new Date(currentWindow.start).getTime();
-        const endMs = new Date(currentWindow.end).getTime();
-        if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs <= startMs) return NaN;
-        return startMs + (x / panelRect.width) * (endMs - startMs);
-    }
-
-    function beginWaterfallSelection(state, key, event) {
-        if (!state || !state.timeline || !state.host) return;
-        if (event.button !== 0 || !event.shiftKey) return;
-        const center = getWaterfallCenterPanel(state);
-        if (!center || !center.contains(event.target)) return;
-        const rect = center.getBoundingClientRect();
-        const hostRect = state.host.getBoundingClientRect();
-        if (!rect || rect.width <= 0) return;
-        const startMs = pixelToTimelineMs(state, event.clientX, rect);
-        if (!Number.isFinite(startMs)) return;
-        const startX = Math.max(0, Math.min(rect.width, event.clientX - rect.left));
-        const leftOffset = Math.max(0, rect.left - hostRect.left);
-        const selection = ensureWaterfallSelectionBox(state);
-        if (!selection) return;
-        event.preventDefault();
-        state.host.classList.add('is-selecting');
-        selection.style.display = 'block';
-        selection.style.left = `${leftOffset + startX}px`;
-        selection.style.width = '0px';
-        state.drag = {
-            key,
-            startMs,
-            endMs: startMs,
-            startX,
-            endX: startX,
-            leftOffset
-        };
-    }
-
-    function updateWaterfallSelection(state, event) {
-        if (!state || !state.drag || !state.host) return;
-        const center = getWaterfallCenterPanel(state);
-        if (!center) return;
-        const rect = center.getBoundingClientRect();
-        if (!rect || rect.width <= 0) return;
-        const endMs = pixelToTimelineMs(state, event.clientX, rect);
-        if (!Number.isFinite(endMs)) return;
-        const endX = Math.max(0, Math.min(rect.width, event.clientX - rect.left));
-        const selection = ensureWaterfallSelectionBox(state);
-        if (!selection) return;
-        state.drag.endMs = endMs;
-        state.drag.endX = endX;
-        const left = Math.min(state.drag.startX, endX);
-        const width = Math.max(1, Math.abs(endX - state.drag.startX));
-        selection.style.left = `${state.drag.leftOffset + left}px`;
-        selection.style.width = `${width}px`;
-    }
-
-    function finishWaterfallSelection(state) {
-        if (!state || !state.drag || !state.timeline || !state.host) return;
-        const drag = state.drag;
-        state.drag = null;
-        const selection = ensureWaterfallSelectionBox(state);
-        if (selection) {
-            selection.style.display = 'none';
-            selection.style.width = '0px';
-        }
-        state.host.classList.remove('is-selecting');
-        const pixelDelta = Math.abs((drag.endX || drag.startX) - drag.startX);
-        const startMs = Math.min(drag.startMs, drag.endMs);
-        const endMs = Math.max(drag.startMs, drag.endMs);
-        if (pixelDelta < 4 || !Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs - startMs < 20) return;
-        state.timeline.setWindow(new Date(startMs), new Date(endMs), { animation: false });
-        networkWaterfallViewBySession.set(drag.key, { startMs, endMs });
-        setNetworkLogFollowMode(drag.key, false);
-        updateNetworkLogFollowButton(null, drag.key);
-    }
-
-    function resetWaterfallView(state, key) {
-        if (!state || !state.timeline) return;
-        const fullRange = networkWaterfallFullRangeBySession.get(key);
-        if (!fullRange || !Number.isFinite(fullRange.startMs) || !Number.isFinite(fullRange.endMs) || fullRange.endMs <= fullRange.startMs) return;
-        networkWaterfallViewBySession.delete(key);
-        state.timeline.setWindow(new Date(fullRange.startMs), new Date(fullRange.endMs), { animation: false });
-        state.timeline.redraw();
-    }
-
-    function jumpWaterfallView(sessionId, direction) {
-        const key = String(sessionId || '');
-        if (!key) return;
-        const state = networkWaterfallTimelines.get(key);
-        const fullRange = networkWaterfallFullRangeBySession.get(key);
-        if (!state || !state.timeline || !fullRange) return;
-        if (!Number.isFinite(fullRange.startMs) || !Number.isFinite(fullRange.endMs) || fullRange.endMs <= fullRange.startMs) return;
-
-        // Re-enable auto-pan: user explicitly asked for a coordinated view.
-        state.autoPan = true;
-
-        if (direction === 'fit') {
-            resetWaterfallView(state, key);
-            return;
-        }
-
-        const win = state.timeline.getWindow();
-        const currentStart = new Date(win.start).getTime();
-        const currentEnd = new Date(win.end).getTime();
-        const spanMs = Math.max(100, currentEnd - currentStart);
-
-        let nextStart = fullRange.startMs;
-        let nextEnd = Math.min(fullRange.endMs, nextStart + spanMs);
-        if (direction === 'last') {
-            nextEnd = fullRange.endMs;
-            nextStart = Math.max(fullRange.startMs, nextEnd - spanMs);
-        }
-        state.timeline.setWindow(new Date(nextStart), new Date(nextEnd), { animation: false });
-        networkWaterfallViewBySession.set(key, { startMs: nextStart, endMs: nextEnd });
-        state.timeline.redraw();
-    }
-
-    function bindWaterfallSelectionHandlers(state, key) {
-        if (!state || !state.host || state.selectionHandlersBound) return;
-        state.selectionHandlersBound = true;
-        const onMouseDown = (event) => beginWaterfallSelection(state, key, event);
-        const onMouseMove = (event) => updateWaterfallSelection(state, event);
-        const onMouseUp = () => finishWaterfallSelection(state);
-        const onDoubleClick = (event) => {
-            const center = getWaterfallCenterPanel(state);
-            if (!center || !center.contains(event.target)) return;
-            resetWaterfallView(state, key);
-        };
-        state.host.addEventListener('mousedown', onMouseDown);
-        window.addEventListener('mousemove', onMouseMove);
-        window.addEventListener('mouseup', onMouseUp);
-        state.host.addEventListener('dblclick', onDoubleClick);
-        state.cleanupSelectionHandlers = () => {
-            state.host.removeEventListener('mousedown', onMouseDown);
-            window.removeEventListener('mousemove', onMouseMove);
-            window.removeEventListener('mouseup', onMouseUp);
-            state.host.removeEventListener('dblclick', onDoubleClick);
-        };
-    }
-
-    function ensureWaterfallTimeline(card, sessionId) {
-        const field = card.querySelector('[data-field="network_log_waterfall"]');
-        if (!field || !hasVisTimeline()) return null;
-        const key = String(sessionId);
-        let state = networkWaterfallTimelines.get(key) || null;
-
-        if (state && state.host !== field) {
-            if (state.timeline && typeof state.timeline.destroy === 'function') {
-                state.timeline.destroy();
-            }
-            if (state.cleanupSelectionHandlers) {
-                state.cleanupSelectionHandlers();
-            }
-            state = null;
-        }
-
-        if (!state) {
-            const groups = new window.vis.DataSet();
-            const items = new window.vis.DataSet();
-            const options = {
-                stack: false,
-                zoomable: true,
-                moveable: true,
-                horizontalScroll: true,
-                verticalScroll: true,
-                showCurrentTime: false,
-                selectable: false,
-                showMajorLabels: false,
-                showMinorLabels: true,
-                orientation: { axis: 'top', item: 'bottom' },
-                groupHeightMode: 'fixed',
-                margin: {
-                    axis: 0,
-                    item: {
-                        horizontal: 0,
-                        vertical: 0
-                    }
-                },
-                minHeight: '240px',
-                maxHeight: '360px',
-                tooltip: {
-                    followMouse: true,
-                    overflowMethod: 'flip'
-                },
-                format: {
-                    minorLabels: {
-                        millisecond: 'HH:mm:ss.SSS',
-                        second: 'HH:mm:ss',
-                        minute: 'HH:mm',
-                        hour: 'HH:mm'
-                    },
-                    majorLabels: {
-                        millisecond: 'YYYY-MM-DD',
-                        second: 'YYYY-MM-DD',
-                        minute: 'YYYY-MM-DD',
-                        hour: 'YYYY-MM-DD'
-                    }
-                }
-            };
-            const timeline = new window.vis.Timeline(field, items, groups, options);
-            timeline.on('rangechanged', (props) => {
-                if (!props || !props.start || !props.end || props.byUser !== true) return;
-                const startMs = new Date(props.start).getTime();
-                const endMs = new Date(props.end).getTime();
-                if (Number.isFinite(startMs) && Number.isFinite(endMs) && endMs > startMs) {
-                    networkWaterfallViewBySession.set(key, { startMs, endMs });
-                    setNetworkLogFollowMode(key, false);
-                    updateNetworkLogFollowButton(null, key);
-                    // User took manual control — stop auto-panning until
-                    // they hit Fit / First / Last (issue #286).
-                    state.autoPan = false;
-                }
-            });
-            state = { host: field, timeline, groups, items, drag: null, rows: [], autoPan: isFollowScrollMode(key) };
-            bindWaterfallSelectionHandlers(state, key);
-            attachWaterfallAutoPan(state, key);
-            networkWaterfallTimelines.set(key, state);
-        }
-        return state;
-    }
-
-    // attachWaterfallAutoPan listens for scroll on the entries list and
-    // pans the visible time window to match the rows the user is looking
-    // at. Issue #286.
-    //
-    // We listen to BOTH:
-    //   1. DOM `scroll` on `.vis-content` — fires when vis-timeline uses
-    //      native scrollbars.
-    //   2. `wheel` on the host — vis-timeline drives vertical scroll via
-    //      transforms in some configurations and the DOM scroll event
-    //      doesn't fire. The wheel handler covers that case.
-    function attachWaterfallAutoPan(state, key) {
-        if (!state || !state.host || state.autoPanBound) return;
-        const setupOnce = () => {
-            if (!state.host) return false;
-            const left = state.host.querySelector('.vis-panel.vis-left .vis-content');
-            const center = state.host.querySelector('.vis-panel.vis-center .vis-content');
-            if (!left && !center) return false;
-            let rafId = null;
-            const schedule = () => {
-                if (!state.autoPan) return;
-                if (!isFollowScrollMode(key)) return;
-                if (rafId) return;
-                rafId = window.requestAnimationFrame(() => {
-                    rafId = null;
-                    applyWaterfallAutoPan(state, key);
-                });
-            };
-            if (left) left.addEventListener('scroll', schedule, { passive: true });
-            if (center && center !== left) center.addEventListener('scroll', schedule, { passive: true });
-            // Wheel events fire even when vis-timeline does
-            // transform-based scrolling. Schedule on the next frame so
-            // we read the post-scroll position.
-            state.host.addEventListener('wheel', (event) => {
-                // User-initiated scroll while Following Latest is on
-                // means they want to step away from the live tail —
-                // auto-disable Following Latest and let track-by-scroll
-                // pin the time window to whatever they're looking at.
-                if (isNetworkLogFollowMode(key)) {
-                    setNetworkLogFollowMode(key, false);
-                    const card = state.host.closest('.session-card');
-                    updateNetworkLogFollowButton(card, key);
-                }
-                schedule();
-            }, { passive: true });
-            state.autoPanBound = true;
-            return true;
-        };
-        // vis-timeline builds its DOM async — retry a few frames if the
-        // .vis-content nodes aren't there yet.
-        let attempts = 0;
-        const retry = () => {
-            if (setupOnce()) return;
-            attempts += 1;
-            if (attempts < 20) window.requestAnimationFrame(retry);
-        };
-        window.requestAnimationFrame(retry);
-    }
-
-    // restoreScrollAnchor finds the .vis-group element that corresponds
-    // to the anchor's rowIdx after a re-render and scrolls vis-timeline
-    // so that group sits at the same offset within the viewport as it
-    // did before the re-render. Issue #286 follow-up.
-    function restoreScrollAnchor(state, anchor) {
-        if (!state || !state.host || !anchor) return;
-        const center = state.host.querySelector('.vis-panel.vis-center');
-        if (!center) return;
-        const targetGroupId = String(anchor.rowIdx + 1);
-        const groupEls = state.host.querySelectorAll('.vis-foreground .vis-group');
-        let target = null;
-        for (const el of groupEls) {
-            if ((el.getAttribute('data-id') || el.dataset.id) === targetGroupId) {
-                target = el;
-                break;
-            }
-        }
-        if (!target) return;
-        const centerRect = center.getBoundingClientRect();
-        const targetRect = target.getBoundingClientRect();
-        const desiredOffsetTop = centerRect.top + anchor.offsetWithinGroup;
-        const delta = targetRect.top - desiredOffsetTop;
-        if (Math.abs(delta) < 1) return;
-        // Try vis-timeline's internal scroll surfaces in priority order;
-        // any one of them that's writable will scroll the panel.
-        const surfaces = [
-            state.timeline?.body?.dom?.shadow,
-            state.timeline?.body?.dom?.center,
-            state.host.querySelector('.vis-panel.vis-left .vis-content'),
-            state.host.querySelector('.vis-panel.vis-center .vis-content'),
-        ].filter(Boolean);
-        for (const s of surfaces) {
-            if (typeof s.scrollTop === 'number') {
-                const before = s.scrollTop;
-                s.scrollTop = before + delta;
-                // If it changed, we found the right surface.
-                if (s.scrollTop !== before) return;
-            }
-        }
-    }
-
-    // applyWaterfallAutoPan computes the time range covered by the
-    // entries list's currently-visible rows and pans the waterfall to it.
-    //
-    // vis-timeline virtualizes vertical scroll via CSS transforms, not
-    // native scroll, so .vis-content's scrollTop/scrollHeight don't
-    // reflect the actual scroll state. Instead we walk the rendered
-    // .vis-group DOM elements and check which ones intersect the
-    // center panel's viewport rect.
-    function applyWaterfallAutoPan(state, key) {
-        if (!state || !state.timeline || !Array.isArray(state.rows) || state.rows.length === 0) return;
-        if (!state.host) return;
-        if (!state.autoPan) return;
-
-        const center = state.host.querySelector('.vis-panel.vis-center');
-        if (!center) return;
-        const centerRect = center.getBoundingClientRect();
-        if (centerRect.height <= 0) return;
-
-        const rowCount = state.rows.length;
-        let firstVisibleIdx = -1;
-        let lastVisibleIdx = -1;
-
-        // Strategy 1: walk rendered .vis-group elements and take the
-        // ones whose bounding rect intersects the center viewport.
-        // Works if vis-timeline doesn't apply transforms that make all
-        // groups share the same on-screen rect.
-        const groupEls = state.host.querySelectorAll('.vis-foreground .vis-group');
-        let sampleHeight = 0;
-        groupEls.forEach((el) => {
-            const groupIdAttr = el.getAttribute('data-id') || el.dataset.id;
-            const groupId = parseInt(groupIdAttr, 10);
-            if (!Number.isFinite(groupId)) return;
-            const rowIdx = groupId - 1;
-            if (rowIdx < 0 || rowIdx >= rowCount) return;
-            const r = el.getBoundingClientRect();
-            if (r.height > 0 && sampleHeight === 0) sampleHeight = r.height;
-            if (r.height <= 0) return;
-            if (r.bottom > centerRect.top && r.top < centerRect.bottom) {
-                if (firstVisibleIdx === -1 || rowIdx < firstVisibleIdx) firstVisibleIdx = rowIdx;
-                if (lastVisibleIdx === -1 || rowIdx > lastVisibleIdx) lastVisibleIdx = rowIdx;
-            }
-        });
-
-        // Strategy 2: if intersection found nothing (or found ALL rows
-        // due to vis-timeline's transform-based virtualization), fall
-        // back to "row-height × viewport ÷ pin to last N". Works for
-        // the common Following Latest workflow. The sampled height
-        // comes from the first .vis-group we saw above; if no groups
-        // are rendered at all, we use a 22px default.
-        const sawAllRows = (lastVisibleIdx - firstVisibleIdx + 1) === rowCount;
-        const sawNoRows = firstVisibleIdx === -1;
-        if (sawNoRows || sawAllRows) {
-            const rowHeight = sampleHeight > 0 ? sampleHeight : 22;
-            const visibleRowCount = Math.max(1, Math.min(rowCount, Math.floor(centerRect.height / rowHeight)));
-            // When the entries list is following the latest entries
-            // (Following Latest is the default), the visible rows are
-            // the most recent — pin to the last N. This matches what
-            // the user sees on the left.
-            if (isNetworkLogFollowMode(key)) {
-                firstVisibleIdx = Math.max(0, rowCount - visibleRowCount);
-                lastVisibleIdx = rowCount - 1;
-            } else {
-                // Not following — without reliable scroll position we
-                // pick the FIRST N rows (top-of-list). Will be wrong
-                // when user has scrolled past the top, but that case
-                // doesn't appear common today.
-                firstVisibleIdx = 0;
-                lastVisibleIdx = Math.min(rowCount - 1, visibleRowCount - 1);
-            }
-        }
-
-        const startRow = state.rows[firstVisibleIdx];
-        const endRow = state.rows[lastVisibleIdx];
-        if (!startRow || !endRow) return;
-        const startTs = startRow.timestamp;
-        const endTs = endRow.timestamp + Math.max(50, endRow.duration);
-        if (!Number.isFinite(startTs) || !Number.isFinite(endTs) || endTs <= startTs) return;
-
-        // Tight padding (1%) so adjacent bars peek in at the edges
-        // without swamping short bursts. Minimum 25ms so a single
-        // sub-millisecond bar doesn't render at zero width.
-        const padding = Math.max(25, (endTs - startTs) * 0.01);
-        const fullRange = networkWaterfallFullRangeBySession.get(key);
-        let nextStart = startTs - padding;
-        let nextEnd = endTs + padding;
-        if (fullRange) {
-            if (nextStart < fullRange.startMs) nextStart = fullRange.startMs;
-            if (nextEnd > fullRange.endMs) nextEnd = fullRange.endMs;
-        }
-        if (nextEnd <= nextStart) return;
-        state.timeline.setWindow(new Date(nextStart), new Date(nextEnd), { animation: false });
-        networkWaterfallViewBySession.set(key, { startMs: nextStart, endMs: nextEnd });
-    }
 
     // Global-axis waterfall with a brushable overview pane (issue
     // #291). The overview shows the full session at small scale; the
@@ -2850,44 +2414,46 @@
     }
 
     function attachWaterfallColumnResizer(chartHost, resizer) {
-        let drag = null;
+        // Document-level mousemove/mouseup listeners are scoped to a
+        // single drag — added on mousedown, removed on mouseup. This
+        // avoids the "every axis rebuild adds another pair to document"
+        // leak the older keep-alive form would create.
         resizer.addEventListener('mousedown', (e) => {
             const col = resizer.dataset.col;
             if (!col) return;
             const cell = resizer.parentElement;
             const startPx = cell.getBoundingClientRect().width;
-            drag = {
+            const drag = {
                 col,
                 startX: e.clientX,
                 startPx,
                 minPx: parseInt(resizer.dataset.minPx, 10) || 30,
                 cssVar: `--netwf-col-${col}`
             };
+            const onMove = (ev) => {
+                const next = Math.max(drag.minPx, drag.startPx + (ev.clientX - drag.startX));
+                chartHost.style.setProperty(drag.cssVar, `${Math.round(next)}px`);
+            };
+            const onUp = () => {
+                document.removeEventListener('mousemove', onMove);
+                document.removeEventListener('mouseup', onUp);
+                resizer.classList.remove('dragging');
+                document.body.style.cursor = '';
+                // Persist the new width so it survives session-card
+                // re-renders and page reloads.
+                try {
+                    const stored = JSON.parse(localStorage.getItem('netwf-cols-v2') || '{}');
+                    stored[drag.col] = chartHost.style.getPropertyValue(`--netwf-col-${drag.col}`);
+                    localStorage.setItem('netwf-cols-v2', JSON.stringify(stored));
+                } catch (_) { /* no-op */ }
+            };
             resizer.classList.add('dragging');
             document.body.style.cursor = 'col-resize';
+            document.addEventListener('mousemove', onMove);
+            document.addEventListener('mouseup', onUp);
             e.preventDefault();
             e.stopPropagation();
         });
-        const onMove = (e) => {
-            if (!drag) return;
-            const next = Math.max(drag.minPx, drag.startPx + (e.clientX - drag.startX));
-            chartHost.style.setProperty(drag.cssVar, `${Math.round(next)}px`);
-        };
-        const onUp = () => {
-            if (!drag) return;
-            // Persist the new width so it survives session-card re-renders
-            // and page reloads.
-            try {
-                const stored = JSON.parse(localStorage.getItem('netwf-cols-v2') || '{}');
-                stored[drag.col] = chartHost.style.getPropertyValue(`--netwf-col-${drag.col}`);
-                localStorage.setItem('netwf-cols-v2', JSON.stringify(stored));
-            } catch (_) { /* no-op */ }
-            drag = null;
-            resizer.classList.remove('dragging');
-            document.body.style.cursor = '';
-        };
-        document.addEventListener('mousemove', onMove);
-        document.addEventListener('mouseup', onUp);
     }
 
     // Re-apply persisted column widths to a chart host on first
