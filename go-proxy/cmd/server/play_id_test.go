@@ -73,7 +73,7 @@ func TestBuildHARForSession_FiltersToMostRecentPlayByDefault(t *testing.T) {
 	a.networkLogs["sess-1"] = rb
 
 	session := SessionData{"session_id": "sess-1", "player_id": "p1"}
-	doc := a.buildHARForSession(session, nil, HARBuildFilter{})
+	doc := a.buildHARForSession(session, nil, HARBuildFilter{}, nil)
 	if got := len(doc.Log.Entries); got != 2 {
 		t.Errorf("default filter (most-recent play) entry count = %d, want 2", got)
 	}
@@ -93,7 +93,7 @@ func TestBuildHARForSession_IncludeAllPlays(t *testing.T) {
 	a.networkLogs["sess-1"] = rb
 	session := SessionData{"session_id": "sess-1"}
 
-	doc := a.buildHARForSession(session, nil, HARBuildFilter{IncludeAllPlays: true})
+	doc := a.buildHARForSession(session, nil, HARBuildFilter{IncludeAllPlays: true}, nil)
 	if got := len(doc.Log.Entries); got != 2 {
 		t.Errorf("IncludeAllPlays entry count = %d, want 2 (both plays)", got)
 	}
@@ -110,13 +110,13 @@ func TestBuildHARForSession_ExplicitPlayIDOverride(t *testing.T) {
 	session := SessionData{"session_id": "sess-1"}
 
 	// Default (no PlayID, no IncludeAllPlays) → most recent = play-b → 1 entry
-	doc := a.buildHARForSession(session, nil, HARBuildFilter{})
+	doc := a.buildHARForSession(session, nil, HARBuildFilter{}, nil)
 	if got := len(doc.Log.Entries); got != 1 {
 		t.Errorf("default = play-b entry count = %d, want 1", got)
 	}
 
 	// Explicit override to play-a → 2 entries
-	doc = a.buildHARForSession(session, nil, HARBuildFilter{PlayID: "play-a"})
+	doc = a.buildHARForSession(session, nil, HARBuildFilter{PlayID: "play-a"}, nil)
 	if got := len(doc.Log.Entries); got != 2 {
 		t.Errorf("explicit play-a entry count = %d, want 2", got)
 	}
@@ -131,7 +131,7 @@ func TestBuildHARForSession_IncidentMetadataCarriesPlayID(t *testing.T) {
 	session := SessionData{"session_id": "sess-1"}
 
 	incident := &har.Incident{Reason: "manual"}
-	a.buildHARForSession(session, incident, HARBuildFilter{})
+	a.buildHARForSession(session, incident, HARBuildFilter{}, nil)
 	if incident.Metadata == nil {
 		t.Fatalf("expected metadata populated by builder")
 	}
@@ -152,7 +152,7 @@ func TestBuildHARForSession_IncidentMetadataMarksIncludeAllPlays(t *testing.T) {
 	session := SessionData{"session_id": "sess-1"}
 
 	incident := &har.Incident{Reason: "forensic"}
-	a.buildHARForSession(session, incident, HARBuildFilter{IncludeAllPlays: true})
+	a.buildHARForSession(session, incident, HARBuildFilter{IncludeAllPlays: true}, nil)
 	if v, _ := incident.Metadata["include_all_plays"].(bool); !v {
 		t.Errorf("expected metadata.include_all_plays=true, got %+v", incident.Metadata)
 	}
