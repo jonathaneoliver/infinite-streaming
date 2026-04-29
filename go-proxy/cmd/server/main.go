@@ -357,13 +357,22 @@ type App struct {
 	transferCompleteMu           sync.Mutex
 	transferCompleteMbps         map[int]float64   // latest completed segment Mbps per port
 	transferCompleteAt           map[int]time.Time // when the drain completed
-	// failureDecisionMu serialises the read-modify-write inside
-	// RequestHandler.HandleRequest. Without it, concurrent segment
-	// requests (e.g. video + audio for the same sequence number) race
-	// on segments_count and segment_failure_at, so a single 1-per-Ns
-	// rule can fire twice in the same window.
-	failureDecisionMu        sync.Mutex
 }
+
+// sessionStateMu serialises read-modify-write on the session map
+// (`SessionData`). Multiple goroutines can hit handleProxy for the
+// same session simultaneously — one for the video segment, one for
+// the audio segment, etc. — and any helper that does
+// `session[k] = getInt(session, k) + 1` will lose updates and (in
+// the case of fault-decision logic) double-fire faults.
+//
+// Package-level rather than an App field so free helpers like
+// bumpFaultCounter and updateSessionTraffic can grab the same lock
+// without being converted to methods. Tradeoff: a single global
+// mutex serialises all session-counter mutations across all
+// sessions. The critical section is microseconds and holds no I/O,
+// so contention is negligible at our request rates.
+var sessionStateMu sync.Mutex
 
 type ServerLoopState struct {
 	LastSegmentSeq int
@@ -3416,6 +3425,11 @@ func bumpFaultCounter(session SessionData, faultType string) {
 	if key == "" {
 		return
 	}
+	// Same lock as the fault-decision path: concurrent goroutines
+	// incrementing the same counter on the same session map would
+	// otherwise lose updates.
+	sessionStateMu.Lock()
+	defer sessionStateMu.Unlock()
 	session[key] = getInt(session, key) + 1
 	session["fault_count_total"] = getInt(session, "fault_count_total") + 1
 }
@@ -4013,9 +4027,9 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 	// Serialise the failure-decision read-modify-write so video+audio
 	// requests arriving in the same millisecond don't both pass the
 	// "1 per N seconds" filter and double-fire.
-	a.failureDecisionMu.Lock()
+	sessionStateMu.Lock()
 	failureType := handler.HandleRequest(filename)
-	a.failureDecisionMu.Unlock()
+	sessionStateMu.Unlock()
 
 	a.saveSessionByID(sessionNumber, sessionData)
 
@@ -7423,6 +7437,13 @@ func shouldApplyFailure(entries []string, filename, variant string) bool {
 }
 
 func updateSessionTraffic(session SessionData, bytesIn, bytesOut int64) {
+	// Read-modify-write on byte counters; without the lock concurrent
+	// requests lose bytes and the derived mbps values jitter.
+	// updateSessionTrafficAverages also writes to the same map under
+	// this lock — fine, it's called from within this critical section
+	// and never recursively re-enters bumpFaultCounter / itself.
+	sessionStateMu.Lock()
+	defer sessionStateMu.Unlock()
 	now := time.Now()
 	totalIn := int64FromInterface(session["bytes_in_total"]) + bytesIn
 	totalOut := int64FromInterface(session["bytes_out_total"]) + bytesOut
