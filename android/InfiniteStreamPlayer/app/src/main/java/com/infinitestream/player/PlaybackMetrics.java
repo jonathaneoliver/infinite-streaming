@@ -351,6 +351,7 @@ public final class PlaybackMetrics {
         Map<String, Object> extra = new HashMap<>();
         extra.put("player_metrics_error", message == null ? "" : message);
         sendEvent("error", extra);
+        requestHarSnapshot("player_error", 0, /* force= */ false);
     }
 
     /** Called when user triggers a restart (Restart Playback button, etc). */
@@ -360,6 +361,66 @@ public final class PlaybackMetrics {
         extra.put("player_metrics_restart_reason", reason);
         extra.put("player_restarts", playerRestarts);
         sendEvent("restart", extra);
+        // User-driven restarts should always produce a HAR — bypass the
+        // server-side per-player debounce window.
+        requestHarSnapshot(reason, 0, /* force= */ true);
+    }
+
+    /**
+     * Ask go-proxy to dump the current session timeline to disk as a HAR
+     * file. Issue #273. {@code force=true} bypasses the per-player
+     * 30s debounce — use it for user-driven Reload/Retry and per-attempt
+     * auto-recovery snapshots.
+     */
+    public void requestHarSnapshot(String reason, int attempt, boolean force) {
+        if (urlProvider.currentStreamUrl().isEmpty()) return;
+        final JSONObject metadata = new JSONObject();
+        try {
+            metadata.put("player_state", mapState());
+            metadata.put("auto_recovery_attempt", attempt);
+            metadata.put("player_restarts", playerRestarts);
+            long bufferedPositionMs = player.getBufferedPosition();
+            long currentPositionMs = player.getCurrentPosition();
+            metadata.put("buffer_depth_s",
+                roundSeconds(Math.max(0, bufferedPositionMs - currentPositionMs) / 1000.0));
+        } catch (Exception ignored) {
+        }
+        final JSONObject body = new JSONObject();
+        try {
+            body.put("reason", reason == null ? "manual" : reason);
+            body.put("source", "player");
+            body.put("force", force);
+            body.put("metadata", metadata);
+        } catch (Exception ignored) {
+            return;
+        }
+        networkExecutor.execute(() -> {
+            String sid = resolveSessionId();
+            if (sid == null || sid.isEmpty()) return;
+            postSnapshot(sid, body);
+        });
+    }
+
+    private void postSnapshot(String sid, JSONObject body) {
+        String base = baseUrlProvider.get();
+        if (base == null || base.isEmpty()) return;
+        HttpURLConnection conn = null;
+        try {
+            URL url = new URL(base + "/api/session/" + sid + "/har/snapshot");
+            conn = (HttpURLConnection) url.openConnection();
+            conn.setConnectTimeout(CONNECT_TIMEOUT_MS);
+            conn.setReadTimeout(READ_TIMEOUT_MS);
+            conn.setRequestMethod("POST");
+            conn.setRequestProperty("Content-Type", "application/json");
+            conn.setDoOutput(true);
+            try (OutputStream os = conn.getOutputStream()) {
+                os.write(body.toString().getBytes(StandardCharsets.UTF_8));
+            }
+            conn.getResponseCode();
+        } catch (Exception ignored) {
+        } finally {
+            if (conn != null) conn.disconnect();
+        }
     }
 
     private void maybeDetectFrozen() {
@@ -379,6 +440,7 @@ public final class PlaybackMetrics {
             if (frozenTicks >= FROZEN_THRESHOLD_TICKS && !frozenReported) {
                 frozenReported = true;
                 sendEvent("frozen", Collections.<String, Object>emptyMap());
+                requestHarSnapshot("frozen", 0, /* force= */ false);
             }
         } else {
             frozenTicks = 0;
@@ -397,6 +459,7 @@ public final class PlaybackMetrics {
         if (since >= SEGMENT_STALL_THRESHOLD_MS && !segmentStallReported) {
             segmentStallReported = true;
             sendEvent("segment_stall", Collections.<String, Object>emptyMap());
+            requestHarSnapshot("segment_stall", 0, /* force= */ false);
         }
     }
 

@@ -55,7 +55,35 @@ func resolveIncidentDir() string {
 type SnapshotRequest struct {
 	Reason   string                 `json:"reason"`
 	Source   string                 `json:"source"` // "dashboard", "rest", "player"
+	Force    bool                   `json:"force"`  // bypass per-player debounce
 	Metadata map[string]interface{} `json:"metadata,omitempty"`
+}
+
+// snapshotDebounceWindow is the minimum gap between auto-driven captures from
+// the same player. Manual (force=true) and dashboard captures bypass this.
+const snapshotDebounceWindow = 30 * time.Second
+
+var (
+	snapshotLastMu sync.Mutex
+	snapshotLastAt = map[string]time.Time{} // player_id -> last accepted capture
+)
+
+// snapshotShouldDebounce returns true if we should drop this capture because
+// the player triggered another one within the debounce window. Dashboard /
+// REST captures (source != "player") never debounce.
+func snapshotShouldDebounce(playerID, source string, force bool) bool {
+	if force || source != "player" || playerID == "" {
+		return false
+	}
+	snapshotLastMu.Lock()
+	defer snapshotLastMu.Unlock()
+	now := time.Now()
+	last, ok := snapshotLastAt[playerID]
+	if ok && now.Sub(last) < snapshotDebounceWindow {
+		return true
+	}
+	snapshotLastAt[playerID] = now
+	return false
 }
 
 // IncidentFileInfo describes a stored HAR file in listings.
@@ -195,6 +223,17 @@ func (a *App) handlePostHARSnapshot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	playerID := getString(session, "player_id")
+	if snapshotShouldDebounce(playerID, req.Source, req.Force) {
+		w.WriteHeader(http.StatusTooManyRequests)
+		writeJSON(w, map[string]interface{}{
+			"status":           "debounced",
+			"debounce_window":  snapshotDebounceWindow.Seconds(),
+			"message":          "another snapshot was captured for this player within the debounce window",
+		})
+		return
+	}
+
 	incident := &har.Incident{
 		Reason:    req.Reason,
 		Source:    req.Source,
@@ -204,7 +243,6 @@ func (a *App) handlePostHARSnapshot(w http.ResponseWriter, r *http.Request) {
 	}
 
 	doc := a.buildHARForSession(session, incident)
-	playerID := getString(session, "player_id")
 	info, err := writeIncidentFile(sessionID, playerID, req.Reason, req.Source, doc)
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)

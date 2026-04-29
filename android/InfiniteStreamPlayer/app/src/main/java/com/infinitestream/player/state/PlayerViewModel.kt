@@ -628,6 +628,8 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
     fun retry() {
         val url = _state.value.currentUrl
         if (url.isEmpty()) return
+        // User-driven Retry deserves its own HAR — bypass per-player debounce.
+        metrics?.requestHarSnapshot("user_retry", 0, /* force= */ true)
         player.stop()
         player.clearMediaItems()
         loadStream(url)
