@@ -1,0 +1,314 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Incidents - InfiniteStream</title>
+    <link rel="stylesheet" href="/shared-styles.css">
+    <style>
+        .incidents-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 14px;
+        }
+        .incidents-table th,
+        .incidents-table td {
+            text-align: left;
+            padding: 10px 12px;
+            border-bottom: 1px solid var(--border);
+            vertical-align: top;
+        }
+        .incidents-table th {
+            background: var(--surface-2, #f7f7f9);
+            font-weight: 600;
+            color: var(--text-secondary);
+            font-size: 12px;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+        }
+        .incidents-table tbody tr:hover {
+            background: var(--surface-hover, rgba(0, 0, 0, 0.03));
+        }
+        .reason-pill {
+            display: inline-block;
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 12px;
+            font-weight: 500;
+            background: var(--surface-2, #eee);
+            color: var(--text-primary);
+        }
+        .reason-frozen { background: #fde8e8; color: #b91c1c; }
+        .reason-segment_stall { background: #fef3c7; color: #92400e; }
+        .reason-playback_failure { background: #fde8e8; color: #b91c1c; }
+        .reason-player_error { background: #fde8e8; color: #b91c1c; }
+        .reason-user_retry,
+        .reason-user_reload { background: #dbeafe; color: #1e40af; }
+        .reason-manual { background: #e5e7eb; color: #374151; }
+        .reason-auto_recovery_frozen,
+        .reason-auto_recovery_segment_stall,
+        .reason-auto_recovery_failure,
+        .reason-auto_recovery_zero_buffer { background: #fef3c7; color: #92400e; }
+
+        .source-pill {
+            display: inline-block;
+            padding: 1px 6px;
+            border-radius: 3px;
+            font-size: 11px;
+            background: var(--surface-2, #f3f4f6);
+            color: var(--text-secondary);
+        }
+
+        .filters {
+            display: flex;
+            gap: 12px;
+            flex-wrap: wrap;
+            align-items: center;
+            margin-bottom: 16px;
+        }
+        .filters input,
+        .filters select {
+            padding: 6px 10px;
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            font-size: 14px;
+            background: var(--surface);
+            color: var(--text-primary);
+        }
+        .filters label {
+            font-size: 13px;
+            color: var(--text-secondary);
+        }
+        .filter-meta {
+            margin-left: auto;
+            font-size: 13px;
+            color: var(--text-secondary);
+        }
+        .mono {
+            font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+            font-size: 12px;
+        }
+        .session-id {
+            color: var(--text-secondary);
+            font-size: 11px;
+        }
+        .no-data {
+            text-align: center;
+            padding: 60px 20px;
+            color: var(--text-secondary);
+        }
+        .no-data-icon {
+            font-size: 48px;
+            margin-bottom: 12px;
+            opacity: 0.5;
+        }
+    </style>
+</head>
+<body data-ism-active-page="incidents">
+    <div class="ism-content-wide">
+        <div class="card">
+            <div class="card-header">
+                <div class="header-actions">
+                    <h1>🚨 Incidents</h1>
+                    <div class="header-actions-right">
+                        <button id="refreshBtn" class="btn btn-secondary">Refresh</button>
+                    </div>
+                </div>
+                <p>HAR snapshots captured by go-proxy when a player reported a freeze, auto-recovery attempt, or user-tapped Reload — or when someone hit "Save HAR" on a session. Drop a downloaded file into Chrome DevTools → Network → Import HAR.</p>
+            </div>
+            <div class="card-body">
+                <div class="filters">
+                    <label>Player ID
+                        <input type="text" id="filterPlayer" placeholder="any" size="20">
+                    </label>
+                    <label>Reason
+                        <select id="filterReason"><option value="">all</option></select>
+                    </label>
+                    <label>Source
+                        <select id="filterSource">
+                            <option value="">all</option>
+                            <option value="player">player</option>
+                            <option value="dashboard">dashboard</option>
+                            <option value="rest">rest</option>
+                        </select>
+                    </label>
+                    <span class="filter-meta" id="countLabel">—</span>
+                </div>
+
+                <div id="loading" class="text-center text-secondary" style="padding: 40px;">
+                    <div class="spinner"></div>
+                    <div style="margin-top: 12px;">Loading incidents…</div>
+                </div>
+
+                <div id="emptyState" class="no-data" style="display: none;">
+                    <div class="no-data-icon">📭</div>
+                    <h2>No incidents captured yet</h2>
+                    <p>Open a testing session, induce a fault, and the freeze/recovery path will write a HAR here. Or hit <strong>Save HAR</strong> in the Network Log of a testing session.</p>
+                </div>
+
+                <div id="tableWrap" style="display: none;">
+                    <table class="incidents-table">
+                        <thead>
+                            <tr>
+                                <th>When</th>
+                                <th>Reason</th>
+                                <th>Player</th>
+                                <th>Session</th>
+                                <th>Source</th>
+                                <th>Size</th>
+                                <th></th>
+                            </tr>
+                        </thead>
+                        <tbody id="rows"></tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="/shared/shared-nav.js"></script>
+    <script>
+        const escapeHTML = (s) => {
+            if (s === null || s === undefined) return '';
+            return String(s)
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#39;');
+        };
+
+        const fmtSize = (n) => {
+            if (!n && n !== 0) return '—';
+            if (n < 1024) return `${n} B`;
+            if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+            return `${(n / (1024 * 1024)).toFixed(2)} MB`;
+        };
+        const fmtAge = (iso) => {
+            if (!iso) return '—';
+            const d = new Date(iso);
+            const ms = Date.now() - d.getTime();
+            const s = Math.floor(ms / 1000);
+            if (s < 60) return `${s}s ago`;
+            if (s < 3600) return `${Math.floor(s / 60)}m ago`;
+            if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
+            return `${Math.floor(s / 86400)}d ago`;
+        };
+        const fmtDate = (iso) => iso ? new Date(iso).toLocaleString() : '—';
+        const reasonClass = (reason) => `reason-pill reason-${(reason || 'unknown').replace(/[^a-z0-9_]/gi, '_')}`;
+
+        let allIncidents = [];
+
+        async function loadIncidents() {
+            const loading = document.getElementById('loading');
+            const tableWrap = document.getElementById('tableWrap');
+            const emptyState = document.getElementById('emptyState');
+            loading.style.display = '';
+            tableWrap.style.display = 'none';
+            emptyState.style.display = 'none';
+            try {
+                const r = await fetch('/api/incidents');
+                const data = await r.json();
+                allIncidents = Array.isArray(data.incidents) ? data.incidents : [];
+                populateReasonFilter();
+                render();
+            } catch (e) {
+                loading.innerHTML = `<div style="color: var(--danger, #b91c1c);">Failed to load: ${escapeHTML(e.message)}</div>`;
+                return;
+            }
+            loading.style.display = 'none';
+        }
+
+        function populateReasonFilter() {
+            const sel = document.getElementById('filterReason');
+            const reasons = [...new Set(allIncidents.map(i => i.reason).filter(Boolean))].sort();
+            const current = sel.value;
+            sel.innerHTML = '<option value="">all</option>' +
+                reasons.map(r => `<option value="${escapeHTML(r)}">${escapeHTML(r)}</option>`).join('');
+            if (reasons.includes(current)) sel.value = current;
+        }
+
+        function render() {
+            const tableWrap = document.getElementById('tableWrap');
+            const emptyState = document.getElementById('emptyState');
+            const rows = document.getElementById('rows');
+            const playerFilter = document.getElementById('filterPlayer').value.trim().toLowerCase();
+            const reasonFilter = document.getElementById('filterReason').value;
+            const sourceFilter = document.getElementById('filterSource').value;
+
+            const filtered = allIncidents.filter(i => {
+                if (playerFilter && !(i.player_id || '').toLowerCase().includes(playerFilter)) return false;
+                if (reasonFilter && i.reason !== reasonFilter) return false;
+                if (sourceFilter && i.source !== sourceFilter) return false;
+                return true;
+            });
+
+            document.getElementById('countLabel').textContent =
+                filtered.length === allIncidents.length
+                    ? `${filtered.length} incident${filtered.length === 1 ? '' : 's'}`
+                    : `${filtered.length} of ${allIncidents.length}`;
+
+            if (filtered.length === 0) {
+                tableWrap.style.display = 'none';
+                emptyState.style.display = '';
+                return;
+            }
+            emptyState.style.display = 'none';
+            tableWrap.style.display = '';
+            rows.innerHTML = filtered.map(i => {
+                // i.path is server-controlled (it's the filesystem path of the
+                // saved HAR), but treat it as untrusted and escape into both
+                // URL and attribute contexts.
+                const pathSegments = String(i.path || '').split('/').map(encodeURIComponent).join('/');
+                const downloadHref = `/api/incidents/${pathSegments}`;
+                const reasonRaw = i.reason || '—';
+                const reasonHTML = `<span class="${reasonClass(i.reason)}">${escapeHTML(reasonRaw)}</span>`;
+                const sourceHTML = i.source
+                    ? `<span class="source-pill">${escapeHTML(i.source)}</span>`
+                    : '<span class="source-pill">—</span>';
+                const player = i.player_id
+                    ? escapeHTML(i.player_id)
+                    : '<span class="text-secondary">—</span>';
+                const sessionShort = i.session_id ? escapeHTML(i.session_id.slice(0, 12)) : '—';
+                const fullSession = escapeHTML(i.session_id || '');
+                const time = escapeHTML(fmtDate(i.created_at));
+                const age = escapeHTML(fmtAge(i.created_at));
+                const filenameAttr = escapeHTML(i.filename || 'incident.har');
+                const hrefAttr = escapeHTML(downloadHref);
+                return `
+                    <tr>
+                        <td>
+                            <div>${time}</div>
+                            <div class="session-id">${age}</div>
+                        </td>
+                        <td>${reasonHTML}</td>
+                        <td class="mono">${player}</td>
+                        <td class="mono" title="${fullSession}">${sessionShort}</td>
+                        <td>${sourceHTML}</td>
+                        <td>${fmtSize(i.size_bytes)}</td>
+                        <td>
+                            <a href="${hrefAttr}" download="${filenameAttr}" class="btn btn-mini btn-secondary">Download</a>
+                        </td>
+                    </tr>
+                `;
+            }).join('');
+        }
+
+        document.getElementById('refreshBtn').addEventListener('click', loadIncidents);
+        document.getElementById('filterPlayer').addEventListener('input', render);
+        document.getElementById('filterReason').addEventListener('change', render);
+        document.getElementById('filterSource').addEventListener('change', render);
+
+        // Honor ?player_id= in URL for deep-links from testing-session.html.
+        const params = new URLSearchParams(window.location.search);
+        const initialPlayer = params.get('player_id');
+        if (initialPlayer) document.getElementById('filterPlayer').value = initialPlayer;
+
+        loadIncidents();
+        // Auto-refresh every 10s while page is visible.
+        setInterval(() => {
+            if (document.visibilityState === 'visible') loadIncidents();
+        }, 10000);
+    </script>
+</body>
+</html>

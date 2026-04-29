@@ -45,17 +45,25 @@
     const networkWaterfallTimelines = new Map();
     const networkWaterfallViewBySession = new Map();
     const networkWaterfallFollowModeBySession = new Map();
-    // Follow Scroll: pan the waterfall's time window to match the rows
-    // visible in the entries list as the user scrolls. Default true.
-    // Issue #286.
-    const networkWaterfallFollowScrollBySession = new Map();
     const networkWaterfallFullRangeBySession = new Map();
     const networkWaterfallRenderSignatureBySession = new Map();
-    const networkWaterfallRollingWindowMs = 5 * 60 * 1000;
+    const networkWaterfallRowSignaturesBySession = new Map();
+    const networkWaterfallRowsBySession = new Map();
+    // Per-session brush state: { startMs, endMs, follow }. `follow=true`
+    // means the brush sticks to the right edge as new entries arrive
+    // (Following Latest). Drag-pan flips it to false.
+    const networkWaterfallBrushBySession = new Map();
+    const networkWaterfallRollingWindowMs = 10 * 60 * 1000;
+    // Default and minimum brush span. Tighter than this and the time
+    // axis gets too granular to be useful; this is also the default
+    // initial span when a session first opens.
+    const networkWaterfallMinBrushMs = 1 * 60 * 1000;
     const networkLogAutoRefreshTimers = new Map();
     const networkLogFetchInFlight = new Set();
     const networkLogAutoRefreshMs = 1500;
-    const networkLogDeveloperEnabled = new URLSearchParams(window.location.search).get('developer') === '1';
+    // Network log used to be developer-only; now enabled for everyone.
+    // The constant stays as `true` so the runtime gates still compile.
+    const networkLogDeveloperEnabled = true;
 
     function formatDate(value) {
         if (!value) return '—';
@@ -1063,7 +1071,6 @@
                 </div>
                 ` : ''}
 
-                ${developerMode ? `
                 <!-- Collapsible Network Log -->
                 <div class="collapsible-section" data-section="network-log" data-default-open="false">
                     <div class="collapsible-header" data-toggle="network-log">
@@ -1076,36 +1083,34 @@
                             <div class="network-log-controls">
                                 <button type="button" class="btn btn-mini btn-secondary" data-action="refresh-network-log">Refresh</button>
                                 <button type="button" class="btn btn-mini btn-secondary" data-action="save-har-snapshot" title="Save the current network timeline as a HAR file: downloads to your machine and adds it to the Incidents list">Download HAR</button>
-                                <a href="/api/incidents" target="_blank" rel="noopener" class="btn btn-mini btn-secondary" title="List saved HAR snapshots (raw JSON)">Incidents</a>
-                                <button type="button" class="btn btn-mini btn-secondary" data-action="network-log-jump-first">First</button>
-                                <button type="button" class="btn btn-mini btn-secondary" data-action="network-log-jump-last">Last</button>
-                                <button type="button" class="btn btn-mini btn-secondary" data-action="network-log-jump-fit">Fit</button>
+                                <a href="/dashboard/incidents.html" target="_blank" rel="noopener" class="btn btn-mini btn-secondary" title="Browse saved HAR snapshots">Incidents</a>
                                 <button type="button" class="btn btn-mini btn-secondary" data-action="network-log-follow">Following Latest</button>
-                                <label class="network-log-filter" title="Pan the waterfall's time window to match the entries currently visible in the list above">
-                                    <input type="checkbox" data-field="follow-scroll" checked>
-                                    Follow Scroll
-                                </label>
-                                <label class="network-log-filter">
-                                    <input type="checkbox" data-filter="show-faulted" checked>
-                                    Show Faults
-                                </label>
-                                <label class="network-log-filter">
-                                    <input type="checkbox" data-filter="show-successful" checked>
-                                    Show Successful
+                                <label class="network-log-filter" title="When checked, only faulted / non-success entries appear in the list.">
+                                    <input type="checkbox" data-filter="hide-successful">
+                                    Hide Successful
                                 </label>
                             </div>
                             <div class="network-log-warning">
-                                Transfer timings and derived Mbps are approximate.
-                                They are most reliable when the network is slow and transfers are large (especially video segments).
+                                Transfer timings and derived Mbps are approximate, and measured <strong>downstream</strong> — from when go-proxy starts writing the response back to the client device until the last byte is flushed (proxy → player). They do <strong>not</strong> include the upstream fetch from go-proxy to go-live. The numbers are most reliable when the network is slow and transfers are large (especially video segments); short responses transfer in &lt;1 ms and round to noise.
                             </div>
                             <div class="network-log-waterfall-wrap">
-                                <div class="network-log-waterfall" data-field="network_log_waterfall"></div>
+                                <div class="netwf-summary" data-field="netwf_summary"></div>
+                                <div class="netwf-overview-axis" data-field="netwf_overview_axis"></div>
+                                <div class="netwf-overview" data-field="netwf_overview">
+                                    <div class="netwf-overview-bars" data-field="netwf_overview_bars"></div>
+                                    <div class="netwf-brush" data-field="netwf_brush" style="left:0%;width:100%;">
+                                        <div class="netwf-brush-handle left" data-field="netwf_brush_handle_left"></div>
+                                        <div class="netwf-brush-handle right" data-field="netwf_brush_handle_right"></div>
+                                    </div>
+                                </div>
+                                <div class="network-log-waterfall-scroll" data-field="network_log_waterfall_scroll">
+                                    <div class="network-log-waterfall" data-field="network_log_waterfall"></div>
+                                </div>
                                 <div class="network-log-waterfall-empty" data-field="network_log_waterfall_empty" style="display:none;">No requests to plot yet.</div>
                             </div>
                         </div>
                     </div>
                 </div>
-                ` : ''}
 
             </div>
         `;
@@ -1366,12 +1371,6 @@
             const cb = e.target;
             if (!cb || cb.type !== 'checkbox' || !cb.dataset.field) return;
             const field = cb.dataset.field;
-            if (field === 'follow-scroll') {
-                const card = cb.closest('.session-card');
-                const sessionId = card ? String(card.dataset.sessionId || '') : '';
-                if (sessionId) setFollowScrollMode(sessionId, !!cb.checked);
-                return;
-            }
             if (field !== 'segment_failure_urls' && field !== 'manifest_failure_urls') return;
             const group = cb.closest('.checkbox-group');
             if (!group) return;
@@ -1405,7 +1404,21 @@
                         setNetworkLogFollowMode(sessionId, nextFollow);
                         updateNetworkLogFollowButton(card, sessionId);
                         if (nextFollow) {
-                            jumpWaterfallView(sessionId, 'last');
+                            // Snap to the live point immediately —
+                            // refresh the entry list, re-render so the
+                            // brush hits the right edge, then make sure
+                            // the row list is scrolled to the bottom
+                            // even after layout settles.
+                            updateNetworkLog(sessionId);
+                            const scrollHost = card.querySelector('[data-field="network_log_waterfall_scroll"]');
+                            if (scrollHost) {
+                                scrollHost.scrollTop = scrollHost.scrollHeight;
+                                window.requestAnimationFrame(() => {
+                                    scrollHost.scrollTop = scrollHost.scrollHeight;
+                                });
+                            }
+                        } else if (card) {
+                            applyNetworkLogFilters(card);
                         }
                     }
                     return;
@@ -1414,50 +1427,43 @@
                     const card = actionButton.closest('.session-card');
                     const sessionId = card ? String(card.dataset.sessionId || '') : '';
                     if (!sessionId) return;
-                    const reason = window.prompt('Snapshot reason (e.g. manual, freeze, restart):', 'manual') || 'manual';
                     actionButton.disabled = true;
                     fetch(`/api/session/${encodeURIComponent(sessionId)}/har/snapshot`, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ reason, source: 'dashboard' })
+                        body: JSON.stringify({ reason: 'manual', source: 'dashboard' })
                     })
                         .then(r => r.json())
-                        .then(data => {
+                        .then(async (data) => {
                             if (data && data.incident && data.incident.path) {
-                                // Trigger a direct download — server already
-                                // wrote the file to /incidents/, we just
-                                // route the browser at it via a hidden <a>.
+                                // Fetch the just-saved file as a blob and
+                                // trigger the download from a blob: URL.
+                                // Linking to /api/incidents/... directly
+                                // triggers Chrome's "insecure download"
+                                // block on plain-HTTP origins (mixed-
+                                // content download). A blob URL is
+                                // local-origin, so it isn't blocked.
+                                const fileResp = await fetch(`/api/incidents/${data.incident.path}`);
+                                if (!fileResp.ok) {
+                                    throw new Error(`HAR fetch ${fileResp.status}`);
+                                }
+                                const blob = await fileResp.blob();
+                                const url = URL.createObjectURL(blob);
                                 const a = document.createElement('a');
-                                a.href = `/api/incidents/${data.incident.path}`;
+                                a.href = url;
                                 a.download = data.incident.filename || 'incident.har';
                                 a.style.display = 'none';
                                 document.body.appendChild(a);
                                 a.click();
                                 document.body.removeChild(a);
+                                // Defer revoke so the click has time to start.
+                                setTimeout(() => URL.revokeObjectURL(url), 1000);
                             } else if (data && data.error) {
                                 window.alert(`HAR save failed: ${data.error}`);
                             }
                         })
                         .catch(err => window.alert(`HAR save failed: ${err}`))
                         .finally(() => { actionButton.disabled = false; });
-                    return;
-                }
-                if (action === 'network-log-jump-first' || action === 'network-log-jump-last' || action === 'network-log-jump-fit') {
-                    const card = actionButton.closest('.session-card');
-                    const sessionId = card ? card.dataset.sessionId : '';
-                    if (sessionId) {
-                        if (action === 'network-log-jump-first') {
-                            setNetworkLogFollowMode(sessionId, false);
-                            updateNetworkLogFollowButton(card, sessionId);
-                            jumpWaterfallView(sessionId, 'first');
-                        } else if (action === 'network-log-jump-last') {
-                            jumpWaterfallView(sessionId, 'last');
-                        } else {
-                            setNetworkLogFollowMode(sessionId, false);
-                            updateNetworkLogFollowButton(card, sessionId);
-                            jumpWaterfallView(sessionId, 'fit');
-                        }
-                    }
                     return;
                 }
             }
@@ -1548,13 +1554,8 @@
             return;
         }
         resumeNetworkLogAutoRefreshForVisiblePanels();
-        window.addEventListener('resize', () => {
-            networkWaterfallTimelines.forEach((state) => {
-                if (state && state.timeline && typeof state.timeline.redraw === 'function') {
-                    state.timeline.redraw();
-                }
-            });
-        });
+        // Native waterfall layouts re-flow on the next refresh tick;
+        // no explicit redraw needed on window resize.
         document.addEventListener('visibilitychange', () => {
             if (document.hidden) {
                 stopAllNetworkLogAutoRefresh();
@@ -1596,28 +1597,10 @@
 
     function isNetworkLogFollowMode(sessionId) {
         const key = String(sessionId || '');
-        // Default OFF — the user expects the list to "just sit there"
-        // until they explicitly opt into auto-scroll.
-        return networkWaterfallFollowModeBySession.get(key) === true;
-    }
-
-    // Follow Scroll mode: when on, the waterfall's time window
-    // auto-pans to match the rows currently visible in the entries
-    // list. Default true so the feature is on out-of-the-box. Issue #286.
-    function isFollowScrollMode(sessionId) {
-        const key = String(sessionId || '');
-        return networkWaterfallFollowScrollBySession.get(key) !== false;
-    }
-
-    function setFollowScrollMode(sessionId, enabled) {
-        const key = String(sessionId || '');
-        if (!key) return;
-        networkWaterfallFollowScrollBySession.set(key, !!enabled);
-        const state = networkWaterfallTimelines.get(key);
-        if (state) {
-            state.autoPan = !!enabled;
-            if (enabled) applyWaterfallAutoPan(state, key);
-        }
+        // Default ON — with the brushable overview, the user can pan
+        // away whenever they want; the live tail is the more useful
+        // initial state.
+        return networkWaterfallFollowModeBySession.get(key) !== false;
     }
 
     function setNetworkLogFollowMode(sessionId, enabled) {
@@ -1636,12 +1619,6 @@
         button.setAttribute('aria-pressed', following ? 'true' : 'false');
         button.classList.toggle('btn-primary', following);
         button.classList.toggle('btn-secondary', !following);
-        // Keep the Follow Scroll checkbox in sync with the per-session
-        // map across re-renders (the HTML template defaults to checked).
-        const followScrollCb = hostCard.querySelector('input[data-field="follow-scroll"]');
-        if (followScrollCb) {
-            followScrollCb.checked = isFollowScrollMode(sessionId);
-        }
     }
 
     function scrollWaterfallToLatestRow(state) {
@@ -1735,6 +1712,26 @@
         return `${mbps.toFixed(2)} Mbps`;
     }
 
+    // Fixed-precision formatters for the row table. Decimal count is
+    // constant across rows so a column scans cleanly (e.g. "5.00",
+    // "12.30", "145.00" rather than "5", "12.3", "145").
+    function formatKBNumber(bytes) {
+        const n = Number(bytes || 0);
+        if (!Number.isFinite(n) || n <= 0) return '—';
+        return (n / 1024).toFixed(1);
+    }
+
+    function formatMbpsNumber(bytes, transferMs) {
+        const bytesNum = Number(bytes || 0);
+        const msNum = Number(transferMs || 0);
+        if (!Number.isFinite(bytesNum) || !Number.isFinite(msNum) || bytesNum <= 0 || msNum <= 0) {
+            return '—';
+        }
+        const mbps = (bytesNum * 8) / (msNum * 1000);
+        if (!Number.isFinite(mbps) || mbps <= 0) return '—';
+        return mbps.toFixed(2);
+    }
+
     function escapeHtml(value) {
         return String(value || '')
             .replace(/&/g, '&amp;')
@@ -1764,12 +1761,36 @@
 
     function getFilteredNetworkEntries(card, sessionId) {
         const entries = networkLogEntriesBySession.get(String(sessionId)) || [];
-        const showFaulted = card.querySelector('[data-filter="show-faulted"]')?.checked ?? true;
-        const showSuccessful = card.querySelector('[data-filter="show-successful"]')?.checked ?? true;
-        return entries.filter((entry) => {
-            const faulted = !!entry.faulted;
-            return (faulted && showFaulted) || (!faulted && showSuccessful);
-        });
+        // Faults are always shown. "Hide Successful" defaults off, so
+        // by default we show everything; tick it to focus on problems.
+        const hideSuccessful = card.querySelector('[data-filter="hide-successful"]')?.checked ?? false;
+        return entries.filter((entry) => entry.faulted || !hideSuccessful);
+    }
+
+    // Derive segment duration from the URL conventions used by go-live:
+    //   /go-live/<content>/2s/...    -> 2s segments
+    //   /go-live/<content>/6s/...    -> 6s segments
+    //   /go-live/<content>/ll/...    -> LL partials (~200ms part target;
+    //                                    use 1s as a conservative
+    //                                    "normal cadence")
+    //   playlist_<N>s_<variant>.m3u8 -> N seconds (also matches DASH-side)
+    // Anything we can't classify falls back to the 6s default.
+    function waterfallSegmentDurationMsFor(row) {
+        const url = String(row.entry.url || row.entry.path || row.pathDisplay || '').toLowerCase();
+        if (!url) return 6000;
+        const lowLatency = /(^|[/_])ll([/_.]|$)/.test(url);
+        if (lowLatency) return 1000;
+        const m = url.match(/(?:[/_])(\d{1,2})s(?:[/_])/);
+        if (m) {
+            const secs = parseInt(m[1], 10);
+            if (secs > 0 && secs <= 30) return secs * 1000;
+        }
+        const m2 = url.match(/playlist_(\d{1,2})s[_-]/);
+        if (m2) {
+            const secs = parseInt(m2[1], 10);
+            if (secs > 0 && secs <= 30) return secs * 1000;
+        }
+        return 6000;
     }
 
     function buildWaterfallRows(entries) {
@@ -1883,6 +1904,35 @@
         });
         const ordered = rows.filter((row) => row.timestamp > 0).sort((a, b) => a.timestamp - b.timestamp);
         if (!ordered.length) return ordered;
+        // Tag re-requests: same URL+method seen earlier in the session.
+        // `attempt` / `totalAttempts` give chronological context; the
+        // narrower `is_retry` flag fires only when the gap from the
+        // previous fetch is suspiciously short — faster than a normal
+        // HLS playlist refresh / segment refetch cadence. The cutoff
+        // is *half the segment duration* parsed from the URL path
+        // (.../2s/..., .../6s/..., .../ll/..., or playlist_2s_...).
+        // Routine periodic refetches won't get flagged; rapid retries
+        // after a failure will.
+        const attemptByKey = new Map();
+        const lastTimeByKey = new Map();
+        for (const row of ordered) {
+            const k = `${row.entry.method || 'GET'} ${row.entry.url || row.entry.path || ''}`;
+            const next = (attemptByKey.get(k) || 0) + 1;
+            attemptByKey.set(k, next);
+            row.attempt = next;
+            const prevTs = lastTimeByKey.get(k);
+            row.segment_duration_ms = waterfallSegmentDurationMsFor(row);
+            const threshold = row.segment_duration_ms / 2;
+            row.retry_threshold_ms = threshold;
+            row.is_retry = next > 1 && prevTs !== undefined && (row.timestamp - prevTs) < threshold;
+            row.gap_from_prev_ms = prevTs !== undefined ? row.timestamp - prevTs : null;
+            lastTimeByKey.set(k, row.timestamp);
+            row.totalAttempts = 0; // filled in below
+        }
+        for (const row of ordered) {
+            const k = `${row.entry.method || 'GET'} ${row.entry.url || row.entry.path || ''}`;
+            row.totalAttempts = attemptByKey.get(k) || 1;
+        }
         const newestTimestamp = ordered[ordered.length - 1].timestamp;
         const cutoff = newestTimestamp - networkWaterfallRollingWindowMs;
         return ordered.filter((row) => (row.timestamp + row.duration) >= cutoff);
@@ -2322,224 +2372,747 @@
         networkWaterfallViewBySession.set(key, { startMs: nextStart, endMs: nextEnd });
     }
 
+    // Global-axis waterfall with a brushable overview pane (issue
+    // #291). The overview shows the full session at small scale; the
+    // user drags the brush to pick a time window, and the bars in the
+    // main view position themselves within that window. Chrome
+    // DevTools' Network panel pattern.
     function updateNetworkWaterfall(card, sessionId) {
         const key = String(sessionId);
         const chartHost = card.querySelector('[data-field="network_log_waterfall"]');
+        const scrollHost = card.querySelector('[data-field="network_log_waterfall_scroll"]');
         const emptyHost = card.querySelector('[data-field="network_log_waterfall_empty"]');
+        const overviewEl = card.querySelector('[data-field="netwf_overview"]');
+        const overviewBars = card.querySelector('[data-field="netwf_overview_bars"]');
+        const brushEl = card.querySelector('[data-field="netwf_brush"]');
         if (!chartHost || !emptyHost) return;
-
-        if (!hasVisTimeline()) {
-            emptyHost.textContent = 'vis-timeline not loaded; waterfall unavailable.';
-            emptyHost.style.display = 'block';
-            return;
-        }
+        applyPersistedWaterfallColumns(chartHost);
 
         const rows = buildWaterfallRows(getFilteredNetworkEntries(card, key));
         if (!rows.length) {
             emptyHost.textContent = 'No requests to plot yet.';
             emptyHost.style.display = 'block';
-            const state = networkWaterfallTimelines.get(key);
-            networkWaterfallFullRangeBySession.delete(key);
+            chartHost.replaceChildren();
+            if (overviewBars) overviewBars.replaceChildren();
             networkWaterfallRenderSignatureBySession.delete(key);
-            if (state && state.items && state.groups) {
-                state.items.clear();
-                state.groups.clear();
-                if (state.timeline && typeof state.timeline.redraw === 'function') {
-                    state.timeline.redraw();
-                }
-            }
+            networkWaterfallRowsBySession.delete(key);
             return;
         }
         emptyHost.style.display = 'none';
 
-        const state = ensureWaterfallTimeline(card, key);
-        if (!state) return;
+        // Full session range (the overview always shows this).
+        const dataStartMs = rows[0].timestamp;
+        const dataEndMs = Math.max(...rows.map((r) => r.timestamp + Math.max(50, r.duration)));
+        const fullSpan = Math.max(50, dataEndMs - dataStartMs);
 
-        const dataStartMs = Math.min(...rows.map((row) => row.timestamp));
-        const dataEndMs = Math.max(...rows.map((row) => row.timestamp + row.duration));
-        const firstRow = rows[0];
-        const lastRow = rows[rows.length - 1];
-        const renderSignature = [
-            rows.length,
-            Math.round(dataStartMs),
-            Math.round(dataEndMs),
-            firstRow ? `${firstRow.filename}|${firstRow.entry.status || ''}|${Math.round(firstRow.duration)}` : '',
-            lastRow ? `${lastRow.filename}|${lastRow.entry.status || ''}|${Math.round(lastRow.duration)}` : ''
-        ].join('|');
-        const previousSignature = networkWaterfallRenderSignatureBySession.get(key);
-        if (previousSignature === renderSignature) {
-            updateNetworkLogFollowButton(card, key);
-            if (isNetworkLogFollowMode(key)) {
-                scrollWaterfallToLatestRow(state);
-            }
-            return;
+        // Brush state — Following Latest = stick to the right edge.
+        // Default: zoom to the most recent 2 minutes (or full session
+        // if shorter). 2 min is also the floor we enforce on user
+        // resize so bars stay scannable.
+        let brush = networkWaterfallBrushBySession.get(key);
+        if (!brush) {
+            const initialSpan = Math.min(fullSpan, networkWaterfallMinBrushMs);
+            brush = { startMs: dataEndMs - initialSpan, endMs: dataEndMs, follow: true };
+            networkWaterfallBrushBySession.set(key, brush);
         }
-        networkWaterfallRenderSignatureBySession.set(key, renderSignature);
-        const toTime = (timestampMs) => new Date(Math.max(0, Math.round(timestampMs)));
-        const groups = [];
-        const items = [];
+        // Sync brush.follow with the Follow Latest button. Clicking
+        // the button re-engages right-edge stickiness even if the user
+        // had previously dragged the brush.
+        brush.follow = isNetworkLogFollowMode(key);
+        if (brush.follow) {
+            const span = brush.endMs - brush.startMs;
+            brush.endMs = dataEndMs;
+            brush.startMs = Math.max(dataStartMs, brush.endMs - span);
+        }
+        // Clamp to data range and enforce the minimum brush width.
+        if (brush.endMs > dataEndMs) brush.endMs = dataEndMs;
+        if (brush.startMs < dataStartMs) brush.startMs = dataStartMs;
+        if (brush.endMs - brush.startMs < networkWaterfallMinBrushMs) {
+            // Try to expand left first; if there's not enough history,
+            // accept whatever we can fit (full session shorter than
+            // the minimum is fine — the floor only applies when the
+            // user could have a wider view).
+            brush.startMs = Math.max(dataStartMs, brush.endMs - networkWaterfallMinBrushMs);
+        }
 
-        rows.forEach((row, idx) => {
-            const groupId = idx + 1;
-            const method = row.entry.method || 'GET';
-            const status = row.entry.status || '—';
-            const labelClass = row.entry.faulted ? 'waterfall-rowtext is-faulted' : 'waterfall-rowtext';
-            const requestStartMs = row.timestamp;
-            const bytesOut = Number(row.entry.bytes_out || 0);
-            const bytesLabel = bytesOut > 0 ? formatBytes(bytesOut) : '—';
-            const mbpsLabel = formatMbpsFromBytesAndMs(bytesOut, row.transfer);
-            const variantLabel = row.variantLabel || '—';
-            const filenameLower = String(row.filename || '').toLowerCase();
-            let segmentLabel = '—';
-            const segmentMatch = filenameLower.match(/segment[_-](\d+)/);
-            if (segmentMatch) {
-                segmentLabel = segmentMatch[1];
-            } else if (filenameLower.includes('init.')) {
-                segmentLabel = 'init';
-            } else if (filenameLower.includes('playlist')) {
-                segmentLabel = 'playlist';
-            } else if (filenameLower.includes('master')) {
-                segmentLabel = 'master';
-            } else if (row.filename) {
-                segmentLabel = row.filename;
-            }
-            const labelText = [
-                formatColumn(method, 6),
-                formatColumn(row.pathDisplay, 54),
-                formatColumn(variantLabel, 10),
-                formatColumn(segmentLabel, 10),
-                formatColumn(status, 6, true),
-                formatColumn(bytesLabel, 10, true),
-                formatColumn(mbpsLabel, 10, true)
-            ].join(' ');
+        // Summary row: total + categorical counts. Read at a glance
+        // before the user starts panning the brush.
+        const summaryEl = card.querySelector('[data-field="netwf_summary"]');
+        if (summaryEl) {
+            renderWaterfallSummary(summaryEl, rows, dataStartMs, dataEndMs);
+        }
 
-            groups.push({
-                id: groupId,
-                content: `<span class="${labelClass}" title="${escapeHtml(row.entry.url || row.entry.path || '')}">${escapeHtml(labelText)}</span>`
-            });
+        // Time labels above the overview pane — full session range,
+        // independent of the brush. So the user sees both the
+        // big-picture wall clock (this row) and the zoomed-in
+        // wall clock (the row above the bars below).
+        const overviewAxis = card.querySelector('[data-field="netwf_overview_axis"]');
+        if (overviewAxis) {
+            renderWaterfallAxisTicks(overviewAxis, dataStartMs, dataEndMs);
+        }
 
-            const phases = [
-                { key: 'dns', value: row.dns, label: 'DNS' },
-                { key: 'connect', value: row.connect, label: 'Connect' },
-                { key: 'tls', value: row.tls, label: 'TLS' },
-                { key: 'wait', value: row.wait, label: 'Wait' },
-                { key: 'transfer', value: row.transfer, label: 'Receive' }
-            ];
-
-            let cursor = requestStartMs;
-            phases.forEach((phase) => {
-                if (phase.value <= 0) return;
-                const phaseStart = cursor;
-                const phaseEnd = cursor + phase.value;
-                items.push({
-                    id: `${groupId}-${phase.key}`,
-                    group: groupId,
-                    start: toTime(phaseStart),
-                    end: toTime(phaseEnd),
-                    className: `waterfall-phase waterfall-${phase.key}`,
-                    title: [
-                        `${method} ${row.filename}`,
-                        `Status: ${status}`,
-                        `${phase.label}: ${formatMilliseconds(phase.value)}`,
-                        `Total: ${formatMilliseconds(row.duration)}`,
-                        row.entry.url || row.entry.path || ''
-                    ].join('\n')
-                });
-                cursor = phaseEnd;
-            });
-        });
-
-        // Anchor preservation: when Following Latest is OFF, capture the
-        // topmost visible group's row index + pixel offset BEFORE the
-        // re-render so we can restore the user's view after the
-        // groups/items DataSet is replaced. Without this, vis-timeline's
-        // re-render snaps the scroll position to top and the user's view
-        // jumps every time new entries arrive.
-        let scrollAnchor = null;
-        if (!isNetworkLogFollowMode(key) && state.host) {
-            const center = state.host.querySelector('.vis-panel.vis-center');
-            const groupEls = state.host.querySelectorAll('.vis-foreground .vis-group');
-            if (center && groupEls.length > 0) {
-                const centerRect = center.getBoundingClientRect();
-                for (const el of groupEls) {
-                    const r = el.getBoundingClientRect();
-                    if (r.height <= 0) continue;
-                    if (r.bottom > centerRect.top) {
-                        const groupId = parseInt(el.getAttribute('data-id') || el.dataset.id, 10);
-                        if (Number.isFinite(groupId)) {
-                            scrollAnchor = {
-                                rowIdx: groupId - 1,
-                                offsetWithinGroup: centerRect.top - r.top,
-                            };
-                        }
-                        break;
-                    }
-                }
+        // Render overview ticks (one per row, positioned by absolute
+        // time). Re-render is cheap; we redraw on every refresh.
+        // Apply the same status/fault classes the main rows use so
+        // bad requests stand out on the strip too.
+        if (overviewBars) {
+            overviewBars.replaceChildren();
+            for (const row of rows) {
+                const left = ((row.timestamp - dataStartMs) / fullSpan) * 100;
+                const width = Math.max(0.05, (Math.max(50, row.duration) / fullSpan) * 100);
+                const tick = document.createElement('div');
+                tick.className = 'netwf-overview-tick' + waterfallRowStatusClasses(row);
+                tick.style.left = `${left.toFixed(3)}%`;
+                tick.style.width = `${width.toFixed(3)}%`;
+                overviewBars.appendChild(tick);
             }
         }
 
-        state.groups.clear();
-        state.items.clear();
-        state.groups.add(groups);
-        state.items.add(items);
-        // Stash the rows so the auto-pan handler (issue #286) can map
-        // entries-list scroll position to a time window.
-        state.rows = rows;
+        // Position the brush to match its current state.
+        if (brushEl) {
+            const left = ((brush.startMs - dataStartMs) / fullSpan) * 100;
+            const width = ((brush.endMs - brush.startMs) / fullSpan) * 100;
+            brushEl.style.left = `${Math.max(0, left).toFixed(3)}%`;
+            brushEl.style.width = `${Math.max(0.5, width).toFixed(3)}%`;
+        }
 
-        const fullStartMs = dataStartMs;
-        const latestTransferEndMs = dataEndMs;
-        const rightPadMs = 1000;
-        const fullEndMs = latestTransferEndMs + rightPadMs;
-        networkWaterfallFullRangeBySession.set(key, { startMs: fullStartMs, endMs: fullEndMs });
-        state.timeline.setOptions({
-            // Clamp user pan/zoom to the session's full data range so the
-            // viewer can't drift into empty space outside the session.
-            min: toTime(fullStartMs),
-            max: toTime(fullEndMs),
-            zoomMax: Math.max(1000, fullEndMs - fullStartMs),
-            zoomMin: 100 // Don't let users zoom-in tighter than 100ms.
+        // Lazy-attach brush drag handlers (one set per overview).
+        if (overviewEl && !overviewEl.dataset.netwfBound) {
+            overviewEl.dataset.netwfBound = '1';
+            attachBrushHandlers(card, overviewEl, brushEl);
+        }
+
+        // Filter the row list to requests that overlap the brush
+        // window. The overview above keeps showing the full session;
+        // the list below shows only what the user has selected.
+        const visibleRows = rows.filter((row) => {
+            const reqEnd = row.timestamp + Math.max(50, row.duration);
+            return reqEnd >= brush.startMs && row.timestamp <= brush.endMs;
         });
-        const storedView = networkWaterfallViewBySession.get(key);
-        const following = isNetworkLogFollowMode(key);
+
+        // Sticky axis row at the top of the list — column headers (with
+        // drag-to-resize handles) on the left, tick marks across the
+        // brush window on the right. One axis row in DOM, rebuilt only
+        // when its content changes.
+        let axisEl = chartHost.firstElementChild;
+        if (!axisEl || !axisEl.classList.contains('netwf-axis')) {
+            axisEl = buildWaterfallAxisRow(chartHost);
+            if (chartHost.firstElementChild) {
+                chartHost.insertBefore(axisEl, chartHost.firstElementChild);
+            } else {
+                chartHost.appendChild(axisEl);
+            }
+        }
+        // Update the time-cell header text with current count.
+        const timeHdr = axisEl.querySelector('.netwf-cell.time');
+        if (timeHdr) timeHdr.textContent = `${visibleRows.length}/${rows.length}`;
+        const axisScale = axisEl.querySelector('[data-field="netwf_axis_scale"]');
+        if (axisScale) {
+            renderWaterfallAxisTicks(axisScale, brush.startMs, brush.endMs);
+        }
+
+        // Diff-based DOM updates for the row list. Native scroll keeps
+        // its position when only existing rows update / new ones
+        // append. Note: the axis row sits at index 0, so data rows
+        // start at child index 1.
+        const sigs = visibleRows.map(buildRowSignature);
+        const oldSigs = networkWaterfallRowSignaturesBySession.get(key) || [];
+        const winKey = `${Math.round(brush.startMs)}-${Math.round(brush.endMs)}`;
+        const winChanged = chartHost.dataset.netwfWin !== winKey;
+
+        // Trim removed rows (filter shrunk OR ring buffer evicted).
+        while (chartHost.children.length - 1 > visibleRows.length) {
+            chartHost.removeChild(chartHost.lastElementChild);
+        }
+        visibleRows.forEach((row, idx) => {
+            const domIdx = idx + 1; // axis is at index 0
+            const existing = chartHost.children[domIdx];
+            if (existing && !winChanged && oldSigs[idx] === sigs[idx]) return;
+            const rowEl = buildWaterfallRowEl(row, idx, brush.startMs, brush.endMs);
+            if (existing) {
+                chartHost.replaceChild(rowEl, existing);
+            } else {
+                chartHost.appendChild(rowEl);
+            }
+        });
+        chartHost.dataset.netwfWin = winKey;
+        networkWaterfallRowSignaturesBySession.set(key, sigs);
+        // Keep the unfiltered rows on the session so the brush handler
+        // knows the full data range.
+        networkWaterfallRowsBySession.set(key, rows);
+        networkWaterfallRenderSignatureBySession.set(key, sigs.length + ':' + (sigs[sigs.length - 1] || ''));
+
+        if (scrollHost && isNetworkLogFollowMode(key)) {
+            scrollHost.scrollTop = scrollHost.scrollHeight;
+        }
         updateNetworkLogFollowButton(card, key);
-        if (following) {
-            const spanFromStored = (storedView && Number.isFinite(storedView.startMs) && Number.isFinite(storedView.endMs))
-                ? (storedView.endMs - storedView.startMs)
-                : (fullEndMs - fullStartMs);
-            const spanMs = Math.max(20, Math.min(spanFromStored, Math.max(20, fullEndMs - fullStartMs)));
-            const followEnd = fullEndMs;
-            const followStart = Math.max(fullStartMs, followEnd - spanMs);
-            state.timeline.setWindow(toTime(followStart), toTime(followEnd), { animation: false });
-            networkWaterfallViewBySession.set(key, { startMs: followStart, endMs: followEnd });
-        } else if (storedView && Number.isFinite(storedView.startMs) && Number.isFinite(storedView.endMs)) {
-            const clampedStart = Math.max(fullStartMs, Math.min(fullEndMs, storedView.startMs));
-            const clampedEnd = Math.max(clampedStart + 20, Math.min(fullEndMs, storedView.endMs));
-            state.timeline.setWindow(toTime(clampedStart), toTime(clampedEnd), { animation: false });
-        } else {
-            state.timeline.setWindow(toTime(fullStartMs), toTime(fullEndMs), { animation: false });
+
+        // Lazy-attach scroll listener — scrolling away from the bottom
+        // disables Following Latest.
+        if (scrollHost && !scrollHost.dataset.netwfBound) {
+            scrollHost.dataset.netwfBound = '1';
+            scrollHost.addEventListener('scroll', () => {
+                const c = scrollHost.closest('.session-card');
+                const sid = c ? String(c.dataset.sessionId || '') : '';
+                if (!sid) return;
+                if (isNetworkLogFollowMode(sid) && scrollHost.scrollTop + scrollHost.clientHeight < scrollHost.scrollHeight - 4) {
+                    setNetworkLogFollowMode(sid, false);
+                    updateNetworkLogFollowButton(c, sid);
+                }
+            }, { passive: true });
         }
-        state.timeline.redraw();
-        if (following) {
-            scrollWaterfallToLatestRow(state);
-        } else if (scrollAnchor) {
-            // Re-render snapped vis-timeline's scroll to top — restore
-            // the user's view by scrolling the same row back into the
-            // same vertical offset within the viewport.
-            window.requestAnimationFrame(() => {
-                window.requestAnimationFrame(() => restoreScrollAnchor(state, scrollAnchor));
-            });
-        }
-        // After the initial render, drive the time window from the
-        // currently-visible rows when Follow Scroll is on. The setWindow
-        // calls above bracket the data range; auto-pan tightens to just
-        // what the user is looking at. Two rAFs let vis-timeline lay out
-        // its panels (the second one is when scrollHeight is final).
-        if (isFollowScrollMode(key) && state.autoPan) {
-            window.requestAnimationFrame(() => {
-                window.requestAnimationFrame(() => applyWaterfallAutoPan(state, key));
-            });
+
+        // Lazy-attach hover tooltip handlers on the chart host.
+        if (chartHost && !chartHost.dataset.netwfTipBound) {
+            chartHost.dataset.netwfTipBound = '1';
+            attachWaterfallHoverTooltip(chartHost);
         }
     }
+
+    let netwfTooltipEl = null;
+    function ensureNetwfTooltip() {
+        if (netwfTooltipEl && document.body.contains(netwfTooltipEl)) return netwfTooltipEl;
+        netwfTooltipEl = document.createElement('div');
+        netwfTooltipEl.className = 'netwf-tooltip';
+        document.body.appendChild(netwfTooltipEl);
+        return netwfTooltipEl;
+    }
+
+    function attachWaterfallHoverTooltip(chartHost) {
+        let activeRowEl = null;
+        const onMove = (event) => {
+            const rowEl = event.target.closest('.netwf-row');
+            if (!rowEl || !chartHost.contains(rowEl) || !rowEl.__netwfRow) {
+                hideTip();
+                return;
+            }
+            if (rowEl !== activeRowEl) {
+                activeRowEl = rowEl;
+                renderTipFor(rowEl.__netwfRow);
+            }
+            positionTip(event.clientX, event.clientY);
+        };
+        const onLeave = () => hideTip();
+        chartHost.addEventListener('mousemove', onMove);
+        chartHost.addEventListener('mouseleave', onLeave);
+    }
+
+    function renderTipFor(row) {
+        const tip = ensureNetwfTooltip();
+        const entry = row.entry || {};
+        const status = entry.status ? String(entry.status) : '—';
+        const method = entry.method || 'GET';
+        const bytesOut = Number(entry.bytes_out || 0);
+        const bytesLabel = bytesOut > 0 ? formatBytes(bytesOut) : '—';
+        const mbpsLabel = formatMbpsFromBytesAndMs(bytesOut, row.transfer);
+        const startedAt = new Date(row.timestamp);
+        const startedLabel = `${String(startedAt.getHours()).padStart(2,'0')}:${String(startedAt.getMinutes()).padStart(2,'0')}:${String(startedAt.getSeconds()).padStart(2,'0')}.${String(startedAt.getMilliseconds()).padStart(3,'0')}`;
+
+        const phases = [
+            { key: 'dns', name: 'DNS', value: row.dns },
+            { key: 'connect', name: 'Connect', value: row.connect },
+            { key: 'tls', name: 'TLS', value: row.tls },
+            { key: 'wait', name: 'Wait (TTFB)', value: row.wait },
+            { key: 'transfer', name: 'Receive', value: row.transfer }
+        ].filter((p) => p.value > 0);
+
+        const phaseRows = phases.map((p) =>
+            `<div class="netwf-tooltip-phase-swatch ${p.key}"></div>`
+            + `<div class="netwf-tooltip-phase-name">${escapeHtml(p.name)}</div>`
+            + `<div class="netwf-tooltip-phase-value">${escapeHtml(formatMilliseconds(p.value))}</div>`
+        ).join('');
+
+        const variant = row.variantLabel ? row.variantLabel : '—';
+        const filename = row.filename || '—';
+        const faultBlock = entry.faulted
+            ? `<div class="netwf-tooltip-fault"><strong>FAULT</strong>: ${escapeHtml(entry.fault_type || 'unknown')}${entry.fault_action ? ` · ${escapeHtml(entry.fault_action)}` : ''}</div>`
+            : '';
+        const url = entry.url || entry.path || '';
+
+        const attemptStr = row.totalAttempts > 1
+            ? `${row.attempt} of ${row.totalAttempts}`
+                + (row.gap_from_prev_ms !== null && row.gap_from_prev_ms !== undefined
+                    ? ` · ${formatMilliseconds(row.gap_from_prev_ms)} since previous`
+                    : '')
+                + (row.is_retry
+                    ? ` (quick retry · cutoff ${formatMilliseconds(row.retry_threshold_ms || 0)})`
+                    : '')
+            : '1';
+        const reqRange = entry.request_range || '';
+        const respRange = entry.response_content_range || '';
+        const rangeStr = reqRange || respRange
+            ? `${reqRange ? `req: ${reqRange}` : ''}${reqRange && respRange ? ' · ' : ''}${respRange ? `resp: ${respRange}` : ''}`
+            : '';
+
+        tip.innerHTML = `
+            <div class="netwf-tooltip-head">${escapeHtml(method)} ${escapeHtml(filename)}</div>
+            <dl class="netwf-tooltip-meta">
+                <dt>Status</dt><dd>${escapeHtml(status)}${status === '206' ? ' (Partial Content)' : ''}</dd>
+                <dt>Total</dt><dd>${escapeHtml(formatMilliseconds(row.duration))}</dd>
+                <dt>Bytes</dt><dd>${escapeHtml(bytesLabel)} @ ${escapeHtml(mbpsLabel)}</dd>
+                <dt>Variant</dt><dd>${escapeHtml(variant)}</dd>
+                <dt>Started</dt><dd>${escapeHtml(startedLabel)}</dd>
+                <dt>Attempt</dt><dd>${escapeHtml(attemptStr)}</dd>
+                ${rangeStr ? `<dt>Range</dt><dd>${escapeHtml(rangeStr)}</dd>` : ''}
+            </dl>
+            <div class="netwf-tooltip-phases">${phaseRows || '<div></div><div class="netwf-tooltip-phase-name">no phase data</div><div></div>'}</div>
+            ${faultBlock}
+            ${url ? `<div class="netwf-tooltip-url">${escapeHtml(url)}</div>` : ''}
+        `;
+        tip.classList.add('visible');
+    }
+
+    function positionTip(clientX, clientY) {
+        const tip = ensureNetwfTooltip();
+        if (!tip.classList.contains('visible')) return;
+        const margin = 12;
+        // Read after innerHTML has been set so dimensions reflect content.
+        const rect = tip.getBoundingClientRect();
+        let left = clientX + 14;
+        let top = clientY + 14;
+        if (left + rect.width + margin > window.innerWidth) {
+            left = clientX - rect.width - 14;
+        }
+        if (top + rect.height + margin > window.innerHeight) {
+            top = clientY - rect.height - 14;
+        }
+        if (left < margin) left = margin;
+        if (top < margin) top = margin;
+        tip.style.left = `${left}px`;
+        tip.style.top = `${top}px`;
+    }
+
+    function hideTip() {
+        if (netwfTooltipEl) netwfTooltipEl.classList.remove('visible');
+    }
+
+    function buildRowSignature(row) {
+        return `${row.timestamp}|${Math.round(row.duration)}|${row.entry.status || ''}|${row.entry.bytes_out || 0}|${row.label}|${row.entry.faulted ? 'F' : ''}|${row.entry.fault_type || ''}|${row.attempt || 1}|${row.is_retry ? 'R' : ''}|${row.entry.request_range || ''}`;
+    }
+
+    function waterfallRowStatusClasses(row) {
+        const cls = [];
+        const status = Number(row.entry.status) || 0;
+        if (status === 206) cls.push(' status-206');
+        else if (status >= 200 && status < 300) cls.push(' status-2xx');
+        else if (status >= 300 && status < 400) cls.push(' status-3xx');
+        else if (status >= 400 && status < 500) cls.push(' status-4xx');
+        else if (status >= 500) cls.push(' status-5xx');
+
+        const ft = String(row.entry.fault_type || '').toLowerCase();
+        if (ft.includes('timeout')) cls.push(' fault-timeout');
+        else if (ft.includes('corrupt') || ft.includes('partial') || isWaterfallRowIncomplete(row)) cls.push(' fault-incomplete');
+        else if (row.entry.faulted) cls.push(' is-faulted');
+
+        if (row.is_retry) cls.push(' is-retry');
+        return cls.join('');
+    }
+
+    function isWaterfallRowIncomplete(row) {
+        const ft = String(row.entry.fault_type || '').toLowerCase();
+        if (ft.includes('timeout') || ft.includes('corrupt') || ft.includes('partial') || ft.includes('abandon')) return true;
+        // Heuristic: faulted with bytes-out smaller than expected. We
+        // don't always know "expected", but a faulted entry with a
+        // 2xx status implies the proxy injected a partial/incomplete
+        // response.
+        const status = Number(row.entry.status) || 0;
+        if (row.entry.faulted && status >= 200 && status < 300) return true;
+        return false;
+    }
+
+    function buildWaterfallRowEl(row, idx, winStart, winEnd) {
+        const el = document.createElement('div');
+        el.className = 'netwf-row' + waterfallRowStatusClasses(row);
+        el.dataset.rowIdx = String(idx);
+        // Stash the row data on the DOM node so the hover tooltip can
+        // build a rich expansion without re-querying the session map.
+        el.__netwfRow = row;
+
+        // Column cells. Widths come from CSS vars on the chart host —
+        // resizing a header reflows every row in sync.
+        const ts = new Date(row.timestamp);
+        const tsLabel = `${String(ts.getHours()).padStart(2,'0')}:${String(ts.getMinutes()).padStart(2,'0')}:${String(ts.getSeconds()).padStart(2,'0')}.${String(ts.getMilliseconds()).padStart(3,'0')}`;
+        const method = row.entry.method || 'GET';
+        const bytesOut = Number(row.entry.bytes_out || 0);
+        const bytesLabel = formatKBNumber(bytesOut);
+        const mbpsLabel = formatMbpsNumber(bytesOut, row.transfer);
+        const path = row.pathDisplay || row.filename || '';
+        const flags = (row.is_retry ? '↻' : '') + (row.entry.faulted ? '!' : '');
+        const statusCode = Number(row.entry.status) || 0;
+
+        const cells = [
+            { col: 'time', text: tsLabel },
+            { col: 'flags', text: flags, color: row.is_retry ? '#be185d' : (row.entry.faulted ? '#7f1d1d' : '') },
+            { col: 'method', text: method },
+            { col: 'path', text: path, title: row.entry.url || row.entry.path || '' },
+            { col: 'bytes', text: bytesLabel },
+            { col: 'mbps', text: mbpsLabel },
+            { col: 'status', text: statusCode > 0 ? String(statusCode) : '—' }
+        ];
+        for (const c of cells) {
+            const cellEl = document.createElement('div');
+            cellEl.className = `netwf-cell ${c.col}`;
+            cellEl.textContent = c.text;
+            if (c.title) cellEl.title = c.title;
+            if (c.color) cellEl.style.color = c.color;
+            el.appendChild(cellEl);
+        }
+
+        const trackEl = document.createElement('div');
+        trackEl.className = 'netwf-row-track';
+
+        const winSpan = Math.max(50, winEnd - winStart);
+        const reqStart = row.timestamp;
+        const reqEnd = row.timestamp + Math.max(50, row.duration);
+        // Off-screen rows (entirely outside the brush): render an
+        // empty track so vertical alignment with the URL list stays
+        // correct.
+        if (reqEnd >= winStart && reqStart <= winEnd) {
+            const left = ((reqStart - winStart) / winSpan) * 100;
+            const width = ((reqEnd - reqStart) / winSpan) * 100;
+            const barEl = document.createElement('div');
+            barEl.className = 'netwf-row-bar' + (isWaterfallRowIncomplete(row) ? ' is-incomplete' : '');
+            barEl.style.left = `${Math.max(0, left).toFixed(3)}%`;
+            barEl.style.width = `${Math.max(0.2, width).toFixed(3)}%`;
+            // No native title — custom hover tooltip handles details.
+            const phases = [
+                { key: 'dns', value: row.dns },
+                { key: 'connect', value: row.connect },
+                { key: 'tls', value: row.tls },
+                { key: 'wait', value: row.wait },
+                { key: 'transfer', value: row.transfer }
+            ];
+            const total = phases.reduce((sum, p) => sum + Math.max(0, p.value), 0);
+            for (const phase of phases) {
+                if (phase.value <= 0) continue;
+                const seg = document.createElement('div');
+                seg.className = `netwf-row-phase ${phase.key}`;
+                seg.style.flex = `${phase.value / total} 0 0`;
+                barEl.appendChild(seg);
+            }
+            trackEl.appendChild(barEl);
+
+            // Duration text just past the right edge of the bar. If
+            // the bar is too far right to fit text after it, anchor
+            // the text just before the bar's right edge instead.
+            const right = Math.max(0, left) + Math.max(0.2, width);
+            const durEl = document.createElement('div');
+            durEl.className = 'netwf-row-duration';
+            durEl.textContent = formatMilliseconds(row.duration);
+            if (right < 90) {
+                durEl.style.left = `calc(${right.toFixed(3)}% + 6px)`;
+            } else {
+                durEl.style.right = `${(100 - right + 0.5).toFixed(3)}%`;
+            }
+            trackEl.appendChild(durEl);
+        }
+
+        el.appendChild(trackEl);
+        return el;
+    }
+
+    // Header column definitions — `key` matches CSS variable name
+    // (`--netwf-col-${key}`) and the cell class. `min` is the smallest
+    // pixel width we'll let the user drag the column to.
+    const NETWF_COLUMNS = [
+        { key: 'time',   label: 'Time',     min: 60 },
+        { key: 'flags',  label: '',         min: 16 },
+        { key: 'method', label: 'Method',   min: 30 },
+        { key: 'path',   label: 'Path',     min: 60 },
+        // Single-unit columns: header carries the unit, cells carry
+        // tabular-aligned numbers. Bytes always rendered in KB,
+        // throughput always in Mbps — easier to scan than mixed units.
+        { key: 'bytes',  label: 'KB',       min: 50 },
+        { key: 'mbps',   label: 'Mbps',     min: 50 },
+        { key: 'status', label: 'Status',   min: 40 }
+    ];
+
+    function buildWaterfallAxisRow(chartHost) {
+        const axisEl = document.createElement('div');
+        axisEl.className = 'netwf-axis';
+        for (const col of NETWF_COLUMNS) {
+            const cell = document.createElement('div');
+            cell.className = `netwf-cell ${col.key}`;
+            cell.textContent = col.label;
+            const resizer = document.createElement('div');
+            resizer.className = 'netwf-cell-resizer';
+            resizer.dataset.col = col.key;
+            resizer.dataset.minPx = String(col.min);
+            cell.appendChild(resizer);
+            attachWaterfallColumnResizer(chartHost, resizer);
+            axisEl.appendChild(cell);
+        }
+        const scale = document.createElement('div');
+        scale.className = 'netwf-axis-scale';
+        scale.dataset.field = 'netwf_axis_scale';
+        axisEl.appendChild(scale);
+        return axisEl;
+    }
+
+    function attachWaterfallColumnResizer(chartHost, resizer) {
+        let drag = null;
+        resizer.addEventListener('mousedown', (e) => {
+            const col = resizer.dataset.col;
+            if (!col) return;
+            const cell = resizer.parentElement;
+            const startPx = cell.getBoundingClientRect().width;
+            drag = {
+                col,
+                startX: e.clientX,
+                startPx,
+                minPx: parseInt(resizer.dataset.minPx, 10) || 30,
+                cssVar: `--netwf-col-${col}`
+            };
+            resizer.classList.add('dragging');
+            document.body.style.cursor = 'col-resize';
+            e.preventDefault();
+            e.stopPropagation();
+        });
+        const onMove = (e) => {
+            if (!drag) return;
+            const next = Math.max(drag.minPx, drag.startPx + (e.clientX - drag.startX));
+            chartHost.style.setProperty(drag.cssVar, `${Math.round(next)}px`);
+        };
+        const onUp = () => {
+            if (!drag) return;
+            // Persist the new width so it survives session-card re-renders
+            // and page reloads.
+            try {
+                const stored = JSON.parse(localStorage.getItem('netwf-cols-v2') || '{}');
+                stored[drag.col] = chartHost.style.getPropertyValue(`--netwf-col-${drag.col}`);
+                localStorage.setItem('netwf-cols-v2', JSON.stringify(stored));
+            } catch (_) { /* no-op */ }
+            drag = null;
+            resizer.classList.remove('dragging');
+            document.body.style.cursor = '';
+        };
+        document.addEventListener('mousemove', onMove);
+        document.addEventListener('mouseup', onUp);
+    }
+
+    // Re-apply persisted column widths to a chart host on first
+    // render so user preferences survive page reloads.
+    function applyPersistedWaterfallColumns(chartHost) {
+        if (!chartHost || chartHost.dataset.netwfColsApplied) return;
+        chartHost.dataset.netwfColsApplied = '1';
+        try {
+            const stored = JSON.parse(localStorage.getItem('netwf-cols-v2') || '{}');
+            for (const col of NETWF_COLUMNS) {
+                const v = stored[col.key];
+                if (v) chartHost.style.setProperty(`--netwf-col-${col.key}`, v);
+            }
+        } catch (_) { /* no-op */ }
+    }
+
+    function renderWaterfallAxisTicks(host, winStart, winEnd) {
+        host.replaceChildren();
+        const span = winEnd - winStart;
+        if (span <= 0) return;
+        const targetTickCount = 6;
+        const niceMs = pickNiceTickIntervalMs(span / targetTickCount);
+        const firstTick = Math.ceil(winStart / niceMs) * niceMs;
+        for (let t = firstTick; t <= winEnd; t += niceMs) {
+            const left = ((t - winStart) / span) * 100;
+            if (left < 0 || left > 100) continue;
+            const tick = document.createElement('div');
+            tick.className = 'netwf-axis-tick';
+            tick.style.left = `${left.toFixed(3)}%`;
+            host.appendChild(tick);
+            const label = document.createElement('div');
+            label.className = 'netwf-axis-tick-label';
+            label.style.left = `${left.toFixed(3)}%`;
+            label.textContent = formatAxisTickLabel(t);
+            host.appendChild(label);
+        }
+        // Right-aligned summary: brush span (zoom level).
+        const summary = document.createElement('div');
+        summary.className = 'netwf-axis-summary';
+        summary.textContent = `Δ ${formatMilliseconds(span)}`;
+        host.appendChild(summary);
+    }
+
+    function renderWaterfallSummary(host, rows, dataStartMs, dataEndMs) {
+        const counts = {
+            total: rows.length,
+            success: 0,
+            partial: 0,
+            client: 0,
+            server: 0,
+            faulted: 0,
+            timeout: 0,
+            disconnect: 0,
+            retry: 0
+        };
+        for (const row of rows) {
+            const status = Number(row.entry.status) || 0;
+            if (status === 206) counts.partial += 1;
+            else if (status >= 200 && status < 300) counts.success += 1;
+            else if (status >= 400 && status < 500) counts.client += 1;
+            else if (status >= 500) counts.server += 1;
+
+            const ft = String(row.entry.fault_type || '').toLowerCase();
+            if (ft.includes('timeout')) counts.timeout += 1;
+            else if (ft.includes('client_disconnect') || ft === 'client_disconnect') counts.disconnect += 1;
+            else if (row.entry.faulted) counts.faulted += 1;
+
+            if (row.is_retry) counts.retry += 1;
+        }
+        const span = Math.max(0, dataEndMs - dataStartMs);
+        const pill = (cls, label, count) => {
+            const zero = count === 0 ? ' zero' : '';
+            return `<span class="netwf-summary-pill ${cls}${zero}"><span class="count">${count}</span> ${escapeHtml(label)}</span>`;
+        };
+        host.innerHTML = [
+            `<span class="netwf-summary-pill total"><span class="count">${counts.total}</span> requests</span>`,
+            `<span class="netwf-summary-pill span">${escapeHtml(formatMilliseconds(span))} span</span>`,
+            pill('success', '2xx', counts.success),
+            pill('partial', '206', counts.partial),
+            pill('client-error', '4xx', counts.client),
+            pill('server-error', '5xx', counts.server),
+            pill('faulted', 'faulted', counts.faulted),
+            pill('timeout', 'timeouts', counts.timeout),
+            pill('disconnect', 'disconnects', counts.disconnect),
+            pill('retry', 'retries', counts.retry)
+        ].join('');
+    }
+
+    function pickNiceTickIntervalMs(roughMs) {
+        const candidates = [10, 25, 50, 100, 200, 250, 500, 1000, 2000, 5000, 10000, 15000, 30000, 60000, 120000, 300000];
+        for (const c of candidates) if (c >= roughMs) return c;
+        return Math.ceil(roughMs / 60000) * 60000;
+    }
+
+    function formatAxisTickLabel(absMs) {
+        const d = new Date(absMs);
+        const hh = String(d.getHours()).padStart(2, '0');
+        const mm = String(d.getMinutes()).padStart(2, '0');
+        const ss = String(d.getSeconds()).padStart(2, '0');
+        return `${hh}:${mm}:${ss}`;
+    }
+
+    // Brush drag/resize handlers. The brush is positioned in % of the
+    // overview's width, so we convert px deltas to % via the
+    // overview's bounding rect. Drag-pan or drag-resize disables
+    // Following Latest so the user's selection stays put.
+    function attachBrushHandlers(card, overviewEl, brushEl) {
+        if (!overviewEl) return;
+        const sessionId = String(card.dataset.sessionId || '');
+        if (!sessionId) return;
+
+        let drag = null;
+
+        const startDrag = (event, mode) => {
+            const rect = overviewEl.getBoundingClientRect();
+            if (rect.width <= 0) return;
+            const rows = networkWaterfallRowsBySession.get(sessionId) || [];
+            if (!rows.length) return;
+            const dataStartMs = rows[0].timestamp;
+            const dataEndMs = Math.max(...rows.map((r) => r.timestamp + Math.max(50, r.duration)));
+            const fullSpan = Math.max(50, dataEndMs - dataStartMs);
+            const brush = networkWaterfallBrushBySession.get(sessionId);
+            if (!brush) return;
+            drag = {
+                mode,
+                rect,
+                fullSpan,
+                dataStartMs,
+                dataEndMs,
+                startBrushStart: brush.startMs,
+                startBrushEnd: brush.endMs,
+                pointerStartX: event.clientX
+            };
+            brushEl?.classList.add('dragging');
+            event.preventDefault();
+            event.stopPropagation();
+        };
+
+        const onPointerMove = (event) => {
+            if (!drag) return;
+            const dxPx = event.clientX - drag.pointerStartX;
+            const dxMs = (dxPx / drag.rect.width) * drag.fullSpan;
+            const brush = networkWaterfallBrushBySession.get(sessionId);
+            if (!brush) return;
+            if (drag.mode === 'pan') {
+                let newStart = drag.startBrushStart + dxMs;
+                let newEnd = drag.startBrushEnd + dxMs;
+                const span = newEnd - newStart;
+                if (newStart < drag.dataStartMs) { newStart = drag.dataStartMs; newEnd = newStart + span; }
+                if (newEnd > drag.dataEndMs) { newEnd = drag.dataEndMs; newStart = newEnd - span; }
+                brush.startMs = newStart;
+                brush.endMs = newEnd;
+            } else if (drag.mode === 'resize-left') {
+                let newStart = drag.startBrushStart + dxMs;
+                if (newStart < drag.dataStartMs) newStart = drag.dataStartMs;
+                // Enforce the minimum brush width — never let the user
+                // drag the left handle within networkWaterfallMinBrushMs
+                // of the right edge.
+                if (newStart > brush.endMs - networkWaterfallMinBrushMs) {
+                    newStart = brush.endMs - networkWaterfallMinBrushMs;
+                }
+                brush.startMs = newStart;
+            } else if (drag.mode === 'resize-right') {
+                let newEnd = drag.startBrushEnd + dxMs;
+                if (newEnd > drag.dataEndMs) newEnd = drag.dataEndMs;
+                if (newEnd < brush.startMs + networkWaterfallMinBrushMs) {
+                    newEnd = brush.startMs + networkWaterfallMinBrushMs;
+                }
+                brush.endMs = newEnd;
+            }
+            brush.follow = false;
+            // Disable Following Latest so the user's pick sticks.
+            if (isNetworkLogFollowMode(sessionId)) {
+                setNetworkLogFollowMode(sessionId, false);
+                updateNetworkLogFollowButton(card, sessionId);
+            }
+            updateNetworkWaterfall(card, sessionId);
+        };
+
+        const onPointerUp = () => {
+            if (!drag) return;
+            drag = null;
+            brushEl?.classList.remove('dragging');
+        };
+
+        // Brush body = pan. Handles = resize. Click on bare overview
+        // jumps the brush centre to the click point.
+        if (brushEl) {
+            brushEl.addEventListener('mousedown', (e) => {
+                if (e.target.classList.contains('netwf-brush-handle')) return;
+                startDrag(e, 'pan');
+            });
+            const leftHandle = brushEl.querySelector('.netwf-brush-handle.left');
+            const rightHandle = brushEl.querySelector('.netwf-brush-handle.right');
+            if (leftHandle) leftHandle.addEventListener('mousedown', (e) => startDrag(e, 'resize-left'));
+            if (rightHandle) rightHandle.addEventListener('mousedown', (e) => startDrag(e, 'resize-right'));
+        }
+        overviewEl.addEventListener('mousedown', (e) => {
+            if (e.target !== overviewEl && !e.target.classList.contains('netwf-overview-bars')) return;
+            const rect = overviewEl.getBoundingClientRect();
+            const rows = networkWaterfallRowsBySession.get(sessionId) || [];
+            if (!rows.length || rect.width <= 0) return;
+            const dataStartMs = rows[0].timestamp;
+            const dataEndMs = Math.max(...rows.map((r) => r.timestamp + Math.max(50, r.duration)));
+            const fullSpan = Math.max(50, dataEndMs - dataStartMs);
+            const fracX = (e.clientX - rect.left) / rect.width;
+            const targetMs = dataStartMs + fracX * fullSpan;
+            const brush = networkWaterfallBrushBySession.get(sessionId);
+            if (!brush) return;
+            const span = brush.endMs - brush.startMs;
+            brush.startMs = Math.max(dataStartMs, targetMs - span / 2);
+            brush.endMs = Math.min(dataEndMs, brush.startMs + span);
+            brush.startMs = brush.endMs - span;
+            brush.follow = false;
+            if (isNetworkLogFollowMode(sessionId)) {
+                setNetworkLogFollowMode(sessionId, false);
+                updateNetworkLogFollowButton(card, sessionId);
+            }
+            updateNetworkWaterfall(card, sessionId);
+        });
+
+        document.addEventListener('mousemove', onPointerMove);
+        document.addEventListener('mouseup', onPointerUp);
+    }
+
 
     function updateNetworkLog(sessionId, options = {}) {
         if (!networkLogDeveloperEnabled) return;
