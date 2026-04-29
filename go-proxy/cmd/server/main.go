@@ -106,6 +106,14 @@ type NetworkLogEntry struct {
 	BytesOut    int64     `json:"bytes_out"`
 	ContentType string    `json:"content_type"`
 
+	// PlayID identifies the playback episode this request belongs to.
+	// The player generates a fresh UUID at every loadStream / reload
+	// and passes it as `?play_id=...` on every URL. HAR snapshots
+	// filter by the current play_id by default, so a freeze 8 minutes
+	// into a session shows just that play's network log instead of
+	// the whole ring buffer. Issue #280.
+	PlayID string `json:"play_id,omitempty"`
+
 	// Timing phases (milliseconds)
 	DNSMs      float64 `json:"dns_ms"`
 	ConnectMs  float64 `json:"connect_ms"`
@@ -3547,6 +3555,17 @@ func (iw *idleWriter) Stop() {
 }
 
 func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
+	// Extract the player's `play_id` query param (issue #280). Used to
+	// scope HAR snapshots to a single playback episode. Stamped onto
+	// every NetworkLogEntry created in this handler via the logEntry
+	// closure below.
+	playID := strings.TrimSpace(r.URL.Query().Get("play_id"))
+	logEntry := func(sessionID string, entry NetworkLogEntry) {
+		if entry.PlayID == "" {
+			entry.PlayID = playID
+		}
+		a.addNetworkLogEntry(sessionID, entry)
+	}
 	filename := strings.TrimPrefix(r.URL.Path, "/")
 	escapedPath := strings.TrimPrefix(r.URL.EscapedPath(), "/")
 	if filename == "" {
@@ -3858,7 +3877,7 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 				// Log network entry for fault
 				sessionID := getString(sessionData, "session_id")
 				netEntry := createFaultLogEntry(upstreamURL, requestKind, failureType, actionTaken, http.StatusBadGateway, requestBytes)
-				a.addNetworkLogEntry(sessionID, netEntry)
+				logEntry(sessionID,netEntry)
 				sessionList[index] = sessionData
 				a.saveSessionList(sessionList)
 				return
@@ -3885,7 +3904,7 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 				netEntry.FaultType = failureType
 				netEntry.FaultAction = actionTaken
 				netEntry.FaultCategory = categorizeFaultType(failureType)
-				a.addNetworkLogEntry(sessionID, *netEntry)
+				logEntry(sessionID,*netEntry)
 				sessionList[index] = sessionData
 				a.saveSessionList(sessionList)
 				return
@@ -3905,7 +3924,7 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 				netEntry.FaultType = failureType
 				netEntry.FaultAction = actionTaken
 				netEntry.FaultCategory = categorizeFaultType(failureType)
-				a.addNetworkLogEntry(sessionID, *netEntry)
+				logEntry(sessionID,*netEntry)
 				sessionList[index] = sessionData
 				a.saveSessionList(sessionList)
 				return
@@ -3937,7 +3956,7 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 			netEntry.FaultType = failureType
 			netEntry.FaultAction = actionTaken
 			netEntry.FaultCategory = categorizeFaultType(failureType)
-			a.addNetworkLogEntry(sessionID, *netEntry)
+			logEntry(sessionID,*netEntry)
 			sessionList[index] = sessionData
 			a.saveSessionList(sessionList)
 			return
@@ -3959,7 +3978,7 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 			sessionID := getString(sessionData, "session_id")
 			status := http.StatusServiceUnavailable
 			netEntry := createFaultLogEntry(upstreamURL, requestKind, failureType, actionTaken, status, requestBytes)
-			a.addNetworkLogEntry(sessionID, netEntry)
+			logEntry(sessionID,netEntry)
 			sessionList[index] = sessionData
 			a.saveSessionList(sessionList)
 			return
@@ -4015,7 +4034,7 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 			status = http.StatusTooManyRequests
 		}
 		netEntry := createFaultLogEntry(upstreamURL, requestKind, failureType, actionTaken, status, requestBytes)
-		a.addNetworkLogEntry(sessionID, netEntry)
+		logEntry(sessionID,netEntry)
 		return
 	}
 
@@ -4037,7 +4056,7 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 		// Log network entry for error
 		sessionID := getString(sessionData, "session_id")
 		netEntry := createFaultLogEntry(upstreamURL, requestKind, "none", "http_502_request_failed", http.StatusBadGateway, requestBytes)
-		a.addNetworkLogEntry(sessionID, netEntry)
+		logEntry(sessionID,netEntry)
 		return
 	}
 	if rangeHeader := r.Header.Get("Range"); rangeHeader != "" {
@@ -4064,7 +4083,7 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 		sessionID := getString(sessionData, "session_id")
 		netEntry.RequestKind = requestKind
 		netEntry.BytesIn = requestBytes
-		a.addNetworkLogEntry(sessionID, *netEntry)
+		logEntry(sessionID,*netEntry)
 		return
 	}
 	defer resp.Body.Close()
@@ -4088,7 +4107,7 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 		sessionID := getString(sessionData, "session_id")
 		netEntry.RequestKind = requestKind
 		netEntry.BytesIn = requestBytes
-		a.addNetworkLogEntry(sessionID, *netEntry)
+		logEntry(sessionID,*netEntry)
 		return
 	}
 	copyUpstreamHeaders(w, resp)
@@ -4207,7 +4226,7 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 	netEntry.RequestKind = requestKind
 	netEntry.BytesIn = requestBytes
 	netEntry.BytesOut = bytesOut
-	a.addNetworkLogEntry(sessionID, *netEntry)
+	logEntry(sessionID,*netEntry)
 	a.saveSessionByID(sessionNumber, sessionData)
 }
 

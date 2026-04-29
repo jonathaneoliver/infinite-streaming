@@ -95,6 +95,13 @@ final class PlayerViewModel: ObservableObject {
     /// **not** rotate it — proxy session continuity matters.
     let playerId: String = UUID().uuidString
 
+    /// `play_id` (issue #280) — a UUID regenerated at every fresh
+    /// playback episode (loadStream / reload / retry / variant change).
+    /// Threaded through every URL the player issues as `?play_id=...`
+    /// so go-proxy can scope its NetworkLogEntry ring buffer per play.
+    /// HAR snapshots filter to the most-recent play_id by default.
+    private var currentPlayID: String = UUID().uuidString
+
     // MARK: - Private state
 
     private var codecRetries = 0
@@ -481,6 +488,8 @@ final class PlayerViewModel: ObservableObject {
 
     private func buildURLAndLoad() {
         guard let server = activeServer, !selectedContent.isEmpty else { return }
+        // Fresh play_id at every loadStream boundary — issue #280.
+        regeneratePlayID()
         var url = StreamURLBuilder.playbackURL(
             server: server,
             contentName: selectedContent,
@@ -499,7 +508,12 @@ final class PlayerViewModel: ObservableObject {
         } else {
             url = resolved
         }
-        guard let final = url else { return }
+        guard var final = url else { return }
+        // Append play_id last so it survives the player_id strip above
+        // for k3s-dev's content port. (For HAR scoping go-proxy reads
+        // play_id from URLs that hit it; the content port stripping
+        // only affects routes that don't reach go-proxy.)
+        final = appendPlayID(to: final)
         self.currentURL = final
         self.statusText = final.absoluteString
         loadStream(url: final)
@@ -510,6 +524,23 @@ final class PlayerViewModel: ObservableObject {
         components.queryItems = components.queryItems?.filter { $0.name != "player_id" }
         if components.queryItems?.isEmpty == true { components.queryItems = nil }
         return components.url ?? url
+    }
+
+    /// Replace any existing `play_id` query item with the current
+    /// `currentPlayID`. Issue #280.
+    private func appendPlayID(to url: URL) -> URL {
+        guard var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return url }
+        var items = components.queryItems ?? []
+        items.removeAll { $0.name == "play_id" }
+        items.append(URLQueryItem(name: "play_id", value: currentPlayID))
+        components.queryItems = items
+        return components.url ?? url
+    }
+
+    /// Mint a fresh `play_id` UUID. Called at every new playback
+    /// episode boundary so go-proxy can scope its network log per play.
+    private func regeneratePlayID() {
+        currentPlayID = UUID().uuidString
     }
 
     private func loadStream(url: URL) {
@@ -773,7 +804,13 @@ final class PlayerViewModel: ObservableObject {
     /// the *same* URL on the *same* AVPlayer.
     func retry() {
         guard let url = currentURL else { return }
-        loadStream(url: url)
+        // A retry is a new playback episode — fresh play_id so the
+        // proxy's network log scopes the next round of requests
+        // separately from the one that just failed. Issue #280.
+        regeneratePlayID()
+        let refreshed = appendPlayID(to: url)
+        self.currentURL = refreshed
+        loadStream(url: refreshed)
     }
 
     /// Full tear-down + recreate. Replaces the AVPlayer instance,
