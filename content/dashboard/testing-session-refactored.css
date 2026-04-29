@@ -523,13 +523,479 @@
     margin-bottom: 10px;
     padding: 0;
     overflow: hidden;
+    font-size: 11px;
+}
+
+/* Native scroll on the wrapper. The list of rows is the height of the
+ * data; the wrapper clips it. New entries appended at the bottom
+ * don't pull the user's scroll position around. Max-height fits the
+ * sticky 22px axis row plus 20 data rows (axis stays visible while
+ * the rows below scroll). */
+.network-log-waterfall-scroll {
+    width: 100%;
+    max-height: 462px; /* 22 (axis) + 20 * 22 (rows) */
+    overflow-y: auto;
+    overflow-x: hidden;
 }
 
 .network-log-waterfall {
     position: relative;
     width: 100%;
-    min-height: 280px;
-    height: 320px;
+}
+
+/* Summary row: at-a-glance stats for the visible HAR window. Sits
+ * above the overview so the user sees totals, span, and trouble
+ * counts before they even scroll. Click on a stat-pill to filter? —
+ * a future enhancement; for now it's read-only. */
+.netwf-summary {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 10px;
+    background: #f1f5f9;
+    border-bottom: 1px solid #e2e8f0;
+    font-size: 11px;
+    color: #475569;
+}
+
+.netwf-summary-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 2px 8px;
+    border-radius: 999px;
+    background: #e2e8f0;
+    color: #334155;
+    font-weight: 600;
+    line-height: 16px;
+    white-space: nowrap;
+}
+
+.netwf-summary-pill .count { font-variant-numeric: tabular-nums; }
+.netwf-summary-pill.span { background: #ddd6fe; color: #4c1d95; }
+.netwf-summary-pill.total { background: #cbd5e1; color: #1e293b; }
+.netwf-summary-pill.success { background: #d1fae5; color: #065f46; }
+.netwf-summary-pill.partial { background: #ccfbf1; color: #134e4a; }
+.netwf-summary-pill.client-error { background: #fef3c7; color: #92400e; }
+.netwf-summary-pill.server-error { background: #fee2e2; color: #991b1b; }
+.netwf-summary-pill.faulted { background: #fecaca; color: #7f1d1d; }
+.netwf-summary-pill.timeout { background: #fed7aa; color: #9a3412; }
+.netwf-summary-pill.disconnect { background: #fbcfe8; color: #831843; }
+.netwf-summary-pill.retry { background: #e0e7ff; color: #3730a3; }
+.netwf-summary-pill.zero { opacity: 0.45; }
+
+/* Time labels above the overview — give the user a wall-clock sense
+ * of the full session's span. Different ticks than the brush axis
+ * below (which zooms with the user's selection). */
+.netwf-overview-axis {
+    position: relative;
+    height: 18px;
+    background: #f8fafc;
+    border-bottom: 1px solid #eef2f7;
+    overflow: hidden;
+    font-size: 10px;
+    color: #64748b;
+    font-weight: 600;
+}
+
+/* Overview strip: shows the full session at small scale. The brush
+ * (selection rectangle) on top is the user's window into the
+ * waterfall below. Drag the body to pan, drag a handle to resize
+ * (zoom). Inspired by Chrome DevTools' Network overview. */
+.netwf-overview {
+    position: relative;
+    height: 36px;
+    background: #f8fafc;
+    border-bottom: 1px solid #e2e8f0;
+    cursor: crosshair;
+    user-select: none;
+    overflow: hidden;
+}
+
+.netwf-overview-bars {
+    position: absolute;
+    inset: 4px 0;
+    pointer-events: none;
+}
+
+.netwf-overview-tick {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    background: rgba(52, 211, 153, 0.65);
+    min-width: 1px;
+}
+
+/* Same status / fault palette as the main waterfall rows so the user
+ * can scan the overview and spot trouble at a glance. Higher z-index
+ * on errors so they're visible even when adjacent successful ticks
+ * cover them. */
+.netwf-overview-tick.status-206 { background: rgba(20, 184, 166, 0.75); }
+.netwf-overview-tick.status-3xx { background: rgba(96, 165, 250, 0.75); }
+.netwf-overview-tick.status-4xx { background: rgba(245, 158, 11, 0.85); z-index: 1; }
+.netwf-overview-tick.status-5xx { background: rgba(239, 68, 68, 0.9); z-index: 2; }
+.netwf-overview-tick.fault-timeout { background: rgba(217, 119, 6, 0.95); z-index: 3; }
+.netwf-overview-tick.fault-incomplete { background: rgba(190, 24, 93, 0.95); z-index: 3; }
+.netwf-overview-tick.is-faulted { background: rgba(185, 28, 28, 0.95); z-index: 4; }
+
+.netwf-brush {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    background: rgba(33, 150, 243, 0.10);
+    border-left: 2px solid #2196F3;
+    border-right: 2px solid #2196F3;
+    cursor: grab;
+    box-sizing: border-box;
+}
+
+.netwf-brush.dragging {
+    cursor: grabbing;
+}
+
+.netwf-brush-handle {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    width: 6px;
+    background: rgba(33, 150, 243, 0.35);
+    cursor: ew-resize;
+}
+
+.netwf-brush-handle.left { left: -3px; }
+.netwf-brush-handle.right { right: -3px; }
+
+/* Global-axis waterfall: each row's bar is positioned within the
+ * brush's time window. Bars on the same horizontal pixel = requests
+ * happening at the same wall-clock instant. Phase segments inside
+ * the bar render dns/connect/tls/wait/receive to scale. */
+.netwf-row {
+    display: flex;
+    align-items: center;
+    height: 22px;
+    border-bottom: 1px solid #eef2f7;
+    border-left: 3px solid transparent;
+    line-height: 22px;
+    box-sizing: border-box;
+}
+
+/* Status / fault tinting. Left-border accent + faint row background
+ * so the colour is visible without overpowering the bars. Faulted +
+ * timeout entries get the strongest signal because they're the
+ * thing the user is hunting. */
+.netwf-row.status-2xx { border-left-color: #34d399; }
+/* 206 Partial Content — distinct from a normal 200 because the
+ * player asked for a byte range. Teal so it stands apart from the
+ * green of full 2xx responses. */
+.netwf-row.status-206 { border-left-color: #14b8a6; background: #f0fdfa; }
+.netwf-row.status-3xx { border-left-color: #60a5fa; }
+.netwf-row.status-4xx { border-left-color: #f59e0b; background: #fffbeb; }
+.netwf-row.status-5xx { border-left-color: #ef4444; background: #fef2f2; }
+
+/* Retry / re-attempt accent — colour the row label so the ↻ glyph
+ * (rendered inline by the JS, after the timestamp) reads at a
+ * glance. The ! fault prefix sits next to it for the same reason. */
+.netwf-row.is-retry .netwf-row-label {
+    color: #be185d;
+}
+
+.netwf-row.is-faulted {
+    background: #fee2e2;
+    border-left-color: #b91c1c;
+}
+
+.netwf-row.fault-timeout {
+    background: #fef3c7;
+    border-left-color: #d97706;
+}
+
+.netwf-row.fault-incomplete {
+    background: #fce7f3;
+    border-left-color: #be185d;
+}
+
+/* Column-cell layout. Widths live in CSS variables on the waterfall
+ * host so a single drag on a header resizer reflows every row + the
+ * axis row in lockstep. Defaults below are the same widths the
+ * single-label version used; users can drag from there. */
+.network-log-waterfall {
+    --netwf-col-time: 116px; /* fits HH:MM:SS.mmm with padding */
+    --netwf-col-flags: 28px;
+    --netwf-col-method: 44px;
+    --netwf-col-path: 200px;
+    --netwf-col-bytes: 64px;
+    --netwf-col-mbps: 72px;
+    --netwf-col-status: 56px;
+}
+
+.netwf-cell {
+    position: relative;
+    padding: 0 6px;
+    border-right: 1px solid #e2e8f0;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+    font-size: 11px;
+    color: #334155;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    box-sizing: border-box;
+}
+
+.netwf-cell.time   { flex: 0 0 var(--netwf-col-time); }
+.netwf-cell.flags  { flex: 0 0 var(--netwf-col-flags); text-align: center; padding: 0; font-weight: 700; }
+.netwf-cell.method { flex: 0 0 var(--netwf-col-method); }
+.netwf-cell.path   { flex: 0 0 var(--netwf-col-path); }
+.netwf-cell.bytes  { flex: 0 0 var(--netwf-col-bytes); text-align: right; font-variant-numeric: tabular-nums; }
+.netwf-cell.mbps   { flex: 0 0 var(--netwf-col-mbps); text-align: right; font-variant-numeric: tabular-nums; }
+.netwf-cell.status {
+    flex: 0 0 var(--netwf-col-status);
+    text-align: center;
+    font-weight: 600;
+    color: #475569;
+}
+
+.netwf-row.status-2xx .netwf-cell.status { color: #065f46; background: #d1fae5; }
+.netwf-row.status-206 .netwf-cell.status { color: #134e4a; background: #ccfbf1; }
+.netwf-row.status-3xx .netwf-cell.status { color: #1e3a8a; background: #dbeafe; }
+.netwf-row.status-4xx .netwf-cell.status { color: #92400e; background: #fef3c7; }
+.netwf-row.status-5xx .netwf-cell.status { color: #991b1b; background: #fee2e2; }
+.netwf-row.is-faulted .netwf-cell.status,
+.netwf-row.fault-timeout .netwf-cell.status,
+.netwf-row.fault-incomplete .netwf-cell.status {
+    color: #7f1d1d;
+    background: #fecaca;
+}
+
+/* Drag handle on the right edge of header cells. Picks up pointer
+ * events; the body cells underneath ignore them. */
+.netwf-cell-resizer {
+    position: absolute;
+    top: 0;
+    right: -3px;
+    bottom: 0;
+    width: 6px;
+    cursor: col-resize;
+    z-index: 5;
+}
+
+.netwf-cell-resizer:hover,
+.netwf-cell-resizer.dragging {
+    background: rgba(33, 150, 243, 0.35);
+}
+
+/* Header (axis) cells inherit the same widths but render with the
+ * existing axis-row look. Each header cell is the only place that
+ * carries a resizer — drag affects all body rows via the shared CSS
+ * vars. */
+.netwf-axis .netwf-cell {
+    background: #f8fafc;
+    color: #64748b;
+    font-weight: 600;
+    line-height: 22px;
+}
+
+.netwf-row.status-4xx .netwf-row-label { color: #92400e; }
+.netwf-row.status-5xx .netwf-row-label { color: #991b1b; }
+.netwf-row.is-faulted .netwf-row-label { color: #7f1d1d; font-weight: 600; }
+.netwf-row.fault-timeout .netwf-row-label { color: #92400e; font-weight: 600; }
+.netwf-row.fault-incomplete .netwf-row-label { color: #831843; font-weight: 600; }
+
+/* Bar overlay when transfer didn't complete — diagonal hatch over
+ * the receive segment so it's visually clear bytes are missing. */
+.netwf-row-bar.is-incomplete .netwf-row-phase.transfer {
+    background-image: repeating-linear-gradient(
+        45deg,
+        rgba(190, 24, 93, 0.85) 0,
+        rgba(190, 24, 93, 0.85) 4px,
+        rgba(252, 231, 243, 0.85) 4px,
+        rgba(252, 231, 243, 0.85) 8px
+    );
+}
+
+/* Hover tooltip — floating panel that follows the cursor with full
+ * forensics for the row under the pointer. Pointer-events: none so
+ * the tooltip doesn't capture hover and ping-pong on/off. */
+.netwf-tooltip {
+    position: fixed;
+    z-index: 10000;
+    pointer-events: none;
+    background: #0f172a;
+    color: #e2e8f0;
+    border-radius: 6px;
+    padding: 10px 12px;
+    box-shadow: 0 8px 24px rgba(15, 23, 42, 0.32);
+    font-size: 11px;
+    line-height: 1.45;
+    max-width: 480px;
+    min-width: 280px;
+    display: none;
+}
+
+.netwf-tooltip.visible {
+    display: block;
+}
+
+.netwf-tooltip-head {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+    font-weight: 600;
+    margin-bottom: 4px;
+    color: #f1f5f9;
+    word-break: break-all;
+}
+
+.netwf-tooltip-meta {
+    display: grid;
+    grid-template-columns: max-content auto;
+    column-gap: 12px;
+    row-gap: 2px;
+    margin-bottom: 6px;
+    color: #cbd5e1;
+}
+
+.netwf-tooltip-meta dt { color: #94a3b8; }
+.netwf-tooltip-meta dd { margin: 0; color: #f1f5f9; }
+
+.netwf-tooltip-phases {
+    margin: 6px 0;
+    border-top: 1px solid rgba(148, 163, 184, 0.25);
+    padding-top: 6px;
+    display: grid;
+    grid-template-columns: 12px max-content auto;
+    column-gap: 8px;
+    row-gap: 2px;
+    align-items: center;
+}
+
+.netwf-tooltip-phase-swatch {
+    width: 10px;
+    height: 10px;
+    border-radius: 2px;
+}
+.netwf-tooltip-phase-swatch.dns { background: #8e8cd8; }
+.netwf-tooltip-phase-swatch.connect { background: #f59e0b; }
+.netwf-tooltip-phase-swatch.tls { background: #b084eb; }
+.netwf-tooltip-phase-swatch.wait { background: #7dd3fc; }
+.netwf-tooltip-phase-swatch.transfer { background: #34d399; }
+
+.netwf-tooltip-phase-name { color: #cbd5e1; }
+.netwf-tooltip-phase-value { color: #f1f5f9; font-variant-numeric: tabular-nums; }
+
+.netwf-tooltip-fault {
+    border-top: 1px solid rgba(248, 113, 113, 0.4);
+    padding-top: 6px;
+    margin-top: 6px;
+    color: #fca5a5;
+}
+
+.netwf-tooltip-url {
+    border-top: 1px solid rgba(148, 163, 184, 0.25);
+    padding-top: 6px;
+    margin-top: 6px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+    color: #94a3b8;
+    word-break: break-all;
+}
+
+.netwf-row-track {
+    flex: 1 1 auto;
+    position: relative;
+    height: 22px;
+    background-image: repeating-linear-gradient(
+        to right,
+        rgba(148, 163, 184, 0.10) 0,
+        rgba(148, 163, 184, 0.10) 1px,
+        transparent 1px,
+        transparent 40px
+    );
+}
+
+.netwf-row-bar {
+    position: absolute;
+    top: 6px;
+    height: 9px;
+    display: flex;
+    box-shadow: inset 0 0 0 1px rgba(15, 23, 42, 0.12);
+    min-width: 2px;
+}
+
+.netwf-row-phase {
+    height: 100%;
+    min-width: 1px;
+}
+.netwf-row-phase.dns { background: #8e8cd8; }
+.netwf-row-phase.connect { background: #f59e0b; }
+.netwf-row-phase.tls { background: #b084eb; }
+.netwf-row-phase.wait { background: #7dd3fc; }
+.netwf-row-phase.transfer { background: #34d399; }
+
+.netwf-row-duration {
+    position: absolute;
+    top: 4px;
+    height: 14px;
+    line-height: 14px;
+    font-size: 10px;
+    color: #475569;
+    white-space: nowrap;
+    pointer-events: none;
+    padding: 0 4px;
+}
+
+.netwf-axis {
+    position: sticky;
+    top: 0;
+    z-index: 2;
+    display: flex;
+    height: 22px;
+    line-height: 22px;
+    background: #f8fafc;
+    border-bottom: 1px solid #e2e8f0;
+    font-size: 10px;
+    color: #64748b;
+    font-weight: 600;
+    box-sizing: border-box;
+}
+
+/* The column cells (.netwf-cell) cover the left columns now — the
+ * axis row has no separate label spacer. The flex track to the right
+ * of the cells is the time-axis scale. */
+
+.netwf-axis-scale {
+    flex: 1 1 auto;
+    position: relative;
+    box-sizing: border-box;
+    overflow: hidden;
+}
+
+.netwf-axis-tick {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    width: 1px;
+    background: rgba(148, 163, 184, 0.45);
+}
+
+.netwf-axis-tick-label {
+    position: absolute;
+    top: 4px;
+    transform: translateX(-50%);
+    line-height: 14px;
+    white-space: nowrap;
+    color: #64748b;
+    font-weight: 600;
+    background: #f8fafc;
+    padding: 0 3px;
+}
+
+.netwf-axis-summary {
+    position: absolute;
+    right: 8px;
+    top: 4px;
+    line-height: 14px;
+    color: #475569;
+    font-weight: 600;
+    background: #f8fafc;
+    padding: 0 3px;
 }
 
 .network-log-waterfall-empty {

@@ -165,6 +165,14 @@ type NetworkLogEntry struct {
 	FaultType     string `json:"fault_type,omitempty"`
 	FaultAction   string `json:"fault_action,omitempty"`
 	FaultCategory string `json:"fault_category,omitempty"` // "http", "socket", "transport", "corruption"
+
+	// Range-request metadata. RequestRange is the client's `Range:`
+	// header (e.g. "bytes=0-1023"); ResponseContentRange is the
+	// origin's `Content-Range:` header (e.g. "bytes 0-1023/5242880").
+	// Useful for telling apart partial-content fetches and continuation
+	// requests in the dashboard.
+	RequestRange         string `json:"request_range,omitempty"`
+	ResponseContentRange string `json:"response_content_range,omitempty"`
 }
 
 // sensitiveHeaderNames are excluded from HAR captures regardless of source.
@@ -4211,8 +4219,9 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 		logEntry(sessionID,netEntry)
 		return
 	}
-	if rangeHeader := r.Header.Get("Range"); rangeHeader != "" {
-		proxyReq.Header.Set("Range", rangeHeader)
+	clientRange := r.Header.Get("Range")
+	if clientRange != "" {
+		proxyReq.Header.Set("Range", clientRange)
 	}
 	if ifRange := r.Header.Get("If-Range"); ifRange != "" {
 		proxyReq.Header.Set("If-Range", ifRange)
@@ -4221,8 +4230,14 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 	// doRequestWithTracing populates URL/Path from the upstream request —
 	// override with the player-facing values so HAR entries reflect what
 	// the player did, not the proxy → origin URL.
-	netEntry.URL = playerURL
-	netEntry.Path = r.URL.Path
+	if netEntry != nil {
+		netEntry.URL = playerURL
+		netEntry.Path = r.URL.Path
+		netEntry.RequestRange = clientRange
+		if resp != nil {
+			netEntry.ResponseContentRange = resp.Header.Get("Content-Range")
+		}
+	}
 	if err != nil {
 		netEntry.ClientWaitMs = elapsedMs(requestReceivedAt)
 		// Set status before writing header
@@ -4321,9 +4336,22 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 			if idleW != nil && idleW.timedOut.Load() {
 				bumpFaultCounter(sessionData, "transfer_idle_timeout")
 				logFaultEvent(sessionData, externalPort, "transfer_idle_timeout", requestKind, "transfer_idle_timeout_mid_body")
+				netEntry.Faulted = true
+				netEntry.FaultType = "transfer_idle_timeout"
+				netEntry.FaultAction = "transfer_idle_timeout_mid_body"
+				netEntry.FaultCategory = categorizeFaultType("transfer_idle_timeout")
 			} else if errors.Is(writeErr, context.DeadlineExceeded) || errors.Is(flushErr, context.DeadlineExceeded) || errors.Is(proxyCtx.Err(), context.DeadlineExceeded) {
 				bumpFaultCounter(sessionData, "transfer_active_timeout")
 				logFaultEvent(sessionData, externalPort, "transfer_active_timeout", requestKind, "transfer_active_timeout_mid_body")
+				netEntry.Faulted = true
+				netEntry.FaultType = "transfer_active_timeout"
+				netEntry.FaultAction = "transfer_active_timeout_mid_body"
+				netEntry.FaultCategory = categorizeFaultType("transfer_active_timeout")
+			} else {
+				netEntry.Faulted = true
+				netEntry.FaultType = "client_disconnect"
+				netEntry.FaultAction = "transfer_abandoned"
+				netEntry.FaultCategory = "client_disconnect"
 			}
 		}
 	} else {
@@ -4366,9 +4394,26 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 			if idleW != nil && idleW.timedOut.Load() {
 				bumpFaultCounter(sessionData, "transfer_idle_timeout")
 				logFaultEvent(sessionData, externalPort, "transfer_idle_timeout", requestKind, "transfer_idle_timeout_mid_body")
+				netEntry.Faulted = true
+				netEntry.FaultType = "transfer_idle_timeout"
+				netEntry.FaultAction = "transfer_idle_timeout_mid_body"
+				netEntry.FaultCategory = categorizeFaultType("transfer_idle_timeout")
 			} else if errors.Is(copyErr, context.DeadlineExceeded) || errors.Is(proxyCtx.Err(), context.DeadlineExceeded) {
 				bumpFaultCounter(sessionData, "transfer_active_timeout")
 				logFaultEvent(sessionData, externalPort, "transfer_active_timeout", requestKind, "transfer_active_timeout_mid_body")
+				netEntry.Faulted = true
+				netEntry.FaultType = "transfer_active_timeout"
+				netEntry.FaultAction = "transfer_active_timeout_mid_body"
+				netEntry.FaultCategory = categorizeFaultType("transfer_active_timeout")
+			} else {
+				// Real client closed the socket mid-body (broken pipe,
+				// ECONNRESET, etc.). Not a deliberate fault — tag it
+				// so the dashboard can show "abandoned by client" in
+				// red without the user having to read the proxy log.
+				netEntry.Faulted = true
+				netEntry.FaultType = "client_disconnect"
+				netEntry.FaultAction = "transfer_abandoned"
+				netEntry.FaultCategory = "client_disconnect"
 			}
 		}
 		if isManifest || isMasterManifest {
