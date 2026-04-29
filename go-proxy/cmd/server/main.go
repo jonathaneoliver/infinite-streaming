@@ -4227,16 +4227,26 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 		proxyReq.Header.Set("If-Range", ifRange)
 	}
 	resp, netEntry, err := a.doRequestWithTracing(proxyCtx, proxyReq)
+	// doRequestWithTracing always returns a non-nil entry — but if a
+	// future regression breaks that contract, fall back to a minimal
+	// stub here so the rest of handleProxy can deref freely without
+	// scattered nil-guards.
+	if netEntry == nil {
+		netEntry = &NetworkLogEntry{
+			Timestamp: time.Now(),
+			Method:    proxyReq.Method,
+			URL:       playerURL,
+			Path:      r.URL.Path,
+		}
+	}
 	// doRequestWithTracing populates URL/Path from the upstream request —
 	// override with the player-facing values so HAR entries reflect what
 	// the player did, not the proxy → origin URL.
-	if netEntry != nil {
-		netEntry.URL = playerURL
-		netEntry.Path = r.URL.Path
-		netEntry.RequestRange = clientRange
-		if resp != nil {
-			netEntry.ResponseContentRange = resp.Header.Get("Content-Range")
-		}
+	netEntry.URL = playerURL
+	netEntry.Path = r.URL.Path
+	netEntry.RequestRange = clientRange
+	if resp != nil {
+		netEntry.ResponseContentRange = resp.Header.Get("Content-Range")
 	}
 	if err != nil {
 		netEntry.ClientWaitMs = elapsedMs(requestReceivedAt)
