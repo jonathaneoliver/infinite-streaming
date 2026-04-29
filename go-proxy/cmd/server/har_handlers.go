@@ -85,24 +85,27 @@ func (a *App) buildHARForSession(session SessionData, incident *har.Incident) ha
 		sources = make([]har.Source, 0, len(entries))
 		for _, e := range entries {
 			sources = append(sources, har.Source{
-				Timestamp:     e.Timestamp,
-				Method:        e.Method,
-				URL:           e.URL,
-				RequestKind:   e.RequestKind,
-				Status:        e.Status,
-				BytesIn:       e.BytesIn,
-				BytesOut:      e.BytesOut,
-				ContentType:   e.ContentType,
-				DNSMs:         e.DNSMs,
-				ConnectMs:     e.ConnectMs,
-				TLSMs:         e.TLSMs,
-				TTFBMs:        e.TTFBMs,
-				TransferMs:    e.TransferMs,
-				TotalMs:       e.TotalMs,
-				Faulted:       e.Faulted,
-				FaultType:     e.FaultType,
-				FaultAction:   e.FaultAction,
-				FaultCategory: e.FaultCategory,
+				Timestamp:       e.Timestamp,
+				Method:          e.Method,
+				URL:             e.URL,
+				RequestKind:     e.RequestKind,
+				Status:          e.Status,
+				BytesIn:         e.BytesIn,
+				BytesOut:        e.BytesOut,
+				ContentType:     e.ContentType,
+				DNSMs:           e.DNSMs,
+				ConnectMs:       e.ConnectMs,
+				TLSMs:           e.TLSMs,
+				TTFBMs:          e.TTFBMs,
+				TransferMs:      e.TransferMs,
+				TotalMs:         e.TotalMs,
+				RequestHeaders:  toNameValueSlice(e.RequestHeaders),
+				ResponseHeaders: toNameValueSlice(e.ResponseHeaders),
+				QueryString:     toNameValueSlice(e.QueryString),
+				Faulted:         e.Faulted,
+				FaultType:       e.FaultType,
+				FaultAction:     e.FaultAction,
+				FaultCategory:   e.FaultCategory,
 			})
 		}
 	}
@@ -126,6 +129,20 @@ func (a *App) buildHARForSession(session SessionData, incident *har.Incident) ha
 	}
 
 	return har.Build(sources, opts)
+}
+
+// toNameValueSlice converts a []HeaderPair (main package's HTTP capture
+// type) to a []har.NameValue without sharing memory. Returns nil for an
+// empty slice so the HAR builder can apply its own defaults.
+func toNameValueSlice(in []HeaderPair) []har.NameValue {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]har.NameValue, len(in))
+	for i, p := range in {
+		out[i] = har.NameValue{Name: p.Name, Value: p.Value}
+	}
+	return out
 }
 
 // findSessionByID returns the session map matching session_id, or nil.

@@ -21,6 +21,7 @@ import (
 	"os/exec"
 	"regexp"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -94,6 +95,15 @@ type tcStatsCache struct {
 
 
 
+// HeaderPair is a single name/value pair, used to carry HTTP request /
+// response headers and query parameters in NetworkLogEntry. Mirrors the
+// HAR 1.2 NameValue shape so a HAR consumer can drop these straight into
+// request.headers / response.headers without conversion.
+type HeaderPair struct {
+	Name  string `json:"name"`
+	Value string `json:"value"`
+}
+
 // NetworkLogEntry represents a single network request/response in the session
 type NetworkLogEntry struct {
 	Timestamp   time.Time `json:"timestamp"`
@@ -105,6 +115,13 @@ type NetworkLogEntry struct {
 	BytesIn     int64     `json:"bytes_in"`
 	BytesOut    int64     `json:"bytes_out"`
 	ContentType string    `json:"content_type"`
+
+	// HTTP-level metadata captured per-request. Sensitive headers
+	// (Cookie / Authorization / Set-Cookie) are filtered before they
+	// land here — see capturedRequestHeaders / capturedResponseHeaders.
+	RequestHeaders  []HeaderPair `json:"request_headers,omitempty"`
+	ResponseHeaders []HeaderPair `json:"response_headers,omitempty"`
+	QueryString     []HeaderPair `json:"query_string,omitempty"`
 
 	// Timing phases (milliseconds)
 	DNSMs      float64 `json:"dns_ms"`
@@ -119,6 +136,91 @@ type NetworkLogEntry struct {
 	FaultType     string `json:"fault_type,omitempty"`
 	FaultAction   string `json:"fault_action,omitempty"`
 	FaultCategory string `json:"fault_category,omitempty"` // "http", "socket", "transport", "corruption"
+}
+
+// sensitiveHeaderNames are excluded from HAR captures regardless of source.
+// Lower-cased for canonical comparison.
+var sensitiveHeaderNames = map[string]bool{
+	"cookie":               true,
+	"set-cookie":           true,
+	"authorization":        true,
+	"proxy-authorization":  true,
+	"x-amz-security-token": true,
+}
+
+// capturedHeaders converts an http.Header map to a sorted []HeaderPair,
+// dropping sensitive entries. Stable ordering keeps HAR diffs readable.
+func capturedHeaders(h http.Header) []HeaderPair {
+	if len(h) == 0 {
+		return nil
+	}
+	out := make([]HeaderPair, 0, len(h))
+	for name, values := range h {
+		if sensitiveHeaderNames[strings.ToLower(name)] {
+			continue
+		}
+		for _, v := range values {
+			out = append(out, HeaderPair{Name: name, Value: v})
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Name != out[j].Name {
+			return out[i].Name < out[j].Name
+		}
+		return out[i].Value < out[j].Value
+	})
+	return out
+}
+
+// stampNetMeta attaches captured request headers, query string, and (if
+// available) response headers onto a NetworkLogEntry. Idempotent — won't
+// overwrite already-set fields, so callers can pre-populate any of them
+// at the entry-construction site.
+func stampNetMeta(entry *NetworkLogEntry, requestHeaders, queryString []HeaderPair, resp *http.Response) {
+	if entry == nil {
+		return
+	}
+	if entry.RequestHeaders == nil && len(requestHeaders) > 0 {
+		entry.RequestHeaders = requestHeaders
+	}
+	if entry.QueryString == nil && len(queryString) > 0 {
+		entry.QueryString = queryString
+	}
+	if entry.ResponseHeaders == nil && resp != nil {
+		entry.ResponseHeaders = capturedHeaders(resp.Header)
+	}
+}
+
+// capturedQueryString converts the URL's query into []HeaderPair preserving
+// the parameter order from the URL. Sensitive values aren't filtered here —
+// the dashboard already exposes player_id query params; if that ever changes
+// the privacy filter goes here.
+func capturedQueryString(u *url.URL) []HeaderPair {
+	if u == nil || u.RawQuery == "" {
+		return nil
+	}
+	pairs := strings.Split(u.RawQuery, "&")
+	out := make([]HeaderPair, 0, len(pairs))
+	for _, p := range pairs {
+		if p == "" {
+			continue
+		}
+		var name, value string
+		if eq := strings.IndexByte(p, '='); eq >= 0 {
+			name, value = p[:eq], p[eq+1:]
+		} else {
+			name = p
+		}
+		// URL-decode each side; ignore errors and keep the raw bytes.
+		if decoded, err := url.QueryUnescape(name); err == nil {
+			name = decoded
+		}
+		if decoded, err := url.QueryUnescape(value); err == nil {
+			value = decoded
+		}
+		out = append(out, HeaderPair{Name: name, Value: value})
+	}
+	return out
 }
 
 // NetworkLogRingBuffer maintains a bounded list of recent network entries
@@ -3547,6 +3649,12 @@ func (iw *idleWriter) Stop() {
 }
 
 func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
+	// Snapshot the player's request headers + query string once for HAR
+	// capture (issue #279). Sensitive headers are filtered inside
+	// capturedHeaders. The parsed query is preserved in original URL
+	// order via capturedQueryString.
+	requestHeaders := capturedHeaders(r.Header)
+	queryString := capturedQueryString(r.URL)
 	filename := strings.TrimPrefix(r.URL.Path, "/")
 	escapedPath := strings.TrimPrefix(r.URL.EscapedPath(), "/")
 	if filename == "" {
@@ -3858,6 +3966,7 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 				// Log network entry for fault
 				sessionID := getString(sessionData, "session_id")
 				netEntry := createFaultLogEntry(upstreamURL, requestKind, failureType, actionTaken, http.StatusBadGateway, requestBytes)
+				stampNetMeta(&netEntry, requestHeaders, queryString, nil)
 				a.addNetworkLogEntry(sessionID, netEntry)
 				sessionList[index] = sessionData
 				a.saveSessionList(sessionList)
@@ -3885,6 +3994,7 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 				netEntry.FaultType = failureType
 				netEntry.FaultAction = actionTaken
 				netEntry.FaultCategory = categorizeFaultType(failureType)
+				stampNetMeta(netEntry, requestHeaders, queryString, nil)
 				a.addNetworkLogEntry(sessionID, *netEntry)
 				sessionList[index] = sessionData
 				a.saveSessionList(sessionList)
@@ -3905,6 +4015,7 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 				netEntry.FaultType = failureType
 				netEntry.FaultAction = actionTaken
 				netEntry.FaultCategory = categorizeFaultType(failureType)
+				stampNetMeta(netEntry, requestHeaders, queryString, resp)
 				a.addNetworkLogEntry(sessionID, *netEntry)
 				sessionList[index] = sessionData
 				a.saveSessionList(sessionList)
@@ -3937,6 +4048,7 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 			netEntry.FaultType = failureType
 			netEntry.FaultAction = actionTaken
 			netEntry.FaultCategory = categorizeFaultType(failureType)
+			stampNetMeta(netEntry, requestHeaders, queryString, resp)
 			a.addNetworkLogEntry(sessionID, *netEntry)
 			sessionList[index] = sessionData
 			a.saveSessionList(sessionList)
@@ -3959,6 +4071,7 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 			sessionID := getString(sessionData, "session_id")
 			status := http.StatusServiceUnavailable
 			netEntry := createFaultLogEntry(upstreamURL, requestKind, failureType, actionTaken, status, requestBytes)
+			stampNetMeta(&netEntry, requestHeaders, queryString, nil)
 			a.addNetworkLogEntry(sessionID, netEntry)
 			sessionList[index] = sessionData
 			a.saveSessionList(sessionList)
@@ -4015,6 +4128,7 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 			status = http.StatusTooManyRequests
 		}
 		netEntry := createFaultLogEntry(upstreamURL, requestKind, failureType, actionTaken, status, requestBytes)
+		stampNetMeta(&netEntry, requestHeaders, queryString, nil)
 		a.addNetworkLogEntry(sessionID, netEntry)
 		return
 	}
@@ -4037,6 +4151,7 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 		// Log network entry for error
 		sessionID := getString(sessionData, "session_id")
 		netEntry := createFaultLogEntry(upstreamURL, requestKind, "none", "http_502_request_failed", http.StatusBadGateway, requestBytes)
+		stampNetMeta(&netEntry, requestHeaders, queryString, nil)
 		a.addNetworkLogEntry(sessionID, netEntry)
 		return
 	}
@@ -4064,6 +4179,7 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 		sessionID := getString(sessionData, "session_id")
 		netEntry.RequestKind = requestKind
 		netEntry.BytesIn = requestBytes
+		stampNetMeta(netEntry, requestHeaders, queryString, nil)
 		a.addNetworkLogEntry(sessionID, *netEntry)
 		return
 	}
@@ -4088,6 +4204,7 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 		sessionID := getString(sessionData, "session_id")
 		netEntry.RequestKind = requestKind
 		netEntry.BytesIn = requestBytes
+		stampNetMeta(netEntry, requestHeaders, queryString, resp)
 		a.addNetworkLogEntry(sessionID, *netEntry)
 		return
 	}
@@ -4207,6 +4324,7 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 	netEntry.RequestKind = requestKind
 	netEntry.BytesIn = requestBytes
 	netEntry.BytesOut = bytesOut
+	stampNetMeta(netEntry, requestHeaders, queryString, resp)
 	a.addNetworkLogEntry(sessionID, *netEntry)
 	a.saveSessionByID(sessionNumber, sessionData)
 }
