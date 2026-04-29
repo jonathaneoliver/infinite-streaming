@@ -4027,7 +4027,15 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 	// Serialise the failure-decision read-modify-write so video+audio
 	// requests arriving in the same millisecond don't both pass the
 	// "1 per N seconds" filter and double-fire.
+	//
+	// The lock alone isn't enough: each goroutine has its own clone
+	// of sessionData (from the snap-clone in getSessionList above)
+	// taken BEFORE the lock — so without refreshing, two goroutines
+	// can both read segment_failure_recover_at = nil even when one
+	// of them just wrote a new value. Refresh the dedup-relevant
+	// fields from the latest snap inside the lock before deciding.
 	sessionStateMu.Lock()
+	refreshFailureStateFromLatest(a, sessionData, sessionNumber)
 	failureType := handler.HandleRequest(filename)
 	sessionStateMu.Unlock()
 
@@ -6959,6 +6967,39 @@ type FailureHandler struct {
 	failureAt        interface{}
 	failureRecoverAt interface{}
 	resetFailureType interface{}
+}
+
+// refreshFailureStateFromLatest copies the fault-decision-relevant
+// fields from the latest published session snapshot onto the
+// per-request `dst` clone. Called inside `sessionStateMu` so the
+// snapshot and the read are consistent: every goroutine entering
+// the failure-decision critical section sees the same view of
+// `<prefix>_failure_at` / `<prefix>_failure_recover_at`,
+// regardless of when its outer clone was taken.
+func refreshFailureStateFromLatest(a *App, dst SessionData, sessionID string) {
+	if a == nil || dst == nil || sessionID == "" {
+		return
+	}
+	latest := a.getSessionList()
+	for _, s := range latest {
+		if getString(s, "session_id") != sessionID {
+			continue
+		}
+		// Counters and timestamps that gate the dedup. Order matters
+		// only in the sense that all of these need to come from the
+		// same snapshot.
+		for _, k := range []string{
+			"segments_count", "manifest_requests_count", "master_manifest_requests_count",
+			"segment_failure_at", "segment_failure_recover_at",
+			"manifest_failure_at", "manifest_failure_recover_at",
+			"master_manifest_failure_at", "master_manifest_failure_recover_at",
+		} {
+			if v, ok := s[k]; ok {
+				dst[k] = v
+			}
+		}
+		return
+	}
 }
 
 func NewFailureHandler(prefix string, session SessionData) *FailureHandler {
