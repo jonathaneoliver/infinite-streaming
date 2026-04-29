@@ -45,6 +45,10 @@
     const networkWaterfallTimelines = new Map();
     const networkWaterfallViewBySession = new Map();
     const networkWaterfallFollowModeBySession = new Map();
+    // Follow Scroll: pan the waterfall's time window to match the rows
+    // visible in the entries list as the user scrolls. Default true.
+    // Issue #286.
+    const networkWaterfallFollowScrollBySession = new Map();
     const networkWaterfallFullRangeBySession = new Map();
     const networkWaterfallRenderSignatureBySession = new Map();
     const networkWaterfallRollingWindowMs = 5 * 60 * 1000;
@@ -1077,6 +1081,10 @@
                                 <button type="button" class="btn btn-mini btn-secondary" data-action="network-log-jump-last">Last</button>
                                 <button type="button" class="btn btn-mini btn-secondary" data-action="network-log-jump-fit">Fit</button>
                                 <button type="button" class="btn btn-mini btn-secondary" data-action="network-log-follow">Following Latest</button>
+                                <label class="network-log-filter" title="Pan the waterfall's time window to match the entries currently visible in the list above">
+                                    <input type="checkbox" data-field="follow-scroll" checked>
+                                    Follow Scroll
+                                </label>
                                 <label class="network-log-filter">
                                     <input type="checkbox" data-filter="show-faulted" checked>
                                     Show Faults
@@ -1361,6 +1369,12 @@
             const cb = e.target;
             if (!cb || cb.type !== 'checkbox' || !cb.dataset.field) return;
             const field = cb.dataset.field;
+            if (field === 'follow-scroll') {
+                const card = cb.closest('.session-card');
+                const sessionId = card ? String(card.dataset.sessionId || '') : '';
+                if (sessionId) setFollowScrollMode(sessionId, !!cb.checked);
+                return;
+            }
             if (field !== 'segment_failure_urls' && field !== 'manifest_failure_urls') return;
             const group = cb.closest('.checkbox-group');
             if (!group) return;
@@ -1582,6 +1596,25 @@
         return networkWaterfallFollowModeBySession.get(key) !== false;
     }
 
+    // Follow Scroll mode: when on, the waterfall's time window
+    // auto-pans to match the rows currently visible in the entries
+    // list. Default true so the feature is on out-of-the-box. Issue #286.
+    function isFollowScrollMode(sessionId) {
+        const key = String(sessionId || '');
+        return networkWaterfallFollowScrollBySession.get(key) !== false;
+    }
+
+    function setFollowScrollMode(sessionId, enabled) {
+        const key = String(sessionId || '');
+        if (!key) return;
+        networkWaterfallFollowScrollBySession.set(key, !!enabled);
+        const state = networkWaterfallTimelines.get(key);
+        if (state) {
+            state.autoPan = !!enabled;
+            if (enabled) applyWaterfallAutoPan(state, key);
+        }
+    }
+
     function hasNetworkLogFollowModeState(sessionId) {
         const key = String(sessionId || '');
         if (!key) return false;
@@ -1604,6 +1637,12 @@
         button.setAttribute('aria-pressed', following ? 'true' : 'false');
         button.classList.toggle('btn-primary', following);
         button.classList.toggle('btn-secondary', !following);
+        // Keep the Follow Scroll checkbox in sync with the per-session
+        // map across re-renders (the HTML template defaults to checked).
+        const followScrollCb = hostCard.querySelector('input[data-field="follow-scroll"]');
+        if (followScrollCb) {
+            followScrollCb.checked = isFollowScrollMode(sessionId);
+        }
     }
 
     function scrollWaterfallToLatestRow(state) {
@@ -2083,7 +2122,7 @@
                     state.autoPan = false;
                 }
             });
-            state = { host: field, timeline, groups, items, drag: null, rows: [], autoPan: true };
+            state = { host: field, timeline, groups, items, drag: null, rows: [], autoPan: isFollowScrollMode(key) };
             bindWaterfallSelectionHandlers(state, key);
             attachWaterfallAutoPan(state, key);
             networkWaterfallTimelines.set(key, state);
@@ -2104,6 +2143,7 @@
             let rafId = null;
             const onScroll = () => {
                 if (!state.autoPan) return;
+                if (!isFollowScrollMode(key)) return;
                 if (rafId) return;
                 rafId = window.requestAnimationFrame(() => {
                     rafId = null;
