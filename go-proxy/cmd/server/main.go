@@ -7076,6 +7076,9 @@ func (h *FailureHandler) handleFailureCount(count int, now time.Time) {
 			return
 		}
 		if h.failureFrequency > 0 {
+			// Mixed-units case (counts overall, seconds on-window).
+			// Schedule next fault `freq` requests from now — the on-
+			// window cost in counts is unknown so we don't subtract.
 			h.failureAt = count + h.failureFrequency
 			h.failureType = "none"
 			h.failureRecoverAt = nil
@@ -7096,7 +7099,15 @@ func (h *FailureHandler) handleFailureCount(count int, now time.Time) {
 		return
 	}
 	if h.failureFrequency > 0 {
-		h.failureAt = count + h.failureFrequency
+		// Frequency = full cycle length (fault start → next fault
+		// start). Subtract the on-window in counts so the gap after
+		// recovery makes the cycle exactly `freq` requests. Clamp ≥0
+		// in case the user set freq < consec.
+		gap := h.failureFrequency - h.consecutive
+		if gap < 0 {
+			gap = 0
+		}
+		h.failureAt = count + gap
 		h.failureType = "none"
 		h.failureRecoverAt = nil
 		return
@@ -7129,7 +7140,15 @@ func (h *FailureHandler) handleFailureTime(count int, now time.Time) {
 			return
 		}
 		if h.failureFrequency > 0 {
-			h.failureAt = now.Add(time.Duration(h.failureFrequency) * time.Second).Format("2006-01-02T15:04:05.000")
+			// Frequency = full cycle length (fault start → next fault
+			// start). Subtract the on-window so the gap after recovery
+			// makes the cycle exactly `freq` seconds. Clamp ≥0 in case
+			// the user set freq < consec (would mean continuous fault).
+			gapSec := h.failureFrequency - h.consecutive
+			if gapSec < 0 {
+				gapSec = 0
+			}
+			h.failureAt = now.Add(time.Duration(gapSec) * time.Second).Format("2006-01-02T15:04:05.000")
 			h.failureType = "none"
 			h.failureRecoverAt = nil
 			return
@@ -7149,6 +7168,9 @@ func (h *FailureHandler) handleFailureTime(count int, now time.Time) {
 		return
 	}
 	if h.failureFrequency > 0 {
+		// Mixed-units case: fault on-window is counts but the gap
+		// scheduling is in seconds. Keep the existing semantics —
+		// next fault scheduled `freq` seconds from recovery wallclock.
 		h.failureAt = now.Add(time.Duration(h.failureFrequency) * time.Second).Format("2006-01-02T15:04:05.000")
 		h.failureType = "none"
 		h.failureRecoverAt = nil
