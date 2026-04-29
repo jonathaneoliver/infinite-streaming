@@ -95,6 +95,13 @@ final class PlayerViewModel: ObservableObject {
     /// **not** rotate it — proxy session continuity matters.
     let playerId: String = UUID().uuidString
 
+    /// `play_id` (issue #280) — a UUID regenerated at every fresh
+    /// playback episode (loadStream / reload / retry / variant change).
+    /// Threaded through every URL the player issues as `?play_id=...`
+    /// so go-proxy can scope its NetworkLogEntry ring buffer per play.
+    /// HAR snapshots filter to the most-recent play_id by default.
+    private var currentPlayID: String = UUID().uuidString
+
     // MARK: - Private state
 
     private var codecRetries = 0
@@ -481,6 +488,8 @@ final class PlayerViewModel: ObservableObject {
 
     private func buildURLAndLoad() {
         guard let server = activeServer, !selectedContent.isEmpty else { return }
+        // Fresh play_id at every loadStream boundary — issue #280.
+        regeneratePlayID()
         var url = StreamURLBuilder.playbackURL(
             server: server,
             contentName: selectedContent,
@@ -499,7 +508,12 @@ final class PlayerViewModel: ObservableObject {
         } else {
             url = resolved
         }
-        guard let final = url else { return }
+        guard var final = url else { return }
+        // Append play_id last so it survives the player_id strip above
+        // for k3s-dev's content port. (For HAR scoping go-proxy reads
+        // play_id from URLs that hit it; the content port stripping
+        // only affects routes that don't reach go-proxy.)
+        final = appendPlayID(to: final)
         self.currentURL = final
         self.statusText = final.absoluteString
         loadStream(url: final)
@@ -510,6 +524,23 @@ final class PlayerViewModel: ObservableObject {
         components.queryItems = components.queryItems?.filter { $0.name != "player_id" }
         if components.queryItems?.isEmpty == true { components.queryItems = nil }
         return components.url ?? url
+    }
+
+    /// Replace any existing `play_id` query item with the current
+    /// `currentPlayID`. Issue #280.
+    private func appendPlayID(to url: URL) -> URL {
+        guard var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return url }
+        var items = components.queryItems ?? []
+        items.removeAll { $0.name == "play_id" }
+        items.append(URLQueryItem(name: "play_id", value: currentPlayID))
+        components.queryItems = items
+        return components.url ?? url
+    }
+
+    /// Mint a fresh `play_id` UUID. Called at every new playback
+    /// episode boundary so go-proxy can scope its network log per play.
+    private func regeneratePlayID() {
+        currentPlayID = UUID().uuidString
     }
 
     private func loadStream(url: URL) {
@@ -773,7 +804,16 @@ final class PlayerViewModel: ObservableObject {
     /// the *same* URL on the *same* AVPlayer.
     func retry() {
         guard let url = currentURL else { return }
-        loadStream(url: url)
+        // A retry is a new playback episode — fresh play_id so the
+        // proxy's network log scopes the next round of requests
+        // separately from the one that just failed. Issue #280.
+        regeneratePlayID()
+        let refreshed = appendPlayID(to: url)
+        self.currentURL = refreshed
+        Task { [weak self] in
+            await self?.requestHARSnapshot(reason: "user_retry", force: true)
+        }
+        loadStream(url: refreshed)
     }
 
     /// Full tear-down + recreate. Replaces the AVPlayer instance,
@@ -784,6 +824,9 @@ final class PlayerViewModel: ObservableObject {
     ///
     /// Same `playerId` (proxy session continuity), no catalogue refetch.
     func reload() {
+        Task { [weak self] in
+            await self?.requestHARSnapshot(reason: "user_reload", force: true)
+        }
         // Snapshot cumulative counters into diagnostics' "prior" buckets
         // so the new playback continues to add to the same dropped /
         // displayed totals — matches legacy behaviour.
@@ -1071,7 +1114,12 @@ extension PlayerViewModel {
                 self.log("Playback failure: \(value)")
                 Task { await self.sendPlayerMetrics(event: "error", extra: ["player_metrics_error": value]) }
                 if self.autoRecovery {
+                    // Per-attempt HAR is captured by scheduleAutoRecoveryRestart
+                    // when the timer fires (force=true). Don't double-capture
+                    // here.
                     self.scheduleAutoRecoveryRestart(reason: "auto_recovery_failure")
+                } else {
+                    Task { await self.requestHARSnapshot(reason: "playback_failure") }
                 }
             }
             .store(in: &cancellables)
@@ -1091,7 +1139,11 @@ extension PlayerViewModel {
                 guard let self, frozen else { return }
                 Task { await self.sendPlayerMetrics(event: "frozen") }
                 if self.autoRecovery {
+                    // The recovery timer's per-attempt HAR (force=true)
+                    // captures the same incident a moment later.
                     self.scheduleAutoRecoveryRestart(reason: "auto_recovery_frozen")
+                } else {
+                    Task { await self.requestHARSnapshot(reason: "frozen") }
                 }
             }
             .store(in: &cancellables)
@@ -1103,6 +1155,8 @@ extension PlayerViewModel {
                 Task { await self.sendPlayerMetrics(event: "segment_stall") }
                 if self.autoRecovery {
                     self.scheduleAutoRecoveryRestart(reason: "auto_recovery_segment_stall")
+                } else {
+                    Task { await self.requestHARSnapshot(reason: "segment_stall") }
                 }
             }
             .store(in: &cancellables)
@@ -1251,6 +1305,12 @@ extension PlayerViewModel {
                         "player_metrics_restart_reason": reason,
                         "player_restarts": self?.playerRestarts ?? 0
                     ])
+                }
+                // Each auto-recovery attempt deserves its own HAR — bypass
+                // the per-player debounce so back-to-back attempts inside
+                // the 30s window each produce a snapshot.
+                Task { [weak self] in
+                    await self?.requestHARSnapshot(reason: reason, attempt: attempt, force: true)
                 }
                 self.scheduleAutoRecoverySuccessCheck()
             }
@@ -1434,6 +1494,43 @@ extension PlayerViewModel {
             compact["player_metrics_network_bitrate_mbps"] = NSNull()
         }
         return compact
+    }
+
+    /// Tell go-proxy to dump the current session timeline to disk as a HAR
+    /// file. Called from auto-recovery / freeze / Reload sites — server
+    /// debounces by player_id (default 30s). Issue #273.
+    fileprivate func requestHARSnapshot(reason: String, attempt: Int = 0, force: Bool = false) async {
+        guard let baseURL = metricsBaseURL() else { return }
+        guard let sessionId = await resolveMetricsSessionId(baseURL: baseURL) else { return }
+        let url = baseURL
+            .appendingPathComponent("api/session")
+            .appendingPathComponent(sessionId)
+            .appendingPathComponent("har/snapshot")
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        applyPlayerHeaders(to: &request)
+        var metadata: [String: Any] = [
+            "player_state": diagnostics.state,
+            "buffer_depth_s": diagnostics.bufferDepth as Any,
+            "stall_count": diagnostics.stallCount,
+            "auto_recovery_attempt": attempt,
+            "player_restarts": playerRestarts
+        ]
+        if !diagnostics.lastError.isEmpty { metadata["last_error"] = diagnostics.lastError }
+        if !diagnostics.lastFailure.isEmpty { metadata["last_failure"] = diagnostics.lastFailure }
+        let body: [String: Any] = [
+            "reason": reason,
+            "source": "player",
+            "force": force,
+            "metadata": metadata
+        ]
+        do {
+            request.httpBody = try JSONSerialization.data(withJSONObject: body, options: [])
+            _ = try await URLSession.shared.data(for: request)
+        } catch {
+            log("HAR snapshot request failed: \(error.localizedDescription)")
+        }
     }
 
     fileprivate func patchSessionMetrics(sessionId: String, baseURL: URL, payload: [String: Any]) async {
