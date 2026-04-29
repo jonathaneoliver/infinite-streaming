@@ -1407,13 +1407,21 @@
                             // the row list is scrolled to the bottom
                             // even after layout settles.
                             updateNetworkLog(sessionId);
-                            const scrollHost = card.querySelector('[data-field="network_log_waterfall_scroll"]');
-                            if (scrollHost) {
-                                scrollHost.scrollTop = scrollHost.scrollHeight;
-                                window.requestAnimationFrame(() => {
-                                    scrollHost.scrollTop = scrollHost.scrollHeight;
-                                });
-                            }
+                            // Section has no internal scroll — the page
+                            // scrolls instead. Bring the last row into
+                            // view across two rAFs so the new entries
+                            // (which may not be in the DOM yet) are
+                            // covered.
+                            const chartHost = card.querySelector('[data-field="network_log_waterfall"]');
+                            const snapToLast = () => {
+                                const rows = chartHost ? chartHost.children : null;
+                                const last = rows && rows[rows.length - 1];
+                                if (last) last.scrollIntoView({ block: 'end', behavior: 'auto' });
+                            };
+                            window.requestAnimationFrame(() => {
+                                snapToLast();
+                                window.requestAnimationFrame(snapToLast);
+                            });
                         } else if (card) {
                             applyNetworkLogFilters(card);
                         }
@@ -2106,24 +2114,26 @@
         networkWaterfallRowsBySession.set(key, rows);
         networkWaterfallRenderSignatureBySession.set(key, sigs.length + ':' + (sigs[sigs.length - 1] || ''));
 
-        if (scrollHost && isNetworkLogFollowMode(key)) {
-            scrollHost.scrollTop = scrollHost.scrollHeight;
+        // Following Latest: bring the last row into view via the page
+        // scroll. The waterfall has no internal scroll cap — the
+        // section grows with the data — so we use the bottom row's
+        // own scrollIntoView instead of `scrollTop = scrollHeight`.
+        if (isNetworkLogFollowMode(key)) {
+            const rowEls = chartHost.children;
+            const lastRow = rowEls[rowEls.length - 1];
+            if (lastRow) {
+                lastRow.scrollIntoView({ block: 'end', behavior: 'auto' });
+            }
         }
         updateNetworkLogFollowButton(card, key);
 
-        // Lazy-attach scroll listener — scrolling away from the bottom
-        // disables Following Latest.
-        if (scrollHost && !scrollHost.dataset.netwfBound) {
-            scrollHost.dataset.netwfBound = '1';
-            scrollHost.addEventListener('scroll', () => {
-                const c = scrollHost.closest('.session-card');
-                const sid = c ? String(c.dataset.sessionId || '') : '';
-                if (!sid) return;
-                if (isNetworkLogFollowMode(sid) && scrollHost.scrollTop + scrollHost.clientHeight < scrollHost.scrollHeight - 4) {
-                    setNetworkLogFollowMode(sid, false);
-                    updateNetworkLogFollowButton(c, sid);
-                }
-            }, { passive: true });
+        // Lazy-attach an IntersectionObserver on the last-row sentinel
+        // so when the user scrolls the page away from the live tail
+        // (the bottom of the row list leaves the viewport) we
+        // auto-disable Following Latest. One observer per chart host.
+        if (chartHost && !chartHost.dataset.netwfFollowObserved) {
+            chartHost.dataset.netwfFollowObserved = '1';
+            attachWaterfallFollowObserver(card, chartHost);
         }
 
         // Lazy-attach hover tooltip handlers on the chart host.
@@ -2131,6 +2141,31 @@
             chartHost.dataset.netwfTipBound = '1';
             attachWaterfallHoverTooltip(chartHost);
         }
+    }
+
+    function attachWaterfallFollowObserver(card, chartHost) {
+        if (typeof window.IntersectionObserver !== 'function') return;
+        const sessionId = String(card.dataset.sessionId || '');
+        if (!sessionId) return;
+        const scrollHost = chartHost.parentElement;
+        if (!scrollHost) return;
+        // A 1px sentinel placed *after* the chart host (sibling, not
+        // child) so the row-update trim loop in updateNetworkWaterfall
+        // doesn't remove it. When the sentinel is off-screen, the
+        // user has scrolled away from the live tail.
+        const sentinel = document.createElement('div');
+        sentinel.style.cssText = 'height:1px;width:1px;pointer-events:none;';
+        sentinel.dataset.field = 'netwf_follow_sentinel';
+        scrollHost.appendChild(sentinel);
+        const io = new IntersectionObserver((entries) => {
+            for (const entry of entries) {
+                if (!entry.isIntersecting && isNetworkLogFollowMode(sessionId)) {
+                    setNetworkLogFollowMode(sessionId, false);
+                    updateNetworkLogFollowButton(card, sessionId);
+                }
+            }
+        }, { threshold: 0 });
+        io.observe(sentinel);
     }
 
     let netwfTooltipEl = null;
