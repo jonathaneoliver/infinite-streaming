@@ -121,12 +121,14 @@ func (a *App) buildHARForSession(session SessionData, incident *har.Incident) ha
 				BytesIn:       e.BytesIn,
 				BytesOut:      e.BytesOut,
 				ContentType:   e.ContentType,
+				ClientWaitMs:  e.ClientWaitMs,
+				TransferMs:    e.TransferMs,
+				TotalMs:       e.TotalMs,
+				UpstreamURL:   e.UpstreamURL,
 				DNSMs:         e.DNSMs,
 				ConnectMs:     e.ConnectMs,
 				TLSMs:         e.TLSMs,
 				TTFBMs:        e.TTFBMs,
-				TransferMs:    e.TransferMs,
-				TotalMs:       e.TotalMs,
 				Faulted:       e.Faulted,
 				FaultType:     e.FaultType,
 				FaultAction:   e.FaultAction,
@@ -339,10 +341,16 @@ func writeIncidentFile(sessionID, playerID, reason, source string, doc har.HAR) 
 		return IncidentFileInfo{}, err
 	}
 
+	// Filename pattern: `proxy_<player_id>_<session_id>__<ts>.har`. The
+	// `proxy_` prefix signals "go-proxy's view" — future client-side
+	// HARs (issue #282) will use `client_`. The trailing __<ts> keeps
+	// successive incidents from the same player/session pair from
+	// overwriting each other (one play can produce multiple HARs:
+	// freeze, then user_retry, then segment_stall).
 	ts := now.Format("20060102T150405Z")
-	filename := fmt.Sprintf("%s__%s__%s.har",
+	filename := fmt.Sprintf("proxy_%s_%s__%s.har",
+		safeFilename(playerID),
 		safeFilename(sessionID),
-		safeFilename(reason),
 		ts,
 	)
 	full := filepath.Join(dir, filename)
@@ -456,15 +464,28 @@ func readIncidentMeta(path string) (IncidentFileInfo, error) {
 		}
 	}
 
-	// Filename fallback: {sessionID}__{reason}__{ts}.har
-	if info.SessionID == "" || info.Reason == "" {
-		parts := strings.SplitN(strings.TrimSuffix(info.Filename, ".har"), "__", 3)
-		if len(parts) >= 2 {
-			if info.SessionID == "" {
-				info.SessionID = parts[0]
+	// Filename fallback: `proxy_<playerID>_<sessionID>__<ts>.har`. We
+	// only use this when the JSON parse failed and the in-document
+	// _extensions.session block isn't available — best effort.
+	if info.SessionID == "" || info.PlayerID == "" {
+		stem := strings.TrimSuffix(info.Filename, ".har")
+		// Trim the optional `proxy_` / `client_` prefix.
+		stem = strings.TrimPrefix(stem, "proxy_")
+		stem = strings.TrimPrefix(stem, "client_")
+		// Drop the `__<ts>` suffix.
+		if idx := strings.LastIndex(stem, "__"); idx >= 0 {
+			stem = stem[:idx]
+		}
+		// Remaining: `<playerID>_<sessionID>`. Split on the LAST `_`:
+		// everything before is playerID, everything after is sessionID.
+		// Correct as long as sessionID has no `_` (it's UUID-shaped in
+		// practice, `[a-z0-9-]+`); playerID may contain `_`.
+		if idx := strings.LastIndex(stem, "_"); idx >= 0 {
+			if info.PlayerID == "" {
+				info.PlayerID = stem[:idx]
 			}
-			if info.Reason == "" {
-				info.Reason = parts[1]
+			if info.SessionID == "" {
+				info.SessionID = stem[idx+1:]
 			}
 		}
 	}

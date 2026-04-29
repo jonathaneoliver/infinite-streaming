@@ -95,10 +95,17 @@ type tcStatsCache struct {
 
 
 // NetworkLogEntry represents a single network request/response in the session
+//
+// The URL field stores the *player-facing* URL (what the client requested
+// from go-proxy) so HAR entries reflect the player's view. The
+// UpstreamURL field carries the URL the proxy used to reach the origin —
+// useful forensics ("did the proxy rewrite the variant?") that lands
+// under HAR's _extensions.upstream.url.
 type NetworkLogEntry struct {
 	Timestamp   time.Time `json:"timestamp"`
 	Method      string    `json:"method"`
 	URL         string    `json:"url"`
+	UpstreamURL string    `json:"upstream_url,omitempty"`
 	Path        string    `json:"path"`
 	RequestKind string    `json:"request_kind"` // "segment", "manifest", "master_manifest"
 	Status      int       `json:"status"`
@@ -106,13 +113,25 @@ type NetworkLogEntry struct {
 	BytesOut    int64     `json:"bytes_out"`
 	ContentType string    `json:"content_type"`
 
-	// Timing phases (milliseconds)
+	// Timing phases (milliseconds).
+	//
+	// The DNSMs/ConnectMs/TLSMs/TTFBMs/TransferMs/TotalMs fields measure
+	// the *upstream* connection (proxy → origin) — captured by httptrace
+	// during doRequestWithTracing. They're useful for forensics ("was the
+	// origin slow?") but they are NOT what the player perceived.
 	DNSMs      float64 `json:"dns_ms"`
 	ConnectMs  float64 `json:"connect_ms"`
 	TLSMs      float64 `json:"tls_ms"`
-	TTFBMs     float64 `json:"ttfb_ms"`     // Time to first byte
-	TransferMs float64 `json:"transfer_ms"` // Downstream write+flush time to client
+	TTFBMs     float64 `json:"ttfb_ms"`     // Upstream time to first byte
+	TransferMs float64 `json:"transfer_ms"` // Downstream write+flush time to client (= client-perceived `receive`)
 	TotalMs    float64 `json:"total_ms"`
+
+	// ClientWaitMs is the time from when the proxy received the request
+	// to when it sent the first response byte back to the client. It IS
+	// what the player perceived as `wait` (HAR's TTFB), modulo the
+	// network RTT in both directions which we don't capture server-side
+	// (issue #283).
+	ClientWaitMs float64 `json:"client_wait_ms"`
 
 	// Fault injection metadata
 	Faulted       bool   `json:"faulted"`
@@ -3547,6 +3566,14 @@ func (iw *idleWriter) Stop() {
 }
 
 func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
+	// Anchor the player's perceived timeline at the moment we received
+	// their request. ClientWaitMs (wait perceived by the player) is
+	// computed against this on every path, including faults.
+	requestReceivedAt := time.Now()
+	// playerURL is the URL the player asked for — used as the primary
+	// `URL` field on every NetworkLogEntry so HAR entries reflect what
+	// the player did, not the proxy → origin URL.
+	playerURL := r.URL.String()
 	filename := strings.TrimPrefix(r.URL.Path, "/")
 	escapedPath := strings.TrimPrefix(r.URL.EscapedPath(), "/")
 	if filename == "" {
@@ -3857,14 +3884,20 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 				updateSessionTraffic(sessionData, requestBytes, 0)
 				// Log network entry for fault
 				sessionID := getString(sessionData, "session_id")
-				netEntry := createFaultLogEntry(upstreamURL, requestKind, failureType, actionTaken, http.StatusBadGateway, requestBytes)
+				netEntry := createFaultLogEntry(playerURL, upstreamURL, requestKind, failureType, actionTaken, http.StatusBadGateway, requestBytes, requestReceivedAt)
 				a.addNetworkLogEntry(sessionID, netEntry)
 				sessionList[index] = sessionData
 				a.saveSessionList(sessionList)
 				return
 			}
 			resp, netEntry, err := a.doRequestWithTracing(r.Context(), proxyReq)
+			// doRequestWithTracing populates URL/Path from the upstream
+			// request — override with the player-facing values so HAR
+			// entries reflect what the player did, not the proxy → origin URL.
+			netEntry.URL = playerURL
+			netEntry.Path = r.URL.Path
 			if err != nil {
+				netEntry.ClientWaitMs = elapsedMs(requestReceivedAt)
 				if errors.Is(err, context.DeadlineExceeded) {
 					actionTaken = "http_504_upstream_timeout"
 					w.WriteHeader(http.StatusGatewayTimeout)
@@ -3893,6 +3926,7 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 			defer resp.Body.Close()
 			if resp.StatusCode >= 400 {
 				actionTaken = fmt.Sprintf("http_%d_upstream", resp.StatusCode)
+				netEntry.ClientWaitMs = elapsedMs(requestReceivedAt)
 				w.WriteHeader(resp.StatusCode)
 				bumpFaultCounter(sessionData, failureType)
 				logFaultEvent(sessionData, externalPort, failureType, requestKind, actionTaken)
@@ -3914,6 +3948,7 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Content-Type", contentType)
 			}
 			w.Header().Set("X-Session-ID", getString(sessionData, "session_number"))
+			netEntry.ClientWaitMs = elapsedMs(requestReceivedAt)
 			w.WriteHeader(http.StatusOK)
 			bytesOut, transferMs, copyErr := streamToClientMeasured(w, resp.Body, true)
 			if copyErr != nil && !errors.Is(copyErr, io.EOF) {
@@ -3958,7 +3993,7 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 			// and don't generate HTTP responses, so we log with 503 status
 			sessionID := getString(sessionData, "session_id")
 			status := http.StatusServiceUnavailable
-			netEntry := createFaultLogEntry(upstreamURL, requestKind, failureType, actionTaken, status, requestBytes)
+			netEntry := createFaultLogEntry(playerURL, upstreamURL, requestKind, failureType, actionTaken, status, requestBytes, requestReceivedAt)
 			a.addNetworkLogEntry(sessionID, netEntry)
 			sessionList[index] = sessionData
 			a.saveSessionList(sessionList)
@@ -4014,7 +4049,7 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 		case "http_429_rate_limited":
 			status = http.StatusTooManyRequests
 		}
-		netEntry := createFaultLogEntry(upstreamURL, requestKind, failureType, actionTaken, status, requestBytes)
+		netEntry := createFaultLogEntry(playerURL, upstreamURL, requestKind, failureType, actionTaken, status, requestBytes, requestReceivedAt)
 		a.addNetworkLogEntry(sessionID, netEntry)
 		return
 	}
@@ -4036,7 +4071,7 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadGateway)
 		// Log network entry for error
 		sessionID := getString(sessionData, "session_id")
-		netEntry := createFaultLogEntry(upstreamURL, requestKind, "none", "http_502_request_failed", http.StatusBadGateway, requestBytes)
+		netEntry := createFaultLogEntry(playerURL, upstreamURL, requestKind, "none", "http_502_request_failed", http.StatusBadGateway, requestBytes, requestReceivedAt)
 		a.addNetworkLogEntry(sessionID, netEntry)
 		return
 	}
@@ -4047,7 +4082,13 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 		proxyReq.Header.Set("If-Range", ifRange)
 	}
 	resp, netEntry, err := a.doRequestWithTracing(proxyCtx, proxyReq)
+	// doRequestWithTracing populates URL/Path from the upstream request —
+	// override with the player-facing values so HAR entries reflect what
+	// the player did, not the proxy → origin URL.
+	netEntry.URL = playerURL
+	netEntry.Path = r.URL.Path
 	if err != nil {
+		netEntry.ClientWaitMs = elapsedMs(requestReceivedAt)
 		// Set status before writing header
 		if errors.Is(err, context.DeadlineExceeded) {
 			netEntry.Status = http.StatusGatewayTimeout
@@ -4083,6 +4124,7 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 			getString(sessionData, "player_id"),
 			externalPort,
 		)
+		netEntry.ClientWaitMs = elapsedMs(requestReceivedAt)
 		w.WriteHeader(resp.StatusCode)
 		// Log network entry for upstream error
 		sessionID := getString(sessionData, "session_id")
@@ -4120,6 +4162,7 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 		}
 
 		w.Header().Set("Content-Length", strconv.Itoa(len(modifiedBody)))
+		netEntry.ClientWaitMs = elapsedMs(requestReceivedAt)
 		w.WriteHeader(resp.StatusCode)
 		var downstream io.Writer = w
 		if idleTimeout > 0 {
@@ -4127,8 +4170,10 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 			downstream = idleW
 		}
 		writer := bufio.NewWriter(downstream)
+		transferStart := time.Now()
 		_, writeErr := writer.Write(modifiedBody)
 		flushErr := writer.Flush()
+		netEntry.TransferMs = elapsedMs(transferStart)
 		if idleW != nil {
 			idleW.Stop()
 		}
@@ -4144,6 +4189,7 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	} else {
+		netEntry.ClientWaitMs = elapsedMs(requestReceivedAt)
 		w.WriteHeader(resp.StatusCode)
 		var downstream io.Writer = w
 		if idleTimeout > 0 {
@@ -4165,8 +4211,10 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 			)
 		}
 		var copyErr error
+		transferStart := time.Now()
 		bytesOut, copyErr = io.Copy(writer, resp.Body)
 		flushErr := writer.Flush()
+		netEntry.TransferMs = elapsedMs(transferStart)
 		if idleW != nil {
 			idleW.Stop()
 		}
@@ -5019,6 +5067,11 @@ func mergeTotalTiming(entry *NetworkLogEntry) {
 	}
 }
 
+// elapsedMs returns time.Since(t0) in fractional milliseconds.
+func elapsedMs(t0 time.Time) float64 {
+	return float64(time.Since(t0).Microseconds()) / 1000.0
+}
+
 // streamToClientMeasured copies bytes from src to client response writer and measures
 // downstream write+flush time, which is where traffic shaping backpressure appears.
 func streamToClientMeasured(w http.ResponseWriter, src io.Reader, zeroFill bool) (int64, float64, error) {
@@ -5070,11 +5123,17 @@ func streamToClientMeasured(w http.ResponseWriter, src io.Reader, zeroFill bool)
 
 // doRequestWithTracing executes an HTTP request with timing trace and returns the response and timings
 func (a *App) doRequestWithTracing(ctx context.Context, req *http.Request) (*http.Response, *NetworkLogEntry, error) {
+	// Note: caller is expected to overwrite entry.URL / entry.Path with
+	// the *player-facing* URL after this returns; what we set here is the
+	// upstream URL. We populate UpstreamURL up front and copy it into URL
+	// as a safe default for callers that don't override.
+	upstreamURL := req.URL.String()
 	entry := &NetworkLogEntry{
-		Timestamp: time.Now(),
-		Method:    req.Method,
-		URL:       req.URL.String(),
-		Path:      req.URL.Path,
+		Timestamp:   time.Now(),
+		Method:      req.Method,
+		URL:         upstreamURL,
+		UpstreamURL: upstreamURL,
+		Path:        req.URL.Path,
 	}
 
 	var start, dnsStart, connectStart, tlsStart time.Time
@@ -5128,13 +5187,18 @@ func (a *App) doRequestWithTracing(ctx context.Context, req *http.Request) (*htt
 	return resp, entry, nil
 }
 
-// createFaultLogEntry creates a network log entry for a faulted request
-func createFaultLogEntry(url, requestKind, faultType, faultAction string, status int, bytesIn int64) NetworkLogEntry {
+// createFaultLogEntry creates a network log entry for a faulted request.
+// `playerURL` is what the player asked for; `upstreamURL` (optional, may be
+// empty if the proxy never reached the upstream) is the resolved upstream URL
+// used for forensics under HAR's _extensions.upstream.url.
+func createFaultLogEntry(playerURL, upstreamURL, requestKind, faultType, faultAction string, status int, bytesIn int64, requestReceivedAt time.Time) NetworkLogEntry {
+	wait := elapsedMs(requestReceivedAt)
 	return NetworkLogEntry{
 		Timestamp:     time.Now(),
 		Method:        "GET",
-		URL:           url,
-		Path:          extractPathFromURL(url),
+		URL:           playerURL,
+		UpstreamURL:   upstreamURL,
+		Path:          extractPathFromURL(playerURL),
 		RequestKind:   requestKind,
 		Status:        status,
 		BytesIn:       bytesIn,
@@ -5143,6 +5207,11 @@ func createFaultLogEntry(url, requestKind, faultType, faultAction string, status
 		FaultType:     faultType,
 		FaultAction:   faultAction,
 		FaultCategory: categorizeFaultType(faultType),
+		// Fault paths short-circuit before any body — wait time is the
+		// total latency from receiving the request to writing the
+		// response status line.
+		ClientWaitMs: wait,
+		TotalMs:      wait,
 	}
 }
 

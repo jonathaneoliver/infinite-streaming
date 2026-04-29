@@ -28,37 +28,56 @@ func TestBuild_EmptySources(t *testing.T) {
 	}
 }
 
-func TestBuild_TimingMapping(t *testing.T) {
+func TestBuild_TimingMapping_DownstreamPerspective(t *testing.T) {
+	// HAR's standard timings.* surfaces *downstream* timings (proxy →
+	// player) so a viewer shows the player's experience by default.
+	// Upstream timings land under _extensions.upstream.
 	src := Source{
-		Timestamp:   time.Date(2026, 4, 28, 12, 0, 0, 0, time.UTC),
-		Method:      "GET",
-		URL:         "https://example.test/segment.m4s",
-		ContentType: "video/mp4",
-		Status:      200,
-		BytesIn:     1024 * 50,
-		BytesOut:    256,
-		DNSMs:       2.5,
-		ConnectMs:   8.1,
-		TLSMs:       12.0,
-		TTFBMs:      40.3,
-		TransferMs:  120.5,
-		TotalMs:     183.4,
+		Timestamp:    time.Date(2026, 4, 28, 12, 0, 0, 0, time.UTC),
+		Method:       "GET",
+		URL:          "https://example.test/segment.m4s",
+		ContentType:  "video/mp4",
+		Status:       200,
+		BytesIn:      1024 * 50,
+		BytesOut:     256,
+		ClientWaitMs: 65.0,  // request received → first response byte to client
+		TransferMs:   120.5, // body write+flush
+		TotalMs:      185.5,
+		// Upstream timings — should NOT appear in the standard Timings block.
+		DNSMs:     2.5,
+		ConnectMs: 8.1,
+		TLSMs:     12.0,
+		TTFBMs:    40.3,
 	}
 	doc := Build([]Source{src}, BuildOptions{SessionID: "s"})
 	if len(doc.Log.Entries) != 1 {
 		t.Fatalf("entries = %d, want 1", len(doc.Log.Entries))
 	}
 	e := doc.Log.Entries[0]
-	if e.Time != 183.4 {
-		t.Errorf("Time = %v, want 183.4", e.Time)
+	if e.Time != 185.5 {
+		t.Errorf("Time = %v, want 185.5", e.Time)
 	}
-	if e.Timings.DNS != 2.5 || e.Timings.Connect != 8.1 || e.Timings.SSL != 12.0 ||
-		e.Timings.Wait != 40.3 || e.Timings.Receive != 120.5 {
-		t.Errorf("Timings mapping off: %+v", e.Timings)
+	// Standard HAR Timings reflect downstream perspective only.
+	if e.Timings.Wait != 65.0 || e.Timings.Receive != 120.5 {
+		t.Errorf("downstream timings off: %+v", e.Timings)
 	}
-	// HAR spec: blocked/send default to -1 ("not applicable").
+	// DNS / Connect / SSL describe the *client*'s connect to its server;
+	// from go-proxy → player they're a keepalive transaction with no
+	// client-side handshake to measure here, so they're -1.
+	if e.Timings.DNS != -1 || e.Timings.Connect != -1 || e.Timings.SSL != -1 {
+		t.Errorf("DNS/Connect/SSL should be -1 (downstream): %+v", e.Timings)
+	}
 	if e.Timings.Blocked != -1 || e.Timings.Send != -1 {
 		t.Errorf("Blocked/Send not defaulted to -1: %+v", e.Timings)
+	}
+	// Upstream timings live under _extensions.upstream.
+	upstream, ok := e.Extensions["upstream"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected _extensions.upstream, got %+v", e.Extensions)
+	}
+	if upstream["dns_ms"] != 2.5 || upstream["connect_ms"] != 8.1 ||
+		upstream["tls_ms"] != 12.0 || upstream["ttfb_ms"] != 40.3 {
+		t.Errorf("upstream block wrong: %+v", upstream)
 	}
 	if e.Request.Method != "GET" || e.Request.URL != src.URL {
 		t.Errorf("Request mapping off: %+v", e.Request)
@@ -69,9 +88,60 @@ func TestBuild_TimingMapping(t *testing.T) {
 	if e.Response.Content.MimeType != "video/mp4" {
 		t.Errorf("Content.MimeType = %q, want video/mp4", e.Response.Content.MimeType)
 	}
-	// startedDateTime must be ISO8601 in UTC.
 	if !strings.HasSuffix(e.StartedDateTime, "Z") {
 		t.Errorf("startedDateTime not UTC: %q", e.StartedDateTime)
+	}
+}
+
+func TestBuild_NoUpstreamExtensionWhenAllZero(t *testing.T) {
+	// Fault paths that never reach upstream should NOT emit
+	// _extensions.upstream — there's nothing to report.
+	src := Source{
+		URL:          "https://example.test/x",
+		Status:       502,
+		ClientWaitMs: 1.0,
+		// All upstream timings 0 (rejected before connect).
+	}
+	doc := Build([]Source{src}, BuildOptions{})
+	e := doc.Log.Entries[0]
+	if _, has := e.Extensions["upstream"]; has {
+		t.Errorf("upstream extension should be omitted when nothing measured: %+v", e.Extensions)
+	}
+}
+
+func TestBuild_UpstreamURLLandsInExtension(t *testing.T) {
+	// When the proxy rewrote the URL before fetching upstream
+	// (variant rewrite, mirror), the player URL and upstream URL
+	// differ — both should be visible.
+	src := Source{
+		URL:         "https://proxy.test/seg.m4s?player_id=p&play_id=1",
+		UpstreamURL: "https://origin.test/h264/720p/seg.m4s",
+		Status:      200,
+		TTFBMs:      10,
+	}
+	doc := Build([]Source{src}, BuildOptions{})
+	e := doc.Log.Entries[0]
+	if e.Request.URL != src.URL {
+		t.Errorf("Request.URL should be the player URL, got %q", e.Request.URL)
+	}
+	upstream := e.Extensions["upstream"].(map[string]interface{})
+	if upstream["url"] != src.UpstreamURL {
+		t.Errorf("upstream.url = %v, want %q", upstream["url"], src.UpstreamURL)
+	}
+}
+
+func TestBuild_NoUpstreamURLWhenSameAsPlayerURL(t *testing.T) {
+	// If the proxy didn't rewrite, no point repeating the URL.
+	src := Source{
+		URL:         "https://example.test/seg.m4s",
+		UpstreamURL: "https://example.test/seg.m4s",
+		Status:      200,
+		TTFBMs:      10,
+	}
+	doc := Build([]Source{src}, BuildOptions{})
+	upstream := doc.Log.Entries[0].Extensions["upstream"].(map[string]interface{})
+	if _, has := upstream["url"]; has {
+		t.Errorf("upstream.url should be omitted when identical to player URL: %+v", upstream)
 	}
 }
 
