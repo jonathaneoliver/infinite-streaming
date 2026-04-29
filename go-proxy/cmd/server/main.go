@@ -7016,11 +7016,18 @@ func NewFailureHandler(prefix string, session SessionData) *FailureHandler {
 	if frequencyUnits == "" {
 		frequencyUnits = failureUnits
 	}
+	// Defaults match the dashboard's visible default Mode
+	// ("Failures / Seconds"), which maps to consecutiveUnits=requests
+	// and frequencyUnits=seconds. The dashboard only PATCHes Mode
+	// when the user actively changes it, so a session whose
+	// `<prefix>_failure_mode` field was never set still has empty
+	// units here. Defaulting to the same shape as the visible Mode
+	// avoids "rate limit doesn't fire as expected" on first use.
 	if consecutiveUnits == "" {
 		consecutiveUnits = "requests"
 	}
 	if frequencyUnits == "" {
-		frequencyUnits = "requests"
+		frequencyUnits = "seconds"
 	}
 	resetFailureType := session[prefix+"_reset_failure_type"]
 	if resetString, ok := resetFailureType.(string); ok {
