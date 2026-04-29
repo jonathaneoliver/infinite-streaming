@@ -168,12 +168,57 @@ type Incident struct {
 	Metadata  map[string]interface{} `json:"metadata,omitempty"`
 }
 
+// Context is an analyst-friendly snapshot of *everything around* a HAR
+// at the moment it was captured (issue #281). Lands under
+// `_extensions.context` at the document level so an incident HAR is
+// self-contained — no cross-referencing of separate logs needed to
+// answer "what device, what stream, what test scenario, how far into
+// playback was this?".
+type Context struct {
+	Device        *DeviceContext         `json:"device,omitempty"`
+	Stream        *StreamContext         `json:"stream,omitempty"`
+	Scenario      *ScenarioContext       `json:"scenario,omitempty"`
+	Timing        *TimingContext         `json:"timing,omitempty"`
+	RecoveryChain []string               `json:"recovery_chain,omitempty"`
+	Extra         map[string]interface{} `json:"extra,omitempty"`
+}
+
+// DeviceContext is the player-supplied device fingerprint.
+type DeviceContext struct {
+	Model       string `json:"model,omitempty"`
+	OSVersion   string `json:"os_version,omitempty"`
+	AppVersion  string `json:"app_version,omitempty"`
+	NetworkType string `json:"network_type,omitempty"`
+}
+
+// StreamContext describes what the player is playing.
+type StreamContext struct {
+	ContentID         string `json:"content_id,omitempty"`
+	Protocol          string `json:"protocol,omitempty"` // "hls" or "dash"
+	Codec             string `json:"codec,omitempty"`
+	InitialVariantURL string `json:"initial_variant_url,omitempty"`
+}
+
+// ScenarioContext is a snapshot of the test conditions active when the
+// HAR was taken — server-side from the session record.
+type ScenarioContext struct {
+	FaultSettings map[string]interface{} `json:"fault_settings,omitempty"`
+	NftablesShape map[string]interface{} `json:"nftables_shape,omitempty"`
+}
+
+// TimingContext anchors the incident in playback time.
+type TimingContext struct {
+	PlayStartedAt    string  `json:"play_started_at,omitempty"`    // RFC3339, when the play began
+	IncidentOffsetS  float64 `json:"incident_offset_s,omitempty"`  // seconds since play_started_at
+}
+
 // BuildOptions controls extra metadata embedded at the HAR Log level.
 type BuildOptions struct {
 	SessionID string
 	PlayerID  string
 	GroupID   string
 	Incident  *Incident
+	Context   *Context
 }
 
 // Build constructs a HAR document from the given NetworkLogEntry sources.
@@ -209,11 +254,24 @@ func Build(sources []Source, opts BuildOptions) HAR {
 	if opts.Incident != nil {
 		ext["incident"] = opts.Incident
 	}
+	if opts.Context != nil && !opts.Context.isEmpty() {
+		ext["context"] = opts.Context
+	}
 	if len(ext) > 0 {
 		log.Extensions = ext
 	}
 
 	return HAR{Log: log}
+}
+
+// isEmpty reports whether the Context has nothing populated. Used to
+// avoid emitting an `_extensions.context: {}` block.
+func (c *Context) isEmpty() bool {
+	if c == nil {
+		return true
+	}
+	return c.Device == nil && c.Stream == nil && c.Scenario == nil &&
+		c.Timing == nil && len(c.RecoveryChain) == 0 && len(c.Extra) == 0
 }
 
 func buildEntry(s Source) Entry {

@@ -52,10 +52,89 @@ func resolveIncidentDir() string {
 }
 
 // SnapshotRequest is the body for POST /api/session/{id}/har/snapshot.
+//
+// Players send Device + Stream blocks alongside the freeform Metadata so
+// the server can fold them into the HAR's _extensions.context block
+// (issue #281).
 type SnapshotRequest struct {
 	Reason   string                 `json:"reason"`
 	Source   string                 `json:"source"` // "dashboard", "rest", "player"
 	Metadata map[string]interface{} `json:"metadata,omitempty"`
+	Device   *SnapshotDeviceMeta    `json:"device,omitempty"`
+	Stream   *SnapshotStreamMeta    `json:"stream,omitempty"`
+	PlayID   string                 `json:"play_id,omitempty"`
+}
+
+// SnapshotDeviceMeta is the device fingerprint a player sends with a
+// snapshot request. Mirrors har.DeviceContext on the wire.
+type SnapshotDeviceMeta struct {
+	Model       string `json:"model,omitempty"`
+	OSVersion   string `json:"os_version,omitempty"`
+	AppVersion  string `json:"app_version,omitempty"`
+	NetworkType string `json:"network_type,omitempty"`
+}
+
+// SnapshotStreamMeta describes what the player is playing.
+type SnapshotStreamMeta struct {
+	ContentID         string `json:"content_id,omitempty"`
+	Protocol          string `json:"protocol,omitempty"`
+	Codec             string `json:"codec,omitempty"`
+	InitialVariantURL string `json:"initial_variant_url,omitempty"`
+}
+
+// recoveryChainStore tracks the ordered list of incident reasons a
+// player has hit during the current play. Keyed by playerID + ":" +
+// playID so a fresh play resets the chain. Issue #281.
+var (
+	recoveryChainMu    sync.Mutex
+	recoveryChainStore = map[string][]string{}
+)
+
+func recoveryChainKey(playerID, playID string) string {
+	if playerID == "" && playID == "" {
+		return ""
+	}
+	return playerID + ":" + playID
+}
+
+// recoveryChainSnapshot returns the current chain for (playerID, playID)
+// without modifying it. Used for forensic snapshots that should observe
+// without polluting the chain.
+func recoveryChainSnapshot(playerID, playID string) []string {
+	key := recoveryChainKey(playerID, playID)
+	if key == "" {
+		return nil
+	}
+	recoveryChainMu.Lock()
+	defer recoveryChainMu.Unlock()
+	chain := recoveryChainStore[key]
+	if len(chain) == 0 {
+		return nil
+	}
+	out := make([]string, len(chain))
+	copy(out, chain)
+	return out
+}
+
+// recordRecoveryReason appends `reason` to the chain for
+// (playerID, playID), capped at 32 entries to keep the HAR reasonable.
+// Returns the resulting chain.
+func recordRecoveryReason(playerID, playID, reason string) []string {
+	key := recoveryChainKey(playerID, playID)
+	if key == "" || reason == "" {
+		return nil
+	}
+	recoveryChainMu.Lock()
+	defer recoveryChainMu.Unlock()
+	chain := append(recoveryChainStore[key], reason)
+	const maxChain = 32
+	if len(chain) > maxChain {
+		chain = chain[len(chain)-maxChain:]
+	}
+	recoveryChainStore[key] = chain
+	out := make([]string, len(chain))
+	copy(out, chain)
+	return out
 }
 
 // IncidentFileInfo describes a stored HAR file in listings.
@@ -72,7 +151,8 @@ type IncidentFileInfo struct {
 
 // buildHARForSession reads the session's network ring buffer and returns a HAR
 // document. Caller is expected to have already validated the session exists.
-func (a *App) buildHARForSession(session SessionData, incident *har.Incident) har.HAR {
+// `context` is optional — when non-nil, it lands at log._extensions.context.
+func (a *App) buildHARForSession(session SessionData, incident *har.Incident, context *har.Context) har.HAR {
 	sessionID := getString(session, "session_id")
 
 	a.networkLogsMu.RLock()
@@ -112,6 +192,7 @@ func (a *App) buildHARForSession(session SessionData, incident *har.Incident) ha
 		PlayerID:  getString(session, "player_id"),
 		GroupID:   getString(session, "group_id"),
 		Incident:  incident,
+		Context:   context,
 	}
 	if incident != nil {
 		if incident.PlayerID == "" {
@@ -126,6 +207,111 @@ func (a *App) buildHARForSession(session SessionData, incident *har.Incident) ha
 	}
 
 	return har.Build(sources, opts)
+}
+
+// buildIncidentContext assembles the _extensions.context block for a
+// snapshot. Pulls device + stream from the player's request body,
+// scenario from the session record, timing from the network log's
+// earliest entry for the current play, and the recovery chain from
+// the in-memory store. Issue #281.
+func (a *App) buildIncidentContext(session SessionData, req *SnapshotRequest, playerID string) *har.Context {
+	if req == nil {
+		return nil
+	}
+	ctx := &har.Context{}
+
+	// Device + Stream — copied from request body.
+	if req.Device != nil {
+		ctx.Device = &har.DeviceContext{
+			Model:       req.Device.Model,
+			OSVersion:   req.Device.OSVersion,
+			AppVersion:  req.Device.AppVersion,
+			NetworkType: req.Device.NetworkType,
+		}
+	}
+	if req.Stream != nil {
+		ctx.Stream = &har.StreamContext{
+			ContentID:         req.Stream.ContentID,
+			Protocol:          req.Stream.Protocol,
+			Codec:             req.Stream.Codec,
+			InitialVariantURL: req.Stream.InitialVariantURL,
+		}
+	}
+
+	// Scenario — pull a sanitised view of the session's testing
+	// configuration. Avoid leaking everything in the session blob;
+	// pick the keys analysts actually care about.
+	scenario := &har.ScenarioContext{}
+	faultKeys := []string{
+		"segment_failure_type", "segment_failure_frequency", "segment_consecutive_failures",
+		"segment_failure_mode", "segment_failure_units", "segment_failure_urls",
+		"manifest_failure_type", "manifest_failure_frequency", "manifest_consecutive_failures",
+		"manifest_failure_mode", "manifest_failure_units", "manifest_failure_urls",
+		"master_manifest_failure_type", "master_manifest_failure_frequency",
+		"master_manifest_consecutive_failures", "master_manifest_failure_mode",
+		"transport_failure_type", "transport_consecutive_failures", "transport_failure_frequency",
+		"transport_failure_mode",
+	}
+	for _, k := range faultKeys {
+		if v, ok := session[k]; ok && v != nil && v != "" && v != "none" && v != 0 && v != 0.0 {
+			if scenario.FaultSettings == nil {
+				scenario.FaultSettings = map[string]interface{}{}
+			}
+			scenario.FaultSettings[k] = v
+		}
+	}
+	shapeKeys := []string{
+		"nftables_bandwidth_mbps", "nftables_delay_ms", "nftables_packet_loss",
+		"nftables_pattern_enabled", "nftables_pattern_steps",
+	}
+	for _, k := range shapeKeys {
+		v, ok := session[k]
+		if !ok || v == nil || v == "" {
+			continue
+		}
+		// Booleans are equal to 0 under interface comparison, so skip
+		// the v != 0 guard for bool fields — `false` is a meaningful
+		// "off" we want to surface for nftables_pattern_enabled.
+		if _, isBool := v.(bool); !isBool {
+			if v == 0 || v == 0.0 {
+				continue
+			}
+		}
+		if scenario.NftablesShape == nil {
+			scenario.NftablesShape = map[string]interface{}{}
+		}
+		scenario.NftablesShape[k] = v
+	}
+	if scenario.FaultSettings != nil || scenario.NftablesShape != nil {
+		ctx.Scenario = scenario
+	}
+
+	// Timing — when the player tells us play_started_at via Metadata
+	// (typically a "player_metrics_play_started_at" RFC3339 string)
+	// we surface it here. Once #280 (play_id scoping) lands, the
+	// server will derive this from the network log's earliest entry
+	// for the current play_id; until then, rely on the player's
+	// own snapshot.
+	playID := strings.TrimSpace(req.PlayID)
+	if playStartedAtRaw, ok := req.Metadata["play_started_at"].(string); ok && playStartedAtRaw != "" {
+		if playStartedAt, err := time.Parse(time.RFC3339Nano, playStartedAtRaw); err == nil {
+			ctx.Timing = &har.TimingContext{
+				PlayStartedAt:   playStartedAt.UTC().Format(time.RFC3339Nano),
+				IncidentOffsetS: time.Since(playStartedAt).Seconds(),
+			}
+		}
+	}
+
+	// Recovery chain — append the current reason and surface the
+	// resulting list. Forensic snapshots (source != "player") read
+	// without recording so they don't pollute the chain.
+	if req.Source == "player" {
+		ctx.RecoveryChain = recordRecoveryReason(playerID, playID, req.Reason)
+	} else {
+		ctx.RecoveryChain = recoveryChainSnapshot(playerID, playID)
+	}
+
+	return ctx
 }
 
 // findSessionByID returns the session map matching session_id, or nil.
@@ -156,7 +342,7 @@ func (a *App) handleGetSessionTimelineHAR(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	doc := a.buildHARForSession(session, nil)
+	doc := a.buildHARForSession(session, nil, nil)
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.Header().Set("Content-Disposition",
 		fmt.Sprintf(`attachment; filename="timeline-%s.har"`, safeFilename(playerID)))
@@ -203,8 +389,9 @@ func (a *App) handlePostHARSnapshot(w http.ResponseWriter, r *http.Request) {
 		Metadata:  req.Metadata,
 	}
 
-	doc := a.buildHARForSession(session, incident)
 	playerID := getString(session, "player_id")
+	context := a.buildIncidentContext(session, &req, playerID)
+	doc := a.buildHARForSession(session, incident, context)
 	info, err := writeIncidentFile(sessionID, playerID, req.Reason, req.Source, doc)
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
