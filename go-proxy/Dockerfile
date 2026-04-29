@@ -8,7 +8,7 @@ RUN go mod download
 
 COPY . .
 
-RUN go build -ldflags "-X main.versionString=${VERSION}" -o go-proxy cmd/server/main.go
+RUN go build -ldflags "-X main.versionString=${VERSION}" -o go-proxy ./cmd/server
 
 FROM alpine:3.18
 WORKDIR /app

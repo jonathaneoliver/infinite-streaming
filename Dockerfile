@@ -14,7 +14,7 @@ RUN cd /build/go-upload && \
 ARG VERSION=unknown
 COPY go-proxy /build/go-proxy
 RUN cd /build/go-proxy && \
-    go build -ldflags "-X main.versionString=${VERSION}" -o /out/go-proxy cmd/server/main.go
+    go build -ldflags "-X main.versionString=${VERSION}" -o /out/go-proxy ./cmd/server
 
 FROM alpine:3.23
 
