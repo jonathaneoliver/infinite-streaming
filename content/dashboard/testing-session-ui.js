@@ -2195,34 +2195,57 @@
         const centerRect = center.getBoundingClientRect();
         if (centerRect.height <= 0) return;
 
-        // Walk the rendered group elements. Each .vis-group has
-        // data-id matching the groupId we assigned (groupId = rowIdx + 1
-        // in updateNetworkWaterfall).
-        const groupEls = state.host.querySelectorAll('.vis-foreground .vis-group');
+        const rowCount = state.rows.length;
         let firstVisibleIdx = -1;
         let lastVisibleIdx = -1;
+
+        // Strategy 1: walk rendered .vis-group elements and take the
+        // ones whose bounding rect intersects the center viewport.
+        // Works if vis-timeline doesn't apply transforms that make all
+        // groups share the same on-screen rect.
+        const groupEls = state.host.querySelectorAll('.vis-foreground .vis-group');
+        let sampleHeight = 0;
         groupEls.forEach((el) => {
             const groupIdAttr = el.getAttribute('data-id') || el.dataset.id;
             const groupId = parseInt(groupIdAttr, 10);
             if (!Number.isFinite(groupId)) return;
             const rowIdx = groupId - 1;
-            if (rowIdx < 0 || rowIdx >= state.rows.length) return;
+            if (rowIdx < 0 || rowIdx >= rowCount) return;
             const r = el.getBoundingClientRect();
+            if (r.height > 0 && sampleHeight === 0) sampleHeight = r.height;
             if (r.height <= 0) return;
-            // Group at least partially visible if it overlaps the
-            // center panel's viewport rect.
             if (r.bottom > centerRect.top && r.top < centerRect.bottom) {
                 if (firstVisibleIdx === -1 || rowIdx < firstVisibleIdx) firstVisibleIdx = rowIdx;
                 if (lastVisibleIdx === -1 || rowIdx > lastVisibleIdx) lastVisibleIdx = rowIdx;
             }
         });
 
-        // Fallback: if we couldn't read group elements (race, custom
-        // virtualization), pan to cover all rows. Better than leaving a
-        // mostly-blank timeline.
-        if (firstVisibleIdx === -1 || lastVisibleIdx === -1) {
-            firstVisibleIdx = 0;
-            lastVisibleIdx = state.rows.length - 1;
+        // Strategy 2: if intersection found nothing (or found ALL rows
+        // due to vis-timeline's transform-based virtualization), fall
+        // back to "row-height × viewport ÷ pin to last N". Works for
+        // the common Following Latest workflow. The sampled height
+        // comes from the first .vis-group we saw above; if no groups
+        // are rendered at all, we use a 22px default.
+        const sawAllRows = (lastVisibleIdx - firstVisibleIdx + 1) === rowCount;
+        const sawNoRows = firstVisibleIdx === -1;
+        if (sawNoRows || sawAllRows) {
+            const rowHeight = sampleHeight > 0 ? sampleHeight : 22;
+            const visibleRowCount = Math.max(1, Math.min(rowCount, Math.floor(centerRect.height / rowHeight)));
+            // When the entries list is following the latest entries
+            // (Following Latest is the default), the visible rows are
+            // the most recent — pin to the last N. This matches what
+            // the user sees on the left.
+            if (isNetworkLogFollowMode(key)) {
+                firstVisibleIdx = Math.max(0, rowCount - visibleRowCount);
+                lastVisibleIdx = rowCount - 1;
+            } else {
+                // Not following — without reliable scroll position we
+                // pick the FIRST N rows (top-of-list). Will be wrong
+                // when user has scrolled past the top, but that case
+                // doesn't appear common today.
+                firstVisibleIdx = 0;
+                lastVisibleIdx = Math.min(rowCount - 1, visibleRowCount - 1);
+            }
         }
 
         const startRow = state.rows[firstVisibleIdx];
