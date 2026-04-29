@@ -1081,7 +1081,10 @@
                                 <button type="button" class="btn btn-mini btn-secondary" data-action="refresh-network-log">Refresh</button>
                                 <button type="button" class="btn btn-mini btn-secondary" data-action="save-har-snapshot" title="Save the current network timeline as a HAR file: downloads to your machine and adds it to the Incidents list">Download HAR</button>
                                 <a href="/dashboard/incidents.html" target="_blank" rel="noopener" class="btn btn-mini btn-secondary" title="Browse saved HAR snapshots">Incidents</a>
-                                <button type="button" class="btn btn-mini btn-secondary" data-action="network-log-follow">Following Latest</button>
+                                <label class="network-log-filter" title="When checked, the row list snaps to the latest entry on every refresh.">
+                                    <input type="checkbox" data-field="follow-latest" checked>
+                                    Follow Latest
+                                </label>
                                 <label class="network-log-filter" title="When checked, only faulted / non-success entries appear in the list.">
                                     <input type="checkbox" data-filter="hide-successful">
                                     Hide Successful
@@ -1368,6 +1371,30 @@
             const cb = e.target;
             if (!cb || cb.type !== 'checkbox' || !cb.dataset.field) return;
             const field = cb.dataset.field;
+            if (field === 'follow-latest') {
+                const card = cb.closest('.session-card');
+                const sessionId = card ? String(card.dataset.sessionId || '') : '';
+                if (!sessionId) return;
+                setNetworkLogFollowMode(sessionId, !!cb.checked);
+                if (cb.checked) {
+                    // Refetch + snap to bottom immediately, same as the
+                    // old button click did.
+                    updateNetworkLog(sessionId);
+                    const chartHost = card.querySelector('[data-field="network_log_waterfall"]');
+                    const snapToLast = () => {
+                        const rows = chartHost ? chartHost.children : null;
+                        const last = rows && rows[rows.length - 1];
+                        if (last) last.scrollIntoView({ block: 'end', behavior: 'auto' });
+                    };
+                    window.requestAnimationFrame(() => {
+                        snapToLast();
+                        window.requestAnimationFrame(snapToLast);
+                    });
+                } else if (card) {
+                    applyNetworkLogFilters(card);
+                }
+                return;
+            }
             if (field !== 'segment_failure_urls' && field !== 'manifest_failure_urls') return;
             const group = cb.closest('.checkbox-group');
             if (!group) return;
@@ -1393,41 +1420,6 @@
             const actionButton = targetElement.closest('[data-action]');
             if (actionButton) {
                 const action = actionButton.dataset.action;
-                if (action === 'network-log-follow') {
-                    const card = actionButton.closest('.session-card');
-                    const sessionId = card ? String(card.dataset.sessionId || '') : '';
-                    if (sessionId) {
-                        const nextFollow = !isNetworkLogFollowMode(sessionId);
-                        setNetworkLogFollowMode(sessionId, nextFollow);
-                        updateNetworkLogFollowButton(card, sessionId);
-                        if (nextFollow) {
-                            // Snap to the live point immediately —
-                            // refresh the entry list, re-render so the
-                            // brush hits the right edge, then make sure
-                            // the row list is scrolled to the bottom
-                            // even after layout settles.
-                            updateNetworkLog(sessionId);
-                            // Section has no internal scroll — the page
-                            // scrolls instead. Bring the last row into
-                            // view across two rAFs so the new entries
-                            // (which may not be in the DOM yet) are
-                            // covered.
-                            const chartHost = card.querySelector('[data-field="network_log_waterfall"]');
-                            const snapToLast = () => {
-                                const rows = chartHost ? chartHost.children : null;
-                                const last = rows && rows[rows.length - 1];
-                                if (last) last.scrollIntoView({ block: 'end', behavior: 'auto' });
-                            };
-                            window.requestAnimationFrame(() => {
-                                snapToLast();
-                                window.requestAnimationFrame(snapToLast);
-                            });
-                        } else if (card) {
-                            applyNetworkLogFilters(card);
-                        }
-                    }
-                    return;
-                }
                 if (action === 'save-har-snapshot') {
                     const card = actionButton.closest('.session-card');
                     const sessionId = card ? String(card.dataset.sessionId || '') : '';
@@ -1617,13 +1609,12 @@
     function updateNetworkLogFollowButton(card, sessionId) {
         const hostCard = card || document.querySelector(`.session-card[data-session-id="${sessionId}"]`);
         if (!hostCard) return;
-        const button = hostCard.querySelector('[data-action="network-log-follow"]');
-        if (!button) return;
+        const checkbox = hostCard.querySelector('input[data-field="follow-latest"]');
+        if (!checkbox) return;
         const following = isNetworkLogFollowMode(sessionId);
-        button.textContent = 'Following Latest';
-        button.setAttribute('aria-pressed', following ? 'true' : 'false');
-        button.classList.toggle('btn-primary', following);
-        button.classList.toggle('btn-secondary', !following);
+        if (checkbox.checked !== following) {
+            checkbox.checked = following;
+        }
     }
 
     function scrollWaterfallToLatestRow(state) {
@@ -2127,55 +2118,16 @@
         }
         updateNetworkLogFollowButton(card, key);
 
-        // Lazy-attach an IntersectionObserver on the last-row sentinel
-        // so when the user scrolls the page away from the live tail
-        // (the bottom of the row list leaves the viewport) we
-        // auto-disable Following Latest. One observer per chart host.
-        if (chartHost && !chartHost.dataset.netwfFollowObserved) {
-            chartHost.dataset.netwfFollowObserved = '1';
-            attachWaterfallFollowObserver(card, chartHost);
-        }
+        // (Auto-disable-on-scroll-away removed — too many false
+        // positives from layout reflow / DOM refresh briefly hiding
+        // the sentinel. Following Latest now persists until the user
+        // explicitly clicks the button.)
 
         // Lazy-attach hover tooltip handlers on the chart host.
         if (chartHost && !chartHost.dataset.netwfTipBound) {
             chartHost.dataset.netwfTipBound = '1';
             attachWaterfallHoverTooltip(chartHost);
         }
-    }
-
-    function attachWaterfallFollowObserver(card, chartHost) {
-        if (typeof window.IntersectionObserver !== 'function') return;
-        const sessionId = String(card.dataset.sessionId || '');
-        if (!sessionId) return;
-        const scrollHost = chartHost.parentElement;
-        if (!scrollHost) return;
-        // A 1px sentinel placed *after* the chart host (sibling, not
-        // child) so the row-update trim loop in updateNetworkWaterfall
-        // doesn't remove it. When the sentinel is off-screen, the
-        // user has scrolled away from the live tail.
-        const sentinel = document.createElement('div');
-        sentinel.style.cssText = 'height:1px;width:1px;pointer-events:none;';
-        sentinel.dataset.field = 'netwf_follow_sentinel';
-        scrollHost.appendChild(sentinel);
-        // IntersectionObserver fires once on observe() to report the
-        // initial state. If the network log section is below the
-        // viewport at that moment (user hasn't scrolled to it yet) we'd
-        // get isIntersecting=false immediately and reset Following
-        // Latest before the user did anything. Only react to the
-        // sentinel leaving the viewport AFTER it has been visible at
-        // least once.
-        let hasBeenVisible = false;
-        const io = new IntersectionObserver((entries) => {
-            for (const entry of entries) {
-                if (entry.isIntersecting) {
-                    hasBeenVisible = true;
-                } else if (hasBeenVisible && isNetworkLogFollowMode(sessionId)) {
-                    setNetworkLogFollowMode(sessionId, false);
-                    updateNetworkLogFollowButton(card, sessionId);
-                }
-            }
-        }, { threshold: 0 });
-        io.observe(sentinel);
     }
 
     let netwfTooltipEl = null;
