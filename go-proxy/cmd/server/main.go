@@ -4028,18 +4028,22 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 	// requests arriving in the same millisecond don't both pass the
 	// "1 per N seconds" filter and double-fire.
 	//
-	// The lock alone isn't enough: each goroutine has its own clone
-	// of sessionData (from the snap-clone in getSessionList above)
-	// taken BEFORE the lock — so without refreshing, two goroutines
-	// can both read segment_failure_recover_at = nil even when one
-	// of them just wrote a new value. Refresh the dedup-relevant
-	// fields from the latest snap inside the lock before deciding.
+	// The full atomic sequence is:
+	//   1. Refresh dedup state from the latest snap (defeats stale
+	//      clones).
+	//   2. Run HandleRequest (decides + writes to local clone).
+	//   3. Save back to the snap BEFORE unlocking, so the next
+	//      goroutine to take the lock sees this goroutine's writes
+	//      when it refreshes.
+	// The save MUST be inside the lock — if it's after the unlock,
+	// a second goroutine can acquire the lock and refresh from a
+	// snap that still doesn't have the first goroutine's writes,
+	// and the rule fires twice.
 	sessionStateMu.Lock()
 	refreshFailureStateFromLatest(a, sessionData, sessionNumber)
 	failureType := handler.HandleRequest(filename)
-	sessionStateMu.Unlock()
-
 	a.saveSessionByID(sessionNumber, sessionData)
+	sessionStateMu.Unlock()
 
 	if failureType != "none" {
 		log.Printf("FAILURE! Identifier: %s, %s, %s", sessionNumber, upstreamURL, failureType)
