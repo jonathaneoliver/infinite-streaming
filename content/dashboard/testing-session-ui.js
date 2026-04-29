@@ -1075,7 +1075,7 @@
                         <div class="network-log-section">
                             <div class="network-log-controls">
                                 <button type="button" class="btn btn-mini btn-secondary" data-action="refresh-network-log">Refresh</button>
-                                <button type="button" class="btn btn-mini btn-secondary" data-action="save-har-snapshot" title="Save current network timeline as a HAR file (Phase 1 of issue #272)">Save HAR</button>
+                                <button type="button" class="btn btn-mini btn-secondary" data-action="save-har-snapshot" title="Save the current network timeline as a HAR file: downloads to your machine and adds it to the Incidents list">Download HAR</button>
                                 <a href="/dashboard/incidents.html" target="_blank" rel="noopener" class="btn btn-mini btn-secondary" title="Browse saved HAR snapshots">Incidents</a>
                                 <button type="button" class="btn btn-mini btn-secondary" data-action="network-log-jump-first">First</button>
                                 <button type="button" class="btn btn-mini btn-secondary" data-action="network-log-jump-last">Last</button>
@@ -1427,7 +1427,16 @@
                         .then(r => r.json())
                         .then(data => {
                             if (data && data.incident && data.incident.path) {
-                                window.alert(`HAR saved: ${data.incident.filename}\n\nDownload via /api/incidents/${data.incident.path}`);
+                                // Trigger a direct download — server already
+                                // wrote the file to /incidents/, we just
+                                // route the browser at it via a hidden <a>.
+                                const a = document.createElement('a');
+                                a.href = `/api/incidents/${data.incident.path}`;
+                                a.download = data.incident.filename || 'incident.har';
+                                a.style.display = 'none';
+                                document.body.appendChild(a);
+                                a.click();
+                                document.body.removeChild(a);
                             } else if (data && data.error) {
                                 window.alert(`HAR save failed: ${data.error}`);
                             }
@@ -2162,7 +2171,18 @@
             // Wheel events fire even when vis-timeline does
             // transform-based scrolling. Schedule on the next frame so
             // we read the post-scroll position.
-            state.host.addEventListener('wheel', schedule, { passive: true });
+            state.host.addEventListener('wheel', (event) => {
+                // User-initiated scroll while Following Latest is on
+                // means they want to step away from the live tail —
+                // auto-disable Following Latest and let track-by-scroll
+                // pin the time window to whatever they're looking at.
+                if (isNetworkLogFollowMode(key)) {
+                    setNetworkLogFollowMode(key, false);
+                    const card = state.host.closest('.session-card');
+                    updateNetworkLogFollowButton(card, key);
+                }
+                schedule();
+            }, { passive: true });
             state.autoPanBound = true;
             return true;
         };
@@ -2175,6 +2195,47 @@
             if (attempts < 20) window.requestAnimationFrame(retry);
         };
         window.requestAnimationFrame(retry);
+    }
+
+    // restoreScrollAnchor finds the .vis-group element that corresponds
+    // to the anchor's rowIdx after a re-render and scrolls vis-timeline
+    // so that group sits at the same offset within the viewport as it
+    // did before the re-render. Issue #286 follow-up.
+    function restoreScrollAnchor(state, anchor) {
+        if (!state || !state.host || !anchor) return;
+        const center = state.host.querySelector('.vis-panel.vis-center');
+        if (!center) return;
+        const targetGroupId = String(anchor.rowIdx + 1);
+        const groupEls = state.host.querySelectorAll('.vis-foreground .vis-group');
+        let target = null;
+        for (const el of groupEls) {
+            if ((el.getAttribute('data-id') || el.dataset.id) === targetGroupId) {
+                target = el;
+                break;
+            }
+        }
+        if (!target) return;
+        const centerRect = center.getBoundingClientRect();
+        const targetRect = target.getBoundingClientRect();
+        const desiredOffsetTop = centerRect.top + anchor.offsetWithinGroup;
+        const delta = targetRect.top - desiredOffsetTop;
+        if (Math.abs(delta) < 1) return;
+        // Try vis-timeline's internal scroll surfaces in priority order;
+        // any one of them that's writable will scroll the panel.
+        const surfaces = [
+            state.timeline?.body?.dom?.shadow,
+            state.timeline?.body?.dom?.center,
+            state.host.querySelector('.vis-panel.vis-left .vis-content'),
+            state.host.querySelector('.vis-panel.vis-center .vis-content'),
+        ].filter(Boolean);
+        for (const s of surfaces) {
+            if (typeof s.scrollTop === 'number') {
+                const before = s.scrollTop;
+                s.scrollTop = before + delta;
+                // If it changed, we found the right surface.
+                if (s.scrollTop !== before) return;
+            }
+        }
     }
 
     // applyWaterfallAutoPan computes the time range covered by the
@@ -2398,6 +2459,35 @@
             });
         });
 
+        // Anchor preservation: when Following Latest is OFF, capture the
+        // topmost visible group's row index + pixel offset BEFORE the
+        // re-render so we can restore the user's view after the
+        // groups/items DataSet is replaced. Without this, vis-timeline's
+        // re-render snaps the scroll position to top and the user's view
+        // jumps every time new entries arrive.
+        let scrollAnchor = null;
+        if (!isNetworkLogFollowMode(key) && state.host) {
+            const center = state.host.querySelector('.vis-panel.vis-center');
+            const groupEls = state.host.querySelectorAll('.vis-foreground .vis-group');
+            if (center && groupEls.length > 0) {
+                const centerRect = center.getBoundingClientRect();
+                for (const el of groupEls) {
+                    const r = el.getBoundingClientRect();
+                    if (r.height <= 0) continue;
+                    if (r.bottom > centerRect.top) {
+                        const groupId = parseInt(el.getAttribute('data-id') || el.dataset.id, 10);
+                        if (Number.isFinite(groupId)) {
+                            scrollAnchor = {
+                                rowIdx: groupId - 1,
+                                offsetWithinGroup: centerRect.top - r.top,
+                            };
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+
         state.groups.clear();
         state.items.clear();
         state.groups.add(groups);
@@ -2441,6 +2531,13 @@
         state.timeline.redraw();
         if (following) {
             scrollWaterfallToLatestRow(state);
+        } else if (scrollAnchor) {
+            // Re-render snapped vis-timeline's scroll to top — restore
+            // the user's view by scrolling the same row back into the
+            // same vertical offset within the viewport.
+            window.requestAnimationFrame(() => {
+                window.requestAnimationFrame(() => restoreScrollAnchor(state, scrollAnchor));
+            });
         }
         // After the initial render, drive the time window from the
         // currently-visible rows when Follow Scroll is on. The setWindow
