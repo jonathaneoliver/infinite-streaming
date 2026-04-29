@@ -1802,16 +1802,29 @@
 
         const rows = entries.slice().map((entry, index) => {
             const timestamp = Date.parse(entry.timestamp || '') || 0;
+            // Upstream-perspective phases (proxy → origin) — surfaced in the
+            // tooltip for forensics but not part of the player-perceived bar.
             const dns = Number(entry.dns_ms || 0);
             const connect = Number(entry.connect_ms || 0);
             const tls = Number(entry.tls_ms || 0);
             const ttfb = Number(entry.ttfb_ms || 0);
             const total = Number(entry.total_ms || 0);
             const transferRaw = Number(entry.transfer_ms || 0);
+            // Player-perceived wait — request received → first response byte
+            // sent. Falls back to the legacy upstream-derived value for
+            // entries written before the downstream-timings change (#272).
+            const clientWaitRaw = Number(entry.client_wait_ms || 0);
             const handshake = dns + connect + tls;
-            const wait = Math.max(0, ttfb - handshake);
+            const wait = clientWaitRaw > 0
+                ? clientWaitRaw
+                : Math.max(0, ttfb - handshake);
             const transfer = transferRaw > 0 ? transferRaw : Math.max(0, total - ttfb);
-            const duration = Math.max(0, dns + connect + tls + wait + transfer);
+            // The bar represents the player's view: just wait + transfer.
+            // The upstream handshake phases are out-of-band (proxy ↔ origin)
+            // and don't count toward what the player saw.
+            const duration = clientWaitRaw > 0
+                ? Math.max(0, wait + transfer)
+                : Math.max(0, dns + connect + tls + wait + transfer);
             const parsed = parsePathAndVariant(entry);
             const prefix = entry.faulted ? '!' : '';
             return {
@@ -1950,6 +1963,9 @@
         if (!state || !state.timeline || !fullRange) return;
         if (!Number.isFinite(fullRange.startMs) || !Number.isFinite(fullRange.endMs) || fullRange.endMs <= fullRange.startMs) return;
 
+        // Re-enable auto-pan: user explicitly asked for a coordinated view.
+        state.autoPan = true;
+
         if (direction === 'fit') {
             resetWaterfallView(state, key);
             return;
@@ -2062,13 +2078,96 @@
                     networkWaterfallViewBySession.set(key, { startMs, endMs });
                     setNetworkLogFollowMode(key, false);
                     updateNetworkLogFollowButton(null, key);
+                    // User took manual control — stop auto-panning until
+                    // they hit Fit / First / Last (issue #286).
+                    state.autoPan = false;
                 }
             });
-            state = { host: field, timeline, groups, items, drag: null };
+            state = { host: field, timeline, groups, items, drag: null, rows: [], autoPan: true };
             bindWaterfallSelectionHandlers(state, key);
+            attachWaterfallAutoPan(state, key);
             networkWaterfallTimelines.set(key, state);
         }
         return state;
+    }
+
+    // attachWaterfallAutoPan listens to scroll events on the entries list
+    // (vis-timeline's left + center panels share scrollTop) and pans the
+    // visible time window to match the rows the user is looking at. Issue #286.
+    function attachWaterfallAutoPan(state, key) {
+        if (!state || !state.host || state.autoPanBound) return;
+        const setupOnce = () => {
+            if (!state.host) return false;
+            const left = state.host.querySelector('.vis-panel.vis-left .vis-content');
+            const center = state.host.querySelector('.vis-panel.vis-center .vis-content');
+            if (!left && !center) return false;
+            let rafId = null;
+            const onScroll = () => {
+                if (!state.autoPan) return;
+                if (rafId) return;
+                rafId = window.requestAnimationFrame(() => {
+                    rafId = null;
+                    applyWaterfallAutoPan(state, key);
+                });
+            };
+            if (left) left.addEventListener('scroll', onScroll, { passive: true });
+            if (center && center !== left) center.addEventListener('scroll', onScroll, { passive: true });
+            state.autoPanBound = true;
+            return true;
+        };
+        // vis-timeline builds its DOM async — retry a few frames if the
+        // .vis-content nodes aren't there yet.
+        let attempts = 0;
+        const retry = () => {
+            if (setupOnce()) return;
+            attempts += 1;
+            if (attempts < 20) window.requestAnimationFrame(retry);
+        };
+        window.requestAnimationFrame(retry);
+    }
+
+    // applyWaterfallAutoPan computes the time range covered by the
+    // entries list's currently-visible rows and pans the waterfall to it.
+    function applyWaterfallAutoPan(state, key) {
+        if (!state || !state.timeline || !Array.isArray(state.rows) || state.rows.length === 0) return;
+        if (!state.host) return;
+        // Re-check autoPan: the user may have done Alt+scroll/right-drag
+        // between the scroll event and this rAF firing — `onScroll`
+        // already gates new schedules but a previously-queued rAF would
+        // otherwise override the manual pan.
+        if (!state.autoPan) return;
+        const left = state.host.querySelector('.vis-panel.vis-left .vis-content');
+        if (!left) return;
+        const scrollTop = left.scrollTop;
+        const clientH = left.clientHeight;
+        const scrollH = left.scrollHeight;
+        if (scrollH <= clientH) return;
+        const rowCount = state.rows.length;
+        const rowHeight = scrollH / rowCount;
+        if (!Number.isFinite(rowHeight) || rowHeight <= 0) return;
+        const startIdx = Math.max(0, Math.floor(scrollTop / rowHeight));
+        const endIdx = Math.min(rowCount - 1, Math.ceil((scrollTop + clientH) / rowHeight) - 1);
+        if (endIdx < startIdx) return;
+        const startTs = state.rows[startIdx].timestamp;
+        const endRow = state.rows[endIdx];
+        const endTs = endRow.timestamp + Math.max(50, endRow.duration);
+        if (!Number.isFinite(startTs) || !Number.isFinite(endTs) || endTs <= startTs) return;
+        // Pad 5% on each side so adjacent bars peek in at the edges.
+        const padding = Math.max(50, (endTs - startTs) * 0.05);
+        const fullRange = networkWaterfallFullRangeBySession.get(key);
+        let nextStart = startTs - padding;
+        let nextEnd = endTs + padding;
+        if (fullRange) {
+            // Don't pan past the session's data bounds.
+            if (nextStart < fullRange.startMs) nextStart = fullRange.startMs;
+            if (nextEnd > fullRange.endMs) nextEnd = fullRange.endMs;
+        }
+        if (nextEnd <= nextStart) return;
+        // Suppress the rangechanged user-flag for our own setWindow call —
+        // vis-timeline doesn't fire byUser=true when we drive setWindow,
+        // so this is mostly belt-and-suspenders.
+        state.timeline.setWindow(new Date(nextStart), new Date(nextEnd), { animation: false });
+        networkWaterfallViewBySession.set(key, { startMs: nextStart, endMs: nextEnd });
     }
 
     function updateNetworkWaterfall(card, sessionId) {
@@ -2202,6 +2301,9 @@
         state.items.clear();
         state.groups.add(groups);
         state.items.add(items);
+        // Stash the rows so the auto-pan handler (issue #286) can map
+        // entries-list scroll position to a time window.
+        state.rows = rows;
 
         const fullStartMs = dataStartMs;
         const latestTransferEndMs = dataEndMs;
@@ -2209,9 +2311,12 @@
         const fullEndMs = latestTransferEndMs + rightPadMs;
         networkWaterfallFullRangeBySession.set(key, { startMs: fullStartMs, endMs: fullEndMs });
         state.timeline.setOptions({
+            // Clamp user pan/zoom to the session's full data range so the
+            // viewer can't drift into empty space outside the session.
             min: toTime(fullStartMs),
             max: toTime(fullEndMs),
-            zoomMax: Math.max(1000, fullEndMs - fullStartMs)
+            zoomMax: Math.max(1000, fullEndMs - fullStartMs),
+            zoomMin: 100 // Don't let users zoom-in tighter than 100ms.
         });
         const storedView = networkWaterfallViewBySession.get(key);
         const following = isNetworkLogFollowMode(key);
