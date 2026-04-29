@@ -1350,9 +1350,6 @@
                 const sessionId = card ? String(card.dataset.sessionId || '') : '';
                 if (!sessionId) return;
                 if (isOpen) {
-                    if (!hasNetworkLogFollowModeState(sessionId)) {
-                        setNetworkLogFollowMode(sessionId, true);
-                    }
                     updateNetworkLogFollowButton(card, sessionId);
                     startNetworkLogAutoRefresh(sessionId, card);
                 } else {
@@ -1514,9 +1511,6 @@
                         const card = sectionEl ? sectionEl.closest('.session-card') : null;
                         const sessionId = card ? card.dataset.sessionId : null;
                         if (sessionId && window.TestingSessionUI) {
-                            if (!hasNetworkLogFollowModeState(sessionId)) {
-                                setNetworkLogFollowMode(sessionId, true);
-                            }
                             updateNetworkLogFollowButton(card, sessionId);
                             startNetworkLogAutoRefresh(sessionId, card);
                         }
@@ -1602,7 +1596,9 @@
 
     function isNetworkLogFollowMode(sessionId) {
         const key = String(sessionId || '');
-        return networkWaterfallFollowModeBySession.get(key) !== false;
+        // Default OFF — the user expects the list to "just sit there"
+        // until they explicitly opt into auto-scroll.
+        return networkWaterfallFollowModeBySession.get(key) === true;
     }
 
     // Follow Scroll mode: when on, the waterfall's time window
@@ -1622,12 +1618,6 @@
             state.autoPan = !!enabled;
             if (enabled) applyWaterfallAutoPan(state, key);
         }
-    }
-
-    function hasNetworkLogFollowModeState(sessionId) {
-        const key = String(sessionId || '');
-        if (!key) return false;
-        return networkWaterfallFollowModeBySession.has(key);
     }
 
     function setNetworkLogFollowMode(sessionId, enabled) {
