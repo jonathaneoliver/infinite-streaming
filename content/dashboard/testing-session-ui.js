@@ -2130,9 +2130,16 @@
         return state;
     }
 
-    // attachWaterfallAutoPan listens to scroll events on the entries list
-    // (vis-timeline's left + center panels share scrollTop) and pans the
-    // visible time window to match the rows the user is looking at. Issue #286.
+    // attachWaterfallAutoPan listens for scroll on the entries list and
+    // pans the visible time window to match the rows the user is looking
+    // at. Issue #286.
+    //
+    // We listen to BOTH:
+    //   1. DOM `scroll` on `.vis-content` — fires when vis-timeline uses
+    //      native scrollbars.
+    //   2. `wheel` on the host — vis-timeline drives vertical scroll via
+    //      transforms in some configurations and the DOM scroll event
+    //      doesn't fire. The wheel handler covers that case.
     function attachWaterfallAutoPan(state, key) {
         if (!state || !state.host || state.autoPanBound) return;
         const setupOnce = () => {
@@ -2141,7 +2148,7 @@
             const center = state.host.querySelector('.vis-panel.vis-center .vis-content');
             if (!left && !center) return false;
             let rafId = null;
-            const onScroll = () => {
+            const schedule = () => {
                 if (!state.autoPan) return;
                 if (!isFollowScrollMode(key)) return;
                 if (rafId) return;
@@ -2150,8 +2157,12 @@
                     applyWaterfallAutoPan(state, key);
                 });
             };
-            if (left) left.addEventListener('scroll', onScroll, { passive: true });
-            if (center && center !== left) center.addEventListener('scroll', onScroll, { passive: true });
+            if (left) left.addEventListener('scroll', schedule, { passive: true });
+            if (center && center !== left) center.addEventListener('scroll', schedule, { passive: true });
+            // Wheel events fire even when vis-timeline does
+            // transform-based scrolling. Schedule on the next frame so
+            // we read the post-scroll position.
+            state.host.addEventListener('wheel', schedule, { passive: true });
             state.autoPanBound = true;
             return true;
         };
@@ -2172,28 +2183,39 @@
         if (!state || !state.timeline || !Array.isArray(state.rows) || state.rows.length === 0) return;
         if (!state.host) return;
         // Re-check autoPan: the user may have done Alt+scroll/right-drag
-        // between the scroll event and this rAF firing — `onScroll`
-        // already gates new schedules but a previously-queued rAF would
-        // otherwise override the manual pan.
+        // between the scroll event and this rAF firing.
         if (!state.autoPan) return;
         const left = state.host.querySelector('.vis-panel.vis-left .vis-content');
         if (!left) return;
         const scrollTop = left.scrollTop;
         const clientH = left.clientHeight;
         const scrollH = left.scrollHeight;
-        if (scrollH <= clientH) return;
         const rowCount = state.rows.length;
-        const rowHeight = scrollH / rowCount;
-        if (!Number.isFinite(rowHeight) || rowHeight <= 0) return;
-        const startIdx = Math.max(0, Math.floor(scrollTop / rowHeight));
-        const endIdx = Math.min(rowCount - 1, Math.ceil((scrollTop + clientH) / rowHeight) - 1);
+
+        // When the entries list isn't tall enough to scroll (scrollH ==
+        // clientH), every row is "visible" — pan to cover all of them.
+        // Previously this branch returned early, leaving the time
+        // window at the last Fit/setOptions value (often the full
+        // session range), which made the timeline mostly blank.
+        let startIdx, endIdx;
+        if (scrollH <= clientH || scrollTop <= 0 && clientH >= scrollH) {
+            startIdx = 0;
+            endIdx = rowCount - 1;
+        } else {
+            const rowHeight = scrollH / rowCount;
+            if (!Number.isFinite(rowHeight) || rowHeight <= 0) return;
+            startIdx = Math.max(0, Math.floor(scrollTop / rowHeight));
+            endIdx = Math.min(rowCount - 1, Math.ceil((scrollTop + clientH) / rowHeight) - 1);
+        }
         if (endIdx < startIdx) return;
         const startTs = state.rows[startIdx].timestamp;
         const endRow = state.rows[endIdx];
         const endTs = endRow.timestamp + Math.max(50, endRow.duration);
         if (!Number.isFinite(startTs) || !Number.isFinite(endTs) || endTs <= startTs) return;
-        // Pad 5% on each side so adjacent bars peek in at the edges.
-        const padding = Math.max(50, (endTs - startTs) * 0.05);
+        // Tight padding (1%) so adjacent bars peek in at the edges
+        // without swamping short bursts. Minimum 25ms so a single
+        // sub-millisecond bar doesn't render at zero width.
+        const padding = Math.max(25, (endTs - startTs) * 0.01);
         const fullRange = networkWaterfallFullRangeBySession.get(key);
         let nextStart = startTs - padding;
         let nextEnd = endTs + padding;
@@ -2203,9 +2225,6 @@
             if (nextEnd > fullRange.endMs) nextEnd = fullRange.endMs;
         }
         if (nextEnd <= nextStart) return;
-        // Suppress the rangechanged user-flag for our own setWindow call —
-        // vis-timeline doesn't fire byUser=true when we drive setWindow,
-        // so this is mostly belt-and-suspenders.
         state.timeline.setWindow(new Date(nextStart), new Date(nextEnd), { animation: false });
         networkWaterfallViewBySession.set(key, { startMs: nextStart, endMs: nextEnd });
     }
@@ -2380,6 +2399,16 @@
         state.timeline.redraw();
         if (following) {
             scrollWaterfallToLatestRow(state);
+        }
+        // After the initial render, drive the time window from the
+        // currently-visible rows when Follow Scroll is on. The setWindow
+        // calls above bracket the data range; auto-pan tightens to just
+        // what the user is looking at. Two rAFs let vis-timeline lay out
+        // its panels (the second one is when scrollHeight is final).
+        if (isFollowScrollMode(key) && state.autoPan) {
+            window.requestAnimationFrame(() => {
+                window.requestAnimationFrame(() => applyWaterfallAutoPan(state, key));
+            });
         }
     }
 
