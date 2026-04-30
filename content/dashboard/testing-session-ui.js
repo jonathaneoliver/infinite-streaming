@@ -2105,14 +2105,16 @@
         networkWaterfallRowsBySession.set(key, rows);
         networkWaterfallRenderSignatureBySession.set(key, sigs.length + ':' + (sigs[sigs.length - 1] || ''));
 
-        // Following Latest: bring the last row into view via the page
-        // scroll. The waterfall has no internal scroll cap — the
-        // section grows with the data — so we use the bottom row's
-        // own scrollIntoView instead of `scrollTop = scrollHeight`.
+        // Following Latest: only yank the page scroll to the bottom
+        // when the user is already near the bottom — i.e. they're
+        // actively watching the live tail. If they're scrolled up to
+        // look at the player or charts, leave them alone, even though
+        // the checkbox stays checked. The next time they scroll back
+        // down a refresh will pick up the snap.
         if (isNetworkLogFollowMode(key)) {
             const rowEls = chartHost.children;
             const lastRow = rowEls[rowEls.length - 1];
-            if (lastRow) {
+            if (lastRow && isPageScrolledNearBottom()) {
                 lastRow.scrollIntoView({ block: 'end', behavior: 'auto' });
             }
         }
@@ -2128,6 +2130,20 @@
             chartHost.dataset.netwfTipBound = '1';
             attachWaterfallHoverTooltip(chartHost);
         }
+    }
+
+    // True when the page is scrolled to (or very close to) the bottom.
+    // Used by the Follow Latest auto-snap to avoid yanking the user's
+    // viewport when they're scrolled up looking at the player or
+    // charts; the checkbox stays on, but we only chase the tail when
+    // the user is already there.
+    function isPageScrolledNearBottom() {
+        const doc = document.documentElement;
+        const scrolled = window.scrollY || doc.scrollTop || 0;
+        const view = window.innerHeight || doc.clientHeight || 0;
+        const total = doc.scrollHeight || 0;
+        if (total === 0) return true;
+        return scrolled + view >= total - 64; // 64px tolerance
     }
 
     let netwfTooltipEl = null;
