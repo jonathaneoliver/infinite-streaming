@@ -1576,11 +1576,11 @@ func (a *App) takeUserMarkedSnapshot(sessionID string) {
 	// handful of entries when the user 911s right after a
 	// retry/reload because the current play hasn't accumulated much.
 	// Use IncludeAllPlays so the user sees across plays, but clip
-	// to the last minute so the file stays focused on "what just
-	// happened" rather than dragging in the whole ring buffer.
+	// to the last 10 minutes so the file stays focused on "what
+	// just happened" rather than dragging in the whole ring buffer.
 	doc := a.buildHARForSession(session, incident, HARBuildFilter{
 		IncludeAllPlays: true,
-		SinceWindow:     60 * time.Second,
+		SinceWindow:     10 * time.Minute,
 	}, nil)
 	info, err := writeIncidentFile(sessionID, playerID, harReason, source, doc)
 	if err != nil {
