@@ -526,13 +526,17 @@
     font-size: 11px;
 }
 
-/* Wrapper grows with its content — no inner scroll cap. The page
- * itself scrolls when the list runs past the viewport, and the
- * sticky axis row pins to the page-viewport top while the user
- * scans down. New entries appended at the bottom don't pull the
- * page's scroll position around. */
+/* Inner scroll is back, but with a twist: the wheel inside this
+ * region scrolls the *page* by default, not the list. Hold
+ * Alt/Option while wheeling to scroll the list internally. This
+ * keeps casual browsing of the dashboard predictable (one scroll
+ * surface) while still letting the user dive into the row history
+ * without the page disappearing. The dashboard JS attaches the
+ * wheel handler that enforces this behaviour. */
 .network-log-waterfall-scroll {
     width: 100%;
+    max-height: 462px; /* ~22 (axis) + 20 * 22 (rows) — same fit as before */
+    overflow-y: auto;
     overflow-x: hidden;
 }
 

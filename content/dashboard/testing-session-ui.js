@@ -1377,14 +1377,13 @@
                 if (!sessionId) return;
                 setNetworkLogFollowMode(sessionId, !!cb.checked);
                 if (cb.checked) {
-                    // Refetch + snap to bottom immediately, same as the
-                    // old button click did.
+                    // Refetch + snap the INNER scroll to the bottom.
+                    // Two rAFs so the new entries (still being added
+                    // to the DOM after the fetch) are covered.
                     updateNetworkLog(sessionId);
-                    const chartHost = card.querySelector('[data-field="network_log_waterfall"]');
+                    const scrollHost = card.querySelector('[data-field="network_log_waterfall_scroll"]');
                     const snapToLast = () => {
-                        const rows = chartHost ? chartHost.children : null;
-                        const last = rows && rows[rows.length - 1];
-                        if (last) last.scrollIntoView({ block: 'end', behavior: 'auto' });
+                        if (scrollHost) scrollHost.scrollTop = scrollHost.scrollHeight;
                     };
                     window.requestAnimationFrame(() => {
                         snapToLast();
@@ -2105,18 +2104,19 @@
         networkWaterfallRowsBySession.set(key, rows);
         networkWaterfallRenderSignatureBySession.set(key, sigs.length + ':' + (sigs[sigs.length - 1] || ''));
 
-        // Following Latest: only yank the page scroll to the bottom
-        // when the user is already near the bottom — i.e. they're
-        // actively watching the live tail. If they're scrolled up to
-        // look at the player or charts, leave them alone, even though
-        // the checkbox stays checked. The next time they scroll back
-        // down a refresh will pick up the snap.
-        if (isNetworkLogFollowMode(key)) {
-            const rowEls = chartHost.children;
-            const lastRow = rowEls[rowEls.length - 1];
-            if (lastRow && isPageScrolledNearBottom()) {
-                lastRow.scrollIntoView({ block: 'end', behavior: 'auto' });
-            }
+        // Following Latest: snap the *inner* scroll to the bottom.
+        // The list now has its own scroll surface (max-height +
+        // overflow-y:auto), so chasing the live tail never moves the
+        // page itself. No "near-bottom" guard needed.
+        if (isNetworkLogFollowMode(key) && scrollHost) {
+            scrollHost.scrollTop = scrollHost.scrollHeight;
+        }
+        // Lazy-attach the alt-wheel handler that lets normal mouse
+        // wheel scroll the page, and Alt/Option+wheel scroll the
+        // inner list. One handler per scrollHost.
+        if (scrollHost && !scrollHost.dataset.netwfWheelBound) {
+            scrollHost.dataset.netwfWheelBound = '1';
+            attachWaterfallAltWheel(scrollHost);
         }
         updateNetworkLogFollowButton(card, key);
 
@@ -2132,18 +2132,23 @@
         }
     }
 
-    // True when the page is scrolled to (or very close to) the bottom.
-    // Used by the Follow Latest auto-snap to avoid yanking the user's
-    // viewport when they're scrolled up looking at the player or
-    // charts; the checkbox stays on, but we only chase the tail when
-    // the user is already there.
-    function isPageScrolledNearBottom() {
-        const doc = document.documentElement;
-        const scrolled = window.scrollY || doc.scrollTop || 0;
-        const view = window.innerHeight || doc.clientHeight || 0;
-        const total = doc.scrollHeight || 0;
-        if (total === 0) return true;
-        return scrolled + view >= total - 64; // 64px tolerance
+    // Wheel handler: by default the page scrolls (the list's own
+    // overflow scroll is bypassed). Hold Alt/Option to scroll the
+    // list internally instead. This avoids the dashboard becoming a
+    // mouse-wheel maze where every region traps your scroll until
+    // it bottoms out, while still giving the user a path to scrub
+    // through the row history when they want to.
+    function attachWaterfallAltWheel(scrollHost) {
+        scrollHost.addEventListener('wheel', (event) => {
+            if (event.altKey) {
+                // Native inner scroll — let the browser do its thing.
+                return;
+            }
+            // Otherwise: cancel the native wheel target, hand the
+            // scroll delta off to the page.
+            event.preventDefault();
+            window.scrollBy({ top: event.deltaY, left: event.deltaX, behavior: 'auto' });
+        }, { passive: false });
     }
 
     let netwfTooltipEl = null;
