@@ -1046,6 +1046,13 @@
         const controlRevisionBySession = new Map();
         const bandwidthHistory = new Map();
         const bandwidthEventHistory = new Map();
+        // Width of the right-side Y-axis on the FPS chart (Dropped/s).
+        // Used to pin every chart's right-axis or right padding to the
+        // same value so the plot areas (and x-axis ticks) line up
+        // vertically across the bandwidth / buffer-depth / FPS charts
+        // and the events-timeline above. Matches testing.html's
+        // RIGHT_AXIS_PAD_PX and the events-timeline-wrap CSS.
+        const RIGHT_AXIS_PAD_PX = 60;
         const bandwidthCharts = new Map();
         const bufferDepthCharts = new Map();
         const videoFpsCharts = new Map();
@@ -5876,6 +5883,11 @@
                             },
                             zoom: buildUnifiedChartZoomOptions(sessionId)
                         },
+                        // Reserve right padding equal to the FPS chart's
+                        // right-side Y-axis (Dropped/s) width so all
+                        // stacked charts' plot areas share the same right
+                        // edge, keeping x-axis ticks vertically aligned.
+                        layout: { padding: { right: RIGHT_AXIS_PAD_PX } },
                         scales: {
                             x: {
                                 type: 'linear',
@@ -6052,6 +6064,9 @@
                                 position: 'right',
                                 min: 0,
                                 max: maxWallClock,
+                                // Pin width so the plot's right edge
+                                // matches the bandwidth and FPS charts.
+                                afterFit: (axis) => { axis.width = RIGHT_AXIS_PAD_PX; },
                                 grid: { drawOnChartArea: false },
                                 ticks: {
                                     color: '#6b7280',
@@ -6316,6 +6331,10 @@
                                 position: 'right',
                                 min: 0,
                                 max: maxDroppedFps,
+                                // Pin width so the plot's right edge
+                                // matches the bandwidth and buffer-depth
+                                // charts (and the events-timeline above).
+                                afterFit: (axis) => { axis.width = RIGHT_AXIS_PAD_PX; },
                                 grid: { drawOnChartArea: false },
                                 ticks: {
                                     color: '#9a3412',
