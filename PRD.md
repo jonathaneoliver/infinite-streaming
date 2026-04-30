@@ -97,6 +97,9 @@ The system is intended for:
 - Per‑session failure injection (segments/playlists/manifests) with repeatable timing.
 - Failure modes include HTTP error codes, hung responses, and corrupted segment payloads.
 - Failure timing supports failures‑per‑second (separate frequency vs consecutive units).
+- **All‑tab override**: a single fault rule that applies to *every* HTTP request kind (segments, media manifests, master) when its Failure Type is non‑`none`. The per‑kind tabs disable while the override is active and re‑enable when it returns to `none`. Same control shape (Failure Type, Mode, Consecutive, Frequency, Scope) as the per‑kind tabs.
+- Frequency semantics: full cycle length (fault start → next fault start), not gap‑after‑recovery.
+- **Server transfer timeouts**: per‑kind opt‑in (`Apply To: Segments / Media manifests / Master manifest`) active and idle timeouts the proxy enforces against the client. Active timeout caps total request wall‑clock; idle timeout fires when no bytes flow to the client for the configured window. Timeouts are reflected on network‑log waterfall rows with a `!⏱` glyph.
 - Per‑port transport fault injection (DROP/REJECT) via nftables.
 - Transport faults support consecutive units in seconds or packets, with frequency in seconds.
 - Transport fault packet counters (drop/reject) are surfaced in API/UI for observability.
@@ -104,6 +107,13 @@ The system is intended for:
 - Session grouping controls (group/ungroup/merge) with group badges and group‑aware control propagation.
 - Player selector: HLS.js, Shaka, Video.js, Native.
 - Logs player errors and HTTP failure details in the testing UI.
+
+**Incidents**
+- Persistent browser of HAR snapshots captured during testing sessions.
+- Snapshots are auto‑captured on detected stalls (`reason=stall` / `reason=segment_stall`), on player 911 button presses (`reason="user 911"`), or written manually via the testing‑session **Save HAR** button (`reason=manual`).
+- Each row shows reason / source / clipped time window / first stream URL touched / file size.
+- Click any incident to render its waterfall inline using the same renderer the testing session uses; bulk‑delete and per‑row delete supported.
+- Reason filters split auto‑captures from manual saves so triage isn't drowning in 911 backups.
 
 ### 7.6 Player Characterization (ABR)
 - A per‑session **Player Characterization** panel is available in the Testing session UI.
@@ -176,6 +186,7 @@ Many platforms already expose their own failure tools (player debug features, br
    - **Wire throughput**: measured interface throughput from `tc` counters (`mbps_wire_*`), including packet-level transport/application overhead visible at that interface.
    - **Player averaged bandwidth**: long-window averaged ABR estimate (`player_metrics_avg_network_bitrate_mbps`), algorithmic and client-side; every player can provide this.
    - **Player instantaneous bandwidth**: short-window near-instantaneous wire throughput (`player_metrics_network_bitrate_mbps`), requires per-request wire visibility (currently iOS-only via LocalHTTPProxy); null otherwise.
+   - **Wall‑clock offset (true offset)**: server‑computed live‑edge offset that is independent of the client's clock. The player posts `player_metrics_playhead_wallclock_ms` (encoder PDT at the playhead); the server timestamps receive‑moment with its own clock and stores `true_offset_s = (server_received_at_ms − playhead_wallclock_ms) / 1000` as `player_metrics_true_offset_s`. Surfaced on the buffer‑depth chart's right Y‑axis and as the basis for the cross‑client Live Offset comparison page. Resilient to phone vs laptop NTP drift and to player‑engine offset adjustments.
 - **Expected differences**:
    - `wire throughput` generally converges toward but does not exceed `limit` for sustained intervals.
    - `player averaged bandwidth` should follow `wire throughput` trends over time but may diverge transiently due to smoothing, startup bias, rebuffering, or adaptation hysteresis.
@@ -187,6 +198,8 @@ Many platforms already expose their own failure tools (player debug features, br
 - Partial duration default: 200ms.
 - GOP default: 1s (configurable in UI).
 - Packaging uses Shaka Packager for DASH outputs when available.
+- **Audio normalization**: source audio is always re‑encoded to AAC so every variant on the ladder has a uniform audio codec, regardless of source format. Eliminates client‑specific audio‑codec compatibility variance from playback testing.
+- **Synthetic test content**: `make test-pattern` generates a 4K test pattern clip suitable for controlled ABR / ladder testing. Deterministic visuals, no copyrighted material.
 
 ## 9) Monitoring & Logging
 - Per‑content worker logs:
@@ -194,7 +207,12 @@ Many platforms already expose their own failure tools (player debug features, br
   - LL‑DASH tick time, avg_5m
   - 2s/6s HLS/DASH update timings when generated
 - Go‑Monitor exposes status for each content/variant.
- - Testing session logs per‑player errors and HTTP failure details.
+- Testing session logs per‑player errors and HTTP failure details.
+- **Network log (HAR)**: every request the proxy serves to the player is captured with full timing (DNS / connect / TLS / TTFB / wait / transfer), method, URL, status, request kind, and fault metadata (`faulted`, `fault_type`, `fault_action`, `fault_category`).
+   - The dashboard waterfall renders rows with a flag column whose glyph distinguishes the four "looked like 200, ended badly" categories: `!` (HTTP fault), `!✂` (socket fault inject), `!⏱` (server transfer timeout), `!↩` (client disconnect).
+   - Status codes reflect what the *client* observed on the wire: `200` for socket faults that emitted chunked headers before the cut, `0` for connect‑time aborts, the upstream's status for transfer‑timeout / client‑disconnect mid‑body, and `4xx` / `5xx` for HTTP faults.
+- **HAR snapshots**: persistent files written to `$CONTENT_DIR/incidents/`. Triggered automatically on detected player stalls / segment stalls, on a player **911** button press (`user_marked` event), or manually via the dashboard **Save HAR** button. Each snapshot clips to the last 10 minutes of activity and includes every play within that window.
+- **Cross‑layer 911 logging**: the player's 911 button writes a `"911"` log token on the device (Apple device console / `adb logcat`), POSTs a `user_marked` metrics event the server logs with the same `"911"` token, and triggers an immediate HAR snapshot whose lifecycle is logged. Tracing one user complaint across all three layers reduces to `grep 911`.
 
 ## 10) Security & Access
 - Local development focus; no auth required.
