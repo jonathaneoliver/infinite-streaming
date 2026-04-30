@@ -1560,14 +1560,18 @@ func (a *App) takeUserMarkedSnapshot(sessionID string) {
 		log.Printf("911 USER_MARKED debounced sid=%s player_id=%s", sessionID, playerID)
 		return
 	}
+	// Label the saved HAR with a friendlier "user 911" reason
+	// (matches the on-screen button); the player-facing event type
+	// stays "user_marked" for the metrics path.
+	const harReason = "user 911"
 	incident := &har.Incident{
-		Reason:    "user_marked",
+		Reason:    harReason,
 		Source:    source,
 		SessionID: sessionID,
 		Timestamp: time.Now().UTC(),
 	}
 	doc := a.buildHARForSession(session, incident, HARBuildFilter{}, nil)
-	info, err := writeIncidentFile(sessionID, playerID, "user_marked", source, doc)
+	info, err := writeIncidentFile(sessionID, playerID, harReason, source, doc)
 	if err != nil {
 		log.Printf("911 USER_MARKED write-failed sid=%s err=%v", sessionID, err)
 		return
