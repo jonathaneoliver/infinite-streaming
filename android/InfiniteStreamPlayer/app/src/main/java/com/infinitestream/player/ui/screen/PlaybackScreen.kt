@@ -294,6 +294,8 @@ private fun HudBar(
                 RecoveryButton("Retry", onActivity) { vm.retry() }
                 Spacer(Modifier.width(Space.s2))
                 RecoveryButton("Reload", onActivity) { vm.reload() }
+                Spacer(Modifier.width(Space.s2))
+                RecoveryButton("911", onActivity) { vm.mark911() }
             }
         }
     }

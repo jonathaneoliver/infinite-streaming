@@ -354,6 +354,19 @@ public final class PlaybackMetrics {
         requestHarSnapshot("player_error", 0, /* force= */ false);
     }
 
+    /**
+     * 911 button. Fires a "user_marked" metrics event; the server
+     * recognises that and writes a HAR snapshot to /api/incidents
+     * with reason="user_marked", so the user can review what was on
+     * the wire when they tapped. Posting via the metrics path (not
+     * /har/snapshot directly) keeps the marker visible on the
+     * dashboard's events swim lane too. buildPayload already stamps
+     * an event timestamp — no extras needed.
+     */
+    public void onUserMarked() {
+        sendEvent("user_marked", Collections.<String, Object>emptyMap());
+    }
+
     /** Called when user triggers a restart (Restart Playback button, etc). */
     public void onRestart(String reason) {
         playerRestarts = Math.max(0, playerRestarts) + 1;

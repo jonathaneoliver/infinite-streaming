@@ -823,6 +823,19 @@ final class PlayerViewModel: ObservableObject {
     /// Right tool after a server restart.
     ///
     /// Same `playerId` (proxy session continuity), no catalogue refetch.
+    /// 911 button — marks "something interesting just happened" so a
+    /// HAR snapshot of the current session timeline lands on the
+    /// server's incidents directory. The metrics POST also surfaces
+    /// the marker on the dashboard's events swim lane. Doesn't touch
+    /// playback — purely a forensic capture.
+    func mark911() {
+        Task { [weak self] in
+            await self?.sendPlayerMetrics(event: "user_marked", extra: [
+                "player_metrics_user_marked_at": Self.metricsTimestampFormatter.string(from: Date())
+            ])
+        }
+    }
+
     func reload() {
         Task { [weak self] in
             await self?.requestHARSnapshot(reason: "user_reload", force: true)

@@ -685,6 +685,16 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
      *
      * Same player_id (proxy session continuity), no catalogue refetch.
      */
+    /**
+     * 911 button — marks "something interesting just happened" so the
+     * server fires a HAR snapshot of the current session timeline. The
+     * metrics POST also surfaces a marker on the dashboard's events
+     * swim lane. Doesn't touch playback — purely a forensic capture.
+     */
+    fun mark911() {
+        metrics?.onUserMarked()
+    }
+
     fun reload() {
         metrics?.onRestart("reload")
         metrics?.release()
