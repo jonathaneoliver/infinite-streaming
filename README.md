@@ -30,11 +30,13 @@ Player bugs are usually environmental — a network blip, a truncated segment, a
 
 - **Deterministic looping live.** The sliding window moves on a stable clock and wraps on loop boundaries. The same run produces the same timing.
 - **All variants from one worker.** LL-HLS, LL-DASH, 2s, and 6s segment variants are generated from a single per-content worker on a shared clock, so cross-protocol comparisons are apples-to-apples.
-- **Streaming-aware fault injection.** Inject HTTP errors, hangs, and payload corruption at the segment, playlist, or manifest layer — not just generic TCP faults.
+- **Streaming-aware fault injection.** Inject HTTP errors, hangs, and payload corruption at the segment, playlist, or manifest layer — not just generic TCP faults. The **All** override applies one rule to every HTTP request kind in a single click.
 - **Master-playlist manipulation.** Rewrite the HLS master on the fly — strip CODEC / AVERAGE-BANDWIDTH, overstate BANDWIDTH, allowlist specific rungs, change the live hold-back offset. Explore how ladder shape and optional HLS attributes affect startup, ABR, and live-edge latency **without re-encoding**.
 - **Transport faults too.** Port-level DROP/REJECT via nftables, composable with HTTP-layer faults.
 - **Interactive rate shaping with deterministic patterns.** Drag throughput, latency, loss, and pattern-mode sliders and watch the player react in real time. Or build a step-based throughput pattern with a fixed step duration so the same curve replays bit-for-bit on every run — what you saw rebuffer at 09:14 yesterday rebuffers again today.
 - **Per-session isolation.** Each browser session binds to a dedicated proxy port via `player_id`, so concurrent testers don't collide.
+- **Streaming-aware HAR.** The dashboard's network-log waterfall annotates each request with what *actually* happened on the wire. A row that looks like a 200 but ended badly is tagged with `!✂` (proxy-injected body cut), `!⏱` (server transfer-timeout), or `!↩` (client gave up), so the chart tells the truth even when the status code can't.
+- **One-tap incident capture.** A "911" button on every player (iOS / iPadOS / tvOS / Android TV) snapshots the current session's HAR — a 10-minute window of every request, fault, and play, written to the Incidents browser for replay later. No "what did you click before it broke?" debugging.
 - **Session grouping for differential testing.** Link two or more independent sessions so fault injection and network shaping apply to all of them simultaneously, while everything else (player engine, codec, live offset, platform, ladder constraints) stays independent per session. One bandwidth collapse, two `live_offset` values, instant apples-to-apples comparison of which setting rebuffers. Or iOS vs Android reacting to the exact same throughput curve. See [Session grouping](#session-grouping-differential-testing).
 - **Side-by-side comparison UI.** Mosaic view for watching multiple players or encodings against the same source simultaneously. Quartet (alpha) extends this to four-panel layouts.
 - **Accessible to non-programmers.** The whole surface is a web UI — click a fault type, drag a throttle slider, flip a Content-tab toggle, watch the bitrate / buffer / FPS charts react in real time. No Python addons, no YAML, no CLI. A QA analyst, a producer, or a support engineer can run real experiments and see cause-and-effect without writing any code.
@@ -129,6 +131,7 @@ That walkthrough exercises the majority of the system. The sections below descri
 - **Quartet** *(alpha)* — four-panel side-by-side comparison across encodings or players.
 - **Live Offset** *(alpha)* — compares live offset, buffer depth, and seekable ranges across variants.
 - **Testing Session** — per-session failure injection, traffic shaping, content manipulation, metrics charts. See below.
+- **Incidents** — browse recorded HAR snapshots from every session. Click any incident to render its waterfall inline; bulk-delete cleanup; reason filters distinguish auto-captures (stall / segment-stall / 911) from manual `Save HAR` clicks.
 - **Go-Monitor** — active workers, request counts, last-request time, idle timeout, tick timings.
 - **Upload Content** — web upload + encoding job tracking.
 - **Source Library** — list of `$CONTENT_DIR/originals/`. Click to kick re-encodes.
@@ -158,12 +161,15 @@ The `player_id` is required. go-proxy uses it to allocate a session-specific por
 
 ### Failure injection (per request kind)
 
-The Fault Injection card has separate tabs for **Segment**, **Manifest**, **Master**, **Transport**, and **Content**. The first three share the same controls:
+The Fault Injection card has separate tabs for **All**, **Segment**, **Manifest**, **Master**, **Transport**, and **Content**.
 
-- **Failure Type** (must be non-`none` to activate).
-- **Units**: Requests / Seconds / Failures-per-Second.
-- **Consecutive**: how wide the fault window is.
-- **Frequency**: spacing between fault windows.
+- **All** *(default-selected, override)* — one rule applied to every HTTP request kind. Same controls as the Segment tab; when its Failure Type is anything other than `none`, the per-kind tabs disable with an "All override active" banner. Use this when you want a blunt-instrument blast across segments, media manifests, and master at once.
+- **Segment / Manifest / Master** — per-kind rules with independent config. Same control shape:
+  - **Failure Type** (must be non-`none` to activate).
+  - **Units**: Requests / Seconds / Failures-per-Second.
+  - **Consecutive**: how wide the fault window is.
+  - **Frequency**: spacing between fault windows (full cycle length, not the gap after recovery).
+  - **Scope**: which variants the rule applies to (defaults to `All`).
 
 Changes auto-save. The full fault matrix (status codes, socket misbehavior, corruption) is in [`docs/FAULT_INJECTION.md`](docs/FAULT_INJECTION.md).
 
@@ -201,20 +207,66 @@ The **Content** tab rewrites the HLS master playlist on the fly — no re-encodi
 
 HLS only; DASH is a placeholder. Two-phase: play once to populate the variant list, then replay with the same `player_id`. Full reference in [`docs/FAULT_INJECTION.md`](docs/FAULT_INJECTION.md#manifest-content-manipulation).
 
+### Server Timeouts (transfer active + idle)
+
+![Server Timeouts](docs/screenshots/server-timeouts.png)
+
+ATS-style transfer timeouts the proxy enforces against the *client* — useful for testing player behavior when the server is slow or stalls mid-body. Two independent values, each gated by a per-kind `Apply To` checkbox:
+
+- **Active timeout (s)** — total wall-clock budget from request received → response complete. Fires whether bytes are flowing or not. Trips pre-headers as **504**, mid-body as a transfer cut.
+- **Idle timeout (s)** — gap timer reset on every successful write to the client. Fires when the proxy → player flow goes silent for the configured window — i.e., the player stopped draining bytes.
+- **Apply To**: `Segments` / `Media manifests` / `Master manifest`. Off for a kind = no timeout for that kind. Most testing leaves segments-only checked since manifests / master are too small to meaningfully time out.
+
+When a timeout fires the network-log waterfall renders the row with `!⏱` so you can tell it apart from a fault-injection cut (`!✂`) or a player abort (`!↩`).
+
 ### Bitrate chart (with buffer depth and FPS)
 
-The session card has a collapsible **Bitrate Chart** that stacks up to three time-series charts sharing a 10-minute rolling window and unified zoom/pan. Legend entries toggle series, scroll zooms, drag pans, `⏸` pauses live updates.
+![Playback state chart](docs/screenshots/playback-state-chart.png)
 
+The session card has a collapsible **Bitrate Chart** that stacks an events timeline + up to three time-series charts, all sharing a 10-minute rolling window and unified zoom/pan. Legend entries toggle series, scroll zooms, drag pans, `⏸` pauses live updates. The four panels share an x-axis so a bandwidth dip lines up visually with its buffer / FPS / variant-shift impact.
+
+- **Events timeline** *(top)* — swim-lane visualization of what the player and server are doing right now:
+  - **PLAYER variants** — one lane per ladder rung (e.g. `1920×1080:7.1Mbps`, `1280×720:3.5Mbps`). Coloured blocks show which variant the player was on at each moment. The variant shift on a throughput collapse is visible as a downstep across lanes.
+  - **DISPLAY RES** — the actual rendered resolution per moment (green = matches the highest available, red = downstepped).
+  - **PLAYERSTATE** — `playing` / `paused` / `stalled` lane.
+  - **PLAYBACK** + **IMPAIRMENT** — markers for restarts, stalls, error events, fault windows.
+  - **SERVER LOOP** — content-loop boundaries from go-live, so wraparound effects line up with player behaviour.
 - **Bitrate chart** — up to ten series:
   - **Server metrics**: `mbps_shaper_rate` (100 ms), `mbps_shaper_avg` (6 s rolling), `mbps_transfer_rate` (250 ms, byte-gated), `mbps_transfer_complete` (per segment). See the [Metrics reference](#metrics-reference) below.
   - **Player metrics**: `Player avg_network_bitrate` (averaged ABR bandwidth estimate — iOS `observedBitrate`, Android `DefaultBandwidthMeter`), `Player network_bitrate` (short-window instantaneous throughput — iOS only, from LocalHTTPProxy wire-byte accounting), `Rendition` (bitrate of the current playing variant).
   - **Reference lines**: `Limit` (shaping ceiling, stepped when a pattern is active), `Server Rendition` (what the server believes it delivered), one line per ladder `Variant` (hidden by default).
   - **Events**: `STALL` and `RESTART` markers annotate player stalls and restarts.
-  - **Y-axis**: `Auto` or fixed `5 / 10 / 20 / 30 / 40 / 50` Mbps — pin the scale when comparing two sessions side by side.
-- **Buffer depth chart** — player `buffered` TimeRanges (`player_metrics_buffer_depth_s`), auto-scaled 5–60 s.
+  - **Y-axis**: `Auto` or fixed `5 / 10 / 20 / 30 / 40 / 50 / 100` Mbps — pin the scale when comparing two sessions side by side.
+- **Buffer depth chart** — player `buffered` TimeRanges (`player_metrics_buffer_depth_s`) on the left axis; **Wall-Clock Offset** (player playhead vs encoder PDT) on the right axis.
 - **FPS chart** — rendered and dropped frames/s from `player_metrics_frames_displayed` / `_dropped_frames`, 2 s sliding window, exponential smoothing (α = 0.15). Series: `FPS (smoothed)`, `Low FPS` (red below threshold), `FPS Baseline` (75th percentile), `Low Threshold` (`0.75 × baseline`), `Dropped Frames/s` (right Y-axis).
 
-Buffer and FPS charts render when `showBufferDepthChart: true` on the session. All three share a timeline, so a bandwidth dip lines up visually with its buffer/FPS impact.
+The four panels' plot areas all align on the same right edge so vertical x-axis ticks line up across every chart and the events timeline above.
+
+### Network log waterfall (HAR view)
+
+![Network log waterfall](docs/screenshots/network-log-waterfall.png)
+
+Every request the proxy serves to the player is captured as a HAR-format network log entry. The dashboard renders them in a Chrome DevTools-style waterfall with a brushable overview pane: the brush at the top shows the full session at small scale; drag it to pick a time window, and the bars in the main view position themselves within that window.
+
+Each row is `time | flags | method | path | bytes | Mbps | status | bar`. The **flags** column is the diagnostic disambiguator — when a row's status code can't tell the whole story, the glyph does:
+
+| Glyph | What it means | Status code on the row |
+|---|---|---|
+| `!` | HTTP fault (404 / 500 / 504 / etc.) — the wire response was the error | matches the fault (`404`, `500`, `504`, `429`, …) |
+| `!✂` | Socket fault inject — proxy deliberately tore down the connection (`request_body_*` / `request_first_byte_*` / `request_connect_*`) | `200` (chunked headers went out) or `—` (connect-time abort) |
+| `!⏱` | Server transfer timeout — proxy enforced active or idle timeout | upstream's status (typ. `200`) for mid-body, `504` if pre-headers |
+| `!↩` | Client gave up — player aborted mid-transfer (broken pipe / `ECONNRESET`) | upstream's status (typ. `200`) |
+| `↻` | Quick retry — same URL re-fetched faster than half the segment duration | — |
+
+A row that *looks* like a successful 200 download but has `!↩` or `!⏱` next to its method tells you the player abandoned it or the proxy gave up — exactly the signal you'd otherwise miss.
+
+**Capture controls**:
+
+- **Save HAR** — manual snapshot. Writes a HAR file to the Incidents browser with `reason=manual`.
+- **911 button** — every player (iOS / iPadOS / tvOS / Android TV) has a "911" button right of Reload. One tap fires a `user_marked` event the server picks up, which triggers an automatic HAR snapshot of the current session timeline (10-minute clip, includes all plays). Files in the Incidents browser tagged `reason="user 911"`. Cross-layer "911" log lines on Apple device console, `adb logcat`, and docker logs make it grep-friendly across all three layers.
+- **Auto-snapshot** — go-proxy detects extended player stalls / segment-stalls and triggers a HAR snapshot automatically with `reason=stall` / `reason=segment_stall`.
+
+The Incidents page on the dashboard browses every saved HAR; click an incident to render its waterfall inline without leaving the page.
 
 ---
 
@@ -397,6 +449,7 @@ Full API (`/api/content`, `/api/jobs`, `/api/sessions/*`, `/api/nftables/*`, etc
 - **Transfer metrics** (`mbps_transfer_rate`, `mbps_transfer_complete`): from the 10 ms awaitSocketDrain goroutine. `transfer_rate` aligns to actual TC burst edges (250 ms min gap). `transfer_complete` is the ground-truth per-segment rate.
 - **Player averaged bandwidth** (`player_metrics_avg_network_bitrate_mbps`): player-side averaged ABR estimate; slow-moving, model-based; intended for ladder analysis, initial variant pick, and comparison against shaper average. Populated by iOS (AVPlayer `observedBitrate`), Android (`DefaultBandwidthMeter.bitrateEstimate`), and browser players (HLS.js / Shaka / native) — i.e., the one signal every player can provide.
 - **Player instantaneous bandwidth** (`player_metrics_network_bitrate_mbps`): short-window near-instantaneous wire throughput; reacts quickly to sudden rate drops. Requires per-request wire visibility, so currently iOS-only (via LocalHTTPProxy); null on clients without that plumbing.
+- **Wall-clock offset** (`player_metrics_true_offset_s`): how far behind live the player is, computed *server-side* and *independent of the client's clock*. Players post `player_metrics_playhead_wallclock_ms` (the encoder's PDT at the playhead); the server timestamps the receive moment with its own clock and reports the difference: `true_offset_s = (server_received_at_ms − playhead_wallclock_ms) / 1000`. Survives clock skew on the client device, drift between phone NTP and laptop NTP, and any offset the player engine applies. Surfaced as a session-item field, on the buffer-depth chart's right Y-axis, and as the basis for cross-client comparison on the Live Offset page.
 
 Under steady conditions: `shaper_rate` and `transfer_rate` track near the configured limit; `transfer_complete` is the most trustworthy single number. The player averaged bandwidth broadly tracks wire metrics but is smoother; the instantaneous version catches rate drops fastest.
 
@@ -409,6 +462,10 @@ Implementation details (netlink counters, caching, scope of overhead inclusion) 
 Driven by `generate_abr/create_abr_ladder.sh` (ffmpeg + Shaka Packager v3.4.2, bundled in the container).
 
 Defaults: segment duration **6 s**, partial duration **200 ms**, GOP duration **1 s**.
+
+**Audio**: source audio is normalized to **AAC** during transcode (`always-AAC`). Source tracks in non-AAC codecs are re-encoded so every variant on the ladder has a uniform audio layer, eliminating an entire class of "this segment plays on iOS but not Android" debugging.
+
+**Synthetic source content**: `make test-pattern` generates a 4K test pattern clip you can use as a controlled source — no copyrighted material, deterministic visuals, useful when testing ABR / ladder behaviour without confounding "is this just because of the content?" questions.
 
 See [`generate_abr/README.md`](generate_abr/README.md) for the pipeline, [`generate_abr/QUICKSTART.md`](generate_abr/QUICKSTART.md) for common commands, and [`docs/CLOUD_ENCODING.md`](docs/CLOUD_ENCODING.md) for offloading encodes to AWS EC2 spot instances.
 
@@ -430,11 +487,43 @@ Full list in [`PRD.md`](PRD.md).
 
 Native client apps for device testing:
 
-- **iOS/tvOS** — SwiftUI app in [`apple/InfiniteStreamPlayer/`](apple/InfiniteStreamPlayer/)
-- **Android** — [`android/InfiniteStreamPlayer/README.md`](android/InfiniteStreamPlayer/README.md)
+- **iOS / iPadOS / tvOS** — SwiftUI app in [`apple/InfiniteStreamPlayer/`](apple/InfiniteStreamPlayer/)
+- **Android TV / Google TV** — Jetpack Compose app in [`android/InfiniteStreamPlayer/`](android/InfiniteStreamPlayer/README.md)
 - **Roku** — BrightScript channel in [`roku/InfiniteStreamPlayer/README.md`](roku/InfiniteStreamPlayer/README.md)
 
-Each has its own README for platform-specific setup.
+The Apple and Android TV apps share a cinematic dark UI built around a "Now Playing" hero + LIVE preview tiles, a slide-from-right Settings drawer, and a developer-mode HUD overlay during playback. Roku is intentionally minimal (basic playback channel).
+
+### First launch — Choose a server
+
+![iPad — server picker](docs/screenshots/ipad-server-picker.png)
+
+On first launch the app routes to the Server Picker. It auto-lists servers it discovers on the network (rendezvous heartbeat), and offers **Pair with code** (cross-network) / **Scan QR** (same-LAN) / **Add by URL** (manual) as fallbacks. Once a server is saved, subsequent launches go straight to Home.
+
+### Home — NOW PLAYING + LIVE tiles
+
+![iPad — home](docs/screenshots/ipad-home.png)
+
+Hero "NOW PLAYING" tile carries the most recently played stream; the **LIVE** row below shows live preview thumbnails for every other available stream. On capable hardware the tiles run real LL-HLS previews (capped per the device's decode budget), so you see actual frames not stale stills. Tapping a tile pushes it into the hero / starts playback.
+
+### Playback — developer-mode HUD
+
+![iPad — playback HUD](docs/screenshots/ipad-playback-hud.png)
+
+Toggle **Developer mode** in Settings → Advanced to overlay a live HUD on the player. Reads the same metrics the dashboard's Bitrate Chart shows — wall-clock timestamp, AVG / PEAK Mbps observed, current codec / resolution / framerate, and which bandwidth meter the player is reporting from (`SW` = software / OS-reported, `JEO` = JS engine override). Useful when the dashboard isn't open and you just want to see what the player thinks at 10 feet from the screen.
+
+### Settings drawer
+
+![iPad — settings](docs/screenshots/ipad-settings.png)
+
+Slide-from-right drawer lists Server / Stream / Protocol / Segment length / Codec / Advanced. The first row jumps to the Server Picker; the rest are pickers that push in over the main list. Same pattern on iPad and Apple TV (D-pad on tvOS, touch on iPad).
+
+### Settings → Advanced + Reset All Settings
+
+![iPad — advanced settings](docs/screenshots/ipad-settings-advanced.png)
+
+Advanced exposes the per-session toggles that affect playback behaviour: **4K** (allow renditions above 1080p), **Local Proxy** (route through go-proxy for wire-byte metrics), **Auto-Recovery** (retry on player error), **Go Live** (snap to live edge), **Live offset** (seconds behind live), **Skip Home on launch** (auto-resume), **Mute audio**, **Preview video** (live tile decode budget), **Developer mode** (the HUD above).
+
+The destructive **Reset All Settings** at the bottom wipes every persisted preference (server list, Advanced flags, playback history) and routes back to the Server Picker — equivalent to a fresh install but without losing the app itself. Available on iOS, iPadOS, tvOS, and Android TV.
 
 ---
 
@@ -541,9 +630,11 @@ Captured from the live dashboard; files live in [`docs/screenshots/`](docs/scree
 
 | | |
 |---|---|
+| **Playback state chart** — events timeline + bitrate + buffer + FPS, time-aligned ![Playback state chart](docs/screenshots/playback-state-chart.png) | **Network log waterfall** — HAR view with `!✂` / `!⏱` / `!↩` glyphs ![Network log waterfall](docs/screenshots/network-log-waterfall.png) |
 | **Playback** — single-stream view ![Playback](docs/screenshots/playback.png) | **Mosaic** — multi-tile comparison ![Mosaic](docs/screenshots/mosaic.png) |
 | **Source Library** — content intake ![Source Library](docs/screenshots/source-library.png) | **Upload Content** ![Upload Content](docs/screenshots/upload-content.png) |
 | **Encoding Jobs** ![Encoding Jobs](docs/screenshots/encoding-jobs.png) | **Live Offset** *(alpha)* — cross-variant comparison ![Live Offset](docs/screenshots/live-offset.png) |
+| **iPad — home** ![iPad home](docs/screenshots/ipad-home.png) | **iPad — Settings → Advanced** with destructive Reset All Settings ![iPad settings](docs/screenshots/ipad-settings-advanced.png) |
 
 ---
 
