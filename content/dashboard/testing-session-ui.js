@@ -2753,6 +2753,85 @@
         initializeUI();
     }
 
+    // renderHarWaterfall(hostEl, harDoc) — drop a one-shot read-only
+    // waterfall view of a HAR document into hostEl. Used by the
+    // Incidents page so a clicked incident expands into the same
+    // network-log visualisation the testing session shows. Reuses
+    // the same DOM/CSS scaffold by synthesising a stripped session
+    // card and routing through updateNetworkWaterfall, so visual
+    // changes here track the live testing view automatically.
+    function renderHarWaterfall(hostEl, harDoc) {
+        if (!hostEl) return;
+        const entries = (harDoc && harDoc.log && Array.isArray(harDoc.log.entries))
+            ? harDoc.log.entries
+            : [];
+        const sessionId = `har-incident-${Date.now()}`;
+        // Build a fake-card scaffold matching what the live network
+        // log section emits in renderSessionCard. Only the
+        // network-log piece is needed.
+        hostEl.innerHTML = `
+            <div class="session-card" data-session-id="${escapeHtml(sessionId)}">
+                <div class="network-log-waterfall-wrap">
+                    <div class="netwf-summary" data-field="netwf_summary"></div>
+                    <div class="netwf-overview-axis" data-field="netwf_overview_axis"></div>
+                    <div class="netwf-overview" data-field="netwf_overview">
+                        <div class="netwf-overview-bars" data-field="netwf_overview_bars"></div>
+                        <div class="netwf-brush" data-field="netwf_brush" style="left:0%;width:100%;">
+                            <div class="netwf-brush-handle left" data-field="netwf_brush_handle_left"></div>
+                            <div class="netwf-brush-handle right" data-field="netwf_brush_handle_right"></div>
+                        </div>
+                    </div>
+                    <div class="network-log-waterfall-scroll" data-field="network_log_waterfall_scroll">
+                        <div class="network-log-waterfall" data-field="network_log_waterfall"></div>
+                    </div>
+                    <div class="network-log-waterfall-empty" data-field="network_log_waterfall_empty" style="display:none;">No requests in this incident.</div>
+                </div>
+            </div>`;
+        const card = hostEl.querySelector('.session-card');
+        // Translate HAR entries → NetworkLogEntry shape that
+        // buildWaterfallRows expects. Most fields map straight; a few
+        // (transfer_ms / wait_ms / dns_ms / connect_ms / tls_ms) come
+        // from HAR timings.
+        const networkLogEntries = entries.map((e) => {
+            const timings = e.timings || {};
+            const req = e.request || {};
+            const resp = e.response || {};
+            const status = Number(resp.status) || 0;
+            const bytesOut = Number((resp.bodySize >= 0 ? resp.bodySize : 0)
+                || (resp.content && resp.content.size) || 0);
+            const ts = e.startedDateTime || new Date().toISOString();
+            const fault = e._fault || (e._extensions && e._extensions.fault) || null;
+            return {
+                timestamp: ts,
+                method: req.method || 'GET',
+                url: req.url || '',
+                path: (() => {
+                    try { return new URL(req.url).pathname; } catch (_) { return req.url || ''; }
+                })(),
+                status,
+                bytes_in: 0,
+                bytes_out: bytesOut,
+                content_type: (resp.content && resp.content.mimeType) || '',
+                dns_ms: timings.dns >= 0 ? timings.dns : 0,
+                connect_ms: timings.connect >= 0 ? timings.connect : 0,
+                tls_ms: timings.ssl >= 0 ? timings.ssl : 0,
+                ttfb_ms: 0,
+                transfer_ms: timings.receive >= 0 ? timings.receive : 0,
+                client_wait_ms: timings.wait >= 0 ? timings.wait : 0,
+                total_ms: e.time || 0,
+                faulted: !!(fault && fault.type) || status >= 400,
+                fault_type: fault ? fault.type : '',
+                fault_action: fault ? fault.action : '',
+                request_range: (req.headers || []).find((h) => /^range$/i.test(h.name || ''))?.value || '',
+                response_content_range: (resp.headers || []).find((h) => /^content-range$/i.test(h.name || ''))?.value || ''
+            };
+        });
+        networkLogEntriesBySession.set(sessionId, networkLogEntries);
+        // Default Follow Latest off — incident view is forensic, not live.
+        setNetworkLogFollowMode(sessionId, false);
+        updateNetworkWaterfall(card, sessionId);
+    }
+
     window.TestingSessionUI = {
         renderSessionCard,
         renderPatternStepRowContent,
@@ -2765,6 +2844,7 @@
         applyCollapsibleState,
         updateNetworkLog,
         applyNetworkLogFilters,
-        updateNetworkWaterfall
+        updateNetworkWaterfall,
+        renderHarWaterfall
     };
 })();

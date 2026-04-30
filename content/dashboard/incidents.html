@@ -5,7 +5,41 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Incidents - InfiniteStream</title>
     <link rel="stylesheet" href="/shared-styles.css">
+    <link rel="stylesheet" href="/dashboard/testing-session-refactored.css">
     <style>
+        .incident-viewer {
+            margin-top: 20px;
+        }
+        .incident-viewer-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 8px;
+            padding: 8px 12px;
+            background: var(--surface-2, #f7f7f9);
+            border: 1px solid var(--border, #d1d5db);
+            border-radius: 6px;
+            font-size: 13px;
+        }
+        .incident-viewer-host {
+            border: 1px solid var(--border, #d1d5db);
+            border-radius: 6px;
+            background: #fff;
+            padding: 8px;
+            min-height: 200px;
+        }
+        .incident-viewer-empty {
+            text-align: center;
+            color: var(--text-secondary);
+            padding: 40px 12px;
+            font-style: italic;
+        }
+        .incidents-table tbody tr.is-selected {
+            background: rgba(33, 150, 243, 0.12) !important;
+        }
+        .incidents-table tbody tr {
+            cursor: pointer;
+        }
         .incidents-table {
             width: 100%;
             border-collapse: collapse;
@@ -162,11 +196,21 @@
                         <tbody id="rows"></tbody>
                     </table>
                 </div>
+
+                <div class="incident-viewer">
+                    <div class="incident-viewer-header" id="viewerHeader">
+                        <span>Click an incident row above to load its waterfall here.</span>
+                    </div>
+                    <div class="incident-viewer-host" id="viewerHost">
+                        <div class="incident-viewer-empty">No incident selected.</div>
+                    </div>
+                </div>
             </div>
         </div>
     </div>
 
     <script src="/shared/shared-nav.js"></script>
+    <script src="/dashboard/testing-session-ui.js"></script>
     <script>
         const escapeHTML = (s) => {
             if (s === null || s === undefined) return '';
@@ -255,7 +299,7 @@
             }
             emptyState.style.display = 'none';
             tableWrap.style.display = '';
-            rows.innerHTML = filtered.map(i => {
+            rows.innerHTML = filtered.map((i, idx) => {
                 // i.path is server-controlled (it's the filesystem path of the
                 // saved HAR), but treat it as untrusted and escape into both
                 // URL and attribute contexts.
@@ -276,7 +320,7 @@
                 const filenameAttr = escapeHTML(i.filename || 'incident.har');
                 const hrefAttr = escapeHTML(downloadHref);
                 return `
-                    <tr>
+                    <tr data-incident-path="${escapeHTML(i.path || '')}" data-incident-idx="${idx}">
                         <td>
                             <div>${time}</div>
                             <div class="session-id">${age}</div>
@@ -287,11 +331,55 @@
                         <td>${sourceHTML}</td>
                         <td>${fmtSize(i.size_bytes)}</td>
                         <td>
-                            <a href="${hrefAttr}" download="${filenameAttr}" class="btn btn-mini btn-secondary">Download</a>
+                            <a href="${hrefAttr}" download="${filenameAttr}" class="btn btn-mini btn-secondary" data-no-row-click="1">Download</a>
                         </td>
                     </tr>
                 `;
             }).join('');
+            // Selection handler — clicking a row loads the HAR file and
+            // hands it to the shared waterfall renderer below the table.
+            rows.querySelectorAll('tr[data-incident-path]').forEach((tr) => {
+                tr.addEventListener('click', (event) => {
+                    if (event.target.closest('[data-no-row-click]')) return;
+                    rows.querySelectorAll('tr.is-selected').forEach((r) => r.classList.remove('is-selected'));
+                    tr.classList.add('is-selected');
+                    const path = tr.dataset.incidentPath;
+                    const idx = parseInt(tr.dataset.incidentIdx, 10);
+                    const incident = filtered[idx];
+                    loadIncidentHar(path, incident);
+                });
+            });
+        }
+
+        async function loadIncidentHar(path, incident) {
+            const header = document.getElementById('viewerHeader');
+            const host = document.getElementById('viewerHost');
+            const segments = String(path || '').split('/').map(encodeURIComponent).join('/');
+            const url = `/api/incidents/${segments}`;
+            header.innerHTML = `<span>Loading <code>${escapeHTML(path)}</code>…</span>`;
+            host.innerHTML = '<div class="incident-viewer-empty">Loading…</div>';
+            try {
+                const r = await fetch(url);
+                if (!r.ok) throw new Error(`HTTP ${r.status}`);
+                const har = await r.json();
+                const entryCount = (har.log && Array.isArray(har.log.entries)) ? har.log.entries.length : 0;
+                header.innerHTML = `
+                    <span>
+                        <strong>${escapeHTML(incident.filename || path)}</strong>
+                        — ${entryCount} request${entryCount === 1 ? '' : 's'}
+                        — reason <code>${escapeHTML(incident.reason || '—')}</code>
+                    </span>
+                    <a href="${escapeHTML(url)}" download="${escapeHTML(incident.filename || 'incident.har')}" class="btn btn-mini btn-secondary">Download</a>
+                `;
+                if (window.TestingSessionUI && typeof window.TestingSessionUI.renderHarWaterfall === 'function') {
+                    window.TestingSessionUI.renderHarWaterfall(host, har);
+                } else {
+                    host.innerHTML = '<div class="incident-viewer-empty">Waterfall renderer not loaded.</div>';
+                }
+            } catch (e) {
+                header.innerHTML = `<span style="color: var(--danger, #b91c1c);">Failed to load: ${escapeHTML(e.message)}</span>`;
+                host.innerHTML = '<div class="incident-viewer-empty">Could not parse incident HAR.</div>';
+            }
         }
 
         document.getElementById('refreshBtn').addEventListener('click', loadIncidents);
