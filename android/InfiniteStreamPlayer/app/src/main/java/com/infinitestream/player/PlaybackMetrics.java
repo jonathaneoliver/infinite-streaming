@@ -364,6 +364,9 @@ public final class PlaybackMetrics {
      * an event timestamp — no extras needed.
      */
     public void onUserMarked() {
+        // Console marker — easy to grep adb logcat / OS logs for "911"
+        // alongside the network log entry the server writes.
+        Log.i("InfiniteStream", "911 user-marked at " + iso8601.format(new Date()));
         sendEvent("user_marked", Collections.<String, Object>emptyMap());
     }
 
