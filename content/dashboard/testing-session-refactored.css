@@ -535,7 +535,7 @@
  * wheel handler that enforces this behaviour. */
 .network-log-waterfall-scroll {
     width: 100%;
-    max-height: 462px; /* ~22 (axis) + 20 * 22 (rows) — same fit as before */
+    max-height: 902px; /* ~22 (axis) + 40 * 22 (rows) — 2× the previous depth */
     overflow-y: auto;
     overflow-x: hidden;
 }
