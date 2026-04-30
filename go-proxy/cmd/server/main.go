@@ -1570,7 +1570,12 @@ func (a *App) takeUserMarkedSnapshot(sessionID string) {
 		SessionID: sessionID,
 		Timestamp: time.Now().UTC(),
 	}
-	doc := a.buildHARForSession(session, incident, HARBuildFilter{}, nil)
+	// 911 is forensic — "give me everything that led up to this".
+	// Default play_id scoping (most-recent play only) trims the file
+	// to a handful of entries when the user 911s right after a
+	// retry/reload because the current play hasn't accumulated much.
+	// Use IncludeAllPlays so the user sees the full session timeline.
+	doc := a.buildHARForSession(session, incident, HARBuildFilter{IncludeAllPlays: true}, nil)
 	info, err := writeIncidentFile(sessionID, playerID, harReason, source, doc)
 	if err != nil {
 		log.Printf("911 USER_MARKED write-failed sid=%s err=%v", sessionID, err)
