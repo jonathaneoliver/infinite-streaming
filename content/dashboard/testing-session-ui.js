@@ -1036,6 +1036,10 @@
                         <span class="collapsible-title">Bitrate Chart</span>
                     </div>
                     <div class="collapsible-content" data-content="bitrate-chart" style="display: ${bitrateChartOpen ? 'block' : 'none'};">
+                        <div class="chart-wrap events-timeline-wrap">
+                            <div class="events-timeline-legend" data-field="events_timeline_legend"></div>
+                            <div class="events-timeline" data-field="events_timeline"></div>
+                        </div>
                         <div class="chart-axis-row">
                             <label>Bitrate Y Max</label>
                             <div class="shape-pattern-modes" data-field="bitrate_chart_max_mbps_group">
@@ -1075,10 +1079,6 @@
                             <button type="button" class="btn btn-secondary btn-mini" data-action="reset-bitrate-zoom">Reset Zoom</button>
                             <button type="button" class="btn btn-secondary btn-mini" data-action="pause-bitrate-chart">⏸ Pause</button>
                             <span class="chart-hint" title="Hold Alt (Option on Mac) while scrolling or dragging to zoom; right-click-drag to pan">Alt/⌥+scroll/drag to zoom · right-drag to pan</span>
-                        </div>
-                        <div class="chart-wrap events-timeline-wrap">
-                            <div class="events-timeline-legend" data-field="events_timeline_legend"></div>
-                            <div class="events-timeline" data-field="events_timeline"></div>
                         </div>
                         <div class="chart-wrap">
                             <canvas class="bandwidth-chart" data-field="bandwidth_chart"></canvas>

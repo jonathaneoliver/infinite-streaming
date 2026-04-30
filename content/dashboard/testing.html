@@ -4003,9 +4003,6 @@ maybe a histogram of b
                             },
                             zoom: buildUnifiedChartZoomOptions(sessionId)
                         },
-                        // Match FPS chart's right Y-axis width — see
-                        // bandwidth chart for full rationale.
-                        layout: { padding: { right: RIGHT_AXIS_PAD_PX } },
                         scales: {
                             x: {
                                 type: 'linear',
@@ -4044,6 +4041,12 @@ maybe a histogram of b
                                 position: 'right',
                                 min: 0,
                                 max: maxWallClock,
+                                // Pin width to RIGHT_AXIS_PAD_PX so the
+                                // plot's right edge matches the bandwidth
+                                // and FPS charts (and the events-timeline
+                                // above), keeping x-axis ticks vertically
+                                // aligned across all stacked charts.
+                                afterFit: (axis) => { axis.width = RIGHT_AXIS_PAD_PX; },
                                 grid: { drawOnChartArea: false },
                                 ticks: {
                                     color: '#6b7280',
