@@ -213,7 +213,12 @@ private fun SettingsPanel(
                 } else {
                     PickerList(picker!!, state, vm,
                         firstRowFocus = pickerFirstFocus,
-                        onBack = { picker = null })
+                        onBack = { picker = null },
+                        // Reset All Settings (in the Advanced picker)
+                        // wipes the server list, so AppRoot needs to
+                        // route back to ServerPicker. Reuse the same
+                        // callback the Server row uses.
+                        onResetComplete = onOpenServerPicker)
                 }
             }
 
@@ -309,7 +314,11 @@ private fun PickerList(
     vm: PlayerViewModel,
     firstRowFocus: FocusRequester,
     onBack: () -> Unit,
+    onResetComplete: () -> Unit,
 ) {
+    // Confirmation dialog state for the destructive Reset All Settings
+    // row inside the Advanced picker. Local to this composable.
+    var showResetConfirm by remember { mutableStateOf(false) }
     Column(modifier = Modifier.fillMaxWidth().fillMaxHeight()) {
         Text(
             kind.headerLabel(),
@@ -411,9 +420,26 @@ private fun PickerList(
                             onClick = { vm.setDeveloperMode(!state.developerMode) },
                         )
                     }
+                    item {
+                        DestructiveRow(
+                            label = "Reset All Settings",
+                            onClick = { showResetConfirm = true },
+                        )
+                    }
                 }
             }
         }
+    }
+
+    if (showResetConfirm) {
+        ResetConfirmDialog(
+            onConfirm = {
+                showResetConfirm = false
+                vm.resetAllSettings()
+                onResetComplete()
+            },
+            onDismiss = { showResetConfirm = false },
+        )
     }
 }
 
@@ -454,6 +480,127 @@ private fun PickerKind.headerLabel(): String = when (this) {
     PickerKind.SegmentLength -> "Segment length"
     PickerKind.Codec -> "Codec"
     PickerKind.Advanced -> "Advanced"
+}
+
+/**
+ * Destructive action row — used at the bottom of the Advanced picker
+ * for "Reset All Settings". Same shape as [PickerItem] but the label
+ * renders in [Tokens.destructive] red so users see the danger signal
+ * before they tap. Tap fires [onClick]; the caller is expected to
+ * surface a confirmation dialog before doing anything irreversible.
+ */
+@Composable
+private fun DestructiveRow(
+    label: String,
+    onClick: () -> Unit,
+) {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(48.dp)
+            .tvFocus(cornerRadius = Radius.row)
+            .clip(RoundedCornerShape(Radius.row))
+            .background(Tokens.bgSoft)
+            .clickable(onClick = onClick)
+            .padding(horizontal = Space.s4),
+    ) {
+        Row(
+            modifier = Modifier.fillMaxSize(),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(label, style = AppType.body.copy(color = Tokens.destructive))
+        }
+    }
+}
+
+/**
+ * Confirmation dialog for [PlayerViewModel.resetAllSettings].
+ *
+ * Built with [androidx.compose.ui.window.Dialog] from core compose-ui
+ * — the project uses `androidx.tv:tv-material` and intentionally has
+ * no `androidx.compose.material3` dependency, so AlertDialog isn't
+ * available. The custom surface keeps us in the cinematic dark theme.
+ *
+ * Cancel is auto-focused on entry so D-pad Center on the remote
+ * dismisses by default, matching tvOS / iOS where the system alert's
+ * Cancel button is the safe action.
+ */
+@Composable
+private fun ResetConfirmDialog(
+    onConfirm: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    androidx.compose.ui.window.Dialog(onDismissRequest = onDismiss) {
+        val cancelFocus = remember { FocusRequester() }
+        LaunchedEffect(Unit) {
+            // Wait for the dialog's compose tree to mount, then put
+            // focus on Cancel — same delay-then-requestFocus pattern
+            // the surrounding drawer uses for picker rows.
+            delay(120)
+            try { cancelFocus.requestFocus() } catch (_: Throwable) {}
+        }
+        Column(
+            modifier = Modifier
+                .fillMaxWidth(0.6f)
+                .clip(RoundedCornerShape(Radius.card))
+                .background(Tokens.bgCard)
+                .border(width = 1.dp, color = Tokens.line, shape = RoundedCornerShape(Radius.card))
+                .padding(Space.s5),
+        ) {
+            Text("Reset All Settings?", style = AppType.titleSm.copy(color = Tokens.fg))
+            Spacer(Modifier.height(Space.s3))
+            Text(
+                "This will forget all saved servers and return the app to its first-launch state. Downloaded content and account data are unaffected.",
+                style = AppType.body.copy(color = Tokens.fgDim),
+            )
+            Spacer(Modifier.height(Space.s5))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.End,
+            ) {
+                DialogButton(
+                    label = "Cancel",
+                    color = Tokens.fg,
+                    focusRequester = cancelFocus,
+                    onClick = onDismiss,
+                )
+                Spacer(Modifier.width(Space.s2))
+                DialogButton(
+                    label = "Reset",
+                    color = Tokens.destructive,
+                    onClick = onConfirm,
+                )
+            }
+        }
+    }
+}
+
+/** Plain text button used inside [ResetConfirmDialog]. Picks up the
+ * same gold focus ring as the rest of the app via [tvFocus]. */
+@Composable
+private fun DialogButton(
+    label: String,
+    color: Color,
+    focusRequester: FocusRequester? = null,
+    onClick: () -> Unit,
+) {
+    Box(
+        modifier = Modifier
+            .height(40.dp)
+            .let { if (focusRequester != null) it.focusRequester(focusRequester) else it }
+            .tvFocus(cornerRadius = Radius.row)
+            .clip(RoundedCornerShape(Radius.row))
+            .background(Tokens.bgSoft)
+            .clickable(onClick = onClick)
+            .padding(horizontal = Space.s4),
+    ) {
+        Row(
+            modifier = Modifier.fillMaxHeight(),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(label, style = AppType.body.copy(color = color))
+        }
+    }
 }
 
 /**

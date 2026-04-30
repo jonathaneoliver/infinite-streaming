@@ -33,6 +33,10 @@ enum Tokens {
     static let live = Color(red: 0.98, green: 0.30, blue: 0.34)
     /// Cool blue reserved for diagnostic / dev-mode overlays.
     static let diag = Color(red: 0.36, green: 0.74, blue: 0.95)
+    /// Destructive red used for irreversible actions ("Reset All
+    /// Settings", "Forget Server"). Distinct from `live` (the playback
+    /// LIVE badge) so the two reds don't read as the same affordance.
+    static let destructive = Color(red: 0.92, green: 0.30, blue: 0.30)
 }
 
 enum Space {

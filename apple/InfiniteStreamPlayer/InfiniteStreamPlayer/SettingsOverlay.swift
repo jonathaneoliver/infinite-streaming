@@ -107,7 +107,16 @@ struct SettingsOverlay: View {
 
             Group {
                 if let kind = picker {
-                    PickerList(kind: kind, vm: vm, compact: isCompact) { picker = nil }
+                    PickerList(
+                        kind: kind,
+                        vm: vm,
+                        compact: isCompact,
+                        onBack: { picker = nil },
+                        // After a Reset All Settings the app needs to
+                        // route back to ServerPicker (no servers left).
+                        // Reuse the same callback the Server row uses.
+                        onResetComplete: onOpenServerPicker
+                    )
                 } else {
                     MainList(
                         vm: vm,
@@ -223,10 +232,18 @@ private struct PickerList: View {
     @ObservedObject var vm: PlayerViewModel
     let compact: Bool
     let onBack: () -> Void
+    /// Called after Reset All Settings finishes wiping state, so the
+    /// caller can re-route the app to ServerPicker (the empty-servers
+    /// path AppRoot would normally take on first launch).
+    let onResetComplete: () -> Void
 
     /// tvOS focus seed — set to 0 on appear so the first picker item
     /// receives focus when the page enters. Same reason as `MainList.rowIdx`.
     @FocusState private var itemIdx: Int?
+
+    /// Confirmation alert state for the destructive Reset All Settings
+    /// row. Local to the picker — no need to round-trip through the VM.
+    @State private var showResetConfirm: Bool = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -244,6 +261,18 @@ private struct PickerList: View {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
                 itemIdx = 0
             }
+        }
+        // Confirmation for the destructive Reset All Settings row.
+        // .alert renders natively on iOS / iPadOS / tvOS, no extra
+        // platform branching needed.
+        .alert("Reset All Settings?", isPresented: $showResetConfirm) {
+            Button("Cancel", role: .cancel) { }
+            Button("Reset", role: .destructive) {
+                vm.resetAllSettings()
+                onResetComplete()
+            }
+        } message: {
+            Text("This will forget all saved servers and return the app to its first-launch state. Downloaded content and account data are unaffected.")
         }
     }
 
@@ -322,6 +351,10 @@ private struct PickerList: View {
             ToggleRow(label: "Developer mode",
                       isOn: vm.developerMode, compact: compact) { vm.setDeveloperMode($0) }
                 .focused($itemIdx, equals: 8)
+            DestructiveRow(label: "Reset All Settings", compact: compact) {
+                showResetConfirm = true
+            }
+            .focused($itemIdx, equals: 9)
         }
     }
 }
@@ -536,5 +569,33 @@ private struct ToggleRow: View {
                 .offset(x: isOn ? travel : -travel)
         }
         .animation(.easeOut(duration: Motion.focusS), value: isOn)
+    }
+}
+
+/// Destructive action row — used at the bottom of the Advanced picker
+/// for "Reset All Settings". Same shape as `SettingRow` / `ToggleRow`
+/// (focusable HStack + tap gesture, cinematic focus ring) but the
+/// label renders in `Tokens.destructive` red so users see the danger
+/// signal before they tap. Tap fires `onTap`; the caller is expected
+/// to surface a confirmation alert before doing anything irreversible.
+private struct DestructiveRow: View {
+    let label: String
+    let compact: Bool
+    let onTap: () -> Void
+
+    var body: some View {
+        HStack {
+            Text(label)
+                .font(compact ? AppType.body(size: 15) : AppType.body())
+                .foregroundColor(Tokens.destructive)
+            Spacer()
+        }
+        .padding(.horizontal, compact ? Space.s3 : Space.s4)
+        .frame(height: compact ? 42 : 56)
+        .background(Tokens.bgSoft)
+        .clipShape(RoundedRectangle(cornerRadius: Radius.row, style: .continuous))
+        .cinematicFocus(cornerRadius: Radius.row)
+        .contentShape(Rectangle())
+        .onTapGesture(perform: onTap)
     }
 }
