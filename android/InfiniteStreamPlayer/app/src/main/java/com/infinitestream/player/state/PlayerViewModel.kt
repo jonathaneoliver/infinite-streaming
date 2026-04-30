@@ -233,6 +233,36 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /**
+     * Wipe every persisted preference (server list, Advanced flags,
+     * playback history, view counts) and reset in-memory state to
+     * first-launch defaults. AppRoot reads `state.servers.isEmpty()` to
+     * route back to ServerPicker after reset.
+     *
+     * Stops the player first so nothing keeps a reference to a
+     * now-stale session.
+     */
+    fun resetAllSettings() {
+        player.stop(); player.clearMediaItems()
+        prefs().edit().clear().apply()
+        // Reset in-memory state to declared defaults; loadAdvancedFlags
+        // then re-reads the now-empty prefs to pick up each flag's
+        // default-on-miss value.
+        _state.update {
+            it.copy(
+                servers = emptyList(),
+                activeServerIndex = 0,
+                content = emptyList(),
+                selectedContent = "",
+                currentUrl = "",
+                lastPlayed = "",
+                viewCounts = emptyMap(),
+                statusText = "",
+            )
+        }
+        loadAdvancedFlags()
+    }
+
     /** Returns the index of the (possibly newly-added) server, or -1. */
     fun addServerFromUrl(url: String): Int {
         val u = android.net.Uri.parse(url)

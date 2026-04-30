@@ -39,6 +39,11 @@ object Tokens {
     // Online status (green).
     val ok      = Color(0xFF4ADE80)
     val offline = Color(0xFF6B6F77)
+
+    // Destructive red — used for irreversible actions ("Reset All
+    // Settings"). Distinct from `live` so the playback LIVE badge and
+    // a destructive setting don't read as the same affordance.
+    val destructive = Color(0xFFEB4D4D)
 }
 
 // ---- Spacing scale --------------------------------------------------------

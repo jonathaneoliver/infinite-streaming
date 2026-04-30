@@ -247,6 +247,33 @@ final class PlayerViewModel: ObservableObject {
         }
     }
 
+    /// Wipe every persisted preference and return the app to its
+    /// first-launch state: empty server list, default Advanced flags,
+    /// no playback history, no content cache. AppRoot reads
+    /// `servers.isEmpty` to route back to the ServerPicker.
+    ///
+    /// Stops the player and clears the current item before the wipe so
+    /// nothing keeps a reference to a now-stale URL or session.
+    func resetAllSettings() {
+        player.pause()
+        player.replaceCurrentItem(with: nil)
+        if let domain = Bundle.main.bundleIdentifier {
+            UserDefaults.standard.removePersistentDomain(forName: domain)
+        }
+        // Drop in-memory state and reload from the now-empty defaults
+        // so every published value snaps back to its declared default.
+        servers = []
+        activeServerID = nil
+        content = []
+        selectedContent = ""
+        currentURL = nil
+        lastPlayed = ""
+        viewCounts = [:]
+        statusText = ""
+        loadAdvancedFlags()
+        setSettingsOpen(false)
+    }
+
     // MARK: - Advanced flags
 
     func setDeveloperMode(_ on: Bool) { developerMode = on; persistFlags() }
