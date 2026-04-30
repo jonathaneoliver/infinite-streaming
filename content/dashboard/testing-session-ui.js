@@ -54,7 +54,7 @@
     // Default and minimum brush span. Tighter than this and the time
     // axis gets too granular to be useful; this is also the default
     // initial span when a session first opens.
-    const networkWaterfallMinBrushMs = 1 * 60 * 1000;
+    const networkWaterfallMinBrushMs = 30 * 1000;
     const networkLogAutoRefreshTimers = new Map();
     const networkLogFetchInFlight = new Set();
     const networkLogAutoRefreshMs = 1500;
