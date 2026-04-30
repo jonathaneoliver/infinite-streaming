@@ -1288,6 +1288,7 @@ func main() {
 	router.HandleFunc("/api/session/{id}/har/snapshot", app.handlePostHARSnapshot).Methods(http.MethodPost)
 	router.HandleFunc("/api/incidents", app.handleListIncidents).Methods(http.MethodGet)
 	router.HandleFunc("/api/incidents/{path:.+}", app.handleGetIncidentFile).Methods(http.MethodGet)
+	router.HandleFunc("/api/incidents/{path:.+}", app.handleDeleteIncidentFile).Methods(http.MethodDelete)
 	router.HandleFunc("/api/external-ips", app.handleGetExternalIPs).Methods(http.MethodGet)
 	router.HandleFunc("/api/clear-sessions", app.handleClearSessions).Methods(http.MethodPost)
 	router.HandleFunc("/api/session-group/link", app.handleLinkSessions).Methods(http.MethodPost)
@@ -1570,12 +1571,17 @@ func (a *App) takeUserMarkedSnapshot(sessionID string) {
 		SessionID: sessionID,
 		Timestamp: time.Now().UTC(),
 	}
-	// 911 is forensic — "give me everything that led up to this".
-	// Default play_id scoping (most-recent play only) trims the file
-	// to a handful of entries when the user 911s right after a
+	// 911 is forensic — "give me what led up to this". Default
+	// play_id scoping (most-recent play only) trims the file to a
+	// handful of entries when the user 911s right after a
 	// retry/reload because the current play hasn't accumulated much.
-	// Use IncludeAllPlays so the user sees the full session timeline.
-	doc := a.buildHARForSession(session, incident, HARBuildFilter{IncludeAllPlays: true}, nil)
+	// Use IncludeAllPlays so the user sees across plays, but clip
+	// to the last minute so the file stays focused on "what just
+	// happened" rather than dragging in the whole ring buffer.
+	doc := a.buildHARForSession(session, incident, HARBuildFilter{
+		IncludeAllPlays: true,
+		SinceWindow:     60 * time.Second,
+	}, nil)
 	info, err := writeIncidentFile(sessionID, playerID, harReason, source, doc)
 	if err != nil {
 		log.Printf("911 USER_MARKED write-failed sid=%s err=%v", sessionID, err)

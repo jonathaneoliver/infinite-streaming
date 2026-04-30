@@ -177,17 +177,22 @@ type IncidentFileInfo struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
-// HARBuildFilter controls play_id scoping in buildHARForSession.
+// HARBuildFilter controls scoping in buildHARForSession.
 //
 //   - PlayID == "" and IncludeAllPlays == false: filter to the
 //     most-recent play_id in the ring buffer (default — matches what
 //     the player asks for at incident time).
 //   - PlayID != "": filter to that exact play_id.
-//   - IncludeAllPlays == true: no filter — every entry across every
-//     play is included (forensic mode).
+//   - IncludeAllPlays == true: no play-id filter — every entry across
+//     every play is included (forensic mode).
+//   - SinceWindow > 0: also drop entries older than `SinceWindow`
+//     before the latest entry. Use this to clip to a rolling tail
+//     (e.g. last 60s for the 911 button) without dragging in the
+//     entire ring buffer.
 type HARBuildFilter struct {
 	PlayID          string
 	IncludeAllPlays bool
+	SinceWindow     time.Duration
 }
 
 // buildHARForSession reads the session's network ring buffer and returns a HAR
@@ -210,9 +215,24 @@ func (a *App) buildHARForSession(session SessionData, incident *har.Incident, fi
 	var playStartedAt time.Time
 	if exists {
 		entries := rb.GetAll()
+		// Compute the time floor when SinceWindow is set: drop entries
+		// whose timestamp is older than (latest_entry_time - window).
+		var sinceFloor time.Time
+		if filter.SinceWindow > 0 && len(entries) > 0 {
+			latest := entries[0].Timestamp
+			for _, e := range entries {
+				if e.Timestamp.After(latest) {
+					latest = e.Timestamp
+				}
+			}
+			sinceFloor = latest.Add(-filter.SinceWindow)
+		}
 		sources = make([]har.Source, 0, len(entries))
 		for _, e := range entries {
 			if !filter.IncludeAllPlays && resolvedPlayID != "" && e.PlayID != resolvedPlayID {
+				continue
+			}
+			if !sinceFloor.IsZero() && e.Timestamp.Before(sinceFloor) {
 				continue
 			}
 			if playStartedAt.IsZero() || e.Timestamp.Before(playStartedAt) {
@@ -621,6 +641,49 @@ func (a *App) handleGetIncidentFile(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Disposition",
 		fmt.Sprintf(`attachment; filename="%s"`, filepath.Base(full)))
 	_, _ = io.Copy(w, f)
+}
+
+// handleDeleteIncidentFile removes a saved HAR file from disk.
+// DELETE /api/incidents/{path:.+}
+//
+// Same path-injection guards as handleGetIncidentFile: regex
+// whitelist + filepath-prefix check after Abs/Clean. Refuses any
+// path that escapes the incidents directory.
+func (a *App) handleDeleteIncidentFile(w http.ResponseWriter, r *http.Request) {
+	relPath := mux.Vars(r)["path"]
+	if relPath == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		writeJSON(w, map[string]string{"error": "path required"})
+		return
+	}
+	if !incidentPathRe.MatchString(relPath) {
+		w.WriteHeader(http.StatusBadRequest)
+		writeJSON(w, map[string]string{"error": "invalid path"})
+		return
+	}
+	root, err := filepath.Abs(resolveIncidentDir())
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		writeJSON(w, map[string]string{"error": "incidents dir resolve failed"})
+		return
+	}
+	full := filepath.Clean(filepath.Join(root, filepath.FromSlash(relPath)))
+	if !strings.HasPrefix(full, root+string(filepath.Separator)) && full != root {
+		w.WriteHeader(http.StatusBadRequest)
+		writeJSON(w, map[string]string{"error": "invalid path"})
+		return
+	}
+	if err := os.Remove(full); err != nil {
+		if os.IsNotExist(err) {
+			w.WriteHeader(http.StatusNotFound)
+			writeJSON(w, map[string]string{"error": "not found"})
+			return
+		}
+		w.WriteHeader(http.StatusInternalServerError)
+		writeJSON(w, map[string]string{"error": fmt.Sprintf("delete failed: %v", err)})
+		return
+	}
+	writeJSON(w, map[string]string{"status": "deleted", "path": relPath})
 }
 
 // writeIncidentFile persists doc under {incidentDir}/{date}/{filename}.
