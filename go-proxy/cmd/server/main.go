@@ -1542,20 +1542,22 @@ func (a *App) handlePostSessionMetrics(w http.ResponseWriter, r *http.Request) {
 // takeUserMarkedSnapshot fires a HAR snapshot for the session in
 // response to the player's 911 button. Reuses the same plumbing the
 // REST endpoint and the auto-snapshot path use; the only difference
-// is reason="user_marked" and source="player_button".
+// is reason="user_marked" and source="player_button". Logs prefixed
+// with "911 USER_MARKED" for easy grep/cross-correlation with the
+// client-side "911" lines in adb logcat / Apple device logs.
 func (a *App) takeUserMarkedSnapshot(sessionID string) {
 	if sessionID == "" {
 		return
 	}
 	session := a.findSessionByID(sessionID)
 	if session == nil {
-		log.Printf("[HAR_USER_MARKED] session not found sid=%s", sessionID)
+		log.Printf("911 USER_MARKED session-not-found sid=%s", sessionID)
 		return
 	}
 	playerID := getString(session, "player_id")
 	const source = "player_button"
 	if snapshotShouldDebounce(playerID, source, false) {
-		log.Printf("[HAR_USER_MARKED] debounced sid=%s player_id=%s", sessionID, playerID)
+		log.Printf("911 USER_MARKED debounced sid=%s player_id=%s", sessionID, playerID)
 		return
 	}
 	incident := &har.Incident{
@@ -1567,10 +1569,10 @@ func (a *App) takeUserMarkedSnapshot(sessionID string) {
 	doc := a.buildHARForSession(session, incident, HARBuildFilter{}, nil)
 	info, err := writeIncidentFile(sessionID, playerID, "user_marked", source, doc)
 	if err != nil {
-		log.Printf("[HAR_USER_MARKED] write failed sid=%s err=%v", sessionID, err)
+		log.Printf("911 USER_MARKED write-failed sid=%s err=%v", sessionID, err)
 		return
 	}
-	log.Printf("[HAR_USER_MARKED] saved sid=%s file=%s bytes=%d", sessionID, info.Filename, info.SizeBytes)
+	log.Printf("911 USER_MARKED saved sid=%s player_id=%s file=%s bytes=%d", sessionID, playerID, info.Filename, info.SizeBytes)
 }
 
 func isSignificantPlayerEvent(event string) bool {

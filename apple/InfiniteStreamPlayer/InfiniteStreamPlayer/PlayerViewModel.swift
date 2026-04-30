@@ -827,11 +827,15 @@ final class PlayerViewModel: ObservableObject {
     /// HAR snapshot of the current session timeline lands on the
     /// server's incidents directory. The metrics POST also surfaces
     /// the marker on the dashboard's events swim lane. Doesn't touch
-    /// playback — purely a forensic capture.
+    /// playback — purely a forensic capture. Also writes a "911" line
+    /// to the device console so screen-recording / OS log captures
+    /// have a synchronisation point.
     func mark911() {
+        let stamp = Self.metricsTimestampFormatter.string(from: Date())
+        print("911 user-marked at \(stamp) currentURL=\(currentURL ?? "—")")
         Task { [weak self] in
             await self?.sendPlayerMetrics(event: "user_marked", extra: [
-                "player_metrics_user_marked_at": Self.metricsTimestampFormatter.string(from: Date())
+                "player_metrics_user_marked_at": stamp
             ])
         }
     }
