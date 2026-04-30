@@ -1497,19 +1497,24 @@ maybe a histogram of b
             syncRadio('segment_failure_type', String(session.segment_failure_type || 'none'));
             syncRadio('manifest_failure_type', String(session.manifest_failure_type || 'none'));
             syncRadio('master_manifest_failure_type', String(session.master_manifest_failure_type || 'none'));
+            syncRadio('all_failure_type', String(session.all_failure_type || 'none'));
             syncRadio('transport_failure_type', normalizeTransportFaultType(session));
             syncRadio('transport_failure_mode', normalizeTransportFailureMode(session));
             syncSelect('segment_failure_mode', String(session.segment_failure_mode || 'failures_per_seconds'));
             syncSelect('manifest_failure_mode', String(session.manifest_failure_mode || 'failures_per_seconds'));
             syncSelect('master_manifest_failure_mode', String(session.master_manifest_failure_mode || 'failures_per_seconds'));
+            syncSelect('all_failure_mode', String(session.all_failure_mode || 'failures_per_seconds'));
             syncRange('segment_consecutive_failures', session.segment_consecutive_failures, 1);
             syncRange('segment_failure_frequency', session.segment_failure_frequency, 6);
             syncRange('manifest_consecutive_failures', session.manifest_consecutive_failures, 1);
             syncRange('manifest_failure_frequency', session.manifest_failure_frequency, 6);
             syncRange('master_manifest_consecutive_failures', session.master_manifest_consecutive_failures, 1);
             syncRange('master_manifest_failure_frequency', session.master_manifest_failure_frequency, 6);
+            syncRange('all_consecutive_failures', session.all_consecutive_failures, 1);
+            syncRange('all_failure_frequency', session.all_failure_frequency, 6);
             syncFailureScope('segment_failure_urls', session.segment_failure_urls, true);
             syncFailureScope('manifest_failure_urls', session.manifest_failure_urls, true);
+            syncFailureScope('all_failure_urls', session.all_failure_urls, true);
             TestingSessionUI.updateTransportModeUi(card);
             const transportConsecutiveInput = card.querySelector('input[data-field="transport_consecutive_failures"]');
             const transportFrequencyInput = card.querySelector('input[data-field="transport_failure_frequency"]');
@@ -4545,6 +4550,8 @@ maybe a histogram of b
                 'manifest_failure_frequency',
                 'master_manifest_consecutive_failures',
                 'master_manifest_failure_frequency',
+                'all_consecutive_failures',
+                'all_failure_frequency',
                 'transport_consecutive_failures',
                 'transport_failure_frequency',
                 'transfer_active_timeout_seconds',
@@ -4680,7 +4687,7 @@ maybe a histogram of b
         // the Mode-dropdown handler so any single edit ships the
         // coherent bundle.
         function failureBundleFields(field) {
-            const prefixes = ['segment', 'manifest', 'master_manifest', 'transport'];
+            const prefixes = ['segment', 'manifest', 'master_manifest', 'all', 'transport'];
             for (const prefix of prefixes) {
                 const matches =
                     field === `${prefix}_failure_mode` ||
@@ -4735,7 +4742,7 @@ maybe a histogram of b
         }
 
         function resolveSessionPatchFields(target, sessionId, field) {
-            if (field === 'segment_failure_urls' || field === 'manifest_failure_urls') {
+            if (field === 'segment_failure_urls' || field === 'manifest_failure_urls' || field === 'all_failure_urls') {
                 return [field];
             }
             const prefix = parseSessionControlName(target.name, sessionId);

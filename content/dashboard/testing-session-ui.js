@@ -217,13 +217,14 @@
         return base;
     }
 
-    function renderSegmentOptions(sessionId, playlists, selected) {
+    function renderSegmentOptions(sessionId, playlists, selected, fieldName) {
+        const field = fieldName || 'segment_failure_urls';
         const selectedSet = new Set(selected || []);
         const list = sortedPlaylists(playlists);
         const allChecked = selected == null ? true : selectedSet.has('All');
         const checkbox = (value, label) => {
             const checked = allChecked || selectedSet.has(value) ? 'checked' : '';
-            return `<label><input type="checkbox" data-field="segment_failure_urls" value="${value}" ${checked}>${label}</label>`;
+            return `<label><input type="checkbox" data-field="${field}" value="${value}" ${checked}>${label}</label>`;
         };
         const variants = new Map();
         list.forEach(playlist => {
@@ -485,6 +486,8 @@
         const manifestVariants = session.manifest_variants || [];
         const manifestSelected = session.manifest_failure_urls;
         const segmentSelected = session.segment_failure_urls;
+        const allSelected = session.all_failure_urls;
+        const allOverrideActive = session.all_failure_type && session.all_failure_type !== 'none';
         const inlineHost = options.inlineHost || false;
         const hideTitle = options.hideTitle || false;
         const showPortItem = options.showPortItem || false;
@@ -656,15 +659,48 @@
                         <div class="fault-injection-section">
                             <div class="tabs-container">
                                 <div class="tabs-header">
-                                    <button class="tab-button active" data-tab="segment-failures">Segment</button>
+                                    <button class="tab-button active" data-tab="all-failures">All</button>
+                                    <button class="tab-button" data-tab="segment-failures">Segment</button>
                                     <button class="tab-button" data-tab="manifest-failures">Manifest</button>
                                     <button class="tab-button" data-tab="master-failures">Master</button>
                                     <button class="tab-button" data-tab="transport-faults">Transport</button>
                                     <button class="tab-button" data-tab="content-manipulation">Content</button>
                                 </div>
                                 <div class="tabs-content">
+                                    <!-- All Tab (override) -->
+                                    <div class="tab-panel active" data-panel="all-failures">
+                                        <div class="content-tab-note" style="margin-bottom:8px">
+                                            <strong>Override:</strong> when active, this rule applies to <em>every</em> HTTP request (segments, media manifests, master). The Segment / Manifest / Master tabs are bypassed while All is active.
+                                        </div>
+                                        <div class="fault-control-row">
+                                            <label>Failure Type</label>
+                                            <div class="radio-group">
+                                                ${renderFailureTypeOptions(`all_failure_type_${sessionId}`, session.all_failure_type)}
+                                            </div>
+                                        </div>
+                                        <div class="fault-control-row">
+                                            <label>Scope</label>
+                                            <div class="checkbox-group">${renderSegmentOptions(sessionId, manifestVariants, allSelected, 'all_failure_urls')}</div>
+                                        </div>
+                                        <div class="fault-control-row">
+                                            <label>Mode</label>
+                                            ${renderModeDropdown(`all_failure_mode_${sessionId}`, session.all_failure_mode || 'failures_per_seconds')}
+                                        </div>
+                                        <div class="range-row">
+                                            <label>Consecutive</label>
+                                            <input type="range" min="0" max="10" step="1" data-field="all_consecutive_failures" value="${Number.isFinite(Number(session.all_consecutive_failures)) && Number(session.all_consecutive_failures) >= 0 ? Number(session.all_consecutive_failures) : 1}">
+                                            <span class="range-value">${Number.isFinite(Number(session.all_consecutive_failures)) && Number(session.all_consecutive_failures) >= 0 ? Number(session.all_consecutive_failures) : 1}</span>
+                                        </div>
+                                        <div class="range-row">
+                                            <label>Frequency</label>
+                                            <input type="range" min="0" max="30" step="1" data-field="all_failure_frequency" value="${Number.isFinite(Number(session.all_failure_frequency)) && Number(session.all_failure_frequency) >= 0 ? Number(session.all_failure_frequency) : 6}">
+                                            <span class="range-value">${Number.isFinite(Number(session.all_failure_frequency)) && Number(session.all_failure_frequency) >= 0 ? Number(session.all_failure_frequency) : 6}</span>
+                                        </div>
+                                    </div>
+
                                     <!-- Segment Tab -->
-                                    <div class="tab-panel active" data-panel="segment-failures">
+                                    <div class="tab-panel" data-panel="segment-failures">
+                                        ${allOverrideActive ? '<div class="content-tab-note" style="margin-bottom:8px;background:#fffbe6;border-color:#f0c97b"><strong>All override active</strong> — this tab is ignored. Set <em>All → Failure Type</em> to <code>none</code> to re-enable per-kind tabs.</div>' : ''}
                                         <div class="fault-control-row">
                                             <label>Failure Type</label>
                                             <div class="radio-group">
@@ -686,13 +722,14 @@
                                         </div>
                                         <div class="range-row">
                                             <label>Frequency</label>
-                                            <input type="range" min="0" max="10" step="1" data-field="segment_failure_frequency" value="${Number.isFinite(Number(session.segment_failure_frequency)) && Number(session.segment_failure_frequency) >= 0 ? Number(session.segment_failure_frequency) : 6}">
+                                            <input type="range" min="0" max="30" step="1" data-field="segment_failure_frequency" value="${Number.isFinite(Number(session.segment_failure_frequency)) && Number(session.segment_failure_frequency) >= 0 ? Number(session.segment_failure_frequency) : 6}">
                                             <span class="range-value">${Number.isFinite(Number(session.segment_failure_frequency)) && Number(session.segment_failure_frequency) >= 0 ? Number(session.segment_failure_frequency) : 6}</span>
                                         </div>
                                     </div>
 
                                     <!-- Manifest Tab -->
                                     <div class="tab-panel" data-panel="manifest-failures">
+                                        ${allOverrideActive ? '<div class="content-tab-note" style="margin-bottom:8px;background:#fffbe6;border-color:#f0c97b"><strong>All override active</strong> — this tab is ignored. Set <em>All → Failure Type</em> to <code>none</code> to re-enable per-kind tabs.</div>' : ''}
                                         <div class="fault-control-row">
                                             <label>Failure Type</label>
                                             <div class="radio-group">
@@ -714,13 +751,14 @@
                                         </div>
                                         <div class="range-row">
                                             <label>Frequency</label>
-                                            <input type="range" min="0" max="10" step="1" data-field="manifest_failure_frequency" value="${Number.isFinite(Number(session.manifest_failure_frequency)) && Number(session.manifest_failure_frequency) >= 0 ? Number(session.manifest_failure_frequency) : 6}">
+                                            <input type="range" min="0" max="30" step="1" data-field="manifest_failure_frequency" value="${Number.isFinite(Number(session.manifest_failure_frequency)) && Number(session.manifest_failure_frequency) >= 0 ? Number(session.manifest_failure_frequency) : 6}">
                                             <span class="range-value">${Number.isFinite(Number(session.manifest_failure_frequency)) && Number(session.manifest_failure_frequency) >= 0 ? Number(session.manifest_failure_frequency) : 6}</span>
                                         </div>
                                     </div>
 
                                     <!-- Master Manifest Tab -->
                                     <div class="tab-panel" data-panel="master-failures">
+                                        ${allOverrideActive ? '<div class="content-tab-note" style="margin-bottom:8px;background:#fffbe6;border-color:#f0c97b"><strong>All override active</strong> — this tab is ignored. Set <em>All → Failure Type</em> to <code>none</code> to re-enable per-kind tabs.</div>' : ''}
                                         <div class="fault-control-row">
                                             <label>Failure Type</label>
                                             <div class="radio-group">
@@ -738,7 +776,7 @@
                                         </div>
                                         <div class="range-row">
                                             <label>Frequency</label>
-                                            <input type="range" min="0" max="10" step="1" data-field="master_manifest_failure_frequency" value="${Number.isFinite(Number(session.master_manifest_failure_frequency)) && Number(session.master_manifest_failure_frequency) >= 0 ? Number(session.master_manifest_failure_frequency) : 6}">
+                                            <input type="range" min="0" max="30" step="1" data-field="master_manifest_failure_frequency" value="${Number.isFinite(Number(session.master_manifest_failure_frequency)) && Number(session.master_manifest_failure_frequency) >= 0 ? Number(session.master_manifest_failure_frequency) : 6}">
                                             <span class="range-value">${Number.isFinite(Number(session.master_manifest_failure_frequency)) && Number(session.master_manifest_failure_frequency) >= 0 ? Number(session.master_manifest_failure_frequency) : 6}</span>
                                         </div>
                                     </div>
@@ -1132,16 +1170,19 @@
         const segmentFailureType = getRadioValue(`segment_failure_type_${sessionId}`);
         const manifestFailureType = getRadioValue(`manifest_failure_type_${sessionId}`);
         const masterManifestFailureType = getRadioValue(`master_manifest_failure_type_${sessionId}`);
+        const allFailureType = getRadioValue(`all_failure_type_${sessionId}`);
         const transportFaultType = getRadioValue(`transport_failure_type_${sessionId}`);
 
         const segmentMode = getSelectValue(`segment_failure_mode_${sessionId}`) || 'requests';
         const manifestMode = getSelectValue(`manifest_failure_mode_${sessionId}`) || 'requests';
         const masterManifestMode = getSelectValue(`master_manifest_failure_mode_${sessionId}`) || 'requests';
+        const allMode = getSelectValue(`all_failure_mode_${sessionId}`) || 'requests';
         const transportMode = normalizeTransportMode(getRadioValue(`transport_failure_mode_${sessionId}`));
 
         const segmentUnits = unitsFromMode(segmentMode);
         const manifestUnits = unitsFromMode(manifestMode);
         const masterManifestUnits = unitsFromMode(masterManifestMode);
+        const allUnits = unitsFromMode(allMode);
         const transportUnits = transportUnitsFromMode(transportMode);
 
         const getRangeValue = (field) => {
@@ -1152,6 +1193,8 @@
         const manifestChecks = Array.from(card.querySelectorAll('input[data-field="manifest_failure_urls"]:checked'))
             .map(input => input.value);
         const segmentChecks = Array.from(card.querySelectorAll('input[data-field="segment_failure_urls"]:checked'))
+            .map(input => input.value);
+        const allChecks = Array.from(card.querySelectorAll('input[data-field="all_failure_urls"]:checked'))
             .map(input => input.value);
         
         // Transfer timeout settings
@@ -1201,6 +1244,16 @@
             master_manifest_consecutive_units: masterManifestUnits.consecutiveUnits,
             master_manifest_frequency_units: masterManifestUnits.frequencyUnits,
             master_manifest_failure_mode: masterManifestMode,
+            all_failure_at: null,
+            all_failure_recover_at: null,
+            all_failure_type: allFailureType,
+            all_failure_frequency: getRangeValue('all_failure_frequency'),
+            all_consecutive_failures: getRangeValue('all_consecutive_failures'),
+            all_failure_units: allUnits.consecutiveUnits,
+            all_consecutive_units: allUnits.consecutiveUnits,
+            all_frequency_units: allUnits.frequencyUnits,
+            all_failure_mode: allMode,
+            all_failure_urls: allChecks,
             transport_failure_type: transportFaultType,
             transport_failure_frequency: getRangeValue('transport_failure_frequency'),
             transport_consecutive_failures: getRangeValue('transport_consecutive_failures'),
@@ -1394,7 +1447,7 @@
                 }
                 return;
             }
-            if (field !== 'segment_failure_urls' && field !== 'manifest_failure_urls') return;
+            if (field !== 'segment_failure_urls' && field !== 'manifest_failure_urls' && field !== 'all_failure_urls') return;
             const group = cb.closest('.checkbox-group');
             if (!group) return;
             const allCheckboxes = group.querySelectorAll(`input[data-field="${field}"]`);
@@ -2269,7 +2322,7 @@
     }
 
     function buildRowSignature(row) {
-        return `${row.timestamp}|${Math.round(row.duration)}|${row.entry.status || ''}|${row.entry.bytes_out || 0}|${row.label}|${row.entry.faulted ? 'F' : ''}|${row.entry.fault_type || ''}|${row.attempt || 1}|${row.is_retry ? 'R' : ''}|${row.entry.request_range || ''}`;
+        return `${row.timestamp}|${Math.round(row.duration)}|${row.entry.status || ''}|${row.entry.bytes_out || 0}|${row.label}|${row.entry.faulted ? 'F' : ''}|${row.entry.fault_type || ''}|${row.entry.fault_category || ''}|${row.attempt || 1}|${row.is_retry ? 'R' : ''}|${row.entry.request_range || ''}`;
     }
 
     function waterfallRowStatusClasses(row) {
@@ -2319,7 +2372,29 @@
         const bytesLabel = formatKBNumber(bytesOut);
         const mbpsLabel = formatMbpsNumber(bytesOut, row.transfer);
         const path = row.pathDisplay || row.filename || '';
-        const flags = (row.is_retry ? '↻' : '') + (row.entry.faulted ? '!' : '');
+        // Distinguish the three "looked like 200, ended badly" cases
+        // since the status column alone can't tell them apart:
+        //   ✂ socket fault inject — server deliberately cut the body
+        //                           (request_body_*/connect_*/first_byte_*).
+        //                           Status is forced to 503 by the proxy.
+        //   ⏱ transfer timeout    — server gave up on slow upstream or
+        //                           idle player drain (transfer_active_/
+        //                           idle_timeout). Status is upstream's
+        //                           original (typ. 200) for mid-body, or
+        //                           504 if it tripped pre-headers.
+        //   ↩ client disconnect  — the player aborted mid-transfer.
+        //                           Status is upstream's original.
+        // Everything else (HTTP 4xx/5xx, transport drop/reject, corruption)
+        // keeps the plain "!" — the status code already tells the story.
+        const faultCategory = String(row.entry.fault_category || '').toLowerCase();
+        let faultGlyph = '';
+        if (row.entry.faulted) {
+            if (faultCategory === 'socket') faultGlyph = '!✂';
+            else if (faultCategory === 'transfer_timeout') faultGlyph = '!⏱';
+            else if (faultCategory === 'client_disconnect') faultGlyph = '!↩';
+            else faultGlyph = '!';
+        }
+        const flags = (row.is_retry ? '↻' : '') + faultGlyph;
         const statusCode = Number(row.entry.status) || 0;
 
         const cells = [

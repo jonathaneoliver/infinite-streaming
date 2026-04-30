@@ -3886,6 +3886,7 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 			"manifest_requests_count":                  0,
 			"master_manifest_requests_count":           0,
 			"segments_count":                           0,
+			"all_requests_count":                       0,
 			"last_request":                             createdAt,
 			"first_request_time":                       createdAt,
 			"session_start_time":                       createdAt,
@@ -3918,6 +3919,17 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 			"master_manifest_frequency_units":          "seconds",
 			"master_manifest_failure_mode":             "failures_per_seconds",
 			"master_manifest_consecutive_failures":     0,
+			// "All" fault override — when all_failure_type != "none",
+			// HandleRequest uses this rule for every HTTP request and
+			// ignores the per-kind tabs above. Same control shape as
+			// segment, plus all_failure_urls for variant scoping.
+			"all_failure_type":                         "none",
+			"all_failure_frequency":                    0,
+			"all_consecutive_failures":                 0,
+			"all_failure_units":                        "requests",
+			"all_consecutive_units":                    "requests",
+			"all_frequency_units":                      "seconds",
+			"all_failure_mode":                         "failures_per_seconds",
 			"current_failures":                         0,
 			"consecutive_failures_count":               0,
 			"player_ip":                                requesterIP,
@@ -3933,6 +3945,9 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 			"segment_failure_recover_at":               nil,
 			"master_manifest_failure_at":               nil,
 			"master_manifest_failure_recover_at":       nil,
+			"all_failure_at":                           nil,
+			"all_failure_recover_at":                   nil,
+			"all_failure_urls":                         []string{},
 			"transport_failure_type":                   "none",
 			"transport_failure_frequency":              0,
 			"transport_consecutive_failures":           1,
@@ -4244,11 +4259,28 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 			bumpFaultCounter(sessionData, failureType)
 			logFaultEvent(sessionData, externalPort, failureType, requestKind, actionTaken)
 			updateSessionTraffic(sessionData, requestBytes, 0)
-			// Log network entry for socket fault
-			// Socket faults manipulate the connection directly (RST, hang, delay)
-			// and don't generate HTTP responses, so we log with 503 status
+			// The status logged here must reflect what the *client*
+			// saw on the wire, not an internal sentinel:
+			//  - request_connect_*  → nothing was written; no status.
+			//                         Use 0 so the dashboard renders "—".
+			//  - request_first_byte_*, request_body_* → applySocketFault
+			//                         emitted "HTTP/1.1 200 OK" via
+			//                         writeChunkedHeaders before the cut,
+			//                         so the wire status is 200.
+			//  - applySocketFault hijack-failure fallback → we wrote 503
+			//                         via w.WriteHeader, so 503.
 			sessionID := getString(sessionData, "session_id")
-			status := http.StatusServiceUnavailable
+			var status int
+			switch {
+			case actionTaken == "fallback_http_503":
+				status = http.StatusServiceUnavailable
+			case strings.HasPrefix(failureType, "request_connect_"):
+				status = 0
+			default:
+				// request_first_byte_*, request_body_*: chunked
+				// headers (200 OK) were written before the cut.
+				status = http.StatusOK
+			}
 			netEntry := createFaultLogEntry(playerURL, upstreamURL, requestKind, failureType, actionTaken, status, requestBytes, requestReceivedAt)
 			stampNetMeta(&netEntry, requestHeaders, queryString, nil)
 			logEntry(sessionID,netEntry)
@@ -5553,6 +5585,23 @@ func categorizeFaultType(faultType string) string {
 	// Transport faults
 	if strings.HasPrefix(faultType, "transport_") {
 		return "transport"
+	}
+
+	// Server-enforced transfer timeouts (active or idle). These look
+	// superficially like a 200 that got cut, same as a socket fault —
+	// but the cut came from go-proxy's transfer-timeout policy, not
+	// from injected request_body_*. Dashboard distinguishes via this
+	// category so the waterfall can render a clock glyph rather than
+	// the scissors used for deliberate fault injection.
+	if strings.HasPrefix(faultType, "transfer_") {
+		return "transfer_timeout"
+	}
+
+	// Client gave up mid-transfer (broken pipe / ECONNRESET from the
+	// player's side). Tagged at the call site, but mirrored here for
+	// consistency if anything else round-trips through this fn.
+	if faultType == "client_disconnect" {
+		return "client_disconnect"
 	}
 
 	// HTTP faults (404, 500, etc.)
@@ -7072,9 +7121,11 @@ func refreshFailureStateFromLatest(a *App, dst SessionData, sessionID string) {
 		// same snapshot.
 		for _, k := range []string{
 			"segments_count", "manifest_requests_count", "master_manifest_requests_count",
+			"all_requests_count",
 			"segment_failure_at", "segment_failure_recover_at",
 			"manifest_failure_at", "manifest_failure_recover_at",
 			"master_manifest_failure_at", "master_manifest_failure_recover_at",
+			"all_failure_at", "all_failure_recover_at",
 		} {
 			if v, ok := s[k]; ok {
 				dst[k] = v
@@ -7447,6 +7498,14 @@ func NewRequestHandler(isSegment, isUpdateManifest, isMasterManifest bool, sessi
 }
 
 func (h *RequestHandler) HandleRequest(filename string) string {
+	// "All" override — when set, every HTTP request runs through the
+	// single all-rule and the per-kind tabs (segment/manifest/master)
+	// are bypassed. The dashboard reflects this by disabling those
+	// tabs and showing an "All override active" banner.
+	if getString(h.session, "all_failure_type") != "" &&
+		getString(h.session, "all_failure_type") != "none" {
+		return h.handleAllFailure(filename)
+	}
 	switch h.mode {
 	case "segment":
 		return h.handleSegmentFailure(filename)
@@ -7457,6 +7516,45 @@ func (h *RequestHandler) HandleRequest(filename string) string {
 	default:
 		return "none"
 	}
+}
+
+func (h *RequestHandler) handleAllFailure(filename string) string {
+	h.session["all_requests_count"] = getInt(h.session, "all_requests_count") + 1
+	allURLs := getStringSlice(h.session, "all_failure_urls")
+	if len(allURLs) > 0 {
+		if !shouldApplyFailure(allURLs, filename, pathParent(filename)) {
+			return "none"
+		}
+	}
+	preFailureAt := h.session["all_failure_at"]
+	preFailureRecoverAt := h.session["all_failure_recover_at"]
+	failure := NewFailureHandler("all", h.session)
+	count := getInt(h.session, "all_requests_count")
+	failureType := failure.HandleFailure(count, time.Now())
+	log.Printf(
+		"ALL FAILURE DEBUG count=%d type_in=%s type_out=%s units=%s consecutiveUnits=%s frequencyUnits=%s freq=%d consecutive=%d preFailureAt=%v preFailureRecoverAt=%v postFailureAt=%v postFailureRecoverAt=%v file=%s",
+		count,
+		getString(h.session, "all_failure_type"),
+		failureType,
+		failure.failureUnits,
+		failure.consecutiveUnits,
+		failure.frequencyUnits,
+		failure.failureFrequency,
+		failure.consecutive,
+		preFailureAt,
+		preFailureRecoverAt,
+		failure.failureAt,
+		failure.failureRecoverAt,
+		filename,
+	)
+	h.session["all_failure_at"] = failure.failureAt
+	h.session["all_failure_recover_at"] = failure.failureRecoverAt
+	if failure.resetFailureType != nil {
+		h.session["all_failure_type"] = failure.resetFailureType
+		h.session["all_reset_failure_type"] = nil
+		h.session["control_revision"] = newControlRevision()
+	}
+	return failureType
 }
 
 func (h *RequestHandler) handleFailure(prefix, countKey string) string {
