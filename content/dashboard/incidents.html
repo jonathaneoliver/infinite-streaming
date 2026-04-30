@@ -145,6 +145,7 @@
                 <div class="header-actions">
                     <h1>🚨 Incidents</h1>
                     <div class="header-actions-right">
+                        <button id="deleteSelectedBtn" class="btn btn-danger" disabled>Delete Selected</button>
                         <button id="refreshBtn" class="btn btn-secondary">Refresh</button>
                     </div>
                 </div>
@@ -177,13 +178,19 @@
                 <div id="emptyState" class="no-data" style="display: none;">
                     <div class="no-data-icon">📭</div>
                     <h2>No incidents captured yet</h2>
-                    <p>Open a testing session, induce a fault, and the freeze/recovery path will write a HAR here. Or hit <strong>Save HAR</strong> in the Network Log of a testing session.</p>
+                    <p>Three ways to land an incident here:</p>
+                    <ul style="text-align: left; max-width: 560px; margin: 0 auto;">
+                        <li>Tap <strong>911</strong> on the iOS / iPadOS / tvOS / Android TV player when you spot something interesting — server saves a HAR labelled <code>user 911</code>.</li>
+                        <li>Open a testing session and induce a fault — the freeze / segment-stall / auto-recovery path writes a HAR here.</li>
+                        <li>Hit <strong>Download HAR</strong> in the Network Log of a testing session for a manual snapshot.</li>
+                    </ul>
                 </div>
 
                 <div id="tableWrap" style="display: none;">
                     <table class="incidents-table">
                         <thead>
                             <tr>
+                                <th style="width: 32px;"><input type="checkbox" id="selectAll"></th>
                                 <th>When</th>
                                 <th>Reason</th>
                                 <th>Player</th>
@@ -321,6 +328,7 @@
                 const hrefAttr = escapeHTML(downloadHref);
                 return `
                     <tr data-incident-path="${escapeHTML(i.path || '')}" data-incident-idx="${idx}">
+                        <td><input type="checkbox" class="row-select" data-no-row-click="1" data-path="${escapeHTML(i.path || '')}"></td>
                         <td>
                             <div>${time}</div>
                             <div class="session-id">${age}</div>
@@ -332,6 +340,7 @@
                         <td>${fmtSize(i.size_bytes)}</td>
                         <td>
                             <a href="${hrefAttr}" download="${filenameAttr}" class="btn btn-mini btn-secondary" data-no-row-click="1">Download</a>
+                            <button class="btn btn-mini btn-danger row-delete" data-no-row-click="1" data-path="${escapeHTML(i.path || '')}" title="Delete this incident">×</button>
                         </td>
                     </tr>
                 `;
@@ -349,6 +358,66 @@
                     loadIncidentHar(path, incident);
                 });
             });
+            // Per-row checkboxes — keep "Delete Selected" enabled state
+            // in sync with how many are checked.
+            rows.querySelectorAll('input.row-select').forEach((cb) => {
+                cb.addEventListener('change', updateDeleteSelectedState);
+            });
+            // Per-row delete buttons — confirm + DELETE the single file.
+            rows.querySelectorAll('button.row-delete').forEach((btn) => {
+                btn.addEventListener('click', (event) => {
+                    event.stopPropagation();
+                    const path = btn.dataset.path;
+                    if (!path) return;
+                    if (!window.confirm(`Delete this incident?\n\n${path}`)) return;
+                    deleteIncidents([path]);
+                });
+            });
+            updateDeleteSelectedState();
+        }
+
+        function updateDeleteSelectedState() {
+            const checked = document.querySelectorAll('input.row-select:checked').length;
+            const btn = document.getElementById('deleteSelectedBtn');
+            btn.disabled = checked === 0;
+            btn.textContent = checked > 0 ? `Delete ${checked} Selected` : 'Delete Selected';
+            // Keep the header select-all in tri-state agreement.
+            const all = document.querySelectorAll('input.row-select');
+            const selectAll = document.getElementById('selectAll');
+            if (all.length === 0) {
+                selectAll.checked = false;
+                selectAll.indeterminate = false;
+            } else if (checked === 0) {
+                selectAll.checked = false;
+                selectAll.indeterminate = false;
+            } else if (checked === all.length) {
+                selectAll.checked = true;
+                selectAll.indeterminate = false;
+            } else {
+                selectAll.indeterminate = true;
+            }
+        }
+
+        async function deleteIncidents(paths) {
+            const failures = [];
+            await Promise.all(paths.map(async (path) => {
+                const segs = String(path).split('/').map(encodeURIComponent).join('/');
+                try {
+                    const r = await fetch(`/api/incidents/${segs}`, { method: 'DELETE' });
+                    if (!r.ok) failures.push(`${path}: HTTP ${r.status}`);
+                } catch (e) {
+                    failures.push(`${path}: ${e.message}`);
+                }
+            }));
+            if (failures.length) {
+                window.alert(`Some deletes failed:\n${failures.join('\n')}`);
+            }
+            // Clear the viewer if the loaded incident was just deleted.
+            const host = document.getElementById('viewerHost');
+            const header = document.getElementById('viewerHeader');
+            host.innerHTML = '<div class="incident-viewer-empty">No incident selected.</div>';
+            header.innerHTML = '<span>Click an incident row above to load its waterfall here.</span>';
+            await loadIncidents();
         }
 
         async function loadIncidentHar(path, incident) {
@@ -383,6 +452,23 @@
         }
 
         document.getElementById('refreshBtn').addEventListener('click', loadIncidents);
+        document.getElementById('selectAll').addEventListener('change', (e) => {
+            document.querySelectorAll('input.row-select').forEach((cb) => {
+                cb.checked = e.target.checked;
+            });
+            updateDeleteSelectedState();
+        });
+        document.getElementById('deleteSelectedBtn').addEventListener('click', () => {
+            const paths = Array.from(document.querySelectorAll('input.row-select:checked'))
+                .map((cb) => cb.dataset.path)
+                .filter(Boolean);
+            if (paths.length === 0) return;
+            const msg = paths.length === 1
+                ? `Delete 1 incident?`
+                : `Delete ${paths.length} incidents?`;
+            if (!window.confirm(msg)) return;
+            deleteIncidents(paths);
+        });
         document.getElementById('filterPlayer').addEventListener('input', render);
         document.getElementById('filterReason').addEventListener('change', render);
         document.getElementById('filterSource').addEventListener('change', render);
