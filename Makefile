@@ -9,7 +9,6 @@ export
 K3S_SSH_HOST ?= user@your-k3s-host
 K3S_KUBECONFIG ?= /home/user/.kube/config
 GO_SERVER_IMAGE ?= ghcr.io/jonathaneoliver/infinite-streaming:latest
-GO_PROXY_IMAGE ?= ghcr.io/jonathaneoliver/go-proxy:latest
 K8S_MANIFESTS ?= k8s-infinite-streaming.yaml
 K8S_DEPLOYMENT ?= infinite-streaming
 IOS_SIM_DEVICE ?= iPad Pro 13-inch (M5)
@@ -73,7 +72,6 @@ buildx-push:
 
 K3S_REGISTRY ?= localhost:5000
 K3S_SERVER_REPO ?= infinite-streaming
-K3S_PROXY_REPO ?= go-proxy
 
 build-k3s:
 	docker build --no-cache --progress=plain -t $(K3S_REGISTRY)/$(K3S_SERVER_REPO):latest .
@@ -99,16 +97,7 @@ build-push-k3s: build-k3s push-k3s
 
 build-push-k3s-all: buildx-k3s-all push-k3s-all
 
-build-go-proxy-k3s:
-	docker build --no-cache --progress=plain --build-arg VERSION=$(shell cat VERSION) -t $(K3S_REGISTRY)/$(K3S_PROXY_REPO):latest ./go-proxy
-
-push-go-proxy-k3s:
-	docker push $(K3S_REGISTRY)/$(K3S_PROXY_REPO):latest
-
-build-push-go-proxy-k3s: build-go-proxy-k3s push-go-proxy-k3s
-
 K3S_SERVER_IMAGE ?= $(K3S_REGISTRY)/$(K3S_SERVER_REPO):latest
-K3S_PROXY_IMAGE ?= $(K3S_REGISTRY)/$(K3S_PROXY_REPO):latest
 
 deploy-k3s-local:
 	@set -e; \
