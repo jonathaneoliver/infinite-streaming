@@ -30,6 +30,7 @@ import (
 
 	"github.com/gorilla/mux"
 	"github.com/grafov/m3u8"
+	"github.com/jonathaneoliver/infinite-streaming/go-proxy/internal/har"
 	"github.com/vishvananda/netlink"
 	_ "modernc.org/sqlite"
 
@@ -1522,16 +1523,59 @@ func (a *App) handlePostSessionMetrics(w http.ResponseWriter, r *http.Request) {
 	//   trueOffsetMs = server_received_at_ms - playhead_wallclock_ms
 	metricsOnly["server_received_at_ms"] = time.Now().UnixMilli()
 	a.saveSessionByID(id, metricsOnly)
-	if isSignificantPlayerEvent(getString(metricsOnly, "player_metrics_last_event")) {
+	lastEvent := strings.ToLower(strings.TrimSpace(getString(metricsOnly, "player_metrics_last_event")))
+	if isSignificantPlayerEvent(lastEvent) {
 		a.flushSessionsBroadcast()
+	}
+	// "user_marked" (the 911 button) — capture a HAR snapshot of the
+	// current session timeline so the user can review what was on the
+	// wire when they tapped. Done in a goroutine so the metrics POST
+	// returns immediately; the snapshot writes to disk + the
+	// incidents directory.
+	if lastEvent == "user_marked" {
+		go a.takeUserMarkedSnapshot(id)
 	}
 	w.WriteHeader(http.StatusOK)
 	writeJSON(w, map[string]string{"status": "ok"})
 }
 
+// takeUserMarkedSnapshot fires a HAR snapshot for the session in
+// response to the player's 911 button. Reuses the same plumbing the
+// REST endpoint and the auto-snapshot path use; the only difference
+// is reason="user_marked" and source="player_button".
+func (a *App) takeUserMarkedSnapshot(sessionID string) {
+	if sessionID == "" {
+		return
+	}
+	session := a.findSessionByID(sessionID)
+	if session == nil {
+		log.Printf("[HAR_USER_MARKED] session not found sid=%s", sessionID)
+		return
+	}
+	playerID := getString(session, "player_id")
+	const source = "player_button"
+	if snapshotShouldDebounce(playerID, source, false) {
+		log.Printf("[HAR_USER_MARKED] debounced sid=%s player_id=%s", sessionID, playerID)
+		return
+	}
+	incident := &har.Incident{
+		Reason:    "user_marked",
+		Source:    source,
+		SessionID: sessionID,
+		Timestamp: time.Now().UTC(),
+	}
+	doc := a.buildHARForSession(session, incident, HARBuildFilter{}, nil)
+	info, err := writeIncidentFile(sessionID, playerID, "user_marked", source, doc)
+	if err != nil {
+		log.Printf("[HAR_USER_MARKED] write failed sid=%s err=%v", sessionID, err)
+		return
+	}
+	log.Printf("[HAR_USER_MARKED] saved sid=%s file=%s bytes=%d", sessionID, info.Filename, info.SizeBytes)
+}
+
 func isSignificantPlayerEvent(event string) bool {
 	switch strings.ToLower(strings.TrimSpace(event)) {
-	case "stall_start", "stall_end", "segment_stall", "restart", "frozen", "error", "loop_marker", "playing", "buffering_start", "buffering_end", "rate_shift_up", "rate_shift_down", "video_first_frame", "video_start_time", "timejump":
+	case "stall_start", "stall_end", "segment_stall", "restart", "frozen", "error", "loop_marker", "playing", "buffering_start", "buffering_end", "rate_shift_up", "rate_shift_down", "video_first_frame", "video_start_time", "timejump", "user_marked":
 		return true
 	}
 	return false
