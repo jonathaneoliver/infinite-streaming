@@ -832,7 +832,7 @@ final class PlayerViewModel: ObservableObject {
     /// have a synchronisation point.
     func mark911() {
         let stamp = Self.metricsTimestampFormatter.string(from: Date())
-        print("911 user-marked at \(stamp) currentURL=\(currentURL ?? "—")")
+        print("911 user-marked at \(stamp) currentURL=\(currentURL?.absoluteString ?? "—")")
         Task { [weak self] in
             await self?.sendPlayerMetrics(event: "user_marked", extra: [
                 "player_metrics_user_marked_at": stamp
