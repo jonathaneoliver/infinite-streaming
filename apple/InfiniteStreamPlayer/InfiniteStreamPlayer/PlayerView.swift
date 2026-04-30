@@ -15,6 +15,7 @@ struct PlayerView: UIViewControllerRepresentable {
     let player: AVPlayer
     var onRetry: (() -> Void)? = nil
     var onReload: (() -> Void)? = nil
+    var onMark911: (() -> Void)? = nil
     var onOpenSettings: (() -> Void)? = nil
 
     func makeUIViewController(context: Context) -> AVPlayerViewController {
@@ -49,6 +50,15 @@ struct PlayerView: UIViewControllerRepresentable {
                 title: "Reload",
                 image: UIImage(systemName: "arrow.triangle.2.circlepath")
             ) { _ in onReload() })
+        }
+        if let onMark911 {
+            // 911 — capture a HAR snapshot of the moment for forensic
+            // review later. Sits right of Reload to match the iOS
+            // overlay layout.
+            actions.append(UIAction(
+                title: "911",
+                image: UIImage(systemName: "exclamationmark.triangle.fill")
+            ) { _ in onMark911() })
         }
         if let onOpenSettings {
             actions.append(UIAction(

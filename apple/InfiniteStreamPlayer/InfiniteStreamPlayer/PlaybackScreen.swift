@@ -21,6 +21,7 @@ struct PlaybackScreen: View {
                 player: vm.player,
                 onRetry: { vm.retry() },
                 onReload: { vm.reload() },
+                onMark911: { vm.mark911() },
                 onOpenSettings: { vm.setSettingsOpen(true) }
             )
             .id(vm.playerEpoch)
@@ -34,6 +35,7 @@ struct PlaybackScreen: View {
                     Spacer()
                     iconButton(systemName: "arrow.clockwise") { vm.retry() }
                     iconButton(systemName: "arrow.triangle.2.circlepath") { vm.reload() }
+                    iconButton(systemName: "exclamationmark.triangle.fill") { vm.mark911() }
                     iconButton(systemName: "gearshape") { vm.setSettingsOpen(true) }
                 }
                 .padding(Space.s4)
