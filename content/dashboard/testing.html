@@ -2133,10 +2133,36 @@ maybe a histogram of b
         // In live (not paused) mode, intercept Alt+wheel and apply a custom
         // zoom anchored at the right edge (live point), ignoring mouse position.
         // In paused mode we let the plugin do its normal mouse-centered zoom.
-        function installLiveWheelAnchor(sessionId, chartRef, canvas) {
-            if (!chartRef || !canvas) return;
-            canvas.addEventListener('wheel', (event) => {
+        //
+        // One document-level non-passive wheel listener handles every
+        // bandwidth/events/buffer/fps chart on the page. Per-canvas
+        // listeners would fire a Chrome "non-passive scroll-blocking
+        // wheel listener" violation per session × per chart; the
+        // single delegated listener is one warning instead of N×4.
+        let chartLiveWheelInstalled = false;
+        function ensureChartLiveWheelAnchor() {
+            if (chartLiveWheelInstalled) return;
+            chartLiveWheelInstalled = true;
+            const canvasClassToMap = {
+                'bandwidth-chart': bandwidthCharts,
+                'events-chart': eventsCharts,
+                'buffer-depth-chart': bufferDepthCharts,
+                'video-fps-chart': videoFpsCharts
+            };
+            document.addEventListener('wheel', (event) => {
                 if (!event.altKey) return;
+                const canvas = event.target && event.target.closest && event.target.closest('canvas');
+                if (!canvas) return;
+                let chartMap = null;
+                for (const cls in canvasClassToMap) {
+                    if (canvas.classList.contains(cls)) { chartMap = canvasClassToMap[cls]; break; }
+                }
+                if (!chartMap) return;
+                const card = canvas.closest('.session-card');
+                const sessionId = card ? card.dataset.sessionId : null;
+                if (!sessionId) return;
+                const chartRef = chartMap.get(String(sessionId));
+                if (!chartRef) return;
                 if (isChartPaused(String(sessionId))) return;
                 event.preventDefault();
                 event.stopPropagation();
@@ -2147,7 +2173,7 @@ maybe a histogram of b
                 if (!Number.isFinite(currentMin) || !Number.isFinite(currentMax)) return;
                 const span = currentMax - currentMin;
                 const factor = event.deltaY < 0 ? 0.9 : 1 / 0.9;
-                let newSpan = Math.max(2, Math.min(600, span * factor));
+                const newSpan = Math.max(2, Math.min(600, span * factor));
                 const nextMax = 600;
                 const nextMin = Math.max(0, nextMax - newSpan);
                 if (typeof chartRef.zoomScale === 'function') {
@@ -2158,6 +2184,49 @@ maybe a histogram of b
                     chartRef.update('none');
                 }
                 syncChartViewportAcrossSession(String(sessionId), chartRef);
+            }, { capture: true, passive: false });
+        }
+
+        // vis-timeline counterpart to installLiveWheelAnchor: in live mode
+        // (not paused) Alt+wheel must zoom anchored at the right edge ("now")
+        // independent of mouse position, matching the Chart.js charts. In
+        // paused mode we let vis-timeline's own zoom plugin handle the
+        // wheel as mouse-centered zoom.
+        //
+        // One document-level non-passive wheel listener handles every
+        // events-timeline on the page — much cheaper than attaching a
+        // listener per session (which Chrome flags as a scroll-blocking
+        // perf hit).
+        let visTimelineLiveWheelInstalled = false;
+        function ensureVisTimelineLiveWheelAnchor() {
+            if (visTimelineLiveWheelInstalled) return;
+            visTimelineLiveWheelInstalled = true;
+            const ZOOM_MIN_MS = 1000;
+            const ZOOM_MAX_MS = 6 * 60 * 60 * 1000;
+            document.addEventListener('wheel', (event) => {
+                if (!event.altKey) return;
+                const container = event.target && event.target.closest && event.target.closest('.events-timeline');
+                if (!container) return;
+                const card = container.closest('.session-card');
+                const sessionId = card ? card.dataset.sessionId : null;
+                if (!sessionId) return;
+                const timeline = eventsTimelines.get(String(sessionId));
+                if (!timeline) return;
+                if (isChartPaused(String(sessionId))) return;
+                event.preventDefault();
+                event.stopPropagation();
+                const win = timeline.getWindow();
+                const span = win.end.getTime() - win.start.getTime();
+                if (!Number.isFinite(span) || span <= 0) return;
+                const factor = event.deltaY < 0 ? 0.9 : 1 / 0.9;
+                const newSpan = Math.max(ZOOM_MIN_MS, Math.min(ZOOM_MAX_MS, span * factor));
+                const nowMs = Date.now();
+                timeline.setWindow(
+                    new Date(nowMs - newSpan),
+                    new Date(nowMs),
+                    { animation: false }
+                );
+                syncChartViewportAcrossSession(String(sessionId), timeline);
             }, { capture: true, passive: false });
         }
 
@@ -2240,7 +2309,18 @@ maybe a histogram of b
             const viewport = chartViewportBySession.get(String(sessionId || ''));
             if (!viewport) return false;
             applyChartViewport(chartRef, viewport);
+            updateResetZoomButtonState(sessionId);
             return true;
+        }
+
+        function updateResetZoomButtonState(sessionId) {
+            const key = String(sessionId || '');
+            const card = document.querySelector(`.session-card[data-session-id="${key}"]`);
+            if (!card) return;
+            const zoomed = chartViewportBySession.has(key);
+            for (const btn of card.querySelectorAll('button[data-action="reset-bitrate-zoom"]')) {
+                btn.classList.toggle('zoom-active', zoomed);
+            }
         }
 
         function getChartsForSession(sessionId) {
@@ -2254,18 +2334,28 @@ maybe a histogram of b
             ].filter((chartRef) => !!chartRef);
         }
 
+        function isDefaultChartViewport(viewport) {
+            return !!viewport && viewport.min <= 0 && viewport.max >= 600;
+        }
+
         function syncChartViewportAcrossSession(sessionId, sourceChart) {
             const key = String(sessionId || '');
             const viewport = readChartViewport(sourceChart);
             if (!viewport) return;
-            chartViewportBySession.set(key, viewport);
+            if (isDefaultChartViewport(viewport)) {
+                chartViewportBySession.delete(key);
+            } else {
+                chartViewportBySession.set(key, viewport);
+            }
             for (const chartRef of getChartsForSession(key)) {
                 if (!chartRef || chartRef === sourceChart) continue;
                 applyChartViewport(chartRef, viewport);
-                if (typeof chartRef.zoomScale !== 'function') {
+                if (chartRef.$isVisTimeline) continue;
+                if (typeof chartRef.zoomScale !== 'function' && typeof chartRef.update === 'function') {
                     chartRef.update('none');
                 }
             }
+            updateResetZoomButtonState(key);
         }
 
         function buildUnifiedChartZoomOptions(sessionId) {
@@ -2334,8 +2424,12 @@ maybe a histogram of b
                 chartViewportBySession.set(rightPanDragState.sessionId, viewport);
                 for (const chart of getChartsForSession(rightPanDragState.sessionId)) {
                     applyChartViewport(chart, viewport);
-                    if (typeof chart.zoomScale !== 'function') { chart.update('none'); }
+                    if (chart.$isVisTimeline) continue;
+                    if (typeof chart.zoomScale !== 'function' && typeof chart.update === 'function') {
+                        chart.update('none');
+                    }
                 }
+                updateResetZoomButtonState(rightPanDragState.sessionId);
             });
             window.addEventListener('mouseup', (event) => {
                 if (!rightPanDragState) return;
@@ -2353,8 +2447,7 @@ maybe a histogram of b
             const paused = isChartPaused(key);
             const card = document.querySelector(`.session-card[data-session-id="${key}"]`);
             if (!card) return;
-            const btn = card.querySelector('button[data-action="pause-bitrate-chart"]');
-            if (btn) {
+            for (const btn of card.querySelectorAll('button[data-action="pause-bitrate-chart"]')) {
                 if (paused) {
                     btn.textContent = 'Live';
                     btn.classList.add('chart-live');
@@ -2976,7 +3069,7 @@ maybe a histogram of b
                 applyStoredChartViewport(sessionId, chart);
                 installRightMousePanHandlers(sessionId, chart);
                 installChartClickPauseHandler(sessionId, chart);
-                installLiveWheelAnchor(sessionId, chart, canvas);
+                ensureChartLiveWheelAnchor();
                 eventsCharts.set(sessionId, chart);
             } else {
                 chart.data.datasets = datasets;
@@ -3284,6 +3377,7 @@ maybe a histogram of b
                     }
                 );
                 eventsTimelines.set(sessionId, timeline);
+                ensureVisTimelineLiveWheelAnchor();
                 // Tag for the cross-chart viewport sync helpers, anchor
                 // the seconds-from-windowStart frame to liveStart so
                 // vis-timeline ranges convert consistently to the 0–600
@@ -3443,7 +3537,6 @@ maybe a histogram of b
                     }
                 }
                 eventsCharts.delete(sessionId);
-                eventsTimelines.delete(sessionId);
                 bandwidthCharts.delete(sessionId);
                 bufferDepthCharts.delete(sessionId);
                 videoFpsCharts.delete(sessionId);
@@ -3939,7 +4032,7 @@ maybe a histogram of b
                 applyStoredChartViewport(sessionId, chart);
                 installRightMousePanHandlers(sessionId, chart);
                 installChartClickPauseHandler(sessionId, chart);
-                installLiveWheelAnchor(sessionId, chart, canvas);
+                ensureChartLiveWheelAnchor();
                 bandwidthCharts.set(sessionId, chart);
             } else {
                 chart.data.datasets = datasets;
@@ -4140,7 +4233,7 @@ maybe a histogram of b
                 applyStoredChartViewport(sessionId, bufferChart);
                 installRightMousePanHandlers(sessionId, bufferChart);
                 installChartClickPauseHandler(sessionId, bufferChart);
-                installLiveWheelAnchor(sessionId, bufferChart, bufferCanvas);
+                ensureChartLiveWheelAnchor();
                 bufferDepthCharts.set(sessionId, bufferChart);
             } else {
                 const oldHidden = {};
@@ -4462,7 +4555,7 @@ maybe a histogram of b
                 applyStoredChartViewport(sessionId, fpsChart);
                 installRightMousePanHandlers(sessionId, fpsChart);
                 installChartClickPauseHandler(sessionId, fpsChart);
-                installLiveWheelAnchor(sessionId, fpsChart, fpsCanvas);
+                ensureChartLiveWheelAnchor();
                 videoFpsCharts.set(sessionId, fpsChart);
             } else {
                 const oldHidden = {};
@@ -5250,6 +5343,24 @@ maybe a histogram of b
             const card = button.closest('.session-card');
             if (!card) return;
             const sessionId = card.dataset.sessionId;
+            if (button.dataset.action === 'reset-bitrate-zoom') {
+                const key = String(sessionId || '');
+                chartViewportBySession.delete(key);
+                if (rightPanDragState && rightPanDragState.sessionId === key) {
+                    rightPanDragState = null;
+                }
+                for (const chart of getChartsForSession(key)) {
+                    if (chart && typeof chart.resetZoom === 'function') {
+                        chart.resetZoom('none');
+                    }
+                }
+                updateResetZoomButtonState(key);
+                return;
+            }
+            if (button.dataset.action === 'pause-bitrate-chart') {
+                toggleChartPause(String(sessionId || ''));
+                return;
+            }
             if (button.dataset.action === 'apply-pattern') {
                 scheduleShapingApply(card);
                 const group = card.querySelector('.shaping-pattern-group');

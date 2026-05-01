@@ -270,9 +270,31 @@
 }
 
 .chart-axis-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
     margin-top: 12px;
+    margin-bottom: 8px;
     padding-top: 10px;
     border-top: 1px solid #e0e0e0;
+}
+.chart-axis-row > label {
+    font-size: 11px;
+    color: var(--text-secondary);
+}
+
+/* Forces a wrap inside a flex `.chart-axis-row` (the layout
+ * testing-session.html applies via inline CSS) so the toolbar
+ * buttons fall onto a fresh row below the Y-Max radios. In
+ * non-flex contexts (testing.html) it's a zero-height block
+ * and the children already stack naturally. */
+.chart-axis-row-break {
+    flex-basis: 100%;
+    width: 100%;
+    height: 0;
+    margin: 0;
+    padding: 0;
 }
 
 /* ============================================================================
@@ -386,6 +408,22 @@
     display: flex;
     align-items: center;
     gap: 4px;
+}
+
+.shape-step-row.shape-step-disabled {
+    opacity: 0.55;
+}
+
+/* Likely-stall warning: this step's shaping rate is below the
+ * lowest video variant + a 10% safety margin, so the player will
+ * starve and stall at that rate. The class is toggled on by the
+ * stall-risk classifier in renderPatternStepRow; the visual lives
+ * here so both testing.html and testing-session.html show it. */
+.shape-step-row.shape-step-risk {
+    border: 1px solid #ef4444;
+    border-radius: 8px;
+    padding: 4px;
+    background: rgba(239, 68, 68, 0.08);
 }
 
 .shape-step-list {
@@ -723,11 +761,12 @@
  * single-label version used; users can drag from there. */
 .network-log-waterfall {
     --netwf-col-time: 116px; /* fits HH:MM:SS.mmm with padding */
-    --netwf-col-flags: 28px;
+    --netwf-col-flags: 36px;
     --netwf-col-method: 44px;
     --netwf-col-path: 200px;
     --netwf-col-bytes: 64px;
     --netwf-col-mbps: 72px;
+    --netwf-col-duration: 64px;
     --netwf-col-status: 56px;
 }
 
@@ -750,11 +789,67 @@
 .netwf-cell.path   { flex: 0 0 var(--netwf-col-path); }
 .netwf-cell.bytes  { flex: 0 0 var(--netwf-col-bytes); text-align: right; font-variant-numeric: tabular-nums; }
 .netwf-cell.mbps   { flex: 0 0 var(--netwf-col-mbps); text-align: right; font-variant-numeric: tabular-nums; }
+.netwf-cell.duration { flex: 0 0 var(--netwf-col-duration); text-align: right; font-variant-numeric: tabular-nums; }
 .netwf-cell.status {
     flex: 0 0 var(--netwf-col-status);
     text-align: center;
     font-weight: 600;
     color: #475569;
+}
+
+/* Reset Zoom button highlight when a chart viewport is stored
+ * (chart is zoomed). Solid blue fill + pulsing halo + 🔍 prefix —
+ * matches the chart-live pulse on the Pause button so both action
+ * states are visually loud. Lives in the shared stylesheet so
+ * testing.html and testing-session.html behave the same. */
+button[data-action="reset-bitrate-zoom"].zoom-active {
+    color: #ffffff;
+    border-color: #1d4ed8;
+    background-color: #1d4ed8;
+    font-weight: 600;
+    animation: chart-zoom-pulse 1.6s ease-in-out infinite;
+}
+@keyframes chart-zoom-pulse {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(29, 78, 216, 0.55); }
+    50%      { box-shadow: 0 0 0 6px rgba(29, 78, 216, 0); }
+}
+button[data-action="reset-bitrate-zoom"].zoom-active::before {
+    content: '🔍 ';
+}
+
+/* Slow segment-transfer warning: media segment took longer than
+ * the default HLS target duration (6 s) to download. Same warning
+ * palette as 4xx (amber) since it's a soft "your stream will
+ * stall" signal rather than a hard failure. */
+.netwf-row.slow-transfer {
+    background: #fffbeb;
+}
+.netwf-row.slow-transfer:hover {
+    background: #fef3c7;
+}
+.netwf-row.slow-transfer .netwf-cell.duration {
+    color: #92400e;
+    background: #fde68a;
+    font-weight: 600;
+}
+
+/* Sortable header cells: clickable, with a small arrow that lights
+ * up the active sort direction. Resizer continues to claim the
+ * right edge so the click + drag affordances don't conflict. */
+.netwf-axis .netwf-cell.sortable {
+    cursor: pointer;
+    user-select: none;
+}
+.netwf-axis .netwf-cell.sortable:hover {
+    background: #eef2f7;
+}
+.netwf-axis .netwf-cell.sort-active {
+    color: #1d4ed8;
+    background: #eff6ff;
+}
+.netwf-cell-sort-arrow {
+    font-size: 9px;
+    margin-left: 2px;
 }
 
 .netwf-row.status-2xx .netwf-cell.status { color: #065f46; background: #d1fae5; }
