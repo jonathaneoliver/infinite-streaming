@@ -517,6 +517,55 @@
             width: 100%;
         }
 
+        .chart-expand-btn {
+            position: absolute;
+            bottom: 8px;
+            right: 8px;
+            z-index: 11;
+            display: inline-flex;
+            align-items: center;
+            gap: 5px;
+            height: 26px;
+            padding: 0 10px;
+            font-size: 11px;
+            font-weight: 600;
+            letter-spacing: 0.02em;
+            color: #1e293b;
+            background: #ffffff;
+            border: 1px solid #94a3b8;
+            border-radius: 4px;
+            box-shadow: 0 1px 2px rgba(15, 23, 42, 0.12);
+            cursor: pointer;
+        }
+        .chart-expand-btn:hover {
+            background: #f1f5f9;
+            border-color: #475569;
+        }
+        .chart-expand-icon {
+            font-size: 14px;
+            line-height: 1;
+        }
+        .chart-wrap.chart-expanded .chart-expand-btn {
+            color: #ffffff;
+            background: #2563eb;
+            border-color: #1d4ed8;
+        }
+        .chart-wrap.chart-expanded .chart-expand-btn:hover {
+            background: #1d4ed8;
+        }
+        .chart-wrap.chart-expanded .chart-expand-label {
+            display: none;
+        }
+        .chart-wrap.chart-expanded .chart-expand-btn::after {
+            content: 'Collapse';
+            font-size: 11px;
+            font-weight: 600;
+            letter-spacing: 0.02em;
+        }
+        .chart-wrap.chart-expanded .bandwidth-chart { height: 660px !important; }
+        .chart-wrap.chart-expanded .buffer-depth-chart { height: 510px !important; }
+        .chart-wrap.chart-expanded .video-fps-chart { height: 510px !important; }
+
         .chart-paused-badge {
             display: none;
             position: absolute;
@@ -6383,6 +6432,7 @@
                     }
                 }
                 eventsCharts.delete(sessionId);
+                eventsTimelines.delete(sessionId);
                 bandwidthCharts.delete(sessionId);
                 bufferDepthCharts.delete(sessionId);
                 videoFpsCharts.delete(sessionId);
