@@ -50,6 +50,9 @@
     // means the brush sticks to the right edge as new entries arrive
     // (Following Latest). Drag-pan flips it to false.
     const networkWaterfallBrushBySession = new Map();
+    // Per-session column sort state: { col, dir } where dir is 'asc' or
+    // 'desc'. col=null (or absent) means default chronological order.
+    const networkWaterfallSortBySession = new Map();
     const networkWaterfallRollingWindowMs = 10 * 60 * 1000;
     // Default and minimum brush span. Tighter than this and the time
     // axis gets too granular to be useful; this is also the default
@@ -1037,6 +1040,11 @@
                         <span class="collapsible-title">Player State</span>
                     </div>
                     <div class="collapsible-content" data-content="player-state" style="display: ${playerStateOpen ? 'block' : 'none'};">
+                        <div class="chart-axis-row">
+                            <button type="button" class="btn btn-secondary btn-mini" data-action="reset-bitrate-zoom">Reset Zoom</button>
+                            <button type="button" class="btn btn-secondary btn-mini" data-action="pause-bitrate-chart">⏸ Pause</button>
+                            <span class="chart-hint" title="Hold Alt (Option on Mac) while scrolling or dragging to zoom; right-click-drag to pan">Alt/⌥+scroll/drag to zoom · right-drag to pan</span>
+                        </div>
                         <div class="chart-wrap events-timeline-wrap">
                             <div class="events-timeline-legend" data-field="events_timeline_legend"></div>
                             <div class="events-timeline" data-field="events_timeline"></div>
@@ -1048,7 +1056,7 @@
                 <div class="collapsible-section" data-section="bitrate-chart" data-default-open="${bitrateChartOpen}">
                     <div class="collapsible-header" data-toggle="bitrate-chart">
                         <span class="collapsible-icon">${bitrateChartOpen ? '▼' : '▶'}</span>
-                        <span class="collapsible-title">Bitrate Chart</span>
+                        <span class="collapsible-title">Bitrate Chart etc</span>
                     </div>
                     <div class="collapsible-content" data-content="bitrate-chart" style="display: ${bitrateChartOpen ? 'block' : 'none'};">
                         <div class="chart-axis-row">
@@ -1087,6 +1095,7 @@
                                     <span>100 Mbps</span>
                                 </label>
                             </div>
+                            <div class="chart-axis-row-break"></div>
                             <button type="button" class="btn btn-secondary btn-mini" data-action="reset-bitrate-zoom">Reset Zoom</button>
                             <button type="button" class="btn btn-secondary btn-mini" data-action="pause-bitrate-chart">⏸ Pause</button>
                             <span class="chart-hint" title="Hold Alt (Option on Mac) while scrolling or dragging to zoom; right-click-drag to pan">Alt/⌥+scroll/drag to zoom · right-drag to pan</span>
@@ -2136,10 +2145,12 @@
         // Filter the row list to requests that overlap the brush
         // window. The overview above keeps showing the full session;
         // the list below shows only what the user has selected.
-        const visibleRows = rows.filter((row) => {
+        const visibleRowsRaw = rows.filter((row) => {
             const reqEnd = row.timestamp + Math.max(50, row.duration);
             return reqEnd >= brush.startMs && row.timestamp <= brush.endMs;
         });
+        const sort = getNetworkWaterfallSort(key);
+        const visibleRows = applyNetworkWaterfallSort(visibleRowsRaw, sort);
 
         // Sticky axis row at the top of the list — column headers (with
         // drag-to-resize handles) on the left, tick marks across the
@@ -2155,8 +2166,9 @@
             }
         }
         // Update the time-cell header text with current count.
-        const timeHdr = axisEl.querySelector('.netwf-cell.time');
+        const timeHdr = axisEl.querySelector('.netwf-cell.time .netwf-cell-label');
         if (timeHdr) timeHdr.textContent = `${visibleRows.length}/${rows.length}`;
+        paintWaterfallSortIndicators(axisEl, sort);
         const axisScale = axisEl.querySelector('[data-field="netwf_axis_scale"]');
         if (axisScale) {
             renderWaterfallAxisTicks(axisScale, brush.startMs, brush.endMs);
@@ -2358,7 +2370,20 @@
     }
 
     function buildRowSignature(row) {
-        return `${row.timestamp}|${Math.round(row.duration)}|${row.entry.status || ''}|${row.entry.bytes_out || 0}|${row.label}|${row.entry.faulted ? 'F' : ''}|${row.entry.fault_type || ''}|${row.entry.fault_category || ''}|${row.attempt || 1}|${row.is_retry ? 'R' : ''}|${row.entry.request_range || ''}`;
+        return `${row.timestamp}|${Math.round(row.duration)}|${row.entry.status || ''}|${row.entry.bytes_out || 0}|${row.label}|${row.entry.faulted ? 'F' : ''}|${row.entry.fault_type || ''}|${row.entry.fault_category || ''}|${row.attempt || 1}|${row.is_retry ? 'R' : ''}|${row.entry.request_range || ''}|${isSlowSegmentTransfer(row) ? 'S' : ''}`;
+    }
+
+    // HLS default target duration is 6s. A media-segment transfer that
+    // takes longer than that to download means the player will start to
+    // stall — flag it so it stands out in the row list. Only the actual
+    // transfer phase counts: dns/connect/tls/wait don't reduce segment
+    // availability.
+    const SLOW_SEGMENT_TRANSFER_MS = 6000;
+    const MEDIA_SEGMENT_PATH_RE = /\.(m4s|ts|mp4|m4a|m4v|aac|webm|mp3)(\?|$)/i;
+    function isSlowSegmentTransfer(row) {
+        const url = String((row && row.entry && (row.entry.url || row.entry.path)) || '');
+        if (!MEDIA_SEGMENT_PATH_RE.test(url)) return false;
+        return Number(row && row.transfer || 0) > SLOW_SEGMENT_TRANSFER_MS;
     }
 
     function waterfallRowStatusClasses(row) {
@@ -2376,6 +2401,7 @@
         else if (row.entry.faulted) cls.push(' is-faulted');
 
         if (row.is_retry) cls.push(' is-retry');
+        if (isSlowSegmentTransfer(row)) cls.push(' slow-transfer');
         return cls.join('');
     }
 
@@ -2430,16 +2456,24 @@
             else if (faultCategory === 'client_disconnect') faultGlyph = '!↩';
             else faultGlyph = '!';
         }
-        const flags = (row.is_retry ? '↻' : '') + faultGlyph;
+        // ⏰ flags a media-segment transfer that took longer than the
+        // default HLS target duration (6 s). Player stalls if this
+        // happens regularly.
+        const slowGlyph = isSlowSegmentTransfer(row) ? '⏰' : '';
+        const flags = (row.is_retry ? '↻' : '') + faultGlyph + slowGlyph;
         const statusCode = Number(row.entry.status) || 0;
+        const flagColor = row.is_retry
+            ? '#be185d'
+            : (row.entry.faulted ? '#7f1d1d' : (isSlowSegmentTransfer(row) ? '#92400e' : ''));
 
         const cells = [
             { col: 'time', text: tsLabel },
-            { col: 'flags', text: flags, color: row.is_retry ? '#be185d' : (row.entry.faulted ? '#7f1d1d' : '') },
+            { col: 'flags', text: flags, color: flagColor },
             { col: 'method', text: method },
             { col: 'path', text: path, title: row.entry.url || row.entry.path || '' },
             { col: 'bytes', text: bytesLabel },
             { col: 'mbps', text: mbpsLabel },
+            { col: 'duration', text: formatMilliseconds(row.duration) },
             { col: 'status', text: statusCode > 0 ? String(statusCode) : '—' }
         ];
         for (const c of cells) {
@@ -2508,17 +2542,66 @@
     // (`--netwf-col-${key}`) and the cell class. `min` is the smallest
     // pixel width we'll let the user drag the column to.
     const NETWF_COLUMNS = [
-        { key: 'time',   label: 'Time',     min: 60 },
+        { key: 'time',   label: 'Time',     min: 60, sortable: true },
         { key: 'flags',  label: '',         min: 16 },
-        { key: 'method', label: 'Method',   min: 30 },
-        { key: 'path',   label: 'Path',     min: 60 },
+        { key: 'method', label: 'Method',   min: 30, sortable: true },
+        { key: 'path',   label: 'Path',     min: 60, sortable: true },
         // Single-unit columns: header carries the unit, cells carry
         // tabular-aligned numbers. Bytes always rendered in KB,
         // throughput always in Mbps — easier to scan than mixed units.
-        { key: 'bytes',  label: 'KB',       min: 50 },
-        { key: 'mbps',   label: 'Mbps',     min: 50 },
-        { key: 'status', label: 'Status',   min: 40 }
+        { key: 'bytes',  label: 'KB',       min: 50, sortable: true },
+        { key: 'mbps',   label: 'Mbps',     min: 50, sortable: true },
+        // Duration is the request's full elapsed wall-clock from
+        // first byte sent to last byte received (dns + connect + tls
+        // + wait + transfer). Sortable so the slowest requests are
+        // one click away.
+        { key: 'duration', label: 'Dur',   min: 60, sortable: true },
+        { key: 'status', label: 'Status',   min: 40, sortable: true }
     ];
+
+    function netwfRowSortValue(row, col) {
+        switch (col) {
+            case 'time':     return Number(row.timestamp) || 0;
+            case 'method':   return String(row.entry.method || '');
+            case 'path':     return String(row.pathDisplay || row.filename || row.entry.path || '');
+            case 'bytes':    return Number(row.entry.bytes_out || 0);
+            case 'mbps':     return (Number(row.transfer || 0) > 0)
+                                 ? (Number(row.entry.bytes_out || 0) * 8) / (Number(row.transfer) * 1000)
+                                 : 0;
+            case 'duration': return Number(row.duration || 0);
+            case 'status':   return Number(row.entry.status || 0);
+            default:         return 0;
+        }
+    }
+
+    function getNetworkWaterfallSort(key) {
+        return networkWaterfallSortBySession.get(String(key || '')) || { col: null, dir: 'desc' };
+    }
+
+    function cycleNetworkWaterfallSort(key, col) {
+        const k = String(key || '');
+        const cur = getNetworkWaterfallSort(k);
+        let next;
+        if (cur.col !== col) next = { col, dir: 'desc' };
+        else if (cur.dir === 'desc') next = { col, dir: 'asc' };
+        else next = { col: null, dir: 'desc' };
+        networkWaterfallSortBySession.set(k, next);
+    }
+
+    function applyNetworkWaterfallSort(rows, sort) {
+        if (!sort || !sort.col) return rows;
+        const sign = sort.dir === 'asc' ? 1 : -1;
+        const sorted = rows.slice();
+        sorted.sort((a, b) => {
+            const av = netwfRowSortValue(a, sort.col);
+            const bv = netwfRowSortValue(b, sort.col);
+            if (typeof av === 'string' || typeof bv === 'string') {
+                return String(av).localeCompare(String(bv)) * sign;
+            }
+            return (av - bv) * sign;
+        });
+        return sorted;
+    }
 
     function buildWaterfallAxisRow(chartHost) {
         const axisEl = document.createElement('div');
@@ -2526,7 +2609,25 @@
         for (const col of NETWF_COLUMNS) {
             const cell = document.createElement('div');
             cell.className = `netwf-cell ${col.key}`;
-            cell.textContent = col.label;
+            cell.dataset.col = col.key;
+            const labelEl = document.createElement('span');
+            labelEl.className = 'netwf-cell-label';
+            labelEl.textContent = col.label;
+            cell.appendChild(labelEl);
+            if (col.sortable) {
+                cell.classList.add('sortable');
+                const arrowEl = document.createElement('span');
+                arrowEl.className = 'netwf-cell-sort-arrow';
+                cell.appendChild(arrowEl);
+                cell.addEventListener('click', (event) => {
+                    if (event.target.closest('.netwf-cell-resizer')) return;
+                    const card = chartHost.closest('.session-card');
+                    const sessionId = card ? card.dataset.sessionId : null;
+                    if (!sessionId) return;
+                    cycleNetworkWaterfallSort(sessionId, col.key);
+                    updateNetworkWaterfall(card, sessionId);
+                });
+            }
             const resizer = document.createElement('div');
             resizer.className = 'netwf-cell-resizer';
             resizer.dataset.col = col.key;
@@ -2540,6 +2641,22 @@
         scale.dataset.field = 'netwf_axis_scale';
         axisEl.appendChild(scale);
         return axisEl;
+    }
+
+    function paintWaterfallSortIndicators(axisEl, sort) {
+        if (!axisEl) return;
+        const activeCol = sort && sort.col;
+        const dir = sort && sort.dir;
+        for (const cell of axisEl.querySelectorAll('.netwf-cell.sortable')) {
+            const isActive = cell.dataset.col === activeCol;
+            cell.classList.toggle('sort-active', isActive);
+            cell.classList.toggle('sort-asc', isActive && dir === 'asc');
+            cell.classList.toggle('sort-desc', isActive && dir === 'desc');
+            const arrow = cell.querySelector('.netwf-cell-sort-arrow');
+            if (arrow) {
+                arrow.textContent = isActive ? (dir === 'asc' ? ' ▲' : ' ▼') : '';
+            }
+        }
     }
 
     function attachWaterfallColumnResizer(chartHost, resizer) {
