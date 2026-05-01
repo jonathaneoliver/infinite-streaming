@@ -1081,13 +1081,16 @@
                             <span class="chart-hint" title="Hold Alt (Option on Mac) while scrolling or dragging to zoom; right-click-drag to pan">Alt/⌥+scroll/drag to zoom · right-drag to pan</span>
                         </div>
                         <div class="chart-wrap">
+                            <button type="button" class="chart-expand-btn" data-action="toggle-chart-expanded" title="Toggle expanded chart height" aria-label="Toggle expanded chart height"><span class="chart-expand-icon">⤢</span><span class="chart-expand-label">Expand</span></button>
                             <canvas class="bandwidth-chart" data-field="bandwidth_chart"></canvas>
                         </div>
                         ${showBufferDepthChart ? `
                         <div class="chart-wrap">
+                            <button type="button" class="chart-expand-btn" data-action="toggle-chart-expanded" title="Toggle expanded chart height" aria-label="Toggle expanded chart height"><span class="chart-expand-icon">⤢</span><span class="chart-expand-label">Expand</span></button>
                             <canvas class="buffer-depth-chart" data-field="buffer_depth_chart"></canvas>
                         </div>
                         <div class="chart-wrap">
+                            <button type="button" class="chart-expand-btn" data-action="toggle-chart-expanded" title="Toggle expanded chart height" aria-label="Toggle expanded chart height"><span class="chart-expand-icon">⤢</span><span class="chart-expand-label">Expand</span></button>
                             <canvas class="video-fps-chart" data-field="video_fps_chart"></canvas>
                         </div>
                         ` : ''}
@@ -1472,6 +1475,23 @@
             const actionButton = targetElement.closest('[data-action]');
             if (actionButton) {
                 const action = actionButton.dataset.action;
+                if (action === 'toggle-chart-expanded') {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    const wrap = actionButton.closest('.chart-wrap');
+                    if (!wrap) return;
+                    const card = wrap.closest('.session-card');
+                    const sessionId = card ? String(card.dataset.sessionId || '') : '';
+                    wrap.classList.toggle('chart-expanded');
+                    if (sessionId) {
+                        requestAnimationFrame(() => {
+                            document.dispatchEvent(new CustomEvent('testing-session:charts-resize', {
+                                detail: { sessionId }
+                            }));
+                        });
+                    }
+                    return;
+                }
                 if (action === 'save-har-snapshot') {
                     const card = actionButton.closest('.session-card');
                     const sessionId = card ? String(card.dataset.sessionId || '') : '';
