@@ -24,10 +24,12 @@ jobs:
   claude:
     # Skip runs that can't possibly contain a mention, to avoid burning
     # Actions minutes (and API tokens) on every random comment.
+    # `@claude review` is handled by claude-review.yml — explicitly
+    # exclude it here so the two workflows don't double-fire.
     if: |
-      (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@claude')) ||
-      (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@claude')) ||
-      (github.event_name == 'pull_request_review' && contains(github.event.review.body, '@claude')) ||
+      (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@claude') && !startsWith(github.event.comment.body, '@claude review')) ||
+      (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@claude') && !startsWith(github.event.comment.body, '@claude review')) ||
+      (github.event_name == 'pull_request_review' && contains(github.event.review.body, '@claude') && !startsWith(github.event.review.body, '@claude review')) ||
       (github.event_name == 'issues' && (contains(github.event.issue.body, '@claude') || contains(github.event.issue.title, '@claude')))
     runs-on: ubuntu-latest
     steps:

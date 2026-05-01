@@ -1,13 +1,20 @@
 name: Claude PR Review
 
-# Auto-review every non-draft PR via anthropics/claude-code-action.
-# The `prompt:` field flips the action from "wait for @claude mention"
-# into automation mode, so it runs without manual invocation.
+# Opt-in PR review: fires when an authorised user posts the literal
+# phrase `@claude review` as a comment on a PR. The previous
+# auto-review-on-every-push behaviour was burning the Max-plan token
+# budget on routine PRs (dep bumps, docs, small fixes) where the
+# author didn't want a review pass anyway.
+#
+# To request a review: comment `@claude review` on the PR.
+# `claude.yml` (the general @claude handler) explicitly excludes this
+# exact phrase so the two workflows don't double-fire.
+#
 # Auth: CLAUDE_CODE_OAUTH_TOKEN (Max plan) — same secret as claude.yml.
 
 on:
-  pull_request:
-    types: [opened, synchronize, reopened]
+  issue_comment:
+    types: [created]
 
 permissions:
   contents: read
@@ -17,13 +24,14 @@ permissions:
 jobs:
   review:
     if: |
-      !github.event.pull_request.draft &&
-      !contains(github.event.pull_request.labels.*.name, 'skip-review')
+      github.event.issue.pull_request &&
+      startsWith(github.event.comment.body, '@claude review')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
+          ref: refs/pull/${{ github.event.issue.number }}/head
 
       - uses: anthropics/claude-code-action@v1
         with:
