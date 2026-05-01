@@ -3427,17 +3427,39 @@ maybe a histogram of b
         document.addEventListener('testing-session:charts-resize', (event) => {
             const sessionId = event.detail && event.detail.sessionId;
             if (!sessionId) return;
+            const rebuildEventsTimeline = !!(event.detail && event.detail.rebuildEventsTimeline);
             requestAnimationFrame(() => {
-                for (const chart of getChartsForSession(sessionId)) {
+                // Always destroy Chart.js charts; renderBandwidthChart
+                // recreates them.
+                const chartsToDestroy = [
+                    eventsCharts.get(sessionId),
+                    bandwidthCharts.get(sessionId),
+                    bufferDepthCharts.get(sessionId),
+                    videoFpsCharts.get(sessionId)
+                ];
+                for (const chart of chartsToDestroy) {
                     if (chart && typeof chart.destroy === 'function') {
                         chart.destroy();
                     }
                 }
                 eventsCharts.delete(sessionId);
-                eventsTimelines.delete(sessionId);
                 bandwidthCharts.delete(sessionId);
                 bufferDepthCharts.delete(sessionId);
                 videoFpsCharts.delete(sessionId);
+                // The events-timeline (vis.Timeline) is preserved by
+                // default — destroying it on every resize would cause a
+                // visible blink in the Player State section. Rebuild
+                // only when the caller signals the container went from
+                // hidden → visible (vis.Timeline initialized in a
+                // display:none container has broken internal layout
+                // that redraw() can't fix).
+                const tl = eventsTimelines.get(sessionId);
+                if (rebuildEventsTimeline && tl) {
+                    tl.destroy();
+                    eventsTimelines.delete(sessionId);
+                } else if (tl && typeof tl.redraw === 'function') {
+                    tl.redraw();
+                }
                 renderBandwidthChart(sessionId);
             });
         });

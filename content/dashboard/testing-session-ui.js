@@ -550,6 +550,7 @@
         const serverTimeoutsOpen = resolveSectionDefault(options, 'server-timeouts', false);
         const networkShapingOpen = resolveSectionDefault(options, 'network-shaping', true);
         const bitrateChartOpen = resolveSectionDefault(options, 'bitrate-chart', false);
+        const playerStateOpen = resolveSectionDefault(options, 'player-state', false);
         const playerMetricsOpen = resolveSectionDefault(options, 'player-metrics', false);
 
         return `
@@ -1029,6 +1030,20 @@
                     </div>
                 </div>
 
+                <!-- Collapsible Player State -->
+                <div class="collapsible-section" data-section="player-state" data-default-open="${playerStateOpen}">
+                    <div class="collapsible-header" data-toggle="player-state">
+                        <span class="collapsible-icon">${playerStateOpen ? '▼' : '▶'}</span>
+                        <span class="collapsible-title">Player State</span>
+                    </div>
+                    <div class="collapsible-content" data-content="player-state" style="display: ${playerStateOpen ? 'block' : 'none'};">
+                        <div class="chart-wrap events-timeline-wrap">
+                            <div class="events-timeline-legend" data-field="events_timeline_legend"></div>
+                            <div class="events-timeline" data-field="events_timeline"></div>
+                        </div>
+                    </div>
+                </div>
+
                 <!-- Collapsible Bitrate Chart -->
                 <div class="collapsible-section" data-section="bitrate-chart" data-default-open="${bitrateChartOpen}">
                     <div class="collapsible-header" data-toggle="bitrate-chart">
@@ -1036,10 +1051,6 @@
                         <span class="collapsible-title">Bitrate Chart</span>
                     </div>
                     <div class="collapsible-content" data-content="bitrate-chart" style="display: ${bitrateChartOpen ? 'block' : 'none'};">
-                        <div class="chart-wrap events-timeline-wrap">
-                            <div class="events-timeline-legend" data-field="events_timeline_legend"></div>
-                            <div class="events-timeline" data-field="events_timeline"></div>
-                        </div>
                         <div class="chart-axis-row">
                             <label>Bitrate Y Max</label>
                             <div class="shape-pattern-modes" data-field="bitrate_chart_max_mbps_group">
@@ -1554,12 +1565,17 @@
                     if (section) {
                         setCollapsibleState(section, nextOpen);
                     }
-                    if (section === 'bitrate-chart' && nextOpen) {
+                    if ((section === 'bitrate-chart' || section === 'player-state') && nextOpen) {
                         const card = sectionEl ? sectionEl.closest('.session-card') : null;
                         const sessionId = card ? card.dataset.sessionId : null;
                         if (sessionId) {
+                            // When player-state opens from closed, force
+                            // the events-timeline to be rebuilt — vis.Timeline
+                            // created in a display:none container has broken
+                            // internal layout state that redraw() can't fix.
+                            const rebuildEventsTimeline = (section === 'player-state');
                             const event = new CustomEvent('testing-session:charts-resize', {
-                                detail: { sessionId }
+                                detail: { sessionId, rebuildEventsTimeline }
                             });
                             document.dispatchEvent(event);
                         }
