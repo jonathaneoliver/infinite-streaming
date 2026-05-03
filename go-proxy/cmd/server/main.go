@@ -958,6 +958,81 @@ func (t *TcTrafficManager) RemoveClass(port int) error {
 	return nil
 }
 
+// ClearPortShaping is the one-shot session-start sweep that closes
+// the leftover-tc-rule leak (issue #352): drop any tc class + filter
+// for `port` regardless of whether the proxy thinks one is configured.
+// Idempotent and safe to call on a clean port — `tc class del` on a
+// non-existent class returns a non-zero exit which we ignore.
+//
+// Why session-start instead of process-start or session-end:
+//   - Session-end cleanup misses leaks that survive a proxy crash.
+//   - Process-start cleanup needs a list of active sessions, which is
+//     empty at startup, so it'd nuke ALL classes — risky for
+//     concurrent sessions on a hot reload.
+//   - Session-start cleanup runs exactly when we know the port is
+//     about to belong to a fresh playback episode; whatever was
+//     there before is by definition leftover from a prior session.
+func (t *TcTrafficManager) ClearPortShaping(port int) {
+	portSuffix := fmt.Sprintf("%03d", port%1000)
+	classid := fmt.Sprintf("1:%s", portSuffix)
+	// First check if there's actually a class to clear — keeps the
+	// logs quiet on a fresh port.
+	show := exec.Command("tc", "class", "show", "dev", t.interfaceName)
+	out, _ := show.CombinedOutput()
+	if !strings.Contains(string(out), "class htb "+classid) {
+		return
+	}
+	log.Printf("NETSHAPE port_shaping_clear port=%d classid=%s reason=session_start", port, classid)
+	_ = exec.Command("tc", "filter", "del", "dev", t.interfaceName, "protocol", "ip",
+		"parent", "1:0", "prio", "1", "u32",
+		"match", "ip", "sport", fmt.Sprintf("%d", port), "0xffff").Run()
+	_ = exec.Command("tc", "class", "del", "dev", t.interfaceName, "classid", classid).Run()
+}
+
+// ReadActualRateMbps queries the kernel for the live rate of the
+// per-port class, returning -1 if no class is installed. Used by the
+// session-list API to surface kernel state instead of in-memory state
+// (issue #352 layer 3) so any divergence is visible to operators.
+//
+// `tc class show` output for an htb class looks like:
+//   class htb 1:181 parent 1:1 prio 0 rate 15414Kbit ceil 15414Kbit ...
+// We parse the "rate" token. Kbit and Mbit are the only units the
+// proxy ever installs, so the parser handles both.
+func (t *TcTrafficManager) ReadActualRateMbps(port int) float64 {
+	classid := fmt.Sprintf("1:%d", port%1000)
+	show := exec.Command("tc", "class", "show", "dev", t.interfaceName)
+	out, err := show.CombinedOutput()
+	if err != nil {
+		return -1
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		if !strings.Contains(line, "class htb "+classid) {
+			continue
+		}
+		// Look for "rate <N>Kbit" or "rate <N>Mbit"
+		fields := strings.Fields(line)
+		for i, f := range fields {
+			if f != "rate" || i+1 >= len(fields) {
+				continue
+			}
+			tok := fields[i+1]
+			if strings.HasSuffix(tok, "Mbit") {
+				v, err := strconv.ParseFloat(strings.TrimSuffix(tok, "Mbit"), 64)
+				if err == nil {
+					return v
+				}
+			}
+			if strings.HasSuffix(tok, "Kbit") {
+				v, err := strconv.ParseFloat(strings.TrimSuffix(tok, "Kbit"), 64)
+				if err == nil {
+					return v / 1000.0
+				}
+			}
+		}
+	}
+	return -1
+}
+
 func (t *TcTrafficManager) RemoveFilter(port int) error {
 	cmd := exec.Command(
 		"tc", "filter", "del", "dev", t.interfaceName, "protocol", "ip", "parent", "1:0", "prio", "1", "u32",
@@ -2144,6 +2219,14 @@ func (a *App) handleSession(w http.ResponseWriter, r *http.Request) {
 		for port := range removedPorts {
 			a.disablePatternForPort(port)
 			a.armTransportFaultLoop(port, "none", 1, transportUnitsSeconds, 0)
+			// Tear down any tc rate limit / netem / filter on this
+			// port so a future session that reuses the slot starts
+			// clean — pairs with the ClearPortShaping at session-
+			// allocation time as belt-and-braces (issue #352).
+			if a.traffic != nil {
+				_ = a.traffic.UpdateNetem(port, 0, 0)
+				a.traffic.ClearPortShaping(port)
+			}
 		}
 		writeJSON(w, map[string]string{"message": "Session deleted successfully"})
 		return
@@ -3942,6 +4025,17 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 		allocated := allocateSessionNumber(sessionList, a.maxSessions)
 		assignedExternalPort := replaceThirdFromLastDigit(externalPort, allocated)
 		assignedInternalPort := assignedExternalPort
+		// Sweep any leftover tc rate-limit / filter on the assigned
+		// internal port — closes the leak in #352 where a previous
+		// session's rule survived a proxy restart and silently capped
+		// the new session's bandwidth. Idempotent and quiet on a
+		// clean port; logs only when it actually finds something
+		// to clear.
+		if a.traffic != nil {
+			if internalPortInt, err := strconv.Atoi(assignedInternalPort); err == nil {
+				a.traffic.ClearPortShaping(internalPortInt)
+			}
+		}
 		if mapped, ok := a.portMap.MapExternalPort(assignedExternalPort); ok {
 			assignedInternalPort = mapped
 		} else {
@@ -6234,6 +6328,24 @@ func (a *App) normalizeSessionsForResponse(sessions []SessionData) []SessionData
 	for _, session := range sessions {
 		a.normalizeSessionPorts(session)
 		a.hydrateSessionThroughput(session)
+		// Reflect the kernel-observed tc rate in the API response
+		// instead of the proxy's in-memory copy. Closes the silent-
+		// divergence path in #352: a leftover class from a prior
+		// session would otherwise show as "no shaping" in the UI
+		// while the kernel was actually capping bandwidth. If they
+		// disagree, log so an operator can spot the leak.
+		if a.traffic != nil {
+			if port, err := strconv.Atoi(getString(session, "x_forwarded_port")); err == nil && port > 0 {
+				if kernelMbps := a.traffic.ReadActualRateMbps(port); kernelMbps >= 0 {
+					inMemMbps := getFloat(session, "nftables_bandwidth_mbps")
+					session["nftables_bandwidth_mbps"] = kernelMbps
+					if math.Abs(inMemMbps-kernelMbps) > 0.5 {
+						log.Printf("NETSHAPE LEAK port=%d in_memory_mbps=%.3f kernel_mbps=%.3f session_id=%s",
+							port, inMemMbps, kernelMbps, getString(session, "session_id"))
+					}
+				}
+			}
+		}
 		setDefault := func(key string, value interface{}) {
 			if existing, ok := session[key]; !ok || existing == nil {
 				session[key] = value
