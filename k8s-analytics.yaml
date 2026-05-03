@@ -262,11 +262,14 @@ spec:
         - name: GF_AUTH_ANONYMOUS_ENABLED
           value: "true"
         # Viewer (not Editor) — anonymous visitors can read dashboards
-        # but can't mutate them. Dashboards are provisioned-as-code.
+        # but can't edit them. Log in via the form (admin/admin on
+        # first login, Grafana forces a password change) to edit. UI
+        # edits are per-instance only; the source of truth is the
+        # provisioned JSON in analytics/grafana/provisioning/.
         - name: GF_AUTH_ANONYMOUS_ORG_ROLE
           value: "Viewer"
         - name: GF_AUTH_DISABLE_LOGIN_FORM
-          value: "true"
+          value: "false"
         - name: GF_INSTALL_PLUGINS
           value: "grafana-clickhouse-datasource"
         # Grafana is served behind the go-server nginx at /grafana/,
