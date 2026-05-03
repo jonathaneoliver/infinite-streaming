@@ -39,43 +39,13 @@ import (
 )
 
 // hasInterestingSignal returns true if the snapshot map carries any
-// of the bad-event signals that should auto-classify a session as
-// 'interesting'. Mirrors the predicate inside reclassifySession but
-// works on the in-memory map the SSE consumer hands us, before the
-// row reaches ClickHouse.
+// of the 5 last_event values that drive the picker's "Flags" chips.
+// Matches reclassifySession's SQL predicate exactly so chip + filter
+// + retention tier agree on what "interesting" means.
 func hasInterestingSignal(s map[string]interface{}) bool {
 	switch strings.ToLower(strings.TrimSpace(getStr(s, "player_metrics_last_event"))) {
 	case "user_marked", "frozen", "segment_stall", "restart", "error":
 		return true
-	}
-	if getStr(s, "player_metrics_player_error") != "" {
-		return true
-	}
-	for _, k := range []string{
-		"master_manifest_consecutive_failures",
-		"all_consecutive_failures",
-		"manifest_consecutive_failures",
-		"segment_consecutive_failures",
-		"transport_consecutive_failures",
-		"fault_count_transfer_active_timeout",
-		"fault_count_transfer_idle_timeout",
-	} {
-		if v, ok := s[k]; ok {
-			switch n := v.(type) {
-			case float64:
-				if n > 0 {
-					return true
-				}
-			case int:
-				if n > 0 {
-					return true
-				}
-			case int64:
-				if n > 0 {
-					return true
-				}
-			}
-		}
 	}
 	return false
 }
@@ -158,23 +128,15 @@ func reclassifySession(ctx context.Context, cfg config, sessionID, playID string
 		return errors.New("session id required")
 	}
 	// 1. Determine whether the session is interesting. The signals
-	// match the per-row "Flags" column on the picker so a user who
-	// sees a 🚨 / ❄️ / ⛔ / ⏸ / 🔄 chip on a row knows that row will
-	// auto-class as 'interesting' on session-end.
+	// match the per-row "Flags" column on the picker exactly — any of
+	// the 5 chip types appearing as a last_event value. Keeping the
+	// predicate narrow (just last_event) means the filter chip on
+	// the picker, the auto-classifier, and the retention tier all
+	// agree on what "interesting" means.
 	probe := fmt.Sprintf(`
 		SELECT count() FROM %s.%s
 		WHERE session_id = {session:String} AND play_id = {play:String}
-		  AND (
-		    last_event IN ('user_marked', 'frozen', 'segment_stall', 'restart', 'error')
-		    OR player_error != ''
-		    OR master_manifest_consecutive_failures > 0
-		    OR all_consecutive_failures > 0
-		    OR manifest_consecutive_failures > 0
-		    OR segment_consecutive_failures > 0
-		    OR transport_consecutive_failures > 0
-		    OR fault_count_transfer_active_timeout > 0
-		    OR fault_count_transfer_idle_timeout > 0
-		  )
+		  AND last_event IN ('user_marked', 'frozen', 'segment_stall', 'restart', 'error')
 		FORMAT TSV`, cfg.chDatabase, cfg.chTable)
 	body, err := chQueryBytes(ctx, cfg, probe, map[string]string{
 		"session": sessionID,
