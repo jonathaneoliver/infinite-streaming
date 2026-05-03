@@ -687,7 +687,7 @@ func serveHTTP(ctx context.Context, cfg config) {
 			  SELECT
 			    session_id, play_id, ts,
 			    player_id, group_id, content_id,
-			    player_state, player_error,
+			    player_state, player_error, last_event,
 			    stall_count, dropped_frames, frames_displayed,
 			    video_bitrate_mbps, video_resolution, video_quality_pct,
 			    video_first_frame_time_s,
@@ -740,7 +740,22 @@ func serveHTTP(ctx context.Context, cfg config) {
 			    round(avgIf(video_quality_pct, video_quality_pct > 0), 1) AS avg_quality_pct,
 			    round(minIf(video_quality_pct, video_quality_pct > 0), 1) AS min_quality_pct,
 			    max(frames_displayed) AS frames_displayed,
-			    round(max(video_first_frame_time_s), 2) AS first_frame_s
+			    round(max(video_first_frame_time_s), 2) AS first_frame_s,
+			    -- Per-event-type counts of "really bad things" so the
+			    -- session picker can flag rows distinctly.
+			    --   user_marked  → operator-pressed 911 button
+			    --   frozen       → picture frozen (≠ stall: stall is
+			    --                  buffer-empty, frozen is renderer
+			    --                  hung)
+			    --   segment_stall → stall waiting for a segment fetch
+			    --   restart      → mid-session restart (player-side
+			    --                  recovery attempt)
+			    --   error        → explicit player_error event
+			    countIf(last_event = 'user_marked')   AS user_marked_count,
+			    countIf(last_event = 'frozen')         AS frozen_count,
+			    countIf(last_event = 'segment_stall')  AS segment_stall_count,
+			    countIf(last_event = 'restart')        AS restart_count,
+			    countIf(last_event = 'error')          AS error_event_count
 			  FROM base
 			  GROUP BY session_id, play_id
 			)
@@ -759,7 +774,9 @@ func serveHTTP(ctx context.Context, cfg config) {
 			  agg.all_failures, agg.transport_failures, agg.active_timeouts, agg.idle_timeouts,
 			  agg.bitrate_shifts, agg.downshifts, agg.upshifts, agg.resolution_changes,
 			  agg.avg_quality_pct, agg.min_quality_pct,
-			  agg.frames_displayed, agg.first_frame_s
+			  agg.frames_displayed, agg.first_frame_s,
+			  agg.user_marked_count, agg.frozen_count, agg.segment_stall_count,
+			  agg.restart_count, agg.error_event_count
 			FROM agg
 			LEFT JOIN net_counts
 			  ON agg.session_id = net_counts.session_id
