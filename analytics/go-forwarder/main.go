@@ -1454,6 +1454,10 @@ func serveHTTP(ctx context.Context, cfg config) {
 		w.Write([]byte("]}"))
 	})
 
+	// /api/session_bundle — ZIP of snapshots + HAR + events for one
+	// (session_id, play_id). Defined in bundle.go.
+	registerBundleHandler(mux, cfg)
+
 	srv := &http.Server{
 		Addr:              cfg.httpListen,
 		Handler:           mux,
