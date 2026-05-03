@@ -13,11 +13,10 @@
     {
       "id": 1,
       "type": "timeseries",
-      "title": "Messages by retention tier (last 24h)",
-      "description": "Per-minute row count grouped by classification across both session_snapshots and network_requests. Maps directly to retention tier: 'other' (gray) ages out at 30 d, 'interesting' (amber) at 90 d, 'favourite' (green) is kept forever. Eyeballing the gray slice tells you how much of the recent 24h's data will be gone in a month.",
+      "title": "Messages by retention tier",
+      "description": "Per-minute row count grouped by classification across both session_snapshots and network_requests. Time scope follows the dashboard time picker. Tiers: 'other' (gray, TTL 30 d), 'interesting' (amber, TTL 90 d), 'favourite' (green, kept forever). Eyeballing the gray slice tells you how much of the visible window will be gone in a month.",
       "datasource": { "type": "grafana-clickhouse-datasource", "uid": "ch_infinite_streaming" },
       "gridPos": { "x": 0, "y": 0, "w": 24, "h": 10 },
-      "timeFrom": "24h",
       "fieldConfig": {
         "defaults": {
           "unit": "short",
@@ -48,7 +47,7 @@
         {
           "refId": "A",
           "datasource": { "type": "grafana-clickhouse-datasource", "uid": "ch_infinite_streaming" },
-          "rawSql": "SELECT time, tier, sum(messages) AS messages FROM ( SELECT toStartOfInterval(ts, INTERVAL 1 MINUTE) AS time, classification AS tier, count() AS messages FROM infinite_streaming.session_snapshots WHERE ts >= now() - INTERVAL 24 HOUR GROUP BY time, classification UNION ALL SELECT toStartOfInterval(ts, INTERVAL 1 MINUTE) AS time, classification AS tier, count() AS messages FROM infinite_streaming.network_requests WHERE ts >= now() - INTERVAL 24 HOUR GROUP BY time, classification ) GROUP BY time, tier ORDER BY time ASC, tier ASC",
+          "rawSql": "SELECT time, tier, sum(messages) AS messages FROM ( SELECT toStartOfInterval(ts, $__timeInterval(ts)) AS time, classification AS tier, count() AS messages FROM infinite_streaming.session_snapshots WHERE $__timeFilter(ts) GROUP BY time, classification UNION ALL SELECT toStartOfInterval(ts, $__timeInterval(ts)) AS time, classification AS tier, count() AS messages FROM infinite_streaming.network_requests WHERE $__timeFilter(ts) GROUP BY time, classification ) GROUP BY time, tier ORDER BY time ASC, tier ASC",
           "format": 0
         }
       ]
