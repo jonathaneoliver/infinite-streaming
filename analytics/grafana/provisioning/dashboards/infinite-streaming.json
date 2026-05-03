@@ -47,7 +47,7 @@
         {
           "refId": "A",
           "datasource": { "type": "grafana-clickhouse-datasource", "uid": "ch_infinite_streaming" },
-          "rawSql": "SELECT time, tier, sum(messages) AS messages FROM ( SELECT toStartOfInterval(ts, $__timeInterval(ts)) AS time, classification AS tier, count() AS messages FROM infinite_streaming.session_snapshots WHERE $__timeFilter(ts) GROUP BY time, classification UNION ALL SELECT toStartOfInterval(ts, $__timeInterval(ts)) AS time, classification AS tier, count() AS messages FROM infinite_streaming.network_requests WHERE $__timeFilter(ts) GROUP BY time, classification ) GROUP BY time, tier ORDER BY time ASC, tier ASC",
+          "rawSql": "SELECT time, tier, sum(messages) AS messages FROM ( SELECT $__timeInterval(ts) AS time, classification AS tier, count() AS messages FROM infinite_streaming.session_snapshots WHERE $__timeFilter(ts) GROUP BY time, classification UNION ALL SELECT $__timeInterval(ts) AS time, classification AS tier, count() AS messages FROM infinite_streaming.network_requests WHERE $__timeFilter(ts) GROUP BY time, classification ) GROUP BY time, tier ORDER BY time ASC, tier ASC",
           "format": 0
         }
       ]
