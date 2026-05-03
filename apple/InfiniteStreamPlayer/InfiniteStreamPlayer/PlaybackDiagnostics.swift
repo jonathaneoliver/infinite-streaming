@@ -679,7 +679,21 @@ final class PlaybackDiagnostics: ObservableObject {
     }
 
     private func refreshLiveAccessLogMetrics(from item: AVPlayerItem) {
-        guard let event = item.accessLog()?.events.last else { return }
+        // After player.replaceCurrentItem, the new item's accessLog
+        // is empty until AVFoundation fetches the first segment. If
+        // we early-return here without clearing the bitrate fields,
+        // heartbeats will keep emitting the *previous* item's
+        // observedBitrate / indicatedBitrate / averageVideoBitrate
+        // until a fresh access-log event lands — typically 200-500 ms
+        // of bridging stale data into the new (session_id, play_id).
+        // Clear them on the empty case so the new play starts from a
+        // clean slate.
+        guard let event = item.accessLog()?.events.last else {
+            observedBitrate = nil
+            indicatedBitrate = nil
+            averageVideoBitrate = nil
+            return
+        }
         observedBitrate = event.observedBitrate
         indicatedBitrate = event.indicatedBitrate
         averageVideoBitrate = event.averageVideoBitrate
