@@ -8,6 +8,16 @@ log_format nginx_access 'NGINX access time=$time_iso8601 remote=$remote_addr '
                         'request="$request" status=$status bytes=$body_bytes_sent '
                         'referer="$http_referer" ua="$http_user_agent"';
 
+# WebSocket Upgrade header pass-through. Used by the /grafana/ location
+# to make Grafana Live (/grafana/api/live/ws) work through nginx.
+# `Connection: upgrade` only fires when the client actually sent
+# Upgrade: websocket — for plain HTTP requests this evaluates to
+# `close` and behaves as a normal proxy.
+map $http_upgrade $connection_upgrade {
+    default upgrade;
+    ''      close;
+}
+
 upstream go_upload_service {
     server 127.0.0.1:8003;
     keepalive 4;
@@ -191,13 +201,13 @@ server {
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
         proxy_buffering off;
-    }
-    location ^~ /api/live/ {
-        proxy_pass http://analytics_grafana;
+        # WebSocket upgrade for Grafana Live (/grafana/api/live/ws).
+        # Headers are harmless on non-upgrade requests — $http_upgrade
+        # is empty for plain HTTP, so Connection: "upgrade" only takes
+        # effect when the client actually sent Upgrade: websocket.
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
-        proxy_set_header Host $host;
+        proxy_set_header Connection $connection_upgrade;
         proxy_read_timeout 1h;
     }
 
