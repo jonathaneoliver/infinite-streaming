@@ -22,7 +22,6 @@
             { id: 'test-playback', icon: '🧭', text: 'Testing Playback', href: '/dashboard/testing-session.html?nav=1' },
             { id: 'testing', icon: '🧪', text: 'Testing Monitor', href: '/dashboard/testing.html' },
             { id: 'sessions', icon: '⏪', text: 'Sessions', href: '/dashboard/sessions.html' },
-            { id: 'incidents', icon: '🚨', text: 'Incidents', href: '/dashboard/incidents.html' },
             { id: 'quartet', icon: '🎬', text: 'Quartet', href: '/dashboard/quartet.html', alpha: true },
             { id: 'segment-duration', icon: '⏱️', text: 'Live Offset', href: '/dashboard/segment-duration-comparison.html', alpha: true }
         ],
