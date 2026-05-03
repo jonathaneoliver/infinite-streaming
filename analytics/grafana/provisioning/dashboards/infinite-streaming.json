@@ -13,8 +13,8 @@
     {
       "id": 1,
       "type": "timeseries",
-      "title": "Messages by type (last 24h)",
-      "description": "Per-minute row count ingested into each ClickHouse table over the last 24 hours. The time scope is hard-coded inside the panel — independent of the dashboard time picker — so a misconfigured URL (e.g. from=now/y&to=now/y) can't blank the chart.",
+      "title": "Messages by retention tier (last 24h)",
+      "description": "Per-minute row count grouped by classification across both session_snapshots and network_requests. Maps directly to retention tier: 'other' (gray) ages out at 30 d, 'interesting' (amber) at 90 d, 'favourite' (green) is kept forever. Eyeballing the gray slice tells you how much of the recent 24h's data will be gone in a month.",
       "datasource": { "type": "grafana-clickhouse-datasource", "uid": "ch_infinite_streaming" },
       "gridPos": { "x": 0, "y": 0, "w": 24, "h": 10 },
       "timeFrom": "24h",
@@ -23,13 +23,22 @@
           "unit": "short",
           "custom": {
             "drawStyle": "line",
-            "lineInterpolation": "smooth",
-            "fillOpacity": 12,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 100,
             "showPoints": "never",
+            "spanNulls": true,
             "stacking": { "mode": "normal", "group": "A" }
           }
         },
-        "overrides": []
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "other" },
+            "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "#6b7280" } }] },
+          { "matcher": { "id": "byName", "options": "interesting" },
+            "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "#f59e0b" } }] },
+          { "matcher": { "id": "byName", "options": "favourite" },
+            "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "#10b981" } }] }
+        ]
       },
       "options": {
         "legend": { "displayMode": "table", "placement": "right", "calcs": ["sum"] },
@@ -39,7 +48,7 @@
         {
           "refId": "A",
           "datasource": { "type": "grafana-clickhouse-datasource", "uid": "ch_infinite_streaming" },
-          "rawSql": "SELECT * FROM ( SELECT toStartOfInterval(ts, INTERVAL 1 MINUTE) AS time, 'session_snapshots' AS type, count() AS messages FROM infinite_streaming.session_snapshots WHERE ts >= now() - INTERVAL 24 HOUR GROUP BY time UNION ALL SELECT toStartOfInterval(ts, INTERVAL 1 MINUTE) AS time, 'network_requests' AS type, count() AS messages FROM infinite_streaming.network_requests WHERE ts >= now() - INTERVAL 24 HOUR GROUP BY time ) ORDER BY time ASC, type ASC",
+          "rawSql": "SELECT time, tier, sum(messages) AS messages FROM ( SELECT toStartOfInterval(ts, INTERVAL 1 MINUTE) AS time, classification AS tier, count() AS messages FROM infinite_streaming.session_snapshots WHERE ts >= now() - INTERVAL 24 HOUR GROUP BY time, classification UNION ALL SELECT toStartOfInterval(ts, INTERVAL 1 MINUTE) AS time, classification AS tier, count() AS messages FROM infinite_streaming.network_requests WHERE ts >= now() - INTERVAL 24 HOUR GROUP BY time, classification ) GROUP BY time, tier ORDER BY time ASC, tier ASC",
           "format": 0
         }
       ]
