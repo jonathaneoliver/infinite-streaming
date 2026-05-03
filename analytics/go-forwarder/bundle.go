@@ -94,10 +94,6 @@ func registerBundleHandler(mux *http.ServeMux, cfg config) {
 			fmt.Fprintf(w, "\n[bundle error: network.har: %v]\n", err)
 			return
 		}
-		if err := writeEventsJSON(ctx, zw, cfg, sessionID, playID); err != nil {
-			fmt.Fprintf(w, "\n[bundle error: events.json: %v]\n", err)
-			return
-		}
 		if err := writeREADME(zw, sessionID, playID); err != nil {
 			return
 		}
@@ -464,58 +460,6 @@ func normaliseTSToISO(s string) string {
 	return strings.Replace(s, " ", "T", 1) + "Z"
 }
 
-// events.json — flat list of player-emitted events from last_event.
-// This is the "simple half" of /api/session_events: the player tells
-// us "stall_start", "rate_shift_down" etc. directly. The complex
-// derived events (lag-based fault transitions, paired stall-start /
-// stall-end durations, HAR-derived http_5xx etc.) are NOT included
-// here — recompute them live via /api/session_events while the
-// analytics tier is up. Note in README points the reader there.
-func writeEventsJSON(ctx context.Context, zw *zip.Writer, cfg config, sessionID, playID string) error {
-	params := map[string]string{"session": sessionID}
-	pidPred := "play_id = ''"
-	if playID != "" {
-		pidPred = "play_id = {play:String}"
-		params["play"] = playID
-	}
-	query := fmt.Sprintf(`
-		SELECT toString(ts) AS ts, last_event AS type,
-		       player_error AS info
-		FROM %s.%s
-		WHERE session_id = {session:String} AND %s
-		  AND last_event != ''
-		  AND last_event NOT IN ('heartbeat','state_change','playing','video_bitrate_change')
-		ORDER BY ts ASC
-		FORMAT JSONEachRow`, cfg.chDatabase, cfg.chTable, pidPred)
-	body, err := chQueryBytes(ctx, cfg, query, params)
-	if err != nil {
-		return err
-	}
-	// Wrap NDJSON-style output as a JSON array for events.json so it's
-	// easy to load (`json.load(open('events.json'))` from Python /
-	// jq one-liners). Body is `{...}\n{...}\n...`; convert by joining.
-	var out bytes.Buffer
-	out.WriteByte('[')
-	first := true
-	for _, line := range bytes.Split(bytes.TrimSpace(body), []byte{'\n'}) {
-		if len(bytes.TrimSpace(line)) == 0 {
-			continue
-		}
-		if !first {
-			out.WriteByte(',')
-		}
-		out.WriteByte('\n')
-		out.Write(line)
-		first = false
-	}
-	if !first {
-		out.WriteByte('\n')
-	}
-	out.WriteByte(']')
-	out.WriteByte('\n')
-	return writeZipFile(zw, "events.json", out.Bytes())
-}
-
 // writeREADME — short orientation file for whoever opens the zip in
 // six months. Not auto-generated from a template because the prose
 // belongs in source.
@@ -533,17 +477,20 @@ generated:  %s
                       original blob the go-proxy SSE stream emitted,
                       pre-typed-column-extraction. Use jq:
                         cat snapshots.ndjson | jq 'select(.stall_count > 0)'
+                      Player-emitted events live in the .last_event
+                      field of every snapshot, e.g.:
+                        cat snapshots.ndjson \
+                          | jq 'select(.last_event != "" and .last_event != "heartbeat")
+                                | {ts: .last_event_at, type: .last_event,
+                                   error: .player_error}'
+                      Derived events (paired stall durations, lag-based
+                      fault transitions, HAR-derived http_5xx, etc.)
+                      are recomputable live via the analytics tier's
+                      /analytics/api/session_events endpoint.
 - network.har         HAR 1.2 envelope. Open in Chrome DevTools:
                         chrome://devtools  →  Network panel  →  Import HAR
                       Custom proxy fields (fault_type, upstream_url, etc.)
                       live under each entry's _extensions key.
-- events.json         Player-emitted events (stall_start, rate_shift_down,
-                      error, user_marked, etc.) — the "simple half" of
-                      the events query. Derived events (paired stall
-                      durations, lag-based fault transitions, HAR-derived
-                      http_5xx, etc.) are recomputable live via
-                      /analytics/api/session_events while the analytics
-                      tier is up.
 
 ## Sanitisation
 
