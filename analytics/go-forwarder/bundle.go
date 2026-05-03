@@ -5,9 +5,15 @@
 // self-describing for offline triage long after the 30-day TTL has
 // dropped the source rows.
 //
-// Streamed end-to-end: ClickHouse query → JSON parse → ZIP writer →
-// http.ResponseWriter. Peak memory is dominated by a single page of
-// network rows (~10 MB), not the full bundle.
+// session.json + README.md are tiny and compose into the zip stream
+// directly. snapshots.ndjson streams ClickHouse → ZIP → ResponseWriter
+// per-line. network.har is the heaviest case: we currently materialise
+// every parsed entry into a []json.RawMessage and json.MarshalIndent
+// the whole document, so peak memory scales with the play's HAR size
+// (~50 MB for 100k entries). For typical hour-scale sessions this is
+// well under 10 MB; long all-day soaks could become a concern, at
+// which point switch to streaming HAR-array assembly with the zip
+// writer's deflate side already going.
 
 package main
 
@@ -39,7 +45,15 @@ var sensitiveHeaderNames = map[string]struct{}{
 
 // Query-string param names whose values are redacted (replaced with
 // "[REDACTED]"). Matched case-insensitively against the param name.
-var sensitiveQueryNames = regexp.MustCompile(`(?i)^(token|auth|access[_-]?token|api[_-]?key|key|password|secret|signature|sig)$`)
+// Includes OAuth flow params (refresh_token / id_token / client_secret
+// / authorization code) since these can leak via redirect URLs even
+// when proper Authorization headers would have been used.
+var sensitiveQueryNames = regexp.MustCompile(
+	`(?i)^(` +
+		`token|auth|access[_-]?token|refresh[_-]?token|id[_-]?token|` +
+		`api[_-]?key|key|client[_-]?secret|secret|password|` +
+		`signature|sig|code|nonce` +
+		`)$`)
 
 func registerBundleHandler(mux *http.ServeMux, cfg config) {
 	// GET /api/session_bundle?session=<id>&play_id=<id>
@@ -82,16 +96,27 @@ func registerBundleHandler(mux *http.ServeMux, cfg config) {
 
 		ctx := r.Context()
 
+		// On mid-stream failure: append an ERROR.txt entry to the zip
+		// instead of writing raw bytes to the underlying ResponseWriter.
+		// Headers are already on the wire so we can't switch to plain
+		// http.Error; raw bytes between zip entries would corrupt the
+		// archive's central-directory structure. A zip entry survives
+		// — `unzip -l` will show it and the user can read what failed.
+		writeBundleErr := func(name string, err error) {
+			msg := fmt.Sprintf("[bundle error: %s: %v]\n", name, err)
+			_ = writeZipFile(zw, "ERROR.txt", []byte(msg))
+		}
+
 		if err := writeSessionMetadata(ctx, zw, cfg, sessionID, playID); err != nil {
-			fmt.Fprintf(w, "\n[bundle error: session.json: %v]\n", err)
+			writeBundleErr("session.json", err)
 			return
 		}
 		if err := writeSnapshotsNDJSON(ctx, zw, cfg, sessionID, playID); err != nil {
-			fmt.Fprintf(w, "\n[bundle error: snapshots.ndjson: %v]\n", err)
+			writeBundleErr("snapshots.ndjson", err)
 			return
 		}
 		if err := writeNetworkHAR(ctx, zw, cfg, sessionID, playID); err != nil {
-			fmt.Fprintf(w, "\n[bundle error: network.har: %v]\n", err)
+			writeBundleErr("network.har", err)
 			return
 		}
 		if err := writeREADME(zw, sessionID, playID); err != nil {
@@ -324,9 +349,34 @@ func harEntryFromRow(line []byte) (json.RawMessage, error) {
 
 	startedDateTime := normaliseTSToISO(row.TS)
 
+	// HAR 1.2 §5.3: time == sum of non-negative timings.
+	// The proxy records connect_ms as the full TCP+TLS handshake
+	// window with tls_ms as the TLS slice inside it. HAR expects
+	// `connect` to be TCP-only with `ssl` reported separately, and
+	// Chrome DevTools rejects entries where the two double-count.
+	// Subtract so they don't overlap; if the math would go negative
+	// (rare clock-skew case) drop ssl to -1 (untracked).
+	connect := row.Connect_ms
+	ssl := row.TLS_ms
+	if ssl > 0 && connect >= ssl {
+		connect = connect - ssl
+	} else {
+		ssl = -1
+	}
+	// Recompute `time` as the sum of non-negative timings rather
+	// than trusting total_ms — the proxy's measurement may include
+	// tiny gaps not captured by individual phases (e.g. between
+	// DNS resolve and connect open), which would violate the spec
+	// invariant. This guarantees the entry passes Chrome DevTools'
+	// import constraint regardless of those measurement quirks.
+	timeMs := row.DNS_ms + connect + row.TTFB_ms + row.Transfer_ms
+	if ssl > 0 {
+		timeMs += ssl
+	}
+
 	entry := map[string]any{
 		"startedDateTime": startedDateTime,
-		"time":            row.Total_ms,
+		"time":            timeMs,
 		"request": map[string]any{
 			"method":      defaultIfEmpty(row.Method, "GET"),
 			"url":         row.URL,
@@ -347,19 +397,19 @@ func harEntryFromRow(line []byte) (json.RawMessage, error) {
 				"size":     row.BytesIn,
 				"mimeType": defaultIfEmpty(row.ContentType, "application/octet-stream"),
 			},
-			"redirectURL":  "",
-			"headersSize":  -1,
-			"bodySize":     row.BytesIn,
+			"redirectURL": "",
+			"headersSize": -1,
+			"bodySize":    row.BytesIn,
 		},
 		"cache": map[string]any{},
 		"timings": map[string]any{
 			"blocked": -1,
 			"dns":     row.DNS_ms,
-			"connect": row.Connect_ms,
+			"connect": connect,
 			"send":    0,
 			"wait":    row.TTFB_ms,
 			"receive": row.Transfer_ms,
-			"ssl":     row.TLS_ms,
+			"ssl":     ssl,
 		},
 		"_extensions": map[string]any{
 			"upstream_url":           row.UpstreamURL,
