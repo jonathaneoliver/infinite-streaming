@@ -175,8 +175,16 @@ func writeSessionMetadata(ctx context.Context, zw *zip.Writer, cfg config, sessi
 	return writeZipFile(zw, "session.json", out)
 }
 
-// snapshots.ndjson — one row per session_snapshots line. NDJSON (not a
-// JSON array) so it streams; jq, ripgrep, awk all handle it natively.
+// snapshots.ndjson — one raw session_json blob per line, the same
+// payload the go-proxy SSE stream emitted before the forwarder split
+// hot fields into typed columns. We deliberately drop the typed
+// columns (and `revision`, `ts`) here: the blobs already carry every
+// field the live session-viewer reads, and offline replay should see
+// exactly what the proxy sent — not a denormalised view of it.
+//
+// TabSeparatedRaw emits each session_json value as a single newline-
+// terminated line, no escaping. The proxy serialises blobs as one
+// line of compact JSON so this round-trips cleanly into NDJSON.
 func writeSnapshotsNDJSON(ctx context.Context, zw *zip.Writer, cfg config, sessionID, playID string) error {
 	params := map[string]string{"session": sessionID}
 	pidPred := "play_id = ''"
@@ -184,22 +192,16 @@ func writeSnapshotsNDJSON(ctx context.Context, zw *zip.Writer, cfg config, sessi
 		pidPred = "play_id = {play:String}"
 		params["play"] = playID
 	}
-	// Project all typed columns except `session_json`. The blob is
-	// redundant with the typed columns and ~10× larger; for a 4-hour
-	// session at 1 Hz, dropping it shrinks snapshots.ndjson from
-	// ~400 MB to ~30 MB (and ~4 MB after deflate). Hot fields the
-	// dashboard relies on are all promoted to typed columns anyway.
 	query := fmt.Sprintf(`
-		SELECT * EXCEPT (session_json, revision)
+		SELECT session_json
 		FROM %s.%s
 		WHERE session_id = {session:String} AND %s
 		ORDER BY ts ASC
-		FORMAT JSONEachRow`, cfg.chDatabase, cfg.chTable, pidPred)
+		FORMAT TabSeparatedRaw`, cfg.chDatabase, cfg.chTable, pidPred)
 	body, err := chQueryBytes(ctx, cfg, query, params)
 	if err != nil {
 		return err
 	}
-	// Each line of body is already JSONEachRow — write straight through.
 	return writeZipFile(zw, "snapshots.ndjson", body)
 }
 
@@ -527,9 +529,9 @@ generated:  %s
 ## Files
 
 - session.json        Top-level summary (player, content, timing, fault counts).
-- snapshots.ndjson    One JSON object per per-second snapshot, all
-                      typed columns (stall_count, video_bitrate_mbps,
-                      transport_fault_active, etc.). Use jq:
+- snapshots.ndjson    One JSON object per per-second snapshot — the
+                      original blob the go-proxy SSE stream emitted,
+                      pre-typed-column-extraction. Use jq:
                         cat snapshots.ndjson | jq 'select(.stall_count > 0)'
 - network.har         HAR 1.2 envelope. Open in Chrome DevTools:
                         chrome://devtools  →  Network panel  →  Import HAR
