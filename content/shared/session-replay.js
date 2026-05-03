@@ -2431,7 +2431,25 @@
                 { label: 'Duration',    key: 'duration_ms',      type: 'number', format: fmtDur },
                 { label: 'Player',      key: 'player_id',        type: 'string' },
                 { label: 'Content',     key: 'content_id',       type: 'string' },
-                { label: 'Play ID',     key: 'play_id',          type: 'string' },
+                { label: 'Play ID',     key: 'play_id',          type: 'string', html: true,
+                  format: (v, r) => {
+                      // Wrap the play_id value in its own <a> so the
+                      // browser's native right-click menu on the cell
+                      // offers "Open Link in New Tab" / "Copy Link
+                      // Address" instead of the text-selection menu.
+                      // The row also has a stretched <a> covering the
+                      // whole row at z-index:0; this anchor sits at
+                      // z-index:2 so it wins focus, hover and the
+                      // context menu on this specific cell.
+                      const text = (v == null) ? '' : String(v);
+                      if (!text || text === '—') return escapeHtml(text);
+                      const params = new URLSearchParams({ replay: '1', session: r.session_id });
+                      params.set('play_id', text);
+                      const href = '/dashboard/session-viewer.html?' + params.toString();
+                      return `<a href="${href}" `
+                          + `style="color:#1d4ed8;text-decoration:none;font-weight:600;`
+                          + `position:relative;z-index:2;">${escapeHtml(text)}</a>`;
+                  } },
                 { label: 'State',       key: 'last_state',       type: 'string' },
                 { label: 'Issues',      key: 'issues_count',     type: 'number', html: true, format: fmtIssuesBadge },
                 { label: 'Flags',       key: '__flags',          type: 'string', html: true, format: fmtFlags },
@@ -2567,6 +2585,10 @@
                             const a = document.createElement('a');
                             a.href = href;
                             a.setAttribute('aria-label', `Open session ${r.session_id}${r.play_id ? ' / ' + r.play_id : ''}`);
+                            // Tagged so the row's click handler can tell
+                            // this row-fallback anchor apart from cell-
+                            // level anchors (e.g. the play_id link).
+                            a.dataset.rowFallback = '1';
                             a.tabIndex = -1;
                             a.style.cssText = 'position:absolute;inset:0;z-index:0;text-decoration:none;';
                             // Suppress the link's own left-click — we let
@@ -2593,6 +2615,17 @@
                             // Bundle download link — let the browser
                             // start the .zip download, don't navigate.
                             if (e.target.closest && e.target.closest('[data-bundle-link]')) return;
+                            // Cell-level explicit anchors (e.g. the
+                            // play_id link) — let the browser handle
+                            // the default navigation. Otherwise we'd
+                            // double-fire (the anchor's default plus
+                            // the row's window.location.href below).
+                            // The row's stretched <a> at z-index:0 has
+                            // its own click handler that preventDefaults
+                            // on plain left-click — we still need to
+                            // navigate via the row handler in that case.
+                            const explicitAnchor = e.target.closest && e.target.closest('a:not([data-row-fallback])');
+                            if (explicitAnchor) return;
                             // If the click was on the link, the link's own
                             // handler already chose to either preventDefault
                             // (plain left-click → fall through to here) or
