@@ -103,8 +103,16 @@ private struct ContinueWatchingHero: View {
                     // pointing at the new clip's 720p URL. Without
                     // .id, updateUIView would run with the new content
                     // value but the AVPlayer would keep the old URL.
-                    HeroLiveVideo(server: server, content: item)
-                        .id(item.id)
+                    //
+                    // Skip while playbackActive — the main Playback
+                    // screen is on top and we don't need a second
+                    // AVPlayer running behind it. SwiftUI dismantles
+                    // the UIViewRepresentable cleanly via the `if`
+                    // omission, so the AVPlayer is fully gone.
+                    if !vm.playbackActive {
+                        HeroLiveVideo(server: server, content: item)
+                            .id(item.id)
+                    }
 
                     LinearGradient(
                         stops: [
@@ -245,7 +253,14 @@ private struct LiveRow: View {
                                     LivePreviewTile(
                                         content: item,
                                         server: server,
-                                        videoEnabled: vm.previewVideoSlots > 0
+                                        // Disable preview AVPlayers entirely while
+                                        // the main Playback screen is up — see the
+                                        // playbackActive comment on PlayerViewModel
+                                        // (issue #348). Falls back to static
+                                        // thumbnail; SwiftUI dismantles the
+                                        // MutedLoopingTile UIViewRepresentable so
+                                        // the AVPlayer is gone, not just paused.
+                                        videoEnabled: vm.previewVideoSlots > 0 && !vm.playbackActive
                                     ) { tapped in
                                         vm.setSelectedContent(tapped.name)
                                         onPlay()

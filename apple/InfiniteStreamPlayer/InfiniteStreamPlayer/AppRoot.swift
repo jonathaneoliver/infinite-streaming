@@ -49,6 +49,16 @@ struct AppRoot: View {
         .preferredColorScheme(.dark)
         .onAppear { decideInitialRoute() }
         .onChange(of: route) { _, newRoute in
+            // playbackActive is the gate the Home preview tiles use to
+            // decide whether to instantiate their AVPlayers. While the
+            // main playback is running we don't want Home tiles still
+            // alive in the background — every one is its own AVPlayer
+            // with its own access log and decoder, and prior to this
+            // gate they polluted the analytics archive with phantom
+            // heartbeats / rendition switches stamped to the main
+            // session_id (issue #348).
+            vm.playbackActive = (newRoute == .playback)
+
             // The main vm.player is shared across Playback / Home and
             // keeps its own lifecycle. When leaving Playback we need to
             // fully stop it: pausing alone leaves the audio renderer

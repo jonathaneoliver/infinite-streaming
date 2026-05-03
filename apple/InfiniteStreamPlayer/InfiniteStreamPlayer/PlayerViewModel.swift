@@ -78,6 +78,15 @@ final class PlayerViewModel: ObservableObject {
 
     @Published var hudVisible: Bool = false
     @Published var settingsOpen: Bool = false
+    /// True while the user is on the main Playback screen. Pause-source
+    /// for ancillary AVPlayers (Home preview tiles) so only the main
+    /// player owns the audio session, the codec budget, and — most
+    /// importantly — the metrics-emitting state. Without this gate,
+    /// preview-tile AVPlayer instances and their access-log timers
+    /// keep running behind the main player and pollute the analytics
+    /// archive with phantom heartbeats and rendition switches that
+    /// look like the main player but aren't (issue #348).
+    @Published var playbackActive: Bool = false
 
     // -- Player ---------------------------------------------------------------
 
