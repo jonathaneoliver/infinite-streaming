@@ -369,7 +369,7 @@ The iOS, tvOS, Android, and Roku apps in this repo are reference implementations
 | [`android/InfiniteStreamPlayer/`](android/InfiniteStreamPlayer/) | yes (`/api/content`) | `?player_id=UUID` | auto-follow (ExoPlayer) | — | — |
 | [`roku/InfiniteStreamPlayer/`](roku/InfiniteStreamPlayer/) | yes (`/api/content`) | `?player_id=roku_<ts>` | auto-follow | — | — |
 
-They're all intended as very simple video consumption devices, each with slightly different ABR characteristics and error-recovery implementations. The web players (HLS.js / Shaka / Video.js) are the simplest to use and very handy to confirm everything is wired up — but they're also the least reliable for stress testing. Most of the validation of the server's content generation is done against iOS and tvOS.
+They're all intended as very simple video consumption devices, each with slightly different ABR characteristics and error-recovery implementations. The web players (HLS.js / Shaka / Video.js) are the simplest to use and very handy to confirm everything is wired up — but they're also the least reliable for stress testing. See [Project scope and roadmap](#project-scope-and-roadmap) for which paths get the most testing time.
 
 Point at any of them as a starting template for a new platform.
 
@@ -480,6 +480,31 @@ Common LL-HLS/LL-DASH features that are **not fully implemented**:
 - Chunked CMAF transfer for LL-DASH partials
 
 Full list in [`PRD.md`](PRD.md).
+
+---
+
+## Project scope and roadmap
+
+This is a hobbyist QA tool, built and primarily run on an M5 MacBook. The web UI isn't perf-tuned, and the server isn't built for production scale — it's tuned for a handful of test sessions running locally, where the goal is *deterministic, reproducible* behaviour over throughput. The "When not to use it" call-outs near the top of this README list the limits that implies.
+
+### Platform priorities
+
+Where the time goes, in order:
+
+- **LL-HLS / fmp4 on Apple (iOS / iPadOS / tvOS)** — primary tested path. New content-generation behaviour gets validated here first.
+- **Android TV / Google TV** — second-tier. The reference app works, but the surface area exercised against it is narrower (no SSE, no metrics reporting yet).
+- **LL-DASH** — functional but exercised less than HLS. Some dashboard features (Content-tab manifest rewriting) are HLS-only.
+
+### Roadmap
+
+The project is built in stages, each one depending on the previous:
+
+1. **Repeatable playback, independent of external factors.** *Done.* Looping VOD-as-live with a shared clock across LL / 2s / 6s variants — the same run produces the same timing.
+2. **Repeatable failures and controls.** *Done.* Fault injection, traffic shaping, content manipulation — all per-session, all scriptable through the REST API.
+3. **Persistent session storage for offline viewing and analysis.** *In progress.* The [analytics sidecar](analytics/README.md) (`feat/336-analytics-sidecar`) subscribes to the proxy's SSE session stream, writes snapshots into ClickHouse, exposes them to Grafana, and powers `testing.html?replay=1&session=<id>` replay mode.
+4. **Scripted characterization and cross-thing comparison.** *Future.* Use the controls from stage 2 and the recorded sessions from stage 3 to systematically compare ABR behaviour across players, codecs, ladders, platforms, and network conditions — turning side-by-side eyeballing into reproducible benchmarks.
+
+No dates, no commitments — this is a side project.
 
 ---
 
@@ -657,6 +682,7 @@ Captured from the live dashboard; files live in [`docs/screenshots/`](docs/scree
 
 **Subsystems:**
 - [`go-live/IMPLEMENTATION_SUMMARY.md`](go-live/IMPLEMENTATION_SUMMARY.md), [`go-live/PLAN.md`](go-live/PLAN.md)
+- [`analytics/README.md`](analytics/README.md) — analytics sidecar (ClickHouse + Grafana + replay mode)
 - [`tests/integration/README.md`](tests/integration/README.md), [`tests/integration/PLAYER_CHARACTERIZATION_PYTEST.md`](tests/integration/PLAYER_CHARACTERIZATION_PYTEST.md)
 
 ---

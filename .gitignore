@@ -60,6 +60,7 @@ __pycache__/
 go-proxy/server
 go-live/server
 go-upload/server
+analytics/go-forwarder/go-forwarder
 
 # Test artifacts
 tests/.hls_failure_probe_last_failed

@@ -1,0 +1,5135 @@
+        if (window.Chart && window['chartjs-plugin-zoom']) {
+            const zoomPlugin = window['chartjs-plugin-zoom'].default || window['chartjs-plugin-zoom'];
+            if (zoomPlugin && typeof Chart.register === 'function') {
+                try {
+                    Chart.register(zoomPlugin);
+                } catch (_) {
+                    // Ignore duplicate registration errors.
+                }
+            }
+        }
+
+        // Event-marker plugin: draws a single vertical guide line on
+        // any chart whose `chart.$eventMarkerTsMs` is set, plus a
+        // small label box at the top so the user can read the event
+        // identifier without hovering. Color is intentionally distinct
+        // from every priority/lane/state colour in the chart palette.
+        const EVENT_MARKER_COLOR = '#0891b2';      // cyan-600
+        const EVENT_MARKER_TEXT_COLOR = '#ffffff';
+        if (window.Chart && typeof Chart.register === 'function') {
+            try {
+                Chart.register({
+                    id: 'eventMarker',
+                    afterDraw(chart) {
+                        const ts = Number(chart.$eventMarkerTsMs);
+                        const startMs = Number(chart.$windowStartMs);
+                        if (!Number.isFinite(ts) || !Number.isFinite(startMs)) return;
+                        const xScale = chart.scales && chart.scales.x;
+                        if (!xScale) return;
+                        const xVal = (ts - startMs) / 1000;
+                        if (xVal < xScale.min || xVal > xScale.max) return;
+                        const px = xScale.getPixelForValue(xVal);
+                        const { top, bottom, left, right } = chart.chartArea || {};
+                        if (!Number.isFinite(top) || !Number.isFinite(bottom)) return;
+                        const ctx = chart.ctx;
+                        ctx.save();
+                        ctx.strokeStyle = EVENT_MARKER_COLOR;
+                        ctx.lineWidth = 1.5;
+                        ctx.setLineDash([4, 3]);
+                        ctx.beginPath();
+                        ctx.moveTo(px, top);
+                        ctx.lineTo(px, bottom);
+                        ctx.stroke();
+                        ctx.setLineDash([]);
+                        const label = String(chart.$eventMarkerLabel || '');
+                        if (label) {
+                            ctx.font = '10px system-ui, -apple-system, sans-serif';
+                            const padX = 4, padY = 2;
+                            const textW = ctx.measureText(label).width;
+                            const boxW = textW + padX * 2;
+                            const boxH = 14;
+                            // Prefer right of the line; flip to left if it
+                            // would overflow the plot area.
+                            let boxX = px + 4;
+                            if (boxX + boxW > right) boxX = px - 4 - boxW;
+                            if (boxX < left) boxX = left + 1;
+                            const boxY = top + 2;
+                            ctx.fillStyle = EVENT_MARKER_COLOR;
+                            ctx.fillRect(boxX, boxY, boxW, boxH);
+                            ctx.fillStyle = EVENT_MARKER_TEXT_COLOR;
+                            ctx.textBaseline = 'middle';
+                            ctx.fillText(label, boxX + padX, boxY + boxH / 2);
+                        }
+                        ctx.restore();
+                    },
+                });
+            } catch (_) {
+                /* duplicate-registration is fine */
+            }
+        }
+
+        const failureTypes = [
+            { value: 'none', text: 'None' },
+            { value: '404', text: '404' },
+            { value: '500', text: '500' },
+            { value: 'timeout', text: 'Timeout' },
+            { value: 'connection_refused', text: 'Conn Refused' },
+            { value: 'dns_failure', text: 'DNS Failure' },
+            { value: 'rate_limiting', text: 'Rate Limit' }
+        ];
+
+        const unitOptions = [
+            { value: 'requests', text: 'Requests' },
+            { value: 'seconds', text: 'Seconds' }
+        ];
+
+        const sessionsById = new Map();
+        const selectedSessionIds = new Set();
+        const pendingFailureEdits = new Map();
+        const controlRevisionBySession = new Map();
+        let activeSessionId = null;
+        let isTabLocked = false;
+        let lastAppliedSnapshotVersion = 0;
+        const failureSaveTimers = new Map();
+        const failureSaveFields = new Map();
+        const bandwidthHistory = new Map();
+        const bandwidthEventHistory = new Map();
+        const bandwidthCharts = new Map();
+        const bufferDepthCharts = new Map();
+        const videoFpsCharts = new Map();
+        const eventsCharts = new Map();
+        const eventsTimelines = new Map();
+        // Width reserved on the RIGHT side of every chart's plot area
+        // so the four Chart.js charts (bandwidth, buffer, fps, events
+        // scatter) and the vis-timeline events-timeline above all end
+        // at the same X coordinate. Sized to fit the FPS chart's
+        // right-side "Dropped/s" Y-axis (numeric ticks + rotated title).
+        const RIGHT_AXIS_PAD_PX = 60;
+        // Per-session collapse state for the PLAYER / SERVER section
+        // headers. setGroups replaces the entire groups dataset on
+        // every render, which would otherwise reset the user's
+        // collapse choice to default (expanded) every tick. We read
+        // the live state from the timeline before each rebuild and
+        // mirror it here so the choice survives across renders AND
+        // across full timeline re-creations (e.g. orphan-detection
+        // rebuilds when the session card is regenerated).
+        const eventsTimelineSectionCollapsed = new Map();
+        const chartViewportBySession = new Map();
+        const chartPausedBySession = new Map();
+        // Set of session_ids whose main brush is currently being dragged
+        // by the user. Brush handlers in session-replay.js add/delete
+        // entries here; ambient timers (e.g. the network-log auto-
+        // refresh) check it to skip work that would visually flicker
+        // mid-gesture and only resume on release.
+        const brushDraggingBySession = new Set();
+
+        // Per-session play bounds (in ms) — start and end timestamps of
+        // the currently-viewed play. session-replay.js sets these when
+        // the session-viewer page loads and updates them as live-tail
+        // extends sessionEndMs. Other modules (the network log fetch
+        // in particular) use them to scope analytics queries to this
+        // play instead of pulling all rows for the session_id.
+        const playBoundsBySession = new Map();
+
+        // Per-session override of the chart's rolling time window (in ms).
+        // Default (no entry) is 10 minutes — the live-mode value used by
+        // testing.html. Replay mode sets this to match the brush span so
+        // expanding the focus window past 10 minutes actually grows the
+        // chart's time range instead of being silently clipped.
+        const chartWindowMsBySession = new Map();
+        const DEFAULT_CHART_WINDOW_MS = 10 * 60 * 1000;
+        const getChartWindowMs = (sessionId) => {
+            const v = chartWindowMsBySession.get(String(sessionId || ''));
+            return Number.isFinite(v) && v > 0 ? v : DEFAULT_CHART_WINDOW_MS;
+        };
+
+        // Refcount of active chart-render suppressions per session_id
+        // — used by the brush-move replay loop to feed many snapshots
+        // through pushBandwidthSample without paying for a Chart.js
+        // update on every one. A Map of sessionId → integer depth
+        // (rather than a Set) handles overlapping replayWindow calls
+        // correctly: if two calls suppress concurrently, both must
+        // unsuppress before the count reaches 0 and renders resume.
+        const chartRenderSuppressionByDepth = new Map();
+        // Public Set-like façade so callers don't need to know the
+        // implementation detail. Exposed methods: enter(sessionId)
+        // increments the depth, exit(sessionId) decrements (clamped
+        // to 0), has(sessionId) reports whether render is suppressed.
+        const chartRenderSuppressedBySession = {
+            enter(sessionId) {
+                const k = String(sessionId || '');
+                chartRenderSuppressionByDepth.set(k, (chartRenderSuppressionByDepth.get(k) || 0) + 1);
+            },
+            exit(sessionId) {
+                const k = String(sessionId || '');
+                const d = (chartRenderSuppressionByDepth.get(k) || 0) - 1;
+                if (d <= 0) chartRenderSuppressionByDepth.delete(k);
+                else chartRenderSuppressionByDepth.set(k, d);
+            },
+            has(sessionId) {
+                return (chartRenderSuppressionByDepth.get(String(sessionId || '')) || 0) > 0;
+            }
+        };
+        const bandwidthVisibility = new Map();
+        const bitrateAxisMaxBySession = new Map();
+        const lastRecordedPlayerEventBySession = new Map();
+        const lastRecordedLoopCountBySession = new Map();
+        const lastRecordedServerLoopCountBySession = new Map();
+        const lastRecordedLoopEventStampBySession = new Map();
+        const lastRecordedServerLoopEventStampBySession = new Map();
+        // Per-session memo of the most-recently-seen play_id. When this
+        // changes between snapshots we emit a PLAYBACK_START event into
+        // the PLAYBACK swim lane — the visual marker for "fresh
+        // loadStream() on the client". The first observed value seeds
+        // the memo without firing (so a session-card reload doesn't
+        // pretend playback restarted).
+        const lastRecordedPlayIdBySession = new Map();
+        const pendingShaping = new Map();
+        // Per-session memo of last-seen control-attribute values. Drives the
+        // CONTROL swim lane: whenever any of these fields differs from the
+        // previously seen snapshot for a given session, we emit a
+        // CONTROL_CHANGE event with field name + old → new value. Tracked
+        // fields mirror the Grafana "Control changes" panel so the in-page
+        // and dashboard views agree.
+        const lastRecordedControlsBySession = new Map();
+        const CONTROL_FIELDS = [
+            'nftables_bandwidth_mbps', 'nftables_pattern_enabled',
+            'nftables_pattern_template_mode', 'nftables_delay_ms', 'nftables_packet_loss',
+            'transport_fault_active', 'transport_fault_type',
+            'transport_fault_drop_packets', 'transport_fault_reject_packets',
+            'manifest_failure_type', 'manifest_failure_mode', 'manifest_failure_frequency',
+            'segment_failure_type', 'segment_failure_mode', 'segment_failure_frequency',
+            'transport_failure_type', 'all_failure_type', 'master_manifest_failure_type',
+            'transfer_active_timeout_seconds', 'transfer_idle_timeout_seconds'
+        ];
+
+        function shapingValuesMatch(serverSession, pendingValues) {
+            if (!serverSession || !pendingValues) return false;
+            const sameNumber = (a, b, tolerance = 0.001) => {
+                const left = Number(a);
+                const right = Number(b);
+                if (!Number.isFinite(left) || !Number.isFinite(right)) return false;
+                return Math.abs(left - right) <= tolerance;
+            };
+            const sameBool = (a, b) => {
+                const toBool = (value) => value === true || value === 1 || value === 'true';
+                return toBool(a) === toBool(b);
+            };
+            const sameJson = (a, b) => {
+                try {
+                    return JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
+                } catch {
+                    return false;
+                }
+            };
+            if (!sameNumber(serverSession.nftables_bandwidth_mbps, pendingValues.nftables_bandwidth_mbps, 0.01)) return false;
+            if (!sameNumber(serverSession.nftables_delay_ms, pendingValues.nftables_delay_ms, 0.1)) return false;
+            if (!sameNumber(serverSession.nftables_packet_loss, pendingValues.nftables_packet_loss, 0.01)) return false;
+            if (!sameBool(serverSession.nftables_pattern_enabled, pendingValues.nftables_pattern_enabled)) return false;
+            if (!sameJson(serverSession.nftables_pattern_steps, pendingValues.nftables_pattern_steps)) return false;
+            return true;
+        }
+        const shapingTimers = new Map();
+        const collapseState = new Map();
+        const collapseDefaults = {
+            'session-details': true,
+            'player-metrics': false,
+            'fault-injection': false,
+            'network-shaping': false,
+            'bitrate-chart': false
+        };
+        const collapseStoragePrefix = 'testing_collapse_';
+
+        function getStoredCollapseState(key) {
+            try {
+                const value = localStorage.getItem(`${collapseStoragePrefix}${key}`);
+                if (value === null) return undefined;
+                return value === 'true';
+            } catch (err) {
+                return undefined;
+            }
+        }
+
+        function getSessionSnapshotVersion(session) {
+            const uiVersion = Number(session?.ui_state_version);
+            if (Number.isFinite(uiVersion) && uiVersion > 0) {
+                return uiVersion;
+            }
+            const controlRevisionMs = Date.parse(String(session?.control_revision || ''));
+            if (Number.isFinite(controlRevisionMs) && controlRevisionMs > 0) {
+                return controlRevisionMs;
+            }
+            return 0;
+        }
+
+        function setStoredCollapseState(key, value) {
+            try {
+                localStorage.setItem(`${collapseStoragePrefix}${key}`, value ? 'true' : 'false');
+            } catch (err) {
+                collapseState.set(key, !!value);
+            }
+        }
+
+        window.TestingSessionUICollapseState = {
+            get: (key) => {
+                const stored = getStoredCollapseState(key);
+                if (typeof stored === 'boolean') return stored;
+                if (collapseState.has(key)) return collapseState.get(key);
+                return collapseDefaults[key];
+            },
+            set: (key, value) => {
+                collapseState.set(key, !!value);
+                setStoredCollapseState(key, value);
+            }
+        };
+
+        const TestingSessionUI = window.TestingSessionUI;
+        const isDeveloperMode = new URLSearchParams(window.location.search).get('developer') === '1';
+
+        function mountPlayerCharacterizationForCard(card, session) {
+            if (!isDeveloperMode) return;
+            if (!card || !session) return;
+            const host = card.querySelector('[data-field="player_characterization_host"]');
+            if (!host) return;
+            if (!window.PlayerCharacterization || typeof window.PlayerCharacterization.mount !== 'function') return;
+            const mountKey = `session-${session.session_id}`;
+            if (host.dataset.abrcharMounted === mountKey) return;
+            window.PlayerCharacterization.mount({
+                hostElement: host,
+                instanceKey: mountKey,
+                getSession: () => {
+                    if (!activeSessionId) return null;
+                    return sessionsById.get(String(activeSessionId)) || null;
+                },
+                getCurrentUrl: () => {
+                    const current = activeSessionId ? sessionsById.get(String(activeSessionId)) : null;
+                    return current ? (current.master_manifest_url || current.manifest_url || '') : '';
+                }
+            });
+            host.dataset.abrcharMounted = mountKey;
+        }
+
+        function getShapingPresets(card) {
+            const raw = card.dataset.shapingPresets || '';
+            if (!raw) return [];
+            try {
+                const parsed = JSON.parse(decodeURIComponent(raw));
+                return Array.isArray(parsed) ? parsed : [];
+            } catch (err) {
+                console.warn('Failed to parse shaping presets', err);
+                return [];
+            }
+        }
+
+        function getShapingVideoPresets(card) {
+            const raw = card.dataset.shapingVideoPresets || '';
+            if (!raw) return [];
+            try {
+                const parsed = JSON.parse(decodeURIComponent(raw));
+                return Array.isArray(parsed) ? parsed : [];
+            } catch (err) {
+                console.warn('Failed to parse shaping video presets', err);
+                return [];
+            }
+        }
+
+        function getShapingOverheadMbps(card) {
+            const parsed = Number(card.dataset.shapingOverheadMbps || 0);
+            if (!Number.isFinite(parsed) || parsed < 0) return 0;
+            return parsed;
+        }
+
+        function getStallRiskThresholdMbps(card) {
+            const videoPresets = getShapingVideoPresets(card);
+            if (!videoPresets.length) return null;
+            const minVideo = Math.min(...videoPresets
+                .map((preset) => Number(preset.mbps))
+                .filter((value) => Number.isFinite(value) && value > 0));
+            if (!Number.isFinite(minVideo) || minVideo <= 0) return null;
+            return Math.round(minVideo * 1.1 * 1000) / 1000;
+        }
+
+        function normalizeBitrateAxisMaxMode(value) {
+            const normalized = String(value || 'auto').toLowerCase();
+            return ['auto', '5', '10', '20', '30', '40', '50', '100'].includes(normalized) ? normalized : 'auto';
+        }
+
+        function updateStepRiskUi(card, row) {
+            if (!card || !row) return;
+            const enabled = !!row.querySelector('input[data-field="shaping_step_enabled"]')?.checked;
+            const threshold = getStallRiskThresholdMbps(card);
+            const rate = Number(row.querySelector('input[data-field="shaping_step_mbps"]')?.value ?? 0);
+            const isRisk = enabled && Number.isFinite(threshold) && Number.isFinite(rate) && rate > 0 && rate < threshold;
+            row.classList.toggle('shape-step-risk', isRisk);
+            if (isRisk) {
+                row.title = `Likely stall risk: ${rate} Mbps is below min variant +10% (${threshold} Mbps)`;
+            } else {
+                row.removeAttribute('title');
+            }
+        }
+
+        function updateAllStepRiskUi(card) {
+            if (!card) return;
+            card.querySelectorAll('.shape-step-row').forEach((row) => updateStepRiskUi(card, row));
+        }
+
+        function syncStepPreset(row) {
+            const presetSelect = row.querySelector('select[data-field="shaping_step_mbps_preset"]');
+            const mbpsInput = row.querySelector('input[data-field="shaping_step_mbps"]');
+            if (!presetSelect || !mbpsInput) return;
+            const value = Number(mbpsInput.value);
+            if (!Number.isFinite(value)) {
+                presetSelect.value = 'custom';
+                return;
+            }
+            const matched = Array.from(presetSelect.options).find((option) => {
+                if (option.value === 'custom') return false;
+                return Math.abs(Number(option.value) - value) < 0.001;
+            });
+            presetSelect.value = matched ? matched.value : 'custom';
+        }
+
+        function setStepEnabledUi(card, row, enabled) {
+            row.classList.toggle('shape-step-disabled', !enabled);
+            row.querySelectorAll('select[data-field="shaping_step_mbps_preset"], input[data-field="shaping_step_mbps"], input[data-field="shaping_step_seconds"]').forEach((el) => {
+                el.disabled = !enabled;
+            });
+            updateStepRiskUi(card, row);
+        }
+
+        function makeShapeStepRow(card, rate, seconds, enabled = true, matchOptions = {}) {
+            const row = document.createElement('div');
+            row.className = 'shape-step-row';
+            row.innerHTML = TestingSessionUI.renderPatternStepRowContent(
+                { rate_mbps: rate, duration_seconds: seconds, enabled },
+                getShapingPresets(card),
+                matchOptions
+            );
+            syncStepPreset(row);
+            setStepEnabledUi(card, row, enabled);
+            return row;
+        }
+
+        function updateStepIndices(card) {
+            const rows = card.querySelectorAll('.shape-step-row');
+            rows.forEach((row, idx) => {
+                row.dataset.stepIndex = String(idx);
+            });
+        }
+
+        function getDefaultStepSeconds(card) {
+            const pattern = TestingSessionUI.readShapingPattern(card);
+            return pattern.default_step_seconds;
+        }
+
+        function getTemplateMode(card) {
+            const selected = card.querySelector('input[data-field="shaping_template_mode"]:checked');
+            return selected ? selected.value : 'sliders';
+        }
+
+        function updateTemplateModeUi(card) {
+            const mode = getTemplateMode(card);
+            const throughputRow = card.querySelector('[data-field="shaping_throughput_row"]');
+            const throughputInput = card.querySelector('input[data-field="shaping_throughput_mbps"]');
+            const stepList = card.querySelector('[data-field="shaping_pattern_rows"]');
+            const stepActions = card.querySelector('.shape-step-actions');
+            const applyButton = card.querySelector('[data-field="shaping_apply_pattern_row"]');
+            const usePattern = mode !== 'sliders';
+            if (throughputRow) throughputRow.classList.toggle('range-row-disabled', usePattern);
+            if (throughputInput) throughputInput.disabled = usePattern;
+            if (stepList) stepList.style.display = usePattern ? '' : 'none';
+            if (stepActions) stepActions.style.display = usePattern ? '' : 'none';
+            if (applyButton) applyButton.style.display = usePattern ? '' : 'none';
+        }
+
+        function buildTemplateSteps(card) {
+            const mode = getTemplateMode(card);
+            const presets = getShapingVideoPresets(card);
+            if (mode === 'sliders' || !presets.length) return [];
+            const marginPct = Number(card.querySelector('input[data-field="shaping_template_margin_pct"]:checked')?.value || 0);
+            const overheadMbps = getShapingOverheadMbps(card);
+            const defaultSeconds = getDefaultStepSeconds(card);
+            const adjustRate = (rate) => {
+                let adjusted = Number(rate);
+                if (!Number.isFinite(adjusted)) adjusted = 0;
+                adjusted = adjusted * (1 + (marginPct / 100));
+                adjusted += overheadMbps;
+                if (adjusted < 0) adjusted = 0;
+                return Math.round(adjusted * 1000) / 1000;
+            };
+            const baseRates = presets
+                .map((preset) => Number(preset.mbps))
+                .filter((rate) => Number.isFinite(rate) && rate >= 0);
+            if (!baseRates.length) return [];
+            const minRate = baseRates[0];
+            const maxRate = baseRates[baseRates.length - 1];
+            const maxRatePlus50 = Math.round(maxRate * 1.5 * 1000) / 1000;
+            let rates = [];
+            if (mode === 'square_wave') {
+                rates = maxRatePlus50 === minRate ? [maxRatePlus50] : [maxRatePlus50, minRate];
+            } else if (mode === 'ramp_up') {
+                rates = baseRates.slice();
+                if (maxRatePlus50 > maxRate) rates.push(maxRatePlus50);
+            } else if (mode === 'ramp_down') {
+                rates = baseRates.slice().reverse();
+                if (maxRatePlus50 > maxRate) rates.unshift(maxRatePlus50);
+            } else if (mode === 'pyramid') {
+                const ascending = baseRates.slice();
+                if (maxRatePlus50 > maxRate) ascending.push(maxRatePlus50);
+                rates = ascending.concat(ascending.slice(0, -1).reverse());
+            }
+            return rates
+                .filter((rate) => Number.isFinite(rate) && rate >= 0)
+                .map((rate) => ({ rate_mbps: adjustRate(rate), duration_seconds: defaultSeconds }));
+        }
+
+        function applyTemplatePattern(card, shouldSchedule, resetState = false, preserveStepDurations = true) {
+            const mode = getTemplateMode(card);
+            const rowsHost = card.querySelector('[data-field="shaping_pattern_rows"]');
+
+            // Capture current step states before regenerating (unless resetting)
+            const currentSteps = [];
+            if (rowsHost && !resetState) {
+                const existingRows = rowsHost.querySelectorAll('.shape-step-row');
+                existingRows.forEach((row) => {
+                    const presetSelect = row.querySelector('select[data-field="shaping_step_mbps_preset"]');
+                    const mbpsInput = row.querySelector('input[data-field="shaping_step_mbps"]');
+                    const secondsInput = row.querySelector('input[data-field="shaping_step_seconds"]');
+                    const enabledCheckbox = row.querySelector('input[data-field="shaping_step_enabled"]');
+                    currentSteps.push({
+                        isCustom: presetSelect?.value === 'custom',
+                        customMbps: mbpsInput ? Number(mbpsInput.value) : null,
+                        customSeconds: secondsInput ? Number(secondsInput.value) : null,
+                        enabled: enabledCheckbox ? enabledCheckbox.checked : true
+                    });
+                });
+            }
+
+            const steps = buildTemplateSteps(card);
+            updateTemplateModeUi(card);
+            if (rowsHost && mode !== 'sliders' && steps.length > 0) {
+                // Preserve custom values and disabled states (unless resetting)
+                if (!resetState) {
+                    steps.forEach((step, index) => {
+                        if (currentSteps[index]) {
+                            if (currentSteps[index].isCustom && Number.isFinite(currentSteps[index].customMbps)) {
+                                step.rate_mbps = currentSteps[index].customMbps;
+                            }
+                            if (preserveStepDurations && Number.isFinite(currentSteps[index].customSeconds)) {
+                                step.duration_seconds = currentSteps[index].customSeconds;
+                            }
+                            step.enabled = currentSteps[index].enabled;
+                        }
+                    });
+                }
+
+                // Get current margin and overhead for preset labels
+                const marginPct = Number(card.querySelector('input[data-field="shaping_template_margin_pct"]:checked')?.value || 0);
+                const overheadMbps = getShapingOverheadMbps(card);
+                const matchOptions = { marginPct, overheadMbps };
+
+                rowsHost.innerHTML = '';
+                steps.forEach((step) => {
+                    rowsHost.appendChild(makeShapeStepRow(card, step.rate_mbps, step.duration_seconds, step.enabled, matchOptions));
+                });
+                updateStepIndices(card);
+                const throughputInput = card.querySelector('input[data-field="shaping_throughput_mbps"]');
+                const throughputValue = card.querySelector('[data-field="shaping_throughput_row"] .range-value');
+                if (throughputInput) throughputInput.value = String(steps[0].rate_mbps);
+                if (throughputValue) throughputValue.textContent = String(steps[0].rate_mbps);
+            }
+            if (shouldSchedule) {
+                scheduleShapingApply(card);
+            }
+        }
+
+        function scheduleShapingApply(card) {
+            const sessionId = card.dataset.sessionId;
+            if (sessionId && isAbrcharRunLocked(sessionId)) {
+                console.warn('[NETSHAPE] Ignoring manual shaping update while ABR characterization lock is active.');
+                return;
+            }
+            if (sessionId) {
+                const getValue = (field) => {
+                    const input = card.querySelector(`input[data-field="${field}"]`);
+                    return input ? Number(input.value) : 0;
+                };
+                const pattern = TestingSessionUI.readShapingPattern(card);
+                const usePattern = pattern.template_mode !== 'sliders'
+                    && Array.isArray(pattern.steps)
+                    && pattern.steps.length > 0;
+                pendingShaping.set(sessionId, {
+                    timestamp: Date.now(),
+                    values: {
+                        nftables_bandwidth_mbps: getValue('shaping_throughput_mbps'),
+                        nftables_delay_ms: getValue('shaping_delay_ms'),
+                        nftables_packet_loss: getValue('shaping_loss_pct'),
+                        nftables_pattern_enabled: usePattern,
+                        nftables_pattern_steps: usePattern ? (pattern.steps || []) : [],
+                        nftables_pattern_segment_duration_seconds: pattern.segment_duration_seconds,
+                        nftables_pattern_default_segments: pattern.default_segments,
+                        nftables_pattern_default_step_seconds: pattern.default_step_seconds,
+                        nftables_pattern_template_mode: pattern.template_mode,
+                        nftables_pattern_margin_pct: pattern.template_margin_pct
+                    }
+                });
+            }
+            if (shapingTimers.has(sessionId)) {
+                clearTimeout(shapingTimers.get(sessionId));
+            }
+            shapingTimers.set(sessionId, setTimeout(() => {
+                applyNetworkShapingForCard(card).catch(error => console.error('Error applying network shaping:', error));
+            }, 250));
+        }
+
+        function scheduleSingleShapingApply(card, serverField, value) {
+            const sessionId = card.dataset.sessionId;
+            if (!sessionId) return;
+            if (isAbrcharRunLocked(sessionId)) return;
+            const existing = pendingShaping.get(sessionId);
+            const values = existing ? { ...existing.values } : {};
+            values[serverField] = value;
+            pendingShaping.set(sessionId, { timestamp: Date.now(), values });
+            if (shapingTimers.has(sessionId)) {
+                clearTimeout(shapingTimers.get(sessionId));
+            }
+            shapingTimers.set(sessionId, setTimeout(() => {
+                const pending = pendingShaping.get(sessionId);
+                if (!pending) return;
+                const fields = Object.keys(pending.values);
+                sendSessionPatch(card, fields);
+            }, 250));
+        }
+
+        function renderSessionTabs(sessions) {
+            if (!sessions.length) return '';
+            const hasMultipleSessions = sessions.length > 1;
+            const validIds = new Set(sessions.map(s => String(s.session_id)));
+            Array.from(selectedSessionIds).forEach(id => {
+                if (!validIds.has(String(id))) selectedSessionIds.delete(id);
+            });
+
+            return `
+                ${hasMultipleSessions ? `
+                <div class="group-controls">
+                    <button class="btn btn-sm btn-secondary" id="linkSelectedSessions">Group Selected Sessions</button>
+                    <span class="status-message" data-role="link-status">Select 2+ sessions to group</span>
+                </div>
+                ` : ''}
+                <div class="session-tabs">
+                    ${sessions.map(session => {
+                        const id = session.session_id;
+                        const isActive = id === activeSessionId ? 'active' : '';
+                        const isGrouped = session.group_id ? 'grouped' : '';
+                        const portValue = session.x_forwarded_port_external || session.x_forwarded_port || '';
+                        const portSuffix = portValue ? ` (Port ${portValue})` : '';
+                        const label = `Session ${id}${portSuffix} · ${session.player_id || 'Unknown Player'}`;
+                        const groupBadge = session.group_id ? `<span class="group-badge">${session.group_id}</span>` : '';
+                        const isChecked = selectedSessionIds.has(String(id)) ? 'checked' : '';
+                        const checkbox = hasMultipleSessions ?
+                            `<input type="checkbox" class="session-checkbox" data-session-id="${id}" ${isChecked}>` : '';
+                        return `<button class="session-tab ${isActive} ${isGrouped}" data-session-tab="${id}">
+                            ${checkbox}${label}${groupBadge}
+                        </button>`;
+                    }).join('')}
+                </div>
+            `;
+        }
+
+        function updateTabsAndGroupInfo(container, sessions, activeSession) {
+            if (!container) return;
+            // Replay viewer renders no tabs/group chip, so don't re-introduce
+            // them on later partial updates either.
+            if (document.body.classList.contains('replay-mode')) {
+                container.querySelector('.session-tabs')?.remove();
+                container.querySelector('.group-controls')?.remove();
+                container.querySelector('.group-info')?.remove();
+                return;
+            }
+            const tabsHost = document.createElement('div');
+            tabsHost.innerHTML = renderSessionTabs(sessions);
+            const nextGroupControls = tabsHost.querySelector('.group-controls');
+            const nextTabs = tabsHost.querySelector('.session-tabs');
+            const existingGroupControls = container.querySelector('.group-controls');
+            const existingTabs = container.querySelector('.session-tabs');
+            if (nextGroupControls) {
+                if (existingGroupControls) {
+                    existingGroupControls.replaceWith(nextGroupControls);
+                } else {
+                    container.prepend(nextGroupControls);
+                }
+            } else if (existingGroupControls) {
+                existingGroupControls.remove();
+            }
+            if (nextTabs) {
+                if (existingTabs) {
+                    existingTabs.replaceWith(nextTabs);
+                } else {
+                    const insertAfter = container.querySelector('.group-controls');
+                    if (insertAfter) {
+                        insertAfter.insertAdjacentElement('afterend', nextTabs);
+                    } else {
+                        container.prepend(nextTabs);
+                    }
+                }
+            }
+            const groupHost = document.createElement('div');
+            groupHost.innerHTML = activeSession ? renderGroupInfo(activeSession, sessions) : '';
+            const nextGroupInfo = groupHost.querySelector('.group-info');
+            const existingGroupInfo = container.querySelector('.group-info');
+            if (nextGroupInfo) {
+                if (existingGroupInfo) {
+                    existingGroupInfo.replaceWith(nextGroupInfo);
+                } else {
+                    const card = container.querySelector('.session-card');
+                    if (card) {
+                        card.insertAdjacentElement('beforebegin', nextGroupInfo);
+                    } else if (nextTabs) {
+                        nextTabs.insertAdjacentElement('afterend', nextGroupInfo);
+                    } else {
+                        container.appendChild(nextGroupInfo);
+                    }
+                }
+            } else if (existingGroupInfo) {
+                existingGroupInfo.remove();
+            }
+        }
+
+        function updateSessionDetailFields(card, session) {
+            if (!card || !session) return;
+            const setField = (field, value) => {
+                const el = card.querySelector(`[data-field="${field}"]`);
+                if (el) el.textContent = value;
+            };
+            setField('session_session_id', session.session_id || '—');
+            setField('session_play_id', session.play_id || '—');
+            setField('session_player_id', session.player_id || '—');
+            setField('session_user_agent', session.user_agent || '—');
+            setField('session_player_ip', session.player_ip || '—');
+            setField('session_port_display', session.x_forwarded_port_external || session.x_forwarded_port || '—');
+            setField('session_last_request', TestingSessionUI.formatDate(session.last_request));
+            setField('session_first_request', TestingSessionUI.formatDate(session.first_request_time));
+            setField('session_duration', TestingSessionUI.formatDuration(session.session_duration));
+            setField('session_manifest_url', session.manifest_url || '—');
+            setField('session_master_manifest_url', session.master_manifest_url || '—');
+            setField('session_last_request_url', session.last_request_url || '—');
+            setField('session_measured_mbps', session.measured_mbps ?? '—');
+            setField('session_mbps_shaper_rate', session.mbps_shaper_rate ?? '—');
+            setField('session_mbps_shaper_avg', session.mbps_shaper_avg ?? '—');
+            setField('session_mbps_transfer_rate', session.mbps_transfer_rate ?? '—');
+            setField('session_mbps_transfer_complete', session.mbps_transfer_complete ?? '—');
+            const counts = card.querySelector('[data-field="session_detail_counts"]');
+            if (counts) {
+                const masterCount = session.master_manifest_requests_count || 0;
+                const manifestCount = session.manifest_requests_count || 0;
+                const segmentCount = session.segments_count || 0;
+                counts.textContent = `M:${masterCount} / Man:${manifestCount} / Seg:${segmentCount}`;
+            }
+        }
+
+        function normalizeTransportFaultType(session) {
+            const raw = String(session.transport_failure_type || session.transport_fault_type || 'none').toLowerCase();
+            if (raw === 'drop' || raw === 'reject') return raw;
+            return 'none';
+        }
+
+        function normalizeTransportFailureMode(session) {
+            const modeRaw = String(session.transport_failure_mode || '').toLowerCase();
+            if (modeRaw === 'failures_per_packets' || modeRaw === 'failures_per_packet') {
+                return 'failures_per_packets';
+            }
+            const unitsRaw = String(session.transport_consecutive_units || session.transport_failure_units || '').toLowerCase();
+            if (unitsRaw === 'packet' || unitsRaw === 'packets' || unitsRaw === 'pkt' || unitsRaw === 'pkts') {
+                return 'failures_per_packets';
+            }
+            return 'failures_per_seconds';
+        }
+
+        function getControlRevision(session) {
+            const revision = session ? session.control_revision : null;
+            if (revision === undefined || revision === null || revision === '') {
+                return null;
+            }
+            return String(revision);
+        }
+
+        function shouldSyncControls(sessionId, session) {
+            const key = String(sessionId || session?.session_id || '');
+            if (!key) return true;
+            const revision = getControlRevision(session);
+            const lastRevision = controlRevisionBySession.get(key);
+            if (revision === null) {
+                if (lastRevision === undefined) {
+                    controlRevisionBySession.set(key, null);
+                    return true;
+                }
+                return false;
+            }
+            if (lastRevision !== revision) {
+                controlRevisionBySession.set(key, revision);
+                return true;
+            }
+            return false;
+        }
+
+        function isAbrcharRunLocked(sessionId) {
+            const key = String(sessionId || '');
+            if (!key) return false;
+            const session = sessionsById.get(key);
+            if (!session) return false;
+            return session.abrchar_run_lock === true
+                || session.abrchar_run_lock === 1
+                || session.abrchar_run_lock === 'true';
+        }
+
+        function applyActiveFaultTab(card, tabName) {
+            if (!card || !tabName) return;
+            const container = card.querySelector('.tabs-container');
+            if (!container) return;
+            const targetButton = container.querySelector(`.tab-button[data-tab="${tabName}"]`);
+            const targetPanel = container.querySelector(`.tab-panel[data-panel="${tabName}"]`);
+            if (!targetButton || !targetPanel) return;
+            container.querySelectorAll('.tab-button').forEach(btn => btn.classList.remove('active'));
+            targetButton.classList.add('active');
+            container.querySelectorAll('.tab-panel').forEach(panel => panel.classList.remove('active'));
+            targetPanel.classList.add('active');
+        }
+
+        function syncContentControls(card, session) {
+            if (!card || !session) return;
+            const strip = card.querySelector('input[data-field="content_strip_codecs"]');
+            if (strip) {
+                strip.checked = !!session.content_strip_codecs;
+            }
+            const liveOffsetVal = String(session.content_live_offset || 'none');
+            card.querySelectorAll('input[data-field="content_live_offset"]').forEach(radio => {
+                radio.checked = (radio.value === liveOffsetVal) || (liveOffsetVal === '0' && radio.value === 'none');
+            });
+            const allowed = Array.isArray(session.content_allowed_variants)
+                ? session.content_allowed_variants.map(String)
+                : [];
+            const allowedSet = new Set(allowed);
+            const allChecked = allowedSet.size === 0;
+            card.querySelectorAll('input[data-field="content_allowed_variants"]').forEach((input) => {
+                input.checked = allChecked || allowedSet.has(String(input.value));
+            });
+        }
+
+        function syncServerFaultControls(card, session) {
+            if (!card || !session) return;
+            const sessionId = String(card.dataset.sessionId || session.session_id || '');
+            if (!sessionId) return;
+            const syncSelect = (namePrefix, value) => {
+                const select = card.querySelector(`select[name="${namePrefix}_${sessionId}"]`);
+                if (select && value) {
+                    select.value = value;
+                }
+            };
+            const syncRange = (field, value, fallback) => {
+                const input = card.querySelector(`input[data-field="${field}"]`);
+                if (!input) return;
+                const numeric = Number(value);
+                const resolved = Number.isFinite(numeric) && numeric >= 0 ? numeric : fallback;
+                input.value = String(resolved);
+                const valueEl = input.parentElement?.querySelector('.range-value');
+                if (valueEl) valueEl.textContent = input.value;
+            };
+            const syncFailureScope = (field, values) => {
+                const selected = Array.isArray(values) ? values.map(String) : [];
+                const selectedSet = new Set(selected);
+                const allChecked = values == null
+                    ? true
+                    : selectedSet.has('All');
+                card.querySelectorAll(`input[data-field="${field}"]`).forEach(input => {
+                    if (input.value === 'All') {
+                        input.checked = allChecked;
+                        return;
+                    }
+                    input.checked = allChecked || selectedSet.has(input.value);
+                });
+            };
+            const syncRadio = (namePrefix, value) => {
+                const radios = card.querySelectorAll(`input[name="${namePrefix}_${sessionId}"]`);
+                radios.forEach((radio) => {
+                    radio.checked = radio.value === value;
+                });
+            };
+            syncRadio('segment_failure_type', String(session.segment_failure_type || 'none'));
+            syncRadio('manifest_failure_type', String(session.manifest_failure_type || 'none'));
+            syncRadio('master_manifest_failure_type', String(session.master_manifest_failure_type || 'none'));
+            syncRadio('all_failure_type', String(session.all_failure_type || 'none'));
+            syncRadio('transport_failure_type', normalizeTransportFaultType(session));
+            syncRadio('transport_failure_mode', normalizeTransportFailureMode(session));
+            syncSelect('segment_failure_mode', String(session.segment_failure_mode || 'failures_per_seconds'));
+            syncSelect('manifest_failure_mode', String(session.manifest_failure_mode || 'failures_per_seconds'));
+            syncSelect('master_manifest_failure_mode', String(session.master_manifest_failure_mode || 'failures_per_seconds'));
+            syncSelect('all_failure_mode', String(session.all_failure_mode || 'failures_per_seconds'));
+            syncRange('segment_consecutive_failures', session.segment_consecutive_failures, 1);
+            syncRange('segment_failure_frequency', session.segment_failure_frequency, 6);
+            syncRange('manifest_consecutive_failures', session.manifest_consecutive_failures, 1);
+            syncRange('manifest_failure_frequency', session.manifest_failure_frequency, 6);
+            syncRange('master_manifest_consecutive_failures', session.master_manifest_consecutive_failures, 1);
+            syncRange('master_manifest_failure_frequency', session.master_manifest_failure_frequency, 6);
+            syncRange('all_consecutive_failures', session.all_consecutive_failures, 1);
+            syncRange('all_failure_frequency', session.all_failure_frequency, 6);
+            syncFailureScope('segment_failure_urls', session.segment_failure_urls, true);
+            syncFailureScope('manifest_failure_urls', session.manifest_failure_urls, true);
+            syncFailureScope('all_failure_urls', session.all_failure_urls, true);
+            TestingSessionUI.updateTransportModeUi(card);
+            const transportConsecutiveInput = card.querySelector('input[data-field="transport_consecutive_failures"]');
+            const transportFrequencyInput = card.querySelector('input[data-field="transport_failure_frequency"]');
+            if (transportConsecutiveInput) {
+                const value = Number(
+                    session.transport_consecutive_failures ??
+                    session.transport_consecutive_seconds ??
+                    session.transport_fault_on_seconds ??
+                    0
+                );
+                transportConsecutiveInput.value = String(Number.isFinite(value) ? value : 0);
+                const valueEl = transportConsecutiveInput.parentElement?.querySelector('.range-value');
+                if (valueEl) valueEl.textContent = transportConsecutiveInput.value;
+            }
+            if (transportFrequencyInput) {
+                const value = Number(
+                    session.transport_failure_frequency ??
+                    session.transport_frequency_seconds ??
+                    session.transport_fault_off_seconds ??
+                    0
+                );
+                transportFrequencyInput.value = String(Number.isFinite(value) ? value : 0);
+                const valueEl = transportFrequencyInput.parentElement?.querySelector('.range-value');
+                if (valueEl) valueEl.textContent = transportFrequencyInput.value;
+            }
+            syncRange('transfer_active_timeout_seconds', session.transfer_active_timeout_seconds, 0);
+            syncRange('transfer_idle_timeout_seconds', session.transfer_idle_timeout_seconds, 0);
+            const syncTransferCheckbox = (field, value) => {
+                const input = card.querySelector(`input[data-field="${field}"]`);
+                if (input) input.checked = !!value;
+            };
+            syncTransferCheckbox('transfer_timeout_applies_segments', session.transfer_timeout_applies_segments);
+            syncTransferCheckbox('transfer_timeout_applies_manifests', session.transfer_timeout_applies_manifests);
+            syncTransferCheckbox('transfer_timeout_applies_master', session.transfer_timeout_applies_master);
+        }
+
+        function syncServerFaultData(card, session) {
+            if (!card || !session) return;
+            const stateEl = card.querySelector('[data-field="transport_fault_state"]');
+            if (stateEl) {
+                stateEl.textContent = session.transport_fault_active ? 'Active' : 'Idle';
+            }
+            const countersEl = card.querySelector('[data-field="transport_fault_counters"]');
+            if (countersEl) {
+                const dropPackets = Number(session.transport_fault_drop_packets || 0);
+                const rejectPackets = Number(session.transport_fault_reject_packets || 0);
+                countersEl.textContent = `Drop ${dropPackets} pkts · Reject ${rejectPackets} pkts`;
+            }
+            const transferCountersEl = card.querySelector('[data-field="transfer_timeout_counters"]');
+            if (transferCountersEl) {
+                const activeCount = Number(session.fault_count_transfer_active_timeout || 0);
+                const idleCount = Number(session.fault_count_transfer_idle_timeout || 0);
+                transferCountersEl.textContent = `Active ${activeCount} · Idle ${idleCount}`;
+            }
+        }
+        function formatDate(value) {
+            if (!value) return '—';
+            const date = new Date(value);
+            return date.toLocaleString();
+        }
+        function formatMetricNumber(value, suffix = '') {
+            if (value === null || value === undefined || value === '') return '—';
+            const numeric = Number(value);
+            if (!Number.isFinite(numeric)) return String(value);
+            const rounded = Math.round(numeric * 100) / 100;
+            return `${rounded}${suffix}`;
+        }
+        function formatSeconds(value) {
+            if (value === null || value === undefined || value === '') return '—';
+            const numeric = Number(value);
+            if (!Number.isFinite(numeric)) return String(value);
+            return `${numeric.toFixed(3)}s`;
+        }
+
+        function parseVariantResolution(resolution) {
+            const value = String(resolution || '').trim().toLowerCase();
+            if (!value) return { width: null, height: null };
+            const dimensions = value.match(/(\d{3,4})\s*x\s*(\d{3,4})/i);
+            if (dimensions) {
+                return {
+                    width: Number(dimensions[1]),
+                    height: Number(dimensions[2])
+                };
+            }
+            const progressive = value.match(/(\d{3,4})\s*p$/i);
+            if (progressive) {
+                return {
+                    width: null,
+                    height: Number(progressive[1])
+                };
+            }
+            const numeric = Number(value);
+            if (Number.isFinite(numeric) && numeric > 0) {
+                return {
+                    width: null,
+                    height: numeric
+                };
+            }
+            return { width: null, height: null };
+        }
+
+        function parseVideoResolution(resolution) {
+            return parseVariantResolution(resolution);
+        }
+
+        function isSessionNativeSafari(session) {
+            const browser = String(session?.player_metrics_browser_family || '').trim().toLowerCase();
+            const engine = String(session?.player_metrics_playback_engine || '').trim().toLowerCase();
+            return browser === 'safari' && engine === 'native';
+        }
+
+        function inferSessionNativeRenditionMbps(session) {
+            if (!isSessionNativeSafari(session)) return null;
+            const videoResolution = parseVideoResolution(session?.player_metrics_video_resolution);
+            const videoHeight = Number(videoResolution.height || 0);
+            if (!Number.isFinite(videoHeight) || videoHeight <= 0) return null;
+            const videoWidth = Number(videoResolution.width || 0);
+            const variants = Array.isArray(session?.manifest_variants) ? session.manifest_variants : [];
+            if (!variants.length) return null;
+
+            let best = null;
+            variants.forEach((variant) => {
+                const bandwidth = Number(variant?.bandwidth || 0);
+                if (!Number.isFinite(bandwidth) || bandwidth <= 0) return;
+                const parsed = parseVariantResolution(variant?.resolution);
+                const height = Number(parsed.height || 0);
+                const width = Number(parsed.width || 0);
+                if (!Number.isFinite(height) || height <= 0) return;
+                const heightDelta = Math.abs(height - videoHeight);
+                const hasWidth = Number.isFinite(width) && width > 0 && Number.isFinite(videoWidth) && videoWidth > 0;
+                const widthDelta = hasWidth ? Math.abs(width - videoWidth) : 0;
+                const score = (heightDelta * 10000) + widthDelta;
+                if (!best || score < best.score || (score === best.score && bandwidth > best.bandwidth)) {
+                    best = { score, bandwidth };
+                }
+            });
+
+            if (!best) return null;
+            return Math.round((best.bandwidth / 1000000) * 1000) / 1000;
+        }
+
+        function updateThroughputSlider(card, session) {
+            if (!card || !session) return;
+            const patternEnabled = session.nftables_pattern_enabled === true
+                || session.nftables_pattern_enabled === 1
+                || session.nftables_pattern_enabled === 'true';
+            if (!patternEnabled) return;
+            const runtimeRate = Number(session.nftables_pattern_rate_runtime_mbps);
+            const stepIndex = Number(session.nftables_pattern_step_runtime || session.nftables_pattern_step || 0);
+            const steps = Array.isArray(session.nftables_pattern_steps) ? session.nftables_pattern_steps : [];
+            let stepRate = NaN;
+            if (stepIndex > 0 && stepIndex <= steps.length) {
+                stepRate = Number(steps[stepIndex - 1]?.rate_mbps);
+            }
+            const baseRate = Number(session.nftables_bandwidth_mbps);
+            let target = runtimeRate;
+            if (!Number.isFinite(target)) target = stepRate;
+            if (!Number.isFinite(target)) target = baseRate;
+            if (Number.isFinite(target) && target >= 0) {
+                const throughputInput = card.querySelector('input[data-field="shaping_throughput_mbps"]');
+                const throughputValue = card.querySelector('[data-field="shaping_throughput_row"] .range-value');
+                if (throughputInput) throughputInput.value = String(target);
+                if (throughputValue) throughputValue.textContent = String(target);
+            }
+        }
+
+        function updateSessionDetailData(card, session) {
+            if (!card || !session) return;
+            const setText = (selector, value) => {
+                const el = card.querySelector(selector);
+                if (!el) return;
+                el.textContent = value;
+            };
+            const inferredVideoBitrateMbps = inferSessionNativeRenditionMbps(session);
+            const rawVideoBitrate = Number(session.player_metrics_video_bitrate_mbps);
+            const hasMeasuredVideoBitrate = Number.isFinite(rawVideoBitrate) && rawVideoBitrate > 0;
+            const displayVideoBitrate = hasMeasuredVideoBitrate
+                ? formatMetricNumber(rawVideoBitrate, ' Mbps')
+                : (Number.isFinite(inferredVideoBitrateMbps) ? `~${formatMetricNumber(inferredVideoBitrateMbps, ' Mbps')}` : '—');
+            setText('[data-field="player_metrics_last_event"]', session.player_metrics_last_event || '—');
+            setText('[data-field="player_metrics_trigger_type"]', session.player_metrics_trigger_type || '—');
+            setText('[data-field="player_metrics_last_event_at"]', formatDate(session.player_metrics_last_event_at));
+            setText('[data-field="player_metrics_event_time"]', formatDate(session.player_metrics_event_time));
+            setText('[data-field="player_metrics_state"]', session.player_metrics_state || '—');
+            setText('[data-field="player_metrics_position_s"]', formatSeconds(session.player_metrics_position_s));
+            setText('[data-field="player_metrics_playback_rate"]', formatMetricNumber(session.player_metrics_playback_rate, 'x'));
+            setText('[data-field="player_metrics_buffer_depth_s"]', formatSeconds(session.player_metrics_buffer_depth_s));
+            setText('[data-field="player_metrics_buffer_end_s"]', formatSeconds(session.player_metrics_buffer_end_s));
+            setText('[data-field="player_metrics_seekable_end_s"]', formatSeconds(session.player_metrics_seekable_end_s));
+            setText('[data-field="player_metrics_live_edge_s"]', formatSeconds(session.player_metrics_live_edge_s));
+            setText('[data-field="player_metrics_live_offset_s"]', formatSeconds(session.player_metrics_live_offset_s));
+            setText('[data-field="player_metrics_true_offset_s"]', formatSeconds(session.player_metrics_true_offset_s));
+            setText('[data-field="player_metrics_display_resolution"]', session.player_metrics_display_resolution || '—');
+            setText('[data-field="player_metrics_video_resolution"]', session.player_metrics_video_resolution || '—');
+            setText('[data-field="player_metrics_video_first_frame_time_s"]', formatSeconds(session.player_metrics_video_first_frame_time_s));
+            setText('[data-field="player_metrics_video_start_time_s"]', formatSeconds(session.player_metrics_video_start_time_s));
+            setText('[data-field="player_metrics_video_bitrate_mbps"]', displayVideoBitrate);
+            setText('[data-field="server_video_rendition"]', session.server_video_rendition || '—');
+            setText('[data-field="server_video_rendition_mbps"]', formatMetricNumber(session.server_video_rendition_mbps, ' Mbps'));
+            setText('[data-field="player_metrics_video_quality_pct"]', formatMetricNumber(session.player_metrics_video_quality_pct, '%'));
+            setText('[data-field="player_metrics_avg_network_bitrate_mbps"]', formatMetricNumber(session.player_metrics_avg_network_bitrate_mbps, ' Mbps'));
+            setText('[data-field="player_metrics_network_bitrate_mbps"]', formatMetricNumber(session.player_metrics_network_bitrate_mbps, ' Mbps'));
+            setText('[data-field="player_metrics_frames_displayed"]', formatMetricNumber(session.player_metrics_frames_displayed));
+            setText('[data-field="player_metrics_dropped_frames"]', formatMetricNumber(session.player_metrics_dropped_frames));
+            setText('[data-field="player_metrics_stall_count"]', formatMetricNumber(session.player_metrics_stall_count));
+            setText('[data-field="player_metrics_stall_time_s"]', formatSeconds(session.player_metrics_stall_time_s));
+            setText('[data-field="player_metrics_last_stall_time_s"]', formatSeconds(session.player_metrics_last_stall_time_s));
+            setText('[data-field="player_metrics_error"]', session.player_metrics_error || '—');
+            setText('[data-field="player_metrics_source"]', session.player_metrics_source || '—');
+        }
+
+        function closestStepDuration(seconds) {
+            const options = [6, 12, 18, 24];
+            const numeric = Number(seconds);
+            if (!Number.isFinite(numeric) || numeric <= 0) return 12;
+            let best = options[0];
+            let bestDiff = Math.abs(numeric - best);
+            options.forEach((value) => {
+                const diff = Math.abs(numeric - value);
+                if (diff < bestDiff) {
+                    best = value;
+                    bestDiff = diff;
+                }
+            });
+            return best;
+        }
+
+        function inferSegmentDurationSeconds(session) {
+            const explicit = Number(session?.nftables_pattern_segment_duration_seconds || 0);
+            if (Number.isFinite(explicit) && explicit > 0) {
+                return explicit;
+            }
+            const candidates = [
+                session?.manifest_url || '',
+                session?.master_manifest_url || '',
+                session?.last_request_url || ''
+            ];
+            for (const value of candidates) {
+                const match = value.match(/(?:_|\/)(\d+)s(?:[._/?]|$)/i);
+                if (match) {
+                    const parsed = Number(match[1]);
+                    if (Number.isFinite(parsed) && parsed > 0) {
+                        return parsed;
+                    }
+                }
+            }
+            return 1;
+        }
+
+        function resolvePatternDefaults(session) {
+            const segmentDurationSeconds = inferSegmentDurationSeconds(session);
+            const defaultSegments = Number(session?.nftables_pattern_default_segments || 2);
+            const storedDefaultStepSeconds = Number(session?.nftables_pattern_default_step_seconds || 0);
+            const defaultStepSeconds = Number.isFinite(storedDefaultStepSeconds) && storedDefaultStepSeconds > 0
+                ? storedDefaultStepSeconds
+                : segmentDurationSeconds * defaultSegments;
+            return {
+                segmentDurationSeconds,
+                selectedStepSeconds: closestStepDuration(defaultStepSeconds)
+            };
+        }
+
+        function syncNetworkShapingControls(card, session) {
+            if (!card || !session) return;
+            const sessionId = String(card.dataset.sessionId || session.session_id || '');
+            if (!sessionId) return;
+            const templateModeRaw = String(session.nftables_pattern_template_mode || '').toLowerCase();
+            const templateMode = ['sliders', 'square_wave', 'ramp_up', 'ramp_down', 'pyramid'].includes(templateModeRaw)
+                ? templateModeRaw
+                : 'sliders';
+            card.querySelectorAll(`input[name="shaping_template_mode_${sessionId}"]`).forEach((radio) => {
+                radio.checked = radio.value === templateMode;
+            });
+            const marginRaw = Number(session.nftables_pattern_margin_pct);
+            const marginPct = [0, 10, 25, 50].includes(marginRaw) ? marginRaw : 0;
+            card.querySelectorAll(`input[name="shaping_template_margin_${sessionId}"]`).forEach((radio) => {
+                radio.checked = Number(radio.value) === marginPct;
+            });
+            const defaults = resolvePatternDefaults(session);
+            card.querySelectorAll(`input[name="shaping_default_step_seconds_${sessionId}"]`).forEach((radio) => {
+                radio.checked = Number(radio.value) === defaults.selectedStepSeconds;
+            });
+            if (card) {
+                card.dataset.segmentDurationSeconds = String(defaults.segmentDurationSeconds);
+            }
+            const syncRange = (field, value, fallback = 0) => {
+                const input = card.querySelector(`input[data-field="${field}"]`);
+                if (!input) return;
+                const numeric = Number(value);
+                const resolved = Number.isFinite(numeric) ? numeric : fallback;
+                input.value = String(resolved);
+                const valueEl = input.parentElement?.querySelector('.range-value');
+                if (valueEl) valueEl.textContent = String(resolved);
+            };
+            syncRange('shaping_delay_ms', session.nftables_delay_ms, 0);
+            syncRange('shaping_loss_pct', session.nftables_packet_loss, 0);
+            const rowsHost = card.querySelector('[data-field="shaping_pattern_rows"]');
+            if (rowsHost) {
+                const rawSteps = Array.isArray(session.nftables_pattern_steps) ? session.nftables_pattern_steps : [];
+                const normalizedSteps = rawSteps
+                    .map((step) => {
+                        const rate = Number(step?.rate_mbps);
+                        const seconds = Number(step?.duration_seconds);
+                        const enabled = step?.enabled !== false;
+                        if (!Number.isFinite(rate) || rate < 0) return null;
+                        return {
+                            rate_mbps: Math.round(rate * 1000) / 1000,
+                            duration_seconds: Number.isFinite(seconds) && seconds > 0
+                                ? Math.round(seconds * 10) / 10
+                                : defaults.selectedStepSeconds,
+                            enabled
+                        };
+                    })
+                    .filter(Boolean);
+                const fallbackRate = Number(session.nftables_bandwidth_mbps || 0);
+                const steps = normalizedSteps.length
+                    ? normalizedSteps
+                    : [{ rate_mbps: fallbackRate, duration_seconds: defaults.selectedStepSeconds, enabled: true }];
+                const marginPctForMatch = [0, 10, 25, 50].includes(marginPct) ? marginPct : 0;
+                const matchOptions = { marginPct: marginPctForMatch, overheadMbps: getShapingOverheadMbps(card) };
+                rowsHost.innerHTML = '';
+                steps.forEach((step) => {
+                    rowsHost.appendChild(makeShapeStepRow(card, step.rate_mbps, step.duration_seconds, step.enabled, matchOptions));
+                });
+                updateStepIndices(card);
+                updateAllStepRiskUi(card);
+                const throughputFallback = Number(session.nftables_bandwidth_mbps);
+                const throughputValue = Number.isFinite(throughputFallback) ? throughputFallback : steps[0].rate_mbps;
+                syncRange('shaping_throughput_mbps', throughputValue, 0);
+            }
+            updateTemplateModeUi(card);
+        }
+
+        let deferredRender = false;
+        function renderSessions() {
+            if (activeSliderSessionId) {
+                deferredRender = true;
+                return;
+            }
+            deferredRender = false;
+            const container = document.getElementById('sessionsContainer');
+            if (!sessionsById.size) {
+                container.innerHTML = '<div class="status-message">No active sessions.</div>';
+                return;
+            }
+            const sessions = Array.from(sessionsById.values());
+            const sessionIds = sessions.map(session => session.session_id);
+            if (!activeSessionId || !sessionIds.includes(activeSessionId)) {
+                activeSessionId = sessionIds[0];
+                isTabLocked = false;
+            }
+            let activeSession = sessions.find(session => session.session_id === activeSessionId);
+            const sessionKey = String(activeSession?.session_id || '');
+            const existingCard = container.querySelector('.session-card');
+            const pending = activeSession ? pendingShaping.get(String(activeSession.session_id)) : null;
+            if (activeSession && pending) {
+                if (shapingValuesMatch(activeSession, pending.values)) {
+                    pendingShaping.delete(String(activeSession.session_id));
+                } else {
+                    activeSession = {
+                        ...activeSession,
+                        ...pending.values
+                    };
+                }
+            }
+            const pendingFailure = activeSession ? pendingFailureEdits.get(String(activeSession.session_id)) : null;
+            if (activeSession && pendingFailure && Date.now() - pendingFailure.timestamp < 5000) {
+                activeSession = {
+                    ...activeSession,
+                    ...pendingFailure.values
+                };
+            }
+            if (activeSession) {
+                const savedAxisMode = normalizeBitrateAxisMaxMode(
+                    bitrateAxisMaxBySession.get(String(activeSession.session_id)) || activeSession.ui_bitrate_axis_max || 'auto'
+                );
+                activeSession = {
+                    ...activeSession,
+                    ui_bitrate_axis_max: savedAxisMode
+                };
+            }
+            if (activeSession && existingCard && String(existingCard.dataset.sessionId || '') === sessionKey) {
+                // Check if manifest_variants just became available - need full re-render for presets
+                const hasVariants = Array.isArray(activeSession.manifest_variants) && activeSession.manifest_variants.length > 0;
+                let hadPresets = false;
+                const presetsRaw = existingCard.dataset.shapingPresets || '';
+                if (presetsRaw) {
+                    try {
+                        const decoded = JSON.parse(decodeURIComponent(presetsRaw));
+                        hadPresets = Array.isArray(decoded) && decoded.length > 0;
+                    } catch (err) {
+                        hadPresets = presetsRaw !== 'W10%3D' && presetsRaw !== '%5B%5D';
+                    }
+                }
+                if (hasVariants && !hadPresets) {
+                    // Fall through to full re-render below
+                } else {
+                    updateTabsAndGroupInfo(container, sessions, activeSession);
+                    updateSessionDetailFields(existingCard, activeSession);
+                    const shouldSync = shouldSyncControls(sessionKey, activeSession);
+                    if (shouldSync) {
+                        syncServerFaultControls(existingCard, activeSession);
+                        syncNetworkShapingControls(existingCard, activeSession);
+                        syncContentControls(existingCard, activeSession);
+                    }
+                    syncServerFaultData(existingCard, activeSession);
+                    updateSessionDetailData(existingCard, activeSession);
+                    updateThroughputSlider(existingCard, activeSession);
+                    mountPlayerCharacterizationForCard(existingCard, activeSession);
+                    pushBandwidthSamplesForAllSessions();
+                    return;
+                }
+            }
+            const activeTab = existingCard?.querySelector('.tab-button.active')?.dataset?.tab || '';
+            // Replay viewer always has exactly one session, so the tab strip
+            // and the group-info chip are pure noise — skip both.
+            const isReplay = document.body.classList.contains('replay-mode');
+            const tabsHtml = isReplay ? '' : renderSessionTabs(sessions);
+            const groupHtml = (isReplay || !activeSession) ? '' : renderGroupInfo(activeSession, sessions);
+            container.innerHTML = tabsHtml + (activeSession ?
+                groupHtml +
+                TestingSessionUI.renderSessionCard(activeSession, {
+                    hideTitle: true,
+                    hideHeader: isReplay,
+                    showPortItem: true,
+                    showBufferDepthChart: true,
+                    developerMode: isDeveloperMode,
+                    sectionDefaults: collapseDefaults
+                }) : '');
+            if (activeSession) {
+                const restoredCard = container.querySelector('.session-card');
+                if (restoredCard) {
+                    applyActiveFaultTab(restoredCard, activeTab);
+                    TestingSessionUI.applyCollapsibleState(restoredCard);
+                    updateTemplateModeUi(restoredCard);
+                    updateAllStepRiskUi(restoredCard);
+                    TestingSessionUI.updateTransportModeUi(restoredCard);
+                    updateSessionDetailData(restoredCard, activeSession);
+                    updateThroughputSlider(restoredCard, activeSession);
+                    mountPlayerCharacterizationForCard(restoredCard, activeSession);
+                }
+                pushBandwidthSamplesForAllSessions();
+            }
+        }
+
+        let compareMode = false;
+
+        const SESSION_COLORS = [
+            { main: '#2563eb', light: '#93c5fd' },  // blue
+            { main: '#ea580c', light: '#fdba74' },  // orange
+            { main: '#16a34a', light: '#86efac' },  // green
+            { main: '#9333ea', light: '#c4b5fd' },  // purple
+            { main: '#dc2626', light: '#fca5a5' },  // red
+            { main: '#0891b2', light: '#67e8f9' },  // cyan
+        ];
+
+        function getGroupSessionIds(session, allSessions) {
+            if (!session || !session.group_id) return [session?.session_id].filter(Boolean);
+            return allSessions
+                .filter(s => s.group_id === session.group_id)
+                .map(s => s.session_id);
+        }
+
+        function sessionColorIndex(sessionId, groupIds) {
+            const idx = groupIds.indexOf(sessionId);
+            return idx >= 0 ? idx % SESSION_COLORS.length : 0;
+        }
+
+        function renderGroupInfo(session, allSessions) {
+            if (!session.group_id) return '';
+            const groupMembers = allSessions.filter(s => s.group_id === session.group_id && s.session_id !== session.session_id);
+            const memberLabels = groupMembers.length > 0
+                ? groupMembers.map(s => {
+                    const portValue = s.x_forwarded_port_external || s.x_forwarded_port || '';
+                    const portSuffix = portValue ? ` (Port ${portValue})` : '';
+                    return `Session ${s.session_id}${portSuffix}`;
+                }).join(', ')
+                : 'no other members';
+            const compareChecked = compareMode ? 'checked' : '';
+            const showCompare = groupMembers.length > 0;
+            return `
+                <div class="group-info">
+                    🔗 Grouped with: ${memberLabels}
+                    ${showCompare ? `<label style="margin-left:12px;cursor:pointer;">
+                        <input type="checkbox" id="compareModeToggle" ${compareChecked}> Compare Charts
+                    </label>` : ''}
+                    <button class="unlink-btn" data-session-id="${session.session_id}" data-group-id="${session.group_id}">Ungroup</button>
+                </div>
+            `;
+        }
+
+        function getCompareGroupIds() {
+            if (!compareMode || !activeSessionId) return [];
+            const session = sessionsById.get(activeSessionId);
+            if (!session?.group_id) return [];
+            const allSessions = Array.from(sessionsById.values());
+            const ids = getGroupSessionIds(session, allSessions);
+            return ids.length >= 2 ? ids : [];
+        }
+
+        function bandwidthSeriesKey(label) {
+            return String(label || '').replace(/\s*\(V\d+\)$/, '');
+        }
+
+
+
+        function buildVariantLadder(variants) {
+            if (!Array.isArray(variants) || !variants.length) return [];
+            const ladder = variants
+                .map((variant) => Number(variant?.bandwidth || 0))
+                .filter((bandwidth) => Number.isFinite(bandwidth) && bandwidth > 0)
+                .map((bandwidth) => Math.round((bandwidth / 1000000) * 1000) / 1000)
+                .filter((value, index, array) => array.indexOf(value) === index)
+                .sort((a, b) => a - b);
+            return ladder.map((mbps, index) => ({
+                vx: `V${index + 1}`,
+                mbps
+            }));
+        }
+
+        function parseBandwidthChartEventType(rawEventType) {
+            const eventType = String(rawEventType || '').trim().toLowerCase();
+            if (!eventType) return null;
+            if (eventType === 'stall_start') return 'STALL';
+            if (eventType === 'frozen') return 'FROZEN';
+            if (eventType === 'segment_stall') return 'SEGMENT_STALL';
+            if (eventType === 'error') return 'ERROR';
+            if (eventType === 'restart') return 'RESTART';
+            if (eventType === 'playing') return 'PLAYING';
+            if (eventType === 'buffering_start') return 'BUFFERING';
+            if (eventType === 'video_first_frame') return 'FIRST_FRAME';
+            if (eventType === 'video_start_time') return 'START_TIME';
+            if (eventType === 'rate_shift_up') return 'SHIFT_UP';
+            if (eventType === 'rate_shift_down') return 'SHIFT_DOWN';
+            if (eventType === 'timejump') return 'TIMEJUMP';
+            // 911 / user-flagged moment from the iOS / iPadOS player.
+            // Lives on the CONTROL lane since it's a human-driven
+            // marker, not a player-observed effect.
+            if (eventType === 'user_marked') return 'USER_MARKED';
+            return null;
+        }
+
+        function getBandwidthChartEventTimestampMs(session, fallbackMs) {
+            const candidates = [
+                session?.player_metrics_last_event_at,
+                session?.player_metrics_event_time,
+                session?.control_revision
+            ];
+            for (const candidate of candidates) {
+                const parsed = Date.parse(String(candidate || ''));
+                if (Number.isFinite(parsed) && parsed > 0) {
+                    return parsed;
+                }
+            }
+            return fallbackMs;
+        }
+
+        function formatBitrateChartAbsoluteTick(windowStartMs, offsetSeconds) {
+            const ts = Number(windowStartMs) + (Number(offsetSeconds) * 1000);
+            if (!Number.isFinite(ts)) return '';
+            return new Date(ts).toLocaleTimeString([], {
+                hour12: false,
+                hour: '2-digit',
+                minute: '2-digit',
+                second: '2-digit'
+            });
+        }
+
+        function formatBitrateChartRange(windowStartMs, windowEndMs) {
+            const start = formatBitrateChartAbsoluteTick(windowStartMs, 0);
+            const end = formatBitrateChartAbsoluteTick(windowStartMs, (Number(windowEndMs) - Number(windowStartMs)) / 1000);
+            if (!start || !end) return 'Window: —';
+            return `Window: ${start} → ${end}`;
+        }
+
+        // In live (not paused) mode, intercept Alt+wheel and apply a custom
+        // zoom anchored at the right edge (live point), ignoring mouse position.
+        // In paused mode we let the plugin do its normal mouse-centered zoom.
+        //
+        // One document-level non-passive wheel listener handles every
+        // bandwidth/events/buffer/fps chart on the page. Per-canvas
+        // listeners would fire a Chrome "non-passive scroll-blocking
+        // wheel listener" violation per session × per chart; the
+        // single delegated listener is one warning instead of N×4.
+        let chartLiveWheelInstalled = false;
+        function ensureChartLiveWheelAnchor() {
+            if (chartLiveWheelInstalled) return;
+            chartLiveWheelInstalled = true;
+            const canvasClassToMap = {
+                'bandwidth-chart': bandwidthCharts,
+                'events-chart': eventsCharts,
+                'buffer-depth-chart': bufferDepthCharts,
+                'video-fps-chart': videoFpsCharts
+            };
+            document.addEventListener('wheel', (event) => {
+                if (!event.altKey) return;
+                const canvas = event.target && event.target.closest && event.target.closest('canvas');
+                if (!canvas) return;
+                let chartMap = null;
+                for (const cls in canvasClassToMap) {
+                    if (canvas.classList.contains(cls)) { chartMap = canvasClassToMap[cls]; break; }
+                }
+                if (!chartMap) return;
+                const card = canvas.closest('.session-card');
+                const sessionId = card ? card.dataset.sessionId : null;
+                if (!sessionId) return;
+                const chartRef = chartMap.get(String(sessionId));
+                if (!chartRef) return;
+                if (isChartPaused(String(sessionId))) return;
+                event.preventDefault();
+                event.stopPropagation();
+                const xScale = chartRef.scales && chartRef.scales.x;
+                if (!xScale) return;
+                const currentMin = Number(xScale.min);
+                const currentMax = Number(xScale.max);
+                if (!Number.isFinite(currentMin) || !Number.isFinite(currentMax)) return;
+                const span = currentMax - currentMin;
+                const factor = event.deltaY < 0 ? 0.9 : 1 / 0.9;
+                const newSpan = Math.max(2, Math.min(600, span * factor));
+                const nextMax = 600;
+                const nextMin = Math.max(0, nextMax - newSpan);
+                if (typeof chartRef.zoomScale === 'function') {
+                    chartRef.zoomScale('x', { min: nextMin, max: nextMax }, 'none');
+                } else if (chartRef.options && chartRef.options.scales && chartRef.options.scales.x) {
+                    chartRef.options.scales.x.min = nextMin;
+                    chartRef.options.scales.x.max = nextMax;
+                    chartRef.update('none');
+                }
+                syncChartViewportAcrossSession(String(sessionId), chartRef);
+            }, { capture: true, passive: false });
+        }
+
+        // vis-timeline counterpart to installLiveWheelAnchor: in live mode
+        // (not paused) Alt+wheel must zoom anchored at the right edge ("now")
+        // independent of mouse position, matching the Chart.js charts. In
+        // paused mode we let vis-timeline's own zoom plugin handle the
+        // wheel as mouse-centered zoom.
+        //
+        // One document-level non-passive wheel listener handles every
+        // events-timeline on the page — much cheaper than attaching a
+        // listener per session (which Chrome flags as a scroll-blocking
+        // perf hit).
+        let visTimelineLiveWheelInstalled = false;
+        function ensureVisTimelineLiveWheelAnchor() {
+            if (visTimelineLiveWheelInstalled) return;
+            visTimelineLiveWheelInstalled = true;
+            const ZOOM_MIN_MS = 1000;
+            const ZOOM_MAX_MS = 6 * 60 * 60 * 1000;
+            document.addEventListener('wheel', (event) => {
+                if (!event.altKey) return;
+                const container = event.target && event.target.closest && event.target.closest('.events-timeline');
+                if (!container) return;
+                const card = container.closest('.session-card');
+                const sessionId = card ? card.dataset.sessionId : null;
+                if (!sessionId) return;
+                const timeline = eventsTimelines.get(String(sessionId));
+                if (!timeline) return;
+                if (isChartPaused(String(sessionId))) return;
+                event.preventDefault();
+                event.stopPropagation();
+                const win = timeline.getWindow();
+                const span = win.end.getTime() - win.start.getTime();
+                if (!Number.isFinite(span) || span <= 0) return;
+                const factor = event.deltaY < 0 ? 0.9 : 1 / 0.9;
+                const newSpan = Math.max(ZOOM_MIN_MS, Math.min(ZOOM_MAX_MS, span * factor));
+                const nowMs = Date.now();
+                timeline.setWindow(
+                    new Date(nowMs - newSpan),
+                    new Date(nowMs),
+                    { animation: false }
+                );
+                syncChartViewportAcrossSession(String(sessionId), timeline);
+            }, { capture: true, passive: false });
+        }
+
+        function pinBitrateChartToLiveEdge(chartRef) {
+            const xScale = chartRef?.scales?.x;
+            if (!xScale) return;
+            const domainMin = 0;
+            const domainMax = 600;
+            const currentMin = Number(xScale.min);
+            const currentMax = Number(xScale.max);
+            if (!Number.isFinite(currentMin) || !Number.isFinite(currentMax)) return;
+            const span = Math.max(2, Math.min(domainMax - domainMin, currentMax - currentMin));
+            const nextMax = domainMax;
+            const nextMin = Math.max(domainMin, nextMax - span);
+            if (typeof chartRef.zoomScale === 'function') {
+                chartRef.zoomScale('x', { min: nextMin, max: nextMax }, 'none');
+            } else if (chartRef.options?.scales?.x) {
+                chartRef.options.scales.x.min = nextMin;
+                chartRef.options.scales.x.max = nextMax;
+            }
+        }
+
+        function normalizeChartViewport(minValue, maxValue) {
+            const domainMin = 0;
+            const domainMax = 600;
+            let min = Number(minValue);
+            let max = Number(maxValue);
+            if (!Number.isFinite(min) || !Number.isFinite(max)) return null;
+            if (max < min) { const tmp = min; min = max; max = tmp; }
+            let span = max - min;
+            if (!Number.isFinite(span) || span <= 0) return { min: domainMin, max: domainMax };
+            span = Math.max(2, Math.min(domainMax - domainMin, span));
+            max = Math.min(domainMax, max);
+            min = Math.max(domainMin, max - span);
+            max = min + span;
+            if (max > domainMax) { max = domainMax; min = domainMax - span; }
+            if (min < domainMin) { min = domainMin; max = domainMin + span; }
+            return { min, max };
+        }
+
+        function readChartViewport(chartRef) {
+            if (!chartRef) return null;
+            // vis-timeline branch: marker `$isVisTimeline` set when we
+            // construct it. Window is Date objects; convert to the
+            // seconds-from-windowStart convention the Chart.js charts use.
+            if (chartRef.$isVisTimeline && typeof chartRef.getWindow === 'function') {
+                const win = chartRef.getWindow();
+                const startMs = Number(chartRef.$windowStartMs) || 0;
+                if (!startMs) return null;
+                const min = (win.start.getTime() - startMs) / 1000;
+                const max = (win.end.getTime() - startMs) / 1000;
+                return normalizeChartViewport(min, max);
+            }
+            const xScale = chartRef?.scales?.x;
+            if (!xScale) return null;
+            return normalizeChartViewport(xScale.min, xScale.max);
+        }
+
+        function applyChartViewport(chartRef, viewport) {
+            if (!chartRef || !viewport) return;
+            if (chartRef.$isVisTimeline && typeof chartRef.setWindow === 'function') {
+                const startMs = Number(chartRef.$windowStartMs) || 0;
+                if (!startMs) return;
+                chartRef.setWindow(
+                    new Date(startMs + viewport.min * 1000),
+                    new Date(startMs + viewport.max * 1000),
+                    { animation: false }
+                );
+                return;
+            }
+            if (typeof chartRef.zoomScale === 'function') {
+                chartRef.zoomScale('x', { min: viewport.min, max: viewport.max }, 'none');
+            } else if (chartRef.options?.scales?.x) {
+                chartRef.options.scales.x.min = viewport.min;
+                chartRef.options.scales.x.max = viewport.max;
+            }
+        }
+
+        function applyStoredChartViewport(sessionId, chartRef) {
+            const viewport = chartViewportBySession.get(String(sessionId || ''));
+            if (!viewport) return false;
+            applyChartViewport(chartRef, viewport);
+            updateResetZoomButtonState(sessionId);
+            return true;
+        }
+
+        function updateResetZoomButtonState(sessionId) {
+            const key = String(sessionId || '');
+            const card = document.querySelector(`.session-card[data-session-id="${key}"]`);
+            if (!card) return;
+            const zoomed = chartViewportBySession.has(key);
+            for (const btn of card.querySelectorAll('button[data-action="reset-bitrate-zoom"]')) {
+                btn.classList.toggle('zoom-active', zoomed);
+            }
+        }
+
+        function getChartsForSession(sessionId) {
+            const key = String(sessionId || '');
+            return [
+                eventsCharts.get(key),
+                bandwidthCharts.get(key),
+                bufferDepthCharts.get(key),
+                videoFpsCharts.get(key),
+                eventsTimelines.get(key)
+            ].filter((chartRef) => !!chartRef);
+        }
+
+        function isDefaultChartViewport(viewport) {
+            return !!viewport && viewport.min <= 0 && viewport.max >= 600;
+        }
+
+        function syncChartViewportAcrossSession(sessionId, sourceChart) {
+            const key = String(sessionId || '');
+            const viewport = readChartViewport(sourceChart);
+            if (!viewport) return;
+            if (isDefaultChartViewport(viewport)) {
+                chartViewportBySession.delete(key);
+            } else {
+                chartViewportBySession.set(key, viewport);
+            }
+            for (const chartRef of getChartsForSession(key)) {
+                if (!chartRef || chartRef === sourceChart) continue;
+                applyChartViewport(chartRef, viewport);
+                if (chartRef.$isVisTimeline) continue;
+                if (typeof chartRef.zoomScale !== 'function' && typeof chartRef.update === 'function') {
+                    chartRef.update('none');
+                }
+            }
+            updateResetZoomButtonState(key);
+            // Bind the network log's visible time range to the bitrate
+            // chart's viewport. Chart x is seconds within a 10-min window;
+            // x=0 is windowStart (maxTs − 10min) and x=600 is maxTs (most
+            // recent sample). Convert to wall-clock ms and tell the
+            // network log to filter. On reset (default viewport), release
+            // the override so the waterfall returns to follow-latest.
+            try {
+                const TUI = window.TestingSessionUI;
+                if (!TUI) return;
+                if (isDefaultChartViewport(viewport)) {
+                    if (typeof TUI.clearNetworkLogTimeRange === 'function') {
+                        TUI.clearNetworkLogTimeRange(key);
+                    }
+                    return;
+                }
+                const series = bandwidthHistory.get(key);
+                if (series && series.length && typeof TUI.setNetworkLogTimeRange === 'function') {
+                    const maxTs = series[series.length - 1].ts;
+                    // Match the chart's actual window (per-session override
+                    // in chartWindowMsBySession; default 10 min in live)
+                    // rather than hard-coding 10 min — otherwise pan/zoom
+                    // on a chart with an expanded window would map the
+                    // viewport to a stale 10-min reference range.
+                    const windowMs = getChartWindowMs(key);
+                    const windowStartMs = maxTs - windowMs;
+                    const fromMs = windowStartMs + viewport.min * 1000;
+                    const toMs   = windowStartMs + viewport.max * 1000;
+                    TUI.setNetworkLogTimeRange(key, fromMs, toMs);
+                }
+            } catch (err) {
+                console.warn('network log range sync failed:', err);
+            }
+        }
+
+        function buildUnifiedChartZoomOptions(sessionId) {
+            const key = String(sessionId || '');
+            return {
+                pan: {
+                    enabled: true,
+                    mode: 'x',
+                    threshold: 2,
+                    onPanComplete: ({ chart: chartRef }) => {
+                        syncChartViewportAcrossSession(key, chartRef);
+                    }
+                },
+                limits: {
+                    x: { min: 0, max: 600, minRange: 2 }
+                },
+                zoom: {
+                    wheel: { enabled: true, modifierKey: 'alt' },
+                    drag: {
+                        enabled: true,
+                        modifierKey: 'alt',
+                        borderColor: '#1d4ed8',
+                        borderWidth: 1,
+                        backgroundColor: 'rgba(37, 99, 235, 0.12)'
+                    },
+                    mode: 'x',
+                    onZoomComplete: ({ chart: chartRef }) => {
+                        syncChartViewportAcrossSession(key, chartRef);
+                    }
+                }
+            };
+        }
+
+        let rightPanDragState = null;
+        let rightPanListenersInstalled = false;
+
+        function installRightMousePanHandlers(sessionId, chartRef) {
+            const canvas = chartRef?.canvas;
+            if (!canvas || canvas.dataset.rightPanBound === '1') return;
+            canvas.dataset.rightPanBound = '1';
+            const key = String(sessionId || '');
+            canvas.addEventListener('contextmenu', (event) => { event.preventDefault(); });
+            canvas.addEventListener('mousedown', (event) => {
+                if (event.button !== 2) return;
+                event.preventDefault();
+                const viewport = readChartViewport(chartRef) || { min: 0, max: 600 };
+                rightPanDragState = { sessionId: key, sourceChart: chartRef, startClientX: event.clientX, startViewport: viewport };
+            });
+            if (rightPanListenersInstalled) return;
+            rightPanListenersInstalled = true;
+            window.addEventListener('mousemove', (event) => {
+                if (!rightPanDragState) return;
+                const sourceChart = rightPanDragState.sourceChart;
+                const chartArea = sourceChart?.chartArea;
+                if (!sourceChart || !chartArea) return;
+                const widthPx = Math.max(1, chartArea.right - chartArea.left);
+                const span = rightPanDragState.startViewport.max - rightPanDragState.startViewport.min;
+                if (!Number.isFinite(span) || span <= 0) return;
+                const deltaPx = event.clientX - rightPanDragState.startClientX;
+                const deltaValue = (deltaPx / widthPx) * span;
+                const viewport = normalizeChartViewport(
+                    rightPanDragState.startViewport.min - deltaValue,
+                    rightPanDragState.startViewport.max - deltaValue
+                );
+                if (!viewport) return;
+                chartViewportBySession.set(rightPanDragState.sessionId, viewport);
+                for (const chart of getChartsForSession(rightPanDragState.sessionId)) {
+                    applyChartViewport(chart, viewport);
+                    if (chart.$isVisTimeline) continue;
+                    if (typeof chart.zoomScale !== 'function' && typeof chart.update === 'function') {
+                        chart.update('none');
+                    }
+                }
+                updateResetZoomButtonState(rightPanDragState.sessionId);
+            });
+            window.addEventListener('mouseup', (event) => {
+                if (!rightPanDragState) return;
+                if (event.button === 2) { rightPanDragState = null; }
+            });
+            window.addEventListener('blur', () => { rightPanDragState = null; });
+        }
+
+        function isChartPaused(sessionId) {
+            return chartPausedBySession.get(String(sessionId || '')) === true;
+        }
+
+        function updatePauseButtonAndOverlays(sessionId) {
+            const key = String(sessionId || '');
+            const paused = isChartPaused(key);
+            const card = document.querySelector(`.session-card[data-session-id="${key}"]`);
+            if (!card) return;
+            for (const btn of card.querySelectorAll('button[data-action="pause-bitrate-chart"]')) {
+                if (paused) {
+                    btn.textContent = 'Live';
+                    btn.classList.add('chart-live');
+                } else {
+                    btn.textContent = '⏸ Pause';
+                    btn.classList.remove('chart-live');
+                }
+            }
+            for (const wrap of card.querySelectorAll('.chart-wrap')) {
+                let badge = wrap.querySelector('.chart-paused-badge');
+                if (!badge) {
+                    badge = document.createElement('div');
+                    badge.className = 'chart-paused-badge';
+                    badge.textContent = 'PAUSED';
+                    wrap.appendChild(badge);
+                }
+                wrap.classList.toggle('chart-paused', paused);
+            }
+        }
+
+        function toggleChartPause(sessionId) {
+            const key = String(sessionId || '');
+            const wasPaused = isChartPaused(key);
+            chartPausedBySession.set(key, !wasPaused);
+            updatePauseButtonAndOverlays(key);
+            if (wasPaused) { renderBandwidthChart(key); }
+        }
+
+        function installChartClickPauseHandler(sessionId, chartRef) {
+            const canvas = chartRef?.canvas;
+            if (!canvas || canvas.dataset.pauseHandlerBound === '1') return;
+            canvas.dataset.pauseHandlerBound = '1';
+            let startX = 0;
+            let startY = 0;
+            canvas.addEventListener('mousedown', (e) => {
+                if (e.button !== 0) return;
+                startX = e.clientX;
+                startY = e.clientY;
+            });
+            canvas.addEventListener('click', (e) => {
+                if (e.altKey) return;
+                if (Math.abs(e.clientX - startX) > 5 || Math.abs(e.clientY - startY) > 5) return;
+                const chartArea = chartRef.chartArea;
+                if (chartArea) {
+                    const rect = canvas.getBoundingClientRect();
+                    const cx = e.clientX - rect.left;
+                    const cy = e.clientY - rect.top;
+                    if (cx < chartArea.left || cx > chartArea.right || cy < chartArea.top || cy > chartArea.bottom) return;
+                }
+                toggleChartPause(sessionId);
+            });
+        }
+
+        // Stretch a chart's x-axis to match a target window in ms. The
+        // chart's x-coordinates are seconds-since-windowStart; setting
+        // max to windowMs/1000 gives full visibility. Also nudges the
+        // zoom-plugin's limit so reset-zoom snaps to the new extent.
+        function applyChartXMax(chart, windowMs) {
+            if (!chart || !chart.options || !chart.options.scales || !chart.options.scales.x) return;
+            const sec = Math.max(1, Math.round(windowMs / 1000));
+            chart.options.scales.x.max = sec;
+            const zoom = chart.options.plugins && chart.options.plugins.zoom;
+            if (zoom && zoom.limits && zoom.limits.x) {
+                zoom.limits.x.max = sec;
+            }
+        }
+
+        function pushBandwidthSample(session) {
+            const now = Date.now();
+            const windowMs = getChartWindowMs(session.session_id);
+            const shaperRate = Number.isFinite(Number(session.mbps_shaper_rate)) ? Number(session.mbps_shaper_rate) : null;
+            const shaperAvg = Number.isFinite(Number(session.mbps_shaper_avg)) ? Number(session.mbps_shaper_avg) : null;
+            const transferRate = session.mbps_transfer_rate != null && Number.isFinite(Number(session.mbps_transfer_rate)) ? Number(session.mbps_transfer_rate) : null;
+            const transferComplete = session.mbps_transfer_complete != null && Number.isFinite(Number(session.mbps_transfer_complete)) ? Number(session.mbps_transfer_complete) : null;
+            const metricsAtMs = session.player_metrics_event_time
+                ? Date.parse(session.player_metrics_event_time) || null
+                : null;
+            const bufferDepth = Number.isFinite(Number(session.player_metrics_buffer_depth_s))
+                ? Number(session.player_metrics_buffer_depth_s)
+                : null;
+            // Wall-clock offset = (clock authority) − encoded PDT (epoch ms).
+            // Preference order:
+            //   1. server_received_at_ms − playhead_wallclock_ms (no client skew)
+            //   2. player_metrics_true_offset_s (client computed; biased by skew)
+            //   3. Date.now() − playhead_wallclock_ms (browser's clock as authority)
+            let wallClockOffset = null;
+            const reportedPdtMs = Number(session.player_metrics_playhead_wallclock_ms);
+            const serverReceivedAtMs = Number(session.server_received_at_ms);
+            const reportedTrueOff = Number(session.player_metrics_true_offset_s);
+            if (Number.isFinite(reportedPdtMs) && reportedPdtMs > 0
+                && Number.isFinite(serverReceivedAtMs) && serverReceivedAtMs > 0) {
+                wallClockOffset = Math.round((serverReceivedAtMs - reportedPdtMs) / 10) / 100;
+            } else if (Number.isFinite(reportedTrueOff)) {
+                wallClockOffset = reportedTrueOff;
+            } else if (Number.isFinite(reportedPdtMs) && reportedPdtMs > 0) {
+                wallClockOffset = Math.round((Date.now() - reportedPdtMs) / 10) / 100;
+            }
+            const measuredVideoBitrate = Number(session.player_metrics_video_bitrate_mbps);
+            const inferredVideoBitrate = inferSessionNativeRenditionMbps(session);
+            const currentRendition = (Number.isFinite(measuredVideoBitrate) && measuredVideoBitrate > 0)
+                ? measuredVideoBitrate
+                : (Number.isFinite(inferredVideoBitrate) ? inferredVideoBitrate : null);
+            // Renamed fields (issue #146):
+            //  - player_metrics_avg_network_bitrate_mbps: long-window AVG
+            //    (iOS observedBitrate; Android DefaultBandwidthMeter)
+            //  - player_metrics_network_bitrate_mbps: short-window INSTANT
+            //    (iOS LocalHTTPProxy wire bytes; null on clients without
+            //    per-request wire visibility)
+            const playerEstimate = Number.isFinite(Number(session.player_metrics_avg_network_bitrate_mbps))
+                ? Number(session.player_metrics_avg_network_bitrate_mbps)
+                : null;
+            const rawPlayerWireBitrate = session.player_metrics_network_bitrate_mbps;
+            const playerWireBitrate = (rawPlayerWireBitrate === null || rawPlayerWireBitrate === undefined
+                || !Number.isFinite(Number(rawPlayerWireBitrate)))
+                ? null
+                : Number(rawPlayerWireBitrate);
+            const serverRendition = Number.isFinite(Number(session.server_video_rendition_mbps))
+                ? Number(session.server_video_rendition_mbps)
+                : null;
+            const framesDisplayed = Number.isFinite(Number(session.player_metrics_frames_displayed))
+                ? Number(session.player_metrics_frames_displayed)
+                : null;
+            const framesDropped = Number.isFinite(Number(session.player_metrics_dropped_frames))
+                ? Number(session.player_metrics_dropped_frames)
+                : null;
+            const variantLadder = buildVariantLadder(session.manifest_variants);
+            const patternSteps = Array.isArray(session.nftables_pattern_steps) ? session.nftables_pattern_steps : [];
+            const patternStepIndex = Number(session.nftables_pattern_step_runtime || session.nftables_pattern_step || 0);
+            const patternEnabled = session.nftables_pattern_enabled === true
+                || session.nftables_pattern_enabled === 1
+                || session.nftables_pattern_enabled === 'true';
+            const runtimeTarget = Number(session.nftables_pattern_rate_runtime_mbps);
+            const bandwidthTarget = Number(session.nftables_bandwidth_mbps);
+            const key = session.session_id;
+            if (!key) return;
+
+            const numericLoopCount = Number(session.player_metrics_loop_count_player);
+            if (Number.isFinite(numericLoopCount) && numericLoopCount >= 0) {
+                const loopCount = Math.max(0, Math.round(numericLoopCount));
+                const prevLoopCount = lastRecordedLoopCountBySession.get(String(key));
+                if (Number.isFinite(prevLoopCount) && loopCount > prevLoopCount) {
+                    const stamp = `${String(key)}|player|${loopCount}`;
+                    if (lastRecordedLoopEventStampBySession.get(String(key)) !== stamp) {
+                        const eventSeries = bandwidthEventHistory.get(key) || [];
+                        const loopEventAtMs = getBandwidthChartEventTimestampMs(session, now);
+                        eventSeries.push({ ts: loopEventAtMs, type: 'LOOP_PLAYER' });
+                        const eventCutoff = now - windowMs;
+                        bandwidthEventHistory.set(key, eventSeries.filter((event) => Number(event.ts) >= eventCutoff));
+                        lastRecordedLoopEventStampBySession.set(String(key), stamp);
+                    }
+                }
+                lastRecordedLoopCountBySession.set(String(key), loopCount);
+            }
+
+            const numericServerLoopCount = Number(session.loop_count_server);
+            if (Number.isFinite(numericServerLoopCount) && numericServerLoopCount >= 0) {
+                const serverLoopCount = Math.max(0, Math.round(numericServerLoopCount));
+                const prevServerLoopCount = lastRecordedServerLoopCountBySession.get(String(key));
+                if (Number.isFinite(prevServerLoopCount) && serverLoopCount > prevServerLoopCount) {
+                    const stamp = `${String(key)}|server|${serverLoopCount}`;
+                    if (lastRecordedServerLoopEventStampBySession.get(String(key)) !== stamp) {
+                        const eventSeries = bandwidthEventHistory.get(key) || [];
+                        const loopEventAtMs = getBandwidthChartEventTimestampMs(session, now);
+                        eventSeries.push({ ts: loopEventAtMs, type: 'LOOP_SERVER' });
+                        const eventCutoff = now - windowMs;
+                        bandwidthEventHistory.set(key, eventSeries.filter((event) => Number(event.ts) >= eventCutoff));
+                        lastRecordedServerLoopEventStampBySession.set(String(key), stamp);
+                    }
+                }
+                lastRecordedServerLoopCountBySession.set(String(key), serverLoopCount);
+            }
+
+            // PLAYBACK_START event on play_id rollover (issue #280).
+            // The client mints a fresh play_id at every loadStream
+            // boundary; a change here is the high-level "new playback
+            // episode" signal — distinct from the per-event lane that
+            // tracks individual transitions like SHIFT_UP/STALL. Fires
+            // on the FIRST observation too (prevPlayId === undefined),
+            // so opening the page mid-playback still gets a marker.
+            const newPlayId = String(session.play_id || '').trim();
+            if (newPlayId) {
+                const prevPlayId = lastRecordedPlayIdBySession.get(String(key));
+                if (prevPlayId !== newPlayId) {
+                    const eventSeries = bandwidthEventHistory.get(key) || [];
+                    eventSeries.push({
+                        ts: now,
+                        type: 'PLAYBACK_START',
+                        playId: newPlayId,
+                        prevPlayId: prevPlayId || ''
+                    });
+                    const eventCutoff = now - windowMs;
+                    bandwidthEventHistory.set(key, eventSeries.filter((event) => Number(event.ts) >= eventCutoff));
+                }
+                lastRecordedPlayIdBySession.set(String(key), newPlayId);
+            }
+
+            const eventType = parseBandwidthChartEventType(session.player_metrics_last_event || session.player_metrics_trigger_type);
+            if (eventType) {
+                const eventAtMs = getBandwidthChartEventTimestampMs(session, now);
+                const eventStamp = `${eventType}|${session.player_metrics_last_event_at || session.player_metrics_event_time || eventAtMs}`;
+                const lastStamp = lastRecordedPlayerEventBySession.get(String(key));
+                if (eventStamp !== lastStamp) {
+                    const eventSeries = bandwidthEventHistory.get(key) || [];
+                    eventSeries.push({ ts: eventAtMs, type: eventType });
+                    const eventCutoff = now - windowMs;
+                    bandwidthEventHistory.set(key, eventSeries.filter((event) => Number(event.ts) >= eventCutoff));
+                    lastRecordedPlayerEventBySession.set(String(key), eventStamp);
+                }
+            }
+
+            // PLAYERSTATE lane: sample player_metrics_state every poll
+            // and let the renderer coalesce same-label runs. The
+            // AVFoundation reasonForWaitingToPlay
+            // (player_metrics_waiting_reason) is part of the rendered
+            // label so reason transitions within a state (e.g.
+            // toMinimizeStalls vs evaluatingBufferingRate) split into
+            // distinct ranges.
+            const stateValue = String(session.player_metrics_state || '').trim();
+            const waitingReason = String(session.player_metrics_waiting_reason || '').trim();
+            if (stateValue) {
+                const eventSeries = bandwidthEventHistory.get(key) || [];
+                eventSeries.push({ ts: now, type: 'PLAYERSTATE', state: stateValue, reason: waitingReason });
+                const eventCutoff = now - windowMs;
+                bandwidthEventHistory.set(key, eventSeries.filter((event) => Number(event.ts) >= eventCutoff));
+            }
+
+            // VARIANT lane: bitrate is the leading-edge fetch-time
+            // signal (accessLog updates when a segment download
+            // completes). Resolution is the lagging render-time signal
+            // (presentation-size updates when the new frame is shown).
+            // To avoid phantom (new-resolution, old-bitrate) entries
+            // during the shift window, drive resolution from the
+            // manifest BANDWIDTH lookup keyed off the bitrate, falling
+            // back to the player's reported resolution only when no
+            // manifest match exists. The session payload is heartbeat-
+            // style — every poll carries the current values — so push
+            // unconditionally and let the renderer coalesce same-value
+            // runs into single ranges.
+            const variantMbpsRaw = Number(session.player_metrics_video_bitrate_mbps);
+            if (Number.isFinite(variantMbpsRaw) && variantMbpsRaw > 0) {
+                const variantMbps = Math.round(variantMbpsRaw * 10) / 10;
+                const reportedRes = String(session.player_metrics_video_resolution || '').trim();
+                const manifestRes = manifestResolutionForBitrate(session, variantMbps);
+                const variantRes = manifestRes || reportedRes;
+                if (variantRes) {
+                    const eventSeries = bandwidthEventHistory.get(key) || [];
+                    eventSeries.push({ ts: now, type: 'VARIANT', mbps: variantMbps, resolution: variantRes });
+                    const eventCutoff = now - windowMs;
+                    bandwidthEventHistory.set(key, eventSeries.filter((event) => Number(event.ts) >= eventCutoff));
+                }
+            }
+
+            // DISPLAY_RES lane: the player's actually-presented frame
+            // resolution (player_metrics_video_resolution). Distinct
+            // from VARIANT — gap between VARIANT shifting and
+            // DISPLAY_RES shifting is the fetch-to-render lag.
+            const displayRes = String(session.player_metrics_video_resolution || '').trim();
+            if (displayRes) {
+                const eventSeries = bandwidthEventHistory.get(key) || [];
+                eventSeries.push({ ts: now, type: 'DISPLAY_RES', resolution: displayRes });
+                const eventCutoff = now - windowMs;
+                bandwidthEventHistory.set(key, eventSeries.filter((event) => Number(event.ts) >= eventCutoff));
+            }
+
+            // CONTROL lane: emit one event per (field, old → new) any time
+            // a tracked control attribute (failure injection / shaping /
+            // timeouts) changes between snapshots. First snapshot for a
+            // session seeds the memo without emitting events. Skipped on
+            // the very first call so the lane doesn't fire for "0 → 0"
+            // defaults; subsequent diffs are real user actions.
+            const prevControls = lastRecordedControlsBySession.get(String(key));
+            const nextControls = {};
+            const eventSeriesControl = bandwidthEventHistory.get(key) || [];
+            for (const field of CONTROL_FIELDS) {
+                const raw = session[field];
+                const value = raw === undefined || raw === null ? '' : raw;
+                nextControls[field] = value;
+                if (prevControls === undefined) continue;
+                const prev = prevControls[field];
+                if (prev === undefined) continue;
+                if (prev === value) continue;
+                eventSeriesControl.push({
+                    ts: now,
+                    type: 'CONTROL_CHANGE',
+                    field,
+                    oldValue: prev,
+                    newValue: value
+                });
+            }
+            if (eventSeriesControl.length) {
+                const eventCutoff = now - windowMs;
+                bandwidthEventHistory.set(key, eventSeriesControl.filter((event) => Number(event.ts) >= eventCutoff));
+            }
+            lastRecordedControlsBySession.set(String(key), nextControls);
+
+            const series = bandwidthHistory.get(key) || [];
+            const lastLimit = series.length ? Number(series[series.length - 1].target) : NaN;
+            let target = Number.isFinite(bandwidthTarget) ? bandwidthTarget : (Number.isFinite(lastLimit) ? lastLimit : 0);
+            let usedRuntime = false;
+            if (patternEnabled && Number.isFinite(runtimeTarget)) {
+                target = runtimeTarget;
+                usedRuntime = true;
+            }
+            if (!usedRuntime && patternStepIndex > 0 && patternStepIndex <= patternSteps.length) {
+                const activeStepRate = Number(patternSteps[patternStepIndex - 1]?.rate_mbps);
+                if (Number.isFinite(activeStepRate) && activeStepRate >= 0) {
+                    target = activeStepRate;
+                }
+            }
+            series.push({
+                ts: now,
+                shaperRate,
+                shaperAvg,
+                transferRate,
+                transferComplete,
+                metricsAtMs,
+                bufferDepth,
+                wallClockOffset,
+                playerEstimate,
+                playerWireBitrate,
+                currentRendition,
+                serverRendition,
+                framesDisplayed,
+                framesDropped,
+                target,
+                variantLadder
+            });
+            const cutoff = now - windowMs;
+            const filtered = series.filter(point => point.ts >= cutoff);
+            bandwidthHistory.set(key, filtered);
+            if (key === activeSessionId && !chartRenderSuppressedBySession.has(key)) {
+                renderBandwidthChart(key);
+            }
+        }
+
+        function pushBandwidthSamplesForAllSessions() {
+            for (const [sid, session] of sessionsById) {
+                pushBandwidthSample(session);
+            }
+        }
+
+        // Swim-lane events chart (STALL / RESTART / LOOP_PLAYER / LOOP_SERVER).
+        // Shares x-axis with bitrate chart via syncChartViewportAcrossSession.
+        const EVENT_LANES = {
+            'CONTROL':     { y: 7, color: '#7c3aed', label: 'CONTROL' },
+            'VARIANT':     { y: 6, color: '#16a34a', label: 'VARIANT' },
+            'DISPLAY_RES': { y: 5, color: '#0ea5e9', label: 'DISPLAY RES' },
+            'PLAYERSTATE': { y: 4, color: '#6b7280', label: 'PLAYERSTATE' },
+            'PLAYBACK':    { y: 3, color: '#16a34a', label: 'PLAYBACK' },
+            'IMPAIRMENT':  { y: 2, color: '#000000', label: 'IMPAIRMENT' },
+            'LOOP_SERVER': { y: 1, color: '#84cc16', label: 'LOOP SERVER' }
+        };
+        // Subtype → lane mapping. Each event-source string from
+        // parseBandwidthChartEventType resolves to the lane it
+        // appears in. Subtype tooltip labels and per-point colours
+        // live alongside.
+        const EVENT_SUBTYPE_LANE = {
+            'PLAYING': 'PLAYBACK', 'FIRST_FRAME': 'PLAYBACK', 'START_TIME': 'PLAYBACK',
+            'RESTART': 'PLAYBACK', 'TIMEJUMP': 'PLAYBACK', 'PLAYBACK_START': 'PLAYBACK',
+            'SHIFT_UP': 'PLAYBACK', 'SHIFT_DOWN': 'PLAYBACK',
+            'STALL': 'IMPAIRMENT', 'FROZEN': 'IMPAIRMENT',
+            'SEGMENT_STALL': 'IMPAIRMENT', 'ERROR': 'IMPAIRMENT',
+            // BUFFERING events still flow on the wire but have no lane
+            // here — buffering is already visible on the PLAYERSTATE
+            // ribbon and the dedicated lane was redundant. LOOP_PLAYER
+            // is omitted while the player-side loop counter is broken
+            // (always 0); LOOP_SERVER is the only meaningful loop lane.
+            'LOOP_SERVER': 'LOOP_SERVER',
+            // CONTROL_CHANGE — failure injection / shaping / timeout
+            // toggles applied to the session. One event per (field, old →
+            // new) emitted by pushBandwidthSample when a tracked attr
+            // differs between snapshots.
+            'CONTROL_CHANGE': 'CONTROL',
+            // USER_MARKED — operator-pressed 911 button on the iOS /
+            // iPadOS player. Also a human action, so on CONTROL.
+            'USER_MARKED': 'CONTROL'
+        };
+        const EVENT_SUBTYPE_COLOR = {
+            'PLAYING':       '#16a34a',
+            'FIRST_FRAME':   '#14b8a6',
+            'START_TIME':    '#15803d',
+            'RESTART':       '#a855f7',
+            'TIMEJUMP':      '#d97706',
+            'SHIFT_UP':      '#3b82f6',
+            'SHIFT_DOWN':    '#ef4444',
+            'STALL':         '#000000',
+            'FROZEN':        '#4c1d95',
+            'SEGMENT_STALL': '#c2410c',
+            'ERROR':         '#e11d48',
+            'BUFFERING':     '#f59e0b',
+            'PLAYBACK_START':'#0d9488',
+            'USER_MARKED':   '#dc2626'
+        };
+        const EVENT_SUBTYPE_LABEL = {
+            'PLAYING': 'PLAYING', 'FIRST_FRAME': 'FIRST FRAME', 'START_TIME': 'START TIME',
+            'RESTART': 'RESTART', 'TIMEJUMP': 'TIMEJUMP',
+            'SHIFT_UP': 'SHIFT UP', 'SHIFT_DOWN': 'SHIFT DOWN',
+            'STALL': 'STALL', 'FROZEN': 'FROZEN',
+            'SEGMENT_STALL': 'SEGMENT STALL', 'ERROR': 'ERROR',
+            'BUFFERING': 'BUFFERING',
+            'CONTROL_CHANGE': 'CONTROL',
+            'PLAYBACK_START': 'PLAYBACK START',
+            'USER_MARKED': '911 / USER FLAG'
+        };
+        // Per-state colour for the PLAYERSTATE lane. Keys are lowercase
+        // because clients emit a mix of casings ("Playing" on Apple,
+        // "playing" on Android-test/Roku/web) — playerStateColor()
+        // normalises before lookup so all map to the same colour.
+        const PLAYER_STATE_COLOR = {
+            'playing':   '#16a34a', // green
+            'buffering': '#f59e0b', // amber — expected refill (pre-roll, post-seek)
+            'stalled':   '#dc2626', // red — unexpected mid-play rebuffer
+            'paused':    '#9333ea', // purple
+            'idle':      '#6b7280', // gray
+            'ended':     '#1f2937', // near-black
+            'unknown':   '#d1d5db'  // light gray
+        };
+        function playerStateColor(s) {
+            return PLAYER_STATE_COLOR[String(s || '').trim().toLowerCase()] || '#d1d5db';
+        }
+        // Variant colour buckets — lower bitrate = redder, higher = greener.
+        // Drives the colour of segments / dots on the VARIANT swim lane so
+        // an upshift/downshift is visually obvious before reading the label.
+        function variantColor(mbps) {
+            const m = Number(mbps);
+            if (!Number.isFinite(m) || m <= 0) return '#9ca3af';
+            if (m < 1)  return '#dc2626'; // red
+            if (m < 2)  return '#ea580c'; // orange
+            if (m < 4)  return '#f59e0b'; // amber
+            if (m < 8)  return '#84cc16'; // lime
+            if (m < 16) return '#16a34a'; // green
+            return '#10b981';             // emerald
+        }
+        function variantLabel(mbps, resolution) {
+            const m = Number(mbps);
+            const mbpsStr = Number.isFinite(m) && m > 0 ? `${m.toFixed(1)}Mbps` : '';
+            const res = String(resolution || '').trim();
+            if (res && mbpsStr) return `${res}:${mbpsStr}`;
+            return res || mbpsStr || '—';
+        }
+        // Look up the manifest variant whose BANDWIDTH best matches the
+        // bitrate the player just reported. Used to drive VARIANT's
+        // resolution from the bitrate (which leads the
+        // presentation-size update by the segment's decode/render delay)
+        // — eliminates phantom (new-resolution, old-bitrate) lanes.
+        function manifestResolutionForBitrate(session, mbps) {
+            const variants = Array.isArray(session?.manifest_variants) ? session.manifest_variants : [];
+            if (!variants.length) return null;
+            let best = null;
+            let bestDelta = Infinity;
+            for (const v of variants) {
+                const vMbps = Number(v?.bandwidth || 0) / 1_000_000;
+                if (!Number.isFinite(vMbps) || vMbps <= 0) continue;
+                const delta = Math.abs(vMbps - mbps);
+                const tol = Math.max(0.5, vMbps * 0.05);
+                if (delta < tol && delta < bestDelta) {
+                    bestDelta = delta;
+                    best = String(v.resolution || '').trim() || null;
+                }
+            }
+            return best;
+        }
+        // DISPLAY RES lane colour scheme — bucketed by frame height so a
+        // 4K presentation reads as green/emerald and a 360p reads as red.
+        function displayResColor(res) {
+            const m = /(\d+)\s*[xX]\s*(\d+)/.exec(String(res || ''));
+            if (!m) return '#9ca3af';
+            const h = Number(m[2]);
+            if (!Number.isFinite(h) || h <= 0) return '#9ca3af';
+            if (h <= 360)  return '#dc2626';
+            if (h <= 540)  return '#ea580c';
+            if (h <= 720)  return '#f59e0b';
+            if (h <= 1080) return '#84cc16';
+            if (h <= 1440) return '#16a34a';
+            return '#10b981';
+        }
+        let legendHoverIndex = null;
+        let legendHoverChartId = null;
+        let legendHoverMetricKind = null;
+
+        // Maps a bitrate-chart legend label to a canonical metric kind so that
+        // a hover on one session's series can half-highlight the same metric on
+        // other sessions' series (compare mode appends "(Sn)" per session, and
+        // a couple of labels differ from the own-session name, e.g.
+        // "mbps_shaper_avg" vs "Shaper Avg (S2)").
+        function bitrateLegendMetricKind(label) {
+            if (!label) return null;
+            const base = String(label).replace(/\s*\(S[^)]+\)\s*$/, '').trim();
+            switch (base) {
+                case 'Player avg_network_bitrate':
+                    return 'player_est';
+                case 'Player network_bitrate':
+                    return 'player_wire';
+                case 'Player Variant':
+                    return 'player_variant';
+                case 'Server Variant':
+                    return 'server_variant';
+                case 'mbps_shaper_avg':
+                case 'Shaper Avg':
+                    return 'shaper_avg';
+                default:
+                    return null;
+            }
+        }
+
+        const legendHoverCallbacks = {
+            onHover: (event, legendItem, legend) => {
+                legendHoverIndex = legendItem.datasetIndex;
+                legendHoverChartId = legend.chart.id;
+                const ds = legend.chart.data.datasets[legendItem.datasetIndex];
+                legendHoverMetricKind = bitrateLegendMetricKind(ds && ds.label);
+                refreshLegendHoverAll();
+            },
+            onLeave: () => {
+                legendHoverIndex = null;
+                legendHoverChartId = null;
+                legendHoverMetricKind = null;
+                refreshLegendHoverAll();
+            }
+        };
+
+        // Apply primary (+3) and cross-session (+1.5) borderWidth boosts based
+        // on the current hover state, clearing any stale boost on other datasets.
+        function applyLegendHover(chart) {
+            if (!chart || !chart.data || !Array.isArray(chart.data.datasets)) return;
+            chart.data.datasets.forEach((ds, idx) => {
+                const isPrimary = legendHoverChartId === chart.id
+                    && legendHoverIndex != null
+                    && idx === legendHoverIndex;
+                const kind = bitrateLegendMetricKind(ds.label);
+                const isCross = !isPrimary
+                    && legendHoverMetricKind != null
+                    && kind === legendHoverMetricKind;
+                if (isPrimary) {
+                    if (ds._origWidth === undefined) ds._origWidth = ds.borderWidth;
+                    if (ds._origWidthXHover !== undefined) {
+                        delete ds._origWidthXHover;
+                    }
+                    ds.borderWidth = ds._origWidth + 6;
+                } else if (isCross) {
+                    if (ds._origWidthXHover === undefined) ds._origWidthXHover = ds.borderWidth;
+                    if (ds._origWidth !== undefined) {
+                        ds.borderWidth = ds._origWidth;
+                        delete ds._origWidth;
+                    }
+                    ds.borderWidth = ds._origWidthXHover + 2.5;
+                } else {
+                    if (ds._origWidth !== undefined) {
+                        ds.borderWidth = ds._origWidth;
+                        delete ds._origWidth;
+                    }
+                    if (ds._origWidthXHover !== undefined) {
+                        ds.borderWidth = ds._origWidthXHover;
+                        delete ds._origWidthXHover;
+                    }
+                }
+            });
+        }
+
+        function refreshLegendHoverAll() {
+            const pools = [bandwidthCharts, bufferDepthCharts, videoFpsCharts];
+            for (const pool of pools) {
+                if (!pool) continue;
+                pool.forEach((chart) => {
+                    if (!chart) return;
+                    applyLegendHover(chart);
+                    chart.update('none');
+                });
+            }
+        }
+
+        function renderEventsChart(sessionId, windowStart, eventSeries) {
+            const card = document.querySelector(`.session-card[data-session-id="${sessionId}"]`);
+            if (!card) return;
+            const canvas = card.querySelector('canvas.events-chart');
+            if (!canvas) return;
+            if (isChartPaused(sessionId)) return;
+            const chartEvents = (eventSeries || [])
+                .filter((e) => Number(e.ts) >= windowStart)
+                .map((e) => ({ x: (e.ts - windowStart) / 1000, type: e.type, state: e.state, reason: e.reason, mbps: e.mbps, resolution: e.resolution, ts: Number(e.ts) }))
+                .filter((e) => Number.isFinite(e.x) && e.x >= 0 && e.x <= 600);
+            const datasets = Object.entries(EVENT_LANES).map(([laneKey, cfg]) => {
+                // An event's lane comes either from a 1:1 mapping
+                // (PLAYERSTATE / VARIANT / DISPLAY_RES / LOOP_*) or
+                // via EVENT_SUBTYPE_LANE for the merged PLAYBACK /
+                // IMPAIRMENT / BUFFERING lanes.
+                const points = chartEvents.filter((e) => {
+                    const lane = EVENT_SUBTYPE_LANE[e.type] || e.type;
+                    return lane === laneKey;
+                }).map((e) => ({
+                    x: e.x, y: cfg.y, ts: e.ts,
+                    type: e.type, state: e.state, reason: e.reason, mbps: e.mbps, resolution: e.resolution
+                }));
+                let colors = cfg.color;
+                if (laneKey === 'PLAYERSTATE') colors = points.map(p => playerStateColor(p.state));
+                else if (laneKey === 'VARIANT') colors = points.map(p => variantColor(p.mbps));
+                else if (laneKey === 'DISPLAY_RES') colors = points.map(p => displayResColor(p.resolution));
+                else if (laneKey === 'PLAYBACK' || laneKey === 'IMPAIRMENT') {
+                    colors = points.map(p => EVENT_SUBTYPE_COLOR[p.type] || cfg.color);
+                }
+                return {
+                    label: cfg.label,
+                    data: points,
+                    backgroundColor: colors,
+                    borderColor: colors,
+                    pointRadius: 5,
+                    pointHoverRadius: 7,
+                    showLine: false,
+                };
+            });
+            let chart = eventsCharts.get(sessionId);
+            if (chart && chart.canvas !== canvas) {
+                chart.destroy();
+                chart = null;
+                eventsCharts.delete(sessionId);
+            }
+            if (!chart) {
+                chart = new Chart(canvas, {
+                    type: 'scatter',
+                    data: { datasets },
+                    options: {
+                        responsive: true, maintainAspectRatio: false, animation: false,
+                        plugins: {
+                            legend: { display: true, position: 'bottom',
+                                labels: { color: '#6b7280', font: { family: 'Courier New, monospace', size: 10 }, boxWidth: 8, usePointStyle: true } },
+                            tooltip: {
+                                callbacks: {
+                                    title: (items) => {
+                                        const first = Array.isArray(items) && items.length ? items[0] : null;
+                                        const ts = Number(first && first.raw && first.raw.ts);
+                                        if (!Number.isFinite(ts)) return '';
+                                        const d = new Date(ts);
+                                        const hh = String(d.getHours()).padStart(2, '0');
+                                        const mm = String(d.getMinutes()).padStart(2, '0');
+                                        const ss = String(d.getSeconds()).padStart(2, '0');
+                                        const ms = String(d.getMilliseconds()).padStart(3, '0');
+                                        return `${hh}:${mm}:${ss}.${ms}`;
+                                    },
+                                    label: (ctx) => {
+                                        const ts = Number(ctx && ctx.raw && ctx.raw.ts);
+                                        const startMs = Number(ctx.chart && ctx.chart.$windowStartMs) || 0;
+                                        const offset = Number.isFinite(ts) && startMs > 0
+                                            ? `  (+${((ts - startMs) / 1000).toFixed(3)}s)`
+                                            : '';
+                                        let extra = '';
+                                        let label = ctx.dataset.label;
+                                        if (ctx && ctx.raw) {
+                                            if (ctx.raw.state) {
+                                                extra = ctx.raw.reason
+                                                    ? `: ${ctx.raw.state} (${ctx.raw.reason})`
+                                                    : `: ${ctx.raw.state}`;
+                                            }
+                                            else if (Number.isFinite(Number(ctx.raw.mbps))) extra = `: ${variantLabel(ctx.raw.mbps, ctx.raw.resolution)}`;
+                                            else if (ctx.raw.field) extra = `: ${ctx.raw.field} ${ctx.raw.oldValue} → ${ctx.raw.newValue}`;
+                                            else if (ctx.raw.playId) extra = `: ${ctx.raw.playId.slice(0, 8)} (was ${(ctx.raw.prevPlayId || '∅').slice(0,8)})`;
+                                            else if (ctx.raw.type && EVENT_SUBTYPE_LABEL[ctx.raw.type]) extra = `: ${EVENT_SUBTYPE_LABEL[ctx.raw.type]}`;
+                                        }
+                                        return `${label}${extra}${offset}`;
+                                    }
+                                }
+                            },
+                            zoom: buildUnifiedChartZoomOptions(sessionId)
+                        },
+                        layout: { padding: { right: RIGHT_AXIS_PAD_PX } },
+                        scales: {
+                            x: {
+                                type: 'linear', min: 0, max: 600,
+                                ticks: {
+                                    maxTicksLimit: 8,
+                                    align: 'inner',
+                                    callback: (value) => {
+                                        const startMs = Number(chart && chart.$windowStartMs) || 0;
+                                        return formatBitrateChartAbsoluteTick(startMs, Number(value));
+                                    },
+                                    font: { family: 'Courier New, monospace', size: 9 },
+                                    color: '#6b7280'
+                                },
+                                grid: { color: 'rgba(0,0,0,0.05)' }
+                            },
+                            y: {
+                                type: 'linear', min: 0.5, max: 7.5,
+                                // Force a fixed Y-axis width so this chart's
+                                // X-axis lines up vertically with the bandwidth /
+                                // buffer / fps charts below (they all use the
+                                // same afterFit width).
+                                afterFit: (axis) => { axis.width = 90; },
+                                title: { display: true, text: 'Events', font: { family: 'Courier New, monospace', size: 11, weight: 'bold' }, color: '#4b5563' },
+                                ticks: {
+                                    stepSize: 1,
+                                    callback: (value) => {
+                                        const entry = Object.values(EVENT_LANES).find((l) => l.y === value);
+                                        return entry ? entry.label : '';
+                                    },
+                                    font: { family: 'Courier New, monospace', size: 9 },
+                                    color: '#6b7280'
+                                },
+                                grid: { color: 'rgba(0,0,0,0.05)' }
+                            }
+                        }
+                    }
+                });
+                chart.$windowStartMs = windowStart;
+                applyStoredChartViewport(sessionId, chart);
+                installRightMousePanHandlers(sessionId, chart);
+                installChartClickPauseHandler(sessionId, chart);
+                ensureChartLiveWheelAnchor();
+                eventsCharts.set(sessionId, chart);
+            } else {
+                chart.data.datasets = datasets;
+                chart.$windowStartMs = windowStart;
+                applyChartXMax(chart, getChartWindowMs(sessionId));
+                chart.update('none');
+            }
+        }
+
+        // Real swim-lane chart using vis-timeline. Stacked above the
+        // Chart.js scatter approximation so we can compare. PLAYERSTATE
+        // becomes a continuous coloured ribbon (one segment per state
+        // span). Other lanes remain point markers since their underlying
+        // events are point-in-time. BUFFERING and STALL stay as points
+        // for now — pairing start/end into ranges needs the *_end events
+        // to flow through the dashboard event capture (currently only
+        // *_start variants reach parseBandwidthChartEventType).
+        function renderEventsTimelineChart(sessionId, windowStart, eventSeries) {
+            if (typeof vis === 'undefined' || !vis.Timeline) {
+                console.warn('[events-timeline] vis-timeline not loaded');
+                return;
+            }
+            const card = document.querySelector(`.session-card[data-session-id="${sessionId}"]`);
+            if (!card) return;
+            const container = card.querySelector('.events-timeline');
+            if (!container) {
+                console.warn('[events-timeline] container .events-timeline not in DOM for session', sessionId);
+                return;
+            }
+            // Render the legend strip above the chart. We hide vis-
+            // timeline's left label panel via CSS so the chart area
+            // lines up with the Chart.js charts; the legend gives back
+            // the lane → colour mapping.
+            const legendEl = card.querySelector('.events-timeline-legend');
+            if (legendEl) {
+                const baseLegend = Object.entries(EVENT_LANES)
+                    .map(([type, cfg]) => `<span class="legend-item"><span class="legend-swatch" style="background:${cfg.color}"></span>${cfg.label}</span>`)
+                    .join('');
+                legendEl.innerHTML = baseLegend;
+            }
+
+            const nowMs = Date.now();
+            const events = (eventSeries || []).filter((e) => Number(e.ts) >= windowStart);
+
+            // Three top-level sections so user-driven control toggles,
+            // player-side events, and server-originated events are
+            // visually grouped. Lane order within each section follows
+            // EVENT_LANES.
+            const SERVER_LANES = new Set(['LOOP_SERVER']);
+            const CONTROL_LANES = new Set(['CONTROL']);
+            const playerLanes = Object.keys(EVENT_LANES).filter((k) =>
+                !SERVER_LANES.has(k) && !CONTROL_LANES.has(k) && k !== 'VARIANT');
+            const serverLanes = Object.keys(EVENT_LANES).filter((k) => SERVER_LANES.has(k));
+            const controlLanes = Object.keys(EVENT_LANES).filter((k) => CONTROL_LANES.has(k));
+
+            // Sync our collapse-state mirror from the live timeline
+            // BEFORE we rebuild the groups array — captures any user
+            // toggle that happened since the last render.
+            const existingTimeline = eventsTimelines.get(sessionId);
+            if (existingTimeline && existingTimeline.groupsData) {
+                const live = eventsTimelineSectionCollapsed.get(sessionId) || {};
+                const p = existingTimeline.groupsData.get('PLAYER_SECTION');
+                const c = existingTimeline.groupsData.get('CONTROL_SECTION');
+                const s = existingTimeline.groupsData.get('SERVER_SECTION');
+                if (p) live.player = (p.showNested === false);
+                if (c) live.control = (c.showNested === false);
+                if (s) live.server = (s.showNested === false);
+                eventsTimelineSectionCollapsed.set(sessionId, live);
+            }
+            const sectionState = eventsTimelineSectionCollapsed.get(sessionId) || {};
+            const playerShowNested = !sectionState.player;   // default true (expanded)
+            const controlShowNested = !sectionState.control;
+            const serverShowNested = !sectionState.server;
+
+            // VARIANT subgroups: one lane per observed (resolution,
+            // bitrate) tuple. Multi-bitrate-per-resolution variants are
+            // a real ABR ladder pattern (e.g. H.264 + HEVC at 1080p),
+            // so each gets its own row. Sorted by bitrate DESCENDING,
+            // so the visual ladder runs highest at the top, lowest at
+            // the bottom.
+            const variantEvents = events.filter((e) => e.type === 'VARIANT');
+            const seenVariants = new Map(); // key (res|mbps) -> {mbps, resolution}
+            for (const v of variantEvents) {
+                const res = String(v.resolution || '').trim();
+                const m = Number(v.mbps);
+                if (!res || !Number.isFinite(m) || m <= 0) continue;
+                const k = `${res}|${m}`;
+                if (!seenVariants.has(k)) {
+                    seenVariants.set(k, { mbps: m, resolution: res });
+                }
+            }
+            const variantOrder = Array.from(seenVariants.entries())
+                .sort((a, b) => Number(b[1].mbps) - Number(a[1].mbps));
+            const variantGroups = variantOrder.map(([k, v]) => ({
+                id: `VARIANT::${k}`,
+                content: variantLabel(v.mbps, v.resolution)
+            }));
+            const variantGroupIds = variantGroups.map((g) => g.id);
+
+            const groups = [
+                { id: 'PLAYER_SECTION', content: 'PLAYER', nestedGroups: [...variantGroupIds, ...playerLanes], showNested: playerShowNested },
+                ...variantGroups,
+                ...playerLanes.map((type) => ({ id: type, content: EVENT_LANES[type].label })),
+                { id: 'CONTROL_SECTION', content: 'CONTROL', nestedGroups: controlLanes, showNested: controlShowNested },
+                ...controlLanes.map((type) => ({ id: type, content: EVENT_LANES[type].label })),
+                { id: 'SERVER_SECTION', content: 'SERVER', nestedGroups: serverLanes, showNested: serverShowNested },
+                ...serverLanes.map((type) => ({ id: type, content: EVENT_LANES[type].label }))
+            ];
+
+            const items = [];
+            let itemId = 0;
+
+            // Format absolute times for hover tooltips (matches the
+            // bitrate chart's HH:MM:SS).
+            function formatHoverTime(ms) {
+                const d = new Date(ms);
+                const hh = String(d.getHours()).padStart(2, '0');
+                const mm = String(d.getMinutes()).padStart(2, '0');
+                const ss = String(d.getSeconds()).padStart(2, '0');
+                return `${hh}:${mm}:${ss}`;
+            }
+
+            // Helper to render an event-series sequence as continuous
+            // ranges (one segment per stable value, transition on
+            // change). Heartbeat-style writers emit one event per poll
+            // even when nothing changed, so consecutive same-label
+            // entries are coalesced into a single range.
+            function pushRanges(typeKey, getLabel, getColor) {
+                const seq = events.filter((e) => e.type === typeKey)
+                    .sort((a, b) => Number(a.ts) - Number(b.ts));
+                let i = 0;
+                while (i < seq.length) {
+                    const start = Number(seq[i].ts);
+                    const label = getLabel(seq[i]);
+                    const color = getColor(seq[i]);
+                    let j = i + 1;
+                    while (j < seq.length && getLabel(seq[j]) === label) j++;
+                    const end = j < seq.length ? Number(seq[j].ts) : nowMs;
+                    const durationSec = ((end - start) / 1000).toFixed(1);
+                    const title = `${EVENT_LANES[typeKey].label}: ${label}\n${formatHoverTime(start)} → ${formatHoverTime(end)} (${durationSec}s)`;
+                    items.push({
+                        id: itemId++,
+                        group: typeKey,
+                        content: label,
+                        start: new Date(start),
+                        end: new Date(end),
+                        type: 'range',
+                        title: title,
+                        style: `background-color: ${color}; border-color: ${color}; color: #fff;`
+                    });
+                    i = j;
+                }
+            }
+
+            // PLAYERSTATE label includes the AVPlayer waiting reason
+            // (when present) so the user can disambiguate buffering
+            // causes — e.g. "buffering (toMinimizeStalls)".
+            pushRanges('PLAYERSTATE',
+                (e) => {
+                    const s = e.state || 'Unknown';
+                    return e.reason ? `${s} (${e.reason})` : s;
+                },
+                (e) => playerStateColor(e.state));
+            pushRanges('DISPLAY_RES',
+                (e) => String(e.resolution || '?'),
+                (e) => displayResColor(e.resolution));
+
+            // VARIANT: each (resolution, bitrate) tuple gets its own
+            // swim lane. Lane key matches seenVariants. Heartbeat-style
+            // emission means consecutive same-key entries coalesce into
+            // a single range.
+            const variantSeq = variantEvents.sort((a, b) => Number(a.ts) - Number(b.ts));
+            let vi = 0;
+            while (vi < variantSeq.length) {
+                const v = variantSeq[vi];
+                const res = String(v.resolution || '').trim();
+                const m = Number(v.mbps);
+                if (!res || !Number.isFinite(m) || m <= 0) { vi++; continue; }
+                const k = `${res}|${m}`;
+                let vj = vi + 1;
+                while (vj < variantSeq.length) {
+                    const nv = variantSeq[vj];
+                    const nres = String(nv.resolution || '').trim();
+                    const nm = Number(nv.mbps);
+                    if (`${nres}|${nm}` !== k) break;
+                    vj++;
+                }
+                const start = Number(v.ts);
+                const end = vj < variantSeq.length ? Number(variantSeq[vj].ts) : nowMs;
+                const color = variantColor(m);
+                const durationSec = ((end - start) / 1000).toFixed(1);
+                const title = `Variant: ${variantLabel(m, res)}\n${formatHoverTime(start)} → ${formatHoverTime(end)} (${durationSec}s)`;
+                items.push({
+                    id: itemId++,
+                    group: `VARIANT::${k}`,
+                    content: '',
+                    start: new Date(start),
+                    end: new Date(end),
+                    type: 'range',
+                    title: title,
+                    style: `background-color: ${color}; border-color: ${color}; color: #fff;`
+                });
+                vi = vj;
+            }
+
+            for (const e of events) {
+                if (e.type === 'PLAYERSTATE' || e.type === 'VARIANT' || e.type === 'DISPLAY_RES') continue;
+                const lane = EVENT_SUBTYPE_LANE[e.type] || e.type;
+                const cfg = EVENT_LANES[lane];
+                if (!cfg) continue;
+                const color = EVENT_SUBTYPE_COLOR[e.type] || cfg.color;
+                const subLabel = EVENT_SUBTYPE_LABEL[e.type] || e.type;
+                const ts = Number(e.ts);
+                const detail = e.field
+                    ? `\n${e.field}: ${e.oldValue} → ${e.newValue}`
+                    : (e.playId
+                        ? `\nplay_id: ${e.playId}${e.prevPlayId ? `\nwas: ${e.prevPlayId}` : ''}`
+                        : '');
+                items.push({
+                    id: itemId++,
+                    group: lane,
+                    content: '',
+                    start: new Date(ts),
+                    type: 'point',
+                    title: `${subLabel}${detail}\n${formatHoverTime(ts)}`,
+                    style: `background-color: ${color}; border-color: ${color};`
+                });
+            }
+
+            // Live-edge window: same span as the other charts (per-session
+            // override in chartWindowMsBySession; defaults to 10 min for
+            // live mode). Right edge anchored to "now" so events scroll
+            // left as time advances. Updated on every render so the view
+            // tracks live AND tracks the session-viewer brush expansion.
+            const liveWindowMs = getChartWindowMs(sessionId);
+            const liveStart = new Date(nowMs - liveWindowMs);
+            const liveEnd = new Date(nowMs);
+
+            // Compute explicit height. vis-timeline's height:'auto'
+            // collapses to 0 because the wrap has no intrinsic height
+            // (its internal panels are absolutely positioned). Use a
+            // uniform per-row estimate — section headers and lane
+            // rows share the same auto height now that we no longer
+            // CSS-override section-header heights (which broke
+            // label-to-lane alignment). Slight over-estimate is
+            // safer than under (under-estimate hides top rows).
+            const ROW_PX = 28;
+            const AXIS_PAD_PX = 50;
+            const computedHeight = (groups.length * ROW_PX) + AXIS_PAD_PX;
+            const heightPx = `${computedHeight}px`;
+            container.style.height = heightPx;
+
+            // If the session card was rebuilt (innerHTML rewrite, etc.)
+            // the cached timeline points at an orphaned div that's no
+            // longer in the DOM. Detect that and recreate against the
+            // new container — same defence the Chart.js code does
+            // (`if (chart.canvas !== canvas) destroy + recreate`).
+            let timeline = eventsTimelines.get(sessionId);
+            if (timeline && timeline.$container !== container) {
+                timeline.destroy();
+                eventsTimelines.delete(sessionId);
+                timeline = null;
+            }
+            if (!timeline) {
+                timeline = new vis.Timeline(
+                    container,
+                    new vis.DataSet(items),
+                    new vis.DataSet(groups),
+                    {
+                        stack: false,
+                        showCurrentTime: true,
+                        zoomable: true,
+                        moveable: true,
+                        margin: { item: 4 },
+                        orientation: { axis: 'top' },
+                        height: heightPx,
+                        start: liveStart,
+                        end: liveEnd,
+                        // Match the Chart.js bitrate chart's HH:MM:SS
+                        // 24-hour tick format. Suppress the date strip.
+                        // timeAxis.scale='second' + step=60 forces a
+                        // tick every 60 seconds at consistent spacing,
+                        // matching the bitrate chart's tick density.
+                        timeAxis: { scale: 'second', step: 60 },
+                        format: {
+                            minorLabels: {
+                                millisecond: 'HH:mm:ss',
+                                second: 'HH:mm:ss',
+                                minute: 'HH:mm:ss',
+                                hour: 'HH:mm:ss',
+                                weekday: 'HH:mm:ss',
+                                day: 'HH:mm:ss',
+                                week: 'HH:mm:ss',
+                                month: 'HH:mm:ss',
+                                year: 'HH:mm:ss'
+                            },
+                            majorLabels: {
+                                millisecond: '',
+                                second: '',
+                                minute: '',
+                                hour: '',
+                                weekday: '',
+                                day: '',
+                                week: '',
+                                month: '',
+                                year: ''
+                            }
+                        },
+                        // Match the Chart.js charts' zoom UX:
+                        //   plain wheel = page scroll (do not intercept)
+                        //   Alt/Option + wheel = zoom in/out
+                        // Pan is left-drag on the timeline (vis-timeline
+                        // doesn't support right-drag natively; close enough
+                        // to the Chart.js right-drag-pan behaviour).
+                        zoomKey: 'altKey',
+                        horizontalScroll: false,
+                        // Reasonable zoom bounds: 1s lower (heavy zoom in)
+                        // to 6h upper (back-out enough to see longer
+                        // sessions if user pans backward).
+                        zoomMin: 1000,
+                        zoomMax: 6 * 60 * 60 * 1000
+                    }
+                );
+                eventsTimelines.set(sessionId, timeline);
+                // Re-paint the event-marker overlay if a marker was
+                // picked before this timeline existed (lazy section
+                // open) or if the timeline was just recreated due to
+                // an orphaned-container detection.
+                reapplyEventMarkerToTimeline(sessionId);
+                ensureVisTimelineLiveWheelAnchor();
+                // Tag for the cross-chart viewport sync helpers, anchor
+                // the seconds-from-windowStart frame to liveStart so
+                // vis-timeline ranges convert consistently to the 0–600
+                // units the Chart.js charts use, and remember the DOM
+                // container so a session-card rebuild is detected on
+                // the next render.
+                timeline.$isVisTimeline = true;
+                timeline.$windowStartMs = liveStart.getTime();
+                timeline.$container = container;
+                applyStoredChartViewport(sessionId, timeline);
+                // After a user-driven range change (zoom or pan): if
+                // the chart is NOT paused, re-snap the right edge to
+                // "now" while preserving whatever zoom width the user
+                // landed on. This matches the Chart.js charts'
+                // live-mode behaviour — they auto-track live edge
+                // unless the explicit pause button is engaged. When
+                // paused, accept the user's range as-is.
+                timeline.on('rangechanged', (props) => {
+                    if (!props || !props.byUser) return;
+                    syncChartViewportAcrossSession(sessionId, timeline);
+                    if (isChartPaused(sessionId)) return;
+                    const width = props.end.getTime() - props.start.getTime();
+                    const nowMsLocal = Date.now();
+                    timeline.setWindow(
+                        new Date(nowMsLocal - width),
+                        new Date(nowMsLocal),
+                        { animation: false }
+                    );
+                });
+                // Click toggles pause (matches Chart.js
+                // installChartClickPauseHandler). Skip clicks on the
+                // group label / collapse arrow (those expand/collapse
+                // sections) and skip Alt-clicks (Alt is the zoom
+                // modifier). vis-timeline already distinguishes click
+                // from drag — `click` only fires on a real click.
+                timeline.on('click', (props) => {
+                    if (!props) return;
+                    if (props.event && props.event.altKey) return;
+                    if (props.what === 'group-label') return;
+                    toggleChartPause(sessionId);
+                });
+                // Container width is sometimes 0 on first paint (parent
+                // ScrollView not yet laid out, session card just inserted,
+                // etc). A single requestAnimationFrame isn't reliable —
+                // the next frame can still report width 0. Use a
+                // ResizeObserver that fires redraw() the moment the
+                // container actually has dimensions, then disconnects.
+                if (typeof ResizeObserver !== 'undefined') {
+                    const ro = new ResizeObserver((entries) => {
+                        for (const entry of entries) {
+                            if (entry.contentRect.width > 0) {
+                                timeline.redraw();
+                                ro.disconnect();
+                                return;
+                            }
+                        }
+                    });
+                    ro.observe(container);
+                } else {
+                    requestAnimationFrame(() => timeline.redraw());
+                }
+                timeline.$lastAppliedWindowMs = liveWindowMs;
+            } else {
+                timeline.setItems(new vis.DataSet(items));
+                timeline.setGroups(new vis.DataSet(groups));
+                // Re-apply height each render — group count changes as
+                // variant lanes appear/disappear.
+                timeline.setOptions({ height: heightPx });
+                timeline.$windowStartMs = liveStart.getTime();
+                // If the configured window span has changed since the
+                // last render — typically because the session-viewer
+                // user expanded the brush past 10 minutes — force the
+                // timeline width to match. Otherwise preserve whatever
+                // zoom width the user has interactively set.
+                const prevAppliedWindowMs = Number(timeline.$lastAppliedWindowMs) || 0;
+                const windowMsChanged = prevAppliedWindowMs !== liveWindowMs;
+                if (windowMsChanged) {
+                    timeline.setWindow(
+                        new Date(nowMs - liveWindowMs),
+                        new Date(nowMs),
+                        { animation: false }
+                    );
+                    timeline.$lastAppliedWindowMs = liveWindowMs;
+                } else if (!isChartPaused(sessionId)) {
+                    // Live-edge tracking: slide the visible window so
+                    // its right edge stays pinned to "now". Preserve
+                    // whatever zoom width the user has set.
+                    const win = timeline.getWindow();
+                    const width = win.end.getTime() - win.start.getTime();
+                    timeline.setWindow(
+                        new Date(nowMs - width),
+                        new Date(nowMs),
+                        { animation: false }
+                    );
+                }
+            }
+
+            // Right-edge-anchored tick markers placed at the same
+            // wall-clock times as the Chart.js charts' axis ticks
+            // (every 100s for the 10-min window). Items keep their
+            // exact timestamp positions regardless of where these
+            // tick lines fall.
+            //
+            // When the chart is paused, anchor the ticks to the
+            // visible window's right edge (frozen in time) so the
+            // tick lines stay on top of the events that were visible
+            // when the user paused — not slide right with wall-clock
+            // time while the events stay frozen.
+            const tickAnchorMs = isChartPaused(sessionId)
+                ? timeline.getWindow().end.getTime()
+                : nowMs;
+            refreshLiveTickMarkers(timeline, tickAnchorMs, liveWindowMs);
+        }
+
+        // Add vis-timeline custom-time markers at fixed intervals
+        // back from "now" — matches the Chart.js charts' tick spacing
+        // so HH:MM:SS labels line up vertically across events-timeline
+        // / bandwidth / buffer / fps charts. We rebuild every render
+        // (remove all, add fresh) because vis-timeline's setCustomTime
+        // updates internal state but the DOM line element does not
+        // always reposition — leaving labels that move while the
+        // vertical lines stay put.
+        function refreshLiveTickMarkers(timeline, nowMs, windowMs) {
+            // 100s interval matches Chart.js's auto-pick for the
+            // [0, 600] (seconds) range with maxTicksLimit:8 → ticks
+            // every 100s = 7 visible labels in the 10-min window.
+            const TICK_INTERVAL_MS = 100000;
+            const tickCount = Math.floor(windowMs / TICK_INTERVAL_MS) + 1;
+            if (!timeline.$tickIds) timeline.$tickIds = new Set();
+            const fmt = (ms) => {
+                const d = new Date(ms);
+                return `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}:${String(d.getSeconds()).padStart(2,'0')}`;
+            };
+            // Drop every existing tick marker; the DOM line for a
+            // setCustomTime'd marker doesn't always re-render at the
+            // new x even though its label does.
+            for (const id of Array.from(timeline.$tickIds)) {
+                try { timeline.removeCustomTime(id); } catch (e) {}
+            }
+            timeline.$tickIds.clear();
+            // Re-add at the current wall-clock anchored positions.
+            for (let i = 0; i < tickCount; i++) {
+                const id = `live-tick-${i}`;
+                const t = nowMs - i * TICK_INTERVAL_MS;
+                try {
+                    timeline.addCustomTime(new Date(t), id);
+                    timeline.$tickIds.add(id);
+                    try { timeline.setCustomTimeMarker(fmt(t), id, false); } catch (e) {}
+                } catch (e) {}
+            }
+        }
+
+        document.addEventListener('testing-session:charts-resize', (event) => {
+            const sessionId = event.detail && event.detail.sessionId;
+            if (!sessionId) return;
+            const rebuildEventsTimeline = !!(event.detail && event.detail.rebuildEventsTimeline);
+            requestAnimationFrame(() => {
+                // Always destroy Chart.js charts; renderBandwidthChart
+                // recreates them.
+                const chartsToDestroy = [
+                    eventsCharts.get(sessionId),
+                    bandwidthCharts.get(sessionId),
+                    bufferDepthCharts.get(sessionId),
+                    videoFpsCharts.get(sessionId)
+                ];
+                for (const chart of chartsToDestroy) {
+                    if (chart && typeof chart.destroy === 'function') {
+                        chart.destroy();
+                    }
+                }
+                eventsCharts.delete(sessionId);
+                bandwidthCharts.delete(sessionId);
+                bufferDepthCharts.delete(sessionId);
+                videoFpsCharts.delete(sessionId);
+                // The events-timeline (vis.Timeline) is preserved by
+                // default — destroying it on every resize would cause a
+                // visible blink in the Player State section. Rebuild
+                // only when the caller signals the container went from
+                // hidden → visible (vis.Timeline initialized in a
+                // display:none container has broken internal layout
+                // that redraw() can't fix).
+                const tl = eventsTimelines.get(sessionId);
+                if (rebuildEventsTimeline && tl) {
+                    tl.destroy();
+                    eventsTimelines.delete(sessionId);
+                } else if (tl && typeof tl.redraw === 'function') {
+                    tl.redraw();
+                }
+                renderBandwidthChart(sessionId);
+            });
+        });
+
+        function renderBandwidthChart(sessionId) {
+            if (isChartPaused(sessionId)) return;
+            const series = bandwidthHistory.get(sessionId) || [];
+            const eventSeries = bandwidthEventHistory.get(sessionId) || [];
+            const card = document.querySelector(`.session-card[data-session-id="${sessionId}"]`);
+            if (!card) return;
+            // Lazy render: skip the whole chart pass when both visualising
+            // sections are collapsed. Samples are still recorded in
+            // bandwidthHistory / bandwidthEventHistory above, so when the
+            // user opens either section the existing toggle handler fires
+            // testing-session:charts-resize → destroys charts → re-invokes
+            // this function, which rebuilds from history.
+            const bitrateContent = card.querySelector('[data-content="bitrate-chart"]');
+            const playerStateContent = card.querySelector('[data-content="player-state"]');
+            const bitrateClosed = bitrateContent && bitrateContent.style.display === 'none';
+            const playerStateClosed = playerStateContent && playerStateContent.style.display === 'none';
+            if (bitrateClosed && playerStateClosed) return;
+            const canvas = card.querySelector('canvas.bandwidth-chart');
+            if (!canvas || !series.length) return;
+            const windowMs = getChartWindowMs(sessionId);
+            const maxTs = series[series.length - 1].ts;
+            const windowStart = maxTs - windowMs;
+            const chartRangeLabel = card.querySelector('[data-field="bandwidth_chart_range"]');
+            if (chartRangeLabel) {
+                chartRangeLabel.textContent = formatBitrateChartRange(windowStart, maxTs);
+            }
+            const points = series
+                .filter(point => point.ts >= windowStart)
+                .map(point => ({
+                    x: (point.ts - windowStart) / 1000,
+                    shaperRate: point.shaperRate,
+                    shaperAvg: point.shaperAvg,
+                    transferRate: point.transferRate,
+                    transferComplete: point.transferComplete,
+                    metricsAtMs: point.metricsAtMs,
+                    bufferDepth: point.bufferDepth,
+                    wallClockOffset: point.wallClockOffset,
+                    playerEstimate: point.playerEstimate,
+                    playerWireBitrate: point.playerWireBitrate,
+                    currentRendition: point.currentRendition,
+                    serverRendition: point.serverRendition,
+                    framesDisplayed: point.framesDisplayed,
+                    framesDropped: point.framesDropped,
+                    target: point.target,
+                    variantLadder: point.variantLadder
+                }));
+            const chartEvents = eventSeries
+                .filter((event) => Number(event.ts) >= windowStart)
+                .map((event) => ({
+                    x: (event.ts - windowStart) / 1000,
+                    type: event.type
+                }))
+                .filter((event) => Number.isFinite(event.x) && event.x >= 0 && event.x <= 600);
+            renderEventsChart(sessionId, windowStart, eventSeries);
+            // Hide the per-session events swim-lane in compare mode —
+            // it shows events for ONE session only, which is confusing
+            // alongside the multi-session line charts below.
+            const compareActiveForTimeline = getCompareGroupIds().length >= 2;
+            const eventsTimelineWrap = card.querySelector('.events-timeline-wrap');
+            if (eventsTimelineWrap) {
+                eventsTimelineWrap.style.display = compareActiveForTimeline ? 'none' : '';
+            }
+            if (!compareActiveForTimeline) {
+                renderEventsTimelineChart(sessionId, windowStart, eventSeries);
+            }
+            const shaperRateData = points.map(point => ({ x: point.x, y: point.shaperRate }));
+            const shaperAvgData = points.map(point => ({ x: point.x, y: point.shaperAvg }));
+            const transferRateData = points.map(point => ({ x: point.x, y: point.transferRate }));
+            const transferCompleteData = points.map(point => ({ x: point.x, y: point.transferComplete }));
+            const bufferDepthData = points.map(point => ({ x: point.x, y: Number.isFinite(point.bufferDepth) ? point.bufferDepth : null }));
+            const wallClockOffsetData = points.map(point => ({ x: point.x, y: Number.isFinite(point.wallClockOffset) ? point.wallClockOffset : null }));
+            const estimateData = points.map(point => ({ x: point.x, y: point.playerEstimate || null }));
+            const playerWireBitrateData = points.map(point => ({
+                x: point.x,
+                y: (point.playerWireBitrate === null || point.playerWireBitrate === undefined) ? null : point.playerWireBitrate
+            }));
+            const renditionData = points.map(point => ({ x: point.x, y: point.currentRendition || null }));
+            const serverRenditionData = points.map(point => ({ x: point.x, y: point.serverRendition || null }));
+            const framesDisplayedData = points.map(point => ({ x: point.x, y: Number.isFinite(point.framesDisplayed) ? point.framesDisplayed : null, atMs: point.metricsAtMs || null }));
+            const framesDroppedData = points.map(point => ({ x: point.x, y: Number.isFinite(point.framesDropped) ? point.framesDropped : null, atMs: point.metricsAtMs || null }));
+            const targetData = points.map(point => ({ x: point.x, y: point.target }));
+
+            let variantLadder = [];
+            for (let idx = points.length - 1; idx >= 0; idx -= 1) {
+                if (Array.isArray(points[idx].variantLadder) && points[idx].variantLadder.length) {
+                    variantLadder = points[idx].variantLadder;
+                    break;
+                }
+            }
+
+            const visibility = bandwidthVisibility.get(sessionId) || {};
+            const compareGroupIdsForDefaults = getCompareGroupIds();
+            const compareActive = compareGroupIdsForDefaults.length >= 2;
+            const compareVisibleLabels = new Set([
+                'Player avg_network_bitrate',
+                'Player network_bitrate',
+                'Player Variant',
+                'Server Variant',
+                'Variants',
+                'Limit',
+                'mbps_shaper_avg',
+                'STALL',
+                'RESTART'
+            ]);
+            if (compareActive) {
+                for (const sid of compareGroupIdsForDefaults) {
+                    const tag = `S${sid}`;
+                    compareVisibleLabels.add(`Player Variant (${tag})`);
+                    compareVisibleLabels.add(`Player avg_network_bitrate (${tag})`);
+                    compareVisibleLabels.add(`Player network_bitrate (${tag})`);
+                    compareVisibleLabels.add(`Server Variant (${tag})`);
+                    compareVisibleLabels.add(`Shaper Avg (${tag})`);
+                }
+            }
+            const defaultVisibleLabels = compareActive
+                ? compareVisibleLabels
+                : new Set([
+                    'mbps_shaper_rate',
+                    'mbps_shaper_avg',
+                    'mbps_transfer_rate',
+                    'mbps_transfer_complete',
+                    'Player avg_network_bitrate',
+                    'Player network_bitrate',
+                    'Player Variant',
+                    'Server Variant',
+                    'Variants',
+                    'Limit',
+                    'STALL',
+                    'RESTART'
+                ]);
+            const isSeriesHidden = (label) => {
+                const key = bandwidthSeriesKey(label);
+                if (Object.prototype.hasOwnProperty.call(visibility, label)) {
+                    return visibility[label] === true;
+                }
+                if (Object.prototype.hasOwnProperty.call(visibility, key)) {
+                    return visibility[key] === true;
+                }
+                return !defaultVisibleLabels.has(key);
+            };
+            const axisMode = normalizeBitrateAxisMaxMode(
+                bitrateAxisMaxBySession.get(String(sessionId)) ||
+                card.querySelector('input[data-field="bitrate_chart_max_mbps"]:checked')?.value ||
+                'auto'
+            );
+            bitrateAxisMaxBySession.set(String(sessionId), axisMode);
+            const maxFor = (hidden, data) => (hidden ? [0] : data.map(point => point.y || 0));
+            // Exclude Limit — it can be set arbitrarily high (e.g. 10 Gbps when
+            // shaping is off) and would otherwise saturate auto-mode at the 100 cap.
+            const maxYAutoRaw = Math.max(1,
+                ...maxFor(isSeriesHidden('mbps_shaper_rate'), shaperRateData),
+                ...maxFor(isSeriesHidden('mbps_shaper_avg'), shaperAvgData),
+                ...maxFor(isSeriesHidden('mbps_transfer_rate'), transferRateData),
+                ...maxFor(isSeriesHidden('mbps_transfer_complete'), transferCompleteData),
+                ...maxFor(isSeriesHidden('Player avg_network_bitrate'), estimateData),
+                ...maxFor(isSeriesHidden('Player network_bitrate'), playerWireBitrateData),
+                ...maxFor(isSeriesHidden('Player Variant'), renditionData),
+                ...maxFor(isSeriesHidden('Server Variant'), serverRenditionData)
+            );
+            const maxYAuto = Math.min(100, Math.max(1, (Math.ceil((maxYAutoRaw * 1.05) * 10) / 10)));
+            const maxY = axisMode === 'auto' ? maxYAuto : Number(axisMode);
+
+            const variantsHidden = isSeriesHidden('Variants');
+            const variantDatasets = variantLadder.map((variant, index) => {
+                return {
+                    label: index === 0 ? 'Variants' : `_Variant ${variant.vx}`,
+                    data: points.map(point => ({ x: point.x, y: variant.mbps })),
+                    borderColor: '#9ca3af',
+                    backgroundColor: 'rgba(156,163,175,0.12)',
+                    borderWidth: 1,
+                    pointRadius: 0,
+                    tension: 0,
+                    borderDash: index % 2 === 0 ? [2, 6] : [6, 3],
+                    hidden: variantsHidden
+                };
+            });
+
+            const datasets = [
+                {
+                    label: 'mbps_shaper_rate',
+                    data: shaperRateData,
+                    borderColor: '#0f766e',
+                    backgroundColor: 'rgba(15,118,110,0.12)',
+                    borderWidth: 1.7,
+                    pointRadius: 0,
+                    tension: 0.15,
+                    borderDash: [8, 2],
+                    hidden: isSeriesHidden('mbps_shaper_rate')
+                },
+                {
+                    label: compareActive ? `Shaper Avg (S${sessionId})` : 'mbps_shaper_avg',
+                    data: shaperAvgData,
+                    borderColor: '#0d9488',
+                    backgroundColor: 'rgba(13,148,136,0.12)',
+                    borderWidth: 1.7,
+                    pointRadius: 0,
+                    tension: 0.15,
+                    borderDash: [10, 3],
+                    hidden: isSeriesHidden(compareActive ? `Shaper Avg (S${sessionId})` : 'mbps_shaper_avg')
+                },
+                {
+                    label: 'mbps_transfer_rate',
+                    data: transferRateData,
+                    borderColor: '#f97316',
+                    backgroundColor: 'rgba(249,115,22,0.12)',
+                    borderWidth: 2,
+                    pointRadius: 0,
+                    tension: 0,
+                    borderDash: [4, 2],
+                    hidden: isSeriesHidden('mbps_transfer_rate')
+                },
+                {
+                    label: 'mbps_transfer_complete',
+                    data: transferCompleteData,
+                    borderColor: '#dc2626',
+                    backgroundColor: 'rgba(220,38,38,0.15)',
+                    borderWidth: 3,
+                    pointRadius: 3,
+                    pointBackgroundColor: '#dc2626',
+                    tension: 0,
+                    stepped: 'after',
+                    hidden: isSeriesHidden('mbps_transfer_complete')
+                },
+                {
+                    label: compareActive ? `Player avg_network_bitrate (S${sessionId})` : 'Player avg_network_bitrate',
+                    data: estimateData,
+                    borderColor: '#6366f1',
+                    backgroundColor: 'rgba(99,102,241,0.12)',
+                    borderWidth: 1.5,
+                    pointRadius: 0,
+                    tension: 0.2,
+                    borderDash: [6, 4],
+                    hidden: isSeriesHidden(compareActive ? `Player avg_network_bitrate (S${sessionId})` : 'Player avg_network_bitrate')
+                },
+                {
+                    label: compareActive ? `Player network_bitrate (S${sessionId})` : 'Player network_bitrate',
+                    data: playerWireBitrateData,
+                    borderColor: '#059669',
+                    backgroundColor: 'rgba(5,150,105,0.15)',
+                    borderWidth: 2,
+                    pointRadius: 0,
+                    tension: 0.2,
+                    spanGaps: false,
+                    hidden: isSeriesHidden(compareActive ? `Player network_bitrate (S${sessionId})` : 'Player network_bitrate')
+                },
+                {
+                    label: compareActive ? `Player Variant (S${sessionId})` : 'Player Variant',
+                    data: renditionData,
+                    borderColor: '#ef4444',
+                    backgroundColor: 'rgba(239,68,68,0.12)',
+                    borderWidth: 1.5,
+                    pointRadius: 0,
+                    tension: 0.2,
+                    borderDash: [3, 3],
+                    hidden: isSeriesHidden(compareActive ? `Player Variant (S${sessionId})` : 'Player Variant')
+                },
+                {
+                    label: compareActive ? `Server Variant (S${sessionId})` : 'Server Variant',
+                    data: serverRenditionData,
+                    borderColor: '#b45309',
+                    backgroundColor: 'rgba(180,83,9,0.12)',
+                    borderWidth: 1.5,
+                    pointRadius: 0,
+                    tension: 0.2,
+                    borderDash: [10, 4],
+                    hidden: isSeriesHidden(compareActive ? `Server Variant (S${sessionId})` : 'Server Variant')
+                },
+                ...variantDatasets,
+                {
+                    label: 'Limit',
+                    data: targetData,
+                    borderColor: '#f59e0b',
+                    backgroundColor: 'rgba(245,158,11,0.12)',
+                    borderWidth: 1.5,
+                    pointRadius: 0,
+                    stepped: true,
+                    hidden: isSeriesHidden('Limit')
+                },
+            ];
+
+            // Compare mode: overlay grouped sessions' key metrics
+            const compareGroupIds = getCompareGroupIds();
+            if (compareGroupIds.length >= 2) {
+                const otherIds = compareGroupIds.filter(sid => sid !== sessionId);
+                otherIds.forEach((sid, idx) => {
+                    const ci = sessionColorIndex(sid, compareGroupIds);
+                    const color = SESSION_COLORS[ci];
+                    const otherSeries = (bandwidthHistory.get(sid) || [])
+                        .filter(p => p.ts >= windowStart)
+                        .map(p => ({ x: (p.ts - windowStart) / 1000, y: p }));
+                    const tag = `S${sid}`;
+                    // Player Variant (visible by default in compare)
+                    datasets.push({
+                        label: `Player Variant (${tag})`,
+                        data: otherSeries.map(p => ({ x: p.x, y: p.y.currentRendition || null })),
+                        borderColor: color.main,
+                        borderWidth: 2,
+                        pointRadius: 0,
+                        tension: 0.2,
+                        borderDash: [3, 3],
+                        hidden: isSeriesHidden(`Player Variant (${tag})`)
+                    });
+                    // Player avg_network_bitrate (visible by default in compare)
+                    datasets.push({
+                        label: `Player avg_network_bitrate (${tag})`,
+                        data: otherSeries.map(p => ({ x: p.x, y: p.y.playerEstimate || null })),
+                        borderColor: color.light,
+                        borderWidth: 1.5,
+                        pointRadius: 0,
+                        tension: 0.2,
+                        borderDash: [6, 4],
+                        hidden: isSeriesHidden(`Player avg_network_bitrate (${tag})`)
+                    });
+                    // Player Network Rate (visible by default in compare; null when session has no wire metric)
+                    datasets.push({
+                        label: `Player network_bitrate (${tag})`,
+                        data: otherSeries.map(p => ({
+                            x: p.x,
+                            y: (p.y.playerWireBitrate === null || p.y.playerWireBitrate === undefined)
+                                ? null
+                                : p.y.playerWireBitrate
+                        })),
+                        borderColor: color.main,
+                        borderWidth: 2,
+                        pointRadius: 0,
+                        tension: 0.2,
+                        borderDash: [4, 2],
+                        spanGaps: false,
+                        hidden: isSeriesHidden(`Player network_bitrate (${tag})`)
+                    });
+                    // Server Variant (hidden by default)
+                    datasets.push({
+                        label: `Server Variant (${tag})`,
+                        data: otherSeries.map(p => ({ x: p.x, y: p.y.serverRendition || null })),
+                        borderColor: color.main,
+                        borderWidth: 1,
+                        pointRadius: 0,
+                        tension: 0.2,
+                        borderDash: [10, 4],
+                        hidden: true
+                    });
+                    // Shaper Avg (visible by default in compare)
+                    datasets.push({
+                        label: `Shaper Avg (${tag})`,
+                        data: otherSeries.map(p => ({ x: p.x, y: p.y.shaperAvg || null })),
+                        borderColor: color.light,
+                        borderWidth: 1.5,
+                        pointRadius: 0,
+                        tension: 0.15,
+                        borderDash: [10, 3],
+                        hidden: isSeriesHidden(`Shaper Avg (${tag})`)
+                    });
+                });
+            }
+
+            let chart = bandwidthCharts.get(sessionId);
+            if (chart && chart.canvas !== canvas) {
+                chart.destroy();
+                chart = null;
+                bandwidthCharts.delete(sessionId);
+            }
+            if (!chart) {
+                // Ensure the canvas uses CSS sizing (prevent huge drawing buffer)
+                try {
+                    canvas.style.height = '320px';
+                    canvas.style.width = '100%';
+                    canvas.removeAttribute && canvas.removeAttribute('width');
+                    canvas.removeAttribute && canvas.removeAttribute('height');
+                } catch (e) {
+                    /* ignore */
+                }
+
+                chart = new Chart(canvas, {
+                    type: 'line',
+                    data: {
+                        datasets
+                    },
+                    options: {
+                        // Let Chart.js size the drawing buffer to the CSS box (handles DPR)
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        animation: false,
+                        plugins: {
+                            legend: {
+                                display: true,
+                                position: 'bottom',
+                                ...legendHoverCallbacks,
+                                labels: {
+                                    color: '#6b7280',
+                                    font: { family: 'Courier New, monospace', size: 10 },
+                                    filter: (item) => !item.text.startsWith('_')
+                                },
+                                onClick: (evt, item, legend) => {
+                                    const index = item.datasetIndex;
+                                    const chartRef = legend.chart;
+                                    const label = chartRef.data.datasets[index]?.label;
+                                    if (!label) return;
+                                    const state = bandwidthVisibility.get(sessionId) || {};
+                                    const isVisible = chartRef.isDatasetVisible(index);
+                                    if (label === 'Variants') {
+                                        const newVisible = !isVisible;
+                                        chartRef.data.datasets.forEach((ds, i) => {
+                                            if (ds.label === 'Variants' || (ds.label && ds.label.startsWith('_Variant'))) {
+                                                chartRef.setDatasetVisibility(i, newVisible);
+                                            }
+                                        });
+                                        state['Variants'] = !newVisible;
+                                    } else {
+                                        chartRef.setDatasetVisibility(index, !isVisible);
+                                        state[label] = isVisible;
+                                        state[bandwidthSeriesKey(label)] = isVisible;
+                                    }
+                                    bandwidthVisibility.set(sessionId, state);
+                                    const currentAxisMode = normalizeBitrateAxisMaxMode(
+                                        bitrateAxisMaxBySession.get(String(sessionId)) || 'auto'
+                                    );
+                                    if (currentAxisMode === 'auto') {
+                                        const visibleMax = chartRef.data.datasets
+                                            .filter((_, i) => chartRef.isDatasetVisible(i))
+                                            .flatMap(ds => ds.data.map(pt => Number(pt.y) || 0))
+                                            .reduce((m, v) => Math.max(m, v), 1);
+                                        chartRef.options.scales.y.max = Math.min(100, Math.max(1, Math.ceil(visibleMax * 1.05 * 10) / 10));
+                                    }
+                                    chartRef.update('none');
+                                }
+                            },
+                            tooltip: {
+                                callbacks: {
+                                    title: (items) => {
+                                        const first = Array.isArray(items) && items.length ? items[0] : null;
+                                        if (!first) return '';
+                                        const xValue = Number(first.parsed?.x);
+                                        const startMs = Number(chart?.$windowStartMs || windowStart);
+                                        return formatBitrateChartAbsoluteTick(startMs, xValue);
+                                    }
+                                }
+                            },
+                            zoom: buildUnifiedChartZoomOptions(sessionId)
+                        },
+                        // Reserve right padding equal to the FPS chart's
+                        // right-side Y-axis (Dropped/s) width so all four
+                        // charts' plot areas share the same right edge,
+                        // and so vertical tick lines line up across all
+                        // charts and the events-timeline above.
+                        layout: { padding: { right: RIGHT_AXIS_PAD_PX } },
+                        scales: {
+                            x: {
+                                type: 'linear',
+                                min: 0,
+                                max: 600,
+                                grid: { color: '#e5e7eb' },
+                                ticks: {
+                                    color: '#6b7280',
+                                    font: { family: 'Courier New, monospace', size: 10 },
+                                    maxTicksLimit: 8,
+                                    align: 'inner',
+                                    callback: (value) => {
+                                        const startMs = Number(chart?.$windowStartMs || windowStart);
+                                        return formatBitrateChartAbsoluteTick(startMs, Number(value));
+                                    }
+                                }
+                            },
+                            y: {
+                                min: 0,
+                                max: maxY,
+                                afterFit: (axis) => { axis.width = 90; },
+                                grid: { color: '#e5e7eb' },
+                                ticks: {
+                                    color: '#6b7280',
+                                    font: { family: 'Courier New, monospace', size: 10 }
+                                },
+                                title: {
+                                    display: true,
+                                    text: 'Bitrate (Mbps)',
+                                    color: '#6b7280',
+                                    font: { family: 'Courier New, monospace', size: 10 }
+                                }
+                            }
+                        }
+                    }
+                });
+                chart.$windowStartMs = windowStart;
+                applyStoredChartViewport(sessionId, chart);
+                installRightMousePanHandlers(sessionId, chart);
+                installChartClickPauseHandler(sessionId, chart);
+                ensureChartLiveWheelAnchor();
+                bandwidthCharts.set(sessionId, chart);
+            } else {
+                chart.data.datasets = datasets;
+                chart.data.datasets.forEach((dataset, idx) => {
+                    const label = dataset.label;
+                    const hidden = (label && label.startsWith('_Variant'))
+                        ? isSeriesHidden('Variants')
+                        : isSeriesHidden(label);
+                    dataset.hidden = hidden;
+                    chart.setDatasetVisibility(idx, !hidden);
+                });
+                chart.$windowStartMs = windowStart;
+                chart.options.scales.y.max = maxY;
+                // Stretch the chart x-axis to match the active window
+                // — replay mode can grow this past the live default of
+                // 600s when the user expands the brush. Update zoom-
+                // plugin limits in lockstep so reset-zoom snaps back to
+                // the new full extent.
+                applyChartXMax(chart, windowMs);
+                applyLegendHover(chart);
+                chart.update('none');
+            }
+
+            const bufferCanvas = card.querySelector('canvas.buffer-depth-chart');
+            if (!bufferCanvas) return;
+            const bufferChartRangeLabel = card.querySelector('[data-field="buffer_depth_chart_range"]');
+            if (bufferChartRangeLabel) {
+                bufferChartRangeLabel.textContent = formatBitrateChartRange(windowStart, maxTs);
+            }
+            let bufferChart = bufferDepthCharts.get(sessionId);
+            if (bufferChart && bufferChart.canvas !== bufferCanvas) {
+                bufferChart.destroy();
+                bufferChart = null;
+                bufferDepthCharts.delete(sessionId);
+            }
+            const bufferDatasets = [
+                {
+                    label: compareActive ? `Buffer (S${sessionId})` : 'Buffer Depth',
+                    data: bufferDepthData,
+                    borderColor: '#2563eb',
+                    backgroundColor: 'rgba(37,99,235,0.12)',
+                    borderWidth: 2,
+                    pointRadius: 0,
+                    tension: 0.2,
+                    yAxisID: 'y'
+                },
+                {
+                    // Wall-clock offset shares this chart on a right-side axis.
+                    // The two metrics are related — buffer drains tend to
+                    // coincide with offset jumps — so plotting them together
+                    // makes correlation immediate.
+                    label: compareActive ? `Wall-Clock (S${sessionId})` : 'Wall-Clock Offset',
+                    data: wallClockOffsetData,
+                    borderColor: '#0d9488',
+                    backgroundColor: 'rgba(13,148,136,0.12)',
+                    borderWidth: 2,
+                    pointRadius: 0,
+                    tension: 0.2,
+                    yAxisID: 'y1'
+                }
+            ];
+            if (compareGroupIds.length >= 2) {
+                const otherIds = compareGroupIds.filter(sid => sid !== sessionId);
+                otherIds.forEach((sid) => {
+                    const ci = sessionColorIndex(sid, compareGroupIds);
+                    const color = SESSION_COLORS[ci];
+                    const otherBufferSeries = (bandwidthHistory.get(sid) || [])
+                        .filter(p => p.ts >= windowStart)
+                        .map(p => ({ x: (p.ts - windowStart) / 1000, y: Number.isFinite(p.bufferDepth) ? p.bufferDepth : null }));
+                    const otherWallSeries = (bandwidthHistory.get(sid) || [])
+                        .filter(p => p.ts >= windowStart)
+                        .map(p => ({ x: (p.ts - windowStart) / 1000, y: Number.isFinite(p.wallClockOffset) ? p.wallClockOffset : null }));
+                    bufferDatasets.push({
+                        label: `Buffer (S${sid})`,
+                        data: otherBufferSeries,
+                        borderColor: color.main,
+                        borderWidth: 1.5,
+                        pointRadius: 0,
+                        tension: 0.2,
+                        borderDash: [4, 3],
+                        yAxisID: 'y'
+                    });
+                    bufferDatasets.push({
+                        label: `Wall-Clock (S${sid})`,
+                        data: otherWallSeries,
+                        borderColor: color.light,
+                        borderWidth: 1.5,
+                        pointRadius: 0,
+                        tension: 0.2,
+                        borderDash: [2, 4],
+                        yAxisID: 'y1'
+                    });
+                });
+            }
+            // Buffer-depth bound (left axis): cap 60.
+            const bufferValues = bufferDatasets
+                .filter(ds => ds.yAxisID === 'y')
+                .flatMap(ds => ds.data)
+                .map((point) => Number(point && point.y))
+                .filter((value) => Number.isFinite(value) && value >= 0);
+            const maxBufferDepthRaw = Math.max(5, ...bufferValues, 0);
+            const maxBufferDepth = Math.min(60, Math.ceil(maxBufferDepthRaw / 5) * 5);
+            // Wall-clock bound (right axis): cap 120.
+            const wallValues = bufferDatasets
+                .filter(ds => ds.yAxisID === 'y1')
+                .flatMap(ds => ds.data)
+                .map((point) => Number(point && point.y))
+                .filter((value) => Number.isFinite(value));
+            const maxWallClockRaw = Math.max(5, ...wallValues, 0);
+            const maxWallClock = Math.min(120, Math.ceil(maxWallClockRaw / 5) * 5);
+            if (!bufferChart) {
+                bufferChart = new Chart(bufferCanvas, {
+                    type: 'line',
+                    data: {
+                        datasets: bufferDatasets
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        animation: false,
+                        plugins: {
+                            legend: {
+                                display: true,
+                                position: 'bottom',
+                                ...legendHoverCallbacks,
+                                labels: {
+                                    color: '#6b7280',
+                                    font: { family: 'Courier New, monospace', size: 10 }
+                                }
+                            },
+                            tooltip: {
+                                callbacks: {
+                                    title: (items) => {
+                                        const first = Array.isArray(items) && items.length ? items[0] : null;
+                                        if (!first) return '';
+                                        const xValue = Number(first.parsed?.x);
+                                        const startMs = Number(bufferChart?.$windowStartMs || windowStart);
+                                        return formatBitrateChartAbsoluteTick(startMs, xValue);
+                                    }
+                                }
+                            },
+                            zoom: buildUnifiedChartZoomOptions(sessionId)
+                        },
+                        scales: {
+                            x: {
+                                type: 'linear',
+                                min: 0,
+                                max: 600,
+                                grid: { color: '#e5e7eb' },
+                                ticks: {
+                                    color: '#6b7280',
+                                    font: { family: 'Courier New, monospace', size: 10 },
+                                    maxTicksLimit: 8,
+                                    align: 'inner',
+                                    callback: (value) => {
+                                        const startMs = Number(bufferChart?.$windowStartMs || windowStart);
+                                        return formatBitrateChartAbsoluteTick(startMs, Number(value));
+                                    }
+                                }
+                            },
+                            y: {
+                                position: 'left',
+                                min: 0,
+                                max: maxBufferDepth,
+                                afterFit: (axis) => { axis.width = 90; },
+                                grid: { color: '#e5e7eb' },
+                                ticks: {
+                                    color: '#6b7280',
+                                    font: { family: 'Courier New, monospace', size: 10 }
+                                },
+                                title: {
+                                    display: true,
+                                    text: 'Buffer Depth (s)',
+                                    color: '#6b7280',
+                                    font: { family: 'Courier New, monospace', size: 10 }
+                                }
+                            },
+                            y1: {
+                                position: 'right',
+                                min: 0,
+                                max: maxWallClock,
+                                // Pin width to RIGHT_AXIS_PAD_PX so the
+                                // plot's right edge matches the bandwidth
+                                // and FPS charts (and the events-timeline
+                                // above), keeping x-axis ticks vertically
+                                // aligned across all stacked charts.
+                                afterFit: (axis) => { axis.width = RIGHT_AXIS_PAD_PX; },
+                                grid: { drawOnChartArea: false },
+                                ticks: {
+                                    color: '#6b7280',
+                                    font: { family: 'Courier New, monospace', size: 10 }
+                                },
+                                title: {
+                                    display: true,
+                                    text: 'Wall-Clock Offset (s)',
+                                    color: '#6b7280',
+                                    font: { family: 'Courier New, monospace', size: 10 }
+                                }
+                            }
+                        }
+                    }
+                });
+                bufferChart.$windowStartMs = windowStart;
+                applyStoredChartViewport(sessionId, bufferChart);
+                installRightMousePanHandlers(sessionId, bufferChart);
+                installChartClickPauseHandler(sessionId, bufferChart);
+                ensureChartLiveWheelAnchor();
+                bufferDepthCharts.set(sessionId, bufferChart);
+            } else {
+                const oldHidden = {};
+                bufferChart.data.datasets.forEach((ds, i) => {
+                    if (bufferChart.getDatasetMeta(i).hidden != null) {
+                        oldHidden[ds.label] = bufferChart.getDatasetMeta(i).hidden;
+                    }
+                });
+                bufferDatasets.forEach(ds => {
+                    if (ds.label in oldHidden) ds.hidden = oldHidden[ds.label];
+                });
+                bufferChart.data.datasets = bufferDatasets;
+                bufferChart.$windowStartMs = windowStart;
+                bufferChart.options.scales.y.max = maxBufferDepth;
+                bufferChart.options.scales.y1.max = maxWallClock;
+                applyChartXMax(bufferChart, windowMs);
+                applyLegendHover(bufferChart);
+                bufferChart.update('none');
+            }
+
+            const fpsCanvas = card.querySelector('canvas.video-fps-chart');
+            if (!fpsCanvas) return;
+            const fpsChartRangeLabel = card.querySelector('[data-field="video_fps_chart_range"]');
+            const fpsData = [];
+            const droppedFpsDataRaw = [];
+            const fpsWindowSeconds = 2.0;
+            const maxReasonableFps = 120;
+            const buildRateSeries = (counterSeries) => {
+                const out = [];
+                for (let idx = 0; idx < counterSeries.length; idx += 1) {
+                    const currentPoint = counterSeries[idx];
+                    const currentCount = Number(currentPoint.y);
+                    const currentX = Number(currentPoint.x);
+                    if (!Number.isFinite(currentCount) || !Number.isFinite(currentX)) {
+                        out.push({ x: currentPoint.x, y: null });
+                        continue;
+                    }
+                    const targetX = currentX - fpsWindowSeconds;
+                    let anchorPoint = null;
+                    for (let j = idx - 1; j >= 0; j -= 1) {
+                        const candidateX = Number(counterSeries[j]?.x);
+                        if (!Number.isFinite(candidateX)) continue;
+                        if (candidateX <= targetX) {
+                            anchorPoint = counterSeries[j];
+                            break;
+                        }
+                    }
+                    if (!anchorPoint) {
+                        out.push({ x: currentPoint.x, y: null });
+                        continue;
+                    }
+                    const anchorCount = Number(anchorPoint.y);
+                    const currentMs = Number(currentPoint.atMs);
+                    const anchorMs = Number(anchorPoint.atMs);
+                    const deltaSeconds = (Number.isFinite(currentMs) && Number.isFinite(anchorMs) && currentMs > anchorMs)
+                        ? (currentMs - anchorMs) / 1000
+                        : currentX - Number(anchorPoint.x);
+                    const deltaCount = currentCount - anchorCount;
+                    if (!Number.isFinite(anchorCount) || deltaSeconds <= 0 || deltaCount < 0) {
+                        out.push({ x: currentPoint.x, y: null });
+                        continue;
+                    }
+                    const rate = deltaCount / deltaSeconds;
+                    if (!Number.isFinite(rate) || rate < 0 || rate > maxReasonableFps) {
+                        out.push({ x: currentPoint.x, y: null });
+                        continue;
+                    }
+                    out.push({ x: currentPoint.x, y: rate });
+                }
+                return out;
+            };
+            fpsData.push(...buildRateSeries(framesDisplayedData));
+            droppedFpsDataRaw.push(...buildRateSeries(framesDroppedData));
+            const fpsValues = fpsData.map((point) => Number(point.y)).filter((value) => Number.isFinite(value) && value >= 0);
+            const droppedFpsValues = droppedFpsDataRaw.map((point) => Number(point.y)).filter((value) => Number.isFinite(value) && value >= 0);
+            const fpsSmoothedData = [];
+            let smooth = null;
+            const smoothingAlpha = 0.4;
+            for (const point of fpsData) {
+                const y = Number(point.y);
+                if (!Number.isFinite(y) || y < 0) {
+                    fpsSmoothedData.push({ x: point.x, y: null });
+                    continue;
+                }
+                if (smooth === null) {
+                    smooth = y;
+                } else {
+                    smooth = (smoothingAlpha * y) + ((1 - smoothingAlpha) * smooth);
+                }
+                fpsSmoothedData.push({ x: point.x, y: smooth });
+            }
+            const droppedFpsSmoothedData = [];
+            let droppedSmooth = null;
+            const droppedSmoothingAlpha = 0.35;
+            for (const point of droppedFpsDataRaw) {
+                const y = Number(point.y);
+                if (!Number.isFinite(y) || y < 0) {
+                    droppedFpsSmoothedData.push({ x: point.x, y: null });
+                    continue;
+                }
+                if (droppedSmooth === null) {
+                    droppedSmooth = y;
+                } else {
+                    droppedSmooth = (droppedSmoothingAlpha * y) + ((1 - droppedSmoothingAlpha) * droppedSmooth);
+                }
+                droppedFpsSmoothedData.push({ x: point.x, y: droppedSmooth });
+            }
+            const fpsSorted = [...fpsValues].sort((a, b) => a - b);
+            const baselineIdx = fpsSorted.length
+                ? Math.max(0, Math.min(fpsSorted.length - 1, Math.floor(fpsSorted.length * 0.75)))
+                : -1;
+            const baselineFps = baselineIdx >= 0 ? fpsSorted[baselineIdx] : 30;
+            const lowFpsThreshold = Math.max(8, baselineFps * 0.75);
+            const baselineData = points.map(point => ({ x: point.x, y: baselineFps }));
+            const lowThresholdData = points.map(point => ({ x: point.x, y: lowFpsThreshold }));
+            const lowFpsData = fpsSmoothedData.map(point => {
+                const y = Number(point.y);
+                return { x: point.x, y: (Number.isFinite(y) && y < lowFpsThreshold) ? y : null };
+            });
+            const maxFps = Math.min(120, Math.max(10, baselineFps * 1.2, ...fpsValues, 0));
+            const maxDroppedFps = Math.min(30, Math.max(2, ...droppedFpsValues, 0));
+            if (fpsChartRangeLabel) {
+                fpsChartRangeLabel.textContent = `${formatBitrateChartRange(windowStart, maxTs)} | baseline ${baselineFps.toFixed(1)} fps, low < ${lowFpsThreshold.toFixed(1)}, dropped max ${maxDroppedFps.toFixed(2)}/s`;
+            }
+            let fpsChart = videoFpsCharts.get(sessionId);
+            if (fpsChart && fpsChart.canvas !== fpsCanvas) {
+                fpsChart.destroy();
+                fpsChart = null;
+                videoFpsCharts.delete(sessionId);
+            }
+            const fpsDatasets = [
+                {
+                    label: compareActive ? `FPS (S${sessionId})` : 'FPS (smoothed)',
+                    data: fpsSmoothedData,
+                    borderColor: '#7e22ce',
+                    backgroundColor: 'rgba(126,34,206,0.10)',
+                    borderWidth: 2.2,
+                    pointRadius: 0,
+                    tension: 0.2
+                },
+                {
+                    label: 'Low FPS',
+                    data: lowFpsData,
+                    borderColor: '#dc2626',
+                    backgroundColor: 'rgba(220,38,38,0.22)',
+                    borderWidth: 2,
+                    pointRadius: 0,
+                    tension: 0.2,
+                    spanGaps: false
+                },
+                {
+                    label: 'FPS Baseline',
+                    data: baselineData,
+                    borderColor: '#475569',
+                    borderWidth: 1,
+                    pointRadius: 0,
+                    tension: 0,
+                    borderDash: [6, 4]
+                },
+                {
+                    label: 'Low Threshold',
+                    data: lowThresholdData,
+                    borderColor: '#b91c1c',
+                    borderWidth: 1,
+                    pointRadius: 0,
+                    tension: 0,
+                    borderDash: [3, 4]
+                },
+                {
+                    label: compareActive ? `Dropped (S${sessionId})` : 'Dropped Frames/s',
+                    data: droppedFpsSmoothedData,
+                    yAxisID: 'yDrop',
+                    borderColor: '#ea580c',
+                    backgroundColor: 'rgba(234,88,12,0.14)',
+                    borderWidth: 1.8,
+                    pointRadius: 0,
+                    tension: 0.2,
+                    borderDash: [5, 3]
+                }
+            ];
+            if (compareGroupIds.length >= 2) {
+                const otherIds = compareGroupIds.filter(sid => sid !== sessionId);
+                otherIds.forEach((sid) => {
+                    const ci = sessionColorIndex(sid, compareGroupIds);
+                    const color = SESSION_COLORS[ci];
+                    const otherSeries = (bandwidthHistory.get(sid) || []).filter(p => p.ts >= windowStart);
+                    // Compute FPS for other session
+                    const otherFps = [];
+                    const otherDropped = [];
+                    for (let i = 1; i < otherSeries.length; i++) {
+                        const dt = (otherSeries[i].ts - otherSeries[i - 1].ts) / 1000;
+                        if (dt <= 0) continue;
+                        if (otherSeries[i].framesDisplayed != null && otherSeries[i - 1].framesDisplayed != null) {
+                            const dFrames = otherSeries[i].framesDisplayed - otherSeries[i - 1].framesDisplayed;
+                            if (dFrames >= 0) {
+                                otherFps.push({ x: (otherSeries[i].ts - windowStart) / 1000, y: Math.round(dFrames / dt * 10) / 10 });
+                            }
+                        }
+                        if (otherSeries[i].framesDropped != null && otherSeries[i - 1].framesDropped != null) {
+                            const dDropped = otherSeries[i].framesDropped - otherSeries[i - 1].framesDropped;
+                            if (dDropped >= 0) {
+                                otherDropped.push({ x: (otherSeries[i].ts - windowStart) / 1000, y: Math.round(dDropped / dt * 100) / 100 });
+                            }
+                        }
+                    }
+                    const tag = `S${sid}`;
+                    fpsDatasets.push({
+                        label: `FPS (${tag})`,
+                        data: otherFps,
+                        borderColor: color.main,
+                        borderWidth: 1.5,
+                        pointRadius: 0,
+                        tension: 0.2,
+                        borderDash: [4, 3]
+                    });
+                    fpsDatasets.push({
+                        label: `Dropped (${tag})`,
+                        data: otherDropped,
+                        yAxisID: 'yDrop',
+                        borderColor: color.light,
+                        borderWidth: 1.5,
+                        pointRadius: 0,
+                        tension: 0.2,
+                        borderDash: [5, 3]
+                    });
+                });
+            }
+            if (!fpsChart) {
+                fpsChart = new Chart(fpsCanvas, {
+                    type: 'line',
+                    data: {
+                        datasets: fpsDatasets
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        animation: false,
+                        plugins: {
+                            legend: {
+                                display: true,
+                                position: 'bottom',
+                                ...legendHoverCallbacks,
+                                labels: {
+                                    color: '#6b7280',
+                                    font: { family: 'Courier New, monospace', size: 10 },
+                                    boxWidth: 14,
+                                    usePointStyle: true,
+                                }
+                            },
+                            tooltip: {
+                                callbacks: {
+                                    title: (items) => {
+                                        const first = Array.isArray(items) && items.length ? items[0] : null;
+                                        if (!first) return '';
+                                        const xValue = Number(first.parsed?.x);
+                                        const startMs = Number(fpsChart?.$windowStartMs || windowStart);
+                                        return formatBitrateChartAbsoluteTick(startMs, xValue);
+                                    }
+                                }
+                            },
+                            zoom: buildUnifiedChartZoomOptions(sessionId)
+                        },
+                        scales: {
+                            x: {
+                                type: 'linear',
+                                min: 0,
+                                max: 600,
+                                grid: { color: '#e5e7eb' },
+                                ticks: {
+                                    color: '#6b7280',
+                                    font: { family: 'Courier New, monospace', size: 10 },
+                                    maxTicksLimit: 8,
+                                    align: 'inner',
+                                    callback: (value) => {
+                                        const startMs = Number(fpsChart?.$windowStartMs || windowStart);
+                                        return formatBitrateChartAbsoluteTick(startMs, Number(value));
+                                    }
+                                }
+                            },
+                            y: {
+                                min: 0,
+                                max: maxFps,
+                                afterFit: (axis) => { axis.width = 90; },
+                                grid: { color: '#e5e7eb' },
+                                ticks: {
+                                    color: '#6b7280',
+                                    font: { family: 'Courier New, monospace', size: 10 }
+                                },
+                                title: {
+                                    display: true,
+                                    text: 'Frames/s',
+                                    color: '#6b7280',
+                                    font: { family: 'Courier New, monospace', size: 10 }
+                                }
+                            },
+                            yDrop: {
+                                position: 'right',
+                                min: 0,
+                                max: maxDroppedFps,
+                                // Pin width to RIGHT_AXIS_PAD_PX so all
+                                // four chart plot areas (and the events-
+                                // timeline above) end at the same X.
+                                afterFit: (axis) => { axis.width = RIGHT_AXIS_PAD_PX; },
+                                grid: { drawOnChartArea: false },
+                                ticks: {
+                                    color: '#9a3412',
+                                    font: { family: 'Courier New, monospace', size: 10 }
+                                },
+                                title: {
+                                    display: true,
+                                    text: 'Dropped/s',
+                                    color: '#9a3412',
+                                    font: { family: 'Courier New, monospace', size: 10 }
+                                }
+                            }
+                        }
+                    }
+                });
+                fpsChart.$windowStartMs = windowStart;
+                applyStoredChartViewport(sessionId, fpsChart);
+                installRightMousePanHandlers(sessionId, fpsChart);
+                installChartClickPauseHandler(sessionId, fpsChart);
+                ensureChartLiveWheelAnchor();
+                videoFpsCharts.set(sessionId, fpsChart);
+            } else {
+                const oldHidden = {};
+                fpsChart.data.datasets.forEach((ds, i) => {
+                    if (fpsChart.getDatasetMeta(i).hidden != null) {
+                        oldHidden[ds.label] = fpsChart.getDatasetMeta(i).hidden;
+                    }
+                });
+                fpsDatasets.forEach(ds => {
+                    if (ds.label in oldHidden) ds.hidden = oldHidden[ds.label];
+                });
+                fpsChart.data.datasets = fpsDatasets;
+                fpsChart.$windowStartMs = windowStart;
+                fpsChart.options.scales.y.max = maxFps;
+                fpsChart.options.scales.yDrop.max = maxDroppedFps;
+                applyChartXMax(fpsChart, windowMs);
+                applyLegendHover(fpsChart);
+                fpsChart.update('none');
+            }
+        }
+
+        function saveSettingsForCard(card) {
+            const data = TestingSessionUI.readSessionSettings(card);
+            const fields = Object.keys(data || {}).filter(field => field !== 'session_id');
+            return sendSessionPatch(card, fields);
+        }
+
+        function applyNetworkShapingForCard(card) {
+            const sessionId = card.dataset.sessionId;
+            if (!sessionId) return Promise.resolve();
+            if (sessionId && isAbrcharRunLocked(sessionId)) {
+                console.warn('[NETSHAPE] Manual shaping apply blocked because ABR characterization is running.');
+                return Promise.resolve();
+            }
+            const getValue = (field) => {
+                const input = card.querySelector(`input[data-field="${field}"]`);
+                return input ? Number(input.value) : 0;
+            };
+            const payload = {
+                rate_mbps: getValue('shaping_throughput_mbps'),
+                delay_ms: getValue('shaping_delay_ms'),
+                loss_pct: getValue('shaping_loss_pct')
+            };
+            const pattern = TestingSessionUI.readShapingPattern(card);
+            const usePattern = pattern.template_mode !== 'sliders'
+                && Array.isArray(pattern.steps)
+                && pattern.steps.length > 0;
+            const patternSteps = usePattern ? (pattern.steps || []) : [];
+            pendingShaping.set(sessionId, {
+                timestamp: Date.now(),
+                values: {
+                    nftables_bandwidth_mbps: payload.rate_mbps,
+                    nftables_delay_ms: payload.delay_ms,
+                    nftables_packet_loss: payload.loss_pct,
+                    nftables_pattern_enabled: usePattern,
+                    nftables_pattern_steps: patternSteps,
+                    nftables_pattern_segment_duration_seconds: pattern.segment_duration_seconds,
+                    nftables_pattern_default_segments: pattern.default_segments,
+                    nftables_pattern_default_step_seconds: pattern.default_step_seconds,
+                    nftables_pattern_template_mode: pattern.template_mode,
+                    nftables_pattern_margin_pct: pattern.template_margin_pct
+                }
+            });
+            // Belt-and-suspenders cleanup: if the SSE handler hasn't already
+            // cleared the pending state once values match, drop it after 60s
+            // so we don't hold stale overrides forever.
+            setTimeout(() => {
+                const pending = pendingShaping.get(sessionId);
+                if (pending && Date.now() - pending.timestamp > 55000) {
+                    pendingShaping.delete(sessionId);
+                }
+            }, 60000);
+            const fields = [
+                'nftables_bandwidth_mbps',
+                'nftables_delay_ms',
+                'nftables_packet_loss',
+                'nftables_pattern_enabled',
+                'nftables_pattern_steps',
+                'nftables_pattern_segment_duration_seconds',
+                'nftables_pattern_default_segments',
+                'nftables_pattern_default_step_seconds',
+                'nftables_pattern_template_mode',
+                'nftables_pattern_margin_pct'
+            ];
+            return sendSessionPatch(card, fields);
+        }
+
+        function fetchSessions() {
+            fetch('/api/sessions', { cache: 'no-store' })
+                .then(async response => {
+                    if (!response.ok) {
+                        const body = await response.text();
+                        throw new Error(`/api/sessions failed (${response.status}): ${body.slice(0, 120)}`);
+                    }
+                    const contentType = (response.headers.get('content-type') || '').toLowerCase();
+                    if (!contentType.includes('application/json')) {
+                        const body = await response.text();
+                        throw new Error(`/api/sessions returned non-JSON: ${body.slice(0, 120)}`);
+                    }
+                    return response.json();
+                })
+                .then(sessions => applySessionsList(sessions))
+                .catch(error => {
+                    console.error('Error fetching sessions:', error);
+                    document.getElementById('sessionsContainer').innerHTML = '<div class="status-message">Failed to load sessions.</div>';
+                });
+        }
+
+        function applySessionsList(sessions, options) {
+            const incomingList = Array.isArray(sessions) ? sessions : [];
+            const incomingMaxVersion = incomingList.reduce((max, session) => {
+                const version = getSessionSnapshotVersion(session);
+                return version > max ? version : max;
+            }, 0);
+            // Replay mode deliberately re-applies older snapshots when
+            // the user scrubs back through history — pass {force:true}
+            // to bypass the live-mode out-of-order guard. Without this
+            // the bandwidth/buffer/FPS/events charts wouldn't update on
+            // brush moves into earlier windows.
+            const force = !!(options && options.force);
+            if (
+                !force
+                && incomingMaxVersion > 0
+                && lastAppliedSnapshotVersion > 0
+                && incomingMaxVersion < lastAppliedSnapshotVersion
+            ) {
+                return;
+            }
+
+            const next = new Map();
+            incomingList.forEach((incomingSession) => {
+                const key = String(incomingSession?.session_id || '');
+                if (!key) return;
+                const existingSession = sessionsById.get(key);
+                if (!existingSession) {
+                    next.set(key, incomingSession);
+                    return;
+                }
+                const incomingVersion = getSessionSnapshotVersion(incomingSession);
+                const existingVersion = getSessionSnapshotVersion(existingSession);
+                if (incomingVersion === 0 && existingVersion > 0) {
+                    next.set(key, existingSession);
+                } else if (existingVersion === 0 || incomingVersion >= existingVersion) {
+                    next.set(key, incomingSession);
+                } else {
+                    next.set(key, existingSession);
+                }
+            });
+
+            if (incomingMaxVersion > lastAppliedSnapshotVersion) {
+                lastAppliedSnapshotVersion = incomingMaxVersion;
+            }
+
+            sessionsById.clear();
+            next.forEach((value, key) => sessionsById.set(key, value));
+            const validIds = new Set(next.keys());
+            Array.from(controlRevisionBySession.keys()).forEach((id) => {
+                if (!validIds.has(id)) {
+                    controlRevisionBySession.delete(id);
+                }
+            });
+            renderSessions();
+        }
+
+        function isFailureRangeField(field) {
+            return [
+                'segment_consecutive_failures',
+                'segment_failure_frequency',
+                'manifest_consecutive_failures',
+                'manifest_failure_frequency',
+                'master_manifest_consecutive_failures',
+                'master_manifest_failure_frequency',
+                'all_consecutive_failures',
+                'all_failure_frequency',
+                'transport_consecutive_failures',
+                'transport_failure_frequency',
+                'transfer_active_timeout_seconds',
+                'transfer_idle_timeout_seconds'
+            ].includes(field);
+        }
+
+        function getSessionBaseRevision(sessionId) {
+            const session = sessionsById.get(String(sessionId || ''));
+            const revision = session ? session.control_revision : null;
+            if (revision === undefined || revision === null) {
+                return '';
+            }
+            return String(revision);
+        }
+
+        function queuePendingFailureEdits(sessionId, values) {
+            if (!sessionId || !values) return;
+            const key = String(sessionId);
+            const existing = pendingFailureEdits.get(key);
+            const merged = {
+                ...(existing ? existing.values : {}),
+                ...values
+            };
+            pendingFailureEdits.set(key, {
+                timestamp: Date.now(),
+                values: merged
+            });
+            setTimeout(() => {
+                const pending = pendingFailureEdits.get(key);
+                if (pending && Date.now() - pending.timestamp > 4500) {
+                    pendingFailureEdits.delete(key);
+                }
+            }, 5000);
+        }
+
+        function resolvePendingFailureEdits(sessionId, fields) {
+            const key = String(sessionId || '');
+            const pending = pendingFailureEdits.get(key);
+            if (!pending) return;
+            const values = { ...pending.values };
+            (fields || []).forEach(field => {
+                delete values[field];
+            });
+            if (Object.keys(values).length === 0) {
+                pendingFailureEdits.delete(key);
+            } else {
+                pendingFailureEdits.set(key, {
+                    timestamp: pending.timestamp,
+                    values
+                });
+            }
+        }
+
+        function buildSessionPatch(card, fields) {
+            const data = TestingSessionUI.readSessionSettings(card);
+            const set = {};
+            const getShapingNumber = (field, fallback = 0) => {
+                const input = card.querySelector(`input[data-field="${field}"]`);
+                const value = input ? Number(input.value) : fallback;
+                return Number.isFinite(value) ? value : fallback;
+            };
+            const shapingPattern = TestingSessionUI.readShapingPattern(card);
+            const shapingFieldValues = {
+                nftables_bandwidth_mbps: getShapingNumber('shaping_throughput_mbps', 0),
+                nftables_delay_ms: getShapingNumber('shaping_delay_ms', 0),
+                nftables_packet_loss: getShapingNumber('shaping_loss_pct', 0),
+                nftables_pattern_enabled: shapingPattern.template_mode !== 'sliders' && Array.isArray(shapingPattern.steps) && shapingPattern.steps.length > 0,
+                nftables_pattern_steps: Array.isArray(shapingPattern.steps) ? shapingPattern.steps : [],
+                nftables_pattern_segment_duration_seconds: shapingPattern.segment_duration_seconds,
+                nftables_pattern_default_segments: shapingPattern.default_segments,
+                nftables_pattern_default_step_seconds: shapingPattern.default_step_seconds,
+                nftables_pattern_template_mode: shapingPattern.template_mode,
+                nftables_pattern_margin_pct: shapingPattern.template_margin_pct
+            };
+            (fields || []).forEach(field => {
+                if (Object.prototype.hasOwnProperty.call(data, field)) {
+                    set[field] = data[field];
+                } else if (Object.prototype.hasOwnProperty.call(shapingFieldValues, field)) {
+                    set[field] = shapingFieldValues[field];
+                }
+            });
+            return {
+                sessionId: data.session_id,
+                set,
+                fields: fields || []
+            };
+        }
+
+        function applySessionPatchResponse(session) {
+            if (!session || !session.session_id) return;
+            sessionsById.set(String(session.session_id), session);
+            renderSessions();
+        }
+
+        function sendSessionPatch(card, fields) {
+            const patch = buildSessionPatch(card, fields);
+            if (!patch.sessionId || Object.keys(patch.set).length === 0) {
+                return Promise.resolve();
+            }
+            queuePendingFailureEdits(patch.sessionId, patch.set);
+            return fetch(`/api/session/${patch.sessionId}`, {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    set: patch.set,
+                    fields: patch.fields,
+                    base_revision: getSessionBaseRevision(patch.sessionId)
+                })
+            }).then(async response => {
+                const body = await response.json().catch(() => ({}));
+                if (!response.ok) {
+                    if (response.status === 409 && body.session) {
+                        resolvePendingFailureEdits(patch.sessionId, patch.fields);
+                        pendingFailureEdits.delete(String(patch.sessionId));
+                        applySessionPatchResponse(body.session);
+                        return;
+                    }
+                    throw new Error(body.error || `HTTP ${response.status}`);
+                }
+                if (body.session) {
+                    resolvePendingFailureEdits(patch.sessionId, patch.fields);
+                    applySessionPatchResponse(body.session);
+                }
+            }).catch(error => {
+                console.error('Error saving settings:', error);
+            });
+        }
+
+        // Returns the full set of fields the server needs to keep
+        // mode / units / consecutive / frequency in sync for a given
+        // failure prefix. Used by both the slider-change handler and
+        // the Mode-dropdown handler so any single edit ships the
+        // coherent bundle.
+        function failureBundleFields(field) {
+            const prefixes = ['segment', 'manifest', 'master_manifest', 'all', 'transport'];
+            for (const prefix of prefixes) {
+                const matches =
+                    field === `${prefix}_failure_mode` ||
+                    field === `${prefix}_failure_units` ||
+                    field === `${prefix}_consecutive_units` ||
+                    field === `${prefix}_frequency_units` ||
+                    field === `${prefix}_consecutive_failures` ||
+                    field === `${prefix}_failure_frequency`;
+                if (matches) {
+                    return [
+                        `${prefix}_failure_mode`,
+                        `${prefix}_failure_units`,
+                        `${prefix}_consecutive_units`,
+                        `${prefix}_frequency_units`,
+                        `${prefix}_consecutive_failures`,
+                        `${prefix}_failure_frequency`,
+                    ];
+                }
+            }
+            return [field];
+        }
+
+        function scheduleFailureSave(card, field) {
+            const sessionId = card?.dataset?.sessionId;
+            if (!sessionId || !field) return;
+            const key = String(sessionId);
+            if (!failureSaveFields.has(key)) {
+                failureSaveFields.set(key, new Set());
+            }
+            // Touch any of the 6 related controls and we ship the
+            // whole bundle — keeps the server's view of mode/units/
+            // numbers self-consistent on every interaction.
+            failureBundleFields(field).forEach(f => failureSaveFields.get(key).add(f));
+            if (failureSaveTimers.has(key)) {
+                clearTimeout(failureSaveTimers.get(key));
+            }
+            failureSaveTimers.set(key, setTimeout(() => {
+                const fields = Array.from(failureSaveFields.get(key) || []);
+                failureSaveFields.delete(key);
+                failureSaveTimers.delete(key);
+                if (fields.length) {
+                    sendSessionPatch(card, fields);
+                }
+            }, 200));
+        }
+
+        function parseSessionControlName(name, sessionId) {
+            if (!name || !sessionId) return '';
+            const suffix = `_${sessionId}`;
+            if (!name.endsWith(suffix)) return '';
+            return name.slice(0, -suffix.length);
+        }
+
+        function resolveSessionPatchFields(target, sessionId, field) {
+            if (field === 'segment_failure_urls' || field === 'manifest_failure_urls' || field === 'all_failure_urls') {
+                return [field];
+            }
+            const prefix = parseSessionControlName(target.name, sessionId);
+            if (!prefix) return [];
+            if (prefix.endsWith('_failure_type')) {
+                return [prefix];
+            }
+            if (prefix.endsWith('_failure_mode')) {
+                // Same coherent bundle for every prefix — Mode change
+                // ships the units AND the slider values so the server
+                // can never end up with mode set but units missing.
+                return failureBundleFields(prefix);
+            }
+            return [];
+        }
+
+
+        function startSessionsPolling() {
+            if (sessionsPollTimer) return;
+            sessionsPollTimer = setInterval(fetchSessions, 5000);
+        }
+
+
+
+        // session-viewer.html removes the Active Sessions panel-header (and
+        // its Refresh / Release All buttons), so these getElementById calls
+        // can return null. Guard before binding.
+        document.getElementById('refreshSessions')?.addEventListener('click', fetchSessions);
+        document.getElementById('clearSessions')?.addEventListener('click', () => {
+            fetch('/api/clear-sessions', { method: 'POST' })
+                .then(() => fetchSessions())
+                .catch(error => console.error('Error clearing sessions:', error));
+        });
+
+        document.getElementById('sessionsContainer').addEventListener('change', (event) => {
+            if (event.target.id === 'compareModeToggle') {
+                compareMode = event.target.checked;
+                // Destroy existing charts so they rebuild with/without compare datasets
+                if (activeSessionId) {
+                    for (const chart of getChartsForSession(activeSessionId)) {
+                        if (chart && typeof chart.destroy === 'function') chart.destroy();
+                    }
+                    eventsCharts.delete(activeSessionId);
+                    bandwidthCharts.delete(activeSessionId);
+                    bufferDepthCharts.delete(activeSessionId);
+                    videoFpsCharts.delete(activeSessionId);
+                }
+                renderSessions();
+                return;
+            }
+        }, true);
+
+        let activeSliderSessionId = null;
+        document.getElementById('sessionsContainer').addEventListener('pointerdown', (event) => {
+            if (event.target.matches('input[type="range"]')) {
+                const card = event.target.closest('.session-card');
+                if (card) activeSliderSessionId = card.dataset.sessionId;
+            }
+        });
+        document.addEventListener('pointerup', () => {
+            activeSliderSessionId = null;
+            if (deferredRender) renderSessions();
+        });
+
+        document.getElementById('sessionsContainer').addEventListener('input', (event) => {
+            const input = event.target;
+            const card = input.closest('.session-card');
+            if (input.matches('input[type="range"]')) {
+                const value = input.value;
+                const valueEl = input.parentElement.querySelector('.range-value');
+                if (valueEl) valueEl.textContent = value;
+                if (card && isFailureRangeField(input.dataset.field)) {
+                    scheduleFailureSave(card, input.dataset.field);
+                }
+            }
+            if (input.dataset.field === 'shaping_step_mbps') {
+                const row = input.closest('.shape-step-row');
+                if (card && row) {
+                    syncStepPreset(row);
+                    updateStepRiskUi(card, row);
+                }
+            }
+            if (input.dataset.field === 'shaping_segment_duration_seconds' || input.dataset.field === 'shaping_default_segments') {
+                if (card) {
+                    TestingSessionUI.updatePatternDefaultLabel(card);
+                }
+            }
+        });
+
+        document.getElementById('sessionsContainer').addEventListener('change', (event) => {
+            const target = event.target;
+            if (target.classList.contains('session-checkbox')) {
+                const sessionId = target.dataset.sessionId;
+                if (sessionId) {
+                    const session = sessionsById.get(sessionId);
+                    const groupId = session?.group_id || '';
+                    if (target.checked) {
+                        selectedSessionIds.add(String(sessionId));
+                        // Auto-select all group members
+                        if (groupId) {
+                            for (const [sid, s] of sessionsById) {
+                                if (s.group_id === groupId) {
+                                    selectedSessionIds.add(String(sid));
+                                    const cb = document.querySelector(`.session-checkbox[data-session-id="${sid}"]`);
+                                    if (cb) cb.checked = true;
+                                }
+                            }
+                        }
+                    } else {
+                        selectedSessionIds.delete(String(sessionId));
+                        // Uncheck removes from group
+                        if (groupId) {
+                            fetch('/api/session-group/unlink', {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({ session_id: sessionId, group_id: groupId })
+                            }).then(() => fetchSessions()).catch(err => console.error('Unlink failed:', err));
+                        }
+                    }
+                }
+                event.stopPropagation();
+                return;
+            }
+            const card = target.closest('.session-card');
+            if (!card) return;
+            if (target.dataset.field === 'manifest_failure_urls' && target.value === 'All') {
+                const checks = card.querySelectorAll('input[data-field="manifest_failure_urls"]');
+                checks.forEach(input => {
+                    input.checked = target.checked;
+                });
+            }
+            if (target.dataset.field === 'manifest_failure_urls' && target.value !== 'All') {
+                const checks = Array.from(card.querySelectorAll('input[data-field="manifest_failure_urls"]'));
+                const allBox = checks.find(input => input.value === 'All');
+                const scopedChecks = checks.filter(input => input.value !== 'All');
+                if (allBox) {
+                    allBox.checked = scopedChecks.every(input => input.checked);
+                }
+            }
+            if (target.dataset.field === 'segment_failure_urls' && target.value === 'All') {
+                const checks = card.querySelectorAll('input[data-field="segment_failure_urls"]');
+                checks.forEach(input => {
+                    input.checked = target.checked;
+                });
+            }
+            if (target.dataset.field === 'segment_failure_urls' && target.value !== 'All') {
+                const checks = Array.from(card.querySelectorAll('input[data-field="segment_failure_urls"]'));
+                const allBox = checks.find(input => input.value === 'All');
+                const scopedChecks = checks.filter(input => input.value !== 'All');
+                if (allBox) {
+                    allBox.checked = scopedChecks.every(input => input.checked);
+                }
+            }
+            if (target.dataset.field === 'content_allowed_variants' || target.dataset.field === 'content_strip_codecs' || target.dataset.field === 'content_live_offset') {
+                sendSessionPatch(card, ['content_allowed_variants', 'content_strip_codecs', 'content_live_offset']);
+                return;
+            }
+            if (target.dataset.field === 'transfer_timeout_applies_segments' ||
+                target.dataset.field === 'transfer_timeout_applies_manifests' ||
+                target.dataset.field === 'transfer_timeout_applies_master') {
+                sendSessionPatch(card, [
+                    'transfer_timeout_applies_segments',
+                    'transfer_timeout_applies_manifests',
+                    'transfer_timeout_applies_master'
+                ]);
+                return;
+            }
+            if (target.dataset.field === 'shaping_step_enabled') {
+                const row = target.closest('.shape-step-row');
+                if (row) {
+                    setStepEnabledUi(card, row, !!target.checked);
+                }
+            }
+            if (target.dataset.field === 'transport_failure_mode') {
+                TestingSessionUI.updateTransportModeUi(card);
+            }
+            // Handle network log filter checkboxes
+            if (target.dataset.filter && target.closest('[data-content="network-log"]')) {
+                const card = target.closest('.session-card');
+                if (card && window.TestingSessionUI) {
+                    window.TestingSessionUI.applyNetworkLogFilters(card);
+                }
+                return;
+            }
+            if (target.dataset.field === 'bitrate_chart_max_mbps') {
+                const sessionId = String(card.dataset.sessionId || '');
+                const axisMode = normalizeBitrateAxisMaxMode(target.value);
+                bitrateAxisMaxBySession.set(sessionId, axisMode);
+                if (isChartPaused(sessionId)) {
+                    const chart = bandwidthCharts.get(sessionId);
+                    if (chart) {
+                        let maxY;
+                        if (axisMode === 'auto') {
+                            const visibleMax = chart.data.datasets
+                                .filter((_, idx) => chart.isDatasetVisible(idx))
+                                .flatMap(ds => ds.data.map(pt => Number(pt.y) || 0))
+                                .reduce((m, v) => Math.max(m, v), 1);
+                            maxY = Math.min(100, Math.max(1, Math.ceil(visibleMax * 1.05 * 10) / 10));
+                        } else {
+                            maxY = Number(axisMode);
+                        }
+                        chart.options.scales.y.max = maxY;
+                        chart.update('none');
+                    }
+                } else {
+                    renderBandwidthChart(sessionId);
+                }
+                return;
+            }
+            if (target.dataset.field && target.dataset.field.startsWith('shaping_template_')) {
+                // Reset state when template mode changes, preserve when margin/overhead changes
+                const resetState = target.dataset.field === 'shaping_template_mode';
+                const templateMode = getTemplateMode(card);
+                if (templateMode === 'sliders') {
+                    // In sliders mode, apply immediately as before
+                    applyTemplatePattern(card, true, resetState);
+                } else {
+                    // In pattern mode, any template change (mode/margin) reopens
+                    // the edit view and stops the currently-running pattern.
+                    const group = card.querySelector('.shaping-pattern-group');
+                    const wasApplied = group && group.classList.contains('pattern-applied');
+                    if (group) group.classList.remove('pattern-applied');
+                    if (wasApplied) {
+                        const sessionId = card.dataset.sessionId;
+                        if (sessionId) {
+                            fetch(`/api/session/${sessionId}`, {
+                                method: 'PATCH',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({
+                                    set: { nftables_pattern_enabled: false },
+                                    fields: ['nftables_pattern_enabled']
+                                })
+                            }).catch(err => console.warn('Failed to stop pattern on template change', err));
+                        }
+                    }
+                    applyTemplatePattern(card, false, resetState);
+                }
+                return;
+            }
+            if (target.dataset.field === 'shaping_default_step_seconds') {
+                const templateMode = getTemplateMode(card);
+                if (templateMode === 'sliders') {
+                    scheduleShapingApply(card);
+                } else {
+                    const group = card.querySelector('.shaping-pattern-group');
+                    const wasApplied = group && group.classList.contains('pattern-applied');
+                    if (group) group.classList.remove('pattern-applied');
+                    if (wasApplied) {
+                        const sessionId = card.dataset.sessionId;
+                        if (sessionId) {
+                            fetch(`/api/session/${sessionId}`, {
+                                method: 'PATCH',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({
+                                    set: { nftables_pattern_enabled: false },
+                                    fields: ['nftables_pattern_enabled']
+                                })
+                            }).catch(err => console.warn('Failed to stop pattern on step-seconds change', err));
+                        }
+                    }
+                    applyTemplatePattern(card, false, false, false);
+                }
+                return;
+            }
+            if (target.dataset.field === 'shaping_step_mbps_preset') {
+                const row = target.closest('.shape-step-row');
+                const mbpsInput = row ? row.querySelector('input[data-field="shaping_step_mbps"]') : null;
+                if (mbpsInput && target.value !== 'custom') {
+                    mbpsInput.value = target.value;
+                    updateStepRiskUi(card, row);
+                }
+            }
+            if (target.dataset.field && target.dataset.field.startsWith('shaping_')) {
+                const templateMode = getTemplateMode(card);
+                if (templateMode === 'sliders') {
+                    const sliderFieldMap = {
+                        'shaping_throughput_mbps': 'nftables_bandwidth_mbps',
+                        'shaping_delay_ms': 'nftables_delay_ms',
+                        'shaping_loss_pct': 'nftables_packet_loss'
+                    };
+                    const serverField = sliderFieldMap[target.dataset.field];
+                    if (serverField) {
+                        scheduleSingleShapingApply(card, serverField, Number(target.value));
+                    } else {
+                        scheduleShapingApply(card);
+                    }
+                }
+                return;
+            }
+            if (isFailureRangeField(target.dataset.field)) {
+                scheduleFailureSave(card, target.dataset.field);
+                return;
+            }
+            const sessionId = String(card.dataset.sessionId || '');
+            const field = target.dataset.field || '';
+            const fields = resolveSessionPatchFields(target, sessionId, field);
+            if (fields.length) {
+                sendSessionPatch(card, fields);
+            }
+        });
+
+        document.getElementById('sessionsContainer').addEventListener('click', (event) => {
+            const checkbox = event.target.closest('.session-checkbox');
+            if (checkbox) {
+                event.stopPropagation();
+                return;
+            }
+            const button = event.target.closest('button');
+            if (!button) return;
+            
+            // Handle link selected sessions button
+            if (button.id === 'linkSelectedSessions') {
+                const statusEl = button.closest('.group-controls')?.querySelector('[data-role="link-status"]');
+                const sessionIds = Array.from(selectedSessionIds);
+                if (sessionIds.length < 2) {
+                    alert('Please select at least 2 sessions to group');
+                    return;
+                }
+                if (statusEl) statusEl.textContent = 'Linking sessions...';
+                fetch('/api/session-group/link', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ session_ids: sessionIds })
+                })
+                    .then(async response => {
+                        if (!response.ok) {
+                            const body = await response.text();
+                            throw new Error(body || `HTTP ${response.status}`);
+                        }
+                        return response.json();
+                    })
+                    .then(data => {
+                        if (statusEl) statusEl.textContent = `Grouped ${data.group_id || ''}`.trim();
+                        fetchSessions();
+                    })
+                    .catch(error => {
+                        console.error('Error grouping sessions:', error);
+                        if (statusEl) statusEl.textContent = `Group failed: ${error.message || 'unknown error'}`;
+                    });
+                return;
+            }
+            
+            // Handle ungroup button
+            if (button.classList.contains('unlink-btn')) {
+                const sessionId = button.dataset.sessionId;
+                const groupId = button.dataset.groupId;
+                fetch('/api/session-group/unlink', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ session_id: sessionId, group_id: groupId, unlink_group: true })
+                })
+                    .then(response => response.json())
+                    .then(data => {
+                        fetchSessions();
+                    })
+                    .catch(error => console.error('Error unlinking session:', error));
+                return;
+            }
+            
+            if (button.dataset.sessionTab) {
+                activeSessionId = button.dataset.sessionTab;
+                isTabLocked = true;
+                renderSessions();
+                return;
+            }
+            const card = button.closest('.session-card');
+            if (!card) return;
+            const sessionId = card.dataset.sessionId;
+            if (button.dataset.action === 'reset-bitrate-zoom') {
+                const key = String(sessionId || '');
+                chartViewportBySession.delete(key);
+                if (rightPanDragState && rightPanDragState.sessionId === key) {
+                    rightPanDragState = null;
+                }
+                for (const chart of getChartsForSession(key)) {
+                    if (chart && typeof chart.resetZoom === 'function') {
+                        chart.resetZoom('none');
+                    }
+                }
+                updateResetZoomButtonState(key);
+                return;
+            }
+            if (button.dataset.action === 'pause-bitrate-chart') {
+                toggleChartPause(String(sessionId || ''));
+                return;
+            }
+            if (button.dataset.action === 'apply-pattern') {
+                scheduleShapingApply(card);
+                const group = card.querySelector('.shaping-pattern-group');
+                if (group) group.classList.add('pattern-applied');
+                return;
+            }
+            if (button.dataset.action === 'edit-pattern') {
+                const group = card.querySelector('.shaping-pattern-group');
+                if (group) group.classList.remove('pattern-applied');
+                return;
+            }
+            if (button.dataset.action === 'add-shaping-step') {
+                const rowsHost = card.querySelector('[data-field="shaping_pattern_rows"]');
+                const throughput = Number(card.querySelector('input[data-field="shaping_throughput_mbps"]')?.value || 0);
+                const defaultSeconds = getDefaultStepSeconds(card);
+                if (rowsHost) {
+                    rowsHost.appendChild(makeShapeStepRow(card, throughput, defaultSeconds));
+                    updateStepIndices(card);
+                    const templateMode = getTemplateMode(card);
+                    if (templateMode === 'sliders') {
+                        scheduleShapingApply(card);
+                    }
+                }
+                return;
+            }
+            if (button.dataset.action === 'remove-shaping-step') {
+                const row = button.closest('.shape-step-row');
+                if (row) {
+                    row.remove();
+                    updateStepIndices(card);
+                    const templateMode = getTemplateMode(card);
+                    if (templateMode === 'sliders') {
+                        scheduleShapingApply(card);
+                    }
+                }
+                return;
+            }
+            if (button.dataset.action === 'clear-shaping-pattern') {
+                const rowsHost = card.querySelector('[data-field="shaping_pattern_rows"]');
+                if (rowsHost) {
+                    rowsHost.innerHTML = '';
+                    const templateMode = getTemplateMode(card);
+                    if (templateMode === 'sliders') {
+                        scheduleShapingApply(card);
+                    }
+                }
+                return;
+            }
+            if (button.dataset.action === 'refresh-network-log') {
+                const sessionId = card.dataset.sessionId;
+                if (sessionId && window.TestingSessionUI) {
+                    window.TestingSessionUI.updateNetworkLog(sessionId);
+                }
+                return;
+            }
+            if (button.dataset.action === 'save-session') {
+                saveSettingsForCard(card).catch(error => console.error('Error saving settings:', error));
+            }
+            if (button.dataset.action === 'delete-session') {
+                fetch(`/api/session/${sessionId}`, { method: 'DELETE' })
+                    .then(() => fetchSessions())
+                    .catch(error => console.error('Error deleting session:', error));
+            }
+        });
+
+        // Right-click context menu on session tabs
+        let ctxMenu = null;
+        function hideContextMenu() { if (ctxMenu) { ctxMenu.remove(); ctxMenu = null; } }
+        document.addEventListener('click', hideContextMenu);
+        document.getElementById('sessionsContainer').addEventListener('contextmenu', (event) => {
+            const tab = event.target.closest('.session-tab');
+            if (!tab) return;
+            event.preventDefault();
+            hideContextMenu();
+            const sessionId = tab.dataset.sessionTab;
+            if (!sessionId) return;
+            const session = sessionsById.get(sessionId);
+            if (!session) return;
+            const allSessions = Array.from(sessionsById.values());
+            const groupId = session.group_id || '';
+            const existingGroups = [...new Set(allSessions.map(s => s.group_id).filter(Boolean))];
+
+            const menu = document.createElement('div');
+            menu.style.cssText = 'position:fixed;background:#fff;border:1px solid #ccc;border-radius:6px;padding:4px 0;box-shadow:0 4px 12px rgba(0,0,0,0.15);z-index:9999;min-width:180px;font-size:13px;';
+            menu.style.left = event.clientX + 'px';
+            menu.style.top = event.clientY + 'px';
+
+            const addItem = (text, onClick) => {
+                const item = document.createElement('div');
+                item.textContent = text;
+                item.style.cssText = 'padding:6px 16px;cursor:pointer;';
+                item.addEventListener('mouseenter', () => item.style.background = '#f0f0f0');
+                item.addEventListener('mouseleave', () => item.style.background = '');
+                item.addEventListener('click', () => { hideContextMenu(); onClick(); });
+                menu.appendChild(item);
+            };
+
+            if (groupId) {
+                addItem('Remove from Group', () => {
+                    fetch('/api/session-group/unlink', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ session_id: sessionId, group_id: groupId })
+                    }).then(() => fetchSessions()).catch(err => console.error('Unlink failed:', err));
+                });
+            }
+
+            if (!groupId) {
+                existingGroups.forEach(gid => {
+                    const members = allSessions.filter(s => s.group_id === gid);
+                    const memberLabel = members.map(s => `S${s.session_id}`).join(', ');
+                    addItem(`Add to ${gid} (${memberLabel})`, () => {
+                        const ids = [...members.map(s => s.session_id), sessionId];
+                        fetch('/api/session-group/link', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ session_ids: ids, group_id: gid })
+                        }).then(() => fetchSessions()).catch(err => console.error('Link failed:', err));
+                    });
+                });
+                const ungroupedOthers = allSessions.filter(s => s.session_id !== sessionId && !s.group_id);
+                ungroupedOthers.forEach(other => {
+                    addItem(`Group with Session ${other.session_id}`, () => {
+                        fetch('/api/session-group/link', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ session_ids: [sessionId, other.session_id] })
+                        }).then(() => fetchSessions()).catch(err => console.error('Link failed:', err));
+                    });
+                });
+            }
+
+            if (menu.children.length === 0) {
+                addItem('No group actions available', () => {});
+            }
+
+            document.body.appendChild(menu);
+            ctxMenu = menu;
+        });
+
+        // Replay mode: ?replay=1&session=<id>[&from=<rfc3339>][&to=<rfc3339>]
+        // Loads snapshots from the analytics forwarder and feeds them through
+        // the same applySessionsList renderer the live SSE stream uses. We
+        // patch Date.now during each snapshot's processing so the chart
+        // accumulators (which key time off Date.now) line up with the
+        // snapshot's recorded timestamp.
+
+
+        // Expose state + functions for sibling shared modules
+        // Per-session event-marker {tsMs, label}. The replay viewer's
+        // events dropdown publishes a `replay:event-marker` custom
+        // event; the listener below fans the value out to every chart
+        // (Chart.js + vis.Timeline) so the user sees a vertical guide
+        // line at exactly the event's moment in each panel, with a
+        // colored label box identifying the event type.
+        const eventMarkerBySession = new Map();
+
+        // Paint or update an event-marker overlay on the player-state
+        // vis-timeline. We don't use vis-timeline's built-in custom-
+        // time bar because: (1) it's only 1 px wide, (2) labels are
+        // hover-only, (3) styling has to fight vis-timeline's CSS
+        // specificity. Instead we inject our own absolute-positioned
+        // div into the timeline's centre panel and update its left
+        // coord whenever the timeline's range changes (zoom/pan).
+        function paintTimelineEventMarker(timeline, marker) {
+            if (!timeline || !timeline.body || !timeline.body.dom) return;
+            const center = timeline.body.dom.center;
+            if (!center) return;
+            const MARKER_CLASS = 'replay-event-marker';
+            // Remove existing marker first.
+            const existing = center.querySelector('.' + MARKER_CLASS);
+            if (existing) existing.remove();
+            if (!marker) return;
+            const range = timeline.range;
+            if (!range) return;
+            const startMs = Number(range.start);
+            const endMs = Number(range.end);
+            if (!(endMs > startMs)) return;
+            if (marker.tsMs < startMs || marker.tsMs > endMs) return;
+            const fraction = (marker.tsMs - startMs) / (endMs - startMs);
+            const wrapper = document.createElement('div');
+            wrapper.className = MARKER_CLASS;
+            wrapper.style.cssText =
+                'position:absolute;top:0;bottom:0;width:0;' +
+                'border-left:2px solid #0891b2;' +
+                'pointer-events:none;z-index:1000;';
+            wrapper.style.left = `${(fraction * 100).toFixed(3)}%`;
+            const label = document.createElement('div');
+            label.style.cssText =
+                'position:absolute;top:2px;left:4px;' +
+                'background:#0891b2;color:#fff;' +
+                'font:10px system-ui,-apple-system,sans-serif;' +
+                'padding:2px 4px;border-radius:2px;white-space:nowrap;' +
+                'box-shadow:0 1px 3px rgba(0,0,0,0.25);';
+            label.textContent = marker.label || '';
+            wrapper.appendChild(label);
+            center.appendChild(wrapper);
+        }
+
+        function applyEventMarker(sessionId, tsMs, label) {
+            const key = String(sessionId);
+            const markerLabel = (label == null ? '' : String(label));
+            if (tsMs == null || !Number.isFinite(Number(tsMs))) {
+                eventMarkerBySession.delete(key);
+            } else {
+                eventMarkerBySession.set(key, { tsMs: Number(tsMs), label: markerLabel });
+            }
+            const marker = eventMarkerBySession.get(key);
+            const pools = [bandwidthCharts, bufferDepthCharts, videoFpsCharts, eventsCharts];
+            for (const pool of pools) {
+                if (!pool) continue;
+                const chart = pool.get(key) || pool.get(sessionId);
+                if (!chart) continue;
+                chart.$eventMarkerTsMs = marker ? marker.tsMs : null;
+                chart.$eventMarkerLabel = marker ? marker.label : '';
+                try { chart.draw(); } catch (_) { /* chart may be tearing down */ }
+            }
+            const timeline = eventsTimelines.get(key) || eventsTimelines.get(sessionId);
+            if (timeline) {
+                paintTimelineEventMarker(timeline, marker);
+                // Re-paint on every range change so the line tracks
+                // zoom/pan. Lazily attach the listener once per
+                // timeline; subsequent applyEventMarker calls only
+                // update $eventMarker so the listener picks up the
+                // new value on next rangechange.
+                timeline.$eventMarker = marker || null;
+                if (!timeline.$eventMarkerBound) {
+                    timeline.$eventMarkerBound = true;
+                    timeline.on('rangechange', () => paintTimelineEventMarker(timeline, timeline.$eventMarker));
+                    timeline.on('rangechanged', () => paintTimelineEventMarker(timeline, timeline.$eventMarker));
+                }
+            }
+        }
+
+        // Re-paint the timeline marker after any code path that may
+        // have re-created the timeline (e.g. orphan-detection in
+        // pushBandwidthSample). External hook: callers that build a
+        // fresh timeline should fire this so the marker survives.
+        function reapplyEventMarkerToTimeline(sessionId) {
+            const key = String(sessionId);
+            const marker = eventMarkerBySession.get(key);
+            const timeline = eventsTimelines.get(key) || eventsTimelines.get(sessionId);
+            if (!timeline) return;
+            paintTimelineEventMarker(timeline, marker || null);
+            timeline.$eventMarker = marker || null;
+            if (!timeline.$eventMarkerBound) {
+                timeline.$eventMarkerBound = true;
+                timeline.on('rangechange', () => paintTimelineEventMarker(timeline, timeline.$eventMarker));
+                timeline.on('rangechanged', () => paintTimelineEventMarker(timeline, timeline.$eventMarker));
+            }
+        }
+
+        // Guard against duplicate listener registration if this module's
+        // boot runs more than once (live-reload, future SPA navigation).
+        // Each extra copy would call applyEventMarker redundantly.
+        if (!window.__replayEventMarkerListenerBound) {
+            window.__replayEventMarkerListenerBound = true;
+            document.addEventListener('replay:event-marker', (ev) => {
+                if (!ev || !ev.detail) return;
+                applyEventMarker(ev.detail.sessionId, ev.detail.tsMs, ev.detail.label);
+            });
+        }
+
+        // (session-replay.js needs the chart history Maps and the
+        // applySessionsList / pushBandwidthSample primitives). Both
+        // are loaded before this script's boot runs.
+        window.SessionShell = {
+            sessionsById: sessionsById,
+            applySessionsList: applySessionsList,
+            pushBandwidthSample: pushBandwidthSample,
+            bandwidthHistory: bandwidthHistory,
+            bandwidthEventHistory: bandwidthEventHistory,
+            bandwidthCharts: bandwidthCharts,
+            bufferDepthCharts: bufferDepthCharts,
+            videoFpsCharts: videoFpsCharts,
+            eventsCharts: eventsCharts,
+            bandwidthVisibility: bandwidthVisibility,
+            bitrateAxisMaxBySession: bitrateAxisMaxBySession,
+            chartViewportBySession: chartViewportBySession,
+            chartPausedBySession: chartPausedBySession,
+            chartRenderSuppressedBySession: chartRenderSuppressedBySession,
+            chartWindowMsBySession: chartWindowMsBySession,
+            playBoundsBySession: playBoundsBySession,
+            brushDraggingBySession: brushDraggingBySession,
+            lastRecordedPlayerEventBySession: lastRecordedPlayerEventBySession,
+            lastRecordedLoopCountBySession: lastRecordedLoopCountBySession,
+            lastRecordedServerLoopCountBySession: lastRecordedServerLoopCountBySession,
+            lastRecordedLoopEventStampBySession: lastRecordedLoopEventStampBySession,
+            lastRecordedServerLoopEventStampBySession: lastRecordedServerLoopEventStampBySession,
+            lastRecordedControlsBySession: lastRecordedControlsBySession,
+            lastRecordedPlayIdBySession: lastRecordedPlayIdBySession,
+            fetchSessions: fetchSessions,
+            startSessionsPolling: startSessionsPolling
+        };
+
+        // Boot dispatch — three pages, one shell:
+        //   sessions.html         (body.session-selector) → picker only
+        //   session-viewer.html   (body.replay-mode + ?session=) → viewer
+        //   session-viewer.html   (body.replay-mode, no session) →
+        //                                          redirect to selector
+        //   testing.html          (no flags) → live SSE / polling
+        // Legacy: testing.html?replay=1 still routes to viewer or
+        // picker depending on whether ?session= is present.
+        //
+        // Deferred until DOMContentLoaded (or next task if already
+        // fired) so sibling modules — session-replay.js and
+        // session-live.js — finish loading before we read their
+        // window.SessionReplay / window.SessionLive exports.
+        function bootDispatch() {
+            const replayParams = new URLSearchParams(window.location.search);
+            const isSelectorPage = document.body.classList.contains('session-selector');
+            const replayMode = replayParams.get('replay') === '1'
+                || document.body.classList.contains('replay-mode');
+            const replaySession = replayParams.get('session');
+            if (isSelectorPage) {
+                window.SessionReplay.startPicker();
+            } else if (replayMode && replaySession) {
+                window.SessionReplay.startMode(
+                    replaySession,
+                    replayParams.get('from'),
+                    replayParams.get('to'),
+                    replayParams.get('play_id')
+                );
+            } else if (replayMode) {
+                // Viewer reached without a session — bounce to selector.
+                window.location.replace('/dashboard/sessions.html');
+            } else {
+                fetchSessions();
+                if (!(window.SessionLive && window.SessionLive.start())) {
+                    startSessionsPolling();
+                }
+            }
+        }
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', bootDispatch);
+        } else {
+            setTimeout(bootDispatch, 0);
+        }

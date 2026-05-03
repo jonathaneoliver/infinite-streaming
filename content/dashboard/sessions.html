@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Testing Monitor - InfiniteStream</title>
+    <title>Sessions - InfiniteStream</title>
     <link rel="stylesheet" href="/shared-styles.css">
     <style>
         .page-header {
@@ -407,14 +407,21 @@
             filter: grayscale(0.5);
         }
 
+        /* Selector page: the picker is the page content, hide the empty
+         * Active Sessions panel that gets inherited from the testing-page
+         * template clone. Page header (title + subtitle) is preserved.
+         * The picker itself uses .session-picker-panel so we exclude it. */
+        body.session-selector .ism-content-wide > .panel:not(.session-picker-panel) {
+            display: none !important;
+        }
 
     </style>
 </head>
-<body>
+<body class="replay-mode session-selector">
     <div class="ism-content-wide">
         <div class="page-header">
-            <div class="page-title">Testing Monitor</div>
-            <div class="page-subtitle" id="testingSubtitle">Launch sessions and tune failure settings per session.</div>
+            <div class="page-title">Sessions</div>
+            <div class="page-subtitle" id="testingSubtitle">Browse archived streaming sessions. Click one to open it in the Session Viewer.</div>
         </div>
 
         <div class="panel">
@@ -430,23 +437,6 @@
     </div>
 
     <script src="/shared/shared-nav.js"></script>
-    <script>
-        (() => {
-            const subtitle = document.getElementById('testingSubtitle');
-            if (!subtitle) return;
-            let port = window.location.port || (window.location.protocol === 'https:' ? '443' : '80');
-            if (window.ISMNav && typeof window.ISMNav.normalizeTestingBaseUrl === 'function') {
-                try {
-                    const normalized = window.ISMNav.normalizeTestingBaseUrl(window.location.origin);
-                    const parsed = new URL(normalized);
-                    port = parsed.port || port;
-                } catch (err) {
-                    console.warn('Failed to resolve testing port', err);
-                }
-            }
-            subtitle.textContent = `Launch sessions on port ${port} and tune failure settings per session.`;
-        })();
-    </script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2.0.1/dist/chartjs-plugin-zoom.min.js"></script>
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/vis-timeline@7.7.3/styles/vis-timeline-graph2d.min.css">
@@ -456,6 +446,5 @@
     <script src="/dashboard/player-characterization.js"></script>
     <script src="/shared/session-shell.js"></script>
     <script src="/shared/session-replay.js"></script>
-    <script src="/shared/session-live.js"></script>
 </body>
 </html>

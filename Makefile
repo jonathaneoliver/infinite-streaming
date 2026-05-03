@@ -175,6 +175,35 @@ test-deploy-dev:
 	scp tests/deploy/override-dev.yml $(TEST_SSH):~/test-dev/docker-compose.override.yml
 	ssh $(TEST_SSH) 'cd ~/test-dev && docker compose build && docker compose up -d'
 
+# Iterate on Grafana provisioning (dashboards / datasources) without
+# touching go-server. Sessions keep flowing live; Grafana auto-reloads
+# the dashboard JSON within 30s, but we --force-recreate to pick it up
+# immediately and to refresh the bind mount in case files were added.
+analytics-update:
+	@echo "=== Updating analytics provisioning on test-dev (no go-server restart) ==="
+	rsync -az --delete \
+		/Users/jonathanoliver/Projects/smashing/analytics/grafana/ \
+		$(TEST_SSH):~/test-dev/analytics/grafana/
+	ssh $(TEST_SSH) 'cd ~/test-dev && docker compose up -d --force-recreate grafana'
+
+# Rebuild the forwarder binary and recreate just that container. Sessions
+# keep flowing live (go-server is untouched); archival pauses for ~1s
+# while the forwarder restarts. --no-deps prevents docker compose from
+# pulling go-server into the recreate.
+analytics-rebuild-forwarder:
+	@echo "=== Rebuilding forwarder on test-dev (no go-server restart) ==="
+	ssh $(TEST_SSH) 'mkdir -p ~/test-dev/analytics/go-forwarder'
+	rsync -az --delete \
+		/Users/jonathanoliver/Projects/smashing/analytics/go-forwarder/ \
+		$(TEST_SSH):~/test-dev/analytics/go-forwarder/
+	ssh $(TEST_SSH) 'cd ~/test-dev && docker compose build forwarder && docker compose up -d --no-deps forwarder'
+
+# Apply a one-line ClickHouse migration without restarting anything.
+# Usage: make analytics-migrate SQL='ALTER TABLE session_snapshots ADD COLUMN ...'
+analytics-migrate:
+	@test -n "$(SQL)" || { echo "set SQL=..."; exit 1; }
+	ssh $(TEST_SSH) 'curl -fsS -X POST "http://localhost:21123/?database=infinite_streaming" --data-binary @- <<<"$(SQL)" && echo "ok"'
+
 test-clean-dev:
 	ssh $(TEST_SSH) 'docker rm -f test-dev-server 2>/dev/null'
 

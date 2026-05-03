@@ -637,6 +637,7 @@
         })();
     </script>
     <script src="/shared/shared-nav.js"></script>
+    <script src="/shared/play-id.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2.0.1/dist/chartjs-plugin-zoom.min.js"></script>
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/vis-timeline@7.7.3/styles/vis-timeline-graph2d.min.css">
@@ -2017,7 +2018,22 @@
             videoEl.setAttribute('height', '2160');
         }
 
+        // play_id (issue #280) — mint a fresh UUID at every loadStream
+        // boundary and stamp it on every outgoing player request via the
+        // engine-specific interceptor. Mirrors PlayerViewModel.swift /
+        // PlayerViewModel.kt. Lets the analytics pipeline partition on
+        // (session_id, play_id) so each fresh playback gets its own row
+        // in the Session Viewer table.
+        let currentPlayId = '';
+        function getCurrentPlayId() { return currentPlayId; }
+
         function loadStream(url) {
+            // Fresh play_id for this playback episode. Subsequent retries
+            // re-enter loadStream and mint a new one.
+            currentPlayId = (window.PlayId && window.PlayId.mint) ? window.PlayId.mint() : '';
+            if (currentPlayId && window.PlayId) {
+                url = window.PlayId.apply(url, currentPlayId);
+            }
             currentUrl = url;
             markPlaybackStart();
             clearLiveOffsetSeekTimer();
@@ -2048,6 +2064,7 @@
                     return;
                 }
                 shakaPlayer = new shaka.Player(video);
+                if (window.PlayId) window.PlayId.installShaka(shakaPlayer, getCurrentPlayId);
                 shakaPlayer.addEventListener('error', (e) => {
                     log(`ERROR: ${e.detail.code} ${e.detail.message}`);
                     const shakaHttp = extractShakaHttpFailure(e.detail);
@@ -2080,10 +2097,12 @@
                     // segments exist); on 2s/6s it just enables a fetch
                     // path that has nothing to fetch.
                     const isLL = (derived.segment || '').toUpperCase() === 'LL';
-                    hlsInstance = new Hls({
+                    const hlsConfig = {
                         enableWorker: true,
                         lowLatencyMode: isLL
-                    });
+                    };
+                    if (window.PlayId) window.PlayId.installHls(hlsConfig, getCurrentPlayId);
+                    hlsInstance = new Hls(hlsConfig);
                     hlsInstance.on(Hls.Events.ERROR, (evt, data) => {
                         log(`HLS ERROR: ${data.type} ${data.details}`);
                         const hlsHttp = extractHlsHttpFailure(data);
@@ -2128,6 +2147,7 @@
                     return;
                 }
                 video.className = 'video-js vjs-default-skin';
+                if (window.PlayId && window.videojs) window.PlayId.installVideoJs(window.videojs, getCurrentPlayId);
                 videojsPlayer = videojs(video, {
                     controls: true,
                     autoplay: true,
@@ -3837,6 +3857,7 @@
             };
             const portDisplay = session.x_forwarded_port_external || session.x_forwarded_port || '—';
             setText('[data-field="session_session_id"]', session.session_id || '—');
+            setText('[data-field="session_play_id"]', session.play_id || '—');
             setText('[data-field="session_player_id"]', session.player_id || '—');
             setText('[data-field="session_user_agent"]', session.user_agent || '—');
             setText('[data-field="session_player_ip"]', session.player_ip || '—');

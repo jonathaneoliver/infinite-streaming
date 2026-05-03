@@ -21,6 +21,7 @@
             { id: 'playback', icon: '▶️', text: 'Playback', href: '/dashboard/playback.html' },
             { id: 'test-playback', icon: '🧭', text: 'Testing Playback', href: '/dashboard/testing-session.html?nav=1' },
             { id: 'testing', icon: '🧪', text: 'Testing Monitor', href: '/dashboard/testing.html' },
+            { id: 'sessions', icon: '⏪', text: 'Sessions', href: '/dashboard/sessions.html' },
             { id: 'incidents', icon: '🚨', text: 'Incidents', href: '/dashboard/incidents.html' },
             { id: 'quartet', icon: '🎬', text: 'Quartet', href: '/dashboard/quartet.html', alpha: true },
             { id: 'segment-duration', icon: '⏱️', text: 'Live Offset', href: '/dashboard/segment-duration-comparison.html', alpha: true }
@@ -152,15 +153,27 @@
         }
         const path = window.location.pathname;
         const filename = path.split('/').pop() || 'dashboard.html';
-        
+
+        // Backwards compat: testing.html?replay=1 used to be the
+        // Session Viewer URL. Highlight the Sessions nav item if
+        // anyone bookmarked the old form.
+        if (filename === 'testing.html') {
+            const params = new URLSearchParams(window.location.search);
+            if (params.get('replay') === '1') return 'sessions';
+        }
+        // session-viewer.html is a deep-link target (only meaningful
+        // with ?session=); highlight the Sessions list when a viewer
+        // tab is open so the user can jump back to the selector.
+        if (filename === 'session-viewer.html') return 'sessions';
+
         // Check all navigation items
         for (const section in NAVIGATION) {
-            const item = NAVIGATION[section].find(item => 
+            const item = NAVIGATION[section].find(item =>
                 item.href && item.href.includes(filename)
             );
             if (item) return item.id;
         }
-        
+
         // Default to dashboard
         return 'dashboard';
     }
