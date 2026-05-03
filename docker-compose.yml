@@ -119,6 +119,14 @@ services:
       # public URL differs from the default localhost:30000.
       - GF_SERVER_ROOT_URL=${INFINITE_STREAM_BASE_URL:-http://localhost:30000}/grafana/
       - GF_SERVER_SERVE_FROM_SUB_PATH=true
+      # Grafana Live's WebSocket handshake checks the browser's Origin
+      # header against ROOT_URL by default. The dev box is reachable
+      # at multiple hostnames (.local vs not, IP, Tailscale name) so
+      # pinning ROOT_URL to one of them blocks WS from the others.
+      # Wildcard the Live origins for dev — the WS endpoint serves
+      # only data the user could already pull over HTTPS, so the
+      # origin check is more about csrf-style replay than auth.
+      - GF_LIVE_ALLOWED_ORIGINS=*
       - GF_INSTALL_PLUGINS=grafana-clickhouse-datasource
       - GF_PATHS_PROVISIONING=/etc/grafana/provisioning
     volumes:
