@@ -2262,22 +2262,18 @@
             // bottom shows the rows that match all active filters.
             const distinct = (key) => Array.from(new Set(rows.map(r => r[key] || '').filter(v => v))).sort();
             const filters = { player_id: '', group_id: '', content_id: '', play_id: '', classification: 'all' };
-            // "Interesting" for picker filtering = the same flag set
-            // we surface in the per-row chip column. A row is
-            // "interesting" if any of the bad-event types appears, OR
-            // any failure counter is non-zero, OR there's a non-empty
-            // last_player_error. Mirrors the forwarder's auto-classifier
-            // predicate so chip + filter chip + retention agree.
+            // "Interesting" matches the per-row Flags column exactly:
+            // any of the 5 chip-types (user_marked / frozen / error
+            // event / segment_stall / restart) is non-zero. A row
+            // showing Flags = '—' is by definition not interesting,
+            // and the filter respects that. Server-side auto-classifier
+            // (forwarder/classification.go) uses the same predicate.
             const isInterestingRow = (r) => {
                 if (Number(r.user_marked_count) > 0) return true;
                 if (Number(r.frozen_count) > 0) return true;
                 if (Number(r.error_event_count) > 0) return true;
                 if (Number(r.segment_stall_count) > 0) return true;
                 if (Number(r.restart_count) > 0) return true;
-                if (Number(r.errors_count) > 0) return true;
-                if (Number(r.faults_count) > 0) return true;
-                if (Number(r.master_manifest_failures) > 0) return true;
-                if (Number(r.all_failures) > 0) return true;
                 return false;
             };
             const matchesClassification = (r) => {
