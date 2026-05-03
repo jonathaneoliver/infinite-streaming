@@ -16,6 +16,17 @@
     <string>1</string>
     <key>LSRequiresIPhoneOS</key>
     <true/>
+    <!-- Disable iPadOS multi-window. Each WindowGroup scene would get
+         its own @StateObject AppRoot → its own PlayerViewModel → its
+         own metrics-emitting heartbeat timer, all POSTing for the same
+         per-installation player_id. Two scenes produced two interleaved
+         heartbeat streams in the analytics archive (issue #348). The
+         app is a single-player experience anyway. -->
+    <key>UIApplicationSceneManifest</key>
+    <dict>
+        <key>UIApplicationSupportsMultipleScenes</key>
+        <false/>
+    </dict>
     <key>UILaunchScreen</key>
     <dict/>
     <key>NSCameraUsageDescription</key>

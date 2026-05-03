@@ -103,8 +103,16 @@ private struct ContinueWatchingHero: View {
                     // pointing at the new clip's 720p URL. Without
                     // .id, updateUIView would run with the new content
                     // value but the AVPlayer would keep the old URL.
-                    HeroLiveVideo(server: server, content: item)
-                        .id(item.id)
+                    //
+                    // Skip while playbackActive — the main Playback
+                    // screen is on top and we don't need a second
+                    // AVPlayer running behind it. SwiftUI dismantles
+                    // the UIViewRepresentable cleanly via the `if`
+                    // omission, so the AVPlayer is fully gone.
+                    if !vm.playbackActive {
+                        HeroLiveVideo(server: server, content: item)
+                            .id(item.id)
+                    }
 
                     LinearGradient(
                         stops: [
@@ -245,10 +253,38 @@ private struct LiveRow: View {
                                     LivePreviewTile(
                                         content: item,
                                         server: server,
-                                        videoEnabled: vm.previewVideoSlots > 0
+                                        // Disable preview AVPlayers entirely while
+                                        // the main Playback screen is up — see the
+                                        // playbackActive comment on PlayerViewModel
+                                        // (issue #348). Falls back to static
+                                        // thumbnail; SwiftUI dismantles the
+                                        // MutedLoopingTile UIViewRepresentable so
+                                        // the AVPlayer is gone, not just paused.
+                                        videoEnabled: vm.previewVideoSlots > 0 && !vm.playbackActive
                                     ) { tapped in
-                                        vm.setSelectedContent(tapped.name)
+                                        // Order matters here:
+                                        // 1. onPlay() flips route to .playback,
+                                        //    which sets playbackActive=true and
+                                        //    causes SwiftUI to re-evaluate the
+                                        //    tile grid — but actual UIView-
+                                        //    Representable dismantling happens
+                                        //    on the NEXT runloop cycle.
+                                        // 2. setSelectedContent() triggers
+                                        //    buildURLAndLoad → replaceCurrentItem
+                                        //    on the main player → diagnostics
+                                        //    starts emitting metrics.
+                                        // If we ran (2) before (1), the main
+                                        // player's first-second metrics would
+                                        // be polluted by the still-alive preview
+                                        // AVPlayers' access-log activity. By
+                                        // dispatching (2) on the next runloop,
+                                        // SwiftUI gets a chance to call
+                                        // dismantleUIView on every tile + the
+                                        // hero before main playback begins.
                                         onPlay()
+                                        DispatchQueue.main.async {
+                                            vm.setSelectedContent(tapped.name)
+                                        }
                                     }
                                     .id(item.id)
                                 }
