@@ -1361,7 +1361,6 @@ func main() {
 	router.HandleFunc("/api/session/{id}/metrics", app.handlePostSessionMetrics).Methods(http.MethodPost)
 	router.HandleFunc("/api/session/{id}/network", app.handleGetNetworkLog).Methods(http.MethodGet)
 	router.HandleFunc("/api/network/stream", app.handleNetworkStream).Methods(http.MethodGet)
-	router.HandleFunc("/api/sessions/{player_id}/timeline.har", app.handleGetSessionTimelineHAR).Methods(http.MethodGet)
 	router.HandleFunc("/api/external-ips", app.handleGetExternalIPs).Methods(http.MethodGet)
 	router.HandleFunc("/api/clear-sessions", app.handleClearSessions).Methods(http.MethodPost)
 	router.HandleFunc("/api/session-group/link", app.handleLinkSessions).Methods(http.MethodPost)
