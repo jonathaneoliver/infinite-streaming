@@ -168,7 +168,17 @@ CREATE TABLE IF NOT EXISTS infinite_streaming.session_snapshots
 ENGINE = MergeTree
 PARTITION BY toYYYYMMDD(ts)
 ORDER BY (session_id, ts)
-TTL toDateTime(ts) + INTERVAL 30 DAY
+-- Tiered retention by classification column (issue #342):
+--   * 'other'       → 30 d (default)
+--   * 'interesting' → 90 d
+--   * 'favourite'   → no clause matches → kept forever
+-- Per-row TTL is computed against the row's own ts. For long sessions
+-- the front of the session may evict before the end (#347 tracks the
+-- session_end_ts polish that would make eviction strictly all-or-
+-- nothing). For typical hour-scale sessions the trim window is too
+-- small to care about.
+TTL toDateTime(ts) + INTERVAL 30 DAY DELETE WHERE classification = 'other',
+    toDateTime(ts) + INTERVAL 90 DAY DELETE WHERE classification = 'interesting'
 SETTINGS index_granularity = 8192;
 
 -- Bloom filter on session_id for fast point lookups in replay mode.
@@ -254,7 +264,18 @@ ALTER TABLE infinite_streaming.session_snapshots
     ADD COLUMN IF NOT EXISTS content_live_offset Float32 CODEC(ZSTD(1)),
     ADD COLUMN IF NOT EXISTS content_strip_codecs String CODEC(ZSTD(1)),
     ADD COLUMN IF NOT EXISTS abrchar_run_lock UInt8 DEFAULT 0,
-    ADD COLUMN IF NOT EXISTS control_revision UInt64 DEFAULT 0;
+    ADD COLUMN IF NOT EXISTS control_revision UInt64 DEFAULT 0,
+    -- Tiered retention classification (issue #342). One of:
+    --   'other'        — default, evicted at 30 d (TTL clause below).
+    --   'interesting'  — auto-classified at session-end when any of
+    --                    user_marked / frozen / segment_stall / restart /
+    --                    error / non-empty player_error / fault counters
+    --                    appear in the session. Evicted at 90 d.
+    --   'favourite'    — explicitly starred by the user. Never evicted.
+    -- Set by the forwarder via ALTER UPDATE on session-end + on star /
+    -- unstar API calls. Lives on every row of (session_id, play_id) so
+    -- ClickHouse TTL can evaluate it without joining a side table.
+    ADD COLUMN IF NOT EXISTS classification LowCardinality(String) DEFAULT 'other' CODEC(ZSTD(1));
 
 -- Convert legacy manifest_variants UInt16 (broken: always stored 0 because
 -- the SSE field is an array, not a number) to String (JSON of the variant
@@ -306,5 +327,15 @@ CREATE TABLE IF NOT EXISTS infinite_streaming.network_requests
 ENGINE = MergeTree
 PARTITION BY toYYYYMMDD(ts)
 ORDER BY (session_id, ts, entry_fingerprint)
-TTL toDateTime(ts) + INTERVAL 30 DAY
+-- Tiered retention by classification column — see comment on
+-- session_snapshots above. Both tables share the same retention
+-- policy so paired (snapshots, network) data ages out together.
+TTL toDateTime(ts) + INTERVAL 30 DAY DELETE WHERE classification = 'other',
+    toDateTime(ts) + INTERVAL 90 DAY DELETE WHERE classification = 'interesting'
 SETTINGS index_granularity = 8192;
+
+-- Same classification column on the per-request table so HAR rows
+-- track their session's retention tier. Defaults to 'other' on insert;
+-- forwarder bumps it on session-end / star / unstar via ALTER UPDATE.
+ALTER TABLE infinite_streaming.network_requests
+    ADD COLUMN IF NOT EXISTS classification LowCardinality(String) DEFAULT 'other' CODEC(ZSTD(1));

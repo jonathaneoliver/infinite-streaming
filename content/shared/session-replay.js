@@ -61,6 +61,62 @@
             left.append(text);
             const right = document.createElement('div');
             right.style.cssText = 'display:flex;align-items:center;gap:8px;';
+            // Star toggle — explicit user-driven retention bookmark.
+            // Reads initial state from /api/sessions and POSTs/DELETEs
+            // to /api/sessions/{sid}/{pid}/star. The picker chip uses
+            // the same endpoint; both views stay in sync via the
+            // session_snapshots.classification column.
+            if (sessionId) {
+                const starBtn = document.createElement('button');
+                starBtn.type = 'button';
+                starBtn.className = 'btn btn-secondary';
+                starBtn.id = 'replay-banner-star';
+                starBtn.dataset.starred = '0';
+                starBtn.textContent = '☆ Star';
+                starBtn.title = 'Star — keep this session forever (exempt from TTL)';
+                starBtn.addEventListener('click', async () => {
+                    const wasStarred = starBtn.dataset.starred === '1';
+                    const pid = playId || '—';
+                    const url = `/analytics/api/sessions/${encodeURIComponent(sessionId)}/${encodeURIComponent(pid)}/star`;
+                    starBtn.disabled = true;
+                    try {
+                        const r = await fetch(url, { method: wasStarred ? 'DELETE' : 'POST' });
+                        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+                        starBtn.dataset.starred = wasStarred ? '0' : '1';
+                        starBtn.textContent = wasStarred ? '☆ Star' : '★ Starred';
+                    } catch (err) {
+                        window.alert(`Star toggle failed: ${err.message || err}`);
+                    } finally {
+                        starBtn.disabled = false;
+                    }
+                });
+                // Best-effort initial sync: query /api/sessions for
+                // this row's current classification. Non-blocking — if
+                // the query fails the button starts unstarred and the
+                // user can still star/unstar correctly.
+                (async () => {
+                    try {
+                        const r = await fetch('/analytics/api/sessions');
+                        if (!r.ok) return;
+                        const t = await r.text();
+                        for (const line of t.split('\n')) {
+                            if (!line.trim()) continue;
+                            try {
+                                const row = JSON.parse(line);
+                                if (String(row.session_id) === String(sessionId) &&
+                                    (row.play_id === playId || (!playId && row.play_id === '—'))) {
+                                    if (String(row.classification || '') === 'favourite') {
+                                        starBtn.dataset.starred = '1';
+                                        starBtn.textContent = '★ Starred';
+                                    }
+                                    return;
+                                }
+                            } catch {}
+                        }
+                    } catch {}
+                })();
+                right.appendChild(starBtn);
+            }
             // Session bundle download — full snapshots + HAR + events
             // archived as a ZIP. Server builds it; browser just clicks
             // <a download>. Live during the replay session, no need to
@@ -2205,12 +2261,36 @@
             // Session row. Each select narrows the next; the table at the
             // bottom shows the rows that match all active filters.
             const distinct = (key) => Array.from(new Set(rows.map(r => r[key] || '').filter(v => v))).sort();
-            const filters = { player_id: '', group_id: '', content_id: '', play_id: '' };
+            const filters = { player_id: '', group_id: '', content_id: '', play_id: '', classification: 'all' };
+            // "Interesting" matches the per-row Flags column exactly:
+            // any of the 5 chip-types (user_marked / frozen / error
+            // event / segment_stall / restart) is non-zero. A row
+            // showing Flags = '—' is by definition not interesting,
+            // and the filter respects that. Server-side auto-classifier
+            // (forwarder/classification.go) uses the same predicate.
+            const isInterestingRow = (r) => {
+                if (Number(r.user_marked_count) > 0) return true;
+                if (Number(r.frozen_count) > 0) return true;
+                if (Number(r.error_event_count) > 0) return true;
+                if (Number(r.segment_stall_count) > 0) return true;
+                if (Number(r.restart_count) > 0) return true;
+                return false;
+            };
+            const matchesClassification = (r) => {
+                switch (filters.classification) {
+                    case 'all':         return true;
+                    case 'starred':     return String(r.classification || '') === 'favourite';
+                    case 'interesting': return isInterestingRow(r) || String(r.classification || '') === 'favourite';
+                    case 'other':       return !isInterestingRow(r) && String(r.classification || '') !== 'favourite';
+                    default:            return true;
+                }
+            };
             const matches = (r) =>
                 (!filters.player_id  || r.player_id  === filters.player_id) &&
                 (!filters.group_id   || r.group_id   === filters.group_id) &&
                 (!filters.content_id || r.content_id === filters.content_id) &&
-                (!filters.play_id    || r.play_id    === filters.play_id);
+                (!filters.play_id    || r.play_id    === filters.play_id) &&
+                matchesClassification(r);
 
             const wrap = document.createElement('div');
             wrap.style.cssText = 'display:flex;flex-direction:column;gap:10px;';
@@ -2294,6 +2374,47 @@
             const groupSel   = buildSelect('group_id',   'Group');
             const contentSel = buildSelect('content_id', 'Content');
             const playSel    = buildSelect('play_id',    'Play');
+
+            // Classification chips: All / Starred / Interesting / Other.
+            // Default 'all' so the picker keeps its current behaviour
+            // until the user explicitly narrows. Selection is local to
+            // this page load — no persistence across reloads in v1.
+            const classChipWrap = document.createElement('div');
+            classChipWrap.style.cssText = 'display:flex;align-items:center;gap:6px;';
+            const classLbl = document.createElement('span');
+            classLbl.textContent = 'Show:';
+            classLbl.style.cssText = labelCss;
+            classChipWrap.appendChild(classLbl);
+            const classChips = [
+                { value: 'all',         label: 'All' },
+                { value: 'starred',     label: '★ Starred' },
+                { value: 'interesting', label: 'Interesting' },
+                { value: 'other',       label: 'Other' }
+            ];
+            const renderClassChips = () => {
+                for (const btn of classChipWrap.querySelectorAll('button[data-class-chip]')) {
+                    const active = btn.dataset.classChip === filters.classification;
+                    btn.style.background = active ? '#1d4ed8' : 'var(--bg-secondary,#f3f4f6)';
+                    btn.style.color = active ? '#fff' : 'var(--text-primary,#111827)';
+                    btn.style.fontWeight = active ? '700' : '500';
+                }
+            };
+            for (const c of classChips) {
+                const btn = document.createElement('button');
+                btn.type = 'button';
+                btn.dataset.classChip = c.value;
+                btn.textContent = c.label;
+                btn.style.cssText = 'padding:4px 10px;border-radius:14px;border:1px solid var(--border-color,#d1d5db);font:500 12px system-ui;cursor:pointer;';
+                btn.addEventListener('click', () => {
+                    filters.classification = c.value;
+                    renderClassChips();
+                    refreshSelects();
+                });
+                classChipWrap.appendChild(btn);
+            }
+            filterRow.appendChild(classChipWrap);
+            renderClassChips();
+
             const clearBtn = document.createElement('button');
             clearBtn.type = 'button';
             clearBtn.className = 'btn btn-secondary';
@@ -2425,7 +2546,30 @@
                 return `<span title="${escapeHtml(tip)}" style="color:${color};">${label}</span>`;
             };
 
+            // Star column — explicit user-driven retention bookmark.
+            // ★ = the row's classification is 'favourite' (kept forever
+            // by tiered TTL); ☆ = anything else. Click toggles via
+            // /api/sessions/{sid}/{pid}/star (POST = star, DELETE =
+            // unstar). data-star-cell so the row's click handler can
+            // skip the row-level navigation when the star is clicked.
+            const fmtStar = (_, r) => {
+                const isFav = String(r.classification || '') === 'favourite';
+                const icon = isFav ? '★' : '☆';
+                const color = isFav ? '#f59e0b' : '#9ca3af';
+                const tip = isFav
+                    ? 'Starred — kept forever (click to unstar)'
+                    : 'Click to star — kept forever and exempt from TTL';
+                return `<span data-star-cell `
+                    + `data-session-id="${escapeHtml(r.session_id)}" `
+                    + `data-play-id="${escapeHtml(r.play_id || '')}" `
+                    + `data-starred="${isFav ? '1' : '0'}" `
+                    + `title="${escapeHtml(tip)}" `
+                    + `style="cursor:pointer;color:${color};font-size:18px;line-height:1;`
+                    + `display:inline-block;padding:0 6px;position:relative;z-index:2;`
+                    + `user-select:none;">${icon}</span>`;
+            };
             const columns = [
+                { label: '',            key: '__star',           type: 'string', html: true, format: fmtStar },
                 { label: 'Started',     key: 'started',          type: 'string' },
                 { label: 'Last updated', key: 'last_seen',       type: 'string', html: true, format: fmtRelTime },
                 { label: 'Duration',    key: 'duration_ms',      type: 'number', format: fmtDur },
@@ -2615,6 +2759,14 @@
                             // Bundle download link — let the browser
                             // start the .zip download, don't navigate.
                             if (e.target.closest && e.target.closest('[data-bundle-link]')) return;
+                            // Star toggle — handled by the cell, don't
+                            // navigate the row.
+                            const starCell = e.target.closest && e.target.closest('[data-star-cell]');
+                            if (starCell) {
+                                e.stopPropagation();
+                                toggleStar(starCell);
+                                return;
+                            }
                             // Cell-level explicit anchors (e.g. the
                             // play_id link) — let the browser handle
                             // the default navigation. Otherwise we'd
@@ -2650,8 +2802,43 @@
             playSel.addEventListener('change', onFilterChange);
             clearBtn.addEventListener('click', () => {
                 filters.player_id = filters.group_id = filters.content_id = filters.play_id = '';
+                filters.classification = 'all';
+                renderClassChips();
                 refreshSelects();
             });
+
+            // Star toggle handler. Optimistically flips the icon,
+            // POSTs/DELETEs to the forwarder, and updates the row's
+            // in-memory classification so subsequent renders agree.
+            // On failure, reverts the icon and surfaces an alert.
+            const toggleStar = async (cell) => {
+                const sid = cell.dataset.sessionId || '';
+                const pidRaw = cell.dataset.playId || '';
+                const pid = pidRaw === '' || pidRaw === '—' ? '—' : pidRaw;
+                const wasStarred = cell.dataset.starred === '1';
+                const url = `/analytics/api/sessions/${encodeURIComponent(sid)}/${encodeURIComponent(pid)}/star`;
+                const method = wasStarred ? 'DELETE' : 'POST';
+                // Optimistic flip.
+                cell.dataset.starred = wasStarred ? '0' : '1';
+                cell.textContent = wasStarred ? '☆' : '★';
+                cell.style.color = wasStarred ? '#9ca3af' : '#f59e0b';
+                try {
+                    const r = await fetch(url, { method });
+                    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+                    // Update the underlying row so re-render keeps the
+                    // new state, and so the chip filter agrees.
+                    const row = rows.find(rr => rr.session_id === sid && (rr.play_id === pidRaw || (pidRaw === '' && rr.play_id === '—')));
+                    if (row) {
+                        row.classification = wasStarred ? '' : 'favourite';
+                    }
+                } catch (err) {
+                    // Revert.
+                    cell.dataset.starred = wasStarred ? '1' : '0';
+                    cell.textContent = wasStarred ? '★' : '☆';
+                    cell.style.color = wasStarred ? '#f59e0b' : '#9ca3af';
+                    window.alert(`Star toggle failed: ${err.message || err}`);
+                }
+            };
 
             refreshSelects();
 

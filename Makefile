@@ -198,11 +198,44 @@ analytics-rebuild-forwarder:
 		$(TEST_SSH):~/test-dev/analytics/go-forwarder/
 	ssh $(TEST_SSH) 'cd ~/test-dev && docker compose build forwarder && docker compose up -d --no-deps forwarder'
 
-# Apply a one-line ClickHouse migration without restarting anything.
-# Usage: make analytics-migrate SQL='ALTER TABLE session_snapshots ADD COLUMN ...'
+# Apply a ClickHouse migration without restarting anything. Pipes the
+# SQL through SSH's stdin → temp file on the host → curl, so the SQL
+# can contain any characters including single quotes (which would
+# otherwise collide with the outer single-quoted SSH command).
+#
+# A SQL-FILE may contain multiple `;`-separated statements; they are
+# split and posted one at a time (ClickHouse 24.8's HTTP interface
+# rejects multi-statement bodies). Single-quoted literals inside
+# values are preserved — the splitter is dumb-on-`;` and trusts that
+# migration SQL doesn't include `;` inside string literals.
+#
+# Usage:
+#   make analytics-migrate SQL="ALTER TABLE session_snapshots ADD COLUMN foo String DEFAULT 'bar'"
+#   make analytics-migrate SQL-FILE=/path/to/migration.sql
 analytics-migrate:
-	@test -n "$(SQL)" || { echo "set SQL=..."; exit 1; }
-	ssh $(TEST_SSH) 'curl -fsS -X POST "http://localhost:21123/?database=infinite_streaming" --data-binary @- <<<"$(SQL)" && echo "ok"'
+	@if [ -n "$(SQL-FILE)" ]; then \
+	  cat "$(SQL-FILE)"; \
+	elif [ -n "$(SQL)" ]; then \
+	  printf '%s\n' "$(SQL)"; \
+	else \
+	  echo "set SQL=... or SQL-FILE=..."; exit 1; \
+	fi | \
+	ssh $(TEST_SSH) ' \
+	  cat > /tmp/.analytics-migrate.sql && \
+	  printf ";\n" >> /tmp/.analytics-migrate.sql && \
+	  rc=0; \
+	  while IFS= read -r -d ";" stmt; do \
+	    trimmed=$$(printf "%s" "$$stmt" | tr -d "\n" | sed "s/^[ \t]*//;s/[ \t]*$$//"); \
+	    [ -z "$$trimmed" ] && continue; \
+	    printf "→ %s\n" "$$(printf "%s" "$$trimmed" | cut -c1-100)"; \
+	    if curl -fsS -X POST "http://localhost:21123/?database=infinite_streaming" --data-binary "$$trimmed"; then \
+	      echo "  ok"; \
+	    else \
+	      echo "  FAILED"; rc=1; \
+	    fi; \
+	  done < /tmp/.analytics-migrate.sql; \
+	  rm -f /tmp/.analytics-migrate.sql; \
+	  exit $$rc'
 
 test-clean-dev:
 	ssh $(TEST_SSH) 'docker rm -f test-dev-server 2>/dev/null'

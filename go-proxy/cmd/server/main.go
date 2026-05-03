@@ -30,7 +30,6 @@ import (
 
 	"github.com/gorilla/mux"
 	"github.com/grafov/m3u8"
-	"github.com/jonathaneoliver/infinite-streaming/go-proxy/internal/har"
 	"github.com/vishvananda/netlink"
 	_ "modernc.org/sqlite"
 
@@ -1362,11 +1361,6 @@ func main() {
 	router.HandleFunc("/api/session/{id}/metrics", app.handlePostSessionMetrics).Methods(http.MethodPost)
 	router.HandleFunc("/api/session/{id}/network", app.handleGetNetworkLog).Methods(http.MethodGet)
 	router.HandleFunc("/api/network/stream", app.handleNetworkStream).Methods(http.MethodGet)
-	router.HandleFunc("/api/sessions/{player_id}/timeline.har", app.handleGetSessionTimelineHAR).Methods(http.MethodGet)
-	router.HandleFunc("/api/session/{id}/har/snapshot", app.handlePostHARSnapshot).Methods(http.MethodPost)
-	router.HandleFunc("/api/incidents", app.handleListIncidents).Methods(http.MethodGet)
-	router.HandleFunc("/api/incidents/{path:.+}", app.handleGetIncidentFile).Methods(http.MethodGet)
-	router.HandleFunc("/api/incidents/{path:.+}", app.handleDeleteIncidentFile).Methods(http.MethodDelete)
 	router.HandleFunc("/api/external-ips", app.handleGetExternalIPs).Methods(http.MethodGet)
 	router.HandleFunc("/api/clear-sessions", app.handleClearSessions).Methods(http.MethodPost)
 	router.HandleFunc("/api/session-group/link", app.handleLinkSessions).Methods(http.MethodPost)
@@ -1663,66 +1657,14 @@ func (a *App) handlePostSessionMetrics(w http.ResponseWriter, r *http.Request) {
 	if isSignificantPlayerEvent(lastEvent) {
 		a.flushSessionsBroadcast()
 	}
-	// "user_marked" (the 911 button) — capture a HAR snapshot of the
-	// current session timeline so the user can review what was on the
-	// wire when they tapped. Done in a goroutine so the metrics POST
-	// returns immediately; the snapshot writes to disk + the
-	// incidents directory.
-	if lastEvent == "user_marked" {
-		go a.takeUserMarkedSnapshot(id)
-	}
+	// "user_marked" (the 911 button) flows into the analytics tier
+	// via session_snapshots.last_event = 'user_marked'; the operator
+	// triages it in the session viewer / picker. No on-disk HAR
+	// snapshot is taken — historical sessions can be ZIP-bundled via
+	// /analytics/api/session_bundle if forensic preservation past the
+	// 30-day TTL is needed.
 	w.WriteHeader(http.StatusOK)
 	writeJSON(w, map[string]string{"status": "ok"})
-}
-
-// takeUserMarkedSnapshot fires a HAR snapshot for the session in
-// response to the player's 911 button. Reuses the same plumbing the
-// REST endpoint and the auto-snapshot path use; the only difference
-// is reason="user_marked" and source="player_button". Logs prefixed
-// with "911 USER_MARKED" for easy grep/cross-correlation with the
-// client-side "911" lines in adb logcat / Apple device logs.
-func (a *App) takeUserMarkedSnapshot(sessionID string) {
-	if sessionID == "" {
-		return
-	}
-	session := a.findSessionByID(sessionID)
-	if session == nil {
-		log.Printf("911 USER_MARKED session-not-found sid=%s", sessionID)
-		return
-	}
-	playerID := getString(session, "player_id")
-	const source = "player_button"
-	if snapshotShouldDebounce(playerID, source, false) {
-		log.Printf("911 USER_MARKED debounced sid=%s player_id=%s", sessionID, playerID)
-		return
-	}
-	// Label the saved HAR with a friendlier "user 911" reason
-	// (matches the on-screen button); the player-facing event type
-	// stays "user_marked" for the metrics path.
-	const harReason = "user 911"
-	incident := &har.Incident{
-		Reason:    harReason,
-		Source:    source,
-		SessionID: sessionID,
-		Timestamp: time.Now().UTC(),
-	}
-	// 911 is forensic — "give me what led up to this". Default
-	// play_id scoping (most-recent play only) trims the file to a
-	// handful of entries when the user 911s right after a
-	// retry/reload because the current play hasn't accumulated much.
-	// Use IncludeAllPlays so the user sees across plays, but clip
-	// to the last 10 minutes so the file stays focused on "what
-	// just happened" rather than dragging in the whole ring buffer.
-	doc := a.buildHARForSession(session, incident, HARBuildFilter{
-		IncludeAllPlays: true,
-		SinceWindow:     10 * time.Minute,
-	}, nil)
-	info, err := writeIncidentFile(sessionID, playerID, harReason, source, doc)
-	if err != nil {
-		log.Printf("911 USER_MARKED write-failed sid=%s err=%v", sessionID, err)
-		return
-	}
-	log.Printf("911 USER_MARKED saved sid=%s player_id=%s file=%s bytes=%d", sessionID, playerID, info.Filename, info.SizeBytes)
 }
 
 func isSignificantPlayerEvent(event string) bool {
