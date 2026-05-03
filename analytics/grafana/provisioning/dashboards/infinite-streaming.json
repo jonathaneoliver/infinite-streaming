@@ -13,10 +13,11 @@
     {
       "id": 1,
       "type": "timeseries",
-      "title": "Messages by type",
-      "description": "Per-minute row count ingested into each ClickHouse table.",
+      "title": "Messages by type (last 24h)",
+      "description": "Per-minute row count ingested into each ClickHouse table over the last 24 hours. The time scope is hard-coded inside the panel — independent of the dashboard time picker — so a misconfigured URL (e.g. from=now/y&to=now/y) can't blank the chart.",
       "datasource": { "type": "grafana-clickhouse-datasource", "uid": "ch_infinite_streaming" },
       "gridPos": { "x": 0, "y": 0, "w": 24, "h": 10 },
+      "timeFrom": "24h",
       "fieldConfig": {
         "defaults": {
           "unit": "short",
@@ -38,7 +39,7 @@
         {
           "refId": "A",
           "datasource": { "type": "grafana-clickhouse-datasource", "uid": "ch_infinite_streaming" },
-          "rawSql": "SELECT toStartOfInterval(ts, INTERVAL 1 MINUTE) AS time, 'session_snapshots' AS type, count() AS messages FROM infinite_streaming.session_snapshots WHERE $__timeFilter(ts) GROUP BY time UNION ALL SELECT toStartOfInterval(ts, INTERVAL 1 MINUTE) AS time, 'network_requests' AS type, count() AS messages FROM infinite_streaming.network_requests WHERE $__timeFilter(ts) GROUP BY time ORDER BY time",
+          "rawSql": "SELECT toStartOfInterval(ts, INTERVAL 1 MINUTE) AS time, 'session_snapshots' AS type, count() AS messages FROM infinite_streaming.session_snapshots WHERE ts >= now() - INTERVAL 24 HOUR GROUP BY time UNION ALL SELECT toStartOfInterval(ts, INTERVAL 1 MINUTE) AS time, 'network_requests' AS type, count() AS messages FROM infinite_streaming.network_requests WHERE ts >= now() - INTERVAL 24 HOUR GROUP BY time ORDER BY time",
           "format": 0
         }
       ]
