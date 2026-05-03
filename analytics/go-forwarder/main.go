@@ -259,13 +259,23 @@ func main() {
 	go batchInsertNet(ctx, cfg, netRows)
 	go runNetworkStream(ctx, cfg, netSeenSet, netRows)
 
+	// Auto-classifier: when a snapshot carries an interesting signal
+	// (911 / frozen / hard error / fault counters), queue the
+	// (session, play) pair for reclassification. A single background
+	// goroutine drains the queue every 30 s and fires one ALTER
+	// UPDATE per pair, marking 'interesting' on session_snapshots +
+	// network_requests. ClickHouse mutations are async + cheap; the
+	// debounce coalesces repeated signals from the same session.
+	classifyQ := newClassifyQueue()
+	go runClassifyLoop(ctx, cfg, classifyQ, 30*time.Second)
+
 	cache := newFingerprintCache()
 	backoff := time.Second
 	for {
 		if ctx.Err() != nil {
 			return
 		}
-		err := streamSSE(ctx, cfg, cache, netSeenSet, rows)
+		err := streamSSE(ctx, cfg, cache, netSeenSet, rows, classifyQ)
 		if ctx.Err() != nil {
 			return
 		}
@@ -281,7 +291,7 @@ func main() {
 	}
 }
 
-func streamSSE(ctx context.Context, cfg config, cache *fingerprintCache, netSeen *netSeen, out chan<- row) error {
+func streamSSE(ctx context.Context, cfg config, cache *fingerprintCache, netSeen *netSeen, out chan<- row, classifyQ *classifyQueue) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, cfg.sseURL, nil)
 	if err != nil {
 		return err
@@ -309,7 +319,7 @@ func streamSSE(ctx context.Context, cfg config, cache *fingerprintCache, netSeen
 		line = strings.TrimRight(line, "\r\n")
 		if line == "" {
 			if dataBuf.Len() > 0 {
-				handlePayload(dataBuf.Bytes(), cache, netSeen, out)
+				handlePayload(dataBuf.Bytes(), cache, netSeen, out, classifyQ)
 				dataBuf.Reset()
 			}
 			continue
@@ -320,7 +330,7 @@ func streamSSE(ctx context.Context, cfg config, cache *fingerprintCache, netSeen
 	}
 }
 
-func handlePayload(data []byte, cache *fingerprintCache, netSeen *netSeen, out chan<- row) {
+func handlePayload(data []byte, cache *fingerprintCache, netSeen *netSeen, out chan<- row, classifyQ *classifyQueue) {
 	var payload ssePayload
 	if err := json.Unmarshal(data, &payload); err != nil {
 		log.Printf("bad sse payload: %v", err)
@@ -339,6 +349,12 @@ func handlePayload(data []byte, cache *fingerprintCache, netSeen *netSeen, out c
 			continue
 		}
 		out <- toRow(now, payload.Revision, sessionID, s)
+		// Queue auto-classifier if this snapshot carries any of the
+		// "really bad things" signals. Debounced — repeated marks
+		// for the same (session,play) coalesce to one mutation.
+		if classifyQ != nil && hasInterestingSignal(s) {
+			classifyQ.mark(sessionID, getStr(s, "play_id"))
+		}
 	}
 	cache.prune(active)
 	// Free network-log fingerprint memory for sessions that have aged
@@ -698,6 +714,7 @@ func serveHTTP(ctx context.Context, cfg config) {
 			    transport_consecutive_failures,
 			    fault_count_transfer_active_timeout,
 			    fault_count_transfer_idle_timeout,
+			    classification,
 			    lagInFrame(video_bitrate_mbps, 1, video_bitrate_mbps) OVER w AS prev_bitrate,
 			    lagInFrame(video_resolution,   1, video_resolution)   OVER w AS prev_resolution
 			  FROM %s.%s
@@ -755,7 +772,13 @@ func serveHTTP(ctx context.Context, cfg config) {
 			    countIf(last_event = 'frozen')         AS frozen_count,
 			    countIf(last_event = 'segment_stall')  AS segment_stall_count,
 			    countIf(last_event = 'restart')        AS restart_count,
-			    countIf(last_event = 'error')          AS error_event_count
+			    countIf(last_event = 'error')          AS error_event_count,
+			    -- Tiered retention class (issue #342). Same value on
+			    -- every row of (session_id, play_id) once the
+			    -- forwarder's session-end / star path stamps it; before
+			    -- that, default 'other'. any() is fine here because
+			    -- once the mutation has settled all rows agree.
+			    any(classification) AS classification
 			  FROM base
 			  GROUP BY session_id, play_id
 			)
@@ -776,7 +799,8 @@ func serveHTTP(ctx context.Context, cfg config) {
 			  agg.avg_quality_pct, agg.min_quality_pct,
 			  agg.frames_displayed, agg.first_frame_s,
 			  agg.user_marked_count, agg.frozen_count, agg.segment_stall_count,
-			  agg.restart_count, agg.error_event_count
+			  agg.restart_count, agg.error_event_count,
+			  agg.classification
 			FROM agg
 			LEFT JOIN net_counts
 			  ON agg.session_id = net_counts.session_id
@@ -1474,6 +1498,10 @@ func serveHTTP(ctx context.Context, cfg config) {
 	// /api/session_bundle — ZIP of snapshots + HAR + events for one
 	// (session_id, play_id). Defined in bundle.go.
 	registerBundleHandler(mux, cfg)
+
+	// /api/sessions/{sid}/{pid}/{star,reclassify} — tiered retention
+	// classification (issue #342). Defined in classification.go.
+	registerClassificationHandlers(mux, cfg)
 
 	srv := &http.Server{
 		Addr:              cfg.httpListen,
