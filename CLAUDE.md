@@ -78,13 +78,18 @@ Default server target for tests is `$K3S_HOST:30000/30081`. Override with `--hos
 | `memcached` | 11211 | Session state storage (embedded in container) |
 | nginx | 30000 | Routing, static dashboard |
 
+Plus the optional **analytics sidecar** (separate compose services): `clickhouse` (archive, 30-day TTL), `forwarder` (SSE → ClickHouse + read API), `grafana` (provisioned dashboards). All under [`analytics/`](analytics/). The live streaming path is independent of the sidecar — if the forwarder dies, the live UI keeps working, archival just pauses.
+
 ### nginx routing (`nginx-content.conf.template`)
 
 - `/go-live/{content}/*.m3u8` and `*.mpd` → proxied to `go-live:8010` for dynamic generation
 - `/go-live/{content}/*.m4s`, `*.ts`, `*.mp4`, etc. → served directly from the output directory by nginx
 - `/api/content`, `/api/jobs`, `/api/sources`, `/api/upload`, `/api/setup` → `go-upload:8003`
 - `/api/sessions*`, `/api/session/*`, `/api/failure-settings/*`, `/api/session-group/*`, `/api/nftables/*` → `go-proxy:30081`
+- `/analytics/api/*` → `forwarder:8080` (read-only ClickHouse query proxy + bundle ZIP streaming)
+- `/grafana/*` → `grafana:3000` (with `GF_SERVER_SERVE_FROM_SUB_PATH=true`)
 - `/dashboard/` → `content/dashboard/` static files
+- HTTP Basic auth on `/dashboard/`, `/analytics/api/`, `/grafana/` is opt-in via `INFINITE_STREAM_AUTH_HTPASSWD` env var; player-app endpoints stay public.
 
 ### go-live (`go-live/`)
 
@@ -112,13 +117,29 @@ Per-session failure injection and traffic shaping proxy. Each testing session ge
 
 The `player_id` query param on `testing-session.html` binds the browser session to a proxy port.
 
-### Dashboard (`content/dashboard/`)
+### Dashboard (`content/dashboard/` + `content/shared/`)
 
 Static HTML/JS/CSS pages served by nginx:
 - `dashboard.html` — main entry
 - `testing-session.html` + `testing-session-ui.js` — failure injection UI and player characterization
+- `sessions.html` — picker over archived sessions; per-row bad-event chips, bundle download
+- `session-viewer.html` — replays one archived play through the same charts as the live page
 - `player-characterization.js` — ABR ramp sweep logic
 - `grid.html`, `quartet.html`, `playback.html`, `go-monitor.html`, etc.
+
+Shared modules (`content/shared/`):
+- `session-shell.js` — chart rendering core (Chart.js + vis-timeline) used by both live and replay
+- `session-replay.js` — brush + events dropdown + rail markers for the replay page
+- `session-live.js`, `play-id.js` — live/replay glue
+
+### Analytics sidecar (`analytics/`)
+
+- `clickhouse/init.d/01-schema.sql` — `session_snapshots` + `network_requests` schema, 30-day TTL.
+- `go-forwarder/` — Go binary that subscribes to `/api/sessions/stream`, batches inserts into ClickHouse, and serves `/api/sessions`, `/api/snapshots`, `/api/session_events`, `/api/network_requests`, `/api/session_heatmap`, `/api/session_bundle` (ZIP) read-only via parameterized `{name:Type}` SQL placeholders.
+- `grafana/provisioning/` — dashboards-as-code; reload with `make analytics-update`.
+- See [`analytics/README.md`](analytics/README.md) for ops, schema, and the WAN-deploy auth runbook.
+
+Make targets: `make analytics-rebuild-forwarder` (rebuild + recreate forwarder only, no go-server restart), `make analytics-update` (Grafana reload), `make analytics-migrate SQL='ALTER …'` (one-line schema change).
 
 ### Encoding Pipeline (`generate_abr/`)
 
