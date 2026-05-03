@@ -283,6 +283,54 @@ Every session and every network request auto-archives into the analytics sidecar
 
 ---
 
+## Sessions view (the picker)
+
+![Sessions view](docs/screenshots/sessions.png)
+
+The Sessions page (`dashboard/sessions.html`) is the **triage entry point** for archived plays. One row per `(session_id, play_id)` over the last 30 days, sorted newest first. Designed so an operator can scan a long list and spot the bad ones without opening each.
+
+- **Per-row event chips.** Each row carries colored chips for every "really bad thing" the auto-classifier flagged — 🚨 user-marked (the 911 button), ❄️ frozen, ⛔ error, ⏸ segment stall, 🔄 restart. Counts on each chip make a long stall-recovery sequence visually distinct from a single hiccup.
+- **Critical-row red bar.** Sessions classified as `interesting` by the auto-classifier (or pinned by an operator) get a red left edge so a folder of fifty sessions scans like a status board, not a list.
+- **Filters across the top.** Time range, classification (interesting / starred / other), platform (iOS / Android / web), content. Filters apply to the same query that drives the list and the per-tier counts in the header.
+- **⭐ star.** Pin a session for permanent retention beyond the 30-day TTL, regardless of whether the auto-classifier flagged it.
+- **📥 bundle download.** Each row has a download button that streams the session as a portable ZIP (snapshots + HAR + summary). Same artifact format the Session Viewer's banner button produces.
+- **Right-click → Open in new tab.** Useful when comparing two sessions side-by-side.
+
+When something stands out — a row with a 🚨 chip, a stack of ⛔ errors, a stall-and-recover sequence — click the row to drop into the Session Viewer for that play.
+
+---
+
+## Session Viewer (replay one play)
+
+![Session Viewer](docs/screenshots/session-viewer.png)
+
+The Session Viewer (`dashboard/session-viewer.html?session=<sid>&play_id=<pid>`) replays one archived play through the same chart stack the live Testing Session page uses. Same widgets, frozen data, with two viewer-only additions across the top.
+
+### Scrub bar (top)
+
+A session-long rail across the page header shows the entire play's wall-clock span. A movable brush selects the visible window for every chart on the page. Drag the brush to scrub forward / backward; resize its edges to widen or narrow the inspected window.
+
+- **Tick markers** on the rail mark significant events (errors, frozen, segment stall, restarts, user-marked) at their exact session-relative position. Eye-glance overview of where the trouble was, without expanding any chart.
+- **Brush window propagates everywhere.** The bandwidth chart, buffer-depth chart, FPS chart, the player-state vis-timeline above them, *and* the network-log waterfall fold all retarget to the brushed range as you drag. One control, all charts.
+- **Cross-chart event marker.** Click any event row in the events-timeline dropdown and a vertical cyan line drops onto every chart at that event's exact timestamp — and an entry highlights in the network log waterfall. Pin moments cross-chart without comparing timestamps in your head.
+
+### Event filters (top toolbar)
+
+Right of the scrub bar is a row of priority chips and an events dropdown.
+
+- **P1 / P2 / P3 / P4 priority chips.** Every event type has a triage priority (set by the forwarder at classification time). The chips toggle whole groups on/off — P1+P2+P3 visible by default, P4 (informational) hidden. Persisted in `localStorage` so a power user's "I only care about stalls and errors" preference sticks across sessions.
+- **Per-event-type filter (right-click on a priority chip).** Fine-grained override of the priority-level toggle. Use it when you want everything-but-buffering, or only-stalls-and-errors.
+- **Events dropdown.** A scrollable list of every event in the play, grouped by priority then by type. Click any row to drop the cross-chart event marker on that moment.
+
+### Same charts as live Testing Session
+
+Below the brush + filters: bandwidth chart (with buffer depth and FPS overlays), buffer-depth chart, FPS chart, player-state vis-timeline (variant lanes, display-resolution lane, player-state lane, control lane, server lane), and the network-log waterfall fold. All chart events plot at the player-recorded `player_metrics_event_time` rather than browser-receive time, so cross-chart alignment holds even when the SSE pipeline jitters relative to the device clock.
+
+- **⭐ star and 📥 bundle download** in the banner — same controls as the picker row, applied to the play in view.
+- **🚨 last-event marker** if the play included a `user_marked` event — vertical line on every chart at the exact moment of the 911 press.
+
+---
+
 ## Analytics tier
 
 A sidecar stack (ClickHouse + Grafana + a small Go forwarder) auto-archives session metrics and per-request HAR for 30 days. Lives entirely under [`analytics/`](analytics/) — operationally independent of the live streaming path: if the forwarder dies, the live UI keeps working, archival just pauses until it restarts.
