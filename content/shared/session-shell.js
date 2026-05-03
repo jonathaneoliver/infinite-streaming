@@ -1717,6 +1717,15 @@
                     enabled: true,
                     mode: 'x',
                     threshold: 2,
+                    onPanStart: () => {
+                        // Panning while live drops the user off the
+                        // streaming edge — keep the chart on the range
+                        // they navigated to instead of snapping it back.
+                        if (!isChartPaused(key)) {
+                            chartPausedBySession.set(key, true);
+                            updatePauseButtonAndOverlays(key);
+                        }
+                    },
                     onPanComplete: ({ chart: chartRef }) => {
                         syncChartViewportAcrossSession(key, chartRef);
                     }
@@ -1767,6 +1776,10 @@
                 const span = rightPanDragState.startViewport.max - rightPanDragState.startViewport.min;
                 if (!Number.isFinite(span) || span <= 0) return;
                 const deltaPx = event.clientX - rightPanDragState.startClientX;
+                if (Math.abs(deltaPx) >= 2 && !isChartPaused(rightPanDragState.sessionId)) {
+                    chartPausedBySession.set(rightPanDragState.sessionId, true);
+                    updatePauseButtonAndOverlays(rightPanDragState.sessionId);
+                }
                 const deltaValue = (deltaPx / widthPx) * span;
                 const viewport = normalizeChartViewport(
                     rightPanDragState.startViewport.min - deltaValue,
@@ -1834,13 +1847,26 @@
             canvas.dataset.pauseHandlerBound = '1';
             let startX = 0;
             let startY = 0;
+            let dragged = false;
             canvas.addEventListener('mousedown', (e) => {
                 if (e.button !== 0) return;
                 startX = e.clientX;
                 startY = e.clientY;
+                dragged = false;
+            });
+            canvas.addEventListener('mousemove', (e) => {
+                // Track real movement while a button is held so the
+                // mouseup-after-pan doesn't get treated as a click and
+                // toggle pause. e.buttons is a bitmask; non-zero means
+                // at least one button is currently down.
+                if (e.buttons === 0) return;
+                if (Math.abs(e.clientX - startX) > 3 || Math.abs(e.clientY - startY) > 3) {
+                    dragged = true;
+                }
             });
             canvas.addEventListener('click', (e) => {
                 if (e.altKey) return;
+                if (dragged) return;
                 if (Math.abs(e.clientX - startX) > 5 || Math.abs(e.clientY - startY) > 5) return;
                 const chartArea = chartRef.chartArea;
                 if (chartArea) {
@@ -4783,8 +4809,32 @@
                 if (rightPanDragState && rightPanDragState.sessionId === key) {
                     rightPanDragState = null;
                 }
+                // Explicit snap-to-full-extent. chart.resetZoom() relies on
+                // the zoom plugin's `_originalScaleLimits` snapshot, which
+                // drifts after applyChartXMax mutates scales.x.max — the
+                // result is that "reset" restores to a stale window
+                // instead of the current full domain. zoomScale + setWindow
+                // with the live x.max is deterministic.
                 for (const chart of getChartsForSession(key)) {
-                    if (chart && typeof chart.resetZoom === 'function') {
+                    if (!chart) continue;
+                    if (chart.$isVisTimeline && typeof chart.setWindow === 'function') {
+                        const startMs = Number(chart.$windowStartMs) || 0;
+                        const xMax = Number(chart.$xMaxSeconds) || 600;
+                        if (startMs) {
+                            chart.setWindow(
+                                new Date(startMs),
+                                new Date(startMs + xMax * 1000),
+                                { animation: false }
+                            );
+                        }
+                        continue;
+                    }
+                    const xMax = (chart.options?.scales?.x?.max != null)
+                        ? Number(chart.options.scales.x.max)
+                        : 600;
+                    if (typeof chart.zoomScale === 'function') {
+                        chart.zoomScale('x', { min: 0, max: xMax }, 'none');
+                    } else if (typeof chart.resetZoom === 'function') {
                         chart.resetZoom('none');
                     }
                 }
