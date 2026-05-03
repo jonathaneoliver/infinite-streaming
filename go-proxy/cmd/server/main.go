@@ -6328,19 +6328,24 @@ func (a *App) normalizeSessionsForResponse(sessions []SessionData) []SessionData
 	for _, session := range sessions {
 		a.normalizeSessionPorts(session)
 		a.hydrateSessionThroughput(session)
-		// Reflect the kernel-observed tc rate in the API response
-		// instead of the proxy's in-memory copy. Closes the silent-
-		// divergence path in #352: a leftover class from a prior
-		// session would otherwise show as "no shaping" in the UI
-		// while the kernel was actually capping bandwidth. If they
-		// disagree, log so an operator can spot the leak.
+		// Surface the kernel-observed tc rate alongside (not over) the
+		// configured rate. Closes the silent-divergence path in #352
+		// without redefining what `nftables_bandwidth_mbps` means in
+		// the analytics archive — that field stays the configured
+		// value (what the user set). The new
+		// `nftables_bandwidth_kernel_mbps` field is the live tc
+		// class rate from the kernel; -1 means "no class installed".
+		// When the two disagree by more than 0.5 Mbps the proxy
+		// logs `NETSHAPE LEAK ...` so operators see the divergence
+		// without it being silently fixed-up at the API layer.
 		if a.traffic != nil {
 			if port, err := strconv.Atoi(getString(session, "x_forwarded_port")); err == nil && port > 0 {
-				if kernelMbps := a.traffic.ReadActualRateMbps(port); kernelMbps >= 0 {
+				kernelMbps := a.traffic.ReadActualRateMbps(port)
+				session["nftables_bandwidth_kernel_mbps"] = kernelMbps
+				if kernelMbps >= 0 {
 					inMemMbps := getFloat(session, "nftables_bandwidth_mbps")
-					session["nftables_bandwidth_mbps"] = kernelMbps
 					if math.Abs(inMemMbps-kernelMbps) > 0.5 {
-						log.Printf("NETSHAPE LEAK port=%d in_memory_mbps=%.3f kernel_mbps=%.3f session_id=%s",
+						log.Printf("NETSHAPE LEAK port=%d configured_mbps=%.3f kernel_mbps=%.3f session_id=%s",
 							port, inMemMbps, kernelMbps, getString(session, "session_id"))
 					}
 				}
