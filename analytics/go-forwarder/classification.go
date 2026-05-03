@@ -209,13 +209,25 @@ func setClassification(ctx context.Context, cfg config, sessionID, playID, value
 		"play":    playID,
 		"cls":     value,
 	}
-	updates := []string{
-		fmt.Sprintf("ALTER TABLE %s.%s UPDATE classification = {cls:String} %s", cfg.chDatabase, cfg.chTable, whereSafe),
-		fmt.Sprintf("ALTER TABLE %s.network_requests UPDATE classification = {cls:String} %s", cfg.chDatabase, whereSafe),
+	// Two ALTER UPDATEs run sequentially on different tables. If the
+	// first succeeds but the second fails the tables are momentarily
+	// out of sync (snapshots.classification != network_requests
+	// .classification for the same session+play). At our scale this
+	// is harmless — at most one tier-boundary's worth of premature
+	// or delayed eviction — but log distinguishably so an operator
+	// can see WHICH table failed and re-run by hand if needed.
+	updates := []struct {
+		label string
+		query string
+	}{
+		{"session_snapshots", fmt.Sprintf("ALTER TABLE %s.%s UPDATE classification = {cls:String} %s", cfg.chDatabase, cfg.chTable, whereSafe)},
+		{"network_requests", fmt.Sprintf("ALTER TABLE %s.network_requests UPDATE classification = {cls:String} %s", cfg.chDatabase, whereSafe)},
 	}
-	for _, q := range updates {
-		if _, err := chQueryBytes(ctx, cfg, q, params); err != nil {
-			return fmt.Errorf("ALTER UPDATE classification: %w", err)
+	for _, u := range updates {
+		if _, err := chQueryBytes(ctx, cfg, u.query, params); err != nil {
+			log.Printf("ALTER UPDATE classification table=%s sid=%s pid=%s value=%s err=%v",
+				u.label, sessionID, playID, value, err)
+			return fmt.Errorf("ALTER UPDATE classification on %s: %w", u.label, err)
 		}
 	}
 	return nil
