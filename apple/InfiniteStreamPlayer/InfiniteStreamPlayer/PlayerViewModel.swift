@@ -1458,19 +1458,18 @@ extension PlayerViewModel {
         // wire — see plan humming-sleeping-squid.md.
         let payload = buildMetricsPayload(event: event, extra: extra)
         if payload.isEmpty { return }
-        // Resolve session ID outside the chain (cached after first
-        // lookup; idempotent and safe to run concurrently).
-        guard let sessionId = await resolveMetricsSessionId(baseURL: baseURL) else { return }
-        // Serialize the PATCH onto the tail of the in-flight chain so
-        // wire-arrival order matches iOS submission order. URLSession
-        // .shared runs concurrent requests in arbitrary order; without
-        // this, a heartbeat sent 8ms before a rate_shift can arrive
-        // AFTER it and the proxy's last-writer-wins merge stomps the
-        // fresher value. See plan humming-sleeping-squid.md.
+        // CRITICAL: read-tail / set-tail must be synchronous (no
+        // awaits between them) or two concurrent callers can suspend
+        // on a prior await, resume out of FIFO order, and end up
+        // chaining backwards — wire-arrival order then doesn't match
+        // iOS-clock submission order. resolveMetricsSessionId and
+        // patchSessionMetrics live inside the Task so the chain
+        // pointer is updated atomically within one MainActor tick.
         let prev = metricsTaskTail
         let next = Task { [weak self] in
             if let prev { await prev.value }
             guard let self else { return }
+            guard let sessionId = await self.resolveMetricsSessionId(baseURL: baseURL) else { return }
             await self.patchSessionMetrics(sessionId: sessionId, baseURL: baseURL, payload: payload)
         }
         metricsTaskTail = next
