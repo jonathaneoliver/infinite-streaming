@@ -262,8 +262,29 @@ private struct LiveRow: View {
                                         // the AVPlayer is gone, not just paused.
                                         videoEnabled: vm.previewVideoSlots > 0 && !vm.playbackActive
                                     ) { tapped in
-                                        vm.setSelectedContent(tapped.name)
+                                        // Order matters here:
+                                        // 1. onPlay() flips route to .playback,
+                                        //    which sets playbackActive=true and
+                                        //    causes SwiftUI to re-evaluate the
+                                        //    tile grid — but actual UIView-
+                                        //    Representable dismantling happens
+                                        //    on the NEXT runloop cycle.
+                                        // 2. setSelectedContent() triggers
+                                        //    buildURLAndLoad → replaceCurrentItem
+                                        //    on the main player → diagnostics
+                                        //    starts emitting metrics.
+                                        // If we ran (2) before (1), the main
+                                        // player's first-second metrics would
+                                        // be polluted by the still-alive preview
+                                        // AVPlayers' access-log activity. By
+                                        // dispatching (2) on the next runloop,
+                                        // SwiftUI gets a chance to call
+                                        // dismantleUIView on every tile + the
+                                        // hero before main playback begins.
                                         onPlay()
+                                        DispatchQueue.main.async {
+                                            vm.setSelectedContent(tapped.name)
+                                        }
                                     }
                                     .id(item.id)
                                 }
