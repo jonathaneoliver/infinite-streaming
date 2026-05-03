@@ -99,12 +99,19 @@ services:
     container_name: infinite-streaming-grafana
     environment:
       - GF_AUTH_ANONYMOUS_ENABLED=true
-      # Viewer (not Editor) — anonymous LAN visitors can read dashboards
-      # but can't mutate them. Dashboards are provisioned-as-code from
-      # analytics/grafana/provisioning/, so editing through the web UI
-      # was never the workflow anyway.
+      # Viewer (not Editor) — anonymous LAN visitors can read
+      # dashboards but can't edit them. To edit, log in via the form
+      # in the bottom-right (default admin/admin on first login;
+      # Grafana forces a password change). The new password persists
+      # in the grafana_data volume.
+      #
+      # UI edits to dashboards are *per-instance only* — provisioning
+      # rewrites them from analytics/grafana/provisioning/ on every
+      # container restart and on the 30s auto-reload tick. Use the UI
+      # to iterate on a layout, then export the panel JSON and paste
+      # it into infinite-streaming.json so the change survives.
       - GF_AUTH_ANONYMOUS_ORG_ROLE=Viewer
-      - GF_AUTH_DISABLE_LOGIN_FORM=true
+      - GF_AUTH_DISABLE_LOGIN_FORM=false
       # Grafana is reachable via the nginx /grafana/ prefix; the root
       # URL must reflect the user-facing host:port so OAuth / login
       # redirects land back on nginx, not Grafana's internal :3000.
