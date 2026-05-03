@@ -171,6 +171,15 @@ final class PlayerViewModel: ObservableObject {
     // MARK: - Init
 
     init() {
+        // Defensive log — there should only ever be ONE PlayerViewModel
+        // alive in the process. iPadOS's WindowGroup multi-window
+        // would have minted one per scene before we set
+        // UIApplicationSupportsMultipleScenes=false in Info.plist; if
+        // a regression brings multi-window back, two PlayerViewModels
+        // start emitting metrics for the same player_id and the
+        // analytics archive shows interleaved heartbeats (issue #348).
+        // grep `[VM-INIT]` in the device console to count them.
+        print("[VM-INIT] PlayerViewModel \(ObjectIdentifier(self))")
         // Migrate legacy UserDefaults keys (boss* → is* → new is.flag.*
         // namespace) before loading so users upgrading from a pre-rework
         // build keep their saved server list, codec / segment / protocol
@@ -206,6 +215,7 @@ final class PlayerViewModel: ObservableObject {
     }
 
     deinit {
+        print("[VM-DEINIT] PlayerViewModel \(ObjectIdentifier(self))")
         if let o = didPlayToEndObserver { NotificationCenter.default.removeObserver(o) }
         if let o = failedToPlayObserver { NotificationCenter.default.removeObserver(o) }
         if let o = willEnterForegroundObserver { NotificationCenter.default.removeObserver(o) }
