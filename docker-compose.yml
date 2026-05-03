@@ -54,6 +54,81 @@ services:
     restart: unless-stopped
     stop_grace_period: 1s
 
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.8-alpine
+    container_name: infinite-streaming-clickhouse
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+      - ./analytics/clickhouse/init.d:/docker-entrypoint-initdb.d:ro
+    environment:
+      - CLICKHOUSE_DB=infinite_streaming
+      - CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT=1
+    # Bind to loopback only — ClickHouse has no auth configured here,
+    # so anyone on the LAN reaching :30123 would have full DROP/INSERT
+    # rights. The forwarder + Grafana reach it via the docker bridge
+    # (http://clickhouse:8123); host-side tools (e.g. `make
+    # analytics-migrate`, ad-hoc curl) reach it via 127.0.0.1.
+    ports:
+      - "127.0.0.1:30123:8123"
+    networks:
+      - app_network
+    restart: unless-stopped
+
+  forwarder:
+    build: ./analytics/go-forwarder
+    image: infinite-streaming-forwarder
+    container_name: infinite-streaming-forwarder
+    environment:
+      - FORWARDER_SSE_URL=http://go-server:30081/api/sessions/stream
+      - FORWARDER_CLICKHOUSE_URL=http://clickhouse:8123
+      - FORWARDER_CLICKHOUSE_DB=infinite_streaming
+      - FORWARDER_CLICKHOUSE_TABLE=session_snapshots
+    depends_on:
+      - clickhouse
+      - go-server
+    networks:
+      - app_network
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana-oss:11.3.0
+    container_name: infinite-streaming-grafana
+    environment:
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      # Viewer (not Editor) — anonymous LAN visitors can read dashboards
+      # but can't mutate them. Dashboards are provisioned-as-code from
+      # analytics/grafana/provisioning/, so editing through the web UI
+      # was never the workflow anyway.
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Viewer
+      - GF_AUTH_DISABLE_LOGIN_FORM=true
+      # Grafana is reachable via the nginx /grafana/ prefix; the root
+      # URL must reflect the user-facing host:port so OAuth / login
+      # redirects land back on nginx, not Grafana's internal :3000.
+      # Override INFINITE_STREAM_BASE_URL in your environment when the
+      # public URL differs from the default localhost:30000.
+      - GF_SERVER_ROOT_URL=${INFINITE_STREAM_BASE_URL:-http://localhost:30000}/grafana/
+      - GF_SERVER_SERVE_FROM_SUB_PATH=true
+      - GF_INSTALL_PLUGINS=grafana-clickhouse-datasource
+      - GF_PATHS_PROVISIONING=/etc/grafana/provisioning
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./analytics/grafana/provisioning:/etc/grafana/provisioning:ro
+    # No host-side port — reach Grafana through the nginx /grafana/
+    # prefix so the same basic-auth and host firewall rules apply.
+    depends_on:
+      - clickhouse
+    networks:
+      - app_network
+    restart: unless-stopped
+
+volumes:
+  clickhouse_data:
+  grafana_data:
+
 networks:
   app_network:
     driver: bridge

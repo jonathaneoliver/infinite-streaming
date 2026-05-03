@@ -24,6 +24,20 @@ upstream go_proxy {
     keepalive 4;
 }
 
+# Upstream to analytics forwarder (read-only ClickHouse query proxy)
+upstream analytics_forwarder {
+    server ${INFINITE_STREAM_FORWARDER_HOST}:8080;
+    keepalive 4;
+}
+
+# Upstream to Grafana. Routed through nginx so that basic-auth and the
+# host firewall rules apply uniformly — Grafana is no longer reachable
+# directly via its container port from outside the docker network.
+upstream analytics_grafana {
+    server ${INFINITE_STREAM_GRAFANA_HOST}:3000;
+    keepalive 4;
+}
+
 # Normal server
 server {
 
@@ -104,6 +118,7 @@ server {
     }
 
     location /dashboard/ {
+        ${INFINITE_STREAM_AUTH_DIRECTIVES}
         alias /content/dashboard/;
         try_files $uri $uri/ /dashboard/dashboard.html;
     }
@@ -117,7 +132,7 @@ server {
         return 302 /dashboard/dashboard.html;
     }
 
-    location / { 
+    location / {
         root /content;
         try_files $uri $uri/  @fallback;
     }
@@ -145,6 +160,62 @@ server {
     location = /api/announce-now {
         proxy_pass http://go_upload_service;
         add_header Access-Control-Allow-Origin * always;
+    }
+
+    # Analytics: read-only proxy to the SSE→ClickHouse forwarder, which
+    # exposes /api/snapshots and /api/sessions for historical replay and
+    # cross-session queries. Failing closed (502) when the forwarder is
+    # not running keeps the live UI unaffected.
+    # Bare /grafana → /grafana/ — the prefix-match `location ^~
+    # /grafana/` requires the trailing slash, so without this redirect
+    # /grafana would fall through to the catch-all and 404.
+    # Use $http_host (the client's Host header) instead of $host:$server_port
+    # so the redirect preserves the port the client actually connected
+    # on (e.g. 21000 on test-dev) — nginx's default would otherwise
+    # build the URL with its own listen port (30000 inside the container).
+    location = /grafana {
+        return 301 $scheme://$http_host/grafana/;
+    }
+
+    # Grafana, routed through nginx so basic-auth applies uniformly.
+    # Set GF_SERVER_ROOT_URL in the grafana service to match this prefix
+    # (e.g. http://localhost:30000/grafana/) so dashboard URLs resolve.
+    location ^~ /grafana/ {
+        ${INFINITE_STREAM_AUTH_DIRECTIVES}
+        # No trailing slash on proxy_pass — Grafana expects to receive
+        # requests at /grafana/* and serves them via its sub-path
+        # config (GF_SERVER_SERVE_FROM_SUB_PATH=true).
+        proxy_pass http://analytics_grafana;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_buffering off;
+    }
+    location ^~ /api/live/ {
+        proxy_pass http://analytics_grafana;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_read_timeout 1h;
+    }
+
+    location ^~ /analytics/api/ {
+        ${INFINITE_STREAM_AUTH_DIRECTIVES}
+        proxy_pass http://analytics_forwarder/api/;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_read_timeout 60s;
+        # Stream NDJSON to the browser line-by-line so the replay UI
+        # can paint snapshots as they arrive instead of waiting for
+        # the entire response to buffer.
+        proxy_buffering off;
+        proxy_request_buffering off;
+        add_header X-Accel-Buffering "no" always;
+        add_header Access-Control-Allow-Origin * always;
+        add_header Cache-Control "no-cache, no-store, must-revalidate" always;
     }
 
     location = /api/sessions {

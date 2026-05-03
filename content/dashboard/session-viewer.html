@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Testing Monitor - InfiniteStream</title>
+    <title>Session Viewer - InfiniteStream</title>
     <link rel="stylesheet" href="/shared-styles.css">
     <style>
         .page-header {
@@ -407,26 +407,17 @@
             filter: grayscale(0.5);
         }
 
-
     </style>
 </head>
-<body>
+<body class="replay-mode">
     <div class="ism-content-wide">
         <div class="page-header">
-            <div class="page-title">Testing Monitor</div>
-            <div class="page-subtitle" id="testingSubtitle">Launch sessions and tune failure settings per session.</div>
+            <div class="page-title">Session Viewer</div>
+            <div class="page-subtitle" id="testingSubtitle">Browse and replay archived streaming sessions from the analytics tier.</div>
         </div>
 
-        <div class="panel">
-            <div class="panel-header">
-                <div class="panel-title">Active Sessions <span class="status-message" id="sseMissedBadge"></span></div>
-                <div class="btn-row">
-                    <button class="btn btn-secondary" id="refreshSessions">Refresh</button>
-                    <button class="btn btn-danger" id="clearSessions">Release All Sessions</button>
-                </div>
-            </div>
-            <div id="sessionsContainer"></div>
-        </div>
+        <span id="sseMissedBadge" hidden></span>
+        <div id="sessionsContainer"></div>
     </div>
 
     <script src="/shared/shared-nav.js"></script>
@@ -456,6 +447,5 @@
     <script src="/dashboard/player-characterization.js"></script>
     <script src="/shared/session-shell.js"></script>
     <script src="/shared/session-replay.js"></script>
-    <script src="/shared/session-live.js"></script>
 </body>
 </html>
