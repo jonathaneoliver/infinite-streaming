@@ -50,6 +50,18 @@
     // means the brush sticks to the right edge as new entries arrive
     // (Following Latest). Drag-pan flips it to false.
     const networkWaterfallBrushBySession = new Map();
+    // Per-session event-marker state — { tsMs, label } picked from the
+    // session-replay events dropdown / rail. Painted as a cyan vertical
+    // guide on both the overview rail and the row-list time scale so
+    // the user can see exactly where the picked event lands among the
+    // network requests.
+    const networkLogEventMarkerBySession = new Map();
+    // Session ids whose next paint should auto-scroll the row list to
+    // the row closest to the marker's timestamp. We only scroll on a
+    // fresh pick (not on every brush drag / re-render) so the user
+    // can scroll away to read nearby rows without being yanked back.
+    const networkLogPendingScrollBySession = new Set();
+    const NETLOG_EVENT_MARKER_COLOR = '#0891b2';
     // Per-session column sort state: { col, dir } where dir is 'asc' or
     // 'desc'. col=null (or absent) means default chronological order.
     const networkWaterfallSortBySession = new Map();
@@ -58,9 +70,26 @@
     // axis gets too granular to be useful; this is also the default
     // initial span when a session first opens.
     const networkWaterfallMinBrushMs = 30 * 1000;
+    // In replay mode the network log brush should match the main page
+    // brush span (10 min) by default rather than the live-mode 30s tail.
+    // Using the same span makes the two scrub bars feel coordinated even
+    // before the user touches either one. Live testing.html keeps the
+    // small default — there entries arrive in real time and a tight
+    // tail is more useful.
+    const networkWaterfallReplayDefaultMs = 10 * 60 * 1000;
     const networkLogAutoRefreshTimers = new Map();
     const networkLogFetchInFlight = new Set();
     const networkLogAutoRefreshMs = 1500;
+    // True when the user explicitly paused fetching for this session.
+    // While paused, the auto-refresh timer is stopped — entries don't
+    // grow, the brush stays where the user left it, and a "PAUSED"
+    // overlay sits on top of the waterfall. Click Live to resume.
+    const networkLogPausedBySession = new Map();
+    // Set of session_ids whose own network-log brush is being dragged.
+    // Used to gate the 1.5s auto-refresh poll so the row table doesn't
+    // rebuild mid-gesture. Distinct from SessionShell's
+    // brushDraggingBySession (the main session-viewer brush).
+    const networkLogBrushDragging = new Set();
     // Network log used to be developer-only; now enabled for everyone.
     // The constant stays as `true` so the runtime gates still compile.
     const networkLogDeveloperEnabled = true;
@@ -556,12 +585,13 @@
         const playerStateOpen = resolveSectionDefault(options, 'player-state', false);
         const playerMetricsOpen = resolveSectionDefault(options, 'player-metrics', false);
 
+        const hideHeader = options.hideHeader || false;
         return `
             <div class="session-card" data-session-id="${sessionId}" data-session-port="${session.x_forwarded_port_external || session.x_forwarded_port || ''}" data-segment-duration-seconds="${segmentDurationSeconds}" data-shaping-presets="${encodedPresets}" data-shaping-video-presets="${encodedVideoPresets}" data-shaping-overhead-mbps="${overheadMbps}">
-                <div class="session-header">
+                ${hideHeader ? '' : `<div class="session-header">
                     ${hideTitle ? '' : `<div class="session-title">Session ${sessionId}</div>`}
                     <div class="session-meta" title="Port">${portDisplay}</div>
-                </div>
+                </div>`}
                 ${inlineHost ? `<div class="session-inline-player" data-inline-host="${sessionId}"></div>` : ''}
 
                 <!-- Collapsible Session Details -->
@@ -574,6 +604,7 @@
                     <div class="collapsible-content" data-content="session-details" style="display: ${sessionDetailsOpen ? 'block' : 'none'};">
                         <div class="session-grid">
                             <div class="session-item"><span class="label">Session ID</span><span class="value" data-field="session_session_id">${session.session_id || '—'}</span></div>
+                            <div class="session-item"><span class="label">Play ID</span><span class="value" data-field="session_play_id" title="Fresh UUID minted by the player at every loadStream() boundary (issue #280). Each fresh playback episode gets its own play_id; the analytics pipeline partitions on (session_id, play_id).">${session.play_id || '—'}</span></div>
                             <div class="session-item"><span class="label">Player ID</span><span class="value" data-field="session_player_id">${session.player_id || '—'}</span></div>
                             <div class="session-item"><span class="label">User Agent</span><span class="value" data-field="session_user_agent">${session.user_agent || '—'}</span></div>
                             <div class="session-item"><span class="label">Player IP</span><span class="value" data-field="session_player_ip">${session.player_ip || '—'}</span></div>
@@ -1140,6 +1171,7 @@
                         <div class="network-log-section">
                             <div class="network-log-controls">
                                 <button type="button" class="btn btn-mini btn-secondary" data-action="refresh-network-log">Refresh</button>
+                                <button type="button" class="btn btn-mini btn-secondary" data-action="pause-network-log" title="Stop fetching new entries — freeze the current view until you click Live">⏸ Pause</button>
                                 <button type="button" class="btn btn-mini btn-secondary" data-action="save-har-snapshot" title="Save the current network timeline as a HAR file: downloads to your machine and adds it to the Incidents list">Download HAR</button>
                                 <a href="/dashboard/incidents.html" target="_blank" rel="noopener" class="btn btn-mini btn-secondary" title="Browse saved HAR snapshots">Incidents</a>
                                 <label class="network-log-filter" title="When checked, the row list snaps to the latest entry on every refresh.">
@@ -1442,6 +1474,34 @@
 
     // Initialize collapsible sections and tabs
     function initializeUI() {
+        // Click on empty space inside the network-log waterfall toggles
+        // pause/live, mirroring the chart canvas behaviour. Skip clicks
+        // on rows, the brush, controls, and links — those have their
+        // own behaviour. Drag-detection uses a 5-pixel threshold so a
+        // brush-drag that ends inside the wrap doesn't accidentally
+        // toggle pause.
+        let netwfMouseDownX = 0, netwfMouseDownY = 0;
+        document.addEventListener('mousedown', (e) => {
+            if (e.button === 0 && e.target.closest('.network-log-waterfall-wrap')) {
+                netwfMouseDownX = e.clientX;
+                netwfMouseDownY = e.clientY;
+            }
+        });
+        document.addEventListener('click', (e) => {
+            const wrap = e.target.closest('.network-log-waterfall-wrap');
+            if (!wrap) return;
+            // Was this a real click, not the end of a drag?
+            if (Math.abs(e.clientX - netwfMouseDownX) > 5 || Math.abs(e.clientY - netwfMouseDownY) > 5) return;
+            // Skip clicks on interactive sub-elements that have their
+            // own meaning (rows, the brush, controls, links).
+            const skipSelectors = '.netwf-row, .netwf-brush, .netwf-brush-handle, .netwf-overview-bars, .netwf-overview-tick, button, input, label, select, textarea, a';
+            if (e.target.closest(skipSelectors)) return;
+            const card = wrap.closest('.session-card');
+            const sessionId = card ? String(card.dataset.sessionId || '') : '';
+            if (!sessionId) return;
+            toggleNetworkLogPaused(sessionId);
+        });
+
         // "All" checkbox toggles all sibling scope checkboxes
         document.addEventListener('change', (e) => {
             const cb = e.target;
@@ -1510,6 +1570,22 @@
                             }));
                         });
                     }
+                    return;
+                }
+                if (action === 'pause-network-log') {
+                    const card = actionButton.closest('.session-card');
+                    const sessionId = card ? String(card.dataset.sessionId || '') : '';
+                    if (!sessionId) return;
+                    toggleNetworkLogPaused(sessionId);
+                    return;
+                }
+                if (action === 'refresh-network-log') {
+                    const card = actionButton.closest('.session-card');
+                    const sessionId = card ? String(card.dataset.sessionId || '') : '';
+                    if (!sessionId) return;
+                    // One-shot refresh ignores the pause state — the user
+                    // explicitly asked for fresh data right now.
+                    updateNetworkLog(sessionId);
                     return;
                 }
                 if (action === 'save-har-snapshot') {
@@ -1679,6 +1755,10 @@
         if (!networkLogDeveloperEnabled) return;
         const key = String(sessionId || '');
         if (!key || document.hidden) return;
+        // Honour the user's Pause toggle — even when the fold opens or
+        // the page becomes visible again, don't resume polling unless
+        // the user has explicitly clicked Live.
+        if (isNetworkLogPaused(key)) return;
         const hostCard = card || document.querySelector(`.session-card[data-session-id="${key}"]`);
         if (!hostCard) return;
         if (networkLogAutoRefreshTimers.has(key)) return;
@@ -1687,6 +1767,64 @@
             updateNetworkLog(key, { skipIfInFlight: true });
         }, networkLogAutoRefreshMs);
         networkLogAutoRefreshTimers.set(key, timer);
+    }
+
+    function isNetworkLogPaused(sessionId) {
+        return networkLogPausedBySession.get(String(sessionId || '')) === true;
+    }
+
+    // Sync the visible button label + PAUSED badge to the persisted
+    // pause state. Called from setNetworkLogPaused (after toggle) and
+    // from updateNetworkWaterfall (after every refresh) so SSE-driven
+    // session-card re-renders don't reset the visual state.
+    function applyNetworkLogPauseUI(sessionId, card) {
+        const key = String(sessionId || '');
+        if (!key) return;
+        const hostCard = card || document.querySelector(`.session-card[data-session-id="${key}"]`);
+        if (!hostCard) return;
+        const paused = isNetworkLogPaused(key);
+        for (const btn of hostCard.querySelectorAll('button[data-action="pause-network-log"]')) {
+            if (paused) {
+                btn.textContent = '▶ Live';
+                btn.classList.add('netwf-live');
+                btn.title = 'Resume fetching new entries';
+            } else {
+                btn.textContent = '⏸ Pause';
+                btn.classList.remove('netwf-live');
+                btn.title = 'Stop fetching new entries — freeze the current view until you click Live';
+            }
+        }
+        const wrap = hostCard.querySelector('.network-log-waterfall-wrap');
+        if (wrap) {
+            let badge = wrap.querySelector('.network-log-paused-badge');
+            if (!badge) {
+                badge = document.createElement('div');
+                badge.className = 'network-log-paused-badge';
+                badge.textContent = 'PAUSED';
+                badge.style.cssText = 'position:absolute;top:8px;right:8px;padding:2px 10px;border-radius:10px;background:rgba(220,38,38,0.85);color:#fff;font:600 11px system-ui;letter-spacing:0.06em;pointer-events:none;display:none;z-index:5;';
+                if (getComputedStyle(wrap).position === 'static') wrap.style.position = 'relative';
+                wrap.appendChild(badge);
+            }
+            badge.style.display = paused ? 'block' : 'none';
+        }
+    }
+
+    function setNetworkLogPaused(sessionId, paused) {
+        const key = String(sessionId || '');
+        if (!key) return;
+        networkLogPausedBySession.set(key, !!paused);
+        const card = document.querySelector(`.session-card[data-session-id="${key}"]`);
+        applyNetworkLogPauseUI(key, card);
+        if (paused) {
+            stopNetworkLogAutoRefresh(key);
+        } else {
+            // Resume: kick off a fresh poll immediately.
+            startNetworkLogAutoRefresh(key, card);
+        }
+    }
+
+    function toggleNetworkLogPaused(sessionId) {
+        setNetworkLogPaused(sessionId, !isNetworkLogPaused(sessionId));
     }
 
     function isNetworkLogFollowMode(sessionId) {
@@ -1953,7 +2091,22 @@
         };
 
         const rows = entries.slice().map((entry, index) => {
-            const timestamp = Date.parse(entry.timestamp || '') || 0;
+            // Two on-the-wire formats:
+            //   live (go-proxy):       "2026-05-02T23:18:20.608Z"  (RFC3339, UTC)
+            //   archived (ClickHouse): "2026-05-02 23:18:20.608"   (no TZ marker)
+            // Date.parse defaults the second form to LOCAL time, which shifts
+            // every archived entry by the user's UTC offset and makes the
+            // network log times disagree with the chart/heatmap times.
+            // Normalise the unspaced/no-TZ form to ISO+Z before parsing.
+            const tsRaw = String(entry.timestamp || '');
+            let timestamp;
+            if (!tsRaw) {
+                timestamp = 0;
+            } else if (tsRaw.includes('T') && (tsRaw.endsWith('Z') || /[+-]\d\d:?\d\d$/.test(tsRaw))) {
+                timestamp = Date.parse(tsRaw) || 0;
+            } else {
+                timestamp = Date.parse(tsRaw.replace(' ', 'T') + 'Z') || 0;
+            }
             // Upstream-perspective phases (proxy → origin) — surfaced in the
             // tooltip for forensics but not part of the player-perceived bar.
             const dns = Number(entry.dns_ms || 0);
@@ -2027,6 +2180,15 @@
             row.totalAttempts = attemptByKey.get(k) || 1;
         }
         const newestTimestamp = ordered[ordered.length - 1].timestamp;
+        // Live testing.html uses a 10-min rolling cutoff so the table
+        // doesn't grow forever as new requests stream in. In replay mode
+        // we WANT the whole session — the user is investigating history,
+        // not tailing live traffic — so don't trim. Otherwise a 75-min
+        // session would silently lose 65 min of HAR rows before the rail
+        // / brush even sees them.
+        if (document.body.classList.contains('replay-mode')) {
+            return ordered;
+        }
         const cutoff = newestTimestamp - networkWaterfallRollingWindowMs;
         return ordered.filter((row) => (row.timestamp + row.duration) >= cutoff);
     }
@@ -2039,6 +2201,11 @@
     // DevTools' Network panel pattern.
     function updateNetworkWaterfall(card, sessionId) {
         const key = String(sessionId);
+        // Re-establish the pause-state UI on every render — SSE-driven
+        // session-card re-renders on testing.html / testing-session.html
+        // would otherwise drop the "▶ Live" label and PAUSED badge even
+        // though the persisted pause state still suppresses polling.
+        applyNetworkLogPauseUI(key, card);
         const chartHost = card.querySelector('[data-field="network_log_waterfall"]');
         const scrollHost = card.querySelector('[data-field="network_log_waterfall_scroll"]');
         const emptyHost = card.querySelector('[data-field="network_log_waterfall_empty"]');
@@ -2060,40 +2227,78 @@
         }
         emptyHost.style.display = 'none';
 
-        // Full session range (the overview always shows this).
+        // The overview rail used to span just the HAR data extent. In
+        // session-viewer the user can expand the main brush past the
+        // available data — we extend the rail to the union of data
+        // range and brush range so the rail always covers what the
+        // user is looking at, with empty area for "no requests here."
         const dataStartMs = rows[0].timestamp;
         const dataEndMs = Math.max(...rows.map((r) => r.timestamp + Math.max(50, r.duration)));
-        const fullSpan = Math.max(50, dataEndMs - dataStartMs);
+        // Span of the actual HAR data — used for default brush sizing.
+        // Distinct from `fullSpan` (= rail span = max(data, brush))
+        // computed once the brush is settled, below.
+        const dataSpan = Math.max(50, dataEndMs - dataStartMs);
 
         // Brush state — Following Latest = stick to the right edge.
         // Default: zoom to the most recent 2 minutes (or full session
         // if shorter). 2 min is also the floor we enforce on user
         // resize so bars stay scannable.
+        const isReplay = document.body.classList.contains('replay-mode');
+        const defaultSpanMs = isReplay ? networkWaterfallReplayDefaultMs : networkWaterfallMinBrushMs;
         let brush = networkWaterfallBrushBySession.get(key);
         if (!brush) {
-            const initialSpan = Math.min(fullSpan, networkWaterfallMinBrushMs);
+            const initialSpan = Math.min(dataSpan, defaultSpanMs);
             brush = { startMs: dataEndMs - initialSpan, endMs: dataEndMs, follow: true };
             networkWaterfallBrushBySession.set(key, brush);
+        }
+        // External callers (e.g. the bitrate chart's pan/zoom or the
+        // session-viewer scrubber) may have set a brush range that's
+        // entirely outside the actual HAR data — for example, a session
+        // viewer scrubbed to "last 30s" but the proxy buffer only holds
+        // entries from earlier. If the requested range has no overlap
+        // with the data we have, fall back to a sensible default
+        // (follow-latest) so the user sees *something*. The next user
+        // gesture re-anchors the brush.
+        const noOverlap = (brush.endMs < dataStartMs) || (brush.startMs > dataEndMs);
+        if (noOverlap) {
+            const initialSpan = Math.min(dataSpan, networkWaterfallMinBrushMs);
+            brush.startMs = Math.max(dataStartMs, dataEndMs - initialSpan);
+            brush.endMs = dataEndMs;
+            brush.follow = true;
         }
         // Sync brush.follow with the Follow Latest button. Clicking
         // the button re-engages right-edge stickiness even if the user
         // had previously dragged the brush.
-        brush.follow = isNetworkLogFollowMode(key);
+        brush.follow = brush.follow || isNetworkLogFollowMode(key);
         if (brush.follow) {
             const span = brush.endMs - brush.startMs;
             brush.endMs = dataEndMs;
             brush.startMs = Math.max(dataStartMs, brush.endMs - span);
         }
         // Clamp to data range and enforce the minimum brush width.
-        if (brush.endMs > dataEndMs) brush.endMs = dataEndMs;
-        if (brush.startMs < dataStartMs) brush.startMs = dataStartMs;
-        if (brush.endMs - brush.startMs < networkWaterfallMinBrushMs) {
-            // Try to expand left first; if there's not enough history,
-            // accept whatever we can fit (full session shorter than
-            // the minimum is fine — the floor only applies when the
-            // user could have a wider view).
-            brush.startMs = Math.max(dataStartMs, brush.endMs - networkWaterfallMinBrushMs);
+        // Defensive: end can still be <= start if the requested range
+        // was zero or otherwise pathological. Fall back to a sensible
+        // default brush at the data tail.
+        if (brush.endMs <= brush.startMs) {
+            brush.endMs = dataEndMs;
+            const initialSpan = Math.min(dataEndMs - dataStartMs, defaultSpanMs);
+            brush.startMs = Math.max(dataStartMs, dataEndMs - initialSpan);
         }
+        // Min-brush-width enforcement only kicks in when the brush would
+        // otherwise be uselessly small. Don't clamp to data range here —
+        // the rail extends to encompass the brush below.
+        if (brush.endMs - brush.startMs < networkWaterfallMinBrushMs) {
+            brush.startMs = brush.endMs - networkWaterfallMinBrushMs;
+        }
+
+        // Rail coordinate system = union of data range and brush range.
+        // When the brush extends past the data (typical when expanding
+        // the session-viewer focus window past available HAR archival),
+        // the rail grows to include the brush — empty space rendered
+        // for "no requests in this part" rather than clipping the brush.
+        const railStartMs = Math.min(dataStartMs, brush.startMs);
+        const railEndMs   = Math.max(dataEndMs,   brush.endMs);
+        const fullSpan = Math.max(50, railEndMs - railStartMs);
 
         // Summary row: total + categorical counts. Read at a glance
         // before the user starts panning the brush.
@@ -2102,23 +2307,22 @@
             renderWaterfallSummary(summaryEl, rows, dataStartMs, dataEndMs);
         }
 
-        // Time labels above the overview pane — full session range,
-        // independent of the brush. So the user sees both the
-        // big-picture wall clock (this row) and the zoomed-in
-        // wall clock (the row above the bars below).
+        // Time labels above the overview pane — span the rail (which
+        // covers data + brush) so axis ticks line up with the rail
+        // beneath them.
         const overviewAxis = card.querySelector('[data-field="netwf_overview_axis"]');
         if (overviewAxis) {
-            renderWaterfallAxisTicks(overviewAxis, dataStartMs, dataEndMs);
+            renderWaterfallAxisTicks(overviewAxis, railStartMs, railEndMs);
         }
 
         // Render overview ticks (one per row, positioned by absolute
-        // time). Re-render is cheap; we redraw on every refresh.
-        // Apply the same status/fault classes the main rows use so
-        // bad requests stand out on the strip too.
+        // time within the rail). Rail bounds in use; data ticks fall
+        // wherever they are, with empty rail beyond if the brush
+        // extends past data range.
         if (overviewBars) {
             overviewBars.replaceChildren();
             for (const row of rows) {
-                const left = ((row.timestamp - dataStartMs) / fullSpan) * 100;
+                const left = ((row.timestamp - railStartMs) / fullSpan) * 100;
                 const width = Math.max(0.05, (Math.max(50, row.duration) / fullSpan) * 100);
                 const tick = document.createElement('div');
                 tick.className = 'netwf-overview-tick' + waterfallRowStatusClasses(row);
@@ -2128,9 +2332,9 @@
             }
         }
 
-        // Position the brush to match its current state.
+        // Position the brush to match its current state, in rail coords.
         if (brushEl) {
-            const left = ((brush.startMs - dataStartMs) / fullSpan) * 100;
+            const left = ((brush.startMs - railStartMs) / fullSpan) * 100;
             const width = ((brush.endMs - brush.startMs) / fullSpan) * 100;
             brushEl.style.left = `${Math.max(0, left).toFixed(3)}%`;
             brushEl.style.width = `${Math.max(0.5, width).toFixed(3)}%`;
@@ -2204,6 +2408,9 @@
         // knows the full data range.
         networkWaterfallRowsBySession.set(key, rows);
         networkWaterfallRenderSignatureBySession.set(key, sigs.length + ':' + (sigs[sigs.length - 1] || ''));
+        // Repaint the event-marker guide (if any) using the freshly
+        // rendered axis scale and brush window.
+        paintNetworkLogEventMarker(card, key);
 
         // Following Latest: snap the *inner* scroll to the bottom.
         // The list now has its own scroll surface (max-height +
@@ -2802,6 +3009,33 @@
         return `${hh}:${mm}:${ss}`;
     }
 
+    // Cheap mid-drag brush reposition — updates the brush element's
+    // left/width CSS only, without rebuilding the row table or
+    // recomputing summaries. Used during drag so the waterfall
+    // doesn't re-render on every mousemove. Mirrors the rail bounds
+    // logic from updateNetworkWaterfall (rail = data ∪ brush).
+    function repositionBrushOnly(card, sessionId) {
+        const brush = networkWaterfallBrushBySession.get(String(sessionId));
+        if (!brush) return;
+        const brushEl = card.querySelector('[data-field="netwf_brush"]');
+        if (!brushEl) return;
+        const rows = networkWaterfallRowsBySession.get(String(sessionId)) || [];
+        if (!rows.length) return;
+        const dataStartMs = rows[0].timestamp;
+        const dataEndMs = Math.max(...rows.map((r) => r.timestamp + Math.max(50, r.duration)));
+        const railStartMs = Math.min(dataStartMs, brush.startMs);
+        const railEndMs   = Math.max(dataEndMs,   brush.endMs);
+        const fullSpan = Math.max(50, railEndMs - railStartMs);
+        const left = ((brush.startMs - railStartMs) / fullSpan) * 100;
+        const width = ((brush.endMs - brush.startMs) / fullSpan) * 100;
+        brushEl.style.left = `${Math.max(0, left).toFixed(3)}%`;
+        brushEl.style.width = `${Math.max(0.5, width).toFixed(3)}%`;
+        // Mid-drag reposition of the event-marker guide too — the row
+        // list isn't re-rendered until release, but the rail line and
+        // the row-list line should track the brush in real time.
+        paintNetworkLogEventMarker(card, sessionId);
+    }
+
     // Brush drag/resize handlers. The brush is positioned in % of the
     // overview's width, so we convert px deltas to % via the
     // overview's bounding rect. Drag-pan or drag-resize disables
@@ -2834,6 +3068,7 @@
                 pointerStartX: event.clientX
             };
             brushEl?.classList.add('dragging');
+            networkLogBrushDragging.add(sessionId);
             event.preventDefault();
             event.stopPropagation();
         };
@@ -2876,13 +3111,45 @@
                 setNetworkLogFollowMode(sessionId, false);
                 updateNetworkLogFollowButton(card, sessionId);
             }
-            updateNetworkWaterfall(card, sessionId);
+            // Mid-drag: cheap reposition only (brush CSS left/width).
+            // Full waterfall re-render fires on mouseup.
+            repositionBrushOnly(card, sessionId);
+            // Live-sync the main session-viewer brush so both rails
+            // move together. live:true means "no chart re-render yet"
+            // — the chart-side listener just repositions its brush.
+            document.dispatchEvent(new CustomEvent('replay:brush-range-change', {
+                detail: {
+                    sessionId,
+                    startMs: brush.startMs,
+                    endMs: brush.endMs,
+                    source: 'network-log',
+                    live: true
+                }
+            }));
         };
 
         const onPointerUp = () => {
             if (!drag) return;
             drag = null;
             brushEl?.classList.remove('dragging');
+            networkLogBrushDragging.delete(sessionId);
+            // Final full render on release — picks up the brush range
+            // and rebuilds the row table to match.
+            updateNetworkWaterfall(card, sessionId);
+            // Tell the main session-viewer brush to settle on this
+            // range and trigger its full chart re-render.
+            const brush = networkWaterfallBrushBySession.get(sessionId);
+            if (brush) {
+                document.dispatchEvent(new CustomEvent('replay:brush-range-change', {
+                    detail: {
+                        sessionId,
+                        startMs: brush.startMs,
+                        endMs: brush.endMs,
+                        source: 'network-log',
+                        live: false
+                    }
+                }));
+            }
         };
 
         // Brush body = pan. Handles = resize. Click on bare overview
@@ -2919,6 +3186,17 @@
                 updateNetworkLogFollowButton(card, sessionId);
             }
             updateNetworkWaterfall(card, sessionId);
+            // Sync the main brush — discrete click is a settle event,
+            // so live:false to trigger the full chart re-render.
+            document.dispatchEvent(new CustomEvent('replay:brush-range-change', {
+                detail: {
+                    sessionId,
+                    startMs: brush.startMs,
+                    endMs: brush.endMs,
+                    source: 'network-log',
+                    live: false
+                }
+            }));
         });
 
         document.addEventListener('mousemove', onPointerMove);
@@ -2931,6 +3209,29 @@
         const key = String(sessionId || '');
         if (!key) return;
         if (options.skipIfInFlight && networkLogFetchInFlight.has(key)) return;
+        // Skip while the user is actively dragging the main session-
+        // viewer brush. Ambient 1.5s polling otherwise flickers the
+        // waterfall mid-gesture; one render fires on release via
+        // syncNetworkLogToBrush. Manual user actions (clicking
+        // Refresh) bypass this check by passing skipIfDragging=false.
+        const skipIfDragging = options.skipIfDragging !== false;
+        if (skipIfDragging) {
+            // Two drag sources to consider:
+            //   1) the session-viewer's main brush (SessionShell flag)
+            //   2) the network-log fold's own brush (local flag)
+            // Either one being active means we should skip the
+            // ambient refresh — the rebuild would flicker the row
+            // table mid-gesture. Manual user actions (clicking
+            // Refresh) bypass via skipIfDragging:false.
+            if (window.SessionShell
+                && window.SessionShell.brushDraggingBySession
+                && window.SessionShell.brushDraggingBySession.has(key)) {
+                return;
+            }
+            if (networkLogBrushDragging.has(key)) {
+                return;
+            }
+        }
 
         const card = document.querySelector(`.session-card[data-session-id="${key}"]`);
         if (!card) {
@@ -2941,25 +3242,71 @@
         const countBadge = card.querySelector('[data-field="network_log_count"]');
         networkLogFetchInFlight.add(key);
 
-        fetch(`/api/session/${key}/network`)
-            .then(response => response.json())
+        // In replay mode, the live go-proxy session is gone — go straight
+        // to the analytics archive. In live mode we hit go-proxy first
+        // (cheaper, freshest); the archive is queried only as a fallback
+        // for sessions whose proxy buffer has aged out.
+        //
+        // We deliberately do NOT filter by play_id on the archive query.
+        // iOS HLS doesn't preserve the master-manifest's `?play_id=…`
+        // query string on variant / segment URLs, so many requests land
+        // with empty play_id even when the session is bound to a single
+        // playback episode. Filtering by play_id would hide them. We
+        // scope by TIME RANGE instead, using the play bounds that
+        // session-replay.js publishes to SessionShell after first batch.
+        // Without this scope the rail extends back to *the earliest
+        // entry across all plays of this session_id* — easily hours
+        // earlier than the play we're actually viewing.
+        const isReplay = document.body.classList.contains('replay-mode');
+        const archiveParams = new URLSearchParams({ session: key });
+        if (isReplay && window.SessionShell && window.SessionShell.playBoundsBySession) {
+            const bounds = window.SessionShell.playBoundsBySession.get(key);
+            if (bounds && Number.isFinite(bounds.startMs) && Number.isFinite(bounds.endMs)) {
+                archiveParams.set('from', new Date(bounds.startMs).toISOString());
+                archiveParams.set('to',   new Date(bounds.endMs).toISOString());
+            }
+        }
+        const archiveURL = `/analytics/api/network_requests?${archiveParams.toString()}`;
+        const liveURL = `/api/session/${key}/network`;
+
+        const apply = (entries) => {
+            const count = entries.length;
+            networkLogEntriesBySession.set(key, entries);
+            if (countBadge) {
+                countBadge.textContent = `${count} request${count !== 1 ? 's' : ''}`;
+            }
+            applyNetworkLogFilters(card);
+        };
+
+        const fetchFrom = (u) => fetch(u).then(r => {
+            if (!r.ok) throw new Error(`HTTP ${r.status}`);
+            return r.json();
+        });
+
+        const primary = isReplay ? archiveURL : liveURL;
+        const fallback = isReplay ? null : archiveURL;
+        fetchFrom(primary)
             .then(data => {
                 const entries = data.entries || [];
-                const count = entries.length;
-                networkLogEntriesBySession.set(key, entries);
-
-                // Update count badge
-                if (countBadge) {
-                    countBadge.textContent = `${count} request${count !== 1 ? 's' : ''}`;
+                if (entries.length === 0 && fallback) {
+                    return fetchFrom(fallback).then(d => apply(d.entries || []));
                 }
-                applyNetworkLogFilters(card);
+                apply(entries);
             })
             .catch(error => {
-                console.error('Failed to fetch network log:', error);
-                networkLogEntriesBySession.delete(key);
-                if (countBadge) {
-                    countBadge.textContent = '0 requests';
+                if (fallback) {
+                    return fetchFrom(fallback)
+                        .then(d => apply(d.entries || []))
+                        .catch(err2 => {
+                            console.error('Network log fetch (both sources) failed:', error, err2);
+                            networkLogEntriesBySession.delete(key);
+                            if (countBadge) countBadge.textContent = '0 requests';
+                            updateNetworkWaterfall(card, key);
+                        });
                 }
+                console.error('Network log fetch failed:', error);
+                networkLogEntriesBySession.delete(key);
+                if (countBadge) countBadge.textContent = '0 requests';
                 updateNetworkWaterfall(card, key);
             })
             .finally(() => {
@@ -3060,6 +3407,256 @@
         updateNetworkWaterfall(card, sessionId);
     }
 
+    // Sync the network-log brush to a given wall-clock range, so other
+    // controls (e.g. the bitrate chart's pan/zoom) can drive the
+    // waterfall's visible time window. Disengages Follow-Latest because
+    // the caller is asserting a specific range.
+    function setNetworkLogTimeRange(sessionId, fromMs, toMs) {
+        const key = String(sessionId || '');
+        if (!key) return;
+        if (!Number.isFinite(fromMs) || !Number.isFinite(toMs) || toMs <= fromMs) return;
+        networkWaterfallBrushBySession.set(key, { startMs: fromMs, endMs: toMs, follow: false });
+        setNetworkLogFollowMode(key, false);
+        const card = document.querySelector(`.session-card[data-session-id="${key}"]`);
+        if (!card) return;
+        // Only re-render if the network log fold is open — collapsed
+        // sections will pick up the new range when the user opens them.
+        const content = card.querySelector('[data-content="network-log"]');
+        if (!content || content.style.display === 'none') return;
+        updateNetworkWaterfall(card, key);
+    }
+
+    // Listen for replay event-marker picks. If the picked event's
+    // timestamp falls outside the current network-log brush window,
+    // shift the window (preserving its span) so the event lands at
+    // the centre. Ignores in-window picks so the user's existing
+    // zoom level is preserved when scanning nearby events.
+    // Guarded against duplicate registration if this module's IIFE
+    // runs more than once (live-reload, future SPA navigation).
+    if (!window.__networkLogEventMarkerListenerBound) {
+    window.__networkLogEventMarkerListenerBound = true;
+    document.addEventListener('replay:event-marker', (ev) => {
+        if (!ev || !ev.detail) return;
+        const sessionId = String(ev.detail.sessionId || '');
+        const tsMs = Number(ev.detail.tsMs);
+        if (!sessionId) return;
+        const card = document.querySelector(`.session-card[data-session-id="${sessionId}"]`);
+        if (!Number.isFinite(tsMs)) {
+            networkLogEventMarkerBySession.delete(sessionId);
+            if (card) paintNetworkLogEventMarker(card, sessionId);
+            return;
+        }
+        // Stash the marker so the next updateNetworkWaterfall (or
+        // brush-only reposition) can paint the cyan guide line.
+        networkLogEventMarkerBySession.set(sessionId, {
+            tsMs,
+            label: String(ev.detail.label || '')
+        });
+        // Fresh pick → ask the next paint to scroll the row list so
+        // the closest-to-event row is in view. One-shot; cleared by
+        // paintNetworkLogEventMarker once the scroll is performed.
+        networkLogPendingScrollBySession.add(sessionId);
+        const brush = networkWaterfallBrushBySession.get(sessionId);
+        // No brush yet (network log fold not opened) — bail; the
+        // marker we just stashed will be painted on first render.
+        if (!brush) {
+            if (card) paintNetworkLogEventMarker(card, sessionId);
+            return;
+        }
+        const span = brush.endMs - brush.startMs;
+        if (span <= 0) {
+            if (card) paintNetworkLogEventMarker(card, sessionId);
+            return;
+        }
+        // 5 % padding inside the brush so the marker doesn't sit
+        // exactly on the edge.
+        const pad = span * 0.05;
+        if (tsMs >= brush.startMs + pad && tsMs <= brush.endMs - pad) {
+            // Already in view — just repaint the line at the current
+            // position; no scroll needed.
+            if (card) paintNetworkLogEventMarker(card, sessionId);
+            return;
+        }
+        const half = span / 2;
+        let newStart = tsMs - half;
+        let newEnd = tsMs + half;
+        // Clamp against the data range so we never scroll past the
+        // first/last archived row.
+        const rows = networkWaterfallRowsBySession.get(sessionId) || [];
+        if (rows.length) {
+            const dataStartMs = rows[0].timestamp;
+            const dataEndMs = Math.max(...rows.map((r) => r.timestamp + Math.max(50, r.duration)));
+            if (newStart < dataStartMs) { newStart = dataStartMs; newEnd = newStart + span; }
+            if (newEnd > dataEndMs)     { newEnd = dataEndMs;     newStart = newEnd - span; }
+        }
+        setNetworkLogTimeRange(sessionId, newStart, newEnd);
+        // setNetworkLogTimeRange runs updateNetworkWaterfall which
+        // will pick up the marker via paintNetworkLogEventMarker
+        // below.
+    });
+    }
+
+    // Paint (or remove) the cyan event-marker guide on the network
+    // log's overview rail and on the row-list's time scale. Called
+    // at the end of updateNetworkWaterfall and also directly from
+    // the replay:event-marker listener for in-window picks.
+    function paintNetworkLogEventMarker(card, sessionId) {
+        const key = String(sessionId);
+        const marker = networkLogEventMarkerBySession.get(key);
+        const overviewEl = card.querySelector('[data-field="netwf_overview"]');
+        const chartHost = card.querySelector('[data-field="network_log_waterfall"]');
+        const RAIL_ID = 'netwf_event_marker_rail';
+        const ROW_ID  = 'netwf_event_marker_row';
+
+        const removeIf = (host, id) => {
+            if (!host) return;
+            const el = host.querySelector(`[data-field="${id}"]`);
+            if (el) el.remove();
+        };
+        if (!marker) {
+            removeIf(overviewEl, RAIL_ID);
+            removeIf(chartHost, ROW_ID);
+            return;
+        }
+
+        // Overview rail line: rail coords = union(data, brush).
+        if (overviewEl) {
+            const rows = networkWaterfallRowsBySession.get(key) || [];
+            const brush = networkWaterfallBrushBySession.get(key);
+            if (rows.length && brush) {
+                const dataStartMs = rows[0].timestamp;
+                const dataEndMs = Math.max(...rows.map((r) => r.timestamp + Math.max(50, r.duration)));
+                const railStartMs = Math.min(dataStartMs, brush.startMs);
+                const railEndMs   = Math.max(dataEndMs,   brush.endMs);
+                const fullSpan = Math.max(50, railEndMs - railStartMs);
+                let line = overviewEl.querySelector(`[data-field="${RAIL_ID}"]`);
+                if (marker.tsMs < railStartMs || marker.tsMs > railEndMs) {
+                    if (line) line.remove();
+                } else {
+                    if (!line) {
+                        line = document.createElement('div');
+                        line.dataset.field = RAIL_ID;
+                        line.style.cssText =
+                            'position:absolute;top:-2px;bottom:-2px;width:2px;' +
+                            `background:${NETLOG_EVENT_MARKER_COLOR};` +
+                            'pointer-events:none;z-index:6;';
+                        overviewEl.appendChild(line);
+                    }
+                    const leftPct = ((marker.tsMs - railStartMs) / fullSpan) * 100;
+                    line.style.left = `calc(${leftPct.toFixed(3)}% - 1px)`;
+                }
+            }
+        }
+
+        // Row-list line: spans the entire chartHost vertically and is
+        // positioned within the time-scale region (right of the resizable
+        // columns). We anchor x to the axis's `netwf-axis-scale` element
+        // because that's the live width of the time area as columns
+        // resize. Time coords = brush window only.
+        if (chartHost) {
+            const brush = networkWaterfallBrushBySession.get(key);
+            const axisScale = chartHost.querySelector('[data-field="netwf_axis_scale"]');
+            if (!brush || !axisScale) {
+                removeIf(chartHost, ROW_ID);
+                return;
+            }
+            const span = brush.endMs - brush.startMs;
+            if (span <= 0 || marker.tsMs < brush.startMs || marker.tsMs > brush.endMs) {
+                removeIf(chartHost, ROW_ID);
+                return;
+            }
+            // chartHost must be position:relative for absolute children
+            // to anchor to it. Set on first paint; harmless to re-set.
+            const cs = window.getComputedStyle(chartHost).position;
+            if (cs === 'static') chartHost.style.position = 'relative';
+            const hostRect = chartHost.getBoundingClientRect();
+            const scaleRect = axisScale.getBoundingClientRect();
+            const scaleLeftPx = scaleRect.left - hostRect.left;
+            const scaleWidthPx = scaleRect.width;
+            const fracInBrush = (marker.tsMs - brush.startMs) / span;
+            const linePx = scaleLeftPx + fracInBrush * scaleWidthPx;
+            let line = chartHost.querySelector(`[data-field="${ROW_ID}"]`);
+            if (!line) {
+                line = document.createElement('div');
+                line.dataset.field = ROW_ID;
+                line.style.cssText =
+                    'position:absolute;top:0;bottom:0;width:0;' +
+                    `border-left:1.5px dashed ${NETLOG_EVENT_MARKER_COLOR};` +
+                    'pointer-events:none;z-index:6;';
+                const label = document.createElement('div');
+                label.dataset.field = ROW_ID + '_label';
+                label.style.cssText =
+                    'position:absolute;top:2px;left:4px;' +
+                    `background:${NETLOG_EVENT_MARKER_COLOR};color:#fff;` +
+                    'font:10px system-ui,-apple-system,sans-serif;' +
+                    'padding:2px 4px;border-radius:2px;white-space:nowrap;';
+                line.appendChild(label);
+                chartHost.appendChild(line);
+            }
+            line.style.left = `${linePx.toFixed(2)}px`;
+            line.style.height = `${chartHost.scrollHeight}px`;
+            const labelEl = line.querySelector(`[data-field="${ROW_ID}_label"]`);
+            if (labelEl) labelEl.textContent = marker.label || '';
+
+            // Auto-scroll the row list vertically so the row whose
+            // timestamp is closest to the event lands roughly at the
+            // centre of the visible scroll area. One-shot per pick —
+            // scrolling on every brush drag would yank the user
+            // around while they're reading nearby rows.
+            if (networkLogPendingScrollBySession.has(key)) {
+                networkLogPendingScrollBySession.delete(key);
+                const scrollHost = card.querySelector('[data-field="network_log_waterfall_scroll"]');
+                if (scrollHost) {
+                    // Disable Following Latest — its bottom-snap would
+                    // immediately overwrite our targeted scroll.
+                    if (isNetworkLogFollowMode(key)) {
+                        setNetworkLogFollowMode(key, false);
+                        updateNetworkLogFollowButton(card, key);
+                    }
+                    // chartHost children: [axis, row, row, ...]. Walk
+                    // them and pick the row whose data-ts is closest
+                    // to (and ≤, when possible) the marker timestamp.
+                    let bestEl = null;
+                    let bestDiff = Infinity;
+                    for (let i = 1; i < chartHost.children.length; i++) {
+                        const child = chartHost.children[i];
+                        const rowData = child.__netwfRow;
+                        const ts = rowData ? Number(rowData.timestamp) : Number(child.dataset.ts);
+                        if (!Number.isFinite(ts)) continue;
+                        const diff = Math.abs(ts - marker.tsMs);
+                        if (diff < bestDiff) {
+                            bestDiff = diff;
+                            bestEl = child;
+                        }
+                    }
+                    if (bestEl) {
+                        const visibleH = scrollHost.clientHeight;
+                        const targetTop = bestEl.offsetTop - (visibleH / 2) + (bestEl.offsetHeight / 2);
+                        scrollHost.scrollTo({
+                            top: Math.max(0, targetTop),
+                            behavior: 'smooth'
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    // Release the network-log brush back to its default (follow-latest,
+    // rolling 2 min window). Used when the bitrate chart zoom is reset
+    // so the waterfall doesn't stay pinned to a stale range.
+    function clearNetworkLogTimeRange(sessionId) {
+        const key = String(sessionId || '');
+        if (!key) return;
+        networkWaterfallBrushBySession.delete(key);
+        setNetworkLogFollowMode(key, true);
+        const card = document.querySelector(`.session-card[data-session-id="${key}"]`);
+        if (!card) return;
+        const content = card.querySelector('[data-content="network-log"]');
+        if (!content || content.style.display === 'none') return;
+        updateNetworkWaterfall(card, key);
+    }
+
     window.TestingSessionUI = {
         renderSessionCard,
         renderPatternStepRowContent,
@@ -3073,6 +3670,8 @@
         updateNetworkLog,
         applyNetworkLogFilters,
         updateNetworkWaterfall,
-        renderHarWaterfall
+        renderHarWaterfall,
+        setNetworkLogTimeRange,
+        clearNetworkLogTimeRange
     };
 })();

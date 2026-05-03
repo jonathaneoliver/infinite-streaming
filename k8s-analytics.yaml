@@ -1,0 +1,293 @@
+# Analytics sidecar: ClickHouse + Grafana + SSE→ClickHouse forwarder.
+# Apply alongside k8s-infinite-streaming-dev.yaml or k8s-infinite-streaming.yaml.
+# Uses envsubst at apply time for ${K3S_REGISTRY} and the SSE source URL
+# (${ANALYTICS_SSE_URL}). The forwarder defaults to the dev stack
+# (infinite-streaming-dev:30081); override ANALYTICS_SSE_URL for release.
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: analytics-clickhouse-init
+data:
+  01-schema.sql: |
+    CREATE DATABASE IF NOT EXISTS infinite_streaming;
+    CREATE TABLE IF NOT EXISTS infinite_streaming.session_snapshots
+    (
+        ts DateTime64(3, 'UTC'),
+        revision UInt64,
+        session_id String,
+        play_id LowCardinality(String),
+        player_id LowCardinality(String),
+        group_id LowCardinality(String),
+        user_agent String,
+        manifest_url String,
+        manifest_variants String,
+        last_request_url String,
+        content_id LowCardinality(String),
+        player_state LowCardinality(String),
+        waiting_reason LowCardinality(String),
+        buffer_depth_s Float32,
+        network_bitrate_mbps Float32,
+        video_bitrate_mbps Float32,
+        measured_mbps Float32,
+        mbps_shaper_rate Float32,
+        mbps_shaper_avg Float32,
+        display_resolution LowCardinality(String),
+        video_resolution LowCardinality(String),
+        frames_displayed UInt64 DEFAULT 0,
+        dropped_frames UInt32 DEFAULT 0,
+        stall_count UInt32 DEFAULT 0,
+        stall_time_s Float32,
+        position_s Float32,
+        live_edge_s Float32,
+        true_offset_s Float32,
+        playback_rate Float32,
+        loop_count_player UInt32 DEFAULT 0,
+        loop_count_server UInt32 DEFAULT 0,
+        last_event LowCardinality(String),
+        last_event_at String,
+        trigger_type LowCardinality(String),
+        event_time String,
+        player_error String,
+        avg_network_bitrate_mbps Float32,
+        buffer_end_s Float32,
+        last_stall_time_s Float32,
+        live_offset_s Float32,
+        playhead_wallclock_ms Int64,
+        seekable_end_s Float32,
+        metrics_source LowCardinality(String),
+        video_first_frame_time_s Float32,
+        video_quality_pct Float32,
+        video_start_time_s Float32,
+        mbps_transfer_complete Float32,
+        mbps_transfer_rate Float32,
+        player_ip LowCardinality(String),
+        server_received_at_ms Int64,
+        x_forwarded_port UInt16 DEFAULT 0,
+        x_forwarded_port_external UInt16 DEFAULT 0,
+        master_manifest_url String,
+        master_manifest_failure_type LowCardinality(String),
+        master_manifest_failure_mode LowCardinality(String),
+        master_manifest_failure_frequency Float32,
+        master_manifest_consecutive_failures UInt32 DEFAULT 0,
+        master_manifest_requests_count UInt32 DEFAULT 0,
+        manifest_failure_frequency Float32,
+        manifest_failure_urls String,
+        manifest_consecutive_failures UInt32 DEFAULT 0,
+        manifest_requests_count UInt32 DEFAULT 0,
+        segment_failure_frequency Float32,
+        segment_failure_urls String,
+        segment_consecutive_failures UInt32 DEFAULT 0,
+        segments_count UInt32 DEFAULT 0,
+        all_failure_type LowCardinality(String),
+        all_failure_mode LowCardinality(String),
+        all_failure_frequency Float32,
+        all_failure_urls String,
+        all_consecutive_failures UInt32 DEFAULT 0,
+        transport_failure_frequency Float32,
+        transport_failure_mode LowCardinality(String),
+        transport_failure_units LowCardinality(String),
+        transport_consecutive_failures UInt32 DEFAULT 0,
+        transport_consecutive_seconds Float32,
+        transport_consecutive_units UInt32 DEFAULT 0,
+        transport_frequency_seconds Float32,
+        transport_fault_drop_packets UInt8 DEFAULT 0,
+        transport_fault_reject_packets UInt8 DEFAULT 0,
+        transport_fault_off_seconds Float32,
+        transport_fault_on_seconds Float32,
+        transport_fault_type LowCardinality(String),
+        fault_count_transfer_active_timeout UInt32 DEFAULT 0,
+        fault_count_transfer_idle_timeout UInt32 DEFAULT 0,
+        transfer_active_timeout_seconds Float32,
+        transfer_idle_timeout_seconds Float32,
+        transfer_timeout_applies_manifests UInt8 DEFAULT 0,
+        transfer_timeout_applies_master UInt8 DEFAULT 0,
+        transfer_timeout_applies_segments UInt8 DEFAULT 0,
+        nftables_pattern_step UInt32 DEFAULT 0,
+        nftables_pattern_step_runtime UInt32 DEFAULT 0,
+        nftables_pattern_steps String,
+        nftables_pattern_rate_runtime_mbps Float32,
+        nftables_pattern_margin_pct Float32,
+        nftables_pattern_template_mode LowCardinality(String),
+        content_allowed_variants String,
+        content_live_offset Float32,
+        content_strip_codecs String,
+        abrchar_run_lock UInt8 DEFAULT 0,
+        control_revision UInt64 DEFAULT 0,
+        server_video_rendition LowCardinality(String),
+        server_video_rendition_mbps Float32,
+        manifest_failure_type LowCardinality(String),
+        manifest_failure_mode LowCardinality(String),
+        segment_failure_type LowCardinality(String),
+        segment_failure_mode LowCardinality(String),
+        transport_failure_type LowCardinality(String),
+        transport_fault_active UInt8 DEFAULT 0,
+        nftables_bandwidth_mbps Float32,
+        nftables_delay_ms UInt32 DEFAULT 0,
+        nftables_packet_loss Float32,
+        nftables_pattern_enabled UInt8 DEFAULT 0,
+        first_request_time String,
+        last_request String,
+        session_duration Float32,
+        session_json String CODEC(ZSTD(3))
+    )
+    ENGINE = MergeTree
+    PARTITION BY toYYYYMMDD(ts)
+    ORDER BY (session_id, ts)
+    TTL toDateTime(ts) + INTERVAL 30 DAY;
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: clickhouse
+spec:
+  serviceName: clickhouse
+  replicas: 1
+  selector:
+    matchLabels:
+      app: clickhouse
+  template:
+    metadata:
+      labels:
+        app: clickhouse
+    spec:
+      containers:
+      - name: clickhouse
+        image: clickhouse/clickhouse-server:24.8-alpine
+        ports:
+        - containerPort: 8123
+        - containerPort: 9000
+        env:
+        - name: CLICKHOUSE_DB
+          value: infinite_streaming
+        - name: CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT
+          value: "1"
+        - name: CLICKHOUSE_SKIP_USER_SETUP
+          value: "1"
+        volumeMounts:
+        - name: data
+          mountPath: /var/lib/clickhouse
+        - name: init
+          mountPath: /docker-entrypoint-initdb.d
+      volumes:
+      - name: init
+        configMap:
+          name: analytics-clickhouse-init
+  volumeClaimTemplates:
+  - metadata:
+      name: data
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      resources:
+        requests:
+          storage: 20Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: clickhouse
+spec:
+  selector:
+    app: clickhouse
+  ports:
+  - name: http
+    port: 8123
+    targetPort: 8123
+  - name: native
+    port: 9000
+    targetPort: 9000
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: forwarder
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: forwarder
+  template:
+    metadata:
+      labels:
+        app: forwarder
+    spec:
+      containers:
+      - name: forwarder
+        image: ${K3S_REGISTRY}/infinite-streaming-forwarder:dev
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 8080
+        env:
+        - name: FORWARDER_SSE_URL
+          value: "${ANALYTICS_SSE_URL}"
+        - name: FORWARDER_CLICKHOUSE_URL
+          value: "http://clickhouse:8123"
+        - name: FORWARDER_CLICKHOUSE_DB
+          value: infinite_streaming
+        - name: FORWARDER_CLICKHOUSE_TABLE
+          value: session_snapshots
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: forwarder
+spec:
+  selector:
+    app: forwarder
+  ports:
+  - name: http
+    port: 8080
+    targetPort: 8080
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: grafana
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: grafana
+  template:
+    metadata:
+      labels:
+        app: grafana
+    spec:
+      containers:
+      - name: grafana
+        image: grafana/grafana-oss:11.3.0
+        ports:
+        - containerPort: 3000
+        env:
+        - name: GF_AUTH_ANONYMOUS_ENABLED
+          value: "true"
+        # Viewer (not Editor) — anonymous visitors can read dashboards
+        # but can't mutate them. Dashboards are provisioned-as-code.
+        - name: GF_AUTH_ANONYMOUS_ORG_ROLE
+          value: "Viewer"
+        - name: GF_AUTH_DISABLE_LOGIN_FORM
+          value: "true"
+        - name: GF_INSTALL_PLUGINS
+          value: "grafana-clickhouse-datasource"
+        # Grafana is served behind the go-server nginx at /grafana/,
+        # so it must build URLs relative to that prefix.
+        - name: GF_SERVER_ROOT_URL
+          value: "%(protocol)s://%(domain)s:%(http_port)s/grafana/"
+        - name: GF_SERVER_SERVE_FROM_SUB_PATH
+          value: "true"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: grafana
+spec:
+  # ClusterIP, not NodePort — Grafana is reached via the go-server
+  # nginx at /grafana/ where basic-auth (when enabled) gates access.
+  # Exposing it directly on a node port would bypass that gate.
+  type: ClusterIP
+  selector:
+    app: grafana
+  ports:
+  - name: http
+    port: 3000
+    targetPort: 3000

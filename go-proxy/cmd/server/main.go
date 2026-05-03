@@ -341,6 +341,7 @@ type App struct {
 	sessionsBroadcastPending bool
 	sessionsBroadcastLatest  []SessionData
 	sessionsBroadcastSeq     uint64
+	networkHub               *NetworkEventHub
 	uiStateVersionSeq        uint64
 	segmentFlightMu          sync.Mutex
 	segmentFlight            map[int]segmentFlightInfo // internal port -> segment transfer info
@@ -431,6 +432,81 @@ type PortMapping struct {
 
 func NewSessionEventHub() *SessionEventHub {
 	return &SessionEventHub{clients: map[int]*SessionClient{}}
+}
+
+// NetworkEventHub fans out per-request network log entries to subscribed
+// SSE clients (currently: the analytics forwarder). Each Add() call
+// produces one event with {session_id, entry}. Slow clients lose old
+// events on overflow rather than blocking the proxy hot path.
+type NetworkEventHub struct {
+	mu      sync.Mutex
+	nextID  int
+	clients map[int]*NetworkClient
+}
+
+type NetworkClient struct {
+	ch      chan NetworkEvent
+	dropped uint64
+}
+
+type NetworkEvent struct {
+	SessionID string
+	Entry     NetworkLogEntry
+}
+
+func NewNetworkEventHub() *NetworkEventHub {
+	return &NetworkEventHub{clients: map[int]*NetworkClient{}}
+}
+
+func (h *NetworkEventHub) AddClient(buffer int) (int, <-chan NetworkEvent) {
+	if buffer <= 0 {
+		buffer = 256
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.nextID++
+	id := h.nextID
+	c := &NetworkClient{ch: make(chan NetworkEvent, buffer)}
+	h.clients[id] = c
+	return id, c.ch
+}
+
+func (h *NetworkEventHub) RemoveClient(id int) {
+	h.mu.Lock()
+	c, ok := h.clients[id]
+	if ok {
+		delete(h.clients, id)
+	}
+	h.mu.Unlock()
+	if ok {
+		close(c.ch)
+	}
+}
+
+func (h *NetworkEventHub) Broadcast(sessionID string, entry NetworkLogEntry) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if len(h.clients) == 0 {
+		return
+	}
+	ev := NetworkEvent{SessionID: sessionID, Entry: entry}
+	for _, c := range h.clients {
+		select {
+		case c.ch <- ev:
+		default:
+			// Buffer full — drop oldest, log occasionally.
+			select {
+			case <-c.ch:
+				c.dropped++
+			default:
+			}
+			select {
+			case c.ch <- ev:
+			default:
+				c.dropped++
+			}
+		}
+	}
 }
 
 func (h *SessionEventHub) AddClient(playerIDFilter string) (int, <-chan SessionsEvent) {
@@ -1255,6 +1331,7 @@ func main() {
 		shapeApply:         map[int]ShapeApplyState{},
 		faultLoops:         map[int]context.CancelFunc{},
 		sessionsHub:        NewSessionEventHub(),
+		networkHub:         NewNetworkEventHub(),
 		networkLogs:        map[string]*NetworkLogRingBuffer{},
 		loopStateBySession: map[string]ServerLoopState{},
 		segmentFlight:      map[int]segmentFlightInfo{},
@@ -1284,6 +1361,7 @@ func main() {
 	router.HandleFunc("/api/session/{id}", app.handlePatchSession).Methods(http.MethodPatch)
 	router.HandleFunc("/api/session/{id}/metrics", app.handlePostSessionMetrics).Methods(http.MethodPost)
 	router.HandleFunc("/api/session/{id}/network", app.handleGetNetworkLog).Methods(http.MethodGet)
+	router.HandleFunc("/api/network/stream", app.handleNetworkStream).Methods(http.MethodGet)
 	router.HandleFunc("/api/sessions/{player_id}/timeline.har", app.handleGetSessionTimelineHAR).Methods(http.MethodGet)
 	router.HandleFunc("/api/session/{id}/har/snapshot", app.handlePostHARSnapshot).Methods(http.MethodPost)
 	router.HandleFunc("/api/incidents", app.handleListIncidents).Methods(http.MethodGet)
@@ -1369,6 +1447,63 @@ func (a *App) handleGetSessions(w http.ResponseWriter, r *http.Request) {
 		sessions = sessions[:10]
 	}
 	writeJSON(w, a.normalizeSessionsForResponse(sessions))
+}
+
+// handleNetworkStream emits each network log entry as it lands in any
+// session's ring buffer. Body is one SSE `data:` line per entry,
+// {"session_id":"...","entry":{...}}. Subscribers must reconnect on
+// disconnect; nothing is replayed.
+func (a *App) handleNetworkStream(w http.ResponseWriter, r *http.Request) {
+	if a.networkHub == nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		writeJSON(w, map[string]string{"error": "stream unavailable"})
+		return
+	}
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		w.WriteHeader(http.StatusInternalServerError)
+		writeJSON(w, map[string]string{"error": "stream unsupported"})
+		return
+	}
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+
+	clientID, ch := a.networkHub.AddClient(1024)
+	defer a.networkHub.RemoveClient(clientID)
+
+	// Heartbeat keeps idle proxies through corp firewalls/load balancers.
+	heartbeat := time.NewTicker(15 * time.Second)
+	defer heartbeat.Stop()
+
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case <-heartbeat.C:
+			if _, err := w.Write([]byte(": ping\n\n")); err != nil {
+				return
+			}
+			flusher.Flush()
+		case ev, ok := <-ch:
+			if !ok {
+				return
+			}
+			payload := struct {
+				SessionID string          `json:"session_id"`
+				Entry     NetworkLogEntry `json:"entry"`
+			}{ev.SessionID, ev.Entry}
+			b, err := json.Marshal(payload)
+			if err != nil {
+				continue
+			}
+			if _, err := w.Write([]byte("data: " + string(b) + "\n\n")); err != nil {
+				return
+			}
+			flusher.Flush()
+		}
+	}
 }
 
 func (a *App) handleSessionStream(w http.ResponseWriter, r *http.Request) {
@@ -4034,6 +4169,14 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 	sessionData["last_request"] = nowISO()
 	sessionData["last_request_url"] = filename
 	sessionData["user_agent"] = r.UserAgent()
+	// Stamp the player's current play_id on the session so the SSE stream
+	// (and downstream analytics) can partition by playback episode. The
+	// player regenerates play_id at every fresh loadStream boundary
+	// (issue #280); when this value differs from the prior snapshot,
+	// that's a "new playback started" signal in replay views.
+	if playID != "" {
+		sessionData["play_id"] = playID
+	}
 
 	// Extract client IP considering X-Forwarded-For
 	clientIP := extractClientIP(r.RemoteAddr, r.Header.Get("X-Forwarded-For"))
@@ -5386,12 +5529,47 @@ func (a *App) getOrCreateNetworkLog(sessionID string) *NetworkLogRingBuffer {
 }
 
 // addNetworkLogEntry adds a network log entry to the session's ring buffer
+// and fans it out to any subscribed SSE clients (the analytics forwarder).
+//
+// If the entry arrived with an empty PlayID (typical for variant manifests
+// and segments — iOS HLS doesn't preserve the master manifest's
+// `?play_id=…` query string on derived URLs), fall back to the session's
+// last-known sticky play_id from the live session map. session_snapshots
+// already does this implicitly via the "if playID != ''" guard at the
+// session level; without this fallback the network_requests table ends
+// up with most rows attributed to play_id='' and the session-viewer's
+// play_id filter only catches the master manifest hits.
 func (a *App) addNetworkLogEntry(sessionID string, entry NetworkLogEntry) {
 	if sessionID == "" {
 		return
 	}
+	if entry.PlayID == "" {
+		entry.PlayID = a.sessionStickyPlayID(sessionID)
+	}
 	rb := a.getOrCreateNetworkLog(sessionID)
 	rb.Add(entry)
+	if a.networkHub != nil {
+		a.networkHub.Broadcast(sessionID, entry)
+	}
+}
+
+// sessionStickyPlayID reads the session's last-known play_id from the
+// atomic snapshot without cloning the whole list. Returns "" if the
+// session isn't tracked or has no play_id stamped yet.
+func (a *App) sessionStickyPlayID(sessionID string) string {
+	snap := a.sessionsSnap.Load()
+	if snap == nil {
+		return ""
+	}
+	for _, s := range *snap {
+		id, _ := s["session_id"].(string)
+		if id != sessionID {
+			continue
+		}
+		pid, _ := s["play_id"].(string)
+		return pid
+	}
+	return ""
 }
 
 func durationToMilliseconds(d time.Duration) float64 {

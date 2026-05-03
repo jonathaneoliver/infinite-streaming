@@ -1,0 +1,110 @@
+{
+  "title": "InfiniteStream Storage",
+  "uid": "is-session-analytics",
+  "schemaVersion": 39,
+  "editable": true,
+  "tags": ["infinite-streaming"],
+  "time": { "from": "now-6h", "to": "now" },
+  "refresh": "30s",
+  "timepicker": {
+    "refresh_intervals": ["10s", "30s", "1m", "5m", "15m", "1h"]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "Messages by type",
+      "description": "Per-minute row count ingested into each ClickHouse table.",
+      "datasource": { "type": "grafana-clickhouse-datasource", "uid": "ch_infinite_streaming" },
+      "gridPos": { "x": 0, "y": 0, "w": 24, "h": 10 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "fillOpacity": 12,
+            "showPoints": "never",
+            "stacking": { "mode": "normal", "group": "A" }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "right", "calcs": ["sum"] },
+        "tooltip": { "mode": "multi", "sort": "none" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "grafana-clickhouse-datasource", "uid": "ch_infinite_streaming" },
+          "rawSql": "SELECT toStartOfInterval(ts, INTERVAL 1 MINUTE) AS time, 'session_snapshots' AS type, count() AS messages FROM infinite_streaming.session_snapshots WHERE $__timeFilter(ts) GROUP BY time UNION ALL SELECT toStartOfInterval(ts, INTERVAL 1 MINUTE) AS time, 'network_requests' AS type, count() AS messages FROM infinite_streaming.network_requests WHERE $__timeFilter(ts) GROUP BY time ORDER BY time",
+          "format": 0
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Total storage",
+      "description": "On-disk bytes across all active parts in the infinite_streaming database.",
+      "datasource": { "type": "grafana-clickhouse-datasource", "uid": "ch_infinite_streaming" },
+      "gridPos": { "x": 0, "y": 10, "w": 8, "h": 6 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "decbytes",
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 5368709120 },
+              { "color": "red", "value": 21474836480 }
+            ]
+          }
+        }
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "colorMode": "value",
+        "graphMode": "area",
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "grafana-clickhouse-datasource", "uid": "ch_infinite_streaming" },
+          "rawSql": "SELECT sum(bytes_on_disk) AS bytes FROM system.parts WHERE database = 'infinite_streaming' AND active",
+          "format": 1
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "table",
+      "title": "Storage by table",
+      "description": "Active part bytes and row counts per table.",
+      "datasource": { "type": "grafana-clickhouse-datasource", "uid": "ch_infinite_streaming" },
+      "gridPos": { "x": 8, "y": 10, "w": 16, "h": 6 },
+      "fieldConfig": {
+        "defaults": { "unit": "short" },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "bytes" }, "properties": [{ "id": "unit", "value": "decbytes" }] },
+          { "matcher": { "id": "byName", "options": "rows" },  "properties": [{ "id": "unit", "value": "short" }] }
+        ]
+      },
+      "options": {
+        "showHeader": true,
+        "footer": { "show": false }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "grafana-clickhouse-datasource", "uid": "ch_infinite_streaming" },
+          "rawSql": "SELECT table, sum(rows) AS rows, sum(bytes_on_disk) AS bytes FROM system.parts WHERE database = 'infinite_streaming' AND active GROUP BY table ORDER BY bytes DESC",
+          "format": 1
+        }
+      ]
+    }
+  ]
+}

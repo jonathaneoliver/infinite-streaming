@@ -13,3 +13,28 @@ services:
       - "21681:30681"
       - "21781:30781"
       - "21881:30881"
+  clickhouse:
+    container_name: test-dev-clickhouse
+    # Bind to loopback only — see docker-compose.yml. analytics-migrate
+    # SSHes into the host and curls localhost:21123 so loopback is
+    # sufficient; LAN access is blocked.
+    ports:
+      !override
+      - "127.0.0.1:21123:8123"
+  grafana:
+    container_name: test-dev-grafana
+    # No host port — reach Grafana via the test-dev nginx /grafana/
+    # prefix (e.g. http://jonathanoliver-ubuntu.local:21000/grafana/).
+    ports: !override []
+    environment:
+      # Public root URL for the test-deploy-dev box — overrides the
+      # docker-compose default localhost:30000 so Grafana's own
+      # redirects (login flow, etc.) land back on the right host:port.
+      - GF_SERVER_ROOT_URL=http://jonathanoliver-ubuntu.local:21000/grafana/
+  forwarder:
+    container_name: test-dev-forwarder
+    environment:
+      - FORWARDER_SSE_URL=http://go-server:30081/api/sessions/stream
+      - FORWARDER_CLICKHOUSE_URL=http://clickhouse:8123
+      - FORWARDER_CLICKHOUSE_DB=infinite_streaming
+      - FORWARDER_CLICKHOUSE_TABLE=session_snapshots

@@ -749,28 +749,21 @@ final class PlayerViewModel: ObservableObject {
     /// willing to switch to — when 4K is off we cap at 1080p so the
     /// device decoder isn't asked to do 4K H.264.
     ///
-    /// Simulator override: the iOS / iPadOS simulator's video decoder
-    /// can't reliably handle 4K H.264 (or HEVC at any resolution above
-    /// 1080p) regardless of what the user picks. Hard-cap at 1080p on
-    /// simulator builds so clips with 4K renditions in their master
-    /// (e.g. "Samsung Ride on Board 4K Demo") play cleanly during
-    /// local development. Real-device builds honour the user toggle.
+    /// The simulator used to be hard-capped at 1080p regardless of the
+    /// toggle because Intel-host sims couldn't reliably decode 4K HEVC.
+    /// On Apple-Silicon hosts the simulator routes decode through the
+    /// host's hardware HEVC decoder and 4K plays fine, so the override
+    /// is gone — sim now honours `allow4K`. If a particular host can't
+    /// decode, AVPlayer surfaces `decodeFailedNotification` and the
+    /// existing recovery pipeline kicks in (same path real devices use).
     private func apply4kPreference(to item: AVPlayerItem) {
-        #if targetEnvironment(simulator)
-        if #available(iOS 15.0, tvOS 15.0, *) {
-            item.preferredMaximumResolution = CGSize(width: 1920, height: 1080)
-        }
         item.preferredPeakBitRate = 0
-        #else
+        guard #available(iOS 15.0, tvOS 15.0, *) else { return }
         if allow4K {
-            item.preferredPeakBitRate = 0
-            if #available(iOS 15.0, tvOS 15.0, *) {
-                item.preferredMaximumResolution = CGSize(width: 3840, height: 2160)
-            }
-        } else if #available(iOS 15.0, tvOS 15.0, *) {
+            item.preferredMaximumResolution = CGSize(width: 3840, height: 2160)
+        } else {
             item.preferredMaximumResolution = CGSize(width: 1920, height: 1080)
         }
-        #endif
     }
 
     private func seekToLiveEdge(item: AVPlayerItem) {

@@ -681,30 +681,37 @@
 
 .netwf-brush {
     position: absolute;
-    top: 0;
-    bottom: 0;
-    background: rgba(33, 150, 243, 0.10);
-    border-left: 2px solid #2196F3;
-    border-right: 2px solid #2196F3;
+    top: -2px;
+    bottom: -2px;
+    background: rgba(37, 99, 235, 0.20);
+    border: 2px solid #1d4ed8;
+    border-radius: 4px;
+    box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.6),
+                0 4px 12px rgba(29, 78, 216, 0.35);
     cursor: grab;
     box-sizing: border-box;
+    z-index: 2;
 }
 
 .netwf-brush.dragging {
     cursor: grabbing;
+    box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.7),
+                0 6px 18px rgba(29, 78, 216, 0.55);
 }
 
 .netwf-brush-handle {
     position: absolute;
     top: 0;
     bottom: 0;
-    width: 6px;
-    background: rgba(33, 150, 243, 0.35);
+    width: 10px;
+    background: #1d4ed8;
+    border-radius: 2px;
+    box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.7);
     cursor: ew-resize;
 }
 
-.netwf-brush-handle.left { left: -3px; }
-.netwf-brush-handle.right { right: -3px; }
+.netwf-brush-handle.left  { left: -5px; }
+.netwf-brush-handle.right { right: -5px; }
 
 /* Global-axis waterfall: each row's bar is positioned within the
  * brush's time window. Bars on the same horizontal pixel = requests
@@ -1430,7 +1437,8 @@ button[data-action="reset-bitrate-zoom"].zoom-active::before {
    Live/Pause toggle button (chart-live highlight + pulsing dot).
    ============================================================================ */
 
-button[data-action="pause-bitrate-chart"].chart-live {
+button[data-action="pause-bitrate-chart"].chart-live,
+button[data-action="pause-network-log"].netwf-live {
     color: #16a34a;
     border-color: #16a34a;
     font-weight: 600;
@@ -1439,7 +1447,8 @@ button[data-action="pause-bitrate-chart"].chart-live {
     0%, 100% { opacity: 1; }
     50% { opacity: 0.35; }
 }
-button[data-action="pause-bitrate-chart"].chart-live::before {
+button[data-action="pause-bitrate-chart"].chart-live::before,
+button[data-action="pause-network-log"].netwf-live::before {
     content: '● ';
     animation: chart-pulse-dot 1.2s ease-in-out infinite;
 }
