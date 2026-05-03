@@ -4653,11 +4653,19 @@
 
             // PLAYERSTATE: sample state + AVPlayer waiting reason every
             // poll; the renderer coalesces same-label runs.
+            //
+            // All player-attributable events plot at iOS-clock event_time,
+            // not browser-now — pipeline jitter (proxy debounce, SSE
+            // buffering, JS event-loop) can shuffle browser-receive order
+            // vs iOS-clock order → phantom flapping in variant lanes.
+            // Anchoring to player_metrics_event_time pins each event to
+            // its true wall-clock moment.
+            const playerEventAtMs = getBandwidthChartEventTimestampMs(session, now);
             const stateValue = String(session.player_metrics_state || '').trim();
             const waitingReason = String(session.player_metrics_waiting_reason || '').trim();
             if (stateValue) {
                 const eventSeries = bandwidthEventHistory.get(key) || [];
-                eventSeries.push({ ts: now, type: 'PLAYERSTATE', state: stateValue, reason: waitingReason });
+                eventSeries.push({ ts: playerEventAtMs, type: 'PLAYERSTATE', state: stateValue, reason: waitingReason });
                 const eventCutoff = now - windowMs;
                 bandwidthEventHistory.set(key, eventSeries.filter((event) => Number(event.ts) >= eventCutoff));
             }
@@ -4678,7 +4686,7 @@
                 const variantRes = manifestRes || reportedRes;
                 if (variantRes) {
                     const eventSeries = bandwidthEventHistory.get(key) || [];
-                    eventSeries.push({ ts: now, type: 'VARIANT', mbps: variantMbps, resolution: variantRes });
+                    eventSeries.push({ ts: playerEventAtMs, type: 'VARIANT', mbps: variantMbps, resolution: variantRes });
                     const eventCutoff = now - windowMs;
                     bandwidthEventHistory.set(key, eventSeries.filter((event) => Number(event.ts) >= eventCutoff));
                 }
@@ -4690,7 +4698,7 @@
             const displayRes = String(session.player_metrics_video_resolution || '').trim();
             if (displayRes) {
                 const eventSeries = bandwidthEventHistory.get(key) || [];
-                eventSeries.push({ ts: now, type: 'DISPLAY_RES', resolution: displayRes });
+                eventSeries.push({ ts: playerEventAtMs, type: 'DISPLAY_RES', resolution: displayRes });
                 const eventCutoff = now - windowMs;
                 bandwidthEventHistory.set(key, eventSeries.filter((event) => Number(event.ts) >= eventCutoff));
             }
@@ -4705,7 +4713,10 @@
                 }
             }
             series.push({
-                ts: now,
+                // Pin sample to iOS-clock event_time so the bandwidth
+                // line and the variant/state lanes share one timeline
+                // even under pipeline jitter — see session-shell.js.
+                ts: playerEventAtMs,
                 wireActive6s,
                 wireActive1s,
                 segmentWire,
