@@ -39,7 +39,7 @@
         {
           "refId": "A",
           "datasource": { "type": "grafana-clickhouse-datasource", "uid": "ch_infinite_streaming" },
-          "rawSql": "SELECT toStartOfInterval(ts, INTERVAL 1 MINUTE) AS time, 'session_snapshots' AS type, count() AS messages FROM infinite_streaming.session_snapshots WHERE ts >= now() - INTERVAL 24 HOUR GROUP BY time UNION ALL SELECT toStartOfInterval(ts, INTERVAL 1 MINUTE) AS time, 'network_requests' AS type, count() AS messages FROM infinite_streaming.network_requests WHERE ts >= now() - INTERVAL 24 HOUR GROUP BY time ORDER BY time",
+          "rawSql": "SELECT * FROM ( SELECT toStartOfInterval(ts, INTERVAL 1 MINUTE) AS time, 'session_snapshots' AS type, count() AS messages FROM infinite_streaming.session_snapshots WHERE ts >= now() - INTERVAL 24 HOUR GROUP BY time UNION ALL SELECT toStartOfInterval(ts, INTERVAL 1 MINUTE) AS time, 'network_requests' AS type, count() AS messages FROM infinite_streaming.network_requests WHERE ts >= now() - INTERVAL 24 HOUR GROUP BY time ) ORDER BY time ASC, type ASC",
           "format": 0
         }
       ]
