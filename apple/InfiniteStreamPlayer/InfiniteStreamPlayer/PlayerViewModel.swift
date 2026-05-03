@@ -150,6 +150,15 @@ final class PlayerViewModel: ObservableObject {
     private var lastReportedStallDuration: Double = 0
     private var lastReportedLoopCount: Int = 0
     private let metricsHeartbeatSeconds: TimeInterval = 1
+    // Tail of the serialized chain of in-flight metrics PATCHes. Each
+    // new sendPlayerMetrics call chains onto this Task so URLSession
+    // requests reach the proxy in iOS-clock submission order. Without
+    // this, concurrent URLSession.shared requests can complete out of
+    // order and the proxy's last-writer-wins merge stomps a fresher
+    // event (e.g. rate_shift_up bps=3.46) with an earlier-submitted
+    // heartbeat (bps=1.84) that arrived later. See plan
+    // humming-sleeping-squid.md.
+    private var metricsTaskTail: Task<Void, Never>?
     private let metricsSessionLookupSeconds: TimeInterval = 30
     private let autoRecoveryThresholdSeconds: TimeInterval = 60
     private let autoRecoveryBaseDelaySeconds: TimeInterval = 2
@@ -1442,10 +1451,30 @@ extension PlayerViewModel {
     fileprivate func sendPlayerMetrics(event: String, extra: [String: Any] = [:]) async {
         guard currentURL != nil else { return }
         guard let baseURL = metricsBaseURL() else { return }
-        guard let sessionId = await resolveMetricsSessionId(baseURL: baseURL) else { return }
+        // Build payload NOW so the iOS-clock-time of submission is
+        // captured in player_metrics_event_time and the bitrate field
+        // reflects diagnostics state at this instant. The actual HTTP
+        // send is serialized below to preserve submission order on the
+        // wire — see plan humming-sleeping-squid.md.
         let payload = buildMetricsPayload(event: event, extra: extra)
         if payload.isEmpty { return }
-        await patchSessionMetrics(sessionId: sessionId, baseURL: baseURL, payload: payload)
+        // Resolve session ID outside the chain (cached after first
+        // lookup; idempotent and safe to run concurrently).
+        guard let sessionId = await resolveMetricsSessionId(baseURL: baseURL) else { return }
+        // Serialize the PATCH onto the tail of the in-flight chain so
+        // wire-arrival order matches iOS submission order. URLSession
+        // .shared runs concurrent requests in arbitrary order; without
+        // this, a heartbeat sent 8ms before a rate_shift can arrive
+        // AFTER it and the proxy's last-writer-wins merge stomps the
+        // fresher value. See plan humming-sleeping-squid.md.
+        let prev = metricsTaskTail
+        let next = Task { [weak self] in
+            if let prev { await prev.value }
+            guard let self else { return }
+            await self.patchSessionMetrics(sessionId: sessionId, baseURL: baseURL, payload: payload)
+        }
+        metricsTaskTail = next
+        await next.value
     }
 
     fileprivate func metricsBaseURL() -> URL? {
