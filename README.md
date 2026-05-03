@@ -40,6 +40,7 @@ Player bugs are usually environmental — a network blip, a truncated segment, a
 - **Session grouping for differential testing.** Link two or more independent sessions so fault injection and network shaping apply to all of them simultaneously, while everything else (player engine, codec, live offset, platform, ladder constraints) stays independent per session. One bandwidth collapse, two `live_offset` values, instant apples-to-apples comparison of which setting rebuffers. Or iOS vs Android reacting to the exact same throughput curve. See [Session grouping](#session-grouping-differential-testing).
 - **Side-by-side comparison UI.** Mosaic view for watching multiple players or encodings against the same source simultaneously. Quartet (alpha) extends this to four-panel layouts.
 - **Accessible to non-programmers.** The whole surface is a web UI — click a fault type, drag a throttle slider, flip a Content-tab toggle, watch the bitrate / buffer / FPS charts react in real time. No Python addons, no YAML, no CLI. A QA analyst, a producer, or a support engineer can run real experiments and see cause-and-effect without writing any code.
+- **WYSIWYG sanity check and ABR teaching tool.** Even when your real workflow is headless CI, the dashboard earns its keep two ways. As a confirmation surface: drag the throughput slider, watch the player downshift on the bitrate chart, see the buffer dip and recover — three seconds of eyeballing tells you the fault actually fired and the player actually reacted, and is much faster than parsing a CI log to convince yourself the harness isn't lying. As an ABR teacher: a live `ramp_down` pattern with three time-aligned charts shows you *how* an ABR algorithm thinks — when it commits to a downshift, how long it sits on a rung, what kind of buffer pressure trips it — in a way log scraping never will.
 - **Everything is a REST API.** No UI-only controls — anything a tester can do, a CI job can do.
 
 **Use cases:**
@@ -64,6 +65,18 @@ Player bugs are usually environmental — a network blip, a truncated segment, a
 | toxiproxy, `tc`, Chaos Mesh | Generic network faults | Protocol-agnostic — no awareness of segments, partials, playlists |
 | Charles, mitmproxy | Per-request rewriting | Manual, per-operator; not scripted or repeatable across runs |
 | mediamtx, SRS, OvenMediaEngine | Live ingest and serving | Not looping-VOD focused; not QA-focused; no fault injection |
+
+**Why this is as important as live-feed testing for ABR work:**
+
+Testing against real CDNs and live broadcasts is essential — it's how you find out whether the player handles real-world content variability, cache behaviour, and peering quirks. But live-feed testing has one irreducible weakness: when something breaks, you can't isolate the cause. A stall could be the player, a network blip, a slow CDN POP, a cache miss, an origin under load — *or the upstream itself could be wrong*: a malformed manifest, misaligned segment boundaries, incorrect `CODECS` strings, a busted `EXT-X-DISCONTINUITY`, drifting PDT, an encoder bug that ships a corrupted partial. You don't get to assume the reference stream is correct. Every investigation ends in an "...or maybe it was the CDN, or maybe the content is just broken" shrug. InfiniteStream is the complement, not the replacement:
+
+- **Origin is yours and observable.** The proxy logs every byte it served and every fault it injected. A clean-200 row in the HAR waterfall is a ground-truth statement that the server did its job — anything wrong from there is the player. No CDN-shaped tail on the investigation.
+- **Content bitrate stops being a confound.** Live VBR makes a "5 Mbps rung" deliver 6.5 Mbps in an action scene and 2 Mbps in a talking head. If your player downshifts mid-action-scene under shaping pressure, you can't tell whether it reacted to the throughput drop or the content-bitrate spike. Canned content with known per-segment byte sizes makes that distinguishable.
+- **Loop-over-loop diffing.** Same bytes past the playhead every cycle — "this loop vs last loop, same content, different player state" is a pure-player diff. Live feeds can't give you that.
+- **Repeatable fault placement.** A 3 s drop at "30 s in" lands on the same frame, the same I-frame distance, every run. Regressions become confirmable instead of "I think it got worse?"
+- **Cross-player parity for grouped sessions.** Two grouped players on different platforms see the *same* bytes at the *same* moments — chart differences are player differences, not differences in what each happened to receive.
+
+Use live-feed testing to answer "does it work in the wild." Use this to answer "when it doesn't, why."
 
 **When not to use it:**
 
