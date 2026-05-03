@@ -2005,13 +2005,21 @@
             // tracks individual transitions like SHIFT_UP/STALL. Fires
             // on the FIRST observation too (prevPlayId === undefined),
             // so opening the page mid-playback still gets a marker.
+            // Single iOS-clock timestamp for every player-attributable
+            // event recorded by this snapshot pass — pins all chart
+            // events to the device-observed wall-clock moment regardless
+            // of pipeline jitter (proxy debounce, SSE buffering, JS
+            // event-loop). Falls back to browser-now only when the
+            // session payload carries no device timestamp.
+            const playerEventAtMs = getBandwidthChartEventTimestampMs(session, now);
+
             const newPlayId = String(session.play_id || '').trim();
             if (newPlayId) {
                 const prevPlayId = lastRecordedPlayIdBySession.get(String(key));
                 if (prevPlayId !== newPlayId) {
                     const eventSeries = bandwidthEventHistory.get(key) || [];
                     eventSeries.push({
-                        ts: now,
+                        ts: playerEventAtMs,
                         type: 'PLAYBACK_START',
                         playId: newPlayId,
                         prevPlayId: prevPlayId || ''
@@ -2024,7 +2032,7 @@
 
             const eventType = parseBandwidthChartEventType(session.player_metrics_last_event || session.player_metrics_trigger_type);
             if (eventType) {
-                const eventAtMs = getBandwidthChartEventTimestampMs(session, now);
+                const eventAtMs = playerEventAtMs;
                 const eventStamp = `${eventType}|${session.player_metrics_last_event_at || session.player_metrics_event_time || eventAtMs}`;
                 const lastStamp = lastRecordedPlayerEventBySession.get(String(key));
                 if (eventStamp !== lastStamp) {
@@ -2047,7 +2055,7 @@
             const waitingReason = String(session.player_metrics_waiting_reason || '').trim();
             if (stateValue) {
                 const eventSeries = bandwidthEventHistory.get(key) || [];
-                eventSeries.push({ ts: now, type: 'PLAYERSTATE', state: stateValue, reason: waitingReason });
+                eventSeries.push({ ts: playerEventAtMs, type: 'PLAYERSTATE', state: stateValue, reason: waitingReason });
                 const eventCutoff = now - windowMs;
                 bandwidthEventHistory.set(key, eventSeries.filter((event) => Number(event.ts) >= eventCutoff));
             }
@@ -2072,7 +2080,7 @@
                 const variantRes = manifestRes || reportedRes;
                 if (variantRes) {
                     const eventSeries = bandwidthEventHistory.get(key) || [];
-                    eventSeries.push({ ts: now, type: 'VARIANT', mbps: variantMbps, resolution: variantRes });
+                    eventSeries.push({ ts: playerEventAtMs, type: 'VARIANT', mbps: variantMbps, resolution: variantRes });
                     const eventCutoff = now - windowMs;
                     bandwidthEventHistory.set(key, eventSeries.filter((event) => Number(event.ts) >= eventCutoff));
                 }
@@ -2085,7 +2093,7 @@
             const displayRes = String(session.player_metrics_video_resolution || '').trim();
             if (displayRes) {
                 const eventSeries = bandwidthEventHistory.get(key) || [];
-                eventSeries.push({ ts: now, type: 'DISPLAY_RES', resolution: displayRes });
+                eventSeries.push({ ts: playerEventAtMs, type: 'DISPLAY_RES', resolution: displayRes });
                 const eventCutoff = now - windowMs;
                 bandwidthEventHistory.set(key, eventSeries.filter((event) => Number(event.ts) >= eventCutoff));
             }
@@ -2136,7 +2144,15 @@
                 }
             }
             series.push({
-                ts: now,
+                // Pin sample to iOS-clock event_time so the bandwidth
+                // line and the variant/state lanes share one timeline
+                // even under pipeline jitter. The fields below mix
+                // server-measured (shaperRate, transferRate) and
+                // iOS-reported (bufferDepth, currentRendition) values
+                // — they all relate to the moment iOS emitted this
+                // heartbeat, so anchoring the whole sample to that
+                // instant keeps cross-lane alignment correct.
+                ts: playerEventAtMs,
                 shaperRate,
                 shaperAvg,
                 transferRate,
