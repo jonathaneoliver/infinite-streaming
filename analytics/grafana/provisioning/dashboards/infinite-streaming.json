@@ -4,17 +4,26 @@
   "schemaVersion": 39,
   "editable": true,
   "tags": ["infinite-streaming"],
-  "time": { "from": "now-6h", "to": "now" },
+  "time": { "from": "now-24h", "to": "now" },
   "refresh": "30s",
   "timepicker": {
-    "refresh_intervals": ["10s", "30s", "1m", "5m", "15m", "1h"]
+    "refresh_intervals": ["10s", "30s", "1m", "5m", "15m", "1h"],
+    "quick_ranges": [
+      { "from": "now-15m",  "to": "now",     "display": "Last 15 minutes" },
+      { "from": "now-1h",   "to": "now",     "display": "Last hour"       },
+      { "from": "now-6h",   "to": "now",     "display": "Last 6 hours"    },
+      { "from": "now-24h",  "to": "now",     "display": "Last 24 hours"   },
+      { "from": "now-7d",   "to": "now",     "display": "Last 7 days"     },
+      { "from": "now-30d",  "to": "now",     "display": "Last 30 days"    },
+      { "from": "now-90d",  "to": "now",     "display": "Last 90 days"    }
+    ]
   },
   "panels": [
     {
       "id": 1,
       "type": "timeseries",
-      "title": "Messages by type",
-      "description": "Per-minute row count ingested into each ClickHouse table.",
+      "title": "Messages by retention tier",
+      "description": "Per-minute row count grouped by classification across both session_snapshots and network_requests. Time scope follows the dashboard time picker. Tiers: 'other' (gray, TTL 30 d), 'interesting' (amber, TTL 90 d), 'favourite' (green, kept forever). Eyeballing the gray slice tells you how much of the visible window will be gone in a month.",
       "datasource": { "type": "grafana-clickhouse-datasource", "uid": "ch_infinite_streaming" },
       "gridPos": { "x": 0, "y": 0, "w": 24, "h": 10 },
       "fieldConfig": {
@@ -22,13 +31,22 @@
           "unit": "short",
           "custom": {
             "drawStyle": "line",
-            "lineInterpolation": "smooth",
-            "fillOpacity": 12,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 100,
             "showPoints": "never",
+            "spanNulls": true,
             "stacking": { "mode": "normal", "group": "A" }
           }
         },
-        "overrides": []
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "other" },
+            "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "#6b7280" } }] },
+          { "matcher": { "id": "byName", "options": "interesting" },
+            "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "#f59e0b" } }] },
+          { "matcher": { "id": "byName", "options": "favourite" },
+            "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "#10b981" } }] }
+        ]
       },
       "options": {
         "legend": { "displayMode": "table", "placement": "right", "calcs": ["sum"] },
@@ -38,7 +56,7 @@
         {
           "refId": "A",
           "datasource": { "type": "grafana-clickhouse-datasource", "uid": "ch_infinite_streaming" },
-          "rawSql": "SELECT toStartOfInterval(ts, INTERVAL 1 MINUTE) AS time, 'session_snapshots' AS type, count() AS messages FROM infinite_streaming.session_snapshots WHERE $__timeFilter(ts) GROUP BY time UNION ALL SELECT toStartOfInterval(ts, INTERVAL 1 MINUTE) AS time, 'network_requests' AS type, count() AS messages FROM infinite_streaming.network_requests WHERE $__timeFilter(ts) GROUP BY time ORDER BY time",
+          "rawSql": "SELECT time, tier, sum(messages) AS messages FROM ( SELECT $__timeInterval(ts) AS time, classification AS tier, count() AS messages FROM infinite_streaming.session_snapshots WHERE $__timeFilter(ts) GROUP BY time, classification UNION ALL SELECT $__timeInterval(ts) AS time, classification AS tier, count() AS messages FROM infinite_streaming.network_requests WHERE $__timeFilter(ts) GROUP BY time, classification ) GROUP BY time, tier ORDER BY time ASC, tier ASC",
           "format": 0
         }
       ]
@@ -82,8 +100,8 @@
     {
       "id": 3,
       "type": "table",
-      "title": "Storage by table",
-      "description": "Active part bytes and row counts per table.",
+      "title": "Storage by table × tier",
+      "description": "Per-table on-disk bytes and row counts split by retention tier. Bytes are proportional: total table bytes from system.parts × (tier_rows / total_table_rows). Compression is part-level, not row-level, so this is an estimate — accurate to within a few percent for typical mixes.",
       "datasource": { "type": "grafana-clickhouse-datasource", "uid": "ch_infinite_streaming" },
       "gridPos": { "x": 8, "y": 10, "w": 16, "h": 6 },
       "fieldConfig": {
@@ -101,7 +119,7 @@
         {
           "refId": "A",
           "datasource": { "type": "grafana-clickhouse-datasource", "uid": "ch_infinite_streaming" },
-          "rawSql": "SELECT table, sum(rows) AS rows, sum(bytes_on_disk) AS bytes FROM system.parts WHERE database = 'infinite_streaming' AND active GROUP BY table ORDER BY bytes DESC",
+          "rawSql": "WITH part_sizes AS ( SELECT table, sum(rows) AS table_rows, sum(bytes_on_disk) AS table_bytes FROM system.parts WHERE database = 'infinite_streaming' AND active GROUP BY table ), class_counts AS ( SELECT 'session_snapshots' AS table, classification, count() AS class_rows FROM infinite_streaming.session_snapshots GROUP BY classification UNION ALL SELECT 'network_requests', classification, count() FROM infinite_streaming.network_requests GROUP BY classification ) SELECT c.table AS table, c.classification AS tier, c.class_rows AS rows, toUInt64(p.table_bytes * (c.class_rows / nullIf(p.table_rows, 0))) AS bytes FROM class_counts c LEFT JOIN part_sizes p ON c.table = p.table ORDER BY c.table ASC, c.classification ASC",
           "format": 1
         }
       ]
