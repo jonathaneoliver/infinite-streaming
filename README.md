@@ -36,7 +36,7 @@ Player bugs are usually environmental — a network blip, a truncated segment, a
 - **Interactive rate shaping with deterministic patterns.** Drag throughput, latency, loss, and pattern-mode sliders and watch the player react in real time. Or build a step-based throughput pattern with a fixed step duration so the same curve replays bit-for-bit on every run — what you saw rebuffer at 09:14 yesterday rebuffers again today.
 - **Per-session isolation.** Each browser session binds to a dedicated proxy port via `player_id`, so concurrent testers don't collide.
 - **Streaming-aware HAR.** The dashboard's network-log waterfall annotates each request with what *actually* happened on the wire. A row that looks like a 200 but ended badly is tagged with `!✂` (proxy-injected body cut), `!⏱` (server transfer-timeout), or `!↩` (client gave up), so the chart tells the truth even when the status code can't.
-- **One-tap incident capture.** A "911" button on every player (iOS / iPadOS / tvOS / Android TV) snapshots the current session's HAR — a 10-minute window of every request, fault, and play, written to the Incidents browser for replay later. No "what did you click before it broke?" debugging.
+- **Auto-archived session forensics.** Every snapshot and every network request streams into a ClickHouse + Grafana sidecar in real time. The dashboard's **Sessions** picker lists every play of every session for the last 30 days; the **Session Viewer** replays one through the same charts the live page uses, scrubbable to any moment. A "911" button on every player (iOS / iPadOS / tvOS / Android TV) drops a `user_marked` event you can see across charts and pick out from the picker. One-click **bundle download** packages a session's snapshots + HAR + README into a portable `.zip` you can attach to a bug report or replay offline after the 30-day TTL expires.
 - **Session grouping for differential testing.** Link two or more independent sessions so fault injection and network shaping apply to all of them simultaneously, while everything else (player engine, codec, live offset, platform, ladder constraints) stays independent per session. One bandwidth collapse, two `live_offset` values, instant apples-to-apples comparison of which setting rebuffers. Or iOS vs Android reacting to the exact same throughput curve. See [Session grouping](#session-grouping-differential-testing).
 - **Side-by-side comparison UI.** Mosaic view for watching multiple players or encodings against the same source simultaneously. Quartet (alpha) extends this to four-panel layouts.
 - **Accessible to non-programmers.** The whole surface is a web UI — click a fault type, drag a throttle slider, flip a Content-tab toggle, watch the bitrate / buffer / FPS charts react in real time. No Python addons, no YAML, no CLI. A QA analyst, a producer, or a support engineer can run real experiments and see cause-and-effect without writing any code.
@@ -131,7 +131,8 @@ That walkthrough exercises the majority of the system. The sections below descri
 - **Quartet** *(alpha)* — four-panel side-by-side comparison across encodings or players.
 - **Live Offset** *(alpha)* — compares live offset, buffer depth, and seekable ranges across variants.
 - **Testing Session** — per-session failure injection, traffic shaping, content manipulation, metrics charts. See below.
-- **Incidents** — browse recorded HAR snapshots from every session. Click any incident to render its waterfall inline; bulk-delete cleanup; reason filters distinguish auto-captures (stall / segment-stall / 911) from manual `Save HAR` clicks.
+- **Sessions** — picker over every archived session for the last 30 days. Per-row colored chips flag bad-event types (🚨 911 / ❄️ frozen / ⛔ error / ⏸ segment stall / 🔄 restart) and a red left bar on critical rows make scanning a folder of sessions a glance, not a click-through. Each row has a 📥 button that downloads the session as a portable bundle ZIP.
+- **Session Viewer** — replays one archived session through the same charts the live Testing Session page uses (bandwidth, buffer, FPS, player-state vis-timeline, network log). A brush across a session-long rail scrubs to any moment; cross-chart event marker draws a cyan vertical line at the picked event's timestamp on every chart and on the network log.
 - **Go-Monitor** — active workers, request counts, last-request time, idle timeout, tick timings.
 - **Upload Content** — web upload + encoding job tracking.
 - **Source Library** — list of `$CONTENT_DIR/originals/`. Click to kick re-encodes.
@@ -260,13 +261,28 @@ Each row is `time | flags | method | path | bytes | Mbps | status | bar`. The **
 
 A row that *looks* like a successful 200 download but has `!↩` or `!⏱` next to its method tells you the player abandoned it or the proxy gave up — exactly the signal you'd otherwise miss.
 
-**Capture controls**:
+**Capture & triage**:
 
-- **Save HAR** — manual snapshot. Writes a HAR file to the Incidents browser with `reason=manual`.
-- **911 button** — every player (iOS / iPadOS / tvOS / Android TV) has a "911" button right of Reload. One tap fires a `user_marked` event the server picks up, which triggers an automatic HAR snapshot of the current session timeline (10-minute clip, includes all plays). Files in the Incidents browser tagged `reason="user 911"`. Cross-layer "911" log lines on Apple device console, `adb logcat`, and docker logs make it grep-friendly across all three layers.
-- **Auto-snapshot** — go-proxy detects extended player stalls / segment-stalls and triggers a HAR snapshot automatically with `reason=stall` / `reason=segment_stall`.
+Every session and every network request auto-archives into the analytics sidecar (ClickHouse + go-forwarder, see [Analytics tier](#analytics-tier)) for 30 days. The dashboard's **Sessions** picker and **Session Viewer** are the triage UI; downloads happen via **bundle ZIP**.
 
-The Incidents page on the dashboard browses every saved HAR; click an incident to render its waterfall inline without leaving the page.
+- **911 button** — every player (iOS / iPadOS / tvOS / Android TV) has a "911" button right of Reload. One tap fires a `user_marked` event that lands as a row in `session_snapshots.last_event` and as a 🚨 chip on the picker row. Cross-layer "911" log lines on Apple device console, `adb logcat`, and docker logs make it grep-friendly across all three layers.
+- **Bundle download** — 📥 button on each picker row and in the session-viewer banner streams a `.zip` containing `snapshots.ndjson` (raw per-second blobs), `network.har` (HAR 1.2 envelope, opens in Chrome DevTools), `session.json` (summary), and `README.md`. Sensitive headers and credential-shaped query params are redacted server-side before the bytes leave the forwarder. See [`analytics/README.md`](analytics/README.md) for the full bundle format.
+
+---
+
+## Analytics tier
+
+A sidecar stack (ClickHouse + Grafana + a small Go forwarder) auto-archives session metrics and per-request HAR for 30 days. Lives entirely under [`analytics/`](analytics/) — operationally independent of the live streaming path: if the forwarder dies, the live UI keeps working, archival just pauses until it restarts.
+
+| Component | Role |
+|---|---|
+| `clickhouse` | Two wide tables (`session_snapshots`, `network_requests`) with 30-day TTL. Hot fields are typed columns; everything else lands in a `session_json` blob. |
+| `go-forwarder` | Subscribes to go-proxy's `/api/sessions/stream` SSE, dedupes by snapshot fingerprint, batches inserts into ClickHouse. Also serves `/api/sessions`, `/api/snapshots`, `/api/session_events`, `/api/network_requests`, `/api/session_heatmap`, `/api/session_bundle` — read-only, parameterized SQL, behind `nginx /analytics/api/`. |
+| `grafana` | Provisioned-as-code dashboards under [`analytics/grafana/provisioning/`](analytics/grafana/provisioning/). Reachable via `nginx /grafana/`. |
+
+**Operating it**: `make analytics-rebuild-forwarder` recreates the forwarder container in-place (live UI untouched); `make analytics-update` reloads Grafana provisioning; `make analytics-migrate SQL='ALTER TABLE …'` runs a schema change. The data is exposed read-only to the dashboard via parameterized ClickHouse queries — no string interpolation, no auth-token leakage.
+
+**Securing for WAN deployment**: opt-in HTTP Basic auth via `INFINITE_STREAM_AUTH_HTPASSWD` gates the dashboard, `/analytics/api/`, and `/grafana/`; player-app endpoints stay public so unattended Apple/Roku/AndroidTV clients keep working. ClickHouse binds to `127.0.0.1` only by default. See [`analytics/README.md`](analytics/README.md) for the docker-compose and k3s runbooks.
 
 ---
 

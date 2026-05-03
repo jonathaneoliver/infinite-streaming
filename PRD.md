@@ -108,12 +108,11 @@ The system is intended for:
 - Player selector: HLS.js, Shaka, Video.js, Native.
 - Logs player errors and HTTP failure details in the testing UI.
 
-**Incidents**
-- Persistent browser of HAR snapshots captured during testing sessions.
-- Snapshots are auto‑captured on detected stalls (`reason=stall` / `reason=segment_stall`), on player 911 button presses (`reason="user 911"`), or written manually via the testing‑session **Save HAR** button (`reason=manual`).
-- Each row shows reason / source / clipped time window / first stream URL touched / file size.
-- Click any incident to render its waterfall inline using the same renderer the testing session uses; bulk‑delete and per‑row delete supported.
-- Reason filters split auto‑captures from manual saves so triage isn't drowning in 911 backups.
+**Sessions Viewer & Bundle Download**
+- Every session and every network request auto‑archives into the analytics sidecar (ClickHouse + go‑forwarder, 30‑day TTL).
+- The **Sessions** picker page (`/dashboard/sessions.html`) lists every `(session_id, play_id)` pair archived in the last 30 days. Cascading filter UI on player / group / content / play_id; per‑row colored chips flag bad‑event types (🚨 user_marked / ❄️ frozen / ⛔ error / ⏸ segment_stall / 🔄 restart) and a red left bar marks any row carrying a 911, frozen, hard error, master‑manifest failure, or all‑failure event.
+- The **Session Viewer** page (`/dashboard/session-viewer.html?session=…&play_id=…`) replays one play through the same charts the live testing UI uses — bandwidth + variant, buffer depth, FPS, player‑state vis‑timeline, and a HAR network‑log waterfall — scrubbable to any moment via a session‑long brush. Picking an event from the dropdown or rail draws a cyan vertical guide line at that timestamp on every chart and the network log.
+- **Bundle download** (📥 in the picker / banner) streams a `.zip` containing `snapshots.ndjson` (raw per‑second blobs from the proxy SSE stream), `network.har` (HAR 1.2 envelope, opens in Chrome DevTools, custom proxy fields under `_extensions`), `session.json` (at‑a‑glance summary), and `README.md`. Sanitises sensitive headers and credential‑shaped query params server‑side before the bytes leave the forwarder.
 
 ### 7.6 Player Characterization (ABR)
 - A per‑session **Player Characterization** panel is available in the Testing session UI.
@@ -211,8 +210,8 @@ Many platforms already expose their own failure tools (player debug features, br
 - **Network log (HAR)**: every request the proxy serves to the player is captured with full timing (DNS / connect / TLS / TTFB / wait / transfer), method, URL, status, request kind, and fault metadata (`faulted`, `fault_type`, `fault_action`, `fault_category`).
    - The dashboard waterfall renders rows with a flag column whose glyph distinguishes the four "looked like 200, ended badly" categories: `!` (HTTP fault), `!✂` (socket fault inject), `!⏱` (server transfer timeout), `!↩` (client disconnect).
    - Status codes reflect what the *client* observed on the wire: `200` for socket faults that emitted chunked headers before the cut, `0` for connect‑time aborts, the upstream's status for transfer‑timeout / client‑disconnect mid‑body, and `4xx` / `5xx` for HTTP faults.
-- **HAR snapshots**: persistent files written to `$CONTENT_DIR/incidents/`. Triggered automatically on detected player stalls / segment stalls, on a player **911** button press (`user_marked` event), or manually via the dashboard **Save HAR** button. Each snapshot clips to the last 10 minutes of activity and includes every play within that window.
-- **Cross‑layer 911 logging**: the player's 911 button writes a `"911"` log token on the device (Apple device console / `adb logcat`), POSTs a `user_marked` metrics event the server logs with the same `"911"` token, and triggers an immediate HAR snapshot whose lifecycle is logged. Tracing one user complaint across all three layers reduces to `grep 911`.
+- **Auto‑archival**: every session snapshot and every captured request streams into ClickHouse via the analytics sidecar's go‑forwarder (`/api/sessions/stream` SSE → `session_snapshots` + `network_requests` tables, 30‑day TTL). The Sessions picker and Session Viewer read from those tables; the bundle ZIP packages a single play's data for offline / >30‑day preservation.
+- **Cross‑layer 911 logging**: the player's 911 button writes a `"911"` log token on the device (Apple device console / `adb logcat`), POSTs a `user_marked` metrics event the server logs with the same `"911"` token. The event lands in `session_snapshots.last_event = 'user_marked'`, surfaces as a 🚨 chip on the Sessions picker, and as a cyan‑labelled marker on every Session Viewer chart. Tracing one user complaint across device → server → archive reduces to `grep 911`.
 
 ## 10) Security & Access
 - Local development focus; no auth required.
