@@ -896,6 +896,7 @@ func (t *TcTrafficManager) UpdateRateLimit(port int, rateMbps float64) error {
 		_ = t.RemoveFilter(port)
 		_ = t.RemoveClass(port)
 		t.logTcState("rate_clear", port)
+		t.scheduleRateLimitVerification(port, 0, 3*time.Second)
 		return nil
 	}
 	portSuffix := fmt.Sprintf("%03d", port%1000)
@@ -948,6 +949,7 @@ func (t *TcTrafficManager) UpdateRateLimit(port int, rateMbps float64) error {
 		return fmt.Errorf("tc class not present after update: %s", strings.TrimSpace(verifyText))
 	}
 	t.logTcState("rate_apply", port)
+	t.scheduleRateLimitVerification(port, rateMbps, 3*time.Second)
 	return nil
 }
 
@@ -987,6 +989,44 @@ func (t *TcTrafficManager) ClearPortShaping(port int) {
 		"parent", "1:0", "prio", "1", "u32",
 		"match", "ip", "sport", fmt.Sprintf("%d", port), "0xffff").Run()
 	_ = exec.Command("tc", "class", "del", "dev", t.interfaceName, "classid", classid).Run()
+}
+
+// scheduleRateLimitVerification fires a one-shot check `delay` after
+// a rate limit was applied to confirm it stuck. Catches the case
+// where the apply command reports success but the kernel state
+// diverges within seconds — e.g. another process clears the rule,
+// the kernel drops it, a follow-up tc operation racing on the same
+// port wins. Logs `NETSHAPE LOST` if the kernel rate diverges from
+// expected, otherwise quietly logs `NETSHAPE VERIFIED` at info level
+// so a `grep "VERIFIED|LOST"` pass surfaces every apply.
+//
+// expectedMbps==0 means the apply was a CLEAR; the verification then
+// asserts the class is gone (ReadActualRateMbps returns -1).
+func (t *TcTrafficManager) scheduleRateLimitVerification(port int, expectedMbps float64, delay time.Duration) {
+	go func() {
+		time.Sleep(delay)
+		actualMbps := t.ReadActualRateMbps(port)
+		if expectedMbps == 0 {
+			if actualMbps >= 0 {
+				log.Printf("NETSHAPE LOST port=%d expected=clear kernel_mbps=%.3f delay=%s",
+					port, actualMbps, delay)
+			} else {
+				log.Printf("NETSHAPE VERIFIED port=%d cleared delay=%s", port, delay)
+			}
+			return
+		}
+		if actualMbps < 0 {
+			log.Printf("NETSHAPE LOST port=%d expected_mbps=%.3f kernel=no_class delay=%s",
+				port, expectedMbps, delay)
+			return
+		}
+		if math.Abs(actualMbps-expectedMbps) > 0.5 {
+			log.Printf("NETSHAPE LOST port=%d expected_mbps=%.3f kernel_mbps=%.3f delay=%s",
+				port, expectedMbps, actualMbps, delay)
+			return
+		}
+		log.Printf("NETSHAPE VERIFIED port=%d mbps=%.3f delay=%s", port, actualMbps, delay)
+	}()
 }
 
 // ReadActualRateMbps queries the kernel for the live rate of the
