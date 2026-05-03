@@ -2072,6 +2072,24 @@
                 r.downshifts_count = downshifts;
                 r.upshifts_count   = upshifts;
 
+                // Per-event "really bad things" surfacing — directly
+                // from the forwarder's per-(session,play) aggregations.
+                // Critical = anything that should make a triager stop
+                // and look. user_marked / frozen / hard error are the
+                // top signals; segment_stall / restart are second-tier
+                // (recovery attempts that might not have succeeded).
+                r.user_marked_count   = n('user_marked_count');
+                r.frozen_count        = n('frozen_count');
+                r.segment_stall_count = n('segment_stall_count');
+                r.restart_count       = n('restart_count');
+                r.error_event_count   = n('error_event_count');
+                r.is_critical = (r.user_marked_count > 0)
+                            || (r.frozen_count > 0)
+                            || (r.error_event_count > 0)
+                            || (errors > 0)
+                            || (n('master_manifest_failures') > 0)
+                            || (n('all_failures') > 0);
+
                 // (A) Issues badge — single weighted total. Weights chosen so
                 // a clean session is 0 and a session with one fatal error is
                 // already in the red bucket.
@@ -2129,6 +2147,35 @@
                 else if (n >= thresholds[0]) color = '#92400e';
                 else if (n === 0)      color = '#9ca3af';
                 return `<span style="color:${color};font-weight:${n === 0 ? '400' : '600'};">${n}</span>`;
+            };
+
+            // (D) Flags column — visible chip per "really bad" event
+            // type so a row with a 911 / freeze / hard error stands
+            // out without the user having to read every counter. Each
+            // chip carries a count + tooltip; only chips with > 0 are
+            // rendered. Empty cell when the session is clean.
+            const FLAG_DEFS = [
+                // [key, icon, label, color, severity]
+                { key: 'user_marked_count',   icon: '🚨', label: '911 / user flag',     color: '#dc2626', severity: 1 },
+                { key: 'frozen_count',        icon: '❄️', label: 'frozen',              color: '#7c3aed', severity: 1 },
+                { key: 'error_event_count',   icon: '⛔', label: 'error event',         color: '#b91c1c', severity: 1 },
+                { key: 'segment_stall_count', icon: '⏸',  label: 'segment stall',       color: '#c2410c', severity: 2 },
+                { key: 'restart_count',       icon: '🔄', label: 'restart',             color: '#b45309', severity: 2 }
+            ];
+            const fmtFlags = (_, r) => {
+                const chips = [];
+                for (const f of FLAG_DEFS) {
+                    const c = Number(r[f.key]) || 0;
+                    if (c <= 0) continue;
+                    const tip = `${c} ${f.label}${c === 1 ? '' : 's'}`;
+                    chips.push(
+                        `<span title="${escapeHtml(tip)}" style="display:inline-block;` +
+                        `padding:1px 6px;margin:0 2px 0 0;border-radius:10px;` +
+                        `background:${f.color};color:#fff;` +
+                        `font:600 11px system-ui;line-height:1.4;">${f.icon} ${c}</span>`
+                    );
+                }
+                return chips.join('') || '<span style="color:#9ca3af;">—</span>';
             };
 
             // (C) Health score 0-100 with green/amber/red.
@@ -2384,9 +2431,28 @@
                 { label: 'Duration',    key: 'duration_ms',      type: 'number', format: fmtDur },
                 { label: 'Player',      key: 'player_id',        type: 'string' },
                 { label: 'Content',     key: 'content_id',       type: 'string' },
-                { label: 'Play ID',     key: 'play_id',          type: 'string' },
+                { label: 'Play ID',     key: 'play_id',          type: 'string', html: true,
+                  format: (v, r) => {
+                      // Wrap the play_id value in its own <a> so the
+                      // browser's native right-click menu on the cell
+                      // offers "Open Link in New Tab" / "Copy Link
+                      // Address" instead of the text-selection menu.
+                      // The row also has a stretched <a> covering the
+                      // whole row at z-index:0; this anchor sits at
+                      // z-index:2 so it wins focus, hover and the
+                      // context menu on this specific cell.
+                      const text = (v == null) ? '' : String(v);
+                      if (!text || text === '—') return escapeHtml(text);
+                      const params = new URLSearchParams({ replay: '1', session: r.session_id });
+                      params.set('play_id', text);
+                      const href = '/dashboard/session-viewer.html?' + params.toString();
+                      return `<a href="${href}" `
+                          + `style="color:#1d4ed8;text-decoration:none;font-weight:600;`
+                          + `position:relative;z-index:2;">${escapeHtml(text)}</a>`;
+                  } },
                 { label: 'State',       key: 'last_state',       type: 'string' },
                 { label: 'Issues',      key: 'issues_count',     type: 'number', html: true, format: fmtIssuesBadge },
+                { label: 'Flags',       key: '__flags',          type: 'string', html: true, format: fmtFlags },
                 { label: 'Health',      key: 'health_score',     type: 'number', html: true, format: fmtHealth },
                 { label: 'Stalls',      key: 'stalls',           type: 'number', html: true, format: fmtCount([1, 5]) },
                 { label: 'Errors',      key: 'errors_count',     type: 'number', html: true, format: fmtCount([1, 1]) },
@@ -2470,10 +2536,17 @@
                 } else {
                     for (const r of sorted) {
                         const tr = document.createElement('tr');
+                        // Critical rows get a red left bar so the eye
+                        // catches them while scrolling — applies to any
+                        // session with a 911, frozen, or error event.
+                        const baseBorder = r.is_critical
+                            ? 'border-left:4px solid #dc2626;'
+                            : 'border-left:4px solid transparent;';
                         // position:relative so the stretched <a> below
                         // resolves against the row, not the table.
-                        tr.style.cssText = 'cursor:pointer;border-bottom:1px solid var(--border-color, #f3f4f6);position:relative;';
-                        tr.addEventListener('mouseenter', () => tr.style.background = 'var(--bg-hover, #f9fafb)');
+                        tr.style.cssText = `cursor:pointer;border-bottom:1px solid var(--border-color, #f3f4f6);position:relative;${baseBorder}`;
+                        const hoverBg = r.is_critical ? '#fef2f2' : 'var(--bg-hover, #f9fafb)';
+                        tr.addEventListener('mouseenter', () => tr.style.background = hoverBg);
                         tr.addEventListener('mouseleave', () => tr.style.background = '');
 
                         const params = new URLSearchParams({ replay: '1', session: r.session_id });
@@ -2512,6 +2585,10 @@
                             const a = document.createElement('a');
                             a.href = href;
                             a.setAttribute('aria-label', `Open session ${r.session_id}${r.play_id ? ' / ' + r.play_id : ''}`);
+                            // Tagged so the row's click handler can tell
+                            // this row-fallback anchor apart from cell-
+                            // level anchors (e.g. the play_id link).
+                            a.dataset.rowFallback = '1';
                             a.tabIndex = -1;
                             a.style.cssText = 'position:absolute;inset:0;z-index:0;text-decoration:none;';
                             // Suppress the link's own left-click — we let
@@ -2538,6 +2615,17 @@
                             // Bundle download link — let the browser
                             // start the .zip download, don't navigate.
                             if (e.target.closest && e.target.closest('[data-bundle-link]')) return;
+                            // Cell-level explicit anchors (e.g. the
+                            // play_id link) — let the browser handle
+                            // the default navigation. Otherwise we'd
+                            // double-fire (the anchor's default plus
+                            // the row's window.location.href below).
+                            // The row's stretched <a> at z-index:0 has
+                            // its own click handler that preventDefaults
+                            // on plain left-click — we still need to
+                            // navigate via the row handler in that case.
+                            const explicitAnchor = e.target.closest && e.target.closest('a:not([data-row-fallback])');
+                            if (explicitAnchor) return;
                             // If the click was on the link, the link's own
                             // handler already chose to either preventDefault
                             // (plain left-click → fall through to here) or
