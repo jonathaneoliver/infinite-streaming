@@ -4,10 +4,19 @@
   "schemaVersion": 39,
   "editable": true,
   "tags": ["infinite-streaming"],
-  "time": { "from": "now-6h", "to": "now" },
+  "time": { "from": "now-24h", "to": "now" },
   "refresh": "30s",
   "timepicker": {
-    "refresh_intervals": ["10s", "30s", "1m", "5m", "15m", "1h"]
+    "refresh_intervals": ["10s", "30s", "1m", "5m", "15m", "1h"],
+    "quick_ranges": [
+      { "from": "now-15m",  "to": "now",     "display": "Last 15 minutes" },
+      { "from": "now-1h",   "to": "now",     "display": "Last hour"       },
+      { "from": "now-6h",   "to": "now",     "display": "Last 6 hours"    },
+      { "from": "now-24h",  "to": "now",     "display": "Last 24 hours"   },
+      { "from": "now-7d",   "to": "now",     "display": "Last 7 days"     },
+      { "from": "now-30d",  "to": "now",     "display": "Last 30 days"    },
+      { "from": "now-90d",  "to": "now",     "display": "Last 90 days"    }
+    ]
   },
   "panels": [
     {
