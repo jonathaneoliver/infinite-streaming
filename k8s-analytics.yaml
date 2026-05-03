@@ -278,6 +278,11 @@ spec:
           value: "%(protocol)s://%(domain)s:%(http_port)s/grafana/"
         - name: GF_SERVER_SERVE_FROM_SUB_PATH
           value: "true"
+        # Grafana Live origin check — wildcard so WebSocket works
+        # when the cluster is reached via multiple hostnames
+        # (.local, IP, Tailscale, etc.). See docker-compose.yml note.
+        - name: GF_LIVE_ALLOWED_ORIGINS
+          value: "*"
 ---
 apiVersion: v1
 kind: Service
