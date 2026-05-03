@@ -43,7 +43,7 @@
             return document.getElementById('ism-content') || document.body;
         }
 
-        function makeReplayBanner(initialText) {
+        function makeReplayBanner(initialText, sessionId, playId) {
             // Clean dashboard panel — no historical-stripe chrome. The
             // "back to sessions" link and the scrubber row live here.
             const banner = document.createElement('div');
@@ -61,6 +61,21 @@
             left.append(text);
             const right = document.createElement('div');
             right.style.cssText = 'display:flex;align-items:center;gap:8px;';
+            // Session bundle download — full snapshots + HAR + events
+            // archived as a ZIP. Server builds it; browser just clicks
+            // <a download>. Live during the replay session, no need to
+            // wait for snapshots to finish loading.
+            if (sessionId) {
+                const bundleHref = '/analytics/api/session_bundle?session=' + encodeURIComponent(sessionId)
+                    + (playId ? '&play_id=' + encodeURIComponent(playId) : '');
+                const bundleBtn = document.createElement('a');
+                bundleBtn.href = bundleHref;
+                bundleBtn.setAttribute('download', '');
+                bundleBtn.textContent = '📥 Download bundle';
+                bundleBtn.title = 'Download session as .zip (snapshots, HAR, events)';
+                bundleBtn.className = 'btn btn-secondary';
+                right.appendChild(bundleBtn);
+            }
             const exit = document.createElement('a');
             exit.textContent = '← Back to sessions';
             exit.href = '/dashboard/sessions.html';
@@ -207,7 +222,7 @@
         }
 
         async function startReplayMode(sessionId, fromIso, toIso, playId) {
-            const { banner, text, scrubRow } = makeReplayBanner(`session ${sessionId} — loading snapshots…`);
+            const { banner, text, scrubRow } = makeReplayBanner(`session ${sessionId} — loading snapshots…`, sessionId, playId);
 
             const fail = (msg) => {
                 banner.style.background = '#fef2f2';
@@ -2380,7 +2395,25 @@
                 { label: 'Drops',       key: 'dropped_frames',   type: 'number', html: true, format: fmtCount([100, 1000]) },
                 { label: 'Avg Q%',      key: 'avg_quality_pct',  type: 'number', html: true, format: fmtPct },
                 { label: 'Metrics',     key: 'metric_events',    type: 'number' },
-                { label: 'HAR',         key: 'net_events',       type: 'number' }
+                { label: 'HAR',         key: 'net_events',       type: 'number' },
+                { label: '',            key: '__bundle',         type: 'string', html: true,
+                  format: (_, r) => {
+                      const pid = (r.play_id && r.play_id !== '—') ? r.play_id : '';
+                      const url = '/analytics/api/session_bundle?'
+                          + 'session=' + encodeURIComponent(r.session_id)
+                          + (pid ? '&play_id=' + encodeURIComponent(pid) : '');
+                      // data-bundle-link signals to the row's click handler
+                      // that this is a bundle download — we intercept and
+                      // prevent the page-level navigation that would
+                      // otherwise replace the picker view with the viewer.
+                      return `<a href="${url}" download data-bundle-link
+                          title="Download session bundle (.zip)"
+                          style="display:inline-block;padding:2px 8px;border-radius:4px;
+                                 background:var(--bg-secondary,#f3f4f6);
+                                 color:var(--text-primary,#111827);text-decoration:none;
+                                 font-size:13px;line-height:1.2;
+                                 position:relative;z-index:2;">📥</a>`;
+                  } }
             ];
             let sortKey = 'started';
             let sortDir = 'desc';
@@ -2502,6 +2535,9 @@
                         }
 
                         tr.addEventListener('click', (e) => {
+                            // Bundle download link — let the browser
+                            // start the .zip download, don't navigate.
+                            if (e.target.closest && e.target.closest('[data-bundle-link]')) return;
                             // If the click was on the link, the link's own
                             // handler already chose to either preventDefault
                             // (plain left-click → fall through to here) or
