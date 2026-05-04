@@ -115,13 +115,13 @@ If `$CONTENT_DIR` is empty (you're starting from scratch, no media uploaded), th
 
    ![First-run setup modal](docs/screenshots/oobe-1-setup-modal.png)
 
-2. **Click Seed Sample Content.** The server synthesises a 120-second 720p test pattern (`testsrc` color bars + numbered frame counter + 1 kHz audio tone) inside the container and queues it through the standard ABR ladder. The **Encoding Jobs** panel on the dashboard auto-refreshes every 2 s; the seed clip typically finishes in 60–120 s on commodity hardware.
+2. **Click Seed Sample Content.** The server synthesises a 120-second 720p test pattern (`testsrc` color bars + numbered frame counter + 1 kHz audio tone) inside the container and saves it as `sample_clip.mp4`. It immediately appears in the **Source Content Library** with its file size, duration, and resolution — confirming the seed step succeeded and the bind-mount is writable.
 
-   ![Seed clip encoding](docs/screenshots/oobe-2-encoding-job.png)
+   ![Sample clip in Source Library](docs/screenshots/oobe-2-source-library.png)
 
-3. **Confirm in the Source Library.** Once the encode completes, `sample_clip` shows up in the Source Library with its file size, duration, and resolution — proof that the upload → encode → catalog pipeline runs end-to-end against the freshly-mounted volume.
+3. **Watch the encode complete.** The same click queues an ABR-ladder encoding job against `sample_clip.mp4`. The **Encoding Jobs** panel auto-refreshes every 2 s; on commodity hardware the seed clip finishes in 60–120 s, producing both H.264 and HEVC ladder variants under `$CONTENT_DIR/dynamic_content/`.
 
-   ![Sample clip in Source Library](docs/screenshots/oobe-3-source-library.png)
+   ![Seed clip encoding](docs/screenshots/oobe-3-encoding-job.png)
 
 4. **Open Mosaic.** Default filters (`HLS / H264 / 6s`) reduce to a single playing tile of the seeded clip. The numbered frame counter in the test pattern makes it obvious whether segments are arriving in order, looping cleanly, or frozen — you can spot a player or transport problem at a glance, no instrumentation required.
 
