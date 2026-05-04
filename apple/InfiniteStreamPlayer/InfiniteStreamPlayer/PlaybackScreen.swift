@@ -22,7 +22,8 @@ struct PlaybackScreen: View {
                 onRetry: { vm.retry() },
                 onReload: { vm.reload() },
                 onMark911: { vm.mark911() },
-                onOpenSettings: { vm.setSettingsOpen(true) }
+                onOpenSettings: { vm.setSettingsOpen(true) },
+                onFirstFrame: { at in vm.markFirstFrameRendered(at: at) }
             )
             .id(vm.playerEpoch)
             .ignoresSafeArea()

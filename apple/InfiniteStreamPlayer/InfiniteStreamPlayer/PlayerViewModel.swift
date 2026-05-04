@@ -205,11 +205,12 @@ final class PlayerViewModel: ObservableObject {
         // Wire diagnostics + metrics pipeline. Mirrors the legacy
         // PlaybackViewModel init() — diagnostics observes AVPlayer,
         // bindMetricsReporting forwards @Published changes as POSTs,
-        // and startMetricsHeartbeat begins the 1Hz cadence.
         diagnostics.bind(to: player)
         bindDiagnosticsLogging()
         bindMetricsReporting()
-        startMetricsHeartbeat()
+        // Heartbeat is started by `loadStream` so the first tick lands
+        // 1s AFTER the `playing` event — before any playback happens
+        // there's nothing useful to report on. See `startMetricsHeartbeat`.
         // Initial mute state from persisted flag.
         player.isMuted = isMuted
         // Optimistic: surface cached content for the active server right
@@ -656,8 +657,13 @@ final class PlayerViewModel: ObservableObject {
         hasReportedFirstFrame = false
 
         // Reset per-playback metrics state and emit the `playing` event.
+        // Single `Date()` capture — used as both `playbackStartAt` and
+        // the `playing` event's `at:` stamp so elapsed-since-start in
+        // the `playing` payload is exactly 0 and not skewed by the
+        // few microseconds between two separate `Date()` calls.
         diagnostics.reset()
-        playbackStartAt = Date()
+        let playingEventAt = Date()
+        playbackStartAt = playingEventAt
         videoFirstFrameSeconds = nil
         videoPlayingTimeSeconds = nil
         firstFrameReported = false
@@ -668,12 +674,19 @@ final class PlayerViewModel: ObservableObject {
         zeroBufferStartedAt = nil
         metricsSessionId = nil
         metricsLastSessionLookup = nil
+        let contentName = selectedContent
+        let playingPayload = buildMetricsPayload(event: "playing", at: playingEventAt, extra: [
+            "player_metrics_content_url": url.absoluteString,
+            "player_metrics_content_name": contentName
+        ])
         Task { [weak self] in
-            await self?.sendPlayerMetrics(event: "playing", extra: [
-                "player_metrics_content_url": url.absoluteString,
-                "player_metrics_content_name": self?.selectedContent ?? ""
-            ])
+            await self?.sendPlayerMetrics(payload: playingPayload)
         }
+        // Restart the 1Hz heartbeat so its first tick lands exactly
+        // `metricsHeartbeatSeconds` after this `playing` event — not at
+        // some arbitrary offset inherited from a prior playback or app
+        // launch.
+        startMetricsHeartbeat()
     }
 
     private func isMasterPlaylistURL(_ url: URL) -> Bool {
@@ -879,13 +892,13 @@ final class PlayerViewModel: ObservableObject {
     /// to the device console so screen-recording / OS log captures
     /// have a synchronisation point.
     func mark911() {
-        let stamp = Self.metricsTimestampFormatter.string(from: Date())
+        let eventAt = Date()
+        let stamp = Self.metricsTimestampFormatter.string(from: eventAt)
         print("911 user-marked at \(stamp) currentURL=\(currentURL?.absoluteString ?? "—")")
-        Task { [weak self] in
-            await self?.sendPlayerMetrics(event: "user_marked", extra: [
-                "player_metrics_user_marked_at": stamp
-            ])
-        }
+        let payload = buildMetricsPayload(event: "user_marked", at: eventAt, extra: [
+            "player_metrics_user_marked_at": stamp
+        ])
+        Task { [weak self] in await self?.sendPlayerMetrics(payload: payload) }
     }
 
     func reload() {
@@ -907,12 +920,11 @@ final class PlayerViewModel: ObservableObject {
         // observations and the heartbeat would emit stale data.
         diagnostics.bind(to: newPlayer)
         attachPlayerItemObservers()
-        Task { [weak self] in
-            await self?.sendPlayerMetrics(event: "restart", extra: [
-                "player_metrics_restart_reason": "reload",
-                "player_restarts": self?.playerRestarts ?? 0
-            ])
-        }
+        let restartPayload = buildMetricsPayload(event: "restart", at: Date(), extra: [
+            "player_metrics_restart_reason": "reload",
+            "player_restarts": playerRestarts
+        ])
+        Task { [weak self] in await self?.sendPlayerMetrics(payload: restartPayload) }
         currentURL = nil
         buildURLAndLoad()
     }
@@ -969,33 +981,78 @@ final class PlayerViewModel: ObservableObject {
                 self?.handlePlayerError(err)
             }
         }
-        // First-frame callback — bump lastPlayed + viewCounts.
-        // AVPlayer doesn't expose a direct "first frame rendered" event,
-        // so we observe `isReadyForDisplay` on the AVPlayerLayer in the
-        // PlayerView wrapper. The wrapper calls `markFirstFrameRendered`
-        // when it sees the layer flip.
+        // `video_start_time` event ← canonical AVKit signal.
+        // First time `timeControlStatus` flips to `.playing` after a
+        // playback starts is the moment AVPlayer is actively decoding +
+        // presenting at the requested rate (i.e. "playing smoothly").
+        // One-shot guard via `playingReported` (cleared on each
+        // `playing` reset alongside the other latches).
         statusObserver = player.observe(\.timeControlStatus, options: [.new]) { [weak self] p, _ in
+            // Capture firing instant on the KVO callback thread so the
+            // metric carries the true transition time, not the
+            // MainActor-pickup time. Same snapshot-at-firing-context
+            // pattern as every other emit site in this PR.
+            let firedAt = Date()
             Task { @MainActor in
                 guard let self else { return }
-                if p.timeControlStatus == .playing && !self.hasReportedFirstFrame {
-                    self.markFirstFrameRendered()
+                if p.timeControlStatus == .playing && !self.playingReported {
+                    self.markPlayingStarted(at: firedAt)
                 }
             }
         }
     }
 
     /// Called by the PlayerView wrapper when the AVPlayerLayer reports
-    /// `isReadyForDisplay = true` for the current item.
-    func markFirstFrameRendered() {
-        guard !hasReportedFirstFrame else { return }
-        hasReportedFirstFrame = true
-        codecRetries = 0
-        let current = selectedContent
-        guard !current.isEmpty else { return }
-        let clipId = ContentItem.deriveClipId(from: current)
-        viewCounts[clipId, default: 0] += 1
-        lastPlayed = current
-        persistPlaybackHistory()
+    /// `isReadyForDisplay = true` for the current item — the canonical
+    /// AVKit "first frame rendered" signal. Bumps the lastPlayed /
+    /// viewCount bookkeeping AND fires the `video_first_frame` metric
+    /// event with the flip-instant timestamp.
+    func markFirstFrameRendered(at firstFrameAt: Date) {
+        // Idempotent: PlayerView re-installs its KVO observer on player
+        // swap and the layer's `isReadyForDisplay` flips back to false
+        // on item replace, but a single playback flip may still surface
+        // as multiple `.initial` deliveries to the SwiftUI coordinator
+        // — guard belt-and-braces.
+        guard !firstFrameReported else { return }
+        firstFrameReported = true
+        if !hasReportedFirstFrame {
+            hasReportedFirstFrame = true
+            codecRetries = 0
+            let current = selectedContent
+            if !current.isEmpty {
+                let clipId = ContentItem.deriveClipId(from: current)
+                viewCounts[clipId, default: 0] += 1
+                lastPlayed = current
+                persistPlaybackHistory()
+            }
+        }
+        diagnostics.markFirstFrameRendered()
+        guard let startAt = playbackStartAt else { return }
+        let elapsed = roundSeconds(firstFrameAt.timeIntervalSince(startAt))
+        videoFirstFrameSeconds = elapsed
+        let payload = buildMetricsPayload(event: "video_first_frame", at: firstFrameAt, extra: [
+            "player_metrics_video_first_frame_time_s": elapsed
+        ])
+        Task { [weak self] in await self?.sendPlayerMetrics(payload: payload) }
+    }
+
+    /// Called from the `timeControlStatus` KVO observer when the player
+    /// first transitions to `.playing` after a playback starts. Fires
+    /// the `video_start_time` metric event. Distinct from
+    /// `markFirstFrameRendered` — the latter is the layer-decoded signal,
+    /// this is the player-actively-playing signal. Typical order:
+    /// first-frame fires before .playing, but they're independent KVO
+    /// observables.
+    func markPlayingStarted(at startedAt: Date) {
+        guard !playingReported else { return }
+        playingReported = true
+        guard let startAt = playbackStartAt else { return }
+        let elapsed = roundSeconds(startedAt.timeIntervalSince(startAt))
+        videoPlayingTimeSeconds = elapsed
+        let payload = buildMetricsPayload(event: "video_start_time", at: startedAt, extra: [
+            "player_metrics_video_start_time_s": elapsed
+        ])
+        Task { [weak self] in await self?.sendPlayerMetrics(payload: payload) }
     }
 
     private func handlePlayerError(_ error: Error?) {
@@ -1165,19 +1222,24 @@ extension PlayerViewModel {
         diagnostics.$itemError
             .removeDuplicates()
             .filter { !$0.isEmpty }
+            .receive(on: DispatchQueue.main)
             .sink { [weak self] value in
-                self?.log("Item error: \(value)")
-                Task { await self?.sendPlayerMetrics(event: "error", extra: ["player_metrics_error": value]) }
+                guard let self else { return }
+                self.log("Item error: \(value)")
+                let payload = self.buildMetricsPayload(event: "error", at: Date(), extra: ["player_metrics_error": value])
+                Task { await self.sendPlayerMetrics(payload: payload) }
             }
             .store(in: &cancellables)
 
         diagnostics.$lastFailure
             .removeDuplicates()
             .filter { !$0.isEmpty }
+            .receive(on: DispatchQueue.main)
             .sink { [weak self] value in
                 guard let self else { return }
                 self.log("Playback failure: \(value)")
-                Task { await self.sendPlayerMetrics(event: "error", extra: ["player_metrics_error": value]) }
+                let payload = self.buildMetricsPayload(event: "error", at: Date(), extra: ["player_metrics_error": value])
+                Task { await self.sendPlayerMetrics(payload: payload) }
                 if self.autoRecovery {
                     // Per-attempt HAR is captured by scheduleAutoRecoveryRestart
                     // when the timer fires (force=true). Don't double-capture
@@ -1192,17 +1254,22 @@ extension PlayerViewModel {
         diagnostics.$lastError
             .removeDuplicates()
             .filter { !$0.isEmpty }
+            .receive(on: DispatchQueue.main)
             .sink { [weak self] value in
-                self?.log("Player error: \(value)")
-                Task { await self?.sendPlayerMetrics(event: "error", extra: ["player_metrics_error": value]) }
+                guard let self else { return }
+                self.log("Player error: \(value)")
+                let payload = self.buildMetricsPayload(event: "error", at: Date(), extra: ["player_metrics_error": value])
+                Task { await self.sendPlayerMetrics(payload: payload) }
             }
             .store(in: &cancellables)
 
         diagnostics.$frozenDetected
             .removeDuplicates()
+            .receive(on: DispatchQueue.main)
             .sink { [weak self] frozen in
                 guard let self, frozen else { return }
-                Task { await self.sendPlayerMetrics(event: "frozen") }
+                let payload = self.buildMetricsPayload(event: "frozen", at: Date())
+                Task { await self.sendPlayerMetrics(payload: payload) }
                 if self.autoRecovery {
                     // The recovery timer's per-attempt HAR (force=true)
                     // captures the same incident a moment later.
@@ -1215,9 +1282,11 @@ extension PlayerViewModel {
 
         diagnostics.$segmentStallDetected
             .removeDuplicates()
+            .receive(on: DispatchQueue.main)
             .sink { [weak self] stalled in
                 guard let self, stalled else { return }
-                Task { await self.sendPlayerMetrics(event: "segment_stall") }
+                let payload = self.buildMetricsPayload(event: "segment_stall", at: Date())
+                Task { await self.sendPlayerMetrics(payload: payload) }
                 if self.autoRecovery {
                     self.scheduleAutoRecoveryRestart(reason: "auto_recovery_segment_stall")
                 } else {
@@ -1228,79 +1297,94 @@ extension PlayerViewModel {
     }
 
     fileprivate func bindMetricsReporting() {
+        // Every sink below uses the same shape:
+        //   1. capture `eventAt = Date()` synchronously
+        //   2. build the payload via `buildMetricsPayload(event:at:extra:)`
+        //   3. hand the immutable payload into a Task that does only HTTP
+        // This keeps `event_time`, `last_event_at`, `state`, position,
+        // playhead_wallclock, etc. all anchored to the moment the
+        // underlying event fired — not to whenever the Task body
+        // happens to run after chaining through `metricsTaskTail`.
         diagnostics.$stallCount
             .removeDuplicates()
+            .receive(on: DispatchQueue.main)
             .sink { [weak self] count in
                 guard let self, count > self.lastReportedStallCount else { return }
                 self.lastReportedStallCount = count
-                Task { await self.sendPlayerMetrics(event: "stall_start") }
+                let payload = self.buildMetricsPayload(event: "stall_start", at: Date())
+                Task { await self.sendPlayerMetrics(payload: payload) }
             }
             .store(in: &cancellables)
 
         diagnostics.$lastStallDurationSeconds
             .removeDuplicates()
+            .receive(on: DispatchQueue.main)
             .sink { [weak self] duration in
                 guard let self, duration > 0, duration != self.lastReportedStallDuration else { return }
                 self.lastReportedStallDuration = duration
-                Task {
-                    await self.sendPlayerMetrics(event: "stall_end", extra: [
-                        "player_metrics_last_stall_time_s": self.roundSeconds(duration)
-                    ])
-                }
+                let payload = self.buildMetricsPayload(event: "stall_end", at: Date(), extra: [
+                    "player_metrics_last_stall_time_s": self.roundSeconds(duration)
+                ])
+                Task { await self.sendPlayerMetrics(payload: payload) }
             }
             .store(in: &cancellables)
 
         diagnostics.$state
             .removeDuplicates()
+            .receive(on: DispatchQueue.main)
             .sink { [weak self] state in
                 guard let self else { return }
+                // Capture once — the up-to-three sub-events (state_change
+                // + optional buffering_start/end) all represent one sink
+                // invocation, so they share the timestamp + diagnostics
+                // snapshot.
+                let eventAt = Date()
                 let previous = self.lastReportedState
                 if let previous, previous != state {
-                    Task {
-                        await self.sendPlayerMetrics(event: "state_change", extra: [
-                            "player_metrics_state_from": previous,
-                            "player_metrics_state_to": state
-                        ])
-                    }
+                    let stateChange = self.buildMetricsPayload(event: "state_change", at: eventAt, extra: [
+                        "player_metrics_state_from": previous,
+                        "player_metrics_state_to": state
+                    ])
+                    Task { await self.sendPlayerMetrics(payload: stateChange) }
                     if state == "buffering" {
-                        Task { await self.sendPlayerMetrics(event: "buffering_start") }
+                        let payload = self.buildMetricsPayload(event: "buffering_start", at: eventAt)
+                        Task { await self.sendPlayerMetrics(payload: payload) }
                     } else if previous == "buffering" {
-                        Task { await self.sendPlayerMetrics(event: "buffering_end") }
+                        let payload = self.buildMetricsPayload(event: "buffering_end", at: eventAt)
+                        Task { await self.sendPlayerMetrics(payload: payload) }
                     }
                 } else if previous == nil {
-                    Task { await self.sendPlayerMetrics(event: "state_change") }
+                    let payload = self.buildMetricsPayload(event: "state_change", at: eventAt)
+                    Task { await self.sendPlayerMetrics(payload: payload) }
                 }
                 self.lastReportedState = state
             }
             .store(in: &cancellables)
 
+        // `$currentTime` no longer carries `video_first_frame` or
+        // `video_start_time` as primary signals — those are now driven
+        // by `AVPlayerLayer.isReadyForDisplay` (PlayerView) and
+        // `timeControlStatus == .playing` (observePlayer) respectively.
+        //
+        // The `currentTime > 0 && state == "playing"` synthesis is kept
+        // here as a *fallback* for the first-frame event only —
+        // `AVPlayerViewController` on iOS doesn't reliably expose its
+        // embedded `AVPlayerLayer` as a sublayer of `view.layer`, so
+        // the KVO observer in PlayerView may not fire on initial
+        // mount. The shared `firstFrameReported` latch guarantees we
+        // still emit one event regardless of which signal fires first.
+        // When the KVO observer DOES fire (post-Reload, tvOS,
+        // older iOS), it always wins because it fires earlier (the
+        // layer flips before AVPlayer reports `currentTime > 0`).
         diagnostics.$currentTime
             .removeDuplicates()
+            .receive(on: DispatchQueue.main)
             .sink { [weak self] currentTime in
-                guard let self, let startAt = self.playbackStartAt else { return }
+                guard let self, !self.firstFrameReported else { return }
                 let isActivelyPlaying = self.diagnostics.state == "playing"
                     && self.diagnostics.playbackRate > 0
-                if !self.firstFrameReported && currentTime > 0 && isActivelyPlaying {
-                    let elapsed = self.roundSeconds(Date().timeIntervalSince(startAt))
-                    self.videoFirstFrameSeconds = elapsed
-                    self.firstFrameReported = true
-                    self.diagnostics.markFirstFrameRendered()
-                    self.markFirstFrameRendered()
-                    Task {
-                        await self.sendPlayerMetrics(event: "video_first_frame", extra: [
-                            "player_metrics_video_first_frame_time_s": elapsed
-                        ])
-                    }
-                }
-                if !self.playingReported && currentTime >= 0.1 && isActivelyPlaying {
-                    let elapsed = self.roundSeconds(Date().timeIntervalSince(startAt))
-                    self.videoPlayingTimeSeconds = elapsed
-                    self.playingReported = true
-                    Task {
-                        await self.sendPlayerMetrics(event: "video_start_time", extra: [
-                            "player_metrics_video_start_time_s": elapsed
-                        ])
-                    }
+                if currentTime > 0 && isActivelyPlaying {
+                    self.markFirstFrameRendered(at: Date())
                 }
             }
             .store(in: &cancellables)
@@ -1316,24 +1400,31 @@ extension PlayerViewModel {
             .receive(on: DispatchQueue.main)
             .sink { [weak self] event in
                 guard let self else { return }
-                Task {
-                    await self.sendPlayerMetrics(event: "timejump", extra: [
-                        "player_metrics_timejump_from_s": self.roundSeconds(event.from),
-                        "player_metrics_timejump_to_s": self.roundSeconds(event.to),
-                        "player_metrics_timejump_delta_s": self.roundSeconds(event.to - event.from),
-                        "player_metrics_timejump_origin": event.origin
-                    ])
-                }
+                let payload = self.buildMetricsPayload(event: "timejump", at: event.at, extra: [
+                    "player_metrics_timejump_from_s": self.roundSeconds(event.from),
+                    "player_metrics_timejump_to_s": self.roundSeconds(event.to),
+                    "player_metrics_timejump_delta_s": self.roundSeconds(event.to - event.from),
+                    "player_metrics_timejump_origin": event.origin
+                ])
+                Task { await self.sendPlayerMetrics(payload: payload) }
             }
             .store(in: &cancellables)
     }
 
+    /// Restart the 1Hz metrics heartbeat. Called from `loadStream` so a
+    /// fresh playback session always gets its first heartbeat tick
+    /// exactly `metricsHeartbeatSeconds` after the `playing` event —
+    /// not piggybacked onto whatever phase a previously-running timer
+    /// happened to be in. Suppresses pre-playback heartbeats by
+    /// virtue of not running until playback starts.
     fileprivate func startMetricsHeartbeat() {
         metricsHeartbeatTimer?.invalidate()
         metricsHeartbeatTimer = Timer.scheduledTimer(withTimeInterval: metricsHeartbeatSeconds, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
-                self?.evaluateAutoRecoveryIfNeeded()
-                await self?.sendPlayerMetrics(event: "heartbeat")
+                guard let self else { return }
+                self.evaluateAutoRecoveryIfNeeded()
+                let payload = self.buildMetricsPayload(event: "heartbeat", at: Date())
+                await self.sendPlayerMetrics(payload: payload)
             }
         }
     }
@@ -1365,12 +1456,11 @@ extension PlayerViewModel {
                 self.autoRecoveryAttempts = attempt
                 self.log("Auto-recovery: attempt \(attempt)/\(self.autoRecoveryMaxAttempts) restarting (\(reason))")
                 self.retry()
-                Task { [weak self] in
-                    await self?.sendPlayerMetrics(event: "restart", extra: [
-                        "player_metrics_restart_reason": reason,
-                        "player_restarts": self?.playerRestarts ?? 0
-                    ])
-                }
+                let restartPayload = self.buildMetricsPayload(event: "restart", at: Date(), extra: [
+                    "player_metrics_restart_reason": reason,
+                    "player_restarts": self.playerRestarts
+                ])
+                Task { [weak self] in await self?.sendPlayerMetrics(payload: restartPayload) }
                 // Each auto-recovery attempt deserves its own HAR — bypass
                 // the per-player debounce so back-to-back attempts inside
                 // the 30s window each produce a snapshot.
@@ -1423,41 +1513,54 @@ extension PlayerViewModel {
         let bps = indicated ?? average
         guard let bps, bps > 0 else { return }
         let mbps = roundMetric(bps / 1_000_000)
+        // Capture once — both the bitrate-change event and any rate-shift
+        // sub-event represent the same shift moment, so they share the
+        // sink-time timestamp + diagnostics snapshot.
+        let eventAt = Date()
         if let previous = lastReportedRenditionMbps {
             if mbps != previous {
                 profileShiftCount = max(0, profileShiftCount) + 1
-                Task {
-                    await sendPlayerMetrics(event: "video_bitrate_change", extra: [
-                        "player_metrics_video_bitrate_from_mbps": previous,
-                        "player_metrics_video_bitrate_to_mbps": mbps,
-                        "player_metrics_profile_shift_count": profileShiftCount
-                    ])
-                }
+                let payload = buildMetricsPayload(event: "video_bitrate_change", at: eventAt, extra: [
+                    "player_metrics_video_bitrate_from_mbps": previous,
+                    "player_metrics_video_bitrate_to_mbps": mbps,
+                    "player_metrics_profile_shift_count": profileShiftCount
+                ])
+                Task { [weak self] in await self?.sendPlayerMetrics(payload: payload) }
             }
             let delta = mbps - previous
             if abs(delta) >= 0.1 {
                 let event = delta > 0 ? "rate_shift_up" : "rate_shift_down"
-                Task {
-                    await sendPlayerMetrics(event: event, extra: [
-                        "player_metrics_rate_from_mbps": previous,
-                        "player_metrics_rate_to_mbps": mbps
-                    ])
-                }
+                let payload = buildMetricsPayload(event: event, at: eventAt, extra: [
+                    "player_metrics_rate_from_mbps": previous,
+                    "player_metrics_rate_to_mbps": mbps
+                ])
+                Task { [weak self] in await self?.sendPlayerMetrics(payload: payload) }
             }
         }
         lastReportedRenditionMbps = mbps
     }
 
-    fileprivate func sendPlayerMetrics(event: String, extra: [String: Any] = [:]) async {
+    /// Convenience that builds the payload synchronously here and forwards
+    /// to `sendPlayerMetrics(payload:)`. Use this from any callsite that
+    /// has the `at:` instant in hand and doesn't already need to control
+    /// payload composition.
+    fileprivate func sendPlayerMetrics(event: String, at eventAt: Date = Date(), extra: [String: Any] = [:]) async {
+        guard currentURL != nil else { return }
+        guard metricsBaseURL() != nil else { return }
+        let payload = buildMetricsPayload(event: event, at: eventAt, extra: extra)
+        await sendPlayerMetrics(payload: payload)
+    }
+
+    /// Snapshot-at-firing-context entry point. Callers build the payload
+    /// at the moment the underlying event fires (so `event_time`,
+    /// `state`, `playhead_wallclock`, etc. all reflect that instant) and
+    /// hand the immutable dictionary in. This function does only the
+    /// HTTP queue-and-chain, never re-reads diagnostics.
+    fileprivate func sendPlayerMetrics(payload: [String: Any]) async {
         guard currentURL != nil else { return }
         guard let baseURL = metricsBaseURL() else { return }
-        // Build payload NOW so the iOS-clock-time of submission is
-        // captured in player_metrics_event_time and the bitrate field
-        // reflects diagnostics state at this instant. The actual HTTP
-        // send is serialized below to preserve submission order on the
-        // wire — see plan humming-sleeping-squid.md.
-        let payload = buildMetricsPayload(event: event, extra: extra)
         if payload.isEmpty { return }
+        logMetricsEmit(payload: payload)
         // CRITICAL: read-tail / set-tail must be synchronous (no
         // awaits between them) or two concurrent callers can suspend
         // on a prior await, resume out of FIFO order, and end up
@@ -1474,6 +1577,22 @@ extension PlayerViewModel {
         }
         metricsTaskTail = next
         await next.value
+    }
+
+    /// Greppable one-line console emit per metrics PATCH. Filter
+    /// `idevicesyslog` / Console.app to `[METRICS]` to see every event
+    /// the device sends, with a key fields summary. Keep this short —
+    /// the full payload goes on the wire; this is just for spotting
+    /// bursts and verifying the sink-time snapshot lands correctly.
+    private func logMetricsEmit(payload: [String: Any]) {
+        let event = (payload["player_metrics_last_event"] as? String) ?? "?"
+        let ts = (payload["player_metrics_event_time"] as? String) ?? "—"
+        let state = (payload["player_metrics_state"] as? String) ?? "—"
+        let from = (payload["player_metrics_state_from"] as? String) ?? ""
+        let to = (payload["player_metrics_state_to"] as? String) ?? ""
+        let pos = (payload["player_metrics_position_s"] as? Double).map { String(format: "%.2f", $0) } ?? "—"
+        let suffix = (from.isEmpty && to.isEmpty) ? "" : " from=\(from) to=\(to)"
+        print("[METRICS event=\(event) ts=\(ts) state=\(state) pos=\(pos)\(suffix)]")
     }
 
     fileprivate func metricsBaseURL() -> URL? {
@@ -1512,8 +1631,8 @@ extension PlayerViewModel {
         return nil
     }
 
-    fileprivate func buildMetricsPayload(event: String, extra: [String: Any]) -> [String: Any] {
-        let timestamp = Self.metricsTimestampFormatter.string(from: Date())
+    fileprivate func buildMetricsPayload(event: String, at eventAt: Date = Date(), extra: [String: Any] = [:]) -> [String: Any] {
+        let timestamp = Self.metricsTimestampFormatter.string(from: eventAt)
         let loopCount = max(0, diagnostics.loopCountPlayer)
         let loopIncrement = max(0, loopCount - lastReportedLoopCount)
         lastReportedLoopCount = loopCount
