@@ -69,6 +69,12 @@ services:
       # standalone /pair page lists it. Optional label overrides hostname.
       - INFINITE_STREAM_ANNOUNCE_URL=${INFINITE_STREAM_ANNOUNCE_URL:-}
       - INFINITE_STREAM_ANNOUNCE_LABEL=${INFINITE_STREAM_ANNOUNCE_LABEL:-}
+      # Compose ships the analytics sidecar alongside (forwarder + ClickHouse
+      # + Grafana), so wire the nginx /analytics/api/* and /grafana/* routes.
+      # k3s deployments default this to 0 (off) until k8s-analytics.yaml is
+      # also applied; the main image must boot regardless of the sidecar's
+      # existence (#390).
+      - INFINITE_STREAM_ENABLE_ANALYTICS=1
     tmpfs:
       - /go-live:size=4G,mode=755
     networks:

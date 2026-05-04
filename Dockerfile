@@ -69,6 +69,7 @@ RUN mkdir -p /tmp/uploads /data /data/sources && \
 # Copy config and scripts (rarely change)
 COPY docker/mime.types /etc/nginx/mime.types
 COPY docker/nginx-content.conf.template /etc/nginx/http.d/
+COPY docker/nginx-analytics.conf.template /etc/nginx/snippets/nginx-analytics.conf.template
 COPY docker/launch.sh /sbin/
 COPY generate_abr/parse_fmp4_fragments.py /sbin/
 COPY --from=go-builder /out/go-live /usr/local/bin/go-live
