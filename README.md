@@ -274,12 +274,51 @@ Each row is `time | flags | method | path | bytes | Mbps | status | bar`. The **
 
 A row that *looks* like a successful 200 download but has `!↩` or `!⏱` next to its method tells you the player abandoned it or the proxy gave up — exactly the signal you'd otherwise miss.
 
-**Capture & triage**:
+---
 
-Every session and every network request auto-archives into the analytics sidecar (ClickHouse + go-forwarder, see [Analytics tier](#analytics-tier)) for 30 days. The dashboard's **Sessions** picker and **Session Viewer** are the triage UI; downloads happen via **bundle ZIP**.
+## Session grouping (differential testing)
 
-- **911 button** — every player (iOS / iPadOS / tvOS / Android TV) has a "911" button right of Reload. One tap fires a `user_marked` event that lands as a row in `session_snapshots.last_event` and as a 🚨 chip on the picker row. Cross-layer "911" log lines on Apple device console, `adb logcat`, and docker logs make it grep-friendly across all three layers.
-- **Bundle download** — 📥 button on each picker row and in the session-viewer banner streams a `.zip` containing `snapshots.ndjson` (raw per-second blobs), `network.har` (HAR 1.2 envelope, opens in Chrome DevTools), `session.json` (summary), and `README.md`. Sensitive headers and credential-shaped query params are redacted server-side before the bytes leave the forwarder. See [`analytics/README.md`](analytics/README.md) for the full bundle format.
+Link two or more independent Testing Sessions into a **group**. Faults and network shaping applied to any group member are applied to **all** members simultaneously — while everything else stays independent per session. This is the single highest-leverage feature for *differential* testing: change exactly one variable and watch several targets react to an identical stimulus.
+
+### What propagates vs what stays independent
+
+| Propagates to all group members | Stays per-session |
+|---|---|
+| HTTP fault configuration (segment / manifest / master — type, mode, consecutive, frequency, URL allowlist) | Player engine (HLS.js / Shaka / Video.js / Native) |
+| Transport faults (DROP / REJECT, timing) | Stream URL (protocol / codec / segment duration) |
+| Network shaping — delay, loss, throughput, pattern mode, step duration, margin | Content-tab manipulations (strip CODEC, allowed variants, live offset, etc.) |
+| Shaping patterns (square wave, ramps, pyramid) and their step schedules | Player selector and URL parameters |
+
+Max 10 sessions per group. Endpoints: `POST /api/session-group/link`, `POST /api/session-group/unlink`, `GET /api/session-group/{groupId}` — see [`docs/FAULT_INJECTION.md`](docs/FAULT_INJECTION.md#session-grouping).
+
+### Canonical use cases
+
+- **Same stream, two live offsets.** Session A at `live_offset=6s`, session B at `live_offset=24s`. Apply a 3-second throughput collapse to the group. A rebuffers, B absorbs it — now you know exactly how much headroom the larger offset is buying you.
+- **iOS vs Android under identical conditions.** Open one testing window driving an iOS simulator, another driving the Android player, group them, and drive a `ramp_down` pattern. The Bitrate / Buffer / FPS charts side by side show how each platform's ABR algorithm responds to the same wire-rate curve, with zero variance from network timing.
+- **HLS.js vs Shaka on the same packet-loss schedule.** One click, two engines, identical 2% loss + 80 ms delay — does one rebuffer and the other ride it out?
+- **H.264 vs HEVC under identical throttle.** Same variants on the ladder, different codec, grouped session — how does each codec's bitrate-for-quality affect rebuffer frequency when throughput drops below the 720p rung?
+- **Sparse ladder vs full ladder.** Drop rungs with the Content tab's `Allowed variants` allowlist and compare. This matters most when the gaps are in the **low or middle** of the ladder — a player with only 360p and 4K and no steps in between has nowhere to land when throughput drops through that gap. On a choppy network the ABR logic will overshoot or undershoot, and the player can stall or thrash between the two available rungs instead of glide-downshifting. Group a full-ladder session against a gap-ladder session, drive `ramp_down` with oscillation, and watch the gap-ladder session rebuffer while the full-ladder one rides it out. Critical for validating that your production ladder actually survives poorly-behaving networks, not just smooth downshifts.
+- **Same player, different Content-tab settings.** Identical engine, identical stream, grouped — but A has `Strip CODEC` on and B doesn't. Watch startup time diverge under the same network conditions.
+
+The pattern is always: **change one variable per session, apply the same fault or shaping change to all of them, compare charts side by side.** The Bitrate / Buffer / FPS charts share a timeline across sessions, so you see effect alignment by eye.
+
+---
+
+## Analytics tier
+
+A sidecar stack (ClickHouse + Grafana + a small Go forwarder) auto-archives session metrics and per-request HAR for 30 days. Lives entirely under [`analytics/`](analytics/) — operationally independent of the live streaming path: if the forwarder dies, the live UI keeps working, archival just pauses until it restarts.
+
+| Component | Role |
+|---|---|
+| `clickhouse` | Two wide tables (`session_snapshots`, `network_requests`) with 30-day TTL. Hot fields are typed columns; everything else lands in a `session_json` blob. |
+| `go-forwarder` | Subscribes to go-proxy's `/api/sessions/stream` SSE, dedupes by snapshot fingerprint, batches inserts into ClickHouse. Also serves `/api/sessions`, `/api/snapshots`, `/api/session_events`, `/api/network_requests`, `/api/session_heatmap`, `/api/session_bundle` — read-only, parameterized SQL, behind `nginx /analytics/api/`. |
+| `grafana` | Provisioned-as-code dashboards under [`analytics/grafana/provisioning/`](analytics/grafana/provisioning/). Reachable via `nginx /grafana/`. |
+
+**Operating it**: `make analytics-rebuild-forwarder` recreates the forwarder container in-place (live UI untouched); `make analytics-update` reloads Grafana provisioning; `make analytics-migrate SQL='ALTER TABLE …'` runs a schema change. The data is exposed read-only to the dashboard via parameterized ClickHouse queries — no string interpolation, no auth-token leakage.
+
+**Securing for WAN deployment**: opt-in HTTP Basic auth via `INFINITE_STREAM_AUTH_HTPASSWD` gates the dashboard, `/analytics/api/`, and `/grafana/`; player-app endpoints stay public so unattended Apple/Roku/AndroidTV clients keep working. ClickHouse binds to `127.0.0.1` only by default. See [`analytics/README.md`](analytics/README.md) for the docker-compose and k3s runbooks.
+
+The two pages downstream of this stack — **Sessions view** (the picker) and **Session Viewer** (replay one) — are described in their own sections below.
 
 ---
 
@@ -289,11 +328,17 @@ Every session and every network request auto-archives into the analytics sidecar
 
 The Sessions page (`dashboard/sessions.html`) is the **triage entry point** for archived plays. One row per `(session_id, play_id)` over the last 30 days, sorted newest first. Designed so an operator can scan a long list and spot the bad ones without opening each.
 
+**Capture & triage hooks** — two cross-platform mechanisms drop "look-at-me" markers on the picker:
+
+- **911 button** — every player (iOS / iPadOS / tvOS / Android TV) has a "911" button right of Reload. One tap fires a `user_marked` event that lands as a row in `session_snapshots.last_event` and as a 🚨 chip on the picker row. Cross-layer "911" log lines on Apple device console, `adb logcat`, and docker logs make it grep-friendly across all three layers.
+- **📥 bundle download** — each picker row and the Session Viewer banner both have a download button that streams the session as a portable `.zip` (`snapshots.ndjson` + `network.har` + `session.json` + `README.md`). Sensitive headers and credential-shaped query params are redacted server-side. See [`analytics/README.md`](analytics/README.md) for the bundle format.
+
+**Picker UI**:
+
 - **Per-row event chips.** Each row carries colored chips for every "really bad thing" the auto-classifier flagged — 🚨 user-marked (the 911 button), ❄️ frozen, ⛔ error, ⏸ segment stall, 🔄 restart. Counts on each chip make a long stall-recovery sequence visually distinct from a single hiccup.
 - **Critical-row red bar.** Sessions classified as `interesting` by the auto-classifier (or pinned by an operator) get a red left edge so a folder of fifty sessions scans like a status board, not a list.
 - **Filters across the top.** Time range, classification (interesting / starred / other), platform (iOS / Android / web), content. Filters apply to the same query that drives the list and the per-tier counts in the header.
 - **⭐ star.** Pin a session for permanent retention beyond the 30-day TTL, regardless of whether the auto-classifier flagged it.
-- **📥 bundle download.** Each row has a download button that streams the session as a portable ZIP (snapshots + HAR + summary). Same artifact format the Session Viewer's banner button produces.
 - **Right-click → Open in new tab.** Useful when comparing two sessions side-by-side.
 
 When something stands out — a row with a 🚨 chip, a stack of ⛔ errors, a stall-and-recover sequence — click the row to drop into the Session Viewer for that play.
@@ -328,50 +373,6 @@ Below the brush + filters: bandwidth chart (with buffer depth and FPS overlays),
 
 - **⭐ star and 📥 bundle download** in the banner — same controls as the picker row, applied to the play in view.
 - **🚨 last-event marker** if the play included a `user_marked` event — vertical line on every chart at the exact moment of the 911 press.
-
----
-
-## Analytics tier
-
-A sidecar stack (ClickHouse + Grafana + a small Go forwarder) auto-archives session metrics and per-request HAR for 30 days. Lives entirely under [`analytics/`](analytics/) — operationally independent of the live streaming path: if the forwarder dies, the live UI keeps working, archival just pauses until it restarts.
-
-| Component | Role |
-|---|---|
-| `clickhouse` | Two wide tables (`session_snapshots`, `network_requests`) with 30-day TTL. Hot fields are typed columns; everything else lands in a `session_json` blob. |
-| `go-forwarder` | Subscribes to go-proxy's `/api/sessions/stream` SSE, dedupes by snapshot fingerprint, batches inserts into ClickHouse. Also serves `/api/sessions`, `/api/snapshots`, `/api/session_events`, `/api/network_requests`, `/api/session_heatmap`, `/api/session_bundle` — read-only, parameterized SQL, behind `nginx /analytics/api/`. |
-| `grafana` | Provisioned-as-code dashboards under [`analytics/grafana/provisioning/`](analytics/grafana/provisioning/). Reachable via `nginx /grafana/`. |
-
-**Operating it**: `make analytics-rebuild-forwarder` recreates the forwarder container in-place (live UI untouched); `make analytics-update` reloads Grafana provisioning; `make analytics-migrate SQL='ALTER TABLE …'` runs a schema change. The data is exposed read-only to the dashboard via parameterized ClickHouse queries — no string interpolation, no auth-token leakage.
-
-**Securing for WAN deployment**: opt-in HTTP Basic auth via `INFINITE_STREAM_AUTH_HTPASSWD` gates the dashboard, `/analytics/api/`, and `/grafana/`; player-app endpoints stay public so unattended Apple/Roku/AndroidTV clients keep working. ClickHouse binds to `127.0.0.1` only by default. See [`analytics/README.md`](analytics/README.md) for the docker-compose and k3s runbooks.
-
----
-
-## Session grouping (differential testing)
-
-Link two or more independent Testing Sessions into a **group**. Faults and network shaping applied to any group member are applied to **all** members simultaneously — while everything else stays independent per session. This is the single highest-leverage feature for *differential* testing: change exactly one variable and watch several targets react to an identical stimulus.
-
-### What propagates vs what stays independent
-
-| Propagates to all group members | Stays per-session |
-|---|---|
-| HTTP fault configuration (segment / manifest / master — type, mode, consecutive, frequency, URL allowlist) | Player engine (HLS.js / Shaka / Video.js / Native) |
-| Transport faults (DROP / REJECT, timing) | Stream URL (protocol / codec / segment duration) |
-| Network shaping — delay, loss, throughput, pattern mode, step duration, margin | Content-tab manipulations (strip CODEC, allowed variants, live offset, etc.) |
-| Shaping patterns (square wave, ramps, pyramid) and their step schedules | Player selector and URL parameters |
-
-Max 10 sessions per group. Endpoints: `POST /api/session-group/link`, `POST /api/session-group/unlink`, `GET /api/session-group/{groupId}` — see [`docs/FAULT_INJECTION.md`](docs/FAULT_INJECTION.md#session-grouping).
-
-### Canonical use cases
-
-- **Same stream, two live offsets.** Session A at `live_offset=6s`, session B at `live_offset=24s`. Apply a 3-second throughput collapse to the group. A rebuffers, B absorbs it — now you know exactly how much headroom the larger offset is buying you.
-- **iOS vs Android under identical conditions.** Open one testing window driving an iOS simulator, another driving the Android player, group them, and drive a `ramp_down` pattern. The Bitrate / Buffer / FPS charts side by side show how each platform's ABR algorithm responds to the same wire-rate curve, with zero variance from network timing.
-- **HLS.js vs Shaka on the same packet-loss schedule.** One click, two engines, identical 2% loss + 80 ms delay — does one rebuffer and the other ride it out?
-- **H.264 vs HEVC under identical throttle.** Same variants on the ladder, different codec, grouped session — how does each codec's bitrate-for-quality affect rebuffer frequency when throughput drops below the 720p rung?
-- **Sparse ladder vs full ladder.** Drop rungs with the Content tab's `Allowed variants` allowlist and compare. This matters most when the gaps are in the **low or middle** of the ladder — a player with only 360p and 4K and no steps in between has nowhere to land when throughput drops through that gap. On a choppy network the ABR logic will overshoot or undershoot, and the player can stall or thrash between the two available rungs instead of glide-downshifting. Group a full-ladder session against a gap-ladder session, drive `ramp_down` with oscillation, and watch the gap-ladder session rebuffer while the full-ladder one rides it out. Critical for validating that your production ladder actually survives poorly-behaving networks, not just smooth downshifts.
-- **Same player, different Content-tab settings.** Identical engine, identical stream, grouped — but A has `Strip CODEC` on and B doesn't. Watch startup time diverge under the same network conditions.
-
-The pattern is always: **change one variable per session, apply the same fault or shaping change to all of them, compare charts side by side.** The Bitrate / Buffer / FPS charts share a timeline across sessions, so you see effect alignment by eye.
 
 ---
 
