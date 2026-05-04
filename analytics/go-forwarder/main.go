@@ -232,7 +232,28 @@ func (c *fingerprintCache) prune(activeIDs map[string]struct{}) {
 	}
 }
 
+// setupLogFile mirrors stdlib log output to a file under $CONTENT_DIR
+// (typically /media/logs/forwarder.log) in addition to stderr, matching
+// the pattern the go-server backends use after #377. Best-effort: if
+// FORWARDER_LOG_FILE is unset or unopenable (perms, missing dir), we
+// silently fall back to stderr-only — forwarder is a sidecar, never
+// blocking the live path on log-file availability.
+func setupLogFile() {
+	path := os.Getenv("FORWARDER_LOG_FILE")
+	if path == "" {
+		return
+	}
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		log.Printf("FORWARDER_LOG_FILE=%q: open failed (%v); logging to stderr only", path, err)
+		return
+	}
+	log.SetOutput(io.MultiWriter(os.Stderr, f))
+	log.Printf("forwarder log file: %s", path)
+}
+
 func main() {
+	setupLogFile()
 	cfg := loadConfig()
 	log.Printf("forwarder starting: sse=%s ch=%s/%s.%s", cfg.sseURL, cfg.clickhouseURL, cfg.chDatabase, cfg.chTable)
 

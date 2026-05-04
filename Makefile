@@ -241,15 +241,77 @@ test-clean-dev:
 	ssh $(TEST_SSH) 'docker rm -f test-dev-server 2>/dev/null'
 
 test-clean:
-	ssh $(TEST_SSH) 'docker rm -f test-dev-server test-compose-server test-docker-run test-ghcr-server test-registry-server 2>/dev/null; docker network prune -f 2>/dev/null'
+	ssh $(TEST_SSH) 'docker rm -f test-dev-server test-compose-server test-docker-run test-ghcr-server test-registry-server test-oobe-server 2>/dev/null; docker network prune -f 2>/dev/null'
 
 test-status:
-	@ssh $(TEST_SSH) 'for p in 21000 22000 23000 24000 25000; do \
+	@ssh $(TEST_SSH) 'for p in 21000 22000 23000 24000 25000 26000; do \
 		proxy=$$((p / 1000 * 1000 + 81)); \
 		ui=$$(curl -s -o /dev/null -w "%{http_code}" http://localhost:$$p/); \
 		px=$$(curl -s -o /dev/null -w "%{http_code}" http://localhost:$$proxy/api/sessions 2>/dev/null); \
 		echo "Port $$p: UI=$$ui Proxy=$$proxy=$$px"; \
 	done'
+
+# OOBE simulation: simulate a brand-new install by wiping the host media
+# dir and the test-oobe project's docker volumes on every deploy. The
+# point is to land on the first-run code paths (`/api/setup` warning,
+# setup banner + modal in shared-nav.js) every single time.
+#
+# Three layers of defence keep this from ever touching test-dev's data:
+#   1. Pinned project name (-p test-oobe everywhere; COMPOSE_PROJECT_NAME
+#      in .env) so volume names cannot collide with other variants.
+#   2. `docker compose -p test-oobe down -v` scopes the volume removal to
+#      this project; bare `docker volume rm` is never called.
+#   3. The `rm -rf` of TEST_OOBE_MEDIA_DIR refuses to run unless the path
+#      literally ends in /test-oobe-media. Belt + suspenders.
+#
+# Derives the remote home from $(TEST_SSH) under the assumption that it
+# follows user@host form (the convention in .env). If TEST_SSH is set to
+# a bare hostname, `cut -d@ -f1` returns the hostname unchanged and this
+# path becomes /home/<hostname>/test-oobe-media — wrong but harmless:
+# safety guards still pass and the wipe targets a non-existent dir. Set
+# TEST_OOBE_MEDIA_DIR explicitly in .env if your TEST_SSH lacks a user.
+TEST_OOBE_MEDIA_DIR ?= /home/$(shell echo $(TEST_SSH) | cut -d@ -f1)/test-oobe-media
+
+test-deploy-oobe:
+	@echo "=== OOBE: fresh-install simulation (port 26000) ==="
+	@case "$(TEST_OOBE_MEDIA_DIR)" in \
+	  */test-oobe-media) ;; \
+	  *) echo "REFUSING: TEST_OOBE_MEDIA_DIR must end in /test-oobe-media, got '$(TEST_OOBE_MEDIA_DIR)'"; exit 1 ;; \
+	esac
+	ssh $(TEST_SSH) 'mkdir -p ~/test-oobe ~/test-oobe-media && \
+	  if [ -f ~/test-oobe/docker-compose.yml ]; then \
+	    cd ~/test-oobe && docker compose -p test-oobe down -v --remove-orphans 2>/dev/null || true; \
+	  fi'
+	# Wipe the media dir via a privileged container so we can remove
+	# files owned by the in-container clickhouse / root users that the
+	# host login lacks permission to delete directly.
+	ssh $(TEST_SSH) 'case "$(TEST_OOBE_MEDIA_DIR)" in \
+	  */test-oobe-media) docker run --rm -v $(TEST_OOBE_MEDIA_DIR):/m alpine sh -c "rm -rf /m/* /m/.* 2>/dev/null; true" ;; \
+	  *) echo "REFUSING wipe of $(TEST_OOBE_MEDIA_DIR)"; exit 1 ;; \
+	esac'
+	@echo "Syncing local working tree (excluding .git and .gitignore matches)..."
+	rsync -az --delete \
+		--filter=':- .gitignore' \
+		--exclude='.git/' \
+		--exclude='.env' \
+		./ $(TEST_SSH):~/test-oobe/
+	ssh -n $(TEST_SSH) 'printf "COMPOSE_PROJECT_NAME=test-oobe\nCONTENT_DIR=%s\nINFINITE_STREAM_RENDEZVOUS_URL=%s\nINFINITE_STREAM_ANNOUNCE_URL=http://%s:26000\nINFINITE_STREAM_BASE_URL=http://%s:26000\n" \
+		"$(TEST_OOBE_MEDIA_DIR)" "$(INFINITE_STREAM_RENDEZVOUS_URL)" "$(TEST_HOST)" "$(TEST_HOST)" > ~/test-oobe/.env'
+	scp tests/deploy/override-oobe.yml $(TEST_SSH):~/test-oobe/docker-compose.override.yml
+	ssh $(TEST_SSH) 'cd ~/test-oobe && docker compose -p test-oobe build && docker compose -p test-oobe up -d'
+
+test-clean-oobe:
+	@case "$(TEST_OOBE_MEDIA_DIR)" in \
+	  */test-oobe-media) ;; \
+	  *) echo "REFUSING: TEST_OOBE_MEDIA_DIR must end in /test-oobe-media, got '$(TEST_OOBE_MEDIA_DIR)'"; exit 1 ;; \
+	esac
+	ssh $(TEST_SSH) 'if [ -f ~/test-oobe/docker-compose.yml ]; then \
+	    cd ~/test-oobe && docker compose -p test-oobe down -v --remove-orphans 2>/dev/null || true; \
+	  fi; \
+	  case "$(TEST_OOBE_MEDIA_DIR)" in \
+	    */test-oobe-media) docker run --rm -v $(TEST_OOBE_MEDIA_DIR):/m alpine sh -c "rm -rf /m/* /m/.* 2>/dev/null; true"; rmdir $(TEST_OOBE_MEDIA_DIR) 2>/dev/null; true ;; \
+	    *) echo "REFUSING wipe of $(TEST_OOBE_MEDIA_DIR)"; exit 1 ;; \
+	  esac'
 
 test-deploy-compose:
 	@echo "=== Option 1: Docker Compose from source (port 22000) ==="

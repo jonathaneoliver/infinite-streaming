@@ -107,6 +107,30 @@ docker compose up -d       # first run builds the image
 
 Open **http://localhost:30000/** in a browser. That's the dashboard — everything else happens there.
 
+### First-run setup (out-of-box experience)
+
+If `$CONTENT_DIR` is empty (you're starting from scratch, no media uploaded), the dashboard opens with a **First-Run Setup** modal walking through the three things needed before anything will play. This same flow runs against any fresh `$CONTENT_DIR`, so it's also what you'll see on a brand-new test box.
+
+1. **Setup modal** — pops automatically on first dashboard load. Diagnostics confirm the host folder is mounted at `/media`, list how much content is currently available (zero on first boot), and surface anything blocking. Three buttons: **Seed Sample Content** (one-click, no upload needed), **Open Upload** (use your own media), and **Mark Setup Complete**.
+
+   ![First-run setup modal](docs/screenshots/oobe-1-setup-modal.png)
+
+2. **Click Seed Sample Content.** The server synthesises a 120-second 720p test pattern (`testsrc` color bars + numbered frame counter + 1 kHz audio tone) inside the container and queues it through the standard ABR ladder. The **Encoding Jobs** panel on the dashboard auto-refreshes every 2 s; the seed clip typically finishes in 60–120 s on commodity hardware.
+
+   ![Seed clip encoding](docs/screenshots/oobe-2-encoding-job.png)
+
+3. **Confirm in the Source Library.** Once the encode completes, `sample_clip` shows up in the Source Library with its file size, duration, and resolution — proof that the upload → encode → catalog pipeline runs end-to-end against the freshly-mounted volume.
+
+   ![Sample clip in Source Library](docs/screenshots/oobe-3-source-library.png)
+
+4. **Open Mosaic.** Default filters (`HLS / H264 / 6s`) reduce to a single playing tile of the seeded clip. The numbered frame counter in the test pattern makes it obvious whether segments are arriving in order, looping cleanly, or frozen — you can spot a player or transport problem at a glance, no instrumentation required.
+
+   ![Sample clip playing in Mosaic](docs/screenshots/oobe-4-mosaic-playback.png)
+
+From there, **Playback** plays the same clip standalone, **Testing Session** opens the per-session fault-injection UI, and **Sessions** archives every play. Subsequent dashboard loads skip the modal because `/api/setup/initialize` records a `.infinite-streaming-initialized` marker in `$CONTENT_DIR`. To re-run the OOBE flow on the same volume, delete that marker (or wipe `$CONTENT_DIR` for a true fresh-install reset).
+
+Skipping the seed and uploading your own files via **Open Upload** or by dropping MP4s into `$CONTENT_DIR/originals/` works identically — the seed clip is just a zero-friction "Hello, World" that exercises the full pipeline against content the server generates itself.
+
 Other deployment options (pre-built images, single container, k3s) are in [Advanced deployment](#advanced-deployment) at the bottom.
 
 ---

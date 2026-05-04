@@ -163,7 +163,19 @@ CREATE TABLE IF NOT EXISTS infinite_streaming.session_snapshots
     session_duration     Float32                      CODEC(ZSTD(1)),
 
     -- Long tail: full session map as JSON, for fields not promoted to columns.
-    session_json         String                       CODEC(ZSTD(3))
+    session_json         String                       CODEC(ZSTD(3)),
+
+    -- Tiered retention classification (issue #342). One of:
+    --   'other'        — default, evicted at 30 d (TTL clause below).
+    --   'interesting'  — auto-classified at session-end when any bad-event
+    --                    signal appears in the session. Evicted at 90 d.
+    --   'favourite'    — explicitly starred by the user. Never evicted.
+    -- Set by the forwarder via ALTER UPDATE on session-end + on star /
+    -- unstar API calls. Must be declared inline (not via post-create
+    -- ALTER) because the TTL clause below references it. The redundant
+    -- ADD COLUMN IF NOT EXISTS further down is a no-op for fresh hosts
+    -- but keeps the upgrade path alive for hosts created before #342.
+    classification       LowCardinality(String) DEFAULT 'other' CODEC(ZSTD(1))
 )
 ENGINE = MergeTree
 PARTITION BY toYYYYMMDD(ts)
@@ -321,6 +333,11 @@ CREATE TABLE IF NOT EXISTS infinite_streaming.network_requests
     -- Fingerprint over the immutable identity (ts ms, path, method,
     -- status, play_id) so re-polling go-proxy doesn't double-insert.
     entry_fingerprint        UInt64                 CODEC(ZSTD(1)),
+    -- Tiered retention classification (issue #342) — must be inline
+    -- because the TTL clause below references it. See full comment on
+    -- session_snapshots. The post-create ALTER ADD COLUMN IF NOT EXISTS
+    -- below is a no-op on fresh hosts but covers the upgrade path.
+    classification           LowCardinality(String) DEFAULT 'other' CODEC(ZSTD(1)),
     INDEX idx_play_id play_id TYPE bloom_filter GRANULARITY 4,
     INDEX idx_status status TYPE minmax GRANULARITY 4
 )

@@ -60,9 +60,13 @@ server {
     ssl_protocols TLSv1.2 TLSv1.3;
 
     add_header Access-Control-Allow-Origin *;
-    # Log to stderr for proper time-interleaving in Docker logs
+    # Log to stderr for proper time-interleaving in Docker logs, AND to
+    # files under /media/logs/ so the host can grep historical traffic
+    # without depending on docker's log driver retention. See #377.
     access_log /dev/stderr nginx_access;
-    error_log stderr info;
+    access_log /media/logs/nginx-access.log nginx_access;
+    error_log  stderr info;
+    error_log  /media/logs/nginx-error.log info;
     
     # Increase upload size limit for video files (10GB)
     client_max_body_size 10G;

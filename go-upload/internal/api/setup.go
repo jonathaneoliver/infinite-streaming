@@ -331,7 +331,7 @@ func generateSampleVideo(target string) error {
 		"-i", "testsrc=size=1280x720:rate=30",
 		"-f", "lavfi",
 		"-i", "sine=frequency=1000:sample_rate=44100",
-		"-t", "10",
+		"-t", "120",
 		"-c:v", "libx264",
 		"-pix_fmt", "yuv420p",
 		"-c:a", "aac",
