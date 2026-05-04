@@ -91,6 +91,9 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
 
     private var metrics: PlaybackMetrics? = null
 
+    /** Read-only view of the metrics pipeline for the on-device DiagnosticHud. */
+    val metricsRef: PlaybackMetrics? get() = metrics
+
     /**
      * Count of "decoder leases" currently held by tile / hero ExoPlayer
      * instances on Home (or any other surface that decodes video). Each

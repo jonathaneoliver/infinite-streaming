@@ -27,6 +27,14 @@ struct PlaybackScreen: View {
             .id(vm.playerEpoch)
             .ignoresSafeArea()
             .background(Color.black.ignoresSafeArea())
+            .overlay(alignment: .trailing) {
+                if vm.developerMode && !vm.settingsOpen {
+                    DiagnosticHUD(vm: vm, diagnostics: vm.diagnostics)
+                        .padding(.trailing, Space.s4)
+                        .allowsHitTesting(false)
+                        .accessibilityHidden(true)
+                }
+            }
 
             #if !os(tvOS)
             VStack {

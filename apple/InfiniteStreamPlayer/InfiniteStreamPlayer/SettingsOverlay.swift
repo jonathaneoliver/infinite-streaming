@@ -348,7 +348,7 @@ private struct PickerList: View {
                 vm.setPreviewVideoSlots($0)
             }
             .focused($itemIdx, equals: 7)
-            ToggleRow(label: "Developer mode",
+            ToggleRow(label: "HUD",
                       isOn: vm.developerMode, compact: compact) { vm.setDeveloperMode($0) }
                 .focused($itemIdx, equals: 8)
             DestructiveRow(label: "Reset All Settings", compact: compact) {

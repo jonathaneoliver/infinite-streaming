@@ -272,7 +272,7 @@ private fun MainList(
                 focusRequester = codecFocus)
         }
         item {
-            RowView(SettingRow("Advanced", if (state.developerMode) "Developer mode on" else "Default") {
+            RowView(SettingRow("Advanced", if (state.developerMode) "HUD on" else "Default") {
                 onPick(PickerKind.Advanced)
             }, focusRequester = advancedFocus)
         }
@@ -415,7 +415,7 @@ private fun PickerList(
                     }
                     item {
                         PickerItem(
-                            label = "Developer mode (AVG/PEAK overlay)",
+                            label = "HUD",
                             selected = state.developerMode,
                             onClick = { vm.setDeveloperMode(!state.developerMode) },
                         )
