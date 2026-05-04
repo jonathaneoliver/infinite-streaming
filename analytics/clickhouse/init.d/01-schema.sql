@@ -47,7 +47,6 @@ CREATE TABLE IF NOT EXISTS infinite_streaming.session_snapshots
     -- Player events (discrete signals embedded in the heartbeat snapshot;
     -- testing.html derives event-lane points from transitions in these).
     last_event            LowCardinality(String)      CODEC(ZSTD(1)),
-    last_event_at         String                      CODEC(ZSTD(1)),
     trigger_type          LowCardinality(String)      CODEC(ZSTD(1)),
     event_time            String                      CODEC(ZSTD(1)),
     player_error          String                      CODEC(ZSTD(1)),
@@ -208,7 +207,6 @@ ALTER TABLE infinite_streaming.session_snapshots
     ADD COLUMN IF NOT EXISTS play_id LowCardinality(String) CODEC(ZSTD(1)),
     ADD COLUMN IF NOT EXISTS content_id LowCardinality(String) CODEC(ZSTD(1)),
     ADD COLUMN IF NOT EXISTS last_event LowCardinality(String) CODEC(ZSTD(1)),
-    ADD COLUMN IF NOT EXISTS last_event_at String CODEC(ZSTD(1)),
     ADD COLUMN IF NOT EXISTS trigger_type LowCardinality(String) CODEC(ZSTD(1)),
     ADD COLUMN IF NOT EXISTS event_time String CODEC(ZSTD(1)),
     ADD COLUMN IF NOT EXISTS player_error String CODEC(ZSTD(1)),

@@ -1301,7 +1301,7 @@ extension PlayerViewModel {
         //   1. capture `eventAt = Date()` synchronously
         //   2. build the payload via `buildMetricsPayload(event:at:extra:)`
         //   3. hand the immutable payload into a Task that does only HTTP
-        // This keeps `event_time`, `last_event_at`, `state`, position,
+        // This keeps `event_time`, `state`, position,
         // playhead_wallclock, etc. all anchored to the moment the
         // underlying event fired — not to whenever the Task body
         // happens to run after chaining through `metricsTaskTail`.
@@ -1640,7 +1640,6 @@ extension PlayerViewModel {
             "player_metrics_source": "ios",
             "player_metrics_last_event": event,
             "player_metrics_trigger_type": event,
-            "player_metrics_last_event_at": timestamp,
             "player_metrics_event_time": timestamp,
             "player_metrics_state": diagnostics.state,
             "player_metrics_waiting_reason": diagnostics.waitingReason,
