@@ -324,6 +324,7 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
                 },
                 lastPlayed    = p.getString(LAST_PLAYED_KEY, "") ?: "",
                 viewCounts    = readViewCounts(p),
+                disableAnalytics = p.getBoolean(FLAG_DISABLE_ANALYTICS, false),
             )
         }
     }
@@ -395,6 +396,17 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         val clamped = value.coerceIn(0, DecodeBudget.maxConcurrent)
         _state.update { it.copy(previewVideoSlots = clamped) }
         prefs().edit().putInt(FLAG_PREVIEW_VIDEO_SLOTS, clamped).apply()
+    }
+
+    /**
+     * Toggle the metrics-egress kill-switch. Forwards immediately to the
+     * live PlaybackMetrics instance so a mid-session toggle takes effect
+     * on the next event without a reload.
+     */
+    fun setDisableAnalytics(on: Boolean) {
+        _state.update { it.copy(disableAnalytics = on) }
+        prefs().edit().putBoolean(FLAG_DISABLE_ANALYTICS, on).apply()
+        metrics?.setDisableAnalytics(on)
     }
 
     /**
@@ -756,7 +768,10 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
             player, view, bandwidthMeter, playerId,
             { _state.value.activeServer?.apiUrl ?: "" },
             { _state.value.currentUrl },
-        ).also { it.start() }
+        ).also {
+            it.setDisableAnalytics(_state.value.disableAnalytics)
+            it.start()
+        }
     }
 
     fun unbindMetrics() {
@@ -932,6 +947,7 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         private const val FLAG_GO_LIVE = "advanced_go_live"
         private const val FLAG_SKIP_HOME = "advanced_skip_home_on_launch"
         private const val FLAG_PREVIEW_VIDEO_SLOTS = "advanced_preview_video_slots"
+        private const val FLAG_DISABLE_ANALYTICS = "advanced_disable_analytics"
         private const val LAST_PLAYED_KEY = "last_played_content"
         private const val VIEW_COUNTS_KEY = "view_counts"
         private const val CONTENT_CACHE_PREFIX = "content_cache_"

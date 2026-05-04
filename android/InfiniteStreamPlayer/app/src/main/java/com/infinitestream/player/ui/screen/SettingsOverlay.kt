@@ -421,6 +421,13 @@ private fun PickerList(
                         )
                     }
                     item {
+                        PickerItem(
+                            label = "Disable analytics",
+                            selected = state.disableAnalytics,
+                            onClick = { vm.setDisableAnalytics(!state.disableAnalytics) },
+                        )
+                    }
+                    item {
                         DestructiveRow(
                             label = "Reset All Settings",
                             onClick = { showResetConfirm = true },

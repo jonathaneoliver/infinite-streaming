@@ -81,6 +81,12 @@ public final class PlaybackMetrics {
     private long lastSessionLookupMs;
     private boolean running;
 
+    // Settings → Advanced → "Disable analytics" kill-switch. When true,
+    // sendEvent short-circuits before any HTTP call. Volatile because
+    // PlayerViewModel.setDisableAnalytics() can flip it from the main
+    // thread while sendEvent is being entered from listener threads.
+    private volatile boolean disableAnalytics;
+
     // Counters (accumulated across app lifetime, matching iOS).
     private final AtomicLong framesRenderedTotal = new AtomicLong();
     private long droppedFramesTotal;
@@ -390,6 +396,11 @@ public final class PlaybackMetrics {
      */
     public void requestHarSnapshot(String reason, int attempt, boolean force) {
         if (urlProvider.currentStreamUrl().isEmpty()) return;
+        // The "Disable analytics" toggle simulates a player that doesn't
+        // report anything to the server — that includes ad-hoc HAR
+        // snapshots (error / frozen / segment_stall / 911 / user-retry /
+        // auto-recovery), not just the per-event metrics PATCHes.
+        if (disableAnalytics) return;
         final JSONObject metadata = new JSONObject();
         try {
             metadata.put("player_state", mapState());
@@ -498,6 +509,12 @@ public final class PlaybackMetrics {
 
     void sendEvent(String event, Map<String, Object> extra) {
         if (urlProvider.currentStreamUrl().isEmpty()) return;
+        // Single egress guard: every event-driven and heartbeat call
+        // funnels through here, so this short-circuits the entire metrics
+        // pipeline when the user toggles "Disable analytics" in Advanced.
+        // Checked at fire time so a mid-session toggle takes effect on
+        // the next event.
+        if (disableAnalytics) return;
         final JSONObject payload = buildPayload(event, extra);
         if (payload == null) return;
         networkExecutor.execute(() -> {
@@ -614,6 +631,14 @@ public final class PlaybackMetrics {
     public double getLastStallSeconds() { return lastStallDurationS; }
     public long getDroppedFrames() { return droppedFramesTotal; }
     public int getProfileShiftCount() { return profileShiftCount; }
+
+    /**
+     * Toggle the metrics-egress kill-switch. When true, sendEvent
+     * short-circuits before any HTTP call — used to simulate a player
+     * that doesn't report analytics so the dashboard / Sessions Viewer
+     * UX for silent sessions can be exercised. Off by default.
+     */
+    public void setDisableAnalytics(boolean on) { this.disableAnalytics = on; }
     public String currentMappedState() { return mapState(); }
     public String currentMappedWaitingReason() { return mapWaitingReason(); }
 

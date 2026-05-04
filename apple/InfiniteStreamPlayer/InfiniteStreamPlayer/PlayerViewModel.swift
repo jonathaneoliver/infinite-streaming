@@ -54,6 +54,13 @@ final class PlayerViewModel: ObservableObject {
     @Published var skipHomeOnLaunch: Bool = false
     /// Mute audio. Useful for HUD scrubbing / quick previewing.
     @Published var isMuted: Bool = false
+    /// Suppress every metrics PATCH from this device. Used to simulate
+    /// a player that doesn't report analytics, so the dashboard /
+    /// Sessions Viewer UX for silent sessions can be exercised. Off by
+    /// default — analytics flow as today. The on-device DiagnosticHUD
+    /// keeps rendering because it reads local state, not server
+    /// roundtrips.
+    @Published var disableAnalytics: Bool = false
     /// Override for the port-40000 player_id strip — in k3s-dev the
     /// content port (40000) doesn't accept `?player_id=…` query strings
     /// so we strip it by default. Devs working that environment can set
@@ -320,6 +327,7 @@ final class PlayerViewModel: ObservableObject {
         player.isMuted = on
         persistFlags()
     }
+    func setDisableAnalytics(_ on: Bool) { disableAnalytics = on; persistFlags() }
     func setPreviewVideoSlots(_ value: Int) {
         let clamped = max(0, min(value, DecodeBudget.shared.hardwareCap))
         previewVideoSlots = clamped
@@ -1036,6 +1044,7 @@ final class PlayerViewModel: ObservableObject {
     private static let flagGoLive = "is.flag.go_live"
     private static let flagSkipHome = "is.flag.skip_home"
     private static let flagMuted = "is.flag.muted"
+    private static let flagDisableAnalytics = "is.flag.disable_analytics"
     private static let flagLiveOffset = "is.flag.live_offset_s"
     private static let flagPreviewVideoSlots = "is.flag.preview_video_slots"
     private static let lastPlayedKey = "is.lastPlayed"
@@ -1079,6 +1088,7 @@ final class PlayerViewModel: ObservableObject {
         goLive           = d.bool(forKey: Self.flagGoLive)
         skipHomeOnLaunch = d.bool(forKey: Self.flagSkipHome)
         isMuted = d.bool(forKey: Self.flagMuted)
+        disableAnalytics = d.bool(forKey: Self.flagDisableAnalytics)
         liveOffsetSeconds = d.object(forKey: Self.flagLiveOffset) as? Double ?? 0
         // First launch: no key yet → use the device's hardware cap so
         // the user starts with the richest preview their hardware can
@@ -1112,6 +1122,7 @@ final class PlayerViewModel: ObservableObject {
         d.set(goLive, forKey: Self.flagGoLive)
         d.set(skipHomeOnLaunch, forKey: Self.flagSkipHome)
         d.set(isMuted, forKey: Self.flagMuted)
+        d.set(disableAnalytics, forKey: Self.flagDisableAnalytics)
         d.set(liveOffsetSeconds, forKey: Self.flagLiveOffset)
         d.set(previewVideoSlots, forKey: Self.flagPreviewVideoSlots)
         d.set(codec.rawValue, forKey: Self.codecKey)
@@ -1450,6 +1461,11 @@ extension PlayerViewModel {
 
     fileprivate func sendPlayerMetrics(event: String, extra: [String: Any] = [:]) async {
         guard currentURL != nil else { return }
+        // Single egress guard: every event-driven and heartbeat call funnels
+        // through here, so this short-circuits the entire metrics pipeline
+        // when the user toggles "Disable analytics" in Advanced. Checked at
+        // fire time so a mid-session toggle takes effect on the next event.
+        if disableAnalytics { return }
         guard let baseURL = metricsBaseURL() else { return }
         // Build payload NOW so the iOS-clock-time of submission is
         // captured in player_metrics_event_time and the bitrate field
@@ -1584,6 +1600,11 @@ extension PlayerViewModel {
     /// file. Called from auto-recovery / freeze / Reload sites — server
     /// debounces by player_id (default 30s). Issue #273.
     fileprivate func requestHARSnapshot(reason: String, attempt: Int = 0, force: Bool = false) async {
+        // The "Disable analytics" toggle simulates a player that doesn't
+        // report anything to the server — that includes ad-hoc HAR
+        // snapshots (error / frozen / segment_stall / 911 / user-retry /
+        // auto-recovery), not just the per-event metrics PATCHes.
+        if disableAnalytics { return }
         guard let baseURL = metricsBaseURL() else { return }
         guard let sessionId = await resolveMetricsSessionId(baseURL: baseURL) else { return }
         let url = baseURL

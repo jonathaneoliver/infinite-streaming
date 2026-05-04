@@ -101,6 +101,12 @@ data class UiState(
      *  battery / network reasons. Cannot exceed the hardware cap.
      *  Mirrors the Apple `previewVideoSlots` flag. */
     val previewVideoSlots: Int = -1, // -1 sentinel = "use hardware default"
+    /** Suppress every metrics PATCH from this device. Used to
+     *  simulate a player that doesn't report analytics. Off by
+     *  default — analytics flow as today. The on-device DiagnosticHud
+     *  keeps rendering because it reads local state, not server
+     *  roundtrips. */
+    val disableAnalytics: Boolean = false,
 
     /** True when HUD is visible on the playback screen. */
     val hudVisible: Boolean = false,

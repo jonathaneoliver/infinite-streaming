@@ -351,10 +351,13 @@ private struct PickerList: View {
             ToggleRow(label: "HUD",
                       isOn: vm.developerMode, compact: compact) { vm.setDeveloperMode($0) }
                 .focused($itemIdx, equals: 8)
+            ToggleRow(label: "Disable analytics",
+                      isOn: vm.disableAnalytics, compact: compact) { vm.setDisableAnalytics($0) }
+                .focused($itemIdx, equals: 9)
             DestructiveRow(label: "Reset All Settings", compact: compact) {
                 showResetConfirm = true
             }
-            .focused($itemIdx, equals: 9)
+            .focused($itemIdx, equals: 10)
         }
     }
 }
