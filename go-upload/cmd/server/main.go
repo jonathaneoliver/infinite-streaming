@@ -23,15 +23,15 @@ func main() {
 	}
 
 	cfg := config.Load()
+	if err := app.EnsureDirs(cfg); err != nil {
+		log.Fatalf("failed to ensure directories: %v", err)
+	}
 	st, err := store.NewSQLiteStore(cfg.DatabasePath)
 	if err != nil {
 		log.Fatalf("failed to open sqlite db: %v", err)
 	}
 	if err := st.InitSchema(); err != nil {
 		log.Fatalf("failed to init db schema: %v", err)
-	}
-	if err := app.EnsureDirs(cfg); err != nil {
-		log.Fatalf("failed to ensure directories: %v", err)
 	}
 
 	r := mux.NewRouter()
