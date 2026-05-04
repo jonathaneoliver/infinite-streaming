@@ -306,6 +306,8 @@ The pattern is always: **change one variable per session, apply the same fault o
 
 ## Analytics tier
 
+**Set it and forget it.** With the analytics backend and the Sessions screens in place, the dashboard stops being a foreground-required watching tool and becomes a record-and-triage one. Leave a single Testing Session — or a stack of grouped sessions running a differential test — going for hours, overnight, across a weekend. The forwarder archives every snapshot and every HAR entry as they happen; the auto-classifier flags sessions that hit "really bad things" (errors, frozen, segment stalls, restarts, 911 marks) as `interesting`, the picker red-bars those rows, and 🚨 / ❄️ / ⛔ chips count the specific failures per session. When you come back, you don't replay every play that ran — you scan the picker for red bars and chip clusters, click into the handful that actually went sideways, and ignore the dozens that ran clean. A multi-day soak that would otherwise need a human watching turns into a five-minute morning triage.
+
 A sidecar stack (ClickHouse + Grafana + a small Go forwarder) auto-archives session metrics and per-request HAR for 30 days. Lives entirely under [`analytics/`](analytics/) — operationally independent of the live streaming path: if the forwarder dies, the live UI keeps working, archival just pauses until it restarts.
 
 | Component | Role |
