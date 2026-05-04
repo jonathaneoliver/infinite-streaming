@@ -97,7 +97,6 @@ type row struct {
 	LoopCountPlayer          uint32  `json:"loop_count_player"`
 	LoopCountServer          uint32  `json:"loop_count_server"`
 	LastEvent                string  `json:"last_event"`
-	LastEventAt              string  `json:"last_event_at"`
 	TriggerType              string  `json:"trigger_type"`
 	EventTime                string  `json:"event_time"`
 	PlayerError              string  `json:"player_error"`
@@ -429,7 +428,6 @@ func toRow(ts string, revision uint64, sessionID string, s map[string]interface{
 		LoopCountPlayer:          uint32(getU64(s, "loop_count_player")),
 		LoopCountServer:          uint32(getU64(s, "loop_count_server")),
 		LastEvent:                getStr(s, "player_metrics_last_event"),
-		LastEventAt:              getStr(s, "player_metrics_last_event_at"),
 		TriggerType:              getStr(s, "player_metrics_trigger_type"),
 		EventTime:                getStr(s, "player_metrics_event_time"),
 		PlayerError:              getStr(s, "player_metrics_error"),

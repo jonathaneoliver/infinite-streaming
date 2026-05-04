@@ -531,7 +531,7 @@ generated:  %s
                       field of every snapshot, e.g.:
                         cat snapshots.ndjson \
                           | jq 'select(.last_event != "" and .last_event != "heartbeat")
-                                | {ts: .last_event_at, type: .last_event,
+                                | {ts: .event_time, type: .last_event,
                                    error: .player_error}'
                       Derived events (paired stall durations, lag-based
                       fault transitions, HAR-derived http_5xx, etc.)

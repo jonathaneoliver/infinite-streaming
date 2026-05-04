@@ -182,7 +182,6 @@ class PlayerViewModel : ViewModel() {
             "player_metrics_playback_engine" to "exoplayer",
             "player_metrics_last_event" to eventType,
             "player_metrics_trigger_type" to eventType,
-            "player_metrics_last_event_at" to reporter.nowISO(),
             "player_metrics_event_time" to reporter.nowISO(),
             "player_metrics_state" to state,
             "player_metrics_position_s" to round3(positionMs / 1000.0),

@@ -649,7 +649,6 @@
                         <div class="session-grid">
                             <div class="session-item"><span class="label">Last Event</span><span class="value" data-field="player_metrics_last_event">${session.player_metrics_last_event || '—'}</span></div>
                             <div class="session-item"><span class="label">trigger_type</span><span class="value" data-field="player_metrics_trigger_type">${session.player_metrics_trigger_type || '—'}</span></div>
-                            <div class="session-item"><span class="label">Last Event At</span><span class="value" data-field="player_metrics_last_event_at">${formatDate(session.player_metrics_last_event_at) || '—'}</span></div>
                             <div class="session-item"><span class="label">Event Time</span><span class="value" data-field="player_metrics_event_time">${formatDate(session.player_metrics_event_time) || '—'}</span></div>
                             <div class="session-item"><span class="label">State</span><span class="value" data-field="player_metrics_state">${session.player_metrics_state || '—'}</span></div>
                             <div class="session-item"><span class="label">Position</span><span class="value" data-field="player_metrics_position_s">${session.player_metrics_position_s ?? '—'}</span></div>

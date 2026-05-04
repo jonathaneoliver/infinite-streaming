@@ -514,7 +514,6 @@ public final class PlaybackMetrics {
             p.put("player_metrics_source", "android");
             p.put("player_metrics_last_event", event);
             p.put("player_metrics_trigger_type", event);
-            p.put("player_metrics_last_event_at", timestamp);
             p.put("player_metrics_event_time", timestamp);
             p.put("player_metrics_state", mapState());
             p.put("player_metrics_waiting_reason", mapWaitingReason());

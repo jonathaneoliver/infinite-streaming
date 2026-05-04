@@ -1056,7 +1056,6 @@
                 : (Number.isFinite(inferredVideoBitrateMbps) ? `~${formatMetricNumber(inferredVideoBitrateMbps, ' Mbps')}` : '—');
             setText('[data-field="player_metrics_last_event"]', session.player_metrics_last_event || '—');
             setText('[data-field="player_metrics_trigger_type"]', session.player_metrics_trigger_type || '—');
-            setText('[data-field="player_metrics_last_event_at"]', formatDate(session.player_metrics_last_event_at));
             setText('[data-field="player_metrics_event_time"]', formatDate(session.player_metrics_event_time));
             setText('[data-field="player_metrics_state"]', session.player_metrics_state || '—');
             setText('[data-field="player_metrics_position_s"]', formatSeconds(session.player_metrics_position_s));
@@ -1419,7 +1418,6 @@
 
         function getBandwidthChartEventTimestampMs(session, fallbackMs) {
             const candidates = [
-                session?.player_metrics_last_event_at,
                 session?.player_metrics_event_time,
                 session?.control_revision
             ];
@@ -2033,7 +2031,7 @@
             const eventType = parseBandwidthChartEventType(session.player_metrics_last_event || session.player_metrics_trigger_type);
             if (eventType) {
                 const eventAtMs = playerEventAtMs;
-                const eventStamp = `${eventType}|${session.player_metrics_last_event_at || session.player_metrics_event_time || eventAtMs}`;
+                const eventStamp = `${eventType}|${session.player_metrics_event_time || eventAtMs}`;
                 const lastStamp = lastRecordedPlayerEventBySession.get(String(key));
                 if (eventStamp !== lastStamp) {
                     const eventSeries = bandwidthEventHistory.get(key) || [];
