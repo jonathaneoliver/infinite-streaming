@@ -1437,7 +1437,7 @@ func (h *Handler) OnDemandMasterPlaylistDuration(w http.ResponseWriter, r *http.
 		data, err = os.ReadFile(outputPath)
 		if err != nil {
 			w.Header().Set("Retry-After", "1")
-			http.Error(w, fmt.Sprintf("Master playlist not ready: %v", err), http.StatusTooManyRequests)
+			http.Error(w, fmt.Sprintf("Master playlist not ready: %v", err), http.StatusServiceUnavailable)
 			return
 		}
 	}

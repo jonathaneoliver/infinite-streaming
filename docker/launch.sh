@@ -50,12 +50,22 @@ else
 fi
 envsubst '${INFINITE_STREAM_OUTPUT_DIR} ${INFINITE_STREAM_PROXY_HOST} ${INFINITE_STREAM_FORWARDER_HOST} ${INFINITE_STREAM_GRAFANA_HOST} ${INFINITE_STREAM_LISTEN_PORT} ${INFINITE_STREAM_AUTH_DIRECTIVES}' < /etc/nginx/http.d/nginx-content.conf.template > /etc/nginx/http.d/nginx-content.conf
 
-# Start background processes and nginx
-# All processes now log to stdout/stderr for proper Docker log interleaving
+# Mirror service stdout/stderr to /media/logs/ so logs are inspectable from
+# the host (tail -f, rsync, attach to bug bundle) without losing the docker
+# log stream. See #377.
+#
+# /media/logs is pre-created by the `init-permissions` compose service
+# (which all three services consuming /media bind-mounts depend on) so
+# this script doesn't have to mkdir or chmod across unrelated services.
+#
+# Each backend's combined output is piped through `tee -a` to /media/logs/<svc>.log
+# AND to the container's stdout, so `docker logs` continues to interleave all
+# three services normally. The pipeline runs in a subshell backgrounded with `&`
+# so the parent shell proceeds to exec nginx as PID 1.
 ( echo "Go mode." ) && \
-( /usr/local/bin/go-upload & ) && \
-( /usr/local/bin/go-live & ) && \
-( /usr/local/bin/go-proxy & ) && \
+( /usr/local/bin/go-upload 2>&1 | tee -a /media/logs/go-upload.log & ) && \
+( /usr/local/bin/go-live   2>&1 | tee -a /media/logs/go-live.log   & ) && \
+( /usr/local/bin/go-proxy  2>&1 | tee -a /media/logs/go-proxy.log  & ) && \
 ( echo "Go upload service handles /api/*;" ) && \
 ( echo "Go proxy service handles /api/session*, /api/nftables*;" ) && \
 nginx -g 'daemon off;'

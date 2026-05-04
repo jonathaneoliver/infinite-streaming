@@ -1,0 +1,40 @@
+services:
+  go-server:
+    container_name: test-oobe-server
+    ports:
+      !override
+      - "26000:30000"
+      - "26081:30081"
+      - "26181:30181"
+      - "26281:30281"
+      - "26381:30381"
+      - "26481:30481"
+      - "26581:30581"
+      - "26681:30681"
+      - "26781:30781"
+      - "26881:30881"
+  clickhouse:
+    container_name: test-oobe-clickhouse
+    # Bind to loopback only — see docker-compose.yml. Host-side migrations
+    # / ad-hoc curl reach it via 127.0.0.1:26123; the forwarder + Grafana
+    # use the docker bridge.
+    ports:
+      !override
+      - "127.0.0.1:26123:8123"
+  grafana:
+    container_name: test-oobe-grafana
+    # No host port — reach Grafana through the test-oobe nginx /grafana/
+    # prefix (e.g. http://jonathanoliver-ubuntu.local:26000/grafana/).
+    ports: !override []
+    environment:
+      # Public root URL for the test-deploy-oobe box — overrides the
+      # docker-compose default localhost:30000 so Grafana's own redirects
+      # (login flow, etc.) land back on the right host:port.
+      - GF_SERVER_ROOT_URL=http://jonathanoliver-ubuntu.local:26000/grafana/
+  forwarder:
+    container_name: test-oobe-forwarder
+    environment:
+      - FORWARDER_SSE_URL=http://go-server:30081/api/sessions/stream
+      - FORWARDER_CLICKHOUSE_URL=http://clickhouse:8123
+      - FORWARDER_CLICKHOUSE_DB=infinite_streaming
+      - FORWARDER_CLICKHOUSE_TABLE=session_snapshots

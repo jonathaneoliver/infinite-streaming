@@ -1,4 +1,26 @@
 services:
+  # One-shot init container: pre-creates and chmods bind-mounted subdirs
+  # under $CONTENT_DIR that other services need writable but cannot
+  # create/chown themselves due to in-container UIDs (Grafana 472,
+  # forwarder distroless-nonroot 65532). All services that write under
+  # /media/logs or /media/grafana depend on this completing successfully
+  # so the perms are guaranteed in place before they start. Keeps the
+  # filesystem-prep concern out of go-server's launch.sh. See #383.
+  init-permissions:
+    image: alpine:3
+    # No container_name — compose auto-generates `<project>-init-permissions-1`
+    # so multiple test-deploy-* variants on the same host don't collide on
+    # this one-shot init container's name.
+    user: "0:0"
+    volumes:
+      - ${CONTENT_DIR:-./sample-content}:/media
+    command: >-
+      sh -c "mkdir -p /media/logs /media/grafana &&
+             chmod 0777 /media/logs /media/grafana"
+    restart: "no"
+    networks:
+      - app_network
+
   go-server:
     build: .
     image: infinite-streaming
@@ -51,6 +73,9 @@ services:
       - /go-live:size=4G,mode=755
     networks:
       - app_network
+    depends_on:
+      init-permissions:
+        condition: service_completed_successfully
     restart: unless-stopped
     stop_grace_period: 1s
 
@@ -62,7 +87,12 @@ services:
         soft: 262144
         hard: 262144
     volumes:
-      - clickhouse_data:/var/lib/clickhouse
+      # Bind-mount under $CONTENT_DIR so the analytics archive is
+      # inspectable/portable from the host (single rm -rf for full reset)
+      # and a soak run's data lives next to the originals it was generated
+      # from. Docker creates the host dir with root:root; ClickHouse's
+      # entrypoint chowns it to clickhouse:101 on first start. See #377.
+      - ${CONTENT_DIR:-./sample-content}/clickhouse:/var/lib/clickhouse
       - ./analytics/clickhouse/init.d:/docker-entrypoint-initdb.d:ro
     environment:
       - CLICKHOUSE_DB=infinite_streaming
@@ -82,14 +112,26 @@ services:
     build: ./analytics/go-forwarder
     image: infinite-streaming-forwarder
     container_name: infinite-streaming-forwarder
+    volumes:
+      # Mount the host media dir so the forwarder can append its stdout
+      # log to /media/logs/forwarder.log (matches the pattern used by the
+      # go-server backends in #377 and #383). go-server's launch.sh
+      # chmods /media/logs to 0777 so the forwarder's distroless nonroot
+      # user (UID 65532) can write.
+      - ${CONTENT_DIR:-./sample-content}:/media
     environment:
       - FORWARDER_SSE_URL=http://go-server:30081/api/sessions/stream
       - FORWARDER_CLICKHOUSE_URL=http://clickhouse:8123
       - FORWARDER_CLICKHOUSE_DB=infinite_streaming
       - FORWARDER_CLICKHOUSE_TABLE=session_snapshots
+      - FORWARDER_LOG_FILE=/media/logs/forwarder.log
     depends_on:
-      - clickhouse
-      - go-server
+      clickhouse:
+        condition: service_started
+      go-server:
+        condition: service_started
+      init-permissions:
+        condition: service_completed_successfully
     networks:
       - app_network
     restart: unless-stopped
@@ -130,19 +172,26 @@ services:
       - GF_INSTALL_PLUGINS=grafana-clickhouse-datasource
       - GF_PATHS_PROVISIONING=/etc/grafana/provisioning
     volumes:
-      - grafana_data:/var/lib/grafana
+      # Bind-mount under $CONTENT_DIR so dashboard tweaks, user accounts,
+      # and panel preferences survive a `compose down -v` and can be
+      # rsynced between deployments. Grafana's entrypoint chowns the
+      # data dir to UID 472 at startup, so an empty host dir works on
+      # first boot. See #383.
+      - ${CONTENT_DIR:-./sample-content}/grafana:/var/lib/grafana
       - ./analytics/grafana/provisioning:/etc/grafana/provisioning:ro
     # No host-side port — reach Grafana through the nginx /grafana/
     # prefix so the same basic-auth and host firewall rules apply.
     depends_on:
-      - clickhouse
+      clickhouse:
+        condition: service_started
+      # /media/grafana must be 0777 before Grafana (UID 472) tries to
+      # initialise its plugin / data dirs on the bind mount — see #383.
+      init-permissions:
+        condition: service_completed_successfully
     networks:
       - app_network
     restart: unless-stopped
 
-volumes:
-  clickhouse_data:
-  grafana_data:
 
 networks:
   app_network:

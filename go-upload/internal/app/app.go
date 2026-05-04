@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"log"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -176,7 +177,50 @@ func (a *App) ExecuteEncodingJob(ctx context.Context, jobID string) error {
 	if len(outputPaths) > 0 {
 		a.LogHub.Broadcast(jobID, util.TimestampLog("Output: "+util.JoinArgs(outputPaths)))
 	}
+	go warmGoLiveWorkers(outputPaths)
 	return nil
+}
+
+// warmGoLiveWorkers HEADs each just-encoded content's master playlist so
+// go-live spawns its per-content worker immediately after encode completes.
+// Without this, the user's first navigation to Mosaic / Playback hits a
+// cold-start race (encode just finished → user clicks Mosaic → go-live
+// hasn't yet read the new master → handler returns 503 → player imposes
+// its own slow backoff). We hit nginx (loopback :30000) so the request
+// follows the same routing the browser would.
+//
+// One HEAD per content is enough — go-live keys its worker map on content
+// alone (`hlsWorkers[content]` in api/handlers.go), and a single unified
+// worker emits LL, 2s, and 6s outputs from the same shared clock, so
+// spawning the worker via the LL master also primes 2s / 6s.
+//
+// Fire-and-forget on a goroutine so the encoder reports completion to the
+// SSE log hub without waiting on HTTP.
+func warmGoLiveWorkers(outputPaths []string) {
+	listenPort := os.Getenv("INFINITE_STREAM_LISTEN_PORT")
+	if listenPort == "" {
+		listenPort = "30000"
+	}
+	base := "http://127.0.0.1:" + listenPort + "/go-live"
+	client := &http.Client{Timeout: 10 * time.Second}
+	for _, name := range outputPaths {
+		// `outputPaths` from findOutputDirectories is a list of bare
+		// content names (e.g. "sample_clip_h264"), not full paths. Skip
+		// empties defensively but don't filepath.Base — that would just
+		// be a no-op on bare names and would silently produce a broken
+		// URL if the upstream ever switched to absolute paths.
+		if name == "" {
+			continue
+		}
+		req, err := http.NewRequest(http.MethodHead, base+"/"+name+"/master.m3u8", nil)
+		if err != nil {
+			continue
+		}
+		resp, err := client.Do(req)
+		if err == nil {
+			resp.Body.Close()
+		}
+	}
 }
 
 func (a *App) failJob(jobID, message string) error {
