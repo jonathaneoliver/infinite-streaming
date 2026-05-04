@@ -24,6 +24,7 @@
 		A1A1A1A1A1A1A1A1A1A10057 /* LivePreviewTile.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A11057 /* LivePreviewTile.swift */; };
 		A1A1A1A1A1A1A1A1A1A10058 /* PlaybackDiagnostics.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A11058 /* PlaybackDiagnostics.swift */; };
 		A1A1A1A1A1A1A1A1A1A10059 /* DecodeBudget.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A11059 /* DecodeBudget.swift */; };
+		A1A1A1A1A1A1A1A1A1A10060 /* DiagnosticHUD.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A11060 /* DiagnosticHUD.swift */; };
 		A1A1A1A1A1A1A1A1A1A1000D /* RequestTracker.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A1100D /* RequestTracker.swift */; };
 		A1A1A1A1A1A1A1A1A1A1000F /* LocalHTTPProxy.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A1100F /* LocalHTTPProxy.swift */; };
 		A1A1A1A1A1A1A1A1A1A10020 /* QRScannerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A11030 /* QRScannerView.swift */; };
@@ -45,6 +46,7 @@
 		A2A2A2A2A2A2A2A2A2A20057 /* LivePreviewTile.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A11057 /* LivePreviewTile.swift */; };
 		A2A2A2A2A2A2A2A2A2A20058 /* PlaybackDiagnostics.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A11058 /* PlaybackDiagnostics.swift */; };
 		A2A2A2A2A2A2A2A2A2A20059 /* DecodeBudget.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A11059 /* DecodeBudget.swift */; };
+		A2A2A2A2A2A2A2A2A2A20060 /* DiagnosticHUD.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A11060 /* DiagnosticHUD.swift */; };
 		A2A2A2A2A2A2A2A2A2A2000D /* RequestTracker.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A1100D /* RequestTracker.swift */; };
 		A2A2A2A2A2A2A2A2A2A2000F /* LocalHTTPProxy.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A1100F /* LocalHTTPProxy.swift */; };
 		A2A2A2A2A2A2A2A2A2A20020 /* QRScannerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A11030 /* QRScannerView.swift */; };
@@ -71,6 +73,7 @@
 		A1A1A1A1A1A1A1A1A1A11057 /* LivePreviewTile.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LivePreviewTile.swift; sourceTree = "<group>"; };
 		A1A1A1A1A1A1A1A1A1A11058 /* PlaybackDiagnostics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaybackDiagnostics.swift; sourceTree = "<group>"; };
 		A1A1A1A1A1A1A1A1A1A11059 /* DecodeBudget.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DecodeBudget.swift; sourceTree = "<group>"; };
+		A1A1A1A1A1A1A1A1A1A11060 /* DiagnosticHUD.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiagnosticHUD.swift; sourceTree = "<group>"; };
 		A1A1A1A1A1A1A1A1A1A1100D /* RequestTracker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RequestTracker.swift; sourceTree = "<group>"; };
 		A1A1A1A1A1A1A1A1A1A1100F /* LocalHTTPProxy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalHTTPProxy.swift; sourceTree = "<group>"; };
 		A1A1A1A1A1A1A1A1A1A11030 /* QRScannerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QRScannerView.swift; sourceTree = "<group>"; };
@@ -133,6 +136,7 @@
 				A1A1A1A1A1A1A1A1A1A11057 /* LivePreviewTile.swift */,
 				A1A1A1A1A1A1A1A1A1A11058 /* PlaybackDiagnostics.swift */,
 				A1A1A1A1A1A1A1A1A1A11059 /* DecodeBudget.swift */,
+				A1A1A1A1A1A1A1A1A1A11060 /* DiagnosticHUD.swift */,
 				A1A1A1A1A1A1A1A1A1A1100D /* RequestTracker.swift */,
 				A1A1A1A1A1A1A1A1A1A1100F /* LocalHTTPProxy.swift */,
 				A1A1A1A1A1A1A1A1A1A11030 /* QRScannerView.swift */,
@@ -282,6 +286,7 @@
 				A1A1A1A1A1A1A1A1A1A10057 /* LivePreviewTile.swift in Sources */,
 				A1A1A1A1A1A1A1A1A1A10058 /* PlaybackDiagnostics.swift in Sources */,
 				A1A1A1A1A1A1A1A1A1A10059 /* DecodeBudget.swift in Sources */,
+				A1A1A1A1A1A1A1A1A1A10060 /* DiagnosticHUD.swift in Sources */,
 				A1A1A1A1A1A1A1A1A1A1000D /* RequestTracker.swift in Sources */,
 				A1A1A1A1A1A1A1A1A1A1000F /* LocalHTTPProxy.swift in Sources */,
 				A1A1A1A1A1A1A1A1A1A10020 /* QRScannerView.swift in Sources */,
@@ -309,6 +314,7 @@
 				A2A2A2A2A2A2A2A2A2A20057 /* LivePreviewTile.swift in Sources */,
 				A2A2A2A2A2A2A2A2A2A20058 /* PlaybackDiagnostics.swift in Sources */,
 				A2A2A2A2A2A2A2A2A2A20059 /* DecodeBudget.swift in Sources */,
+				A2A2A2A2A2A2A2A2A2A20060 /* DiagnosticHUD.swift in Sources */,
 				A2A2A2A2A2A2A2A2A2A2000D /* RequestTracker.swift in Sources */,
 				A2A2A2A2A2A2A2A2A2A2000F /* LocalHTTPProxy.swift in Sources */,
 				A2A2A2A2A2A2A2A2A2A20020 /* QRScannerView.swift in Sources */,

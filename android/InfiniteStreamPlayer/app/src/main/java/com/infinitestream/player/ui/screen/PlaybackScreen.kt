@@ -184,33 +184,29 @@ fun PlaybackScreen(
             )
         }
 
-        // Top-right corner stack: shortcut hint sits on top, developer
-        // diagnostics sits below it. Stacking (vs. overlapping) means the
-        // hint stays visible when dev mode is on — otherwise the user
-        // loses the only signpost telling them how to get back into
-        // settings. (Top-left is reserved for source-video burnt-in
-        // overlays we don't control.)
-        Column(
+        // Top-right shortcut hint — the only signpost telling the user
+        // how to reveal the HUD. (Top-left is reserved for source-video
+        // burnt-in overlays we don't control.)
+        AnimatedVisibility(
+            visible = !state.hudVisible && !state.settingsOpen,
+            enter = fadeIn(), exit = fadeOut(),
             modifier = Modifier.align(Alignment.TopEnd).padding(Space.s5),
-            horizontalAlignment = Alignment.End,
         ) {
-            AnimatedVisibility(
-                visible = !state.hudVisible && !state.settingsOpen,
-                enter = fadeIn(), exit = fadeOut(),
-            ) {
-                Text(
-                    "▼ HUD",
-                    style = AppType.monoSm.copy(color = Tokens.fg.copy(alpha = 0.55f)),
-                )
-            }
-            AnimatedVisibility(
-                visible = state.developerMode && !state.settingsOpen,
-                enter = fadeIn(), exit = fadeOut(),
-            ) {
-                Box(modifier = Modifier.padding(top = Space.s2)) {
-                    DeveloperHud(vm)
-                }
-            }
+            Text(
+                "▼ HUD",
+                style = AppType.monoSm.copy(color = Tokens.fg.copy(alpha = 0.55f)),
+            )
+        }
+
+        // Mid-right diagnostic readout — gated on Developer mode. Same
+        // field list and units as the Apple DiagnosticHUD so an operator
+        // can read either readout during a cross-platform soak run.
+        AnimatedVisibility(
+            visible = state.developerMode && !state.settingsOpen,
+            enter = fadeIn(), exit = fadeOut(),
+            modifier = Modifier.align(Alignment.CenterEnd).padding(end = Space.s4),
+        ) {
+            DiagnosticHud(vm)
         }
 
         // Bottom HUD overlay — gradient + transport.
@@ -451,34 +447,127 @@ private fun Scrubber(player: ExoPlayer) {
     }
 }
 
+/**
+ * Mid-right semi-transparent diagnostic readout. Gated on Developer
+ * mode in [PlaybackScreen]. Pure formatting over `vm.player`,
+ * `vm.bandwidthMeter`, and the read-only accessors on [PlaybackMetrics].
+ *
+ * Companion to the Apple `DiagnosticHUD` SwiftUI view; field list,
+ * labels, and units must stay in lockstep so an operator can read
+ * either readout during a cross-platform soak run.
+ */
 @Composable
-private fun DeveloperHud(vm: PlayerViewModel) {
-    val resolution = remember { mutableStateOf("") }
-    val bitrate = remember { mutableStateOf("") }
-    val leases by vm.decoderLeases.collectAsStateWithLifecycle()
+private fun DiagnosticHud(vm: PlayerViewModel) {
+    var stateText by remember { mutableStateOf("—") }
+    // NET is the iOS-only LocalHTTPProxy per-chunk wire rate; we PATCH
+    // null for it on Android, so the row stays at "—".
+    val netText = "—"
+    var avgNetText by remember { mutableStateOf("—") }
+    var videoText by remember { mutableStateOf("—") }
+    var resText by remember { mutableStateOf("—") }
+    var bufferText by remember { mutableStateOf("—") }
+    var offsetText by remember { mutableStateOf("—") }
+    var shiftsText by remember { mutableStateOf("0") }
+    var stallsText by remember { mutableStateOf("0") }
+    var droppedText by remember { mutableStateOf("—") }
+
     LaunchedEffect(vm.player) {
         while (true) {
-            val f = vm.player.videoFormat
-            resolution.value = if (f != null && f.width > 0) "${f.width}x${f.height}" else "—"
-            val mbps = f?.bitrate?.takeIf { it > 0 }?.let { it / 1_000_000.0 }
-            val avg = vm.bandwidthMeter.bitrateEstimate.takeIf { it > 0 }?.let { it / 1_000_000.0 }
-            bitrate.value = buildString {
-                append("AVG ")
-                append(avg?.let { String.format("%.1f", it) } ?: "—")
-                append(" | PEAK ")
-                append(mbps?.let { String.format("%.1f", it) } ?: "—")
+            val player = vm.player
+            val metrics = vm.metricsRef
+
+            // STATE (+ waiting reason in parens when non-empty).
+            val s = (metrics?.currentMappedState() ?: "idle").uppercase()
+            val reason = metrics?.currentMappedWaitingReason().orEmpty()
+            stateText = if (reason.isEmpty()) s else "$s ($reason)"
+
+            // AVG NET = ExoPlayer's session-wide bandwidth estimate, the
+            // analogue of AVPlayer's observedBitrate that the iOS HUD
+            // reads. This is the same value we PATCH as
+            // `player_metrics_avg_network_bitrate_mbps`.
+            val avg = vm.bandwidthMeter.bitrateEstimate.takeIf { it > 0 }
+            avgNetText = avg?.let { String.format("%.2f Mbps", it / 1_000_000.0) } ?: "—"
+            val format = player.videoFormat
+            val videoBps = format?.bitrate?.takeIf { it > 0 }
+            videoText = videoBps?.let { String.format("%.2f Mbps", it / 1_000_000.0) } ?: "—"
+
+            // RES: video stream native resolution.
+            val vs = player.videoSize
+            resText = if (vs.width > 0 && vs.height > 0) "${vs.width}×${vs.height}" else "—"
+
+            // BUFFER: seconds of video ahead of playhead.
+            val bufMs = (player.bufferedPosition - player.currentPosition).coerceAtLeast(0)
+            bufferText = String.format("%.1fs", bufMs / 1000.0)
+
+            // OFFSET: ground-truth seconds behind live edge, derived from
+            // PROGRAM-DATE-TIME at the playhead. Falls back to ExoPlayer's
+            // getCurrentLiveOffset when the timeline doesn't carry a wall-
+            // clock origin.
+            offsetText = run {
+                val tl = player.currentTimeline
+                if (!tl.isEmpty) {
+                    val idx = player.currentMediaItemIndex
+                    if (idx in 0 until tl.windowCount) {
+                        val w = androidx.media3.common.Timeline.Window()
+                        tl.getWindow(idx, w)
+                        if (w.windowStartTimeMs != androidx.media3.common.C.TIME_UNSET) {
+                            val pdtMs = w.windowStartTimeMs + player.currentPosition
+                            return@run String.format("%.1fs", (System.currentTimeMillis() - pdtMs) / 1000.0)
+                        }
+                    }
+                }
+                val live = player.currentLiveOffset
+                if (live != androidx.media3.common.C.TIME_UNSET) String.format("%.1fs", live / 1000.0) else "—"
             }
+
+            // SHIFTS / STALLS / DROPPED — pulled from PlaybackMetrics counters.
+            shiftsText = (metrics?.profileShiftCount ?: 0).toString()
+            val stalls = metrics?.stallCount ?: 0
+            stallsText = if (stalls == 0) "0"
+                else String.format("%d (last %.1fs)", stalls, metrics?.lastStallSeconds ?: 0.0)
+            droppedText = metrics?.droppedFrames?.toString() ?: "—"
+
             delay(1000)
         }
     }
-    Column(horizontalAlignment = Alignment.End) {
-        Text(bitrate.value, style = AppType.monoSm.copy(color = Tokens.fgDim))
-        Text(resolution.value, style = AppType.monoSm.copy(color = Tokens.fgDim))
-        // Live count of preview-tile decoder leases that the main player
-        // gates on during Home → Playback navigation. 0 on the playback
-        // screen unless something is leaking; non-zero briefly during
-        // the transition window.
-        Text("DECODE LEASES $leases", style = AppType.monoSm.copy(color = Tokens.fgDim))
+
+    Column(
+        modifier = Modifier
+            .width(240.dp)
+            .clip(RoundedCornerShape(Radius.row))
+            .background(Color.Black.copy(alpha = 0.45f))
+            .padding(horizontal = Space.s3, vertical = Space.s2),
+    ) {
+        DiagnosticRow("STATE", stateText)
+        DiagnosticRow("NET", netText)
+        DiagnosticRow("AVG NET", avgNetText)
+        DiagnosticRow("VIDEO", videoText)
+        DiagnosticRow("RES", resText)
+        DiagnosticRow("BUFFER", bufferText)
+        DiagnosticRow("OFFSET", offsetText)
+        DiagnosticRow("SHIFTS", shiftsText)
+        DiagnosticRow("STALLS", stallsText)
+        DiagnosticRow("DROPPED", droppedText)
+    }
+}
+
+@Composable
+private fun DiagnosticRow(label: String, value: String) {
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            label,
+            style = AppType.monoSm.copy(color = Tokens.diag),
+            modifier = Modifier.width(72.dp),
+        )
+        Spacer(Modifier.width(Space.s1))
+        Text(
+            value,
+            style = AppType.monoSm.copy(color = Tokens.fg),
+            maxLines = 1,
+        )
     }
 }
 

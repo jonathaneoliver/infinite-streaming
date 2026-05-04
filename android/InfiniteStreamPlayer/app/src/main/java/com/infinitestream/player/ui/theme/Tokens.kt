@@ -36,6 +36,11 @@ object Tokens {
     // LIVE badge: coral red (oklch(0.70 0.18 25) ≈ #EC5E4A).
     val live    = Color(0xFFEC5E4A)
 
+    // Cool blue used exclusively for diagnostic / dev-mode overlays.
+    // Matches Apple Tokens.diag so the HUD palette is consistent
+    // across platforms.
+    val diag    = Color(0xFF5BBDF2)
+
     // Online status (green).
     val ok      = Color(0xFF4ADE80)
     val offline = Color(0xFF6B6F77)

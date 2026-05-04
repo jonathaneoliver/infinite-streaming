@@ -609,6 +609,14 @@ public final class PlaybackMetrics {
         return p;
     }
 
+    /** Read-only counters surfaced for the on-device DiagnosticHud. */
+    public int getStallCount() { return stallCount; }
+    public double getLastStallSeconds() { return lastStallDurationS; }
+    public long getDroppedFrames() { return droppedFramesTotal; }
+    public int getProfileShiftCount() { return profileShiftCount; }
+    public String currentMappedState() { return mapState(); }
+    public String currentMappedWaitingReason() { return mapWaitingReason(); }
+
     private String mapState() {
         // Lowercase canonical names — matches Apple PlaybackDiagnostics,
         // Android-test ExoPlayerTestApp, web embed, and Roku, so the
