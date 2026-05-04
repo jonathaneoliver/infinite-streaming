@@ -69,6 +69,15 @@ func DatabasePathFromEnv() string {
 }
 
 func NewSQLiteStore(dbPath string) (*SQLiteStore, error) {
+	// Defense in depth: SQLite cannot create the file in a non-existent
+	// directory. main.go already calls app.EnsureDirs(cfg) before reaching
+	// here, but a future caller that forgets that ordering would hit the
+	// same paper-cut PR #343 fixed at the call site. Self-protect.
+	if dir := filepath.Dir(dbPath); dir != "" && dir != "." {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return nil, fmt.Errorf("create sqlite parent dir %s: %w", dir, err)
+		}
+	}
 	// WAL mode allows concurrent reads alongside a single writer.
 	// busy_timeout makes writers wait briefly on contention instead of failing
 	// immediately with SQLITE_BUSY.

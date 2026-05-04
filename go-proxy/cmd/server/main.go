@@ -19,6 +19,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"runtime"
 	"sort"
@@ -625,6 +626,15 @@ const (
 func newSessionEventStore(path string) (*SessionEventStore, error) {
 	if strings.TrimSpace(path) == "" {
 		path = defaultSessionEventsDB
+	}
+	// SQLite cannot create the file in a non-existent directory; the
+	// default /tmp path is always present, but operators overriding
+	// GO_PROXY_SESSION_EVENTS_DB to a custom path otherwise hit the
+	// same db.Ping() failure that PR #343 fixed for go-upload.
+	if dir := filepath.Dir(path); dir != "" && dir != "." {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return nil, fmt.Errorf("create session-events parent dir %s: %w", dir, err)
+		}
 	}
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
