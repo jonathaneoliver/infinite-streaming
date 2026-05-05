@@ -1258,18 +1258,25 @@ func (t *TcTrafficManager) UpdateNetem(port int, delayMs int, lossPct float64) e
 	if err := t.ensurePrioLeafForPort(port); err != nil {
 		return err
 	}
-	jitter := delayMs / 2
 	for band := 1; band <= 3; band++ {
 		bandParent := fmt.Sprintf("%s0:%d", portSuffix, band) // e.g. 1810:1
 		bandHandle := fmt.Sprintf("%s%d:", portSuffix, band)  // e.g. 1811:
 		args := []string{"qdisc", "replace", "dev", t.interfaceName,
 			"parent", bandParent, "handle", bandHandle, "netem"}
 		if delayMs > 0 {
-			if jitter > 0 {
-				args = append(args, "delay", fmt.Sprintf("%dms", delayMs), fmt.Sprintf("%dms", jitter), "distribution", "normal")
-			} else {
-				args = append(args, "delay", fmt.Sprintf("%dms", delayMs))
-			}
+			// Exact configured delay — no auto-jitter. Earlier
+			// versions added a normal-distributed `delay/2` jitter
+			// term to "look realistic", but it meant per-packet
+			// delay was sampled from N(mean=delay, stddev=delay/2)
+			// — so a configured 25 ms could yield individual
+			// packets in [13, 37] ms (and below netem-clamp-zero
+			// in the long tail). The path-ping chart's per-window
+			// min then dipped below the configured value, which
+			// surprised users (and is the wrong mental model for
+			// "I set 25 ms of delay"). If we ever expose a jitter
+			// dial in the UI, plumb it through as a separate
+			// param rather than auto-deriving from the delay.
+			args = append(args, "delay", fmt.Sprintf("%dms", delayMs))
 		}
 		if lossPct > 0 {
 			args = append(args, "loss", fmt.Sprintf("%.2f%%", lossPct))
