@@ -1642,6 +1642,14 @@ func (a *App) handleSessionStream(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("X-Accel-Buffering", "no")
 
+	// Tell EventSource to retry every 1s (default 3s) on a clean
+	// reconnect path. Combined with the client-side watchdog this
+	// keeps recovery snappy after a server redeploy.
+	if _, err := w.Write([]byte("retry: 1000\n\n")); err != nil {
+		return
+	}
+	flusher.Flush()
+
 	playerIDFilter := r.URL.Query().Get("player_id")
 
 	a.removeInactiveSessions()
@@ -1662,10 +1670,24 @@ func (a *App) handleSessionStream(w http.ResponseWriter, r *http.Request) {
 	clientID, ch := a.sessionsHub.AddClient(playerIDFilter)
 	defer a.sessionsHub.RemoveClient(clientID)
 
+	// Heartbeat so the client can distinguish "connection alive but
+	// idle" from "connection dead". 5 s cadence pairs with the
+	// dashboard's 12 s watchdog (one missed heartbeat + 2 s margin)
+	// so a silent SSE connection recovers within ~12 s instead of
+	// the original 30 s. Also keeps middlebox idle timeouts from
+	// silently dropping the SSE TCP connection.
+	heartbeat := time.NewTicker(5 * time.Second)
+	defer heartbeat.Stop()
+
 	for {
 		select {
 		case <-r.Context().Done():
 			return
+		case <-heartbeat.C:
+			if _, err := w.Write([]byte("event: heartbeat\ndata: {}\n\n")); err != nil {
+				return
+			}
+			flusher.Flush()
 		case event, ok := <-ch:
 			if !ok {
 				return
