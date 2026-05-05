@@ -2,7 +2,7 @@
 
 The dashboard is a thin client over this API. Every fault-injection action, every shaping change, every session control the UI exposes is available here — so anything you can do in the browser, a test script or CI job can do too. There are no UI-only controls.
 
-All endpoints are exposed through nginx on port `30000` (Docker Compose and k3s release) or `40000` (k3s dev). nginx routes them to the backing service based on path.
+All endpoints are exposed through nginx on port `30000` (Docker Compose and k3d release) or `40000` (k3d dev). nginx routes them to the backing service based on path.
 
 For the **fault-injection** surface (`/api/session/*` patch payloads, `/api/nftables/*` shaping), see [`docs/FAULT_INJECTION.md`](FAULT_INJECTION.md) — this page only summarises those endpoints and points to the full reference.
 

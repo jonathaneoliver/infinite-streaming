@@ -23,7 +23,72 @@ services:
     environment:
       - INFINITE_STREAM_MAX_SESSIONS=8
       - INFINITE_STREAM_TC_INTERFACE=eth0
+      - INFINITE_STREAM_ENABLE_ANALYTICS=1
+      - INFINITE_STREAM_FORWARDER_HOST=forwarder
+      - INFINITE_STREAM_GRAFANA_HOST=grafana
     tmpfs:
       - /go-live:size=4G,mode=755
+    networks:
+      - test_registry_net
+    depends_on:
+      - clickhouse
+      - forwarder
+      - grafana
     restart: unless-stopped
     stop_grace_period: 1s
+
+  # Analytics tier — pulled from the same private registry as the main
+  # image, so the registry-pull install path has full feature parity
+  # with `make run`.
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.8-alpine
+    container_name: test-registry-clickhouse
+    environment:
+      - CLICKHOUSE_DB=infinite_streaming
+      - CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT=1
+      - CLICKHOUSE_SKIP_USER_SETUP=1
+    ports:
+      - "127.0.0.1:25123:8123"
+    volumes:
+      - ${CONTENT_DIR:-./sample-content}/analytics:/var/lib/clickhouse
+      - ../../analytics/clickhouse/init.d:/docker-entrypoint-initdb.d:ro
+    networks:
+      - test_registry_net
+    restart: unless-stopped
+
+  forwarder:
+    image: ${K3S_REGISTRY}/infinite-streaming-forwarder:dev
+    container_name: test-registry-forwarder
+    environment:
+      - FORWARDER_SSE_URL=http://go-server:30081/api/sessions/stream
+      - FORWARDER_CLICKHOUSE_URL=http://clickhouse:8123
+      - FORWARDER_CLICKHOUSE_DB=infinite_streaming
+      - FORWARDER_CLICKHOUSE_TABLE=session_snapshots
+    volumes:
+      - ${CONTENT_DIR:-./sample-content}/logs:/media/logs
+    networks:
+      - test_registry_net
+    depends_on:
+      - clickhouse
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana-oss:11.3.0
+    container_name: test-registry-grafana
+    environment:
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Viewer
+      - GF_INSTALL_PLUGINS=grafana-clickhouse-datasource
+      - GF_SERVER_ROOT_URL=http://localhost:25000/grafana/
+      - GF_SERVER_SERVE_FROM_SUB_PATH=true
+      - GF_LIVE_ALLOWED_ORIGINS=*
+    volumes:
+      - ../../analytics/grafana/provisioning:/etc/grafana/provisioning:ro
+    networks:
+      - test_registry_net
+    restart: unless-stopped
+
+networks:
+  test_registry_net:
+    driver: bridge

@@ -37,11 +37,15 @@ Then:
 - Grafana dashboard: <http://localhost:30300/d/is-session-analytics>
 - Replay a session: <http://localhost:30000/testing.html?replay=1&session=SESSION_ID>
 
-## k3s
+## k3d
 
-Apply `k8s-analytics.yaml` alongside the main deployment. Set
-`ANALYTICS_SSE_URL` (default `http://infinite-streaming-dev:30081/api/sessions/stream`)
-and `ANALYTICS_GRAFANA_NODEPORT`.
+`make deploy` and `make deploy-release` apply `k8s-analytics.yaml`
+into the matching k3d cluster automatically — one analytics tier per
+cluster (each cluster has its own ClickHouse PVC, forwarder, and
+Grafana). The forwarder's SSE source is the same in-cluster URL in
+both clusters (`http://infinite-streaming:30081/api/sessions/stream`)
+because each cluster has exactly one `infinite-streaming` Service at
+NodePort 30081.
 
 ## Replay mode
 
@@ -104,18 +108,23 @@ When `INFINITE_STREAM_AUTH_HTPASSWD` is unset (the default), auth is
 disabled — same behaviour as before. With it set, the dashboard pages,
 `/analytics/api/*`, and `/grafana/*` all return 401 without credentials.
 
-### k3s deployment (lenovo)
+### k3d deployment (lenovo)
+
+Both clusters use the same Deployment name (`infinite-streaming`); pick the right kubeconfig per cluster.
 
 ```sh
+# Pick a cluster (dev or release)
+export KUBECONFIG=~/.config/k3d/smashing-release-kubeconfig.yaml
+# (or smashing-dev-kubeconfig.yaml for the dev cluster)
+
 # Generate htpasswd
 docker run --rm httpd:alpine htpasswd -nbB myuser 'mypass' > /tmp/htpasswd
 
-# Create a Secret holding the file
+# Create a Secret holding the file (per-cluster)
 kubectl create secret generic infinite-streaming-auth \
   --from-file=htpasswd=/tmp/htpasswd
 
-# Patch the deployment (use `infinite-streaming` for release,
-# `infinite-streaming-dev` for the dev stack)
+# Patch the deployment (same name in both clusters)
 kubectl patch deployment infinite-streaming --patch '
 spec:
   template:
@@ -143,7 +152,7 @@ curl -s -o /dev/null -w '%{http_code}\n' -u myuser:mypass http://lenovo.local:30
 # → 200
 ```
 
-Rotate the password by re-creating the secret and restarting the rollout:
+Rotate the password by re-creating the secret and restarting the rollout (in the same cluster context):
 
 ```sh
 docker run --rm httpd:alpine htpasswd -nbB myuser 'newpass' > /tmp/htpasswd

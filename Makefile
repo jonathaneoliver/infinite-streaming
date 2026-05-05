@@ -7,10 +7,7 @@ export
 
 
 K3S_SSH_HOST ?= user@your-k3s-host
-K3S_KUBECONFIG ?= /home/user/.kube/config
 GO_SERVER_IMAGE ?= ghcr.io/jonathaneoliver/infinite-streaming:latest
-K8S_MANIFESTS ?= k8s-infinite-streaming.yaml
-K8S_DEPLOYMENT ?= infinite-streaming
 IOS_SIM_DEVICE ?= iPad Pro 13-inch (M5)
 IOS_APP_BUNDLE_ID ?= com.jeoliver.InfiniteStreamPlayer
 IOS_API_BASE ?= http://$(K3S_HOST):40000
@@ -304,7 +301,7 @@ test-go:
 	@echo "=== go-upload ==="
 	cd go-upload && go vet ./... && go test -race ./...
 
-test-deploy-all: test-deploy-compose test-deploy-run test-deploy-ghcr test-deploy-registry
+test-deploy-all: test-deploy-compose test-deploy-ghcr test-deploy-registry
 
 test-deploy-dev:
 	@echo "=== Dev: local working tree (port 21000) ==="
@@ -385,7 +382,7 @@ test-clean-dev:
 	ssh $(TEST_SSH) 'docker rm -f test-dev-server 2>/dev/null'
 
 test-clean:
-	ssh $(TEST_SSH) 'docker rm -f test-dev-server test-compose-server test-docker-run test-ghcr-server test-registry-server test-oobe-server 2>/dev/null; docker network prune -f 2>/dev/null'
+	ssh $(TEST_SSH) 'docker rm -f test-dev-server test-compose-server test-ghcr-server test-registry-server test-oobe-server 2>/dev/null; docker network prune -f 2>/dev/null'
 
 test-status:
 	@ssh $(TEST_SSH) 'for p in 21000 22000 23000 24000 25000 26000; do \
@@ -464,16 +461,12 @@ test-deploy-compose:
 	scp tests/deploy/override-compose.yml $(TEST_SSH):~/test-compose/docker-compose.override.yml
 	ssh $(TEST_SSH) 'cd ~/test-compose && docker compose build && docker compose up -d'
 
-test-deploy-run:
-	@echo "=== Option 2: Docker run (port 23000) ==="
-	ssh $(TEST_SSH) 'docker rm -f test-docker-run 2>/dev/null; \
-		docker run -d --name test-docker-run --cap-add NET_ADMIN --privileged \
-		-p 23000:30000 -p 23081:30081 -p 23181:30181 -p 23281:30281 -p 23381:30381 -p 23481:30481 \
-		-p 23581:30581 -p 23681:30681 -p 23781:30781 -p 23881:30881 \
-		-e INFINITE_STREAM_RENDEZVOUS_URL=$(INFINITE_STREAM_RENDEZVOUS_URL) \
-		-e INFINITE_STREAM_ANNOUNCE_URL=http://$(TEST_HOST):23000 \
-		-v $(TEST_MEDIA_DIR):/media \
-		infinite-streaming:latest /sbin/launch.sh 1'
+# `test-deploy-run` (the bare `docker run` of a single container)
+# was removed in #394 — the install method it tested can't support
+# analytics by definition (one image, no sidecars), and analytics is
+# now a baseline expectation in every deploy path. The
+# `test-deploy-{compose,ghcr,registry}` variants cover the actual
+# install methods documented in the README.
 
 test-deploy-ghcr:
 	@echo "=== Option 3: GHCR pre-built (port 24000) ==="

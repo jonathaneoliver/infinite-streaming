@@ -36,12 +36,82 @@ services:
       - INFINITE_STREAM_UPSTREAM_PORT=30000
       - INFINITE_STREAM_MAX_SESSIONS=8
       - INFINITE_STREAM_TC_INTERFACE=eth0
+      # Wire nginx /analytics/api/* and /grafana/* to the analytics
+      # sidecar services below. Same gating pattern as base compose;
+      # missing/down sidecar yields a 502 from nginx, not a startup
+      # crash (#390).
+      - INFINITE_STREAM_ENABLE_ANALYTICS=1
+      - INFINITE_STREAM_FORWARDER_HOST=forwarder
+      - INFINITE_STREAM_GRAFANA_HOST=grafana
     tmpfs:
       - /go-live:size=4G,mode=755
     networks:
       - app_network
+    depends_on:
+      - clickhouse
+      - forwarder
+      - grafana
     restart: unless-stopped
     stop_grace_period: 1s
+
+  # ── Analytics sidecar (parity with base docker-compose.yml) ──────────
+  # Same shape as the source-build path — only the images come from
+  # GHCR instead of being built locally. ClickHouse + Grafana are
+  # upstream public images either way.
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.8-alpine
+    container_name: infinite-streaming-clickhouse
+    environment:
+      - CLICKHOUSE_DB=infinite_streaming
+      - CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT=1
+      - CLICKHOUSE_SKIP_USER_SETUP=1
+    # Loopback-only — same posture as base compose. Internal services
+    # reach it via the bridge network; ad-hoc curl from the host uses
+    # 127.0.0.1:30123. Never exposed on the LAN by default.
+    ports:
+      - "127.0.0.1:30123:8123"
+    volumes:
+      - ${CONTENT_DIR:-./sample-content}/analytics:/var/lib/clickhouse
+      - ./analytics/clickhouse/init.d:/docker-entrypoint-initdb.d:ro
+    networks:
+      - app_network
+    restart: unless-stopped
+
+  forwarder:
+    image: ghcr.io/jonathaneoliver/infinite-streaming-forwarder:latest
+    container_name: infinite-streaming-forwarder
+    environment:
+      - FORWARDER_SSE_URL=http://go-server:30081/api/sessions/stream
+      - FORWARDER_CLICKHOUSE_URL=http://clickhouse:8123
+      - FORWARDER_CLICKHOUSE_DB=infinite_streaming
+      - FORWARDER_CLICKHOUSE_TABLE=session_snapshots
+    volumes:
+      - ${CONTENT_DIR:-./sample-content}/logs:/media/logs
+    networks:
+      - app_network
+    depends_on:
+      - clickhouse
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana-oss:11.3.0
+    container_name: infinite-streaming-grafana
+    environment:
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Viewer
+      - GF_AUTH_DISABLE_LOGIN_FORM=false
+      - GF_INSTALL_PLUGINS=grafana-clickhouse-datasource
+      - GF_SERVER_ROOT_URL=http://localhost:30000/grafana/
+      - GF_SERVER_SERVE_FROM_SUB_PATH=true
+      - GF_LIVE_ALLOWED_ORIGINS=*
+    # No host port — reach Grafana through nginx at /grafana/ where
+    # opt-in basic auth applies uniformly (see CLAUDE.md WAN runbook).
+    volumes:
+      - ./analytics/grafana/provisioning:/etc/grafana/provisioning:ro
+    networks:
+      - app_network
+    restart: unless-stopped
 
 networks:
   app_network:
