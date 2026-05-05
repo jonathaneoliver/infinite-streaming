@@ -13,6 +13,9 @@ datasources:
       defaultDatabase: infinite_streaming
       tlsSkipVerify: true
       username: default
-    secureJsonData:
-      password: ""
+    # secureJsonData.password is intentionally omitted — ClickHouse's
+    # default user has no password (CLICKHOUSE_SKIP_USER_SETUP=1 in
+    # docker-compose / k8s manifest), and Grafana skips the field
+    # upstream when not set. Setting an empty literal here would trip
+    # CodeQL without changing behavior.
     editable: true

@@ -502,8 +502,11 @@ data:
           defaultDatabase: infinite_streaming
           tlsSkipVerify: true
           username: default
-        secureJsonData:
-          password: ""
+        # secureJsonData.password is intentionally omitted — ClickHouse's
+        # default user has no password (CLICKHOUSE_SKIP_USER_SETUP=1 in
+        # the StatefulSet env below), and Grafana skips the field
+        # upstream when not set. Setting an empty literal here would
+        # trip CodeQL without changing behavior.
         editable: true
 ---
 apiVersion: v1
