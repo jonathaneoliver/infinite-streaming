@@ -4332,7 +4332,11 @@
                             },
                             zoom: buildUnifiedChartZoomOptions(sessionId)
                         },
-                        layout: { padding: { right: RIGHT_AXIS_PAD_PX } },
+                        // No layout.padding.right — the y1 axis below
+                        // already reserves RIGHT_AXIS_PAD_PX. Adding
+                        // both stacks them and pushes the plot's right
+                        // edge inward, mis-aligning with the bandwidth
+                        // / buffer / FPS charts above and below.
                         scales: {
                             x: {
                                 type: 'linear',
