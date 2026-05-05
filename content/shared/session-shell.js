@@ -4196,7 +4196,14 @@
                         rto: point.rto,
                         pathPing: point.pathPing
                     };
-                });
+                })
+                // Defensive sort: a Chart.js line chart connects points
+                // in array order. Non-monotonic x (player clock skew,
+                // duplicate snapshots replayed by the SSE pipeline,
+                // re-broadcasts at queue-flush boundaries) would draw
+                // the line backwards and forwards. Sorting by x makes
+                // the line strictly monotonic regardless of push order.
+                .sort((a, b) => a.x - b.x);
             const avgData = points.map(p => ({ x: p.x, y: p.avg }));
             const maxData = points.map(p => ({ x: p.x, y: p.max }));
             const minData = points.map(p => ({ x: p.x, y: p.min }));

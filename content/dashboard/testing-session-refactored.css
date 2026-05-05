@@ -526,7 +526,8 @@
 }
 
 .bandwidth-chart,
-.buffer-depth-chart {
+.buffer-depth-chart,
+.rtt-chart {
     width: 100%;
     height: auto;
 }
@@ -537,6 +538,10 @@
 
 .buffer-depth-chart {
     height: 170px;
+}
+
+.rtt-chart {
+    height: 180px;
 }
 
 /* ============================================================================
@@ -1432,6 +1437,7 @@ button[data-action="reset-bitrate-zoom"].zoom-active::before {
 .chart-wrap.chart-expanded .bandwidth-chart { height: 660px !important; }
 .chart-wrap.chart-expanded .buffer-depth-chart { height: 510px !important; }
 .chart-wrap.chart-expanded .video-fps-chart { height: 510px !important; }
+.chart-wrap.chart-expanded .rtt-chart { height: 510px !important; }
 
 /* ============================================================================
    Live/Pause toggle button (chart-live highlight + pulsing dot).
