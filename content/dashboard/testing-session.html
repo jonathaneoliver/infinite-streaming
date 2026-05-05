@@ -734,6 +734,11 @@
         let sessionPollLastAppliedSeq = 0;
         let sessionsStream = null;
         let sessionPollTimer = null;
+        // Same SSE-reconnect plumbing as session-live.js — without
+        // this a server redeploy strands the testing-session page on
+        // its 1s polling fallback forever (no path back to SSE).
+        let sseReconnectTimer = null;
+        const SSE_RETRY_MS = 2000;
         const failureSaveTimers = new Map();
         const failureSaveFields = new Map();
         let playerEstimatedMbps = null;
@@ -6414,8 +6419,25 @@
         function startSessionStream(playerId) {
             if (!window.EventSource) return false;
             if (!playerId) return false;
+            if (sseReconnectTimer !== null) {
+                clearTimeout(sseReconnectTimer);
+                sseReconnectTimer = null;
+            }
             const source = new EventSource('/api/sessions/stream?player_id=' + encodeURIComponent(playerId));
             sessionsStream = source;
+            source.addEventListener('open', () => {
+                // Server-side sessionsBroadcastSeq resets across
+                // container restarts; clear our last-seen revision
+                // so we don't compute a bogus "missed N updates"
+                // gap on the first post-reconnect event.
+                sseLastRevision = 0;
+                // SSE is back — kill any polling fallback we
+                // installed during the outage.
+                if (sessionPollTimer) {
+                    clearInterval(sessionPollTimer);
+                    sessionPollTimer = null;
+                }
+            });
             source.addEventListener('sessions', (event) => {
                 try {
                     const payload = parseSessionsStreamPayload(event);
@@ -6477,11 +6499,20 @@
                 }
             });
             source.addEventListener('error', () => {
-                if (source.readyState === EventSource.CLOSED) {
-                    source.close();
-                    sessionsStream = null;
-                    startSessionPolling(playerId);
-                }
+                // CONNECTING means EventSource is auto-retrying
+                // already — leave it alone. CLOSED means the browser
+                // gave up; start the 1s polling fallback as a safety
+                // net AND queue an SSE retry so we don't get stuck
+                // on polling after a server redeploy.
+                if (source.readyState !== EventSource.CLOSED) return;
+                source.close();
+                sessionsStream = null;
+                startSessionPolling(playerId);
+                if (sseReconnectTimer !== null) return;
+                sseReconnectTimer = setTimeout(() => {
+                    sseReconnectTimer = null;
+                    startSessionStream(playerId);
+                }, SSE_RETRY_MS);
             });
             return true;
         }
