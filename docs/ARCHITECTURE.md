@@ -8,11 +8,10 @@ InfiniteStream runs as a **single Docker container** with four cooperating proce
 |---|---|---|
 | `go-live` | 8010 | Dynamic HLS/DASH manifest generation (LL + 2s + 6s segment variants) from short VOD content |
 | `go-upload` | 8003 | Upload API, encoding job orchestration, content discovery |
-| `go-proxy` | 30081 (base) + per-session ports | Failure-injection proxy and traffic shaping |
+| `go-proxy` | 30081 (base) + per-session ports | Failure-injection proxy + traffic shaping; holds the per-session state map in-process and broadcasts changes via SSE |
 | `nginx` | 30000 | Static dashboard + routing to the three Go services |
-| `memcached` | 11211 (internal only) | Session state for go-proxy |
 
-All four run in the same container. The only optional external dependency at runtime is a Cloudflare Worker for client-side server discovery (see [Server discovery](#server-discovery) below) — disable it by leaving `INFINITE_STREAM_RENDEZVOUS_URL` unset.
+All three Go services + nginx run in the same container. The only optional external dependency at runtime is a Cloudflare Worker for client-side server discovery (see [Server discovery](#server-discovery) below) — disable it by leaving `INFINITE_STREAM_RENDEZVOUS_URL` unset.
 
 ## High-level flow
 

@@ -487,9 +487,8 @@ Point at any of them as a starting template for a new platform.
 |---|---|---|
 | `go-live` | 8010 | LL-HLS + LL-DASH generator (2s / 6s / LL segment variants) |
 | `go-upload` | 8003 | Upload API, encoding job orchestration, content discovery |
-| `go-proxy` | 30081 (+ per-session ports) | Failure injection, traffic shaping, SSE session stream |
+| `go-proxy` | 30081 (+ per-session ports) | Failure injection, traffic shaping, SSE session stream, in-process session-state map |
 | `nginx` | 30000 | Routing, static dashboard |
-| `memcached` | 11211 | Session state (internal) |
 
 ### Live stream generation
 
