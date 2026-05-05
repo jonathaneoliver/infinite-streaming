@@ -1264,19 +1264,23 @@ func (t *TcTrafficManager) UpdateNetem(port int, delayMs int, lossPct float64) e
 		args := []string{"qdisc", "replace", "dev", t.interfaceName,
 			"parent", bandParent, "handle", bandHandle, "netem"}
 		if delayMs > 0 {
-			// Exact configured delay — no auto-jitter. Earlier
-			// versions added a normal-distributed `delay/2` jitter
-			// term to "look realistic", but it meant per-packet
-			// delay was sampled from N(mean=delay, stddev=delay/2)
-			// — so a configured 25 ms could yield individual
-			// packets in [13, 37] ms (and below netem-clamp-zero
-			// in the long tail). The path-ping chart's per-window
-			// min then dipped below the configured value, which
-			// surprised users (and is the wrong mental model for
-			// "I set 25 ms of delay"). If we ever expose a jitter
-			// dial in the UI, plumb it through as a separate
-			// param rather than auto-deriving from the delay.
-			args = append(args, "delay", fmt.Sprintf("%dms", delayMs))
+			// Tight Gaussian: stddev = 5% of mean. For delay=25 ms
+			// that's ~1 ms stddev, so ~99.7% of per-packet delays
+			// land in [22, 28] ms — variance for ABR/jitter-aware
+			// testing without dominating the configured value.
+			// Earlier `delay/2` was way too wide (a 25 ms config
+			// could draw [13, 37] ms with normal distribution and
+			// dip below netem's clamp-at-zero floor in the long
+			// tail), which violated the "I set 25 ms" mental model.
+			// Integer-divide rounds small delays (≤19 ms) to zero
+			// jitter — fine: those configs are testing low-RTT
+			// paths where jitter noise would be the dominant signal.
+			jitter := delayMs / 20
+			if jitter > 0 {
+				args = append(args, "delay", fmt.Sprintf("%dms", delayMs), fmt.Sprintf("%dms", jitter), "distribution", "normal")
+			} else {
+				args = append(args, "delay", fmt.Sprintf("%dms", delayMs))
+			}
 		}
 		if lossPct > 0 {
 			args = append(args, "loss", fmt.Sprintf("%.2f%%", lossPct))
