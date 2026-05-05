@@ -739,14 +739,14 @@
         // its 1s polling fallback forever (no path back to SSE).
         let sseReconnectTimer = null;
         const SSE_RETRY_MS = 2000;
-        // Watchdog: server sends a `heartbeat` SSE event every 15 s.
-        // No event of any kind within 30 s ⇒ connection is dead in
+        // Watchdog: server sends a `heartbeat` SSE event every 5 s.
+        // No event of any kind within 12 s ⇒ connection is dead in
         // some way the EventSource state machine hasn't surfaced
         // (browser stuck CONNECTING with silent retry failures, or
-        // similar). Force-close + reopen so we don't go silent.
+        // similar). 12 s allows for one missed heartbeat + jitter.
         let sseLastEventAt = Date.now();
         let sseWatchdogTimer = null;
-        const SSE_WATCHDOG_MS = 30000;
+        const SSE_WATCHDOG_MS = 12000;
         const failureSaveTimers = new Map();
         const failureSaveFields = new Map();
         let playerEstimatedMbps = null;
@@ -6426,6 +6426,8 @@
 
         function ensureSseWatchdog(playerId) {
             if (sseWatchdogTimer !== null) return;
+            // Tick at half the budget so worst-case detection is
+            // one tick + the budget itself.
             sseWatchdogTimer = setInterval(() => {
                 if (Date.now() - sseLastEventAt < SSE_WATCHDOG_MS) return;
                 console.warn(`SSE silent for ${SSE_WATCHDOG_MS}ms — forcing reconnect`);
@@ -6435,7 +6437,7 @@
                 }
                 sseLastEventAt = Date.now();
                 startSessionStream(playerId);
-            }, 5000);
+            }, 2000);
         }
 
         function startSessionStream(playerId) {

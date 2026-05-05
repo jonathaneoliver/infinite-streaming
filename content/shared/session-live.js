@@ -25,14 +25,15 @@
     // successful (re)connect.
     let sseReconnectTimer = null;
     const SSE_RETRY_MS = 2000;
-    // Watchdog: server sends a `heartbeat` event every 15 s. If we
-    // don't see ANY event (heartbeat or sessions) within 30 s, the
+    // Watchdog: server sends a `heartbeat` event every 5 s. If we
+    // don't see ANY event (heartbeat or sessions) within 12 s, the
     // connection is dead in some way the EventSource state machine
     // hasn't surfaced (e.g. browser stuck in CONNECTING with silent
-    // retry failures). Force-close + reopen.
+    // retry failures). Force-close + reopen. 12 s allows for one
+    // missed heartbeat plus ~2 s of network jitter.
     let sseLastEventAt = Date.now();
     let sseWatchdogTimer = null;
-    const SSE_WATCHDOG_MS = 30000;
+    const SSE_WATCHDOG_MS = 12000;
 
         function updateSseMissedBadge() {
             if (!sseMissedBadge) return;
@@ -128,6 +129,8 @@
 
     function ensureSseWatchdog() {
         if (sseWatchdogTimer !== null) return;
+        // Tick at half the budget so worst-case detection is one
+        // tick + the budget itself.
         sseWatchdogTimer = setInterval(() => {
             if (Date.now() - sseLastEventAt < SSE_WATCHDOG_MS) return;
             console.warn(`SSE silent for ${SSE_WATCHDOG_MS}ms — forcing reconnect`);
@@ -137,7 +140,7 @@
             }
             sseLastEventAt = Date.now();
             startSessionsStream();
-        }, 5000);
+        }, 2000);
     }
 
     function start() {
