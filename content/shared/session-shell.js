@@ -4233,11 +4233,15 @@
                     yAxisID: 'y'
                 },
                 {
-                    label: '_rtt_min_anchor',
+                    label: 'RTT min (ms)',
                     data: minData,
-                    borderColor: 'rgba(139,92,246,0)',
+                    // Same lighter purple as max — both are bounds on
+                    // the avg, just at opposite ends. fill:false so
+                    // the band-fill anchored on max above only paints
+                    // once, not twice.
+                    borderColor: 'rgba(139,92,246,0.55)',
                     backgroundColor: 'rgba(139,92,246,0)',
-                    borderWidth: 0,
+                    borderWidth: 1,
                     pointRadius: 0,
                     fill: false,
                     tension: 0.2,
