@@ -10,6 +10,7 @@
     <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.15"></script>
     <link href="https://vjs.zencdn.net/8.21.1/video-js.css" rel="stylesheet" />
     <script src="https://vjs.zencdn.net/8.21.1/video.min.js"></script>
+    <script src="/shared/play-id.js"></script>
     <style>
         .page-header {
             margin-bottom: 20px;
@@ -293,6 +294,16 @@
                     Allow 4K (native)
                 </label>
             </div>
+            <div class="content-control-group" title="Auto-rotate play_id for long soak runs (issue #403). Same presets as iOS/Android.">
+                <label class="content-control-label">Rotate play_id</label>
+                <div id="playIdRotationGroup" style="display: inline-flex; gap: 6px; font-size: 12px; color: var(--text-secondary);">
+                    <label><input type="radio" name="playIdRotation" value="0"> Off</label>
+                    <label><input type="radio" name="playIdRotation" value="300"> 5m</label>
+                    <label><input type="radio" name="playIdRotation" value="1800"> 30m</label>
+                    <label><input type="radio" name="playIdRotation" value="3600"> 1h</label>
+                    <label><input type="radio" name="playIdRotation" value="21600"> 6h</label>
+                </div>
+            </div>
             <div class="control-actions">
                 <button onclick="playStream()">▶ Play</button>
                 <button onclick="pauseStream()">⏸ Pause</button>
@@ -327,8 +338,19 @@
     <script>
         const BASE_URL = '';
         const video = document.getElementById('mainVideo');
-        const playerState = { instance: null, type: null, url: null };
+        // playId/rotation: see issue #403 — long soak runs partition cleanly
+        // in ClickHouse when each loadStream() boundary mints a fresh play_id
+        // and a one-shot timer triggers a soft restart on expiry.
+        const playerState = { instance: null, type: null, url: null, playId: null, mintedAt: 0, lastActivityAt: 0 };
         let availableContent = [];
+        const PLAY_ID_ROTATION_LS_KEY = 'ismPlayIdRotationSeconds';
+        const PLAY_ID_QUIESCENCE_MS = 60_000;
+        function effectivePlayIdRotationSeconds() {
+            const raw = localStorage.getItem(PLAY_ID_ROTATION_LS_KEY);
+            if (raw === null || raw === '') return 0;
+            const n = parseInt(raw, 10);
+            return Number.isFinite(n) && n > 0 ? n : 0;
+        }
         const AUDIO_MUTED_KEY = 'ismAudioMuted';
         const NATIVE_4K_KEY = 'ismPrefer4kNative';
         const UHD_HEIGHT_THRESHOLD = 2160; // 4K/UHD resolution threshold
@@ -450,27 +472,69 @@
             video.load();
         }
 
+        // Mark an "interesting" player event so the age-based rotation
+        // poll defers firing mid-incident (60s quiet window).
+        function markRotationActivity() {
+            playerState.lastActivityAt = Date.now();
+        }
+
+        // Age-based rotation check (issue #403). Polled from updateStats.
+        // Fires when (age >= setting) AND no interesting activity in the
+        // last 60s. Setting changes apply on the next tick — no rearm
+        // required.
+        function checkPlayIdRotation() {
+            const setting = effectivePlayIdRotationSeconds();
+            if (!setting || !playerState.mintedAt || !playerState.url) return;
+            const ageMs = Date.now() - playerState.mintedAt;
+            if (ageMs < setting * 1000) return;
+            const sinceActivityMs = playerState.lastActivityAt
+                ? (Date.now() - playerState.lastActivityAt) : Infinity;
+            if (sinceActivityMs < PLAY_ID_QUIESCENCE_MS) return;
+            console.log(`[PLAY_ID] rotating after ${Math.round(ageMs / 1000)}s (target ${setting}s)`);
+            applySelection();
+        }
+
         async function initPlayer(url, protocol, playerChoice, mutedState = true) {
             clearPlayerInstance();
-            playerState.url = url;
+
+            // Mint a fresh play_id at every loadStream boundary (issue #280
+            // for mobile, gap-fill for web in #403). Stamp the master URL
+            // up-front; per-segment hooks below propagate it to subsequent
+            // requests. mintedAt anchors the age-based rotation poll.
+            const playId = window.PlayId ? window.PlayId.mint() : null;
+            playerState.playId = playId;
+            playerState.mintedAt = Date.now();
+            playerState.lastActivityAt = 0;
+            const stampedUrl = window.PlayId ? window.PlayId.apply(url, playId) : url;
+            playerState.url = stampedUrl;
             video.muted = mutedState;
+            const getPlayId = () => playerState.playId;
+
+            // "Interesting" activity = stalls and errors only. ABR
+            // level-switches happen routinely on healthy streams and
+            // would otherwise prevent rotation indefinitely.
+            video.addEventListener('waiting', markRotationActivity, { once: false });
+            video.addEventListener('error', markRotationActivity, { once: false });
 
             if (playerChoice === 'native') {
                 applyNative4kPreference(video);
-                video.src = url;
+                video.src = stampedUrl;
                 playerState.type = 'native';
                 return;
             }
 
             if (playerChoice === 'shaka') {
                 const shakaPlayer = new shaka.Player(video);
-                await shakaPlayer.load(url);
+                if (window.PlayId) window.PlayId.installShaka(shakaPlayer, getPlayId);
+                shakaPlayer.addEventListener('error', markRotationActivity);
+                await shakaPlayer.load(stampedUrl);
                 playerState.instance = shakaPlayer;
                 playerState.type = 'shaka';
                 return;
             }
 
             if (playerChoice === 'videojs') {
+                if (window.PlayId) window.PlayId.installVideoJs(videojs, getPlayId);
                 video.className = 'video-js vjs-default-skin';
                 const vjs = videojs(video, {
                     autoplay: false,
@@ -480,7 +544,7 @@
                     liveui: true
                 });
                 const mimeType = protocol === 'dash' ? 'application/dash+xml' : 'application/x-mpegURL';
-                vjs.src({ src: url, type: mimeType });
+                vjs.src({ src: stampedUrl, type: mimeType });
                 playerState.instance = vjs;
                 playerState.type = 'videojs';
                 return;
@@ -490,7 +554,7 @@
                 if (!Hls.isSupported()) {
                     console.warn('HLS.js not supported, falling back to native');
                     applyNative4kPreference(video);
-                    video.src = url;
+                    video.src = stampedUrl;
                     playerState.type = 'native';
                     return;
                 }
@@ -500,11 +564,14 @@
                 // the variant by go-live so hls.js doesn't park at the
                 // oldest segment). lowLatencyMode is only useful on LL.
                 const isLL = !/(_2s|_6s)\.m3u8/.test(url);
-                const hls = new Hls({
+                const hlsConfig = {
                     lowLatencyMode: isLL,
                     autoLevelEnabled: true
-                });
-                hls.loadSource(url);
+                };
+                if (window.PlayId) window.PlayId.installHls(hlsConfig, getPlayId);
+                const hls = new Hls(hlsConfig);
+                hls.on(Hls.Events.ERROR, markRotationActivity);
+                hls.loadSource(stampedUrl);
                 hls.attachMedia(video);
                 playerState.instance = hls;
                 playerState.type = 'hlsjs';
@@ -513,7 +580,11 @@
         }
 
         function buildStreamUrl(contentName, protocol, segment) {
-            const base = `${BASE_URL}/go-live/${contentName}`;
+            // Encode the content-name path segment so any URL-special
+            // chars (?, #, &, /) in the name can't corrupt the URL
+            // structure when it lands on `video.src`. Quiets the
+            // js/xss-through-dom CodeQL alert on the same line.
+            const base = `${BASE_URL}/go-live/${encodeURIComponent(contentName)}`;
             if (protocol === 'dash') {
                 if (segment === '2s') return `${base}/manifest_2s.mpd`;
                 if (segment === '6s') return `${base}/manifest_6s.mpd`;
@@ -729,6 +800,7 @@
         function fmtIso(d) { return d == null ? 'nil' : d.toISOString(); }
 
         function updateStats() {
+            checkPlayIdRotation();
             const buffered = video.buffered;
             const current = video.currentTime || 0;
             let bufferedEnd = '--';
@@ -855,6 +927,25 @@
                 availableContent = all.filter(item => item.has_hls || item.has_dash);
             } catch (error) {
                 console.warn('Failed to load content list:', error);
+            }
+
+            // play_id rotation period — user-driven preset (issue #403),
+            // persisted per-browser. The age-based poll picks up changes
+            // on the next tick; no rearm needed.
+            const playIdRotationGroup = document.getElementById('playIdRotationGroup');
+            if (playIdRotationGroup) {
+                const stored = localStorage.getItem(PLAY_ID_ROTATION_LS_KEY) || '0';
+                const initial = playIdRotationGroup.querySelector(`input[value="${stored}"]`)
+                    || playIdRotationGroup.querySelector('input[value="0"]');
+                if (initial) initial.checked = true;
+                playIdRotationGroup.addEventListener('change', (event) => {
+                    const value = String(event.target.value || '0');
+                    if (value === '0') {
+                        localStorage.removeItem(PLAY_ID_ROTATION_LS_KEY);
+                    } else {
+                        localStorage.setItem(PLAY_ID_ROTATION_LS_KEY, value);
+                    }
+                });
             }
 
             const storedCodec = localStorage.getItem('ismSelectedCodec');

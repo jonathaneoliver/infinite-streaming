@@ -111,6 +111,27 @@ final class PlayerViewModel: ObservableObject {
     /// HAR snapshots filter to the most-recent play_id by default.
     private var currentPlayID: String = UUID().uuidString
 
+    /// `play_id` rotation period in seconds (issue #403). 0 = disabled.
+    /// User-driven knob in Settings → Advanced; persisted to UserDefaults
+    /// so a soak run survives app restarts. The rotation Task computes
+    /// remaining time from `playIdMintedAt` so a setting change applies
+    /// to the in-progress play (no full re-arm from zero).
+    @Published var playIdRotationSeconds: Int = 0
+    /// Rotation Task armed after every successful loadStream and
+    /// rescheduled when the user picks a new period. Cancelled on
+    /// teardown / fresh `buildURLAndLoad`.
+    private var playIdRotationTask: Task<Void, Never>?
+    /// Wall-clock timestamp of when the current `play_id` minted.
+    /// Drives the age-based rotation deadline.
+    private var playIdMintedAt: Date = .distantPast
+    /// Wall-clock timestamp of the last "interesting" player event
+    /// (stall, error). Used by the rotation Task to defer firing if
+    /// the boundary would split mid-incident — see issue #403 comment
+    /// requesting a 60s quiet window. Rate shifts are *not* counted
+    /// here; on healthy streams ABR switches happen routinely and
+    /// would otherwise prevent rotation indefinitely.
+    private var playIdLastActivityAt: Date = .distantPast
+
     // MARK: - Private state
 
     private var codecRetries = 0
@@ -230,6 +251,7 @@ final class PlayerViewModel: ObservableObject {
         if let o = failedToPlayObserver { NotificationCenter.default.removeObserver(o) }
         if let o = willEnterForegroundObserver { NotificationCenter.default.removeObserver(o) }
         if let o = didEnterBackgroundObserver { NotificationCenter.default.removeObserver(o) }
+        playIdRotationTask?.cancel()
     }
 
     // MARK: - Server list
@@ -340,6 +362,14 @@ final class PlayerViewModel: ObservableObject {
         if currentURL != nil {
             scheduleLiveOffsetSeek(reason: "setting changed")
         }
+    }
+    func setPlayIdRotationSeconds(_ value: Int) {
+        playIdRotationSeconds = max(0, value)
+        persistFlags()
+        // Reschedule using the *remaining* time since the current
+        // play_id minted. If the new period is less than the elapsed
+        // age, the rescheduled Task fires immediately. Issue #403.
+        if currentURL != nil { schedulePlayIdRotation() }
     }
 
     // MARK: - Selection setters
@@ -546,6 +576,11 @@ final class PlayerViewModel: ObservableObject {
         guard let server = activeServer, !selectedContent.isEmpty else { return }
         // Fresh play_id at every loadStream boundary — issue #280.
         regeneratePlayID()
+        // Anchor the age clock for the soak-rotation timer. Every
+        // fresh loadStream resets the boundary; the Task is rescheduled
+        // at the bottom once playback has been handed off.
+        playIdMintedAt = Date()
+        playIdLastActivityAt = .distantPast
         var url = StreamURLBuilder.playbackURL(
             server: server,
             contentName: selectedContent,
@@ -573,7 +608,41 @@ final class PlayerViewModel: ObservableObject {
         self.currentURL = final
         self.statusText = final.absoluteString
         loadStream(url: final)
+        schedulePlayIdRotation()
     }
+
+    /// Cancel any pending rotation Task and (if the setting is non-zero)
+    /// arm a fresh one for the *remaining* time relative to
+    /// `playIdMintedAt`. Called on every `buildURLAndLoad` and whenever
+    /// the user changes the setting. Issue #403.
+    private func schedulePlayIdRotation() {
+        playIdRotationTask?.cancel()
+        playIdRotationTask = nil
+        let target = playIdRotationSeconds
+        guard target > 0 else { return }
+        let elapsedSec = Date().timeIntervalSince(playIdMintedAt)
+        let remainingSec = max(0.0, Double(target) - elapsedSec)
+        let quiescenceMs: Int = 60_000
+        playIdRotationTask = Task { @MainActor [weak self] in
+            if remainingSec > 0 {
+                try? await Task.sleep(nanoseconds: UInt64(remainingSec * 1_000_000_000))
+            }
+            while !Task.isCancelled {
+                guard let self else { return }
+                let activityAt = self.playIdLastActivityAt
+                if activityAt == .distantPast { break }
+                let sinceMs = Int(Date().timeIntervalSince(activityAt) * 1000)
+                if sinceMs >= quiescenceMs { break }
+                try? await Task.sleep(nanoseconds: UInt64(quiescenceMs - sinceMs) * 1_000_000)
+            }
+            if Task.isCancelled { return }
+            guard let self else { return }
+            let age = Int(Date().timeIntervalSince(self.playIdMintedAt))
+            print("[PLAY_ID] rotating after \(age)s (target \(target)s)")
+            self.buildURLAndLoad()
+        }
+    }
+
 
     private static func removePlayerId(from url: URL) -> URL {
         guard var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return url }
@@ -1094,6 +1163,7 @@ final class PlayerViewModel: ObservableObject {
     private static let flagSkipHome = "is.flag.skip_home"
     private static let flagMuted = "is.flag.muted"
     private static let flagLiveOffset = "is.flag.live_offset_s"
+    private static let flagPlayIdRotation = "is.flag.play_id_rotation_s"
     private static let flagPreviewVideoSlots = "is.flag.preview_video_slots"
     private static let lastPlayedKey = "is.lastPlayed"
     private static let viewCountsKey = "is.viewCounts"
@@ -1137,6 +1207,7 @@ final class PlayerViewModel: ObservableObject {
         skipHomeOnLaunch = d.bool(forKey: Self.flagSkipHome)
         isMuted = d.bool(forKey: Self.flagMuted)
         liveOffsetSeconds = d.object(forKey: Self.flagLiveOffset) as? Double ?? 0
+        playIdRotationSeconds = max(0, d.object(forKey: Self.flagPlayIdRotation) as? Int ?? 0)
         // First launch: no key yet → use the device's hardware cap so
         // the user starts with the richest preview their hardware can
         // run. After that, persist whatever they've chosen.
@@ -1170,6 +1241,7 @@ final class PlayerViewModel: ObservableObject {
         d.set(skipHomeOnLaunch, forKey: Self.flagSkipHome)
         d.set(isMuted, forKey: Self.flagMuted)
         d.set(liveOffsetSeconds, forKey: Self.flagLiveOffset)
+        d.set(playIdRotationSeconds, forKey: Self.flagPlayIdRotation)
         d.set(previewVideoSlots, forKey: Self.flagPreviewVideoSlots)
         d.set(codec.rawValue, forKey: Self.codecKey)
         d.set(segment.rawValue, forKey: Self.segmentKey)
@@ -1228,6 +1300,7 @@ extension PlayerViewModel {
                 self.log("Item error: \(value)")
                 let payload = self.buildMetricsPayload(event: "error", at: Date(), extra: ["player_metrics_error": value])
                 Task { await self.sendPlayerMetrics(payload: payload) }
+                self.markPlayIdActivity()
             }
             .store(in: &cancellables)
 
@@ -1260,6 +1333,7 @@ extension PlayerViewModel {
                 self.log("Player error: \(value)")
                 let payload = self.buildMetricsPayload(event: "error", at: Date(), extra: ["player_metrics_error": value])
                 Task { await self.sendPlayerMetrics(payload: payload) }
+                self.markPlayIdActivity()
             }
             .store(in: &cancellables)
 
@@ -1311,6 +1385,7 @@ extension PlayerViewModel {
             .sink { [weak self] count in
                 guard let self, count > self.lastReportedStallCount else { return }
                 self.lastReportedStallCount = count
+                self.markPlayIdActivity()
                 let payload = self.buildMetricsPayload(event: "stall_start", at: Date())
                 Task { await self.sendPlayerMetrics(payload: payload) }
             }
@@ -1535,9 +1610,19 @@ extension PlayerViewModel {
                     "player_metrics_rate_to_mbps": mbps
                 ])
                 Task { [weak self] in await self?.sendPlayerMetrics(payload: payload) }
+                // Note: rate shifts are intentionally NOT marked as
+                // play_id activity — on healthy ABR streams they happen
+                // routinely and would block soak rotation indefinitely.
             }
         }
         lastReportedRenditionMbps = mbps
+    }
+
+    /// Stamp the wall clock for the rotation Task's quiescence check —
+    /// mid-incident rotations split the row across boundaries the
+    /// dashboard cares about (stalls / rate shifts / errors). Issue #403.
+    private func markPlayIdActivity() {
+        playIdLastActivityAt = Date()
     }
 
     /// Convenience that builds the payload synchronously here and forwards

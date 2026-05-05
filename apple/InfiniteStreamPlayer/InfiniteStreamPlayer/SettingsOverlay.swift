@@ -336,25 +336,29 @@ private struct PickerList: View {
                 vm.setLiveOffsetSeconds($0)
             }
             .focused($itemIdx, equals: 4)
+            PlayIdRotationRow(seconds: vm.playIdRotationSeconds, compact: compact) {
+                vm.setPlayIdRotationSeconds($0)
+            }
+            .focused($itemIdx, equals: 5)
             ToggleRow(label: "Skip Home on launch",
                       isOn: vm.skipHomeOnLaunch, compact: compact) { vm.setSkipHomeOnLaunch($0) }
-                .focused($itemIdx, equals: 5)
+                .focused($itemIdx, equals: 6)
             ToggleRow(label: "Mute audio",
                       isOn: vm.isMuted, compact: compact) { vm.setIsMuted($0) }
-                .focused($itemIdx, equals: 6)
+                .focused($itemIdx, equals: 7)
             PreviewVideoSlotsRow(slots: vm.previewVideoSlots,
                                  hardwareCap: DecodeBudget.shared.hardwareCap,
                                  compact: compact) {
                 vm.setPreviewVideoSlots($0)
             }
-            .focused($itemIdx, equals: 7)
+            .focused($itemIdx, equals: 8)
             ToggleRow(label: "HUD",
                       isOn: vm.developerMode, compact: compact) { vm.setDeveloperMode($0) }
-                .focused($itemIdx, equals: 8)
+                .focused($itemIdx, equals: 9)
             DestructiveRow(label: "Reset All Settings", compact: compact) {
                 showResetConfirm = true
             }
-            .focused($itemIdx, equals: 9)
+            .focused($itemIdx, equals: 10)
         }
     }
 }
@@ -450,6 +454,65 @@ private struct LiveOffsetRow: View {
         // No outer cinematicFocus — the +/− buttons inside are the
         // focus targets. Wrapping the row in another focusable starved
         // the inner buttons of focus on tvOS.
+    }
+}
+
+/// Soak-only knob for issue #403. Presets cover the realistic range —
+/// off, 5 min (smoke), 30 min, 1 h, 6 h. The 60s minimum is enforced by
+/// the helper, so a stray "60" here doesn't fire-twice-a-minute.
+private struct PlayIdRotationRow: View {
+    let seconds: Int
+    let compact: Bool
+    let onChange: (Int) -> Void
+
+    private static let presets: [(label: String, seconds: Int)] = [
+        ("Off", 0),
+        ("5m", 300),
+        ("30m", 1800),
+        ("1h", 3600),
+        ("6h", 21600),
+    ]
+
+    private var subtitle: String {
+        if seconds == 0 { return "Off — one play_id per session" }
+        if seconds < 60 { return "\(seconds)s (clamped to 60s at fire time)" }
+        if seconds < 3600 { return "Rotate every \(seconds / 60)m" }
+        return "Rotate every \(seconds / 3600)h"
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Rotate play_id (soak runs)")
+                .font(compact ? AppType.body(size: 15) : AppType.body())
+                .foregroundColor(Tokens.fg)
+                .lineLimit(1)
+            Text(subtitle)
+                .font(AppType.monoSm())
+                .foregroundColor(Tokens.fgFaint)
+            HStack(spacing: Space.s2) {
+                ForEach(Self.presets, id: \.seconds) { preset in
+                    Button { onChange(preset.seconds) } label: {
+                        Text(preset.label)
+                            .font(AppType.monoSm())
+                            .foregroundColor(seconds == preset.seconds ? Tokens.bg : Tokens.fg)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 6)
+                            .background(seconds == preset.seconds ? Tokens.accent : Tokens.bgCard)
+                            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                            .cinematicFocusFollower(cornerRadius: 8)
+                    }
+                    .buttonStyle(.plain)
+                    #if os(tvOS)
+                    .focusEffectDisabled()
+                    #endif
+                }
+            }
+        }
+        .padding(.horizontal, compact ? Space.s3 : Space.s4)
+        .padding(.vertical, compact ? Space.s2 : Space.s3)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Tokens.bgSoft)
+        .clipShape(RoundedRectangle(cornerRadius: Radius.row, style: .continuous))
     }
 }
 
