@@ -1470,6 +1470,7 @@
             const canvasClassToMap = {
                 'bandwidth-chart': bandwidthCharts,
                 'events-chart': eventsCharts,
+                'rtt-chart': rttCharts,
                 'buffer-depth-chart': bufferDepthCharts,
                 'video-fps-chart': videoFpsCharts
             };
@@ -2438,7 +2439,7 @@
         }
 
         function refreshLegendHoverAll() {
-            const pools = [bandwidthCharts, bufferDepthCharts, videoFpsCharts];
+            const pools = [bandwidthCharts, rttCharts, bufferDepthCharts, videoFpsCharts];
             for (const pool of pools) {
                 if (!pool) continue;
                 pool.forEach((chart) => {
@@ -3076,6 +3077,7 @@
                 const chartsToDestroy = [
                     eventsCharts.get(sessionId),
                     bandwidthCharts.get(sessionId),
+                    rttCharts.get(sessionId),
                     bufferDepthCharts.get(sessionId),
                     videoFpsCharts.get(sessionId)
                 ];
@@ -5369,7 +5371,7 @@
                 eventMarkerBySession.set(key, { tsMs: Number(tsMs), label: markerLabel });
             }
             const marker = eventMarkerBySession.get(key);
-            const pools = [bandwidthCharts, bufferDepthCharts, videoFpsCharts, eventsCharts];
+            const pools = [bandwidthCharts, rttCharts, bufferDepthCharts, videoFpsCharts, eventsCharts];
             for (const pool of pools) {
                 if (!pool) continue;
                 const chart = pool.get(key) || pool.get(sessionId);
