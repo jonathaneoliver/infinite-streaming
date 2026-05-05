@@ -67,6 +67,19 @@ server {
 
     include /etc/nginx/mime.types;
 
+    # Liveness/readiness probe endpoint — purely "is nginx accepting
+    # connections?", no upstream dependencies. `auth_basic off` so probes
+    # don't 401 when INFINITE_STREAM_AUTH_HTPASSWD is set.
+    # `access_log off` so probe traffic doesn't dominate the access log.
+    # See #397 — a probe pointed here would have caught the #390 nginx
+    # config-load crash at deploy-time instead of leaving the pod marked
+    # Running but serving 502s on every request.
+    location = /healthz {
+        auth_basic off;
+        access_log off;
+        return 200 "ok\n";
+    }
+
     # Go-live location must come BEFORE catch-all .m3u8/.mpd to take precedence
     # Routes /go-live/ URLs to Go LL-HLS service (port 8010) for playlists
     # Serves segments directly from source files
