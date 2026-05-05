@@ -77,6 +77,28 @@ docker compose up -d --force-recreate grafana
 - `TTL toDateTime(ts) + INTERVAL 30 DAY` enforces retention; tune via
   `ALTER TABLE ... MODIFY TTL`.
 
+### Reading the RTT chart (issue #401)
+
+Six `client_rtt_*_ms` columns carry server-side TCP_INFO RTT, sampled
+inside go-proxy on a 100 ms ticker and drained into 1 s windows on
+every snapshot tick. Read them like this:
+
+- `client_rtt_ms` is the kernel's smoothed RTT — the *current* path
+  latency, with EWMA so it lags real changes by a fraction of a second.
+- `client_rtt_min_lifetime_ms` is the connection's *path floor* — the
+  best RTT ever seen on that TCP connection. Sticky-low: once observed
+  it doesn't drift back up.
+- The gap between smoothed RTT and lifetime min is *congestion buildup*
+  — queueing on the path beyond the no-load minimum.
+- `client_rto_ms` rising above `client_rtt_ms` means the kernel has
+  doubled its retransmit timeout because ACKs aren't flowing. That gap
+  is the canonical wedge indicator — it's visible even when smoothed
+  RTT goes flat (no fresh ACKs to update the EWMA).
+
+`client_rtt_max_ms` / `client_rtt_min_ms` are the peak/trough of
+smoothed RTT *within the 1 s emit window*, useful for detecting
+sub-second spikes the kernel's EWMA would otherwise mask.
+
 ## Securing a WAN-exposed deployment
 
 Default docker-compose binds ClickHouse to `127.0.0.1` (host-only) and

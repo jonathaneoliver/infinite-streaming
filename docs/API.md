@@ -156,6 +156,21 @@ Network log response shape:
 | GET | `/api/version` | Build version / commit SHA |
 | GET | `/debug` | Internal debug HTML dashboard |
 
+### Server-side RTT fields (issue #401)
+
+Every `/api/sessions` row and SSE snapshot carries six TCP_INFO-derived RTT metrics, in milliseconds. Sampled inside go-proxy by a 100 ms ticker that calls `getsockopt(TCP_INFO)` on each session's most-recent connection and folds the reads into a 1 s window drained on every snapshot tick. Linux-only; the macOS dev build emits zeros.
+
+| Field | Source | Meaning |
+|---|---|---|
+| `client_rtt_ms` | window-avg of `tcpi_rtt` | Smoothed RTT (RFC 6298 SRTT, kernel EWMA) |
+| `client_rtt_max_ms` | window-max of `tcpi_rtt` | Peak smoothed RTT in window — sub-second spike detector |
+| `client_rtt_min_ms` | window-min of `tcpi_rtt` | Trough during the window |
+| `client_rtt_min_lifetime_ms` | `tcpi_min_rtt` | Min RTT ever observed on this connection — path floor |
+| `client_rtt_var_ms` | `tcpi_rttvar` | Smoothed mean deviation (jitter) |
+| `client_rto_ms` | `tcpi_rto` | Current retransmit timeout — rises during a wedge |
+
+If a 1 s window had no fresh kernel samples (typically a short connection gap), the row carries `client_rtt_stale: true` alongside the previous-window values.
+
 ## CORS and caching
 
 All API responses include `Access-Control-Allow-Origin: *` and `Cache-Control: no-cache, no-store, must-revalidate` headers (applied by nginx). Media segments are the exception — they are immutable and served with `expires 1y`.

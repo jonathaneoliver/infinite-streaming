@@ -545,6 +545,19 @@ Full API (`/api/content`, `/api/jobs`, `/api/sessions/*`, `/api/nftables/*`, etc
 | `mbps_transfer_rate` | 250 ms | Byte-change-gated rate during segment transfer, aligned to HTB burst edges. Reports at drain/refill boundaries |
 | `mbps_transfer_complete` | per segment | Total bytes / total time for one completed segment transfer (backlog drained to 0) |
 
+### Server-side RTT metrics
+
+Sampled inside go-proxy via `getsockopt(TCP_INFO)` on each session's most-recent connection. The 100 ms sampler folds reads into a 1 s window that drains on every snapshot tick — same cadence as the player-metrics PATCH heartbeat, so the RTT chart shares a time axis with the bitrate chart above it. Linux-only (the kernel option doesn't exist on macOS); the dev build compiles via a stub that emits zeros. All values in milliseconds.
+
+| Metric | Source field | What it measures |
+|---|---|---|
+| `client_rtt_ms` | `tcpi_rtt` (avg of 1 s window) | Smoothed RTT (RFC 6298 SRTT, kernel EWMA) |
+| `client_rtt_max_ms` | window max of `tcpi_rtt` | Peak smoothed RTT in window — catches sub-second spikes the kernel's EWMA would mask |
+| `client_rtt_min_ms` | window min of `tcpi_rtt` | Trough during the same 1 s window |
+| `client_rtt_min_lifetime_ms` | `tcpi_min_rtt` | Min RTT ever observed on this connection — the path floor |
+| `client_rtt_var_ms` | `tcpi_rttvar` | Smoothed mean deviation (jitter) |
+| `client_rto_ms` | `tcpi_rto` | Current retransmit timeout — rises during a wedge while smoothed RTT flatlines; the gap between `rto` and `rtt` is the canonical "kernel suspects this connection is stalling" signal |
+
 ### Metric semantics
 
 - **Limit value** (`nftables` shaping rate): configured ceiling for the session port; a control target, not a measured throughput.

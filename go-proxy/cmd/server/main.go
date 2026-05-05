@@ -1482,6 +1482,11 @@ func main() {
 
 	go app.trackPortThroughput()
 	app.restoreTransportFaultSchedules()
+	// 100 ms TCP_INFO sampler — folds smoothed RTT / jitter / lifetime
+	// min / RTO into per-session windows that get drained on each
+	// snapshot broadcast (issue #401). Linux-only kernel read; the
+	// !linux stub keeps the dev build green on macOS.
+	app.startRTTSampler(context.Background())
 
 	router := mux.NewRouter()
 	router.Use(corsMiddleware)
@@ -1527,6 +1532,11 @@ func main() {
 			srv := &http.Server{
 				Addr:    bind,
 				Handler: router,
+				// Stamp the underlying *net.TCPConn on the per-
+				// connection context so handleProxy can attach
+				// it to its session for the RTT sampler to
+				// read. Issue #401.
+				ConnContext: withTCPConnContext,
 			}
 			errorCh <- srv.ListenAndServe()
 		}(addr)
@@ -4305,6 +4315,14 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 
 	sessionData["x_forwarded_port"] = internalPort
 	sessionData["x_forwarded_port_external"] = externalPort
+	// Bind the live TCP connection to the session so the 100 ms RTT
+	// sampler can read TCP_INFO off it. Lazily creates the session's
+	// RTT window on first request; subsequent requests just refresh
+	// the conn pointer (atomic). Issue #401.
+	if tcpConn := tcpConnFromContext(r.Context()); tcpConn != nil {
+		sessionStoreTCPConn(sessionData, tcpConn)
+		sessionGetOrCreateRTTWindow(sessionData)
+	}
 	log.Printf(
 		"[GO-PROXY][REQUEST] method=%s host=%s port=%s path=%s query=%s session_id=%s player_id_q=%s player_id_h=%s playback_session_h=%s client_ip=%s user_agent=%q",
 		r.Method,
@@ -6654,6 +6672,23 @@ func (a *App) normalizeSessionsForResponse(sessions []SessionData) []SessionData
 		} else {
 			delete(session, "player_metrics_video_quality_pct")
 		}
+		// Drain the 1 s RTT window onto the snapshot so this
+		// broadcast carries fresh client_rtt_* fields. Issue #401.
+		// NB: this also runs on `/api/sessions` GET requests (which
+		// re-use this normalizer), so a poll racing the SSE flush
+		// can leave one of them with empty `client_rtt_ms` — the
+		// other path gets the previous-window replay via
+		// drainAndReset's stale fallback. Acceptable for a
+		// monitoring tool; flagging it here for future readers.
+		drainSessionRTT(session)
+		// Strip internal session keys that aren't meant for the
+		// SSE / JSON projection — *atomic.Pointer[net.TCPConn]
+		// and *RTTWindow are runtime handles, not metrics. The
+		// authoritative copies live on the snapshot map and are
+		// preserved across cloneSession (cloneInterface's default
+		// arm passes unknown pointer types through).
+		delete(session, "_lastTCPConn")
+		delete(session, "_rttWindow")
 	}
 	return sessions
 }

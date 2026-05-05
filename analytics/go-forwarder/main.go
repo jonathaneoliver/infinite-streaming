@@ -84,6 +84,13 @@ type row struct {
 	MeasuredMbps             float32 `json:"measured_mbps"`
 	MbpsShaperRate           float32 `json:"mbps_shaper_rate"`
 	MbpsShaperAvg            float32 `json:"mbps_shaper_avg"`
+	// Server-side TCP_INFO RTT (issue #401).
+	ClientRTTMs             float32 `json:"client_rtt_ms"`
+	ClientRTTMaxMs          float32 `json:"client_rtt_max_ms"`
+	ClientRTTMinMs          float32 `json:"client_rtt_min_ms"`
+	ClientRTTMinLifetimeMs  float32 `json:"client_rtt_min_lifetime_ms"`
+	ClientRTTVarMs          float32 `json:"client_rtt_var_ms"`
+	ClientRTOMs             float32 `json:"client_rto_ms"`
 	DisplayResolution        string  `json:"display_resolution"`
 	VideoResolution          string  `json:"video_resolution"`
 	FramesDisplayed          uint64  `json:"frames_displayed"`
@@ -441,6 +448,12 @@ func toRow(ts string, revision uint64, sessionID string, s map[string]interface{
 		MeasuredMbps:             getF32(s, "measured_mbps"),
 		MbpsShaperRate:           getF32(s, "mbps_shaper_rate"),
 		MbpsShaperAvg:            getF32(s, "mbps_shaper_avg"),
+		ClientRTTMs:              getF32(s, "client_rtt_ms"),
+		ClientRTTMaxMs:           getF32(s, "client_rtt_max_ms"),
+		ClientRTTMinMs:           getF32(s, "client_rtt_min_ms"),
+		ClientRTTMinLifetimeMs:   getF32(s, "client_rtt_min_lifetime_ms"),
+		ClientRTTVarMs:           getF32(s, "client_rtt_var_ms"),
+		ClientRTOMs:              getF32(s, "client_rto_ms"),
 		DisplayResolution:        getStr(s, "player_metrics_display_resolution"),
 		VideoResolution:          getStr(s, "player_metrics_video_resolution"),
 		FramesDisplayed:          getU64(s, "player_metrics_frames_displayed"),
