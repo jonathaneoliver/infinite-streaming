@@ -16,6 +16,15 @@
     let sessionsStream = null;
     let sseLastRevision = 0;
     let sseMissedTotal = 0;
+    // Reconnection state — EventSource's built-in auto-retry covers
+    // most transient errors, but in some failure modes (notably
+    // server redeploy when the container is killed mid-response) the
+    // browser sets readyState=CLOSED and gives up. Without an
+    // explicit retry the dashboard goes silent until the user
+    // hits refresh. Retry with a short fixed backoff; reset on
+    // successful (re)connect.
+    let sseReconnectTimer = null;
+    const SSE_RETRY_MS = 2000;
 
         function updateSseMissedBadge() {
             if (!sseMissedBadge) return;
@@ -41,8 +50,21 @@
 
         function startSessionsStream() {
             if (!window.EventSource) return false;
+            if (sseReconnectTimer !== null) {
+                clearTimeout(sseReconnectTimer);
+                sseReconnectTimer = null;
+            }
             const source = new EventSource('/api/sessions/stream');
             sessionsStream = source;
+            source.addEventListener('open', () => {
+                // Server is talking again. Server-side
+                // sessionsBroadcastSeq resets across container
+                // restarts, so the previous revision number is
+                // meaningless on the new connection — clear it so
+                // we don't compute a bogus gap on the first
+                // post-reconnect event.
+                sseLastRevision = 0;
+            });
             source.addEventListener('sessions', (event) => {
                 try {
                     const payload = parseSessionsStreamPayload(event);
@@ -73,11 +95,18 @@
                 }
             });
             source.addEventListener('error', () => {
-                if (source.readyState === EventSource.CLOSED) {
-                    source.close();
-                    sessionsStream = null;
-                    startSessionsPolling();
-                }
+                // CONNECTING state means the browser is auto-retrying
+                // already — leave it alone. CLOSED means the browser
+                // gave up; explicitly retry so a server redeploy
+                // doesn't strand the dashboard until manual refresh.
+                if (source.readyState !== EventSource.CLOSED) return;
+                source.close();
+                sessionsStream = null;
+                if (sseReconnectTimer !== null) return;
+                sseReconnectTimer = setTimeout(() => {
+                    sseReconnectTimer = null;
+                    startSessionsStream();
+                }, SSE_RETRY_MS);
             });
             return true;
         }
