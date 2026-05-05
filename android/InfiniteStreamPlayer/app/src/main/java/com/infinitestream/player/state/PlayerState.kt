@@ -101,6 +101,10 @@ data class UiState(
      *  battery / network reasons. Cannot exceed the hardware cap.
      *  Mirrors the Apple `previewVideoSlots` flag. */
     val previewVideoSlots: Int = -1, // -1 sentinel = "use hardware default"
+    /** Auto-rotate `play_id` every N seconds for long soak runs (issue
+     *  #403). 0 = disabled. Helper enforces a 60s minimum at fire time;
+     *  Settings UI offers a small set of presets (5m, 30m, 1h, 6h). */
+    val playIdRotationSeconds: Int = 0,
 
     /** True when HUD is visible on the playback screen. */
     val hudVisible: Boolean = false,

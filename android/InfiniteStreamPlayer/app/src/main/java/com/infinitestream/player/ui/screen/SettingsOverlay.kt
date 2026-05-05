@@ -414,6 +414,12 @@ private fun PickerList(
                         )
                     }
                     item {
+                        PlayIdRotationRow(
+                            seconds = state.playIdRotationSeconds,
+                            onChange = { vm.setPlayIdRotationSeconds(it) },
+                        )
+                    }
+                    item {
                         PickerItem(
                             label = "HUD",
                             selected = state.developerMode,
@@ -648,6 +654,60 @@ private fun PreviewVideoSlotsRow(
             enabled = slots < hardwareCap,
             onClick = { onChange(slots + 1) },
         )
+    }
+}
+
+@Composable
+private fun PlayIdRotationRow(seconds: Int, onChange: (Int) -> Unit) {
+    val presets = listOf(
+        "Off" to 0,
+        "5m" to 300,
+        "30m" to 1800,
+        "1h" to 3600,
+        "6h" to 21600,
+    )
+    val subtitle = when {
+        seconds == 0 -> "Off — one play_id per session"
+        seconds < 60 -> "${seconds}s (clamped to 60s at fire time)"
+        seconds < 3600 -> "Rotate every ${seconds / 60}m"
+        else -> "Rotate every ${seconds / 3600}h"
+    }
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(Radius.row))
+            .background(Tokens.bgSoft)
+            .padding(horizontal = Space.s4, vertical = Space.s3),
+    ) {
+        Text(
+            "Rotate play_id (soak runs)",
+            style = AppType.body.copy(color = Tokens.fg),
+        )
+        Spacer(Modifier.height(2.dp))
+        Text(subtitle, style = AppType.monoSm.copy(color = Tokens.fgFaint))
+        Spacer(Modifier.height(Space.s2))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            presets.forEachIndexed { index, (label, value) ->
+                if (index > 0) Spacer(Modifier.width(Space.s2))
+                val active = seconds == value
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(if (active) Tokens.accent else Tokens.bgCard)
+                        .tvFocus(cornerRadius = 8.dp)
+                        .clickable(onClick = { onChange(value) })
+                        .padding(horizontal = 12.dp, vertical = 6.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        label,
+                        style = AppType.monoSm.copy(
+                            color = if (active) Tokens.bg else Tokens.fg,
+                        ),
+                    )
+                }
+            }
+        }
     }
 }
 

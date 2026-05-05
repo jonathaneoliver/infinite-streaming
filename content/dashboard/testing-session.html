@@ -599,6 +599,16 @@
                     <input id="videoPipToggle" type="checkbox">
                     PiP
                 </label>
+                <span title="Auto-rotate play_id for long soak runs (issue #403). Same presets as iOS/Android.">
+                    Rotate play_id
+                    <span id="playIdRotationGroup" style="display: inline-flex; gap: 4px; margin-left: 4px;">
+                        <label><input type="radio" name="playIdRotation" value="0"> Off</label>
+                        <label><input type="radio" name="playIdRotation" value="300"> 5m</label>
+                        <label><input type="radio" name="playIdRotation" value="1800"> 30m</label>
+                        <label><input type="radio" name="playIdRotation" value="3600"> 1h</label>
+                        <label><input type="radio" name="playIdRotation" value="21600"> 6h</label>
+                    </span>
+                </span>
             </div>
             <div class="player-frame">
                 <video id="player" controls autoplay muted playsinline></video>
@@ -682,6 +692,36 @@
         let playerLoopCount = 0;
         let autoRetryCount = 0;
         let autoRetryTimer = null;
+        // play_id rotation (issue #403). Age-based: track when the
+        // current play_id minted, poll on the existing 2Hz updateStats
+        // tick, fire when (age >= setting) AND (no "interesting"
+        // activity in the last 60s). Setting lives in localStorage so
+        // changes apply to the in-progress play on the next tick — no
+        // cancel/rearm dance.
+        let playIdMintedAt = 0;
+        let playIdLastActivityAt = 0;
+        const PLAY_ID_ROTATION_LS_KEY = 'ismPlayIdRotationSeconds';
+        const PLAY_ID_QUIESCENCE_MS = 60_000;
+        function effectivePlayIdRotationSeconds() {
+            const raw = localStorage.getItem(PLAY_ID_ROTATION_LS_KEY);
+            if (raw === null || raw === '') return 0;
+            const n = parseInt(raw, 10);
+            return Number.isFinite(n) && n > 0 ? n : 0;
+        }
+        function markPlayIdActivity() {
+            playIdLastActivityAt = Date.now();
+        }
+        function checkPlayIdRotation() {
+            const setting = effectivePlayIdRotationSeconds();
+            if (!setting || !playIdMintedAt || !currentUrl) return;
+            const ageMs = Date.now() - playIdMintedAt;
+            if (ageMs < setting * 1000) return;
+            const sinceActivityMs = playIdLastActivityAt
+                ? (Date.now() - playIdLastActivityAt) : Infinity;
+            if (sinceActivityMs < PLAY_ID_QUIESCENCE_MS) return;
+            log(`PLAY_ID: rotating after ${Math.round(ageMs / 1000)}s (target ${setting}s)`);
+            performPlaybackRestart('play_id_rotation');
+        }
         const pendingShaping = new Map();
         const shapingPatternDirty = new Map();
         const lastAppliedShaping = new Map();
@@ -1841,6 +1881,7 @@
                     sendSessionMetrics('stall_start');
                 }
                 log('STALL: waiting');
+                markPlayIdActivity();
             });
             video.addEventListener('stalled', () => {
                 sendPlayerStateChange('buffering');
@@ -1869,6 +1910,7 @@
                     player_metrics_error_code: err && err.code ? err.code : null
                 });
                 scheduleAutoRetry('video error');
+                markPlayIdActivity();
             });
             video.addEventListener('playing', () => {
                 sendPlayerStateChange('playing');
@@ -1886,6 +1928,7 @@
         }
 
         function updateStats() {
+            checkPlayIdRotation();
             const buffered = video.buffered;
             const current = video.currentTime || 0;
             let bufferedEnd = '--';
@@ -2055,6 +2098,8 @@
             // Fresh play_id for this playback episode. Subsequent retries
             // re-enter loadStream and mint a new one.
             currentPlayId = (window.PlayId && window.PlayId.mint) ? window.PlayId.mint() : '';
+            playIdMintedAt = Date.now();
+            playIdLastActivityAt = 0;
             if (currentPlayId && window.PlayId) {
                 url = window.PlayId.apply(url, currentPlayId);
             }
@@ -6600,6 +6645,31 @@
             const savedPlayer = localStorage.getItem('testing_session_player');
             setPlayerChoice(params.player || savedPlayer || 'auto');
             attachVideoEvents();
+            // Wire the soak-rotation radio group to localStorage. The
+            // age-based poll in updateStats picks up changes on the next
+            // tick — no explicit re-arm needed. If the new target is
+            // smaller than the current play_id age, the next tick fires
+            // immediately; if larger, the play continues until the new
+            // boundary is reached.
+            const playIdRotationGroup = document.getElementById('playIdRotationGroup');
+            if (playIdRotationGroup) {
+                const stored = localStorage.getItem(PLAY_ID_ROTATION_LS_KEY) || '0';
+                const initial = playIdRotationGroup.querySelector(`input[value="${stored}"]`)
+                    || playIdRotationGroup.querySelector('input[value="0"]');
+                if (initial) initial.checked = true;
+                playIdRotationGroup.addEventListener('change', (event) => {
+                    const value = String(event.target.value || '0');
+                    if (value === '0') {
+                        localStorage.removeItem(PLAY_ID_ROTATION_LS_KEY);
+                    } else {
+                        localStorage.setItem(PLAY_ID_ROTATION_LS_KEY, value);
+                    }
+                    const seconds = effectivePlayIdRotationSeconds();
+                    log(seconds
+                        ? `PLAY_ID: rotation set to ${seconds}s`
+                        : `PLAY_ID: rotation off`);
+                });
+            }
             loadStream(params.url);
             bindSessionControls();
             bindGroupControls();

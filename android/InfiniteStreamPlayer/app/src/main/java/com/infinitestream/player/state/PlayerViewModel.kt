@@ -67,6 +67,22 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         currentPlayId = UUID.randomUUID().toString()
     }
 
+    /** Rotation Job armed after every successful loadStream and
+     *  rescheduled when the user picks a new period (the new period is
+     *  applied to the in-progress play via remaining-time arithmetic).
+     *  Cancelled on `onCleared`. Issue #403. */
+    private var playIdRotationJob: kotlinx.coroutines.Job? = null
+    /** Wall-clock millis of when the current play_id minted. Drives the
+     *  age-based rotation deadline. */
+    private var playIdMintedAt: Long = 0L
+    /** Wall-clock millis of the last "interesting" event (stall/error).
+     *  Rate shifts are NOT counted — they happen routinely on healthy
+     *  ABR streams and would block soak rotation indefinitely. */
+    private var playIdLastActivityAt: Long = 0L
+    private fun markPlayIdActivity() {
+        playIdLastActivityAt = System.currentTimeMillis()
+    }
+
     /** Replace any existing `play_id` query param with `currentPlayId`. */
     private fun withPlayId(url: String): String {
         if (url.isEmpty()) return url
@@ -324,6 +340,7 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
                 },
                 lastPlayed    = p.getString(LAST_PLAYED_KEY, "") ?: "",
                 viewCounts    = readViewCounts(p),
+                playIdRotationSeconds = p.getInt(FLAG_PLAY_ID_ROTATION, 0).coerceAtLeast(0),
             )
         }
     }
@@ -636,9 +653,53 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         // Fresh play_id at every loadStream boundary (issue #280) so
         // go-proxy can scope its network log per play.
         regeneratePlayId()
+        // Anchor the age clock for the soak-rotation timer. Every
+        // fresh loadStream resets the boundary; the Job is rescheduled
+        // below once the player has been handed off.
+        playIdMintedAt = System.currentTimeMillis()
+        playIdLastActivityAt = 0L
         val url = "http://${server.host}:$port/go-live/${s.selectedContent}/$manifest?player_id=$playerId&play_id=$currentPlayId"
         _state.update { it.copy(currentUrl = url, statusText = url) }
         loadStream(url)
+        schedulePlayIdRotation()
+    }
+
+    /** Cancel any pending rotation Job and (if the setting is non-zero)
+     *  arm a fresh one for the *remaining* time relative to
+     *  `playIdMintedAt`. Issue #403. */
+    private fun schedulePlayIdRotation() {
+        playIdRotationJob?.cancel()
+        playIdRotationJob = null
+        val target = _state.value.playIdRotationSeconds
+        if (target <= 0) return
+        val elapsedMs = System.currentTimeMillis() - playIdMintedAt
+        val remainingMs = (target * 1000L - elapsedMs).coerceAtLeast(0L)
+        val quiescenceMs = 60_000L
+        playIdRotationJob = viewModelScope.launch {
+            if (remainingMs > 0) kotlinx.coroutines.delay(remainingMs)
+            while (true) {
+                if (playIdLastActivityAt == 0L) break
+                val sinceMs = System.currentTimeMillis() - playIdLastActivityAt
+                if (sinceMs >= quiescenceMs) break
+                kotlinx.coroutines.delay(quiescenceMs - sinceMs)
+            }
+            val ageS = (System.currentTimeMillis() - playIdMintedAt) / 1000
+            android.util.Log.i("InfiniteStream",
+                "[PLAY_ID] rotating after ${ageS}s (target ${target}s)")
+            buildUrlAndLoad()
+        }
+    }
+
+    /** User-driven setter for the soak-rotation period. 0 disables.
+     *  Reschedules using the *remaining* time since the current play_id
+     *  minted, so a setting change applies to the in-progress play. If
+     *  the new period is shorter than the elapsed age, the rescheduled
+     *  Job fires immediately. Issue #403. */
+    fun setPlayIdRotationSeconds(seconds: Int) {
+        val clamped = seconds.coerceAtLeast(0)
+        _state.update { it.copy(playIdRotationSeconds = clamped) }
+        prefs().edit().putInt(FLAG_PLAY_ID_ROTATION, clamped).apply()
+        if (_state.value.currentUrl.isNotEmpty()) schedulePlayIdRotation()
     }
 
     private fun loadStream(url: String) {
@@ -768,6 +829,7 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         player.addListener(object : Player.Listener {
             override fun onPlayerError(error: PlaybackException) {
                 metrics?.onPlayerError(error.message)
+                markPlayIdActivity()
                 // Retry on any MediaCodec decoder failure — covers both
                 // NO_MEMORY init failures (lease-counting in
                 // setSelectedContentDeferred is the happy path; this is
@@ -834,6 +896,7 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
                 if (state == Player.STATE_BUFFERING) {
                     metrics?.onBufferingStart()
                     if (player.playWhenReady && !player.isPlaying) metrics?.onStallStart()
+                    markPlayIdActivity()
                 } else {
                     metrics?.onBufferingEnd()
                 }
@@ -861,7 +924,11 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
             override fun onVideoInputFormatChanged(
                 eventTime: AnalyticsListener.EventTime, format: Format,
                 decoderReuseEvaluation: DecoderReuseEvaluation?
-            ) { metrics?.onVideoFormatChanged(format) }
+            ) {
+                // Note: rate shifts are intentionally NOT marked as
+                // play_id activity — issue #403.
+                metrics?.onVideoFormatChanged(format)
+            }
 
             override fun onLoadCompleted(
                 eventTime: AnalyticsListener.EventTime, loadEventInfo: LoadEventInfo,
@@ -917,6 +984,7 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
 
     override fun onCleared() {
         super.onCleared()
+        playIdRotationJob?.cancel()
         metrics?.release()
         player.release()
     }
@@ -932,6 +1000,7 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         private const val FLAG_GO_LIVE = "advanced_go_live"
         private const val FLAG_SKIP_HOME = "advanced_skip_home_on_launch"
         private const val FLAG_PREVIEW_VIDEO_SLOTS = "advanced_preview_video_slots"
+        private const val FLAG_PLAY_ID_ROTATION = "advanced_play_id_rotation_s"
         private const val LAST_PLAYED_KEY = "last_played_content"
         private const val VIEW_COUNTS_KEY = "view_counts"
         private const val CONTENT_CACHE_PREFIX = "content_cache_"
