@@ -257,11 +257,11 @@ ATS-style transfer timeouts the proxy enforces against the *client* — useful f
 
 When a timeout fires the network-log waterfall renders the row with `!⏱` so you can tell it apart from a fault-injection cut (`!✂`) or a player abort (`!↩`).
 
-### Bitrate chart (with buffer depth and FPS)
+### Bitrate chart (with RTT, buffer depth, and FPS)
 
 ![Playback state chart](docs/screenshots/playback-state-chart.png)
 
-The session card has a collapsible **Bitrate Chart** that stacks an events timeline + up to three time-series charts, all sharing a 10-minute rolling window and unified zoom/pan. Legend entries toggle series, scroll zooms, drag pans, `⏸` pauses live updates. The four panels share an x-axis so a bandwidth dip lines up visually with its buffer / FPS / variant-shift impact.
+The session card has a collapsible **Bitrate Chart** that stacks an events timeline + up to four time-series charts, all sharing a 10-minute rolling window and unified zoom/pan. Legend entries toggle series, scroll zooms, drag pans, `⏸` pauses live updates. The five panels share an x-axis so a bandwidth dip lines up visually with its RTT / buffer / FPS / variant-shift impact.
 
 - **Events timeline** *(top)* — swim-lane visualization of what the player and server are doing right now:
   - **PLAYER variants** — one lane per ladder rung (e.g. `1920×1080:7.1Mbps`, `1280×720:3.5Mbps`). Coloured blocks show which variant the player was on at each moment. The variant shift on a throughput collapse is visible as a downstep across lanes.
@@ -275,10 +275,14 @@ The session card has a collapsible **Bitrate Chart** that stacks an events timel
   - **Reference lines**: `Limit` (shaping ceiling, stepped when a pattern is active), `Server Rendition` (what the server believes it delivered), one line per ladder `Variant` (hidden by default).
   - **Events**: `STALL` and `RESTART` markers annotate player stalls and restarts.
   - **Y-axis**: `Auto` or fixed `5 / 10 / 20 / 30 / 40 / 50 / 100` Mbps — pin the scale when comparing two sessions side by side.
+- **RTT chart** — two independent round-trip-time signals on the same time axis (issues #401 / #404):
+  - **TCP_INFO RTT family** (purple lines, left Y-axis) — what the streaming TCP connection actually experiences. Sampled inside go-proxy via `getsockopt(TCP_INFO)` at 100 Hz, drained into 1 s windows: `RTT avg` (smoothed RFC 6298 SRTT), `RTT max` / `min` (per-window peak/trough envelope), `RTT lifetime min` (sticky path floor, dashed reference), `RTO` (right Y-axis, hidden by default — climbs above RTT during a wedge while smoothed RTT flatlines).
+  - **Path ping** (cyan line, left Y-axis) — out-of-band ICMP echo from go-proxy → `player_ip` at 1 Hz, routed through a high-priority band inside the per-port shaping class. Sees the configured netem delay but jumps the bulk segment queue. The closest thing to "what the path could deliver if you weren't loading it." Zero / gap when ICMP is filtered.
+  - **Why both?** The ping line is the network's contribution; the gap up to the TCP_INFO line is the application stack's contribution (queueing under throttle, delayed ACKs, receiver load). Together they decompose latency under shaping: rising netem moves both lines together; rising throttle inflates only TCP_INFO via bufferbloat. See [`analytics/README.md`](analytics/README.md#reading-the-rtt-chart-issues-401-404) for the deep interpretation guide and per-shaping-knob test recipes.
 - **Buffer depth chart** — player `buffered` TimeRanges (`player_metrics_buffer_depth_s`) on the left axis; **Wall-Clock Offset** (player playhead vs encoder PDT) on the right axis.
 - **FPS chart** — rendered and dropped frames/s from `player_metrics_frames_displayed` / `_dropped_frames`, 2 s sliding window, exponential smoothing (α = 0.15). Series: `FPS (smoothed)`, `Low FPS` (red below threshold), `FPS Baseline` (75th percentile), `Low Threshold` (`0.75 × baseline`), `Dropped Frames/s` (right Y-axis).
 
-The four panels' plot areas all align on the same right edge so vertical x-axis ticks line up across every chart and the events timeline above.
+The five panels' plot areas all align on the same right edge so vertical x-axis ticks line up across every chart and the events timeline above.
 
 ### Network log waterfall (HAR view)
 
