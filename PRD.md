@@ -166,7 +166,7 @@ Many platforms already expose their own failure tools (player debug features, br
 - Keeps test setup **documented and portable** with the content itself.
 
 ### 7.5 Session Data Distribution & Shaping Control
-- **Session store**: all session state is stored in memcache under `session_list` and broadcast on change.
+- **Session store**: go-proxy holds the per-session state map in-process under a `session_list` key and broadcasts the full snapshot on change.
 - **SSE updates**: `/api/sessions/stream` emits full session snapshots (no 10‑session cap). UI should treat each event as authoritative.
 - **Polling fallback**: when SSE is unavailable, the UI polls `/api/sessions` and applies the same normalization logic.
 - **Control vs data**: UI control widgets sync only when `control_revision` changes; data metrics update every tick.

@@ -82,8 +82,7 @@ Default server target for tests is `$K3S_HOST:30000/30081`. Override with `--hos
 |---------|------|------|
 | `go-live` | 8010 | LL-HLS + LL-DASH generator (2s/6s/LL variants) |
 | `go-upload` | 8003 | Upload API, encoding job orchestration, content discovery |
-| `go-proxy` | 30081 | Per-session testing proxy — failure injection, traffic shaping (nftables), SSE session stream |
-| `memcached` | 11211 | Session state storage (embedded in container) |
+| `go-proxy` | 30081 | Per-session testing proxy — failure injection, traffic shaping (nftables), SSE session stream, in-process session-state map |
 | nginx | 30000 | Routing, static dashboard |
 
 Plus the optional **analytics sidecar** (separate compose services): `clickhouse` (archive, 30-day TTL), `forwarder` (SSE → ClickHouse + read API), `grafana` (provisioned dashboards). All under [`analytics/`](analytics/). The live streaming path is independent of the sidecar — if the forwarder dies, the live UI keeps working, archival just pauses.

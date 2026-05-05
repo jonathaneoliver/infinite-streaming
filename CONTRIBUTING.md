@@ -48,7 +48,7 @@ go build ./...
 go test ./...
 ```
 
-Running a service outside the container is possible but needs careful env setup — memcached, the media volume layout, and nginx upstreams all have to be reachable. For most work, rebuilding the full container (`make build && make run`) is faster to reason about.
+Running a service outside the container is possible but needs careful env setup — the media volume layout and nginx upstreams have to be reachable. For most work, rebuilding the full container (`make build && make run`) is faster to reason about.
 
 ### Iterating on the dashboard
 
