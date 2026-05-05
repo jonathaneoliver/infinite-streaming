@@ -99,129 +99,192 @@ build-push-k3s-all: buildx-k3s-all push-k3s-all
 
 K3S_SERVER_IMAGE ?= $(K3S_REGISTRY)/$(K3S_SERVER_REPO):latest
 
-deploy-k3s-local:
-	@set -e; \
-	echo "Cleaning up legacy split deployments/services"; \
-	ssh $(K3S_SSH_HOST) "export KUBECONFIG=$(K3S_KUBECONFIG); kubectl delete service go-server go-proxy --ignore-not-found=true"; \
-	ssh $(K3S_SSH_HOST) "export KUBECONFIG=$(K3S_KUBECONFIG); kubectl delete deployment go-server go-proxy --ignore-not-found=true"; \
-	for manifest in $(K8S_MANIFESTS); do \
-		echo "Applying $$manifest to $(K3S_SSH_HOST)"; \
-		INFINITE_STREAM_RENDEZVOUS_URL='$(INFINITE_STREAM_RENDEZVOUS_URL)' \
-		INFINITE_STREAM_ANNOUNCE_URL_K3S_DEV='$(INFINITE_STREAM_ANNOUNCE_URL_K3S_DEV)' \
-		INFINITE_STREAM_ANNOUNCE_LABEL_K3S_DEV='$(INFINITE_STREAM_ANNOUNCE_LABEL_K3S_DEV)' \
-		INFINITE_STREAM_ANNOUNCE_URL_K3S_RELEASE='$(INFINITE_STREAM_ANNOUNCE_URL_K3S_RELEASE)' \
-		INFINITE_STREAM_ANNOUNCE_LABEL_K3S_RELEASE='$(INFINITE_STREAM_ANNOUNCE_LABEL_K3S_RELEASE)' \
-		envsubst < $$manifest | ssh $(K3S_SSH_HOST) "export KUBECONFIG=$(K3S_KUBECONFIG); kubectl apply -f -"; \
-	done; \
-	echo "Updating deployment images"; \
-	ssh $(K3S_SSH_HOST) "export KUBECONFIG=$(K3S_KUBECONFIG); kubectl set image deployment/$(K8S_DEPLOYMENT) go-server=$(K3S_SERVER_IMAGE)"; \
-	echo "Restarting deployments explicitly"; \
-	ssh $(K3S_SSH_HOST) "export KUBECONFIG=$(K3S_KUBECONFIG); kubectl rollout restart deployment/$(K8S_DEPLOYMENT)"; \
-	echo "Waiting for rollout"; \
-	ssh $(K3S_SSH_HOST) "export KUBECONFIG=$(K3S_KUBECONFIG); kubectl rollout status deployment/$(K8S_DEPLOYMENT) --timeout=180s"; \
-	echo "Deployment status"; \
-	ssh $(K3S_SSH_HOST) "export KUBECONFIG=$(K3S_KUBECONFIG); kubectl get pods -n default -o wide; echo; kubectl get svc -n default"
+# ── k3d cluster lifecycle ──────────────────────────────────────────────
+# Two independent k3d clusters on $K3S_SSH_HOST: `dev` (host ports
+# 40000-40881, API :6543) and `release` (host ports 30000-30881, API
+# :6544). Each is a Docker-in-Docker k3s, so cluster identity is the
+# kubeconfig context, not a resource-name suffix. Manifests share one
+# template — a single `infinite-streaming` Deployment per cluster, no
+# `-dev` / `-release` disambiguation.
+#
+# API ports avoid 6443 (whatever else might be on the host's k3s).
 
-deploy-k3s: deploy-k3s-local
+K3D_DEV_KUBECONFIG     ?= ~/.config/k3d/smashing-dev-kubeconfig.yaml
+K3D_RELEASE_KUBECONFIG ?= ~/.config/k3d/smashing-release-kubeconfig.yaml
+
+# Bootstrap both k3d clusters on $K3S_SSH_HOST. Idempotent: re-running
+# is a no-op once both clusters exist. Installs k3d if missing into
+# ~/.local/bin (no sudo). Subsequent ssh commands prepend
+# ~/.local/bin to PATH so the install location doesn't have to be
+# in the noninteractive shell's default PATH.
+# Writes per-cluster kubeconfigs to ~/.kube/smashing-{dev,release}.yaml
+# so subsequent `make deploy` / `make deploy-release` targets can pick
+# the right context with KUBECONFIG=… without depending on whichever
+# kubeconfig happens to be active in the user's shell.
+
+# Wrapper to push ~/.local/bin onto PATH for non-interactive ssh
+# sessions where ~/.bashrc / ~/.profile may not be sourced.
+K3D_REMOTE_SHELL = export PATH=$$HOME/.local/bin:$$PATH
+
+k3d-bootstrap:
+	@echo "=== Ensuring k3d is installed on $(K3S_SSH_HOST) ==="
+	ssh $(K3S_SSH_HOST) 'mkdir -p ~/.local/bin && \
+		(test -x $$HOME/.local/bin/k3d && echo "k3d already installed: $$HOME/.local/bin/k3d") || \
+		(USE_SUDO=false K3D_INSTALL_DIR=$$HOME/.local/bin curl -sfL https://raw.githubusercontent.com/k3d-io/k3d/main/install.sh | USE_SUDO=false K3D_INSTALL_DIR=$$HOME/.local/bin bash || true) && \
+		test -x $$HOME/.local/bin/k3d'
+	@echo "=== Writing registries.yaml so both clusters can pull from $(K3S_REGISTRY) (HTTP) ==="
+	@printf 'mirrors:\n  "%s":\n    endpoint:\n      - "http://%s"\nconfigs:\n  "%s":\n    tls:\n      insecure_skip_verify: true\n' \
+		'$(K3S_REGISTRY)' '$(K3S_REGISTRY)' '$(K3S_REGISTRY)' | \
+		ssh $(K3S_SSH_HOST) 'mkdir -p ~/.config/k3d && cat > ~/.config/k3d/smashing-registries.yaml'
+	@echo "=== Creating k3d cluster `dev` (api :6543, host ports 40000-40881) ==="
+	ssh $(K3S_SSH_HOST) '$(K3D_REMOTE_SHELL); k3d cluster list dev 2>/dev/null | grep -q "^dev " || k3d cluster create dev \
+		--api-port 6543 \
+		--port "40000:30000@loadbalancer" \
+		--port "40081:30081@loadbalancer" \
+		--port "40181:30181@loadbalancer" \
+		--port "40281:30281@loadbalancer" \
+		--port "40381:30381@loadbalancer" \
+		--port "40481:30481@loadbalancer" \
+		--port "40581:30581@loadbalancer" \
+		--port "40681:30681@loadbalancer" \
+		--port "40781:30781@loadbalancer" \
+		--port "40881:30881@loadbalancer" \
+		--registry-config ~/.config/k3d/smashing-registries.yaml \
+		--volume "$(K3S_MEDIA_DIR):$(K3S_MEDIA_DIR)@server:0" \
+		--volume "$(K3S_CERTS_DIR):$(K3S_CERTS_DIR)@server:0" \
+		--kubeconfig-update-default=false \
+		--kubeconfig-switch-context=false'
+	ssh $(K3S_SSH_HOST) '$(K3D_REMOTE_SHELL); mkdir -p ~/.config/k3d && k3d kubeconfig get dev > $(K3D_DEV_KUBECONFIG)'
+	@echo "=== Creating k3d cluster `release` (api :6544, host ports 30000-30881) ==="
+	ssh $(K3S_SSH_HOST) '$(K3D_REMOTE_SHELL); k3d cluster list release 2>/dev/null | grep -q "^release " || k3d cluster create release \
+		--api-port 6544 \
+		--port "30000:30000@loadbalancer" \
+		--port "30081:30081@loadbalancer" \
+		--port "30181:30181@loadbalancer" \
+		--port "30281:30281@loadbalancer" \
+		--port "30381:30381@loadbalancer" \
+		--port "30481:30481@loadbalancer" \
+		--port "30581:30581@loadbalancer" \
+		--port "30681:30681@loadbalancer" \
+		--port "30781:30781@loadbalancer" \
+		--port "30881:30881@loadbalancer" \
+		--registry-config ~/.config/k3d/smashing-registries.yaml \
+		--volume "$(K3S_MEDIA_DIR):$(K3S_MEDIA_DIR)@server:0" \
+		--volume "$(K3S_CERTS_DIR):$(K3S_CERTS_DIR)@server:0" \
+		--kubeconfig-update-default=false \
+		--kubeconfig-switch-context=false'
+	ssh $(K3S_SSH_HOST) '$(K3D_REMOTE_SHELL); mkdir -p ~/.config/k3d && k3d kubeconfig get release > $(K3D_RELEASE_KUBECONFIG)'
+	@echo "Both clusters ready. Run \`make deploy\` for dev / \`make deploy-release\` for release."
 
 status-k3s:
-	ssh $(K3S_SSH_HOST) "export KUBECONFIG=$(K3S_KUBECONFIG); kubectl get nodes; echo; kubectl get pods -A"
+	ssh $(K3S_SSH_HOST) '$(K3D_REMOTE_SHELL); k3d cluster list; \
+		echo; echo "--- dev ---"; export KUBECONFIG=$(K3D_DEV_KUBECONFIG); kubectl get pods -A; \
+		echo; echo "--- release ---"; export KUBECONFIG=$(K3D_RELEASE_KUBECONFIG); kubectl get pods -A'
 
 # `make deploy` and `make deploy-release` are end-to-end — they build +
-# push the main image, apply the main app manifest, AND apply that
-# stack's analytics tier (ClickHouse + forwarder + Grafana — separate
-# pods, Services, and PVCs per stack so dev and release share nothing).
-# Each stack picks its own `ANALYTICS_STACK` and `ANALYTICS_SSE_URL`
-# via target-specific variables below.
+# push the main image, apply the consolidated `k8s-infinite-streaming.yaml.tmpl`
+# AND the analytics tier (ClickHouse + forwarder + Grafana) into the
+# stack's k3d cluster. Each cluster has exactly one set of resources —
+# stack identity is the cluster context, not a name suffix.
 
-deploy: ANALYTICS_STACK=dev
-# Dev's go-proxy is reachable via the dev Service at port 40081
-# (the NodePort's `port` value, mapped to container :30081).
-deploy: ANALYTICS_SSE_URL=http://infinite-streaming-dev:40081/api/sessions/stream
+# Each target binds its KUBECONFIG_FILE, SERVER_ID, ANNOUNCE_URL/LABEL,
+# and EXTERNAL_PORT_BASE so the same template renders cleanly per stack.
+deploy: KUBECONFIG_FILE=$(K3D_DEV_KUBECONFIG)
+deploy: SERVER_ID=infinite-streaming-dev
+deploy: ANNOUNCE_URL=$(INFINITE_STREAM_ANNOUNCE_URL_K3S_DEV)
+deploy: ANNOUNCE_LABEL=$(INFINITE_STREAM_ANNOUNCE_LABEL_K3S_DEV)
+deploy: EXTERNAL_PORT_BASE=40081
 deploy: analytics-deploy-k3s
 	docker buildx build --platform linux/amd64 --build-arg VERSION=$(shell cat VERSION) -t $(K3S_REGISTRY)/$(K3S_SERVER_REPO):dev --push .
-	$(MAKE) deploy-k3s K3S_KUBECONFIG=$(K3S_KUBECONFIG) K8S_MANIFESTS=k8s-infinite-streaming-dev.yaml K8S_DEPLOYMENT=infinite-streaming-dev K3S_SERVER_IMAGE=$(K3S_REGISTRY)/$(K3S_SERVER_REPO):dev
+	$(MAKE) deploy-k3d K3S_SERVER_IMAGE=$(K3S_REGISTRY)/$(K3S_SERVER_REPO):dev \
+		KUBECONFIG_FILE=$(KUBECONFIG_FILE) \
+		SERVER_ID=$(SERVER_ID) \
+		ANNOUNCE_URL=$(ANNOUNCE_URL) \
+		ANNOUNCE_LABEL=$(ANNOUNCE_LABEL) \
+		EXTERNAL_PORT_BASE=$(EXTERNAL_PORT_BASE)
 
-logs:
-	ssh $(K3S_SSH_HOST) "export KUBECONFIG=$(K3S_KUBECONFIG); kubectl logs deploy/infinite-streaming-dev --all-containers -f"
-
-deploy-release: ANALYTICS_STACK=release
-deploy-release: ANALYTICS_SSE_URL=http://infinite-streaming:30081/api/sessions/stream
+deploy-release: KUBECONFIG_FILE=$(K3D_RELEASE_KUBECONFIG)
+deploy-release: SERVER_ID=infinite-streaming-release
+deploy-release: ANNOUNCE_URL=$(INFINITE_STREAM_ANNOUNCE_URL_K3S_RELEASE)
+deploy-release: ANNOUNCE_LABEL=$(INFINITE_STREAM_ANNOUNCE_LABEL_K3S_RELEASE)
+deploy-release: EXTERNAL_PORT_BASE=30081
 deploy-release: analytics-deploy-k3s
 	docker buildx build --platform linux/amd64 \
 		--build-arg VERSION=$(shell cat VERSION) \
 		-t $(K3S_SERVER_IMAGE) \
 		-t $(K3S_REGISTRY)/$(K3S_SERVER_REPO):$(shell cat VERSION) \
 		--push .
-	$(MAKE) deploy-k3s K3S_KUBECONFIG=$(K3S_KUBECONFIG) K3S_SERVER_IMAGE=$(K3S_SERVER_IMAGE)
+	$(MAKE) deploy-k3d K3S_SERVER_IMAGE=$(K3S_SERVER_IMAGE) \
+		KUBECONFIG_FILE=$(KUBECONFIG_FILE) \
+		SERVER_ID=$(SERVER_ID) \
+		ANNOUNCE_URL=$(ANNOUNCE_URL) \
+		ANNOUNCE_LABEL=$(ANNOUNCE_LABEL) \
+		EXTERNAL_PORT_BASE=$(EXTERNAL_PORT_BASE)
 
-# ── Analytics tier deployment to k3s ───────────────────────────────────
-# Per-stack analytics: dev and release each get their own ClickHouse,
-# forwarder, and Grafana. Resources are named with `-${ANALYTICS_STACK}`
-# suffix so both can coexist in the same namespace. Schemas + Grafana
-# provisioning are inlined in k8s-analytics.yaml — no separate
-# ConfigMap-from-file step.
+# Inner worker — applies the consolidated main-app template against
+# whichever k3d cluster's kubeconfig was passed in. Used by both
+# `deploy` and `deploy-release`.
+deploy-k3d:
+	@if [ -z "$(KUBECONFIG_FILE)" ]; then echo "KUBECONFIG_FILE required"; exit 1; fi
+	@echo "=== Applying main app to k3d cluster ($(KUBECONFIG_FILE)) ==="
+	K3S_REGISTRY='$(K3S_REGISTRY)' \
+	K3S_MEDIA_DIR='$(K3S_MEDIA_DIR)' \
+	K3S_CERTS_DIR='$(K3S_CERTS_DIR)' \
+	SERVER_ID='$(SERVER_ID)' \
+	ANNOUNCE_URL='$(ANNOUNCE_URL)' \
+	ANNOUNCE_LABEL='$(ANNOUNCE_LABEL)' \
+	RENDEZVOUS_URL='$(INFINITE_STREAM_RENDEZVOUS_URL)' \
+	EXTERNAL_PORT_BASE='$(EXTERNAL_PORT_BASE)' \
+		envsubst < k8s-infinite-streaming.yaml.tmpl | \
+		ssh $(K3S_SSH_HOST) "export KUBECONFIG=$(KUBECONFIG_FILE); kubectl apply -f -"
+	ssh $(K3S_SSH_HOST) "export KUBECONFIG=$(KUBECONFIG_FILE); kubectl set image deployment/infinite-streaming go-server=$(K3S_SERVER_IMAGE)"
+	ssh $(K3S_SSH_HOST) "export KUBECONFIG=$(KUBECONFIG_FILE); kubectl rollout restart deployment/infinite-streaming"
+	ssh $(K3S_SSH_HOST) "export KUBECONFIG=$(KUBECONFIG_FILE); kubectl rollout status deployment/infinite-streaming --timeout=180s"
+	ssh $(K3S_SSH_HOST) "export KUBECONFIG=$(KUBECONFIG_FILE); kubectl get pods -o wide; echo; kubectl get svc"
+
+logs:
+	ssh $(K3S_SSH_HOST) "export KUBECONFIG=$(K3D_DEV_KUBECONFIG); kubectl logs deploy/infinite-streaming --all-containers -f"
+
+# ── Analytics tier deployment ──────────────────────────────────────────
+# One analytics tier per cluster (no shared state — each k3d cluster
+# has its own clickhouse, forwarder, grafana). Inside both clusters the
+# forwarder's SSE source is the same in-cluster URL, since each cluster
+# has exactly one `infinite-streaming` Service at NodePort 30081.
+
+ANALYTICS_SSE_URL ?= http://infinite-streaming:30081/api/sessions/stream
 
 # Build + push the forwarder image into the cluster's registry. Same
-# image is shared across stacks (it's stack-agnostic); only the
-# Deployment env vars differ.
+# image is shared across stacks (cluster-agnostic).
 analytics-build-forwarder-k3s:
 	docker buildx build --platform linux/amd64 \
 		-t $(K3S_REGISTRY)/infinite-streaming-forwarder:dev \
 		--push ./analytics/go-forwarder
 
-# Apply the analytics manifest for the `${ANALYTICS_STACK}` stack.
-# Idempotent: `kubectl apply` re-converges on every run.
+# Apply the analytics manifest into the cluster pointed at by
+# $(KUBECONFIG_FILE). Idempotent.
 analytics-deploy-k3s: analytics-build-forwarder-k3s
-	@if [ -z "$(ANALYTICS_STACK)" ]; then echo "ANALYTICS_STACK must be set (dev|release)"; exit 1; fi
-	@if [ -z "$(ANALYTICS_SSE_URL)" ]; then echo "ANALYTICS_SSE_URL must be set"; exit 1; fi
-	@echo "=== Applying analytics tier (stack=$(ANALYTICS_STACK)) ==="
-	ANALYTICS_STACK='$(ANALYTICS_STACK)' \
+	@if [ -z "$(KUBECONFIG_FILE)" ]; then echo "KUBECONFIG_FILE required (set by deploy / deploy-release targets)"; exit 1; fi
+	@echo "=== Applying analytics tier ($(KUBECONFIG_FILE)) ==="
 	ANALYTICS_SSE_URL='$(ANALYTICS_SSE_URL)' \
 	K3S_REGISTRY='$(K3S_REGISTRY)' \
 		envsubst < k8s-analytics.yaml | \
-		ssh $(K3S_SSH_HOST) "export KUBECONFIG=$(K3S_KUBECONFIG); kubectl apply -f -"
-	@echo "=== Waiting for $(ANALYTICS_STACK) analytics rollout ==="
-	ssh $(K3S_SSH_HOST) "export KUBECONFIG=$(K3S_KUBECONFIG); \
-		kubectl rollout status statefulset/clickhouse-$(ANALYTICS_STACK) --timeout=120s; \
-		kubectl rollout status deployment/forwarder-$(ANALYTICS_STACK) --timeout=120s; \
-		kubectl rollout status deployment/grafana-$(ANALYTICS_STACK) --timeout=120s"
+		ssh $(K3S_SSH_HOST) "export KUBECONFIG=$(KUBECONFIG_FILE); kubectl apply -f -"
+	@echo "=== Waiting for analytics rollout ==="
+	ssh $(K3S_SSH_HOST) "export KUBECONFIG=$(KUBECONFIG_FILE); \
+		kubectl rollout status statefulset/clickhouse --timeout=120s; \
+		kubectl rollout status deployment/forwarder --timeout=120s; \
+		kubectl rollout status deployment/grafana --timeout=120s"
 
-# Tear down a single stack (analytics + main app) so the other stack
-# can be exercised in isolation. Removes Deployments, Services,
-# StatefulSets, ConfigMaps, AND the PVC (so a subsequent
-# `make deploy[-release]` starts from empty ClickHouse data — matches
-# the user's "no data migration needed" model).
-#
-# Usage:
-#   make teardown-k3s-dev        # wipes the dev stack
-#   make teardown-k3s-release    # wipes the release stack
-#
-# Both targets also delete the main app deployment for that stack so
-# you get a fully empty namespace slot.
-teardown-k3s-dev:
-	$(MAKE) teardown-k3s-stack ANALYTICS_STACK=dev MAIN_APP=infinite-streaming-dev
-teardown-k3s-release:
-	$(MAKE) teardown-k3s-stack ANALYTICS_STACK=release MAIN_APP=infinite-streaming
+# Tear down a single k3d cluster — wipes everything in it (analytics +
+# main app + PVC + node containers). The other cluster stays untouched
+# so each can be exercised in isolation.
+teardown-dev:
+	ssh $(K3S_SSH_HOST) '$(K3D_REMOTE_SHELL); k3d cluster delete dev'
+	@echo "Cluster `dev` deleted. Re-run \`make k3d-bootstrap\` then \`make deploy\` to bring it back."
 
-# Internal worker. Don't invoke directly; use the dev/release wrappers.
-teardown-k3s-stack:
-	@if [ -z "$(ANALYTICS_STACK)" ]; then echo "ANALYTICS_STACK required"; exit 1; fi
-	@echo "=== Tearing down $(ANALYTICS_STACK) analytics + main app ==="
-	ssh $(K3S_SSH_HOST) "export KUBECONFIG=$(K3S_KUBECONFIG); \
-		kubectl delete --ignore-not-found=true \
-			deployment/grafana-$(ANALYTICS_STACK) \
-			deployment/forwarder-$(ANALYTICS_STACK) \
-			statefulset/clickhouse-$(ANALYTICS_STACK) \
-			service/grafana-$(ANALYTICS_STACK) \
-			service/forwarder-$(ANALYTICS_STACK) \
-			service/clickhouse-$(ANALYTICS_STACK) \
-			configmap/analytics-grafana-dashboards-$(ANALYTICS_STACK) \
-			configmap/analytics-grafana-datasources-$(ANALYTICS_STACK) \
-			configmap/analytics-clickhouse-init-$(ANALYTICS_STACK); \
-		kubectl delete pvc --ignore-not-found=true -l app=clickhouse-$(ANALYTICS_STACK); \
-		kubectl delete --ignore-not-found=true deployment/$(MAIN_APP) service/$(MAIN_APP)"
-	@echo "Stack $(ANALYTICS_STACK) torn down. Run \`make deploy$(if $(filter release,$(ANALYTICS_STACK)),-release,)\` to bring it back."
+teardown-release:
+	ssh $(K3S_SSH_HOST) '$(K3D_REMOTE_SHELL); k3d cluster delete release'
+	@echo "Cluster `release` deleted. Re-run \`make k3d-bootstrap\` then \`make deploy-release\` to bring it back."
 
 # ── Remote deployment testing ──────────────────────────────────────────
 # Deploy all 4 installation methods to a remote Docker host for parallel testing.
