@@ -63,8 +63,13 @@ location ^~ /grafana/ {
 # prefix so the forwarder sees its native /api/ path.
 location ^~ /analytics/api/ {
     ${INFINITE_STREAM_AUTH_DIRECTIVES}
-    rewrite ^/analytics(/api/.*)$ $1 break;
+    # CRITICAL: `set` must come BEFORE `rewrite … break`. `break` halts
+    # the rewrite-module phase, and `set` is also a rewrite-module
+    # directive — putting `set` after `rewrite … break` leaves the
+    # variable uninitialized at proxy_pass time and yields
+    #   "using uninitialized $forwarder_host variable" → 500.
     set $forwarder_host "${INFINITE_STREAM_FORWARDER_HOST}";
+    rewrite ^/analytics(/api/.*)$ $1 break;
     proxy_pass http://$forwarder_host:8080;
     proxy_set_header Host $host;
     proxy_set_header X-Real-IP $remote_addr;
