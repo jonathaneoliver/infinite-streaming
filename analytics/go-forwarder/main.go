@@ -356,7 +356,7 @@ func handlePayload(data []byte, cache *fingerprintCache, netSeen *netSeen, out c
 		log.Printf("bad sse payload: %v", err)
 		return
 	}
-	now := time.Now().UTC().Format("2006-01-02 15:04:05.000")
+	fallback := time.Now().UTC().Format("2006-01-02 15:04:05.000")
 	active := make(map[string]struct{}, len(payload.Sessions))
 	for _, s := range payload.Sessions {
 		sessionID, _ := s["session_id"].(string)
@@ -368,7 +368,16 @@ func handlePayload(data []byte, cache *fingerprintCache, netSeen *netSeen, out c
 		if !cache.changed(sessionID, fp) {
 			continue
 		}
-		out <- toRow(now, payload.Revision, sessionID, s)
+		// Anchor the row's `ts` to the snapshot's `player_metrics_event_time`
+		// (proxy/iOS clock) so `session_snapshots.ts` and the in-blob
+		// event_time are the same value. This gives the session-viewer's
+		// chart x-axis a single time source and lets `ORDER BY ts` produce
+		// event-time ordering for free. The forwarder wall clock is only
+		// used as a fallback if event_time is missing — which shouldn't
+		// happen now that `saveSessionByID` stamps proxy now() on every
+		// merge (issue #403 follow-up).
+		ts := snapshotEventTimeAsCHTimestamp(s, fallback)
+		out <- toRow(ts, payload.Revision, sessionID, s)
 		// Queue auto-classifier if this snapshot carries any of the
 		// "really bad things" signals. Debounced — repeated marks
 		// for the same (session,play) coalesce to one mutation.
@@ -391,6 +400,23 @@ func fingerprint(s map[string]interface{}) string {
 	}
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:8])
+}
+
+// snapshotEventTimeAsCHTimestamp converts the snapshot's
+// `player_metrics_event_time` (RFC3339 with optional fractional
+// seconds) into the `YYYY-MM-DD hh:mm:ss.SSS` form ClickHouse expects
+// for `DateTime64(3, 'UTC')`. Falls back to `fallback` when the field
+// is missing or unparseable.
+func snapshotEventTimeAsCHTimestamp(s map[string]interface{}, fallback string) string {
+	raw := getStr(s, "player_metrics_event_time")
+	if raw == "" {
+		return fallback
+	}
+	t, err := time.Parse(time.RFC3339Nano, raw)
+	if err != nil {
+		return fallback
+	}
+	return t.UTC().Format("2006-01-02 15:04:05.000")
 }
 
 func toRow(ts string, revision uint64, sessionID string, s map[string]interface{}) row {

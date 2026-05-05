@@ -202,13 +202,11 @@
             // buffer / FPS / events chart x-axis. Cleared when the user
             // exits replay; live mode never sets it.
             chartWindowMsBySession.set(String(sessionId), windowMs);
-            // Filter then sort — `snapshots` is in receive order (whatever
-            // direction the stream arrived), but pushBandwidthSample needs
-            // chronological feeding. Subset is bounded by window size, so
-            // an O(W log W) sort here is much cheaper than maintaining a
-            // sorted invariant on every line.
+            // Snapshots arrive ASC-by-event_time (forwarder ts ==
+            // player_metrics_event_time on new rows; the snapshots fetch
+            // requests order=asc) so the filtered subset is already in
+            // chronological order. No sort needed.
             const subset = snapshots.filter(s => s.tsMs >= startMs && s.tsMs <= endMs);
-            subset.sort((a, b) => a.tsMs - b.tsMs);
             clearReplaySessionState(sessionId);
             const realDateNow = Date.now.bind(Date);
             let mockNow = realDateNow();
@@ -227,6 +225,9 @@
             try {
                 for (let i = 0; i < subset.length - 1; i++) {
                     const s = subset[i];
+                    // Mocked clock tracks event_time so the cutoff filter
+                    // inside pushBandwidthSample (which compares to
+                    // playerEventAtMs) lines up with sample x positions.
                     if (Number.isFinite(s.tsMs)) mockNow = s.tsMs;
                     sessionsById.set(sidStr, s.snap);
                     try { pushBandwidthSample(s.snap); } catch (_e) {}
@@ -326,12 +327,19 @@
                 }
             }
 
-            // Stream snapshots from ClickHouse in reverse-chronological
-            // order so the end-of-session window paints first.
+            // Stream snapshots from ClickHouse in chronological order
+            // (start → end). The previous reverse-stream optimisation
+            // ("end of session paints first") meant pushBandwidthSample
+            // got fed out-of-event-time samples, which interacts badly
+            // with the carry-forward `lastLimit` lookup in series push
+            // (issue #403 follow-up — limit/bitrate lines zigzag at
+            // step boundaries). ASC ingest matches the order the user
+            // expects to see and lets the chart pipeline render
+            // correctly without a defensive resort at every render.
             const params = new URLSearchParams({
                 session: sessionId,
                 limit: '200000',
-                order: 'desc'
+                order: 'asc'
             });
             if (playId) params.set('play_id', playId);
             if (fromIso) params.set('from', fromIso);
@@ -1700,11 +1708,10 @@
                 if (!snap || typeof snap !== 'object') return;
                 const tsMs = Date.parse((row.ts || '').replace(' ', 'T') + 'Z');
                 if (!Number.isFinite(tsMs)) return;
-                // O(1) push regardless of stream direction. The array is
-                // intentionally NOT kept sorted — that was the O(N²) tax
-                // of reverse streaming. Nothing in the brush/rail/header
-                // path needs ordering; replayWindow sorts its small
-                // filtered subset before feeding the chart.
+                // `row.ts` is now anchored to player_metrics_event_time
+                // upstream (forwarder writes event_time as the ts column),
+                // so a single tsMs serves both brush UI positioning and
+                // the chart's chronological feed.
                 snapshots.push({ tsMs, snap });
                 if (tsMs < observedStartMs) observedStartMs = tsMs;
                 if (tsMs > observedEndMs)   observedEndMs   = tsMs;
