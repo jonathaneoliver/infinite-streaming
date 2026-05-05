@@ -25,6 +25,14 @@
     // successful (re)connect.
     let sseReconnectTimer = null;
     const SSE_RETRY_MS = 2000;
+    // Watchdog: server sends a `heartbeat` event every 15 s. If we
+    // don't see ANY event (heartbeat or sessions) within 30 s, the
+    // connection is dead in some way the EventSource state machine
+    // hasn't surfaced (e.g. browser stuck in CONNECTING with silent
+    // retry failures). Force-close + reopen.
+    let sseLastEventAt = Date.now();
+    let sseWatchdogTimer = null;
+    const SSE_WATCHDOG_MS = 30000;
 
         function updateSseMissedBadge() {
             if (!sseMissedBadge) return;
@@ -56,6 +64,8 @@
             }
             const source = new EventSource('/api/sessions/stream');
             sessionsStream = source;
+            sseLastEventAt = Date.now();
+            ensureSseWatchdog();
             source.addEventListener('open', () => {
                 // Server is talking again. Server-side
                 // sessionsBroadcastSeq resets across container
@@ -64,8 +74,13 @@
                 // we don't compute a bogus gap on the first
                 // post-reconnect event.
                 sseLastRevision = 0;
+                sseLastEventAt = Date.now();
+            });
+            source.addEventListener('heartbeat', () => {
+                sseLastEventAt = Date.now();
             });
             source.addEventListener('sessions', (event) => {
+                sseLastEventAt = Date.now();
                 try {
                     const payload = parseSessionsStreamPayload(event);
                     const sessions = payload.sessions;
@@ -110,6 +125,20 @@
             });
             return true;
         }
+
+    function ensureSseWatchdog() {
+        if (sseWatchdogTimer !== null) return;
+        sseWatchdogTimer = setInterval(() => {
+            if (Date.now() - sseLastEventAt < SSE_WATCHDOG_MS) return;
+            console.warn(`SSE silent for ${SSE_WATCHDOG_MS}ms — forcing reconnect`);
+            if (sessionsStream) {
+                try { sessionsStream.close(); } catch (_) { /* ignore */ }
+                sessionsStream = null;
+            }
+            sseLastEventAt = Date.now();
+            startSessionsStream();
+        }, 5000);
+    }
 
     function start() {
         return startSessionsStream();

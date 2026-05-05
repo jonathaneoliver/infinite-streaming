@@ -739,6 +739,14 @@
         // its 1s polling fallback forever (no path back to SSE).
         let sseReconnectTimer = null;
         const SSE_RETRY_MS = 2000;
+        // Watchdog: server sends a `heartbeat` SSE event every 15 s.
+        // No event of any kind within 30 s ⇒ connection is dead in
+        // some way the EventSource state machine hasn't surfaced
+        // (browser stuck CONNECTING with silent retry failures, or
+        // similar). Force-close + reopen so we don't go silent.
+        let sseLastEventAt = Date.now();
+        let sseWatchdogTimer = null;
+        const SSE_WATCHDOG_MS = 30000;
         const failureSaveTimers = new Map();
         const failureSaveFields = new Map();
         let playerEstimatedMbps = null;
@@ -6416,6 +6424,20 @@
             sessionPollTimer = setInterval(() => refreshSession(playerId), 1000);
         }
 
+        function ensureSseWatchdog(playerId) {
+            if (sseWatchdogTimer !== null) return;
+            sseWatchdogTimer = setInterval(() => {
+                if (Date.now() - sseLastEventAt < SSE_WATCHDOG_MS) return;
+                console.warn(`SSE silent for ${SSE_WATCHDOG_MS}ms — forcing reconnect`);
+                if (sessionsStream) {
+                    try { sessionsStream.close(); } catch (_) { /* ignore */ }
+                    sessionsStream = null;
+                }
+                sseLastEventAt = Date.now();
+                startSessionStream(playerId);
+            }, 5000);
+        }
+
         function startSessionStream(playerId) {
             if (!window.EventSource) return false;
             if (!playerId) return false;
@@ -6425,12 +6447,15 @@
             }
             const source = new EventSource('/api/sessions/stream?player_id=' + encodeURIComponent(playerId));
             sessionsStream = source;
+            sseLastEventAt = Date.now();
+            ensureSseWatchdog(playerId);
             source.addEventListener('open', () => {
                 // Server-side sessionsBroadcastSeq resets across
                 // container restarts; clear our last-seen revision
                 // so we don't compute a bogus "missed N updates"
                 // gap on the first post-reconnect event.
                 sseLastRevision = 0;
+                sseLastEventAt = Date.now();
                 // SSE is back — kill any polling fallback we
                 // installed during the outage.
                 if (sessionPollTimer) {
@@ -6438,7 +6463,11 @@
                     sessionPollTimer = null;
                 }
             });
+            source.addEventListener('heartbeat', () => {
+                sseLastEventAt = Date.now();
+            });
             source.addEventListener('sessions', (event) => {
+                sseLastEventAt = Date.now();
                 try {
                     const payload = parseSessionsStreamPayload(event);
                     const sessions = mergeSessionsBySnapshotVersion(payload.sessions);

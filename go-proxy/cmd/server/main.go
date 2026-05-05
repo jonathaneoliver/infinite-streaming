@@ -1662,10 +1662,24 @@ func (a *App) handleSessionStream(w http.ResponseWriter, r *http.Request) {
 	clientID, ch := a.sessionsHub.AddClient(playerIDFilter)
 	defer a.sessionsHub.RemoveClient(clientID)
 
+	// Heartbeat so the client can distinguish "connection alive but
+	// idle" from "connection dead". The dashboard's watchdog
+	// force-reconnects if no event arrives within 30 s, so a 15 s
+	// cadence here keeps the connection comfortably inside the
+	// liveness window. Also keeps middlebox idle timeouts from
+	// silently dropping the SSE TCP connection.
+	heartbeat := time.NewTicker(15 * time.Second)
+	defer heartbeat.Stop()
+
 	for {
 		select {
 		case <-r.Context().Done():
 			return
+		case <-heartbeat.C:
+			if _, err := w.Write([]byte("event: heartbeat\ndata: {}\n\n")); err != nil {
+				return
+			}
+			flusher.Flush()
 		case event, ok := <-ch:
 			if !ok {
 				return
