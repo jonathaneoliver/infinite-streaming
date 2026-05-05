@@ -6438,6 +6438,21 @@
                 sseLastEventAt = Date.now();
                 startSessionStream(playerId);
             }, 2000);
+            // Background tabs throttle setInterval — re-check
+            // liveness on visibility change so a hidden-then-visible
+            // tab catches up immediately instead of waiting for the
+            // next throttled tick.
+            document.addEventListener('visibilitychange', () => {
+                if (document.visibilityState !== 'visible') return;
+                if (Date.now() - sseLastEventAt < SSE_WATCHDOG_MS) return;
+                console.warn('SSE silent while tab was hidden — forcing reconnect on visibilitychange');
+                if (sessionsStream) {
+                    try { sessionsStream.close(); } catch (_) { /* ignore */ }
+                    sessionsStream = null;
+                }
+                sseLastEventAt = Date.now();
+                startSessionStream(playerId);
+            });
         }
 
         function startSessionStream(playerId) {

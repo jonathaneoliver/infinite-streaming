@@ -141,6 +141,21 @@
             sseLastEventAt = Date.now();
             startSessionsStream();
         }, 2000);
+        // Browsers throttle setInterval in background tabs (Chrome
+        // clamps to ≥1Hz, can be much slower under load). When the
+        // tab becomes visible again, immediately check liveness and
+        // force-reconnect if we missed events while throttled.
+        document.addEventListener('visibilitychange', () => {
+            if (document.visibilityState !== 'visible') return;
+            if (Date.now() - sseLastEventAt < SSE_WATCHDOG_MS) return;
+            console.warn('SSE silent while tab was hidden — forcing reconnect on visibilitychange');
+            if (sessionsStream) {
+                try { sessionsStream.close(); } catch (_) { /* ignore */ }
+                sessionsStream = null;
+            }
+            sseLastEventAt = Date.now();
+            startSessionsStream();
+        });
     }
 
     function start() {
