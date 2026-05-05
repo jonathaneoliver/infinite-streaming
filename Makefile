@@ -127,20 +127,101 @@ deploy-k3s: deploy-k3s-local
 status-k3s:
 	ssh $(K3S_SSH_HOST) "export KUBECONFIG=$(K3S_KUBECONFIG); kubectl get nodes; echo; kubectl get pods -A"
 
-deploy:
+# `make deploy` and `make deploy-release` are end-to-end — they build +
+# push the main image, apply the main app manifest, AND apply that
+# stack's analytics tier (ClickHouse + forwarder + Grafana — separate
+# pods, Services, and PVCs per stack so dev and release share nothing).
+# Each stack picks its own `ANALYTICS_STACK` and `ANALYTICS_SSE_URL`
+# via target-specific variables below.
+
+deploy: ANALYTICS_STACK=dev
+# Dev's go-proxy is reachable via the dev Service at port 40081
+# (the NodePort's `port` value, mapped to container :30081).
+deploy: ANALYTICS_SSE_URL=http://infinite-streaming-dev:40081/api/sessions/stream
+deploy: analytics-deploy-k3s
 	docker buildx build --platform linux/amd64 --build-arg VERSION=$(shell cat VERSION) -t $(K3S_REGISTRY)/$(K3S_SERVER_REPO):dev --push .
 	$(MAKE) deploy-k3s K3S_KUBECONFIG=$(K3S_KUBECONFIG) K8S_MANIFESTS=k8s-infinite-streaming-dev.yaml K8S_DEPLOYMENT=infinite-streaming-dev K3S_SERVER_IMAGE=$(K3S_REGISTRY)/$(K3S_SERVER_REPO):dev
 
 logs:
 	ssh $(K3S_SSH_HOST) "export KUBECONFIG=$(K3S_KUBECONFIG); kubectl logs deploy/infinite-streaming-dev --all-containers -f"
 
-deploy-release:
+deploy-release: ANALYTICS_STACK=release
+deploy-release: ANALYTICS_SSE_URL=http://infinite-streaming:30081/api/sessions/stream
+deploy-release: analytics-deploy-k3s
 	docker buildx build --platform linux/amd64 \
 		--build-arg VERSION=$(shell cat VERSION) \
 		-t $(K3S_SERVER_IMAGE) \
 		-t $(K3S_REGISTRY)/$(K3S_SERVER_REPO):$(shell cat VERSION) \
 		--push .
 	$(MAKE) deploy-k3s K3S_KUBECONFIG=$(K3S_KUBECONFIG) K3S_SERVER_IMAGE=$(K3S_SERVER_IMAGE)
+
+# ── Analytics tier deployment to k3s ───────────────────────────────────
+# Per-stack analytics: dev and release each get their own ClickHouse,
+# forwarder, and Grafana. Resources are named with `-${ANALYTICS_STACK}`
+# suffix so both can coexist in the same namespace. Schemas + Grafana
+# provisioning are inlined in k8s-analytics.yaml — no separate
+# ConfigMap-from-file step.
+
+# Build + push the forwarder image into the cluster's registry. Same
+# image is shared across stacks (it's stack-agnostic); only the
+# Deployment env vars differ.
+analytics-build-forwarder-k3s:
+	docker buildx build --platform linux/amd64 \
+		-t $(K3S_REGISTRY)/infinite-streaming-forwarder:dev \
+		--push ./analytics/go-forwarder
+
+# Apply the analytics manifest for the `${ANALYTICS_STACK}` stack.
+# Idempotent: `kubectl apply` re-converges on every run.
+analytics-deploy-k3s: analytics-build-forwarder-k3s
+	@if [ -z "$(ANALYTICS_STACK)" ]; then echo "ANALYTICS_STACK must be set (dev|release)"; exit 1; fi
+	@if [ -z "$(ANALYTICS_SSE_URL)" ]; then echo "ANALYTICS_SSE_URL must be set"; exit 1; fi
+	@echo "=== Applying analytics tier (stack=$(ANALYTICS_STACK)) ==="
+	ANALYTICS_STACK='$(ANALYTICS_STACK)' \
+	ANALYTICS_SSE_URL='$(ANALYTICS_SSE_URL)' \
+	K3S_REGISTRY='$(K3S_REGISTRY)' \
+		envsubst < k8s-analytics.yaml | \
+		ssh $(K3S_SSH_HOST) "export KUBECONFIG=$(K3S_KUBECONFIG); kubectl apply -f -"
+	@echo "=== Waiting for $(ANALYTICS_STACK) analytics rollout ==="
+	ssh $(K3S_SSH_HOST) "export KUBECONFIG=$(K3S_KUBECONFIG); \
+		kubectl rollout status statefulset/clickhouse-$(ANALYTICS_STACK) --timeout=120s; \
+		kubectl rollout status deployment/forwarder-$(ANALYTICS_STACK) --timeout=120s; \
+		kubectl rollout status deployment/grafana-$(ANALYTICS_STACK) --timeout=120s"
+
+# Tear down a single stack (analytics + main app) so the other stack
+# can be exercised in isolation. Removes Deployments, Services,
+# StatefulSets, ConfigMaps, AND the PVC (so a subsequent
+# `make deploy[-release]` starts from empty ClickHouse data — matches
+# the user's "no data migration needed" model).
+#
+# Usage:
+#   make teardown-k3s-dev        # wipes the dev stack
+#   make teardown-k3s-release    # wipes the release stack
+#
+# Both targets also delete the main app deployment for that stack so
+# you get a fully empty namespace slot.
+teardown-k3s-dev:
+	$(MAKE) teardown-k3s-stack ANALYTICS_STACK=dev MAIN_APP=infinite-streaming-dev
+teardown-k3s-release:
+	$(MAKE) teardown-k3s-stack ANALYTICS_STACK=release MAIN_APP=infinite-streaming
+
+# Internal worker. Don't invoke directly; use the dev/release wrappers.
+teardown-k3s-stack:
+	@if [ -z "$(ANALYTICS_STACK)" ]; then echo "ANALYTICS_STACK required"; exit 1; fi
+	@echo "=== Tearing down $(ANALYTICS_STACK) analytics + main app ==="
+	ssh $(K3S_SSH_HOST) "export KUBECONFIG=$(K3S_KUBECONFIG); \
+		kubectl delete --ignore-not-found=true \
+			deployment/grafana-$(ANALYTICS_STACK) \
+			deployment/forwarder-$(ANALYTICS_STACK) \
+			statefulset/clickhouse-$(ANALYTICS_STACK) \
+			service/grafana-$(ANALYTICS_STACK) \
+			service/forwarder-$(ANALYTICS_STACK) \
+			service/clickhouse-$(ANALYTICS_STACK) \
+			configmap/analytics-grafana-dashboards-$(ANALYTICS_STACK) \
+			configmap/analytics-grafana-datasources-$(ANALYTICS_STACK) \
+			configmap/analytics-clickhouse-init-$(ANALYTICS_STACK); \
+		kubectl delete pvc --ignore-not-found=true -l app=clickhouse-$(ANALYTICS_STACK); \
+		kubectl delete --ignore-not-found=true deployment/$(MAIN_APP) service/$(MAIN_APP)"
+	@echo "Stack $(ANALYTICS_STACK) torn down. Run \`make deploy$(if $(filter release,$(ANALYTICS_STACK)),-release,)\` to bring it back."
 
 # ── Remote deployment testing ──────────────────────────────────────────
 # Deploy all 4 installation methods to a remote Docker host for parallel testing.

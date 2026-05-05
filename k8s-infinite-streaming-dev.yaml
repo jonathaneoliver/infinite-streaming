@@ -69,6 +69,21 @@ spec:
           value: "9"
         - name: INFINITE_STREAM_TC_DEBUG
           value: "1"
+        # Wire nginx /analytics/api/* and /grafana/* to the dev-stack
+        # analytics Services. See #390 for the gating mechanism. Each
+        # stack (dev/release) has its own forwarder + ClickHouse +
+        # Grafana so their archives don't mix.
+        - name: INFINITE_STREAM_ENABLE_ANALYTICS
+          value: "1"
+        # FQDNs (not bare service names): nginx's runtime `resolver`
+        # directive sends queries with no search-domain expansion, so
+        # CoreDNS only answers for the fully-qualified form. Bare
+        # `forwarder-dev` resolves fine for in-cluster shells (which
+        # walk /etc/resolv.conf's search list) but not for nginx.
+        - name: INFINITE_STREAM_FORWARDER_HOST
+          value: "forwarder-dev.default.svc.cluster.local"
+        - name: INFINITE_STREAM_GRAFANA_HOST
+          value: "grafana-dev.default.svc.cluster.local"
         # Pairing rendezvous (substituted by envsubst at deploy time).
         - name: INFINITE_STREAM_RENDEZVOUS_URL
           value: "${INFINITE_STREAM_RENDEZVOUS_URL}"

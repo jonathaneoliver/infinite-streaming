@@ -1,0 +1,86 @@
+# ============================================================
+# Analytics location blocks — included from inside server {}
+# in nginx-content.conf.template via:
+#   include /etc/nginx/snippets/analytics-*.conf;
+# launch.sh writes this snippet to
+# /etc/nginx/snippets/analytics-locations.conf only when
+# INFINITE_STREAM_ENABLE_ANALYTICS=1, so the glob matches zero
+# files cleanly when analytics is off.
+# ============================================================
+
+# Runtime DNS resolver — defers upstream hostname resolution to
+# request time instead of nginx config-load time. A missing or
+# unreachable forwarder/grafana yields a per-request 502 instead
+# of taking down the entire main image at startup.
+#
+# In docker-compose this is the embedded Docker DNS (127.0.0.11);
+# in k3s it's CoreDNS at the cluster's nameserver IP. launch.sh
+# extracts the first nameserver from /etc/resolv.conf so this
+# works in both environments without per-environment overrides.
+resolver ${INFINITE_STREAM_DNS_RESOLVER} valid=10s ipv6=off;
+
+# Bare /grafana → /grafana/ — the prefix-match `location ^~
+# /grafana/` requires the trailing slash, so without this redirect
+# /grafana would fall through to the catch-all and 404.
+# Use $http_host (the client's Host header) instead of $host:$server_port
+# so the redirect preserves the port the client actually connected
+# on (e.g. 21000 on test-dev) — nginx's default would otherwise
+# build the URL with its own listen port (30000 inside the container).
+location = /grafana {
+    return 301 $scheme://$http_host/grafana/;
+}
+
+# Grafana, routed through nginx so basic-auth applies uniformly.
+# Set GF_SERVER_ROOT_URL in the grafana service to match this prefix
+# (e.g. http://localhost:30000/grafana/) so dashboard URLs resolve.
+location ^~ /grafana/ {
+    ${INFINITE_STREAM_AUTH_DIRECTIVES}
+    # Variable proxy_pass — DNS happens per-request via the resolver
+    # above. The `$request_uri` suffix is required when the proxy_pass
+    # value is variable-only (no path), otherwise nginx treats it as
+    # ambiguous. Grafana expects to receive requests at /grafana/* and
+    # serves them via its sub-path config (GF_SERVER_SERVE_FROM_SUB_PATH=true).
+    set $grafana_host "${INFINITE_STREAM_GRAFANA_HOST}";
+    proxy_pass http://$grafana_host:3000$request_uri;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_buffering off;
+    # WebSocket upgrade for Grafana Live (/grafana/api/live/ws).
+    # Headers are harmless on non-upgrade requests — $http_upgrade
+    # is empty for plain HTTP, so $connection_upgrade evaluates to
+    # `close` and behaves as a normal proxy.
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection $connection_upgrade;
+    proxy_read_timeout 1h;
+}
+
+# Analytics: read-only proxy to the SSE→ClickHouse forwarder, which
+# exposes /api/snapshots and /api/sessions for historical replay and
+# cross-session queries. The `rewrite ... break` strips the /analytics
+# prefix so the forwarder sees its native /api/ path.
+location ^~ /analytics/api/ {
+    ${INFINITE_STREAM_AUTH_DIRECTIVES}
+    # CRITICAL: `set` must come BEFORE `rewrite … break`. `break` halts
+    # the rewrite-module phase, and `set` is also a rewrite-module
+    # directive — putting `set` after `rewrite … break` leaves the
+    # variable uninitialized at proxy_pass time and yields
+    #   "using uninitialized $forwarder_host variable" → 500.
+    set $forwarder_host "${INFINITE_STREAM_FORWARDER_HOST}";
+    rewrite ^/analytics(/api/.*)$ $1 break;
+    proxy_pass http://$forwarder_host:8080;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_read_timeout 60s;
+    # Stream NDJSON to the browser line-by-line so the replay UI
+    # can paint snapshots as they arrive instead of waiting for
+    # the entire response to buffer.
+    proxy_buffering off;
+    proxy_request_buffering off;
+    add_header X-Accel-Buffering "no" always;
+    add_header Access-Control-Allow-Origin * always;
+    add_header Cache-Control "no-cache, no-store, must-revalidate" always;
+}
