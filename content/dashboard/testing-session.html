@@ -1307,19 +1307,31 @@
             loadStream(currentUrl);
         }
 
+        // Tail of the serialized chain of in-flight metrics POSTs.
+        // Each new sendSessionMetrics call chains onto this Promise so
+        // requests reach the proxy in submission order. Without this,
+        // concurrent fetch()es complete on independent goroutines
+        // proxy-side and last-writer-wins lets a freshly-emitted POST
+        // get clobbered by a slower-to-arrive older POST — producing
+        // backward `event_time` jumps on session_snapshots that the
+        // session-viewer's bitrate / limit lines render as zigzag at
+        // step boundaries. Mirrors the iOS `metricsTaskTail` pattern
+        // in PlayerViewModel.swift.
+        let metricsTaskTail = Promise.resolve();
         function sendSessionMetrics(eventType, extra = {}) {
             if (!currentSessionId) return;
             const payload = buildMetricsPayload(eventType, extra);
             const fields = Object.keys(payload);
             if (!fields.length) return;
-            fetch(`/api/session/${currentSessionId}/metrics`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    set: payload,
-                    fields
-                })
-            }).catch(err => console.warn('Metrics post failed', err));
+            const sessionId = currentSessionId;
+            metricsTaskTail = metricsTaskTail
+                .catch(() => {})
+                .then(() => fetch(`/api/session/${sessionId}/metrics`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ set: payload, fields })
+                }))
+                .catch(err => console.warn('Metrics post failed', err));
         }
 
         function scheduleMetricsHeartbeat() {

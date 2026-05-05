@@ -359,6 +359,16 @@ type App struct {
 	transferCompleteMu           sync.Mutex
 	transferCompleteMbps         map[int]float64   // latest completed segment Mbps per port
 	transferCompleteAt           map[int]time.Time // when the drain completed
+	// metricsPostMu serialises `handlePostSessionMetrics` per session_id.
+	// Without this, two near-simultaneous POSTs run in independent
+	// goroutines that race for `sessionsMu`; the loser writes after the
+	// winner and would clobber a fresher event_time with stale (the
+	// stale-guard in saveSessionByID prevents the bad outcome but loses
+	// the older POST's data entirely). Per-session mutex preserves
+	// arrival order — Go's sync.Mutex grants in approximately FIFO
+	// order under contention since 1.9, which is what TCP delivery
+	// guarantees per connection. Issue #403 follow-up.
+	metricsPostMu                sync.Map // session_id -> *sync.Mutex
 }
 
 // sessionStateMu serialises read-modify-write on the session map
@@ -1642,14 +1652,6 @@ func (a *App) handleSessionStream(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("X-Accel-Buffering", "no")
 
-	// Tell EventSource to retry every 1s (default 3s) on a clean
-	// reconnect path. Combined with the client-side watchdog this
-	// keeps recovery snappy after a server redeploy.
-	if _, err := w.Write([]byte("retry: 1000\n\n")); err != nil {
-		return
-	}
-	flusher.Flush()
-
 	playerIDFilter := r.URL.Query().Get("player_id")
 
 	a.removeInactiveSessions()
@@ -1670,24 +1672,10 @@ func (a *App) handleSessionStream(w http.ResponseWriter, r *http.Request) {
 	clientID, ch := a.sessionsHub.AddClient(playerIDFilter)
 	defer a.sessionsHub.RemoveClient(clientID)
 
-	// Heartbeat so the client can distinguish "connection alive but
-	// idle" from "connection dead". 5 s cadence pairs with the
-	// dashboard's 12 s watchdog (one missed heartbeat + 2 s margin)
-	// so a silent SSE connection recovers within ~12 s instead of
-	// the original 30 s. Also keeps middlebox idle timeouts from
-	// silently dropping the SSE TCP connection.
-	heartbeat := time.NewTicker(5 * time.Second)
-	defer heartbeat.Stop()
-
 	for {
 		select {
 		case <-r.Context().Done():
 			return
-		case <-heartbeat.C:
-			if _, err := w.Write([]byte("event: heartbeat\ndata: {}\n\n")); err != nil {
-				return
-			}
-			flusher.Flush()
 		case event, ok := <-ch:
 			if !ok {
 				return
@@ -1776,6 +1764,13 @@ func (a *App) handlePatchSession(w http.ResponseWriter, r *http.Request) {
 // control changes (rate limit, failure settings).
 func (a *App) handlePostSessionMetrics(w http.ResponseWriter, r *http.Request) {
 	id := mux.Vars(r)["id"]
+	// Per-session lock serialises this handler so concurrent POSTs
+	// for the same session merge in arrival order rather than racing
+	// on the global sessionsMu. See `metricsPostMu` for the rationale.
+	muIface, _ := a.metricsPostMu.LoadOrStore(id, &sync.Mutex{})
+	mu := muIface.(*sync.Mutex)
+	mu.Lock()
+	defer mu.Unlock()
 	var payload SessionPatchRequest
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 		w.WriteHeader(http.StatusBadRequest)
@@ -6019,11 +6014,23 @@ func (a *App) saveSessionList(sessions []SessionData) {
 
 func (a *App) saveSessionByID(sessionID string, session SessionData) {
 	a.sessionsMu.Lock()
+	defer a.sessionsMu.Unlock()
 	snap := a.getSessionList()
 	updated := make([]SessionData, len(snap))
 	copy(updated, snap)
 	for i, s := range updated {
 		if getString(s, "session_id") == sessionID {
+			// Drop the merge if it's a player_metrics POST whose
+			// `player_metrics_event_time` predates what we already have.
+			// One goroutine per request means two near-simultaneous
+			// POSTs can be scheduled out of submission order — the
+			// older one would otherwise overwrite the newer one's
+			// state under last-writer-wins, producing backward
+			// event_time jumps in session_snapshots and zigzag charts
+			// at step boundaries (issue #403 follow-up).
+			if isStalePlayerMetricsUpdate(s, session) {
+				return
+			}
 			merged := cloneSession(s)
 			for k, v := range session {
 				merged[k] = v
@@ -6033,12 +6040,55 @@ func (a *App) saveSessionByID(sessionID string, session SessionData) {
 			if isControlRevisionNewer(existingRevision, incomingRevision) {
 				copySessionControlState(merged, s)
 			}
+			// If the update didn't carry its own player_metrics_event_time
+			// (i.e. it's a server-side trigger like a URL request or a
+			// pattern step bump, not an iOS POST), stamp the proxy's
+			// current wall clock so the snapshot anchors to when it was
+			// emitted — not to the last iOS heartbeat. Without this,
+			// non-metric snapshots inherit a stale event_time and the
+			// session-viewer charts plot proxy-side state changes (limit
+			// line, shaper rate) at the wrong x. Issue #403 follow-up.
+			// Only push forward — never regress past an existing event_time.
+			if _, hasIncoming := session["player_metrics_event_time"]; !hasIncoming {
+				nowStr := time.Now().UTC().Format(time.RFC3339Nano)
+				nowT, _ := parseEventTime(nowStr)
+				if existingT, ok := parseEventTime(getString(s, "player_metrics_event_time")); !ok || nowT.After(existingT) {
+					merged["player_metrics_event_time"] = nowStr
+				}
+			}
 			updated[i] = merged
 			break
 		}
 	}
 	a.publishSnapshot(updated)
-	a.sessionsMu.Unlock()
+}
+
+// isStalePlayerMetricsUpdate returns true when `incoming` carries a
+// `player_metrics_event_time` strictly older than what `existing`
+// already has. Non-metrics callers (no event_time on incoming) are
+// never stale by this check, since their merges aren't bound to the
+// player's clock at all.
+func isStalePlayerMetricsUpdate(existing, incoming SessionData) bool {
+	incomingTS, ok := parseEventTime(getString(incoming, "player_metrics_event_time"))
+	if !ok {
+		return false
+	}
+	existingTS, ok := parseEventTime(getString(existing, "player_metrics_event_time"))
+	if !ok {
+		return false
+	}
+	return incomingTS.Before(existingTS)
+}
+
+func parseEventTime(s string) (time.Time, bool) {
+	if s == "" {
+		return time.Time{}, false
+	}
+	t, err := time.Parse(time.RFC3339Nano, s)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return t, true
 }
 
 func applySessionThroughput(session SessionData, throughput map[string]interface{}) {
