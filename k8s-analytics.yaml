@@ -1,25 +1,26 @@
-# Analytics tier — ClickHouse + forwarder + Grafana, parametrized for
-# dev/release split. Apply per-stack: each `make deploy` /
-# `make deploy-release` invokes this manifest with a stack-specific
-# `${ANALYTICS_STACK}` so the two stacks share nothing — separate
-# pods, separate Services, separate PVCs, separate Grafana state.
+# Analytics tier — ClickHouse + forwarder + Grafana for one k3d cluster.
+# Stack identity (dev vs release) is now the cluster context, not a
+# resource-name suffix. Each cluster gets exactly one set of these
+# resources; cross-cluster isolation is provided by k3d's clean network
+# separation.
 #
-# Three placeholders are envsubst'd at apply time:
-#   - ${ANALYTICS_STACK}      — "dev" or "release" (stack identifier)
+# envsubst placeholders supplied at apply time:
 #   - ${ANALYTICS_SSE_URL}    — the forwarder's session-stream source
+#                                (`http://infinite-streaming:30081/api/sessions/stream`
+#                                works inside both clusters since the
+#                                main app's NodePort is the same)
 #   - ${K3S_REGISTRY}         — host:port for the forwarder image
 #
 # Schemas + Grafana provisioning are inlined here so the manifest is
-# self-contained — `kubectl apply -f` is enough to bring the stack up,
-# no separate ConfigMap-from-file step in the Makefile. If the source
-# files in analytics/clickhouse/init.d/ or
+# self-contained — `kubectl apply -f` is enough to bring the analytics
+# tier up. If the source files in analytics/clickhouse/init.d/ or
 # analytics/grafana/provisioning/ change, regenerate this file with
 # `make analytics-regen-k8s-manifest`.
 ---
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: analytics-clickhouse-init-${ANALYTICS_STACK}
+  name: analytics-clickhouse-init
 data:
   01-schema.sql: |
     -- Analytics schema for InfiniteStream session snapshots.
@@ -382,17 +383,17 @@ data:
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
-  name: clickhouse-${ANALYTICS_STACK}
+  name: clickhouse
 spec:
-  serviceName: clickhouse-${ANALYTICS_STACK}
+  serviceName: clickhouse
   replicas: 1
   selector:
     matchLabels:
-      app: clickhouse-${ANALYTICS_STACK}
+      app: clickhouse
   template:
     metadata:
       labels:
-        app: clickhouse-${ANALYTICS_STACK}
+        app: clickhouse
     spec:
       containers:
       - name: clickhouse
@@ -415,7 +416,7 @@ spec:
       volumes:
       - name: init
         configMap:
-          name: analytics-clickhouse-init-${ANALYTICS_STACK}
+          name: analytics-clickhouse-init
   volumeClaimTemplates:
   - metadata:
       name: data
@@ -428,10 +429,10 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: clickhouse-${ANALYTICS_STACK}
+  name: clickhouse
 spec:
   selector:
-    app: clickhouse-${ANALYTICS_STACK}
+    app: clickhouse
   ports:
   - name: http
     port: 8123
@@ -443,16 +444,16 @@ spec:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: forwarder-${ANALYTICS_STACK}
+  name: forwarder
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: forwarder-${ANALYTICS_STACK}
+      app: forwarder
   template:
     metadata:
       labels:
-        app: forwarder-${ANALYTICS_STACK}
+        app: forwarder
     spec:
       containers:
       - name: forwarder
@@ -464,7 +465,7 @@ spec:
         - name: FORWARDER_SSE_URL
           value: "${ANALYTICS_SSE_URL}"
         - name: FORWARDER_CLICKHOUSE_URL
-          value: "http://clickhouse-${ANALYTICS_STACK}:8123"
+          value: "http://clickhouse:8123"
         - name: FORWARDER_CLICKHOUSE_DB
           value: infinite_streaming
         - name: FORWARDER_CLICKHOUSE_TABLE
@@ -473,10 +474,10 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: forwarder-${ANALYTICS_STACK}
+  name: forwarder
 spec:
   selector:
-    app: forwarder-${ANALYTICS_STACK}
+    app: forwarder
   ports:
   - name: http
     port: 8080
@@ -485,7 +486,7 @@ spec:
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: analytics-grafana-datasources-${ANALYTICS_STACK}
+  name: analytics-grafana-datasources
 data:
   clickhouse.yml: |
     apiVersion: 1
@@ -496,7 +497,7 @@ data:
         access: proxy
         isDefault: true
         jsonData:
-          host: clickhouse-${ANALYTICS_STACK}
+          host: clickhouse
           port: 9000
           protocol: native
           defaultDatabase: infinite_streaming
@@ -512,7 +513,7 @@ data:
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: analytics-grafana-dashboards-${ANALYTICS_STACK}
+  name: analytics-grafana-dashboards
 data:
   default.yml: |
     apiVersion: 1
@@ -659,16 +660,16 @@ data:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: grafana-${ANALYTICS_STACK}
+  name: grafana
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: grafana-${ANALYTICS_STACK}
+      app: grafana
   template:
     metadata:
       labels:
-        app: grafana-${ANALYTICS_STACK}
+        app: grafana
     spec:
       containers:
       - name: grafana
@@ -698,19 +699,19 @@ spec:
       volumes:
       - name: datasources
         configMap:
-          name: analytics-grafana-datasources-${ANALYTICS_STACK}
+          name: analytics-grafana-datasources
       - name: dashboards
         configMap:
-          name: analytics-grafana-dashboards-${ANALYTICS_STACK}
+          name: analytics-grafana-dashboards
 ---
 apiVersion: v1
 kind: Service
 metadata:
-  name: grafana-${ANALYTICS_STACK}
+  name: grafana
 spec:
   type: ClusterIP
   selector:
-    app: grafana-${ANALYTICS_STACK}
+    app: grafana
   ports:
   - name: http
     port: 3000

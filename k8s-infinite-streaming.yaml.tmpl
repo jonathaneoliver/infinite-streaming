@@ -1,22 +1,48 @@
+# Main app deployment template — applied identically to BOTH the `dev`
+# and `release` k3d clusters on $K3S_SSH_HOST. Per-stack identity
+# (which cluster is which) lives in the kubeconfig context the
+# Makefile selects, NOT in resource names. NodePorts inside the
+# cluster are stable (30000-30881); each k3d cluster's `--port` flag
+# remaps host ports to those NodePorts (dev → 40000-40881, release →
+# 30000-30881).
+#
+# envsubst placeholders supplied at apply time:
+#   ${K3S_REGISTRY}          — registry hosting the main image
+#   ${K3S_MEDIA_DIR}         — host path mounted as /media in the pod
+#   ${K3S_CERTS_DIR}         — host path mounted as /etc/nginx/certs
+#   ${SERVER_ID}             — distinct id per stack so /media/data/server_id
+#                              doesn't clobber across announces (e.g.
+#                              `infinite-streaming-dev` /
+#                              `infinite-streaming-release`)
+#   ${ANNOUNCE_URL}          — public URL clients use to reach this stack
+#                              (e.g. http://lenovo:30000 or http://lenovo:40000)
+#   ${ANNOUNCE_LABEL}        — human-readable label for the rendezvous
+#   ${RENDEZVOUS_URL}        — pairing rendezvous worker URL (shared
+#                              across stacks, optional)
+#   ${EXTERNAL_PORT_BASE}    — public port the proxy advertises to clients
+#                              for per-session URLs (40081 for dev,
+#                              30081 for release — the host-side port
+#                              that k3d maps to the in-cluster :30081)
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: infinite-streaming-dev
+  name: infinite-streaming
 spec:
   replicas: 1
   strategy:
     type: Recreate
   selector:
     matchLabels:
-      app: infinite-streaming-dev
+      app: infinite-streaming
   template:
     metadata:
       labels:
-        app: infinite-streaming-dev
+        app: infinite-streaming
     spec:
       containers:
       - name: go-server
-        image: ${K3S_REGISTRY}/infinite-streaming:dev
+        image: ${K3S_REGISTRY}/infinite-streaming:latest
         imagePullPolicy: Always
         command: ["/sbin/launch.sh", "1"]
         ports:
@@ -62,40 +88,34 @@ spec:
         - name: INFINITE_STREAM_TC_INTERFACE
           value: "eth0"
         - name: EXTERNAL_PORT_BASE
-          value: "40081"
+          value: "${EXTERNAL_PORT_BASE}"
         - name: INTERNAL_PORT_BASE
           value: "30081"
         - name: PORT_RANGE_COUNT
           value: "9"
         - name: INFINITE_STREAM_TC_DEBUG
           value: "1"
-        # Wire nginx /analytics/api/* and /grafana/* to the dev-stack
-        # analytics Services. See #390 for the gating mechanism. Each
-        # stack (dev/release) has its own forwarder + ClickHouse +
-        # Grafana so their archives don't mix.
+        # Wire nginx /analytics/api/* and /grafana/* to this cluster's
+        # forwarder + grafana (no `-dev` / `-release` suffix — each
+        # cluster has exactly one of each, no name disambiguation
+        # needed). FQDN is required because nginx's runtime resolver
+        # doesn't honor /etc/resolv.conf's search list.
         - name: INFINITE_STREAM_ENABLE_ANALYTICS
           value: "1"
-        # FQDNs (not bare service names): nginx's runtime `resolver`
-        # directive sends queries with no search-domain expansion, so
-        # CoreDNS only answers for the fully-qualified form. Bare
-        # `forwarder-dev` resolves fine for in-cluster shells (which
-        # walk /etc/resolv.conf's search list) but not for nginx.
         - name: INFINITE_STREAM_FORWARDER_HOST
-          value: "forwarder-dev.default.svc.cluster.local"
+          value: "forwarder.default.svc.cluster.local"
         - name: INFINITE_STREAM_GRAFANA_HOST
-          value: "grafana-dev.default.svc.cluster.local"
-        # Pairing rendezvous (substituted by envsubst at deploy time).
+          value: "grafana.default.svc.cluster.local"
         - name: INFINITE_STREAM_RENDEZVOUS_URL
-          value: "${INFINITE_STREAM_RENDEZVOUS_URL}"
+          value: "${RENDEZVOUS_URL}"
         - name: INFINITE_STREAM_ANNOUNCE_URL
-          value: "${INFINITE_STREAM_ANNOUNCE_URL_K3S_DEV}"
+          value: "${ANNOUNCE_URL}"
         - name: INFINITE_STREAM_ANNOUNCE_LABEL
-          value: "${INFINITE_STREAM_ANNOUNCE_LABEL_K3S_DEV}"
-        # Distinct from k8s-infinite-streaming.yaml so dev + release don't
-        # share the persisted /media/data/server_id and overwrite each
-        # other's announces on the rendezvous.
+          value: "${ANNOUNCE_LABEL}"
+        # Distinct id per stack so /media/data/server_id doesn't clash
+        # when both stacks announce themselves to the rendezvous.
         - name: INFINITE_STREAM_SERVER_ID
-          value: "infinite-streaming-dev"
+          value: "${SERVER_ID}"
         securityContext:
           privileged: true
           capabilities:
@@ -126,50 +146,49 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: infinite-streaming-dev
+  name: infinite-streaming
 spec:
-  externalTrafficPolicy: Local
   selector:
-    app: infinite-streaming-dev
+    app: infinite-streaming
   ports:
-    - name: p40000
-      port: 40000
+    - name: p30000
+      port: 30000
       targetPort: 30000
-      nodePort: 40000
-    - name: p40081
-      port: 40081
+      nodePort: 30000
+    - name: p30081
+      port: 30081
       targetPort: 30081
-      nodePort: 40081
-    - name: p40181
-      port: 40181
+      nodePort: 30081
+    - name: p30181
+      port: 30181
       targetPort: 30181
-      nodePort: 40181
-    - name: p40281
-      port: 40281
+      nodePort: 30181
+    - name: p30281
+      port: 30281
       targetPort: 30281
-      nodePort: 40281
-    - name: p40381
-      port: 40381
+      nodePort: 30281
+    - name: p30381
+      port: 30381
       targetPort: 30381
-      nodePort: 40381
-    - name: p40481
-      port: 40481
+      nodePort: 30381
+    - name: p30481
+      port: 30481
       targetPort: 30481
-      nodePort: 40481
-    - name: p40581
-      port: 40581
+      nodePort: 30481
+    - name: p30581
+      port: 30581
       targetPort: 30581
-      nodePort: 40581
-    - name: p40681
-      port: 40681
+      nodePort: 30581
+    - name: p30681
+      port: 30681
       targetPort: 30681
-      nodePort: 40681
-    - name: p40781
-      port: 40781
+      nodePort: 30681
+    - name: p30781
+      port: 30781
       targetPort: 30781
-      nodePort: 40781
-    - name: p40881
-      port: 40881
+      nodePort: 30781
+    - name: p30881
+      port: 30881
       targetPort: 30881
-      nodePort: 40881
+      nodePort: 30881
   type: NodePort

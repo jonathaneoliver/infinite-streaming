@@ -19,14 +19,22 @@ make stop
 # Shell into running container
 make shell
 
-# Deploy to k3s (dev stack)
+# One-time bootstrap — installs k3d on $K3S_SSH_HOST and creates the
+# `dev` and `release` clusters with their host port mappings.
+make k3d-bootstrap
+
+# Deploy to k3d (dev cluster — host ports 40000/40081/40181-40881)
 make deploy
 
-# Deploy to k3s (release)
+# Deploy to k3d (release cluster — host ports 30000/30081/30181-30881)
 make deploy-release
+
+# Wipe a single cluster (k3d cluster delete) for clean reinstall
+make teardown-dev
+make teardown-release
 ```
 
-UI is available at `http://localhost:30000/` (Docker Compose) or `http://$K3S_HOST:30000/` (k3s release) / `http://$K3S_HOST:40000/` (k3s dev).
+UI is available at `http://localhost:30000/` (Docker Compose) or `http://$K3S_HOST:30000/` (k3d release) / `http://$K3S_HOST:40000/` (k3d dev).
 
 ## Testing
 
@@ -160,10 +168,12 @@ When creating issues/PRs/comments with `gh`, pass the body using a heredoc or `-
 
 ## Deployment Environments
 
-| Environment | UI | HLS/Proxy |
-|---|---|---|
-| Docker Compose | `localhost:30000` | `localhost:30081` |
-| k3s release | `$K3S_HOST:30000` | `$K3S_HOST:30081` |
-| k3s dev | `$K3S_HOST:40000` | `$K3S_HOST:40081` |
+| Environment | UI | HLS/Proxy | Cluster |
+|---|---|---|---|
+| Docker Compose | `localhost:30000` | `localhost:30081` | n/a |
+| k3d release | `$K3S_HOST:30000` | `$K3S_HOST:30081` | `release` (api `:6544`) |
+| k3d dev | `$K3S_HOST:40000` | `$K3S_HOST:40081` | `dev` (api `:6543`) |
 
-k3s images are pushed to `$K3S_REGISTRY` (local registry) or GHCR (`ghcr.io/jonathaneoliver/`).
+The two k3d clusters run as Docker containers on `$K3S_SSH_HOST`, share the host's local image registry (`$K3S_REGISTRY`, HTTP-only), and share nothing else — separate kubeconfigs, separate Services, separate ClickHouse PVCs, separate Grafana state. Per-cluster kubeconfigs live at `~/.config/k3d/smashing-{dev,release}-kubeconfig.yaml` on the remote host. Run `make k3d-bootstrap` once to install k3d (no sudo, into `~/.local/bin`) and create both clusters.
+
+k3d images are pushed to `$K3S_REGISTRY` (local registry) or GHCR (`ghcr.io/jonathaneoliver/`).
