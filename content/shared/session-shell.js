@@ -4194,28 +4194,43 @@
             const lifetimeMinData = points.map(p => ({ x: p.x, y: p.lifetimeMin }));
             const rtoData = points.map(p => ({ x: p.x, y: p.rto }));
 
-            // Auto y-max: max of avg/max/lifetime/rto in window, ceil
-            // to nearest 10 ms with a 5 ms floor and 5000 ms cap (RTOs
-            // can spike to seconds during a wedge — clip rather than
-            // let one outlier flatten the rest of the chart).
-            const numericValues = []
-                .concat(avgData, maxData, lifetimeMinData, rtoData)
+            // Two y-axes: RTT (left, low-millisecond range on a healthy
+            // path) and RTO (right, can spike to seconds during a
+            // wedge). Sharing one axis would flatten the RTT line to
+            // a flat-zero baseline whenever RTO climbs.
+            const rttValues = []
+                .concat(avgData, maxData, lifetimeMinData)
                 .map(p => Number(p.y))
                 .filter(v => Number.isFinite(v) && v >= 0);
-            const rawMax = Math.max(5, ...numericValues, 0);
-            const maxY = Math.min(5000, Math.max(5, Math.ceil((rawMax * 1.1) / 10) * 10));
+            const rtoValues = rtoData
+                .map(p => Number(p.y))
+                .filter(v => Number.isFinite(v) && v >= 0);
+            // RTT axis: floor at 5 ms; cap at 1000 ms (LAN ~1 ms,
+            // shaped 100–500 ms — beyond a second RTT we're in a
+            // pathology that owns the chart anyway).
+            const rttRawMax = Math.max(5, ...rttValues, 0);
+            const maxY = Math.min(1000, Math.max(5, Math.ceil((rttRawMax * 1.1) / 10) * 10));
+            // RTO axis: floor at 50 ms (kernel default); cap at 60000 ms
+            // (kernel ceiling is TCP_RTO_MAX, typically 120 s — clip
+            // hard so a single outlier doesn't dominate).
+            const rtoRawMax = Math.max(50, ...rtoValues, 0);
+            const maxY1 = Math.min(60000, Math.max(50, Math.ceil((rtoRawMax * 1.1) / 50) * 50));
 
             const datasets = [
                 {
-                    label: '_rtt_max_anchor',
+                    label: 'RTT max (ms)',
                     data: maxData,
-                    borderColor: 'rgba(139,92,246,0)',
+                    // Lighter purple than avg so the line reads as a
+                    // bound, not the primary signal. fill:'+1' shades
+                    // the band down to the (transparent) min anchor.
+                    borderColor: 'rgba(139,92,246,0.55)',
                     backgroundColor: 'rgba(139,92,246,0.15)',
-                    borderWidth: 0,
+                    borderWidth: 1,
                     pointRadius: 0,
                     fill: '+1',
                     tension: 0.2,
-                    spanGaps: false
+                    spanGaps: false,
+                    yAxisID: 'y'
                 },
                 {
                     label: '_rtt_min_anchor',
@@ -4226,7 +4241,8 @@
                     pointRadius: 0,
                     fill: false,
                     tension: 0.2,
-                    spanGaps: false
+                    spanGaps: false,
+                    yAxisID: 'y'
                 },
                 {
                     label: 'RTT avg (ms)',
@@ -4237,7 +4253,8 @@
                     pointRadius: 0,
                     tension: 0.2,
                     fill: false,
-                    spanGaps: false
+                    spanGaps: false,
+                    yAxisID: 'y'
                 },
                 {
                     label: 'RTT lifetime min (ms)',
@@ -4248,7 +4265,8 @@
                     pointRadius: 0,
                     tension: 0,
                     borderDash: [8, 4],
-                    fill: false
+                    fill: false,
+                    yAxisID: 'y'
                 },
                 {
                     label: 'RTO (ms)',
@@ -4260,7 +4278,7 @@
                     tension: 0.2,
                     borderDash: [4, 2],
                     fill: false,
-                    hidden: true
+                    yAxisID: 'y1'
                 }
             ];
 
@@ -4327,6 +4345,7 @@
                                 }
                             },
                             y: {
+                                position: 'left',
                                 min: 0,
                                 max: maxY,
                                 afterFit: (axis) => { axis.width = 90; },
@@ -4338,6 +4357,27 @@
                                 title: {
                                     display: true,
                                     text: 'RTT (ms)',
+                                    color: '#6b7280',
+                                    font: { family: 'Courier New, monospace', size: 10 }
+                                }
+                            },
+                            y1: {
+                                position: 'right',
+                                min: 0,
+                                max: maxY1,
+                                // Pin width to RIGHT_AXIS_PAD_PX so the
+                                // plot's right edge matches the bandwidth
+                                // / buffer / FPS charts, keeping x-axis
+                                // ticks aligned across the stack.
+                                afterFit: (axis) => { axis.width = RIGHT_AXIS_PAD_PX; },
+                                grid: { drawOnChartArea: false },
+                                ticks: {
+                                    color: '#6b7280',
+                                    font: { family: 'Courier New, monospace', size: 10 }
+                                },
+                                title: {
+                                    display: true,
+                                    text: 'RTO (ms)',
                                     color: '#6b7280',
                                     font: { family: 'Courier New, monospace', size: 10 }
                                 }
@@ -4355,6 +4395,7 @@
                 chart.data.datasets = datasets;
                 chart.$windowStartMs = windowStart;
                 chart.options.scales.y.max = maxY;
+                chart.options.scales.y1.max = maxY1;
                 applyChartXMax(chart, windowMs);
                 applyLegendHover(chart);
                 chart.update('none');
