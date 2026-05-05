@@ -85,24 +85,27 @@ These require Linux with nftables. On macOS Docker Desktop the proxy container d
 
 Same requirement — Linux + `tc`. Check `GET /api/nftables/capabilities`.
 
-## k3s deployment
+## k3d deployment
 
 ### Pods crash-loop on first deploy
 
 Usually image pull failures:
 
-- If using the local registry (`K3S_REGISTRY`), confirm k3s is configured to trust the insecure registry (`/etc/rancher/k3s/registries.yaml`).
-- If using GHCR, the image must be public or the cluster must have an image pull secret. Pull manually from a worker to confirm: `crictl pull ghcr.io/jonathaneoliver/infinite-streaming:latest`.
+- If using the local registry (`K3S_REGISTRY`), confirm `~/.config/k3d/smashing-registries.yaml` was written by `make k3d-bootstrap` and contains the registry as a mirror with `insecure_skip_verify: true`. The two clusters created via `make k3d-bootstrap` already pass this file via `--registry-config`; only relevant if you re-create a cluster manually.
+- If using GHCR, the image must be public or the cluster must have an image pull secret. Pull manually from a worker to confirm: `kubectl --kubeconfig ~/.config/k3d/smashing-dev-kubeconfig.yaml run pull-test --rm -it --image=ghcr.io/jonathaneoliver/infinite-streaming:latest -- echo ok`.
 
 ### Dev and release fight over ports
 
-They don't — release uses 30xxx, dev uses 40xxx. If you see conflicts:
-- Confirm you deployed `k8s-infinite-streaming-dev.yaml` for dev and `k8s-infinite-streaming.yaml` for release.
-- `kubectl get svc -A` should show both NodePort ranges without overlap.
+They can't — they're separate k3d clusters with disjoint host port mappings (release: 30000-30881; dev: 40000-40881). If you see conflicts on the host:
+- `k3d cluster list` should show both `dev` and `release` running.
+- `docker ps --filter name=k3d-` should show four containers: `k3d-dev-server-0`, `k3d-dev-serverlb`, `k3d-release-server-0`, `k3d-release-serverlb`.
+- Anything else listening on those host ports (e.g. an old k3s install) needs to be stopped first.
 
 ### Session ports work inside the cluster but not from the browser
 
-k3s NodePort maps external → internal via `EXTERNAL_PORT_BASE`, `INTERNAL_PORT_BASE`, `PORT_RANGE_COUNT`. If these don't match between the Service and the Deployment env, the browser hits the proxy on an external port the pod isn't listening for. Redeploy after editing — k3s doesn't pick up env changes without a pod restart.
+The cluster's internal NodePort is stable (`30181-30881` in both clusters). k3d's `--port HOST:NODE@loadbalancer` flag handles the host→cluster remap (e.g. host `:40181` → cluster `:30181` for the dev cluster). If a session port works via `kubectl exec` curl but fails from the browser, the host-side mapping is missing — re-run `make k3d-bootstrap` (idempotent) or check `docker port k3d-{dev,release}-serverlb`.
+
+`go-proxy` separately advertises the *external* host port to clients via `EXTERNAL_PORT_BASE` (set per stack in the Makefile — `40081` for dev, `30081` for release). If the per-session URLs the browser receives have the wrong port, this env var is mismatched between the manifest and the cluster's host-port mapping.
 
 ## Encoding
 
@@ -130,7 +133,7 @@ See [`docs/CLOUD_ENCODING.md`](CLOUD_ENCODING.md#troubleshooting) — common iss
 
 If something isn't covered here, include:
 
-- `docker compose logs infinite-streaming` (or `kubectl logs` for k3s)
+- `docker compose logs infinite-streaming` (or `kubectl logs --kubeconfig ~/.config/k3d/smashing-{dev,release}-kubeconfig.yaml deploy/infinite-streaming` for k3d)
 - `GET /api/version` output
 - For playback issues: `GET /api/session/{id}/network` for the affected session, and the browser's dev-tools network tab
 - For encoding issues: `GET /api/jobs/{job_id}` and the last ~100 lines from the encoder log stream (`/api/jobs/{job_id}/stream`)

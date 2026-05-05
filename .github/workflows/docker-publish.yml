@@ -83,3 +83,47 @@ jobs:
             ${{ steps.meta-server-dh.outputs.tags }}
           labels: ${{ steps.meta-server-ghcr.outputs.labels }}
 
+      # ── Forwarder image ────────────────────────────────────────────────
+      # Published alongside the main image so `make run-ghcr` and the
+      # docker-compose.ghcr.yml install path can pull a complete analytics
+      # stack from GHCR without a source checkout. The forwarder is
+      # cluster-/install-agnostic; the same image works for compose, k3d,
+      # and the various test-deploy variants.
+
+      - name: Extract metadata (forwarder, GHCR)
+        id: meta-forwarder-ghcr
+        uses: docker/metadata-action@v6
+        with:
+          images: ghcr.io/${{ github.repository }}-forwarder
+          tags: |
+            type=ref,event=branch
+            type=sha
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=semver,pattern={{version}},prefix=v
+            type=semver,pattern={{major}}.{{minor}},prefix=v
+            type=semver,pattern={{major}},prefix=v
+
+      - name: Extract metadata (forwarder, Docker Hub)
+        if: ${{ vars.DOCKERHUB_NAMESPACE != '' }}
+        id: meta-forwarder-dh
+        uses: docker/metadata-action@v6
+        with:
+          images: docker.io/${{ vars.DOCKERHUB_NAMESPACE }}/infinite-streaming-forwarder
+          tags: |
+            type=ref,event=branch
+            type=sha
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=semver,pattern={{version}},prefix=v
+            type=semver,pattern={{major}}.{{minor}},prefix=v
+            type=semver,pattern={{major}},prefix=v
+
+      - name: Build and push forwarder
+        uses: docker/build-push-action@v7
+        with:
+          context: ./analytics/go-forwarder
+          push: true
+          tags: |
+            ${{ steps.meta-forwarder-ghcr.outputs.tags }}
+            ${{ steps.meta-forwarder-dh.outputs.tags }}
+          labels: ${{ steps.meta-forwarder-ghcr.outputs.labels }}
+

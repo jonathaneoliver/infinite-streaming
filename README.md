@@ -131,7 +131,7 @@ From there, **Playback** plays the same clip standalone, **Testing Session** ope
 
 Skipping the seed and uploading your own files via **Open Upload** or by dropping MP4s into `$CONTENT_DIR/originals/` works identically — the seed clip is just a zero-friction "Hello, World" that exercises the full pipeline against content the server generates itself.
 
-Other deployment options (pre-built images, single container, k3s) are in [Advanced deployment](#advanced-deployment) at the bottom.
+Other deployment options (pre-built images from GHCR, k3d clusters) are in [Other ways to run it](#other-ways-to-run-it) at the bottom.
 
 ---
 
@@ -342,7 +342,7 @@ A sidecar stack (ClickHouse + Grafana + a small Go forwarder) auto-archives sess
 
 **Operating it**: `make analytics-rebuild-forwarder` recreates the forwarder container in-place (live UI untouched); `make analytics-update` reloads Grafana provisioning; `make analytics-migrate SQL='ALTER TABLE …'` runs a schema change. The data is exposed read-only to the dashboard via parameterized ClickHouse queries — no string interpolation, no auth-token leakage.
 
-**Securing for WAN deployment**: opt-in HTTP Basic auth via `INFINITE_STREAM_AUTH_HTPASSWD` gates the dashboard, `/analytics/api/`, and `/grafana/`; player-app endpoints stay public so unattended Apple/Roku/AndroidTV clients keep working. ClickHouse binds to `127.0.0.1` only by default. See [`analytics/README.md`](analytics/README.md) for the docker-compose and k3s runbooks.
+**Securing for WAN deployment**: opt-in HTTP Basic auth via `INFINITE_STREAM_AUTH_HTPASSWD` gates the dashboard, `/analytics/api/`, and `/grafana/`; player-app endpoints stay public so unattended Apple/Roku/AndroidTV clients keep working. ClickHouse binds to `127.0.0.1` only by default. See [`analytics/README.md`](analytics/README.md) for the docker-compose and k3d runbooks.
 
 The two pages downstream of this stack — **Sessions view** (the picker) and **Session Viewer** (replay one) — are described in their own sections below.
 
@@ -694,7 +694,7 @@ That's it — no third-party services beyond a Cloudflare account.
 | `INFINITE_STREAM_RENDEZVOUS_URL` | Rendezvous Worker base URL. Required to enable any pairing. |
 | `INFINITE_STREAM_ANNOUNCE_URL` | URL that clients should use to reach this server (e.g. `http://lenovo.local:30000`). When set, this server appears in same-WAN auto-discovery. |
 | `INFINITE_STREAM_ANNOUNCE_LABEL` | Optional friendly label. Defaults to `host:port` from the announce URL. |
-| `INFINITE_STREAM_SERVER_ID` | Optional explicit announce ID (4–64 chars `[A-Za-z0-9_-]`). Defaults to a stable random ID persisted at `<data_dir>/server_id`. Set this when multiple deployments share the same data directory (e.g. dev + release pods on the same k3s node), otherwise their announces overwrite each other on the rendezvous. |
+| `INFINITE_STREAM_SERVER_ID` | Optional explicit announce ID (4–64 chars `[A-Za-z0-9_-]`). Defaults to a stable random ID persisted at `<data_dir>/server_id`. Set this when multiple deployments share the same data directory (e.g. dev + release pods on the same k3d host), otherwise their announces overwrite each other on the rendezvous. |
 
 ### HTTP, HTTPS, and iOS App Transport Security
 
@@ -709,7 +709,7 @@ The server defaults to plain HTTP on its dashboard / API / playback ports. That'
 
 The iOS/tvOS Info.plist files in this repo include an explicit `NSExceptionDomains` entry for `infinitestreaming.jeoliver.com` (the upstream maintainer's public domain). **If you fork and ship apps that talk to a different public-HTTP hostname** (your own server, a Tailscale MagicDNS name like `*.ts.net`, a Tailscale CGNAT IP in `100.64.0.0/10`, etc.) you must add it to both Info.plists or those clients will silently fail to load anything.
 
-The cleaner long-term answer is to terminate TLS at the server so all clients use HTTPS and no per-domain ATS / cleartext exceptions are needed. The k3s manifests already mount a `certs-vol` for this; flipping the nginx template to `listen … ssl` and pointing it at a Let's Encrypt cert (or whichever cert lives in `K3S_CERTS_DIR`) gets you there.
+The cleaner long-term answer is to terminate TLS at the server so all clients use HTTPS and no per-domain ATS / cleartext exceptions are needed. The k3d manifests already mount a `certs-vol` for this; flipping the nginx template to `listen … ssl` and pointing it at a Let's Encrypt cert (or whichever cert lives in `K3S_CERTS_DIR`) gets you there.
 
 ---
 
@@ -717,39 +717,34 @@ The cleaner long-term answer is to terminate TLS at the server so all clients us
 
 Most users should stick with Docker Compose from the [Quick start](#quick-start). These variants are for specific scenarios.
 
-### Docker run (single container, no compose)
-
-```bash
-export CONTENT_DIR=/path/to/your/media
-
-docker run -d --name infinite-streaming \
-  --cap-add NET_ADMIN --privileged \
-  -p 30000:30000 \
-  -p 30081:30081 \
-  -p 30181:30181 -p 30281:30281 -p 30381:30381 -p 30481:30481 \
-  -p 30581:30581 -p 30681:30681 -p 30781:30781 -p 30881:30881 \
-  -v $CONTENT_DIR:/media \
-  ghcr.io/jonathaneoliver/infinite-streaming:latest \
-  /sbin/launch.sh 1
-```
-
-Ports 30181–30881 are the per-session proxy ports that testing sessions get redirected to. Without mapping them, `testing-session.html` works but segments never load because the allocated session port is unreachable from the host.
-
 > **macOS / Docker Desktop note:** Network shaping (TC/nftables) works on Docker Desktop for Mac with `--cap-add NET_ADMIN`, but the TC stats polling (every 100ms per session) spawns processes through the Linux VM layer, which causes significantly higher CPU usage and fan noise compared to native Linux. This is a Docker Desktop VM overhead issue, not a code issue. For sustained testing with shaping, use a native Linux host.
 
 ### Pre-built images from GHCR (no source checkout)
 
+The compose file pulls `infinite-streaming` and `infinite-streaming-forwarder` from GHCR. ClickHouse and Grafana provisioning files are tiny (~30 KB) so the install grabs them via a tarball alongside the compose file:
+
 ```bash
 mkdir infinite-streaming && cd infinite-streaming
+
+# Compose file
 curl -fsSL https://raw.githubusercontent.com/jonathaneoliver/infinite-streaming/main/docker-compose.ghcr.yml \
   -o docker-compose.yml
+
+# Analytics provisioning (ClickHouse schema + Grafana datasources/dashboards)
+mkdir -p analytics
+curl -fsSL https://github.com/jonathaneoliver/infinite-streaming/archive/main.tar.gz | \
+  tar -xzC . --strip-components=1 \
+    infinite-streaming-main/analytics
+
 echo "CONTENT_DIR=/path/to/your/media" > .env
 docker compose up -d
 ```
 
-### k3s, release tagging, GHCR publishing
+Open `http://localhost:30000/`. The dashboard's Sessions / Session Viewer / Grafana features all work in this mode (analytics tier comes up alongside the main image — see [Analytics tier](#analytics-tier)).
 
-See [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) for running in a k3s cluster (release + dev side by side), pinning immutable release tags, and configuring GHCR publishing from a fork.
+### k3d, release tagging, GHCR publishing
+
+See [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) for running in two side-by-side k3d clusters (release + dev), pinning immutable release tags, and configuring GHCR publishing from a fork.
 
 ---
 
@@ -773,7 +768,7 @@ Captured from the live dashboard; files live in [`docs/screenshots/`](docs/scree
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — services, routing, port map, request flow
 - [`docs/API.md`](docs/API.md) — HTTP endpoints across go-live, go-upload, go-proxy
 - [`docs/FAULT_INJECTION.md`](docs/FAULT_INJECTION.md) — full fault and shaping reference
-- [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) — k3s, release tagging, GHCR publishing
+- [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) — k3d, release tagging, GHCR publishing
 - [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md) — common issues and fixes
 - [`PRD.md`](PRD.md) — product behavior source of truth
 - [`CONTRIBUTING.md`](CONTRIBUTING.md) — development workflow

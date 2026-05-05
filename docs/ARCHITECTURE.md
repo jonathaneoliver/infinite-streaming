@@ -64,15 +64,15 @@ Manifest responses carry `no-cache, no-store, must-revalidate`. Segments are imm
 
 The testing dashboard gives each browser session a dedicated `go-proxy` port. When the player loads `testing-session.html?player_id=<uuid>`, the proxy allocates the session a port in `30181..30881` (internal) — the browser talks to that port for stream requests, not the shared `30081`. All failure injection and traffic shaping applied to that session are scoped to its port.
 
-Internal / external port mapping for k3s:
+Internal / external port mapping:
 
 | Environment | External UI | External session ports | Internal |
 |---|---|---|---|
 | Docker Compose | 30000 | 30181..30881 | same |
-| k3s release | 30000 | 30181..30881 | same |
-| k3s dev | 40000 | 40181..40881 | 30181..30881 |
+| k3d release | 30000 | 30181..30881 | same |
+| k3d dev | 40000 | 40181..40881 | 30181..30881 |
 
-go-proxy maps external → internal using `EXTERNAL_PORT_BASE`, `INTERNAL_PORT_BASE`, and `PORT_RANGE_COUNT` env vars so dev and release can coexist on one host.
+For k3d, the cluster's `--port` flag does the host→cluster remapping (e.g. host `:40081` → in-cluster NodePort `:30081` for the dev cluster). Inside both clusters the Service NodePorts are stable (30000-30881); the host-port mismatch is purely an external-port concern. go-proxy reads `EXTERNAL_PORT_BASE`, `INTERNAL_PORT_BASE`, and `PORT_RANGE_COUNT` env vars so the per-session URLs it advertises to clients use the right host port for the cluster's external mapping.
 
 See [`docs/FAULT_INJECTION.md`](FAULT_INJECTION.md) for what go-proxy can do to a session; [`docs/API.md`](API.md) for the full endpoint surface.
 
@@ -135,8 +135,8 @@ Global selection (content, URL, protocol, codec, segment) is kept in `localStora
 | Mode | How | UI | Notes |
 |---|---|---|---|
 | Docker Compose | `make run` or `docker compose up -d` | `localhost:30000` | Simplest, single-host |
-| k3s release | `make deploy-release` | `$K3S_HOST:30000` | 30x port range |
-| k3s dev | `make deploy` | `$K3S_HOST:40000` | 40x port range, coexists with release |
+| k3d release | `make deploy-release` | `$K3S_HOST:30000` | Independent k3d cluster, api `:6544`, 30x port range |
+| k3d dev | `make deploy` | `$K3S_HOST:40000` | Independent k3d cluster, api `:6543`, 40x port range — coexists with release |
 | GHCR compose | Pull `ghcr.io/jonathaneoliver/infinite-streaming:<tag>` | `localhost:30000` | No local build |
 
 All modes mount the same content layout. See [`README.md`](../README.md#quick-start) for commands and [`docs/TROUBLESHOOTING.md`](TROUBLESHOOTING.md) for common operational issues.
@@ -145,7 +145,7 @@ All modes mount the same content layout. See [`README.md`](../README.md#quick-st
 
 The native client apps (iOS/tvOS, Android TV, Roku) need a way to *find* the server URL on first launch — they can't ship hardcoded addresses. InfiniteStream uses a small **Cloudflare Worker + KV** acting as a public rendezvous, plus a server-side announce loop that publishes its URL there. Clients query the rendezvous and only see servers that share their public IP (the rendezvous filters by `CF-Connecting-IP`), giving same-WAN auto-discovery without LAN multicast.
 
-> **Why not mDNS / Bonjour?** This was the first thing we tried (`_infinitestream._tcp` advertised via `github.com/grandcat/zeroconf` from `go-upload`). Docker's default bridge network filters multicast, so the advertisement never escapes the container — `dns-sd -B` on the host found nothing. Host-network mode is fragile across Linux/macOS/Windows and isn't available on every deployment target (k3s, Docker Desktop). The Cloudflare same-public-IP check delivers the same "servers on my network" semantics without needing multicast to survive the container boundary, so the mDNS advertiser was removed.
+> **Why not mDNS / Bonjour?** This was the first thing we tried (`_infinitestream._tcp` advertised via `github.com/grandcat/zeroconf` from `go-upload`). Docker's default bridge network filters multicast, so the advertisement never escapes the container — `dns-sd -B` on the host found nothing. Host-network mode is fragile across Linux/macOS/Windows and isn't available on every deployment target (k3d, Docker Desktop). The Cloudflare same-public-IP check delivers the same "servers on my network" semantics without needing multicast to survive the container boundary, so the mDNS advertiser was removed.
 
 ```
                                     Cloudflare Worker
@@ -179,8 +179,8 @@ The native client apps (iOS/tvOS, Android TV, Roku) need a way to *find* the ser
 
 **Same-WAN check.** The rendezvous derives a stable hash from `CF-Connecting-IP`; entries are stored under `announce:<ip-hash>:<server_id>`. A `GET /announce` from the client only lists entries with the caller's same IP hash, so the discovery list is automatically scoped to "servers visible from your public IP". Code-based pairing uses the same check (different public IP → 403, with `RENDEZVOUS_ALLOW_CROSS_NETWORK=1` to opt out).
 
-**Distinct `server_id` per deployment.** Multiple deployments sharing a data directory (typical of dev + release pods on the same k3s host that both mount `/media`) end up with the same persisted `<data_dir>/server_id` and overwrite each other on the rendezvous. Set `INFINITE_STREAM_SERVER_ID` explicitly per deployment (e.g. `infinite-streaming-dev` / `infinite-streaming-release`) to make them appear as independent entries in the announce list.
+**Distinct `server_id` per deployment.** Multiple deployments sharing a data directory (typical of dev + release k3d clusters on the same host that both mount `/media`) end up with the same persisted `<data_dir>/server_id` and overwrite each other on the rendezvous. Set `INFINITE_STREAM_SERVER_ID` explicitly per deployment (e.g. `infinite-streaming-dev` / `infinite-streaming-release`) to make them appear as independent entries in the announce list.
 
-**Cleartext HTTP and ATS.** The server defaults to plain HTTP on every listening port. iOS/tvOS' App Transport Security blocks plain HTTP to public hostnames unless the domain is in the app's `NSExceptionDomains`; the iOS/tvOS Info.plists in this repo include an exception for `infinitestreaming.jeoliver.com` so the upstream public deployment is reachable. Forks that ship apps pointing at a different public-HTTP host need to add their own exception (or — better — terminate TLS at the server so HTTPS works without exceptions; the `certs-vol` mount in the k3s manifests is the hook for that). Android has `usesCleartextTraffic="true"` so it isn't affected.
+**Cleartext HTTP and ATS.** The server defaults to plain HTTP on every listening port. iOS/tvOS' App Transport Security blocks plain HTTP to public hostnames unless the domain is in the app's `NSExceptionDomains`; the iOS/tvOS Info.plists in this repo include an exception for `infinitestreaming.jeoliver.com` so the upstream public deployment is reachable. Forks that ship apps pointing at a different public-HTTP host need to add their own exception (or — better — terminate TLS at the server so HTTPS works without exceptions; the `certs-vol` mount in the k3d manifests is the hook for that). Android has `usesCleartextTraffic="true"` so it isn't affected.
 
 See the [Server discovery section in the README](../README.md#server-discovery) for the user-facing summary.
