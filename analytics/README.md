@@ -99,6 +99,16 @@ every snapshot tick. Read them like this:
 smoothed RTT *within the 1 s emit window*, useful for detecting
 sub-second spikes the kernel's EWMA would otherwise mask.
 
+`client_path_ping_rtt_ms` (issue #404) is a separate signal entirely
+— an out-of-band ICMP echo from go-proxy → player_ip at 1 Hz. ICMP
+packets are tiny and don't share a queue with the streaming bytes,
+so this line reflects the path's *real* current latency regardless
+of what shaping is doing. The TCP_INFO lines climb under throttle
+(self-loaded measurement); the ping line stays put. The gap between
+ping and `client_rtt_ms` is the queueing delay the application is
+inducing on itself — bufferbloat, made visible. Zero / absent when
+ICMP is filtered on the path between proxy and player.
+
 ## Securing a WAN-exposed deployment
 
 Default docker-compose binds ClickHouse to `127.0.0.1` (host-only) and

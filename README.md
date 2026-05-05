@@ -557,6 +557,7 @@ Sampled inside go-proxy via `getsockopt(TCP_INFO)` on each session's most-recent
 | `client_rtt_min_lifetime_ms` | `tcpi_min_rtt` | Min RTT ever observed on this connection — the path floor |
 | `client_rtt_var_ms` | `tcpi_rttvar` | Smoothed mean deviation (jitter) |
 | `client_rto_ms` | `tcpi_rto` | Current retransmit timeout — rises during a wedge while smoothed RTT flatlines; the gap between `rto` and `rtt` is the canonical "kernel suspects this connection is stalling" signal |
+| `client_path_ping_rtt_ms` | ICMP echo, 1 Hz | **Out-of-band path latency** (issue #404). Independent of the streaming connection's queue contribution — TCP_INFO RTT inflates with throttle, but ICMP packets bypass the application's send queue, so this line stays at the LAN baseline when shaping kicks in. The vertical gap between this line and `client_rtt_ms` is the queueing delay the application is inducing on itself. Zero / gap when ICMP is filtered. |
 
 ### Metric semantics
 

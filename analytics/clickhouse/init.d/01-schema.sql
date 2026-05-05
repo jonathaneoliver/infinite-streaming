@@ -45,6 +45,12 @@ CREATE TABLE IF NOT EXISTS infinite_streaming.session_snapshots
     client_rtt_min_lifetime_ms Float32                CODEC(ZSTD(1)),
     client_rtt_var_ms          Float32                CODEC(ZSTD(1)),
     client_rto_ms              Float32                CODEC(ZSTD(1)),
+    -- Out-of-band ICMP echo from go-proxy → player_ip at 1 Hz
+    -- (issue #404). Path latency that's independent of the
+    -- streaming TCP connection's queue contribution — the line
+    -- that stays put when shaping kicks in while client_rtt_ms
+    -- climbs from queueing.
+    client_path_ping_rtt_ms    Float32                CODEC(ZSTD(1)),
     display_resolution    LowCardinality(String)      CODEC(ZSTD(1)),
     video_resolution      LowCardinality(String)      CODEC(ZSTD(1)),
     frames_displayed      UInt64                      DEFAULT 0,
@@ -297,6 +303,9 @@ ALTER TABLE infinite_streaming.session_snapshots
     ADD COLUMN IF NOT EXISTS client_rtt_min_lifetime_ms Float32 CODEC(ZSTD(1)),
     ADD COLUMN IF NOT EXISTS client_rtt_var_ms Float32 CODEC(ZSTD(1)),
     ADD COLUMN IF NOT EXISTS client_rto_ms Float32 CODEC(ZSTD(1)),
+    -- Out-of-band ICMP path-ping (issue #404). See inline comment
+    -- on the CREATE TABLE column above.
+    ADD COLUMN IF NOT EXISTS client_path_ping_rtt_ms Float32 CODEC(ZSTD(1)),
     -- Tiered retention classification (issue #342). One of:
     --   'other'        — default, evicted at 30 d (TTL clause below).
     --   'interesting'  — auto-classified at session-end when any of

@@ -1487,6 +1487,11 @@ func main() {
 	// snapshot broadcast (issue #401). Linux-only kernel read; the
 	// !linux stub keeps the dev build green on macOS.
 	app.startRTTSampler(context.Background())
+	// 1 Hz out-of-band ICMP probe to each session's player_ip
+	// (issue #404). Surfaces path latency independent of the
+	// streaming connection's queue contribution — the line that
+	// stays put when shaping kicks in, while TCP_INFO RTT climbs.
+	app.startPathPingSampler(context.Background())
 
 	router := mux.NewRouter()
 	router.Use(corsMiddleware)
@@ -4323,6 +4328,11 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 		sessionStoreTCPConn(sessionData, tcpConn)
 		sessionGetOrCreateRTTWindow(sessionData)
 	}
+	// Path-ping holder for issue #404 — created here (not in the
+	// sampler) so the snapshot map mutation rides on handleProxy's
+	// normal save path. Sampler reads via the atomic; never writes
+	// to the map itself.
+	sessionGetOrCreatePingRTT(sessionData)
 	log.Printf(
 		"[GO-PROXY][REQUEST] method=%s host=%s port=%s path=%s query=%s session_id=%s player_id_q=%s player_id_h=%s playback_session_h=%s client_ip=%s user_agent=%q",
 		r.Method,
@@ -6681,14 +6691,17 @@ func (a *App) normalizeSessionsForResponse(sessions []SessionData) []SessionData
 		// drainAndReset's stale fallback. Acceptable for a
 		// monitoring tool; flagging it here for future readers.
 		drainSessionRTT(session)
+		// Out-of-band ICMP path-ping (issue #404). Latest 1 Hz
+		// sample stamped here as `client_path_ping_rtt_ms`.
+		stampSessionPathPing(session)
 		// Strip internal session keys that aren't meant for the
-		// SSE / JSON projection — *atomic.Pointer[net.TCPConn]
-		// and *RTTWindow are runtime handles, not metrics. The
-		// authoritative copies live on the snapshot map and are
-		// preserved across cloneSession (cloneInterface's default
-		// arm passes unknown pointer types through).
+		// SSE / JSON projection — runtime handles, not metrics.
+		// The authoritative copies live on the snapshot map and
+		// are preserved across cloneSession (cloneInterface's
+		// default arm passes unknown pointer types through).
 		delete(session, "_lastTCPConn")
 		delete(session, "_rttWindow")
+		delete(session, "_pingRTTUs")
 	}
 	return sessions
 }

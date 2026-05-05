@@ -2195,6 +2195,11 @@
             const rttLifetimeMin = numericIfFinite(session.client_rtt_min_lifetime_ms);
             const rttVar = numericIfFinite(session.client_rtt_var_ms);
             const rttRto = numericIfFinite(session.client_rto_ms);
+            // Out-of-band ICMP path-ping (issue #404). Independent of
+            // the streaming connection's queue contribution — stays
+            // at the LAN baseline when shaping kicks in while the
+            // TCP_INFO lines climb from queueing.
+            const pathPing = numericIfFinite(session.client_path_ping_rtt_ms);
             const rttStale = session.client_rtt_stale === true;
             const rttSeries = rttHistory.get(key) || [];
             rttSeries.push({
@@ -2205,6 +2210,7 @@
                 lifetimeMin: rttLifetimeMin,
                 variance: rttVar,
                 rto: rttRto,
+                pathPing,
                 stale: rttStale
             });
             rttHistory.set(key, rttSeries.filter(point => point.ts >= cutoff));
@@ -4187,7 +4193,8 @@
                         max: point.stale ? null : point.max,
                         min: point.stale ? null : point.min,
                         lifetimeMin: point.lifetimeMin,
-                        rto: point.rto
+                        rto: point.rto,
+                        pathPing: point.pathPing
                     };
                 });
             const avgData = points.map(p => ({ x: p.x, y: p.avg }));
@@ -4195,13 +4202,14 @@
             const minData = points.map(p => ({ x: p.x, y: p.min }));
             const lifetimeMinData = points.map(p => ({ x: p.x, y: p.lifetimeMin }));
             const rtoData = points.map(p => ({ x: p.x, y: p.rto }));
+            const pathPingData = points.map(p => ({ x: p.x, y: p.pathPing }));
 
             // Two y-axes: RTT (left, low-millisecond range on a healthy
             // path) and RTO (right, can spike to seconds during a
             // wedge). Sharing one axis would flatten the RTT line to
             // a flat-zero baseline whenever RTO climbs.
             const rttValues = []
-                .concat(avgData, maxData, lifetimeMinData)
+                .concat(avgData, maxData, lifetimeMinData, pathPingData)
                 .map(p => Number(p.y))
                 .filter(v => Number.isFinite(v) && v >= 0);
             const rtoValues = rtoData
@@ -4272,6 +4280,21 @@
                     tension: 0,
                     borderDash: [8, 4],
                     fill: false,
+                    yAxisID: 'y'
+                },
+                {
+                    // Out-of-band ICMP path-ping (issue #404). Cyan
+                    // to read as "physical path", distinct from the
+                    // purple TCP_INFO family on the same axis.
+                    label: 'Path ping (ms)',
+                    data: pathPingData,
+                    borderColor: '#0891b2',
+                    backgroundColor: 'rgba(8,145,178,0.10)',
+                    borderWidth: 2,
+                    pointRadius: 0,
+                    tension: 0.2,
+                    fill: false,
+                    spanGaps: false,
                     yAxisID: 'y'
                 },
                 {

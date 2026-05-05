@@ -168,6 +168,7 @@ Every `/api/sessions` row and SSE snapshot carries six TCP_INFO-derived RTT metr
 | `client_rtt_min_lifetime_ms` | `tcpi_min_rtt` | Min RTT ever observed on this connection — path floor |
 | `client_rtt_var_ms` | `tcpi_rttvar` | Smoothed mean deviation (jitter) |
 | `client_rto_ms` | `tcpi_rto` | Current retransmit timeout — rises during a wedge |
+| `client_path_ping_rtt_ms` | ICMP echo, 1 Hz | Out-of-band path latency (issue #404), independent of throttle — zero / absent when ICMP is filtered |
 
 If a 1 s window had no fresh kernel samples (typically a short connection gap), the row carries `client_rtt_stale: true` alongside the previous-window values.
 

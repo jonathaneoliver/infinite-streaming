@@ -91,6 +91,8 @@ type row struct {
 	ClientRTTMinLifetimeMs  float32 `json:"client_rtt_min_lifetime_ms"`
 	ClientRTTVarMs          float32 `json:"client_rtt_var_ms"`
 	ClientRTOMs             float32 `json:"client_rto_ms"`
+	// Out-of-band ICMP path-ping (issue #404).
+	ClientPathPingRTTMs     float32 `json:"client_path_ping_rtt_ms"`
 	DisplayResolution        string  `json:"display_resolution"`
 	VideoResolution          string  `json:"video_resolution"`
 	FramesDisplayed          uint64  `json:"frames_displayed"`
@@ -454,6 +456,7 @@ func toRow(ts string, revision uint64, sessionID string, s map[string]interface{
 		ClientRTTMinLifetimeMs:   getF32(s, "client_rtt_min_lifetime_ms"),
 		ClientRTTVarMs:           getF32(s, "client_rtt_var_ms"),
 		ClientRTOMs:              getF32(s, "client_rto_ms"),
+		ClientPathPingRTTMs:      getF32(s, "client_path_ping_rtt_ms"),
 		DisplayResolution:        getStr(s, "player_metrics_display_resolution"),
 		VideoResolution:          getStr(s, "player_metrics_video_resolution"),
 		FramesDisplayed:          getU64(s, "player_metrics_frames_displayed"),
