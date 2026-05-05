@@ -36,6 +36,15 @@ func newPingSocket() (*pingSocket, error) {
 	if err != nil {
 		return nil, err
 	}
+	// IP_TOS = 0x10 (Min Delay) maps to TC_PRIO_INTERACTIVE under the
+	// kernel's default rt_tos2priority table, which the per-port
+	// `prio` qdisc installed by UpdateNetem routes to band 0 — the
+	// high-priority lane that jumps bulk segment data queued in
+	// band 1. Issue #404. SetTOS sets the socket-level IP_TOS option
+	// so all subsequent sends inherit it; no per-packet cmsg dance.
+	if pc := c.IPv4PacketConn(); pc != nil {
+		_ = pc.SetTOS(0x10)
+	}
 	s := &pingSocket{
 		conn:    c,
 		pid:     os.Getpid() & 0xffff,

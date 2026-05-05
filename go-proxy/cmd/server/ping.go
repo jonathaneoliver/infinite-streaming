@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"log"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -85,6 +86,20 @@ func (a *App) startPathPingSampler(ctx context.Context) {
 						continue
 					}
 					ip := strings.TrimSpace(getString(session, "player_ip"))
+					// Keep the per-port ICMP filter in sync with
+					// shaping state (issue #404). When shaping is
+					// active we route ICMP-to-player_ip into the
+					// port's HTB class so the probe sees the
+					// configured netem delay; when shaping is off
+					// we tear the filter down so ICMP travels the
+					// unshaped default class.
+					port, _ := strconv.Atoi(strings.TrimSpace(getString(session, "x_forwarded_port")))
+					shapingActive := getFloat(session, "nftables_bandwidth_mbps") > 0 ||
+						getInt(session, "nftables_delay_ms") > 0 ||
+						getFloat(session, "nftables_packet_loss") > 0
+					if a.traffic != nil && port > 0 {
+						_ = a.traffic.ApplyPlayerICMPFilter(port, ip, shapingActive && ip != "")
+					}
 					if ip == "" {
 						holder.Store(0)
 						continue

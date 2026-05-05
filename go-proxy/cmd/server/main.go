@@ -580,6 +580,13 @@ type TcTrafficManager struct {
 	nlMu          sync.Mutex
 	nlHandle      *netlink.Handle // persistent netlink handle, created lazily
 	nlLink        netlink.Link    // resolved once from interfaceName
+	// Per-port ICMP filter state (issue #404). Tracks the last
+	// player_ip we installed an ICMP-routing filter for so the
+	// path-ping sampler's per-tick ApplyPlayerICMPFilter call
+	// becomes a no-op when nothing changed. Also doubles as the
+	// "is a filter currently installed?" check for cleanup.
+	icmpFilterMu       sync.Mutex
+	icmpFilterIPByPort map[int]string
 }
 
 type ShapeApplyState struct {
@@ -779,7 +786,11 @@ func (s *NftShapeStep) UnmarshalJSON(data []byte) error {
 }
 
 func NewTcTrafficManager(interfaceName string, debug bool) *TcTrafficManager {
-	return &TcTrafficManager{interfaceName: interfaceName, debug: debug}
+	return &TcTrafficManager{
+		interfaceName:      interfaceName,
+		debug:              debug,
+		icmpFilterIPByPort: map[int]string{},
+	}
 }
 
 func (t *TcTrafficManager) IsActive() bool {
@@ -1008,6 +1019,15 @@ func (t *TcTrafficManager) ClearPortShaping(port int) {
 	_ = exec.Command("tc", "filter", "del", "dev", t.interfaceName, "protocol", "ip",
 		"parent", "1:0", "prio", "1", "u32",
 		"match", "ip", "sport", fmt.Sprintf("%d", port), "0xffff").Run()
+	// Also clear the per-port ICMP-to-player_ip filter installed for
+	// the path-ping prio routing (issue #404). Per-port pref makes
+	// this a single by-attribute delete; the tracking map is then
+	// pruned so a future install fires fresh tc commands.
+	_ = exec.Command("tc", "filter", "del", "dev", t.interfaceName,
+		"parent", "1:", "pref", icmpFilterPref(port)).Run()
+	t.icmpFilterMu.Lock()
+	delete(t.icmpFilterIPByPort, port)
+	t.icmpFilterMu.Unlock()
 	_ = exec.Command("tc", "class", "del", "dev", t.interfaceName, "classid", classid).Run()
 }
 
@@ -1146,6 +1166,27 @@ func (t *TcTrafficManager) EnsureClass(port int, rateMbps float64) error {
 	return t.UpdateRateLimit(port, rateMbps)
 }
 
+// UpdateNetem (re)writes the leaf qdisc inside the per-port HTB class.
+//
+// Layout (issue #404):
+//
+//	HTB class (1:<suffix>, rate-limited)
+//	└── prio (handle <suffix>0:, 3 bands, default priomap)
+//	    ├── band 1 → netem (handle <suffix>1:, delay/loss)
+//	    ├── band 2 → netem (handle <suffix>2:, same delay/loss)
+//	    └── band 3 → netem (handle <suffix>3:, same delay/loss)
+//
+// Bulk segment traffic (default skb->priority = 0 = TC_PRIO_BESTEFFORT)
+// lands in band 2. The path-ping ICMP socket sets IP_TOS = 0x10
+// (Min Delay → TC_PRIO_INTERACTIVE) so its packets land in band 1,
+// jumping bulk in the HTB drain order. All three bands carry netem
+// with identical delay/loss so the configured shaping applies
+// uniformly regardless of priority.
+//
+// Strict-priority scheduling means the probe is preempt-eligible but
+// not preempt-able mid-packet — the worst-case extra residency is one
+// MTU at the rate limit (≈12 ms at 1 Mbps, ≈2.4 ms at 5 Mbps), vs.
+// hundreds of ms of bufferbloat the bulk lane can accumulate.
 func (t *TcTrafficManager) UpdateNetem(port int, delayMs int, lossPct float64) error {
 	if err := t.EnsureRootQdisc(); err != nil {
 		return err
@@ -1160,29 +1201,104 @@ func (t *TcTrafficManager) UpdateNetem(port int, delayMs int, lossPct float64) e
 	}
 	portSuffix := fmt.Sprintf("%03d", port%1000)
 	classid := fmt.Sprintf("1:%s", portSuffix)
-	handle := fmt.Sprintf("%s0:", portSuffix)
+	prioHandle := fmt.Sprintf("%s0:", portSuffix)
 	if delayMs <= 0 && lossPct <= 0 {
-		_ = exec.Command("tc", "qdisc", "del", "dev", t.interfaceName, "parent", classid, "handle", handle, "netem").Run()
+		// Removing the prio leaf cascades to its child netems.
+		_ = exec.Command("tc", "qdisc", "del", "dev", t.interfaceName, "parent", classid, "handle", prioHandle).Run()
 		t.logTcState("netem_clear", port)
 		return nil
 	}
+	// Replace leaf with prio (3 bands, default priomap).
+	if out, err := exec.Command(
+		"tc", "qdisc", "replace", "dev", t.interfaceName,
+		"parent", classid, "handle", prioHandle,
+		"prio", "bands", "3",
+	).CombinedOutput(); err != nil {
+		return fmt.Errorf("tc prio failed: %s", strings.TrimSpace(string(out)))
+	}
+	// Attach netem to each band so the configured delay/loss
+	// applies regardless of which band a packet lands in.
 	jitter := delayMs / 2
-	args := []string{"qdisc", "replace", "dev", t.interfaceName, "parent", classid, "handle", handle, "netem"}
-	if delayMs > 0 {
-		if jitter > 0 {
-			args = append(args, "delay", fmt.Sprintf("%dms", delayMs), fmt.Sprintf("%dms", jitter), "distribution", "normal")
-		} else {
-			args = append(args, "delay", fmt.Sprintf("%dms", delayMs))
+	for band := 1; band <= 3; band++ {
+		bandParent := fmt.Sprintf("%s0:%d", portSuffix, band) // e.g. 1810:1
+		bandHandle := fmt.Sprintf("%s%d:", portSuffix, band)  // e.g. 1811:
+		args := []string{"qdisc", "replace", "dev", t.interfaceName,
+			"parent", bandParent, "handle", bandHandle, "netem"}
+		if delayMs > 0 {
+			if jitter > 0 {
+				args = append(args, "delay", fmt.Sprintf("%dms", delayMs), fmt.Sprintf("%dms", jitter), "distribution", "normal")
+			} else {
+				args = append(args, "delay", fmt.Sprintf("%dms", delayMs))
+			}
+		}
+		if lossPct > 0 {
+			args = append(args, "loss", fmt.Sprintf("%.2f%%", lossPct))
+		}
+		if out, err := exec.Command("tc", args...).CombinedOutput(); err != nil {
+			return fmt.Errorf("tc netem band %d failed: %s", band, strings.TrimSpace(string(out)))
 		}
 	}
-	if lossPct > 0 {
-		args = append(args, "loss", fmt.Sprintf("%.2f%%", lossPct))
-	}
-	cmd := exec.Command("tc", args...)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("tc netem failed: %s", strings.TrimSpace(string(out)))
-	}
 	t.logTcState("netem_apply", port)
+	return nil
+}
+
+// icmpFilterPref returns a unique tc filter pref for the per-port
+// ICMP-to-player_ip filter. Per-port pref means deletion can be
+// done by attribute (no need to parse handles out of `tc filter
+// show` output).
+func icmpFilterPref(port int) string {
+	return fmt.Sprintf("%d", 1000+(port%1000))
+}
+
+// ApplyPlayerICMPFilter installs (install=true) or removes
+// (install=false) a `tc filter` that routes ICMP packets destined
+// for `playerIP` into the per-port HTB class. Issue #404 — combined
+// with the prio+netem leaf installed by UpdateNetem and IP_TOS=0x10
+// on the path-ping socket, this is what lets the probe see the
+// configured netem delay while jumping the bulk queue.
+//
+// Idempotent: tracks the last-installed IP per port and skips the
+// tc invocation when nothing changed. Handles the player-IP-changed
+// case (rare but possible if a player reconnects from a different
+// IP under the same session) by deleting and re-adding.
+func (t *TcTrafficManager) ApplyPlayerICMPFilter(port int, playerIP string, install bool) error {
+	if t == nil {
+		return nil
+	}
+	t.icmpFilterMu.Lock()
+	defer t.icmpFilterMu.Unlock()
+	current := t.icmpFilterIPByPort[port]
+	pref := icmpFilterPref(port)
+	if !install || playerIP == "" {
+		if current == "" {
+			return nil
+		}
+		_ = exec.Command("tc", "filter", "del", "dev", t.interfaceName,
+			"parent", "1:", "pref", pref).Run()
+		delete(t.icmpFilterIPByPort, port)
+		return nil
+	}
+	if current == playerIP {
+		return nil
+	}
+	if current != "" {
+		_ = exec.Command("tc", "filter", "del", "dev", t.interfaceName,
+			"parent", "1:", "pref", pref).Run()
+	}
+	portSuffix := fmt.Sprintf("%03d", port%1000)
+	classid := fmt.Sprintf("1:%s", portSuffix)
+	cmd := exec.Command(
+		"tc", "filter", "add", "dev", t.interfaceName,
+		"protocol", "ip", "parent", "1:", "pref", pref, "u32",
+		"match", "ip", "protocol", "1", "0xff",
+		"match", "ip", "dst", playerIP+"/32",
+		"flowid", classid,
+	)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("tc icmp filter add port=%d ip=%s: %s",
+			port, playerIP, strings.TrimSpace(string(out)))
+	}
+	t.icmpFilterIPByPort[port] = playerIP
 	return nil
 }
 
