@@ -116,6 +116,20 @@ spec:
         # when both stacks announce themselves to the rendezvous.
         - name: INFINITE_STREAM_SERVER_ID
           value: "${SERVER_ID}"
+        # Readiness only — no liveness probe, intentionally. The
+        # underlying failure modes we've actually hit (nginx config-load
+        # crash on missing upstream, missing /media/logs dir) all
+        # surface at startup; a readiness probe holds the pod NotReady
+        # until nginx is actually serving, which fails the rolling-
+        # update cleanly. Restart-on-wedge (livenessProbe) is deferred
+        # to #399 — too easy to false-positive on a transient blip.
+        readinessProbe:
+          httpGet:
+            path: /healthz
+            port: 30000
+          initialDelaySeconds: 5
+          periodSeconds: 10
+          failureThreshold: 3
         securityContext:
           privileged: true
           capabilities:
