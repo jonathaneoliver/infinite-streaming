@@ -967,6 +967,15 @@ func (t *TcTrafficManager) UpdateRateLimit(port int, rateMbps float64) error {
 	if err := t.ensurePortFilter(port, classid); err != nil {
 		return err
 	}
+	// Make sure the per-port prio+netem-per-band leaf is in place so
+	// the path-ping probe (issue #404) actually jumps the bulk queue
+	// even when shaping was set up via a rate-only call (no netem).
+	// Without this the class falls back to the kernel's default
+	// pfifo leaf and ICMP routed in via ApplyPlayerICMPFilter would
+	// queue behind segment data.
+	if err := t.ensurePrioLeafForPort(port); err != nil {
+		log.Printf("NETSHAPE prio leaf install failed port=%d: %v", port, err)
+	}
 	verifyCmd := exec.Command("tc", "class", "show", "dev", t.interfaceName)
 	verifyOut, _ := verifyCmd.CombinedOutput()
 	afterFilterCmd := exec.Command("tc", "filter", "show", "dev", t.interfaceName)
@@ -1166,27 +1175,63 @@ func (t *TcTrafficManager) EnsureClass(port int, rateMbps float64) error {
 	return t.UpdateRateLimit(port, rateMbps)
 }
 
-// UpdateNetem (re)writes the leaf qdisc inside the per-port HTB class.
+// ensurePrioLeafForPort installs the prio+netem-per-band leaf inside
+// the per-port HTB class if it isn't already there (issue #404).
+// MUST run whenever the class is created/updated — including the
+// rate-limit-only path (UpdateRateLimit) and the netem path
+// (UpdateNetem) — otherwise the class falls back to the default
+// pfifo leaf and the path-ping probe queues behind bulk regardless
+// of what `IP_TOS` the probe socket set.
 //
-// Layout (issue #404):
+// Layout:
 //
-//	HTB class (1:<suffix>, rate-limited)
-//	└── prio (handle <suffix>0:, 3 bands, default priomap)
-//	    ├── band 1 → netem (handle <suffix>1:, delay/loss)
-//	    ├── band 2 → netem (handle <suffix>2:, same delay/loss)
-//	    └── band 3 → netem (handle <suffix>3:, same delay/loss)
+//	HTB class 1:<suffix>
+//	└── prio  <suffix>0:        (3 bands, default priomap)
+//	    ├── netem <suffix>1:    (band 1 — TC_PRIO_INTERACTIVE → probe lane)
+//	    ├── netem <suffix>2:    (band 2 — TC_PRIO_BESTEFFORT → bulk lane)
+//	    └── netem <suffix>3:    (band 3 — unused)
 //
-// Bulk segment traffic (default skb->priority = 0 = TC_PRIO_BESTEFFORT)
-// lands in band 2. The path-ping ICMP socket sets IP_TOS = 0x10
-// (Min Delay → TC_PRIO_INTERACTIVE) so its packets land in band 1,
-// jumping bulk in the HTB drain order. All three bands carry netem
-// with identical delay/loss so the configured shaping applies
-// uniformly regardless of priority.
-//
-// Strict-priority scheduling means the probe is preempt-eligible but
-// not preempt-able mid-packet — the worst-case extra residency is one
-// MTU at the rate limit (≈12 ms at 1 Mbps, ≈2.4 ms at 5 Mbps), vs.
-// hundreds of ms of bufferbloat the bulk lane can accumulate.
+// Initial install gives each band a no-op netem (delay=0, loss=0);
+// UpdateNetem subsequently replaces the per-band netems with user-
+// configured values. Idempotent — exits fast when the prio handle
+// already shows up under `tc qdisc show parent <classid>`.
+func (t *TcTrafficManager) ensurePrioLeafForPort(port int) error {
+	portSuffix := fmt.Sprintf("%03d", port%1000)
+	classid := fmt.Sprintf("1:%s", portSuffix)
+	prioHandle := fmt.Sprintf("%s0:", portSuffix)
+	show := exec.Command("tc", "qdisc", "show", "dev", t.interfaceName, "parent", classid)
+	out, _ := show.CombinedOutput()
+	if strings.Contains(string(out), "qdisc prio "+prioHandle) {
+		return nil
+	}
+	// `replace` is destructive — wipes any existing leaf qdisc
+	// (e.g. the kernel default pfifo) atomically and installs prio
+	// in its place.
+	if installOut, err := exec.Command(
+		"tc", "qdisc", "replace", "dev", t.interfaceName,
+		"parent", classid, "handle", prioHandle,
+		"prio", "bands", "3",
+	).CombinedOutput(); err != nil {
+		return fmt.Errorf("tc prio replace failed: %s", strings.TrimSpace(string(installOut)))
+	}
+	for band := 1; band <= 3; band++ {
+		bandParent := fmt.Sprintf("%s0:%d", portSuffix, band)
+		bandHandle := fmt.Sprintf("%s%d:", portSuffix, band)
+		if out, err := exec.Command(
+			"tc", "qdisc", "replace", "dev", t.interfaceName,
+			"parent", bandParent, "handle", bandHandle, "netem",
+		).CombinedOutput(); err != nil {
+			return fmt.Errorf("tc netem (band %d) replace failed: %s", band, strings.TrimSpace(string(out)))
+		}
+	}
+	return nil
+}
+
+// UpdateNetem replaces each band's netem qdisc inside the prio leaf
+// with the new delay/loss params. Issue #404. The leaf itself is
+// installed (or confirmed present) before the netem replacements so
+// this works even when called on a class created by UpdateRateLimit
+// without netem ever previously being touched.
 func (t *TcTrafficManager) UpdateNetem(port int, delayMs int, lossPct float64) error {
 	if err := t.EnsureRootQdisc(); err != nil {
 		return err
@@ -1194,30 +1239,25 @@ func (t *TcTrafficManager) UpdateNetem(port int, delayMs int, lossPct float64) e
 	if err := t.EnsureRootClass(); err != nil {
 		return err
 	}
-	if delayMs > 0 || lossPct > 0 {
+	portSuffix := fmt.Sprintf("%03d", port%1000)
+	classid := fmt.Sprintf("1:%s", portSuffix)
+	if delayMs <= 0 && lossPct <= 0 {
+		// Clearing netem when no class exists is a no-op — don't
+		// create one just to set zero netem on it.
+		showClass := exec.Command("tc", "class", "show", "dev", t.interfaceName)
+		classOut, _ := showClass.CombinedOutput()
+		if !strings.Contains(string(classOut), classid) {
+			t.logTcState("netem_clear", port)
+			return nil
+		}
+	} else {
 		if err := t.EnsureClass(port, 10000); err != nil {
 			return err
 		}
 	}
-	portSuffix := fmt.Sprintf("%03d", port%1000)
-	classid := fmt.Sprintf("1:%s", portSuffix)
-	prioHandle := fmt.Sprintf("%s0:", portSuffix)
-	if delayMs <= 0 && lossPct <= 0 {
-		// Removing the prio leaf cascades to its child netems.
-		_ = exec.Command("tc", "qdisc", "del", "dev", t.interfaceName, "parent", classid, "handle", prioHandle).Run()
-		t.logTcState("netem_clear", port)
-		return nil
+	if err := t.ensurePrioLeafForPort(port); err != nil {
+		return err
 	}
-	// Replace leaf with prio (3 bands, default priomap).
-	if out, err := exec.Command(
-		"tc", "qdisc", "replace", "dev", t.interfaceName,
-		"parent", classid, "handle", prioHandle,
-		"prio", "bands", "3",
-	).CombinedOutput(); err != nil {
-		return fmt.Errorf("tc prio failed: %s", strings.TrimSpace(string(out)))
-	}
-	// Attach netem to each band so the configured delay/loss
-	// applies regardless of which band a packet lands in.
 	jitter := delayMs / 2
 	for band := 1; band <= 3; band++ {
 		bandParent := fmt.Sprintf("%s0:%d", portSuffix, band) // e.g. 1810:1
@@ -1238,7 +1278,11 @@ func (t *TcTrafficManager) UpdateNetem(port int, delayMs int, lossPct float64) e
 			return fmt.Errorf("tc netem band %d failed: %s", band, strings.TrimSpace(string(out)))
 		}
 	}
-	t.logTcState("netem_apply", port)
+	if delayMs <= 0 && lossPct <= 0 {
+		t.logTcState("netem_clear", port)
+	} else {
+		t.logTcState("netem_apply", port)
+	}
 	return nil
 }
 
