@@ -69,6 +69,12 @@ spec:
           value: "9"
         - name: INFINITE_STREAM_TC_DEBUG
           value: "1"
+        # Wire nginx /analytics/api/* and /grafana/* to the analytics
+        # sidecar Services (forwarder, grafana). See #390 for the gating
+        # mechanism. The analytics tier is applied alongside this
+        # deployment by the same `make deploy` target.
+        - name: INFINITE_STREAM_ENABLE_ANALYTICS
+          value: "1"
         # Pairing rendezvous (substituted by envsubst at deploy time).
         - name: INFINITE_STREAM_RENDEZVOUS_URL
           value: "${INFINITE_STREAM_RENDEZVOUS_URL}"

@@ -3,138 +3,19 @@
 # Uses envsubst at apply time for ${K3S_REGISTRY} and the SSE source URL
 # (${ANALYTICS_SSE_URL}). The forwarder defaults to the dev stack
 # (infinite-streaming-dev:30081); override ANALYTICS_SSE_URL for release.
----
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: analytics-clickhouse-init
-data:
-  01-schema.sql: |
-    CREATE DATABASE IF NOT EXISTS infinite_streaming;
-    CREATE TABLE IF NOT EXISTS infinite_streaming.session_snapshots
-    (
-        ts DateTime64(3, 'UTC'),
-        revision UInt64,
-        session_id String,
-        play_id LowCardinality(String),
-        player_id LowCardinality(String),
-        group_id LowCardinality(String),
-        user_agent String,
-        manifest_url String,
-        manifest_variants String,
-        last_request_url String,
-        content_id LowCardinality(String),
-        player_state LowCardinality(String),
-        waiting_reason LowCardinality(String),
-        buffer_depth_s Float32,
-        network_bitrate_mbps Float32,
-        video_bitrate_mbps Float32,
-        measured_mbps Float32,
-        mbps_shaper_rate Float32,
-        mbps_shaper_avg Float32,
-        display_resolution LowCardinality(String),
-        video_resolution LowCardinality(String),
-        frames_displayed UInt64 DEFAULT 0,
-        dropped_frames UInt32 DEFAULT 0,
-        stall_count UInt32 DEFAULT 0,
-        stall_time_s Float32,
-        position_s Float32,
-        live_edge_s Float32,
-        true_offset_s Float32,
-        playback_rate Float32,
-        loop_count_player UInt32 DEFAULT 0,
-        loop_count_server UInt32 DEFAULT 0,
-        last_event LowCardinality(String),
-        last_event_at String,
-        trigger_type LowCardinality(String),
-        event_time String,
-        player_error String,
-        avg_network_bitrate_mbps Float32,
-        buffer_end_s Float32,
-        last_stall_time_s Float32,
-        live_offset_s Float32,
-        playhead_wallclock_ms Int64,
-        seekable_end_s Float32,
-        metrics_source LowCardinality(String),
-        video_first_frame_time_s Float32,
-        video_quality_pct Float32,
-        video_start_time_s Float32,
-        mbps_transfer_complete Float32,
-        mbps_transfer_rate Float32,
-        player_ip LowCardinality(String),
-        server_received_at_ms Int64,
-        x_forwarded_port UInt16 DEFAULT 0,
-        x_forwarded_port_external UInt16 DEFAULT 0,
-        master_manifest_url String,
-        master_manifest_failure_type LowCardinality(String),
-        master_manifest_failure_mode LowCardinality(String),
-        master_manifest_failure_frequency Float32,
-        master_manifest_consecutive_failures UInt32 DEFAULT 0,
-        master_manifest_requests_count UInt32 DEFAULT 0,
-        manifest_failure_frequency Float32,
-        manifest_failure_urls String,
-        manifest_consecutive_failures UInt32 DEFAULT 0,
-        manifest_requests_count UInt32 DEFAULT 0,
-        segment_failure_frequency Float32,
-        segment_failure_urls String,
-        segment_consecutive_failures UInt32 DEFAULT 0,
-        segments_count UInt32 DEFAULT 0,
-        all_failure_type LowCardinality(String),
-        all_failure_mode LowCardinality(String),
-        all_failure_frequency Float32,
-        all_failure_urls String,
-        all_consecutive_failures UInt32 DEFAULT 0,
-        transport_failure_frequency Float32,
-        transport_failure_mode LowCardinality(String),
-        transport_failure_units LowCardinality(String),
-        transport_consecutive_failures UInt32 DEFAULT 0,
-        transport_consecutive_seconds Float32,
-        transport_consecutive_units UInt32 DEFAULT 0,
-        transport_frequency_seconds Float32,
-        transport_fault_drop_packets UInt8 DEFAULT 0,
-        transport_fault_reject_packets UInt8 DEFAULT 0,
-        transport_fault_off_seconds Float32,
-        transport_fault_on_seconds Float32,
-        transport_fault_type LowCardinality(String),
-        fault_count_transfer_active_timeout UInt32 DEFAULT 0,
-        fault_count_transfer_idle_timeout UInt32 DEFAULT 0,
-        transfer_active_timeout_seconds Float32,
-        transfer_idle_timeout_seconds Float32,
-        transfer_timeout_applies_manifests UInt8 DEFAULT 0,
-        transfer_timeout_applies_master UInt8 DEFAULT 0,
-        transfer_timeout_applies_segments UInt8 DEFAULT 0,
-        nftables_pattern_step UInt32 DEFAULT 0,
-        nftables_pattern_step_runtime UInt32 DEFAULT 0,
-        nftables_pattern_steps String,
-        nftables_pattern_rate_runtime_mbps Float32,
-        nftables_pattern_margin_pct Float32,
-        nftables_pattern_template_mode LowCardinality(String),
-        content_allowed_variants String,
-        content_live_offset Float32,
-        content_strip_codecs String,
-        abrchar_run_lock UInt8 DEFAULT 0,
-        control_revision UInt64 DEFAULT 0,
-        server_video_rendition LowCardinality(String),
-        server_video_rendition_mbps Float32,
-        manifest_failure_type LowCardinality(String),
-        manifest_failure_mode LowCardinality(String),
-        segment_failure_type LowCardinality(String),
-        segment_failure_mode LowCardinality(String),
-        transport_failure_type LowCardinality(String),
-        transport_fault_active UInt8 DEFAULT 0,
-        nftables_bandwidth_mbps Float32,
-        nftables_delay_ms UInt32 DEFAULT 0,
-        nftables_packet_loss Float32,
-        nftables_pattern_enabled UInt8 DEFAULT 0,
-        first_request_time String,
-        last_request String,
-        session_duration Float32,
-        session_json String CODEC(ZSTD(3))
-    )
-    ENGINE = MergeTree
-    PARTITION BY toYYYYMMDD(ts)
-    ORDER BY (session_id, ts)
-    TTL toDateTime(ts) + INTERVAL 30 DAY;
+#
+# The `analytics-clickhouse-init` ConfigMap is NOT defined inline here.
+# `make analytics-deploy-k3s` generates it from the canonical schema at
+# analytics/clickhouse/init.d/01-schema.sql via:
+#   kubectl create configmap analytics-clickhouse-init \
+#       --from-file=01-schema.sql=analytics/clickhouse/init.d/01-schema.sql \
+#       --dry-run=client -o yaml | kubectl apply -f -
+# This keeps a single source of truth for the schema across compose
+# (which bind-mounts the file into ClickHouse) and k3s. The same
+# Makefile target also re-applies the canonical schema against the
+# running clickhouse-0 pod after rollout, so column-add migrations
+# land on existing clusters even though docker-entrypoint-initdb.d/
+# only runs on first startup.
 ---
 apiVersion: apps/v1
 kind: StatefulSet
@@ -283,6 +164,22 @@ spec:
         # (.local, IP, Tailscale, etc.). See docker-compose.yml note.
         - name: GF_LIVE_ALLOWED_ORIGINS
           value: "*"
+        volumeMounts:
+        # Datasources + dashboards come from ConfigMaps populated by
+        # `make analytics-deploy-k3s` from analytics/grafana/provisioning/.
+        # Same content compose mounts via bind-mount; in k3s we package
+        # it as ConfigMaps so the cluster has its own copy.
+        - name: datasources
+          mountPath: /etc/grafana/provisioning/datasources
+        - name: dashboards
+          mountPath: /etc/grafana/provisioning/dashboards
+      volumes:
+      - name: datasources
+        configMap:
+          name: analytics-grafana-datasources
+      - name: dashboards
+        configMap:
+          name: analytics-grafana-dashboards
 ---
 apiVersion: v1
 kind: Service
