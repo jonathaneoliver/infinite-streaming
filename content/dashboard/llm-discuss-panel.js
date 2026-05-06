@@ -99,6 +99,26 @@
 }
 .llm-discuss-budget.over { background: #fef2f2; color: #991b1b; }
 
+.llm-discuss-focus {
+    padding: 6px 16px;
+    font-size: 11px;
+    color: #312e81;
+    border-bottom: 1px solid #f1f5f9;
+    background: #eef2ff;
+    display: none;
+}
+.llm-discuss-focus.active { display: block; }
+.llm-discuss-focus button {
+    margin-left: 8px;
+    background: none;
+    border: 1px solid #c7d2fe;
+    border-radius: 4px;
+    padding: 2px 6px;
+    cursor: pointer;
+    font-size: 10px;
+    color: #312e81;
+}
+
 .llm-discuss-history {
     flex: 1;
     overflow-y: auto;
@@ -182,6 +202,7 @@
                 <button class="llm-discuss-clear" type="button">Clear</button>
             </div>
             <div class="llm-discuss-budget" data-role="budget">Loading budget…</div>
+            <div class="llm-discuss-focus" data-role="focus"></div>
             <div class="llm-discuss-history" data-role="history" aria-live="polite"></div>
             <div class="llm-discuss-input">
                 <textarea data-role="input" placeholder="Ask about this session — e.g. 'what happened around the stall at 0:42?'" aria-label="Message"></textarea>
@@ -318,12 +339,58 @@
         const clearBtn = panel.querySelector('.llm-discuss-clear');
         const profileSelect = panel.querySelector('[data-role=profile]');
         const budgetEl = panel.querySelector('[data-role=budget]');
+        const focusEl = panel.querySelector('[data-role=focus]');
 
         let sessionId = getSessionIdFromURL();
         let history = loadHistory(sessionId);
         let activeStream = null;
         let budgetTimer = null;
         let profilesReady = false;
+        // Brush range tracked from session-replay.js's
+        // 'replay:brush-changed' CustomEvent. null = no brush
+        // (overview mode); {fromMs, toMs, sessionStartMs} = forensic
+        // mode — the next chat message ships {range:{from,to}} so
+        // the LLM scopes queries to the brushed window.
+        let brushRange = null;
+        let brushOverride = null; // user-suppressed brush focus
+
+        function fmtMs(ms) {
+            if (!Number.isFinite(ms) || ms < 0) return '—';
+            const totalS = Math.floor(ms / 1000);
+            const m = Math.floor(totalS / 60);
+            const s = totalS - m * 60;
+            return `${m}:${s.toString().padStart(2, '0')}`;
+        }
+        function effectiveRange() {
+            if (brushOverride === 'off') return null;
+            return brushRange;
+        }
+        function refreshFocus() {
+            const r = effectiveRange();
+            if (!r) {
+                focusEl.classList.remove('active');
+                focusEl.textContent = '';
+                return;
+            }
+            const startMs = r.sessionStartMs || 0;
+            const span = r.toMs - r.fromMs;
+            focusEl.classList.add('active');
+            focusEl.innerHTML = `Focus: <strong>${escapeHTML(fmtMs(r.fromMs - startMs))}–${escapeHTML(fmtMs(r.toMs - startMs))}</strong> (${escapeHTML(fmtMs(span))} window) <button data-role="focus-clear" type="button">Use full session</button>`;
+            focusEl.querySelector('[data-role=focus-clear]').addEventListener('click', () => {
+                brushOverride = 'off';
+                refreshFocus();
+            });
+        }
+
+        document.addEventListener('replay:brush-changed', (e) => {
+            const detail = e.detail || {};
+            if (detail.sessionId && sessionId && detail.sessionId !== sessionId) return;
+            brushRange = (detail.fromMs && detail.toMs && detail.toMs > detail.fromMs)
+                ? { fromMs: detail.fromMs, toMs: detail.toMs, sessionStartMs: detail.sessionStartMs || 0 }
+                : null;
+            brushOverride = null; // any new brush activity re-enables focus
+            refreshFocus();
+        });
 
         renderHistory(historyEl, history);
 
@@ -404,10 +471,12 @@
             const partial = { role: 'assistant', content: '', meta: '' };
             history.push(partial);
 
+            const focusRange = effectiveRange();
             const stream = window.LLMChat.chat({
                 profile: profileSelect.value,
                 messages: wireMessages,
                 sessionId,
+                range: focusRange ? { from: focusRange.fromMs, to: focusRange.toMs } : null,
             });
             activeStream = stream;
 
