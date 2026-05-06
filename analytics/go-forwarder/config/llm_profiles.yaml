@@ -1,0 +1,82 @@
+# LLM profiles for the AI session-analysis path (epic #412).
+#
+# Each profile selects a backend by setting `base_url` to an
+# OpenAI-compatible endpoint. The same Go client (llm_client.go) talks
+# to all of them. Routing options:
+#
+#   - HF Inference Providers: https://router.huggingface.co/v1
+#   - Anthropic OpenAI-compat: https://api.anthropic.com/v1/openai/
+#   - OpenAI:                 https://api.openai.com/v1
+#   - Local Ollama:           http://ollama:11434/v1
+#   - OpenRouter:             https://openrouter.ai/api/v1
+#
+# `api_key_env` names the env var the client reads at request time. A
+# missing env var means the profile is `available: false` in the
+# /analytics/api/llm_profiles listing — UIs should grey it out.
+# Empty string means no auth is needed (local Ollama).
+#
+# `pricing` is per-million-tokens USD; used to compute cost_usd in the
+# llm_calls ledger (#417). Set both to 0 for free / locally-hosted
+# models so they don't count against the daily budget.
+#
+# `supports_tools` and `supports_caching` are advisory hints — the
+# session_chat endpoint (#416) reads them to decide whether to send
+# a `tools` array and to set `cache_control` markers respectively.
+# Models that lie about their capabilities will simply produce worse
+# results, not crash.
+
+active: hf-llama-70b
+
+profiles:
+  hf-llama-70b:
+    base_url: https://router.huggingface.co/v1
+    api_key_env: HF_TOKEN
+    # The :together suffix pins the upstream provider for reproducibility —
+    # without it, HF picks an underlying provider that can shift between
+    # calls and produce inconsistent tool-use behavior.
+    model: meta-llama/Llama-3.3-70B-Instruct:together
+    supports_tools: true
+    supports_caching: false
+    pricing:
+      input_per_mtok: 0.88
+      output_per_mtok: 0.88
+
+  hf-qwen-72b:
+    base_url: https://router.huggingface.co/v1
+    api_key_env: HF_TOKEN
+    model: Qwen/Qwen2.5-72B-Instruct:fireworks
+    supports_tools: true
+    supports_caching: false
+    pricing:
+      input_per_mtok: 0.90
+      output_per_mtok: 0.90
+
+  opus:
+    base_url: https://api.anthropic.com/v1/openai/
+    api_key_env: ANTHROPIC_API_KEY
+    model: claude-opus-4-7
+    supports_tools: true
+    supports_caching: true
+    pricing:
+      input_per_mtok: 15.00
+      output_per_mtok: 75.00
+
+  gpt4o:
+    base_url: https://api.openai.com/v1
+    api_key_env: OPENAI_API_KEY
+    model: gpt-4o
+    supports_tools: true
+    supports_caching: true
+    pricing:
+      input_per_mtok: 2.50
+      output_per_mtok: 10.00
+
+  local-llama:
+    base_url: http://ollama:11434/v1
+    api_key_env: ""
+    model: llama3.1:70b
+    supports_tools: true
+    supports_caching: false
+    pricing:
+      input_per_mtok: 0
+      output_per_mtok: 0
