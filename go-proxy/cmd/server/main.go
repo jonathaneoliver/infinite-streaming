@@ -580,6 +580,13 @@ type TcTrafficManager struct {
 	nlMu          sync.Mutex
 	nlHandle      *netlink.Handle // persistent netlink handle, created lazily
 	nlLink        netlink.Link    // resolved once from interfaceName
+	// Per-port ICMP filter state (issue #404). Tracks the last
+	// player_ip we installed an ICMP-routing filter for so the
+	// path-ping sampler's per-tick ApplyPlayerICMPFilter call
+	// becomes a no-op when nothing changed. Also doubles as the
+	// "is a filter currently installed?" check for cleanup.
+	icmpFilterMu       sync.Mutex
+	icmpFilterIPByPort map[int]string
 }
 
 type ShapeApplyState struct {
@@ -779,7 +786,11 @@ func (s *NftShapeStep) UnmarshalJSON(data []byte) error {
 }
 
 func NewTcTrafficManager(interfaceName string, debug bool) *TcTrafficManager {
-	return &TcTrafficManager{interfaceName: interfaceName, debug: debug}
+	return &TcTrafficManager{
+		interfaceName:      interfaceName,
+		debug:              debug,
+		icmpFilterIPByPort: map[int]string{},
+	}
 }
 
 func (t *TcTrafficManager) IsActive() bool {
@@ -956,6 +967,15 @@ func (t *TcTrafficManager) UpdateRateLimit(port int, rateMbps float64) error {
 	if err := t.ensurePortFilter(port, classid); err != nil {
 		return err
 	}
+	// Make sure the per-port prio+netem-per-band leaf is in place so
+	// the path-ping probe (issue #404) actually jumps the bulk queue
+	// even when shaping was set up via a rate-only call (no netem).
+	// Without this the class falls back to the kernel's default
+	// pfifo leaf and ICMP routed in via ApplyPlayerICMPFilter would
+	// queue behind segment data.
+	if err := t.ensurePrioLeafForPort(port); err != nil {
+		log.Printf("NETSHAPE prio leaf install failed port=%d: %v", port, err)
+	}
 	verifyCmd := exec.Command("tc", "class", "show", "dev", t.interfaceName)
 	verifyOut, _ := verifyCmd.CombinedOutput()
 	afterFilterCmd := exec.Command("tc", "filter", "show", "dev", t.interfaceName)
@@ -1008,6 +1028,15 @@ func (t *TcTrafficManager) ClearPortShaping(port int) {
 	_ = exec.Command("tc", "filter", "del", "dev", t.interfaceName, "protocol", "ip",
 		"parent", "1:0", "prio", "1", "u32",
 		"match", "ip", "sport", fmt.Sprintf("%d", port), "0xffff").Run()
+	// Also clear the per-port ICMP-to-player_ip filter installed for
+	// the path-ping prio routing (issue #404). Per-port pref makes
+	// this a single by-attribute delete; the tracking map is then
+	// pruned so a future install fires fresh tc commands.
+	_ = exec.Command("tc", "filter", "del", "dev", t.interfaceName,
+		"parent", "1:", "pref", icmpFilterPref(port)).Run()
+	t.icmpFilterMu.Lock()
+	delete(t.icmpFilterIPByPort, port)
+	t.icmpFilterMu.Unlock()
 	_ = exec.Command("tc", "class", "del", "dev", t.interfaceName, "classid", classid).Run()
 }
 
@@ -1146,6 +1175,63 @@ func (t *TcTrafficManager) EnsureClass(port int, rateMbps float64) error {
 	return t.UpdateRateLimit(port, rateMbps)
 }
 
+// ensurePrioLeafForPort installs the prio+netem-per-band leaf inside
+// the per-port HTB class if it isn't already there (issue #404).
+// MUST run whenever the class is created/updated — including the
+// rate-limit-only path (UpdateRateLimit) and the netem path
+// (UpdateNetem) — otherwise the class falls back to the default
+// pfifo leaf and the path-ping probe queues behind bulk regardless
+// of what `IP_TOS` the probe socket set.
+//
+// Layout:
+//
+//	HTB class 1:<suffix>
+//	└── prio  <suffix>0:        (3 bands, default priomap)
+//	    ├── netem <suffix>1:    (band 1 — TC_PRIO_INTERACTIVE → probe lane)
+//	    ├── netem <suffix>2:    (band 2 — TC_PRIO_BESTEFFORT → bulk lane)
+//	    └── netem <suffix>3:    (band 3 — unused)
+//
+// Initial install gives each band a no-op netem (delay=0, loss=0);
+// UpdateNetem subsequently replaces the per-band netems with user-
+// configured values. Idempotent — exits fast when the prio handle
+// already shows up under `tc qdisc show parent <classid>`.
+func (t *TcTrafficManager) ensurePrioLeafForPort(port int) error {
+	portSuffix := fmt.Sprintf("%03d", port%1000)
+	classid := fmt.Sprintf("1:%s", portSuffix)
+	prioHandle := fmt.Sprintf("%s0:", portSuffix)
+	show := exec.Command("tc", "qdisc", "show", "dev", t.interfaceName, "parent", classid)
+	out, _ := show.CombinedOutput()
+	if strings.Contains(string(out), "qdisc prio "+prioHandle) {
+		return nil
+	}
+	// `replace` is destructive — wipes any existing leaf qdisc
+	// (e.g. the kernel default pfifo) atomically and installs prio
+	// in its place.
+	if installOut, err := exec.Command(
+		"tc", "qdisc", "replace", "dev", t.interfaceName,
+		"parent", classid, "handle", prioHandle,
+		"prio", "bands", "3",
+	).CombinedOutput(); err != nil {
+		return fmt.Errorf("tc prio replace failed: %s", strings.TrimSpace(string(installOut)))
+	}
+	for band := 1; band <= 3; band++ {
+		bandParent := fmt.Sprintf("%s0:%d", portSuffix, band)
+		bandHandle := fmt.Sprintf("%s%d:", portSuffix, band)
+		if out, err := exec.Command(
+			"tc", "qdisc", "replace", "dev", t.interfaceName,
+			"parent", bandParent, "handle", bandHandle, "netem",
+		).CombinedOutput(); err != nil {
+			return fmt.Errorf("tc netem (band %d) replace failed: %s", band, strings.TrimSpace(string(out)))
+		}
+	}
+	return nil
+}
+
+// UpdateNetem replaces each band's netem qdisc inside the prio leaf
+// with the new delay/loss params. Issue #404. The leaf itself is
+// installed (or confirmed present) before the netem replacements so
+// this works even when called on a class created by UpdateRateLimit
+// without netem ever previously being touched.
 func (t *TcTrafficManager) UpdateNetem(port int, delayMs int, lossPct float64) error {
 	if err := t.EnsureRootQdisc(); err != nil {
 		return err
@@ -1153,36 +1239,121 @@ func (t *TcTrafficManager) UpdateNetem(port int, delayMs int, lossPct float64) e
 	if err := t.EnsureRootClass(); err != nil {
 		return err
 	}
-	if delayMs > 0 || lossPct > 0 {
+	portSuffix := fmt.Sprintf("%03d", port%1000)
+	classid := fmt.Sprintf("1:%s", portSuffix)
+	if delayMs <= 0 && lossPct <= 0 {
+		// Clearing netem when no class exists is a no-op — don't
+		// create one just to set zero netem on it.
+		showClass := exec.Command("tc", "class", "show", "dev", t.interfaceName)
+		classOut, _ := showClass.CombinedOutput()
+		if !strings.Contains(string(classOut), classid) {
+			t.logTcState("netem_clear", port)
+			return nil
+		}
+	} else {
 		if err := t.EnsureClass(port, 10000); err != nil {
 			return err
 		}
 	}
-	portSuffix := fmt.Sprintf("%03d", port%1000)
-	classid := fmt.Sprintf("1:%s", portSuffix)
-	handle := fmt.Sprintf("%s0:", portSuffix)
-	if delayMs <= 0 && lossPct <= 0 {
-		_ = exec.Command("tc", "qdisc", "del", "dev", t.interfaceName, "parent", classid, "handle", handle, "netem").Run()
-		t.logTcState("netem_clear", port)
-		return nil
+	if err := t.ensurePrioLeafForPort(port); err != nil {
+		return err
 	}
-	jitter := delayMs / 2
-	args := []string{"qdisc", "replace", "dev", t.interfaceName, "parent", classid, "handle", handle, "netem"}
-	if delayMs > 0 {
-		if jitter > 0 {
-			args = append(args, "delay", fmt.Sprintf("%dms", delayMs), fmt.Sprintf("%dms", jitter), "distribution", "normal")
-		} else {
-			args = append(args, "delay", fmt.Sprintf("%dms", delayMs))
+	for band := 1; band <= 3; band++ {
+		bandParent := fmt.Sprintf("%s0:%d", portSuffix, band) // e.g. 1810:1
+		bandHandle := fmt.Sprintf("%s%d:", portSuffix, band)  // e.g. 1811:
+		args := []string{"qdisc", "replace", "dev", t.interfaceName,
+			"parent", bandParent, "handle", bandHandle, "netem"}
+		if delayMs > 0 {
+			// Tight Gaussian: stddev = 5% of mean. For delay=25 ms
+			// that's ~1 ms stddev, so ~99.7% of per-packet delays
+			// land in [22, 28] ms — variance for ABR/jitter-aware
+			// testing without dominating the configured value.
+			// Earlier `delay/2` was way too wide (a 25 ms config
+			// could draw [13, 37] ms with normal distribution and
+			// dip below netem's clamp-at-zero floor in the long
+			// tail), which violated the "I set 25 ms" mental model.
+			// Integer-divide rounds small delays (≤19 ms) to zero
+			// jitter — fine: those configs are testing low-RTT
+			// paths where jitter noise would be the dominant signal.
+			jitter := delayMs / 20
+			if jitter > 0 {
+				args = append(args, "delay", fmt.Sprintf("%dms", delayMs), fmt.Sprintf("%dms", jitter), "distribution", "normal")
+			} else {
+				args = append(args, "delay", fmt.Sprintf("%dms", delayMs))
+			}
+		}
+		if lossPct > 0 {
+			args = append(args, "loss", fmt.Sprintf("%.2f%%", lossPct))
+		}
+		if out, err := exec.Command("tc", args...).CombinedOutput(); err != nil {
+			return fmt.Errorf("tc netem band %d failed: %s", band, strings.TrimSpace(string(out)))
 		}
 	}
-	if lossPct > 0 {
-		args = append(args, "loss", fmt.Sprintf("%.2f%%", lossPct))
+	if delayMs <= 0 && lossPct <= 0 {
+		t.logTcState("netem_clear", port)
+	} else {
+		t.logTcState("netem_apply", port)
 	}
-	cmd := exec.Command("tc", args...)
+	return nil
+}
+
+// icmpFilterPref returns a unique tc filter pref for the per-port
+// ICMP-to-player_ip filter. Per-port pref means deletion can be
+// done by attribute (no need to parse handles out of `tc filter
+// show` output).
+func icmpFilterPref(port int) string {
+	return fmt.Sprintf("%d", 1000+(port%1000))
+}
+
+// ApplyPlayerICMPFilter installs (install=true) or removes
+// (install=false) a `tc filter` that routes ICMP packets destined
+// for `playerIP` into the per-port HTB class. Issue #404 — combined
+// with the prio+netem leaf installed by UpdateNetem and IP_TOS=0x10
+// on the path-ping socket, this is what lets the probe see the
+// configured netem delay while jumping the bulk queue.
+//
+// Idempotent: tracks the last-installed IP per port and skips the
+// tc invocation when nothing changed. Handles the player-IP-changed
+// case (rare but possible if a player reconnects from a different
+// IP under the same session) by deleting and re-adding.
+func (t *TcTrafficManager) ApplyPlayerICMPFilter(port int, playerIP string, install bool) error {
+	if t == nil {
+		return nil
+	}
+	t.icmpFilterMu.Lock()
+	defer t.icmpFilterMu.Unlock()
+	current := t.icmpFilterIPByPort[port]
+	pref := icmpFilterPref(port)
+	if !install || playerIP == "" {
+		if current == "" {
+			return nil
+		}
+		_ = exec.Command("tc", "filter", "del", "dev", t.interfaceName,
+			"parent", "1:", "pref", pref).Run()
+		delete(t.icmpFilterIPByPort, port)
+		return nil
+	}
+	if current == playerIP {
+		return nil
+	}
+	if current != "" {
+		_ = exec.Command("tc", "filter", "del", "dev", t.interfaceName,
+			"parent", "1:", "pref", pref).Run()
+	}
+	portSuffix := fmt.Sprintf("%03d", port%1000)
+	classid := fmt.Sprintf("1:%s", portSuffix)
+	cmd := exec.Command(
+		"tc", "filter", "add", "dev", t.interfaceName,
+		"protocol", "ip", "parent", "1:", "pref", pref, "u32",
+		"match", "ip", "protocol", "1", "0xff",
+		"match", "ip", "dst", playerIP+"/32",
+		"flowid", classid,
+	)
 	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("tc netem failed: %s", strings.TrimSpace(string(out)))
+		return fmt.Errorf("tc icmp filter add port=%d ip=%s: %s",
+			port, playerIP, strings.TrimSpace(string(out)))
 	}
-	t.logTcState("netem_apply", port)
+	t.icmpFilterIPByPort[port] = playerIP
 	return nil
 }
 
@@ -1482,6 +1653,16 @@ func main() {
 
 	go app.trackPortThroughput()
 	app.restoreTransportFaultSchedules()
+	// 100 ms TCP_INFO sampler — folds smoothed RTT / jitter / lifetime
+	// min / RTO into per-session windows that get drained on each
+	// snapshot broadcast (issue #401). Linux-only kernel read; the
+	// !linux stub keeps the dev build green on macOS.
+	app.startRTTSampler(context.Background())
+	// 1 Hz out-of-band ICMP probe to each session's player_ip
+	// (issue #404). Surfaces path latency independent of the
+	// streaming connection's queue contribution — the line that
+	// stays put when shaping kicks in, while TCP_INFO RTT climbs.
+	app.startPathPingSampler(context.Background())
 
 	router := mux.NewRouter()
 	router.Use(corsMiddleware)
@@ -1527,6 +1708,11 @@ func main() {
 			srv := &http.Server{
 				Addr:    bind,
 				Handler: router,
+				// Stamp the underlying *net.TCPConn on the per-
+				// connection context so handleProxy can attach
+				// it to its session for the RTT sampler to
+				// read. Issue #401.
+				ConnContext: withTCPConnContext,
 			}
 			errorCh <- srv.ListenAndServe()
 		}(addr)
@@ -4305,6 +4491,19 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 
 	sessionData["x_forwarded_port"] = internalPort
 	sessionData["x_forwarded_port_external"] = externalPort
+	// Bind the live TCP connection to the session so the 100 ms RTT
+	// sampler can read TCP_INFO off it. Lazily creates the session's
+	// RTT window on first request; subsequent requests just refresh
+	// the conn pointer (atomic). Issue #401.
+	if tcpConn := tcpConnFromContext(r.Context()); tcpConn != nil {
+		sessionStoreTCPConn(sessionData, tcpConn)
+		sessionGetOrCreateRTTWindow(sessionData)
+	}
+	// Path-ping holder for issue #404 — created here (not in the
+	// sampler) so the snapshot map mutation rides on handleProxy's
+	// normal save path. Sampler reads via the atomic; never writes
+	// to the map itself.
+	sessionGetOrCreatePingRTT(sessionData)
 	log.Printf(
 		"[GO-PROXY][REQUEST] method=%s host=%s port=%s path=%s query=%s session_id=%s player_id_q=%s player_id_h=%s playback_session_h=%s client_ip=%s user_agent=%q",
 		r.Method,
@@ -6654,6 +6853,26 @@ func (a *App) normalizeSessionsForResponse(sessions []SessionData) []SessionData
 		} else {
 			delete(session, "player_metrics_video_quality_pct")
 		}
+		// Drain the 1 s RTT window onto the snapshot so this
+		// broadcast carries fresh client_rtt_* fields. Issue #401.
+		// NB: this also runs on `/api/sessions` GET requests (which
+		// re-use this normalizer), so a poll racing the SSE flush
+		// can leave one of them with empty `client_rtt_ms` — the
+		// other path gets the previous-window replay via
+		// drainAndReset's stale fallback. Acceptable for a
+		// monitoring tool; flagging it here for future readers.
+		drainSessionRTT(session)
+		// Out-of-band ICMP path-ping (issue #404). Latest 1 Hz
+		// sample stamped here as `client_path_ping_rtt_ms`.
+		stampSessionPathPing(session)
+		// Strip internal session keys that aren't meant for the
+		// SSE / JSON projection — runtime handles, not metrics.
+		// The authoritative copies live on the snapshot map and
+		// are preserved across cloneSession (cloneInterface's
+		// default arm passes unknown pointer types through).
+		delete(session, "_lastTCPConn")
+		delete(session, "_rttWindow")
+		delete(session, "_pingRTTUs")
 	}
 	return sessions
 }

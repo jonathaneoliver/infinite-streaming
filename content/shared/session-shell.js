@@ -98,6 +98,12 @@
         const bufferDepthCharts = new Map();
         const videoFpsCharts = new Map();
         const eventsCharts = new Map();
+        // Server-side TCP_INFO RTT chart (issue #401). Mirrors
+        // bandwidthHistory / bandwidthCharts shape; rendered in
+        // renderRTTChart, fed by the six client_rtt_* fields drained
+        // off go-proxy's per-session window each broadcast tick.
+        const rttHistory = new Map();
+        const rttCharts = new Map();
         const eventsTimelines = new Map();
         // Width reserved on the RIGHT side of every chart's plot area
         // so the four Chart.js charts (bandwidth, buffer, fps, events
@@ -1464,6 +1470,7 @@
             const canvasClassToMap = {
                 'bandwidth-chart': bandwidthCharts,
                 'events-chart': eventsCharts,
+                'rtt-chart': rttCharts,
                 'buffer-depth-chart': bufferDepthCharts,
                 'video-fps-chart': videoFpsCharts
             };
@@ -1646,6 +1653,7 @@
             return [
                 eventsCharts.get(key),
                 bandwidthCharts.get(key),
+                rttCharts.get(key),
                 bufferDepthCharts.get(key),
                 videoFpsCharts.get(key),
                 eventsTimelines.get(key)
@@ -2170,6 +2178,43 @@
             const cutoff = now - windowMs;
             const filtered = series.filter(point => point.ts >= cutoff);
             bandwidthHistory.set(key, filtered);
+
+            // Server-side RTT (issue #401). Six fields stamped on the
+            // session by go-proxy's normalizeSessionsForResponse →
+            // drainSessionRTT. _stale=true marks a window with no
+            // fresh kernel samples (typically a brief connection
+            // gap) — render avg as null in that case so the line
+            // breaks rather than dragging a stale value forward.
+            const numericIfFinite = (raw) => {
+                const num = Number(raw);
+                return Number.isFinite(num) ? num : null;
+            };
+            const rttAvg = numericIfFinite(session.client_rtt_ms);
+            const rttMax = numericIfFinite(session.client_rtt_max_ms);
+            const rttMin = numericIfFinite(session.client_rtt_min_ms);
+            const rttLifetimeMin = numericIfFinite(session.client_rtt_min_lifetime_ms);
+            const rttVar = numericIfFinite(session.client_rtt_var_ms);
+            const rttRto = numericIfFinite(session.client_rto_ms);
+            // Out-of-band ICMP path-ping (issue #404). Independent of
+            // the streaming connection's queue contribution — stays
+            // at the LAN baseline when shaping kicks in while the
+            // TCP_INFO lines climb from queueing.
+            const pathPing = numericIfFinite(session.client_path_ping_rtt_ms);
+            const rttStale = session.client_rtt_stale === true;
+            const rttSeries = rttHistory.get(key) || [];
+            rttSeries.push({
+                ts: playerEventAtMs,
+                avg: rttAvg,
+                max: rttMax,
+                min: rttMin,
+                lifetimeMin: rttLifetimeMin,
+                variance: rttVar,
+                rto: rttRto,
+                pathPing,
+                stale: rttStale
+            });
+            rttHistory.set(key, rttSeries.filter(point => point.ts >= cutoff));
+
             if (key === activeSessionId && !chartRenderSuppressedBySession.has(key)) {
                 renderBandwidthChart(key);
             }
@@ -2400,7 +2445,7 @@
         }
 
         function refreshLegendHoverAll() {
-            const pools = [bandwidthCharts, bufferDepthCharts, videoFpsCharts];
+            const pools = [bandwidthCharts, rttCharts, bufferDepthCharts, videoFpsCharts];
             for (const pool of pools) {
                 if (!pool) continue;
                 pool.forEach((chart) => {
@@ -3038,6 +3083,7 @@
                 const chartsToDestroy = [
                     eventsCharts.get(sessionId),
                     bandwidthCharts.get(sessionId),
+                    rttCharts.get(sessionId),
                     bufferDepthCharts.get(sessionId),
                     videoFpsCharts.get(sessionId)
                 ];
@@ -3048,6 +3094,7 @@
                 }
                 eventsCharts.delete(sessionId);
                 bandwidthCharts.delete(sessionId);
+                rttCharts.delete(sessionId);
                 bufferDepthCharts.delete(sessionId);
                 videoFpsCharts.delete(sessionId);
                 // The events-timeline (vis.Timeline) is preserved by
@@ -3577,6 +3624,13 @@
                 chart.update('none');
             }
 
+            // Server-side TCP_INFO RTT chart (issue #401). Lives
+            // immediately under the bitrate chart, sharing the time
+            // axis / brush / pan via getChartsForSession, so RTT
+            // spikes line up visually with the bitrate / buffer
+            // reactions on the chart above.
+            renderRTTChart(sessionId, windowStart, windowMs);
+
             const bufferCanvas = card.querySelector('canvas.buffer-depth-chart');
             if (!bufferCanvas) return;
             const bufferChartRangeLabel = card.querySelector('[data-field="buffer_depth_chart_range"]');
@@ -4105,6 +4159,289 @@
             }
         }
 
+        // Server-side TCP_INFO RTT chart (issue #401). Sits directly
+        // under the bitrate chart, time-axis-locked to it via
+        // getChartsForSession + buildUnifiedChartZoomOptions. Datasets:
+        //   1. RTT max (transparent line, fills downward to RTT min)
+        //   2. RTT min (transparent line, anchors the band floor)
+        //   3. RTT avg (solid, primary line)
+        //   4. RTT lifetime min (dashed reference — kernel's sticky
+        //      per-connection min RTT, the "path floor")
+        //   5. RTO (thin red, hidden by default — toggleable; rises
+        //      above RTT during a wedge while smoothed RTT flatlines)
+        function renderRTTChart(sessionId, windowStart, windowMs) {
+            if (isChartPaused(sessionId)) return;
+            const card = document.querySelector(`.session-card[data-session-id="${sessionId}"]`);
+            if (!card) return;
+            const canvas = card.querySelector('canvas.rtt-chart');
+            if (!canvas) return;
+            const series = rttHistory.get(sessionId) || [];
+            if (!series.length) return;
+            const points = series
+                .filter(point => point.ts >= windowStart)
+                .map(point => {
+                    const x = (point.ts - windowStart) / 1000;
+                    // Stale points (no fresh kernel samples this 1 s
+                    // window) render as gaps on avg/max/min so the line
+                    // breaks rather than carrying a stale value
+                    // forward; lifetime-min and rto stay populated
+                    // because they're the latest kernel reads, not a
+                    // window aggregate.
+                    return {
+                        x,
+                        avg: point.stale ? null : point.avg,
+                        max: point.stale ? null : point.max,
+                        min: point.stale ? null : point.min,
+                        lifetimeMin: point.lifetimeMin,
+                        rto: point.rto,
+                        pathPing: point.pathPing
+                    };
+                })
+                // Defensive sort: a Chart.js line chart connects points
+                // in array order. Non-monotonic x (player clock skew,
+                // duplicate snapshots replayed by the SSE pipeline,
+                // re-broadcasts at queue-flush boundaries) would draw
+                // the line backwards and forwards. Sorting by x makes
+                // the line strictly monotonic regardless of push order.
+                .sort((a, b) => a.x - b.x);
+            const avgData = points.map(p => ({ x: p.x, y: p.avg }));
+            const maxData = points.map(p => ({ x: p.x, y: p.max }));
+            const minData = points.map(p => ({ x: p.x, y: p.min }));
+            const lifetimeMinData = points.map(p => ({ x: p.x, y: p.lifetimeMin }));
+            const rtoData = points.map(p => ({ x: p.x, y: p.rto }));
+            const pathPingData = points.map(p => ({ x: p.x, y: p.pathPing }));
+
+            // Two y-axes: RTT (left, low-millisecond range on a healthy
+            // path) and RTO (right, can spike to seconds during a
+            // wedge). Sharing one axis would flatten the RTT line to
+            // a flat-zero baseline whenever RTO climbs.
+            const rttValues = []
+                .concat(avgData, maxData, lifetimeMinData, pathPingData)
+                .map(p => Number(p.y))
+                .filter(v => Number.isFinite(v) && v >= 0);
+            const rtoValues = rtoData
+                .map(p => Number(p.y))
+                .filter(v => Number.isFinite(v) && v >= 0);
+            // RTT axis: floor at 5 ms; cap at 1000 ms (LAN ~1 ms,
+            // shaped 100–500 ms — beyond a second RTT we're in a
+            // pathology that owns the chart anyway).
+            const rttRawMax = Math.max(5, ...rttValues, 0);
+            const maxY = Math.min(1000, Math.max(5, Math.ceil((rttRawMax * 1.1) / 10) * 10));
+            // RTO axis: floor at 50 ms (kernel default); cap at 60000 ms
+            // (kernel ceiling is TCP_RTO_MAX, typically 120 s — clip
+            // hard so a single outlier doesn't dominate).
+            const rtoRawMax = Math.max(50, ...rtoValues, 0);
+            const maxY1 = Math.min(60000, Math.max(50, Math.ceil((rtoRawMax * 1.1) / 50) * 50));
+
+            const datasets = [
+                {
+                    label: 'RTT max (ms)',
+                    data: maxData,
+                    // Lighter purple than avg so the line reads as a
+                    // bound, not the primary signal. fill:'+1' shades
+                    // the band down to the (transparent) min anchor.
+                    borderColor: 'rgba(139,92,246,0.55)',
+                    backgroundColor: 'rgba(139,92,246,0.15)',
+                    borderWidth: 1,
+                    pointRadius: 0,
+                    fill: '+1',
+                    tension: 0.2,
+                    spanGaps: false,
+                    yAxisID: 'y'
+                },
+                {
+                    label: 'RTT min (ms)',
+                    data: minData,
+                    // Same lighter purple as max — both are bounds on
+                    // the avg, just at opposite ends. fill:false so
+                    // the band-fill anchored on max above only paints
+                    // once, not twice.
+                    borderColor: 'rgba(139,92,246,0.55)',
+                    backgroundColor: 'rgba(139,92,246,0)',
+                    borderWidth: 1,
+                    pointRadius: 0,
+                    fill: false,
+                    tension: 0.2,
+                    spanGaps: false,
+                    yAxisID: 'y'
+                },
+                {
+                    label: 'RTT avg (ms)',
+                    data: avgData,
+                    borderColor: '#8b5cf6',
+                    backgroundColor: 'rgba(139,92,246,0.12)',
+                    borderWidth: 2,
+                    pointRadius: 0,
+                    tension: 0.2,
+                    fill: false,
+                    spanGaps: false,
+                    yAxisID: 'y'
+                },
+                {
+                    label: 'RTT lifetime min (ms)',
+                    data: lifetimeMinData,
+                    borderColor: '#8b5cf6',
+                    backgroundColor: 'rgba(139,92,246,0)',
+                    borderWidth: 1,
+                    pointRadius: 0,
+                    tension: 0,
+                    borderDash: [8, 4],
+                    fill: false,
+                    yAxisID: 'y'
+                },
+                {
+                    // Out-of-band ICMP path-ping (issue #404). Cyan
+                    // to read as "physical path", distinct from the
+                    // purple TCP_INFO family on the same axis.
+                    label: 'Path ping (ms)',
+                    data: pathPingData,
+                    borderColor: '#0891b2',
+                    backgroundColor: 'rgba(8,145,178,0.10)',
+                    borderWidth: 2,
+                    pointRadius: 0,
+                    tension: 0.2,
+                    fill: false,
+                    spanGaps: false,
+                    yAxisID: 'y'
+                },
+                {
+                    label: 'RTO (ms)',
+                    data: rtoData,
+                    borderColor: '#ef4444',
+                    backgroundColor: 'rgba(239,68,68,0)',
+                    borderWidth: 1,
+                    pointRadius: 0,
+                    tension: 0.2,
+                    borderDash: [4, 2],
+                    fill: false,
+                    yAxisID: 'y1'
+                }
+            ];
+
+            let chart = rttCharts.get(sessionId);
+            if (chart && chart.canvas !== canvas) {
+                chart.destroy();
+                chart = null;
+                rttCharts.delete(sessionId);
+            }
+            if (!chart) {
+                try {
+                    canvas.style.height = '180px';
+                    canvas.style.width = '100%';
+                    canvas.removeAttribute && canvas.removeAttribute('width');
+                    canvas.removeAttribute && canvas.removeAttribute('height');
+                } catch (e) { /* ignore */ }
+                chart = new Chart(canvas, {
+                    type: 'line',
+                    data: { datasets },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        animation: false,
+                        plugins: {
+                            legend: {
+                                display: true,
+                                position: 'bottom',
+                                ...legendHoverCallbacks,
+                                labels: {
+                                    color: '#6b7280',
+                                    font: { family: 'Courier New, monospace', size: 10 },
+                                    filter: (item) => !item.text.startsWith('_')
+                                }
+                            },
+                            tooltip: {
+                                callbacks: {
+                                    title: (items) => {
+                                        const first = Array.isArray(items) && items.length ? items[0] : null;
+                                        if (!first) return '';
+                                        const xValue = Number(first.parsed?.x);
+                                        const startMs = Number(chart?.$windowStartMs || windowStart);
+                                        return formatBitrateChartAbsoluteTick(startMs, xValue);
+                                    }
+                                }
+                            },
+                            zoom: buildUnifiedChartZoomOptions(sessionId)
+                        },
+                        // No layout.padding.right — the y1 axis below
+                        // already reserves RIGHT_AXIS_PAD_PX. Adding
+                        // both stacks them and pushes the plot's right
+                        // edge inward, mis-aligning with the bandwidth
+                        // / buffer / FPS charts above and below.
+                        scales: {
+                            x: {
+                                type: 'linear',
+                                min: 0,
+                                max: 600,
+                                grid: { color: '#e5e7eb' },
+                                ticks: {
+                                    color: '#6b7280',
+                                    font: { family: 'Courier New, monospace', size: 10 },
+                                    maxTicksLimit: 8,
+                                    align: 'inner',
+                                    callback: (value) => {
+                                        const startMs = Number(chart?.$windowStartMs || windowStart);
+                                        return formatBitrateChartAbsoluteTick(startMs, Number(value));
+                                    }
+                                }
+                            },
+                            y: {
+                                position: 'left',
+                                min: 0,
+                                max: maxY,
+                                afterFit: (axis) => { axis.width = 90; },
+                                grid: { color: '#e5e7eb' },
+                                ticks: {
+                                    color: '#6b7280',
+                                    font: { family: 'Courier New, monospace', size: 10 }
+                                },
+                                title: {
+                                    display: true,
+                                    text: 'RTT (ms)',
+                                    color: '#6b7280',
+                                    font: { family: 'Courier New, monospace', size: 10 }
+                                }
+                            },
+                            y1: {
+                                position: 'right',
+                                min: 0,
+                                max: maxY1,
+                                // Pin width to RIGHT_AXIS_PAD_PX so the
+                                // plot's right edge matches the bandwidth
+                                // / buffer / FPS charts, keeping x-axis
+                                // ticks aligned across the stack.
+                                afterFit: (axis) => { axis.width = RIGHT_AXIS_PAD_PX; },
+                                grid: { drawOnChartArea: false },
+                                ticks: {
+                                    color: '#6b7280',
+                                    font: { family: 'Courier New, monospace', size: 10 }
+                                },
+                                title: {
+                                    display: true,
+                                    text: 'RTO (ms)',
+                                    color: '#6b7280',
+                                    font: { family: 'Courier New, monospace', size: 10 }
+                                }
+                            }
+                        }
+                    }
+                });
+                chart.$windowStartMs = windowStart;
+                applyStoredChartViewport(sessionId, chart);
+                installRightMousePanHandlers(sessionId, chart);
+                installChartClickPauseHandler(sessionId, chart);
+                ensureChartLiveWheelAnchor();
+                rttCharts.set(sessionId, chart);
+            } else {
+                chart.data.datasets = datasets;
+                chart.$windowStartMs = windowStart;
+                chart.options.scales.y.max = maxY;
+                chart.options.scales.y1.max = maxY1;
+                applyChartXMax(chart, windowMs);
+                applyLegendHover(chart);
+                chart.update('none');
+            }
+        }
+
         function saveSettingsForCard(card) {
             const data = TestingSessionUI.readSessionSettings(card);
             const fields = Object.keys(data || {}).filter(field => field !== 'session_id');
@@ -4493,6 +4830,7 @@
                     }
                     eventsCharts.delete(activeSessionId);
                     bandwidthCharts.delete(activeSessionId);
+                    rttCharts.delete(activeSessionId);
                     bufferDepthCharts.delete(activeSessionId);
                     videoFpsCharts.delete(activeSessionId);
                 }
@@ -5067,7 +5405,7 @@
                 eventMarkerBySession.set(key, { tsMs: Number(tsMs), label: markerLabel });
             }
             const marker = eventMarkerBySession.get(key);
-            const pools = [bandwidthCharts, bufferDepthCharts, videoFpsCharts, eventsCharts];
+            const pools = [bandwidthCharts, rttCharts, bufferDepthCharts, videoFpsCharts, eventsCharts];
             for (const pool of pools) {
                 if (!pool) continue;
                 const chart = pool.get(key) || pool.get(sessionId);
@@ -5135,6 +5473,8 @@
             bufferDepthCharts: bufferDepthCharts,
             videoFpsCharts: videoFpsCharts,
             eventsCharts: eventsCharts,
+            rttHistory: rttHistory,
+            rttCharts: rttCharts,
             bandwidthVisibility: bandwidthVisibility,
             bitrateAxisMaxBySession: bitrateAxisMaxBySession,
             chartViewportBySession: chartViewportBySession,

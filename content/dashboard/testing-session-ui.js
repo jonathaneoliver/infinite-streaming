@@ -1134,6 +1134,10 @@
                             <button type="button" class="chart-expand-btn" data-action="toggle-chart-expanded" title="Toggle expanded chart height" aria-label="Toggle expanded chart height"><span class="chart-expand-icon">⤢</span><span class="chart-expand-label">Expand</span></button>
                             <canvas class="bandwidth-chart" data-field="bandwidth_chart"></canvas>
                         </div>
+                        <div class="chart-wrap">
+                            <button type="button" class="chart-expand-btn" data-action="toggle-chart-expanded" title="Toggle expanded chart height" aria-label="Toggle expanded chart height"><span class="chart-expand-icon">⤢</span><span class="chart-expand-label">Expand</span></button>
+                            <canvas class="rtt-chart" data-field="rtt_chart"></canvas>
+                        </div>
                         ${showBufferDepthChart ? `
                         <div class="chart-wrap">
                             <button type="button" class="chart-expand-btn" data-action="toggle-chart-expanded" title="Toggle expanded chart height" aria-label="Toggle expanded chart height"><span class="chart-expand-icon">⤢</span><span class="chart-expand-label">Expand</span></button>
