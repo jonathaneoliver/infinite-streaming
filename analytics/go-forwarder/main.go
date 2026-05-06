@@ -36,6 +36,11 @@ type config struct {
 	httpListen    string
 
 	llmProfilesPath string
+
+	// AI budget guards (#417). Zero values use the defaults baked
+	// into llm_ledger.go (defaultDailyBudgetUSD, defaultMaxInputTokensPerCall).
+	llmDailyBudgetUSD float64
+	llmMaxInputTokens int
 }
 
 func loadConfig() config {
@@ -58,8 +63,21 @@ func loadConfig() config {
 		// forwarder/config/ to. Override via env when running outside
 		// Docker or to point at a custom override file.
 		llmProfilesPath: getenv("LLM_PROFILES_PATH", "/config/llm_profiles.yaml"),
+
+		llmDailyBudgetUSD: envFloatPositive("LLM_DAILY_BUDGET_USD", defaultDailyBudgetUSD),
+		llmMaxInputTokens: envIntPositive("LLM_MAX_INPUT_TOKENS_PER_CALL", 0, defaultMaxInputTokensPerCall),
 	}
 	return c
+}
+
+func envFloatPositive(name string, def float64) float64 {
+	if v := os.Getenv(name); v != "" {
+		var f float64
+		if _, err := fmt.Sscanf(v, "%f", &f); err == nil && f > 0 {
+			return f
+		}
+	}
+	return def
 }
 
 func getenv(key, def string) string {
