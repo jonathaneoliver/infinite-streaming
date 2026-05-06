@@ -449,6 +449,28 @@
             let brushStart = 0, brushEnd = 0;
             let userMovedBrush = false;
 
+            // publishBrush exposes the current brush window via the
+            // window.SessionReplay.getBrushRange() registry + dispatches
+            // a 'replay:brush-changed' CustomEvent. Used by external
+            // modules (e.g. AI Discuss panel #420) to scope chat
+            // requests to the brushed range. The event detail includes
+            // sessionStartMs so subscribers can format the brush window
+            // relative to play start without re-querying.
+            function publishBrush() {
+                if (!window.SessionReplay || !window.SessionReplay._brushByKey) return;
+                const key = String(sessionId);
+                const range = { fromMs: brushStart, toMs: brushEnd, sessionStartMs };
+                window.SessionReplay._brushByKey.set(key, range);
+                document.dispatchEvent(new CustomEvent('replay:brush-changed', {
+                    detail: {
+                        sessionId: key,
+                        fromMs: brushStart,
+                        toMs: brushEnd,
+                        sessionStartMs,
+                    },
+                }));
+            }
+
             // Brush UI is built once on first batch (when we know session
             // bounds). Subsequent batches just refresh the ticks and
             // bounds without rebuilding the DOM scaffolding.
@@ -486,6 +508,10 @@
                     scrubRow._startLabel.textContent = fmtIsoLocal(sessionStartMs);
                     scrubRow._endLabel.textContent = fmtIsoLocal(sessionEndMs);
                 }
+                // Publish the brush range to external subscribers
+                // (#420 AI Discuss panel scopes chats to the brushed
+                // window). Cheap — just a Map.set + a CustomEvent.
+                publishBrush();
             };
             const updateWindowText = (status) => {
                 if (!windowText) return;
@@ -2863,6 +2889,17 @@
 
     window.SessionReplay = {
         startMode: startReplayMode,
-        startPicker: startReplayPicker
+        startPicker: startReplayPicker,
+        // Brush range registry — populated by publishBrush() inside
+        // a session's brush handlers. Key: String(sessionId).
+        // Value: {fromMs, toMs}. Subscribers also listen for
+        // 'replay:brush-changed' on document for live updates.
+        _brushByKey: new Map(),
+        getBrushRange(sessionId) {
+            const r = window.SessionReplay._brushByKey.get(String(sessionId));
+            if (!r || !Number.isFinite(r.fromMs) || !Number.isFinite(r.toMs)) return null;
+            if (r.toMs <= r.fromMs) return null;
+            return r;
+        },
     };
 })();
