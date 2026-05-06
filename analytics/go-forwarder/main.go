@@ -34,6 +34,8 @@ type config struct {
 	flushEvery    time.Duration
 	flushBatch    int
 	httpListen    string
+
+	llmProfilesPath string
 }
 
 func loadConfig() config {
@@ -48,9 +50,14 @@ func loadConfig() config {
 		// inserter empties whichever happens first (timer or batch
 		// fills). 250ms keeps the picker's "x seconds ago" honest
 		// without significantly raising ClickHouse insert pressure.
-		flushEvery:    250 * time.Millisecond,
-		flushBatch:    500,
-		httpListen:    getenv("FORWARDER_HTTP_LISTEN", ":8080"),
+		flushEvery: 250 * time.Millisecond,
+		flushBatch: 500,
+		httpListen: getenv("FORWARDER_HTTP_LISTEN", ":8080"),
+
+		// /config is the in-image path Dockerfile copies analytics/go-
+		// forwarder/config/ to. Override via env when running outside
+		// Docker or to point at a custom override file.
+		llmProfilesPath: getenv("LLM_PROFILES_PATH", "/config/llm_profiles.yaml"),
 	}
 	return c
 }
@@ -260,10 +267,21 @@ func setupLogFile() {
 	log.Printf("forwarder log file: %s", path)
 }
 
+// llmProfiles is the parsed AI-analysis profile registry (epic #412).
+// nil when LLM_PROFILES_PATH is missing or unreadable; the analytics
+// archive path is independent of this and must keep working without it.
+// session_chat handlers (#416) will check for nil and 503 if absent.
+//
+// Set once in main() before any goroutine starts, then read-only.
+// If a future PR adds /api/llm_profiles/reload or hot-reload, swap
+// this for an atomic.Pointer[LLMProfiles] to avoid the race.
+var llmProfiles *LLMProfiles
+
 func main() {
 	setupLogFile()
 	cfg := loadConfig()
 	log.Printf("forwarder starting: sse=%s ch=%s/%s.%s", cfg.sseURL, cfg.clickhouseURL, cfg.chDatabase, cfg.chTable)
+	loadLLMProfilesAtStartup(cfg.llmProfilesPath)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
