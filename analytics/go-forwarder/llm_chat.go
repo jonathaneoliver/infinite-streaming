@@ -63,6 +63,18 @@ type ChatTurnOptions struct {
 	TurnTimeout       time.Duration // whole turn; default 120s
 	Temperature       float32       // default 0 (deterministic-ish)
 	MaxTokens         int           // default 4096
+
+	// Callbacks fire at iteration boundaries. Used by #416's SSE
+	// endpoint to stream progress to the browser while the loop is
+	// still running. All callbacks are nil-safe; if any is set,
+	// the loop blocks on it. Heavy work belongs in a goroutine on
+	// the caller side.
+	OnToolCall   func(name, argumentsJSON string)
+	OnToolResult func(name, resultJSON string)
+	// OnAssistantText fires once the model's no-tool-calls response
+	// is received with the FinalText. SSE handler emits this as the
+	// terminal assistant_delta + done.
+	OnAssistantText func(text string)
 }
 
 func (c *LLMClient) RunChatTurn(
@@ -159,6 +171,9 @@ func (c *LLMClient) RunChatTurn(
 			} else {
 				res.StoppedReason = "complete"
 			}
+			if opts.OnAssistantText != nil && res.FinalText != "" {
+				opts.OnAssistantText(res.FinalText)
+			}
 			return res, nil
 		}
 
@@ -188,6 +203,9 @@ func (c *LLMClient) RunChatTurn(
 				budgetBlown = true
 				continue
 			}
+			if opts.OnToolCall != nil {
+				opts.OnToolCall(tc.Function.Name, tc.Function.Arguments)
+			}
 			// turnCtx deadline dominates if it's sooner than the
 			// 12 s ClickHouse cap inside QueryTool, so a confused
 			// dispatcher can't outlive the request.
@@ -197,6 +215,9 @@ func (c *LLMClient) RunChatTurn(
 				ToolCallID: tc.ID,
 				Content:    result,
 			})
+			if opts.OnToolResult != nil {
+				opts.OnToolResult(tc.Function.Name, result)
+			}
 		}
 	}
 
