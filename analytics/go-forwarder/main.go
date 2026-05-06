@@ -1582,6 +1582,11 @@ func serveHTTP(ctx context.Context, cfg config) {
 	// classification (issue #342). Defined in classification.go.
 	registerClassificationHandlers(mux, cfg)
 
+	// /api/session_chat (SSE) + /api/llm_profiles — AI session
+	// analysis (epic #412). No-ops when LLM_PROFILES_PATH is unset
+	// or fails to load, so the rest of the API stays alive.
+	registerLLMHandlers(mux, cfg)
+
 	srv := &http.Server{
 		Addr:              cfg.httpListen,
 		Handler:           mux,
