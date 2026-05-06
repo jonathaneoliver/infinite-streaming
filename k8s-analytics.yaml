@@ -379,6 +379,43 @@ data:
     -- forwarder bumps it on session-end / star / unstar via ALTER UPDATE.
     ALTER TABLE infinite_streaming.network_requests
         ADD COLUMN IF NOT EXISTS classification LowCardinality(String) DEFAULT 'other' CODEC(ZSTD(1));
+  03-llm-calls.sql: |
+    -- Mirror of analytics/clickhouse/init.d/03-llm-calls.sql — edit both.
+    -- See that file for the migration runbook (`make analytics-migrate
+    -- SQL-FILE=...` for live clusters) and the column rationale.
+    --
+    -- LLM call ledger (issue #417, part of epic #412). One row per
+    -- /api/session_chat call, including refused/cancelled ones, so
+    -- the daily-budget gate sums real spend attempts not just
+    -- successes.
+
+    CREATE TABLE IF NOT EXISTS infinite_streaming.llm_calls
+    (
+        ts                DateTime64(3, 'UTC')        DEFAULT now64(3),
+        session_id        String                      CODEC(ZSTD(1)),
+        profile           LowCardinality(String)      CODEC(ZSTD(1)),
+        model             LowCardinality(String)      CODEC(ZSTD(1)),
+        prompt_version    LowCardinality(String)      CODEC(ZSTD(1)),
+        one_shot          UInt8                       DEFAULT 0,
+        input_tokens      UInt32                      CODEC(ZSTD(1)),
+        output_tokens     UInt32                      CODEC(ZSTD(1)),
+        cost_usd          Float64                     CODEC(ZSTD(1)),
+        duration_ms       UInt32                      CODEC(ZSTD(1)),
+        iterations        UInt16                      DEFAULT 0,
+        tool_calls_count  UInt16                      DEFAULT 0,
+        status            LowCardinality(String)      CODEC(ZSTD(1)),
+        error_kind        LowCardinality(String)      DEFAULT '',
+        error_detail      String                      CODEC(ZSTD(3))
+    )
+    ENGINE = MergeTree
+    PARTITION BY toYYYYMM(ts)
+    ORDER BY ts
+    TTL toDateTime(ts) + INTERVAL 90 DAY;
+
+    ALTER TABLE infinite_streaming.llm_calls
+        ADD COLUMN IF NOT EXISTS prompt_version LowCardinality(String) CODEC(ZSTD(1)),
+        ADD COLUMN IF NOT EXISTS error_kind LowCardinality(String) DEFAULT '',
+        ADD COLUMN IF NOT EXISTS error_detail String CODEC(ZSTD(3));
 ---
 apiVersion: apps/v1
 kind: StatefulSet

@@ -59,21 +59,35 @@ type llmProfileSummary struct {
 	Pricing         Pricing `json:"pricing"`
 }
 
-// registerLLMHandlers wires the chat + profiles handlers into the
-// existing forwarder mux. Caller owns the mux. The `/api/llm_profiles`
-// endpoint is always registered so UIs can poll for the `enabled`
-// flag; `/api/session_chat` is only registered when profiles loaded
+// registerLLMHandlers wires the chat + profiles + budget handlers
+// into the existing forwarder mux. Caller owns the mux. The
+// `/api/llm_profiles` and `/api/llm_budget` endpoints are always
+// registered so UIs can poll for the `enabled` / `cap` state;
+// `/api/session_chat` is only registered when profiles loaded
 // (otherwise it 404s, which is the right shape for "feature off").
 func registerLLMHandlers(mux *http.ServeMux, cfg config) {
+	ledger := NewLLMLedger(cfg.clickhouseURL, cfg.chDatabase)
+	dailyCap := cfg.llmDailyBudgetUSD
+	if dailyCap <= 0 {
+		dailyCap = defaultDailyBudgetUSD
+	}
+	maxTok := cfg.llmMaxInputTokens
+	if maxTok <= 0 {
+		maxTok = defaultMaxInputTokensPerCall
+	}
+
 	mux.HandleFunc("/api/llm_profiles", serveLLMProfiles)
+	mux.HandleFunc("/api/llm_budget", func(w http.ResponseWriter, r *http.Request) {
+		serveLLMBudget(w, r, ledger, dailyCap)
+	})
 	if llmProfiles == nil {
-		log.Printf("AI session_chat disabled (no profiles loaded); /api/llm_profiles still serves enabled=false")
+		log.Printf("AI session_chat disabled (no profiles loaded); /api/llm_profiles + /api/llm_budget still serve")
 		return
 	}
 	queryTool := NewQueryTool(cfg.clickhouseURL)
 	client := NewLLMClient(llmProfiles)
 	mux.HandleFunc("/api/session_chat", func(w http.ResponseWriter, r *http.Request) {
-		handleSessionChat(w, r, client, queryTool)
+		handleSessionChat(w, r, client, queryTool, ledger, dailyCap, maxTok)
 	})
 }
 
@@ -106,7 +120,7 @@ func serveLLMProfiles(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]any{"enabled": true, "profiles": out})
 }
 
-func handleSessionChat(w http.ResponseWriter, r *http.Request, client *LLMClient, queryTool *QueryTool) {
+func handleSessionChat(w http.ResponseWriter, r *http.Request, client *LLMClient, queryTool *QueryTool, ledger *LLMLedger, dailyBudgetUSD float64, maxInputTokens int) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -118,6 +132,54 @@ func handleSessionChat(w http.ResponseWriter, r *http.Request, client *LLMClient
 	}
 	if len(req.Messages) == 0 {
 		http.Error(w, "messages required", http.StatusBadRequest)
+		return
+	}
+
+	// Resolve the profile early so pre-flight ledger entries carry
+	// real model names; profile resolution failures are an early 4xx.
+	prof, err := llmProfiles.Resolve(req.Profile)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	// Pre-flight token estimate. tiktoken-style accuracy is a future
+	// upgrade; char/4 is conservative within ±25% which is enough
+	// for "is this clearly too big?" gating.
+	msgsForEstimate := make([]openaiMessageLike, 0, len(req.Messages))
+	for _, m := range req.Messages {
+		msgsForEstimate = append(msgsForEstimate, openaiMessageLike{Role: m.Role, Content: m.Content})
+	}
+	if estTok := EstimateInputTokens(msgsForEstimate, ""); estTok > maxInputTokens {
+		_ = ledger.WriteCall(r.Context(), LLMCallRecord{
+			SessionID:   req.SessionID,
+			Profile:     prof.Name,
+			Model:       prof.Model,
+			Status:      statusInputTooLarge,
+			InputTokens: uint32(estTok),
+			ErrorKind:   "estimated_input_tokens_over_cap",
+			ErrorDetail: fmt.Sprintf("estimated %d tokens > limit %d", estTok, maxInputTokens),
+		})
+		http.Error(w, fmt.Sprintf("payload too large: estimated %d tokens > limit %d", estTok, maxInputTokens), http.StatusRequestEntityTooLarge)
+		return
+	}
+
+	// Pre-flight daily budget gate. ClickHouse hiccup → don't refuse;
+	// fail-open so a ledger blip never blocks paying users from
+	// running a single call (the post-flight insert below will still
+	// catch this call once ClickHouse recovers).
+	if spent, err := ledger.TodaysSpendUSD(r.Context()); err == nil && spent >= dailyBudgetUSD {
+		_ = ledger.WriteCall(r.Context(), LLMCallRecord{
+			SessionID:   req.SessionID,
+			Profile:     prof.Name,
+			Model:       prof.Model,
+			Status:      statusBudgetExceeded,
+			ErrorKind:   "daily_budget_exhausted",
+			ErrorDetail: fmt.Sprintf("today's spend $%.4f >= cap $%.4f", spent, dailyBudgetUSD),
+		})
+		retryAfter := SecondsUntilUTCMidnight(time.Now())
+		w.Header().Set("Retry-After", fmt.Sprintf("%d", retryAfter))
+		http.Error(w, fmt.Sprintf("daily budget exhausted ($%.4f spent of $%.2f); resets at 00:00 UTC", spent, dailyBudgetUSD), http.StatusTooManyRequests)
 		return
 	}
 
@@ -162,6 +224,7 @@ func handleSessionChat(w http.ResponseWriter, r *http.Request, client *LLMClient
 	tools := []openai.Tool{queryTool.OpenAITool()}
 	dispatcher := MakeQueryDispatcher(queryTool)
 
+	turnStart := time.Now()
 	res, err := client.RunChatTurn(chatCtx, req.Profile, messages, ChatTurnOptions{
 		Tools:      tools,
 		Dispatcher: dispatcher,
@@ -191,9 +254,53 @@ func handleSessionChat(w http.ResponseWriter, r *http.Request, client *LLMClient
 	})
 	stopHeartbeat()
 
-	// If the client disconnected mid-turn, the in-flight LLM call's
-	// request was canceled via chatCtx (no further token billing).
-	// Skip writing usage/done into a closed pipe.
+	// Always write a ledger row, even on disconnect / error / cancel.
+	// res accumulates per-iteration usage as the loop runs, so a
+	// cancellation mid-loop preserves usage from completed iterations.
+	// One known limitation: tokens consumed by an in-flight upstream
+	// call that gets aborted by ctx cancel are billed by the provider
+	// but NOT reflected here — the upstream API doesn't return usage
+	// on canceled requests. Acceptable v1 fidelity.
+	dur := uint32(time.Since(turnStart).Milliseconds())
+	rec := LLMCallRecord{
+		SessionID:      req.SessionID,
+		Profile:        prof.Name,
+		Model:          prof.Model,
+		OneShot:        boolToU8(req.OneShot),
+		DurationMS:     dur,
+		Iterations:     uint16(res.Iterations),
+		ToolCallsCount: uint16(res.ToolCallsCount),
+		InputTokens:    uint32(res.InputTokens),
+		OutputTokens:   uint32(res.OutputTokens),
+		CostUSD:        CostUSD(prof, res.InputTokens, res.OutputTokens),
+	}
+	switch {
+	case chatCtx.Err() != nil:
+		rec.Status = statusCancelled
+	case err != nil:
+		rec.Status = statusError
+		rec.ErrorKind = "upstream"
+		rec.ErrorDetail = truncateErrDetail(err.Error())
+	case res.StoppedReason == "tool_budget" || res.StoppedReason == "timeout":
+		rec.Status = res.StoppedReason
+		rec.ErrorKind = res.StoppedReason
+		rec.ErrorDetail = res.StoppedDetail
+	default:
+		rec.Status = statusOK
+	}
+	// Use a fresh detached context with the ledger's own timeout so
+	// the post-flight write completes even after the client
+	// disconnected (which canceled chatCtx and r.Context()). The
+	// cancellation branch especially needs this to record real
+	// billed usage instead of silently failing.
+	writeCtx, writeCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	if writeErr := ledger.WriteCall(writeCtx, rec); writeErr != nil {
+		log.Printf("ledger write failed (status=%s session=%s): %v", rec.Status, req.SessionID, writeErr)
+	}
+	writeCancel()
+
+	// If the client disconnected mid-turn, skip writing usage/done
+	// into a closed pipe.
 	if chatCtx.Err() != nil {
 		return
 	}
@@ -210,8 +317,55 @@ func handleSessionChat(w http.ResponseWriter, r *http.Request, client *LLMClient
 		"tool_calls_count": res.ToolCallsCount,
 		"iterations":       res.Iterations,
 		"stopped_reason":   res.StoppedReason,
+		"cost_usd":         rec.CostUSD,
 	})
 	sw.Event("done", nil)
+}
+
+func boolToU8(b bool) uint8 {
+	if b {
+		return 1
+	}
+	return 0
+}
+
+func truncateErrDetail(s string) string {
+	const max = 200
+	if len(s) <= max {
+		return s
+	}
+	return s[:max]
+}
+
+// serveLLMBudget reports today's spend versus the daily cap and the
+// number of calls today. Used by the dashboard's budget meter (#419)
+// and by automation that wants to predict refusal before posting.
+func serveLLMBudget(w http.ResponseWriter, r *http.Request, ledger *LLMLedger, capUSD float64) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	now := time.Now().UTC()
+	resetsAt := time.Date(now.Year(), now.Month(), now.Day()+1, 0, 0, 0, 0, time.UTC)
+	out := map[string]any{
+		"cap_usd":         capUSD,
+		"resets_at":       resetsAt.Format(time.RFC3339),
+		"resets_in_secs":  SecondsUntilUTCMidnight(now),
+	}
+	// Soft-fail on ClickHouse blips — the meter is informational
+	// and should never block UI rendering.
+	spent, err := ledger.TodaysSpendUSD(r.Context())
+	if err != nil {
+		out["error"] = err.Error()
+		out["spent_usd"] = 0.0
+		out["calls_today"] = 0
+	} else {
+		out["spent_usd"] = spent
+		count, _ := ledger.CallsTodayCount(r.Context())
+		out["calls_today"] = count
+	}
+	_ = json.NewEncoder(w).Encode(out)
 }
 
 // buildMessagesWithContext prepends a focus-context system message

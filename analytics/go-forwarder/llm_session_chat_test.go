@@ -67,10 +67,40 @@ func (s *chatTestSetup) Close() {
 	}
 }
 
+// fakeChatClickHouse is permissive: it routes ledger queries
+// (SELECT sum/count, INSERT) to canned responses and forwards the
+// LLM tool's SELECT...FORMAT JSON queries to a body the test
+// supplies. Used by the chat handler tests (which now exercise both
+// the QueryTool and the LLMLedger). The strict fakeClickHouse stays
+// in llm_tool_query_test.go for narrow tool-only tests.
+func fakeChatClickHouse(t *testing.T, toolJSON string) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		query := r.URL.Query().Get("query")
+		switch {
+		case strings.Contains(query, "sum(cost_usd)"):
+			_, _ = io.WriteString(w, "0\n")
+		case strings.Contains(query, "count()") && strings.Contains(query, "llm_calls"):
+			_, _ = io.WriteString(w, "0\n")
+		case strings.Contains(query, "INSERT INTO") && strings.Contains(query, "llm_calls"):
+			w.WriteHeader(http.StatusOK)
+		case strings.Contains(r.URL.RawQuery, "default_format=JSON"):
+			// LLM tool query — serve the configured response body.
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, toolJSON)
+		default:
+			t.Errorf("unhandled CH request: query=%q body=%q", query, body)
+			http.Error(w, "unhandled", http.StatusBadRequest)
+		}
+	}))
+}
+
 func newChatTestSetup(t *testing.T, scriptedResponses []openai.ChatCompletionResponse, chJSON string) *chatTestSetup {
 	t.Helper()
 	llmSrv := newScriptedLLM(t, scriptedResponses...)
-	chSrv := fakeClickHouse(t, http.StatusOK, chJSON)
+	chSrv := fakeChatClickHouse(t, chJSON)
+	t.Cleanup(chSrv.Close)
 
 	const envName = "LLM_SESSION_CHAT_TEST_KEY"
 	t.Setenv(envName, "test-key")
@@ -85,12 +115,18 @@ func newChatTestSetup(t *testing.T, scriptedResponses []openai.ChatCompletionRes
 				BaseURL:   llmSrv.URL() + "/",
 				APIKeyEnv: envName,
 				Model:     "test-model",
+				Pricing:   Pricing{InputPerMTok: 1.0, OutputPerMTok: 1.0},
 			},
 		},
 	}
 
 	mux := http.NewServeMux()
-	registerLLMHandlers(mux, config{clickhouseURL: chSrv.URL})
+	registerLLMHandlers(mux, config{
+		clickhouseURL:     chSrv.URL,
+		chDatabase:        "infinite_streaming",
+		llmDailyBudgetUSD: defaultDailyBudgetUSD,
+		llmMaxInputTokens: defaultMaxInputTokensPerCall,
+	})
 
 	muxSrv := httptest.NewServer(mux)
 	t.Cleanup(muxSrv.Close)
