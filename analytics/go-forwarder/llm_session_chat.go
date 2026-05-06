@@ -220,7 +220,8 @@ func handleSessionChat(w http.ResponseWriter, r *http.Request, client *LLMClient
 	stopHeartbeat := startSSEHeartbeat(chatCtx, sw, heartbeatIntervalForTest)
 	defer stopHeartbeat()
 
-	messages := buildMessagesWithContext(req)
+	systemPrompt, promptVersion := SessionChatPrompt()
+	messages := buildMessagesWithContext(req, systemPrompt)
 	tools := []openai.Tool{queryTool.OpenAITool()}
 	dispatcher := MakeQueryDispatcher(queryTool)
 
@@ -266,6 +267,7 @@ func handleSessionChat(w http.ResponseWriter, r *http.Request, client *LLMClient
 		SessionID:      req.SessionID,
 		Profile:        prof.Name,
 		Model:          prof.Model,
+		PromptVersion:  promptVersion,
 		OneShot:        boolToU8(req.OneShot),
 		DurationMS:     dur,
 		Iterations:     uint16(res.Iterations),
@@ -368,39 +370,44 @@ func serveLLMBudget(w http.ResponseWriter, r *http.Request, ledger *LLMLedger, c
 	_ = json.NewEncoder(w).Encode(out)
 }
 
-// buildMessagesWithContext prepends a focus-context system message
-// when session_id / sessions / range are set. Contract for multi-turn
-// chat: the client must NOT echo system messages from prior turns
-// back in `messages` — it should send the user/assistant/tool history
-// only and re-supply session_id / range / sessions on each turn. We
-// always re-inject so prompt-cacheable backends see a byte-identical
-// prefix (sessions slice is sorted for that reason).
-func buildMessagesWithContext(req chatRequest) []openai.ChatCompletionMessage {
-	messages := req.Messages
-	if req.SessionID == "" && len(req.Sessions) == 0 && req.Range == nil {
-		return messages
+// buildMessagesWithContext prepends the system prompt + a focus-
+// context system message when session_id / sessions / range are set.
+// Contract for multi-turn chat: the client must NOT echo system
+// messages from prior turns back in `messages` — it should send the
+// user/assistant/tool history only and re-supply session_id / range
+// / sessions on each turn. We always re-inject so prompt-cacheable
+// backends see a byte-identical prefix (sessions slice is sorted
+// for that reason). System prompt comes first (largest, cacheable);
+// focus context second (small, varies per call).
+func buildMessagesWithContext(req chatRequest, systemPrompt string) []openai.ChatCompletionMessage {
+	out := make([]openai.ChatCompletionMessage, 0, len(req.Messages)+2)
+	if systemPrompt != "" {
+		out = append(out, openai.ChatCompletionMessage{
+			Role:    openai.ChatMessageRoleSystem,
+			Content: systemPrompt,
+		})
 	}
-	parts := []string{}
-	if req.SessionID != "" {
-		parts = append(parts, fmt.Sprintf("Focus session_id: %s", req.SessionID))
+	if req.SessionID != "" || len(req.Sessions) > 0 || req.Range != nil {
+		parts := []string{}
+		if req.SessionID != "" {
+			parts = append(parts, fmt.Sprintf("Focus session_id: %s", req.SessionID))
+		}
+		if len(req.Sessions) > 0 {
+			// Sort for stable cache key — Anthropic prefix caching
+			// needs a byte-identical prefix across calls.
+			sorted := append([]string(nil), req.Sessions...)
+			sort.Strings(sorted)
+			parts = append(parts, fmt.Sprintf("Compare sessions: %v", sorted))
+		}
+		if req.Range != nil {
+			parts = append(parts, fmt.Sprintf("Focus range (ms): %d to %d", req.Range.From, req.Range.To))
+		}
+		out = append(out, openai.ChatCompletionMessage{
+			Role:    openai.ChatMessageRoleSystem,
+			Content: "Session-chat preamble:\n- " + strings.Join(parts, "\n- "),
+		})
 	}
-	if len(req.Sessions) > 0 {
-		// Sort for stable cache key — Anthropic prefix caching needs
-		// a byte-identical prefix across calls.
-		sorted := append([]string(nil), req.Sessions...)
-		sort.Strings(sorted)
-		parts = append(parts, fmt.Sprintf("Compare sessions: %v", sorted))
-	}
-	if req.Range != nil {
-		parts = append(parts, fmt.Sprintf("Focus range (ms): %d to %d", req.Range.From, req.Range.To))
-	}
-	preamble := openai.ChatCompletionMessage{
-		Role:    openai.ChatMessageRoleSystem,
-		Content: "Session-chat preamble:\n- " + strings.Join(parts, "\n- "),
-	}
-	out := make([]openai.ChatCompletionMessage, 0, len(messages)+1)
-	out = append(out, preamble)
-	out = append(out, messages...)
+	out = append(out, req.Messages...)
 	return out
 }
 

@@ -336,6 +336,40 @@ func TestRegisterLLMHandlers_DisabledWhenNoProfiles(t *testing.T) {
 	}
 }
 
+// Verifies the system prompt loaded by SessionChatPrompt() reaches
+// the LLM as the first message — this is what links the rest of the
+// epic (style rules, tool docs, schema) to actual model behavior.
+func TestSessionChat_InjectsSystemPrompt(t *testing.T) {
+	src := `---
+prompt_version: test-v9
+---
+SUPER UNIQUE PROMPT MARKER do not match elsewhere
+`
+	path := writePromptTemp(t, src)
+	t.Setenv("SESSION_CHAT_PROMPT_PATH", path)
+	defaultPromptCache = &PromptCache{entries: map[string]*Prompt{}}
+
+	s := newChatTestSetup(t,
+		[]openai.ChatCompletionResponse{textResp("ok", 5, 5)},
+		`{"meta":[],"data":[]}`,
+	)
+	body := `{"profile":"test","messages":[{"role":"user","content":"hi"}]}`
+	resp, err := http.Post(s.muxServer.URL+"/api/session_chat", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST: %v", err)
+	}
+	defer resp.Body.Close()
+	io.Copy(io.Discard, resp.Body)
+
+	bodies := s.llmServer.Bodies()
+	if len(bodies) == 0 {
+		t.Fatal("LLM saw no bodies")
+	}
+	if !bytes.Contains(bodies[0], []byte("SUPER UNIQUE PROMPT MARKER")) {
+		t.Errorf("system prompt body not injected; bodies[0]=%s", bodies[0])
+	}
+}
+
 func TestSessionChat_InjectsSessionContext(t *testing.T) {
 	s := newChatTestSetup(t,
 		[]openai.ChatCompletionResponse{textResp("ok", 5, 5)},
