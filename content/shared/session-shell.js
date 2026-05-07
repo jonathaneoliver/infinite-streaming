@@ -88,6 +88,11 @@
         const pendingFailureEdits = new Map();
         const controlRevisionBySession = new Map();
         let activeSessionId = null;
+        // single-session-mode pages (testing-session.html) host one
+        // session per page and never set activeSessionId; treat every
+        // pushed sample as the active one so the per-tick render in
+        // pushBandwidthSample fires (#409).
+        const isSingleSessionPage = () => !!(document.body && document.body.classList.contains('single-session-mode'));
         let isTabLocked = false;
         let lastAppliedSnapshotVersion = 0;
         const failureSaveTimers = new Map();
@@ -841,8 +846,19 @@
                 if (valueEl) valueEl.textContent = input.value;
             };
             const syncFailureScope = (field, values) => {
+                // applyScopeToggle has already painted the DOM for the
+                // user's toggle. Skip the SSE-driven re-sync while a
+                // pending edit for this field is in flight so the
+                // server's `[]` doesn't overwrite the just-toggled state.
+                const sid = String(card.dataset.sessionId || session.session_id || '');
+                const pending = pendingFailureEdits.get(sid);
+                if (pending && pending.values && Object.prototype.hasOwnProperty.call(pending.values, field)) {
+                    return;
+                }
                 const selected = Array.isArray(values) ? values.map(String) : [];
                 const selectedSet = new Set(selected);
+                // null/undefined → fresh session, default to all-checked.
+                // [] → user explicitly cleared → nothing checked.
                 const allChecked = values == null
                     ? true
                     : selectedSet.has('All');
@@ -2215,7 +2231,7 @@
             });
             rttHistory.set(key, rttSeries.filter(point => point.ts >= cutoff));
 
-            if (key === activeSessionId && !chartRenderSuppressedBySession.has(key)) {
+            if ((key === activeSessionId || isSingleSessionPage()) && !chartRenderSuppressedBySession.has(key)) {
                 renderBandwidthChart(key);
             }
         }
@@ -4716,8 +4732,11 @@
                     throw new Error(body.error || `HTTP ${response.status}`);
                 }
                 if (body.session) {
-                    resolvePendingFailureEdits(patch.sessionId, patch.fields);
+                    // Apply BEFORE clearing pending so syncFailureScope
+                    // sees the in-flight edit and skips overwriting the
+                    // just-toggled DOM with the server's `[]` (#409).
                     applySessionPatchResponse(body.session);
+                    resolvePendingFailureEdits(patch.sessionId, patch.fields);
                 }
             }).catch(error => {
                 console.error('Error saving settings:', error);
@@ -4820,7 +4839,7 @@
                 .catch(error => console.error('Error clearing sessions:', error));
         });
 
-        document.getElementById('sessionsContainer').addEventListener('change', (event) => {
+        document.getElementById('sessionsContainer')?.addEventListener('change', (event) => {
             if (event.target.id === 'compareModeToggle') {
                 compareMode = event.target.checked;
                 // Destroy existing charts so they rebuild with/without compare datasets
@@ -4840,7 +4859,7 @@
         }, true);
 
         let activeSliderSessionId = null;
-        document.getElementById('sessionsContainer').addEventListener('pointerdown', (event) => {
+        document.getElementById('sessionsContainer')?.addEventListener('pointerdown', (event) => {
             if (event.target.matches('input[type="range"]')) {
                 const card = event.target.closest('.session-card');
                 if (card) activeSliderSessionId = card.dataset.sessionId;
@@ -4851,7 +4870,7 @@
             if (deferredRender) renderSessions();
         });
 
-        document.getElementById('sessionsContainer').addEventListener('input', (event) => {
+        document.getElementById('sessionsContainer')?.addEventListener('input', (event) => {
             const input = event.target;
             const card = input.closest('.session-card');
             if (input.matches('input[type="range"]')) {
@@ -4876,7 +4895,7 @@
             }
         });
 
-        document.getElementById('sessionsContainer').addEventListener('change', (event) => {
+        document.getElementById('sessionsContainer')?.addEventListener('change', (event) => {
             const target = event.target;
             if (target.classList.contains('session-checkbox')) {
                 const sessionId = target.dataset.sessionId;
@@ -4912,34 +4931,7 @@
             }
             const card = target.closest('.session-card');
             if (!card) return;
-            if (target.dataset.field === 'manifest_failure_urls' && target.value === 'All') {
-                const checks = card.querySelectorAll('input[data-field="manifest_failure_urls"]');
-                checks.forEach(input => {
-                    input.checked = target.checked;
-                });
-            }
-            if (target.dataset.field === 'manifest_failure_urls' && target.value !== 'All') {
-                const checks = Array.from(card.querySelectorAll('input[data-field="manifest_failure_urls"]'));
-                const allBox = checks.find(input => input.value === 'All');
-                const scopedChecks = checks.filter(input => input.value !== 'All');
-                if (allBox) {
-                    allBox.checked = scopedChecks.every(input => input.checked);
-                }
-            }
-            if (target.dataset.field === 'segment_failure_urls' && target.value === 'All') {
-                const checks = card.querySelectorAll('input[data-field="segment_failure_urls"]');
-                checks.forEach(input => {
-                    input.checked = target.checked;
-                });
-            }
-            if (target.dataset.field === 'segment_failure_urls' && target.value !== 'All') {
-                const checks = Array.from(card.querySelectorAll('input[data-field="segment_failure_urls"]'));
-                const allBox = checks.find(input => input.value === 'All');
-                const scopedChecks = checks.filter(input => input.value !== 'All');
-                if (allBox) {
-                    allBox.checked = scopedChecks.every(input => input.checked);
-                }
-            }
+            TestingSessionUI.applyScopeToggle(card, target);
             if (target.dataset.field === 'content_allowed_variants' || target.dataset.field === 'content_strip_codecs' || target.dataset.field === 'content_live_offset') {
                 sendSessionPatch(card, ['content_allowed_variants', 'content_strip_codecs', 'content_live_offset']);
                 return;
@@ -5088,7 +5080,7 @@
             }
         });
 
-        document.getElementById('sessionsContainer').addEventListener('click', (event) => {
+        document.getElementById('sessionsContainer')?.addEventListener('click', (event) => {
             const checkbox = event.target.closest('.session-checkbox');
             if (checkbox) {
                 event.stopPropagation();
@@ -5266,7 +5258,7 @@
         let ctxMenu = null;
         function hideContextMenu() { if (ctxMenu) { ctxMenu.remove(); ctxMenu = null; } }
         document.addEventListener('click', hideContextMenu);
-        document.getElementById('sessionsContainer').addEventListener('contextmenu', (event) => {
+        document.getElementById('sessionsContainer')?.addEventListener('contextmenu', (event) => {
             const tab = event.target.closest('.session-tab');
             if (!tab) return;
             event.preventDefault();
@@ -5494,12 +5486,16 @@
             startSessionsPolling: startSessionsPolling
         };
 
-        // Boot dispatch — three pages, one shell:
+        // Boot dispatch — four pages, one shell:
         //   sessions.html         (body.session-selector) → picker only
         //   session-viewer.html   (body.replay-mode + ?session=) → viewer
         //   session-viewer.html   (body.replay-mode, no session) →
         //                                          redirect to selector
         //   testing.html          (no flags) → live SSE / polling
+        //   testing-session.html  (body.single-session-mode) → no-op;
+        //                                          page drives charts
+        //                                          via window.SessionShell
+        //                                          and owns its own SSE
         // Legacy: testing.html?replay=1 still routes to viewer or
         // picker depending on whether ?session= is present.
         //
@@ -5510,9 +5506,15 @@
         function bootDispatch() {
             const replayParams = new URLSearchParams(window.location.search);
             const isSelectorPage = document.body.classList.contains('session-selector');
+            const isSingleSessionMode = document.body.classList.contains('single-session-mode');
             const replayMode = replayParams.get('replay') === '1'
                 || document.body.classList.contains('replay-mode');
             const replaySession = replayParams.get('session');
+            if (isSingleSessionMode) {
+                // window.SessionShell is already populated above; the
+                // page handles its own SSE/polling and orchestration.
+                return;
+            }
             if (isSelectorPage) {
                 window.SessionReplay.startPicker();
             } else if (replayMode && replaySession) {

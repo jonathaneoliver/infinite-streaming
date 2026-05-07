@@ -186,6 +186,7 @@
 
 .fault-control-row .radio-group {
     display: flex;
+    flex-wrap: wrap;
     gap: 8px;
 }
 
