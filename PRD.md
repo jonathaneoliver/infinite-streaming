@@ -147,6 +147,11 @@ The system is intended for:
 - Clicking a tile selects audio and updates global selection.
  - Developer context menu includes an HLS.js demo link for the selected test URL (developer=1).
 
+**Mosaic (10ft)**
+- TV‑style lean‑back layout: large 16:9 hero on top + horizontally‑scrolling LIVE row of preview tiles below.
+- Mirrors the iPad/tvOS Home layout (`apple/InfiniteStreamPlayer/HomeScreen.swift`); reuses the global `ismSelectedContent` selection state.
+- Arrow keys + Enter promote a tile to hero; `S` opens a slide‑in settings drawer (filters); `F` toggles fullscreen. Mouse: tile click promotes, hero click toggles audio, vertical wheel scrolls the row horizontally, click‑and‑drag scrolls the row.
+
 **Live Offset Comparison**
 - Compare live offset and buffering for LL‑HLS vs 2s/6s HLS vs DASH variants.
 

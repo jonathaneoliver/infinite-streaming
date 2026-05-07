@@ -18,6 +18,7 @@
         ],
         testing: [
             { id: 'grid', icon: '🎮', text: 'Mosaic', href: '/dashboard/grid.html', warning: true },
+            { id: 'mosaic-10ft', icon: '📺', text: '10ft UI', href: '/dashboard/mosaic-10ft.html', alpha: true },
             { id: 'playback', icon: '▶️', text: 'Playback', href: '/dashboard/playback.html' },
             { id: 'test-playback', icon: '🧭', text: 'Testing Playback', href: '/dashboard/testing-session.html?nav=1' },
             { id: 'testing', icon: '🧪', text: 'Testing Monitor', href: '/dashboard/testing.html' },
