@@ -3536,6 +3536,31 @@
         updateNetworkWaterfall(card, key);
     }
 
+    // Propagate "All" / per-variant toggles in the three Fault Injection
+    // scope checkbox groups (segment_failure_urls, manifest_failure_urls,
+    // all_failure_urls). Used by both testing.html and testing-session.html
+    // so all three groups behave identically:
+    //   - Toggle "All" → every variant follows.
+    //   - Toggle a variant → "All" auto-syncs to .every() of the variants.
+    const SCOPE_FIELDS = new Set([
+        'segment_failure_urls',
+        'manifest_failure_urls',
+        'all_failure_urls'
+    ]);
+    function applyScopeToggle(card, target) {
+        if (!card || !target || !SCOPE_FIELDS.has(target.dataset.field)) return false;
+        const field = target.dataset.field;
+        const checks = Array.from(card.querySelectorAll(`input[data-field="${field}"]`));
+        if (target.value === 'All') {
+            checks.forEach(input => { input.checked = target.checked; });
+            return true;
+        }
+        const allBox = checks.find(input => input.value === 'All');
+        const scopedChecks = checks.filter(input => input.value !== 'All');
+        if (allBox) allBox.checked = scopedChecks.every(input => input.checked);
+        return true;
+    }
+
     window.TestingSessionUI = {
         renderSessionCard,
         renderPatternStepRowContent,
@@ -3546,6 +3571,7 @@
         formatDate,
         formatDuration,
         applyCollapsibleState,
+        applyScopeToggle,
         updateNetworkLog,
         applyNetworkLogFilters,
         updateNetworkWaterfall,

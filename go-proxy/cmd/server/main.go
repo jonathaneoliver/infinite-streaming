@@ -4363,15 +4363,21 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 			"is_external_ip":                           isExternalIP(requesterIP),
 			"manifest_failure_at":                      nil,
 			"manifest_failure_recover_at":              nil,
-			"manifest_failure_urls":                    []string{},
-			"segment_failure_urls":                     []string{},
+			// nil (not []string{}) so the dashboard can tell "fresh
+			// session, default to all-URLs filter" from "user
+			// explicitly cleared the list" — both serialize to JSON
+			// the same when both are []string{}, which made unchecking
+			// "All" silently snap back via the empty-defaults-to-all
+			// rule on the dashboard (#409).
+			"manifest_failure_urls":                    nil,
+			"segment_failure_urls":                     nil,
 			"segment_failure_at":                       nil,
 			"segment_failure_recover_at":               nil,
 			"master_manifest_failure_at":               nil,
 			"master_manifest_failure_recover_at":       nil,
 			"all_failure_at":                           nil,
 			"all_failure_recover_at":                   nil,
-			"all_failure_urls":                         []string{},
+			"all_failure_urls":                         nil,
 			"transport_failure_type":                   "none",
 			"transport_failure_frequency":              0,
 			"transport_consecutive_failures":           1,
