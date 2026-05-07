@@ -1170,14 +1170,28 @@
     // Mirror iPad/tvOS: tapping a clip leaves the Home/Mosaic view and
     // navigates to the dedicated full-screen playback surface (play-10ft.html),
     // which routes the manifest URL through go-proxy.
+    //
+    // player_id is *device-scoped* — every navigation reuses the same id so
+    // the user lands on the same go-proxy port across plays. Only 911 (in
+    // play-10ft) clears it for a true fresh session.
     function playClip(item) {
         if (!item) return;
         persistSelection(item);
         const url = streamUrlFor(item);
-        const playerId = createPlayerId();
+        const playerId = getOrMintPlayerId();
         const proxiedUrl = buildTestingUrl(url, playerId);
         const href = `/dashboard/play-10ft.html?player_id=${encodeURIComponent(playerId)}&url=${encodeURIComponent(proxiedUrl)}`;
         window.location.href = href;
+    }
+
+    function getOrMintPlayerId() {
+        let id = '';
+        try { id = sessionStorage.getItem('ism10ftPlayerId') || ''; } catch (_) {}
+        if (!id) {
+            id = createPlayerId();
+            try { sessionStorage.setItem('ism10ftPlayerId', id); } catch (_) {}
+        }
+        return id;
     }
 
     // ─── go-proxy URL helpers (mirror grid.html) ───

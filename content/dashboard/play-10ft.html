@@ -7,6 +7,7 @@
     <link rel="stylesheet" href="/shared-styles.css">
     <script src="https://cdnjs.cloudflare.com/ajax/libs/shaka-player/4.7.7/shaka-player.compiled.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.15"></script>
+    <script src="/shared/play-id.js"></script>
     <style>
         :root {
             --autohide-ms: 2800ms;
@@ -433,6 +434,8 @@
             <div class="hud-row"><span class="k">Live offset</span><span class="v" id="hudLiveOffset">—</span></div>
             <div class="hud-row"><span class="k">Dropped frames</span><span class="v" id="hudDropped">—</span></div>
             <div class="hud-row"><span class="k">Stalls</span><span class="v" id="hudStalls">0</span></div>
+            <div class="hud-row"><span class="k">player_id</span><span class="v" id="hudPlayerId">—</span></div>
+            <div class="hud-row"><span class="k">play_id</span><span class="v" id="hudPlayId">—</span></div>
         </div>
 
         <div class="play-overlay-top" id="topBar">
@@ -478,7 +481,31 @@
 
     const Q = new URLSearchParams(location.search);
     let currentUrl = Q.get('url');
-    let currentPlayerId = Q.get('player_id') || createPlayerId();
+    // player_id = persistent for the device/browser session (routes to a
+    // dedicated go-proxy port). Does NOT change on Reload or Restart. URL
+    // wins (caller supplied), then sessionStorage (back-nav from mosaic
+    // returns to the same id), then mint once and persist.
+    let currentPlayerId = (function () {
+        const fromUrl = Q.get('player_id');
+        if (fromUrl) {
+            try { sessionStorage.setItem('ism10ftPlayerId', fromUrl); } catch (_) {}
+            return fromUrl;
+        }
+        try {
+            const stored = sessionStorage.getItem('ism10ftPlayerId');
+            if (stored) return stored;
+        } catch (_) {}
+        const minted = createPlayerId();
+        try { sessionStorage.setItem('ism10ftPlayerId', minted); } catch (_) {}
+        return minted;
+    })();
+    // play_id = fresh per play (each new manifest load). Re-minted on Restart
+    // and on initial boot; left alone on a soft Reload.
+    let currentPlayId = '';
+    function getCurrentPlayId() { return currentPlayId; }
+    function mintPlayId() {
+        return (window.PlayId && window.PlayId.mint) ? window.PlayId.mint() : Math.random().toString(36).slice(2, 14);
+    }
     let currentItem = null;
 
     let ALL_CONTENT = [];
@@ -506,6 +533,21 @@
     let hudTimer = null;
     let stallCount = 0;
     let activeEngine = '—';
+
+    // ─── Metrics state (mirrors testing-session.html shape) ───
+    let currentSessionId = null;
+    let metricsHeartbeatTimer = null;
+    let metricsTaskTail = Promise.resolve();
+    let videoFirstFrameAtMs = 0;       // performance.now() at the moment first frame rendered
+    let firstFrameSentForLoad = false;
+    let stallStartedAtMs = 0;
+    let stallTotalMs = 0;
+    let lastStallDurationMs = 0;
+    let playerRestartCount = 0;
+    let profileShiftCount = 0;         // cumulative bitrate-rendition switches (matches testing-session.html)
+    let currentRenditionMbps = 0;
+    let playerEstimatedMbps = 0;
+    let videoStartedAtMs = 0;          // performance.now() when loadStream began (for video_start_time)
 
     let shakaP = null;
     let hlsP = null;
@@ -536,8 +578,24 @@
             }
         }
 
+        // Mint the initial play_id once on cold boot. Reload keeps it,
+        // Restart re-mints, 911 drops everything via location.replace.
+        currentPlayId = mintPlayId();
+
         if (currentUrl) {
             loadStream(currentUrl);
+            // Resolve the go-proxy session_id once the first manifest fetch
+            // (carrying our player_id) has reached the proxy, then start the
+            // 1Hz metrics heartbeat. resolveSessionId polls /api/sessions
+            // until the session appears.
+            resolveSessionId().then(sid => {
+                if (!sid) {
+                    console.warn('Could not resolve go-proxy session for player_id', currentPlayerId);
+                    return;
+                }
+                sendSessionMetrics('state_change');
+                startMetricsHeartbeat();
+            });
         } else {
             showError('No stream selected — open Settings to pick one.');
         }
@@ -545,7 +603,23 @@
         applyRotatePlayIdTimer();
         applyHud();
 
-        window.addEventListener('beforeunload', destroyPlayers);
+        window.addEventListener('beforeunload', () => {
+            stopMetricsHeartbeat();
+            destroyPlayers();
+        });
+
+        // bfcache: when the user back-navigates from mosaic-10ft and this
+        // page is restored from cache, DOMContentLoaded does NOT re-fire.
+        // Resume the heartbeat so metrics keep flowing without forcing the
+        // user to reload.
+        window.addEventListener('pageshow', (event) => {
+            if (event.persisted && currentSessionId && !metricsHeartbeatTimer) {
+                startMetricsHeartbeat();
+            }
+        });
+        window.addEventListener('pagehide', () => {
+            stopMetricsHeartbeat();
+        });
     });
 
     // ───── Stream load ─────
@@ -562,6 +636,16 @@
         video.volume = advancedState.muteAudio ? 0 : 1.0;
         showLoading('Loading…');
 
+        // Reset per-load metrics state. profileShiftCount resets per-load to
+        // match testing-session.html:markPlaybackStart (line 1140) so
+        // ABR-thrash counts are comparable across surfaces.
+        videoStartedAtMs = performance.now();
+        videoFirstFrameAtMs = 0;
+        firstFrameSentForLoad = false;
+        stallStartedAtMs = 0;
+        lastStallDurationMs = 0;
+        profileShiftCount = 0;
+
         const isDash = url.includes('.mpd');
         const engine = pickEngine(isDash);
         activeEngine = engine || '—';
@@ -572,24 +656,45 @@
                 shaka.polyfill.installAll();
                 const player = new shaka.Player(video);
                 shakaP = player;
-                // Match testing-session.html: keep most settings at default so we
-                // ramp up from low variant (low CPU at start). Only constrain max
-                // height when the user hasn't opted into 4K — Shaka's default is
-                // already conservative on bufferingGoal / abr.
+                // Stamp every Shaka request with the current play_id (manifests,
+                // segments, init segments). Identical pattern to testing-session.html.
+                if (window.PlayId) window.PlayId.installShaka(player, getCurrentPlayId);
                 if (!advancedState.allow4k) {
                     player.configure({ abr: { restrictions: { maxHeight: 1080 } } });
                 }
                 if (advancedState.liveOffsetS > 0) {
                     player.configure({ streaming: { bufferBehind: Math.max(30, advancedState.liveOffsetS * 3) } });
                 }
-                player.addEventListener('error', (ev) => onEngineError('shaka', ev.detail));
+                player.addEventListener('error', (ev) => {
+                    onEngineError('shaka', ev.detail);
+                    const http = extractShakaHttpFailure(ev.detail);
+                    sendSessionMetrics('error', {
+                        player_metrics_error: `shaka ${ev.detail.code} ${ev.detail.message || ''}`.trim(),
+                        player_metrics_error_code: ev.detail.code,
+                        player_metrics_http_status: http.status,
+                        player_metrics_error_url: http.url,
+                    });
+                });
+                player.addEventListener('adaptation', () => {
+                    try {
+                        const stats = player.getStats();
+                        if (stats) {
+                            const prev = currentRenditionMbps;
+                            if (Number.isFinite(stats.streamBandwidth) && stats.streamBandwidth > 0) {
+                                currentRenditionMbps = stats.streamBandwidth / 1_000_000;
+                            }
+                            if (Number.isFinite(stats.estimatedBandwidth) && stats.estimatedBandwidth > 0) {
+                                playerEstimatedMbps = stats.estimatedBandwidth / 1_000_000;
+                            }
+                            if (Math.abs(currentRenditionMbps - prev) > 0.01) {
+                                profileShiftCount++;
+                                sendSessionMetrics('video_bitrate_change');
+                            }
+                        }
+                    } catch (_) {}
+                });
                 await player.load(url);
             } else if (engine === 'hlsjs') {
-                // Match testing-session.html's lean default. enableWorker is the
-                // big win: demuxing on a Web Worker keeps the main thread free.
-                // Skip aggressive bandwidth-estimate / buffer overrides so the
-                // engine ramps from low variant instead of slamming 1080p+ on
-                // first load.
                 const isLL = url.includes('master.m3u8') && !url.includes('master_2s') && !url.includes('master_6s');
                 const hlsCfg = {
                     enableWorker: true,
@@ -597,10 +702,38 @@
                     capLevelToPlayerSize: !advancedState.allow4k,
                 };
                 if (advancedState.liveOffsetS > 0) hlsCfg.liveSyncDuration = advancedState.liveOffsetS;
+                // installHls patches the loader BEFORE `new Hls()` so manifest +
+                // segment fetches all carry play_id. Order matters here.
+                if (window.PlayId) window.PlayId.installHls(hlsCfg, getCurrentPlayId);
                 const hls = new Hls(hlsCfg);
+                hls.on(Hls.Events.LEVEL_SWITCHED, (_evt, data) => {
+                    try {
+                        const lvl = hls.levels && hls.levels[data.level];
+                        if (lvl && Number.isFinite(lvl.bitrate) && lvl.bitrate > 0) {
+                            const prev = currentRenditionMbps;
+                            currentRenditionMbps = lvl.bitrate / 1_000_000;
+                            if (Math.abs(currentRenditionMbps - prev) > 0.01) {
+                                profileShiftCount++;
+                                sendSessionMetrics('video_bitrate_change');
+                            }
+                        }
+                    } catch (_) {}
+                });
+                hls.on(Hls.Events.FRAG_LOADED, (_evt, data) => {
+                    if (data && data.frag && Number.isFinite(data.frag.stats?.bwEstimate) && data.frag.stats.bwEstimate > 0) {
+                        playerEstimatedMbps = data.frag.stats.bwEstimate / 1_000_000;
+                    }
+                });
                 hlsP = hls;
                 hls.on(Hls.Events.ERROR, (_e, data) => {
                     if (!data.fatal) return;
+                    const http = extractHlsHttpFailure(data);
+                    sendSessionMetrics('error', {
+                        player_metrics_error: `hls ${data.type} ${data.details || ''}`.trim(),
+                        player_metrics_error_code: data.type,
+                        player_metrics_http_status: http.status,
+                        player_metrics_error_url: http.url,
+                    });
                     if (advancedState.autoRecovery) {
                         if (data.type === Hls.ErrorTypes.NETWORK_ERROR) { hls.startLoad(); return; }
                         if (data.type === Hls.ErrorTypes.MEDIA_ERROR)   { hls.recoverMediaError(); return; }
@@ -610,7 +743,12 @@
                 hls.loadSource(url);
                 hls.attachMedia(video);
             } else if (engine === 'native') {
-                video.src = url;
+                // Native engine can't be intercepted post-src — stamp play_id once
+                // upfront. Subsequent fetches happen inside the browser media stack.
+                const stamped = (window.PlayId && window.PlayId.apply)
+                    ? window.PlayId.apply(url, currentPlayId)
+                    : url;
+                video.src = stamped;
             } else {
                 throw new Error('No supported playback engine');
             }
@@ -647,9 +785,40 @@
     function attachStallHooks(video) {
         if (video.__stallHooked) return;
         video.__stallHooked = true;
-        video.addEventListener('waiting', () => { stallCount++; showLoading('Buffering…'); });
-        video.addEventListener('playing', () => hideLoading());
+        video.addEventListener('waiting', () => {
+            stallCount++;
+            stallStartedAtMs = performance.now();
+            sendSessionMetrics('stall_start');
+            showLoading('Buffering…');
+        });
+        video.addEventListener('playing', () => {
+            // First-frame edge: record and emit once per load
+            if (!firstFrameSentForLoad) {
+                videoFirstFrameAtMs = performance.now();
+                firstFrameSentForLoad = true;
+                sendSessionMetrics('video_first_frame');
+                sendSessionMetrics('video_start_time');
+            }
+            // Stall-end edge
+            if (stallStartedAtMs > 0) {
+                lastStallDurationMs = Math.max(0, performance.now() - stallStartedAtMs);
+                stallTotalMs += lastStallDurationMs;
+                stallStartedAtMs = 0;
+                sendSessionMetrics('stall_end');
+            } else {
+                sendSessionMetrics('state_change');
+            }
+            hideLoading();
+        });
+        video.addEventListener('pause', () => sendSessionMetrics('state_change'));
         video.addEventListener('canplay', () => hideLoading());
+        video.addEventListener('error', () => {
+            const err = video.error;
+            sendSessionMetrics('error', {
+                player_metrics_error: err ? `media-error code=${err.code}` : 'media-error',
+                player_metrics_error_code: err ? Number(err.code) : null,
+            });
+        });
     }
 
     async function destroyPlayers() {
@@ -687,27 +856,30 @@
         await loadStream(currentUrl);
     }
 
-    // Medium: tear down the engine entirely and re-init from a fresh player_id
-    // (mirrors testing-session.html "Restart Playback" semantics — fresh proxy session).
+    // Medium: tear down the engine and re-init with a fresh play_id (so analytics
+    // correlate this as a new play session). player_id is preserved — that's
+    // device-scoped and tied to the go-proxy port. 911 is the button for a
+    // fresh player_id.
     async function doRestart() {
         if (!currentUrl) return;
         flashStatus('Restarting player…');
-        currentPlayerId = createPlayerId();
-        if (currentItem) {
-            currentUrl = buildProxiedUrl(currentItem);
-            updateUrlBar();
-        }
+        playerRestartCount++;
+        sendSessionMetrics('restart', {
+            player_restarts: playerRestartCount,
+            player_metrics_restart_reason: 'manual',
+        });
+        currentPlayId = mintPlayId();
         await loadStream(currentUrl);
     }
 
-    // 911: nuclear option — destroy the player, clear session preferences, hard-reload the page.
+    // 911: nuclear option — destroy the player, drop the persisted player_id
+    // so go-proxy gets a fresh session, hard-reload the page.
     function do911() {
         flashStatus('911 — full reset…');
         try { destroyPlayers(); } catch (_) {}
-        // Drop the player_id so go-proxy gets a fresh session next load
+        try { sessionStorage.removeItem('ism10ftPlayerId'); } catch (_) {}
         const u = new URL(location.href);
         u.searchParams.delete('player_id');
-        // Hard reload (bypass cache)
         location.replace(u.toString());
     }
 
@@ -1324,6 +1496,10 @@
         const stallEl = document.getElementById('hudStalls');
         stallEl.textContent = String(stallCount);
         stallEl.className = 'v ' + (stallCount === 0 ? 'good' : stallCount < 3 ? 'warn' : 'error');
+
+        // Identifiers
+        document.getElementById('hudPlayerId').textContent = currentPlayerId || '—';
+        document.getElementById('hudPlayId').textContent = currentPlayId || '—';
     }
 
     function formatBitrate(bps) {
@@ -1332,6 +1508,212 @@
         if (bps >= 1_000) return `${(bps / 1_000).toFixed(0)} kbps`;
         return `${bps} bps`;
     }
+
+    // ─── Metrics ────────────────────────────────────────────────────
+    //
+    // Same shape as testing-session.html so go-proxy / forwarder pipelines
+    // can ingest events without special-casing this page. Minimal subset:
+    // state_change, video_first_frame, stall_start, stall_end, error,
+    // restart, heartbeat.
+    //
+    // session_id is the go-proxy session keyed on our player_id. We
+    // resolve it via /api/sessions and retry until it appears (the proxy
+    // only allocates one once a manifest fetch carrying player_id has
+    // landed).
+
+    async function resolveSessionId(maxAttempts = 20) {
+        for (let attempt = 0; attempt < maxAttempts; attempt++) {
+            try {
+                const r = await fetch('/api/sessions', { cache: 'no-store' });
+                if (r.ok) {
+                    const sessions = await r.json();
+                    if (Array.isArray(sessions)) {
+                        // Pick the session whose player_id matches and that has the most recent last-request stamp.
+                        const matches = sessions
+                            .filter(s => String(s.player_id || '') === String(currentPlayerId || ''))
+                            .sort((a, b) => Number(b.last_request_at || b.firstRequest || 0) - Number(a.last_request_at || a.firstRequest || 0));
+                        if (matches.length > 0 && matches[0].session_id) {
+                            currentSessionId = matches[0].session_id;
+                            return currentSessionId;
+                        }
+                    }
+                }
+            } catch (_) {}
+            await new Promise(res => setTimeout(res, 500));
+        }
+        return null;
+    }
+
+    function buildMetricsPayload(eventType, extra = {}) {
+        const v = document.getElementById('player');
+        const buffered = v.buffered;
+        const seekable = v.seekable;
+        const current = Number(v.currentTime || 0);
+        let bufferedEnd = null, bufferDepth = 0, seekableEnd = null;
+        try {
+            if (buffered && buffered.length > 0) {
+                const end = buffered.end(buffered.length - 1);
+                bufferedEnd = round2(end);
+                bufferDepth = round2(Math.max(0, end - current));
+            }
+            if (seekable && seekable.length > 0) seekableEnd = round2(seekable.end(seekable.length - 1));
+        } catch (_) {}
+        const liveOffset = (seekableEnd !== null) ? round2(Math.max(0, seekableEnd - current)) : null;
+
+        let playheadWallclockMs = null;
+        try {
+            if (shakaP && typeof shakaP.getPlayheadTimeAsDate === 'function') {
+                const d = shakaP.getPlayheadTimeAsDate();
+                if (d instanceof Date && !isNaN(d.getTime())) playheadWallclockMs = d.getTime();
+            }
+            if (playheadWallclockMs === null && hlsP && hlsP.playingDate instanceof Date) {
+                const d = hlsP.playingDate;
+                if (!isNaN(d.getTime())) playheadWallclockMs = d.getTime();
+            }
+        } catch (_) {}
+
+        const q = (typeof v.getVideoPlaybackQuality === 'function') ? v.getVideoPlaybackQuality() : null;
+        const totalFrames = q ? Number(q.totalVideoFrames || 0) : null;
+        const droppedFrames = q ? Number(q.droppedVideoFrames || 0) : null;
+        const displayedFrames = (totalFrames !== null && droppedFrames !== null) ? Math.max(0, totalFrames - droppedFrames) : null;
+
+        const videoFirstFrameS = videoFirstFrameAtMs > 0
+            ? round2((videoFirstFrameAtMs - videoStartedAtMs) / 1000)
+            : null;
+        const videoStartTimeS = (videoStartedAtMs > 0)
+            ? round2((performance.now() - videoStartedAtMs) / 1000)
+            : null;
+
+        const base = {
+            player_metrics_source: 'web-10ft',
+            player_metrics_browser_family: detectBrowserFamily(),
+            player_metrics_playback_engine: activeEngine,
+            player_metrics_last_event: eventType,
+            player_metrics_trigger_type: eventType,
+            player_metrics_event_time: new Date().toISOString(),
+            player_metrics_state: v.paused ? 'paused' : 'playing',
+            player_metrics_position_s: round2(current),
+            player_metrics_playback_rate: round2(v.playbackRate || 0),
+            player_metrics_buffer_depth_s: bufferDepth,
+            player_metrics_buffer_end_s: bufferedEnd,
+            player_metrics_seekable_end_s: seekableEnd,
+            player_metrics_live_edge_s: seekableEnd,
+            player_metrics_live_offset_s: liveOffset,
+            player_metrics_playhead_wallclock_ms: playheadWallclockMs,
+            player_metrics_true_offset_s: playheadWallclockMs != null
+                ? round2((Date.now() - playheadWallclockMs) / 1000)
+                : null,
+            player_metrics_display_resolution: `${v.clientWidth}x${v.clientHeight}`,
+            player_metrics_video_resolution: (v.videoWidth && v.videoHeight) ? `${v.videoWidth}x${v.videoHeight}` : null,
+            player_metrics_video_first_frame_time_s: videoFirstFrameS,
+            player_metrics_video_start_time_s: videoStartTimeS,
+            player_metrics_video_bitrate_mbps: round3(currentRenditionMbps),
+            player_metrics_avg_network_bitrate_mbps: round3(playerEstimatedMbps),
+            player_auto_recovery_enabled: !!advancedState.autoRecovery,
+            player_restarts: playerRestartCount,
+            player_metrics_profile_shift_count: Math.max(0, Math.round(profileShiftCount || 0)),
+            player_metrics_frames_displayed: displayedFrames,
+            player_metrics_total_video_frames: totalFrames,
+            player_metrics_dropped_frames: droppedFrames,
+            player_metrics_stall_count: stallCount,
+            player_metrics_stall_time_s: round2(stallTotalMs / 1000),
+            player_metrics_last_stall_time_s: round2(lastStallDurationMs / 1000),
+            play_id: currentPlayId || null,
+        };
+        const merged = { ...base, ...extra };
+        const compact = {};
+        for (const [k, val] of Object.entries(merged)) {
+            if (val === null || val === undefined || val === '') continue;
+            compact[k] = val;
+        }
+        return compact;
+    }
+
+    function sendSessionMetrics(eventType, extra = {}) {
+        if (!currentSessionId) return;
+        const payload = buildMetricsPayload(eventType, extra);
+        const fields = Object.keys(payload);
+        if (!fields.length) return;
+        const sid = currentSessionId;
+        // Serialize so events arrive in submission order (matches the iOS
+        // metricsTaskTail / testing-session.html pattern).
+        metricsTaskTail = metricsTaskTail
+            .catch(() => {})
+            .then(() => {
+                // 5s per-fetch timeout so a hung request can't stall the
+                // whole metrics queue. AbortSignal.timeout is supported
+                // everywhere we run.
+                const init = {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ set: payload, fields }),
+                };
+                if (typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function') {
+                    init.signal = AbortSignal.timeout(5000);
+                }
+                return fetch(`/api/session/${sid}/metrics`, init);
+            })
+            .catch(err => console.warn('metrics POST failed', err));
+    }
+
+    function startMetricsHeartbeat() {
+        if (metricsHeartbeatTimer) clearInterval(metricsHeartbeatTimer);
+        metricsHeartbeatTimer = setInterval(() => sendSessionMetrics('heartbeat'), 1000);
+    }
+    function stopMetricsHeartbeat() {
+        if (metricsHeartbeatTimer) { clearInterval(metricsHeartbeatTimer); metricsHeartbeatTimer = null; }
+    }
+
+    // Pull the HTTP status + URL out of an hls.js fatal error payload so we
+    // can attach it to the `error` metric. Mirrors testing-session.html
+    // (lines 1472–1485) — checks response, networkDetails, and frag fallbacks
+    // so it works in both worker (no networkDetails) and main-thread modes.
+    function extractHlsHttpFailure(data) {
+        const response = data && data.response ? data.response : null;
+        const network = data && data.networkDetails ? data.networkDetails : null;
+        const status = (response && (response.code || response.status)) ||
+            (response && response.xhr && response.xhr.status) ||
+            (network && network.status) ||
+            null;
+        const url = (response && (response.url || response.responseURL)) ||
+            (response && response.xhr && response.xhr.responseURL) ||
+            (data && data.url) ||
+            (data && data.frag && data.frag.url) ||
+            null;
+        return { status, url };
+    }
+
+    // Shaka stores HTTP failure data in detail.data with layouts that vary
+    // by error code (e.g. NETWORK_HTTP_ERROR=1001 is [uri, data, status, …]).
+    // Iterate the array looking for any number in 400..599 and any string
+    // starting with "http" — same pattern as testing-session.html (1487–1505).
+    function extractShakaHttpFailure(detail) {
+        if (!detail) return { status: null, url: null };
+        let status = null;
+        let url = null;
+        if (Array.isArray(detail.data)) {
+            detail.data.forEach(item => {
+                if (typeof item === 'number' && item >= 400 && item <= 599) status = item;
+                if (typeof item === 'string' && item.startsWith('http')) url = item;
+            });
+            // Fallback: some 11xx codes put a path string at index 1 even
+            // without a leading "http" scheme.
+            if (!url && typeof detail.data[1] === 'string') url = detail.data[1];
+        }
+        return { status, url };
+    }
+
+    function detectBrowserFamily() {
+        const ua = navigator.userAgent || '';
+        if (/Edg\//.test(ua)) return 'edge';
+        if (/Chrome\//.test(ua)) return 'chrome';
+        if (/Firefox\//.test(ua)) return 'firefox';
+        if (/Safari\//.test(ua)) return 'safari';
+        return 'other';
+    }
+
+    function round2(n) { return Number.isFinite(n) ? Math.round(n * 100) / 100 : 0; }
+    function round3(n) { return Number.isFinite(n) ? Math.round(n * 1000) / 1000 : 0; }
 
     function applyRotatePlayIdTimer() {
         if (playIdRotationTimer) { clearInterval(playIdRotationTimer); playIdRotationTimer = null; }
