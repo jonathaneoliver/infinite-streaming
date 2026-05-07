@@ -1,0 +1,1998 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Play - InfiniteStream</title>
+    <link rel="stylesheet" href="/shared-styles.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/shaka-player/4.7.7/shaka-player.compiled.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.15"></script>
+    <script src="/shared/play-id.js"></script>
+    <style>
+        :root {
+            --autohide-ms: 2800ms;
+            --row-h: 56px;
+            --row-h-compact: 44px;
+        }
+
+        body { background: #000; color: #fff; }
+        body.drawer-open { overflow: hidden; }
+
+        /* Play stage fills the dashboard content area (sidebar + global header
+           injected by shared-nav.js sit outside it). */
+        .play-stage {
+            position: relative;
+            width: 100%;
+            height: calc(100vh - var(--header-height, 64px));
+            background: #000;
+            overflow: hidden;
+            cursor: default;
+        }
+        .play-stage.idle { cursor: none; }
+
+        video#player {
+            width: 100%;
+            height: 100%;
+            object-fit: contain;
+            background: #000;
+            display: block;
+        }
+
+        /* ───── Top overlay (auto-hide) ───── */
+
+        .play-overlay-top {
+            position: absolute;
+            top: 0; left: 0; right: 0;
+            display: flex;
+            align-items: center;
+            gap: 16px;
+            padding: 18px 26px;
+            background: linear-gradient(to bottom,
+                rgba(0,0,0,0.72) 0%,
+                rgba(0,0,0,0.42) 60%,
+                rgba(0,0,0,0) 100%);
+            z-index: 30;
+            transition: opacity 220ms ease, transform 220ms ease;
+            opacity: 1;
+        }
+        .play-overlay-top .title-block { flex: 1; }
+        .play-overlay-top.hidden {
+            opacity: 0;
+            transform: translateY(-8px);
+            pointer-events: none;
+        }
+
+        .title-block {
+            min-width: 0;
+            display: flex;
+            flex-direction: column;
+            gap: 2px;
+        }
+        .title-block h1 {
+            font-size: 18px;
+            font-weight: 500;
+            margin: 0;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            max-width: 50vw;
+        }
+        .title-block .sub {
+            font-size: 12px;
+            color: rgba(255,255,255,0.7);
+        }
+
+        .action-block {
+            display: flex; align-items: center; gap: 10px;
+            flex: 0 0 auto;
+        }
+
+        /* Square icon button — same shape for back / reload / restart / 911 / gear */
+        .icon-btn {
+            width: 56px;
+            height: 56px;
+            padding: 0;
+            background: rgba(0,0,0,0.5);
+            border: 1px solid rgba(255,255,255,0.22);
+            color: #fff;
+            border-radius: 12px;
+            font-size: 26px;
+            line-height: 1;
+            cursor: pointer;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            transition: background 150ms ease, border-color 150ms ease, transform 120ms ease;
+        }
+        .icon-btn:hover {
+            background: rgba(255,255,255,0.14);
+            border-color: rgba(255,255,255,0.5);
+        }
+        .icon-btn:active { transform: scale(0.96); }
+        .icon-btn:focus-visible { outline: 3px solid #1a73e8; outline-offset: 3px; }
+
+        /* Back chevron sits at the top-left of the player area */
+        .icon-btn.back {
+            font-size: 32px;
+            font-weight: 300;
+        }
+
+        /* 911 button uses pill shape so the "911" digits read clearly */
+        .icon-btn.emergency {
+            width: auto;
+            padding: 0 18px;
+            font-size: 18px;
+            font-weight: 700;
+            letter-spacing: 0.5px;
+            background: rgba(217, 48, 37, 0.18);
+            border-color: rgba(255, 88, 88, 0.6);
+            color: #ff8a80;
+            gap: 8px;
+        }
+        .icon-btn.emergency:hover {
+            background: rgba(217, 48, 37, 0.36);
+            border-color: rgba(255, 88, 88, 0.9);
+            color: #fff;
+        }
+
+        /* ───── Center loading / error pill ───── */
+
+        .center-overlay {
+            position: absolute;
+            inset: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            pointer-events: none;
+            z-index: 5;
+        }
+        .center-overlay .pill {
+            background: rgba(0,0,0,0.65);
+            color: #fff;
+            padding: 10px 18px;
+            border-radius: 999px;
+            font-size: 13px;
+            display: none;
+        }
+        .center-overlay.show .pill { display: block; }
+
+        /* ───── TV-style settings drawer (right-slide, 240ms) ───── */
+
+        .settings-backdrop {
+            position: fixed; inset: 0;
+            background: rgba(0,0,0,0.55);
+            opacity: 0;
+            transition: opacity 240ms ease-out;
+            z-index: 1500;
+            pointer-events: none;
+        }
+        .settings-backdrop.open { opacity: 1; pointer-events: auto; }
+
+        .settings-drawer {
+            position: fixed;
+            top: 0; right: 0; bottom: 0;
+            width: 46vw;
+            max-width: 580px;
+            background: #1a1a1f;
+            color: #f5f5f7;
+            box-shadow: -4px 0 24px rgba(0,0,0,0.55);
+            transform: translateX(100%);
+            transition: transform 240ms ease-out;
+            z-index: 1600;
+            display: flex;
+            flex-direction: column;
+            font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, sans-serif;
+        }
+        .settings-drawer.open { transform: translateX(0); }
+        @media (max-width: 899px) {
+            .settings-drawer { width: 78vw; max-width: none; }
+        }
+
+        .drawer-header {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 18px 20px 8px;
+        }
+        .back-chevron {
+            width: 36px; height: 36px;
+            border-radius: 50%;
+            background: rgba(255,255,255,0.08);
+            border: 1px solid rgba(255,255,255,0.14);
+            color: #f5f5f7;
+            font-size: 22px;
+            line-height: 1;
+            cursor: pointer;
+            display: inline-flex; align-items: center; justify-content: center;
+            transition: background 150ms ease;
+        }
+        .back-chevron:hover { background: rgba(255,255,255,0.16); }
+        .back-chevron:focus-visible { outline: 3px solid #1a73e8; outline-offset: 2px; }
+
+        .drawer-now-playing {
+            min-width: 0;
+            flex: 1;
+        }
+        .drawer-now-playing .kicker {
+            font-size: 11px;
+            font-weight: 600;
+            letter-spacing: 1.2px;
+            color: rgba(245,245,247,0.55);
+            text-transform: uppercase;
+            margin-bottom: 2px;
+        }
+        .drawer-now-playing .title {
+            font-size: 22px;
+            font-weight: 500;
+            line-height: 1.2;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .drawer-screen-title {
+            font-size: 15px;
+            font-weight: 500;
+            color: rgba(245,245,247,0.85);
+            padding: 6px 24px 14px;
+        }
+
+        .drawer-body {
+            flex: 1;
+            overflow-y: auto;
+            padding: 8px 16px 24px;
+        }
+
+        /* Settings row — TV-style: label + value + chevron, full-width tap target */
+        .row {
+            position: relative;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            min-height: var(--row-h);
+            padding: 10px 14px;
+            margin: 4px 0;
+            background: rgba(255,255,255,0.06);
+            border: 1px solid transparent;
+            border-radius: 10px;
+            color: #f5f5f7;
+            cursor: pointer;
+            transition: background 150ms ease, border-color 150ms ease, transform 150ms ease;
+            text-align: left;
+            width: 100%;
+            font-family: inherit;
+            font-size: 15px;
+        }
+        .row:hover, .row:focus-visible {
+            background: rgba(255,255,255,0.12);
+            border-color: rgba(255,255,255,0.22);
+            outline: none;
+        }
+        .row:focus-visible {
+            border-color: #1a73e8;
+            box-shadow: 0 0 0 3px rgba(26, 115, 232, 0.35);
+        }
+        .row .row-label {
+            flex: 1;
+            font-weight: 500;
+        }
+        .row .row-value {
+            font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+            font-size: 13px;
+            color: rgba(245,245,247,0.65);
+            max-width: 50%;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        .row .row-chevron {
+            color: rgba(245,245,247,0.45);
+            font-size: 16px;
+            flex: 0 0 auto;
+        }
+        .row.row-toggle .row-value {
+            font-family: inherit;
+            font-size: 13px;
+        }
+        .row.row-destructive {
+            border-color: rgba(255, 88, 88, 0.32);
+        }
+        .row.row-destructive .row-label { color: #ff8a80; }
+        .row.row-destructive:hover {
+            background: rgba(217, 48, 37, 0.18);
+            border-color: rgba(255, 88, 88, 0.6);
+        }
+
+        /* Picker option row (sub-page) */
+        .opt {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            min-height: var(--row-h-compact);
+            padding: 10px 14px;
+            margin: 4px 0;
+            background: rgba(255,255,255,0.06);
+            border: 1px solid transparent;
+            border-radius: 10px;
+            color: #f5f5f7;
+            cursor: pointer;
+            font-family: inherit;
+            font-size: 14px;
+            text-align: left;
+            width: 100%;
+        }
+        .opt:hover, .opt:focus-visible {
+            background: rgba(255,255,255,0.12);
+            border-color: rgba(255,255,255,0.22);
+            outline: none;
+        }
+        .opt:focus-visible {
+            border-color: #1a73e8;
+            box-shadow: 0 0 0 3px rgba(26, 115, 232, 0.35);
+        }
+        .opt .check {
+            color: #4a90ff;
+            font-size: 16px;
+            visibility: hidden;
+        }
+        .opt.selected .check { visibility: visible; }
+
+        .section-divider {
+            height: 1px;
+            background: rgba(255,255,255,0.08);
+            margin: 16px 6px;
+        }
+
+        .matches-info {
+            font-size: 11px;
+            color: rgba(245,245,247,0.45);
+            padding: 4px 14px 0;
+        }
+
+        /* HUD — diagnostic overlay (Advanced ▸ HUD) */
+        .hud {
+            position: absolute;
+            left: 18px;
+            bottom: 86px;          /* sit above native video controls */
+            z-index: 25;
+            background: rgba(0, 0, 0, 0.78);
+            border: 1px solid rgba(255, 255, 255, 0.18);
+            border-radius: 8px;
+            padding: 10px 12px;
+            font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
+            color: rgba(255, 255, 255, 0.92);
+            min-width: 240px;
+            max-width: 360px;
+            backdrop-filter: blur(6px);
+            -webkit-backdrop-filter: blur(6px);
+            pointer-events: none;
+        }
+        .hud.hidden { display: none; }
+        .hud .hud-title {
+            font: 600 11px/1 -apple-system, BlinkMacSystemFont, sans-serif;
+            letter-spacing: 1px;
+            color: rgba(255, 255, 255, 0.55);
+            margin-bottom: 6px;
+            text-transform: uppercase;
+        }
+        .hud .hud-row {
+            display: flex;
+            justify-content: space-between;
+            gap: 12px;
+        }
+        .hud .hud-row .k { color: rgba(255, 255, 255, 0.55); }
+        .hud .hud-row .v { color: #fff; }
+        .hud .hud-row .v.warn  { color: #ffb74d; }
+        .hud .hud-row .v.error { color: #ff8a80; }
+        .hud .hud-row .v.good  { color: #80e27e; }
+
+        /* keyboard hint shown briefly on first load */
+        .keys-hint {
+            position: absolute;
+            bottom: 80px; left: 50%;
+            transform: translateX(-50%);
+            background: rgba(0,0,0,0.78);
+            color: #fff;
+            padding: 8px 14px;
+            border-radius: 8px;
+            font-size: 11px;
+            z-index: 40;
+            opacity: 0;
+            pointer-events: none;
+            transition: opacity 250ms ease;
+        }
+        .keys-hint.show { opacity: 1; }
+        .keys-hint kbd {
+            background: rgba(255,255,255,0.15);
+            border-radius: 3px;
+            padding: 1px 5px;
+            font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+            font-size: 10px;
+            margin: 0 2px;
+        }
+    </style>
+</head>
+<!-- Reuse the mosaic-10ft sidebar entry: play-10ft has no separate nav slot,
+     so it inherits the highlight from its parent home screen. -->
+<body data-ism-active-page="mosaic-10ft">
+
+<div class="ism-content-fullwidth">
+    <div class="play-stage" id="playStage">
+        <video id="player" controls autoplay playsinline></video>
+
+        <div class="center-overlay" id="centerOverlay">
+            <div class="pill" id="centerPill">Loading…</div>
+        </div>
+
+        <div class="hud hidden" id="hud" aria-hidden="true">
+            <div class="hud-title">HUD</div>
+            <div class="hud-row"><span class="k">Engine</span><span class="v" id="hudEngine">—</span></div>
+            <div class="hud-row"><span class="k">State</span><span class="v" id="hudState">—</span></div>
+            <div class="hud-row"><span class="k">Resolution</span><span class="v" id="hudRes">—</span></div>
+            <div class="hud-row"><span class="k">Bitrate</span><span class="v" id="hudBitrate">—</span></div>
+            <div class="hud-row"><span class="k">Buffer</span><span class="v" id="hudBuffer">—</span></div>
+            <div class="hud-row"><span class="k">Live offset</span><span class="v" id="hudLiveOffset">—</span></div>
+            <div class="hud-row"><span class="k">Dropped frames</span><span class="v" id="hudDropped">—</span></div>
+            <div class="hud-row"><span class="k">Stalls</span><span class="v" id="hudStalls">0</span></div>
+            <div class="hud-row"><span class="k">player_id</span><span class="v" id="hudPlayerId">—</span></div>
+            <div class="hud-row"><span class="k">play_id</span><span class="v" id="hudPlayId">—</span></div>
+        </div>
+
+        <div class="play-overlay-top" id="topBar">
+            <button id="backBtn" class="icon-btn back" title="Back (Esc)" aria-label="Back to Mosaic">‹</button>
+            <div class="title-block">
+                <h1 id="streamTitle">Loading…</h1>
+                <span class="sub" id="streamSub"></span>
+            </div>
+            <div class="action-block">
+                <button id="reloadBtn"    class="icon-btn"           title="Reload manifest (R)"      aria-label="Reload manifest">🔄</button>
+                <button id="restartBtn"   class="icon-btn"           title="Restart player (Shift+R)" aria-label="Restart player">↻</button>
+                <button id="emergencyBtn" class="icon-btn emergency" title="911 — full reset (E)"     aria-label="911 emergency reset">🚨 911</button>
+                <button id="settingsBtn"  class="icon-btn"           title="Settings (S)"             aria-label="Open settings" aria-haspopup="dialog">⚙︎</button>
+            </div>
+        </div>
+
+        <div class="keys-hint" id="keysHint" aria-hidden="true">
+            <kbd>Space</kbd> play/pause &nbsp; <kbd>←</kbd>/<kbd>→</kbd> seek 10s &nbsp;
+            <kbd>R</kbd> reload &nbsp; <kbd>⇧R</kbd> restart &nbsp; <kbd>E</kbd> 911 &nbsp;
+            <kbd>S</kbd> settings &nbsp; <kbd>F</kbd> fullscreen &nbsp; <kbd>Esc</kbd> back
+        </div>
+    </div>
+</div>
+
+<!-- Slide-in TV-style settings drawer -->
+<div id="settingsBackdrop" class="settings-backdrop" hidden></div>
+<aside id="settingsDrawer" class="settings-drawer" aria-hidden="true" role="dialog" aria-modal="true" aria-label="Settings">
+    <header class="drawer-header">
+        <button id="backChevron" class="back-chevron" aria-label="Back">‹</button>
+        <div class="drawer-now-playing">
+            <div class="kicker">NOW PLAYING</div>
+            <div class="title" id="drawerNowTitle">—</div>
+        </div>
+    </header>
+    <div class="drawer-screen-title" id="drawerScreenTitle">Settings</div>
+    <div class="drawer-body" id="drawerBody"></div>
+</aside>
+
+<script>
+    'use strict';
+
+    // ───── State ─────
+
+    const Q = new URLSearchParams(location.search);
+    let currentUrl = (function () {
+        const raw = Q.get('url');
+        if (!raw) return null;
+        // Validate at the boundary — only http(s) and same-origin paths are
+        // ever fed to the player. See isSafePlaybackUrl for rationale.
+        return isSafePlaybackUrl(raw) ? raw : null;
+    })();
+    // player_id = persistent for the device/browser session (routes to a
+    // dedicated go-proxy port). Does NOT change on Reload or Restart. URL
+    // wins (caller supplied), then sessionStorage (back-nav from mosaic
+    // returns to the same id), then mint once and persist.
+    let currentPlayerId = (function () {
+        const fromUrl = Q.get('player_id');
+        if (fromUrl) {
+            try { sessionStorage.setItem('ism10ftPlayerId', fromUrl); } catch (_) {}
+            return fromUrl;
+        }
+        try {
+            const stored = sessionStorage.getItem('ism10ftPlayerId');
+            if (stored) return stored;
+        } catch (_) {}
+        const minted = createPlayerId();
+        try { sessionStorage.setItem('ism10ftPlayerId', minted); } catch (_) {}
+        return minted;
+    })();
+    // play_id = fresh per play (each new manifest load). Re-minted on Restart
+    // and on initial boot; left alone on a soft Reload.
+    let currentPlayId = '';
+    function getCurrentPlayId() { return currentPlayId; }
+    function mintPlayId() {
+        return (window.PlayId && window.PlayId.mint) ? window.PlayId.mint() : Math.random().toString(36).slice(2, 14);
+    }
+    let currentItem = null;
+
+    let ALL_CONTENT = [];
+
+    // Filter state — initial from query / localStorage, edited in drawer
+    const filterState = {
+        protocol: 'hls',
+        codec: 'h264',
+        segment: localStorage.getItem('ismSelectedSegment') || '6s',
+        maxRes: 'all',
+    };
+
+    // Advanced settings (persisted)
+    const advancedState = {
+        autoRecovery: localStorage.getItem('ism10ftAutoRecovery') !== 'false',   // default ON
+        allow4k:      localStorage.getItem('ism10ftAllow4k') === 'true',          // default OFF
+        engine:       localStorage.getItem('ism10ftEngine') || 'auto',            // auto | hlsjs | shaka | native
+        muteAudio:    localStorage.getItem('ism10ftMuteAudio') === 'true',        // default OFF — start unmuted
+        liveOffsetS:  parseInt(localStorage.getItem('ism10ftLiveOffsetS') || '0', 10) || 0,  // 0 = use HOLD-BACK
+        rotatePlayIdS: parseInt(localStorage.getItem('ism10ftRotatePlayIdS') || '0', 10) || 0, // 0 = off
+        hud:          localStorage.getItem('ism10ftHud') === 'true',              // default OFF
+    };
+
+    let playIdRotationTimer = null;
+    let hudTimer = null;
+    let stallCount = 0;
+    let activeEngine = '—';
+
+    // ─── Metrics state (mirrors testing-session.html shape) ───
+    let currentSessionId = null;
+    let metricsHeartbeatTimer = null;
+    let metricsTaskTail = Promise.resolve();
+    let videoFirstFrameAtMs = 0;       // performance.now() at the moment first frame rendered
+    let firstFrameSentForLoad = false;
+    let stallStartedAtMs = 0;
+    let stallTotalMs = 0;
+    let lastStallDurationMs = 0;
+    let playerRestartCount = 0;
+    let profileShiftCount = 0;         // cumulative bitrate-rendition switches (matches testing-session.html)
+    let currentRenditionMbps = 0;
+    let playerEstimatedMbps = 0;
+    let videoStartedAtMs = 0;          // performance.now() when loadStream began (for video_start_time)
+
+    let shakaP = null;
+    let hlsP = null;
+    let loadStreamGen = 0;             // monotonic counter — guards loadStream() against stale overlapping calls
+
+    // Drawer screen stack: [{kind: 'main'|'picker', ...}]
+    let drawerOpen = false;
+    let drawerStack = [];
+    let drawerOpenedBy = null;
+
+    // ───── Boot ─────
+
+    window.addEventListener('DOMContentLoaded', async () => {
+        wireKeyboard();
+        wireAutoHide();
+        wireActions();
+        wireDrawer();
+        flashKeysHint();
+
+        await fetchContent();
+        resolveCurrentItem();
+
+        if (!currentUrl) {
+            const fallback = pickInitialFromLocalStorage();
+            if (fallback) {
+                currentItem = fallback;
+                currentUrl = buildProxiedUrl(fallback);
+            }
+        }
+
+        // Mint the initial play_id once on cold boot. Reload keeps it,
+        // Restart re-mints, 911 drops everything via location.replace.
+        currentPlayId = mintPlayId();
+
+        if (currentUrl) {
+            loadStream(currentUrl);
+            // Resolve the go-proxy session_id once the first manifest fetch
+            // (carrying our player_id) has reached the proxy, then start the
+            // 1Hz metrics heartbeat. resolveSessionId polls /api/sessions
+            // until the session appears.
+            resolveSessionId().then(sid => {
+                if (!sid) {
+                    console.warn('Could not resolve go-proxy session for player_id', currentPlayerId);
+                    return;
+                }
+                sendSessionMetrics('state_change');
+                startMetricsHeartbeat();
+            });
+        } else {
+            showError('No stream selected — open Settings to pick one.');
+        }
+
+        applyRotatePlayIdTimer();
+        applyHud();
+
+        window.addEventListener('beforeunload', () => {
+            stopMetricsHeartbeat();
+            destroyPlayers();
+        });
+
+        // bfcache: when the user back-navigates from mosaic-10ft and this
+        // page is restored from cache, DOMContentLoaded does NOT re-fire.
+        // Resume the heartbeat so metrics keep flowing without forcing the
+        // user to reload.
+        window.addEventListener('pageshow', (event) => {
+            if (event.persisted && currentSessionId && !metricsHeartbeatTimer) {
+                startMetricsHeartbeat();
+            }
+        });
+        window.addEventListener('pagehide', () => {
+            stopMetricsHeartbeat();
+        });
+    });
+
+    // ───── Stream load ─────
+
+    async function loadStream(url) {
+        // Belt-and-suspenders: the boundary validator at boot already
+        // filters the `url` query param, but loadStream is also called
+        // internally with derived URLs (Restart, drawer Apply, rotate).
+        // Re-check so any future caller can't bypass the gate.
+        if (!isSafePlaybackUrl(url)) {
+            showError('Refused unsafe stream URL');
+            return;
+        }
+        // Guard against overlapping calls (rapid Reload / Restart / drawer-Apply)
+        // from landing two engines on the same <video>.
+        const gen = ++loadStreamGen;
+        await destroyPlayers();
+        if (gen !== loadStreamGen) return;
+        currentUrl = url;
+        const video = document.getElementById('player');
+        video.muted = !!advancedState.muteAudio;
+        video.volume = advancedState.muteAudio ? 0 : 1.0;
+        showLoading('Loading…');
+
+        // Reset per-load metrics state. profileShiftCount resets per-load to
+        // match testing-session.html:markPlaybackStart (line 1140) so
+        // ABR-thrash counts are comparable across surfaces.
+        videoStartedAtMs = performance.now();
+        videoFirstFrameAtMs = 0;
+        firstFrameSentForLoad = false;
+        stallStartedAtMs = 0;
+        lastStallDurationMs = 0;
+        profileShiftCount = 0;
+
+        const isDash = url.includes('.mpd');
+        const engine = pickEngine(isDash);
+        activeEngine = engine || '—';
+
+        try {
+            if (engine === 'shaka') {
+                if (!shaka.Player.isBrowserSupported()) throw new Error('Shaka unsupported');
+                shaka.polyfill.installAll();
+                const player = new shaka.Player(video);
+                shakaP = player;
+                // Stamp every Shaka request with the current play_id (manifests,
+                // segments, init segments). Identical pattern to testing-session.html.
+                if (window.PlayId) window.PlayId.installShaka(player, getCurrentPlayId);
+                if (!advancedState.allow4k) {
+                    player.configure({ abr: { restrictions: { maxHeight: 1080 } } });
+                }
+                if (advancedState.liveOffsetS > 0) {
+                    player.configure({ streaming: { bufferBehind: Math.max(30, advancedState.liveOffsetS * 3) } });
+                }
+                player.addEventListener('error', (ev) => {
+                    onEngineError('shaka', ev.detail);
+                    const http = extractShakaHttpFailure(ev.detail);
+                    sendSessionMetrics('error', {
+                        player_metrics_error: `shaka ${ev.detail.code} ${ev.detail.message || ''}`.trim(),
+                        player_metrics_error_code: ev.detail.code,
+                        player_metrics_http_status: http.status,
+                        player_metrics_error_url: http.url,
+                    });
+                });
+                player.addEventListener('adaptation', () => {
+                    try {
+                        const stats = player.getStats();
+                        if (stats) {
+                            const prev = currentRenditionMbps;
+                            if (Number.isFinite(stats.streamBandwidth) && stats.streamBandwidth > 0) {
+                                currentRenditionMbps = stats.streamBandwidth / 1_000_000;
+                            }
+                            if (Number.isFinite(stats.estimatedBandwidth) && stats.estimatedBandwidth > 0) {
+                                playerEstimatedMbps = stats.estimatedBandwidth / 1_000_000;
+                            }
+                            if (Math.abs(currentRenditionMbps - prev) > 0.01) {
+                                profileShiftCount++;
+                                sendSessionMetrics('video_bitrate_change');
+                            }
+                        }
+                    } catch (_) {}
+                });
+                await player.load(url);
+            } else if (engine === 'hlsjs') {
+                const isLL = url.includes('master.m3u8') && !url.includes('master_2s') && !url.includes('master_6s');
+                const hlsCfg = {
+                    enableWorker: true,
+                    lowLatencyMode: isLL,
+                    capLevelToPlayerSize: !advancedState.allow4k,
+                };
+                if (advancedState.liveOffsetS > 0) hlsCfg.liveSyncDuration = advancedState.liveOffsetS;
+                // installHls patches the loader BEFORE `new Hls()` so manifest +
+                // segment fetches all carry play_id. Order matters here.
+                if (window.PlayId) window.PlayId.installHls(hlsCfg, getCurrentPlayId);
+                const hls = new Hls(hlsCfg);
+                hls.on(Hls.Events.LEVEL_SWITCHED, (_evt, data) => {
+                    try {
+                        const lvl = hls.levels && hls.levels[data.level];
+                        if (lvl && Number.isFinite(lvl.bitrate) && lvl.bitrate > 0) {
+                            const prev = currentRenditionMbps;
+                            currentRenditionMbps = lvl.bitrate / 1_000_000;
+                            if (Math.abs(currentRenditionMbps - prev) > 0.01) {
+                                profileShiftCount++;
+                                sendSessionMetrics('video_bitrate_change');
+                            }
+                        }
+                    } catch (_) {}
+                });
+                hls.on(Hls.Events.FRAG_LOADED, (_evt, data) => {
+                    if (data && data.frag && Number.isFinite(data.frag.stats?.bwEstimate) && data.frag.stats.bwEstimate > 0) {
+                        playerEstimatedMbps = data.frag.stats.bwEstimate / 1_000_000;
+                    }
+                });
+                hlsP = hls;
+                hls.on(Hls.Events.ERROR, (_e, data) => {
+                    if (!data.fatal) return;
+                    const http = extractHlsHttpFailure(data);
+                    sendSessionMetrics('error', {
+                        player_metrics_error: `hls ${data.type} ${data.details || ''}`.trim(),
+                        player_metrics_error_code: data.type,
+                        player_metrics_http_status: http.status,
+                        player_metrics_error_url: http.url,
+                    });
+                    if (advancedState.autoRecovery) {
+                        if (data.type === Hls.ErrorTypes.NETWORK_ERROR) { hls.startLoad(); return; }
+                        if (data.type === Hls.ErrorTypes.MEDIA_ERROR)   { hls.recoverMediaError(); return; }
+                    }
+                    onEngineError('hls.js', data);
+                });
+                hls.loadSource(url);
+                hls.attachMedia(video);
+            } else if (engine === 'native') {
+                // Native engine can't be intercepted post-src — stamp play_id once
+                // upfront. Subsequent fetches happen inside the browser media stack.
+                const stamped = (window.PlayId && window.PlayId.apply)
+                    ? window.PlayId.apply(url, currentPlayId)
+                    : url;
+                video.src = stamped;
+            } else {
+                throw new Error('No supported playback engine');
+            }
+            hideLoading();
+            try { await video.play(); } catch (_) { /* autoplay policy */ }
+        } catch (err) {
+            console.error('loadStream failed', err);
+            showError(`Failed to load: ${err.message}`);
+        }
+
+        attachStallHooks(video);
+    }
+
+    function pickEngine(isDash) {
+        if (advancedState.engine === 'shaka' && shaka.Player.isBrowserSupported()) return 'shaka';
+        if (advancedState.engine === 'hlsjs' && window.Hls && Hls.isSupported()) return 'hlsjs';
+        if (advancedState.engine === 'native') {
+            const v = document.getElementById('player');
+            if (v.canPlayType('application/vnd.apple.mpegurl') || v.canPlayType('application/dash+xml')) return 'native';
+        }
+        // Auto:
+        if (isDash && shaka.Player.isBrowserSupported()) return 'shaka';
+        if (!isDash && window.Hls && Hls.isSupported()) return 'hlsjs';
+        const v = document.getElementById('player');
+        if (v.canPlayType('application/vnd.apple.mpegurl')) return 'native';
+        return null;
+    }
+
+    function onEngineError(engine, detail) {
+        console.error(`${engine} error`, detail);
+        showError(`${engine} error — try Reload or 911`);
+    }
+
+    function attachStallHooks(video) {
+        if (video.__stallHooked) return;
+        video.__stallHooked = true;
+        video.addEventListener('waiting', () => {
+            stallCount++;
+            stallStartedAtMs = performance.now();
+            sendSessionMetrics('stall_start');
+            showLoading('Buffering…');
+        });
+        video.addEventListener('playing', () => {
+            // First-frame edge: record and emit once per load
+            if (!firstFrameSentForLoad) {
+                videoFirstFrameAtMs = performance.now();
+                firstFrameSentForLoad = true;
+                sendSessionMetrics('video_first_frame');
+                sendSessionMetrics('video_start_time');
+            }
+            // Stall-end edge
+            if (stallStartedAtMs > 0) {
+                lastStallDurationMs = Math.max(0, performance.now() - stallStartedAtMs);
+                stallTotalMs += lastStallDurationMs;
+                stallStartedAtMs = 0;
+                sendSessionMetrics('stall_end');
+            } else {
+                sendSessionMetrics('state_change');
+            }
+            hideLoading();
+        });
+        video.addEventListener('pause', () => sendSessionMetrics('state_change'));
+        video.addEventListener('canplay', () => hideLoading());
+        video.addEventListener('error', () => {
+            const err = video.error;
+            sendSessionMetrics('error', {
+                player_metrics_error: err ? `media-error code=${err.code}` : 'media-error',
+                player_metrics_error_code: err ? Number(err.code) : null,
+            });
+        });
+    }
+
+    async function destroyPlayers() {
+        if (shakaP) { try { await shakaP.destroy(); } catch (_) {} shakaP = null; }
+        if (hlsP)   { try { hlsP.destroy(); } catch (_) {} hlsP = null; }
+        const v = document.getElementById('player');
+        if (v) {
+            try { v.pause(); } catch (_) {}
+            v.removeAttribute('src');
+            v.load && v.load();
+        }
+    }
+
+    // ───── Action buttons (Reload / Restart / 911) ─────
+
+    function wireActions() {
+        document.getElementById('reloadBtn').addEventListener('click', doReload);
+        document.getElementById('restartBtn').addEventListener('click', doRestart);
+        document.getElementById('emergencyBtn').addEventListener('click', do911);
+        document.getElementById('backBtn').addEventListener('click', goBack);
+    }
+
+    function goBack() {
+        if (document.referrer && /\/dashboard\/mosaic-10ft\.html/.test(document.referrer) && history.length > 1) {
+            history.back();
+        } else {
+            location.href = '/dashboard/mosaic-10ft.html';
+        }
+    }
+
+    // Soft: re-fetch the manifest (engine stays the same, position resets to live).
+    async function doReload() {
+        if (!currentUrl) return;
+        flashStatus('Reloading manifest…');
+        await loadStream(currentUrl);
+    }
+
+    // Medium: tear down the engine and re-init with a fresh play_id (so analytics
+    // correlate this as a new play session). player_id is preserved — that's
+    // device-scoped and tied to the go-proxy port. 911 is the button for a
+    // fresh player_id.
+    async function doRestart() {
+        if (!currentUrl) return;
+        flashStatus('Restarting player…');
+        playerRestartCount++;
+        sendSessionMetrics('restart', {
+            player_restarts: playerRestartCount,
+            player_metrics_restart_reason: 'manual',
+        });
+        currentPlayId = mintPlayId();
+        await loadStream(currentUrl);
+    }
+
+    // 911: nuclear option — destroy the player, drop the persisted player_id
+    // so go-proxy gets a fresh session, hard-reload the page.
+    function do911() {
+        flashStatus('911 — full reset…');
+        try { destroyPlayers(); } catch (_) {}
+        try { sessionStorage.removeItem('ism10ftPlayerId'); } catch (_) {}
+        const u = new URL(location.href);
+        u.searchParams.delete('player_id');
+        location.replace(u.toString());
+    }
+
+    function flashStatus(msg) {
+        showLoading(msg);
+        setTimeout(hideLoading, 1200);
+    }
+
+    // ───── Content discovery ─────
+
+    async function fetchContent() {
+        try {
+            const r = await fetch('/api/content');
+            if (!r.ok) throw new Error('HTTP ' + r.status);
+            const items = await r.json();
+            ALL_CONTENT = items.map(it => ({
+                name: it.name,
+                label: it.name
+                    .replace(/_/g, ' ')
+                    .replace(/\b\w/g, c => c.toUpperCase())
+                    .replace(/Hevc/g, 'HEVC')
+                    .replace(/Ts/g, 'TS')
+                    .replace(/Hw/g, 'HW')
+                    .replace(/Dash/g, 'DASH'),
+                has_dash: it.has_dash,
+                has_hls: it.has_hls,
+                max_resolution: it.max_resolution || null,
+                max_height: (typeof it.max_height === 'number') ? it.max_height : null,
+            }));
+        } catch (err) {
+            console.warn('fetchContent failed', err);
+        }
+    }
+
+    function resolveCurrentItem() {
+        if (!currentUrl) return;
+        const m = currentUrl.match(/\/go-live\/([^/]+)\/(master|manifest)(?:_(2s|6s|ll))?\.(m3u8|mpd)/);
+        if (!m) return;
+        const name = decodeURIComponent(m[1]);
+        const isDash = m[4] === 'mpd';
+        const segMatch = m[3];
+        const item = ALL_CONTENT.find(it => it.name === name);
+        if (item) {
+            currentItem = { ...item, type: isDash ? 'dash' : 'hls' };
+            filterState.protocol = isDash ? 'dash' : 'hls';
+            if (segMatch) filterState.segment = segMatch;
+            const lname = name.toLowerCase();
+            if (lname.includes('av1')) filterState.codec = 'av1';
+            else if (lname.includes('hevc')) filterState.codec = 'hevc';
+            else if (lname.includes('h264')) filterState.codec = 'h264';
+            updateTitleBar();
+        }
+    }
+
+    function pickInitialFromLocalStorage() {
+        const sel = (localStorage.getItem('ismSelectedContent') || '').trim();
+        if (!sel) return null;
+        const item = ALL_CONTENT.find(it => it.name === sel);
+        if (!item) return null;
+        return { ...item, type: item.has_hls ? 'hls' : 'dash' };
+    }
+
+    function updateTitleBar() {
+        if (!currentItem) return;
+        document.getElementById('streamTitle').textContent = currentItem.label || currentItem.name;
+        document.getElementById('streamSub').textContent = `${currentItem.type.toUpperCase()} · ${filterState.segment} · proxy`;
+        document.getElementById('drawerNowTitle').textContent = currentItem.label || currentItem.name;
+    }
+
+    // ───── Filters → matching streams ─────
+
+    function applyFilters() {
+        const filtered = ALL_CONTENT.filter(item => {
+            if (filterState.codec === 'h264' && !item.name.includes('h264')) return false;
+            if (filterState.codec === 'hevc' && !item.name.includes('hevc')) return false;
+            if (filterState.codec === 'av1'  && !item.name.includes('av1'))  return false;
+            if (filterState.protocol === 'dash' && !item.has_dash) return false;
+            if (filterState.protocol === 'hls'  && !item.has_hls)  return false;
+            if (filterState.protocol === 'both' && (!item.has_dash || !item.has_hls)) return false;
+            if (filterState.maxRes !== 'all') {
+                const h = item.max_height || parseInt(item.max_resolution || '', 10);
+                if (!h || h < parseInt(filterState.maxRes, 10)) return false;
+            }
+            return true;
+        });
+        const expanded = [];
+        for (const item of filtered) {
+            if (item.has_dash && (filterState.protocol === 'all' || filterState.protocol === 'dash' || filterState.protocol === 'both')) {
+                expanded.push({ ...item, type: 'dash' });
+            }
+            if (item.has_hls && (filterState.protocol === 'all' || filterState.protocol === 'hls' || filterState.protocol === 'both')) {
+                expanded.push({ ...item, type: 'hls' });
+            }
+        }
+        expanded.sort((a, b) => a.name.localeCompare(b.name) || a.type.localeCompare(b.type));
+        return expanded;
+    }
+
+    // ───── URL build (go-proxy routed) ─────
+
+    function streamUrlFor(item) {
+        const seg = filterState.segment;
+        if (item.type === 'dash') {
+            if (seg === '2s') return `/go-live/${item.name}/manifest_2s.mpd`;
+            if (seg === '6s') return `/go-live/${item.name}/manifest_6s.mpd`;
+            return `/go-live/${item.name}/manifest.mpd`;
+        }
+        if (seg === '2s') return `/go-live/${item.name}/master_2s.m3u8`;
+        if (seg === '6s') return `/go-live/${item.name}/master_6s.m3u8`;
+        return `/go-live/${item.name}/master.m3u8`;
+    }
+
+    function buildProxiedUrl(item) {
+        const url = streamUrlFor(item);
+        const base = normalizeTestingBase(url);
+        const sep = base.includes('?') ? '&' : '?';
+        return `${base}${sep}player_id=${currentPlayerId}`;
+    }
+
+    function normalizeTestingBase(url) {
+        const parsed = new URL(url, window.location.origin);
+        const uiPort = parsed.port || window.location.port || '30000';
+        parsed.port = uiPort.slice(0, -3) + '081';
+        return parsed.toString();
+    }
+
+    function createPlayerId() {
+        return Math.random().toString(36).slice(2, 10);
+    }
+
+    function updateUrlBar() {
+        const newSearch = new URLSearchParams();
+        newSearch.set('player_id', currentPlayerId);
+        if (currentUrl) newSearch.set('url', currentUrl);
+        history.replaceState(null, '', `${location.pathname}?${newSearch.toString()}`);
+    }
+
+    // ───── Switch to a new clip in place ─────
+
+    function playItem(item) {
+        currentItem = item;
+        currentUrl = buildProxiedUrl(item);
+        updateTitleBar();
+        persistSelection(item);
+        updateUrlBar();
+        loadStream(currentUrl);
+    }
+
+    function persistSelection(item) {
+        const fullName = item.name;
+        localStorage.setItem('ismSelectedContent', fullName);
+        localStorage.setItem('ismSelectedContentFull', fullName);
+        const baseName = fullName
+            .replace(/_(h264|hevc|av1|dash|ts|hw)$/i, '')
+            .replace(/_\d{8}_\d{6}$/i, '');
+        localStorage.setItem('ismSelectedContentBase', baseName);
+        localStorage.setItem('ismSelectedUrl', streamUrlFor(item));
+        localStorage.setItem('ismSelectedSegment', filterState.segment);
+        if (window.ISMNav && typeof window.ISMNav.updateSelectedContentBadge === 'function') {
+            window.ISMNav.updateSelectedContentBadge();
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Settings drawer — TV-style nested menus
+    // ─────────────────────────────────────────────────────────────────────
+
+    function wireDrawer() {
+        document.getElementById('settingsBtn').addEventListener('click', openDrawer);
+        document.getElementById('backChevron').addEventListener('click', drawerBack);
+        document.getElementById('settingsBackdrop').addEventListener('click', closeDrawer);
+
+        document.getElementById('settingsDrawer').addEventListener('keydown', (e) => {
+            if (!drawerOpen) return;       // drawer DOM stays mounted; don't trap when hidden
+            if (e.key !== 'Tab') return;
+            const focusables = focusableInDrawer();
+            if (focusables.length === 0) return;
+            const first = focusables[0], last = focusables[focusables.length - 1];
+            if (e.shiftKey && document.activeElement === first) {
+                e.preventDefault(); last.focus();
+            } else if (!e.shiftKey && document.activeElement === last) {
+                e.preventDefault(); first.focus();
+            }
+        });
+    }
+
+    function focusableInDrawer() {
+        const root = document.getElementById('settingsDrawer');
+        return [...root.querySelectorAll('button, [tabindex]:not([tabindex="-1"])')]
+            .filter(el => !el.disabled && el.offsetParent !== null);
+    }
+
+    function openDrawer() {
+        if (drawerOpen) return;
+        drawerOpen = true;
+        drawerOpenedBy = document.getElementById('settingsBtn');
+        drawerStack = [{ kind: 'main' }];
+        renderDrawer();
+        const drawer = document.getElementById('settingsDrawer');
+        const backdrop = document.getElementById('settingsBackdrop');
+        backdrop.hidden = false;
+        // eslint-disable-next-line no-unused-expressions
+        backdrop.offsetWidth;
+        backdrop.classList.add('open');
+        drawer.classList.add('open');
+        drawer.setAttribute('aria-hidden', 'false');
+        document.body.classList.add('drawer-open');
+        showTopBar();
+        suspendAutoHide(true);
+        // Focus first row
+        setTimeout(() => {
+            const firstRow = drawer.querySelector('.row, .opt');
+            if (firstRow) firstRow.focus();
+        }, 60);
+    }
+
+    function closeDrawer() {
+        if (!drawerOpen) return;
+        drawerOpen = false;
+        drawerStack = [];
+        const drawer = document.getElementById('settingsDrawer');
+        const backdrop = document.getElementById('settingsBackdrop');
+        drawer.classList.remove('open');
+        drawer.setAttribute('aria-hidden', 'true');
+        backdrop.classList.remove('open');
+        document.body.classList.remove('drawer-open');
+        setTimeout(() => { if (!drawerOpen) backdrop.hidden = true; }, 260);
+        if (drawerOpenedBy && typeof drawerOpenedBy.focus === 'function') drawerOpenedBy.focus();
+        suspendAutoHide(false);
+        kickAutoHide();
+    }
+
+    // Single Back semantics: pop sub-page → main → close
+    function drawerBack() {
+        if (drawerStack.length > 1) {
+            drawerStack.pop();
+            renderDrawer();
+            const drawer = document.getElementById('settingsDrawer');
+            setTimeout(() => {
+                const firstRow = drawer.querySelector('.row, .opt');
+                if (firstRow) firstRow.focus();
+            }, 30);
+        } else {
+            closeDrawer();
+        }
+    }
+
+    function pushScreen(screen) {
+        drawerStack.push(screen);
+        renderDrawer();
+        const drawer = document.getElementById('settingsDrawer');
+        setTimeout(() => {
+            const firstRow = drawer.querySelector('.row, .opt');
+            if (firstRow) firstRow.focus();
+        }, 30);
+    }
+
+    function currentScreen() {
+        return drawerStack[drawerStack.length - 1];
+    }
+
+    function renderDrawer() {
+        const body = document.getElementById('drawerBody');
+        const screenTitle = document.getElementById('drawerScreenTitle');
+        body.innerHTML = '';
+        const screen = currentScreen();
+        if (!screen) return;
+
+        if (screen.kind === 'main') {
+            screenTitle.textContent = 'Settings';
+            renderMainList(body);
+        } else if (screen.kind === 'picker') {
+            screenTitle.textContent = pickerTitle(screen.field);
+            renderPicker(body, screen.field);
+        } else if (screen.kind === 'streamPicker') {
+            screenTitle.textContent = 'Stream';
+            renderStreamPicker(body);
+        } else if (screen.kind === 'advanced') {
+            screenTitle.textContent = 'Advanced';
+            renderAdvanced(body);
+        } else if (screen.kind === 'enginePicker') {
+            screenTitle.textContent = 'Player engine';
+            renderEnginePicker(body);
+        } else if (screen.kind === 'liveOffsetPicker') {
+            screenTitle.textContent = 'Live offset';
+            renderLiveOffsetPicker(body);
+        } else if (screen.kind === 'rotatePicker') {
+            screenTitle.textContent = 'Rotate play_id';
+            renderRotatePicker(body);
+        }
+    }
+
+    function renderMainList(body) {
+        body.appendChild(makeRow({
+            label: 'Stream',
+            value: currentItem ? (currentItem.label || currentItem.name) : '—',
+            onSelect: () => pushScreen({ kind: 'streamPicker' }),
+        }));
+        body.appendChild(makeRow({
+            label: 'Protocol',
+            value: protocolLabel(filterState.protocol),
+            onSelect: () => pushScreen({ kind: 'picker', field: 'protocol' }),
+        }));
+        body.appendChild(makeRow({
+            label: 'Codec',
+            value: codecLabel(filterState.codec),
+            onSelect: () => pushScreen({ kind: 'picker', field: 'codec' }),
+        }));
+        body.appendChild(makeRow({
+            label: 'Segment length',
+            value: segmentLabel(filterState.segment),
+            onSelect: () => pushScreen({ kind: 'picker', field: 'segment' }),
+        }));
+        body.appendChild(makeRow({
+            label: 'Max resolution',
+            value: maxResLabel(filterState.maxRes),
+            onSelect: () => pushScreen({ kind: 'picker', field: 'maxRes' }),
+        }));
+
+        const div = document.createElement('div');
+        div.className = 'section-divider';
+        body.appendChild(div);
+
+        body.appendChild(makeRow({
+            label: 'Advanced',
+            value: '',
+            onSelect: () => pushScreen({ kind: 'advanced' }),
+        }));
+    }
+
+    function renderPicker(body, field) {
+        const opts = optionsFor(field);
+        const cur = filterState[field];
+        for (const opt of opts) {
+            body.appendChild(makeOption({
+                label: opt.label,
+                selected: opt.value === cur,
+                onSelect: () => {
+                    filterState[field] = opt.value;
+                    if (field === 'segment') localStorage.setItem('ismSelectedSegment', opt.value);
+                    drawerStack.pop();
+                    renderDrawer();
+                },
+            }));
+        }
+    }
+
+    function renderStreamPicker(body) {
+        const matches = applyFilters();
+        const info = document.createElement('div');
+        info.className = 'matches-info';
+        info.textContent = `${matches.length} match${matches.length === 1 ? '' : 'es'}`;
+        body.appendChild(info);
+        for (const item of matches) {
+            const isCurrent = currentItem && item.name === currentItem.name && item.type === currentItem.type;
+            body.appendChild(makeOption({
+                label: `${item.label} [${item.type.toUpperCase()}]`,
+                selected: isCurrent,
+                onSelect: () => {
+                    playItem(item);
+                    drawerStack.pop();
+                    renderDrawer();
+                },
+            }));
+        }
+    }
+
+    function renderAdvanced(body) {
+        body.appendChild(makeRow({
+            label: 'Mute audio',
+            value: advancedState.muteAudio ? 'On' : 'Off',
+            toggle: true,
+            onSelect: () => {
+                advancedState.muteAudio = !advancedState.muteAudio;
+                localStorage.setItem('ism10ftMuteAudio', String(advancedState.muteAudio));
+                const v = document.getElementById('player');
+                if (v) { v.muted = advancedState.muteAudio; v.volume = advancedState.muteAudio ? 0 : 1.0; }
+                renderDrawer();
+            },
+        }));
+        body.appendChild(makeRow({
+            label: 'Allow 4K',
+            value: advancedState.allow4k ? 'On' : 'Off',
+            toggle: true,
+            onSelect: () => {
+                advancedState.allow4k = !advancedState.allow4k;
+                localStorage.setItem('ism10ftAllow4k', String(advancedState.allow4k));
+                renderDrawer();
+                if (currentUrl) loadStream(currentUrl);
+            },
+        }));
+        body.appendChild(makeRow({
+            label: 'Auto-recovery',
+            value: advancedState.autoRecovery ? 'On' : 'Off',
+            toggle: true,
+            onSelect: () => {
+                advancedState.autoRecovery = !advancedState.autoRecovery;
+                localStorage.setItem('ism10ftAutoRecovery', String(advancedState.autoRecovery));
+                renderDrawer();
+            },
+        }));
+        body.appendChild(makeRow({
+            label: 'Live offset',
+            value: advancedState.liveOffsetS === 0 ? 'Manifest HOLD-BACK' : `${advancedState.liveOffsetS}s behind live`,
+            onSelect: () => pushScreen({ kind: 'liveOffsetPicker' }),
+        }));
+        body.appendChild(makeRow({
+            label: 'Rotate play_id',
+            value: rotatePlayIdLabel(advancedState.rotatePlayIdS),
+            onSelect: () => pushScreen({ kind: 'rotatePicker' }),
+        }));
+        body.appendChild(makeRow({
+            label: 'Player engine',
+            value: engineLabel(advancedState.engine),
+            onSelect: () => pushScreen({ kind: 'enginePicker' }),
+        }));
+        body.appendChild(makeRow({
+            label: 'HUD',
+            value: advancedState.hud ? 'On' : 'Off',
+            toggle: true,
+            onSelect: () => {
+                advancedState.hud = !advancedState.hud;
+                localStorage.setItem('ism10ftHud', String(advancedState.hud));
+                applyHud();
+                renderDrawer();
+            },
+        }));
+
+        const div = document.createElement('div');
+        div.className = 'section-divider';
+        body.appendChild(div);
+
+        body.appendChild(makeRow({
+            label: 'Reset all settings',
+            value: '',
+            destructive: true,
+            onSelect: () => {
+                if (!confirm('Reset all 10ft player settings to defaults? Your selected stream is unaffected.')) return;
+                ['ism10ftAutoRecovery','ism10ftAllow4k','ism10ftEngine',
+                 'ism10ftMuteAudio','ism10ftLiveOffsetS','ism10ftRotatePlayIdS']
+                    .forEach(k => localStorage.removeItem(k));
+                advancedState.autoRecovery = true;
+                advancedState.allow4k = false;
+                advancedState.engine = 'auto';
+                advancedState.muteAudio = false;
+                advancedState.liveOffsetS = 0;
+                advancedState.rotatePlayIdS = 0;
+                applyRotatePlayIdTimer();
+                renderDrawer();
+                if (currentUrl) loadStream(currentUrl);
+            },
+        }));
+    }
+
+    function renderLiveOffsetPicker(body) {
+        const opts = [
+            { v: 0,  label: 'Off — use manifest HOLD-BACK' },
+            { v: 2,  label: '2 seconds behind live' },
+            { v: 4,  label: '4 seconds behind live' },
+            { v: 6,  label: '6 seconds behind live' },
+            { v: 10, label: '10 seconds behind live' },
+            { v: 20, label: '20 seconds behind live' },
+            { v: 30, label: '30 seconds behind live' },
+            { v: 60, label: '60 seconds behind live' },
+        ];
+        for (const opt of opts) {
+            body.appendChild(makeOption({
+                label: opt.label,
+                selected: opt.v === advancedState.liveOffsetS,
+                onSelect: () => {
+                    advancedState.liveOffsetS = opt.v;
+                    localStorage.setItem('ism10ftLiveOffsetS', String(opt.v));
+                    drawerStack.pop();
+                    renderDrawer();
+                    // Re-init the engine to apply the new offset
+                    if (currentUrl) loadStream(currentUrl);
+                },
+            }));
+        }
+    }
+
+    function renderRotatePicker(body) {
+        const opts = [
+            { v: 0,     label: 'Off' },
+            { v: 300,   label: 'Every 5 minutes' },
+            { v: 1800,  label: 'Every 30 minutes' },
+            { v: 3600,  label: 'Every hour' },
+            { v: 21600, label: 'Every 6 hours' },
+        ];
+        for (const opt of opts) {
+            body.appendChild(makeOption({
+                label: opt.label,
+                selected: opt.v === advancedState.rotatePlayIdS,
+                onSelect: () => {
+                    advancedState.rotatePlayIdS = opt.v;
+                    localStorage.setItem('ism10ftRotatePlayIdS', String(opt.v));
+                    applyRotatePlayIdTimer();
+                    drawerStack.pop();
+                    renderDrawer();
+                },
+            }));
+        }
+    }
+
+    // ───── HUD ─────
+
+    function applyHud() {
+        const hud = document.getElementById('hud');
+        if (!hud) return;
+        if (advancedState.hud) {
+            hud.classList.remove('hidden');
+            hud.setAttribute('aria-hidden', 'false');
+            if (hudTimer) clearInterval(hudTimer);
+            hudTimer = setInterval(updateHud, 1000);
+            updateHud();
+        } else {
+            hud.classList.add('hidden');
+            hud.setAttribute('aria-hidden', 'true');
+            if (hudTimer) { clearInterval(hudTimer); hudTimer = null; }
+        }
+    }
+
+    function updateHud() {
+        const v = document.getElementById('player');
+        if (!v) return;
+
+        // Engine
+        document.getElementById('hudEngine').textContent =
+            activeEngine === 'hlsjs' ? 'HLS.js' :
+            activeEngine === 'shaka' ? 'Shaka' :
+            activeEngine === 'native' ? 'Native' : activeEngine;
+
+        // State
+        const stateEl = document.getElementById('hudState');
+        let state = 'idle';
+        let stateClass = '';
+        if (v.error) { state = 'error'; stateClass = 'error'; }
+        else if (v.paused) { state = 'paused'; }
+        else if (v.readyState < 3) { state = 'buffering'; stateClass = 'warn'; }
+        else { state = 'playing'; stateClass = 'good'; }
+        stateEl.textContent = state;
+        stateEl.className = 'v ' + stateClass;
+
+        // Resolution + bitrate (from active engine when available)
+        let resStr = `${v.videoWidth || 0}×${v.videoHeight || 0}`;
+        let bitrateStr = '—';
+        if (hlsP) {
+            const lvlIdx = (typeof hlsP.currentLevel === 'number' && hlsP.currentLevel >= 0)
+                ? hlsP.currentLevel : (hlsP.loadLevel || 0);
+            const lvl = hlsP.levels && hlsP.levels[lvlIdx];
+            if (lvl) {
+                resStr = `${lvl.width || v.videoWidth}×${lvl.height || v.videoHeight}`;
+                bitrateStr = formatBitrate(lvl.bitrate);
+            }
+        } else if (shakaP && typeof shakaP.getStats === 'function') {
+            try {
+                const stats = shakaP.getStats();
+                if (stats && stats.streamBandwidth) bitrateStr = formatBitrate(stats.streamBandwidth);
+                if (stats && stats.width && stats.height) resStr = `${stats.width}×${stats.height}`;
+            } catch (_) {}
+        }
+        document.getElementById('hudRes').textContent = resStr;
+        document.getElementById('hudBitrate').textContent = bitrateStr;
+
+        // Buffer depth
+        let buffer = 0;
+        try {
+            const b = v.buffered;
+            if (b && b.length > 0) {
+                const end = b.end(b.length - 1);
+                buffer = Math.max(0, end - v.currentTime);
+            }
+        } catch (_) {}
+        const bufEl = document.getElementById('hudBuffer');
+        bufEl.textContent = `${buffer.toFixed(1)}s`;
+        bufEl.className = 'v ' + (buffer < 1 ? 'error' : buffer < 3 ? 'warn' : 'good');
+
+        // Live offset (best-effort)
+        let liveOffsetStr = '—';
+        try {
+            if (hlsP && hlsP.liveSyncPosition && Number.isFinite(v.currentTime)) {
+                const off = Math.max(0, hlsP.liveSyncPosition - v.currentTime);
+                liveOffsetStr = `${off.toFixed(1)}s`;
+            } else if (shakaP && typeof shakaP.seekRange === 'function') {
+                const r = shakaP.seekRange();
+                if (r && Number.isFinite(r.end)) {
+                    liveOffsetStr = `${Math.max(0, r.end - v.currentTime).toFixed(1)}s`;
+                }
+            } else if (Number.isFinite(v.duration) && v.duration !== Infinity) {
+                liveOffsetStr = `${Math.max(0, v.duration - v.currentTime).toFixed(1)}s`;
+            }
+        } catch (_) {}
+        document.getElementById('hudLiveOffset').textContent = liveOffsetStr;
+
+        // Dropped frames
+        let dropped = 0, total = 0;
+        try {
+            if (typeof v.getVideoPlaybackQuality === 'function') {
+                const q = v.getVideoPlaybackQuality();
+                dropped = q.droppedVideoFrames || 0;
+                total = q.totalVideoFrames || 0;
+            } else if (typeof v.webkitDroppedFrameCount === 'number') {
+                dropped = v.webkitDroppedFrameCount;
+                total = v.webkitDecodedFrameCount || 0;
+            }
+        } catch (_) {}
+        const dropEl = document.getElementById('hudDropped');
+        dropEl.textContent = total > 0
+            ? `${dropped} / ${total} (${((dropped / total) * 100).toFixed(2)}%)`
+            : `${dropped}`;
+        dropEl.className = 'v ' + (dropped === 0 ? 'good' : (total > 0 && dropped / total > 0.01) ? 'error' : 'warn');
+
+        // Stalls
+        const stallEl = document.getElementById('hudStalls');
+        stallEl.textContent = String(stallCount);
+        stallEl.className = 'v ' + (stallCount === 0 ? 'good' : stallCount < 3 ? 'warn' : 'error');
+
+        // Identifiers
+        document.getElementById('hudPlayerId').textContent = currentPlayerId || '—';
+        document.getElementById('hudPlayId').textContent = currentPlayId || '—';
+    }
+
+    function formatBitrate(bps) {
+        if (!bps || !Number.isFinite(bps)) return '—';
+        if (bps >= 1_000_000) return `${(bps / 1_000_000).toFixed(2)} Mbps`;
+        if (bps >= 1_000) return `${(bps / 1_000).toFixed(0)} kbps`;
+        return `${bps} bps`;
+    }
+
+    // ─── Metrics ────────────────────────────────────────────────────
+    //
+    // Same shape as testing-session.html so go-proxy / forwarder pipelines
+    // can ingest events without special-casing this page. Minimal subset:
+    // state_change, video_first_frame, stall_start, stall_end, error,
+    // restart, heartbeat.
+    //
+    // session_id is the go-proxy session keyed on our player_id. We
+    // resolve it via /api/sessions and retry until it appears (the proxy
+    // only allocates one once a manifest fetch carrying player_id has
+    // landed).
+
+    async function resolveSessionId(maxAttempts = 20) {
+        for (let attempt = 0; attempt < maxAttempts; attempt++) {
+            try {
+                const r = await fetch('/api/sessions', { cache: 'no-store' });
+                if (r.ok) {
+                    const sessions = await r.json();
+                    if (Array.isArray(sessions)) {
+                        // Pick the session whose player_id matches and that has the most recent last-request stamp.
+                        const matches = sessions
+                            .filter(s => String(s.player_id || '') === String(currentPlayerId || ''))
+                            .sort((a, b) => Number(b.last_request_at || b.firstRequest || 0) - Number(a.last_request_at || a.firstRequest || 0));
+                        if (matches.length > 0 && matches[0].session_id) {
+                            currentSessionId = matches[0].session_id;
+                            return currentSessionId;
+                        }
+                    }
+                }
+            } catch (_) {}
+            await new Promise(res => setTimeout(res, 500));
+        }
+        return null;
+    }
+
+    function buildMetricsPayload(eventType, extra = {}) {
+        const v = document.getElementById('player');
+        const buffered = v.buffered;
+        const seekable = v.seekable;
+        const current = Number(v.currentTime || 0);
+        let bufferedEnd = null, bufferDepth = 0, seekableEnd = null;
+        try {
+            if (buffered && buffered.length > 0) {
+                const end = buffered.end(buffered.length - 1);
+                bufferedEnd = round2(end);
+                bufferDepth = round2(Math.max(0, end - current));
+            }
+            if (seekable && seekable.length > 0) seekableEnd = round2(seekable.end(seekable.length - 1));
+        } catch (_) {}
+        const liveOffset = (seekableEnd !== null) ? round2(Math.max(0, seekableEnd - current)) : null;
+
+        let playheadWallclockMs = null;
+        try {
+            if (shakaP && typeof shakaP.getPlayheadTimeAsDate === 'function') {
+                const d = shakaP.getPlayheadTimeAsDate();
+                if (d instanceof Date && !isNaN(d.getTime())) playheadWallclockMs = d.getTime();
+            }
+            if (playheadWallclockMs === null && hlsP && hlsP.playingDate instanceof Date) {
+                const d = hlsP.playingDate;
+                if (!isNaN(d.getTime())) playheadWallclockMs = d.getTime();
+            }
+        } catch (_) {}
+
+        const q = (typeof v.getVideoPlaybackQuality === 'function') ? v.getVideoPlaybackQuality() : null;
+        const totalFrames = q ? Number(q.totalVideoFrames || 0) : null;
+        const droppedFrames = q ? Number(q.droppedVideoFrames || 0) : null;
+        const displayedFrames = (totalFrames !== null && droppedFrames !== null) ? Math.max(0, totalFrames - droppedFrames) : null;
+
+        const videoFirstFrameS = videoFirstFrameAtMs > 0
+            ? round2((videoFirstFrameAtMs - videoStartedAtMs) / 1000)
+            : null;
+        const videoStartTimeS = (videoStartedAtMs > 0)
+            ? round2((performance.now() - videoStartedAtMs) / 1000)
+            : null;
+
+        const base = {
+            player_metrics_source: 'web-10ft',
+            player_metrics_browser_family: detectBrowserFamily(),
+            player_metrics_playback_engine: activeEngine,
+            player_metrics_last_event: eventType,
+            player_metrics_trigger_type: eventType,
+            player_metrics_event_time: new Date().toISOString(),
+            player_metrics_state: v.paused ? 'paused' : 'playing',
+            player_metrics_position_s: round2(current),
+            player_metrics_playback_rate: round2(v.playbackRate || 0),
+            player_metrics_buffer_depth_s: bufferDepth,
+            player_metrics_buffer_end_s: bufferedEnd,
+            player_metrics_seekable_end_s: seekableEnd,
+            player_metrics_live_edge_s: seekableEnd,
+            player_metrics_live_offset_s: liveOffset,
+            player_metrics_playhead_wallclock_ms: playheadWallclockMs,
+            player_metrics_true_offset_s: playheadWallclockMs != null
+                ? round2((Date.now() - playheadWallclockMs) / 1000)
+                : null,
+            player_metrics_display_resolution: `${v.clientWidth}x${v.clientHeight}`,
+            player_metrics_video_resolution: (v.videoWidth && v.videoHeight) ? `${v.videoWidth}x${v.videoHeight}` : null,
+            player_metrics_video_first_frame_time_s: videoFirstFrameS,
+            player_metrics_video_start_time_s: videoStartTimeS,
+            player_metrics_video_bitrate_mbps: round3(currentRenditionMbps),
+            player_metrics_avg_network_bitrate_mbps: round3(playerEstimatedMbps),
+            player_auto_recovery_enabled: !!advancedState.autoRecovery,
+            player_restarts: playerRestartCount,
+            player_metrics_profile_shift_count: Math.max(0, Math.round(profileShiftCount || 0)),
+            player_metrics_frames_displayed: displayedFrames,
+            player_metrics_total_video_frames: totalFrames,
+            player_metrics_dropped_frames: droppedFrames,
+            player_metrics_stall_count: stallCount,
+            player_metrics_stall_time_s: round2(stallTotalMs / 1000),
+            player_metrics_last_stall_time_s: round2(lastStallDurationMs / 1000),
+            play_id: currentPlayId || null,
+        };
+        const merged = { ...base, ...extra };
+        const compact = {};
+        for (const [k, val] of Object.entries(merged)) {
+            if (val === null || val === undefined || val === '') continue;
+            compact[k] = val;
+        }
+        return compact;
+    }
+
+    function sendSessionMetrics(eventType, extra = {}) {
+        if (!currentSessionId) return;
+        const payload = buildMetricsPayload(eventType, extra);
+        const fields = Object.keys(payload);
+        if (!fields.length) return;
+        const sid = currentSessionId;
+        // Serialize so events arrive in submission order (matches the iOS
+        // metricsTaskTail / testing-session.html pattern).
+        metricsTaskTail = metricsTaskTail
+            .catch(() => {})
+            .then(() => {
+                // 5s per-fetch timeout so a hung request can't stall the
+                // whole metrics queue. AbortSignal.timeout is supported
+                // everywhere we run.
+                const init = {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ set: payload, fields }),
+                };
+                if (typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function') {
+                    init.signal = AbortSignal.timeout(5000);
+                }
+                return fetch(`/api/session/${sid}/metrics`, init);
+            })
+            .catch(err => console.warn('metrics POST failed', err));
+    }
+
+    function startMetricsHeartbeat() {
+        if (metricsHeartbeatTimer) clearInterval(metricsHeartbeatTimer);
+        metricsHeartbeatTimer = setInterval(() => sendSessionMetrics('heartbeat'), 1000);
+    }
+    function stopMetricsHeartbeat() {
+        if (metricsHeartbeatTimer) { clearInterval(metricsHeartbeatTimer); metricsHeartbeatTimer = null; }
+    }
+
+    // Pull the HTTP status + URL out of an hls.js fatal error payload so we
+    // can attach it to the `error` metric. Mirrors testing-session.html
+    // (lines 1472–1485) — checks response, networkDetails, and frag fallbacks
+    // so it works in both worker (no networkDetails) and main-thread modes.
+    function extractHlsHttpFailure(data) {
+        const response = data && data.response ? data.response : null;
+        const network = data && data.networkDetails ? data.networkDetails : null;
+        const status = (response && (response.code || response.status)) ||
+            (response && response.xhr && response.xhr.status) ||
+            (network && network.status) ||
+            null;
+        const url = (response && (response.url || response.responseURL)) ||
+            (response && response.xhr && response.xhr.responseURL) ||
+            (data && data.url) ||
+            (data && data.frag && data.frag.url) ||
+            null;
+        return { status, url };
+    }
+
+    // Shaka stores HTTP failure data in detail.data with layouts that vary
+    // by error code (e.g. NETWORK_HTTP_ERROR=1001 is [uri, data, status, …]).
+    // Iterate the array looking for any number in 400..599 and any string
+    // starting with "http" — same pattern as testing-session.html (1487–1505).
+    function extractShakaHttpFailure(detail) {
+        if (!detail) return { status: null, url: null };
+        let status = null;
+        let url = null;
+        if (Array.isArray(detail.data)) {
+            detail.data.forEach(item => {
+                if (typeof item === 'number' && item >= 400 && item <= 599) status = item;
+                if (typeof item === 'string' && item.startsWith('http')) url = item;
+            });
+            // Fallback: some 11xx codes put a path string at index 1 even
+            // without a leading "http" scheme.
+            if (!url && typeof detail.data[1] === 'string') url = detail.data[1];
+        }
+        return { status, url };
+    }
+
+    // Reject anything other than http(s) or same-origin relative paths.
+    // The `url` query param is attacker-controlled; without this gate, a
+    // crafted javascript: / data: URL could land on `video.src` (CodeQL
+    // js/xss + js/client-side-unvalidated-url-redirection alerts on
+    // play-10ft).
+    function isSafePlaybackUrl(u) {
+        if (!u || typeof u !== 'string') return false;
+        // Relative path — same origin
+        if (u.startsWith('/')) return true;
+        try {
+            const parsed = new URL(u, window.location.origin);
+            return parsed.protocol === 'http:' || parsed.protocol === 'https:';
+        } catch (_) {
+            return false;
+        }
+    }
+
+    function detectBrowserFamily() {
+        const ua = navigator.userAgent || '';
+        if (/Edg\//.test(ua)) return 'edge';
+        if (/Chrome\//.test(ua)) return 'chrome';
+        if (/Firefox\//.test(ua)) return 'firefox';
+        if (/Safari\//.test(ua)) return 'safari';
+        return 'other';
+    }
+
+    function round2(n) { return Number.isFinite(n) ? Math.round(n * 100) / 100 : 0; }
+    function round3(n) { return Number.isFinite(n) ? Math.round(n * 1000) / 1000 : 0; }
+
+    function applyRotatePlayIdTimer() {
+        if (playIdRotationTimer) { clearInterval(playIdRotationTimer); playIdRotationTimer = null; }
+        const s = Math.max(0, advancedState.rotatePlayIdS | 0);
+        if (s < 60) return;  // matches iOS guard: ignore values under 60 s
+        playIdRotationTimer = setInterval(() => {
+            doRestart();
+        }, s * 1000);
+    }
+
+    function rotatePlayIdLabel(s) {
+        if (!s) return 'Off';
+        if (s < 60) return `${s}s`;
+        if (s < 3600) return `Every ${Math.round(s / 60)}m`;
+        return `Every ${Math.round(s / 3600)}h`;
+    }
+
+    function renderEnginePicker(body) {
+        const opts = [
+            { value: 'auto',   label: 'Auto (recommended)' },
+            { value: 'shaka',  label: 'Shaka Player' },
+            { value: 'hlsjs',  label: 'HLS.js' },
+            { value: 'native', label: 'Native (browser)' },
+        ];
+        for (const opt of opts) {
+            body.appendChild(makeOption({
+                label: opt.label,
+                selected: opt.value === advancedState.engine,
+                onSelect: () => {
+                    advancedState.engine = opt.value;
+                    localStorage.setItem('ism10ftEngine', opt.value);
+                    drawerStack.pop();
+                    renderDrawer();
+                    if (currentUrl) loadStream(currentUrl);
+                },
+            }));
+        }
+    }
+
+    function optionsFor(field) {
+        if (field === 'protocol') return [
+            { value: 'all', label: 'All' },
+            { value: 'dash', label: 'DASH only' },
+            { value: 'hls', label: 'HLS only' },
+            { value: 'both', label: 'Both (same content)' },
+        ];
+        if (field === 'codec') return [
+            { value: 'all', label: 'All' },
+            { value: 'h264', label: 'H264 only' },
+            { value: 'hevc', label: 'HEVC only' },
+            { value: 'av1', label: 'AV1 only' },
+        ];
+        if (field === 'segment') return [
+            { value: 'all', label: 'All' },
+            { value: 'll', label: 'Low-latency' },
+            { value: '2s', label: '2 seconds' },
+            { value: '6s', label: '6 seconds' },
+        ];
+        if (field === 'maxRes') return [
+            { value: 'all',  label: 'All' },
+            { value: '2160', label: '2160p (4K+)' },
+            { value: '1440', label: '1440p+' },
+            { value: '1080', label: '1080p+' },
+            { value: '720',  label: '720p+' },
+            { value: '540',  label: '540p+' },
+            { value: '360',  label: '360p+' },
+        ];
+        return [];
+    }
+
+    function pickerTitle(field) {
+        if (field === 'protocol') return 'Protocol';
+        if (field === 'codec') return 'Codec';
+        if (field === 'segment') return 'Segment length';
+        if (field === 'maxRes') return 'Max resolution';
+        return 'Pick';
+    }
+
+    function protocolLabel(v) { return ({all:'All', dash:'DASH only', hls:'HLS only', both:'Both'})[v] || v; }
+    function codecLabel(v) { return ({all:'All', h264:'H264', hevc:'HEVC', av1:'AV1'})[v] || v; }
+    function segmentLabel(v) { return ({all:'All', ll:'Low-latency', '2s':'2 seconds', '6s':'6 seconds'})[v] || v; }
+    function maxResLabel(v) { return v === 'all' ? 'All' : `${v}p+`; }
+    function engineLabel(v) { return ({auto:'Auto', shaka:'Shaka', hlsjs:'HLS.js', native:'Native'})[v] || v; }
+
+    function makeRow({ label, value, onSelect, toggle = false, destructive = false }) {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'row' + (toggle ? ' row-toggle' : '') + (destructive ? ' row-destructive' : '');
+        btn.innerHTML = `
+            <span class="row-label"></span>
+            <span class="row-value"></span>
+            ${toggle ? '' : '<span class="row-chevron">›</span>'}
+        `;
+        btn.querySelector('.row-label').textContent = label;
+        btn.querySelector('.row-value').textContent = value || '';
+        btn.addEventListener('click', onSelect);
+        return btn;
+    }
+
+    function makeOption({ label, selected, onSelect }) {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'opt' + (selected ? ' selected' : '');
+        btn.innerHTML = `<span class="opt-label"></span><span class="check">✓</span>`;
+        btn.querySelector('.opt-label').textContent = label;
+        btn.addEventListener('click', onSelect);
+        return btn;
+    }
+
+    // ───── Top-bar auto-hide ─────
+
+    let autohideTimer = null;
+    let autohideSuspended = false;
+
+    function wireAutoHide() {
+        const stage = document.getElementById('playStage');
+        stage.addEventListener('mousemove', () => { showTopBar(); kickAutoHide(); });
+        stage.addEventListener('touchstart', () => { showTopBar(); kickAutoHide(); });
+        document.getElementById('topBar').addEventListener('focusin', showTopBar);
+        kickAutoHide();
+    }
+
+    function showTopBar() {
+        const bar = document.getElementById('topBar');
+        const stage = document.getElementById('playStage');
+        bar.classList.remove('hidden');
+        stage.classList.remove('idle');
+    }
+    function hideTopBar() {
+        if (drawerOpen || autohideSuspended) return;
+        const bar = document.getElementById('topBar');
+        const stage = document.getElementById('playStage');
+        bar.classList.add('hidden');
+        stage.classList.add('idle');
+    }
+    function kickAutoHide() {
+        clearTimeout(autohideTimer);
+        autohideTimer = setTimeout(hideTopBar, 2800);
+    }
+    function suspendAutoHide(s) { autohideSuspended = s; }
+
+    // ───── Keyboard ─────
+
+    function wireKeyboard() {
+        document.addEventListener('keydown', (e) => {
+            const tag = (e.target && e.target.tagName) || '';
+            const inField = tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT';
+            const v = document.getElementById('player');
+
+            if (drawerOpen) {
+                if (e.key === 'Escape') { e.preventDefault(); drawerBack(); }
+                return;
+            }
+
+            if (inField) return;
+
+            switch (e.key) {
+                case ' ':
+                    e.preventDefault();
+                    if (v.paused) v.play().catch(()=>{}); else v.pause();
+                    showTopBar(); kickAutoHide();
+                    break;
+                case 'ArrowLeft':
+                    e.preventDefault();
+                    v.currentTime = Math.max(0, v.currentTime - 10);
+                    showTopBar(); kickAutoHide();
+                    break;
+                case 'ArrowRight':
+                    e.preventDefault();
+                    if (Number.isFinite(v.duration)) v.currentTime = Math.min(v.duration, v.currentTime + 10);
+                    showTopBar(); kickAutoHide();
+                    break;
+                case 'f':
+                case 'F':
+                    e.preventDefault();
+                    toggleNativeFullscreen();
+                    break;
+                case 's':
+                case 'S':
+                    e.preventDefault();
+                    openDrawer();
+                    break;
+                case 'r':
+                    e.preventDefault();
+                    doReload();
+                    break;
+                case 'R':
+                    e.preventDefault();
+                    doRestart();
+                    break;
+                case 'e':
+                case 'E':
+                    e.preventDefault();
+                    if (confirm('911: destroy the player, drop player_id, and hard-reload the page?')) do911();
+                    break;
+                case 'Escape':
+                    e.preventDefault();
+                    goBack();
+                    break;
+                case 'm':
+                case 'M':
+                    e.preventDefault();
+                    v.muted = !v.muted;
+                    showTopBar(); kickAutoHide();
+                    break;
+            }
+        });
+    }
+
+    function toggleNativeFullscreen() {
+        const stage = document.getElementById('playStage');
+        if (!document.fullscreenElement) {
+            (stage.requestFullscreen || stage.webkitRequestFullscreen || (() => {})).call(stage);
+        } else {
+            (document.exitFullscreen || document.webkitExitFullscreen || (() => {})).call(document);
+        }
+    }
+
+    // ───── Loading / error pill ─────
+
+    function showLoading(msg) {
+        const overlay = document.getElementById('centerOverlay');
+        const pill = document.getElementById('centerPill');
+        pill.textContent = msg || 'Loading…';
+        pill.style.color = '#fff';
+        overlay.classList.add('show');
+    }
+    function hideLoading() {
+        const overlay = document.getElementById('centerOverlay');
+        overlay.classList.remove('show');
+    }
+    function showError(msg) {
+        const overlay = document.getElementById('centerOverlay');
+        const pill = document.getElementById('centerPill');
+        pill.textContent = msg;
+        pill.style.color = '#ff8a80';
+        overlay.classList.add('show');
+    }
+
+    // ───── Hint ─────
+
+    function flashKeysHint() {
+        const hint = document.getElementById('keysHint');
+        if (!hint) return;
+        hint.classList.add('show');
+        setTimeout(() => hint.classList.remove('show'), 4500);
+    }
+</script>
+<script src="/shared/shared-nav.js"></script>
+</body>
+</html>

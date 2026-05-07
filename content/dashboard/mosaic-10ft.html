@@ -1,0 +1,1543 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>10ft UI - InfiniteStream</title>
+    <link rel="stylesheet" href="/shared-styles.css">
+    <link rel="stylesheet" href="/dashboard/content-control.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/shaka-player/4.7.7/shaka-player.compiled.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.15"></script>
+    <style>
+        :root {
+            --hero-radius: 16px;
+            --tile-w: 220px;
+            --tile-h: 124px;
+            --row-gap: 16px;
+            --section-gap: 32px;
+            --page-pad: clamp(24px, 3vw, 64px);
+            --label-color: #6b7280;
+            --hero-overlay-from: 0%;
+            --hero-overlay-mid: 45%;
+            --hero-overlay-to: 100%;
+        }
+
+        body {
+            margin: 0;
+            padding: 0;
+            background: #fff;
+            color: var(--text-primary);
+        }
+
+        /* Lean-back fullscreen flips the canvas to black so the hero looks cinema-correct */
+        .ism-fullscreen body,
+        body.ism-fullscreen {
+            background: #000;
+            color: #fff;
+            overflow: hidden;
+        }
+
+        body.drawer-open {
+            overflow: hidden;
+        }
+
+        .ism-content-fullwidth {
+            width: 100%;
+            padding: 0;
+        }
+
+        .ism-fullscreen .ism-content-fullwidth {
+            margin-left: 0;
+        }
+
+        .page-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            padding: 16px var(--page-pad);
+            border-bottom: 1px solid var(--border-light);
+            background: var(--bg-primary, #fff);
+        }
+
+        .ism-fullscreen .page-header { display: none; }
+
+        .page-title {
+            font-size: 28px;
+            font-weight: 400;
+            color: var(--text-primary);
+        }
+
+        .header-actions {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .header-btn {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            color: var(--text-primary);
+            padding: 8px 14px;
+            border-radius: var(--radius-md);
+            font-size: 13px;
+            cursor: pointer;
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            transition: var(--transition);
+        }
+        .header-btn:hover { background: var(--surface-hover); border-color: var(--primary-blue); }
+        .header-btn:focus-visible { outline: 3px solid var(--primary-blue); outline-offset: 2px; }
+        .header-btn.gear {
+            width: 38px; height: 38px;
+            padding: 0;
+            justify-content: center;
+            font-size: 18px;
+        }
+
+        .stage-wrap {
+            padding: var(--page-pad);
+            display: flex;
+            flex-direction: column;
+            gap: var(--section-gap);
+        }
+
+        /* ───── Hero ───── */
+
+        .hero { display: flex; flex-direction: column; gap: 12px; }
+
+        .hero-label {
+            font-size: 12px;
+            font-weight: 600;
+            letter-spacing: 1px;
+            text-transform: uppercase;
+            color: var(--label-color);
+        }
+
+        .hero-stage {
+            position: relative;
+            width: 100%;
+            aspect-ratio: 16/9;
+            max-height: clamp(280px, 38vh, 520px);
+            border-radius: var(--hero-radius);
+            overflow: hidden;
+            background: #000;
+            cursor: pointer;
+            box-shadow: var(--shadow-md);
+        }
+
+        .hero-stage:focus-visible,
+        .hero-stage.focused {
+            outline: 3px solid var(--primary-blue);
+            outline-offset: 4px;
+            box-shadow: 0 0 0 6px rgba(26, 115, 232, 0.18), var(--shadow-md);
+        }
+
+        .hero-poster {
+            position: absolute; inset: 0;
+            background-color: #111;
+            background-size: cover;
+            background-position: center;
+            background-repeat: no-repeat;
+            z-index: 0;
+        }
+
+        #heroVideo {
+            position: absolute; inset: 0;
+            width: 100%; height: 100%;
+            object-fit: cover;
+            z-index: 1;
+            background: transparent;
+        }
+
+        .hero-gradient {
+            position: absolute; inset: 0;
+            background: linear-gradient(to bottom,
+                transparent var(--hero-overlay-from),
+                transparent var(--hero-overlay-mid),
+                rgba(0,0,0,0.85) var(--hero-overlay-to));
+            z-index: 2;
+            pointer-events: none;
+        }
+
+        .hero-meta {
+            position: absolute;
+            left: 24px; right: 24px; bottom: 24px;
+            color: #fff;
+            z-index: 3;
+            pointer-events: none;
+        }
+        .hero-title {
+            font-size: clamp(24px, 3.2vw, 38px);
+            font-weight: 600;
+            line-height: 1.15;
+            text-shadow: 0 2px 12px rgba(0,0,0,0.55);
+            margin-bottom: 6px;
+            max-width: 80%;
+        }
+        .hero-live-chip {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 12px;
+            font-weight: 700;
+            letter-spacing: 1px;
+            color: #ff3b30;
+        }
+        .hero-live-chip .dot {
+            width: 8px; height: 8px;
+            background: #ff3b30;
+            border-radius: 50%;
+            display: inline-block;
+        }
+
+        .hero-status {
+            position: absolute;
+            top: 12px; right: 12px;
+            padding: 4px 10px;
+            border-radius: 6px;
+            font-size: 11px;
+            font-weight: 600;
+            color: #fff;
+            background: rgba(0,0,0,0.65);
+            z-index: 4;
+        }
+        .hero-status.status-loading { color: var(--warning); }
+        .hero-status.status-playing { color: var(--success); }
+        .hero-status.status-error   { color: var(--error); }
+
+        .hero-play-hint {
+            position: absolute;
+            top: 12px; left: 12px;
+            padding: 4px 10px;
+            border-radius: 6px;
+            font-size: 11px;
+            font-weight: 600;
+            color: #fff;
+            background: rgba(0,0,0,0.55);
+            z-index: 4;
+            pointer-events: none;
+            opacity: 0;
+            transition: opacity 200ms ease;
+        }
+        .hero-stage:hover .hero-play-hint,
+        .hero-stage:focus-visible .hero-play-hint { opacity: 1; }
+
+        /* Click-to-unmute hint, shown when autoplay policy forced muted playback */
+        .hero-unmute-hint {
+            position: absolute;
+            top: 12px; right: 12px;
+            padding: 4px 10px;
+            border-radius: 6px;
+            font-size: 11px;
+            font-weight: 600;
+            color: #fff;
+            background: rgba(0,0,0,0.7);
+            border: 1px solid rgba(255,255,255,0.25);
+            z-index: 4;
+            cursor: pointer;
+            display: none;
+        }
+        .hero-unmute-hint.show { display: inline-flex; align-items: center; gap: 4px; }
+
+        /* ───── LIVE row ───── */
+
+        .live-row { display: flex; flex-direction: column; gap: 12px; }
+        .live-row-label {
+            font-size: 12px;
+            font-weight: 600;
+            letter-spacing: 1px;
+            text-transform: uppercase;
+            color: var(--label-color);
+        }
+
+        .live-strip {
+            display: grid;
+            grid-template-columns: repeat(var(--tile-cols, 8), 1fr);
+            gap: var(--row-gap);
+            padding: 8px 4px 16px;
+            outline: none;
+        }
+        .live-strip:empty { display: none; }
+        @media (max-width: 1280px) {
+            .live-strip { grid-template-columns: repeat(min(var(--tile-cols, 8), 4), 1fr); }
+        }
+        @media (max-width: 720px) {
+            .live-strip { grid-template-columns: repeat(min(var(--tile-cols, 8), 2), 1fr); }
+        }
+
+        .tile {
+            position: relative;
+            width: 100%;
+            aspect-ratio: 16/9;
+            background: #000;
+            border-radius: var(--radius-md);
+            overflow: hidden;
+            cursor: pointer;
+            transition: transform 120ms ease-out, box-shadow 120ms ease-out;
+            box-shadow: var(--shadow-sm);
+        }
+        .tile video {
+            width: 100%; height: 100%; object-fit: cover;
+            background: #000;
+        }
+        .tile.hover {
+            box-shadow: 0 0 0 2px rgba(26, 115, 232, 0.45), var(--shadow-md);
+        }
+        .tile.focused {
+            outline: 3px solid var(--primary-blue);
+            outline-offset: 2px;
+            transform: scale(1.04);
+            z-index: 5;
+        }
+        .tile.is-hero {
+            box-shadow: 0 0 0 2px rgba(255, 59, 48, 0.7), var(--shadow-md);
+        }
+        .tile-status {
+            position: absolute; top: 4px; right: 4px;
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-size: 9px; font-weight: 600;
+            color: #fff;
+            background: rgba(0,0,0,0.65);
+            z-index: 3;
+            pointer-events: none;
+        }
+        .tile-status.status-loading { color: var(--warning); }
+        .tile-status.status-playing { color: var(--success); }
+        .tile-status.status-error   { color: var(--error); }
+        .tile-label {
+            position: absolute;
+            left: 6px; right: 6px; bottom: 6px;
+            padding: 3px 6px;
+            background: rgba(0,0,0,0.55);
+            color: #fff;
+            border-radius: 4px;
+            font-size: 10px;
+            font-weight: 500;
+            text-align: center;
+            z-index: 3;
+            pointer-events: none;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .tile-hero-badge {
+            position: absolute;
+            top: 4px; left: 4px;
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-size: 9px;
+            font-weight: 700;
+            color: #fff;
+            background: rgba(255, 59, 48, 0.85);
+            z-index: 3;
+            pointer-events: none;
+            display: none;
+        }
+        .tile.is-hero .tile-hero-badge { display: block; }
+
+        /* ───── Settings drawer ───── */
+
+        .settings-backdrop {
+            position: fixed; inset: 0;
+            background: rgba(0, 0, 0, 0.45);
+            opacity: 0;
+            transition: opacity 240ms ease-out;
+            z-index: 999;
+            pointer-events: none;
+        }
+        .settings-backdrop.open {
+            opacity: 1;
+            pointer-events: auto;
+        }
+
+        .settings-drawer {
+            position: fixed;
+            top: 0; right: 0; bottom: 0;
+            width: 46vw;
+            max-width: 560px;
+            background: #fff;
+            box-shadow: var(--shadow-lg);
+            transform: translateX(100%);
+            transition: transform 240ms ease-out;
+            z-index: 1000;
+            display: flex;
+            flex-direction: column;
+            color: var(--text-primary);
+        }
+        .settings-drawer.open { transform: translateX(0); }
+        .settings-drawer[aria-hidden="true"] { /* still in DOM but inert via tabindex management */ }
+
+        @media (max-width: 899px) {
+            .settings-drawer { width: 78vw; max-width: none; }
+        }
+
+        .settings-drawer-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 16px 20px;
+            border-bottom: 1px solid var(--border-light);
+        }
+        .settings-drawer-header h2 {
+            font-size: 18px;
+            font-weight: 500;
+            margin: 0;
+        }
+        .settings-close {
+            background: transparent;
+            border: 1px solid var(--border);
+            color: var(--text-primary);
+            border-radius: var(--radius-sm);
+            width: 32px; height: 32px;
+            font-size: 16px;
+            cursor: pointer;
+        }
+        .settings-close:hover { background: var(--surface-hover); }
+        .settings-close:focus-visible { outline: 3px solid var(--primary-blue); outline-offset: 2px; }
+
+        .settings-drawer-body {
+            flex: 1;
+            overflow-y: auto;
+            padding: 16px 20px;
+            display: flex;
+            flex-direction: column;
+            gap: 14px;
+        }
+
+        .settings-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 12px;
+            padding: 8px 0;
+            border-bottom: 1px solid var(--border-light);
+        }
+        .settings-row:last-of-type { border-bottom: none; }
+        .settings-row label {
+            font-size: 13px;
+            font-weight: 500;
+            color: var(--text-secondary);
+        }
+        .settings-row select {
+            min-width: 180px;
+            padding: 6px 10px;
+            background: #fff;
+            border: 1px solid var(--border);
+            border-radius: var(--radius-sm);
+            font-size: 13px;
+            color: var(--text-primary);
+        }
+        .settings-row select:focus-visible { outline: 3px solid var(--primary-blue); outline-offset: 1px; }
+
+        .settings-drawer-footer {
+            display: flex;
+            justify-content: flex-end;
+            gap: 8px;
+            padding: 14px 20px;
+            border-top: 1px solid var(--border-light);
+        }
+        .settings-drawer-footer button {
+            padding: 8px 16px;
+            border-radius: var(--radius-sm);
+            border: 1px solid var(--border);
+            background: var(--surface);
+            color: var(--text-primary);
+            font-size: 13px;
+            cursor: pointer;
+        }
+        .settings-drawer-footer button.primary {
+            background: var(--primary-blue);
+            border-color: var(--primary-blue);
+            color: #fff;
+        }
+        .settings-drawer-footer button.primary:hover { background: var(--primary-blue-hover); }
+        .settings-drawer-footer button:focus-visible { outline: 3px solid var(--primary-blue); outline-offset: 2px; }
+
+        .settings-info {
+            font-size: 11px;
+            color: var(--text-disabled);
+        }
+
+        /* keyboard hint shown briefly on first load */
+        .keys-hint {
+            position: fixed;
+            bottom: 18px; left: 50%;
+            transform: translateX(-50%);
+            background: rgba(0,0,0,0.78);
+            color: #fff;
+            padding: 8px 14px;
+            border-radius: var(--radius-md);
+            font-size: 11px;
+            z-index: 50;
+            opacity: 0;
+            pointer-events: none;
+            transition: opacity 250ms ease;
+        }
+        .keys-hint.show { opacity: 1; }
+        .keys-hint kbd {
+            background: rgba(255,255,255,0.15);
+            border-radius: 3px;
+            padding: 1px 5px;
+            font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+            font-size: 10px;
+            margin: 0 2px;
+        }
+    </style>
+</head>
+<body data-ism-active-page="mosaic-10ft">
+
+<div class="ism-content-fullwidth">
+
+    <header class="page-header">
+        <span class="page-title">10ft UI</span>
+        <div class="header-actions">
+            <button id="helpBtn"      class="header-btn gear" aria-label="Keyboard help" title="Keyboard help (?)">?</button>
+            <button id="settingsBtn"  class="header-btn gear" aria-label="Open settings" title="Settings (S)" aria-haspopup="dialog">⚙︎</button>
+            <button id="fullscreenBtn" class="header-btn gear" aria-label="Toggle fullscreen" title="Toggle fullscreen (F)">⛶</button>
+        </div>
+    </header>
+
+    <div class="stage-wrap">
+
+        <section class="hero" aria-label="Featured stream">
+            <div class="hero-label" id="heroLabel">FEATURED</div>
+            <div class="hero-stage" id="heroStage" tabindex="0" role="button" aria-label="Play hero — full screen via go-proxy">
+                <div class="hero-poster" id="heroPoster"></div>
+                <video id="heroVideo" autoplay muted playsinline></video>
+                <div class="hero-gradient"></div>
+                <div class="hero-status status-loading" id="heroStatus">Loading…</div>
+                <div class="hero-play-hint">▶ Play (full screen)</div>
+                <button id="heroUnmuteHint" class="hero-unmute-hint" type="button" aria-label="Unmute hero">🔇 Click to unmute</button>
+                <div class="hero-meta">
+                    <div class="hero-title" id="heroTitle">…</div>
+                    <div class="hero-live-chip"><span class="dot"></span>LIVE</div>
+                </div>
+            </div>
+        </section>
+
+        <section class="live-row" aria-label="Live previews">
+            <div class="live-row-label">LIVE</div>
+            <div class="live-strip" id="strip" tabindex="0" role="listbox" aria-label="Preview tile row"></div>
+        </section>
+
+    </div>
+
+</div>
+
+<!-- Slide-in settings drawer; mirrors apple/.../SettingsOverlay.swift -->
+<div id="settingsBackdrop" class="settings-backdrop" hidden></div>
+<aside id="settingsDrawer" class="settings-drawer" aria-hidden="true" role="dialog" aria-label="Settings" aria-modal="true">
+    <header class="settings-drawer-header">
+        <h2>Settings</h2>
+        <button id="settingsCloseBtn" class="settings-close" aria-label="Close settings">✕</button>
+    </header>
+    <div class="settings-drawer-body">
+        <div class="settings-row">
+            <label for="protocolFilter">Protocol</label>
+            <select id="protocolFilter">
+                <option value="all">All</option>
+                <option value="dash">DASH only</option>
+                <option value="hls" selected>HLS only</option>
+                <option value="both">Both (same content)</option>
+            </select>
+        </div>
+        <div class="settings-row">
+            <label for="codecFilter">Codec</label>
+            <select id="codecFilter">
+                <option value="all">All</option>
+                <option value="h264" selected>H264 only</option>
+                <option value="hevc">HEVC only</option>
+                <option value="av1">AV1 only</option>
+            </select>
+        </div>
+        <div class="settings-row">
+            <label for="segmentFilter">Segment</label>
+            <select id="segmentFilter">
+                <option value="all">All</option>
+                <option value="ll">LL</option>
+                <option value="2s">2s</option>
+                <option value="6s" selected>6s</option>
+            </select>
+        </div>
+        <div class="settings-row">
+            <label for="maxResFilter">Max Res ≥</label>
+            <select id="maxResFilter">
+                <option value="all">All</option>
+                <option value="2160">2160p (4K+)</option>
+                <option value="1440">1440p+</option>
+                <option value="1080">1080p+</option>
+                <option value="720">720p+</option>
+                <option value="540">540p+</option>
+                <option value="360">360p+</option>
+            </select>
+        </div>
+        <div class="settings-row">
+            <label for="contentFilter">Content</label>
+            <select id="contentFilter">
+                <option value="all">All</option>
+            </select>
+        </div>
+        <div class="settings-row">
+            <label for="tileCountSelect" title="Number of LIVE preview tiles. Lower this if your CPU is struggling.">Preview panes</label>
+            <select id="tileCountSelect">
+                <option value="0">Off — thumbnails only</option>
+                <option value="2">2</option>
+                <option value="4">4</option>
+                <option value="6">6</option>
+                <option value="8" selected>8</option>
+                <option value="12">12</option>
+                <option value="16">16</option>
+            </select>
+        </div>
+        <div class="settings-info" id="contentInfo">Loading content…</div>
+    </div>
+    <div class="settings-drawer-footer">
+        <button id="randomizeBtn" type="button">🎲 Randomize</button>
+        <button id="applyBtn" class="primary" type="button">Apply</button>
+    </div>
+</aside>
+
+<div class="keys-hint" id="keysHint" aria-hidden="true">
+    <kbd>↓</kbd> into row &nbsp; <kbd>← →</kbd> move &nbsp; <kbd>↑</kbd> leave row &nbsp; <kbd>Enter</kbd> swap to hero (or play if hero is the focus) &nbsp; click hero / right-click tile to play &nbsp; <kbd>S</kbd> settings &nbsp; <kbd>F</kbd> fullscreen &nbsp; <kbd>?</kbd> hide
+</div>
+
+<script>
+    'use strict';
+
+    // ───── State ─────
+
+    let ALL_CONTENT = [];
+    let tileItems = [];               // items shown in the LIVE row
+    let heroItem = null;              // current hero item
+    const DEFAULT_TILE_COUNT = 8;
+    let TILE_COUNT = clampTileCount(parseInt(localStorage.getItem('ism10ftTileCount') || '', 10));
+    let MAX_DECODING_TILES = TILE_COUNT;  // cap concurrent decodes to the chosen tile count
+
+    function clampTileCount(n) {
+        if (!Number.isFinite(n)) return DEFAULT_TILE_COUNT;
+        return Math.max(0, Math.min(16, n | 0));
+    }
+
+    let heroPlayer = null;            // shaka.Player (DASH)
+    let heroHls = null;               // hls.Hls (HLS)
+    let heroUrl = null;
+    let heroLoadGen = 0;              // monotonic counter — guards loadHero() against stale overlapping calls
+
+    const tilePlayers = [];           // shaka.Player[] indexed by tile slot
+    const tileHls = [];               // hls.Hls[]
+    const tileVideos = [];
+    const tileUrls = [];
+
+    let focusedIndex = 0;
+    let stripFocused = false;         // true while keyboard nav is on the strip
+    let heroFocused = false;          // true while keyboard focus is on the hero
+    let drawerOpen = false;
+    let drawerOpenedBy = null;
+
+    // ───── Boot ─────
+
+    window.addEventListener('DOMContentLoaded', async () => {
+        // Restore segment preference (shared with grid.html)
+        const segSel = document.getElementById('segmentFilter');
+        const storedSeg = localStorage.getItem('ismSelectedSegment');
+        if (storedSeg && new Set(['ll','2s','6s']).has(storedSeg)) segSel.value = storedSeg;
+
+        // Restore tile-count preference
+        const tileSel = document.getElementById('tileCountSelect');
+        if (tileSel) {
+            const validValues = new Set(['0','2','4','6','8','12','16']);
+            tileSel.value = validValues.has(String(TILE_COUNT)) ? String(TILE_COUNT) : '8';
+        }
+
+        wireDrawer();
+        wireKeyboard();
+        wireMouseAndPointer();
+        wireFullscreenButton();
+        wireHeroPlay();
+        wireHelp();
+        flashKeysHint();
+
+        const ok = await fetchContent();
+        if (!ok) return;
+
+        populateContentFilter();
+        rebuildSelection();
+        renderStrip();
+        setHeroFromInitial();
+        observeTileVisibility();
+
+        // Land initial focus on the hero so the user can press Enter to play
+        // immediately or ↓ to drop into the LIVE row — matches iPad/tvOS
+        // Home screen's default focus on the hero.
+        focusHero();
+
+        window.addEventListener('beforeunload', destroyAll);
+    });
+
+    // ───── Content fetch + filters (mirrors grid.html) ─────
+
+    async function fetchContent() {
+        try {
+            const r = await fetch('/api/content');
+            if (!r.ok) throw new Error('HTTP ' + r.status);
+            const items = await r.json();
+            ALL_CONTENT = items.map(it => ({
+                name: it.name,
+                label: it.name
+                    .replace(/_/g, ' ')
+                    .replace(/\b\w/g, c => c.toUpperCase())
+                    .replace(/Hevc/g, 'HEVC')
+                    .replace(/Ts/g, 'TS')
+                    .replace(/Hw/g, 'HW')
+                    .replace(/Dash/g, 'DASH'),
+                has_dash: it.has_dash,
+                has_hls: it.has_hls,
+                max_resolution: it.max_resolution || null,
+                max_height: (typeof it.max_height === 'number') ? it.max_height : null,
+            }));
+            return true;
+        } catch (err) {
+            console.error('fetchContent failed', err);
+            const info = document.getElementById('contentInfo');
+            if (info) info.textContent = 'Error loading content';
+            return false;
+        }
+    }
+
+    function populateContentFilter() {
+        const sel = document.getElementById('contentFilter');
+        const names = [...new Set(ALL_CONTENT.map(c => c.name.replace(/_h264|_hevc|_av1|_ts|_hw|_dash/g, '')))];
+        names.sort();
+        for (const name of names) {
+            const opt = document.createElement('option');
+            opt.value = name; opt.textContent = name;
+            sel.appendChild(opt);
+        }
+    }
+
+    function applyFilters() {
+        const protocol = document.getElementById('protocolFilter').value;
+        const codec = document.getElementById('codecFilter').value;
+        const maxRes = document.getElementById('maxResFilter').value;
+        const content = document.getElementById('contentFilter').value;
+
+        const filtered = ALL_CONTENT.filter(item => {
+            if (content !== 'all' && !item.name.includes(content)) return false;
+            if (codec === 'h264' && !item.name.includes('h264')) return false;
+            if (codec === 'hevc' && !item.name.includes('hevc')) return false;
+            if (codec === 'av1'  && !item.name.includes('av1'))  return false;
+            if (protocol === 'dash' && !item.has_dash) return false;
+            if (protocol === 'hls'  && !item.has_hls)  return false;
+            if (protocol === 'both' && (!item.has_dash || !item.has_hls)) return false;
+            if (maxRes !== 'all') {
+                const h = item.max_height || parseInt(item.max_resolution || '', 10);
+                if (!h || h < parseInt(maxRes, 10)) return false;
+            }
+            return true;
+        });
+
+        const expanded = [];
+        for (const item of filtered) {
+            if (item.has_dash && (protocol === 'all' || protocol === 'dash' || protocol === 'both')) {
+                expanded.push({ ...item, type: 'dash' });
+            }
+            if (item.has_hls && (protocol === 'all' || protocol === 'hls' || protocol === 'both')) {
+                expanded.push({ ...item, type: 'hls' });
+            }
+        }
+        expanded.sort((a, b) => a.name.localeCompare(b.name) || a.type.localeCompare(b.type));
+        return expanded;
+    }
+
+    function rebuildSelection({ randomize = false } = {}) {
+        const pool = applyFilters();
+        let chosen;
+        if (randomize) {
+            chosen = pool.slice().sort(() => Math.random() - 0.5).slice(0, TILE_COUNT);
+        } else {
+            chosen = pool.slice(0, TILE_COUNT);
+        }
+        tileItems = chosen;
+
+        const info = document.getElementById('contentInfo');
+        if (info) info.textContent = `Showing ${chosen.length} of ${pool.length} (${ALL_CONTENT.length} total)`;
+    }
+
+    // ───── URL builder ─────
+
+    function streamUrlFor(item) {
+        const seg = document.getElementById('segmentFilter').value;
+        if (item.type === 'dash') {
+            if (seg === '2s') return `/go-live/${item.name}/manifest_2s.mpd`;
+            if (seg === '6s') return `/go-live/${item.name}/manifest_6s.mpd`;
+            return `/go-live/${item.name}/manifest.mpd`;
+        }
+        if (seg === '2s') return `/go-live/${item.name}/master_2s.m3u8`;
+        if (seg === '6s') return `/go-live/${item.name}/master_6s.m3u8`;
+        return `/go-live/${item.name}/master.m3u8`;
+    }
+
+    // ───── Hero ─────
+
+    function setHeroFromInitial() {
+        // Hero MUST reflect the last selected/played clip — independent of
+        // which 8 tiles happen to be in the row. We resolve against the full
+        // ALL_CONTENT pool, deriving HLS vs DASH from the persisted URL when
+        // available (or has_hls/has_dash as a fallback).
+        const sel = (localStorage.getItem('ismSelectedContent') || '').trim();
+        const last = (localStorage.getItem('ismLastPlayed') || '').trim();
+
+        let item = null;
+        let label = 'FEATURED';
+        if (sel)        { item = resolvePersisted(sel); if (item) label = 'NOW PLAYING'; }
+        else if (last)  { item = resolvePersisted(last); if (item) label = 'CONTINUE WATCHING'; }
+        if (!item)      { item = tileItems[0] || null; }
+
+        if (!item) {
+            // Nothing to show — make sure the previous hero player is torn down
+            // so we don't keep decoding into a stale stage when filters narrow
+            // the catalogue to zero.
+            heroItem = null;
+            destroyHero();
+            return;
+        }
+        document.getElementById('heroLabel').textContent = label;
+        loadHero(item);
+        markHeroTile();
+    }
+
+    function resolvePersisted(name) {
+        const base = ALL_CONTENT.find(it => it.name === name);
+        if (!base) return null;
+        const url = (localStorage.getItem('ismSelectedUrl') || '').trim();
+        let type = null;
+        if (url.includes('.mpd')) type = 'dash';
+        else if (url.includes('.m3u8')) type = 'hls';
+        if (!type) type = base.has_hls ? 'hls' : (base.has_dash ? 'dash' : null);
+        if (!type) return null;
+        return { ...base, type };
+    }
+
+    async function loadHero(item) {
+        // Set synchronously so callers can call markHeroTile() right away
+        heroItem = item;
+        // Guard against rapid overlapping calls (e.g. fast tile clicks) from
+        // landing two engines on the same <video>. Each call gets a unique
+        // generation token; if a newer call started while we were awaiting
+        // teardown, bail out and let the newer call proceed alone.
+        const gen = ++heroLoadGen;
+        await destroyHero();
+        if (gen !== heroLoadGen) return;
+        const video = document.getElementById('heroVideo');
+        const status = document.getElementById('heroStatus');
+        const title = document.getElementById('heroTitle');
+        const poster = document.getElementById('heroPoster');
+
+        title.textContent = item.label || item.name;
+        status.textContent = 'Loading…';
+        status.className = 'hero-status status-loading';
+        poster.style.backgroundImage = '';
+
+        // Hero plays with audio (it represents the user's current selection).
+        // If browser autoplay policy refuses unmuted audio (no prior gesture),
+        // we fall back to muted in the catch below.
+        video.muted = false;
+        video.volume = 1.0;
+
+        const url = streamUrlFor(item);
+        heroUrl = url;
+
+        attachVideoListeners(video, status);
+
+        try {
+            if (item.type === 'dash') {
+                if (!shaka.Player.isBrowserSupported()) throw new Error('Shaka unsupported');
+                const player = new shaka.Player(video);
+                heroPlayer = player;
+                player.configure({
+                    streaming: { bufferingGoal: 10, rebufferingGoal: 2, bufferBehind: 30 },
+                    abr: { enabled: true, defaultBandwidthEstimate: 1500000 },
+                });
+                player.addEventListener('error', (ev) => {
+                    console.error('Hero shaka error', ev.detail);
+                    status.textContent = 'Error';
+                    status.className = 'hero-status status-error';
+                });
+                await player.load(url);
+            } else if (window.Hls && Hls.isSupported()) {
+                const hls = new Hls({
+                    maxBufferLength: 12,
+                    backBufferLength: 30,
+                    liveSyncDurationCount: 3,
+                    abrEwmaDefaultEstimate: 1500000,
+                });
+                heroHls = hls;
+                hls.on(Hls.Events.ERROR, (_e, data) => {
+                    if (!data.fatal) return;
+                    console.error('Hero hls fatal', data);
+                    status.textContent = 'Error';
+                    status.className = 'hero-status status-error';
+                    if (data.type === Hls.ErrorTypes.NETWORK_ERROR) hls.startLoad();
+                    else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) hls.recoverMediaError();
+                    else hls.destroy();
+                });
+                hls.loadSource(url);
+                hls.attachMedia(video);
+            } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+                video.src = url;
+            } else {
+                throw new Error('No supported playback engine for ' + url);
+            }
+
+            try {
+                await video.play();
+                hideUnmuteHint();
+            } catch (_) {
+                // Autoplay-with-audio rejected (no prior user gesture). Fall back
+                // to muted autoplay and surface a small hint so the user can
+                // click to enable audio.
+                try {
+                    video.muted = true;
+                    video.volume = 0;
+                    await video.play();
+                    showUnmuteHint();
+                } catch (e2) {
+                    console.warn('hero autoplay refused', e2);
+                }
+            }
+        } catch (err) {
+            console.error('loadHero failed', err);
+            status.textContent = 'Failed';
+            status.className = 'hero-status status-error';
+        }
+    }
+
+    function showUnmuteHint() {
+        const hint = document.getElementById('heroUnmuteHint');
+        if (hint) hint.classList.add('show');
+    }
+    function hideUnmuteHint() {
+        const hint = document.getElementById('heroUnmuteHint');
+        if (hint) hint.classList.remove('show');
+    }
+    function unmuteHero() {
+        const v = document.getElementById('heroVideo');
+        if (!v) return;
+        v.muted = false;
+        v.volume = 1.0;
+        hideUnmuteHint();
+    }
+
+    async function destroyHero() {
+        if (heroPlayer) { try { await heroPlayer.destroy(); } catch (_) {} heroPlayer = null; }
+        if (heroHls)    { try { heroHls.destroy(); } catch (_) {} heroHls = null; }
+        const v = document.getElementById('heroVideo');
+        if (v) { v.removeAttribute('src'); v.load && v.load(); }
+        heroUrl = null;
+    }
+
+    function attachVideoListeners(video, statusEl) {
+        // Replace listeners by cloning is overkill — guard against duplicates with a flag
+        if (video.__listenersAttached) return;
+        video.__listenersAttached = true;
+        video.addEventListener('playing', () => {
+            statusEl.textContent = 'Playing';
+            statusEl.className = statusEl.className.replace(/status-\w+/, 'status-playing');
+        });
+        video.addEventListener('waiting', () => {
+            statusEl.textContent = 'Buffering…';
+            statusEl.className = statusEl.className.replace(/status-\w+/, 'status-loading');
+        });
+        video.addEventListener('error', () => {
+            statusEl.textContent = 'Error';
+            statusEl.className = statusEl.className.replace(/status-\w+/, 'status-error');
+        });
+    }
+
+    function markHeroTile() {
+        if (!heroItem) return;
+        document.querySelectorAll('.tile').forEach(el => {
+            el.classList.toggle('is-hero', el.dataset.name === heroItem.name && el.dataset.type === heroItem.type);
+        });
+    }
+
+    // ───── Strip ─────
+
+    function renderStrip() {
+        const strip = document.getElementById('strip');
+        // Tear down any existing tile players before re-rendering
+        for (let i = 0; i < tilePlayers.length; i++) {
+            if (tilePlayers[i]) { try { tilePlayers[i].destroy(); } catch (_) {} tilePlayers[i] = null; }
+        }
+        for (let i = 0; i < tileHls.length; i++) {
+            if (tileHls[i]) { try { tileHls[i].destroy(); } catch (_) {} tileHls[i] = null; }
+        }
+        tilePlayers.length = 0; tileHls.length = 0; tileVideos.length = 0; tileUrls.length = 0;
+        strip.innerHTML = '';
+
+        // Drive the CSS grid column count from the chosen tile count so the
+        // strip stays full-width regardless of how many tiles the user picked.
+        strip.style.setProperty('--tile-cols', String(Math.max(1, TILE_COUNT)));
+
+        tileItems.forEach((item, i) => {
+            const tile = document.createElement('div');
+            tile.className = 'tile';
+            tile.setAttribute('role', 'option');
+            tile.setAttribute('tabindex', '-1');
+            tile.dataset.index = String(i);
+            tile.dataset.name = item.name;
+            tile.dataset.type = item.type;
+
+            const video = document.createElement('video');
+            video.muted = true; video.autoplay = true; video.playsInline = true; video.loop = false;
+            video.volume = 0;
+            tile.appendChild(video);
+
+            const status = document.createElement('div');
+            status.className = 'tile-status status-loading';
+            status.textContent = 'Loading';
+            tile.appendChild(status);
+
+            const label = document.createElement('div');
+            label.className = 'tile-label';
+            label.textContent = item.label || item.name;
+            tile.appendChild(label);
+
+            const heroBadge = document.createElement('div');
+            heroBadge.className = 'tile-hero-badge';
+            heroBadge.textContent = 'HERO';
+            tile.appendChild(heroBadge);
+
+            tile.addEventListener('click', () => onTileClick(i));
+            // Right-click → straight to full-screen playback (skip the swap-to-hero step)
+            tile.addEventListener('contextmenu', (e) => {
+                e.preventDefault();
+                const it = tileItems[i];
+                if (it) playClip(it);
+            });
+            tile.addEventListener('mouseenter', () => tile.classList.add('hover'));
+            tile.addEventListener('mouseleave', () => tile.classList.remove('hover'));
+
+            strip.appendChild(tile);
+            tileVideos[i] = video;
+
+            // Player init is lazy — IntersectionObserver kicks it off
+            tile.__pendingItem = item;
+            tile.__pendingStatus = status;
+        });
+
+        // Reset focus index
+        focusedIndex = Math.min(focusedIndex, tileItems.length - 1);
+        if (focusedIndex < 0) focusedIndex = 0;
+    }
+
+    let visibilityObserver = null;
+    let visibleSet = new Set();
+
+    function observeTileVisibility() {
+        if (visibilityObserver) visibilityObserver.disconnect();
+        const strip = document.getElementById('strip');
+        visibilityObserver = new IntersectionObserver((entries) => {
+            for (const ent of entries) {
+                const idx = parseInt(ent.target.dataset.index, 10);
+                if (ent.isIntersecting && ent.intersectionRatio > 0.3) {
+                    visibleSet.add(idx);
+                } else {
+                    visibleSet.delete(idx);
+                }
+            }
+            reconcileTilePlayback();
+        }, { root: strip, threshold: [0, 0.3, 0.7, 1] });
+
+        document.querySelectorAll('.tile').forEach(t => visibilityObserver.observe(t));
+        // First reconcile right after observers fire
+        setTimeout(reconcileTilePlayback, 50);
+    }
+
+    function reconcileTilePlayback() {
+        // Ensure at most MAX_DECODING_TILES tiles are *initialized* simultaneously.
+        // Visible tiles get priority; off-screen tiles get torn down.
+        const visible = [...visibleSet].sort((a, b) => a - b).slice(0, MAX_DECODING_TILES);
+        const visibleIdx = new Set(visible);
+
+        // Tear down off-screen
+        for (let i = 0; i < tileItems.length; i++) {
+            if (!visibleIdx.has(i)) {
+                if (tilePlayers[i] || tileHls[i]) destroyTilePlayer(i);
+            }
+        }
+        // Init visible
+        for (const i of visibleIdx) {
+            if (!tilePlayers[i] && !tileHls[i] && !tileUrls[i]) {
+                initTilePlayer(i);
+            }
+        }
+    }
+
+    async function destroyTilePlayer(i) {
+        if (tilePlayers[i]) { try { await tilePlayers[i].destroy(); } catch (_) {} tilePlayers[i] = null; }
+        if (tileHls[i])    { try { tileHls[i].destroy(); } catch (_) {} tileHls[i] = null; }
+        const v = tileVideos[i];
+        if (v) { try { v.pause(); v.removeAttribute('src'); v.load && v.load(); } catch (_) {} }
+        tileUrls[i] = null;
+    }
+
+    async function initTilePlayer(i) {
+        const item = tileItems[i];
+        const video = tileVideos[i];
+        const tile = document.querySelector(`.tile[data-index="${i}"]`);
+        if (!item || !video || !tile) return;
+        const status = tile.querySelector('.tile-status');
+        const url = streamUrlFor(item);
+        tileUrls[i] = url;
+
+        attachVideoListeners(video, status);
+        video.muted = true; video.volume = 0;
+
+        try {
+            if (item.type === 'dash') {
+                if (!shaka.Player.isBrowserSupported()) throw new Error('Shaka unsupported');
+                const player = new shaka.Player(video);
+                tilePlayers[i] = player;
+                player.configure({
+                    streaming: { bufferingGoal: 8, rebufferingGoal: 2, bufferBehind: 20 },
+                    abr: { enabled: true, defaultBandwidthEstimate: 500000, restrictions: { maxBandwidth: 1500000 } },
+                });
+                player.addEventListener('error', (ev) => {
+                    console.warn(`Tile ${i} shaka error`, ev.detail);
+                    status.textContent = 'Error';
+                    status.className = 'tile-status status-error';
+                });
+                await player.load(url);
+                const tracks = player.getVariantTracks();
+                if (tracks.length) {
+                    tracks.sort((a, b) => a.bandwidth - b.bandwidth);
+                    player.selectVariantTrack(tracks[0], true);
+                }
+            } else if (window.Hls && Hls.isSupported()) {
+                const hls = new Hls({
+                    maxBufferLength: 8,
+                    backBufferLength: 20,
+                    liveSyncDurationCount: 3,
+                    abrEwmaDefaultEstimate: 400000,
+                    startLevel: 0,
+                });
+                tileHls[i] = hls;
+                hls.on(Hls.Events.MANIFEST_PARSED, () => {
+                    if (hls.levels.length > 0) hls.currentLevel = 0;
+                });
+                hls.on(Hls.Events.ERROR, (_e, data) => {
+                    if (!data.fatal) return;
+                    if (data.type === Hls.ErrorTypes.NETWORK_ERROR) hls.startLoad();
+                    else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) hls.recoverMediaError();
+                    else hls.destroy();
+                });
+                hls.loadSource(url);
+                hls.attachMedia(video);
+            } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+                video.src = url;
+            }
+            try { await video.play(); } catch (_) {}
+        } catch (err) {
+            console.warn(`initTilePlayer ${i} failed`, err);
+            status.textContent = 'Failed';
+            status.className = 'tile-status status-error';
+        }
+    }
+
+    function onTileClick(i) {
+        const item = tileItems[i];
+        if (!item) return;
+        focusedIndex = i;
+        renderFocus();
+        previewHero(item);
+    }
+
+    // Tile click swaps the hero preview without leaving Mosaic — matches the
+    // iPad/tvOS pattern where the centered (focused) tile is the hero. Click
+    // the hero to actually start full-screen playback.
+    function previewHero(item) {
+        if (!item) return;
+        document.getElementById('heroLabel').textContent = 'NOW PLAYING';
+        loadHero(item).then(() => markHeroTile());
+        // Persist so other pages reflect the selection immediately
+        persistSelection(item);
+    }
+
+    // Mirror iPad/tvOS: tapping a clip leaves the Home/Mosaic view and
+    // navigates to the dedicated full-screen playback surface (play-10ft.html),
+    // which routes the manifest URL through go-proxy.
+    //
+    // player_id is *device-scoped* — every navigation reuses the same id so
+    // the user lands on the same go-proxy port across plays. Only 911 (in
+    // play-10ft) clears it for a true fresh session.
+    function playClip(item) {
+        if (!item) return;
+        persistSelection(item);
+        const url = streamUrlFor(item);
+        const playerId = getOrMintPlayerId();
+        const proxiedUrl = buildTestingUrl(url, playerId);
+        const href = `/dashboard/play-10ft.html?player_id=${encodeURIComponent(playerId)}&url=${encodeURIComponent(proxiedUrl)}`;
+        window.location.href = href;
+    }
+
+    function getOrMintPlayerId() {
+        let id = '';
+        try { id = sessionStorage.getItem('ism10ftPlayerId') || ''; } catch (_) {}
+        if (!id) {
+            id = createPlayerId();
+            try { sessionStorage.setItem('ism10ftPlayerId', id); } catch (_) {}
+        }
+        return id;
+    }
+
+    // ─── go-proxy URL helpers (mirror grid.html) ───
+
+    function createPlayerId() {
+        if (window.ISMNav && typeof window.ISMNav.createPlayerId === 'function') return window.ISMNav.createPlayerId();
+        return Math.random().toString(36).slice(2, 10);
+    }
+    function getProxyPort() {
+        const uiPort = window.location.port || '30000';
+        return uiPort.slice(0, -3) + '081';
+    }
+    function normalizeTestingBase(url) {
+        if (window.ISMNav && typeof window.ISMNav.normalizeTestingBaseUrl === 'function') {
+            return window.ISMNav.normalizeTestingBaseUrl(url);
+        }
+        const parsed = new URL(url, window.location.origin);
+        parsed.port = getProxyPort();
+        return parsed.toString();
+    }
+    function buildTestingUrl(url, playerId) {
+        if (window.ISMNav && typeof window.ISMNav.buildTestingUrl === 'function') return window.ISMNav.buildTestingUrl(url, playerId);
+        const base = normalizeTestingBase(url);
+        const sep = base.includes('?') ? '&' : '?';
+        return `${base}${sep}player_id=${playerId}`;
+    }
+
+    function persistSelection(item) {
+        if (!item) return;
+        const fullName = item.name;
+        localStorage.setItem('ismSelectedContent', fullName);
+        localStorage.setItem('ismSelectedContentFull', fullName);
+        const baseName = fullName
+            .replace(/_(h264|hevc|av1|dash|ts|hw)$/i, '')
+            .replace(/_\d{8}_\d{6}$/i, '');
+        localStorage.setItem('ismSelectedContentBase', baseName);
+        const url = streamUrlFor(item);
+        if (window.ISMNav && typeof window.ISMNav.setSelectedUrl === 'function') {
+            window.ISMNav.setSelectedUrl(url);
+        } else {
+            localStorage.setItem('ismSelectedUrl', url);
+        }
+        if (window.ISMNav && typeof window.ISMNav.updateSelectedContentBadge === 'function') {
+            window.ISMNav.updateSelectedContentBadge();
+        }
+    }
+
+    // ───── Focus / keyboard nav ─────
+
+    function renderFocus() {
+        document.querySelectorAll('.tile').forEach((el, i) => {
+            el.classList.toggle('focused', stripFocused && i === focusedIndex);
+            if (stripFocused && i === focusedIndex) {
+                el.scrollIntoView({ block: 'nearest', inline: 'center', behavior: 'smooth' });
+            }
+        });
+    }
+
+    function focusStrip() {
+        if (tileItems.length === 0) return;
+        stripFocused = true;
+        heroFocused = false;
+        document.getElementById('strip').focus();
+        renderFocus();
+        renderHeroFocus();
+    }
+
+    function blurStrip() {
+        stripFocused = false;
+        renderFocus();
+    }
+
+    function focusHero() {
+        const stage = document.getElementById('heroStage');
+        if (!stage) return;
+        heroFocused = true;
+        stripFocused = false;
+        stage.focus();
+        renderFocus();
+        renderHeroFocus();
+    }
+
+    function renderHeroFocus() {
+        const stage = document.getElementById('heroStage');
+        if (!stage) return;
+        stage.classList.toggle('focused', heroFocused);
+    }
+
+    function wireKeyboard() {
+        document.addEventListener('keydown', (e) => {
+            // While drawer is open, only Escape and Tab navigation matter
+            if (drawerOpen) {
+                if (e.key === 'Escape') { e.preventDefault(); closeDrawer(); }
+                return;
+            }
+
+            // Don't hijack typing into inputs
+            const tag = (e.target && e.target.tagName) || '';
+            if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+
+            switch (e.key) {
+                case 'ArrowDown':
+                    e.preventDefault();
+                    focusStrip();
+                    break;
+                case 'ArrowUp':
+                    e.preventDefault();
+                    if (stripFocused) {
+                        // Climb out of the strip up to the hero
+                        focusHero();
+                    } else {
+                        // Already at the top — focus the hero from anywhere
+                        focusHero();
+                    }
+                    break;
+                case 'ArrowRight':
+                    if (stripFocused) {
+                        e.preventDefault();
+                        if (tileItems.length === 0) break;
+                        focusedIndex = (focusedIndex + 1) % tileItems.length;
+                        renderFocus();
+                    }
+                    break;
+                case 'ArrowLeft':
+                    if (stripFocused) {
+                        e.preventDefault();
+                        if (tileItems.length === 0) break;
+                        focusedIndex = (focusedIndex - 1 + tileItems.length) % tileItems.length;
+                        renderFocus();
+                    }
+                    break;
+                case 'Enter':
+                case ' ':
+                    e.preventDefault();
+                    // Two-step: focused tile → swap into hero;
+                    // hero (or no strip focus) → start full playback.
+                    if (stripFocused && tileItems[focusedIndex]) {
+                        previewHero(tileItems[focusedIndex]);
+                    } else if (heroItem) {
+                        playClip(heroItem);
+                    }
+                    break;
+                case 's':
+                case 'S':
+                    e.preventDefault(); openDrawer(document.getElementById('settingsBtn')); break;
+                case 'f':
+                case 'F':
+                    e.preventDefault(); toggleFullscreen(); break;
+                case '?':
+                case '/':
+                    e.preventDefault(); toggleKeysHint(); break;
+            }
+        });
+    }
+
+    // ───── Mouse + pointer ─────
+
+    function wireMouseAndPointer() {
+        // No-op: the strip is now a non-scrolling grid, so wheel-translate
+        // and drag-scroll are unnecessary. Tile clicks are wired in renderStrip().
+    }
+
+    // ───── Hero click → full-screen go-proxy playback ─────
+
+    function wireHeroPlay() {
+        const stage = document.getElementById('heroStage');
+        stage.addEventListener('click', () => {
+            if (heroItem) playClip(heroItem);
+        });
+        // Hero stage's own keydown — Enter / Space when stage has focus
+        stage.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault();
+                if (heroItem) playClip(heroItem);
+            }
+        });
+        stage.addEventListener('focus', () => {
+            heroFocused = true;
+            renderHeroFocus();
+        });
+        stage.addEventListener('blur', () => {
+            heroFocused = false;
+            renderHeroFocus();
+        });
+
+        // Unmute pill — stop the click from bubbling up to the stage so we
+        // don't navigate to playback when the user just wants audio on.
+        const unmute = document.getElementById('heroUnmuteHint');
+        if (unmute) {
+            unmute.addEventListener('click', (e) => {
+                e.stopPropagation();
+                unmuteHero();
+            });
+        }
+    }
+
+    // ───── Drawer ─────
+
+    function wireDrawer() {
+        const btn = document.getElementById('settingsBtn');
+        const closeBtn = document.getElementById('settingsCloseBtn');
+        const backdrop = document.getElementById('settingsBackdrop');
+        const apply = document.getElementById('applyBtn');
+        const randomize = document.getElementById('randomizeBtn');
+
+        btn.addEventListener('click', () => openDrawer(btn));
+        closeBtn.addEventListener('click', () => closeDrawer());
+        backdrop.addEventListener('click', () => closeDrawer());
+
+        apply.addEventListener('click', () => {
+            applyDrawerSettings();
+            rebuildSelection();
+            renderStrip();
+            observeTileVisibility();
+            setHeroFromInitial();
+            closeDrawer();
+        });
+
+        randomize.addEventListener('click', () => {
+            applyDrawerSettings();
+            rebuildSelection({ randomize: true });
+            renderStrip();
+            observeTileVisibility();
+            setHeroFromInitial();
+            closeDrawer();
+        });
+
+        function applyDrawerSettings() {
+            const seg = document.getElementById('segmentFilter').value;
+            localStorage.setItem('ismSelectedSegment', seg);
+            const tileSel = document.getElementById('tileCountSelect');
+            if (tileSel) {
+                const n = clampTileCount(parseInt(tileSel.value, 10));
+                TILE_COUNT = n;
+                MAX_DECODING_TILES = n;
+                localStorage.setItem('ism10ftTileCount', String(n));
+            }
+        }
+
+        // Tab focus trap inside the drawer
+        document.getElementById('settingsDrawer').addEventListener('keydown', (e) => {
+            if (!drawerOpen) return;       // drawer DOM stays mounted; don't trap when hidden
+            if (e.key !== 'Tab') return;
+            const focusables = focusableInDrawer();
+            if (focusables.length === 0) return;
+            const first = focusables[0];
+            const last = focusables[focusables.length - 1];
+            if (e.shiftKey && document.activeElement === first) {
+                e.preventDefault(); last.focus();
+            } else if (!e.shiftKey && document.activeElement === last) {
+                e.preventDefault(); first.focus();
+            }
+        });
+    }
+
+    function focusableInDrawer() {
+        const root = document.getElementById('settingsDrawer');
+        return [...root.querySelectorAll('button, select, input, [tabindex]:not([tabindex="-1"])')]
+            .filter(el => !el.disabled && el.offsetParent !== null);
+    }
+
+    function openDrawer(trigger) {
+        if (drawerOpen) return;
+        drawerOpen = true;
+        drawerOpenedBy = trigger || null;
+        const drawer = document.getElementById('settingsDrawer');
+        const backdrop = document.getElementById('settingsBackdrop');
+        backdrop.hidden = false;
+        // Force reflow so the transition runs
+        // eslint-disable-next-line no-unused-expressions
+        backdrop.offsetWidth;
+        backdrop.classList.add('open');
+        drawer.classList.add('open');
+        drawer.setAttribute('aria-hidden', 'false');
+        document.body.classList.add('drawer-open');
+        // Move focus inside the drawer
+        document.getElementById('settingsCloseBtn').focus();
+    }
+
+    function closeDrawer() {
+        if (!drawerOpen) return;
+        drawerOpen = false;
+        const drawer = document.getElementById('settingsDrawer');
+        const backdrop = document.getElementById('settingsBackdrop');
+        drawer.classList.remove('open');
+        drawer.setAttribute('aria-hidden', 'true');
+        backdrop.classList.remove('open');
+        document.body.classList.remove('drawer-open');
+        // Hide backdrop after the transition so it can't block clicks
+        setTimeout(() => { if (!drawerOpen) backdrop.hidden = true; }, 260);
+        if (drawerOpenedBy && typeof drawerOpenedBy.focus === 'function') drawerOpenedBy.focus();
+    }
+
+    // ───── Fullscreen ─────
+
+    function wireFullscreenButton() {
+        document.getElementById('fullscreenBtn').addEventListener('click', toggleFullscreen);
+    }
+
+    function toggleFullscreen() {
+        document.body.classList.toggle('ism-fullscreen');
+        document.documentElement.classList.toggle('ism-fullscreen');
+    }
+
+    // ───── Hint ─────
+
+    let hintAutoTimer = null;
+    let hintSticky = false;
+
+    function flashKeysHint() {
+        const hint = document.getElementById('keysHint');
+        if (!hint) return;
+        hint.classList.add('show');
+        clearTimeout(hintAutoTimer);
+        hintAutoTimer = setTimeout(() => {
+            if (!hintSticky) hint.classList.remove('show');
+        }, 4500);
+    }
+
+    function toggleKeysHint() {
+        const hint = document.getElementById('keysHint');
+        if (!hint) return;
+        hintSticky = !hintSticky;
+        if (hintSticky) {
+            hint.classList.add('show');
+            clearTimeout(hintAutoTimer);
+        } else {
+            hint.classList.remove('show');
+        }
+    }
+
+    function wireHelp() {
+        const btn = document.getElementById('helpBtn');
+        if (btn) btn.addEventListener('click', toggleKeysHint);
+    }
+
+    // ───── Cleanup ─────
+
+    async function destroyAll() {
+        await destroyHero();
+        for (let i = 0; i < tilePlayers.length; i++) {
+            if (tilePlayers[i]) { try { await tilePlayers[i].destroy(); } catch (_) {} }
+            if (tileHls[i])    { try { tileHls[i].destroy(); } catch (_) {} }
+        }
+    }
+</script>
+<script src="/shared/shared-nav.js"></script>
+</body>
+</html>
