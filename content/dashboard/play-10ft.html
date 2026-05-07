@@ -480,7 +480,13 @@
     // ───── State ─────
 
     const Q = new URLSearchParams(location.search);
-    let currentUrl = Q.get('url');
+    let currentUrl = (function () {
+        const raw = Q.get('url');
+        if (!raw) return null;
+        // Validate at the boundary — only http(s) and same-origin paths are
+        // ever fed to the player. See isSafePlaybackUrl for rationale.
+        return isSafePlaybackUrl(raw) ? raw : null;
+    })();
     // player_id = persistent for the device/browser session (routes to a
     // dedicated go-proxy port). Does NOT change on Reload or Restart. URL
     // wins (caller supplied), then sessionStorage (back-nav from mosaic
@@ -625,6 +631,14 @@
     // ───── Stream load ─────
 
     async function loadStream(url) {
+        // Belt-and-suspenders: the boundary validator at boot already
+        // filters the `url` query param, but loadStream is also called
+        // internally with derived URLs (Restart, drawer Apply, rotate).
+        // Re-check so any future caller can't bypass the gate.
+        if (!isSafePlaybackUrl(url)) {
+            showError('Refused unsafe stream URL');
+            return;
+        }
         // Guard against overlapping calls (rapid Reload / Restart / drawer-Apply)
         // from landing two engines on the same <video>.
         const gen = ++loadStreamGen;
@@ -1701,6 +1715,23 @@
             if (!url && typeof detail.data[1] === 'string') url = detail.data[1];
         }
         return { status, url };
+    }
+
+    // Reject anything other than http(s) or same-origin relative paths.
+    // The `url` query param is attacker-controlled; without this gate, a
+    // crafted javascript: / data: URL could land on `video.src` (CodeQL
+    // js/xss + js/client-side-unvalidated-url-redirection alerts on
+    // play-10ft).
+    function isSafePlaybackUrl(u) {
+        if (!u || typeof u !== 'string') return false;
+        // Relative path — same origin
+        if (u.startsWith('/')) return true;
+        try {
+            const parsed = new URL(u, window.location.origin);
+            return parsed.protocol === 'http:' || parsed.protocol === 'https:';
+        } catch (_) {
+            return false;
+        }
     }
 
     function detectBrowserFamily() {
