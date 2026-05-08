@@ -21,6 +21,7 @@ type fakeAdapter struct {
 	// drives v1's nftables / tc helpers; the fake just records.
 	shapeApplyCalls     []string
 	transportFaultCalls []fakeTransportFaultCall
+	patternApplyCalls   []fakePatternCall
 
 	// SubscribeSessions delivers snapshots whenever sessionsChanged
 	// fires; pretests can call it directly to drive the diff.
@@ -193,6 +194,26 @@ type fakeTransportFaultCall struct {
 	Consecutive      int
 	ConsecutiveUnits string
 	Frequency        int
+}
+
+// ApplyPatternToPlayer test stub — records the call for assertions.
+func (a *fakeAdapter) ApplyPatternToPlayer(playerID string, steps []ShapePatternStep, delayMs int, lossPct float64) error {
+	a.mu.Lock()
+	a.patternApplyCalls = append(a.patternApplyCalls, fakePatternCall{
+		PlayerID: playerID,
+		Steps:    steps,
+		DelayMs:  delayMs,
+		LossPct:  lossPct,
+	})
+	a.mu.Unlock()
+	return nil
+}
+
+type fakePatternCall struct {
+	PlayerID string
+	Steps    []ShapePatternStep
+	DelayMs  int
+	LossPct  float64
 }
 
 func (a *fakeAdapter) DeletePlayer(playerID string) bool {

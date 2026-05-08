@@ -485,6 +485,42 @@ func (a *v2Adapter) ApplyShapeToPlayer(playerID string) error {
 	return nil
 }
 
+// ApplyPatternToPlayer drives v1's pattern step-engine on the player's
+// bound port via applyShapePattern. Empty steps disarm the loop.
+func (a *v2Adapter) ApplyPatternToPlayer(playerID string, steps []server.ShapePatternStep, delayMs int, lossPct float64) error {
+	if a == nil || a.app == nil {
+		return nil
+	}
+	want, err := uuid.Parse(playerID)
+	if err != nil {
+		return err
+	}
+	for _, s := range a.app.getSessionList() {
+		stored, perr := uuid.Parse(getString(s, "player_id"))
+		if perr != nil || stored != want {
+			continue
+		}
+		portStr := getString(s, "x_forwarded_port")
+		if portStr == "" {
+			return nil
+		}
+		port, perr := strconv.Atoi(portStr)
+		if perr != nil {
+			return nil
+		}
+		v1Steps := make([]NftShapeStep, 0, len(steps))
+		for _, st := range steps {
+			v1Steps = append(v1Steps, NftShapeStep{
+				DurationSeconds: st.DurationSeconds,
+				RateMbps:        st.RateMbps,
+				Enabled:         st.Enabled,
+			})
+		}
+		return a.app.applyShapePattern(port, v1Steps, delayMs, lossPct)
+	}
+	return nil
+}
+
 // ApplyTransportFaultToPlayer arms (or disarms when faultType="none")
 // the transport-fault loop on the player's port.
 func (a *v2Adapter) ApplyTransportFaultToPlayer(playerID, faultType string, consecutive int, consecutiveUnits string, frequency int) error {
