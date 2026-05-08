@@ -380,8 +380,18 @@ components:
       name: cursor
       schema: { type: string }
       description: |
-        Opaque cursor from a previous response's `next_cursor`. When set,
-        all other filter params are ignored — the cursor encodes them.
+        Opaque keyset-pagination cursor — base64url-encoded
+        `(event_time_micros, last_id)` tuple, server-issued in the
+        previous response's `next_cursor`. Clients **must not** decode
+        or fabricate cursors.
+
+        When `cursor` is set, all filter params (`from`, `to`,
+        `label.*`, etc.) are ignored — the cursor already encodes them.
+        Pass a cursor that fails to decode → `400 Bad Request`.
+
+        End-of-stream is signalled by `next_cursor: null` in the
+        response body; no error / no 404 past the end. See
+        `DESIGN.md § Pagination cursor`.
 
   responses:
     Problem:
