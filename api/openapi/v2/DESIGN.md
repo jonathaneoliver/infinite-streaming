@@ -259,8 +259,18 @@ override.
 
 ### 5. Single URL convention
 
-Every endpoint follows REST plural + sub-resource. No verb-in-path. Ports
-disappear (proxy internal). Full path table in `proxy.yaml`.
+Every endpoint follows REST plural + sub-resource. No verb-in-path. The
+v2 API surface itself is served on a single base origin — the
+per-player proxy ports (still 30181–30881 internally) are not addressed
+directly by API consumers. Full path table in `proxy.yaml`.
+
+**Player → port routing carries over from v1.** Players make manifest
+requests to the proxy's base origin with `?player_id=<uuid>`; the proxy
+looks up the existing per-player port and replies `302 Found` with the
+dedicated origin. New player_ids allocate a port and 302 the same way.
+This is request-routing on the streaming path, not an API v2 endpoint.
+The control plane (everything under `/api/v2/...`) is on the base
+origin only.
 
 ### 6. Consistent SSE envelope
 
@@ -565,3 +575,308 @@ Realistic timeline: spec freeze + first handler PRs week 1; full v2 surface
   with the offending paths listed in `conflicts: [string]` for
   actionable client recovery. Resource ETag is the max of all field
   revisions for backward-compatible RFC 7232 behaviour.
+
+## Resolved before implementation
+
+Open questions surfaced during pre-handler review and resolved here so
+the v2 handlers can be coded against a settled contract.
+
+### Real-player provenance (`player_id`)
+
+Real players (non-synthetic) **do not** call `POST /api/v2/players`.
+They self-register on first manifest request, with the `player_id`
+**generated client-side as a random UUIDv4** and persisted by the
+client across launches (NSUserDefaults / SharedPreferences /
+BrightScript registry / etc.). The proxy treats the `player_id` it
+sees on the URL as authoritative and allocates a port the first time
+it appears. There is no server-side ID mint for real players.
+
+If two app instances ever surface the same `player_id` (cloned install,
+restored backup), the proxy treats them as one player. This is a known
+trade-off that matches v1; if it ever becomes a real problem the fix is
+client-side (mint on first launch, never on restore) rather than a
+server-side ownership check.
+
+`POST /api/v2/players` remains the synthetic-player endpoint only — the
+client supplies a `player_id` (or omits it for server-side generation)
+and the proxy creates a port-allocated player record with no associated
+device traffic yet. Useful for integration tests that want to attach
+faults / shaping / labels before any real request flows.
+
+### `fault_rule.id` collisions
+
+When a PATCH writes a `fault_rules` array containing duplicate `id`
+values, **last write wins** — the array is stored verbatim and the
+duplicate IDs survive. The first-match-wins evaluation then makes the
+later duplicate dead code (it can never match before its earlier
+namesake). This matches the array-as-data philosophy and avoids
+surprising 400s on what is sometimes legitimate (templated rule sets
+that happen to collide).
+
+The per-rule sub-resource endpoints (below) target `id` as a path
+parameter; if the array contains duplicate IDs, those endpoints
+operate on the **first** occurrence.
+
+### Per-rule fault sub-resources
+
+The array-level PATCH treats `fault_rules` as a single concurrency
+unit, which means two clients adding non-overlapping rules will collide
+on `If-Match`. v2.0 ships per-rule sub-resources that resolve into the
+field-level concurrency model:
+
+```
+POST   /api/v2/players/{player_id}/fault_rules          # append a rule
+PATCH  /api/v2/players/{player_id}/fault_rules/{rule_id}   # mutate one rule
+DELETE /api/v2/players/{player_id}/fault_rules/{rule_id}   # remove one rule
+```
+
+Same trio mirrored on `/api/v2/plays/{play_id}/fault_rules/...`.
+
+Each per-rule mutation is a separate "field" for the purposes of
+conflict detection: editing rule `top-rung-500s` does not contend with
+editing rule `kill-the-init`. The path used in `conflicts: [string]`
+is `/fault_rules/{rule_id}`. The whole-array PATCH (on the player or
+play resource) remains supported and contends with all per-rule
+mutations as a single path `/fault_rules`.
+
+Order is preserved across mutations: `POST` appends to the end; `PATCH`
+keeps position; `DELETE` shifts later rules up. Reorder is not its own
+endpoint — clients that need it issue a whole-array PATCH and accept
+the array-level concurrency.
+
+### SSE replay window (`Last-Event-ID`)
+
+Every event frame on `/api/v2/events` carries an SSE-standard `id:`
+field — a monotonically increasing server-issued `uint64`,
+decimal-encoded. Browsers and SSE libraries echo the most-recent `id`
+back as the `Last-Event-ID` request header on automatic reconnect.
+
+The proxy honours `Last-Event-ID` against a **bounded in-memory ring
+buffer** (5 minutes of events or 10 000 frames, whichever is smaller).
+On reconnect:
+
+- If the ring still contains the requested ID, the proxy resends every
+  frame with `id > Last-Event-ID` and continues live.
+- If the requested ID is older than the ring's tail, the proxy emits a
+  synthetic `replay.gap` frame
+  (`{type: "replay.gap", data: {missed_from, missed_to}}`) so the
+  client knows it lost frames, then continues live from the ring's tail.
+- If the request has no `Last-Event-ID` header (first connect), the
+  proxy emits live frames only — no replay, no gap event.
+
+Why bounded ring: persistence is the archive's job, not the live
+stream's. The 5-min/10k window covers transient disconnects (CI proxy
+hiccups, mobile network blips, dashboard tab background-throttling)
+without taking on long-term storage. For longer windows, replay from
+the analytics archive (`/analytics/api/v2/session_events`).
+
+Why surface gaps explicitly: silent replay holes look indistinguishable
+from real anomalies in downstream analysis. Kubernetes' watch streams
+do this for the same reason.
+
+### Pagination cursor
+
+All list endpoints on the forwarder (`/plays`, `/snapshots`,
+`/network_requests`, `/session_events`) use **opaque cursor
+pagination** keyed on `(event_time, id)` against ClickHouse's primary
+index. Already declared in `forwarder.yaml` `components.parameters`
+(`Cursor`, `Limit`); spelled out here for the resolution log:
+
+- `?cursor=<opaque>` — base64url-encoded `(ts_micros, last_id)` tuple.
+  Server-issued in the previous response's `next_cursor`. Clients
+  must not decode or generate.
+- `?limit=N` — page size. Defaults: `/plays` 500, raw archive endpoints
+  500, max 5000. `/aggregate` doesn't paginate.
+- Filters (`from`, `to`, `label.<key>`, etc.) are encoded **into** the
+  cursor on first page; subsequent requests pass `?cursor=<x>` only —
+  filter params are ignored when a cursor is set. This is simpler than
+  re-passing filters every page (one param vs many) and prevents
+  filter-drift across pages within a single iteration.
+- End-of-stream is signalled by `next_cursor: null` in the response
+  body. No 404 on past-the-end.
+- A cursor that fails to decode → `400 Bad Request` with
+  `application/problem+json`. Cursors are not signed; clients
+  shouldn't try to fabricate them.
+
+Anti-pattern explicitly rejected: `?offset=&page=` style. ClickHouse
+sequence-scans on `OFFSET`; keyset pagination by `(ts, id)` uses the
+primary index and stays O(log n) regardless of page depth.
+
+### Variant `rung_positions` stability
+
+`rung_positions: [top]`, `[bottom]`, `[second_from_top]`,
+`[second_from_bottom]` resolve **logically**, against the *current*
+manifest variant set at request evaluation time. If the encoder ladder
+rotates mid-play, `top` follows — the rule continues to fault the
+highest-bandwidth variant after the change, not the variant that *was*
+top before.
+
+Same semantic for explicit numeric `rung_indexes: [N]`: the Nth-from-
+bottom in the current ladder. To freeze a rule against a specific
+variant across ladder rotations, use a more specific filter
+(`codec` + `bandwidth_above`/`bandwidth_below`) or `url_match` as the
+escape hatch.
+
+**Companion signal.** Whenever the proxy observes the variant set
+change for an active play (new variant URLs, removed variants, or a
+re-sorted bandwidth order), it emits a `play.manifest.changed` SSE
+frame with the old and new variant lists. Without this, users
+debugging "why did my fault stop hitting the top rung?" have no signal
+that a rotation happened. With it, they can correlate.
+
+Why logical over frozen: mid-play ladder rotation is rare in practice;
+when it happens, the user almost always wants their conceptual rule
+("kill the top rung") to keep meaning what they wrote. Frozen pinning
+remains available, opt-in, via the more specific filters above.
+
+### `shape.transport_fault` × `shape.loss_pct` interaction
+
+The two are **independent kernel-layer mechanisms** with multiplicative
+effective drop rate. They live in different subsystems:
+
+- `loss_pct` → `tc qdisc add netem loss N%` on the player's veth
+- `transport_fault: drop` → nftables rule on the relevant chain
+- `transport_fault: reject` → nftables rule emitting ICMP unreachable
+
+Neither knows about the other; both run during normal packet flow. The
+combined effective drop rate is approximately:
+
+```
+P(drop) = 1 - (1 - loss_pct/100) × (1 - transport_fault_rate)
+```
+
+For small values these add ~linearly; for large values they compound.
+Mixing them is supported but rarely what users mean — recommended use
+is *either* `loss_pct` for steady background loss *or*
+`transport_fault` for one-shot / cadence-driven transport faults, not
+both. Documented as such in the `Shape` schema description so the
+foot-gun is visible at the point of configuration.
+
+### Player groups — auto-broadcast preserved from v1
+
+v1 already has the right model: groups are tags, and once a player is
+tagged, **any PATCH to that player auto-propagates to every other
+player in the group with the same new `control_revision`** (see
+`go-proxy/cmd/server/main.go:2261` for the v1 implementation).
+There's no `/apply` call — the broadcast is implicit on every member
+PATCH. v2 keeps that UX unchanged.
+
+Implications for v2's field-level concurrency model:
+
+- **Members in the same group share a revision counter for
+  broadcast-eligible fields.** A PATCH on member A to
+  `shape.rate_mbps` writes to all members and stamps them all with
+  the same new revision. Subsequent member PATCHes check `If-Match`
+  against the shared revision.
+- **Disjoint field patches across members both succeed.** Per-field
+  concurrency rules still apply: A patches `shape.rate_mbps`, B
+  patches `labels.test` on a different member at the same time —
+  both broadcast, no conflict.
+- **The group resource itself has its own ETag** for mutations to
+  its own metadata (`member_player_ids`, group-level `labels`).
+  Independent of the member revision counter.
+- **Identity / lifecycle fields do not broadcast.** Only behaviour
+  fields propagate. The split:
+
+  | Field on PlayerRecord | Broadcasts to group? |
+  |---|---|
+  | `id`, `display_id` | no (per-device identity) |
+  | `first_seen_at`, `last_seen_at`, `origination_ip` | no (server-observed lifecycle) |
+  | `current_play`, `fault_counters` | no (per-device runtime state) |
+  | `control_revision` | yes (shared across members after broadcast) |
+  | `labels` | yes |
+  | `fault_rules` (whole-array PATCH and per-rule sub-resources) | yes |
+  | `shape` | yes |
+
+  Schema fields carry an informal `(broadcasts to group)` /
+  `(per-device — does not broadcast)` annotation in their description.
+
+- **Mutate just one member?** Remove it from the group first
+  (`PATCH /player-groups/{id}` to drop the member), or use play-scope
+  (`PATCH /plays/{play_id}`), which is naturally per-play and never
+  broadcasts.
+- **Apply strategy is best-effort.** Each member write is independent;
+  log-and-continue on per-member failure (matching v1). Partial
+  failure is not surfaced via a Multi-Status; it shows up in the
+  per-member SSE `player.updated` events that broadcast emits. Revisit
+  if anyone hits the partial-failure edge in practice.
+
+A separate `POST /player-groups/{id}/apply` endpoint was considered
+and **rejected** — it would force users to choose between two PATCH
+shapes for the same operation and would diverge from v1's mental
+model. The auto-broadcast on member PATCH is the v2 contract.
+
+### Init segment classification covers DASH
+
+`request_kind: init` matches both:
+
+- **HLS:** URLs declared via `#EXT-X-MAP:URI=...` in any seen variant
+  playlist.
+- **DASH:** URLs declared via `<Initialization>` in any seen MPD,
+  including the substituted form from
+  `<SegmentTemplate initialization="...">` after `$RepresentationID$` /
+  `$Number$` etc. expansion.
+
+Both formats are already parsed by go-live for variant tracking; the
+classifier consults the same parser cache. No schema change — the
+`init` enum value stays singular. The doc on `FaultFilter.request_kind`
+spells out the two sources so handler authors don't HLS-only the check.
+
+### `POST /api/v2/players` is a `player_id`-keyed upsert
+
+For synthetic-player creation, retry safety comes from `player_id` as
+the natural primary key, not from an `Idempotency-Key` header:
+
+| State | Body has `player_id`? | Behaviour |
+|---|---|---|
+| No existing player | yes or no | `201 Created`, body returned, port allocated |
+| Existing player, body byte-identical | yes | `200 OK`, existing record returned (idempotent retry) |
+| Existing player, body differs | yes | `409 Conflict`, `application/problem+json` with `{type: "...player-exists-different-settings", existing_player_id, hint: "use PATCH"}` |
+
+When the client omits `player_id`, the server generates a UUIDv4 — but
+retry-on-network-error is genuinely non-idempotent in that case
+(the client has no way to know whether the first POST succeeded).
+Documented as: *"if you care about retry idempotency, supply a
+`player_id`."* CI scripts already mint stable test player IDs anyway.
+
+`Idempotency-Key` was considered and **rejected** for v2.0 — adds a
+server-side response cache (10-min TTL, GC, eviction logic) for one
+endpoint, when the natural primary key is already client-supplied for
+the case that matters. Reconsider if a non-creation POST (e.g. a
+future `/player-groups/.../apply`-shaped call) wants the same
+guarantee.
+
+### Wallclock authority
+
+All timestamps in persisted state are **server-stamped at write
+time**. No PATCH body field is interpreted by the server as a
+timestamp:
+
+- `player.created_at` / `player.first_seen_at` / `player.last_seen_at`
+  — server-issued lifecycle stamps; not present in `PlayerPatch`.
+- `play.started_at` / `play.ended_at` — same.
+- `control_revision` — a monotonic *counter*, not a timestamp.
+  Comparison uses string-compare-as-int, never wallclock arithmetic.
+- SSE frame `id` — a monotonic `uint64` server-issued counter.
+- Label values that look like timestamps (`pytest_run:
+  "2026-05-08T05:00:00Z"`) — stored verbatim as opaque strings; the
+  server does not parse, validate, or interpret them. Consumers parse
+  at query time (e.g. ClickHouse `parseDateTime64BestEffort(labels[k])`).
+
+Three guarantees follow:
+
+1. **No PATCH field carries a server-interpreted timestamp.** A future
+   field that needs a client-supplied time should be modelled as a
+   label-like opaque tag, or computed server-side from a richer
+   description (e.g. `"end_after_seconds": 300` rather than
+   `"ends_at": "..."`).
+2. **Race detection uses `control_revision` exclusively.** Handler
+   authors must not reach for `time.Now()` to compare revisions or
+   sequence concurrent writes — the counter is the source of truth.
+3. **`expires_at` stays rejected** (already in §A) for the same
+   wallclock-skew reason.
+
+Why declare this loudly: in mixed-clock environments (proxy in k3d,
+CLI on a laptop, CI in another timezone) any control-plane decision
+that trusts client wallclocks creates intermittent bugs that look
+like flakes. Locking it down at the spec level removes the option.

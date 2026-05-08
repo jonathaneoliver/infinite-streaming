@@ -13,6 +13,19 @@ info:
     is not exposed as a `session` resource. v1's `session_id` is gone from
     the contract.
 
+    **Player provenance.** Real players are *not* created via this API —
+    they self-register on first manifest request, with `player_id`
+    generated as a random UUIDv4 by the client and persisted across
+    launches. `POST /api/v2/players` is the synthetic-player endpoint
+    only. See `DESIGN.md § Resolved before implementation`.
+
+    **Player → port routing.** The control plane (everything documented
+    here under `/api/v2/...`) lives on the proxy's base origin. The
+    streaming path (manifest + segment requests) is *not* part of this
+    spec; players send those to the base origin with `?player_id=<uuid>`
+    and receive a `302 Found` to their dedicated port. This document
+    describes the v2 control surface only.
+
     See `api/openapi/v2/DESIGN.md` for the principles behind the breaking
     changes from v1.
 
@@ -70,20 +83,49 @@ paths:
 
     post:
       tags: [players]
-      summary: Mint a synthetic player
+      summary: Mint or look up a synthetic player (upsert by `player_id`)
       description: |
         Synthetic players have no associated device. The proxy allocates a
         port and returns the record; integration tests can attach faults /
-        shaping / labels before any traffic flows. Real players self-register
-        on first request and are not created via this endpoint.
+        shaping / labels before any traffic flows.
+
+        Real players never use this endpoint. They self-register on first
+        manifest request with a client-generated UUIDv4 `player_id`
+        persisted across launches; the proxy allocates a port at that
+        point and 302-routes subsequent manifest requests to it.
+
+        **Idempotency by `player_id`.** When the body supplies
+        `player_id`, this endpoint is upsert-shaped:
+
+        - No existing player → `201 Created` with the new record.
+        - Existing player + body byte-identical → `200 OK` with the
+          existing record (idempotent retry).
+        - Existing player + body differs in any other field →
+          `409 Conflict` with `application/problem+json`
+          (`type: ".../player-exists-different-settings"`,
+          `existing_player_id`, hint to use `PATCH`).
+
+        When the body omits `player_id`, the server generates a UUIDv4 —
+        but retry-on-network-error is genuinely non-idempotent in that
+        case. Supply `player_id` if you care about retry safety.
       requestBody:
         required: true
         content:
           application/json:
             schema: { $ref: '#/components/schemas/PlayerCreateRequest' }
       responses:
+        '200':
+          description: |
+            Idempotent upsert hit — `player_id` already exists with a
+            byte-identical body. Existing record returned.
+          headers:
+            ETag:     { $ref: '#/components/headers/ETag' }
+            Location: { $ref: '#/components/headers/Location' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PlayerRecord' }
         '201':
-          description: Created
+          description: Created — new synthetic player
           headers:
             ETag:     { $ref: '#/components/headers/ETag' }
             Location: { $ref: '#/components/headers/Location' }
@@ -91,6 +133,14 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/PlayerRecord' }
         '400': { $ref: '#/components/responses/Problem' }
+        '409':
+          description: |
+            `player_id` already exists with a different body. Use
+            `PATCH /api/v2/players/{player_id}` to mutate the existing
+            record.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ProblemDetails' }
 
     delete:
       tags: [players]
@@ -142,6 +192,15 @@ paths:
 
         Player-scoped mutations persist across `play_id` rotations and
         survive the player reconnecting until explicitly cleared.
+
+        **Group auto-broadcast.** If this player belongs to a group
+        (see `PlayerGroup.member_player_ids`), writes to the
+        broadcast-eligible fields (`labels`, `fault_rules`, `shape`)
+        propagate to every other group member with the same new
+        `control_revision`. Identity / lifecycle fields stay
+        per-device. Each `PlayerRecord` property's description notes
+        which side it falls on. To mutate just this player without
+        propagation, remove it from the group first or use play-scope.
 
         For "do this for N minutes" use cases, use the CLI's `--for` flag
         (apply → sleep → clear) or a pytest `try/finally` — the proxy
@@ -204,6 +263,116 @@ paths:
                     items: { $ref: '#/components/schemas/NetworkLogEntry' }
         '404': { $ref: '#/components/responses/Problem' }
 
+  # ---- Per-rule fault sub-resources (player) -----------------------------
+  # Targeted edits to a single rule in the player's fault_rules array.
+  # Each rule_id is a separate path for field-level concurrency, so two
+  # clients editing different rules don't contend. The whole-array PATCH
+  # on `/players/{player_id}` remains supported and contends with all
+  # per-rule mutations as the single path `/fault_rules`.
+
+  /api/v2/players/{player_id}/fault_rules:
+    parameters:
+      - $ref: '#/components/parameters/PlayerId'
+
+    post:
+      tags: [players]
+      summary: Append a fault rule to the player
+      description: |
+        Adds a rule to the end of `player.fault_rules`. Server fills `id`
+        with a UUIDv7 if omitted. Returns the new rule in the response
+        body and the player's new ETag in the header.
+
+        `If-Match` is required (the current resource ETag); the conflict
+        path is `/fault_rules` (whole-array). For low-contention adds,
+        prefer this over a whole-resource PATCH; for high-contention
+        environments, accept that adds will retry on conflict.
+
+        **Group broadcast.** If this player belongs to a group, the
+        new rule auto-propagates to every other member with the same
+        new `control_revision` (see `PlayerGroup`).
+      parameters:
+        - $ref: '#/components/parameters/IfMatch'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/FaultRule' }
+      responses:
+        '201':
+          description: Created
+          headers:
+            ETag:     { $ref: '#/components/headers/ETag' }
+            Location: { $ref: '#/components/headers/Location' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/FaultRule' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '412': { $ref: '#/components/responses/PreconditionFailed' }
+
+  /api/v2/players/{player_id}/fault_rules/{rule_id}:
+    parameters:
+      - $ref: '#/components/parameters/PlayerId'
+      - $ref: '#/components/parameters/RuleId'
+
+    patch:
+      tags: [players]
+      summary: Patch a single fault rule (field-level concurrency)
+      description: |
+        JSON Merge Patch on one rule. Conflict detection is scoped to
+        `/fault_rules/{rule_id}` — editing this rule does not contend
+        with edits to other rules or to other player fields.
+
+        If the array contains duplicate `id` values, this endpoint
+        operates on the **first** occurrence (see DESIGN.md §
+        `fault_rule.id` collisions).
+
+        `If-Match` is required.
+
+        **Group broadcast.** If this player belongs to a group, the
+        rule edit auto-propagates to the same `rule_id` slot on every
+        other member with the same new `control_revision`.
+      parameters:
+        - $ref: '#/components/parameters/IfMatch'
+      requestBody:
+        required: true
+        content:
+          application/merge-patch+json:
+            schema: { $ref: '#/components/schemas/FaultRule' }
+      responses:
+        '200':
+          description: Updated
+          headers:
+            ETag: { $ref: '#/components/headers/ETag' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/FaultRule' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '412': { $ref: '#/components/responses/PreconditionFailed' }
+
+    delete:
+      tags: [players]
+      summary: Remove a single fault rule
+      description: |
+        Removes the rule and shifts later rules up to fill the gap.
+        Conflict scope is `/fault_rules/{rule_id}`.
+
+        `If-Match` is required.
+
+        **Group broadcast.** If this player belongs to a group, the
+        deletion auto-propagates to every other member with the same
+        new `control_revision`.
+      parameters:
+        - $ref: '#/components/parameters/IfMatch'
+      responses:
+        '204':
+          description: Removed
+          headers:
+            ETag: { $ref: '#/components/headers/ETag' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '412': { $ref: '#/components/responses/PreconditionFailed' }
+
   # ---- Plays -------------------------------------------------------------
 
   /api/v2/plays/{play_id}:
@@ -264,6 +433,79 @@ paths:
               schema: { $ref: '#/components/schemas/ProblemDetails' }
         '412': { $ref: '#/components/responses/PreconditionFailed' }
 
+  # ---- Per-rule fault sub-resources (play) -------------------------------
+  # Mirrors the player per-rule routes. See those for semantics. Editing
+  # `play.fault_rules` does not affect `player.fault_rules`; precedence
+  # remains: a non-null `play.fault_rules` (including `[]`) replaces the
+  # player's rules wholesale for this play.
+
+  /api/v2/plays/{play_id}/fault_rules:
+    parameters:
+      - $ref: '#/components/parameters/PlayId'
+
+    post:
+      tags: [plays]
+      summary: Append a fault rule to the play
+      parameters:
+        - $ref: '#/components/parameters/IfMatch'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/FaultRule' }
+      responses:
+        '201':
+          description: Created
+          headers:
+            ETag:     { $ref: '#/components/headers/ETag' }
+            Location: { $ref: '#/components/headers/Location' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/FaultRule' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '412': { $ref: '#/components/responses/PreconditionFailed' }
+
+  /api/v2/plays/{play_id}/fault_rules/{rule_id}:
+    parameters:
+      - $ref: '#/components/parameters/PlayId'
+      - $ref: '#/components/parameters/RuleId'
+
+    patch:
+      tags: [plays]
+      summary: Patch a single play-scoped fault rule
+      parameters:
+        - $ref: '#/components/parameters/IfMatch'
+      requestBody:
+        required: true
+        content:
+          application/merge-patch+json:
+            schema: { $ref: '#/components/schemas/FaultRule' }
+      responses:
+        '200':
+          description: Updated
+          headers:
+            ETag: { $ref: '#/components/headers/ETag' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/FaultRule' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '412': { $ref: '#/components/responses/PreconditionFailed' }
+
+    delete:
+      tags: [plays]
+      summary: Remove a single play-scoped fault rule
+      parameters:
+        - $ref: '#/components/parameters/IfMatch'
+      responses:
+        '204':
+          description: Removed
+          headers:
+            ETag: { $ref: '#/components/headers/ETag' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '412': { $ref: '#/components/responses/PreconditionFailed' }
+
   # ---- Streams -----------------------------------------------------------
 
   /api/v2/events:
@@ -277,14 +519,40 @@ paths:
         Frame types:
         - `player.created`, `player.updated`, `player.deleted`
         - `play.started`, `play.updated`, `play.ended`
-        - `play.network.entry`  (per-request network log row)
-        - `heartbeat`           (every 15 s)
+        - `play.network.entry`     (per-request network log row)
+        - `play.manifest.changed`  (variant set rotated mid-play)
+        - `heartbeat`              (every 15 s)
+        - `replay.gap`             (synthetic; see below)
 
-        Reconnect on disconnect. The proxy does not replay missed frames.
+        **Frame IDs.** Every frame carries an SSE `id:` field — a
+        monotonically increasing server-issued `uint64` decimal string.
+
+        **Reconnect with replay.** On reconnect, browsers / SSE libraries
+        send `Last-Event-ID: <id>` automatically. The proxy honours this
+        against a bounded in-memory ring (~5 min or 10 000 frames):
+
+        - In-window: every frame with `id > Last-Event-ID` is resent,
+          then live frames continue.
+        - Out-of-window: a synthetic `replay.gap` frame is emitted with
+          `{missed_from, missed_to}` so the client knows frames were
+          lost, then live frames continue from the ring's tail.
+        - No header (first connect): live frames only.
+
+        For longer history, query the analytics archive
+        (`/analytics/api/v2/session_events`).
       parameters:
         - $ref: '#/components/parameters/PlayerIdFilter'
         - $ref: '#/components/parameters/PlayIdFilter'
         - $ref: '#/components/parameters/EventTypeFilter'
+        - in: header
+          name: Last-Event-ID
+          required: false
+          schema: { type: string }
+          description: |
+            SSE-standard reconnect cursor. Decimal-encoded `uint64`
+            matching a previous frame's `id:`. Browsers send this
+            automatically on reconnect; bare HTTP clients should
+            populate it themselves to opt into replay.
       responses:
         '200':
           description: SSE stream
@@ -422,6 +690,16 @@ components:
       name: group_id
       required: true
       schema: { type: string, format: uuid }
+    RuleId:
+      in: path
+      name: rule_id
+      required: true
+      schema: { type: string }
+      description: |
+        Stable identifier of a `FaultRule` within the resource's
+        `fault_rules` array. UUIDv7 if server-generated, but client-set
+        IDs are also accepted. If the array contains duplicates, the
+        per-rule endpoints operate on the first occurrence.
     StateFilter:
       in: query
       name: state
@@ -609,6 +887,13 @@ components:
         Live player state. Reflects player-scope config; for the *effective*
         config combined with any active play's overrides, see the embedded
         `current_play.effective` block.
+
+        **Group broadcast.** When a player belongs to a group (see
+        `PlayerGroup`), PATCH writes to the broadcast-eligible fields
+        below propagate to every other member of the group with the same
+        new `control_revision`. Identity and lifecycle fields are
+        per-device and do not broadcast. Each property's description
+        notes which side it falls on.
       type: object
       additionalProperties: false
       required: [id, display_id, control_revision]
@@ -616,34 +901,67 @@ components:
         id:
           type: string
           format: uuid
-          description: Player-supplied UUIDv4. Stable per device.
+          description: |
+            Player-supplied UUIDv4. Stable per device.
+            *Per-device identity — does not broadcast to group.*
         display_id:
           type: integer
           minimum: 1
-          description: Per-process counter. Recycles across restarts.
+          description: |
+            Per-process counter. Recycles across restarts.
+            *Per-device identity — does not broadcast to group.*
         control_revision:
           type: string
-          description: Concurrency token. ETag/If-Match.
+          description: |
+            Concurrency token. ETag/If-Match.
+            *Shared across group members after any broadcast write.*
         labels:
-          $ref: '#/components/schemas/Labels'
+          allOf:
+            - $ref: '#/components/schemas/Labels'
+          description: |
+            Free-form key/value tags.
+            *Broadcasts to group on PATCH.*
         current_play:
           allOf:
             - $ref: '#/components/schemas/PlayRecord'
           nullable: true
-          description: Currently-active play, or null when idle.
+          description: |
+            Currently-active play, or null when idle.
+            *Per-device runtime state — does not broadcast to group.*
         fault_rules:
           type: array
           items: { $ref: '#/components/schemas/FaultRule' }
           description: |
             HTTP fault rules, evaluated first-match-wins on each request.
             Empty array = no rules; absent = same as empty.
+            *Broadcasts to group on PATCH (whole-array and per-rule
+            sub-resource endpoints both broadcast).*
         shape:
-          $ref: '#/components/schemas/Shape'
+          allOf:
+            - $ref: '#/components/schemas/Shape'
+          description: |
+            Network shaping (rate / delay / loss / transport_fault).
+            *Broadcasts to group on PATCH.*
         fault_counters:
-          $ref: '#/components/schemas/FaultCounters'
-        first_seen_at:    { type: string, format: date-time }
-        last_seen_at:     { type: string, format: date-time }
-        origination_ip:   { type: string }
+          allOf:
+            - $ref: '#/components/schemas/FaultCounters'
+          description: |
+            Per-device fault hit counters.
+            *Per-device runtime state — does not broadcast to group.*
+        first_seen_at:
+          type: string
+          format: date-time
+          description: |
+            *Server-observed lifecycle — does not broadcast to group.*
+        last_seen_at:
+          type: string
+          format: date-time
+          description: |
+            *Server-observed lifecycle — does not broadcast to group.*
+        origination_ip:
+          type: string
+          description: |
+            *Server-observed lifecycle — does not broadcast to group.*
 
     PlayerCreateRequest:
       type: object
@@ -745,6 +1063,13 @@ components:
             Stable identifier for this rule. Server-generated as a UUIDv7
             if omitted on POST. Useful for logs, dashboards, and the
             CLI's `--rule-id` targeting on remove/update operations.
+
+            **Duplicate IDs within the same `fault_rules` array are
+            allowed** (last write wins on whole-array PATCH; the array
+            is stored verbatim). First-match-wins evaluation makes
+            duplicates dead code, but they are not rejected. Per-rule
+            sub-resource endpoints (`/fault_rules/{rule_id}`) operate
+            on the first occurrence.
         type:
           description: |
             HTTP-layer fault types. `corrupted` is segment-only;
@@ -848,6 +1173,13 @@ components:
             Restrict to specific request kinds. Multiple values OR'd. If
             omitted, all kinds match. Example: `[segment, partial]`
             faults media data only, not playlists.
+
+            `init` covers initialisation segments from **both** delivery
+            formats: HLS `#EXT-X-MAP:URI=...` and DASH `<Initialization>`
+            (including the substituted form from
+            `<SegmentTemplate initialization="...">`). The classifier
+            consults the same parser cache that go-live uses for
+            variant tracking.
         variant:
           $ref: '#/components/schemas/VariantPredicate'
         url_match:
@@ -947,6 +1279,16 @@ components:
 
         Patching with non-null replaces wholesale; setting `shape: null`
         clears all shaping.
+
+        **`loss_pct` × `transport_fault` interaction.** The two are
+        independent kernel-layer mechanisms — `loss_pct` is `tc qdisc
+        netem`; `transport_fault` is nftables. Neither knows about the
+        other; their effective combined drop rate compounds:
+        `P(drop) = 1 - (1 - loss_pct/100) × (1 - transport_fault_rate)`.
+        Setting both is supported but rarely intended. Recommended use:
+        `loss_pct` for steady background loss, `transport_fault` for
+        one-shot or cadence-driven transport faults. See
+        `DESIGN.md § shape.transport_fault × shape.loss_pct interaction`.
       type: object
       additionalProperties: false
       properties:
@@ -1040,6 +1382,22 @@ components:
     # ----- Groups --------------------------------------------------------
 
     PlayerGroup:
+      description: |
+        A tag that links N players for fault propagation. Once
+        established, **any PATCH to a member player auto-broadcasts**
+        the broadcast-eligible fields (`labels`, `fault_rules`, `shape`)
+        to every other member, all stamped with the same new
+        `control_revision`. There is no separate `/apply` endpoint —
+        broadcast is implicit on member PATCH (matches v1 behaviour).
+
+        The group resource has its own `control_revision` for
+        mutations to its own metadata (`member_player_ids`,
+        group-level `labels`); that is independent of the shared
+        member revision.
+
+        Apply strategy is best-effort: each member write is
+        independent. Per-member success/failure surfaces in the
+        `player.updated` SSE events emitted by the broadcast.
       type: object
       required: [id, member_player_ids]
       properties:
@@ -1049,7 +1407,12 @@ components:
         member_player_ids:
           type: array
           items: { type: string, format: uuid }
-        control_revision:  { type: string }
+        control_revision:
+          type: string
+          description: |
+            Revision of the group's own metadata
+            (`member_player_ids` + group `labels`). Distinct from the
+            shared `control_revision` of its member players.
 
     PlayerGroupPatch:
       type: object
@@ -1084,7 +1447,9 @@ components:
       description: |
         Discriminated union. `type` selects the variant. Heartbeat frames
         carry no data and exist only to keep idle proxies / load balancers
-        from timing out.
+        from timing out. `replay.gap` is a synthetic frame emitted by the
+        proxy when a reconnecting client's `Last-Event-ID` falls outside
+        the replay ring.
       oneOf:
         - $ref: '#/components/schemas/PlayerCreatedEvent'
         - $ref: '#/components/schemas/PlayerUpdatedEvent'
@@ -1093,18 +1458,22 @@ components:
         - $ref: '#/components/schemas/PlayUpdatedEvent'
         - $ref: '#/components/schemas/PlayEndedEvent'
         - $ref: '#/components/schemas/PlayNetworkEntryEvent'
+        - $ref: '#/components/schemas/PlayManifestChangedEvent'
         - $ref: '#/components/schemas/HeartbeatEvent'
+        - $ref: '#/components/schemas/ReplayGapEvent'
       discriminator:
         propertyName: type
         mapping:
-          player.created:      '#/components/schemas/PlayerCreatedEvent'
-          player.updated:      '#/components/schemas/PlayerUpdatedEvent'
-          player.deleted:      '#/components/schemas/PlayerDeletedEvent'
-          play.started:        '#/components/schemas/PlayStartedEvent'
-          play.updated:        '#/components/schemas/PlayUpdatedEvent'
-          play.ended:          '#/components/schemas/PlayEndedEvent'
-          play.network.entry:  '#/components/schemas/PlayNetworkEntryEvent'
-          heartbeat:           '#/components/schemas/HeartbeatEvent'
+          player.created:        '#/components/schemas/PlayerCreatedEvent'
+          player.updated:        '#/components/schemas/PlayerUpdatedEvent'
+          player.deleted:        '#/components/schemas/PlayerDeletedEvent'
+          play.started:          '#/components/schemas/PlayStartedEvent'
+          play.updated:          '#/components/schemas/PlayUpdatedEvent'
+          play.ended:            '#/components/schemas/PlayEndedEvent'
+          play.network.entry:    '#/components/schemas/PlayNetworkEntryEvent'
+          play.manifest.changed: '#/components/schemas/PlayManifestChangedEvent'
+          heartbeat:             '#/components/schemas/HeartbeatEvent'
+          replay.gap:            '#/components/schemas/ReplayGapEvent'
 
     PlayerCreatedEvent:
       type: object
@@ -1181,6 +1550,34 @@ components:
             play_id:   { type: string, format: uuid }
             entry:     { $ref: '#/components/schemas/NetworkLogEntry' }
 
+    PlayManifestChangedEvent:
+      description: |
+        Emitted when the proxy observes the variant set of an active
+        play change — new variant URLs, removed variants, or a re-sorted
+        bandwidth order. Lets clients correlate "my fault stopped
+        hitting the top rung" with the underlying ladder rotation,
+        since `rung_positions: [top]` is evaluated against the *current*
+        ladder at request time (see `FaultFilter.rung_positions`).
+      type: object
+      required: [type, data]
+      properties:
+        type: { type: string, enum: [play.manifest.changed] }
+        data:
+          type: object
+          required: [player_id, play_id, changed_at, variants_after]
+          properties:
+            player_id:      { type: string, format: uuid }
+            play_id:        { type: string, format: uuid }
+            changed_at:     { type: string, format: date-time }
+            variants_before:
+              type: array
+              items: { $ref: '#/components/schemas/ManifestVariant' }
+              description: Variant set immediately before the rotation. Omitted on first observation of the play.
+            variants_after:
+              type: array
+              items: { $ref: '#/components/schemas/ManifestVariant' }
+              description: Variant set after the rotation.
+
     HeartbeatEvent:
       type: object
       required: [type]
@@ -1190,3 +1587,29 @@ components:
           type: object
           properties:
             ts: { type: string, format: date-time }
+
+    ReplayGapEvent:
+      description: |
+        Synthetic frame emitted by the proxy on reconnect when the
+        client's `Last-Event-ID` is older than the replay ring's tail.
+        Indicates that frames `missed_from..missed_to` (inclusive on
+        both ends) were not delivered. Live frames continue from
+        `missed_to + 1`. Clients that need the missed frames must
+        query the analytics archive
+        (`/analytics/api/v2/session_events`).
+      type: object
+      required: [type, data]
+      properties:
+        type: { type: string, enum: [replay.gap] }
+        data:
+          type: object
+          required: [missed_from, missed_to]
+          properties:
+            missed_from:
+              type: integer
+              format: int64
+              description: First frame `id` that was missed (inclusive).
+            missed_to:
+              type: integer
+              format: int64
+              description: Last frame `id` that was missed (inclusive).
