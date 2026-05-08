@@ -32,10 +32,13 @@ type EventSource struct {
 
 	// State carried across session-snapshot diffs to derive
 	// player.created / player.updated / player.deleted, plus the
-	// session_id → player_id index used by network-row lookups.
+	// session_id → player_id index used by network-row lookups, plus
+	// the per-player current play_id used to derive play.started /
+	// play.ended on network-row arrival.
 	stateMu        sync.Mutex
 	prev           map[string]playerSnapshot // player_id → last seen
 	sessionToPlayr map[string]string         // session_id → player_id
+	currentPlay    map[string]string         // player_id → most recent play_id
 }
 
 // playerSnapshot is the subset of v2 PlayerRecord fields that drive
@@ -59,6 +62,7 @@ func NewEventSource(v1 V1Adapter, ring *EventRing) *EventSource {
 		done:           make(chan struct{}),
 		prev:           map[string]playerSnapshot{},
 		sessionToPlayr: map[string]string{},
+		currentPlay:    map[string]string{},
 	}
 	go s.run(ctx)
 	return s
@@ -177,6 +181,13 @@ func (s *EventSource) handleSessionSnapshot(snap SessionSnapshot) {
 		if _, still := next[pid]; still {
 			continue
 		}
+		// Fire play.ended for the player's active play (if any)
+		// before player.deleted so subscribers maintain a clean
+		// "this play ended" signal.
+		if activePlay := s.currentPlay[pid]; activePlay != "" {
+			s.publishPlayEnded(pid, activePlay, "player_deleted")
+			delete(s.currentPlay, pid)
+		}
 		// json.Marshal of a map with string keys + scalar values
 		// can't fail in practice — ignore the error.
 		body, _ := json.Marshal(map[string]any{
@@ -210,7 +221,8 @@ func (s *EventSource) publishPlayerEvent(typ string, recordJSON []byte) {
 	s.ring.Publish(typ, body)
 }
 
-// handleNetworkRow emits one play.network.entry per v1 NetworkEvent.
+// handleNetworkRow emits one play.network.entry per v1 NetworkEvent
+// and detects play_id rotations to emit play.started / play.ended.
 //
 // Translation:
 //   - the v1 event arrives keyed on session_id (v1 internal); v2
@@ -218,12 +230,23 @@ func (s *EventSource) publishPlayerEvent(typ string, recordJSON []byte) {
 //   - play_id is read from the entry itself (v1 already captures it).
 //   - the entry payload is reused as the data block; oapigen's
 //     NetworkLogEntry shape lines up with the v1 row's keys.
+//
+// Play detection:
+//   - The first time we see a non-empty play_id for a player_id, emit
+//     play.started.
+//   - When the play_id changes to a new non-empty value, emit
+//     play.ended for the old play_id and play.started for the new.
+//   - We don't observe a "play ended without a successor" signal here
+//     — that's emitted from handleSessionSnapshot when the player
+//     itself goes away (player.deleted).
 func (s *EventSource) handleNetworkRow(row NetworkLogRow) {
 	playerID := s.lookupPlayerID(row.SessionID)
 	if playerID == "" {
 		return
 	}
 	playID := getString(row.Entry, "play_id")
+	s.detectPlayRotation(playerID, playID)
+
 	body, err := json.Marshal(map[string]any{
 		"type": "play.network.entry",
 		"data": map[string]any{
@@ -236,6 +259,60 @@ func (s *EventSource) handleNetworkRow(row NetworkLogRow) {
 		return
 	}
 	s.ring.Publish("play.network.entry", body)
+}
+
+// detectPlayRotation maintains the per-player current play_id and
+// emits play.started / play.ended frames on rotation.
+func (s *EventSource) detectPlayRotation(playerID, newPlayID string) {
+	if newPlayID == "" {
+		return
+	}
+	s.stateMu.Lock()
+	prevPlayID := s.currentPlay[playerID]
+	if prevPlayID == newPlayID {
+		s.stateMu.Unlock()
+		return
+	}
+	s.currentPlay[playerID] = newPlayID
+	s.stateMu.Unlock()
+
+	if prevPlayID != "" {
+		s.publishPlayEnded(playerID, prevPlayID, "rotated")
+	}
+	s.publishPlayStarted(playerID, newPlayID)
+}
+
+// publishPlayStarted writes a play.started frame.
+func (s *EventSource) publishPlayStarted(playerID, playID string) {
+	body, err := json.Marshal(map[string]any{
+		"type": "play.started",
+		"data": map[string]any{
+			"player_id":  playerID,
+			"play_id":    playID,
+			"started_at": time.Now().UTC().Format(time.RFC3339Nano),
+		},
+	})
+	if err != nil {
+		return
+	}
+	s.ring.Publish("play.started", body)
+}
+
+// publishPlayEnded writes a play.ended frame.
+func (s *EventSource) publishPlayEnded(playerID, playID, reason string) {
+	body, err := json.Marshal(map[string]any{
+		"type": "play.ended",
+		"data": map[string]any{
+			"player_id": playerID,
+			"play_id":   playID,
+			"ended_at":  time.Now().UTC().Format(time.RFC3339Nano),
+			"reason":    reason,
+		},
+	})
+	if err != nil {
+		return
+	}
+	s.ring.Publish("play.ended", body)
 }
 
 // lookupPlayerID resolves a v1 session_id to the bound player_id via
