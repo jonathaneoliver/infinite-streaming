@@ -1,6 +1,7 @@
 package server
 
 import (
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -162,16 +163,35 @@ func (f *FieldRevisions) Restore(m map[string]string) {
 // concurrent use; appended to the timestamp before format-encoding.
 var monoSeq uint64
 
-// newRevision returns a fresh process-monotonic revision string in
-// v1's `control_revision` format (RFC3339Nano timestamp).
+// revisionTimeLayout is a *fixed-width* RFC3339-shaped layout:
+// always 9 digits of fractional seconds, never strip trailing zeros.
+// This matters because `time.RFC3339Nano` strips zeros, which means
+// `2026-05-08T17:31:42.9Z` lex-sorts *after* `…42.10Z` — wrong, since
+// `.9` is later in real time but lex-smaller than `.10`. With fixed
+// 9-digit fractions this format lex-sorts in real-time order.
 //
-// For high-throughput call sites, two revisions minted within the same
-// nanosecond (rare, but possible on fast CI) would collide on a pure
-// timestamp. We append an atomic counter as a fractional-suffix only
-// when the timestamp string would equal the most recent — but in
-// practice the format already spans nanosecond precision, so the
-// guard is mostly defensive.
+// `Z07:00` renders "Z" for UTC and "+HH:MM" / "-HH:MM" otherwise, so
+// callers passing UTC times get a stable "Z" suffix.
+const revisionTimeLayout = "2006-01-02T15:04:05.000000000Z07:00"
+
+// newRevision returns a fresh process-monotonic revision string. Format:
+//
+//	<fixed-width-utc-timestamp>-<20-digit-zero-padded-seq>
+//
+// Example: `2026-05-08T17:31:42.123456789Z-00000000000000000042`.
+//
+// The shape is *almost* v1's `control_revision` format (pure
+// RFC3339Nano). The trailing `-NNN` suffix breaks ties when two
+// revisions are minted within the same nanosecond (rare but possible
+// under heavy concurrent PATCH load, and observed in unit tests on
+// fast machines). v1's `parseControlRevision` will fail to RFC3339Nano-
+// parse this and fall back to plain string comparison (`existing >
+// incoming` at main.go:5767) — which still gives correct ordering
+// because the timestamp prefix is fixed-width and the seq is
+// zero-padded; both lex-sort in real-time order.
+//
+// 20 digits is enough headroom for ~1.8e19 revisions (uint64 max).
 func newRevision() string {
-	atomic.AddUint64(&monoSeq, 1)
-	return time.Now().UTC().Format(time.RFC3339Nano)
+	seq := atomic.AddUint64(&monoSeq, 1)
+	return fmt.Sprintf("%s-%020d", time.Now().UTC().Format(revisionTimeLayout), seq)
 }

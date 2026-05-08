@@ -9,6 +9,7 @@ package main
 import (
 	"os"
 	"strconv"
+	"sync"
 
 	"github.com/google/uuid"
 
@@ -284,6 +285,105 @@ func (a *v2Adapter) ClearAllPlayers() {
 // explicit error so the v2 server returns 501 with a clear detail.
 func (a *v2Adapter) CreateSyntheticPlayer(playerID string, payload map[string]any) (int, map[string]any, error) {
 	return 0, nil, errSyntheticPlayerNotImplemented
+}
+
+// ----- SSE source surface (Phase E) ----------------------------------------
+
+// SubscribeSessions wraps v1's SessionEventHub: each broadcast lands on
+// our channel as a server.SessionSnapshot (sessions cloned to
+// `[]map[string]any`, revision + dropped counters preserved).
+func (a *v2Adapter) SubscribeSessions(buffer int) (<-chan server.SessionSnapshot, func()) {
+	if a == nil || a.app == nil || a.app.sessionsHub == nil {
+		ch := make(chan server.SessionSnapshot)
+		close(ch)
+		return ch, func() {}
+	}
+	if buffer <= 0 {
+		buffer = 16
+	}
+	clientID, src := a.app.sessionsHub.AddClient("")
+	out := make(chan server.SessionSnapshot, buffer)
+	done := make(chan struct{})
+	go func() {
+		defer close(out)
+		for {
+			select {
+			case ev, ok := <-src:
+				if !ok {
+					return
+				}
+				snap := server.SessionSnapshot{
+					Revision: ev.Revision,
+					Dropped:  ev.Dropped,
+					Sessions: make([]map[string]any, 0, len(ev.Sessions)),
+				}
+				for _, s := range ev.Sessions {
+					snap.Sessions = append(snap.Sessions, map[string]any(cloneSession(s)))
+				}
+				select {
+				case out <- snap:
+				case <-done:
+					return
+				}
+			case <-done:
+				return
+			}
+		}
+	}()
+	var once sync.Once
+	cancel := func() {
+		once.Do(func() {
+			a.app.sessionsHub.RemoveClient(clientID)
+			close(done)
+		})
+	}
+	return out, cancel
+}
+
+// SubscribeNetwork wraps v1's NetworkEventHub: each per-request event
+// lands as a server.NetworkLogRow (session_id + the entry as a map).
+func (a *v2Adapter) SubscribeNetwork(buffer int) (<-chan server.NetworkLogRow, func()) {
+	if a == nil || a.app == nil || a.app.networkHub == nil {
+		ch := make(chan server.NetworkLogRow)
+		close(ch)
+		return ch, func() {}
+	}
+	if buffer <= 0 {
+		buffer = 256
+	}
+	clientID, src := a.app.networkHub.AddClient(buffer)
+	out := make(chan server.NetworkLogRow, buffer)
+	done := make(chan struct{})
+	go func() {
+		defer close(out)
+		for {
+			select {
+			case ev, ok := <-src:
+				if !ok {
+					return
+				}
+				row := server.NetworkLogRow{
+					SessionID: ev.SessionID,
+					Entry:     networkEntryToMap(ev.Entry),
+				}
+				select {
+				case out <- row:
+				case <-done:
+					return
+				}
+			case <-done:
+				return
+			}
+		}
+	}()
+	var once sync.Once
+	cancel := func() {
+		once.Do(func() {
+			a.app.networkHub.RemoveClient(clientID)
+			close(done)
+		})
+	}
+	return out, cancel
 }
 
 // errSyntheticPlayerNotImplemented is an exported sentinel so the v2

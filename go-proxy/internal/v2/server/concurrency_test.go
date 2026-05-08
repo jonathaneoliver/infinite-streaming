@@ -4,7 +4,6 @@ import (
 	"reflect"
 	"sort"
 	"testing"
-	"time"
 )
 
 func TestParseIfMatch(t *testing.T) {
@@ -40,9 +39,6 @@ func TestFieldRevisions_TouchAndTop(t *testing.T) {
 	if got := fr.Top(); got != r1 {
 		t.Errorf("Top after one Touch = %q, want %q", got, r1)
 	}
-	// Sleep long enough to guarantee the next RFC3339Nano timestamp
-	// differs from the first — wall-clock resolution varies by OS.
-	time.Sleep(2 * time.Millisecond)
 	r2 := fr.Touch([]string{"fault_rules"})
 	if r2 == r1 {
 		t.Errorf("second Touch returned same revision %q", r2)
@@ -76,6 +72,20 @@ func TestFieldRevisions_TouchWithSharedRevision(t *testing.T) {
 	}
 	if got := fr.Top(); got != rev {
 		t.Errorf("Top after TouchWith = %q, want %q", got, rev)
+	}
+}
+
+func TestNewRevision_FixedWidthLexOrders(t *testing.T) {
+	// 1000 calls back-to-back; each must lex-sort strictly newer than
+	// the previous. Catches the pre-fix bug where time.RFC3339Nano
+	// stripped trailing zeros and `.9Z` lex-compared > `.10Z`.
+	prev := newRevision()
+	for i := 0; i < 1000; i++ {
+		next := newRevision()
+		if next <= prev {
+			t.Fatalf("lex-order broken at iter %d: %q !> %q", i, next, prev)
+		}
+		prev = next
 	}
 }
 
@@ -128,7 +138,6 @@ func TestFieldRevisions_HierarchicalConflicts(t *testing.T) {
 	}
 
 	// Someone else PATCHed rule r1 since I read.
-	time.Sleep(2 * time.Millisecond)
 	fr.Touch([]string{"fault_rules.r1"})
 	// Whole-array PATCHer at the older revision → conflict.
 	if c := fr.Conflicts(r1, []string{"fault_rules"}); len(c) != 1 || c[0] != "fault_rules" {
@@ -137,14 +146,12 @@ func TestFieldRevisions_HierarchicalConflicts(t *testing.T) {
 
 	// Whole-array writer wins; per-rule reader at the now-stale rev →
 	// conflict on rule r1 (parent path was bumped).
-	time.Sleep(2 * time.Millisecond)
 	fr.Touch([]string{"fault_rules"})
 	if c := fr.Conflicts(r1, []string{"fault_rules.r1"}); len(c) != 1 || c[0] != "fault_rules.r1" {
 		t.Errorf("per-rule vs ancestor write: %v, want [fault_rules.r1]", c)
 	}
 
 	// Sibling rules don't conflict at the current top.
-	time.Sleep(2 * time.Millisecond)
 	fr.Touch([]string{"fault_rules.r2"})
 	top := fr.Top()
 	if c := fr.Conflicts(top, []string{"fault_rules.r3"}); len(c) != 0 {

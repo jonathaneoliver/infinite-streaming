@@ -11,12 +11,6 @@ import (
 	"github.com/jonathaneoliver/infinite-streaming/go-proxy/internal/v2/oapigen"
 )
 
-// ----- Streams -------------------------------------------------------------
-
-func (*Server) GetApiV2Events(w http.ResponseWriter, r *http.Request, params oapigen.GetApiV2EventsParams) {
-	notImplemented(w, "GetApiV2Events")
-}
-
 // ----- Per-rule fault sub-resources (player) -------------------------------
 
 func (*Server) PostApiV2PlayersPlayerIdFaultRules(w http.ResponseWriter, r *http.Request, playerId oapigen.PlayerId, params oapigen.PostApiV2PlayersPlayerIdFaultRulesParams) {

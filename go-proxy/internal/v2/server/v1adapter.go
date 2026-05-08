@@ -62,4 +62,34 @@ type V1Adapter interface {
 	// ClearAllPlayers tears down every active player and live state.
 	// Mirrors v1's /api/clear-sessions.
 	ClearAllPlayers()
+
+	// ----- SSE source surface (Phase E) --------------------------------
+
+	// SubscribeSessions registers a v2 listener on v1's session
+	// broadcast hub. Returns a buffered channel of session-list
+	// snapshots and a cancel func that *must* be called to release
+	// the slot. Snapshots are owned by the caller — do not mutate.
+	SubscribeSessions(buffer int) (<-chan SessionSnapshot, func())
+
+	// SubscribeNetwork registers a v2 listener on v1's per-request
+	// network event hub. Returns a buffered channel of network-log
+	// rows and a cancel func.
+	SubscribeNetwork(buffer int) (<-chan NetworkLogRow, func())
+}
+
+// SessionSnapshot is the v2-friendly shape of a SessionsEvent: the
+// list of session records (each a `map[string]any` clone) plus the
+// publisher's revision counter and any drop count carried since the
+// listener last drained the channel.
+type SessionSnapshot struct {
+	Sessions []map[string]any
+	Revision uint64
+	Dropped  uint64
+}
+
+// NetworkLogRow is the v2-friendly shape of a NetworkEvent: the
+// session_id (v1 routing key) plus the captured request as a map.
+type NetworkLogRow struct {
+	SessionID string
+	Entry     map[string]any
 }
