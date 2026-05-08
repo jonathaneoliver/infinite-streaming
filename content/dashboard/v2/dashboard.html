@@ -1,12 +1,18 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
+    <script src="/shared/v2-compat.js"></script>
+
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Dashboard - InfiniteStream</title>
     <link rel="stylesheet" href="/shared-styles.css">
 </head>
 <body>
+<div id="v2-banner" style="background: #d1ecf1; color: #0c5460; border-bottom: 1px solid #bee5eb; padding: 6px 12px; font-size: 12px; font-family: -apple-system, BlinkMacSystemFont, sans-serif; position: sticky; top: 0; z-index: 9999;">
+  <strong>v2 mode</strong> — running through /api/v2/* with a v1-compatibility shim. <a href="/dashboard/dashboard.html" style="color: inherit; text-decoration: underline;">Switch back to v1</a>
+</div>
+
     <!-- Content will be injected by shared-nav.js -->
     <div class="ism-content-wide">
         
@@ -101,7 +107,7 @@
                         <a href="/dashboard/v2-testing.html" class="btn btn-primary" style="width: 100%;">
                             Testing (v2) →
                         </a>
-                        <a href="/dashboard/testing.html" class="btn btn-secondary" style="width: 100%;">
+                        <a href="/dashboard/v2/testing.html" class="btn btn-secondary" style="width: 100%;">
                             Testing (v1)
                         </a>
                         <a href="/dashboard/playback.html" class="btn btn-secondary" style="width: 100%;">
@@ -201,9 +207,8 @@
                     </div>
                 </div>
                 <div style="display: flex; gap: 16px; flex-wrap: wrap; align-items: center;">
-                    <a href="/dashboard/v2/dashboard.html" class="btn btn-primary btn-sm">Switch to v2 dashboard →</a>
                     <a href="/dashboard/api-docs/" class="btn btn-primary btn-sm">All Specs</a>
-                    <a href="/dashboard/v2-console.html" class="btn btn-primary btn-sm">v2 Console</a>
+                    <a href="/dashboard/v2-console.html" class="btn btn-primary btn-sm">v2 Console →</a>
                     <div style="display: flex; gap: 6px; flex-wrap: wrap;">
                         <span style="color: var(--text-secondary); font-size: 12px; align-self: center; margin-right: 4px;">v1</span>
                         <a href="/dashboard/api-docs/proxy.html" class="btn btn-secondary btn-sm">go-proxy</a>

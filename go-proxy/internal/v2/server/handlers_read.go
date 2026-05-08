@@ -36,13 +36,46 @@ func (s *Server) GetApiV2Info(w http.ResponseWriter, r *http.Request) {
 
 // ----- Players (reads) -----------------------------------------------------
 
+// wantsRaw reports whether the caller asked for the v1-shape full
+// session map alongside the typed v2 record. Read off the raw URL
+// (the typed params don't include this transitional flag).
+//
+// The `?include=raw` flag is a transitional concession to the existing
+// v1 dashboard JS during the v1→v2 UI migration. New clients should
+// not depend on it; it will go away once the dashboard fully consumes
+// typed v2 fields.
+func wantsRaw(r *http.Request) bool {
+	return r.URL.Query().Get("include") == "raw"
+}
+
+// playerRecordWithRaw is the response shape when ?include=raw is set.
+// Anonymous-embeds PlayerRecord so the typed v2 fields serialize
+// at the top level; raw_session adds the v1 SessionData passthrough.
+type playerRecordWithRaw struct {
+	oapigen.PlayerRecord
+	RawSession map[string]any `json:"raw_session,omitempty"`
+}
+
 // GetApiV2Players lists every connected player.
 func (s *Server) GetApiV2Players(w http.ResponseWriter, r *http.Request, params oapigen.GetApiV2PlayersParams) {
 	if s.v1 == nil {
 		writeJSON(w, http.StatusOK, map[string]any{"items": []oapigen.PlayerRecord{}})
 		return
 	}
+	raw := wantsRaw(r)
 	sessions := s.v1.SessionList()
+	if raw {
+		items := make([]playerRecordWithRaw, 0, len(sessions))
+		for _, sess := range sessions {
+			rec, ok := playerFromSession(sess)
+			if !ok {
+				continue
+			}
+			items = append(items, playerRecordWithRaw{PlayerRecord: rec, RawSession: sess})
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"items": items})
+		return
+	}
 	items := make([]oapigen.PlayerRecord, 0, len(sessions))
 	for _, sess := range sessions {
 		rec, ok := playerFromSession(sess)
@@ -72,6 +105,10 @@ func (s *Server) GetApiV2PlayersPlayerId(w http.ResponseWriter, r *http.Request,
 	}
 	if rec.ControlRevision != "" {
 		w.Header().Set("ETag", `"`+rec.ControlRevision+`"`)
+	}
+	if wantsRaw(r) {
+		writeJSON(w, http.StatusOK, playerRecordWithRaw{PlayerRecord: rec, RawSession: sess})
+		return
 	}
 	writeJSON(w, http.StatusOK, rec)
 }

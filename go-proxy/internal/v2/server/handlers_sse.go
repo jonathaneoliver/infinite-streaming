@@ -68,6 +68,11 @@ func (s *Server) GetApiV2Events(w http.ResponseWriter, r *http.Request, params o
 	lastID := ParseLastEventID(r.Header.Get("Last-Event-ID"))
 	since := s.events.ring.Since(lastID)
 
+	// `?include=raw` augments player.*-shaped frames with the full v1
+	// session map under data.raw_session. Transitional flag for the
+	// v1 dashboard JS migration.
+	raw := wantsRaw(r)
+
 	// Track what we've already delivered so the live tail can skip
 	// frames that overlapped the replay window.
 	var lastDelivered uint64
@@ -94,7 +99,7 @@ func (s *Server) GetApiV2Events(w http.ResponseWriter, r *http.Request, params o
 		flusher.Flush()
 	}
 	for _, f := range since.Frames {
-		writeFrame(w, f.ID, f.Type, f.Payload)
+		s.writeFrameMaybeRaw(w, f, raw)
 		if f.ID > lastDelivered {
 			lastDelivered = f.ID
 		}
@@ -116,11 +121,59 @@ func (s *Server) GetApiV2Events(w http.ResponseWriter, r *http.Request, params o
 				// Already delivered during replay — skip.
 				continue
 			}
-			writeFrame(w, f.ID, f.Type, f.Payload)
+			s.writeFrameMaybeRaw(w, f, raw)
 			lastDelivered = f.ID
 			flusher.Flush()
 		}
 	}
+}
+
+// writeFrameMaybeRaw writes a frame to the SSE stream. When raw is
+// true and the frame is a player.* type, the payload is rewritten to
+// include `data.raw_session` from the v1 store. For all other frame
+// types (heartbeat, replay.gap, play.*) the original payload is
+// passed through verbatim — the raw passthrough is player-shaped only.
+func (s *Server) writeFrameMaybeRaw(w http.ResponseWriter, f Frame, raw bool) {
+	if !raw || s.v1 == nil {
+		writeFrame(w, f.ID, f.Type, f.Payload)
+		return
+	}
+	switch f.Type {
+	case "player.created", "player.updated":
+		augmented := s.augmentPlayerFrameWithRaw(f.Payload)
+		writeFrame(w, f.ID, f.Type, augmented)
+	default:
+		writeFrame(w, f.ID, f.Type, f.Payload)
+	}
+}
+
+// augmentPlayerFrameWithRaw decodes a player.* frame, looks up the
+// session map for that player_id, and re-marshals with raw_session
+// embedded under data. Falls back to the original payload on any
+// unmarshal/lookup error so a malformed frame never crashes the
+// stream.
+func (s *Server) augmentPlayerFrameWithRaw(payload []byte) []byte {
+	var env struct {
+		Type string                 `json:"type"`
+		Data map[string]interface{} `json:"data"`
+	}
+	if err := json.Unmarshal(payload, &env); err != nil || env.Data == nil {
+		return payload
+	}
+	pidStr, _ := env.Data["id"].(string)
+	if pidStr == "" {
+		return payload
+	}
+	sess, ok := s.v1.SessionByPlayerID(pidStr)
+	if !ok {
+		return payload
+	}
+	env.Data["raw_session"] = sess
+	out, err := json.Marshal(env)
+	if err != nil {
+		return payload
+	}
+	return out
 }
 
 // writeFrame emits one SSE frame to the wire. SSE format spec: each
