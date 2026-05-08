@@ -1,0 +1,499 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>v2 Testing Session · InfiniteStream</title>
+  <link rel="stylesheet" href="/shared-styles.css" />
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+      background: var(--bg-secondary); color: var(--text-primary); margin: 0; padding: 16px; }
+    .layout { max-width: 1500px; margin: 0 auto; }
+    .topbar { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 14px; gap: 12px; flex-wrap: wrap; }
+    .topbar h1 { font-size: 20px; font-weight: 500; margin: 0; }
+    .topbar .id { font-family: SFMono-Regular, Menlo, monospace; font-size: 12px; color: var(--text-secondary); }
+    .topbar .right { display: flex; gap: 12px; align-items: center; font-size: 13px; }
+    .topbar .right a { color: var(--text-secondary); text-decoration: none; }
+    .topbar .right a:hover { color: var(--text-primary); }
+
+    .pill { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 500; background: var(--bg-tertiary); color: var(--text-secondary); }
+    .pill.ok { background: #d4edda; color: #155724; }
+    .pill.err { background: #f8d7da; color: #721c24; }
+    .pill.warn { background: #fff3cd; color: #856404; }
+
+    .panels { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+    @media (max-width: 1100px) { .panels { grid-template-columns: 1fr; } }
+    .panel { background: var(--bg-primary); border: 1px solid var(--border-light); border-radius: 10px; padding: 14px; }
+    .panel h2 { font-size: 12px; font-weight: 600; margin: 0 0 12px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-secondary); }
+    .panel-full { grid-column: 1 / -1; }
+
+    .row { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; flex-wrap: wrap; }
+    .row label { font-size: 12px; min-width: 90px; color: var(--text-secondary); }
+    input, select, textarea { font: inherit; padding: 5px 8px; border: 1px solid var(--border-light); border-radius: 4px; font-size: 13px; box-sizing: border-box; }
+    input[type=range] { padding: 0; width: 200px; }
+    input[type=number] { width: 90px; }
+    textarea { width: 100%; min-height: 80px; font-family: SFMono-Regular, Menlo, monospace; font-size: 12px; }
+    .value { font-family: SFMono-Regular, Menlo, monospace; font-size: 12px; color: var(--text-primary); min-width: 70px; }
+    button { font: inherit; background: var(--primary, #2962ff); color: white; border: 0; border-radius: 4px; padding: 5px 12px; cursor: pointer; font-size: 12px; }
+    button:hover { background: var(--primary-hover, #1e40af); }
+    button.secondary { background: var(--bg-tertiary); color: var(--text-primary); border: 1px solid var(--border-light); }
+    button.danger { background: #c0392b; }
+    button.sm { padding: 3px 8px; font-size: 11px; }
+
+    table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+    th, td { text-align: left; padding: 5px 8px; border-bottom: 1px solid var(--border-light); }
+    th { font-weight: 600; color: var(--text-secondary); font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.4px; }
+    .id-cell { font-family: SFMono-Regular, Menlo, monospace; font-size: 10.5px; max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+    .stream-log { font-family: SFMono-Regular, Menlo, monospace; font-size: 11px; background: #0b0e14; color: #c9d1d9; border-radius: 6px; padding: 10px; height: 280px; overflow-y: auto; white-space: pre-wrap; word-break: break-word; }
+    .stream-log .ts { color: #6b7280; }
+    .stream-log .typ { color: #58a6ff; font-weight: bold; }
+    .stream-log .err-line { color: #ff7b72; }
+    .stream-log .system { color: #8b949e; }
+    .result-banner { padding: 6px 10px; border-radius: 4px; font-size: 12px; margin-top: 8px; display: none; }
+    .result-banner.show { display: block; }
+    .result-banner.ok { background: #d4edda; color: #155724; }
+    .result-banner.err { background: #f8d7da; color: #721c24; }
+
+    .label-chip { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; margin: 2px; border-radius: 12px; background: var(--bg-tertiary); font-size: 11.5px; font-family: SFMono-Regular, Menlo, monospace; }
+    .label-chip button { background: transparent; color: var(--text-secondary); padding: 0 2px; font-size: 14px; line-height: 1; }
+    .label-chip button:hover { color: var(--text-primary); }
+
+    .rule-row { padding: 6px 0; border-bottom: 1px solid var(--border-light); }
+    .rule-row:last-child { border-bottom: 0; }
+    .rule-meta { font-size: 11px; color: var(--text-secondary); margin-top: 3px; }
+
+    .switch { display: inline-flex; gap: 4px; }
+    .switch button { background: var(--bg-tertiary); color: var(--text-primary); border: 1px solid var(--border-light); padding: 4px 10px; }
+    .switch button.active { background: var(--primary, #2962ff); color: white; border-color: var(--primary, #2962ff); }
+
+    .net-log { font-family: SFMono-Regular, Menlo, monospace; font-size: 11px; max-height: 280px; overflow-y: auto; }
+    .net-log .row { display: grid; grid-template-columns: 60px 70px 70px 1fr; gap: 8px; padding: 3px 0; align-items: center; border-bottom: 1px solid var(--border-light); margin: 0; }
+    .net-log .ok { color: #28a745; }
+    .net-log .err { color: #dc3545; }
+  </style>
+</head>
+<body>
+  <div class="layout">
+    <div class="topbar">
+      <div>
+        <h1>v2 Testing Session <span class="pill" id="player-pill">…</span></h1>
+        <div class="id" id="player-id">no player</div>
+      </div>
+      <div class="right">
+        <span class="pill" id="conn-pill">disconnected</span>
+        <a href="/dashboard/v2-testing.html">← back to picker</a>
+        <a href="/dashboard/api-docs/proxy-v2.html">v2 spec</a>
+      </div>
+    </div>
+
+    <div class="panels">
+      <!-- Identity -->
+      <div class="panel">
+        <h2>Identity</h2>
+        <div class="row"><label>player_id</label> <span class="id" id="hdr-player">—</span></div>
+        <div class="row"><label>display_id</label> <span id="hdr-display">—</span></div>
+        <div class="row"><label>group_id</label> <span class="id" id="hdr-group">—</span></div>
+        <div class="row"><label>control_revision</label> <span class="id" id="hdr-rev">—</span></div>
+        <div class="row"><label>current play</label> <span class="id" id="hdr-play">—</span></div>
+        <div class="row" style="margin-top:10px;">
+          <button onclick="reload()" class="secondary">Reload</button>
+          <button onclick="deletePlayer()" class="danger">Delete player</button>
+        </div>
+        <div id="banner" class="result-banner"></div>
+      </div>
+
+      <!-- Labels -->
+      <div class="panel">
+        <h2>Labels</h2>
+        <div id="labels-chips"></div>
+        <div class="row" style="margin-top:8px;">
+          <input id="label-key" placeholder="key" style="flex:1; min-width:120px;" />
+          <input id="label-val" placeholder="value" style="flex:2; min-width:120px;" />
+          <button onclick="addLabel()">Add / set</button>
+        </div>
+      </div>
+
+      <!-- Shape -->
+      <div class="panel">
+        <h2>Shape</h2>
+        <div class="row">
+          <label>rate (Mbps)</label>
+          <input type="range" id="shape-rate" min="0" max="50" step="0.5" value="0" oninput="document.getElementById('shape-rate-v').textContent = this.value" />
+          <span class="value" id="shape-rate-v">0</span>
+        </div>
+        <div class="row">
+          <label>delay (ms)</label>
+          <input type="range" id="shape-delay" min="0" max="1000" step="5" value="0" oninput="document.getElementById('shape-delay-v').textContent = this.value" />
+          <span class="value" id="shape-delay-v">0</span>
+        </div>
+        <div class="row">
+          <label>loss (%)</label>
+          <input type="range" id="shape-loss" min="0" max="50" step="0.1" value="0" oninput="document.getElementById('shape-loss-v').textContent = this.value" />
+          <span class="value" id="shape-loss-v">0</span>
+        </div>
+        <div class="row">
+          <button onclick="patchShape()">Apply shape</button>
+          <button onclick="resetShape()" class="secondary">Reset</button>
+        </div>
+
+        <h2 style="margin-top:14px;">Transport fault</h2>
+        <div class="row">
+          <label>type</label>
+          <div class="switch" id="tf-type">
+            <button class="active" onclick="setTfType('none', event)">none</button>
+            <button onclick="setTfType('drop', event)">drop</button>
+            <button onclick="setTfType('reject', event)">reject</button>
+          </div>
+        </div>
+        <div class="row">
+          <label>frequency</label>
+          <input type="number" id="tf-frequency" min="0" value="0" />
+          <label style="min-width:60px;">consec</label>
+          <input type="number" id="tf-consec" min="1" value="1" />
+        </div>
+        <div class="row">
+          <button onclick="patchTransportFault()">Apply transport_fault</button>
+        </div>
+      </div>
+
+      <!-- Fault rules -->
+      <div class="panel">
+        <h2>Fault rules</h2>
+        <div id="rules-list"></div>
+        <div class="row" style="margin-top:10px; padding-top:10px; border-top:1px solid var(--border-light);">
+          <input id="new-rule-id" placeholder="rule id (optional)" style="min-width:120px;" />
+          <select id="new-rule-kind">
+            <option value="">all kinds</option>
+            <option value="segment">segment</option>
+            <option value="manifest">manifest</option>
+            <option value="master_manifest">master_manifest</option>
+          </select>
+          <select id="new-rule-type">
+            <option value="500">500</option>
+            <option value="404">404</option>
+            <option value="503">503</option>
+            <option value="timeout">timeout</option>
+            <option value="corrupted">corrupted</option>
+            <option value="none">none</option>
+          </select>
+          <input type="number" id="new-rule-freq" placeholder="freq" min="0" value="5" />
+          <button onclick="appendRule()">Add rule</button>
+        </div>
+      </div>
+
+      <!-- Network log -->
+      <div class="panel panel-full">
+        <h2>Network log <span class="pill" id="netlog-pill">live</span></h2>
+        <div id="netlog" class="net-log"></div>
+      </div>
+
+      <!-- Live event stream (player-scoped) -->
+      <div class="panel panel-full">
+        <h2>Live event stream (this player only)</h2>
+        <div id="stream-log" class="stream-log"></div>
+      </div>
+    </div>
+  </div>
+
+  <script src="/shared/v2-client.js"></script>
+  <script>
+    const v2 = new HarnessV2();
+    let playerID = new URLSearchParams(location.search).get("player_id") || "";
+    let currentRecord = null;
+    let currentPlayID = "";
+    const netLogMax = 200;
+    const netLogRows = [];
+
+    function showBanner(kind, msg) {
+      const b = document.getElementById("banner");
+      b.className = "result-banner show " + kind;
+      b.textContent = msg;
+      setTimeout(() => b.classList.remove("show"), 3500);
+    }
+
+    async function reload() {
+      if (!playerID) {
+        document.getElementById("player-pill").textContent = "no id";
+        return;
+      }
+      const r = await v2.getPlayer(playerID);
+      if (!r.ok) {
+        document.getElementById("player-pill").className = "pill err";
+        document.getElementById("player-pill").textContent = "HTTP " + r.status;
+        showBanner("err", "GET /players failed: " + r.status);
+        return;
+      }
+      document.getElementById("player-pill").className = "pill ok";
+      document.getElementById("player-pill").textContent = "loaded";
+      currentRecord = r.body;
+      renderHeader();
+      renderLabels();
+      renderShape();
+      renderRules();
+      reloadNetlog();
+    }
+
+    function renderHeader() {
+      document.getElementById("player-id").textContent = playerID;
+      document.getElementById("hdr-player").textContent = playerID;
+      document.getElementById("hdr-display").textContent = currentRecord.display_id || "—";
+      document.getElementById("hdr-group").textContent = currentRecord.group_id || "—";
+      document.getElementById("hdr-rev").textContent = currentRecord.control_revision || "—";
+      document.getElementById("hdr-play").textContent =
+        currentRecord.current_play && currentRecord.current_play.id
+          ? currentRecord.current_play.id
+          : "—";
+      currentPlayID = (currentRecord.current_play && currentRecord.current_play.id) || "";
+    }
+
+    function renderLabels() {
+      const labels = currentRecord.labels || {};
+      const chips = document.getElementById("labels-chips");
+      const keys = Object.keys(labels);
+      if (!keys.length) {
+        chips.innerHTML = '<span style="color:var(--text-secondary); font-size:12px;">no labels</span>';
+        return;
+      }
+      chips.innerHTML = keys.map((k) =>
+        `<span class="label-chip">${k}=${labels[k]} <button onclick="removeLabel('${k}')">×</button></span>`
+      ).join("");
+    }
+
+    function renderShape() {
+      const s = currentRecord.shape || {};
+      // The v2 PlayerRecord.Shape projection isn't currently populated by
+      // the read-side translator (player-scope shape lives on v1's
+      // nftables_* fields, not yet projected back). Sliders display the
+      // most-recent server-acknowledged values via the labels-style
+      // round-trip on PATCH; until then they default to 0.
+      document.getElementById("shape-rate").value = s.rate_mbps || 0;
+      document.getElementById("shape-rate-v").textContent = s.rate_mbps || 0;
+      document.getElementById("shape-delay").value = s.delay_ms || 0;
+      document.getElementById("shape-delay-v").textContent = s.delay_ms || 0;
+      document.getElementById("shape-loss").value = s.loss_pct || 0;
+      document.getElementById("shape-loss-v").textContent = s.loss_pct || 0;
+    }
+
+    function renderRules() {
+      const rules = (currentRecord.fault_rules) || [];
+      const list = document.getElementById("rules-list");
+      if (!rules.length) {
+        list.innerHTML = '<span style="color:var(--text-secondary); font-size:12px;">no fault rules</span>';
+        return;
+      }
+      list.innerHTML = rules.map((r) => {
+        const kinds = (r.filter && r.filter.request_kind && r.filter.request_kind.join(",")) || "all";
+        return `
+          <div class="rule-row">
+            <strong>${r.id || "(no-id)"}</strong> — <code>${r.type}</code>
+            ${r.frequency ? "@ " + r.frequency + " " + (r.mode || "f/s") : ""}
+            <button class="sm danger" style="float:right;" onclick="deleteRule('${r.id}')">×</button>
+            <div class="rule-meta">kind=${kinds} consec=${r.consecutive || 1}</div>
+          </div>`;
+      }).join("");
+    }
+
+    // ---- Mutation helpers ----
+    async function applyPatch(label, patch) {
+      const r = await v2.patchPlayer(playerID, patch);
+      if (r.ok) {
+        showBanner("ok", label + " applied — new rev: " + (r.body && r.body.control_revision || "?").slice(11, 23));
+        currentRecord = r.body;
+        renderHeader();
+      } else if (r.status === 412) {
+        showBanner("err", label + " conflict (412): refresh and retry");
+        reload();
+      } else {
+        showBanner("err", label + " failed: HTTP " + r.status + " — " + (r.body && r.body.detail || ""));
+      }
+      return r;
+    }
+
+    async function addLabel() {
+      const k = document.getElementById("label-key").value.trim();
+      const v = document.getElementById("label-val").value.trim();
+      if (!k) return;
+      await applyPatch("label set", { labels: { [k]: v } });
+      document.getElementById("label-key").value = "";
+      document.getElementById("label-val").value = "";
+      reload();
+    }
+    async function removeLabel(k) {
+      await applyPatch("label clear", { labels: { [k]: null } });
+      reload();
+    }
+
+    async function patchShape() {
+      const patch = {
+        shape: {
+          rate_mbps: parseFloat(document.getElementById("shape-rate").value),
+          delay_ms: parseInt(document.getElementById("shape-delay").value, 10),
+          loss_pct: parseFloat(document.getElementById("shape-loss").value),
+        },
+      };
+      await applyPatch("shape", patch);
+    }
+    async function resetShape() {
+      document.getElementById("shape-rate").value = 0;
+      document.getElementById("shape-delay").value = 0;
+      document.getElementById("shape-loss").value = 0;
+      ["rate", "delay", "loss"].forEach((k) =>
+        document.getElementById("shape-" + k + "-v").textContent = "0"
+      );
+      await patchShape();
+    }
+
+    let tfType = "none";
+    function setTfType(t, ev) {
+      tfType = t;
+      document.querySelectorAll("#tf-type button").forEach((b) => b.classList.remove("active"));
+      ev.target.classList.add("active");
+    }
+    async function patchTransportFault() {
+      const patch = {
+        shape: {
+          transport_fault: {
+            type: tfType,
+            frequency: parseInt(document.getElementById("tf-frequency").value, 10) || 0,
+            consecutive: parseInt(document.getElementById("tf-consec").value, 10) || 1,
+            mode: "failures_per_seconds",
+          },
+        },
+      };
+      await applyPatch("transport_fault", patch);
+    }
+
+    async function appendRule() {
+      const kindStr = document.getElementById("new-rule-kind").value;
+      const rule = {
+        id: document.getElementById("new-rule-id").value.trim() || undefined,
+        type: document.getElementById("new-rule-type").value,
+        frequency: parseInt(document.getElementById("new-rule-freq").value, 10) || 0,
+        mode: "failures_per_seconds",
+      };
+      if (kindStr) rule.filter = { request_kind: [kindStr] };
+      const r = await v2.appendFaultRule(playerID, rule);
+      if (r.ok) {
+        showBanner("ok", "rule added");
+        document.getElementById("new-rule-id").value = "";
+        reload();
+      } else {
+        showBanner("err", "POST fault_rules failed: HTTP " + r.status);
+      }
+    }
+    async function deleteRule(id) {
+      const r = await v2.deleteFaultRule(playerID, id);
+      if (r.ok || r.status === 204) {
+        showBanner("ok", "rule deleted");
+        reload();
+      } else {
+        showBanner("err", "DELETE fault_rule failed: HTTP " + r.status);
+      }
+    }
+
+    async function deletePlayer() {
+      if (!confirm("Delete this player and free its port?")) return;
+      const r = await v2.deletePlayer(playerID);
+      if (r.ok || r.status === 204) {
+        location.href = "/dashboard/v2-testing.html";
+      } else {
+        showBanner("err", "DELETE failed: HTTP " + r.status);
+      }
+    }
+
+    // ---- Network log ----
+    async function reloadNetlog() {
+      const r = await v2.networkLog(playerID, 100);
+      const items = (r.body && r.body.items) || [];
+      const log = document.getElementById("netlog");
+      if (!items.length) {
+        log.innerHTML = '<div style="color:var(--text-secondary); font-style:italic; padding:8px;">no captured requests yet</div>';
+        return;
+      }
+      log.innerHTML = items.map((e) => {
+        const cls = (e.status >= 400 || e.faulted) ? "err" : "ok";
+        const ts = (e.timestamp || "").split("T")[1]?.split(".")[0] || "";
+        return `<div class="row"><span>${ts}</span><span>${e.method || "?"}</span><span class="${cls}">${e.status || "?"}</span><span>${e.url || ""}</span></div>`;
+      }).join("");
+    }
+
+    // ---- SSE log (filtered to this player) ----
+    function logEvent(typ, msg, raw) {
+      const log = document.getElementById("stream-log");
+      const ts = new Date().toLocaleTimeString();
+      const cls = /^play\.|^player\./.test(typ) ? "" : "system";
+      const tail = raw ? "\n  " + JSON.stringify(raw).slice(0, 200) : "";
+      log.innerHTML += `<div class="${cls}"><span class="ts">${ts}</span> <span class="typ">${typ}</span> ${msg || ""}${tail}</div>`;
+      log.scrollTop = log.scrollHeight;
+    }
+
+    HarnessV2.subscribeEvents({
+      callbacks: {
+        onConnect: () => {
+          const p = document.getElementById("conn-pill");
+          p.className = "pill ok"; p.textContent = "live";
+        },
+        onDisconnect: () => {
+          const p = document.getElementById("conn-pill");
+          p.className = "pill err"; p.textContent = "reconnecting";
+        },
+        onPlayerUpdated: (rec) => {
+          if (rec && rec.id === playerID) {
+            currentRecord = rec;
+            renderHeader();
+            logEvent("player.updated", rec.control_revision?.slice(11, 23));
+          }
+        },
+        onPlayerDeleted: (data) => {
+          if (data && data.player_id === playerID) {
+            logEvent("player.deleted", data.reason);
+            showBanner("err", "player has been deleted");
+          }
+        },
+        onPlayStarted: (data) => {
+          if (data && data.player_id === playerID) {
+            currentPlayID = data.play_id;
+            document.getElementById("hdr-play").textContent = data.play_id;
+            logEvent("play.started", data.play_id?.slice(0, 12));
+          }
+        },
+        onPlayEnded: (data) => {
+          if (data && data.player_id === playerID) {
+            logEvent("play.ended", `${data.play_id?.slice(0, 12)} (${data.reason})`);
+          }
+        },
+        onPlayNetworkEntry: (data) => {
+          if (data && data.player_id === playerID) {
+            // Append to in-memory log; bound size.
+            netLogRows.unshift(data.entry);
+            if (netLogRows.length > netLogMax) netLogRows.pop();
+            const log = document.getElementById("netlog");
+            const e = data.entry || {};
+            const cls = (e.status >= 400 || e.faulted) ? "err" : "ok";
+            const ts = (e.timestamp || "").split("T")[1]?.split(".")[0] || "";
+            const newRow = document.createElement("div");
+            newRow.className = "row";
+            newRow.innerHTML = `<span>${ts}</span><span>${e.method || "?"}</span><span class="${cls}">${e.status || "?"}</span><span>${e.url || ""}</span>`;
+            if (log.firstElementChild && log.firstElementChild.classList.contains("row")) {
+              log.insertBefore(newRow, log.firstElementChild);
+            } else {
+              log.innerHTML = "";
+              log.appendChild(newRow);
+            }
+          }
+        },
+        onReplayGap: (data) => logEvent("replay.gap", `missed ${data.missed_from}..${data.missed_to}`),
+      },
+    });
+
+    if (!playerID) {
+      document.getElementById("player-pill").className = "pill err";
+      document.getElementById("player-pill").textContent = "no player_id";
+      showBanner("err", "Open this page with ?player_id=<UUID> in the URL.");
+    } else {
+      reload();
+    }
+  </script>
+</body>
+</html>

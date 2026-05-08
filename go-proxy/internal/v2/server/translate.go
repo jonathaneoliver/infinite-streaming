@@ -52,7 +52,172 @@ func playerFromSession(s map[string]any) (oapigen.PlayerRecord, bool) {
 	if t, ok := getTime(s, "updated_at", "last_request_time"); ok {
 		rec.LastSeenAt = &t
 	}
+
+	// v2-shadow fields written by the PATCH translators round-trip
+	// through the GET so the v2 console / harness CLI sees what they
+	// just wrote. Each field is opt-in and absent when the player has
+	// never had the corresponding patch applied.
+	if labels, ok := s["_v2_labels"].(map[string]any); ok && len(labels) > 0 {
+		out := oapigen.Labels{}
+		for k, v := range labels {
+			if str, ok := v.(string); ok {
+				out[k] = str
+			}
+		}
+		if len(out) > 0 {
+			rec.Labels = &out
+		}
+	}
+	if rules, ok := s["_v2_fault_rules"].([]any); ok && len(rules) > 0 {
+		out := make([]oapigen.FaultRule, 0, len(rules))
+		for _, raw := range rules {
+			rule, ok := raw.(map[string]any)
+			if !ok {
+				continue
+			}
+			out = append(out, faultRuleFromMap(rule))
+		}
+		if len(out) > 0 {
+			rec.FaultRules = &out
+		}
+	}
+	if shape := shapeFromSession(s); shape != nil {
+		rec.Shape = shape
+	}
 	return rec, true
+}
+
+// faultRuleFromMap projects a v2 fault rule (stored as map[string]any
+// on `_v2_fault_rules`) back into the typed schema.
+func faultRuleFromMap(rule map[string]any) oapigen.FaultRule {
+	out := oapigen.FaultRule{}
+	if id, ok := rule["id"].(string); ok {
+		out.Id = &id
+	}
+	if t, ok := rule["type"].(string); ok {
+		out.Type = oapigen.FaultRuleType(t)
+	}
+	if v, ok := numericFloatTranslate(rule["frequency"]); ok {
+		freq := int(v)
+		out.Frequency = &freq
+	}
+	if v, ok := numericFloatTranslate(rule["consecutive"]); ok {
+		consec := int(v)
+		out.Consecutive = &consec
+	}
+	if mode, ok := rule["mode"].(string); ok && mode != "" {
+		m := oapigen.FaultRuleMode(mode)
+		out.Mode = &m
+	}
+	if filter, ok := rule["filter"].(map[string]any); ok && len(filter) > 0 {
+		f := oapigen.FaultFilter{}
+		if kinds, ok := filter["request_kind"].([]any); ok && len(kinds) > 0 {
+			rk := make([]oapigen.FaultFilterRequestKind, 0, len(kinds))
+			for _, k := range kinds {
+				if s, ok := k.(string); ok {
+					rk = append(rk, oapigen.FaultFilterRequestKind(s))
+				}
+			}
+			if len(rk) > 0 {
+				f.RequestKind = &rk
+			}
+		}
+		out.Filter = &f
+	}
+	return out
+}
+
+// shapeFromSession projects v1's nftables_* fields + transport_*
+// fields + `_v2_shape_pattern` stash back into a v2 Shape. Returns nil
+// when no shape is configured (rate=0, delay=0, loss=0, no transport
+// fault, no pattern).
+func shapeFromSession(s map[string]any) *oapigen.Shape {
+	rate, _ := numericFloatTranslate(s["nftables_bandwidth_mbps"])
+	delay, _ := numericFloatTranslate(s["nftables_delay_ms"])
+	loss, _ := numericFloatTranslate(s["nftables_packet_loss"])
+	tfType, _ := s["transport_failure_type"].(string)
+	pattern, _ := s["_v2_shape_pattern"].(map[string]any)
+
+	if rate == 0 && delay == 0 && loss == 0 && (tfType == "" || tfType == "none") && pattern == nil {
+		return nil
+	}
+	out := &oapigen.Shape{}
+	if rate > 0 {
+		r := float32(rate)
+		out.RateMbps = &r
+	}
+	if delay > 0 {
+		d := float32(delay)
+		out.DelayMs = &d
+	}
+	if loss > 0 {
+		l := float32(loss)
+		out.LossPct = &l
+	}
+	if tfType != "" && tfType != "none" {
+		tf := oapigen.TransportFault{Type: oapigen.TransportFaultType(tfType)}
+		if v, ok := numericFloatTranslate(s["transport_failure_frequency"]); ok && v > 0 {
+			f := int(v)
+			tf.Frequency = &f
+		}
+		if v, ok := numericFloatTranslate(s["transport_consecutive_failures"]); ok && v >= 1 {
+			c := int(v)
+			tf.Consecutive = &c
+		}
+		if mode, ok := s["transport_failure_mode"].(string); ok && mode != "" {
+			m := oapigen.TransportFaultMode(mode)
+			tf.Mode = &m
+		}
+		out.TransportFault = &tf
+	}
+	if pattern != nil {
+		p := oapigen.Pattern{}
+		if t, ok := pattern["template"].(string); ok && t != "" {
+			tmpl := oapigen.PatternTemplate(t)
+			p.Template = &tmpl
+		}
+		if stepsAny, ok := pattern["steps"].([]any); ok {
+			for _, raw := range stepsAny {
+				step, ok := raw.(map[string]any)
+				if !ok {
+					continue
+				}
+				ps := oapigen.PatternStep{}
+				if v, ok := numericFloatTranslate(step["duration_seconds"]); ok {
+					ps.DurationSeconds = int(v)
+				}
+				if v, ok := numericFloatTranslate(step["rate_mbps"]); ok {
+					ps.RateMbps = float32(v)
+				}
+				if v, ok := step["enabled"].(bool); ok {
+					e := v
+					ps.Enabled = &e
+				}
+				p.Steps = append(p.Steps, ps)
+			}
+		}
+		out.Pattern = &p
+	}
+	return out
+}
+
+// numericFloatTranslate is the read-side numeric coercer (mirror of
+// numericFloat in handlers_mutate.go but living here so translate.go
+// stays self-contained).
+func numericFloatTranslate(v any) (float64, bool) {
+	switch x := v.(type) {
+	case float64:
+		return x, true
+	case float32:
+		return float64(x), true
+	case int:
+		return float64(x), true
+	case int32:
+		return float64(x), true
+	case int64:
+		return float64(x), true
+	}
+	return 0, false
 }
 
 // networkEntryFromV1 projects a v1 network ring-buffer row into a v2

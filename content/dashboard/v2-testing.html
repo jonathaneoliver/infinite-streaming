@@ -1,0 +1,205 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>v2 Testing · InfiniteStream</title>
+  <link rel="stylesheet" href="/shared-styles.css" />
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+      background: var(--bg-secondary); color: var(--text-primary); margin: 0; padding: 20px; }
+    .layout { max-width: 1400px; margin: 0 auto; }
+    .topbar { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 16px; }
+    .topbar h1 { font-size: 24px; font-weight: 500; margin: 0; }
+    .topbar .right { display: flex; gap: 16px; align-items: center; font-size: 13px; }
+    .topbar .right a { color: var(--text-secondary); text-decoration: none; }
+    .topbar .right a:hover { color: var(--text-primary); }
+    .pill { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 500; background: var(--bg-tertiary); color: var(--text-secondary); }
+    .pill.ok { background: #d4edda; color: #155724; }
+    .pill.err { background: #f8d7da; color: #721c24; }
+
+    .panel { background: var(--bg-primary); border: 1px solid var(--border-light); border-radius: 10px; padding: 14px 16px; margin-bottom: 16px; }
+    .panel h2 { font-size: 12px; font-weight: 600; margin: 0 0 12px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-secondary); }
+
+    .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 12px; }
+    .card { background: var(--bg-primary); border: 1px solid var(--border-light); border-radius: 10px; padding: 14px; cursor: pointer; transition: border-color 0.15s, transform 0.15s; }
+    .card:hover { border-color: #58a6ff; transform: translateY(-1px); }
+    .card .id { font-family: SFMono-Regular, Menlo, monospace; font-size: 11.5px; color: var(--text-secondary); margin-bottom: 6px; }
+    .card .stats { display: flex; gap: 16px; font-size: 12px; margin-top: 8px; color: var(--text-secondary); }
+    .card .stats b { color: var(--text-primary); font-weight: 500; }
+
+    .controls { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+    button { font: inherit; background: var(--primary, #2962ff); color: white; border: 0; border-radius: 4px; padding: 6px 14px; cursor: pointer; font-size: 12px; }
+    button:hover { background: var(--primary-hover, #1e40af); }
+    button.secondary { background: var(--bg-tertiary); color: var(--text-primary); border: 1px solid var(--border-light); }
+    button.danger { background: #c0392b; }
+    input { font: inherit; padding: 6px 8px; border: 1px solid var(--border-light); border-radius: 4px; font-size: 13px; }
+    .empty { color: var(--text-secondary); font-style: italic; padding: 12px; }
+  </style>
+</head>
+<body>
+  <div class="layout">
+    <div class="topbar">
+      <h1>v2 Testing <span class="pill" id="health-pill">…</span></h1>
+      <div class="right">
+        <span id="players-count">0 players</span>
+        <span id="groups-count">0 groups</span>
+        <span class="pill" id="conn-pill">disconnected</span>
+        <a href="/dashboard/">Dashboard</a>
+        <a href="/dashboard/api-docs/proxy-v2.html">v2 spec</a>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2>Mint a synthetic player</h2>
+      <div class="controls">
+        <input id="mint-player-id" placeholder="player_id (UUID, optional — server generates if blank)" style="min-width: 360px;" />
+        <input id="mint-labels" placeholder='labels JSON, e.g. {"test":"abr"}' style="min-width: 240px;" />
+        <button onclick="mintPlayer()">Mint</button>
+        <button onclick="clearAll()" class="danger">Drop all</button>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2>Active players</h2>
+      <div id="players-grid" class="grid"></div>
+    </div>
+
+    <div class="panel">
+      <h2>Groups</h2>
+      <div id="groups-list" class="grid"></div>
+      <div class="controls" style="margin-top: 10px;">
+        <input id="group-members" placeholder="comma-separated player_ids" style="min-width: 360px;" />
+        <input id="group-label" placeholder="label" />
+        <button onclick="createGroupFromForm()">Create group</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="/shared/v2-client.js"></script>
+  <script>
+    const v2 = new HarnessV2();
+    let lastPlayers = [];
+    let lastGroups = [];
+
+    async function refresh() {
+      const [info, players, groups] = await Promise.all([v2.healthz(), v2.listPlayers(), v2.listGroups()]);
+      const hp = document.getElementById("health-pill");
+      hp.className = "pill " + (info.ok ? "ok" : "err");
+      hp.textContent = info.ok ? "healthy" : "down";
+      lastPlayers = (players.body && players.body.items) || [];
+      lastGroups = (groups.body && groups.body.items) || [];
+      renderPlayers();
+      renderGroups();
+    }
+
+    function renderPlayers() {
+      document.getElementById("players-count").textContent = lastPlayers.length + " players";
+      const grid = document.getElementById("players-grid");
+      if (!lastPlayers.length) {
+        grid.innerHTML = '<div class="empty">No active players. Mint a synthetic one above, or wait for a real device to connect.</div>';
+        return;
+      }
+      grid.innerHTML = lastPlayers.map((p) => `
+        <div class="card" onclick="goToPlayer('${p.id}')">
+          <div class="id" title="${p.id}">${p.id}</div>
+          <div><b>display_id:</b> ${p.display_id || "—"}</div>
+          <div class="stats">
+            <span>rev <b>${(p.control_revision || "").slice(11, 23) || "—"}</b></span>
+            <span>group <b>${p.group_id ? p.group_id.slice(0, 8) : "—"}</b></span>
+            <span>play <b>${p.current_play && p.current_play.id ? p.current_play.id.slice(0, 8) : "—"}</b></span>
+          </div>
+        </div>`).join("");
+    }
+
+    function renderGroups() {
+      document.getElementById("groups-count").textContent = lastGroups.length + " groups";
+      const list = document.getElementById("groups-list");
+      if (!lastGroups.length) {
+        list.innerHTML = '<div class="empty">No groups.</div>';
+        return;
+      }
+      list.innerHTML = lastGroups.map((g) => `
+        <div class="card" onclick="event.stopPropagation()">
+          <div class="id" title="${g.id}">${g.id}</div>
+          <div><b>${g.label || "—"}</b></div>
+          <div class="stats">
+            <span><b>${(g.member_player_ids || []).length}</b> members</span>
+            <button class="secondary" onclick="event.stopPropagation(); disbandGroup('${g.id}')">Disband</button>
+          </div>
+        </div>`).join("");
+    }
+
+    function goToPlayer(id) {
+      window.location.href = "/dashboard/v2-testing-session.html?player_id=" + encodeURIComponent(id);
+    }
+
+    async function mintPlayer() {
+      const idIn = document.getElementById("mint-player-id").value.trim();
+      const labelsIn = document.getElementById("mint-labels").value.trim();
+      const payload = {};
+      if (idIn) payload.player_id = idIn;
+      if (labelsIn) {
+        try { payload.labels = JSON.parse(labelsIn); }
+        catch (e) { alert("labels JSON invalid: " + e.message); return; }
+      }
+      const r = await v2.createSyntheticPlayer(payload);
+      if (!r.ok && r.status !== 200) {
+        alert("Mint failed: HTTP " + r.status + "\n" + JSON.stringify(r.body));
+        return;
+      }
+      const newID = r.body && r.body.id;
+      if (newID) goToPlayer(newID);
+    }
+
+    async function clearAll() {
+      if (!confirm("Drop every active player?")) return;
+      await v2.deleteAllPlayers();
+      refresh();
+    }
+
+    async function disbandGroup(id) {
+      const r = await v2.deleteGroup(id);
+      if (r.ok || r.status === 204) refresh();
+    }
+
+    async function createGroupFromForm() {
+      const members = document.getElementById("group-members").value.split(",").map((s) => s.trim()).filter(Boolean);
+      const label = document.getElementById("group-label").value.trim();
+      if (!members.length) { alert("at least one member_player_id required"); return; }
+      const payload = { member_player_ids: members };
+      if (label) payload.label = label;
+      const r = await v2.createGroup(payload);
+      if (!r.ok && r.status !== 201) {
+        alert("Create failed: HTTP " + r.status + "\n" + JSON.stringify(r.body));
+        return;
+      }
+      document.getElementById("group-members").value = "";
+      document.getElementById("group-label").value = "";
+      refresh();
+    }
+
+    HarnessV2.subscribeEvents({
+      callbacks: {
+        onConnect: () => {
+          const p = document.getElementById("conn-pill");
+          p.className = "pill ok";
+          p.textContent = "live";
+        },
+        onDisconnect: () => {
+          const p = document.getElementById("conn-pill");
+          p.className = "pill err";
+          p.textContent = "reconnecting";
+        },
+        // Refresh on any state-changing event so the cards reflect
+        // SSE-driven updates without waiting for the next poll.
+        onPlayerCreated: refresh,
+        onPlayerUpdated: refresh,
+        onPlayerDeleted: refresh,
+      },
+    });
+    refresh();
+    setInterval(refresh, 5000);
+  </script>
+</body>
+</html>
