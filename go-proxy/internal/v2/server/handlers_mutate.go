@@ -172,6 +172,11 @@ func (s *Server) PatchApiV2PlayersPlayerId(w http.ResponseWriter, r *http.Reques
 	// patch publish and the FieldRevisions Touch.
 	rev := newRevision()
 
+	// Capture the player's group_id under the same MutatePlayer call
+	// so we can fan-out broadcast under one consistent view. groupID
+	// is empty when the player isn't in any group — broadcast becomes
+	// a no-op.
+	var groupID string
 	post, found, mErr := s.v1.MutatePlayer(pidStr, func(s map[string]any) error {
 		// Re-check under sessionsMu. Another v2 PATCH that won the
 		// outer race would have updated FieldRevisions before
@@ -185,6 +190,7 @@ func (s *Server) PatchApiV2PlayersPlayerId(w http.ResponseWriter, r *http.Reques
 		// post-patch payload paired with the prior revision.
 		s["control_revision"] = rev
 		fr.TouchWith(paths, rev)
+		groupID = getString(s, "group_id")
 		return nil
 	})
 	if mErr != nil {
@@ -201,6 +207,29 @@ func (s *Server) PatchApiV2PlayersPlayerId(w http.ResponseWriter, r *http.Reques
 		// and the lock acquisition. Treat as 404.
 		writePlayerNotFound(w, pidStr)
 		return
+	}
+
+	// Auto-broadcast to other group members (DESIGN.md § Player groups
+	// — auto-broadcast preserved from v1). Each member gets the same
+	// new control_revision and the same patch applied; their per-
+	// player FieldRevisions tracker is bumped to the same `rev` so a
+	// concurrent PATCHer reading from any member sees the latest
+	// revision uniformly.
+	if groupID != "" {
+		touched, bErr := s.v1.BroadcastPatch(groupID, pidStr, rev, func(member map[string]any) error {
+			applyPatchToSession(member, patch)
+			return nil
+		})
+		if bErr != nil {
+			// Broadcast failure on a sibling member shouldn't 500
+			// the whole PATCH — the originating member already
+			// landed cleanly. Log via a problem extension instead.
+			writeProblem(w, http.StatusInternalServerError, "https://harness/errors/broadcast-failed", "primary patch succeeded but group broadcast failed", bErr.Error(), map[string]any{"primary_player_id": pidStr, "group_id": groupID})
+			return
+		}
+		for _, p := range touched {
+			s.fieldRevs(p).TouchWith(paths, rev)
+		}
 	}
 
 	rec, ok := playerFromSession(post)

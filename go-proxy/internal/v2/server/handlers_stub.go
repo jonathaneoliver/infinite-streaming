@@ -39,16 +39,3 @@ func (*Server) DeleteApiV2PlaysPlayIdFaultRulesRuleId(w http.ResponseWriter, r *
 	notImplemented(w, "DeleteApiV2PlaysPlayIdFaultRulesRuleId")
 }
 
-// ----- Player groups (mutations) -------------------------------------------
-
-func (*Server) PostApiV2PlayerGroups(w http.ResponseWriter, r *http.Request) {
-	notImplemented(w, "PostApiV2PlayerGroups")
-}
-
-func (*Server) PatchApiV2PlayerGroupsGroupId(w http.ResponseWriter, r *http.Request, groupId oapigen.GroupId, params oapigen.PatchApiV2PlayerGroupsGroupIdParams) {
-	notImplemented(w, "PatchApiV2PlayerGroupsGroupId")
-}
-
-func (*Server) DeleteApiV2PlayerGroupsGroupId(w http.ResponseWriter, r *http.Request, groupId oapigen.GroupId) {
-	notImplemented(w, "DeleteApiV2PlayerGroupsGroupId")
-}

@@ -36,6 +36,14 @@ type Server struct {
 	revsMu sync.Mutex
 	revs   map[string]*FieldRevisions
 
+	// Per-group field-revision trackers, keyed by group_id (canonical
+	// UUID string). Used by PATCH /api/v2/player-groups/{id} for the
+	// group's own metadata revision. Distinct from per-member
+	// FieldRevisions (which track member-side broadcast-eligible
+	// fields).
+	groupRevsMu sync.Mutex
+	groupRevsMp map[string]*FieldRevisions
+
 	// events owns the v2 SSE pipeline (subscription + transform + ring).
 	// Nil-safe: the GET /api/v2/events handler returns 503 if absent.
 	events *EventSource
@@ -50,9 +58,10 @@ type Server struct {
 func New(v1 V1Adapter) *Server {
 	ring := NewEventRing(0, 0)
 	return &Server{
-		v1:     v1,
-		revs:   map[string]*FieldRevisions{},
-		events: NewEventSource(v1, ring),
+		v1:          v1,
+		revs:        map[string]*FieldRevisions{},
+		groupRevsMp: map[string]*FieldRevisions{},
+		events:      NewEventSource(v1, ring),
 	}
 }
 
@@ -85,6 +94,26 @@ func (s *Server) dropFieldRevs(playerID string) {
 	s.revsMu.Lock()
 	delete(s.revs, playerID)
 	s.revsMu.Unlock()
+}
+
+// groupRevs returns the (lazily-allocated) per-group metadata revision
+// tracker. Distinct from per-member FieldRevisions.
+func (s *Server) groupRevs(groupID string) *FieldRevisions {
+	s.groupRevsMu.Lock()
+	defer s.groupRevsMu.Unlock()
+	fr, ok := s.groupRevsMp[groupID]
+	if !ok {
+		fr = NewFieldRevisions()
+		s.groupRevsMp[groupID] = fr
+	}
+	return fr
+}
+
+// dropGroupRevs is called on disband to free the tracker.
+func (s *Server) dropGroupRevs(groupID string) {
+	s.groupRevsMu.Lock()
+	delete(s.groupRevsMp, groupID)
+	s.groupRevsMu.Unlock()
 }
 
 // Mount registers every v2 route on the supplied gorilla/mux router under

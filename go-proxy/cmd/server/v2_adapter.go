@@ -340,6 +340,149 @@ func (a *v2Adapter) SubscribeSessions(buffer int) (<-chan server.SessionSnapshot
 	return out, cancel
 }
 
+// ----- Group surface (Phase F) ---------------------------------------------
+
+// GroupMembers scans the snapshot for sessions tagged with groupID
+// and returns the bound player_ids. Order is the snapshot order.
+func (a *v2Adapter) GroupMembers(groupID string) []string {
+	if a == nil || a.app == nil || groupID == "" {
+		return nil
+	}
+	var out []string
+	for _, s := range a.app.getSessionList() {
+		if getString(s, "group_id") == groupID {
+			if pid := getString(s, "player_id"); pid != "" {
+				out = append(out, pid)
+			}
+		}
+	}
+	return out
+}
+
+// LinkGroup tags each player_id's session with groupID. Players not
+// currently connected are silently skipped — v2 callers can list
+// /api/v2/players first and reject up-front if they care about that.
+func (a *v2Adapter) LinkGroup(groupID string, playerIDs []string) []string {
+	if a == nil || a.app == nil || groupID == "" || len(playerIDs) == 0 {
+		return nil
+	}
+	wanted := map[string]struct{}{}
+	for _, p := range playerIDs {
+		if p != "" {
+			wanted[p] = struct{}{}
+		}
+	}
+	current := a.app.getSessionList()
+	updated := cloneSessionList(current)
+	var linked []string
+	for i, s := range updated {
+		pid := getString(s, "player_id")
+		if _, ok := wanted[pid]; !ok {
+			continue
+		}
+		updated[i]["group_id"] = groupID
+		updated[i]["control_revision"] = newControlRevision()
+		linked = append(linked, pid)
+	}
+	a.app.saveSessionList(updated)
+	return linked
+}
+
+// UnlinkGroup clears group_id on every session currently tagged with
+// the supplied group_id.
+func (a *v2Adapter) UnlinkGroup(groupID string) []string {
+	if a == nil || a.app == nil || groupID == "" {
+		return nil
+	}
+	current := a.app.getSessionList()
+	updated := cloneSessionList(current)
+	var cleared []string
+	for i, s := range updated {
+		if getString(s, "group_id") != groupID {
+			continue
+		}
+		updated[i]["group_id"] = ""
+		updated[i]["control_revision"] = newControlRevision()
+		if pid := getString(s, "player_id"); pid != "" {
+			cleared = append(cleared, pid)
+		}
+	}
+	if len(cleared) == 0 {
+		return nil
+	}
+	a.app.saveSessionList(updated)
+	return cleared
+}
+
+// RemoveFromGroup clears one player's group_id tag. Returns true if
+// the player existed AND had a non-empty group_id.
+func (a *v2Adapter) RemoveFromGroup(playerID string) bool {
+	if a == nil || a.app == nil || playerID == "" {
+		return false
+	}
+	want, err := uuid.Parse(playerID)
+	if err != nil {
+		return false
+	}
+	current := a.app.getSessionList()
+	updated := cloneSessionList(current)
+	for i, s := range updated {
+		stored, perr := uuid.Parse(getString(s, "player_id"))
+		if perr != nil || stored != want {
+			continue
+		}
+		if getString(s, "group_id") == "" {
+			return false
+		}
+		updated[i]["group_id"] = ""
+		updated[i]["control_revision"] = newControlRevision()
+		a.app.saveSessionList(updated)
+		return true
+	}
+	return false
+}
+
+// BroadcastPatch applies fn to every group member except
+// `excludePlayerID` and stamps each with the supplied `rev`. The
+// caller's MutatePlayer for the originating player_id has already
+// run; this completes the fan-out under one sessionsMu acquire.
+func (a *v2Adapter) BroadcastPatch(groupID string, excludePlayerID string, rev string, fn func(map[string]any) error) ([]string, error) {
+	if a == nil || a.app == nil || groupID == "" {
+		return nil, nil
+	}
+	exclude, _ := uuid.Parse(excludePlayerID)
+	a.app.sessionsMu.Lock()
+	defer a.app.sessionsMu.Unlock()
+
+	current := a.app.getSessionList()
+	updated := make([]SessionData, len(current))
+	copy(updated, current)
+	var touched []string
+	for i, s := range current {
+		if getString(s, "group_id") != groupID {
+			continue
+		}
+		stored, perr := uuid.Parse(getString(s, "player_id"))
+		if perr == nil && stored == exclude {
+			continue
+		}
+		mutable := cloneSession(s)
+		if err := fn(mutable); err != nil {
+			return touched, err
+		}
+		mutable["control_revision"] = rev
+		updated[i] = mutable
+		if pid := getString(mutable, "player_id"); pid != "" {
+			touched = append(touched, pid)
+		}
+	}
+	if len(touched) == 0 {
+		return nil, nil
+	}
+	a.app.publishSnapshot(cloneSessionList(updated))
+	return touched, nil
+}
+
 // SubscribeNetwork wraps v1's NetworkEventHub: each per-request event
 // lands as a server.NetworkLogRow (session_id + the entry as a map).
 func (a *v2Adapter) SubscribeNetwork(buffer int) (<-chan server.NetworkLogRow, func()) {
