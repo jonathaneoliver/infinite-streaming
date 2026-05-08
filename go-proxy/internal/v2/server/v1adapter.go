@@ -121,6 +121,22 @@ type V1Adapter interface {
 	// player's bound port with the supplied type/cadence. type="none"
 	// disarms.
 	ApplyTransportFaultToPlayer(playerID string, faultType string, consecutive int, consecutiveUnits string, frequency int) error
+
+	// ApplyPatternToPlayer drives v1's pattern step-engine on the
+	// player's bound port. `steps` is the time-varying rate profile
+	// (each step has a duration in seconds + rate in Mbps + an enabled
+	// flag). `delayMs` and `lossPct` carry through to the netem qdisc.
+	// Empty steps disarm the pattern loop and revert to static rate.
+	ApplyPatternToPlayer(playerID string, steps []ShapePatternStep, delayMs int, lossPct float64) error
+}
+
+// ShapePatternStep is the v1-shaped step the adapter expects. Mirrors
+// v1's NftShapeStep; declared here so v2 server code doesn't need to
+// import v1 internals.
+type ShapePatternStep struct {
+	DurationSeconds float64
+	RateMbps        float64
+	Enabled         bool
 }
 
 // SessionSnapshot is the v2-friendly shape of a SessionsEvent: the

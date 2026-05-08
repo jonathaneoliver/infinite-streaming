@@ -289,13 +289,77 @@ func TestPatch_UnsupportedField_501(t *testing.T) {
 	a, _, ts := newTestServer(t)
 	pid := uuid.New().String()
 	a.addPlayer(pid, "rev1", nil)
-	// shape.pattern is still deferred (Phase I wires shape rate/loss
-	// and fault_rules but not the pattern step engine).
+	// `display_id` is per-device identity, not mutable. Any v2 path
+	// outside the {labels, shape, fault_rules} whitelist returns 501.
 	status, body, _ := mustDo(t, ts, "PATCH", "/api/v2/players/"+pid,
-		`{"shape":{"pattern":{"steps":[{"duration_seconds":5,"rate_mbps":3}]}}}`,
+		`{"display_id":99}`,
 		map[string]string{"If-Match": `"rev1"`})
 	if status != http.StatusNotImplemented {
 		t.Errorf("status %d, want 501; body=%s", status, body)
+	}
+}
+
+func TestPatch_ShapePatternRoundTrip(t *testing.T) {
+	a, _, ts := newTestServer(t)
+	pid := uuid.New().String()
+	initialRev := "2020-01-01T00:00:00.000000000Z"
+	a.addPlayer(pid, initialRev, nil)
+
+	body := `{"shape":{"pattern":{"template":"square_wave","steps":[{"duration_seconds":30,"rate_mbps":5},{"duration_seconds":10,"rate_mbps":1}]}}}`
+	status, respBody, _ := mustDo(t, ts, "PATCH", "/api/v2/players/"+pid, body,
+		map[string]string{"If-Match": `"` + initialRev + `"`})
+	if status != http.StatusOK {
+		t.Fatalf("status %d body=%s", status, respBody)
+	}
+	stored, _ := a.SessionByPlayerID(pid)
+	pat, _ := stored["_v2_shape_pattern"].(map[string]any)
+	if pat == nil {
+		t.Fatalf("_v2_shape_pattern not stashed: %v", stored)
+	}
+	steps, _ := pat["steps"].([]any)
+	if len(steps) != 2 {
+		t.Errorf("steps len = %d, want 2", len(steps))
+	}
+	a.mu.Lock()
+	calls := append([]fakePatternCall{}, a.patternApplyCalls...)
+	a.mu.Unlock()
+	if len(calls) == 0 {
+		t.Fatalf("ApplyPatternToPlayer not called")
+	}
+	last := calls[len(calls)-1]
+	if last.PlayerID != pid || len(last.Steps) != 2 {
+		t.Errorf("pattern call mismatch: %+v", last)
+	}
+	if last.Steps[0].DurationSeconds != 30 || last.Steps[0].RateMbps != 5 {
+		t.Errorf("step[0] = %+v, want duration=30 rate=5", last.Steps[0])
+	}
+}
+
+func TestPatch_ShapePatternDisarm(t *testing.T) {
+	a, _, ts := newTestServer(t)
+	pid := uuid.New().String()
+	initialRev := "2020-01-01T00:00:00.000000000Z"
+	a.addPlayer(pid, initialRev, map[string]any{
+		"_v2_shape_pattern": map[string]any{"steps": []any{
+			map[string]any{"duration_seconds": 5.0, "rate_mbps": 3.0},
+		}},
+	})
+
+	body := `{"shape":{"pattern":null}}`
+	status, _, _ := mustDo(t, ts, "PATCH", "/api/v2/players/"+pid, body,
+		map[string]string{"If-Match": `"` + initialRev + `"`})
+	if status != http.StatusOK {
+		t.Fatalf("status %d", status)
+	}
+	stored, _ := a.SessionByPlayerID(pid)
+	if _, has := stored["_v2_shape_pattern"]; has {
+		t.Errorf("pattern should be cleared, still present: %v", stored["_v2_shape_pattern"])
+	}
+	a.mu.Lock()
+	calls := append([]fakePatternCall{}, a.patternApplyCalls...)
+	a.mu.Unlock()
+	if len(calls) == 0 || len(calls[len(calls)-1].Steps) != 0 {
+		t.Errorf("expected disarm call (empty steps), got %+v", calls)
 	}
 }
 

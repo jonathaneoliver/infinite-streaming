@@ -282,7 +282,18 @@ func (s *Server) PatchApiV2PlayersPlayerId(w http.ResponseWriter, r *http.Reques
 	// These run after the SessionData write has been published so v1
 	// SSE consumers see the new field values before the kernel apply
 	// fires its own log lines.
-	if shapeFieldsTouched(paths) {
+	// shape.pattern takes precedence over shape.rate_mbps when both
+	// are set — v1's pattern loop owns the rate while enabled. Fire
+	// pattern apply first so a "pattern + rate" body lands the
+	// pattern path (not the static-rate path).
+	if patternTouched(paths) {
+		applyPatternFromSession(s, post, pidStr)
+		for _, p := range broadcastTouched {
+			if memberSess, ok := s.v1.SessionByPlayerID(p); ok {
+				applyPatternFromSession(s, memberSess, p)
+			}
+		}
+	} else if shapeFieldsTouched(paths) {
 		_ = s.v1.ApplyShapeToPlayer(pidStr)
 		for _, p := range broadcastTouched {
 			_ = s.v1.ApplyShapeToPlayer(p)
@@ -331,8 +342,7 @@ func (*Server) PatchApiV2PlaysPlayId(w http.ResponseWriter, r *http.Request, pla
 // Phase H: + shape.{rate_mbps,delay_ms,loss_pct,transport_fault.*}
 // Phase I: + fault_rules (whole-array PATCH; the per-rule sub-resource
 //          endpoints have their own paths and don't run through here).
-//
-// shape.pattern still 501 until the pattern step translator lands.
+// Phase K: + shape.pattern (drives v1's pattern step-engine).
 func unsupportedPaths(paths []string) []string {
 	var bad []string
 	for _, p := range paths {
@@ -342,6 +352,7 @@ func unsupportedPaths(paths []string) []string {
 		case p == "shape.delay_ms":
 		case p == "shape.loss_pct":
 		case p == "shape.transport_fault", strings.HasPrefix(p, "shape.transport_fault."):
+		case p == "shape.pattern", strings.HasPrefix(p, "shape.pattern."):
 		case p == "shape":
 		case p == "fault_rules":
 		default:
@@ -370,6 +381,18 @@ func shapeFieldsTouched(paths []string) bool {
 func transportFaultTouched(paths []string) bool {
 	for _, p := range paths {
 		if p == "shape" || p == "shape.transport_fault" || strings.HasPrefix(p, "shape.transport_fault.") {
+			return true
+		}
+	}
+	return false
+}
+
+// patternTouched reports whether the patch touches shape.pattern.
+// Used to decide whether to invoke ApplyPatternToPlayer after a
+// successful PATCH.
+func patternTouched(paths []string) bool {
+	for _, p := range paths {
+		if p == "shape" || p == "shape.pattern" || strings.HasPrefix(p, "shape.pattern.") {
 			return true
 		}
 	}
@@ -482,6 +505,66 @@ func applyShapePatch(s map[string]any, shape any) {
 	if tf, present := shapeMap["transport_fault"]; present {
 		applyTransportFaultPatch(s, tf)
 	}
+	if pat, present := shapeMap["pattern"]; present {
+		applyPatternPatch(s, pat)
+	}
+}
+
+// applyPatternPatch stashes the v2 pattern shape on `_v2_shape_pattern`
+// for round-trip. The kernel-apply path (handlers_mutate's PATCH flow
+// → ApplyPatternToPlayer) reads this back, translates to []NftShapeStep,
+// and drives v1's applyShapePattern. Setting shape.pattern: null
+// disarms the v1 step engine.
+func applyPatternPatch(s map[string]any, pat any) {
+	if pat == nil {
+		delete(s, "_v2_shape_pattern")
+		// Setting nftables_pattern_enabled=false here is harmless;
+		// applyShapePattern with empty steps will write the same
+		// keys via updateSessionsByPortWithControl. Keeping the
+		// translator field-only avoids stale state if the kernel
+		// apply fails after the SessionData publish.
+		return
+	}
+	m, ok := pat.(map[string]any)
+	if !ok {
+		return
+	}
+	s["_v2_shape_pattern"] = m
+}
+
+// extractPatternSteps reads the v2 pattern stash from the session map
+// and returns the v1-shaped step slice. Returns nil when no pattern
+// is set or the stash is malformed.
+func extractPatternSteps(sess map[string]any) []ShapePatternStep {
+	pat, ok := sess["_v2_shape_pattern"].(map[string]any)
+	if !ok {
+		return nil
+	}
+	stepsAny, ok := pat["steps"].([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]ShapePatternStep, 0, len(stepsAny))
+	for _, raw := range stepsAny {
+		step, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		var s ShapePatternStep
+		if v, ok := numericFloat(step["duration_seconds"]); ok {
+			s.DurationSeconds = v
+		}
+		if v, ok := numericFloat(step["rate_mbps"]); ok {
+			s.RateMbps = v
+		}
+		// Default enabled=true unless explicitly false.
+		s.Enabled = true
+		if v, ok := step["enabled"].(bool); ok {
+			s.Enabled = v
+		}
+		out = append(out, s)
+	}
+	return out
 }
 
 func applyTransportFaultPatch(s map[string]any, tf any) {
@@ -529,6 +612,27 @@ func applyTransportFaultPatch(s map[string]any, tf any) {
 			s["transport_failure_mode"] = str
 		}
 	}
+}
+
+// applyPatternFromSession reads the v2 pattern stash + delay/loss out
+// of the post-patch session map and arms (or disarms) the kernel-side
+// step engine on the player's port.
+//
+// Empty steps disarm. Non-empty steps drive applyShapePattern.
+func applyPatternFromSession(srv *Server, sess map[string]any, playerID string) {
+	if srv == nil || srv.v1 == nil || sess == nil {
+		return
+	}
+	steps := extractPatternSteps(sess)
+	delayMs := 0
+	if f, ok := numericFloat(sess["nftables_delay_ms"]); ok {
+		delayMs = int(f)
+	}
+	lossPct := 0.0
+	if f, ok := numericFloat(sess["nftables_packet_loss"]); ok {
+		lossPct = f
+	}
+	_ = srv.v1.ApplyPatternToPlayer(playerID, steps, delayMs, lossPct)
 }
 
 // applyTransportFaultFromSession reads the transport-fault state out
