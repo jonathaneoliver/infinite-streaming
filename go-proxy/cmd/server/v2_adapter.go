@@ -7,6 +7,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"strconv"
 	"sync"
@@ -279,12 +280,241 @@ func (a *v2Adapter) ClearAllPlayers() {
 	a.app.saveSessionList([]SessionData{})
 }
 
-// CreateSyntheticPlayer is not yet wired. Synthetic players need port
-// allocation + nftables setup without traffic — a Phase F deliverable.
-// For now the adapter signals "not implemented" via status 0 and an
-// explicit error so the v2 server returns 501 with a clear detail.
+// CreateSyntheticPlayer mints a synthetic player record by reusing
+// v1's session-allocation helpers (allocateSessionNumber +
+// replaceThirdFromLastDigit) and stamping a fully-populated session
+// map into the v1 store. No HTTP redirect / no manifest traffic —
+// the player is "born allocated" and CI scripts can attach faults /
+// shaping / labels before the first request lands.
+//
+// Idempotency contract (matches OpenAPI):
+//
+//	201 — newly created
+//	200 — playerID already exists with a v2-equivalent body
+//	409 — playerID already exists with a different body
+//
+// Body equivalence currently checks `_v2_labels` only (the only v2
+// field the synthetic flow accepts; shape/fault_rules apply via PATCH).
 func (a *v2Adapter) CreateSyntheticPlayer(playerID string, payload map[string]any) (int, map[string]any, error) {
-	return 0, nil, errSyntheticPlayerNotImplemented
+	if a == nil || a.app == nil {
+		return 0, nil, errSyntheticPlayerNotImplemented
+	}
+	if playerID == "" {
+		playerID = uuid.New().String()
+	} else if _, err := uuid.Parse(playerID); err != nil {
+		return 0, nil, errInvalidPlayerID
+	}
+
+	a.app.sessionsMu.Lock()
+	defer a.app.sessionsMu.Unlock()
+
+	current := a.app.getSessionList()
+	for _, s := range current {
+		if stored, perr := uuid.Parse(getString(s, "player_id")); perr == nil && stored.String() == playerID {
+			existingLabels, _ := s["_v2_labels"].(map[string]any)
+			incomingLabels, _ := payload["labels"].(map[string]any)
+			if labelsEqual(existingLabels, incomingLabels) {
+				return 200, map[string]any(cloneSession(s)), nil
+			}
+			return 409, nil, nil
+		}
+	}
+
+	if len(current) >= a.app.maxSessions {
+		return 0, nil, errSessionLimitReached
+	}
+
+	createdAt := nowISO()
+	allocated := allocateSessionNumber(current, a.app.maxSessions)
+	externalPort := replaceThirdFromLastDigit("30081", allocated)
+	internalPort := externalPort
+	if mapped, ok := a.app.portMap.MapExternalPort(externalPort); ok {
+		internalPort = mapped
+	}
+	if a.app.traffic != nil {
+		if portInt, err := strconv.Atoi(internalPort); err == nil {
+			a.app.traffic.ClearPortShaping(portInt)
+		}
+	}
+
+	sessionData := newSyntheticSessionTemplate(playerID, allocated, internalPort, externalPort, createdAt)
+	if labels, ok := payload["labels"].(map[string]any); ok && len(labels) > 0 {
+		sessionData["_v2_labels"] = labels
+	}
+
+	a.app.resetServerLoopState(fmt.Sprintf("%d", allocated))
+	updated := append(current, sessionData)
+	a.app.publishSnapshot(cloneSessionList(updated))
+	a.app.recordSessionStart(sessionData, "/synthetic/v2")
+	return 201, map[string]any(cloneSession(sessionData)), nil
+}
+
+// errInvalidPlayerID — sentinel for handler 400 mapping.
+var errInvalidPlayerID = invalidPlayerIDError{}
+
+type invalidPlayerIDError struct{}
+
+func (invalidPlayerIDError) Error() string { return "player_id must be a UUID" }
+
+// errSessionLimitReached — sentinel for handler 503 mapping.
+var errSessionLimitReached = sessionLimitError{}
+
+type sessionLimitError struct{}
+
+func (sessionLimitError) Error() string { return "session limit reached; clear an existing player first" }
+
+// labelsEqual returns true iff two label maps are byte-equivalent for
+// the purposes of POST /players idempotency.
+func labelsEqual(a, b map[string]any) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, v := range a {
+		if b[k] != v {
+			return false
+		}
+	}
+	return true
+}
+
+// newSyntheticSessionTemplate is the v1 session map used for synthetic
+// players. Mirrors the per-field defaults at main.go:4306 (real-player
+// auto-registration) but without HTTP-request-derived fields.
+func newSyntheticSessionTemplate(playerID string, allocated int, internalPort, externalPort, createdAt string) SessionData {
+	id := fmt.Sprintf("%d", allocated)
+	return SessionData{
+		"session_number":   id,
+		"sid":              id,
+		"session_id":       id,
+		"player_id":        playerID,
+		"group_id":         "",
+		"control_revision": newControlRevision(),
+
+		"manifest_requests_count":        0,
+		"master_manifest_requests_count": 0,
+		"segments_count":                 0,
+		"all_requests_count":             0,
+		"last_request":                   createdAt,
+		"first_request_time":             createdAt,
+		"session_start_time":             createdAt,
+		"origination_time":               createdAt,
+		"origination_ip":                 "",
+		"is_external_ip":                 false,
+		"synthetic":                      true,
+
+		"segment_failure_type":         "none",
+		"segment_failure_frequency":    0,
+		"segment_consecutive_failures": 0,
+		"segment_failure_units":        "requests",
+		"segment_consecutive_units":    "requests",
+		"segment_frequency_units":      "seconds",
+		"segment_failure_mode":         "failures_per_seconds",
+
+		"manifest_failure_type":         "none",
+		"manifest_failure_frequency":    0,
+		"manifest_failure_units":        "requests",
+		"manifest_consecutive_units":    "requests",
+		"manifest_frequency_units":      "seconds",
+		"manifest_failure_mode":         "failures_per_seconds",
+		"manifest_consecutive_failures": 0,
+
+		"master_manifest_failure_type":         "none",
+		"master_manifest_failure_frequency":    0,
+		"master_manifest_failure_units":        "requests",
+		"master_manifest_consecutive_units":    "requests",
+		"master_manifest_frequency_units":      "seconds",
+		"master_manifest_failure_mode":         "failures_per_seconds",
+		"master_manifest_consecutive_failures": 0,
+
+		"all_failure_type":           "none",
+		"all_failure_frequency":      0,
+		"all_consecutive_failures":   0,
+		"all_failure_units":          "requests",
+		"all_consecutive_units":      "requests",
+		"all_frequency_units":        "seconds",
+		"all_failure_mode":           "failures_per_seconds",
+		"current_failures":           0,
+		"consecutive_failures_count": 0,
+
+		"transport_failure_type":         "none",
+		"transport_failure_frequency":    0,
+		"transport_consecutive_failures": 1,
+		"transport_failure_units":        "seconds",
+		"transport_consecutive_units":    "seconds",
+		"transport_frequency_units":      "seconds",
+		"transport_failure_mode":         "failures_per_seconds",
+		"transport_fault_type":           "none",
+		"transport_fault_on_seconds":     1,
+		"transport_fault_off_seconds":    0,
+		"transport_consecutive_seconds":  1,
+		"transport_frequency_seconds":    0,
+		"transport_fault_active":         false,
+
+		"x_forwarded_port":          internalPort,
+		"x_forwarded_port_external": externalPort,
+		"loop_count_server":         0,
+	}
+}
+
+// ApplyShapeToPlayer drives the kernel-side rate/delay/loss state for
+// the player's bound port via v1's existing applySessionShaping helper.
+func (a *v2Adapter) ApplyShapeToPlayer(playerID string) error {
+	if a == nil || a.app == nil {
+		return nil
+	}
+	want, err := uuid.Parse(playerID)
+	if err != nil {
+		return err
+	}
+	for _, s := range a.app.getSessionList() {
+		stored, perr := uuid.Parse(getString(s, "player_id"))
+		if perr != nil || stored != want {
+			continue
+		}
+		portStr := getString(s, "x_forwarded_port")
+		if portStr == "" {
+			return nil
+		}
+		port, perr := strconv.Atoi(portStr)
+		if perr != nil {
+			return nil
+		}
+		a.app.applySessionShaping(s, port)
+		return nil
+	}
+	return nil
+}
+
+// ApplyTransportFaultToPlayer arms (or disarms when faultType="none")
+// the transport-fault loop on the player's port.
+func (a *v2Adapter) ApplyTransportFaultToPlayer(playerID, faultType string, consecutive int, consecutiveUnits string, frequency int) error {
+	if a == nil || a.app == nil {
+		return nil
+	}
+	want, err := uuid.Parse(playerID)
+	if err != nil {
+		return err
+	}
+	for _, s := range a.app.getSessionList() {
+		stored, perr := uuid.Parse(getString(s, "player_id"))
+		if perr != nil || stored != want {
+			continue
+		}
+		portStr := getString(s, "x_forwarded_port")
+		if portStr == "" {
+			return nil
+		}
+		port, perr := strconv.Atoi(portStr)
+		if perr != nil {
+			return nil
+		}
+		if consecutive < 1 {
+			consecutive = 1
+		}
+		a.app.armTransportFaultLoop(port, faultType, consecutive, consecutiveUnits, frequency)
+		return nil
+	}
+	return nil
 }
 
 // ----- SSE source surface (Phase E) ----------------------------------------
