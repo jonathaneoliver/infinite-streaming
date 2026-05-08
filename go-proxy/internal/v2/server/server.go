@@ -35,16 +35,34 @@ type Server struct {
 	// adapter exposes a deletion hook).
 	revsMu sync.Mutex
 	revs   map[string]*FieldRevisions
+
+	// events owns the v2 SSE pipeline (subscription + transform + ring).
+	// Nil-safe: the GET /api/v2/events handler returns 503 if absent.
+	events *EventSource
 }
 
 // New returns a Server backed by a V1Adapter (typically *App in package
 // main). Pass a nil adapter to mount the 501-stub variant — useful for
 // tests that exercise the wiring without a real proxy backing it.
+//
+// New also boots the EventSource that powers /api/v2/events. Call
+// Close on the returned Server to shut it down cleanly.
 func New(v1 V1Adapter) *Server {
+	ring := NewEventRing(0, 0)
 	return &Server{
-		v1:   v1,
-		revs: map[string]*FieldRevisions{},
+		v1:     v1,
+		revs:   map[string]*FieldRevisions{},
+		events: NewEventSource(v1, ring),
 	}
+}
+
+// Close releases the EventSource subscriptions. Safe to call on a nil
+// Server. Idempotent.
+func (s *Server) Close() {
+	if s == nil {
+		return
+	}
+	s.events.Close()
 }
 
 // fieldRevs returns the (lazily-allocated) per-field revision tracker
