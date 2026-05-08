@@ -318,21 +318,6 @@ func (s *Server) PatchApiV2PlayersPlayerId(w http.ResponseWriter, r *http.Reques
 	writeJSON(w, http.StatusOK, rec)
 }
 
-// ----- Plays (mutations) ---------------------------------------------------
-
-// PatchApiV2PlaysPlayId stays 404 until Phase E surfaces play boundaries
-// from the SSE stream and the v1 store grows a play-id index.
-func (*Server) PatchApiV2PlaysPlayId(w http.ResponseWriter, r *http.Request, playId oapigen.PlayId, params oapigen.PatchApiV2PlaysPlayIdParams) {
-	writeProblem(
-		w,
-		http.StatusNotFound,
-		"https://harness/errors/play-not-found",
-		"play not found",
-		"play-scope mutation needs a live play index (Phase E)",
-		map[string]any{"play_id": playId.String()},
-	)
-}
-
 // ----- helpers -------------------------------------------------------------
 
 // unsupportedPaths returns the leaf paths whose v2→v1 translator hasn't
