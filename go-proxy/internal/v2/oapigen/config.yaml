@@ -1,0 +1,9 @@
+package: oapigen
+output: oapigen.gen.go
+generate:
+  models: true
+  gorilla-server: true
+  strict-server: true
+  embedded-spec: false
+output-options:
+  skip-prune: true
