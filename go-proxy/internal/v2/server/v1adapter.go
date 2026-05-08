@@ -33,4 +33,33 @@ type V1Adapter interface {
 
 	// AnalyticsEnabled reports whether the forwarder sidecar is reachable.
 	AnalyticsEnabled() bool
+
+	// ----- Mutation surface (Phase D) ----------------------------------
+
+	// MutatePlayer atomically applies fn to the player's session under
+	// the v1 store's write lock. fn may modify the supplied map freely;
+	// any returned error aborts the write. Returns the post-mutation
+	// session (a clone, safe to read), found=true if the player exists.
+	MutatePlayer(playerID string, fn func(map[string]any) error) (post map[string]any, found bool, err error)
+
+	// CreateSyntheticPlayer provisions a synthetic player record. If
+	// `playerID` is empty the adapter allocates a new UUIDv4. The
+	// returned status is one of:
+	//
+	//   201 - newly created
+	//   200 - upsert hit: a player with that id already exists with a
+	//         body byte-equivalent to `payload`
+	//   409 - player exists with a different body; client should PATCH
+	//
+	// The returned record is the (cloned) session map after creation
+	// or look-up. On 409 the record is nil.
+	CreateSyntheticPlayer(playerID string, payload map[string]any) (status int, record map[string]any, err error)
+
+	// DeletePlayer drops the named player. Returns true if the player
+	// existed prior to this call.
+	DeletePlayer(playerID string) bool
+
+	// ClearAllPlayers tears down every active player and live state.
+	// Mirrors v1's /api/clear-sessions.
+	ClearAllPlayers()
 }

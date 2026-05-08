@@ -17,24 +17,6 @@ func (*Server) GetApiV2Events(w http.ResponseWriter, r *http.Request, params oap
 	notImplemented(w, "GetApiV2Events")
 }
 
-// ----- Players (mutations) -------------------------------------------------
-
-func (*Server) PostApiV2Players(w http.ResponseWriter, r *http.Request) {
-	notImplemented(w, "PostApiV2Players")
-}
-
-func (*Server) DeleteApiV2Players(w http.ResponseWriter, r *http.Request) {
-	notImplemented(w, "DeleteApiV2Players")
-}
-
-func (*Server) PatchApiV2PlayersPlayerId(w http.ResponseWriter, r *http.Request, playerId oapigen.PlayerId, params oapigen.PatchApiV2PlayersPlayerIdParams) {
-	notImplemented(w, "PatchApiV2PlayersPlayerId")
-}
-
-func (*Server) DeleteApiV2PlayersPlayerId(w http.ResponseWriter, r *http.Request, playerId oapigen.PlayerId) {
-	notImplemented(w, "DeleteApiV2PlayersPlayerId")
-}
-
 // ----- Per-rule fault sub-resources (player) -------------------------------
 
 func (*Server) PostApiV2PlayersPlayerIdFaultRules(w http.ResponseWriter, r *http.Request, playerId oapigen.PlayerId, params oapigen.PostApiV2PlayersPlayerIdFaultRulesParams) {
@@ -47,12 +29,6 @@ func (*Server) PatchApiV2PlayersPlayerIdFaultRulesRuleId(w http.ResponseWriter, 
 
 func (*Server) DeleteApiV2PlayersPlayerIdFaultRulesRuleId(w http.ResponseWriter, r *http.Request, playerId oapigen.PlayerId, ruleId oapigen.RuleId, params oapigen.DeleteApiV2PlayersPlayerIdFaultRulesRuleIdParams) {
 	notImplemented(w, "DeleteApiV2PlayersPlayerIdFaultRulesRuleId")
-}
-
-// ----- Plays (mutations) ---------------------------------------------------
-
-func (*Server) PatchApiV2PlaysPlayId(w http.ResponseWriter, r *http.Request, playId oapigen.PlayId, params oapigen.PatchApiV2PlaysPlayIdParams) {
-	notImplemented(w, "PatchApiV2PlaysPlayId")
 }
 
 // ----- Per-rule fault sub-resources (play) ---------------------------------
