@@ -72,3 +72,4 @@ apple/InfiniteStreamPlayer/InfiniteStreamPlayer.xcodeproj/project.xcworkspace/xc
 # Environment config (contains local paths/IPs)
 .env
 
+.playwright-mcp/

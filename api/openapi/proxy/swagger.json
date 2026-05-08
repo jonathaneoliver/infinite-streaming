@@ -1,0 +1,1032 @@
+{
+    "components": {
+        "schemas": {
+            "main.BandwidthRequest": {
+                "properties": {
+                    "rate_mbps": {
+                        "type": "number"
+                    }
+                },
+                "type": "object"
+            },
+            "main.ConflictResponse": {
+                "properties": {
+                    "control_revision": {
+                        "type": "string"
+                    },
+                    "error": {
+                        "type": "string"
+                    },
+                    "session": {
+                        "additionalProperties": {},
+                        "type": "object"
+                    }
+                },
+                "type": "object"
+            },
+            "main.HeaderPair": {
+                "properties": {
+                    "name": {
+                        "type": "string"
+                    },
+                    "value": {
+                        "type": "string"
+                    }
+                },
+                "type": "object"
+            },
+            "main.LinkSessionsRequest": {
+                "properties": {
+                    "session_ids": {
+                        "items": {
+                            "type": "string"
+                        },
+                        "type": "array",
+                        "uniqueItems": false
+                    }
+                },
+                "type": "object"
+            },
+            "main.LossRequest": {
+                "properties": {
+                    "loss_pct": {
+                        "type": "number"
+                    }
+                },
+                "type": "object"
+            },
+            "main.NetworkLogEntry": {
+                "properties": {
+                    "bytes_in": {
+                        "type": "integer"
+                    },
+                    "bytes_out": {
+                        "type": "integer"
+                    },
+                    "client_wait_ms": {
+                        "description": "ClientWaitMs is the time from when the proxy received the request\nto when it sent the first response byte back to the client. It IS\nwhat the player perceived as `wait` (HAR's TTFB), modulo the\nnetwork RTT in both directions which we don't capture server-side\n(issue #283).",
+                        "type": "number"
+                    },
+                    "connect_ms": {
+                        "type": "number"
+                    },
+                    "content_type": {
+                        "type": "string"
+                    },
+                    "dns_ms": {
+                        "description": "Timing phases (milliseconds).\n\nThe DNSMs/ConnectMs/TLSMs/TTFBMs fields measure the *upstream*\nconnection (proxy → origin) — captured by httptrace during\ndoRequestWithTracing. They're useful forensics (\"was the origin\nslow?\") but NOT what the player perceived. ClientWaitMs and\nTransferMs measure the player-perceived (downstream) view; see\nthe explicit ClientWaitMs field below.",
+                        "type": "number"
+                    },
+                    "fault_action": {
+                        "type": "string"
+                    },
+                    "fault_category": {
+                        "description": "\"http\", \"socket\", \"transport\", \"corruption\"",
+                        "type": "string"
+                    },
+                    "fault_type": {
+                        "type": "string"
+                    },
+                    "faulted": {
+                        "description": "Fault injection metadata",
+                        "type": "boolean"
+                    },
+                    "method": {
+                        "type": "string"
+                    },
+                    "path": {
+                        "type": "string"
+                    },
+                    "play_id": {
+                        "description": "PlayID identifies the playback episode this request belongs to.\nThe player generates a fresh UUID at every loadStream / reload\nand passes it as `?play_id=...` on every URL. HAR snapshots\nfilter by the current play_id by default, so a freeze 8 minutes\ninto a session shows just that play's network log instead of\nthe whole ring buffer. Issue #280.",
+                        "type": "string"
+                    },
+                    "query_string": {
+                        "items": {
+                            "$ref": "#/components/schemas/main.HeaderPair"
+                        },
+                        "type": "array",
+                        "uniqueItems": false
+                    },
+                    "request_headers": {
+                        "description": "HTTP-level metadata captured per-request. Sensitive headers\n(Cookie / Authorization / Set-Cookie) are filtered before they\nland here — see capturedHeaders.",
+                        "items": {
+                            "$ref": "#/components/schemas/main.HeaderPair"
+                        },
+                        "type": "array",
+                        "uniqueItems": false
+                    },
+                    "request_kind": {
+                        "description": "\"segment\", \"manifest\", \"master_manifest\"",
+                        "type": "string"
+                    },
+                    "request_range": {
+                        "description": "Range-request metadata. RequestRange is the client's `Range:`\nheader (e.g. \"bytes=0-1023\"); ResponseContentRange is the\norigin's `Content-Range:` header (e.g. \"bytes 0-1023/5242880\").\nUseful for telling apart partial-content fetches and continuation\nrequests in the dashboard.",
+                        "type": "string"
+                    },
+                    "response_content_range": {
+                        "type": "string"
+                    },
+                    "response_headers": {
+                        "items": {
+                            "$ref": "#/components/schemas/main.HeaderPair"
+                        },
+                        "type": "array",
+                        "uniqueItems": false
+                    },
+                    "status": {
+                        "type": "integer"
+                    },
+                    "timestamp": {
+                        "type": "string"
+                    },
+                    "tls_ms": {
+                        "type": "number"
+                    },
+                    "total_ms": {
+                        "type": "number"
+                    },
+                    "transfer_ms": {
+                        "description": "Downstream write+flush time to client (= client-perceived `receive`)",
+                        "type": "number"
+                    },
+                    "ttfb_ms": {
+                        "description": "Upstream time to first byte",
+                        "type": "number"
+                    },
+                    "upstream_url": {
+                        "type": "string"
+                    },
+                    "url": {
+                        "type": "string"
+                    }
+                },
+                "type": "object"
+            },
+            "main.NetworkStreamFrame": {
+                "properties": {
+                    "entry": {
+                        "$ref": "#/components/schemas/main.NetworkLogEntry"
+                    },
+                    "session_id": {
+                        "type": "string"
+                    }
+                },
+                "type": "object"
+            },
+            "main.PatchSessionRequest": {
+                "properties": {
+                    "base_revision": {
+                        "type": "string"
+                    },
+                    "fields": {
+                        "items": {
+                            "type": "string"
+                        },
+                        "type": "array",
+                        "uniqueItems": false
+                    },
+                    "set": {
+                        "additionalProperties": {},
+                        "type": "object"
+                    }
+                },
+                "type": "object"
+            },
+            "main.PatchSessionResponse": {
+                "properties": {
+                    "control_revision": {
+                        "type": "string"
+                    },
+                    "session": {
+                        "additionalProperties": {},
+                        "type": "object"
+                    }
+                },
+                "type": "object"
+            },
+            "main.PatternRequest": {
+                "properties": {
+                    "delay_ms": {
+                        "type": "number"
+                    },
+                    "loss_pct": {
+                        "type": "number"
+                    },
+                    "steps": {
+                        "items": {
+                            "$ref": "#/components/schemas/main.PatternStep"
+                        },
+                        "type": "array",
+                        "uniqueItems": false
+                    },
+                    "template_mode": {
+                        "type": "string"
+                    }
+                },
+                "type": "object"
+            },
+            "main.PatternStep": {
+                "properties": {
+                    "duration_seconds": {
+                        "type": "integer"
+                    },
+                    "enabled": {
+                        "type": "boolean"
+                    },
+                    "rate_mbps": {
+                        "type": "number"
+                    }
+                },
+                "type": "object"
+            },
+            "main.SessionStreamFrame": {
+                "properties": {
+                    "active_summary": {
+                        "description": "ActiveSummary is the compact \"what else is going on\" list for\nthe dashboard's filtered view. Present only when filtered.",
+                        "items": {
+                            "additionalProperties": {},
+                            "type": "object"
+                        },
+                        "type": "array",
+                        "uniqueItems": false
+                    },
+                    "revision": {
+                        "description": "Revision is a monotonically increasing counter; useful for\nclient-side dedup across reconnects.",
+                        "type": "integer"
+                    },
+                    "session": {
+                        "additionalProperties": {},
+                        "description": "Session is the single filtered record (player_id query present).",
+                        "type": "object"
+                    },
+                    "sessions": {
+                        "description": "Sessions is the unfiltered list (player_id query absent).",
+                        "items": {
+                            "additionalProperties": {},
+                            "type": "object"
+                        },
+                        "type": "array",
+                        "uniqueItems": false
+                    }
+                },
+                "type": "object"
+            },
+            "main.ShapeRequest": {
+                "properties": {
+                    "delay_ms": {
+                        "type": "number"
+                    },
+                    "loss_pct": {
+                        "type": "number"
+                    },
+                    "rate_mbps": {
+                        "type": "number"
+                    }
+                },
+                "type": "object"
+            },
+            "main.UnlinkSessionRequest": {
+                "properties": {
+                    "session_id": {
+                        "type": "string"
+                    }
+                },
+                "type": "object"
+            }
+        }
+    },
+    "info": {
+        "description": "Per-session HTTP fault injection, transport faults via nftables,\nand live streams of session + network events. Sits behind\nnginx; clients reach it via http://\u003chost\u003e:21000/api/...",
+        "title": "go-proxy harness API",
+        "version": "1.0"
+    },
+    "externalDocs": {
+        "description": "",
+        "url": ""
+    },
+    "paths": {
+        "/api/clear-sessions": {
+            "post": {
+                "description": "Destructive: clears all sessions, fault config, and nftables shaping. Confirm before calling.",
+                "responses": {
+                    "200": {
+                        "description": "OK"
+                    }
+                },
+                "summary": "Wipe every session",
+                "tags": [
+                    "sessions"
+                ]
+            }
+        },
+        "/api/external-ips": {
+            "get": {
+                "responses": {
+                    "200": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object"
+                                }
+                            }
+                        },
+                        "description": "OK"
+                    }
+                },
+                "summary": "External IPs the harness is reachable from",
+                "tags": [
+                    "diagnostics"
+                ]
+            }
+        },
+        "/api/failure-settings/{id}": {
+            "post": {
+                "deprecated": true,
+                "description": "Predates the PATCH envelope. Kept for backwards compat with older dashboard code.",
+                "parameters": [
+                    {
+                        "description": "session_id",
+                        "in": "path",
+                        "name": "id",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                ],
+                "requestBody": {
+                    "content": {
+                        "text/plain": {
+                            "schema": {
+                                "title": "body",
+                                "type": "object"
+                            }
+                        }
+                    },
+                    "description": "fault settings",
+                    "required": true
+                },
+                "responses": {
+                    "200": {
+                        "description": "OK"
+                    }
+                },
+                "summary": "Legacy fault-settings POST (use PATCH instead)",
+                "tags": [
+                    "internal"
+                ]
+            }
+        },
+        "/api/network/stream": {
+            "get": {
+                "description": "Long-lived `text/event-stream` connection. Server emits one `data:` frame per HTTP request as it lands in any session's ring buffer.\n\nEach `data:` frame is a JSON-encoded `NetworkStreamFrame` (see schemas), shape `{session_id, entry: NetworkLogEntry}`.\nHeartbeat: comment line `: ping` every 15s. Reconnect on disconnect; nothing is replayed. Wrapped by `harness-cli tail`.",
+                "responses": {
+                    "200": {
+                        "content": {
+                            "text/event-stream": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/main.NetworkStreamFrame"
+                                }
+                            }
+                        },
+                        "description": "JSON payload of one SSE data frame"
+                    }
+                },
+                "summary": "Stream per-request network events (SSE)",
+                "tags": [
+                    "streams"
+                ]
+            }
+        },
+        "/api/nftables/bandwidth/{port}": {
+            "post": {
+                "parameters": [
+                    {
+                        "description": "session-bound port",
+                        "in": "path",
+                        "name": "port",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                ],
+                "requestBody": {
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "$ref": "#/components/schemas/main.BandwidthRequest",
+                                "summary": "body",
+                                "description": "{rate_mbps}"
+                            }
+                        }
+                    },
+                    "description": "{rate_mbps}",
+                    "required": true
+                },
+                "responses": {
+                    "200": {
+                        "description": "OK"
+                    }
+                },
+                "summary": "Set port bandwidth alone",
+                "tags": [
+                    "shaping"
+                ]
+            }
+        },
+        "/api/nftables/capabilities": {
+            "get": {
+                "description": "Reports whether netem, htb, and per-port rules are operational.",
+                "responses": {
+                    "200": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object"
+                                }
+                            }
+                        },
+                        "description": "OK"
+                    }
+                },
+                "summary": "Kernel shaping primitives available",
+                "tags": [
+                    "shaping"
+                ]
+            }
+        },
+        "/api/nftables/loss/{port}": {
+            "post": {
+                "parameters": [
+                    {
+                        "description": "session-bound port",
+                        "in": "path",
+                        "name": "port",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                ],
+                "requestBody": {
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "$ref": "#/components/schemas/main.LossRequest",
+                                "summary": "body",
+                                "description": "{loss_pct}"
+                            }
+                        }
+                    },
+                    "description": "{loss_pct}",
+                    "required": true
+                },
+                "responses": {
+                    "200": {
+                        "description": "OK"
+                    }
+                },
+                "summary": "Set port packet loss alone",
+                "tags": [
+                    "shaping"
+                ]
+            }
+        },
+        "/api/nftables/pattern/{port}": {
+            "post": {
+                "description": "Time-boxed sequence of rate steps (ramp_up, square_wave, etc). steps=[] clears.",
+                "parameters": [
+                    {
+                        "description": "session-bound port",
+                        "in": "path",
+                        "name": "port",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                ],
+                "requestBody": {
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "$ref": "#/components/schemas/main.PatternRequest",
+                                "summary": "body",
+                                "description": "steps + template_mode"
+                            }
+                        }
+                    },
+                    "description": "steps + template_mode",
+                    "required": true
+                },
+                "responses": {
+                    "200": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object"
+                                }
+                            }
+                        },
+                        "description": "OK"
+                    }
+                },
+                "summary": "Install a step pattern on a port",
+                "tags": [
+                    "shaping"
+                ]
+            }
+        },
+        "/api/nftables/port/{port}": {
+            "get": {
+                "parameters": [
+                    {
+                        "description": "session-bound port",
+                        "in": "path",
+                        "name": "port",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object"
+                                }
+                            }
+                        },
+                        "description": "OK"
+                    }
+                },
+                "summary": "Inspect current shaping for a port",
+                "tags": [
+                    "shaping"
+                ]
+            }
+        },
+        "/api/nftables/shape/{port}": {
+            "post": {
+                "description": "nftables/tc rate + delay + loss on the proxy's egress for one session port. Setting any axis disables an active pattern on the same port.",
+                "parameters": [
+                    {
+                        "description": "session-bound port (e.g. 30281)",
+                        "in": "path",
+                        "name": "port",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                ],
+                "requestBody": {
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "$ref": "#/components/schemas/main.ShapeRequest",
+                                "summary": "body",
+                                "description": "rate / delay / loss"
+                            }
+                        }
+                    },
+                    "description": "rate / delay / loss",
+                    "required": true
+                },
+                "responses": {
+                    "200": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object"
+                                }
+                            }
+                        },
+                        "description": "OK"
+                    }
+                },
+                "summary": "Apply transport shaping to a port",
+                "tags": [
+                    "shaping"
+                ]
+            }
+        },
+        "/api/nftables/status": {
+            "get": {
+                "responses": {
+                    "200": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object"
+                                }
+                            }
+                        },
+                        "description": "OK"
+                    }
+                },
+                "summary": "Global nftables status",
+                "tags": [
+                    "shaping"
+                ]
+            }
+        },
+        "/api/session-group/link": {
+            "post": {
+                "requestBody": {
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "$ref": "#/components/schemas/main.LinkSessionsRequest",
+                                "summary": "body",
+                                "description": "{session_ids: [...]}"
+                            }
+                        }
+                    },
+                    "description": "{session_ids: [...]}",
+                    "required": true
+                },
+                "responses": {
+                    "200": {
+                        "description": "OK"
+                    }
+                },
+                "summary": "Link sessions into a fault-propagation group",
+                "tags": [
+                    "groups"
+                ]
+            }
+        },
+        "/api/session-group/unlink": {
+            "post": {
+                "requestBody": {
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "$ref": "#/components/schemas/main.UnlinkSessionRequest",
+                                "summary": "body",
+                                "description": "{session_id}"
+                            }
+                        }
+                    },
+                    "description": "{session_id}",
+                    "required": true
+                },
+                "responses": {
+                    "200": {
+                        "description": "OK"
+                    }
+                },
+                "summary": "Unlink a session from its group",
+                "tags": [
+                    "groups"
+                ]
+            }
+        },
+        "/api/session-group/{groupId}": {
+            "get": {
+                "parameters": [
+                    {
+                        "description": "group id",
+                        "in": "path",
+                        "name": "groupId",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object"
+                                }
+                            }
+                        },
+                        "description": "OK"
+                    }
+                },
+                "summary": "Get a session group",
+                "tags": [
+                    "groups"
+                ]
+            }
+        },
+        "/api/session/{id}": {
+            "delete": {
+                "description": "Removes the session from the in-memory map and frees its dedicated proxy port.",
+                "parameters": [
+                    {
+                        "description": "session_id",
+                        "in": "path",
+                        "name": "id",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                ],
+                "responses": {
+                    "204": {
+                        "description": "No Content"
+                    }
+                },
+                "summary": "Delete one session",
+                "tags": [
+                    "sessions"
+                ]
+            },
+            "get": {
+                "parameters": [
+                    {
+                        "description": "session_id",
+                        "in": "path",
+                        "name": "id",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object"
+                                }
+                            }
+                        },
+                        "description": "Full session record including fault counters, shaping state, player metrics, manifest_variants."
+                    },
+                    "404": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "additionalProperties": {
+                                        "type": "string"
+                                    },
+                                    "type": "object"
+                                }
+                            }
+                        },
+                        "description": "Not Found"
+                    }
+                },
+                "summary": "Get one session",
+                "tags": [
+                    "sessions"
+                ]
+            },
+            "patch": {
+                "description": "Optimistic-concurrency PATCH used for fault config + shaping flags.\nBody envelope: `{set: {field: value, ...}, fields: [field, ...], base_revision: \"\u003ciso8601\u003e\"}`.\nReturns 409 with the current control_revision when base_revision is stale.",
+                "parameters": [
+                    {
+                        "description": "session_id",
+                        "in": "path",
+                        "name": "id",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                ],
+                "requestBody": {
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "$ref": "#/components/schemas/main.PatchSessionRequest",
+                                "summary": "envelope",
+                                "description": "Set+fields+base_revision envelope"
+                            }
+                        }
+                    },
+                    "description": "Set+fields+base_revision envelope",
+                    "required": true
+                },
+                "responses": {
+                    "200": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/main.PatchSessionResponse"
+                                }
+                            }
+                        },
+                        "description": "OK"
+                    },
+                    "409": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/main.ConflictResponse"
+                                }
+                            }
+                        },
+                        "description": "control_revision conflict"
+                    }
+                },
+                "summary": "Patch session settings",
+                "tags": [
+                    "sessions"
+                ]
+            }
+        },
+        "/api/session/{id}/metrics": {
+            "post": {
+                "description": "Players post their internal metrics here. Not for ops use.",
+                "parameters": [
+                    {
+                        "description": "session_id",
+                        "in": "path",
+                        "name": "id",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                ],
+                "requestBody": {
+                    "content": {
+                        "text/plain": {
+                            "schema": {
+                                "title": "body",
+                                "type": "object"
+                            }
+                        }
+                    },
+                    "description": "player metrics",
+                    "required": true
+                },
+                "responses": {
+                    "200": {
+                        "description": "OK"
+                    }
+                },
+                "summary": "Player-side metrics ingestion",
+                "tags": [
+                    "internal"
+                ]
+            }
+        },
+        "/api/session/{id}/network": {
+            "get": {
+                "description": "One-shot snapshot of the per-session in-memory request log (HAR-shaped). Bounded; older entries fall off as new ones arrive.",
+                "parameters": [
+                    {
+                        "description": "session_id",
+                        "in": "path",
+                        "name": "id",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "items": {
+                                        "$ref": "#/components/schemas/main.NetworkLogEntry"
+                                    },
+                                    "type": "array"
+                                }
+                            }
+                        },
+                        "description": "OK"
+                    }
+                },
+                "summary": "Get one session's network ring buffer",
+                "tags": [
+                    "network"
+                ]
+            }
+        },
+        "/api/session/{id}/update": {
+            "post": {
+                "deprecated": true,
+                "parameters": [
+                    {
+                        "description": "session_id",
+                        "in": "path",
+                        "name": "id",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                ],
+                "requestBody": {
+                    "content": {
+                        "text/plain": {
+                            "schema": {
+                                "title": "body",
+                                "type": "object"
+                            }
+                        }
+                    },
+                    "description": "settings",
+                    "required": true
+                },
+                "responses": {
+                    "200": {
+                        "description": "OK"
+                    }
+                },
+                "summary": "Legacy session-update POST (use PATCH instead)",
+                "tags": [
+                    "internal"
+                ]
+            }
+        },
+        "/api/sessions": {
+            "get": {
+                "responses": {
+                    "200": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "items": {
+                                        "type": "object"
+                                    },
+                                    "type": "array"
+                                }
+                            }
+                        },
+                        "description": "Each item is a normalized session record (~80 fields). Subset returned to the dashboard; harness-cli reads the full record from /api/session/{id}."
+                    }
+                },
+                "summary": "List active sessions",
+                "tags": [
+                    "sessions"
+                ]
+            }
+        },
+        "/api/sessions/stream": {
+            "get": {
+                "description": "Long-lived `text/event-stream` connection. Server emits one `data:` frame per session-record change (debounced ~250ms). Optional `player_id` query param filters to one player.\n\nEach `data:` frame is a JSON-encoded `SessionStreamFrame` (see schemas).\nHeartbeat: comment line `: ping` every ~15s. Reconnect on disconnect; the proxy does not replay missed frames.",
+                "parameters": [
+                    {
+                        "description": "filter frames to one player_id",
+                        "in": "query",
+                        "name": "player_id",
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "content": {
+                            "text/event-stream": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/main.SessionStreamFrame"
+                                }
+                            }
+                        },
+                        "description": "JSON payload of one SSE data frame"
+                    }
+                },
+                "summary": "Stream session-state diffs (SSE)",
+                "tags": [
+                    "streams"
+                ]
+            }
+        },
+        "/api/version": {
+            "get": {
+                "responses": {
+                    "200": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object"
+                                }
+                            }
+                        },
+                        "description": "OK"
+                    }
+                },
+                "summary": "Proxy version",
+                "tags": [
+                    "diagnostics"
+                ]
+            }
+        }
+    },
+    "openapi": "3.1.0",
+    "servers": [
+        {
+            "description": "Same origin as wherever this spec is served",
+            "url": "/"
+        }
+    ]
+}

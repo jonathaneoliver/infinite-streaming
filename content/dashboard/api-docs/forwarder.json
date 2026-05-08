@@ -1,0 +1,424 @@
+{
+    "components": {},
+    "info": {
+        "description": "Read-only ClickHouse query layer over archived session\ndata: snapshots, network requests, heatmap, events, and\nsession-bundle ZIPs. Subscribes to go-proxy's SSE streams\nand writes to ClickHouse with a 30-day TTL.",
+        "title": "Analytics forwarder API",
+        "version": "1.0"
+    },
+    "externalDocs": {
+        "description": "",
+        "url": ""
+    },
+    "paths": {
+        "/api/network_requests": {
+            "get": {
+                "description": "Per-request rows mirrored from go-proxy's `/api/network/stream`, with `fault_category` / `fault_action` columns. ~10s ingestion lag from live.",
+                "parameters": [
+                    {
+                        "description": "session_id filter",
+                        "in": "query",
+                        "name": "session",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "description": "play_id filter",
+                        "in": "query",
+                        "name": "play_id",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "description": "ISO8601 lower bound",
+                        "in": "query",
+                        "name": "from",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "description": "ISO8601 upper bound",
+                        "in": "query",
+                        "name": "to",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "description": "max rows",
+                        "in": "query",
+                        "name": "limit",
+                        "schema": {
+                            "type": "integer"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "items": {
+                                        "type": "object"
+                                    },
+                                    "type": "array"
+                                }
+                            }
+                        },
+                        "description": "OK"
+                    }
+                },
+                "summary": "Historical HAR-shaped network rows",
+                "tags": [
+                    "archive"
+                ]
+            }
+        },
+        "/api/session_bundle": {
+            "get": {
+                "description": "Streams a ZIP containing snapshots, events, network rows, and a HAR file for the given play_id (or full session_id). Useful for offline forensics.",
+                "parameters": [
+                    {
+                        "description": "session_id filter",
+                        "in": "query",
+                        "name": "session",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "description": "play_id filter (preferred — one play per bundle)",
+                        "in": "query",
+                        "name": "play_id",
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "content": {
+                            "application/zip": {
+                                "schema": {
+                                    "type": "file"
+                                }
+                            }
+                        },
+                        "description": "OK"
+                    }
+                },
+                "summary": "Download a session bundle (ZIP)",
+                "tags": [
+                    "archive"
+                ]
+            }
+        },
+        "/api/session_events": {
+            "get": {
+                "description": "Player + harness events: ABR shifts, stalls, fault firings, error events.",
+                "parameters": [
+                    {
+                        "description": "session_id filter",
+                        "in": "query",
+                        "name": "session",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "description": "play_id filter",
+                        "in": "query",
+                        "name": "play_id",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "description": "max rows",
+                        "in": "query",
+                        "name": "limit",
+                        "schema": {
+                            "type": "integer"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "items": {
+                                        "type": "object"
+                                    },
+                                    "type": "array"
+                                }
+                            }
+                        },
+                        "description": "OK"
+                    }
+                },
+                "summary": "Chronological session events",
+                "tags": [
+                    "archive"
+                ]
+            }
+        },
+        "/api/session_heatmap": {
+            "get": {
+                "description": "Pre-binned grid for the dashboard's heatmap visualization. Useful for spotting stalls without pulling raw rows.",
+                "parameters": [
+                    {
+                        "description": "session_id filter",
+                        "in": "query",
+                        "name": "session",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "description": "play_id filter",
+                        "in": "query",
+                        "name": "play_id",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "description": "number of time buckets (default 240)",
+                        "in": "query",
+                        "name": "buckets",
+                        "schema": {
+                            "type": "integer"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "items": {
+                                        "type": "object"
+                                    },
+                                    "type": "array"
+                                }
+                            }
+                        },
+                        "description": "OK"
+                    }
+                },
+                "summary": "Per-second buffer + state heatmap",
+                "tags": [
+                    "archive"
+                ]
+            }
+        },
+        "/api/sessions": {
+            "get": {
+                "description": "Returns one row per (session_id, play_id) seen in the archive within the time window.",
+                "parameters": [
+                    {
+                        "description": "ISO8601 lower bound (defaults to now-24h)",
+                        "in": "query",
+                        "name": "since",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "description": "ISO8601 upper bound",
+                        "in": "query",
+                        "name": "until",
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "items": {
+                                        "type": "object"
+                                    },
+                                    "type": "array"
+                                }
+                            }
+                        },
+                        "description": "OK"
+                    }
+                },
+                "summary": "List archived sessions",
+                "tags": [
+                    "archive"
+                ]
+            }
+        },
+        "/api/snapshot_count": {
+            "get": {
+                "parameters": [
+                    {
+                        "description": "session_id filter",
+                        "in": "query",
+                        "name": "session",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "description": "play_id filter",
+                        "in": "query",
+                        "name": "play_id",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "description": "ISO8601 lower bound",
+                        "in": "query",
+                        "name": "from",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "description": "ISO8601 upper bound",
+                        "in": "query",
+                        "name": "to",
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object"
+                                }
+                            }
+                        },
+                        "description": "{count: N}"
+                    }
+                },
+                "summary": "Count archived snapshots",
+                "tags": [
+                    "archive"
+                ]
+            }
+        },
+        "/api/snapshots": {
+            "get": {
+                "description": "Each row is one normalized session-state record; the snapshot stream emits these on every relevant change.",
+                "parameters": [
+                    {
+                        "description": "session_id filter",
+                        "in": "query",
+                        "name": "session",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "description": "play_id filter",
+                        "in": "query",
+                        "name": "play_id",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "description": "ISO8601 lower bound",
+                        "in": "query",
+                        "name": "from",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "description": "ISO8601 upper bound",
+                        "in": "query",
+                        "name": "to",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "description": "max rows (default server-side cap)",
+                        "in": "query",
+                        "name": "limit",
+                        "schema": {
+                            "type": "integer"
+                        }
+                    },
+                    {
+                        "description": "asc|desc (default asc)",
+                        "in": "query",
+                        "name": "order",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "description": "downsample to one row per stride",
+                        "in": "query",
+                        "name": "stride_ms",
+                        "schema": {
+                            "type": "integer"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "items": {
+                                        "type": "object"
+                                    },
+                                    "type": "array"
+                                }
+                            }
+                        },
+                        "description": "OK"
+                    }
+                },
+                "summary": "List session snapshots",
+                "tags": [
+                    "archive"
+                ]
+            }
+        },
+        "/healthz": {
+            "get": {
+                "responses": {
+                    "200": {
+                        "content": {
+                            "text/plain": {
+                                "schema": {
+                                    "type": "string"
+                                }
+                            }
+                        },
+                        "description": "ok"
+                    }
+                },
+                "summary": "Health check",
+                "tags": [
+                    "diagnostics"
+                ]
+            }
+        }
+    },
+    "openapi": "3.1.0",
+    "servers": [
+        {
+            "description": "Mounted under /analytics on the same origin as the spec",
+            "url": "/analytics"
+        }
+    ]
+}
