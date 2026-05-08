@@ -289,13 +289,91 @@ func TestPatch_UnsupportedField_501(t *testing.T) {
 	a, _, ts := newTestServer(t)
 	pid := uuid.New().String()
 	a.addPlayer(pid, "rev1", nil)
-	// fault_rules is still deferred — Phase H wires shape but not
-	// fault_rules.
+	// shape.pattern is still deferred (Phase I wires shape rate/loss
+	// and fault_rules but not the pattern step engine).
 	status, body, _ := mustDo(t, ts, "PATCH", "/api/v2/players/"+pid,
-		`{"fault_rules":[{"id":"r1","type":"500"}]}`,
+		`{"shape":{"pattern":{"steps":[{"duration_seconds":5,"rate_mbps":3}]}}}`,
 		map[string]string{"If-Match": `"rev1"`})
 	if status != http.StatusNotImplemented {
 		t.Errorf("status %d, want 501; body=%s", status, body)
+	}
+}
+
+func TestPatch_FaultRules_UnsupportedFilter_501(t *testing.T) {
+	a, _, ts := newTestServer(t)
+	pid := uuid.New().String()
+	initialRev := "2020-01-01T00:00:00.000000000Z"
+	a.addPlayer(pid, initialRev, nil)
+	body := `{"fault_rules":[{"id":"r1","type":"500","filter":{"variant":{"rung_positions":["top"]}}}]}`
+	status, respBody, _ := mustDo(t, ts, "PATCH", "/api/v2/players/"+pid, body,
+		map[string]string{"If-Match": `"` + initialRev + `"`})
+	if status != http.StatusNotImplemented {
+		t.Errorf("status %d, want 501; body=%s", status, respBody)
+	}
+}
+
+func TestPatch_FaultRules_RoundTrip(t *testing.T) {
+	a, _, ts := newTestServer(t)
+	pid := uuid.New().String()
+	initialRev := "2020-01-01T00:00:00.000000000Z"
+	a.addPlayer(pid, initialRev, nil)
+
+	body := `{"fault_rules":[{"id":"r-seg","type":"500","frequency":5,"filter":{"request_kind":["segment"]}}]}`
+	status, respBody, _ := mustDo(t, ts, "PATCH", "/api/v2/players/"+pid, body,
+		map[string]string{"If-Match": `"` + initialRev + `"`})
+	if status != http.StatusOK {
+		t.Fatalf("status %d body=%s", status, respBody)
+	}
+	stored, _ := a.SessionByPlayerID(pid)
+	if stored["segment_failure_type"] != "500" {
+		t.Errorf("segment_failure_type = %v, want 500", stored["segment_failure_type"])
+	}
+	if stored["segment_failure_frequency"] != 5 {
+		t.Errorf("segment_failure_frequency = %v, want 5", stored["segment_failure_frequency"])
+	}
+}
+
+func TestPost_FaultRule_AppendOne(t *testing.T) {
+	a, _, ts := newTestServer(t)
+	pid := uuid.New().String()
+	initialRev := "2020-01-01T00:00:00.000000000Z"
+	a.addPlayer(pid, initialRev, nil)
+
+	body := `{"id":"r1","type":"500","frequency":3,"filter":{"request_kind":["segment"]}}`
+	status, respBody, _ := mustDo(t, ts, "POST", "/api/v2/players/"+pid+"/fault_rules", body,
+		map[string]string{"If-Match": `"` + initialRev + `"`})
+	if status != http.StatusCreated {
+		t.Fatalf("status %d body=%s", status, respBody)
+	}
+	stored, _ := a.SessionByPlayerID(pid)
+	if stored["segment_failure_type"] != "500" {
+		t.Errorf("segment_failure_type = %v, want 500", stored["segment_failure_type"])
+	}
+}
+
+func TestDelete_FaultRule(t *testing.T) {
+	a, _, ts := newTestServer(t)
+	pid := uuid.New().String()
+	initialRev := "2020-01-01T00:00:00.000000000Z"
+	a.addPlayer(pid, initialRev, nil)
+
+	// Seed a rule via whole-array PATCH.
+	mustDo(t, ts, "PATCH", "/api/v2/players/"+pid,
+		`{"fault_rules":[{"id":"to-delete","type":"500","filter":{"request_kind":["segment"]}}]}`,
+		map[string]string{"If-Match": `"` + initialRev + `"`})
+
+	// DELETE the rule using its own If-Match.
+	stored, _ := a.SessionByPlayerID(pid)
+	rev := asString(stored["control_revision"])
+	status, _, _ := mustDo(t, ts, "DELETE", "/api/v2/players/"+pid+"/fault_rules/to-delete", "",
+		map[string]string{"If-Match": `"` + rev + `"`})
+	if status != http.StatusNoContent {
+		t.Fatalf("status %d", status)
+	}
+	stored, _ = a.SessionByPlayerID(pid)
+	// segment surface should be cleared after the delete.
+	if stored["segment_failure_type"] != "none" {
+		t.Errorf("segment_failure_type after delete = %v, want none", stored["segment_failure_type"])
 	}
 }
 

@@ -217,7 +217,9 @@ func (s *Server) PatchApiV2PlayersPlayerId(w http.ResponseWriter, r *http.Reques
 		if conflicts := fr.Conflicts(ifMatch, paths); len(conflicts) > 0 {
 			return conflictErr{paths: conflicts}
 		}
-		applyPatchToSession(s, patch)
+		if err := applyPatchToSession(s, patch); err != nil {
+			return err
+		}
 		// Stamp control_revision (RFC3339Nano) + FieldRevisions
 		// inside the same lock so SSE subscribers never see the
 		// post-patch payload paired with the prior revision.
@@ -230,6 +232,16 @@ func (s *Server) PatchApiV2PlayersPlayerId(w http.ResponseWriter, r *http.Reques
 		var ce conflictErr
 		if errors.As(mErr, &ce) {
 			writePreconditionFailed(w, fr.Top(), ce.paths)
+			return
+		}
+		var ufre *unsupportedFaultRuleError
+		if errors.As(mErr, &ufre) {
+			writeProblem(w, http.StatusNotImplemented,
+				"https://harness/errors/fault-rule-not-supported",
+				"fault_rule cannot be translated to the v1 surface model",
+				ufre.Error(),
+				map[string]any{"rule_id": ufre.RuleID, "reason": ufre.Reason},
+			)
 			return
 		}
 		writeProblem(w, http.StatusInternalServerError, "https://harness/errors/internal", "mutation failed", mErr.Error(), nil)
@@ -251,8 +263,7 @@ func (s *Server) PatchApiV2PlayersPlayerId(w http.ResponseWriter, r *http.Reques
 	var broadcastTouched []string
 	if groupID != "" {
 		touched, bErr := s.v1.BroadcastPatch(groupID, pidStr, rev, func(member map[string]any) error {
-			applyPatchToSession(member, patch)
-			return nil
+			return applyPatchToSession(member, patch)
 		})
 		if bErr != nil {
 			// Broadcast failure on a sibling member shouldn't 500
@@ -317,9 +328,11 @@ func (*Server) PatchApiV2PlaysPlayId(w http.ResponseWriter, r *http.Request, pla
 // been written yet.
 //
 // Phase D: labels.* only.
-// Phase H: + shape.{rate_mbps,delay_ms,loss_pct,transport_fault.*} —
-// fault_rules and shape.pattern stay 501 until their dedicated
-// translators land.
+// Phase H: + shape.{rate_mbps,delay_ms,loss_pct,transport_fault.*}
+// Phase I: + fault_rules (whole-array PATCH; the per-rule sub-resource
+//          endpoints have their own paths and don't run through here).
+//
+// shape.pattern still 501 until the pattern step translator lands.
 func unsupportedPaths(paths []string) []string {
 	var bad []string
 	for _, p := range paths {
@@ -330,10 +343,7 @@ func unsupportedPaths(paths []string) []string {
 		case p == "shape.loss_pct":
 		case p == "shape.transport_fault", strings.HasPrefix(p, "shape.transport_fault."):
 		case p == "shape":
-			// Whole-shape replace via Merge Patch: we'll translate
-			// every recognised sub-field; unknown sub-fields land in
-			// the session map as `_v2_shape_unsupported.<name>` and
-			// don't drive any kernel state. Acceptable.
+		case p == "fault_rules":
 		default:
 			bad = append(bad, p)
 		}
@@ -379,13 +389,29 @@ func transportFaultTouched(paths []string) bool {
 // Other v2 paths are admitted via unsupportedPaths but stored as
 // `_v2_unsupported.<path>` for Phase debugging visibility — they
 // don't drive any kernel state.
-func applyPatchToSession(s map[string]any, patch map[string]any) {
+func applyPatchToSession(s map[string]any, patch map[string]any) error {
 	if labels, hasLabels := patch["labels"]; hasLabels {
 		applyLabelsPatch(s, labels)
 	}
 	if shape, hasShape := patch["shape"]; hasShape {
 		applyShapePatch(s, shape)
 	}
+	if rulesAny, hasRules := patch["fault_rules"]; hasRules {
+		if rulesAny == nil {
+			if err := translateFaultRules(s, nil); err != nil {
+				return err
+			}
+		} else {
+			rules, ok := rulesAny.([]any)
+			if !ok {
+				return &unsupportedFaultRuleError{Reason: "fault_rules must be an array"}
+			}
+			if err := translateFaultRules(s, rules); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 func applyLabelsPatch(s map[string]any, labels any) {
