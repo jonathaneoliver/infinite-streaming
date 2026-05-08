@@ -43,21 +43,41 @@ func (a *v2Adapter) SessionList() []map[string]any {
 	return out
 }
 
+// matchesPlayerID compares a stored v1 player_id against an incoming
+// lookup token. Three resolution paths in priority order:
+//
+//  1. Direct string equality (v1 short-form passed through as-is).
+//  2. UUID equality (v2 canonical UUID against a UUID-shaped stored).
+//  3. Derived-UUID match — incoming canonical UUID matches the
+//     v5(playerUUIDNamespace, stored_short_form) derivation. This is
+//     how v2 reads (which returned the derived UUID) round-trip back
+//     to the original v1 session on subsequent PATCH/DELETE.
+func matchesPlayerID(stored, incoming string) bool {
+	if stored == "" || incoming == "" {
+		return false
+	}
+	if stored == incoming {
+		return true
+	}
+	want, err := uuid.Parse(incoming)
+	if err != nil {
+		return false
+	}
+	if su, err := uuid.Parse(stored); err == nil && su == want {
+		return true
+	}
+	return server.PlayerUUIDForRawID(stored) == want
+}
+
 // SessionByPlayerID returns the (cloned) session record for one player,
-// or (nil, false) if no session matches. Comparison is UUID-equality
-// (not string-equality) so non-canonical-case stored player_ids still
-// match — Roku and a few historical clients have written uppercase.
+// or (nil, false) if no session matches. Honors v1 short-form
+// player_ids via matchesPlayerID.
 func (a *v2Adapter) SessionByPlayerID(playerID string) (map[string]any, bool) {
 	if playerID == "" || a == nil || a.app == nil {
 		return nil, false
 	}
-	want, err := uuid.Parse(playerID)
-	if err != nil {
-		return nil, false
-	}
 	for _, s := range a.app.getSessionList() {
-		stored, err := uuid.Parse(getString(s, "player_id"))
-		if err == nil && stored == want {
+		if matchesPlayerID(getString(s, "player_id"), playerID) {
 			return map[string]any(s), true
 		}
 	}
@@ -74,14 +94,9 @@ func (a *v2Adapter) NetworkLogForPlayer(playerID string, limit int) []map[string
 	if limit <= 0 || limit > 1000 {
 		limit = 200
 	}
-	want, err := uuid.Parse(playerID)
-	if err != nil {
-		return nil
-	}
 	var sessionID string
 	for _, s := range a.app.getSessionList() {
-		stored, err := uuid.Parse(getString(s, "player_id"))
-		if err != nil || stored != want {
+		if !matchesPlayerID(getString(s, "player_id"), playerID) {
 			continue
 		}
 		sessionID = getString(s, "session_id")
@@ -169,18 +184,13 @@ func (a *v2Adapter) MutatePlayer(playerID string, fn func(map[string]any) error)
 	if playerID == "" || a == nil || a.app == nil {
 		return nil, false, nil
 	}
-	want, err := uuid.Parse(playerID)
-	if err != nil {
-		return nil, false, nil
-	}
 	a.app.sessionsMu.Lock()
 	defer a.app.sessionsMu.Unlock()
 
 	current := a.app.getSessionList()
 	idx := -1
 	for i, s := range current {
-		stored, err := uuid.Parse(getString(s, "player_id"))
-		if err == nil && stored == want {
+		if matchesPlayerID(getString(s, "player_id"), playerID) {
 			idx = i
 			break
 		}
@@ -213,16 +223,11 @@ func (a *v2Adapter) DeletePlayer(playerID string) bool {
 	if playerID == "" || a == nil || a.app == nil {
 		return false
 	}
-	want, err := uuid.Parse(playerID)
-	if err != nil {
-		return false
-	}
 
 	current := a.app.getSessionList()
 	idx := -1
 	for i, s := range current {
-		stored, err := uuid.Parse(getString(s, "player_id"))
-		if err == nil && stored == want {
+		if matchesPlayerID(getString(s, "player_id"), playerID) {
 			idx = i
 			break
 		}
@@ -462,13 +467,8 @@ func (a *v2Adapter) ApplyShapeToPlayer(playerID string) error {
 	if a == nil || a.app == nil {
 		return nil
 	}
-	want, err := uuid.Parse(playerID)
-	if err != nil {
-		return err
-	}
 	for _, s := range a.app.getSessionList() {
-		stored, perr := uuid.Parse(getString(s, "player_id"))
-		if perr != nil || stored != want {
+		if !matchesPlayerID(getString(s, "player_id"), playerID) {
 			continue
 		}
 		portStr := getString(s, "x_forwarded_port")
@@ -491,13 +491,8 @@ func (a *v2Adapter) ApplyPatternToPlayer(playerID string, steps []server.ShapePa
 	if a == nil || a.app == nil {
 		return nil
 	}
-	want, err := uuid.Parse(playerID)
-	if err != nil {
-		return err
-	}
 	for _, s := range a.app.getSessionList() {
-		stored, perr := uuid.Parse(getString(s, "player_id"))
-		if perr != nil || stored != want {
+		if !matchesPlayerID(getString(s, "player_id"), playerID) {
 			continue
 		}
 		portStr := getString(s, "x_forwarded_port")
@@ -527,13 +522,8 @@ func (a *v2Adapter) ApplyTransportFaultToPlayer(playerID, faultType string, cons
 	if a == nil || a.app == nil {
 		return nil
 	}
-	want, err := uuid.Parse(playerID)
-	if err != nil {
-		return err
-	}
 	for _, s := range a.app.getSessionList() {
-		stored, perr := uuid.Parse(getString(s, "player_id"))
-		if perr != nil || stored != want {
+		if !matchesPlayerID(getString(s, "player_id"), playerID) {
 			continue
 		}
 		portStr := getString(s, "x_forwarded_port")
@@ -686,15 +676,10 @@ func (a *v2Adapter) RemoveFromGroup(playerID string) bool {
 	if a == nil || a.app == nil || playerID == "" {
 		return false
 	}
-	want, err := uuid.Parse(playerID)
-	if err != nil {
-		return false
-	}
 	current := a.app.getSessionList()
 	updated := cloneSessionList(current)
 	for i, s := range updated {
-		stored, perr := uuid.Parse(getString(s, "player_id"))
-		if perr != nil || stored != want {
+		if !matchesPlayerID(getString(s, "player_id"), playerID) {
 			continue
 		}
 		if getString(s, "group_id") == "" {
@@ -716,7 +701,6 @@ func (a *v2Adapter) BroadcastPatch(groupID string, excludePlayerID string, rev s
 	if a == nil || a.app == nil || groupID == "" {
 		return nil, nil
 	}
-	exclude, _ := uuid.Parse(excludePlayerID)
 	a.app.sessionsMu.Lock()
 	defer a.app.sessionsMu.Unlock()
 
@@ -728,8 +712,7 @@ func (a *v2Adapter) BroadcastPatch(groupID string, excludePlayerID string, rev s
 		if getString(s, "group_id") != groupID {
 			continue
 		}
-		stored, perr := uuid.Parse(getString(s, "player_id"))
-		if perr == nil && stored == exclude {
+		if matchesPlayerID(getString(s, "player_id"), excludePlayerID) {
 			continue
 		}
 		mutable := cloneSession(s)

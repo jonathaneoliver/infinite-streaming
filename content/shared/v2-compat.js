@@ -451,9 +451,17 @@
     const params = new URLSearchParams((url.split("?")[1] || ""));
     const filterPlayerID = params.get("player_id") || "";
 
-    // Build the v2 URL with the same filter + raw passthrough.
+    // v2's events endpoint requires a strict UUID for the player_id
+    // filter (oapigen rejects 8-char short hex with 400). v1 accepted
+    // any string and filtered server-side. To stay compatible, only
+    // pass the filter through when it parses as a full UUID; otherwise
+    // we filter client-side below.
+    const isUUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(filterPlayerID);
+    const filterClientSide = filterPlayerID && !isUUID;
+
+    // Build the v2 URL: server-side filter only when we have a valid UUID.
     const v2URL = "/api/v2/events?include=raw" +
-      (filterPlayerID ? "&player_id=" + encodeURIComponent(filterPlayerID) : "");
+      (isUUID ? "&player_id=" + encodeURIComponent(filterPlayerID) : "");
     const sub = new OrigEventSource(v2URL, opts);
 
     const target = new EventTarget();
@@ -469,20 +477,44 @@
       target.dispatchEvent(ev);
     }
 
+    // v1 used substring matches over `player_id` (e.g. matches when
+    // sess.player_id starts with the supplied prefix). Mirror that
+    // when we have to filter client-side. UUID-shaped filters are
+    // already handled server-side and arrive here pre-narrowed.
+    function passesFilter(rawSess) {
+      if (!filterClientSide) return true;
+      const candidates = [
+        rawSess.player_id,
+        rawSess.session_id,
+        rawSess.session_number,
+        rawSess.headers_player_id,
+        rawSess["headers_player-ID"],
+        rawSess.x_playback_session_id,
+      ];
+      for (const c of candidates) {
+        if (typeof c === "string" && c && c.indexOf(filterPlayerID) >= 0) {
+          return true;
+        }
+      }
+      return false;
+    }
+
     function handleEnvelope(ev) {
       try {
         const body = JSON.parse(ev.data);
         const data = body.data || {};
         switch (body.type) {
           case "player.created":
-          case "player.updated":
-            if (data.id) {
-              sessionsByID.set(data.id, data.raw_session || data);
-              emitSessions();
-            }
+          case "player.updated": {
+            if (!data.id) break;
+            const raw = data.raw_session || data;
+            if (!passesFilter(raw)) break;
+            sessionsByID.set(data.id, raw);
+            emitSessions();
             break;
+          }
           case "player.deleted":
-            if (data.player_id) {
+            if (data.player_id && sessionsByID.has(data.player_id)) {
               sessionsByID.delete(data.player_id);
               emitSessions();
             }
@@ -494,11 +526,34 @@
     sub.addEventListener("player.created", handleEnvelope);
     sub.addEventListener("player.updated", handleEnvelope);
     sub.addEventListener("player.deleted", handleEnvelope);
-    sub.onopen = (e) => target.dispatchEvent(new Event("open"));
-    sub.onerror = (e) => {
-      const err = new Event("error");
-      target.dispatchEvent(err);
-    };
+    // Heartbeat → re-emit the current session list so session-live.js's
+    // 12s silence watchdog doesn't force a reconnect every iteration.
+    // Also dispatch a `heartbeat` event so consumers that listen on
+    // that channel directly (session-live.js does) get the same
+    // signal v1 used to send.
+    sub.addEventListener("heartbeat", () => {
+      target.dispatchEvent(new MessageEvent("heartbeat", { data: "{}" }));
+      emitSessions();
+    });
+    sub.onopen = () => target.dispatchEvent(new Event("open"));
+    sub.onerror = () => target.dispatchEvent(new Event("error"));
+
+    // Bootstrap immediately — don't wait for sub.onopen. With an idle
+    // proxy the v2 events stream's first server-emitted frame is a
+    // 15s heartbeat, but the watchdog fires at 12s; doing the
+    // initial /api/v2/players fetch + emit on construction means the
+    // dashboard sees a sessions event within hundreds of ms regardless
+    // of when the underlying SSE connection settles.
+    origFetch("/api/v2/players?include=raw")
+      .then((r) => r.json())
+      .then((body) => {
+        for (const p of body.items || []) {
+          const raw = p.raw_session || {};
+          if (passesFilter(raw)) sessionsByID.set(p.id, raw);
+        }
+        emitSessions();
+      })
+      .catch(() => emitSessions());
 
     // Public EventSource-shaped surface
     const proxy = {

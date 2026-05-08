@@ -22,11 +22,18 @@ import (
 // Returns ok=false when the session has no player_id (v1 sessions
 // occasionally land before the player has self-registered an ID).
 //
-// Phase B scope: identity, lifecycle, control_revision, labels (empty
-// for now — v1 has no labels concept), origination_ip. Mutation-side
-// fields (fault_rules, shape) come back nil/empty until Phase C/D
-// shapes them properly. CurrentPlay is nil until Phase E surfaces
-// play boundaries from the network log.
+// **Non-UUID v1 player_ids.** v2 spec defines player_id as UUIDv4, but
+// existing v1 clients (Apple TV / Roku / Android TV / older app builds)
+// frequently use 8-char short hex forms like "c4723433". To keep those
+// players visible through the v2 read API we synthesize a deterministic
+// UUIDv5 from the short form under a fixed namespace. The same string
+// always derives the same UUID; reverse-resolution lives on the
+// adapter side (see SessionByPlayerID).
+//
+// Phase B scope: identity, lifecycle, control_revision, labels.
+// Mutation-side fields (fault_rules, shape) come back via the
+// v2-shadow projections added in later phases. CurrentPlay is nil
+// until Phase E surfaces play boundaries from the network log.
 func playerFromSession(s map[string]any) (oapigen.PlayerRecord, bool) {
 	rawPlayerID := getString(s, "player_id")
 	if rawPlayerID == "" {
@@ -34,7 +41,9 @@ func playerFromSession(s map[string]any) (oapigen.PlayerRecord, bool) {
 	}
 	playerUUID, err := uuid.Parse(rawPlayerID)
 	if err != nil {
-		return oapigen.PlayerRecord{}, false
+		// v1-compat fallback: derive a stable UUIDv5 so this player is
+		// still addressable through v2's UUID-typed API surface.
+		playerUUID = derivePlayerUUID(rawPlayerID)
 	}
 
 	rec := oapigen.PlayerRecord{
@@ -311,6 +320,28 @@ func groupsFromSessions(sessions []map[string]any) []oapigen.PlayerGroup {
 		out = append(out, *byID[gid])
 	}
 	return out
+}
+
+// playerUUIDNamespace is the v5 namespace used to derive deterministic
+// UUIDs from non-UUID v1 player_id strings (e.g. "c4723433"). Fixed
+// once and never rotated so the derived UUID is stable across
+// process restarts and proxy redeploys.
+var playerUUIDNamespace = uuid.MustParse("4f0a8c14-2bb5-4a31-a2e1-0b6c63c83e88")
+
+// derivePlayerUUID returns the stable UUIDv5 for a non-UUID v1
+// player_id string. Pure — no side effects.
+func derivePlayerUUID(rawPlayerID string) uuid.UUID {
+	return uuid.NewSHA1(playerUUIDNamespace, []byte(rawPlayerID))
+}
+
+// PlayerUUIDForRawID exposes the derivation rule to the adapter so
+// reverse-resolution can match incoming canonical UUIDs back to the
+// v1 short-form session.
+func PlayerUUIDForRawID(rawPlayerID string) uuid.UUID {
+	if u, err := uuid.Parse(rawPlayerID); err == nil {
+		return u
+	}
+	return derivePlayerUUID(rawPlayerID)
 }
 
 // stableGroupUUID maps a v1 string group_id (e.g. "G1234") to a
