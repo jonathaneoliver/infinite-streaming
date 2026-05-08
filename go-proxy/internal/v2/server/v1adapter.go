@@ -75,6 +75,38 @@ type V1Adapter interface {
 	// network event hub. Returns a buffered channel of network-log
 	// rows and a cancel func.
 	SubscribeNetwork(buffer int) (<-chan NetworkLogRow, func())
+
+	// ----- Group surface (Phase F) -------------------------------------
+
+	// GroupMembers returns the player_ids of every session currently
+	// tagged with the supplied group_id (v1 stores group_id as a
+	// string on the session map; v2 reuses the string, so a v2 UUID
+	// round-trips as itself when v2-created).
+	GroupMembers(groupID string) []string
+
+	// LinkGroup tags each named player_id with the supplied group_id.
+	// Players that don't currently have a session are silently
+	// skipped (the tag will land if/when they self-register — but
+	// that's a Phase F+ concern).
+	LinkGroup(groupID string, playerIDs []string) (linked []string)
+
+	// UnlinkGroup clears `group_id` on every session currently tagged
+	// with the supplied group_id. Returns the list of affected
+	// player_ids.
+	UnlinkGroup(groupID string) (cleared []string)
+
+	// RemoveFromGroup clears `group_id` on one specific player's
+	// session. Returns true if the player was found AND was a member
+	// of any group prior to the call.
+	RemoveFromGroup(playerID string) bool
+
+	// BroadcastPatch applies fn under sessionsMu to every session
+	// currently in the named group, *excluding* `excludePlayerID`
+	// (which is the originating PATCH target — already mutated by a
+	// preceding MutatePlayer call). Each touched session's
+	// `control_revision` is stamped to `rev`. Returns the player_ids
+	// touched (suitable for fanning per-member FieldRevisions).
+	BroadcastPatch(groupID string, excludePlayerID string, rev string, fn func(map[string]any) error) (touched []string, err error)
 }
 
 // SessionSnapshot is the v2-friendly shape of a SessionsEvent: the
