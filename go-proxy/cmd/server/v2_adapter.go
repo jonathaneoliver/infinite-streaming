@@ -8,6 +8,7 @@ package main
 
 import (
 	"os"
+	"strconv"
 
 	"github.com/google/uuid"
 
@@ -150,4 +151,148 @@ func networkEntryToMap(e NetworkLogEntry) map[string]any {
 		"content_type": e.ContentType,
 		"play_id":      e.PlayID,
 	}
+}
+
+// ----- Mutation surface (Phase D) ------------------------------------------
+
+// MutatePlayer locates the session matching playerID, hands its session
+// map to fn, and persists the result. Runs under sessionsMu so concurrent
+// PATCHes serialise.
+//
+// fn may modify the map freely; returning an error from fn aborts the
+// mutation cleanly (no v1 side-effects). A successful fn is followed by
+// publishSnapshot — the same path v1's own write handlers use, so the
+// existing SSE hub / network log / clients see the change identically.
+func (a *v2Adapter) MutatePlayer(playerID string, fn func(map[string]any) error) (map[string]any, bool, error) {
+	if playerID == "" || a == nil || a.app == nil {
+		return nil, false, nil
+	}
+	want, err := uuid.Parse(playerID)
+	if err != nil {
+		return nil, false, nil
+	}
+	a.app.sessionsMu.Lock()
+	defer a.app.sessionsMu.Unlock()
+
+	current := a.app.getSessionList()
+	idx := -1
+	for i, s := range current {
+		stored, err := uuid.Parse(getString(s, "player_id"))
+		if err == nil && stored == want {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		return nil, false, nil
+	}
+	mutable := cloneSession(current[idx])
+	if err := fn(mutable); err != nil {
+		return nil, true, err
+	}
+	updated := make([]SessionData, len(current))
+	copy(updated, current)
+	updated[idx] = mutable
+	a.app.publishSnapshot(cloneSessionList(updated))
+	return map[string]any(cloneSession(mutable)), true, nil
+}
+
+// DeletePlayer removes the named player from the v1 store and frees any
+// shaping/fault loops bound to its dedicated port.
+//
+// Mirrors v1's `handleClearSessions` pattern: the session list is
+// captured without holding sessionsMu, helpers (`disablePatternForPort`,
+// `armTransportFaultLoop`) drive their own locking via saveSessionByID,
+// and the final session-list write goes through saveSessionList (which
+// acquires sessionsMu internally). Crucially, sessionsMu is *not* held
+// across the helper calls — sync.Mutex is non-reentrant in Go, and the
+// helpers ultimately re-enter through saveSessionList.
+func (a *v2Adapter) DeletePlayer(playerID string) bool {
+	if playerID == "" || a == nil || a.app == nil {
+		return false
+	}
+	want, err := uuid.Parse(playerID)
+	if err != nil {
+		return false
+	}
+
+	current := a.app.getSessionList()
+	idx := -1
+	for i, s := range current {
+		stored, err := uuid.Parse(getString(s, "player_id"))
+		if err == nil && stored == want {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		return false
+	}
+	target := current[idx]
+	a.app.removeServerLoopState(getString(target, "session_id"))
+	a.app.recordSessionEnd(target, "v2_delete")
+	if portStr := getString(target, "x_forwarded_port"); portStr != "" {
+		if port, err := strconv.Atoi(portStr); err == nil {
+			a.app.disablePatternForPort(port)
+			a.app.armTransportFaultLoop(port, "none", 1, transportUnitsSeconds, 0)
+		}
+	}
+	updated := make([]SessionData, 0, len(current)-1)
+	updated = append(updated, current[:idx]...)
+	updated = append(updated, current[idx+1:]...)
+	a.app.saveSessionList(updated)
+	return true
+}
+
+// ClearAllPlayers tears every player and live state down — same path
+// as v1's /api/clear-sessions.
+//
+// Mirrors v1: snapshot under no lock, drive helpers without holding
+// sessionsMu (they re-enter via saveSessionByID/saveSessionList), then
+// write the empty list through saveSessionList which takes the lock
+// briefly at the end.
+func (a *v2Adapter) ClearAllPlayers() {
+	if a == nil || a.app == nil {
+		return
+	}
+	current := a.app.getSessionList()
+	portSet := map[int]struct{}{}
+	a.app.shapeMu.Lock()
+	for port := range a.app.shapeLoops {
+		portSet[port] = struct{}{}
+	}
+	a.app.shapeMu.Unlock()
+	for _, sess := range current {
+		a.app.removeServerLoopState(getString(sess, "session_id"))
+		a.app.recordSessionEnd(sess, "cleared_v2")
+		if portStr := getString(sess, "x_forwarded_port"); portStr != "" {
+			if port, err := strconv.Atoi(portStr); err == nil {
+				portSet[port] = struct{}{}
+			}
+		}
+	}
+	for port := range portSet {
+		a.app.disablePatternForPort(port)
+		a.app.armTransportFaultLoop(port, "none", 1, transportUnitsSeconds, 0)
+	}
+	a.app.saveSessionList([]SessionData{})
+}
+
+// CreateSyntheticPlayer is not yet wired. Synthetic players need port
+// allocation + nftables setup without traffic — a Phase F deliverable.
+// For now the adapter signals "not implemented" via status 0 and an
+// explicit error so the v2 server returns 501 with a clear detail.
+func (a *v2Adapter) CreateSyntheticPlayer(playerID string, payload map[string]any) (int, map[string]any, error) {
+	return 0, nil, errSyntheticPlayerNotImplemented
+}
+
+// errSyntheticPlayerNotImplemented is an exported sentinel so the v2
+// server can detect the "not yet wired" path and respond with 501 +
+// problem detail rather than a generic 500.
+var errSyntheticPlayerNotImplemented = syntheticNotImplementedError{}
+
+type syntheticNotImplementedError struct{}
+
+func (syntheticNotImplementedError) Error() string {
+	return "synthetic player creation requires port allocation + nftables setup — not yet wired"
 }
