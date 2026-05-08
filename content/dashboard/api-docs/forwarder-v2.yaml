@@ -1,0 +1,550 @@
+openapi: 3.0.3
+
+info:
+  title: Analytics forwarder API (v2)
+  version: "2.0"
+  description: |
+    Read-only ClickHouse query layer over archived player + play data.
+    Subscribes to go-proxy's SSE stream, writes typed rows, and serves
+    them back with label-aware filter pushdown.
+
+    v2 introduces:
+    - Plays as the canonical archive entity (replaces v1's "session_id +
+      play_id" tuples).
+    - Labels as first-class query primitives (`?label.<key>=<value>`).
+    - `play_summaries` rollup table for long-retention trend analysis
+      (raw rows still 30-day TTL, summaries 1-year).
+    - Filter pushdown on every list endpoint.
+    - Aggregation endpoint for group-by queries without direct ClickHouse.
+
+    See `api/openapi/v2/DESIGN.md` for principles.
+
+servers:
+  - url: /analytics
+    description: Mounted under /analytics on the same origin as the spec.
+
+security:
+  - {}
+  - basicAuth: []
+
+tags:
+  - name: plays
+    description: |
+      Per-play records and rollups. Source of truth for "what happened in
+      this playback" questions.
+  - name: archive
+    description: Raw row queries — snapshots, network, events.
+  - name: aggregate
+    description: |
+      Group-by + metric aggregation pushdowns. Avoids pulling raw rows
+      to the client just to reduce them.
+  - name: bundle
+    description: Offline ZIP exports.
+  - name: diagnostics
+    description: Health, version.
+
+paths:
+
+  /api/v2/healthz:
+    get:
+      tags: [diagnostics]
+      summary: Liveness probe
+      responses:
+        '200':
+          description: ok
+          content:
+            text/plain:
+              schema: { type: string, example: ok }
+
+  /api/v2/info:
+    get:
+      tags: [diagnostics]
+      summary: Forwarder info — build, ClickHouse target, retention
+      responses:
+        '200':
+          description: Info
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Info' }
+
+  # ---- Plays --------------------------------------------------------------
+
+  /api/v2/plays:
+    get:
+      tags: [plays]
+      summary: List plays (cursor-paginated, label-filtered)
+      description: |
+        Source: `play_summaries` table when available, falling back to
+        deriving from `session_snapshots` for very recent plays whose
+        `play.ended` hasn't been seen yet.
+      parameters:
+        - $ref: '#/components/parameters/PlayerIdFilter'
+        - $ref: '#/components/parameters/From'
+        - $ref: '#/components/parameters/To'
+        - $ref: '#/components/parameters/LabelFilter'
+        - $ref: '#/components/parameters/Classification'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: Page of plays
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PlaySummaryPage' }
+
+  /api/v2/plays/{play_id}:
+    parameters:
+      - $ref: '#/components/parameters/PlayId'
+    get:
+      tags: [plays]
+      summary: Get one archived play (full detail)
+      description: |
+        Returns the play summary plus an embedded `events_summary`
+        (counts per event type) and `network_summary` (counts per
+        status / fault category). For raw rows, follow the
+        `_links` URLs in the response.
+      responses:
+        '200':
+          description: Found
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PlayDetail' }
+        '404': { $ref: '#/components/responses/Problem' }
+
+  /api/v2/plays/aggregate:
+    get:
+      tags: [aggregate]
+      summary: Group-by aggregation over plays
+      description: |
+        Generic pushdown: group by any combination of fields and labels,
+        compute one or more metric expressions over each group. Eliminates
+        the need to pull raw rows for trend / regression queries.
+
+        The query is translated to ClickHouse SQL server-side with
+        parameterized placeholders. Field-level group-by uses native
+        columns; label-level group-by uses `labels[<key>]`.
+      parameters:
+        - $ref: '#/components/parameters/From'
+        - $ref: '#/components/parameters/To'
+        - $ref: '#/components/parameters/LabelFilter'
+        - $ref: '#/components/parameters/Classification'
+        - in: query
+          name: group_by
+          required: true
+          explode: false
+          schema:
+            type: array
+            items: { type: string }
+          description: |
+            Fields to group by. Comma-separated. Native fields (e.g.
+            `player_id`, `classification`) or label keys prefixed with
+            `labels.` (e.g. `labels.test`, `labels.pytest_run`).
+          example: labels.pytest_run,player_id
+        - in: query
+          name: metrics
+          required: true
+          explode: false
+          schema:
+            type: array
+            items: { type: string }
+          description: |
+            Metric expressions, comma-separated. Format: `<agg>.<field>`
+            where `<agg>` ∈ `count|sum|avg|min|max|p50|p95|p99` and
+            `<field>` is one of the numeric columns on `play_summaries`.
+            `count` alone (without `.<field>`) means row count.
+          example: count,avg.rebuffer_ratio,p95.stall_seconds
+        - in: query
+          name: order_by
+          schema: { type: string }
+          description: |
+            Field name (group-by or metric alias) to sort by; prefix `-`
+            for descending. Default: first group_by ascending.
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Aggregated groups
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AggregateResult' }
+
+  # ---- Raw archive rows ---------------------------------------------------
+
+  /api/v2/snapshots:
+    get:
+      tags: [archive]
+      summary: Session snapshots (raw)
+      parameters:
+        - $ref: '#/components/parameters/PlayerIdFilter'
+        - $ref: '#/components/parameters/PlayIdFilter'
+        - $ref: '#/components/parameters/From'
+        - $ref: '#/components/parameters/To'
+        - $ref: '#/components/parameters/LabelFilter'
+        - $ref: '#/components/parameters/StrideMs'
+        - $ref: '#/components/parameters/Order'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: Snapshot rows
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: { type: object, additionalProperties: true }
+                  next_cursor: { type: string, nullable: true }
+
+  /api/v2/network_requests:
+    get:
+      tags: [archive]
+      summary: HAR-shaped network rows (raw)
+      parameters:
+        - $ref: '#/components/parameters/PlayerIdFilter'
+        - $ref: '#/components/parameters/PlayIdFilter'
+        - $ref: '#/components/parameters/From'
+        - $ref: '#/components/parameters/To'
+        - $ref: '#/components/parameters/LabelFilter'
+        - in: query
+          name: status_min
+          schema: { type: integer }
+        - in: query
+          name: status_max
+          schema: { type: integer }
+        - in: query
+          name: fault_category
+          schema:
+            type: string
+            enum: [http, socket, corruption, transport, transfer_timeout, client_disconnect]
+        - in: query
+          name: fault_action
+          schema: { type: string }
+        - in: query
+          name: faulted_only
+          schema: { type: boolean, default: false }
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: Network rows
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/NetworkRequestsPage' }
+
+  /api/v2/session_events:
+    get:
+      tags: [archive]
+      summary: Chronological events (raw)
+      description: |
+        Player + harness events: ABR shifts, stalls, fault firings, errors.
+        v1's "session_events" name retained for source-table parity even
+        though the user-facing concept is plays.
+      parameters:
+        - $ref: '#/components/parameters/PlayerIdFilter'
+        - $ref: '#/components/parameters/PlayIdFilter'
+        - $ref: '#/components/parameters/From'
+        - $ref: '#/components/parameters/To'
+        - $ref: '#/components/parameters/LabelFilter'
+        - in: query
+          name: type
+          explode: true
+          schema:
+            type: array
+            items: { type: string }
+          description: |
+            Filter to specific event types. Multiple values OR'd. Examples:
+            `type=stall&type=downshift`.
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: Event rows
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: { type: object, additionalProperties: true }
+                  next_cursor: { type: string, nullable: true }
+
+  /api/v2/session_heatmap:
+    get:
+      tags: [archive]
+      summary: Per-second buffer + state heatmap
+      description: |
+        Pre-binned grid for visualisation. One row per (play_id, time_bucket).
+      parameters:
+        - $ref: '#/components/parameters/PlayerIdFilter'
+        - $ref: '#/components/parameters/PlayIdFilter'
+        - in: query
+          name: buckets
+          schema: { type: integer, minimum: 10, maximum: 1000, default: 240 }
+      responses:
+        '200':
+          description: Heatmap rows
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: { type: object, additionalProperties: true }
+
+  # ---- Bundle -------------------------------------------------------------
+
+  /api/v2/plays/{play_id}/bundle:
+    parameters:
+      - $ref: '#/components/parameters/PlayId'
+    get:
+      tags: [bundle]
+      summary: Download a play bundle (ZIP)
+      description: |
+        Streams a ZIP containing the play summary, snapshots (`.ndjson`),
+        events, and a HAR file. Useful for offline forensics or preserving
+        a play that's about to age out of the 30-day raw TTL.
+      responses:
+        '200':
+          description: ZIP archive
+          content:
+            application/zip:
+              schema: { type: string, format: binary }
+        '404': { $ref: '#/components/responses/Problem' }
+
+# ---------------------------------------------------------------------------
+
+components:
+
+  parameters:
+    PlayerIdFilter:
+      in: query
+      name: player_id
+      schema: { type: string, format: uuid }
+    PlayIdFilter:
+      in: query
+      name: play_id
+      schema: { type: string, format: uuid }
+    PlayId:
+      in: path
+      name: play_id
+      required: true
+      schema: { type: string, format: uuid }
+    From:
+      in: query
+      name: from
+      schema: { type: string, format: date-time }
+      description: ISO 8601 lower bound on the row timestamp. Inclusive.
+    To:
+      in: query
+      name: to
+      schema: { type: string, format: date-time }
+      description: ISO 8601 upper bound on the row timestamp. Exclusive.
+    LabelFilter:
+      in: query
+      name: label
+      explode: true
+      schema:
+        type: object
+        additionalProperties: { type: string }
+      description: |
+        `label.<key>=<value>` query params. Multiple AND together.
+        Example: `?label.test=foo&label.pytest_run=2026-05-08T05:00:00Z`.
+    Classification:
+      in: query
+      name: classification
+      schema:
+        type: string
+        enum: [clean, stalled, errored, fault-induced, abandoned]
+      description: Filter to plays of a specific classification.
+    StrideMs:
+      in: query
+      name: stride_ms
+      schema: { type: integer, minimum: 100 }
+      description: Downsample to one row per stride.
+    Order:
+      in: query
+      name: order
+      schema: { type: string, enum: [asc, desc], default: asc }
+    Limit:
+      in: query
+      name: limit
+      schema: { type: integer, minimum: 1, maximum: 5000, default: 500 }
+    Cursor:
+      in: query
+      name: cursor
+      schema: { type: string }
+      description: |
+        Opaque cursor from a previous response's `next_cursor`. When set,
+        all other filter params are ignored — the cursor encodes them.
+
+  responses:
+    Problem:
+      description: Error
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/ProblemDetails' }
+
+  securitySchemes:
+    basicAuth:
+      type: http
+      scheme: basic
+
+  schemas:
+
+    ProblemDetails:
+      description: RFC 7807 problem detail.
+      type: object
+      required: [type, title, status]
+      properties:
+        type:     { type: string, format: uri }
+        title:    { type: string }
+        status:   { type: integer }
+        detail:   { type: string }
+        instance: { type: string, format: uri }
+
+    Info:
+      type: object
+      properties:
+        version:               { type: string }
+        api_versions:          { type: array, items: { type: string } }
+        clickhouse_target:     { type: string }
+        raw_retention_days:    { type: integer, example: 30 }
+        summary_retention_days: { type: integer, example: 365 }
+
+    PlaySummary:
+      description: |
+        One row from the `play_summaries` table — finalised when a play
+        ends. Forwarder writes one row per `play.ended` SSE event from
+        the proxy.
+      type: object
+      required:
+        - play_id
+        - player_id
+        - started_at
+        - duration_seconds
+      properties:
+        play_id:           { type: string, format: uuid }
+        player_id:         { type: string, format: uuid }
+        display_id:        { type: integer }
+        started_at:        { type: string, format: date-time }
+        ended_at:          { type: string, format: date-time }
+        duration_seconds:  { type: integer }
+        labels:
+          type: object
+          additionalProperties: { type: string }
+        # quality
+        stall_count:       { type: integer }
+        stall_seconds:     { type: number, format: float }
+        rebuffer_ratio:    { type: number, format: float, description: stall_seconds / duration_seconds }
+        downshifts:        { type: integer }
+        upshifts:          { type: integer }
+        dropped_frames:    { type: integer }
+        avg_quality_pct:   { type: number, format: float }
+        min_quality_pct:   { type: number, format: float }
+        # harness signals
+        fault_count_total: { type: integer }
+        fault_categories:  { type: array, items: { type: string } }
+        shape_pattern:     { type: string }
+        player_error:      { type: string }
+        classification:
+          type: string
+          enum: [clean, stalled, errored, fault-induced, abandoned]
+
+    PlaySummaryPage:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/PlaySummary' }
+        next_cursor:
+          type: string
+          nullable: true
+          description: Pass back as `?cursor=` to fetch the next page.
+
+    PlayDetail:
+      description: Play summary plus embedded counts for at-a-glance.
+      allOf:
+        - $ref: '#/components/schemas/PlaySummary'
+        - type: object
+          properties:
+            events_summary:
+              type: object
+              additionalProperties: { type: integer }
+              description: Count per event type.
+              example:
+                stall: 1
+                downshift: 4
+                upshift: 8
+                slow_segment: 2
+            network_summary:
+              type: object
+              properties:
+                total_requests: { type: integer }
+                by_status:
+                  type: object
+                  additionalProperties: { type: integer }
+                by_fault_category:
+                  type: object
+                  additionalProperties: { type: integer }
+            _links:
+              type: object
+              properties:
+                snapshots:        { type: string, format: uri }
+                events:           { type: string, format: uri }
+                network_requests: { type: string, format: uri }
+                heatmap:          { type: string, format: uri }
+                bundle:           { type: string, format: uri }
+
+    NetworkRequestsPage:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { type: object, additionalProperties: true }
+        next_cursor: { type: string, nullable: true }
+
+    AggregateResult:
+      description: |
+        Group-by output. `groups` is one row per distinct combination of
+        the requested `group_by` keys; each group has the requested metrics
+        plus the group-key values.
+      type: object
+      required: [groups]
+      properties:
+        query:
+          type: object
+          description: Echo of the parsed query, for debugging.
+          properties:
+            group_by: { type: array, items: { type: string } }
+            metrics:  { type: array, items: { type: string } }
+            order_by: { type: string }
+            sql:      { type: string, description: "ClickHouse SQL the server ran (parameterised)." }
+        groups:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+          description: |
+            Each item carries the group-by keys verbatim plus a metric
+            value per requested metric. Example for
+            `group_by=labels.pytest_run&metrics=count,avg.rebuffer_ratio`:
+
+            ```json
+            {
+              "labels.pytest_run": "2026-04-01T03:00:00Z",
+              "count":             12,
+              "avg.rebuffer_ratio": 0.012
+            }
+            ```
+        elapsed_ms:
+          type: number
+          format: float
+          description: ClickHouse query wallclock.

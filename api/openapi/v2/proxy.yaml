@@ -1,0 +1,1192 @@
+openapi: 3.0.3
+
+info:
+  title: go-proxy harness API (v2)
+  version: "2.0"
+  description: |
+    Per-player and per-play HTTP fault injection, transport faults via
+    nftables, network shaping, and live SSE streams. v2 lives at
+    `/api/v2/...` alongside v1 `/api/...`.
+
+    The user-facing model is **players** and **plays**. The proxy still has
+    per-connection state internally (port allocation, ring buffers), but it
+    is not exposed as a `session` resource. v1's `session_id` is gone from
+    the contract.
+
+    See `api/openapi/v2/DESIGN.md` for the principles behind the breaking
+    changes from v1.
+
+servers:
+  - url: /
+    description: Same origin as wherever this spec is served
+
+security:
+  - {}                         # auth optional by default
+  - basicAuth: []              # if INFINITE_STREAM_AUTH_HTPASSWD is configured
+
+tags:
+  - name: players
+    description: |
+      Connected devices. A player has zero or one *active* play at any
+      moment. Player-scoped mutations persist across `play_id` rotations
+      and reconnects.
+  - name: plays
+    description: |
+      One continuous playback. Play-scoped mutations auto-clear when the
+      play ends or rotates. Plays survive in the analytics archive after
+      they end; this API exposes the live record only.
+  - name: streams
+    description: |
+      Server-Sent Event streams. Every frame is a `StreamEvent` envelope
+      with a discriminating `type` field.
+  - name: groups
+    description: Player groups for fault propagation (replaces v1 session-groups).
+  - name: diagnostics
+    description: Health, version, capabilities.
+
+paths:
+
+  # ---- Players -----------------------------------------------------------
+
+  /api/v2/players:
+    get:
+      tags: [players]
+      summary: List connected players
+      parameters:
+        - $ref: '#/components/parameters/StateFilter'
+        - $ref: '#/components/parameters/LabelFilter'
+      responses:
+        '200':
+          description: Player list
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/PlayerRecord' }
+
+    post:
+      tags: [players]
+      summary: Mint a synthetic player
+      description: |
+        Synthetic players have no associated device. The proxy allocates a
+        port and returns the record; integration tests can attach faults /
+        shaping / labels before any traffic flows. Real players self-register
+        on first request and are not created via this endpoint.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PlayerCreateRequest' }
+      responses:
+        '201':
+          description: Created
+          headers:
+            ETag:     { $ref: '#/components/headers/ETag' }
+            Location: { $ref: '#/components/headers/Location' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PlayerRecord' }
+        '400': { $ref: '#/components/responses/Problem' }
+
+    delete:
+      tags: [players]
+      summary: Drop every player + clear all live state
+      description: |
+        Destructive: tears down every active player, clears fault config,
+        resets nftables shaping. Replaces v1's `/api/clear-sessions`.
+      responses:
+        '204': { description: Cleared }
+
+  /api/v2/players/{player_id}:
+    parameters:
+      - $ref: '#/components/parameters/PlayerId'
+
+    get:
+      tags: [players]
+      summary: Get one player
+      responses:
+        '200':
+          description: Found
+          headers:
+            ETag: { $ref: '#/components/headers/ETag' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PlayerRecord' }
+        '404': { $ref: '#/components/responses/Problem' }
+
+    patch:
+      tags: [players]
+      summary: Patch player fields (JSON Merge Patch + field-level If-Match)
+      description: |
+        Mutate any subset of player fields using RFC 7396 JSON Merge Patch.
+        `null` clears a field; `null` for `labels` wipes all labels;
+        `null` value inside `labels` removes that key. Unknown field names
+        return `400 Bad Request`.
+
+        `If-Match` is required (current `control_revision`, quoted), but
+        the conflict check runs at the level of each leaf path the body
+        writes — not the whole resource. Two tabs editing different
+        controls (one tweaks `shape.rate_mbps`, the other tweaks
+        `labels.test`) both succeed even if the resource's top-level
+        revision has moved between their reads. `412` fires only on
+        real per-field contention; the response body's `conflicts`
+        array names which paths are at issue.
+
+        Note: `fault_rules` is treated as a single concurrency unit
+        (the whole array is one path) until per-rule sub-resource
+        endpoints land.
+
+        Player-scoped mutations persist across `play_id` rotations and
+        survive the player reconnecting until explicitly cleared.
+
+        For "do this for N minutes" use cases, use the CLI's `--for` flag
+        (apply → sleep → clear) or a pytest `try/finally` — the proxy
+        does not provide server-side auto-expiry.
+      parameters:
+        - $ref: '#/components/parameters/IfMatch'
+      requestBody:
+        required: true
+        content:
+          application/merge-patch+json:
+            schema: { $ref: '#/components/schemas/PlayerPatch' }
+      responses:
+        '200':
+          description: Updated
+          headers:
+            ETag: { $ref: '#/components/headers/ETag' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PlayerRecord' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '412': { $ref: '#/components/responses/PreconditionFailed' }
+
+    delete:
+      tags: [players]
+      summary: Drop one player
+      description: |
+        Removes the player record, frees its port, ends any active play.
+        Real players reappear automatically on the next request.
+      responses:
+        '204': { description: Gone }
+        '404': { $ref: '#/components/responses/Problem' }
+
+  /api/v2/players/{player_id}/network:
+    parameters:
+      - $ref: '#/components/parameters/PlayerId'
+
+    get:
+      tags: [players]
+      summary: One-shot snapshot of the player's recent network ring buffer
+      description: |
+        Returns the last N requests this player made (proxy-bounded ring
+        buffer). For long-form analysis use the analytics archive
+        (`/analytics/api/v2/network_requests`) which has 30-day retention.
+      parameters:
+        - in: query
+          name: limit
+          schema: { type: integer, minimum: 1, maximum: 1000, default: 200 }
+      responses:
+        '200':
+          description: Network log entries
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/NetworkLogEntry' }
+        '404': { $ref: '#/components/responses/Problem' }
+
+  # ---- Plays -------------------------------------------------------------
+
+  /api/v2/plays/{play_id}:
+    parameters:
+      - $ref: '#/components/parameters/PlayId'
+
+    get:
+      tags: [plays]
+      summary: Get one live play
+      description: |
+        Live plays only. For ended plays, query
+        `/analytics/api/v2/plays/{play_id}` on the forwarder.
+      responses:
+        '200':
+          description: Found
+          headers:
+            ETag: { $ref: '#/components/headers/ETag' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PlayRecord' }
+        '404': { $ref: '#/components/responses/Problem' }
+
+    patch:
+      tags: [plays]
+      summary: Patch play fields (play-scoped mutation)
+      description: |
+        Same Merge Patch + field-level `If-Match` contract as
+        `PATCH /api/v2/players/{id}`. Conflicts are reported per leaf
+        path; concurrent disjoint patches both succeed.
+
+        Play-scoped: auto-clears when the play ends or `play_id` rotates.
+
+        Effective fault rules: if `play.fault_rules` is non-null
+        (including `[]`), it **replaces** `player.fault_rules` for this
+        play. Null/absent = inherit player's. Same all-or-nothing
+        semantics for `play.shape`. Per-rule merging by id was
+        considered and rejected — see DESIGN.md.
+      parameters:
+        - $ref: '#/components/parameters/IfMatch'
+      requestBody:
+        required: true
+        content:
+          application/merge-patch+json:
+            schema: { $ref: '#/components/schemas/PlayPatch' }
+      responses:
+        '200':
+          description: Updated
+          headers:
+            ETag: { $ref: '#/components/headers/ETag' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PlayRecord' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '404':
+          description: Play not found or already ended/rotated
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ProblemDetails' }
+        '412': { $ref: '#/components/responses/PreconditionFailed' }
+
+  # ---- Streams -----------------------------------------------------------
+
+  /api/v2/events:
+    get:
+      tags: [streams]
+      summary: Stream every harness event (SSE)
+      description: |
+        Long-lived `text/event-stream`. Single unified stream replaces v1's
+        two streams. Each frame is a `StreamEvent` discriminated by `type`.
+
+        Frame types:
+        - `player.created`, `player.updated`, `player.deleted`
+        - `play.started`, `play.updated`, `play.ended`
+        - `play.network.entry`  (per-request network log row)
+        - `heartbeat`           (every 15 s)
+
+        Reconnect on disconnect. The proxy does not replay missed frames.
+      parameters:
+        - $ref: '#/components/parameters/PlayerIdFilter'
+        - $ref: '#/components/parameters/PlayIdFilter'
+        - $ref: '#/components/parameters/EventTypeFilter'
+      responses:
+        '200':
+          description: SSE stream
+          content:
+            text/event-stream:
+              schema: { $ref: '#/components/schemas/StreamEvent' }
+
+  # ---- Groups ------------------------------------------------------------
+
+  /api/v2/player-groups:
+    get:
+      tags: [groups]
+      summary: List player groups
+      responses:
+        '200':
+          description: Group list
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/PlayerGroup' }
+
+    post:
+      tags: [groups]
+      summary: Create a player group
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [member_player_ids]
+              properties:
+                label:
+                  type: string
+                member_player_ids:
+                  type: array
+                  items: { type: string, format: uuid }
+                labels: { $ref: '#/components/schemas/Labels' }
+      responses:
+        '201':
+          description: Created
+          headers:
+            Location: { $ref: '#/components/headers/Location' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PlayerGroup' }
+
+  /api/v2/player-groups/{group_id}:
+    parameters:
+      - $ref: '#/components/parameters/GroupId'
+    get:
+      tags: [groups]
+      summary: Get one group
+      responses:
+        '200':
+          description: Found
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PlayerGroup' }
+        '404': { $ref: '#/components/responses/Problem' }
+    patch:
+      tags: [groups]
+      summary: Patch group (members, labels)
+      parameters:
+        - $ref: '#/components/parameters/IfMatch'
+      requestBody:
+        required: true
+        content:
+          application/merge-patch+json:
+            schema: { $ref: '#/components/schemas/PlayerGroupPatch' }
+      responses:
+        '200':
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PlayerGroup' }
+    delete:
+      tags: [groups]
+      summary: Disband group
+      responses:
+        '204': { description: Gone }
+
+  # ---- Diagnostics -------------------------------------------------------
+
+  /api/v2/healthz:
+    get:
+      tags: [diagnostics]
+      summary: Liveness probe
+      responses:
+        '200':
+          description: ok
+          content:
+            text/plain:
+              schema: { type: string, example: ok }
+
+  /api/v2/info:
+    get:
+      tags: [diagnostics]
+      summary: Build + config introspection
+      description: |
+        Replaces v1 `/api/version`. Returns the proxy's build commit, configured
+        content directory, kernel shaping capabilities, and which optional
+        features (auth, analytics) are enabled.
+      responses:
+        '200':
+          description: Info
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Info' }
+
+# ---------------------------------------------------------------------------
+
+components:
+
+  parameters:
+    PlayerId:
+      in: path
+      name: player_id
+      required: true
+      schema: { type: string, format: uuid }
+      description: Player UUID. Stable per device.
+    PlayId:
+      in: path
+      name: play_id
+      required: true
+      schema: { type: string, format: uuid }
+      description: Play UUIDv7 (server-issued, time-sortable).
+    GroupId:
+      in: path
+      name: group_id
+      required: true
+      schema: { type: string, format: uuid }
+    StateFilter:
+      in: query
+      name: state
+      schema:
+        type: string
+        enum: [playing, paused, stalled, ended]
+      description: Only return players whose current play matches this state.
+    PlayerIdFilter:
+      in: query
+      name: player_id
+      schema: { type: string, format: uuid }
+      description: Filter SSE frames to one player.
+    PlayIdFilter:
+      in: query
+      name: play_id
+      schema: { type: string, format: uuid }
+      description: Filter SSE frames to one play.
+    EventTypeFilter:
+      in: query
+      name: type
+      explode: true
+      schema:
+        type: array
+        items:
+          type: string
+          enum:
+            - player.created
+            - player.updated
+            - player.deleted
+            - play.started
+            - play.updated
+            - play.ended
+            - play.network.entry
+            - heartbeat
+      description: |
+        Filter SSE frames to specific event types. Multiple values AND'd
+        with each other for a "this set of types" filter; omit for all.
+    LabelFilter:
+      in: query
+      name: label
+      explode: true
+      schema:
+        type: object
+        additionalProperties: { type: string }
+      description: |
+        `label.<key>=<value>` query params. Multiple AND together. Matches
+        on the player's effective labels (player labels + any inherited
+        from group). Example: `?label.test=foo&label.pytest_run=bar`.
+    IfMatch:
+      in: header
+      name: If-Match
+      required: true
+      schema:
+        type: string
+        example: '"2026-05-08T01:53:12Z"'
+      description: |
+        RFC 7232 strong entity tag — the value is the current
+        `control_revision` wrapped in literal double-quotes. Echo verbatim
+        from the most-recent `ETag` response header.
+
+        Concurrency is checked **at the level of each leaf path written
+        by the merge-patch body**, not the resource as a whole. Two
+        clients PATCHing disjoint paths both succeed regardless of
+        whether the resource revision has moved between their reads.
+
+        Conflict (412 Precondition Failed) fires only when one or more
+        of the paths this PATCH writes has been modified after the
+        `If-Match` revision. The 412 body's `conflicts` array names the
+        contended paths exactly.
+
+        v2 does **not** accept `If-Match: *` (the wildcard "any current
+        ETag") or comma-separated multi-ETag lists.
+
+  headers:
+    ETag:
+      description: |
+        RFC 7232 strong entity tag — current `control_revision` wrapped in
+        literal double-quotes. Pass back verbatim as the next mutation's
+        `If-Match` header.
+      schema:
+        type: string
+        example: '"2026-05-08T01:53:12Z"'
+    Location:
+      description: URL of the newly-created resource.
+      schema: { type: string, format: uri }
+
+  responses:
+    Problem:
+      description: Error
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/ProblemDetails' }
+    PreconditionFailed:
+      description: If-Match revision mismatch
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/PreconditionFailed' }
+
+  securitySchemes:
+    basicAuth:
+      type: http
+      scheme: basic
+      description: |
+        HTTP Basic. Opt-in via `INFINITE_STREAM_AUTH_HTPASSWD`. When unset,
+        endpoints accept anonymous requests.
+
+  schemas:
+
+    # ----- Errors --------------------------------------------------------
+
+    ProblemDetails:
+      description: RFC 7807 problem detail.
+      type: object
+      required: [type, title, status]
+      properties:
+        type:     { type: string, format: uri }
+        title:    { type: string }
+        status:   { type: integer, minimum: 100, maximum: 599 }
+        detail:   { type: string }
+        instance: { type: string, format: uri }
+
+    PreconditionFailed:
+      description: |
+        Returned on PATCH when one or more of the leaf paths in the merge-
+        patch body has been modified after the client's `If-Match`
+        revision. The `conflicts` array names exactly which paths are
+        contended; paths the client wrote that *aren't* listed have not
+        been modified by anyone else and would have applied cleanly if
+        not for the rejected siblings.
+
+        Recovery pattern: re-fetch the resource (or just the listed
+        paths), let the user reconcile the contended values, retry the
+        PATCH with the new `If-Match`. The non-contended changes can be
+        kept locally — they were never actually rejected for a
+        concurrency reason.
+      allOf:
+        - $ref: '#/components/schemas/ProblemDetails'
+        - type: object
+          required: [current_revision, conflicts]
+          properties:
+            current_revision:
+              type: string
+              description: |
+                The resource's current top-level `control_revision`. Equal
+                to the max of all field revisions. Pass back as `If-Match`
+                on the retry.
+            conflicts:
+              type: array
+              minItems: 1
+              items: { type: string }
+              description: |
+                Leaf paths (dot-separated, e.g. `shape.rate_mbps`) that
+                have been modified after the client's `If-Match` revision
+                and are also being written by this PATCH. The client
+                should re-fetch these specific fields, decide what to do,
+                and retry. `fault_rules` is reported as a single path
+                until per-rule sub-resource endpoints land.
+              example: ["shape.rate_mbps", "labels.test"]
+
+    # ----- Labels --------------------------------------------------------
+
+    Labels:
+      description: |
+        Free-form k/v tags. Propagated to ClickHouse archive rows at insert
+        time. Designed for low-to-medium cardinality grouping (test names,
+        CI run IDs, branches), not unique identifiers.
+
+        Validation: keys match `[a-z][a-z0-9_./-]{0,62}`, values ≤256 chars,
+        max 32 entries per resource. Keys starting with `harness.` or `_`
+        are server-managed and rejected on PATCH.
+      type: object
+      additionalProperties:
+        type: string
+        maxLength: 256
+      maxProperties: 32
+      example:
+        test: tests/integration/test_abr.py::test_downshift_under_loss
+        pytest_run: 2026-05-08T05:00:00Z
+        branch: feat/claude-skills-437
+
+    # ----- Player + Play -------------------------------------------------
+
+    PlayerRecord:
+      description: |
+        Live player state. Reflects player-scope config; for the *effective*
+        config combined with any active play's overrides, see the embedded
+        `current_play.effective` block.
+      type: object
+      additionalProperties: false
+      required: [id, display_id, control_revision]
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Player-supplied UUIDv4. Stable per device.
+        display_id:
+          type: integer
+          minimum: 1
+          description: Per-process counter. Recycles across restarts.
+        control_revision:
+          type: string
+          description: Concurrency token. ETag/If-Match.
+        labels:
+          $ref: '#/components/schemas/Labels'
+        current_play:
+          allOf:
+            - $ref: '#/components/schemas/PlayRecord'
+          nullable: true
+          description: Currently-active play, or null when idle.
+        fault_rules:
+          type: array
+          items: { $ref: '#/components/schemas/FaultRule' }
+          description: |
+            HTTP fault rules, evaluated first-match-wins on each request.
+            Empty array = no rules; absent = same as empty.
+        shape:
+          $ref: '#/components/schemas/Shape'
+        fault_counters:
+          $ref: '#/components/schemas/FaultCounters'
+        first_seen_at:    { type: string, format: date-time }
+        last_seen_at:     { type: string, format: date-time }
+        origination_ip:   { type: string }
+
+    PlayerCreateRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        synthetic:    { type: boolean, default: true }
+        manifest_url: { type: string, format: uri }
+        labels:       { $ref: '#/components/schemas/Labels' }
+        fault_rules:
+          type: array
+          items: { $ref: '#/components/schemas/FaultRule' }
+        shape:        { $ref: '#/components/schemas/Shape' }
+
+    PlayerPatch:
+      description: |
+        Mutable subset of `PlayerRecord`. JSON Merge Patch semantics.
+        `additionalProperties: false` — typo'd field names return 400.
+
+        `fault_rules` is treated as a single concurrency unit for the
+        purposes of `If-Match` (any rule change conflicts with any other
+        rule change). For per-rule add/update/remove without whole-list
+        replacement, sub-resource endpoints
+        (`POST/PATCH/DELETE /api/v2/players/{id}/fault-rules/{rule_id}`)
+        are a planned addition; not in this initial spec.
+      type: object
+      additionalProperties: false
+      properties:
+        labels: { $ref: '#/components/schemas/Labels' }
+        fault_rules:
+          type: array
+          items: { $ref: '#/components/schemas/FaultRule' }
+        shape:  { $ref: '#/components/schemas/Shape' }
+
+    PlayRecord:
+      description: |
+        Live play state. The same `PlayRecord` schema is also used in the
+        analytics archive (`/analytics/api/v2/plays/{id}`) for ended plays;
+        the only difference is `ended_at` is non-null in the archive.
+      type: object
+      additionalProperties: false
+      required: [id, player_id, started_at, control_revision]
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: UUIDv7. Server-issued, time-sortable.
+        player_id:        { type: string, format: uuid }
+        control_revision: { type: string }
+        labels:
+          $ref: '#/components/schemas/Labels'
+          description: |
+            Effective labels = player.labels merged with any play-specific
+            additions/overrides. Snapshotted onto archive rows at insert.
+        started_at:       { type: string, format: date-time }
+        ended_at:         { type: string, format: date-time, nullable: true }
+        manifest: { $ref: '#/components/schemas/Manifest' }
+        fault_rules:
+          type: array
+          items: { $ref: '#/components/schemas/FaultRule' }
+          description: |
+            Play-scoped fault rules. If non-null (including empty array),
+            **replaces** `player.fault_rules` for this play. Null/absent =
+            inherit player's. Auto-cleared on play end.
+        shape:
+          allOf: [{ $ref: '#/components/schemas/Shape' }]
+          description: |
+            Play-scoped shape override. Replaces `player.shape` for this
+            play if set. Auto-cleared on play end.
+        server_metrics:   { $ref: '#/components/schemas/ServerMetrics' }
+        player_metrics:   { $ref: '#/components/schemas/PlayerMetrics' }
+
+    PlayPatch:
+      type: object
+      additionalProperties: false
+      properties:
+        labels: { $ref: '#/components/schemas/Labels' }
+        fault_rules:
+          type: array
+          items: { $ref: '#/components/schemas/FaultRule' }
+        shape:  { $ref: '#/components/schemas/Shape' }
+
+    # ----- Faults --------------------------------------------------------
+
+    FaultRule:
+      description: |
+        One HTTP fault rule. Independent `(filter, behavior)` pair.
+        Multiple concurrent rules per resource; **first match wins** during
+        request evaluation (rule order matters).
+
+        Transport-layer faults (kernel `drop`/`reject`) live separately
+        on `Shape.transport_fault` since they operate below HTTP.
+      type: object
+      additionalProperties: false
+      required: [type]
+      properties:
+        id:
+          type: string
+          description: |
+            Stable identifier for this rule. Server-generated as a UUIDv7
+            if omitted on POST. Useful for logs, dashboards, and the
+            CLI's `--rule-id` targeting on remove/update operations.
+        type:
+          description: |
+            HTTP-layer fault types. `corrupted` is segment-only;
+            `request_*_hang/reset/delayed` are socket-phase faults that
+            apply at any HTTP request kind. `none` disables this rule
+            without removing it.
+          type: string
+          enum:
+            - none
+            - "404"
+            - "500"
+            - "503"
+            - timeout
+            - corrupted
+            - request_connect_hang
+            - request_connect_reset
+            - request_connect_delayed
+            - request_first_byte_hang
+            - request_first_byte_reset
+            - request_first_byte_delayed
+            - request_body_hang
+            - request_body_reset
+            - request_body_delayed
+        frequency:
+          type: integer
+          minimum: 0
+          description: Cadence numerator. Units controlled by `mode`. 0 = one-shot.
+        mode:
+          type: string
+          enum: [failures_per_seconds, seconds, requests]
+          default: failures_per_seconds
+        consecutive:
+          type: integer
+          minimum: 1
+          default: 1
+        filter:
+          $ref: '#/components/schemas/FaultFilter'
+
+    TransportFault:
+      description: |
+        Kernel-level transport fault via nftables. Belongs to `Shape`
+        because it operates below HTTP and shares plumbing with rate /
+        delay / loss shaping.
+
+        At most one transport fault per session — `drop` and `reject`
+        are mutually exclusive at the kernel rule level.
+      type: object
+      additionalProperties: false
+      required: [type]
+      properties:
+        type:
+          type: string
+          enum: [drop, reject]
+          description: |
+            `drop` silently discards packets (player sees timeout-ish
+            behaviour); `reject` sends an ICMP unreachable (player sees
+            a connection refused, faster signal).
+        frequency:
+          type: integer
+          minimum: 0
+        mode:
+          type: string
+          enum: [failures_per_seconds, seconds, requests]
+          default: failures_per_seconds
+        consecutive:
+          type: integer
+          minimum: 1
+          default: 1
+
+    FaultFilter:
+      description: |
+        Filters which requests on this surface trigger the fault. All
+        predicates set here AND together. Omit `filter` (or set to null)
+        to match every request on the surface.
+
+        Variant predicates target manifest-declared properties (BANDWIDTH,
+        RESOLUTION, CODECS) — they're stable across encoding-pipeline
+        renames because they read from the master manifest the proxy
+        already parses. `url_match` is an escape hatch for URLs the proxy
+        can't classify (preroll, ad insertions, custom paths).
+
+        Replaces v1's `*_failure_urls` substring matching, which depended
+        on URL spelling conventions and silently broke when the encoding
+        pipeline renamed files.
+      type: object
+      additionalProperties: false
+      properties:
+        request_kind:
+          type: array
+          items:
+            type: string
+            enum:
+              - master_manifest
+              - manifest
+              - segment
+              - partial
+              - init
+              - audio_manifest
+              - audio_segment
+          description: |
+            Restrict to specific request kinds. Multiple values OR'd. If
+            omitted, all kinds match. Example: `[segment, partial]`
+            faults media data only, not playlists.
+        variant:
+          $ref: '#/components/schemas/VariantPredicate'
+        url_match:
+          $ref: '#/components/schemas/UrlMatch'
+
+    VariantPredicate:
+      description: |
+        Identify a variant by manifest-declared properties. All set
+        sub-predicates AND together. Properties read from
+        `#EXT-X-STREAM-INF` in HLS master playlists or
+        `AdaptationSet`/`Representation` in DASH MPDs.
+
+        For requests the proxy can't map to a variant (master not yet
+        fetched, audio-only rendition, unrecognised content), the
+        variant predicate does not match — fall back to `url_match`
+        for those cases.
+
+        At least one sub-predicate must be set; an empty `variant: {}`
+        is rejected with 400.
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        rung_indexes:
+          type: array
+          items: { type: integer, minimum: 0 }
+          description: |
+            Explicit rung indexes (0 = lowest BANDWIDTH). Multiple values
+            OR'd. Example: `[0, 4, 5]` for the lowest plus the top two
+            rungs of a 6-rung ladder.
+        rung_positions:
+          type: array
+          items:
+            type: string
+            enum: [top, second_from_top, bottom, second_from_bottom]
+          description: |
+            Symbolic positions, evaluated against the *current* ladder.
+            Survives ladder changes — `top` always means the highest rung.
+        resolutions:
+          type: array
+          items: { type: string }
+          description: |
+            Match by RESOLUTION declared in the manifest. Format
+            `WIDTHxHEIGHT` (e.g. "3840x2160"). Multiple values OR'd.
+        bandwidth_above:
+          type: integer
+          description: |
+            Match variants whose declared BANDWIDTH (bits/sec) is strictly
+            greater than this value.
+        bandwidth_below:
+          type: integer
+          description: |
+            Match variants whose declared BANDWIDTH (bits/sec) is strictly
+            less than this value.
+        codec_prefix:
+          type: string
+          description: |
+            Match variants whose CODECS string starts with this prefix.
+            Example: `"avc1."` matches all H.264 variants;
+            `"hvc1.,hev1."` is *not* supported (use multiple filter
+            entries on the surface if needed).
+
+    UrlMatch:
+      description: |
+        Substring / basename / exact / regex matching against the request
+        URL. Use only when variant predicates don't apply — preroll, ads,
+        custom paths the proxy can't classify.
+      type: object
+      additionalProperties: false
+      required: [mode, patterns]
+      properties:
+        mode:
+          type: string
+          enum: [exact, basename, substring, regex]
+        patterns:
+          type: array
+          minItems: 1
+          items: { type: string }
+
+    FaultCounters:
+      description: Read-only. Server-maintained; never appears in PATCH bodies.
+      type: object
+      additionalProperties: { type: integer }
+      example:
+        total: 42
+        socket_drop: 3
+        socket_reject: 0
+        request_first_byte_reset: 5
+
+    # ----- Shape ---------------------------------------------------------
+
+    Shape:
+      description: |
+        Network shaping (kernel-level). Includes optional `transport_fault`
+        for nftables drop/reject — a layer-correct home since these share
+        the nftables/tc plumbing with rate / delay / loss.
+
+        Patching with non-null replaces wholesale; setting `shape: null`
+        clears all shaping.
+      type: object
+      additionalProperties: false
+      properties:
+        rate_mbps:        { type: number, format: float, minimum: 0 }
+        delay_ms:         { type: number, format: float, minimum: 0 }
+        loss_pct:         { type: number, format: float, minimum: 0, maximum: 100 }
+        pattern:          { $ref: '#/components/schemas/Pattern' }
+        transport_fault:  { $ref: '#/components/schemas/TransportFault' }
+
+    Pattern:
+      type: object
+      additionalProperties: false
+      required: [steps]
+      properties:
+        template:
+          type: string
+          enum: [sliders, square_wave, ramp_up, ramp_down, pyramid]
+        steps:
+          type: array
+          minItems: 1
+          items: { $ref: '#/components/schemas/PatternStep' }
+
+    PatternStep:
+      type: object
+      additionalProperties: false
+      required: [rate_mbps, duration_seconds]
+      properties:
+        rate_mbps:        { type: number, format: float, minimum: 0 }
+        duration_seconds: { type: integer, minimum: 1 }
+        enabled:          { type: boolean, default: true }
+
+    # ----- Manifest / metrics --------------------------------------------
+
+    Manifest:
+      type: object
+      properties:
+        master_url:
+          type: string
+          format: uri
+          nullable: true
+        variants:
+          type: array
+          items: { $ref: '#/components/schemas/ManifestVariant' }
+
+    ManifestVariant:
+      type: object
+      required: [url, bandwidth, resolution]
+      properties:
+        url:        { type: string }
+        bandwidth:  { type: integer, description: bits per second }
+        resolution: { type: string, description: 'WIDTHxHEIGHT' }
+
+    PlayerMetrics:
+      type: object
+      properties:
+        video_resolution:   { type: string, nullable: true }
+        video_bitrate_mbps: { type: number, format: float, nullable: true }
+        buffer_depth_s:     { type: number, format: float, nullable: true }
+        stalls:             { type: integer, nullable: true }
+
+    ServerMetrics:
+      type: object
+      properties:
+        rendition_url:  { type: string, nullable: true }
+        rendition_mbps: { type: number, format: float, nullable: true }
+
+    # ----- Network -------------------------------------------------------
+
+    NetworkLogEntry:
+      description: HAR-shaped per-request record.
+      type: object
+      properties:
+        timestamp:      { type: string, format: date-time }
+        method:         { type: string }
+        url:            { type: string }
+        upstream_url:   { type: string }
+        path:           { type: string }
+        request_kind:   { type: string }
+        status:         { type: integer }
+        bytes_in:       { type: integer }
+        bytes_out:      { type: integer }
+        content_type:   { type: string }
+        play_id:        { type: string, format: uuid }
+        ttfb_ms:        { type: number, format: float }
+        total_ms:       { type: number, format: float }
+        faulted:        { type: boolean }
+        fault_type:     { type: string }
+        fault_action:   { type: string }
+        fault_category: { type: string }
+
+    # ----- Groups --------------------------------------------------------
+
+    PlayerGroup:
+      type: object
+      required: [id, member_player_ids]
+      properties:
+        id:                { type: string, format: uuid }
+        label:             { type: string }
+        labels:            { $ref: '#/components/schemas/Labels' }
+        member_player_ids:
+          type: array
+          items: { type: string, format: uuid }
+        control_revision:  { type: string }
+
+    PlayerGroupPatch:
+      type: object
+      additionalProperties: false
+      properties:
+        label:             { type: string }
+        labels:            { $ref: '#/components/schemas/Labels' }
+        member_player_ids:
+          type: array
+          items: { type: string, format: uuid }
+
+    # ----- Diagnostics ---------------------------------------------------
+
+    Info:
+      type: object
+      properties:
+        version:           { type: string, description: build commit / tag }
+        api_versions:      { type: array, items: { type: string } }
+        content_dir:       { type: string }
+        auth_enabled:      { type: boolean }
+        analytics_enabled: { type: boolean }
+        nftables_capabilities:
+          type: object
+          properties:
+            netem:    { type: boolean }
+            htb:      { type: boolean }
+            per_port: { type: boolean }
+
+    # ----- SSE envelope --------------------------------------------------
+
+    StreamEvent:
+      description: |
+        Discriminated union. `type` selects the variant. Heartbeat frames
+        carry no data and exist only to keep idle proxies / load balancers
+        from timing out.
+      oneOf:
+        - $ref: '#/components/schemas/PlayerCreatedEvent'
+        - $ref: '#/components/schemas/PlayerUpdatedEvent'
+        - $ref: '#/components/schemas/PlayerDeletedEvent'
+        - $ref: '#/components/schemas/PlayStartedEvent'
+        - $ref: '#/components/schemas/PlayUpdatedEvent'
+        - $ref: '#/components/schemas/PlayEndedEvent'
+        - $ref: '#/components/schemas/PlayNetworkEntryEvent'
+        - $ref: '#/components/schemas/HeartbeatEvent'
+      discriminator:
+        propertyName: type
+        mapping:
+          player.created:      '#/components/schemas/PlayerCreatedEvent'
+          player.updated:      '#/components/schemas/PlayerUpdatedEvent'
+          player.deleted:      '#/components/schemas/PlayerDeletedEvent'
+          play.started:        '#/components/schemas/PlayStartedEvent'
+          play.updated:        '#/components/schemas/PlayUpdatedEvent'
+          play.ended:          '#/components/schemas/PlayEndedEvent'
+          play.network.entry:  '#/components/schemas/PlayNetworkEntryEvent'
+          heartbeat:           '#/components/schemas/HeartbeatEvent'
+
+    PlayerCreatedEvent:
+      type: object
+      required: [type, data]
+      properties:
+        type: { type: string, enum: [player.created] }
+        data: { $ref: '#/components/schemas/PlayerRecord' }
+
+    PlayerUpdatedEvent:
+      type: object
+      required: [type, data]
+      properties:
+        type: { type: string, enum: [player.updated] }
+        data: { $ref: '#/components/schemas/PlayerRecord' }
+
+    PlayerDeletedEvent:
+      type: object
+      required: [type, data]
+      properties:
+        type: { type: string, enum: [player.deleted] }
+        data:
+          type: object
+          required: [player_id]
+          properties:
+            player_id: { type: string, format: uuid }
+            reason:
+              type: string
+              enum: [client_disconnect, idle_timeout, explicit_delete, harness_reset]
+
+    PlayStartedEvent:
+      type: object
+      required: [type, data]
+      properties:
+        type: { type: string, enum: [play.started] }
+        data: { $ref: '#/components/schemas/PlayRecord' }
+
+    PlayUpdatedEvent:
+      type: object
+      required: [type, data]
+      properties:
+        type: { type: string, enum: [play.updated] }
+        data: { $ref: '#/components/schemas/PlayRecord' }
+
+    PlayEndedEvent:
+      description: |
+        The forwarder consumes this to finalise the in-memory accumulator
+        and write a `play_summaries` row. `reason` distinguishes graceful
+        end vs. timeouts vs. forced rotation.
+      type: object
+      required: [type, data]
+      properties:
+        type: { type: string, enum: [play.ended] }
+        data:
+          type: object
+          required: [play_id, ended_at, reason]
+          properties:
+            play_id:  { type: string, format: uuid }
+            ended_at: { type: string, format: date-time }
+            reason:
+              type: string
+              enum: [client_disconnect, idle_timeout, content_complete, rotation, explicit_delete]
+
+    PlayNetworkEntryEvent:
+      description: One HTTP request as it lands in the play's ring buffer.
+      type: object
+      required: [type, data]
+      properties:
+        type: { type: string, enum: [play.network.entry] }
+        data:
+          type: object
+          required: [player_id, play_id, entry]
+          properties:
+            player_id: { type: string, format: uuid }
+            play_id:   { type: string, format: uuid }
+            entry:     { $ref: '#/components/schemas/NetworkLogEntry' }
+
+    HeartbeatEvent:
+      type: object
+      required: [type]
+      properties:
+        type: { type: string, enum: [heartbeat] }
+        data:
+          type: object
+          properties:
+            ts: { type: string, format: date-time }

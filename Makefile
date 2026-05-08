@@ -67,6 +67,45 @@ buildx-arm64:
 buildx-push:
 	docker buildx build --platform linux/amd64,linux/arm64 -t infinite-streaming:latest --push .
 
+# OpenAPI / Swagger spec generation. Annotations live in
+# go-proxy/cmd/server/openapi.go and analytics/go-forwarder/openapi.go
+# (separate from the handlers so main.go stays clean). Output drops in
+# api/openapi/{proxy,forwarder}/swagger.{json,yaml}; v2 hand-written
+# specs live in api/openapi/v2/.
+SWAG := $(or $(SWAG),$(shell go env GOPATH)/bin/swag)
+
+openapi-tools:
+	go install github.com/swaggo/swag/v2/cmd/swag@v2.0.0
+	@echo "installed: $(SWAG)"
+
+openapi:
+	@test -x "$(SWAG)" || { echo "swag not installed — run 'make openapi-tools'"; exit 1; }
+	@mkdir -p api/openapi/proxy api/openapi/forwarder
+	cd go-proxy && $(SWAG) init --v3.1 -g cmd/server/openapi.go --output ../api/openapi/proxy --outputTypes json,yaml --parseInternal
+	@if [ -f analytics/go-forwarder/openapi.go ]; then \
+	  cd analytics/go-forwarder && $(SWAG) init --v3.1 -g openapi.go --output ../../api/openapi/forwarder --outputTypes json,yaml --parseInternal; \
+	else \
+	  echo "skipping forwarder spec — analytics/go-forwarder/openapi.go not present yet"; \
+	fi
+	@mkdir -p content/dashboard/api-docs
+	@cp api/openapi/proxy/swagger.json content/dashboard/api-docs/proxy.json
+	@if [ -f api/openapi/forwarder/swagger.json ]; then \
+	  cp api/openapi/forwarder/swagger.json content/dashboard/api-docs/forwarder.json; \
+	fi
+	@if [ -f api/openapi/v2/proxy.yaml ]; then \
+	  cp api/openapi/v2/proxy.yaml content/dashboard/api-docs/proxy-v2.yaml; \
+	fi
+	@if [ -f api/openapi/v2/forwarder.yaml ]; then \
+	  cp api/openapi/v2/forwarder.yaml content/dashboard/api-docs/forwarder-v2.yaml; \
+	fi
+	@echo "specs regenerated under api/openapi/"
+	@echo "scalar UI mirror: content/dashboard/api-docs/{proxy,forwarder,proxy-v2,forwarder-v2}.{json,yaml}"
+
+openapi-clean:
+	rm -rf api/openapi/proxy api/openapi/forwarder
+	rm -f content/dashboard/api-docs/proxy.json content/dashboard/api-docs/forwarder.json
+	rm -f content/dashboard/api-docs/proxy-v2.yaml content/dashboard/api-docs/forwarder-v2.yaml
+
 K3S_REGISTRY ?= localhost:5000
 K3S_SERVER_REPO ?= infinite-streaming
 
