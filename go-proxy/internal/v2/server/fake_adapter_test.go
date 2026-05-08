@@ -239,6 +239,20 @@ func (a *fakeAdapter) SubscribeSessions(buffer int) (<-chan SessionSnapshot, fun
 	return ch, cancel
 }
 
+// pushNetworkRow lets tests inject a synthetic network event into
+// every active subscriber. Mirrors what v1's NetworkEventHub.Broadcast
+// does in production.
+func (a *fakeAdapter) pushNetworkRow(row NetworkLogRow) {
+	a.subNetMu.Lock()
+	defer a.subNetMu.Unlock()
+	for _, ch := range a.subNet {
+		select {
+		case ch <- row:
+		default:
+		}
+	}
+}
+
 func (a *fakeAdapter) SubscribeNetwork(buffer int) (<-chan NetworkLogRow, func()) {
 	ch := make(chan NetworkLogRow, buffer)
 	a.subNetMu.Lock()

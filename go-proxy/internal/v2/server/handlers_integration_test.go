@@ -691,6 +691,85 @@ func TestSSE_LastEventID_Replays(t *testing.T) {
 	}
 }
 
+func TestSSE_PlayStartedAndEnded(t *testing.T) {
+	a, srv, _ := newTestServer(t)
+	pid := uuid.New().String()
+	a.addPlayer(pid, "rev1", map[string]any{"session_id": "sess-A"})
+
+	// Wait briefly for the EventSource to receive the initial session
+	// snapshot from addSession's notifySessions goroutine. Without
+	// this, the subsequent network rows would arrive before the
+	// session_id → player_id map populates and lookupPlayerID
+	// returns "".
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if got := srv.events.lookupPlayerID("sess-A"); got == pid {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// Push two network rows with different play_ids — should yield
+	// play.started(playA), then (on rotation) play.ended(playA) +
+	// play.started(playB).
+	a.pushNetworkRow(NetworkLogRow{SessionID: "sess-A", Entry: map[string]any{"play_id": "playA", "url": "/seg1"}})
+	a.pushNetworkRow(NetworkLogRow{SessionID: "sess-A", Entry: map[string]any{"play_id": "playB", "url": "/seg2"}})
+
+	// Spin briefly until both events land in the ring (best-effort —
+	// the EventSource processes them on its goroutine).
+	deadline = time.Now().Add(1 * time.Second)
+	for time.Now().Before(deadline) {
+		srv.events.ring.mu.RLock()
+		n := len(srv.events.ring.frames)
+		srv.events.ring.mu.RUnlock()
+		if n >= 4 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// Inspect the ring for the expected event types in order.
+	srv.events.ring.mu.RLock()
+	got := make([]string, 0, len(srv.events.ring.frames))
+	for _, f := range srv.events.ring.frames {
+		got = append(got, f.Type)
+	}
+	srv.events.ring.mu.RUnlock()
+
+	// Find the index of the first play.started.
+	startIdx := -1
+	for i, t := range got {
+		if t == "play.started" {
+			startIdx = i
+			break
+		}
+	}
+	if startIdx < 0 {
+		t.Fatalf("play.started missing; ring=%v", got)
+	}
+	// After the first play.started we should see play.ended then
+	// play.started again (potentially interleaved with
+	// play.network.entry frames).
+	rest := got[startIdx+1:]
+	sawEnded := false
+	sawSecondStarted := false
+	for _, t := range rest {
+		if t == "play.ended" {
+			sawEnded = true
+		}
+		if sawEnded && t == "play.started" {
+			sawSecondStarted = true
+			break
+		}
+	}
+	if !sawEnded {
+		t.Errorf("expected play.ended after rotation; ring=%v", got)
+	}
+	if !sawSecondStarted {
+		t.Errorf("expected second play.started after play.ended; ring=%v", got)
+	}
+}
+
 func TestSSE_Gap_Synth(t *testing.T) {
 	_, srv, ts := newTestServer(t)
 
