@@ -11,21 +11,9 @@ import (
 	"github.com/jonathaneoliver/infinite-streaming/go-proxy/internal/v2/oapigen"
 )
 
-// ----- Per-rule fault sub-resources (player) -------------------------------
-
-func (*Server) PostApiV2PlayersPlayerIdFaultRules(w http.ResponseWriter, r *http.Request, playerId oapigen.PlayerId, params oapigen.PostApiV2PlayersPlayerIdFaultRulesParams) {
-	notImplemented(w, "PostApiV2PlayersPlayerIdFaultRules")
-}
-
-func (*Server) PatchApiV2PlayersPlayerIdFaultRulesRuleId(w http.ResponseWriter, r *http.Request, playerId oapigen.PlayerId, ruleId oapigen.RuleId, params oapigen.PatchApiV2PlayersPlayerIdFaultRulesRuleIdParams) {
-	notImplemented(w, "PatchApiV2PlayersPlayerIdFaultRulesRuleId")
-}
-
-func (*Server) DeleteApiV2PlayersPlayerIdFaultRulesRuleId(w http.ResponseWriter, r *http.Request, playerId oapigen.PlayerId, ruleId oapigen.RuleId, params oapigen.DeleteApiV2PlayersPlayerIdFaultRulesRuleIdParams) {
-	notImplemented(w, "DeleteApiV2PlayersPlayerIdFaultRulesRuleId")
-}
-
 // ----- Per-rule fault sub-resources (play) ---------------------------------
+// Plays aren't first-class in v1 yet — these stay 501 until Phase J
+// surfaces play_id boundaries onto session records.
 
 func (*Server) PostApiV2PlaysPlayIdFaultRules(w http.ResponseWriter, r *http.Request, playId oapigen.PlayId, params oapigen.PostApiV2PlaysPlayIdFaultRulesParams) {
 	notImplemented(w, "PostApiV2PlaysPlayIdFaultRules")
