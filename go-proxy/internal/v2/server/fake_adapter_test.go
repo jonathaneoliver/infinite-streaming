@@ -2,6 +2,8 @@ package server
 
 import (
 	"sync"
+
+	"github.com/google/uuid"
 )
 
 // fakeAdapter is an in-memory V1Adapter for handler tests. Mirrors the
@@ -14,6 +16,11 @@ import (
 type fakeAdapter struct {
 	mu       sync.Mutex
 	sessions []map[string]any
+
+	// Test-side observation hooks for kernel-apply calls. Real adapter
+	// drives v1's nftables / tc helpers; the fake just records.
+	shapeApplyCalls     []string
+	transportFaultCalls []fakeTransportFaultCall
 
 	// SubscribeSessions delivers snapshots whenever sessionsChanged
 	// fires; pretests can call it directly to drive the diff.
@@ -105,13 +112,88 @@ func (a *fakeAdapter) MutatePlayer(playerID string, fn func(map[string]any) erro
 	return nil, false, nil
 }
 
+// CreateSyntheticPlayer in tests just creates a minimal session record.
+// Idempotency contract follows the real adapter: 200 on labels-equal,
+// 409 on labels-differ, 201 on new.
 func (a *fakeAdapter) CreateSyntheticPlayer(playerID string, payload map[string]any) (int, map[string]any, error) {
-	return 0, nil, fakeSyntheticErr{}
+	if playerID == "" {
+		playerID = uuid.New().String()
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for _, s := range a.sessions {
+		if asString(s["player_id"]) == playerID {
+			existing, _ := s["_v2_labels"].(map[string]any)
+			incoming, _ := payload["labels"].(map[string]any)
+			if labelsMapEqual(existing, incoming) {
+				return 200, cloneMap(s), nil
+			}
+			return 409, nil, nil
+		}
+	}
+	rec := map[string]any{
+		"player_id":        playerID,
+		"session_id":       "synth-" + safePrefix(playerID, 8),
+		"control_revision": "2026-01-01T00:00:00.000000000Z",
+		"x_forwarded_port": "30181",
+	}
+	if labels, ok := payload["labels"].(map[string]any); ok && len(labels) > 0 {
+		rec["_v2_labels"] = labels
+	}
+	a.sessions = append(a.sessions, rec)
+	go a.notifySessions()
+	return 201, cloneMap(rec), nil
 }
 
-type fakeSyntheticErr struct{}
+func safePrefix(s string, n int) string {
+	if len(s) < n {
+		return s
+	}
+	return s[:n]
+}
 
-func (fakeSyntheticErr) Error() string { return "fake adapter doesn't implement synthetic players" }
+func labelsMapEqual(a, b map[string]any) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, v := range a {
+		if b[k] != v {
+			return false
+		}
+	}
+	return true
+}
+
+// ApplyShapeToPlayer / ApplyTransportFaultToPlayer are kernel-applied
+// in production. The fake records that they were called for assertions
+// but doesn't simulate any kernel state.
+func (a *fakeAdapter) ApplyShapeToPlayer(playerID string) error {
+	a.mu.Lock()
+	a.shapeApplyCalls = append(a.shapeApplyCalls, playerID)
+	a.mu.Unlock()
+	return nil
+}
+
+func (a *fakeAdapter) ApplyTransportFaultToPlayer(playerID, faultType string, consecutive int, consecutiveUnits string, frequency int) error {
+	a.mu.Lock()
+	a.transportFaultCalls = append(a.transportFaultCalls, fakeTransportFaultCall{
+		PlayerID:         playerID,
+		FaultType:        faultType,
+		Consecutive:      consecutive,
+		ConsecutiveUnits: consecutiveUnits,
+		Frequency:        frequency,
+	})
+	a.mu.Unlock()
+	return nil
+}
+
+type fakeTransportFaultCall struct {
+	PlayerID         string
+	FaultType        string
+	Consecutive      int
+	ConsecutiveUnits string
+	Frequency        int
+}
 
 func (a *fakeAdapter) DeletePlayer(playerID string) bool {
 	a.mu.Lock()

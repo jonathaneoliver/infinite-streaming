@@ -169,11 +169,70 @@ func TestGet_PlayersByID_Found_HasETag(t *testing.T) {
 	}
 }
 
-func TestPost_Players_NotImplemented(t *testing.T) {
+func TestPost_Players_201_ServerGeneratedID(t *testing.T) {
 	_, _, ts := newTestServer(t)
-	status, body, _ := mustDo(t, ts, "POST", "/api/v2/players", "{}", nil)
-	if status != http.StatusNotImplemented {
-		t.Errorf("status %d, want 501; body=%s", status, body)
+	status, body, headers := mustDo(t, ts, "POST", "/api/v2/players", "{}", nil)
+	if status != http.StatusCreated {
+		t.Fatalf("status %d body=%s", status, body)
+	}
+	var rec map[string]any
+	if err := json.Unmarshal(body, &rec); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if _, ok := rec["id"]; !ok {
+		t.Errorf("response missing id: %s", body)
+	}
+	if headers.Get("Location") == "" {
+		t.Errorf("Location header missing")
+	}
+	if headers.Get("ETag") == "" {
+		t.Errorf("ETag header missing")
+	}
+}
+
+func TestPost_Players_201_ClientSuppliedID(t *testing.T) {
+	a, _, ts := newTestServer(t)
+	pid := uuid.New().String()
+	body := `{"player_id":"` + pid + `","labels":{"test":"hello"}}`
+	status, _, _ := mustDo(t, ts, "POST", "/api/v2/players", body, nil)
+	if status != http.StatusCreated {
+		t.Fatalf("status %d", status)
+	}
+	stored, ok := a.SessionByPlayerID(pid)
+	if !ok {
+		t.Fatalf("session not stored")
+	}
+	labels, _ := stored["_v2_labels"].(map[string]any)
+	if labels["test"] != "hello" {
+		t.Errorf("labels = %v, want test=hello", labels)
+	}
+}
+
+func TestPost_Players_200_IdempotentRetry(t *testing.T) {
+	_, _, ts := newTestServer(t)
+	pid := uuid.New().String()
+	body := `{"player_id":"` + pid + `","labels":{"k":"v"}}`
+	if s, _, _ := mustDo(t, ts, "POST", "/api/v2/players", body, nil); s != http.StatusCreated {
+		t.Fatalf("first POST %d", s)
+	}
+	// Same body → 200.
+	status, _, _ := mustDo(t, ts, "POST", "/api/v2/players", body, nil)
+	if status != http.StatusOK {
+		t.Errorf("retry status %d, want 200", status)
+	}
+}
+
+func TestPost_Players_409_DifferentBody(t *testing.T) {
+	_, _, ts := newTestServer(t)
+	pid := uuid.New().String()
+	body1 := `{"player_id":"` + pid + `","labels":{"k":"v1"}}`
+	body2 := `{"player_id":"` + pid + `","labels":{"k":"v2"}}`
+	if s, _, _ := mustDo(t, ts, "POST", "/api/v2/players", body1, nil); s != http.StatusCreated {
+		t.Fatalf("first POST %d", s)
+	}
+	status, _, _ := mustDo(t, ts, "POST", "/api/v2/players", body2, nil)
+	if status != http.StatusConflict {
+		t.Errorf("conflicting body status %d, want 409", status)
 	}
 }
 
@@ -230,11 +289,75 @@ func TestPatch_UnsupportedField_501(t *testing.T) {
 	a, _, ts := newTestServer(t)
 	pid := uuid.New().String()
 	a.addPlayer(pid, "rev1", nil)
+	// fault_rules is still deferred — Phase H wires shape but not
+	// fault_rules.
 	status, body, _ := mustDo(t, ts, "PATCH", "/api/v2/players/"+pid,
-		`{"shape":{"rate_mbps":5}}`,
+		`{"fault_rules":[{"id":"r1","type":"500"}]}`,
 		map[string]string{"If-Match": `"rev1"`})
 	if status != http.StatusNotImplemented {
 		t.Errorf("status %d, want 501; body=%s", status, body)
+	}
+}
+
+func TestPatch_ShapeRoundTrip(t *testing.T) {
+	a, _, ts := newTestServer(t)
+	pid := uuid.New().String()
+	initialRev := "2020-01-01T00:00:00.000000000Z"
+	a.addPlayer(pid, initialRev, nil)
+
+	body := `{"shape":{"rate_mbps":5,"delay_ms":50,"loss_pct":1.5}}`
+	status, respBody, _ := mustDo(t, ts, "PATCH", "/api/v2/players/"+pid, body,
+		map[string]string{"If-Match": `"` + initialRev + `"`})
+	if status != http.StatusOK {
+		t.Fatalf("status %d body=%s", status, respBody)
+	}
+	stored, _ := a.SessionByPlayerID(pid)
+	if stored["nftables_bandwidth_mbps"] != float64(5) {
+		t.Errorf("nftables_bandwidth_mbps = %v", stored["nftables_bandwidth_mbps"])
+	}
+	if stored["nftables_delay_ms"] != 50 {
+		t.Errorf("nftables_delay_ms = %v", stored["nftables_delay_ms"])
+	}
+	if stored["nftables_packet_loss"] != 1.5 {
+		t.Errorf("nftables_packet_loss = %v", stored["nftables_packet_loss"])
+	}
+	// ApplyShapeToPlayer should have been called.
+	a.mu.Lock()
+	calls := append([]string{}, a.shapeApplyCalls...)
+	a.mu.Unlock()
+	found := false
+	for _, p := range calls {
+		if p == pid {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("ApplyShapeToPlayer not called for %s; calls=%v", pid, calls)
+	}
+}
+
+func TestPatch_TransportFault_ArmsKernel(t *testing.T) {
+	a, _, ts := newTestServer(t)
+	pid := uuid.New().String()
+	initialRev := "2020-01-01T00:00:00.000000000Z"
+	a.addPlayer(pid, initialRev, nil)
+
+	body := `{"shape":{"transport_fault":{"type":"drop","frequency":5,"consecutive":2,"mode":"failures_per_seconds"}}}`
+	status, respBody, _ := mustDo(t, ts, "PATCH", "/api/v2/players/"+pid, body,
+		map[string]string{"If-Match": `"` + initialRev + `"`})
+	if status != http.StatusOK {
+		t.Fatalf("status %d body=%s", status, respBody)
+	}
+	a.mu.Lock()
+	calls := append([]fakeTransportFaultCall{}, a.transportFaultCalls...)
+	a.mu.Unlock()
+	if len(calls) == 0 {
+		t.Fatalf("ApplyTransportFaultToPlayer not called")
+	}
+	last := calls[len(calls)-1]
+	if last.PlayerID != pid || last.FaultType != "drop" || last.Consecutive != 2 || last.Frequency != 5 {
+		t.Errorf("transport-fault call mismatch: %+v", last)
 	}
 }
 

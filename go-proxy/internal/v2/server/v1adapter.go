@@ -107,6 +107,20 @@ type V1Adapter interface {
 	// `control_revision` is stamped to `rev`. Returns the player_ids
 	// touched (suitable for fanning per-member FieldRevisions).
 	BroadcastPatch(groupID string, excludePlayerID string, rev string, fn func(map[string]any) error) (touched []string, err error)
+
+	// ----- Kernel-apply surface (Phase F+) -----------------------------
+
+	// ApplyShapeToPlayer pushes the session's nftables_*
+	// (rate/delay/loss) values into the kernel for the player's bound
+	// port. Idempotent — short-circuits when the desired state already
+	// matches the current kernel state. No-op when the proxy is
+	// non-Linux or has no traffic manager.
+	ApplyShapeToPlayer(playerID string) error
+
+	// ApplyTransportFaultToPlayer arms the transport-fault loop on the
+	// player's bound port with the supplied type/cadence. type="none"
+	// disarms.
+	ApplyTransportFaultToPlayer(playerID string, faultType string, consecutive int, consecutiveUnits string, frequency int) error
 }
 
 // SessionSnapshot is the v2-friendly shape of a SessionsEvent: the

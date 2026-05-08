@@ -34,8 +34,14 @@ import (
 
 // ----- Players (mutations) -------------------------------------------------
 
-// PostApiV2Players: synthetic-player upsert. Awaits the v1-side port
-// allocator; returns 501 with a clear problem detail in the meantime.
+// PostApiV2Players: synthetic-player upsert.
+//
+//   - 201 if newly created
+//   - 200 if a player with the same player_id already exists with
+//     v2-equivalent labels
+//   - 400 on malformed body / invalid player_id
+//   - 409 if the player_id exists with a different body
+//   - 503 if the proxy's session limit is reached
 func (s *Server) PostApiV2Players(w http.ResponseWriter, r *http.Request) {
 	if s.v1 == nil {
 		notImplemented(w, "PostApiV2Players")
@@ -59,13 +65,19 @@ func (s *Server) PostApiV2Players(w http.ResponseWriter, r *http.Request) {
 
 	status, record, cerr := s.v1.CreateSyntheticPlayer(pid, payload)
 	if cerr != nil {
-		writeProblem(
-			w,
-			http.StatusNotImplemented,
-			"https://harness/errors/not-implemented",
-			"synthetic player creation not yet wired",
-			cerr.Error(),
-			map[string]any{"operation": "PostApiV2Players"},
+		writePlayerCreateError(w, cerr)
+		return
+	}
+	if status == 0 {
+		writeProblem(w, http.StatusInternalServerError, "https://harness/errors/internal", "adapter returned status=0 with no error", "", nil)
+		return
+	}
+	if status == http.StatusConflict {
+		writeProblem(w, http.StatusConflict,
+			"https://harness/errors/player-exists-different-settings",
+			"player exists with different settings",
+			"a player with that player_id is already connected; mutate it via PATCH instead",
+			map[string]any{"existing_player_id": pid, "hint": "use PATCH"},
 		)
 		return
 	}
@@ -79,6 +91,27 @@ func (s *Server) PostApiV2Players(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Location", "/api/v2/players/"+rec.Id.String())
 	writeJSON(w, status, rec)
+}
+
+// writePlayerCreateError maps adapter sentinel errors into RFC 7807
+// problem responses. Lives in handlers_mutate.go because the adapter
+// errors are package-private to cmd/server (we only see them via the
+// V1Adapter return value, but the messages are stable enough to
+// pattern-match on).
+func writePlayerCreateError(w http.ResponseWriter, err error) {
+	msg := err.Error()
+	switch {
+	case strings.Contains(msg, "player_id must be a UUID"):
+		writeProblem(w, http.StatusBadRequest, "https://harness/errors/bad-request", "player_id must be a UUID", msg, nil)
+	case strings.Contains(msg, "session limit reached"):
+		writeProblem(w, http.StatusServiceUnavailable, "https://harness/errors/session-limit", "session limit reached", msg, nil)
+	case strings.Contains(msg, "v1 *App backing"):
+		// Test-mode adapter without a real *App. Surface as 501 so
+		// callers know the feature isn't wired.
+		writeProblem(w, http.StatusNotImplemented, "https://harness/errors/not-implemented", "synthetic player creation requires a v1 backing", msg, nil)
+	default:
+		writeProblem(w, http.StatusInternalServerError, "https://harness/errors/internal", "create failed", msg, nil)
+	}
 }
 
 // DeleteApiV2Players clears every active player.
@@ -215,6 +248,7 @@ func (s *Server) PatchApiV2PlayersPlayerId(w http.ResponseWriter, r *http.Reques
 	// player FieldRevisions tracker is bumped to the same `rev` so a
 	// concurrent PATCHer reading from any member sees the latest
 	// revision uniformly.
+	var broadcastTouched []string
 	if groupID != "" {
 		touched, bErr := s.v1.BroadcastPatch(groupID, pidStr, rev, func(member map[string]any) error {
 			applyPatchToSession(member, patch)
@@ -229,6 +263,26 @@ func (s *Server) PatchApiV2PlayersPlayerId(w http.ResponseWriter, r *http.Reques
 		}
 		for _, p := range touched {
 			s.fieldRevs(p).TouchWith(paths, rev)
+		}
+		broadcastTouched = touched
+	}
+
+	// Drive the kernel-side state for shape / transport_fault changes.
+	// These run after the SessionData write has been published so v1
+	// SSE consumers see the new field values before the kernel apply
+	// fires its own log lines.
+	if shapeFieldsTouched(paths) {
+		_ = s.v1.ApplyShapeToPlayer(pidStr)
+		for _, p := range broadcastTouched {
+			_ = s.v1.ApplyShapeToPlayer(p)
+		}
+	}
+	if transportFaultTouched(paths) {
+		applyTransportFaultFromSession(s, post, pidStr)
+		for _, p := range broadcastTouched {
+			if memberSess, ok := s.v1.SessionByPlayerID(p); ok {
+				applyTransportFaultFromSession(s, memberSess, p)
+			}
 		}
 	}
 
@@ -260,41 +314,92 @@ func (*Server) PatchApiV2PlaysPlayId(w http.ResponseWriter, r *http.Request, pla
 // ----- helpers -------------------------------------------------------------
 
 // unsupportedPaths returns the leaf paths whose v2→v1 translator hasn't
-// been written yet. Phase D supports labels.* only.
+// been written yet.
+//
+// Phase D: labels.* only.
+// Phase H: + shape.{rate_mbps,delay_ms,loss_pct,transport_fault.*} —
+// fault_rules and shape.pattern stay 501 until their dedicated
+// translators land.
 func unsupportedPaths(paths []string) []string {
 	var bad []string
 	for _, p := range paths {
-		if p == "labels" || strings.HasPrefix(p, "labels.") {
-			continue
+		switch {
+		case p == "labels", strings.HasPrefix(p, "labels."):
+		case p == "shape.rate_mbps":
+		case p == "shape.delay_ms":
+		case p == "shape.loss_pct":
+		case p == "shape.transport_fault", strings.HasPrefix(p, "shape.transport_fault."):
+		case p == "shape":
+			// Whole-shape replace via Merge Patch: we'll translate
+			// every recognised sub-field; unknown sub-fields land in
+			// the session map as `_v2_shape_unsupported.<name>` and
+			// don't drive any kernel state. Acceptable.
+		default:
+			bad = append(bad, p)
 		}
-		bad = append(bad, p)
 	}
 	return bad
 }
 
-// applyPatchToSession projects the v2 Merge Patch onto the v1
-// SessionData map. Phase D handles labels only — this function will
-// grow as shape and fault_rules translators land.
-//
-// Labels are stored on the v1 session under the `_v2_labels` key as a
-// `map[string]any` (string keys, string values). v1's existing read
-// handlers ignore unknown keys, so this is invisible to the dashboard.
-func applyPatchToSession(s map[string]any, patch map[string]any) {
-	labels, hasLabels := patch["labels"]
-	if !hasLabels {
-		return
+// shapeFieldsTouched reports whether the patch touches any kernel-side
+// shape state (rate/delay/loss). Used to decide whether to invoke
+// ApplyShapeToPlayer after a successful PATCH.
+func shapeFieldsTouched(paths []string) bool {
+	for _, p := range paths {
+		switch p {
+		case "shape", "shape.rate_mbps", "shape.delay_ms", "shape.loss_pct":
+			return true
+		}
 	}
+	return false
+}
+
+// transportFaultTouched reports whether the patch touches transport
+// fault state. Used to decide whether to invoke
+// ApplyTransportFaultToPlayer after a successful PATCH.
+func transportFaultTouched(paths []string) bool {
+	for _, p := range paths {
+		if p == "shape" || p == "shape.transport_fault" || strings.HasPrefix(p, "shape.transport_fault.") {
+			return true
+		}
+	}
+	return false
+}
+
+// applyPatchToSession projects the v2 Merge Patch onto the v1
+// SessionData map. Translates v2 field names to v1 storage keys:
+//
+//	labels.*          → s["_v2_labels"][...]                (Phase D)
+//	shape.rate_mbps   → s["nftables_bandwidth_mbps"]        (Phase H)
+//	shape.delay_ms    → s["nftables_delay_ms"]
+//	shape.loss_pct    → s["nftables_packet_loss"]
+//	shape.transport_fault.{type,frequency,consecutive,mode}
+//	                  → s["transport_failure_*"] / s["transport_fault_*"]
+//
+// Other v2 paths are admitted via unsupportedPaths but stored as
+// `_v2_unsupported.<path>` for Phase debugging visibility — they
+// don't drive any kernel state.
+func applyPatchToSession(s map[string]any, patch map[string]any) {
+	if labels, hasLabels := patch["labels"]; hasLabels {
+		applyLabelsPatch(s, labels)
+	}
+	if shape, hasShape := patch["shape"]; hasShape {
+		applyShapePatch(s, shape)
+	}
+}
+
+func applyLabelsPatch(s map[string]any, labels any) {
 	if labels == nil {
 		delete(s, "_v2_labels")
+		return
+	}
+	patchMap, ok := labels.(map[string]any)
+	if !ok {
 		return
 	}
 	current, _ := s["_v2_labels"].(map[string]any)
 	if current == nil {
 		current = map[string]any{}
-	}
-	patchMap, ok := labels.(map[string]any)
-	if !ok {
-		return
 	}
 	for k, v := range patchMap {
 		if v == nil {
@@ -308,6 +413,142 @@ func applyPatchToSession(s map[string]any, patch map[string]any) {
 		return
 	}
 	s["_v2_labels"] = current
+}
+
+func applyShapePatch(s map[string]any, shape any) {
+	if shape == nil {
+		// Wholesale wipe — clear every translated v1 field.
+		s["nftables_bandwidth_mbps"] = float64(0)
+		s["nftables_delay_ms"] = 0
+		s["nftables_packet_loss"] = float64(0)
+		s["transport_failure_type"] = "none"
+		s["transport_fault_type"] = "none"
+		s["transport_failure_frequency"] = 0
+		s["transport_consecutive_failures"] = 1
+		s["transport_failure_mode"] = "failures_per_seconds"
+		return
+	}
+	shapeMap, ok := shape.(map[string]any)
+	if !ok {
+		return
+	}
+	if v, present := shapeMap["rate_mbps"]; present {
+		if v == nil {
+			s["nftables_bandwidth_mbps"] = float64(0)
+		} else if f, ok := numericFloat(v); ok {
+			s["nftables_bandwidth_mbps"] = f
+		}
+	}
+	if v, present := shapeMap["delay_ms"]; present {
+		if v == nil {
+			s["nftables_delay_ms"] = 0
+		} else if f, ok := numericFloat(v); ok {
+			s["nftables_delay_ms"] = int(f)
+		}
+	}
+	if v, present := shapeMap["loss_pct"]; present {
+		if v == nil {
+			s["nftables_packet_loss"] = float64(0)
+		} else if f, ok := numericFloat(v); ok {
+			s["nftables_packet_loss"] = f
+		}
+	}
+	if tf, present := shapeMap["transport_fault"]; present {
+		applyTransportFaultPatch(s, tf)
+	}
+}
+
+func applyTransportFaultPatch(s map[string]any, tf any) {
+	if tf == nil {
+		s["transport_failure_type"] = "none"
+		s["transport_fault_type"] = "none"
+		s["transport_failure_frequency"] = 0
+		s["transport_consecutive_failures"] = 1
+		s["transport_failure_mode"] = "failures_per_seconds"
+		return
+	}
+	m, ok := tf.(map[string]any)
+	if !ok {
+		return
+	}
+	if v, present := m["type"]; present {
+		if v == nil {
+			s["transport_failure_type"] = "none"
+			s["transport_fault_type"] = "none"
+		} else if str, ok := v.(string); ok {
+			s["transport_failure_type"] = str
+			s["transport_fault_type"] = str
+		}
+	}
+	if v, present := m["frequency"]; present {
+		if v == nil {
+			s["transport_failure_frequency"] = 0
+		} else if f, ok := numericFloat(v); ok {
+			s["transport_failure_frequency"] = int(f)
+		}
+	}
+	if v, present := m["consecutive"]; present {
+		if v == nil {
+			s["transport_consecutive_failures"] = 1
+		} else if f, ok := numericFloat(v); ok {
+			c := int(f)
+			if c < 1 {
+				c = 1
+			}
+			s["transport_consecutive_failures"] = c
+		}
+	}
+	if v, present := m["mode"]; present {
+		if str, ok := v.(string); ok {
+			s["transport_failure_mode"] = str
+		}
+	}
+}
+
+// applyTransportFaultFromSession reads the transport-fault state out
+// of the post-patch session map and arms the kernel-side loop on the
+// player's port via the V1Adapter.
+func applyTransportFaultFromSession(srv *Server, sess map[string]any, playerID string) {
+	if srv == nil || srv.v1 == nil || sess == nil {
+		return
+	}
+	faultType, _ := sess["transport_failure_type"].(string)
+	if faultType == "" {
+		faultType = "none"
+	}
+	consec := 1
+	if f, ok := numericFloat(sess["transport_consecutive_failures"]); ok && int(f) >= 1 {
+		consec = int(f)
+	}
+	consecUnits, _ := sess["transport_consecutive_units"].(string)
+	if consecUnits == "" {
+		consecUnits = "seconds"
+	}
+	freq := 0
+	if f, ok := numericFloat(sess["transport_failure_frequency"]); ok {
+		freq = int(f)
+	}
+	_ = srv.v1.ApplyTransportFaultToPlayer(playerID, faultType, consec, consecUnits, freq)
+}
+
+// numericFloat coerces a JSON-decoded scalar to float64. JSON numbers
+// land as float64 by default; integers still arrive as float64 from
+// json.Unmarshal into interface{}.
+func numericFloat(v any) (float64, bool) {
+	switch x := v.(type) {
+	case float64:
+		return x, true
+	case float32:
+		return float64(x), true
+	case int:
+		return float64(x), true
+	case int32:
+		return float64(x), true
+	case int64:
+		return float64(x), true
+	default:
+		return 0, false
+	}
 }
 
 // conflictErr is the in-band signal from the MutatePlayer fn back up to
