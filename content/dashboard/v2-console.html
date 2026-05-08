@@ -1,0 +1,332 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>v2 Console · InfiniteStream</title>
+  <link rel="stylesheet" href="/shared-styles.css" />
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+      background: var(--bg-secondary);
+      color: var(--text-primary);
+      margin: 0;
+      padding: 20px;
+    }
+    .layout { max-width: 1200px; margin: 0 auto; }
+    .pageheader { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 16px; }
+    .pageheader h1 { font-size: 24px; font-weight: 500; margin: 0; }
+    .pageheader .nav-links { font-size: 13px; }
+    .pageheader .nav-links a { color: var(--text-secondary); margin-left: 12px; text-decoration: none; }
+    .pageheader .nav-links a:hover { color: var(--text-primary); }
+
+    .panels { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+    @media (max-width: 900px) { .panels { grid-template-columns: 1fr; } }
+
+    .panel {
+      background: var(--bg-primary);
+      border: 1px solid var(--border-light);
+      border-radius: 10px;
+      padding: 14px 16px;
+    }
+    .panel h2 { font-size: 14px; font-weight: 600; margin: 0 0 12px; text-transform: uppercase; letter-spacing: 0.4px; color: var(--text-secondary); }
+
+    .pill { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 500; background: var(--bg-tertiary); color: var(--text-secondary); margin-right: 4px; }
+    .pill.ok { background: #d4edda; color: #155724; }
+    .pill.err { background: #f8d7da; color: #721c24; }
+    .pill.info { background: #d1ecf1; color: #0c5460; }
+
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border-light); }
+    th { font-weight: 600; color: var(--text-secondary); font-size: 11px; text-transform: uppercase; letter-spacing: 0.4px; }
+    .id-cell { font-family: SFMono-Regular, Menlo, Consolas, monospace; font-size: 11px; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+    .stream-log {
+      font-family: SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 11.5px;
+      background: #0b0e14;
+      color: #c9d1d9;
+      border-radius: 6px;
+      padding: 10px;
+      height: 360px;
+      overflow-y: auto;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .stream-log .ts { color: #6b7280; }
+    .stream-log .typ { color: #58a6ff; font-weight: bold; }
+    .stream-log .err-line { color: #ff7b72; }
+    .stream-log .gap-line { color: #f0883e; }
+    .stream-log .heartbeat { color: #6b7280; }
+
+    .controls { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 10px; }
+    .controls input, .controls textarea { font-family: SFMono-Regular, Menlo, monospace; font-size: 12px; }
+    .controls input { padding: 6px 8px; border: 1px solid var(--border); border-radius: 4px; min-width: 240px; }
+    .controls textarea { width: 100%; min-height: 80px; padding: 8px; border: 1px solid var(--border); border-radius: 4px; }
+    button { font: inherit; background: var(--primary); color: white; border: 0; border-radius: 4px; padding: 6px 12px; cursor: pointer; font-size: 12px; }
+    button:hover { background: var(--primary-hover); }
+    button.secondary { background: var(--bg-tertiary); color: var(--text-primary); }
+
+    .result-box {
+      margin-top: 10px;
+      background: #161b22;
+      color: #e6edf3;
+      border-radius: 6px;
+      padding: 10px;
+      font-family: SFMono-Regular, Menlo, monospace;
+      font-size: 11.5px;
+      white-space: pre-wrap;
+      word-break: break-word;
+      max-height: 280px;
+      overflow-y: auto;
+    }
+    .panel-full { grid-column: 1 / -1; }
+  </style>
+</head>
+<body>
+  <div class="layout">
+    <div class="pageheader">
+      <h1>v2 Console <span class="pill" id="health-pill">…</span></h1>
+      <div class="nav-links">
+        <a href="/dashboard/">Dashboard</a>
+        <a href="/dashboard/api-docs/proxy-v2.html">v2 spec</a>
+        <a href="/dashboard/sessions.html">Archive</a>
+      </div>
+    </div>
+
+    <div class="panels">
+      <div class="panel">
+        <h2>Info</h2>
+        <div id="info-out" class="result-box">loading…</div>
+        <div class="controls" style="margin-top:10px;">
+          <button onclick="refreshInfo()" class="secondary">Refresh</button>
+          <button onclick="postSyntheticPlayer()">Mint synthetic player</button>
+          <button onclick="clearAllPlayers()" class="secondary">Clear all</button>
+        </div>
+      </div>
+
+      <div class="panel">
+        <h2>Players</h2>
+        <table id="players-table">
+          <thead><tr><th>player_id</th><th>display_id</th><th>rev</th><th>group</th><th>actions</th></tr></thead>
+          <tbody id="players-tbody"><tr><td colspan="5">loading…</td></tr></tbody>
+        </table>
+      </div>
+
+      <div class="panel">
+        <h2>Selected player</h2>
+        <div class="controls">
+          <input id="selected-player-id" placeholder="player_id" />
+          <button onclick="loadSelectedPlayer()">Load</button>
+        </div>
+        <textarea id="patch-body" placeholder='{"labels":{"test":"hello"}}'>{"labels":{"test":"v2-console"}}</textarea>
+        <div class="controls" style="margin-top:8px;">
+          <button onclick="patchSelected()">PATCH</button>
+          <button onclick="deleteSelected()" class="secondary">DELETE</button>
+        </div>
+        <div id="selected-out" class="result-box">no player loaded</div>
+      </div>
+
+      <div class="panel">
+        <h2>Groups</h2>
+        <table id="groups-table">
+          <thead><tr><th>group_id</th><th>label</th><th>members</th><th>actions</th></tr></thead>
+          <tbody id="groups-tbody"><tr><td colspan="4">loading…</td></tr></tbody>
+        </table>
+        <div class="controls" style="margin-top:8px;">
+          <input id="new-group-members" placeholder='comma-separated player_ids' />
+          <input id="new-group-label" placeholder="label (optional)" />
+          <button onclick="createGroupFromForm()">Create</button>
+        </div>
+      </div>
+
+      <div class="panel panel-full">
+        <h2>Live event stream <span class="pill info" id="conn-pill">disconnected</span></h2>
+        <div id="stream-log" class="stream-log"></div>
+      </div>
+    </div>
+  </div>
+
+  <script src="/shared/v2-client.js"></script>
+  <script>
+    const v2 = new HarnessV2();
+
+    // ---- Info / health ----------------------------------------------
+    async function refreshInfo() {
+      const h = await v2.healthz();
+      const pill = document.getElementById("health-pill");
+      pill.className = "pill " + (h.ok ? "ok" : "err");
+      pill.textContent = h.ok ? "ok" : `down ${h.status}`;
+      const i = await v2.info();
+      document.getElementById("info-out").textContent = JSON.stringify(i.body, null, 2);
+    }
+
+    // ---- Players ----------------------------------------------------
+    async function refreshPlayers() {
+      const r = await v2.listPlayers();
+      const tbody = document.getElementById("players-tbody");
+      const items = r.body && r.body.items || [];
+      if (!items.length) {
+        tbody.innerHTML = '<tr><td colspan="5"><em>no players</em></td></tr>';
+        return;
+      }
+      tbody.innerHTML = items.map((p) => `
+        <tr>
+          <td class="id-cell" title="${p.id}">${p.id}</td>
+          <td>${p.display_id || ""}</td>
+          <td class="id-cell">${p.control_revision || ""}</td>
+          <td>${p.group_id || ""}</td>
+          <td>
+            <button onclick="selectPlayer('${p.id}')" class="secondary">select</button>
+            <button onclick="deleteOne('${p.id}')" class="secondary">×</button>
+          </td>
+        </tr>`).join("");
+    }
+    async function postSyntheticPlayer() {
+      const r = await v2.createSyntheticPlayer({ labels: { source: "v2-console" } });
+      logEvent("system", "POST /players → " + r.status, r.body);
+      refreshPlayers();
+    }
+    async function deleteOne(id) {
+      const r = await v2.deletePlayer(id);
+      logEvent("system", `DELETE /players/${id.slice(0,8)} → ${r.status}`);
+      refreshPlayers();
+    }
+    async function clearAllPlayers() {
+      if (!confirm("Drop every active player?")) return;
+      const r = await v2.deleteAllPlayers();
+      logEvent("system", `DELETE /players → ${r.status}`);
+      refreshPlayers();
+    }
+    function selectPlayer(id) {
+      document.getElementById("selected-player-id").value = id;
+      loadSelectedPlayer();
+    }
+    async function loadSelectedPlayer() {
+      const id = document.getElementById("selected-player-id").value.trim();
+      if (!id) return;
+      const r = await v2.getPlayer(id);
+      const out = r.ok ? JSON.stringify(r.body, null, 2)
+                       : `HTTP ${r.status}\n` + JSON.stringify(r.body, null, 2);
+      document.getElementById("selected-out").textContent = out;
+    }
+    async function patchSelected() {
+      const id = document.getElementById("selected-player-id").value.trim();
+      if (!id) return;
+      let patch;
+      try { patch = JSON.parse(document.getElementById("patch-body").value); }
+      catch (e) { alert("Invalid JSON: " + e.message); return; }
+      const r = await v2.patchPlayer(id, patch);
+      const out = r.ok ? JSON.stringify(r.body, null, 2)
+                       : `HTTP ${r.status}\n` + JSON.stringify(r.body, null, 2);
+      document.getElementById("selected-out").textContent = out;
+      refreshPlayers();
+    }
+    async function deleteSelected() {
+      const id = document.getElementById("selected-player-id").value.trim();
+      if (!id) return;
+      const r = await v2.deletePlayer(id);
+      logEvent("system", `DELETE /players/${id.slice(0,8)} → ${r.status}`);
+      document.getElementById("selected-out").textContent = "deleted";
+      refreshPlayers();
+    }
+
+    // ---- Groups -----------------------------------------------------
+    async function refreshGroups() {
+      const r = await v2.listGroups();
+      const tbody = document.getElementById("groups-tbody");
+      const items = r.body && r.body.items || [];
+      if (!items.length) {
+        tbody.innerHTML = '<tr><td colspan="4"><em>no groups</em></td></tr>';
+        return;
+      }
+      tbody.innerHTML = items.map((g) => `
+        <tr>
+          <td class="id-cell" title="${g.id}">${g.id}</td>
+          <td>${g.label || ""}</td>
+          <td>${(g.member_player_ids || []).length}</td>
+          <td><button onclick="disbandGroup('${g.id}')" class="secondary">disband</button></td>
+        </tr>`).join("");
+    }
+    async function createGroupFromForm() {
+      const members = document.getElementById("new-group-members").value
+        .split(",").map((s) => s.trim()).filter(Boolean);
+      const label = document.getElementById("new-group-label").value.trim();
+      if (!members.length) { alert("at least one member_player_id"); return; }
+      const payload = { member_player_ids: members };
+      if (label) payload.label = label;
+      const r = await v2.createGroup(payload);
+      logEvent("system", `POST /player-groups → ${r.status}`, r.body);
+      refreshGroups();
+    }
+    async function disbandGroup(id) {
+      const r = await v2.deleteGroup(id);
+      logEvent("system", `DELETE /player-groups/${id.slice(0,8)} → ${r.status}`);
+      refreshGroups();
+    }
+
+    // ---- Event stream -----------------------------------------------
+    function logEvent(type, msg, data) {
+      const log = document.getElementById("stream-log");
+      const ts = new Date().toLocaleTimeString();
+      let cls = "";
+      if (type === "heartbeat") cls = "heartbeat";
+      if (type === "replay.gap") cls = "gap-line";
+      if (type === "system" && /→ [45]/.test(msg)) cls = "err-line";
+      const dataStr = data ? "\n  " + JSON.stringify(data).slice(0, 240) : "";
+      log.innerHTML +=
+        `<div class="${cls}"><span class="ts">${ts}</span> <span class="typ">${type}</span> ${msg || ""}${dataStr}</div>`;
+      log.scrollTop = log.scrollHeight;
+    }
+
+    function startSSE() {
+      HarnessV2.subscribeEvents({
+        callbacks: {
+          onConnect: () => {
+            const p = document.getElementById("conn-pill");
+            p.className = "pill ok";
+            p.textContent = "connected";
+            logEvent("system", "SSE connected");
+          },
+          onDisconnect: () => {
+            const p = document.getElementById("conn-pill");
+            p.className = "pill err";
+            p.textContent = "reconnecting…";
+          },
+          onPlayerCreated: (rec) => {
+            logEvent("player.created", rec && rec.id ? rec.id.slice(0, 8) : "");
+            refreshPlayers();
+          },
+          onPlayerUpdated: (rec) => {
+            logEvent("player.updated", rec && rec.id ? rec.id.slice(0, 8) : "", { rev: rec && rec.control_revision });
+          },
+          onPlayerDeleted: (data) => {
+            logEvent("player.deleted", data && data.player_id ? data.player_id.slice(0, 8) : "", data);
+            refreshPlayers();
+          },
+          onPlayStarted: (data) => logEvent("play.started", `player=${data.player_id?.slice(0,8)} play=${data.play_id?.slice(0,8)}`),
+          onPlayEnded: (data) => logEvent("play.ended", `player=${data.player_id?.slice(0,8)} play=${data.play_id?.slice(0,8)} reason=${data.reason}`),
+          onPlayNetworkEntry: (data) => {
+            const e = data && data.entry || {};
+            logEvent("play.network.entry", `${e.method || "?"} ${e.status || "?"} ${e.url || ""}`);
+          },
+          onHeartbeat: () => {
+            // Keep heartbeats out of the visible log to avoid noise; the
+            // `connected` pill is signal enough.
+          },
+          onReplayGap: (data) => logEvent("replay.gap", `missed ${data.missed_from}..${data.missed_to}`),
+          onError: (e) => logEvent("system", "stream error: " + (e && e.message)),
+        },
+      });
+    }
+
+    // ---- Boot -------------------------------------------------------
+    refreshInfo();
+    refreshPlayers();
+    refreshGroups();
+    startSSE();
+    setInterval(refreshPlayers, 5000);
+    setInterval(refreshGroups, 10000);
+  </script>
+</body>
+</html>
