@@ -694,6 +694,131 @@ func TestPatch_GroupedMember_Broadcasts(t *testing.T) {
 	}
 }
 
+// ----- Plays --------------------------------------------------------------
+
+func TestGet_PlaysPlayId_404_Unknown(t *testing.T) {
+	_, _, ts := newTestServer(t)
+	playID := uuid.New().String()
+	status, _, _ := mustGet(t, ts, "/api/v2/plays/"+playID)
+	if status != http.StatusNotFound {
+		t.Errorf("status %d, want 404", status)
+	}
+}
+
+// seedActivePlay registers a player and drives a network row so the
+// EventSource records the player's currentPlay[playID]. Returns the
+// player_id so callers can assert against the session map.
+func seedActivePlay(t *testing.T, a *fakeAdapter, srv *Server, playID string) string {
+	t.Helper()
+	pid := uuid.New().String()
+	initialRev := "2020-01-01T00:00:00.000000000Z"
+	sessID := "sess-" + pid[:8]
+	a.addSession(map[string]any{
+		"player_id":        pid,
+		"session_id":       sessID,
+		"control_revision": initialRev,
+		"x_forwarded_port": "30181",
+	})
+	// Wait for the EventSource to ingest the snapshot so
+	// SubscribeSessions populates sessionToPlayr.
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if got := srv.events.lookupPlayerID(sessID); got == pid {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	a.pushNetworkRow(NetworkLogRow{SessionID: sessID, Entry: map[string]any{"play_id": playID, "url": "/seg1"}})
+	// Wait for currentPlay to populate.
+	deadline = time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if p, ok := srv.events.PlayerForPlay(playID); ok && p == pid {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return pid
+}
+
+func TestPatch_PlayId_LabelsRoundTrip_AndRestoreOnRotate(t *testing.T) {
+	a, srv, ts := newTestServer(t)
+	playID := uuid.New().String()
+	pid := seedActivePlay(t, a, srv, playID)
+	if got, _ := srv.events.PlayerForPlay(playID); got != pid {
+		t.Fatalf("PlayerForPlay %q = %q, want %q", playID, got, pid)
+	}
+	stored, _ := a.SessionByPlayerID(pid)
+	rev := asString(stored["control_revision"])
+
+	// PATCH the play with labels.
+	body := `{"labels":{"per-play":"yes"}}`
+	status, respBody, _ := mustDo(t, ts, "PATCH", "/api/v2/plays/"+playID, body,
+		map[string]string{"If-Match": `"` + rev + `"`})
+	if status != http.StatusOK {
+		t.Fatalf("PATCH status %d body=%s", status, respBody)
+	}
+	stored, _ = a.SessionByPlayerID(pid)
+	labels, _ := stored["_v2_labels"].(map[string]any)
+	if labels["per-play"] != "yes" {
+		t.Errorf("labels = %v, want per-play=yes", labels)
+	}
+	overrides, _ := stored["_v2_play_overrides"].(map[string]any)
+	if overrides == nil || overrides[playID] == nil {
+		t.Fatalf("expected play override snapshot, got %v", stored["_v2_play_overrides"])
+	}
+
+	// Rotate to a new play_id by pushing another network row.
+	sessID := asString(stored["session_id"])
+	newPlayID := uuid.New().String()
+	a.pushNetworkRow(NetworkLogRow{SessionID: sessID, Entry: map[string]any{"play_id": newPlayID, "url": "/seg2"}})
+
+	// Wait for the rotation to land + restore to fire.
+	deadline := time.Now().Add(1 * time.Second)
+	for time.Now().Before(deadline) {
+		stored, _ = a.SessionByPlayerID(pid)
+		if _, hasOverrides := stored["_v2_play_overrides"].(map[string]any); !hasOverrides {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	stored, _ = a.SessionByPlayerID(pid)
+	if _, has := stored["_v2_play_overrides"].(map[string]any); has {
+		t.Errorf("play overrides should be cleared after rotation, still: %v", stored["_v2_play_overrides"])
+	}
+	if labels, _ := stored["_v2_labels"].(map[string]any); labels["per-play"] == "yes" {
+		t.Errorf("play-scope labels should be cleared after rotation, still: %v", labels)
+	}
+}
+
+func TestPatch_PlayId_NoIfMatch_400(t *testing.T) {
+	a, srv, ts := newTestServer(t)
+	playID := uuid.New().String()
+	seedActivePlay(t, a, srv, playID)
+	status, _, _ := mustDo(t, ts, "PATCH", "/api/v2/plays/"+playID, `{"labels":{"x":"y"}}`, nil)
+	if status != http.StatusBadRequest { // oapigen wrapper rejects missing If-Match
+		t.Errorf("status %d, want 400", status)
+	}
+}
+
+func TestPost_PlayFaultRule_Append(t *testing.T) {
+	a, srv, ts := newTestServer(t)
+	playID := uuid.New().String()
+	pid := seedActivePlay(t, a, srv, playID)
+	stored, _ := a.SessionByPlayerID(pid)
+	rev := asString(stored["control_revision"])
+
+	body := `{"id":"r1","type":"500","frequency":3,"filter":{"request_kind":["segment"]}}`
+	status, respBody, _ := mustDo(t, ts, "POST", "/api/v2/plays/"+playID+"/fault_rules", body,
+		map[string]string{"If-Match": `"` + rev + `"`})
+	if status != http.StatusCreated {
+		t.Fatalf("status %d body=%s", status, respBody)
+	}
+	stored, _ = a.SessionByPlayerID(pid)
+	if stored["segment_failure_type"] != "500" {
+		t.Errorf("segment_failure_type = %v, want 500", stored["segment_failure_type"])
+	}
+}
+
 // ----- SSE /events ---------------------------------------------------------
 
 func TestSSE_FirstConnect_GetsHeartbeat(t *testing.T) {

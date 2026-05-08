@@ -98,25 +98,6 @@ func (s *Server) GetApiV2PlayersPlayerIdNetwork(w http.ResponseWriter, r *http.R
 	writeJSON(w, http.StatusOK, map[string]any{"items": items})
 }
 
-// ----- Plays (reads) -------------------------------------------------------
-
-// GetApiV2PlaysPlayId returns one live play record.
-//
-// Phase B: v1 has no first-class play resource — play_id is captured
-// per network request but not promoted to a session-level field.
-// Returning 404 unconditionally until Phase E surfaces play boundaries
-// from the SSE event stream and the v1 store grows a play index.
-func (*Server) GetApiV2PlaysPlayId(w http.ResponseWriter, r *http.Request, playId oapigen.PlayId) {
-	writeProblem(
-		w,
-		http.StatusNotFound,
-		"https://harness/errors/play-not-found",
-		"play not found",
-		"live play lookup is not yet wired in this build; query the analytics archive at /analytics/api/v2/plays/{play_id} for finished plays",
-		map[string]any{"play_id": playId.String()},
-	)
-}
-
 // ----- Player groups (reads) -----------------------------------------------
 
 // GetApiV2PlayerGroups lists every active group.

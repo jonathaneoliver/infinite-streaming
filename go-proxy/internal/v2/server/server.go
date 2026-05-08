@@ -44,6 +44,13 @@ type Server struct {
 	groupRevsMu sync.Mutex
 	groupRevsMp map[string]*FieldRevisions
 
+	// Per-play field-revision trackers, keyed by play_id. Used by
+	// PATCH /api/v2/plays/{play_id} and the play-scope per-rule
+	// fault sub-resources. Freed when the play rotates (Phase J
+	// detection in EventSource).
+	playRevsMu sync.Mutex
+	playRevsMp map[string]*FieldRevisions
+
 	// events owns the v2 SSE pipeline (subscription + transform + ring).
 	// Nil-safe: the GET /api/v2/events handler returns 503 if absent.
 	events *EventSource
@@ -61,6 +68,7 @@ func New(v1 V1Adapter) *Server {
 		v1:          v1,
 		revs:        map[string]*FieldRevisions{},
 		groupRevsMp: map[string]*FieldRevisions{},
+		playRevsMp:  map[string]*FieldRevisions{},
 		events:      NewEventSource(v1, ring),
 	}
 }

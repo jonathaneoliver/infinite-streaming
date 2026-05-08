@@ -183,7 +183,9 @@ func (s *EventSource) handleSessionSnapshot(snap SessionSnapshot) {
 		}
 		// Fire play.ended for the player's active play (if any)
 		// before player.deleted so subscribers maintain a clean
-		// "this play ended" signal.
+		// "this play ended" signal. Restore is best-effort — the
+		// player session is gone, so kernel-state cleanup happens
+		// via v1's port-cleanup helpers in DeletePlayer anyway.
 		if activePlay := s.currentPlay[pid]; activePlay != "" {
 			s.publishPlayEnded(pid, activePlay, "player_deleted")
 			delete(s.currentPlay, pid)
@@ -263,6 +265,11 @@ func (s *EventSource) handleNetworkRow(row NetworkLogRow) {
 
 // detectPlayRotation maintains the per-player current play_id and
 // emits play.started / play.ended frames on rotation.
+//
+// On rotation, the old play's `_v2_play_overrides` snapshot is
+// restored to the player's session — play-scope mutations
+// auto-clear when the play ends, per DESIGN.md § Player vs play
+// scope precedence.
 func (s *EventSource) detectPlayRotation(playerID, newPlayID string) {
 	if newPlayID == "" {
 		return
@@ -277,9 +284,113 @@ func (s *EventSource) detectPlayRotation(playerID, newPlayID string) {
 	s.stateMu.Unlock()
 
 	if prevPlayID != "" {
+		s.restorePlayScope(playerID, prevPlayID, "rotated")
 		s.publishPlayEnded(playerID, prevPlayID, "rotated")
 	}
 	s.publishPlayStarted(playerID, newPlayID)
+}
+
+// restorePlayScope rolls back the player's session to its pre-play
+// state for the named play_id. Reads `_v2_play_overrides[playID]`
+// (a snapshot of the original field values when the play-scope
+// PATCH was first applied), writes those values back, deletes the
+// snapshot entry, and re-runs the kernel apply for the affected
+// fields. No-op when no snapshot exists.
+func (s *EventSource) restorePlayScope(playerID, playID, reason string) {
+	if s.v1 == nil {
+		return
+	}
+	var touchedShape, touchedTransport, touchedPattern bool
+	_, _, _ = s.v1.MutatePlayer(playerID, func(sess map[string]any) error {
+		overrides, _ := sess["_v2_play_overrides"].(map[string]any)
+		if overrides == nil {
+			return nil
+		}
+		snapshot, _ := overrides[playID].(map[string]any)
+		if snapshot == nil {
+			return nil
+		}
+		for k, v := range snapshot {
+			if v == nil {
+				delete(sess, k)
+			} else {
+				sess[k] = v
+			}
+			switch {
+			case k == "_v2_shape_pattern":
+				touchedPattern = true
+			case k == "nftables_bandwidth_mbps", k == "nftables_delay_ms", k == "nftables_packet_loss":
+				touchedShape = true
+			case k == "transport_failure_type", k == "transport_fault_type",
+				k == "transport_failure_frequency", k == "transport_consecutive_failures",
+				k == "transport_failure_mode":
+				touchedTransport = true
+			}
+		}
+		delete(overrides, playID)
+		if len(overrides) == 0 {
+			delete(sess, "_v2_play_overrides")
+		} else {
+			sess["_v2_play_overrides"] = overrides
+		}
+		// Bump control_revision so SSE consumers see the rollback.
+		sess["control_revision"] = newRevision()
+		return nil
+	})
+	// Drive kernel apply outside the MutatePlayer fn so the lock
+	// order matches PATCH (helpers may re-enter saveSessionList).
+	if touchedPattern {
+		if sess, ok := s.v1.SessionByPlayerID(playerID); ok {
+			steps := extractPatternSteps(sess)
+			delayMs := 0
+			if f, ok := numericFloat(sess["nftables_delay_ms"]); ok {
+				delayMs = int(f)
+			}
+			lossPct := 0.0
+			if f, ok := numericFloat(sess["nftables_packet_loss"]); ok {
+				lossPct = f
+			}
+			_ = s.v1.ApplyPatternToPlayer(playerID, steps, delayMs, lossPct)
+		}
+	}
+	if touchedShape {
+		_ = s.v1.ApplyShapeToPlayer(playerID)
+	}
+	if touchedTransport {
+		if sess, ok := s.v1.SessionByPlayerID(playerID); ok {
+			faultType, _ := sess["transport_failure_type"].(string)
+			if faultType == "" {
+				faultType = "none"
+			}
+			consec := 1
+			if f, ok := numericFloat(sess["transport_consecutive_failures"]); ok && int(f) >= 1 {
+				consec = int(f)
+			}
+			consecUnits, _ := sess["transport_consecutive_units"].(string)
+			if consecUnits == "" {
+				consecUnits = "seconds"
+			}
+			freq := 0
+			if f, ok := numericFloat(sess["transport_failure_frequency"]); ok {
+				freq = int(f)
+			}
+			_ = s.v1.ApplyTransportFaultToPlayer(playerID, faultType, consec, consecUnits, freq)
+		}
+	}
+}
+
+// PlayerForPlay resolves a play_id back to its player_id by reading
+// the most-recent rotation state. Returns ("", false) when no active
+// play matches.
+func (s *EventSource) PlayerForPlay(playID string) (string, bool) {
+	s.stateMu.Lock()
+	defer s.stateMu.Unlock()
+	for player, current := range s.currentPlay {
+		if current == playID {
+			return player, true
+		}
+	}
+	return "", false
 }
 
 // publishPlayStarted writes a play.started frame.
