@@ -4525,18 +4525,27 @@
         }
 
         function fetchSessions() {
-            fetch('/api/sessions', { cache: 'no-store' })
+            // Migration step #4: bypass v2-compat shim for the session
+            // list. Call /api/v2/players?include=raw directly and
+            // project body.items[].raw_session to the bare v1 array
+            // applySessionsList expects. Same projection the shim was
+            // doing internally — moving it inline removes one indirection.
+            fetch('/api/v2/players?include=raw', { cache: 'no-store' })
                 .then(async response => {
                     if (!response.ok) {
                         const body = await response.text();
-                        throw new Error(`/api/sessions failed (${response.status}): ${body.slice(0, 120)}`);
+                        throw new Error(`/api/v2/players failed (${response.status}): ${body.slice(0, 120)}`);
                     }
                     const contentType = (response.headers.get('content-type') || '').toLowerCase();
                     if (!contentType.includes('application/json')) {
                         const body = await response.text();
-                        throw new Error(`/api/sessions returned non-JSON: ${body.slice(0, 120)}`);
+                        throw new Error(`/api/v2/players returned non-JSON: ${body.slice(0, 120)}`);
                     }
                     return response.json();
+                })
+                .then(body => {
+                    const items = (body && body.items) || [];
+                    return items.map(p => p.raw_session || {});
                 })
                 .then(sessions => applySessionsList(sessions))
                 .catch(error => {
@@ -4706,13 +4715,118 @@
             renderSessions();
         }
 
+        // Migration step #6 helper: a one-shot inline PATCH that
+        // skips buildSessionPatch's field bundling. Used by the
+        // pattern-stop calls in the shaping handler. Same v1 → v2
+        // routing as sendSessionPatch (V2Compat.translateV1Patch
+        // when the card has a UUID, fetch fallback otherwise).
+        function sendInlinePatch(card, sessionId, set, fields) {
+            const init = {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ set, fields }),
+            };
+            const playerIdEl = card && card.querySelector('[data-field="session_player_id"]');
+            const playerIdRaw = playerIdEl ? playerIdEl.textContent.trim() : '';
+            const isUUID = playerIdRaw && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(playerIdRaw);
+            if (isUUID && window.V2Compat && typeof window.V2Compat.translateV1Patch === 'function') {
+                return window.V2Compat.translateV1Patch(playerIdRaw, init);
+            }
+            return fetch(`/api/session/${sessionId}`, init);
+        }
+
+        // ---- v2 group helpers (replaces /api/session-group/* shim) ---
+        // Translate session_id → player_id via the local sessionsById
+        // map (populated by every session-list refresh + SSE event)
+        // and call /api/v2/player-groups directly.
+        function v2PlayerIdsForSessionIds(sessionIds) {
+            return (Array.isArray(sessionIds) ? sessionIds : [])
+                .map(sid => {
+                    const s = sessionsById.get(String(sid));
+                    return s && s.player_id ? s.player_id : '';
+                })
+                .filter(Boolean);
+        }
+
+        async function v2GroupLink(sessionIds, existingGroupId) {
+            const memberPlayerIds = v2PlayerIdsForSessionIds(sessionIds);
+            if (memberPlayerIds.length < 2) {
+                throw new Error('Need at least 2 valid player_ids to form a group');
+            }
+            // Existing group: PATCH to add members. New group: POST.
+            if (existingGroupId) {
+                const cur = await fetch(`/api/v2/player-groups/${encodeURIComponent(existingGroupId)}`);
+                if (cur.ok) {
+                    const grp = await cur.json();
+                    const next = Array.from(new Set([...(grp.member_player_ids || []), ...memberPlayerIds]));
+                    const ifMatch = cur.headers.get('ETag');
+                    const r = await fetch(`/api/v2/player-groups/${encodeURIComponent(existingGroupId)}`, {
+                        method: 'PATCH',
+                        headers: {
+                            'Content-Type': 'application/merge-patch+json',
+                            ...(ifMatch ? { 'If-Match': ifMatch } : {}),
+                        },
+                        body: JSON.stringify({ member_player_ids: next }),
+                    });
+                    if (!r.ok) throw new Error(`Group patch failed: HTTP ${r.status}`);
+                    return r.json();
+                }
+                // Group is gone — fall through to create.
+            }
+            const r = await fetch('/api/v2/player-groups', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ member_player_ids: memberPlayerIds }),
+            });
+            if (!r.ok) throw new Error(`Group create failed: HTTP ${r.status}`);
+            return r.json();
+        }
+
+        async function v2GroupDisband(groupId) {
+            if (!groupId) return;
+            const r = await fetch(`/api/v2/player-groups/${encodeURIComponent(groupId)}`, {
+                method: 'DELETE',
+            });
+            if (!r.ok && r.status !== 404) throw new Error(`Disband failed: HTTP ${r.status}`);
+        }
+
+        // Single-member unlink: GET the group, drop the member, PATCH
+        // back. Auto-disbands when membership reaches zero.
+        async function v2GroupUnlinkMember(groupId, sessionId) {
+            if (!groupId) return;
+            const session = sessionsById.get(String(sessionId));
+            const playerId = session && session.player_id ? session.player_id : '';
+            if (!playerId) return;
+            const cur = await fetch(`/api/v2/player-groups/${encodeURIComponent(groupId)}`);
+            if (!cur.ok) {
+                if (cur.status === 404) return;
+                throw new Error(`Group fetch failed: HTTP ${cur.status}`);
+            }
+            const grp = await cur.json();
+            const remaining = (grp.member_player_ids || []).filter(id => id !== playerId);
+            if (remaining.length === 0) {
+                await v2GroupDisband(groupId);
+                return;
+            }
+            const ifMatch = cur.headers.get('ETag');
+            const r = await fetch(`/api/v2/player-groups/${encodeURIComponent(groupId)}`, {
+                method: 'PATCH',
+                headers: {
+                    'Content-Type': 'application/merge-patch+json',
+                    ...(ifMatch ? { 'If-Match': ifMatch } : {}),
+                },
+                body: JSON.stringify({ member_player_ids: remaining }),
+            });
+            if (!r.ok) throw new Error(`Group unlink failed: HTTP ${r.status}`);
+        }
+
         function sendSessionPatch(card, fields) {
             const patch = buildSessionPatch(card, fields);
             if (!patch.sessionId || Object.keys(patch.set).length === 0) {
                 return Promise.resolve();
             }
             queuePendingFailureEdits(patch.sessionId, patch.set);
-            return fetch(`/api/session/${patch.sessionId}`, {
+            const init = {
                 method: 'PATCH',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
@@ -4720,7 +4834,21 @@
                     fields: patch.fields,
                     base_revision: getSessionBaseRevision(patch.sessionId)
                 })
-            }).then(async response => {
+            };
+            // Migration step #6: bypass the v2-compat fetch interception
+            // by calling the translator directly. The translator returns
+            // a Response-shaped object identical to what the shim
+            // intercept used to produce, so the .then chain below stays
+            // unchanged. Falls back to the v1 fetch path only if the
+            // V2Compat helper isn't loaded (paranoia; testing.html
+            // always loads it).
+            const playerIdEl = card.querySelector('[data-field="session_player_id"]');
+            const playerIdRaw = playerIdEl ? playerIdEl.textContent.trim() : '';
+            const isUUID = playerIdRaw && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(playerIdRaw);
+            const direct = (isUUID && window.V2Compat && typeof window.V2Compat.translateV1Patch === 'function')
+                ? window.V2Compat.translateV1Patch(playerIdRaw, init)
+                : fetch(`/api/session/${patch.sessionId}`, init);
+            return direct.then(async response => {
                 const body = await response.json().catch(() => ({}));
                 if (!response.ok) {
                     if (response.status === 409 && body.session) {
@@ -4834,7 +4962,11 @@
         // can return null. Guard before binding.
         document.getElementById('refreshSessions')?.addEventListener('click', fetchSessions);
         document.getElementById('clearSessions')?.addEventListener('click', () => {
-            fetch('/api/clear-sessions', { method: 'POST' })
+            // Migration step #2: bypass v2-compat shim. v1's
+            // POST /api/clear-sessions maps to v2's
+            // DELETE /api/v2/players (delete all). Calling v2
+            // directly removes the rewrite hop.
+            fetch('/api/v2/players', { method: 'DELETE' })
                 .then(() => fetchSessions())
                 .catch(error => console.error('Error clearing sessions:', error));
         });
@@ -4918,11 +5050,9 @@
                         selectedSessionIds.delete(String(sessionId));
                         // Uncheck removes from group
                         if (groupId) {
-                            fetch('/api/session-group/unlink', {
-                                method: 'POST',
-                                headers: { 'Content-Type': 'application/json' },
-                                body: JSON.stringify({ session_id: sessionId, group_id: groupId })
-                            }).then(() => fetchSessions()).catch(err => console.error('Unlink failed:', err));
+                            v2GroupUnlinkMember(groupId, sessionId)
+                                .then(() => fetchSessions())
+                                .catch(err => console.error('Unlink failed:', err));
                         }
                     }
                 }
@@ -5004,14 +5134,10 @@
                     if (wasApplied) {
                         const sessionId = card.dataset.sessionId;
                         if (sessionId) {
-                            fetch(`/api/session/${sessionId}`, {
-                                method: 'PATCH',
-                                headers: { 'Content-Type': 'application/json' },
-                                body: JSON.stringify({
-                                    set: { nftables_pattern_enabled: false },
-                                    fields: ['nftables_pattern_enabled']
-                                })
-                            }).catch(err => console.warn('Failed to stop pattern on template change', err));
+                            sendInlinePatch(card, sessionId,
+                                { nftables_pattern_enabled: false },
+                                ['nftables_pattern_enabled']
+                            ).catch(err => console.warn('Failed to stop pattern on template change', err));
                         }
                     }
                     applyTemplatePattern(card, false, resetState);
@@ -5029,14 +5155,10 @@
                     if (wasApplied) {
                         const sessionId = card.dataset.sessionId;
                         if (sessionId) {
-                            fetch(`/api/session/${sessionId}`, {
-                                method: 'PATCH',
-                                headers: { 'Content-Type': 'application/json' },
-                                body: JSON.stringify({
-                                    set: { nftables_pattern_enabled: false },
-                                    fields: ['nftables_pattern_enabled']
-                                })
-                            }).catch(err => console.warn('Failed to stop pattern on step-seconds change', err));
+                            sendInlinePatch(card, sessionId,
+                                { nftables_pattern_enabled: false },
+                                ['nftables_pattern_enabled']
+                            ).catch(err => console.warn('Failed to stop pattern on step-seconds change', err));
                         }
                     }
                     applyTemplatePattern(card, false, false, false);
@@ -5098,20 +5220,9 @@
                     return;
                 }
                 if (statusEl) statusEl.textContent = 'Linking sessions...';
-                fetch('/api/session-group/link', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ session_ids: sessionIds })
-                })
-                    .then(async response => {
-                        if (!response.ok) {
-                            const body = await response.text();
-                            throw new Error(body || `HTTP ${response.status}`);
-                        }
-                        return response.json();
-                    })
-                    .then(data => {
-                        if (statusEl) statusEl.textContent = `Grouped ${data.group_id || ''}`.trim();
+                v2GroupLink(sessionIds)
+                    .then(group => {
+                        if (statusEl) statusEl.textContent = `Grouped ${group.id || ''}`.trim();
                         fetchSessions();
                     })
                     .catch(error => {
@@ -5121,19 +5232,11 @@
                 return;
             }
             
-            // Handle ungroup button
+            // Handle ungroup button — disband the entire group.
             if (button.classList.contains('unlink-btn')) {
-                const sessionId = button.dataset.sessionId;
                 const groupId = button.dataset.groupId;
-                fetch('/api/session-group/unlink', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ session_id: sessionId, group_id: groupId, unlink_group: true })
-                })
-                    .then(response => response.json())
-                    .then(data => {
-                        fetchSessions();
-                    })
+                v2GroupDisband(groupId)
+                    .then(() => fetchSessions())
                     .catch(error => console.error('Error unlinking session:', error));
                 return;
             }
@@ -5248,7 +5351,19 @@
                 saveSettingsForCard(card).catch(error => console.error('Error saving settings:', error));
             }
             if (button.dataset.action === 'delete-session') {
-                fetch(`/api/session/${sessionId}`, { method: 'DELETE' })
+                // Migration step #2: bypass v2-compat shim. Resolve
+                // playerId from the rendered DOM (set by the v1 render
+                // when populating the Session Details fold) and DELETE
+                // /api/v2/players/{uuid} directly. Falls back to the
+                // shim path if the DOM hasn't yet rendered the UUID
+                // (rare on click; the card has been live for ≥ one
+                // refresh cycle by the time delete is reachable).
+                const playerIdEl = card.querySelector('[data-field="session_player_id"]');
+                const playerId = playerIdEl ? playerIdEl.textContent.trim() : '';
+                const url = (playerId && /^[0-9a-f]{8}-/i.test(playerId))
+                    ? `/api/v2/players/${encodeURIComponent(playerId)}`
+                    : `/api/session/${sessionId}`;
+                fetch(url, { method: 'DELETE' })
                     .then(() => fetchSessions())
                     .catch(error => console.error('Error deleting session:', error));
             }
@@ -5288,11 +5403,9 @@
 
             if (groupId) {
                 addItem('Remove from Group', () => {
-                    fetch('/api/session-group/unlink', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ session_id: sessionId, group_id: groupId })
-                    }).then(() => fetchSessions()).catch(err => console.error('Unlink failed:', err));
+                    v2GroupUnlinkMember(groupId, sessionId)
+                        .then(() => fetchSessions())
+                        .catch(err => console.error('Unlink failed:', err));
                 });
             }
 
@@ -5302,21 +5415,17 @@
                     const memberLabel = members.map(s => `S${s.session_id}`).join(', ');
                     addItem(`Add to ${gid} (${memberLabel})`, () => {
                         const ids = [...members.map(s => s.session_id), sessionId];
-                        fetch('/api/session-group/link', {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({ session_ids: ids, group_id: gid })
-                        }).then(() => fetchSessions()).catch(err => console.error('Link failed:', err));
+                        v2GroupLink(ids, gid)
+                            .then(() => fetchSessions())
+                            .catch(err => console.error('Link failed:', err));
                     });
                 });
                 const ungroupedOthers = allSessions.filter(s => s.session_id !== sessionId && !s.group_id);
                 ungroupedOthers.forEach(other => {
                     addItem(`Group with Session ${other.session_id}`, () => {
-                        fetch('/api/session-group/link', {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({ session_ids: [sessionId, other.session_id] })
-                        }).then(() => fetchSessions()).catch(err => console.error('Link failed:', err));
+                        v2GroupLink([sessionId, other.session_id])
+                            .then(() => fetchSessions())
+                            .catch(err => console.error('Link failed:', err));
                     });
                 });
             }

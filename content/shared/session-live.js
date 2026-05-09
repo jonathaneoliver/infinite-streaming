@@ -44,18 +44,24 @@
             }
         }
 
-        function parseSessionsStreamPayload(event) {
-            const data = JSON.parse(event.data);
-            if (Array.isArray(data)) {
-                return { sessions: data, revision: Number(event.lastEventId || 0), dropped: 0, active_sessions: null };
-            }
-            const sessions = Array.isArray(data.sessions) ? data.sessions : [];
-            const revision = Number(data.revision || event.lastEventId || 0);
-            const dropped = Number(data.dropped || 0);
-            const active_sessions = Array.isArray(data.active_sessions) ? data.active_sessions : null;
-            return { sessions, revision, dropped, active_sessions };
-        }
+        // Migration step #5 (issue #441): bypass the v2-compat
+        // EventSource shim. Subscribe to /api/v2/events?include=raw
+        // directly and maintain the player_id → SessionData map
+        // inline. On every player.created/updated/deleted/heartbeat,
+        // call applySessionsList() with the same v1-array projection
+        // the shim used to dispatch via a synthetic 'sessions' event.
+        // sessionsByID survives across reconnects so the dashboard
+        // never sees a "no sessions" flash on transient disconnect.
+        const sessionsByID = new Map(); // player_id → raw v1 SessionData
 
+        function emitSessions(reason) {
+            const arr = Array.from(sessionsByID.values());
+            try {
+                applySessionsList(arr);
+            } catch (err) {
+                console.error('applySessionsList failed (' + (reason || '?') + ')', err);
+            }
+        }
 
         function startSessionsStream() {
             if (!window.EventSource) return false;
@@ -63,53 +69,69 @@
                 clearTimeout(sseReconnectTimer);
                 sseReconnectTimer = null;
             }
-            const source = new EventSource('/api/sessions/stream');
+            const source = new EventSource('/api/v2/events?include=raw');
             sessionsStream = source;
             sseLastEventAt = Date.now();
             ensureSseWatchdog();
+
+            // Bootstrap immediately — the v2 events stream's first
+            // server-emitted frame can be 15 s out (heartbeat cadence)
+            // and the watchdog fires at 12 s. Pull the current snapshot
+            // up front so the dashboard renders within hundreds of ms
+            // independent of when the SSE connection settles.
+            fetch('/api/v2/players?include=raw', { cache: 'no-store' })
+                .then(r => r.ok ? r.json() : null)
+                .then(body => {
+                    if (!body || !Array.isArray(body.items)) return;
+                    sessionsByID.clear();
+                    for (const p of body.items) {
+                        sessionsByID.set(p.id, p.raw_session || {});
+                    }
+                    emitSessions('bootstrap');
+                })
+                .catch(err => console.error('SSE bootstrap fetch failed', err));
+
             source.addEventListener('open', () => {
-                // Server is talking again. Server-side
-                // sessionsBroadcastSeq resets across container
-                // restarts, so the previous revision number is
-                // meaningless on the new connection — clear it so
-                // we don't compute a bogus gap on the first
-                // post-reconnect event.
+                // Server is talking again. The v2 stream emits a
+                // monotonic event id per frame; we don't track it for
+                // gap detection here because the shim never did
+                // either — heartbeats re-emit the full snapshot, so
+                // any missed delta is repaired within the heartbeat
+                // cadence (5 s server-side).
                 sseLastRevision = 0;
                 sseLastEventAt = Date.now();
             });
             source.addEventListener('heartbeat', () => {
                 sseLastEventAt = Date.now();
+                // Re-emit the current snapshot so the chart engines
+                // (which derive everything from applySessionsList)
+                // keep their rolling-window cursors fresh even when
+                // no player.updated arrived this cycle.
+                emitSessions('heartbeat');
             });
-            source.addEventListener('sessions', (event) => {
+
+            function handlePlayerEvent(rawEvent, kind) {
                 sseLastEventAt = Date.now();
                 try {
-                    const payload = parseSessionsStreamPayload(event);
-                    const sessions = payload.sessions;
-                    const revision = Number(payload.revision || 0);
-                    const dropped = Number(payload.dropped || 0);
-                    let missed = 0;
-                    if (Number.isFinite(revision) && revision > 0 && sseLastRevision > 0) {
-                        const gap = revision - sseLastRevision - 1;
-                        if (gap > 0) {
-                            missed += gap;
-                        }
+                    const env = JSON.parse(rawEvent.data);
+                    const data = env.data || {};
+                    if (kind === 'deleted') {
+                        const pid = data.player_id || data.id;
+                        if (pid && sessionsByID.delete(pid)) emitSessions('deleted');
+                        return;
                     }
-                    if (Number.isFinite(dropped) && dropped > 0) {
-                        missed += dropped;
-                    }
-                    if (missed > 0) {
-                        sseMissedTotal += missed;
-                        updateSseMissedBadge();
-                        console.warn(`SSE missed ${missed} update${missed === 1 ? '' : 's'}`);
-                    }
-                    if (Number.isFinite(revision) && revision > 0) {
-                        sseLastRevision = revision;
-                    }
-                    applySessionsList(sessions);
+                    if (!data.id) return;
+                    const sess = data.raw_session || data;
+                    sessionsByID.set(data.id, sess);
+                    emitSessions(kind);
                 } catch (err) {
-                    console.error('Error parsing sessions stream payload', err);
+                    console.error('SSE player event parse failed', err);
                 }
-            });
+            }
+            source.addEventListener('player.created', (ev) => handlePlayerEvent(ev, 'created'));
+            source.addEventListener('player.updated', (ev) => handlePlayerEvent(ev, 'updated'));
+            source.addEventListener('player.deleted', (ev) => handlePlayerEvent(ev, 'deleted'));
+
             source.addEventListener('error', () => {
                 // CONNECTING state means the browser is auto-retrying
                 // already — leave it alone. CLOSED means the browser

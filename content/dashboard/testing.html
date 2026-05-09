@@ -447,11 +447,22 @@
             subtitle.textContent = `Launch sessions on port ${port} and tune failure settings per session.`;
         })();
     </script>
+    <!-- v2 PATCH translator — provides window.V2Compat.translateV1Patch
+         used by session-shell.js's sendSessionPatch / sendInlinePatch.
+         The dashboard's other wire calls (GET sessions, network log,
+         DELETE, SSE) all go directly to /api/v2/* without any shim
+         after the migration in #441. No fetch/EventSource overrides
+         are installed; this is a pure helper module. -->
+    <script src="/shared/v2-patch-translator.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2.0.1/dist/chartjs-plugin-zoom.min.js"></script>
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/vis-timeline@7.7.3/styles/vis-timeline-graph2d.min.css">
     <script src="https://cdn.jsdelivr.net/npm/vis-timeline@7.7.3/standalone/umd/vis-timeline-graph2d.min.js"></script>
     <link rel="stylesheet" href="/dashboard/testing-session-refactored.css">
+    <!-- v1 rendering stack — visualization is byte-for-byte v1.
+         All wire-level traffic goes direct to /api/v2/* (no shim);
+         the only window.V2Compat helper still in use is
+         translateV1Patch from v2-patch-translator.js. -->
     <script src="/dashboard/testing-session-ui.js"></script>
     <script src="/dashboard/player-characterization.js"></script>
     <script src="/shared/session-shell.js"></script>

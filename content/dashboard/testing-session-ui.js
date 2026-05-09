@@ -3225,7 +3225,17 @@
             }
         }
         const archiveURL = `/analytics/api/network_requests?${archiveParams.toString()}`;
-        const liveURL = `/api/session/${key}/network`;
+
+        // Migration step #1 (issue #441): bypass the v2-compat shim for
+        // the live-network fetch and call the v2 endpoint directly. The
+        // shim's translation of /api/session/{key}/network to v2 stays
+        // in v2-compat.js for now to avoid breaking other call sites,
+        // but this path no longer goes through it. Project the v2
+        // response (body.items[]) back to v1's {entries, session_id,
+        // count} shape so the apply()/fallback logic below stays
+        // unchanged.
+        const playerIdEl = card.querySelector('[data-field="session_player_id"]');
+        const playerId = playerIdEl ? playerIdEl.textContent.trim() : '';
 
         const apply = (entries) => {
             const count = entries.length;
@@ -3241,19 +3251,42 @@
             return r.json();
         });
 
-        const primary = isReplay ? archiveURL : liveURL;
-        const fallback = isReplay ? null : archiveURL;
-        fetchFrom(primary)
+        // Live fetch: direct to /api/v2/players/{uuid}/network. Falls
+        // through to the analytics archive only if the UUID is missing
+        // (newly-rendered card before the player_id field landed) or
+        // the request fails — same behavior as before, just one less
+        // shim hop.
+        const fetchLive = () => {
+            if (!playerId || !/^[0-9a-f]{8}-/i.test(playerId)) {
+                // No UUID yet — fall back to the shim path so the
+                // existing session_id-keyed lookup still resolves.
+                return fetchFrom(`/api/session/${key}/network`);
+            }
+            return fetch(`/api/v2/players/${encodeURIComponent(playerId)}/network?limit=5000`)
+                .then(r => {
+                    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+                    return r.json();
+                })
+                .then(body => ({
+                    session_id: key,
+                    entries: body.items || [],
+                    count: (body.items || []).length,
+                }));
+        };
+
+        const primary = isReplay ? () => fetchFrom(archiveURL) : fetchLive;
+        const fallback = isReplay ? null : () => fetchFrom(archiveURL);
+        primary()
             .then(data => {
                 const entries = data.entries || [];
                 if (entries.length === 0 && fallback) {
-                    return fetchFrom(fallback).then(d => apply(d.entries || []));
+                    return fallback().then(d => apply(d.entries || []));
                 }
                 apply(entries);
             })
             .catch(error => {
                 if (fallback) {
-                    return fetchFrom(fallback)
+                    return fallback()
                         .then(d => apply(d.entries || []))
                         .catch(err2 => {
                             console.error('Network log fetch (both sources) failed:', error, err2);

@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>v2-models tests</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; margin: 24px; }
+    h1 { font-size: 18px; margin-bottom: 8px; }
+    .test { padding: 6px 10px; border-radius: 4px; margin-bottom: 4px; font-size: 13px; }
+    .test.pass { background: #d1fae5; color: #064e3b; }
+    .test.fail { background: #fee2e2; color: #7f1d1d; white-space: pre-wrap; }
+    .summary { margin-top: 12px; padding: 10px 14px; border-radius: 6px; font-weight: 600; }
+    .summary.pass { background: #10b981; color: #fff; }
+    .summary.fail { background: #ef4444; color: #fff; }
+  </style>
+</head>
+<body>
+  <h1>v2-models / v2-repo unit tests</h1>
+  <div id="results"></div>
+
+  <script src="/shared/v2-client.js"></script>
+  <script src="/shared/v2-repo.js"></script>
+  <script src="/shared/v2-models.js"></script>
+  <script>
+  (async () => {
+    const results = document.getElementById('results');
+    const tests = [];
+    function test(name, fn) { tests.push({ name, fn }); }
+    function assert(cond, msg) { if (!cond) throw new Error(msg || 'assertion failed'); }
+    function assertEq(a, b, msg) {
+      if (a !== b) throw new Error((msg || '') + ` expected ${JSON.stringify(b)}, got ${JSON.stringify(a)}`);
+    }
+    function assertDeep(a, b, msg) {
+      const sa = JSON.stringify(a), sb = JSON.stringify(b);
+      if (sa !== sb) throw new Error((msg || '') + ` expected ${sb}, got ${sa}`);
+    }
+    function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+    // ---- FakeRepo: records calls, scriptable responses ----
+    function FakeRepo() {
+      this.calls = [];
+      this.responses = []; // queue of {ok, status, body}
+      this.defaultResponse = { ok: true, status: 200, etag: '"r1"', body: {} };
+    }
+    FakeRepo.prototype._next = function () {
+      return this.responses.length ? this.responses.shift() : this.defaultResponse;
+    };
+    FakeRepo.prototype._record = function (op, args) {
+      this.calls.push({ op, args });
+      return Promise.resolve(this._next());
+    };
+    FakeRepo.prototype.cachedETag = function () { return '"r1"'; };
+    FakeRepo.prototype.patchPlayer = function (id, patch, op) { return this._record('patchPlayer', { id, patch, op }); };
+    FakeRepo.prototype.appendFaultRule = function (id, rule) { return this._record('appendFaultRule', { id, rule }); };
+    FakeRepo.prototype.patchFaultRule = function (id, ruleId, patch) { return this._record('patchFaultRule', { id, ruleId, patch }); };
+    FakeRepo.prototype.deleteFaultRule = function (id, ruleId) { return this._record('deleteFaultRule', { id, ruleId }); };
+    FakeRepo.prototype.deletePlayer = function (id) { return this._record('deletePlayer', { id }); };
+    FakeRepo.prototype.getPlayer = function (id) { return this._record('getPlayer', { id }); };
+    FakeRepo.prototype.listPlayers = function (f) { return this._record('listPlayers', { filters: f }); };
+    FakeRepo.prototype.subscribeEvents = function (opts) {
+      this.calls.push({ op: 'subscribeEvents', args: opts });
+      this._sseCallbacks = opts.callbacks || {};
+      return { cancel: () => {}, lastEventID: () => '' };
+    };
+    FakeRepo.prototype.patchGroup = function (id, patch) { return this._record('patchGroup', { id, patch }); };
+    FakeRepo.prototype.createGroup = function (p) { return this._record('createGroup', { payload: p }); };
+    FakeRepo.prototype.listGroups = function () { return this._record('listGroups', {}); };
+    FakeRepo.prototype.deleteGroup = function (id) { return this._record('deleteGroup', { id }); };
+
+    const M = window.V2Models;
+
+    // ---- Tests ----
+
+    test('Player.setLabel triggers exactly one PATCH with merge-patch shape', async () => {
+      const repo = new FakeRepo();
+      const p = new M.Player(repo, { id: 'p1', display_id: 1, control_revision: 'r1', labels: {} });
+      await p.setLabel('test', 'foo');
+      const patches = repo.calls.filter(c => c.op === 'patchPlayer');
+      assertEq(patches.length, 1, 'one PATCH');
+      assertDeep(patches[0].args.patch, { labels: { test: 'foo' } }, 'patch shape');
+      assertEq(p.labels.test, 'foo', 'local state');
+    });
+
+    test('Player.clearLabel sends null per RFC 7396', async () => {
+      const repo = new FakeRepo();
+      const p = new M.Player(repo, { id: 'p1', display_id: 1, control_revision: 'r1', labels: { test: 'foo' } });
+      await p.clearLabel('test');
+      const patches = repo.calls.filter(c => c.op === 'patchPlayer');
+      assertEq(patches.length, 1);
+      assertDeep(patches[0].args.patch, { labels: { test: null } });
+      assert(!('test' in p.labels), 'label removed');
+    });
+
+    test('ShapeProfile.setRate emits change + pending events', async () => {
+      const repo = new FakeRepo();
+      const p = new M.Player(repo, { id: 'p1', display_id: 1, control_revision: 'r1', shape: { rate_mbps: 5 } });
+      const events = [];
+      p.shape.on('change', (e) => events.push({ kind: 'change', e }));
+      p.shape.on('pending', (e) => events.push({ kind: 'pending', e }));
+      await p.shape.setRate(8);
+      assertEq(p.shape.rateMbps, 8);
+      const changes = events.filter(x => x.kind === 'change');
+      const pendings = events.filter(x => x.kind === 'pending');
+      assert(changes.length >= 1, 'at least one change');
+      assert(pendings.length >= 2, 'pending start + done');
+    });
+
+    test('412 conflict triggers rollback + error event + refetch', async () => {
+      const repo = new FakeRepo();
+      // First PATCH returns 412, then refetch returns the authoritative state.
+      repo.responses.push({ ok: false, status: 412, body: { title: 'precondition failed' } });
+      repo.responses.push({ ok: true, status: 200, etag: '"r2"', body: { id: 'p1', display_id: 1, control_revision: 'r2', shape: { rate_mbps: 12 } } });
+      const p = new M.Player(repo, { id: 'p1', display_id: 1, control_revision: 'r1', shape: { rate_mbps: 5 } });
+      const errors = [];
+      p.shape.on('error', (e) => errors.push(e));
+      await p.shape.setRate(8);
+      // After rollback the value reverts to the snapshot (5), then refetch
+      // overwrites to the authoritative 12.
+      // Allow the refetch (microtask + promise) to settle.
+      await sleep(10);
+      assertEq(errors.length, 1, 'one error event');
+      assertEq(errors[0].response.status, 412);
+      assertEq(p.shape.rateMbps, 12, 'refetched value');
+      assertEq(p.controlRevision, 'r2', 'control_revision updated');
+    });
+
+    test('Slider drag (10 setRate calls in 10ms) coalesces to one PATCH', async () => {
+      const repo = new FakeRepo();
+      const p = new M.Player(repo, { id: 'p1', display_id: 1, control_revision: 'r1', shape: {} });
+      const realRepo = new window.V2Repo({
+        cachedETag: () => '"r1"',
+        patchPlayer: (id, patch, op) => repo._record('patchPlayer', { id, patch, op }),
+      });
+      p._repo = realRepo;
+      const promises = [];
+      for (let i = 1; i <= 10; i++) promises.push(p.shape.setRate(i));
+      await Promise.all(promises);
+      const patches = repo.calls.filter(c => c.op === 'patchPlayer');
+      assertEq(patches.length, 1, 'coalesced to 1 PATCH');
+      assertEq(patches[0].args.patch.shape.rate_mbps, 10, 'last write wins');
+    });
+
+    test('FaultRuleSet.append optimistically adds the rule on success', async () => {
+      const repo = new FakeRepo();
+      repo.responses.push({ ok: true, status: 201, body: { id: 'rule-1', type: '500' } });
+      const p = new M.Player(repo, { id: 'p1', display_id: 1, control_revision: 'r1', fault_rules: [] });
+      await p.faultRules.append({ type: '500' });
+      assertEq(p.faultRules.rules.length, 1);
+      assertEq(p.faultRules.rules[0].type, '500');
+    });
+
+    test('FaultRuleSet.remove rolls back on server error', async () => {
+      const repo = new FakeRepo();
+      repo.responses.push({ ok: false, status: 500 });
+      const p = new M.Player(repo, {
+        id: 'p1', display_id: 1, control_revision: 'r1',
+        fault_rules: [{ id: 'rule-1', type: '500' }],
+      });
+      const errors = [];
+      p.faultRules.on('error', (e) => errors.push(e));
+      await p.faultRules.remove('rule-1');
+      assertEq(p.faultRules.rules.length, 1, 'rolled back');
+      assertEq(errors.length, 1, 'error fired');
+    });
+
+    test('PlayersStore.hydrate populates the map', async () => {
+      const repo = new FakeRepo();
+      repo.responses.push({ ok: true, status: 200, body: { items: [
+        { id: 'p1', display_id: 1, control_revision: 'r1' },
+        { id: 'p2', display_id: 2, control_revision: 'r1' },
+      ] } });
+      const store = new M.PlayersStore(repo);
+      await store.hydrate();
+      assertEq(store.players.size, 2);
+      assert(store.get('p1') instanceof M.Player);
+    });
+
+    test('PlayersStore SSE player.updated absorbs into existing model', async () => {
+      const repo = new FakeRepo();
+      repo.responses.push({ ok: true, status: 200, body: { items: [{ id: 'p1', display_id: 1, control_revision: 'r1', labels: { x: 'a' } }] } });
+      const store = new M.PlayersStore(repo);
+      store.connect();
+      await store.hydrate();
+      const p = store.get('p1');
+      assertEq(p.labels.x, 'a');
+      // Simulate SSE update.
+      repo._sseCallbacks.onPlayerUpdated({ id: 'p1', display_id: 1, control_revision: 'r2', labels: { x: 'b' } });
+      assertEq(p.labels.x, 'b');
+      assertEq(p.controlRevision, 'r2');
+    });
+
+    test('V2Repo._mergePatchInto deep-merges objects', () => {
+      const m = window.V2Repo._mergePatchInto({ shape: { rate_mbps: 5, delay_ms: 10 } }, { shape: { rate_mbps: 8 } });
+      assertDeep(m, { shape: { rate_mbps: 8, delay_ms: 10 } });
+    });
+
+    test('V2Repo._mergePatchInto deletes keys with null', () => {
+      const m = window.V2Repo._mergePatchInto({ labels: { a: '1', b: '2' } }, { labels: { a: null } });
+      assertDeep(m, { labels: { b: '2' } });
+    });
+
+    // ---- Run ----
+
+    let pass = 0, fail = 0;
+    for (const t of tests) {
+      const div = document.createElement('div');
+      div.className = 'test';
+      try {
+        await t.fn();
+        div.classList.add('pass');
+        div.textContent = '✓ ' + t.name;
+        pass++;
+      } catch (err) {
+        div.classList.add('fail');
+        div.textContent = '✗ ' + t.name + '\n  ' + (err.stack || err.message);
+        fail++;
+      }
+      results.appendChild(div);
+    }
+    const summary = document.createElement('div');
+    summary.className = 'summary ' + (fail ? 'fail' : 'pass');
+    summary.textContent = `${pass} passed, ${fail} failed`;
+    results.appendChild(summary);
+  })();
+  </script>
+</body>
+</html>

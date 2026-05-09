@@ -164,6 +164,17 @@ func (s *Server) augmentPlayerFrameWithRaw(payload []byte) []byte {
 	if pidStr == "" {
 		return payload
 	}
+	// events.go::publishPlayerEvent already attaches raw_session from
+	// the same normalized session it derived the typed PlayerRecord
+	// from. Re-fetching via SessionByPlayerID would call
+	// normalizeSessionsForResponse a second time on the same broadcast
+	// tick, which double-drains drainAndReset (consumed-on-read window
+	// aggregator) and surfaces rtt_stale=true on the wire even when
+	// the player is actively streaming. Trust the existing
+	// raw_session and skip the augmentation.
+	if _, alreadyHasRaw := env.Data["raw_session"]; alreadyHasRaw {
+		return payload
+	}
 	sess, ok := s.v1.SessionByPlayerID(pidStr)
 	if !ok {
 		return payload

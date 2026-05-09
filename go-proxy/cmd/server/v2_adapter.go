@@ -8,6 +8,7 @@ package main
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"strconv"
 	"sync"
@@ -31,13 +32,20 @@ func NewV2Adapter(app *App) server.V1Adapter {
 // type-erased maps. Each entry is a clone — safe for v2 to read without
 // holding any locks. Returns an empty slice when the app is not yet
 // initialised (defensive — should not happen at request time).
+//
+// Sessions are passed through normalizeSessionsForResponse so the
+// per-tick stamped fields (client_rtt_*, client_path_ping_rtt_ms,
+// drained byte counters, etc.) are present on the raw_session payload
+// — same as the v1 endpoints serve. Without this the RTT and ping
+// charts have nothing to plot.
 func (a *v2Adapter) SessionList() []map[string]any {
 	if a == nil || a.app == nil {
 		return nil
 	}
 	src := a.app.getSessionList()
-	out := make([]map[string]any, 0, len(src))
-	for _, s := range src {
+	normalized := a.app.normalizeSessionsForResponse(src)
+	out := make([]map[string]any, 0, len(normalized))
+	for _, s := range normalized {
 		out = append(out, map[string]any(s))
 	}
 	return out
@@ -72,11 +80,21 @@ func matchesPlayerID(stored, incoming string) bool {
 // SessionByPlayerID returns the (cloned) session record for one player,
 // or (nil, false) if no session matches. Honors v1 short-form
 // player_ids via matchesPlayerID.
+//
+// Sessions are passed through normalizeSessionsForResponse so the
+// per-tick stamped fields (client_rtt_*, client_path_ping_rtt_ms,
+// drained byte counters, mbps_shaper_*, etc.) are present — same as
+// SessionList(). Without this, augmentPlayerFrameWithRaw on the SSE
+// path would overwrite the v2-events raw_session (which my
+// SubscribeSessions normalized) with un-normalized data, hiding RTT
+// and shaper fields from the dashboard.
 func (a *v2Adapter) SessionByPlayerID(playerID string) (map[string]any, bool) {
 	if playerID == "" || a == nil || a.app == nil {
 		return nil, false
 	}
-	for _, s := range a.app.getSessionList() {
+	src := a.app.getSessionList()
+	normalized := a.app.normalizeSessionsForResponse(src)
+	for _, s := range normalized {
 		if matchesPlayerID(getString(s, "player_id"), playerID) {
 			return map[string]any(s), true
 		}
@@ -91,8 +109,11 @@ func (a *v2Adapter) NetworkLogForPlayer(playerID string, limit int) []map[string
 	if playerID == "" || a == nil || a.app == nil {
 		return nil
 	}
-	if limit <= 0 || limit > 1000 {
-		limit = 200
+	// Match v1 /api/session/{id}/network: default to the entire ring
+	// buffer (5000 entries) so the dashboard waterfall sees the same
+	// time window. Caller can still pass a smaller `?limit=` to narrow.
+	if limit <= 0 || limit > 5000 {
+		limit = 5000
 	}
 	var sessionID string
 	for _, s := range a.app.getSessionList() {
@@ -112,13 +133,17 @@ func (a *v2Adapter) NetworkLogForPlayer(playerID string, limit int) []map[string
 		return nil
 	}
 	all := rb.GetAll()
-	// GetAll returns oldest-first. Spec wants newest-first up to limit.
+	// GetAll returns oldest-first. Match v1 /api/session/{id}/network
+	// which also returns oldest-first — the dashboard waterfall sorts
+	// by timestamp internally either way, but matching the wire shape
+	// removes a class of "field looked normal but rendered wrong"
+	// debugging surprises.
 	if limit > 0 && len(all) > limit {
 		all = all[len(all)-limit:]
 	}
 	out := make([]map[string]any, 0, len(all))
-	for i := len(all) - 1; i >= 0; i-- {
-		out = append(out, networkEntryToMap(all[i]))
+	for _, e := range all {
+		out = append(out, networkEntryToMap(e))
 	}
 	return out
 }
@@ -156,17 +181,30 @@ func (a *v2Adapter) AnalyticsEnabled() bool {
 // in NetworkLogEntry.
 func networkEntryToMap(e NetworkLogEntry) map[string]any {
 	return map[string]any{
-		"timestamp":    e.Timestamp,
-		"method":       e.Method,
-		"url":          e.URL,
-		"upstream_url": e.UpstreamURL,
-		"path":         e.Path,
-		"request_kind": e.RequestKind,
-		"status":       e.Status,
-		"bytes_in":     e.BytesIn,
-		"bytes_out":    e.BytesOut,
-		"content_type": e.ContentType,
-		"play_id":      e.PlayID,
+		"timestamp":      e.Timestamp,
+		"method":         e.Method,
+		"url":            e.URL,
+		"upstream_url":   e.UpstreamURL,
+		"path":           e.Path,
+		"request_kind":   e.RequestKind,
+		"status":         e.Status,
+		"bytes_in":       e.BytesIn,
+		"bytes_out":      e.BytesOut,
+		"content_type":   e.ContentType,
+		"play_id":        e.PlayID,
+		// Phase timings — surfaced when httptrace populated them.
+		"dns_ms":         e.DNSMs,
+		"connect_ms":     e.ConnectMs,
+		"tls_ms":         e.TLSMs,
+		"ttfb_ms":        e.TTFBMs,
+		"transfer_ms":    e.TransferMs,
+		"total_ms":       e.TotalMs,
+		"client_wait_ms": e.ClientWaitMs,
+		// Fault metadata — flagged on rows where the proxy injected one.
+		"faulted":        e.Faulted,
+		"fault_type":     e.FaultType,
+		"fault_action":   e.FaultAction,
+		"fault_category": e.FaultCategory,
 	}
 }
 
@@ -568,13 +606,30 @@ func (a *v2Adapter) SubscribeSessions(buffer int) (<-chan server.SessionSnapshot
 				if !ok {
 					return
 				}
+				// Treat the broadcast event as a trigger only — its
+				// `ev.Sessions` are POST-normalize, so `_rttWindow` /
+				// `_pingRTTUs` pointers were already stripped and we
+				// can't drain a fresh sample from them. Pull a fresh
+				// clone of the live snapshot (which retains the window
+				// pointers) and normalize THAT — so the v2 SSE consumer
+				// sees the same client_rtt_*/_path_ping_*/mbps_shaper_*
+				// fields the polled `/api/sessions` endpoint shows.
+				freshClone := a.app.getSessionList()
+				normalized := a.app.normalizeSessionsForResponse(freshClone)
+				if len(normalized) > 0 {
+					rtt, _ := normalized[0]["client_rtt_ms"].(float64)
+					_, hasWin := normalized[0]["_rttWindow"]
+					_, hasConn := normalized[0]["_lastTCPConn"]
+					_, hasPing := normalized[0]["_pingRTTUs"]
+					log.Printf("V2_SSE_DBG rtt=%.2f keys=%d hasWin=%v hasConn=%v hasPing=%v", rtt, len(normalized[0]), hasWin, hasConn, hasPing)
+				}
 				snap := server.SessionSnapshot{
 					Revision: ev.Revision,
 					Dropped:  ev.Dropped,
-					Sessions: make([]map[string]any, 0, len(ev.Sessions)),
+					Sessions: make([]map[string]any, 0, len(normalized)),
 				}
-				for _, s := range ev.Sessions {
-					snap.Sessions = append(snap.Sessions, map[string]any(cloneSession(s)))
+				for _, s := range normalized {
+					snap.Sessions = append(snap.Sessions, map[string]any(s))
 				}
 				select {
 				case out <- snap:

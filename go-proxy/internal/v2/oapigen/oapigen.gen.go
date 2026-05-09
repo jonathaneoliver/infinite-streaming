@@ -22,6 +22,30 @@ const (
 	BasicAuthScopes basicAuthContextKey = "basicAuth.Scopes"
 )
 
+// Defines values for ContentManipulationLiveOffset.
+const (
+	ContentManipulationLiveOffsetN0  ContentManipulationLiveOffset = 0
+	ContentManipulationLiveOffsetN18 ContentManipulationLiveOffset = 18
+	ContentManipulationLiveOffsetN24 ContentManipulationLiveOffset = 24
+	ContentManipulationLiveOffsetN6  ContentManipulationLiveOffset = 6
+)
+
+// Valid indicates whether the value is a known member of the ContentManipulationLiveOffset enum.
+func (e ContentManipulationLiveOffset) Valid() bool {
+	switch e {
+	case ContentManipulationLiveOffsetN0:
+		return true
+	case ContentManipulationLiveOffsetN18:
+		return true
+	case ContentManipulationLiveOffsetN24:
+		return true
+	case ContentManipulationLiveOffsetN6:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for FaultFilterRequestKind.
 const (
 	FaultFilterRequestKindAudioManifest  FaultFilterRequestKind = "audio_manifest"
@@ -148,12 +172,61 @@ func (e HeartbeatEventType) Valid() bool {
 	}
 }
 
+// Defines values for PatternDefaultStepSeconds.
+const (
+	PatternDefaultStepSecondsN12 PatternDefaultStepSeconds = 12
+	PatternDefaultStepSecondsN18 PatternDefaultStepSeconds = 18
+	PatternDefaultStepSecondsN24 PatternDefaultStepSeconds = 24
+	PatternDefaultStepSecondsN6  PatternDefaultStepSeconds = 6
+)
+
+// Valid indicates whether the value is a known member of the PatternDefaultStepSeconds enum.
+func (e PatternDefaultStepSeconds) Valid() bool {
+	switch e {
+	case PatternDefaultStepSecondsN12:
+		return true
+	case PatternDefaultStepSecondsN18:
+		return true
+	case PatternDefaultStepSecondsN24:
+		return true
+	case PatternDefaultStepSecondsN6:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for PatternMarginPct.
+const (
+	N0  PatternMarginPct = 0
+	N10 PatternMarginPct = 10
+	N25 PatternMarginPct = 25
+	N50 PatternMarginPct = 50
+)
+
+// Valid indicates whether the value is a known member of the PatternMarginPct enum.
+func (e PatternMarginPct) Valid() bool {
+	switch e {
+	case N0:
+		return true
+	case N10:
+		return true
+	case N25:
+		return true
+	case N50:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for PatternTemplate.
 const (
 	Pyramid    PatternTemplate = "pyramid"
 	RampDown   PatternTemplate = "ramp_down"
 	RampUp     PatternTemplate = "ramp_up"
 	Sliders    PatternTemplate = "sliders"
+	Square     PatternTemplate = "square"
 	SquareWave PatternTemplate = "square_wave"
 )
 
@@ -167,6 +240,8 @@ func (e PatternTemplate) Valid() bool {
 	case RampUp:
 		return true
 	case Sliders:
+		return true
+	case Square:
 		return true
 	case SquareWave:
 		return true
@@ -532,6 +607,29 @@ func (e GetApiV2PlayersParamsState) Valid() bool {
 	}
 }
 
+// ContentManipulation Master playlist mutations applied at manifest serve time. Takes
+// effect on the next master manifest fetch. Used to test player
+// robustness against malformed / restricted / shifted manifests.
+type ContentManipulation struct {
+	// AllowedVariants When non-empty, only the listed variant URIs are kept in the master playlist.
+	AllowedVariants *[]string `json:"allowed_variants,omitempty"`
+
+	// LiveOffset Live edge offset window in seconds. 0 = no offset.
+	LiveOffset *ContentManipulationLiveOffset `json:"live_offset,omitempty"`
+
+	// OverstateBandwidth Inflate BANDWIDTH attribute by 10%.
+	OverstateBandwidth *bool `json:"overstate_bandwidth,omitempty"`
+
+	// StripAverageBandwidth Remove AVERAGE-BANDWIDTH attribute.
+	StripAverageBandwidth *bool `json:"strip_average_bandwidth,omitempty"`
+
+	// StripCodecs Remove CODECS attribute from EXT-X-STREAM-INF lines.
+	StripCodecs *bool `json:"strip_codecs,omitempty"`
+}
+
+// ContentManipulationLiveOffset Live edge offset window in seconds. 0 = no offset.
+type ContentManipulationLiveOffset int
+
 // FaultCounters Read-only. Server-maintained; never appears in PATCH bodies.
 type FaultCounters map[string]int
 
@@ -694,9 +792,18 @@ type ManifestVariant struct {
 
 // NetworkLogEntry HAR-shaped per-request record.
 type NetworkLogEntry struct {
-	BytesIn       *int                `json:"bytes_in,omitempty"`
-	BytesOut      *int                `json:"bytes_out,omitempty"`
-	ContentType   *string             `json:"content_type,omitempty"`
+	BytesIn  *int `json:"bytes_in,omitempty"`
+	BytesOut *int `json:"bytes_out,omitempty"`
+
+	// ClientWaitMs Server-perceived wait between request received and first response byte sent.
+	ClientWaitMs *float32 `json:"client_wait_ms,omitempty"`
+
+	// ConnectMs Upstream TCP connect time.
+	ConnectMs   *float32 `json:"connect_ms,omitempty"`
+	ContentType *string  `json:"content_type,omitempty"`
+
+	// DnsMs Upstream DNS resolution time.
+	DnsMs         *float32            `json:"dns_ms,omitempty"`
 	FaultAction   *string             `json:"fault_action,omitempty"`
 	FaultCategory *string             `json:"fault_category,omitempty"`
 	FaultType     *string             `json:"fault_type,omitempty"`
@@ -707,19 +814,46 @@ type NetworkLogEntry struct {
 	RequestKind   *string             `json:"request_kind,omitempty"`
 	Status        *int                `json:"status,omitempty"`
 	Timestamp     *time.Time          `json:"timestamp,omitempty"`
-	TotalMs       *float32            `json:"total_ms,omitempty"`
-	TtfbMs        *float32            `json:"ttfb_ms,omitempty"`
-	UpstreamUrl   *string             `json:"upstream_url,omitempty"`
-	Url           *string             `json:"url,omitempty"`
+
+	// TlsMs Upstream TLS handshake time.
+	TlsMs   *float32 `json:"tls_ms,omitempty"`
+	TotalMs *float32 `json:"total_ms,omitempty"`
+
+	// TransferMs Downstream write+flush time to client (player-perceived receive).
+	TransferMs *float32 `json:"transfer_ms,omitempty"`
+
+	// TtfbMs Upstream TTFB (proxy → origin first byte).
+	TtfbMs      *float32 `json:"ttfb_ms,omitempty"`
+	UpstreamUrl *string  `json:"upstream_url,omitempty"`
+	Url         *string  `json:"url,omitempty"`
 }
 
 // Pattern defines model for Pattern.
 type Pattern struct {
-	Steps    []PatternStep    `json:"steps"`
+	// DefaultStepSeconds Default per-step duration the dashboard chose when generating the step list.
+	DefaultStepSeconds *PatternDefaultStepSeconds `json:"default_step_seconds,omitempty"`
+
+	// MarginPct Headroom percent above the top variant used when sizing template steps (0 = exact).
+	MarginPct *PatternMarginPct `json:"margin_pct,omitempty"`
+	Steps     []PatternStep     `json:"steps"`
+
+	// Template Template that drove step-list generation. Stored verbatim
+	// so the dashboard can repaint the template radios. The kernel
+	// cycles through `steps` regardless of template; this field is
+	// metadata, not a recompute trigger.
 	Template *PatternTemplate `json:"template,omitempty"`
 }
 
-// PatternTemplate defines model for Pattern.Template.
+// PatternDefaultStepSeconds Default per-step duration the dashboard chose when generating the step list.
+type PatternDefaultStepSeconds int
+
+// PatternMarginPct Headroom percent above the top variant used when sizing template steps (0 = exact).
+type PatternMarginPct int
+
+// PatternTemplate Template that drove step-list generation. Stored verbatim
+// so the dashboard can repaint the template radios. The kernel
+// cycles through `steps` regardless of template; this field is
+// metadata, not a recompute trigger.
 type PatternTemplate string
 
 // PatternStep defines model for PatternStep.
@@ -839,11 +973,23 @@ type PlayRecord struct {
 	// Validation: keys match `[a-z][a-z0-9_./-]{0,62}`, values ≤256 chars,
 	// max 32 entries per resource. Keys starting with `harness.` or `_`
 	// are server-managed and rejected on PATCH.
-	Labels        *Labels            `json:"labels,omitempty"`
-	Manifest      *Manifest          `json:"manifest,omitempty"`
-	PlayerId      openapi_types.UUID `json:"player_id"`
-	PlayerMetrics *PlayerMetrics     `json:"player_metrics,omitempty"`
-	ServerMetrics *ServerMetrics     `json:"server_metrics,omitempty"`
+	Labels   *Labels            `json:"labels,omitempty"`
+	Manifest *Manifest          `json:"manifest,omitempty"`
+	PlayerId openapi_types.UUID `json:"player_id"`
+
+	// PlayerMetrics Read-only client-reported playback telemetry. Sourced from the
+	// player app's periodic POST to `/api/session/{id}/metrics` (v1
+	// ingestion endpoint, kept for player apps; v2 surfaces these as
+	// a typed projection). All fields nullable — the player may not
+	// report every field on every tick.
+	PlayerMetrics *PlayerMetrics `json:"player_metrics,omitempty"`
+
+	// ServerMetrics Read-only server-observed transport telemetry. Sourced from
+	// v1's TCP_INFO poll (RTT family) + ICMP path ping + per-session
+	// byte counters + shaper bookkeeping. Only the RTT family is
+	// Linux-specific (TCP_INFO is a Linux syscall; macOS dev builds
+	// zero those out).
+	ServerMetrics *ServerMetrics `json:"server_metrics,omitempty"`
 
 	// Shape Play-scoped shape override. Replaces `player.shape` for this
 	// play if set. Auto-cleared on play end.
@@ -992,12 +1138,96 @@ type PlayerGroupPatch struct {
 	MemberPlayerIds *[]openapi_types.UUID `json:"member_player_ids,omitempty"`
 }
 
-// PlayerMetrics defines model for PlayerMetrics.
+// PlayerMetrics Read-only client-reported playback telemetry. Sourced from the
+// player app's periodic POST to `/api/session/{id}/metrics` (v1
+// ingestion endpoint, kept for player apps; v2 surfaces these as
+// a typed projection). All fields nullable — the player may not
+// report every field on every tick.
 type PlayerMetrics struct {
-	BufferDepthS     *float32 `json:"buffer_depth_s,omitempty"`
-	Stalls           *int     `json:"stalls,omitempty"`
+	// AvgNetworkBitrateMbps Player-computed avgNetworkBitrate.
+	AvgNetworkBitrateMbps *float32 `json:"avg_network_bitrate_mbps,omitempty"`
+	BufferDepthS          *float32 `json:"buffer_depth_s,omitempty"`
+
+	// BufferEndS Player-reported end of buffered range (seconds).
+	BufferEndS *float32 `json:"buffer_end_s,omitempty"`
+
+	// DisplayResolution Player-reported window/display resolution (separate from the active video resolution).
+	DisplayResolution *string `json:"display_resolution,omitempty"`
+
+	// DroppedFrames Player-reported dropped frames count.
+	DroppedFrames *int `json:"dropped_frames,omitempty"`
+
+	// Error Most recent player-reported error string.
+	Error *string `json:"error,omitempty"`
+
+	// EventTime Player-supplied wallclock for the most recent metrics tick.
+	EventTime *time.Time `json:"event_time,omitempty"`
+
+	// FirstFrameTimeS Time-to-first-frame (seconds since play started).
+	FirstFrameTimeS *float32 `json:"first_frame_time_s,omitempty"`
+
+	// FramesDisplayed Player-reported displayed frames count.
+	FramesDisplayed *int `json:"frames_displayed,omitempty"`
+
+	// LastEvent Most recent player-reported lifecycle event (playing, buffering_start, stall_start, etc.).
+	LastEvent *string `json:"last_event,omitempty"`
+
+	// LastStallTimeS Duration of the most recent stall (seconds).
+	LastStallTimeS *float32 `json:"last_stall_time_s,omitempty"`
+
+	// LiveEdgeS Player-reported live edge timestamp (seconds).
+	LiveEdgeS *float32 `json:"live_edge_s,omitempty"`
+
+	// LiveOffsetS Player-reported offset behind live edge (seconds).
+	LiveOffsetS *float32 `json:"live_offset_s,omitempty"`
+
+	// LoopCountIncrement Server-derived increment from the previous report.
+	LoopCountIncrement *int `json:"loop_count_increment,omitempty"`
+
+	// LoopCountPlayer How many times the player has reported looping the content. Player-reported, may be 0 on platforms that do not count.
+	LoopCountPlayer *int `json:"loop_count_player,omitempty"`
+
+	// NetworkBitrateMbps Player-computed instantaneous networkBitrate.
+	NetworkBitrateMbps *float32 `json:"network_bitrate_mbps,omitempty"`
+
+	// PlaybackRate Player playback rate (1.0 = normal).
+	PlaybackRate *float32 `json:"playback_rate,omitempty"`
+
+	// PlayerRestarts Number of player restarts (auto-recovery + manual).
+	PlayerRestarts *int `json:"player_restarts,omitempty"`
+
+	// PositionS Player current position (seconds).
+	PositionS *float32 `json:"position_s,omitempty"`
+
+	// ProfileShiftCount Number of ABR rendition shifts the player has reported.
+	ProfileShiftCount *int `json:"profile_shift_count,omitempty"`
+
+	// SeekableEndS Player-reported end of seekable range (seconds).
+	SeekableEndS *float32 `json:"seekable_end_s,omitempty"`
+
+	// Source Identifier for the metrics source (e.g. avplayer-ios, exoplayer-android).
+	Source *string `json:"source,omitempty"`
+
+	// StallTimeS Cumulative stall time (seconds).
+	StallTimeS *float32 `json:"stall_time_s,omitempty"`
+	Stalls     *int     `json:"stalls,omitempty"`
+
+	// State Player state machine label (idle, playing, paused, buffering, ended, error).
+	State *string `json:"state,omitempty"`
+
+	// TriggerType What triggered the most recent metrics tick (timer, event, etc.).
+	TriggerType *string `json:"trigger_type,omitempty"`
+
+	// TrueOffsetS Wall-clock offset between player position and real time (seconds).
+	TrueOffsetS      *float32 `json:"true_offset_s,omitempty"`
 	VideoBitrateMbps *float32 `json:"video_bitrate_mbps,omitempty"`
-	VideoResolution  *string  `json:"video_resolution,omitempty"`
+
+	// VideoQualityPct video_bitrate_mbps as a percentage of the top variant in the active manifest
+	VideoQualityPct *float32 `json:"video_quality_pct,omitempty"`
+	VideoResolution *string  `json:"video_resolution,omitempty"`
+
+	// VideoStartTimeS Time-to-playing (seconds since play started).
+	VideoStartTimeS *float32 `json:"video_start_time_s,omitempty"`
 }
 
 // PlayerPatch Mutable subset of `PlayerRecord`. JSON Merge Patch semantics.
@@ -1010,7 +1240,11 @@ type PlayerMetrics struct {
 // (`POST/PATCH/DELETE /api/v2/players/{id}/fault-rules/{rule_id}`)
 // are a planned addition; not in this initial spec.
 type PlayerPatch struct {
-	FaultRules *[]FaultRule `json:"fault_rules,omitempty"`
+	// Content Master playlist mutations applied at manifest serve time. Takes
+	// effect on the next master manifest fetch. Used to test player
+	// robustness against malformed / restricted / shifted manifests.
+	Content    *ContentManipulation `json:"content,omitempty"`
+	FaultRules *[]FaultRule         `json:"fault_rules,omitempty"`
 
 	// Labels Free-form k/v tags. Propagated to ClickHouse archive rows at insert
 	// time. Designed for low-to-medium cardinality grouping (test names,
@@ -1038,6 +1272,12 @@ type PlayerPatch struct {
 	// one-shot or cadence-driven transport faults. See
 	// `DESIGN.md § shape.transport_fault × shape.loss_pct interaction`.
 	Shape *Shape `json:"shape,omitempty"`
+
+	// TransferTimeouts Server-side response transfer timeouts. `active_timeout_seconds`
+	// bounds total response duration; `idle_timeout_seconds` bounds
+	// time-since-last-write. The three `applies_*` flags scope which
+	// request kinds the timeout governs (default: segments only).
+	TransferTimeouts *TransferTimeouts `json:"transfer_timeouts,omitempty"`
 }
 
 // PlayerRecord Live player state. Reflects player-scope config; for the *effective*
@@ -1051,6 +1291,13 @@ type PlayerPatch struct {
 // per-device and do not broadcast. Each property's description
 // notes which side it falls on.
 type PlayerRecord struct {
+	// Content Master playlist mutations applied at manifest serve time:
+	// strip CODECS, strip AVERAGE-BANDWIDTH, overstate bandwidth,
+	// allowed-variants whitelist, live-offset window. Takes effect
+	// on the next master manifest fetch.
+	// *Broadcasts to group on PATCH.*
+	Content *ContentManipulation `json:"content,omitempty"`
+
 	// ControlRevision Concurrency token. ETag/If-Match.
 	// *Shared across group members after any broadcast write.*
 	ControlRevision string `json:"control_revision"`
@@ -1087,12 +1334,42 @@ type PlayerRecord struct {
 	// LastSeenAt *Server-observed lifecycle — does not broadcast to group.*
 	LastSeenAt *time.Time `json:"last_seen_at,omitempty"`
 
+	// LoopCountServer Server-counted loop boundaries observed on the manifest
+	// timeline. Independent of the player-reported value in
+	// `player_metrics.loop_count_player`.
+	// *Per-device runtime state — does not broadcast to group.*
+	LoopCountServer *int `json:"loop_count_server,omitempty"`
+
 	// OriginationIp *Server-observed lifecycle — does not broadcast to group.*
 	OriginationIp *string `json:"origination_ip,omitempty"`
+
+	// PlayerIp Player's self-reported IP (from the testing harness).
+	// Differs from `origination_ip` when the player is behind NAT.
+	// *Per-device identity — does not broadcast to group.*
+	PlayerIp *string `json:"player_ip,omitempty"`
+
+	// PlayerMetrics Read-only client-reported playback telemetry.
+	// *Per-device runtime state — does not broadcast to group.*
+	PlayerMetrics *PlayerMetrics `json:"player_metrics,omitempty"`
+
+	// ServerMetrics Read-only server-observed transport telemetry (TCP_INFO + ICMP path
+	// ping + per-session byte counters).
+	// *Per-device runtime state — does not broadcast to group.*
+	ServerMetrics *ServerMetrics `json:"server_metrics,omitempty"`
 
 	// Shape Network shaping (rate / delay / loss / transport_fault).
 	// *Broadcasts to group on PATCH.*
 	Shape *Shape `json:"shape,omitempty"`
+
+	// TransferTimeouts Server-side transfer timeouts (active + idle) applied during
+	// response generation. Per-protocol scope (segments / media
+	// manifests / master manifest).
+	// *Broadcasts to group on PATCH.*
+	TransferTimeouts *TransferTimeouts `json:"transfer_timeouts,omitempty"`
+
+	// UserAgent User-Agent string from the player's first request.
+	// *Per-device identity — does not broadcast to group.*
+	UserAgent *string `json:"user_agent,omitempty"`
 }
 
 // PlayerUpdatedEvent defines model for PlayerUpdatedEvent.
@@ -1165,10 +1442,88 @@ type ReplayGapEvent struct {
 // ReplayGapEventType defines model for ReplayGapEvent.Type.
 type ReplayGapEventType string
 
-// ServerMetrics defines model for ServerMetrics.
+// ServerMetrics Read-only server-observed transport telemetry. Sourced from
+// v1's TCP_INFO poll (RTT family) + ICMP path ping + per-session
+// byte counters + shaper bookkeeping. Only the RTT family is
+// Linux-specific (TCP_INFO is a Linux syscall; macOS dev builds
+// zero those out).
 type ServerMetrics struct {
+	// BytesInLast Bytes-in since the previous metric tick.
+	BytesInLast *int `json:"bytes_in_last,omitempty"`
+
+	// BytesInTotal Lifetime ingress bytes from the player to the proxy.
+	BytesInTotal *int `json:"bytes_in_total,omitempty"`
+
+	// BytesLastTs Unix-seconds timestamp of the most recent bytes_*_last sample.
+	BytesLastTs *int `json:"bytes_last_ts,omitempty"`
+
+	// BytesOutLast Bytes-out since the previous metric tick.
+	BytesOutLast *int `json:"bytes_out_last,omitempty"`
+
+	// BytesOutTotal Lifetime egress bytes from the proxy to the player.
+	BytesOutTotal *int `json:"bytes_out_total,omitempty"`
+
+	// MbpsIn Recent ingress throughput (Mbps).
+	MbpsIn *float32 `json:"mbps_in,omitempty"`
+
+	// MbpsInActive Active-only ingress throughput, excluding idle gaps (Mbps).
+	MbpsInActive *float32 `json:"mbps_in_active,omitempty"`
+
+	// MbpsInAvg Lifetime average ingress throughput (Mbps).
+	MbpsInAvg *float32 `json:"mbps_in_avg,omitempty"`
+
+	// MbpsOut Recent egress throughput (Mbps).
+	MbpsOut *float32 `json:"mbps_out,omitempty"`
+
+	// MbpsShaperAvg EWMA throughput from the shaper (Mbps).
+	MbpsShaperAvg *float32 `json:"mbps_shaper_avg,omitempty"`
+
+	// MbpsShaperRate Configured shaper rate (Mbps).
+	MbpsShaperRate *float32 `json:"mbps_shaper_rate,omitempty"`
+
+	// MbpsTransferComplete Average transfer rate over the last completed transfer (Mbps).
+	MbpsTransferComplete *float32 `json:"mbps_transfer_complete,omitempty"`
+
+	// MbpsTransferRate Instantaneous transfer rate from the per-segment write loop (Mbps).
+	MbpsTransferRate *float32 `json:"mbps_transfer_rate,omitempty"`
+
+	// MeasuredMbps Server-measured throughput passed to the bitrate chart.
+	MeasuredMbps *float32 `json:"measured_mbps,omitempty"`
+
+	// MeasurementWindowActive Width of the active-only sample window (seconds).
+	MeasurementWindowActive *float32 `json:"measurement_window_active,omitempty"`
+
+	// MeasurementWindowIo Width of the I/O sample window (seconds).
+	MeasurementWindowIo *float32 `json:"measurement_window_io,omitempty"`
+
+	// PathPingRttMs ICMP path ping RTT measured server-side.
+	PathPingRttMs *float32 `json:"path_ping_rtt_ms,omitempty"`
 	RenditionMbps *float32 `json:"rendition_mbps,omitempty"`
 	RenditionUrl  *string  `json:"rendition_url,omitempty"`
+
+	// RtoMs Current TCP retransmit timeout.
+	RtoMs *float32 `json:"rto_ms,omitempty"`
+
+	// RttMaxMs Maximum RTT in the last sample window.
+	RttMaxMs *float32 `json:"rtt_max_ms,omitempty"`
+
+	// RttMinLifetimeMs Connection-lifetime minimum RTT (Linux 4.6+).
+	RttMinLifetimeMs *float32 `json:"rtt_min_lifetime_ms,omitempty"`
+
+	// RttMinMs Minimum RTT in the last sample window.
+	RttMinMs *float32 `json:"rtt_min_ms,omitempty"`
+
+	// RttMs Smoothed RTT (RFC 6298 SRTT) over the last sample window.
+	RttMs *float32 `json:"rtt_ms,omitempty"`
+
+	// RttStale true when no fresh TCP_INFO sample is available (e.g. session idle).
+	RttStale *bool `json:"rtt_stale,omitempty"`
+
+	// RttVarMs RTT variance.
+	RttVarMs *float32 `json:"rtt_var_ms,omitempty"`
+
+	// ServerRendition Server-derived active rendition label (e.g. 720p) — separate from rendition_url.
+	ServerRendition *string `json:"server_rendition,omitempty"`
 }
 
 // Shape Network shaping (kernel-level). Includes optional `transport_fault`
@@ -1209,6 +1564,21 @@ type Shape struct {
 // the replay ring.
 type StreamEvent struct {
 	union json.RawMessage
+}
+
+// TransferTimeouts Server-side response transfer timeouts. `active_timeout_seconds`
+// bounds total response duration; `idle_timeout_seconds` bounds
+// time-since-last-write. The three `applies_*` flags scope which
+// request kinds the timeout governs (default: segments only).
+type TransferTimeouts struct {
+	// ActiveTimeoutSeconds 0 = disabled
+	ActiveTimeoutSeconds *int  `json:"active_timeout_seconds,omitempty"`
+	AppliesManifests     *bool `json:"applies_manifests,omitempty"`
+	AppliesMaster        *bool `json:"applies_master,omitempty"`
+	AppliesSegments      *bool `json:"applies_segments,omitempty"`
+
+	// IdleTimeoutSeconds 0 = disabled
+	IdleTimeoutSeconds *int `json:"idle_timeout_seconds,omitempty"`
 }
 
 // TransportFault Kernel-level transport fault via nftables. Belongs to `Shape`

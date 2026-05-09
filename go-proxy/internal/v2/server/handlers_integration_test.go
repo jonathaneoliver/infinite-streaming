@@ -169,6 +169,260 @@ func TestGet_PlayersByID_Found_HasETag(t *testing.T) {
 	}
 }
 
+// TestGet_PlayersByID_Projections_Telemetry asserts that the v1
+// session map's `player_metrics_*`, `client_*` (TCP_INFO + ICMP),
+// `bytes_*`, and `fault_count_*` families round-trip through
+// playerFromSession into the v2 PlayerMetrics / ServerMetrics /
+// FaultCounters projections.
+func TestGet_PlayersByID_Projections_Telemetry(t *testing.T) {
+	a, _, ts := newTestServer(t)
+	pid := uuid.New().String()
+	a.addPlayer(pid, "rev1", map[string]any{
+		// Player metrics
+		"player_metrics_video_resolution":     "1920x1080",
+		"player_metrics_video_bitrate_mbps":   5.5,
+		"player_metrics_video_quality_pct":    72.5,
+		"player_metrics_buffer_depth_s":       12.3,
+		"player_metrics_stalls":               2,
+		"player_metrics_loop_count_player":    7,
+		"player_metrics_loop_count_increment": 1,
+		"player_metrics_profile_shift_count":  4,
+		"player_metrics_last_event":           "playing",
+		"player_metrics_source":               "avplayer-ios",
+		// Server metrics (TCP_INFO + ICMP + bytes)
+		"client_rtt_ms":           42.0,
+		"client_rtt_min_ms":       12.0,
+		"client_path_ping_rtt_ms": 38.5,
+		"client_rtt_stale":        false,
+		"bytes_in_total":          12345,
+		"bytes_out_total":         98765,
+		// Fault counters
+		"fault_count_total":       3,
+		"fault_count_socket_drop": 2,
+	})
+
+	status, body, _ := mustGet(t, ts, "/api/v2/players/"+pid)
+	if status != http.StatusOK {
+		t.Fatalf("status %d body=%s", status, body)
+	}
+	var rec map[string]any
+	if err := json.Unmarshal(body, &rec); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	pm, ok := rec["player_metrics"].(map[string]any)
+	if !ok {
+		t.Fatalf("player_metrics missing or wrong shape: %s", body)
+	}
+	if pm["video_resolution"] != "1920x1080" {
+		t.Errorf("player_metrics.video_resolution = %v", pm["video_resolution"])
+	}
+	if pm["loop_count_player"].(float64) != 7 {
+		t.Errorf("player_metrics.loop_count_player = %v", pm["loop_count_player"])
+	}
+	if pm["last_event"] != "playing" {
+		t.Errorf("player_metrics.last_event = %v", pm["last_event"])
+	}
+
+	sm, ok := rec["server_metrics"].(map[string]any)
+	if !ok {
+		t.Fatalf("server_metrics missing or wrong shape: %s", body)
+	}
+	if sm["rtt_ms"].(float64) != 42.0 {
+		t.Errorf("server_metrics.rtt_ms = %v", sm["rtt_ms"])
+	}
+	if sm["path_ping_rtt_ms"].(float64) != 38.5 {
+		t.Errorf("server_metrics.path_ping_rtt_ms = %v", sm["path_ping_rtt_ms"])
+	}
+	if sm["bytes_in_total"].(float64) != 12345 {
+		t.Errorf("server_metrics.bytes_in_total = %v", sm["bytes_in_total"])
+	}
+
+	fc, ok := rec["fault_counters"].(map[string]any)
+	if !ok {
+		t.Fatalf("fault_counters missing or wrong shape: %s", body)
+	}
+	if fc["total"].(float64) != 3 {
+		t.Errorf("fault_counters.total = %v", fc["total"])
+	}
+	if fc["socket_drop"].(float64) != 2 {
+		t.Errorf("fault_counters.socket_drop = %v", fc["socket_drop"])
+	}
+}
+
+// TestGet_PlayersByID_Projections_AllZeroFaultCounters asserts that an
+// all-zero `fault_count_*` family is suppressed (rendering a sea of
+// zeros on every fresh session is noise — the dashboard should see
+// `fault_counters: undefined` and skip the section entirely).
+func TestGet_PlayersByID_Projections_AllZeroFaultCounters(t *testing.T) {
+	a, _, ts := newTestServer(t)
+	pid := uuid.New().String()
+	a.addPlayer(pid, "rev1", map[string]any{
+		"fault_count_total":       0,
+		"fault_count_socket_drop": 0,
+	})
+
+	_, body, _ := mustGet(t, ts, "/api/v2/players/"+pid)
+	var rec map[string]any
+	json.Unmarshal(body, &rec)
+	if _, ok := rec["fault_counters"]; ok {
+		t.Errorf("fault_counters should be omitted when all zero, got: %v", rec["fault_counters"])
+	}
+}
+
+// TestGet_PlayersByID_Projections_NoTelemetry asserts a session with
+// no metrics fields produces no `player_metrics` / `server_metrics`
+// keys at all (rather than empty objects) — keeps the wire compact.
+func TestGet_PlayersByID_Projections_NoTelemetry(t *testing.T) {
+	a, _, ts := newTestServer(t)
+	pid := uuid.New().String()
+	a.addPlayer(pid, "rev1", nil)
+
+	_, body, _ := mustGet(t, ts, "/api/v2/players/"+pid)
+	var rec map[string]any
+	json.Unmarshal(body, &rec)
+	if _, ok := rec["player_metrics"]; ok {
+		t.Errorf("player_metrics should be omitted when no fields, got: %v", rec["player_metrics"])
+	}
+	if _, ok := rec["server_metrics"]; ok {
+		t.Errorf("server_metrics should be omitted when no fields, got: %v", rec["server_metrics"])
+	}
+}
+
+// TestGet_PlayersByID_Projections_TransferTimeouts asserts the v1
+// transfer_*_timeout fields surface as v2 transfer_timeouts when set.
+func TestGet_PlayersByID_Projections_TransferTimeouts(t *testing.T) {
+	a, _, ts := newTestServer(t)
+	pid := uuid.New().String()
+	a.addPlayer(pid, "rev1", map[string]any{
+		"transfer_active_timeout_seconds":   12,
+		"transfer_idle_timeout_seconds":     5,
+		"transfer_timeout_applies_segments": true,
+		"transfer_timeout_applies_manifests": true,
+	})
+	_, body, _ := mustGet(t, ts, "/api/v2/players/"+pid)
+	var rec map[string]any
+	json.Unmarshal(body, &rec)
+	tt, ok := rec["transfer_timeouts"].(map[string]any)
+	if !ok {
+		t.Fatalf("transfer_timeouts missing: %s", body)
+	}
+	if tt["active_timeout_seconds"].(float64) != 12 {
+		t.Errorf("active_timeout_seconds = %v", tt["active_timeout_seconds"])
+	}
+	if tt["idle_timeout_seconds"].(float64) != 5 {
+		t.Errorf("idle_timeout_seconds = %v", tt["idle_timeout_seconds"])
+	}
+	if tt["applies_manifests"] != true {
+		t.Errorf("applies_manifests = %v", tt["applies_manifests"])
+	}
+}
+
+// TestGet_PlayersByID_Projections_TransferTimeouts_DefaultSuppressed:
+// a session with everything at defaults must omit the transfer_timeouts
+// key entirely (so the dashboard doesn't render the section).
+func TestGet_PlayersByID_Projections_TransferTimeouts_DefaultSuppressed(t *testing.T) {
+	a, _, ts := newTestServer(t)
+	pid := uuid.New().String()
+	a.addPlayer(pid, "rev1", map[string]any{
+		"transfer_active_timeout_seconds":    0,
+		"transfer_idle_timeout_seconds":      0,
+		"transfer_timeout_applies_segments":  true,
+		"transfer_timeout_applies_manifests": false,
+		"transfer_timeout_applies_master":    false,
+	})
+	_, body, _ := mustGet(t, ts, "/api/v2/players/"+pid)
+	var rec map[string]any
+	json.Unmarshal(body, &rec)
+	if _, ok := rec["transfer_timeouts"]; ok {
+		t.Errorf("transfer_timeouts should be suppressed at defaults, got: %v", rec["transfer_timeouts"])
+	}
+}
+
+// TestGet_PlayersByID_Projections_Content asserts content manipulation
+// fields surface when at least one is non-default.
+func TestGet_PlayersByID_Projections_Content(t *testing.T) {
+	a, _, ts := newTestServer(t)
+	pid := uuid.New().String()
+	a.addPlayer(pid, "rev1", map[string]any{
+		"content_strip_codecs":     true,
+		"content_overstate_bandwidth": true,
+		"content_live_offset":      18,
+		"content_allowed_variants": []any{"720p", "1080p"},
+	})
+	_, body, _ := mustGet(t, ts, "/api/v2/players/"+pid)
+	var rec map[string]any
+	json.Unmarshal(body, &rec)
+	c, ok := rec["content"].(map[string]any)
+	if !ok {
+		t.Fatalf("content missing: %s", body)
+	}
+	if c["strip_codecs"] != true {
+		t.Errorf("strip_codecs = %v", c["strip_codecs"])
+	}
+	if c["live_offset"].(float64) != 18 {
+		t.Errorf("live_offset = %v", c["live_offset"])
+	}
+	allowed, ok := c["allowed_variants"].([]any)
+	if !ok || len(allowed) != 2 {
+		t.Errorf("allowed_variants = %v", c["allowed_variants"])
+	}
+}
+
+// TestPatch_Player_TransferTimeouts: PATCH writes flow into the v1
+// session map and the next GET round-trips back as the same shape.
+func TestPatch_Player_TransferTimeouts(t *testing.T) {
+	a, _, ts := newTestServer(t)
+	pid := uuid.New().String()
+	a.addPlayer(pid, "rev1", nil)
+	patch := `{"transfer_timeouts":{"active_timeout_seconds":7,"applies_master":true}}`
+	status, _, _ := mustDo(t, ts, "PATCH", "/api/v2/players/"+pid, patch,
+		map[string]string{"If-Match": `"rev1"`})
+	if status != http.StatusOK && status != http.StatusNoContent {
+		t.Fatalf("PATCH status %d", status)
+	}
+	_, body, _ := mustGet(t, ts, "/api/v2/players/"+pid)
+	var rec map[string]any
+	json.Unmarshal(body, &rec)
+	tt, ok := rec["transfer_timeouts"].(map[string]any)
+	if !ok {
+		t.Fatalf("transfer_timeouts missing after PATCH: %s", body)
+	}
+	if tt["active_timeout_seconds"].(float64) != 7 {
+		t.Errorf("active_timeout_seconds = %v", tt["active_timeout_seconds"])
+	}
+	if tt["applies_master"] != true {
+		t.Errorf("applies_master = %v", tt["applies_master"])
+	}
+}
+
+// TestPatch_Player_Content: PATCH writes content manipulation flags
+// into the v1 session map and round-trips back.
+func TestPatch_Player_Content(t *testing.T) {
+	a, _, ts := newTestServer(t)
+	pid := uuid.New().String()
+	a.addPlayer(pid, "rev1", nil)
+	patch := `{"content":{"strip_codecs":true,"overstate_bandwidth":true,"live_offset":24,"allowed_variants":["v1","v2"]}}`
+	status, _, _ := mustDo(t, ts, "PATCH", "/api/v2/players/"+pid, patch,
+		map[string]string{"If-Match": `"rev1"`})
+	if status != http.StatusOK && status != http.StatusNoContent {
+		t.Fatalf("PATCH status %d", status)
+	}
+	_, body, _ := mustGet(t, ts, "/api/v2/players/"+pid)
+	var rec map[string]any
+	json.Unmarshal(body, &rec)
+	c, ok := rec["content"].(map[string]any)
+	if !ok {
+		t.Fatalf("content missing after PATCH: %s", body)
+	}
+	if c["strip_codecs"] != true || c["overstate_bandwidth"] != true {
+		t.Errorf("flags = %v", c)
+	}
+	if c["live_offset"].(float64) != 24 {
+		t.Errorf("live_offset = %v", c["live_offset"])
+	}
+}
+
 func TestPost_Players_201_ServerGeneratedID(t *testing.T) {
 	_, _, ts := newTestServer(t)
 	status, body, headers := mustDo(t, ts, "POST", "/api/v2/players", "{}", nil)

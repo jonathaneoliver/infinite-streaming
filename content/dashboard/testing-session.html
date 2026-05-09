@@ -590,6 +590,12 @@
         })();
     </script>
     <script src="/shared/shared-nav.js"></script>
+    <!-- v2 PATCH translator — provides window.V2Compat.translateV1Patch
+         used by v1PatchDirect and sendSessionPatch. All other wire
+         calls (GET sessions, network log, DELETE, SSE, group ops) go
+         direct to /api/v2/* on this page after the migration in #441;
+         no fetch/EventSource overrides are installed. -->
+    <script src="/shared/v2-patch-translator.js"></script>
     <script src="/shared/play-id.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2.0.1/dist/chartjs-plugin-zoom.min.js"></script>
@@ -630,6 +636,82 @@
         let playingReported = false;
         let currentSessionId = null;
         let currentPlayerId = '';
+
+        // ---- v2 group helpers (replaces /api/session-group/* shim) ---
+        // Translate session_id → player_id via lastSessionsList (the
+        // most recent SSE/poll snapshot) and call /api/v2/player-groups
+        // directly. Same shape as session-shell.js's helpers.
+        function v2PlayerIdsForSessionIds(sessionIds) {
+            const list = Array.isArray(lastSessionsList) ? lastSessionsList : [];
+            return (Array.isArray(sessionIds) ? sessionIds : [])
+                .map(sid => {
+                    const s = list.find(item => String(item.session_id) === String(sid));
+                    return s && s.player_id ? s.player_id : '';
+                })
+                .filter(Boolean);
+        }
+
+        async function v2GroupLink(sessionIds, existingGroupId) {
+            const memberPlayerIds = v2PlayerIdsForSessionIds(sessionIds);
+            if (memberPlayerIds.length < 2) {
+                throw new Error('Need at least 2 valid player_ids to form a group');
+            }
+            if (existingGroupId) {
+                const cur = await fetch(`/api/v2/player-groups/${encodeURIComponent(existingGroupId)}`);
+                if (cur.ok) {
+                    const grp = await cur.json();
+                    const next = Array.from(new Set([...(grp.member_player_ids || []), ...memberPlayerIds]));
+                    const ifMatch = cur.headers.get('ETag');
+                    const r = await fetch(`/api/v2/player-groups/${encodeURIComponent(existingGroupId)}`, {
+                        method: 'PATCH',
+                        headers: {
+                            'Content-Type': 'application/merge-patch+json',
+                            ...(ifMatch ? { 'If-Match': ifMatch } : {}),
+                        },
+                        body: JSON.stringify({ member_player_ids: next }),
+                    });
+                    if (!r.ok) throw new Error(`Group patch failed: HTTP ${r.status}`);
+                    return r.json();
+                }
+            }
+            const r = await fetch('/api/v2/player-groups', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ member_player_ids: memberPlayerIds }),
+            });
+            if (!r.ok) throw new Error(`Group create failed: HTTP ${r.status}`);
+            return r.json();
+        }
+
+        async function v2GroupDisband(groupId) {
+            if (!groupId) return;
+            const r = await fetch(`/api/v2/player-groups/${encodeURIComponent(groupId)}`, {
+                method: 'DELETE',
+            });
+            if (!r.ok && r.status !== 404) throw new Error(`Disband failed: HTTP ${r.status}`);
+        }
+
+        // Migration helper: routes a v1-shape PATCH envelope through
+        // V2Compat.translateV1Patch when the player_id is a UUID,
+        // bypassing the v2-compat fetch interception. Falls back to
+        // the legacy /api/session/{id} path only when no UUID is
+        // available (early in bootstrap or for non-v2 sessions).
+        function v1PatchDirect(set, fields) {
+            const init = {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    set,
+                    fields,
+                    base_revision: getSessionBaseRevision()
+                })
+            };
+            const isUUID = currentPlayerId && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(currentPlayerId);
+            if (isUUID && window.V2Compat && typeof window.V2Compat.translateV1Patch === 'function') {
+                return window.V2Compat.translateV1Patch(currentPlayerId, init);
+            }
+            return fetch(`/api/session/${currentSessionId}`, init);
+        }
         let currentUrl = '';
         let desiredLiveOffsetSeconds = 0;
         let liveOffsetSeekTimer = null;
@@ -812,29 +894,24 @@
             performPlaybackRestart(reason);
 
             const handledAt = new Date().toISOString();
-            fetch(`/api/session/${currentSessionId}`, {
-                method: 'PATCH',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    set: {
-                        player_restart_requested: false,
-                        player_restart_request_state: 'completed',
-                        player_restart_request_handled_at: handledAt,
-                        player_restart_request_handled_by: `web:${currentPlayerId || 'unknown'}`,
-                        player_restart_request_error: '',
-                        player_restart_request_id: requestId
-                    },
-                    fields: [
-                        'player_restart_requested',
-                        'player_restart_request_state',
-                        'player_restart_request_handled_at',
-                        'player_restart_request_handled_by',
-                        'player_restart_request_error',
-                        'player_restart_request_id'
-                    ],
-                    base_revision: getSessionBaseRevision()
-                })
-            }).catch((err) => {
+            v1PatchDirect(
+                {
+                    player_restart_requested: false,
+                    player_restart_request_state: 'completed',
+                    player_restart_request_handled_at: handledAt,
+                    player_restart_request_handled_by: `web:${currentPlayerId || 'unknown'}`,
+                    player_restart_request_error: '',
+                    player_restart_request_id: requestId
+                },
+                [
+                    'player_restart_requested',
+                    'player_restart_request_state',
+                    'player_restart_request_handled_at',
+                    'player_restart_request_handled_by',
+                    'player_restart_request_error',
+                    'player_restart_request_id'
+                ]
+            ).catch((err) => {
                 console.warn('Remote restart ack failed', err);
             }).finally(() => {
                 remoteRestartInFlight = false;
@@ -987,6 +1064,50 @@
             const dropped = Number(data.dropped || 0);
             const active_sessions = Array.isArray(data.active_sessions) ? data.active_sessions : null;
             return { sessions, revision, dropped, active_sessions };
+        }
+
+        // Migration: build the v1-shaped sessions array from the
+        // sseSessionsByID map (populated directly by /api/v2/events
+        // handlers) and re-run the v1 select + apply pipeline. Mirrors
+        // what the v2-compat shim used to do, but inline.
+        function applyV2SnapshotToSession(playerId) {
+            const arr = Array.from(sseSessionsByID.values());
+            const sessions = mergeSessionsBySnapshotVersion(arr);
+            // Same accounting branches the legacy SSE handler used,
+            // minus active_sessions (the v2 events stream doesn't
+            // emit it; the full snapshot in sseSessionsByID is
+            // authoritative).
+            if (lastSessionsList.length > sessions.length) {
+                for (const s of sessions) {
+                    const idx = lastSessionsList.findIndex(e => e.session_id === s.session_id);
+                    if (idx >= 0) lastSessionsList[idx] = s;
+                    else lastSessionsList.push(s);
+                }
+            } else {
+                lastSessionsList = sessions;
+            }
+            const session = (() => {
+                if (currentSessionId) {
+                    const sticky = sessions.find(item => String(item.session_id) === String(currentSessionId));
+                    if (sticky) return sticky;
+                }
+                const matches = sessions.filter(item => item.player_id === playerId);
+                if (!matches.length) return null;
+                matches.sort((a, b) => {
+                    const aLast = Date.parse(a.last_request || '') || 0;
+                    const bLast = Date.parse(b.last_request || '') || 0;
+                    if (bLast !== aLast) return bLast - aLast;
+                    const aFirst = Date.parse(a.first_request_time || '') || 0;
+                    const bFirst = Date.parse(b.first_request_time || '') || 0;
+                    return bFirst - aFirst;
+                });
+                return matches[0];
+            })();
+            try {
+                applySessionUpdate(session);
+            } catch (err) {
+                console.error('applyV2SnapshotToSession: applySessionUpdate failed', err);
+            }
         }
 
         function logHttpFailure(source, status, url) {
@@ -2413,17 +2534,7 @@
                     alert('Select a session to group with.');
                     return;
                 }
-                const payload = {
-                    session_ids: Array.from(ids)
-                };
-                if (groupId) {
-                    payload.group_id = groupId;
-                }
-                fetch('/api/session-group/link', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(payload)
-                })
+                v2GroupLink(Array.from(ids), groupId || null)
                     .then(() => {
                         groupSelectValue = '';
                         groupSelectSessionId = '';
@@ -2438,7 +2549,15 @@
                 if (!session || !session.session_id) return;
                 if (button.dataset.action === 'delete-session') {
                     const sessionId = String(session.session_id);
-                    fetch(`/api/session/${sessionId}`, { method: 'DELETE' })
+                    // Migration: direct v2 DELETE when we have the
+                    // player_id UUID, otherwise fall through to the
+                    // shim path so the delete still works during early
+                    // bootstrap.
+                    const isUUID = currentPlayerId && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(currentPlayerId);
+                    const url = isUUID
+                        ? `/api/v2/players/${encodeURIComponent(currentPlayerId)}`
+                        : `/api/session/${sessionId}`;
+                    fetch(url, { method: 'DELETE' })
                         .then(() => {
                             const sc = document.getElementById('sessionControls');
                             if (sc) sc.innerHTML = '<div class="status-message">Session deleted.</div>';
@@ -2452,10 +2571,14 @@
                     if (!targetId) return;
                     const targetSession = lastSessionsList.find(item => String(item.session_id) === targetId);
                     if (!targetSession) {
-                        fetch('/api/sessions', { cache: 'no-store' })
+                        // Migration: direct v2 list call. Project
+                        // body.items[].raw_session to the bare v1 array
+                        // shape lastSessionsList expects.
+                        fetch('/api/v2/players?include=raw', { cache: 'no-store' })
                             .then(res => res.json())
-                            .then(all => {
-                                lastSessionsList = Array.isArray(all) ? all : [];
+                            .then(body => {
+                                const items = (body && body.items) || [];
+                                lastSessionsList = items.map(p => p.raw_session || {});
                                 requestGroupWith(session, targetId, lastSessionsList);
                             })
                             .catch(err => console.error('Error fetching sessions for grouping', err));
@@ -2466,15 +2589,10 @@
                 }
                 if (button.dataset.action === 'ungroup') {
                     if (!session.group_id) return;
-                    fetch('/api/session-group/unlink', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({
-                            session_id: String(session.session_id),
-                            group_id: session.group_id,
-                            unlink_group: true
-                        })
-                    })
+                    // The v1 button labelled "Ungroup" disbanded the
+                    // entire group (unlink_group: true). Match v2 by
+                    // calling DELETE /api/v2/player-groups/{id}.
+                    v2GroupDisband(session.group_id)
                         .then(() => {
                             groupSelectValue = '';
                             groupSelectSessionId = '';
@@ -2986,7 +3104,11 @@
                 return Promise.resolve();
             }
             queuePendingFailureEdits(patch.sessionId, patch.set);
-            return fetch(`/api/session/${patch.sessionId}`, {
+            // Migration: route through V2Compat.translateV1Patch
+            // directly when we have a UUID for currentPlayerId, so
+            // the request never round-trips through the v2-compat
+            // fetch interception.
+            const init = {
                 method: 'PATCH',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
@@ -2994,7 +3116,12 @@
                     fields: patch.fields,
                     base_revision: getSessionBaseRevision()
                 })
-            }).then(async response => {
+            };
+            const isUUID = currentPlayerId && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(currentPlayerId);
+            const direct = (isUUID && window.V2Compat && typeof window.V2Compat.translateV1Patch === 'function')
+                ? window.V2Compat.translateV1Patch(currentPlayerId, init)
+                : fetch(`/api/session/${patch.sessionId}`, init);
+            return direct.then(async response => {
                 const body = await response.json().catch(() => ({}));
                 if (!response.ok) {
                     if (response.status === 409 && body.session) {
@@ -3456,14 +3583,10 @@
                         if (wasApplied) {
                             const sessionId = card.dataset.sessionId;
                             if (sessionId) {
-                                fetch(`/api/session/${sessionId}`, {
-                                    method: 'PATCH',
-                                    headers: { 'Content-Type': 'application/json' },
-                                    body: JSON.stringify({
-                                        set: { nftables_pattern_enabled: false },
-                                        fields: ['nftables_pattern_enabled']
-                                    })
-                                }).catch(err => console.warn('Failed to stop pattern on template change', err));
+                                v1PatchDirect(
+                                    { nftables_pattern_enabled: false },
+                                    ['nftables_pattern_enabled']
+                                ).catch(err => console.warn('Failed to stop pattern on template change', err));
                             }
                         }
                         // Regenerate UI for the new template — wait for Apply Pattern button
@@ -3484,14 +3607,10 @@
                         if (wasApplied) {
                             const sessionId = card.dataset.sessionId;
                             if (sessionId) {
-                                fetch(`/api/session/${sessionId}`, {
-                                    method: 'PATCH',
-                                    headers: { 'Content-Type': 'application/json' },
-                                    body: JSON.stringify({
-                                        set: { nftables_pattern_enabled: false },
-                                        fields: ['nftables_pattern_enabled']
-                                    })
-                                }).catch(err => console.warn('Failed to stop pattern on step-seconds change', err));
+                                v1PatchDirect(
+                                    { nftables_pattern_enabled: false },
+                                    ['nftables_pattern_enabled']
+                                ).catch(err => console.warn('Failed to stop pattern on step-seconds change', err));
                             }
                         }
                         applyTemplatePattern(card, false, false, false);
@@ -3793,18 +3912,25 @@
                 return matches[0];
             };
 
-            return fetch('/api/sessions', { cache: 'no-store', signal })
+            // Migration: direct v2 list call. Project body.items[]
+            // .raw_session to the bare v1 array shape
+            // mergeSessionsBySnapshotVersion expects.
+            return fetch('/api/v2/players?include=raw', { cache: 'no-store', signal })
                 .then(async response => {
                     if (!response.ok) {
                         const body = await response.text();
-                        throw new Error(`/api/sessions failed (${response.status}): ${body.slice(0, 120)}`);
+                        throw new Error(`/api/v2/players failed (${response.status}): ${body.slice(0, 120)}`);
                     }
                     const contentType = (response.headers.get('content-type') || '').toLowerCase();
                     if (!contentType.includes('application/json')) {
                         const body = await response.text();
-                        throw new Error(`/api/sessions returned non-JSON: ${body.slice(0, 120)}`);
+                        throw new Error(`/api/v2/players returned non-JSON: ${body.slice(0, 120)}`);
                     }
                     return response.json();
+                })
+                .then(body => {
+                    const items = (body && body.items) || [];
+                    return items.map(p => p.raw_session || {});
                 })
                 .then(sessions => {
                     lastSessionsList = mergeSessionsBySnapshotVersion(sessions);
@@ -4829,6 +4955,13 @@
             });
         }
 
+        // Migration: maintain a player_id → SessionData map populated
+        // directly from /api/v2/events?include=raw — bypasses the
+        // v2-compat EventSource shim. The selectSession + apply flow
+        // below stays identical to the v1-shim implementation; only
+        // the wire layer + frame parsing changes.
+        const sseSessionsByID = new Map();
+
         function startSessionStream(playerId) {
             if (!window.EventSource) return false;
             if (!playerId) return false;
@@ -4836,19 +4969,37 @@
                 clearTimeout(sseReconnectTimer);
                 sseReconnectTimer = null;
             }
-            const source = new EventSource('/api/sessions/stream?player_id=' + encodeURIComponent(playerId));
+            // Server-side filter only when we have a strict UUID; the
+            // v2 events endpoint rejects 8-char short hex with 400.
+            // For non-UUID prefixes, fetch unfiltered and filter
+            // client-side in selectSession.
+            const isUUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(playerId);
+            const v2URL = '/api/v2/events?include=raw' +
+                (isUUID ? '&player_id=' + encodeURIComponent(playerId) : '');
+            const source = new EventSource(v2URL);
             sessionsStream = source;
             sseLastEventAt = Date.now();
             ensureSseWatchdog(playerId);
+
+            // Bootstrap: hydrate sessionsByID immediately so the page
+            // doesn't have to wait for the next heartbeat (5s default
+            // server-side). Without this, the watchdog can fire (12s)
+            // before any frame arrives on an idle pipeline.
+            fetch('/api/v2/players?include=raw', { cache: 'no-store' })
+                .then(r => r.ok ? r.json() : null)
+                .then(body => {
+                    if (!body || !Array.isArray(body.items)) return;
+                    sseSessionsByID.clear();
+                    for (const p of body.items) {
+                        sseSessionsByID.set(p.id, p.raw_session || {});
+                    }
+                    applyV2SnapshotToSession(playerId);
+                })
+                .catch(err => console.warn('SSE bootstrap fetch failed', err));
+
             source.addEventListener('open', () => {
-                // Server-side sessionsBroadcastSeq resets across
-                // container restarts; clear our last-seen revision
-                // so we don't compute a bogus "missed N updates"
-                // gap on the first post-reconnect event.
                 sseLastRevision = 0;
                 sseLastEventAt = Date.now();
-                // SSE is back — kill any polling fallback we
-                // installed during the outage.
                 if (sessionPollTimer) {
                     clearInterval(sessionPollTimer);
                     sessionPollTimer = null;
@@ -4856,68 +5007,32 @@
             });
             source.addEventListener('heartbeat', () => {
                 sseLastEventAt = Date.now();
+                // Re-emit the snapshot so the chart engines tick even
+                // when no player.updated arrived this cycle.
+                applyV2SnapshotToSession(playerId);
             });
-            source.addEventListener('sessions', (event) => {
+
+            function handlePlayerEvent(rawEvent, kind) {
                 sseLastEventAt = Date.now();
                 try {
-                    const payload = parseSessionsStreamPayload(event);
-                    const sessions = mergeSessionsBySnapshotVersion(payload.sessions);
-                    if (Array.isArray(payload.active_sessions)) {
-                        lastSessionsList = payload.active_sessions.map(s => ({
-                            ...s,
-                            x_forwarded_port_external: s.port || s.x_forwarded_port_external || '',
-                        }));
-                    } else if (lastSessionsList.length > sessions.length) {
-                        for (const s of sessions) {
-                            const idx = lastSessionsList.findIndex(e => e.session_id === s.session_id);
-                            if (idx >= 0) lastSessionsList[idx] = s;
-                            else lastSessionsList.push(s);
-                        }
-                    } else {
-                        lastSessionsList = sessions;
+                    const env = JSON.parse(rawEvent.data);
+                    const data = env.data || {};
+                    if (kind === 'deleted') {
+                        const pid = data.player_id || data.id;
+                        if (pid && sseSessionsByID.delete(pid)) applyV2SnapshotToSession(playerId);
+                        return;
                     }
-                    const revision = Number(payload.revision || 0);
-                    const dropped = Number(payload.dropped || 0);
-                    let missed = 0;
-                    if (Number.isFinite(revision) && revision > 0 && sseLastRevision > 0) {
-                        const gap = revision - sseLastRevision - 1;
-                        if (gap > 0) {
-                            missed += gap;
-                        }
-                    }
-                    if (Number.isFinite(dropped) && dropped > 0) {
-                        missed += dropped;
-                    }
-                    if (missed > 0) {
-                        sseMissedTotal += missed;
-                        updateSseMissedUi();
-                        log(`SSE missed ${missed} update${missed === 1 ? '' : 's'}`);
-                    }
-                    if (Number.isFinite(revision) && revision > 0) {
-                        sseLastRevision = revision;
-                    }
-                    const session = (() => {
-                        if (currentSessionId) {
-                            const sticky = sessions.find(item => String(item.session_id) === String(currentSessionId));
-                            if (sticky) return sticky;
-                        }
-                        const matches = sessions.filter(item => item.player_id === playerId);
-                        if (!matches.length) return null;
-                        matches.sort((a, b) => {
-                            const aLast = Date.parse(a.last_request || '') || 0;
-                            const bLast = Date.parse(b.last_request || '') || 0;
-                            if (bLast !== aLast) return bLast - aLast;
-                            const aFirst = Date.parse(a.first_request_time || '') || 0;
-                            const bFirst = Date.parse(b.first_request_time || '') || 0;
-                            return bFirst - aFirst;
-                        });
-                        return matches[0];
-                    })();
-                    applySessionUpdate(session);
+                    if (!data.id) return;
+                    const sess = data.raw_session || data;
+                    sseSessionsByID.set(data.id, sess);
+                    applyV2SnapshotToSession(playerId);
                 } catch (err) {
-                    console.error('Error parsing sessions stream payload', err);
+                    console.error('SSE player event parse failed', err);
                 }
-            });
+            }
+            source.addEventListener('player.created', (ev) => handlePlayerEvent(ev, 'created'));
+            source.addEventListener('player.updated', (ev) => handlePlayerEvent(ev, 'updated'));
+            source.addEventListener('player.deleted', (ev) => handlePlayerEvent(ev, 'deleted'));
             source.addEventListener('error', () => {
                 // CONNECTING means EventSource is auto-retrying
                 // already — leave it alone. CLOSED means the browser

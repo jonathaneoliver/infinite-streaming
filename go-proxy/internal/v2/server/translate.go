@@ -55,6 +55,16 @@ func playerFromSession(s map[string]any) (oapigen.PlayerRecord, bool) {
 	if ip := getString(s, "origination_ip"); ip != "" {
 		rec.OriginationIp = &ip
 	}
+	if ip := getString(s, "player_ip"); ip != "" {
+		rec.PlayerIp = &ip
+	}
+	if ua := getString(s, "user_agent"); ua != "" {
+		rec.UserAgent = &ua
+	}
+	if v, ok := numericFloatTranslate(s["loop_count_server"]); ok {
+		i := int(v)
+		rec.LoopCountServer = &i
+	}
 	if t, ok := getTime(s, "session_start_time", "first_request_time"); ok {
 		rec.FirstSeenAt = &t
 	}
@@ -93,7 +103,385 @@ func playerFromSession(s map[string]any) (oapigen.PlayerRecord, bool) {
 	if shape := shapeFromSession(s); shape != nil {
 		rec.Shape = shape
 	}
+	if pm := playerMetricsFromSession(s); pm != nil {
+		rec.PlayerMetrics = pm
+	}
+	if sm := serverMetricsFromSession(s); sm != nil {
+		rec.ServerMetrics = sm
+	}
+	if fc := faultCountersFromSession(s); fc != nil {
+		rec.FaultCounters = fc
+	}
+	if play := currentPlayFromSession(s, playerUUID); play != nil {
+		rec.CurrentPlay = play
+	}
+	if tt := transferTimeoutsFromSession(s); tt != nil {
+		rec.TransferTimeouts = tt
+	}
+	if c := contentManipulationFromSession(s); c != nil {
+		rec.Content = c
+	}
 	return rec, true
+}
+
+// transferTimeoutsFromSession projects the v1 `transfer_*_timeout_seconds`
+// + `transfer_timeout_applies_*` family. Returns nil only when EVERY
+// field is at its default (segments-only, both timeouts disabled), so
+// the dashboard can skip the section when nothing is configured.
+func transferTimeoutsFromSession(s map[string]any) *oapigen.TransferTimeouts {
+	active := 0
+	idle := 0
+	if v, ok := numericFloatTranslate(s["transfer_active_timeout_seconds"]); ok {
+		active = int(v)
+	}
+	if v, ok := numericFloatTranslate(s["transfer_idle_timeout_seconds"]); ok {
+		idle = int(v)
+	}
+	appliesSegments := true
+	appliesManifests := false
+	appliesMaster := false
+	if v, ok := s["transfer_timeout_applies_segments"].(bool); ok {
+		appliesSegments = v
+	}
+	if v, ok := s["transfer_timeout_applies_manifests"].(bool); ok {
+		appliesManifests = v
+	}
+	if v, ok := s["transfer_timeout_applies_master"].(bool); ok {
+		appliesMaster = v
+	}
+	// Default-everywhere → suppress.
+	if active == 0 && idle == 0 && appliesSegments && !appliesManifests && !appliesMaster {
+		return nil
+	}
+	out := oapigen.TransferTimeouts{
+		ActiveTimeoutSeconds: &active,
+		IdleTimeoutSeconds:   &idle,
+		AppliesSegments:      &appliesSegments,
+		AppliesManifests:     &appliesManifests,
+		AppliesMaster:        &appliesMaster,
+	}
+	return &out
+}
+
+// contentManipulationFromSession projects the v1 `content_*` family.
+// Returns nil when no manipulation is enabled — the dashboard hides
+// the section in that case.
+func contentManipulationFromSession(s map[string]any) *oapigen.ContentManipulation {
+	stripCodecs, _ := s["content_strip_codecs"].(bool)
+	stripAvgBw, _ := s["content_strip_average_bandwidth"].(bool)
+	overstate, _ := s["content_overstate_bandwidth"].(bool)
+	offset := 0
+	if v, ok := numericFloatTranslate(s["content_live_offset"]); ok {
+		offset = int(v)
+	}
+	var allowed []string
+	if raw, ok := s["content_allowed_variants"].([]any); ok {
+		for _, v := range raw {
+			if str, ok := v.(string); ok {
+				allowed = append(allowed, str)
+			}
+		}
+	} else if raw, ok := s["content_allowed_variants"].([]string); ok {
+		allowed = append([]string{}, raw...)
+	}
+	if !stripCodecs && !stripAvgBw && !overstate && offset == 0 && len(allowed) == 0 {
+		return nil
+	}
+	off := oapigen.ContentManipulationLiveOffset(offset)
+	out := oapigen.ContentManipulation{
+		StripCodecs:           &stripCodecs,
+		StripAverageBandwidth: &stripAvgBw,
+		OverstateBandwidth:    &overstate,
+		LiveOffset:            &off,
+	}
+	if allowed != nil {
+		out.AllowedVariants = &allowed
+	}
+	return &out
+}
+
+// playerMetricsFromSession projects v1's `player_metrics_*` family back
+// into the typed v2 PlayerMetrics shape. Every player-reported field
+// in the v1 testing-session UI is surfaced here.
+//
+// Returns nil when no field is set — keeps the wire compact.
+func playerMetricsFromSession(s map[string]any) *oapigen.PlayerMetrics {
+	pm := oapigen.PlayerMetrics{}
+	any := false
+
+	// String fields
+	for _, m := range []struct {
+		key string
+		dst **string
+	}{
+		{"player_metrics_video_resolution", &pm.VideoResolution},
+		{"player_metrics_display_resolution", &pm.DisplayResolution},
+		{"player_metrics_last_event", &pm.LastEvent},
+		{"player_metrics_trigger_type", &pm.TriggerType},
+		{"player_metrics_state", &pm.State},
+		{"player_metrics_error", &pm.Error},
+		{"player_metrics_source", &pm.Source},
+	} {
+		if v, ok := s[m.key].(string); ok && v != "" {
+			vv := v
+			*m.dst = &vv
+			any = true
+		}
+	}
+
+	// Float fields (fractional or 0+)
+	for _, m := range []struct {
+		key string
+		dst **float32
+	}{
+		{"player_metrics_video_bitrate_mbps", &pm.VideoBitrateMbps},
+		{"player_metrics_video_quality_pct", &pm.VideoQualityPct},
+		{"player_metrics_avg_network_bitrate_mbps", &pm.AvgNetworkBitrateMbps},
+		{"player_metrics_network_bitrate_mbps", &pm.NetworkBitrateMbps},
+		{"player_metrics_buffer_depth_s", &pm.BufferDepthS},
+		{"player_metrics_buffer_end_s", &pm.BufferEndS},
+		{"player_metrics_seekable_end_s", &pm.SeekableEndS},
+		{"player_metrics_live_edge_s", &pm.LiveEdgeS},
+		{"player_metrics_live_offset_s", &pm.LiveOffsetS},
+		{"player_metrics_true_offset_s", &pm.TrueOffsetS},
+		{"player_metrics_position_s", &pm.PositionS},
+		{"player_metrics_playback_rate", &pm.PlaybackRate},
+		{"player_metrics_video_first_frame_time_s", &pm.FirstFrameTimeS},
+		{"player_metrics_video_start_time_s", &pm.VideoStartTimeS},
+		{"player_metrics_stall_time_s", &pm.StallTimeS},
+		{"player_metrics_last_stall_time_s", &pm.LastStallTimeS},
+	} {
+		if v, ok := numericFloatTranslate(s[m.key]); ok {
+			f := float32(v)
+			*m.dst = &f
+			any = true
+		}
+	}
+
+	// Integer counter fields
+	for _, m := range []struct {
+		key string
+		dst **int
+	}{
+		{"player_metrics_stalls", &pm.Stalls},
+		{"player_metrics_stall_count", &pm.Stalls}, // v1 alias
+		{"player_metrics_frames_displayed", &pm.FramesDisplayed},
+		{"player_metrics_dropped_frames", &pm.DroppedFrames},
+		{"player_restarts", &pm.PlayerRestarts},
+		{"player_metrics_loop_count_player", &pm.LoopCountPlayer},
+		{"player_metrics_loop_count_increment", &pm.LoopCountIncrement},
+		{"player_metrics_profile_shift_count", &pm.ProfileShiftCount},
+	} {
+		if v, ok := numericFloatTranslate(s[m.key]); ok {
+			i := int(v)
+			*m.dst = &i
+			any = true
+		}
+	}
+
+	if t, ok := getTime(s, "player_metrics_event_time"); ok {
+		pm.EventTime = &t
+		any = true
+	}
+	if !any {
+		return nil
+	}
+	return &pm
+}
+
+// serverMetricsFromSession projects v1's TCP_INFO / ICMP / byte-counter
+// / shaper-bookkeeping family back into the typed v2 ServerMetrics
+// shape. Returns nil when no server-observed telemetry exists (e.g.
+// macOS dev builds where TCP_INFO is a no-op).
+func serverMetricsFromSession(s map[string]any) *oapigen.ServerMetrics {
+	sm := oapigen.ServerMetrics{}
+	any := false
+
+	if v, ok := s["player_metrics_video_url"].(string); ok && v != "" {
+		sm.RenditionUrl = &v
+		any = true
+	}
+	if v, ok := s["server_video_rendition"].(string); ok && v != "" {
+		sm.ServerRendition = &v
+		any = true
+	}
+	if v, ok := numericFloatTranslate(s["server_video_rendition_mbps"]); ok && v > 0 {
+		f := float32(v)
+		sm.RenditionMbps = &f
+		any = true
+	} else if v, ok := numericFloatTranslate(s["player_metrics_video_bitrate_mbps"]); ok && v > 0 {
+		f := float32(v)
+		sm.RenditionMbps = &f
+		any = true
+	}
+	for key, set := range map[string]func(float32){
+		"client_rtt_ms":              func(f float32) { sm.RttMs = &f },
+		"client_rtt_min_ms":          func(f float32) { sm.RttMinMs = &f },
+		"client_rtt_max_ms":          func(f float32) { sm.RttMaxMs = &f },
+		"client_rtt_min_lifetime_ms": func(f float32) { sm.RttMinLifetimeMs = &f },
+		"client_rtt_var_ms":          func(f float32) { sm.RttVarMs = &f },
+		"client_rto_ms":              func(f float32) { sm.RtoMs = &f },
+		"client_path_ping_rtt_ms":    func(f float32) { sm.PathPingRttMs = &f },
+		// Shaper / transfer measurements (developer-mode in v1).
+		"mbps_shaper_avg":            func(f float32) { sm.MbpsShaperAvg = &f },
+		"mbps_shaper_rate":           func(f float32) { sm.MbpsShaperRate = &f },
+		"mbps_transfer_rate":         func(f float32) { sm.MbpsTransferRate = &f },
+		"mbps_transfer_complete":     func(f float32) { sm.MbpsTransferComplete = &f },
+		"mbps_in":                    func(f float32) { sm.MbpsIn = &f },
+		"mbps_out":                   func(f float32) { sm.MbpsOut = &f },
+		"mbps_in_avg":                func(f float32) { sm.MbpsInAvg = &f },
+		"mbps_in_active":             func(f float32) { sm.MbpsInActive = &f },
+		"measured_mbps":              func(f float32) { sm.MeasuredMbps = &f },
+		"measurement_window_io":      func(f float32) { sm.MeasurementWindowIo = &f },
+		"measurement_window_active":  func(f float32) { sm.MeasurementWindowActive = &f },
+	} {
+		if v, ok := numericFloatTranslate(s[key]); ok {
+			set(float32(v))
+			any = true
+		}
+	}
+	if v, ok := s["client_rtt_stale"].(bool); ok {
+		sm.RttStale = &v
+		any = true
+	}
+	for key, set := range map[string]func(int){
+		"bytes_in_total":  func(i int) { sm.BytesInTotal = &i },
+		"bytes_out_total": func(i int) { sm.BytesOutTotal = &i },
+		"bytes_in_last":   func(i int) { sm.BytesInLast = &i },
+		"bytes_out_last":  func(i int) { sm.BytesOutLast = &i },
+		"bytes_last_ts":   func(i int) { sm.BytesLastTs = &i },
+	} {
+		if v, ok := numericFloatTranslate(s[key]); ok {
+			set(int(v))
+			any = true
+		}
+	}
+	if !any {
+		return nil
+	}
+	return &sm
+}
+
+// faultCountersFromSession projects v1's `fault_count_*` family into a
+// `FaultCounters` map (string → int). Returns nil when no counter is
+// non-zero — saves the dashboard from rendering a sea of zeros.
+func faultCountersFromSession(s map[string]any) *oapigen.FaultCounters {
+	out := oapigen.FaultCounters{}
+	for k, v := range s {
+		if !strings.HasPrefix(k, "fault_count_") {
+			continue
+		}
+		n, ok := numericFloatTranslate(v)
+		if !ok {
+			continue
+		}
+		// Strip the `fault_count_` prefix so the v2 map reads
+		// `{total: 42, socket_drop: 3}` not `{fault_count_total: 42, ...}`.
+		out[strings.TrimPrefix(k, "fault_count_")] = int(n)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	// Suppress when every counter is zero (typical for a fresh session).
+	allZero := true
+	for _, v := range out {
+		if v != 0 {
+			allZero = false
+			break
+		}
+	}
+	if allZero {
+		return nil
+	}
+	return &out
+}
+
+// currentPlayFromSession synthesises the active play (if any) from the
+// session's most-recent play_id + manifest_variants snapshot. Returns
+// nil when the session has no active play observed.
+//
+// playerUUID is the v2-canonical UUID for the parent player (used for
+// PlayRecord.PlayerId — we don't re-derive it).
+func currentPlayFromSession(s map[string]any, playerUUID uuid.UUID) *oapigen.PlayRecord {
+	playIDRaw := getString(s, "play_id")
+	if playIDRaw == "" {
+		// Some sessions track play_id only on network entries — try the
+		// most recent network entry if surfaced on the session.
+		playIDRaw = getString(s, "current_play_id")
+	}
+	if playIDRaw == "" {
+		return nil
+	}
+	playUUID, err := uuid.Parse(playIDRaw)
+	if err != nil {
+		playUUID = derivePlayerUUID(playIDRaw) // re-use the v5 namespace for play_ids too
+	}
+
+	rec := &oapigen.PlayRecord{
+		Id:              playUUID,
+		PlayerId:        playerUUID,
+		ControlRevision: getString(s, "control_revision"),
+	}
+	if t, ok := getTime(s, "session_start_time", "first_request_time"); ok {
+		rec.StartedAt = t
+	}
+	if variants := manifestVariantsFromSession(s); variants != nil {
+		rec.Manifest = &oapigen.Manifest{Variants: variants}
+		if mu := getString(s, "manifest_url"); mu != "" {
+			rec.Manifest.MasterUrl = &mu
+		}
+	}
+	if pm := playerMetricsFromSession(s); pm != nil {
+		rec.PlayerMetrics = pm
+	}
+	if sm := serverMetricsFromSession(s); sm != nil {
+		rec.ServerMetrics = sm
+	}
+	return rec
+}
+
+// manifestVariantsFromSession projects v1's `manifest_variants` slice
+// into the typed v2 ManifestVariant array. v1 stores variants as a
+// slice of either typed structs OR map[string]any (depending on
+// codepath); accept both.
+func manifestVariantsFromSession(s map[string]any) *[]oapigen.ManifestVariant {
+	raw, ok := s["manifest_variants"]
+	if !ok || raw == nil {
+		return nil
+	}
+	var out []oapigen.ManifestVariant
+	switch arr := raw.(type) {
+	case []any:
+		for _, v := range arr {
+			m, ok := v.(map[string]any)
+			if !ok {
+				continue
+			}
+			out = append(out, manifestVariantFromMap(m))
+		}
+	case []map[string]any:
+		for _, m := range arr {
+			out = append(out, manifestVariantFromMap(m))
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return &out
+}
+
+func manifestVariantFromMap(m map[string]any) oapigen.ManifestVariant {
+	mv := oapigen.ManifestVariant{}
+	if u, ok := m["url"].(string); ok {
+		mv.Url = u
+	}
+	if v, ok := numericFloatTranslate(m["bandwidth"]); ok {
+		mv.Bandwidth = int(v)
+	}
+	if r, ok := m["resolution"].(string); ok {
+		mv.Resolution = r
+	}
+	return mv
 }
 
 // faultRuleFromMap projects a v2 fault rule (stored as map[string]any
@@ -272,6 +660,39 @@ func networkEntryFromV1(row map[string]any) oapigen.NetworkLogEntry {
 		if u, err := uuid.Parse(v); err == nil {
 			out.PlayId = &u
 		}
+	}
+	// Phase timings — surfaced when httptrace populated them. Useful
+	// for the dashboard's tooltip phase-breakdown bar.
+	for _, m := range []struct {
+		key string
+		dst **float32
+	}{
+		{"ttfb_ms", &out.TtfbMs},
+		{"total_ms", &out.TotalMs},
+		{"dns_ms", &out.DnsMs},
+		{"connect_ms", &out.ConnectMs},
+		{"tls_ms", &out.TlsMs},
+		{"transfer_ms", &out.TransferMs},
+		{"client_wait_ms", &out.ClientWaitMs},
+	} {
+		if v, ok := numericFloatTranslate(row[m.key]); ok {
+			f := float32(v)
+			*m.dst = &f
+		}
+	}
+	// Fault metadata — flagged on rows where the proxy injected a fault.
+	if v, ok := row["faulted"].(bool); ok && v {
+		t := true
+		out.Faulted = &t
+	}
+	if v := getString(row, "fault_type"); v != "" {
+		out.FaultType = &v
+	}
+	if v := getString(row, "fault_action"); v != "" {
+		out.FaultAction = &v
+	}
+	if v := getString(row, "fault_category"); v != "" {
+		out.FaultCategory = &v
 	}
 	return out
 }

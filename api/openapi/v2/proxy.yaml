@@ -962,6 +962,58 @@ components:
           type: string
           description: |
             *Server-observed lifecycle — does not broadcast to group.*
+        player_ip:
+          type: string
+          description: |
+            Player's self-reported IP (from the testing harness).
+            Differs from `origination_ip` when the player is behind NAT.
+            *Per-device identity — does not broadcast to group.*
+        user_agent:
+          type: string
+          description: |
+            User-Agent string from the player's first request.
+            *Per-device identity — does not broadcast to group.*
+        loop_count_server:
+          type: integer
+          description: |
+            Server-counted loop boundaries observed on the manifest
+            timeline. Independent of the player-reported value in
+            `player_metrics.loop_count_player`.
+            *Per-device runtime state — does not broadcast to group.*
+        player_metrics:
+          allOf:
+            - $ref: '#/components/schemas/PlayerMetrics'
+          nullable: true
+          description: |
+            Read-only client-reported playback telemetry.
+            *Per-device runtime state — does not broadcast to group.*
+        server_metrics:
+          allOf:
+            - $ref: '#/components/schemas/ServerMetrics'
+          nullable: true
+          description: |
+            Read-only server-observed transport telemetry (TCP_INFO + ICMP path
+            ping + per-session byte counters).
+            *Per-device runtime state — does not broadcast to group.*
+        transfer_timeouts:
+          allOf:
+            - $ref: '#/components/schemas/TransferTimeouts'
+          nullable: true
+          description: |
+            Server-side transfer timeouts (active + idle) applied during
+            response generation. Per-protocol scope (segments / media
+            manifests / master manifest).
+            *Broadcasts to group on PATCH.*
+        content:
+          allOf:
+            - $ref: '#/components/schemas/ContentManipulation'
+          nullable: true
+          description: |
+            Master playlist mutations applied at manifest serve time:
+            strip CODECS, strip AVERAGE-BANDWIDTH, overstate bandwidth,
+            allowed-variants whitelist, live-offset window. Takes effect
+            on the next master manifest fetch.
+            *Broadcasts to group on PATCH.*
 
     PlayerCreateRequest:
       type: object
@@ -993,7 +1045,9 @@ components:
         fault_rules:
           type: array
           items: { $ref: '#/components/schemas/FaultRule' }
-        shape:  { $ref: '#/components/schemas/Shape' }
+        shape:             { $ref: '#/components/schemas/Shape' }
+        transfer_timeouts: { $ref: '#/components/schemas/TransferTimeouts' }
+        content:           { $ref: '#/components/schemas/ContentManipulation' }
 
     PlayRecord:
       description: |
@@ -1305,11 +1359,24 @@ components:
       properties:
         template:
           type: string
-          enum: [sliders, square_wave, ramp_up, ramp_down, pyramid]
+          enum: [sliders, square, square_wave, ramp_up, ramp_down, pyramid]
+          description: |
+            Template that drove step-list generation. Stored verbatim
+            so the dashboard can repaint the template radios. The kernel
+            cycles through `steps` regardless of template; this field is
+            metadata, not a recompute trigger.
         steps:
           type: array
           minItems: 1
           items: { $ref: '#/components/schemas/PatternStep' }
+        default_step_seconds:
+          type: integer
+          enum: [6, 12, 18, 24]
+          description: 'Default per-step duration the dashboard chose when generating the step list.'
+        margin_pct:
+          type: integer
+          enum: [0, 10, 25, 50]
+          description: 'Headroom percent above the top variant used when sizing template steps (0 = exact).'
 
     PatternStep:
       type: object
@@ -1319,6 +1386,46 @@ components:
         rate_mbps:        { type: number, format: float, minimum: 0 }
         duration_seconds: { type: integer, minimum: 1 }
         enabled:          { type: boolean, default: true }
+
+    # ----- Transfer timeouts --------------------------------------------
+
+    TransferTimeouts:
+      description: |
+        Server-side response transfer timeouts. `active_timeout_seconds`
+        bounds total response duration; `idle_timeout_seconds` bounds
+        time-since-last-write. The three `applies_*` flags scope which
+        request kinds the timeout governs (default: segments only).
+      type: object
+      additionalProperties: false
+      properties:
+        applies_segments:        { type: boolean, default: true }
+        applies_manifests:       { type: boolean, default: false }
+        applies_master:          { type: boolean, default: false }
+        active_timeout_seconds:  { type: integer, minimum: 0, default: 0, description: '0 = disabled' }
+        idle_timeout_seconds:    { type: integer, minimum: 0, default: 0, description: '0 = disabled' }
+
+    # ----- Content manipulation -----------------------------------------
+
+    ContentManipulation:
+      description: |
+        Master playlist mutations applied at manifest serve time. Takes
+        effect on the next master manifest fetch. Used to test player
+        robustness against malformed / restricted / shifted manifests.
+      type: object
+      additionalProperties: false
+      properties:
+        strip_codecs:             { type: boolean, default: false, description: 'Remove CODECS attribute from EXT-X-STREAM-INF lines.' }
+        strip_average_bandwidth:  { type: boolean, default: false, description: 'Remove AVERAGE-BANDWIDTH attribute.' }
+        overstate_bandwidth:      { type: boolean, default: false, description: 'Inflate BANDWIDTH attribute by 10%.' }
+        allowed_variants:
+          type: array
+          items: { type: string }
+          description: 'When non-empty, only the listed variant URIs are kept in the master playlist.'
+        live_offset:
+          type: integer
+          enum: [0, 6, 18, 24]
+          default: 0
+          description: 'Live edge offset window in seconds. 0 = no offset.'
 
     # ----- Manifest / metrics --------------------------------------------
 
@@ -1342,18 +1449,83 @@ components:
         resolution: { type: string, description: 'WIDTHxHEIGHT' }
 
     PlayerMetrics:
+      description: |
+        Read-only client-reported playback telemetry. Sourced from the
+        player app's periodic POST to `/api/session/{id}/metrics` (v1
+        ingestion endpoint, kept for player apps; v2 surfaces these as
+        a typed projection). All fields nullable — the player may not
+        report every field on every tick.
       type: object
       properties:
-        video_resolution:   { type: string, nullable: true }
-        video_bitrate_mbps: { type: number, format: float, nullable: true }
-        buffer_depth_s:     { type: number, format: float, nullable: true }
-        stalls:             { type: integer, nullable: true }
+        video_resolution:    { type: string,  nullable: true }
+        display_resolution:  { type: string,  nullable: true, description: 'Player-reported window/display resolution (separate from the active video resolution).' }
+        video_bitrate_mbps:  { type: number, format: float, nullable: true }
+        video_quality_pct:   { type: number, format: float, nullable: true, description: 'video_bitrate_mbps as a percentage of the top variant in the active manifest' }
+        avg_network_bitrate_mbps: { type: number, format: float, nullable: true, description: 'Player-computed avgNetworkBitrate.' }
+        network_bitrate_mbps:     { type: number, format: float, nullable: true, description: 'Player-computed instantaneous networkBitrate.' }
+        buffer_depth_s:      { type: number, format: float, nullable: true }
+        buffer_end_s:        { type: number, format: float, nullable: true, description: 'Player-reported end of buffered range (seconds).' }
+        seekable_end_s:      { type: number, format: float, nullable: true, description: 'Player-reported end of seekable range (seconds).' }
+        live_edge_s:         { type: number, format: float, nullable: true, description: 'Player-reported live edge timestamp (seconds).' }
+        live_offset_s:       { type: number, format: float, nullable: true, description: 'Player-reported offset behind live edge (seconds).' }
+        true_offset_s:       { type: number, format: float, nullable: true, description: 'Wall-clock offset between player position and real time (seconds).' }
+        position_s:          { type: number, format: float, nullable: true, description: 'Player current position (seconds).' }
+        playback_rate:       { type: number, format: float, nullable: true, description: 'Player playback rate (1.0 = normal).' }
+        first_frame_time_s:  { type: number, format: float, nullable: true, description: 'Time-to-first-frame (seconds since play started).' }
+        video_start_time_s:  { type: number, format: float, nullable: true, description: 'Time-to-playing (seconds since play started).' }
+        stalls:              { type: integer, nullable: true }
+        stall_time_s:        { type: number, format: float, nullable: true, description: 'Cumulative stall time (seconds).' }
+        last_stall_time_s:   { type: number, format: float, nullable: true, description: 'Duration of the most recent stall (seconds).' }
+        frames_displayed:    { type: integer, nullable: true, description: 'Player-reported displayed frames count.' }
+        dropped_frames:      { type: integer, nullable: true, description: 'Player-reported dropped frames count.' }
+        player_restarts:     { type: integer, nullable: true, description: 'Number of player restarts (auto-recovery + manual).' }
+        loop_count_player:   { type: integer, nullable: true, description: 'How many times the player has reported looping the content. Player-reported, may be 0 on platforms that do not count.' }
+        loop_count_increment: { type: integer, nullable: true, description: 'Server-derived increment from the previous report.' }
+        profile_shift_count: { type: integer, nullable: true, description: 'Number of ABR rendition shifts the player has reported.' }
+        last_event:          { type: string,  nullable: true, description: 'Most recent player-reported lifecycle event (playing, buffering_start, stall_start, etc.).' }
+        trigger_type:        { type: string,  nullable: true, description: 'What triggered the most recent metrics tick (timer, event, etc.).' }
+        state:               { type: string,  nullable: true, description: 'Player state machine label (idle, playing, paused, buffering, ended, error).' }
+        error:               { type: string,  nullable: true, description: 'Most recent player-reported error string.' }
+        source:              { type: string,  nullable: true, description: 'Identifier for the metrics source (e.g. avplayer-ios, exoplayer-android).' }
+        event_time:          { type: string,  format: date-time, nullable: true, description: 'Player-supplied wallclock for the most recent metrics tick.' }
 
     ServerMetrics:
+      description: |
+        Read-only server-observed transport telemetry. Sourced from
+        v1's TCP_INFO poll (RTT family) + ICMP path ping + per-session
+        byte counters + shaper bookkeeping. Only the RTT family is
+        Linux-specific (TCP_INFO is a Linux syscall; macOS dev builds
+        zero those out).
       type: object
       properties:
-        rendition_url:  { type: string, nullable: true }
-        rendition_mbps: { type: number, format: float, nullable: true }
+        rendition_url:        { type: string, nullable: true }
+        rendition_mbps:       { type: number, format: float, nullable: true }
+        server_rendition:     { type: string, nullable: true, description: 'Server-derived active rendition label (e.g. 720p) — separate from rendition_url.' }
+        rtt_ms:               { type: number, format: float, nullable: true, description: 'Smoothed RTT (RFC 6298 SRTT) over the last sample window.' }
+        rtt_min_ms:           { type: number, format: float, nullable: true, description: 'Minimum RTT in the last sample window.' }
+        rtt_max_ms:           { type: number, format: float, nullable: true, description: 'Maximum RTT in the last sample window.' }
+        rtt_min_lifetime_ms:  { type: number, format: float, nullable: true, description: 'Connection-lifetime minimum RTT (Linux 4.6+).' }
+        rtt_var_ms:           { type: number, format: float, nullable: true, description: 'RTT variance.' }
+        rto_ms:               { type: number, format: float, nullable: true, description: 'Current TCP retransmit timeout.' }
+        path_ping_rtt_ms:     { type: number, format: float, nullable: true, description: 'ICMP path ping RTT measured server-side.' }
+        rtt_stale:            { type: boolean, nullable: true, description: 'true when no fresh TCP_INFO sample is available (e.g. session idle).' }
+        bytes_in_total:       { type: integer, nullable: true, description: 'Lifetime ingress bytes from the player to the proxy.' }
+        bytes_out_total:      { type: integer, nullable: true, description: 'Lifetime egress bytes from the proxy to the player.' }
+        bytes_in_last:        { type: integer, nullable: true, description: 'Bytes-in since the previous metric tick.' }
+        bytes_out_last:       { type: integer, nullable: true, description: 'Bytes-out since the previous metric tick.' }
+        bytes_last_ts:        { type: integer, nullable: true, description: 'Unix-seconds timestamp of the most recent bytes_*_last sample.' }
+        # ---- shaper / transfer measurement (developer-mode only in v1 UI) ----
+        mbps_shaper_avg:      { type: number, format: float, nullable: true, description: 'EWMA throughput from the shaper (Mbps).' }
+        mbps_shaper_rate:     { type: number, format: float, nullable: true, description: 'Configured shaper rate (Mbps).' }
+        mbps_transfer_rate:   { type: number, format: float, nullable: true, description: 'Instantaneous transfer rate from the per-segment write loop (Mbps).' }
+        mbps_transfer_complete: { type: number, format: float, nullable: true, description: 'Average transfer rate over the last completed transfer (Mbps).' }
+        mbps_in:              { type: number, format: float, nullable: true, description: 'Recent ingress throughput (Mbps).' }
+        mbps_out:             { type: number, format: float, nullable: true, description: 'Recent egress throughput (Mbps).' }
+        mbps_in_avg:          { type: number, format: float, nullable: true, description: 'Lifetime average ingress throughput (Mbps).' }
+        mbps_in_active:       { type: number, format: float, nullable: true, description: 'Active-only ingress throughput, excluding idle gaps (Mbps).' }
+        measured_mbps:        { type: number, format: float, nullable: true, description: 'Server-measured throughput passed to the bitrate chart.' }
+        measurement_window_io: { type: number, format: float, nullable: true, description: 'Width of the I/O sample window (seconds).' }
+        measurement_window_active: { type: number, format: float, nullable: true, description: 'Width of the active-only sample window (seconds).' }
 
     # ----- Network -------------------------------------------------------
 
@@ -1372,8 +1544,15 @@ components:
         bytes_out:      { type: integer }
         content_type:   { type: string }
         play_id:        { type: string, format: uuid }
-        ttfb_ms:        { type: number, format: float }
+        ttfb_ms:        { type: number, format: float, description: 'Upstream TTFB (proxy → origin first byte).' }
         total_ms:       { type: number, format: float }
+        # Phase timings — populated when the proxy can observe the upstream
+        # request via httptrace. Useful for tooltip phase-breakdown bars.
+        dns_ms:          { type: number, format: float, description: 'Upstream DNS resolution time.' }
+        connect_ms:      { type: number, format: float, description: 'Upstream TCP connect time.' }
+        tls_ms:          { type: number, format: float, description: 'Upstream TLS handshake time.' }
+        transfer_ms:     { type: number, format: float, description: 'Downstream write+flush time to client (player-perceived receive).' }
+        client_wait_ms:  { type: number, format: float, description: 'Server-perceived wait between request received and first response byte sent.' }
         faulted:        { type: boolean }
         fault_type:     { type: string }
         fault_action:   { type: string }

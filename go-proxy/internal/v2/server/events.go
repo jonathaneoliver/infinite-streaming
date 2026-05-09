@@ -3,8 +3,11 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"log"
 	"sync"
 	"time"
+
+	"github.com/jonathaneoliver/infinite-streaming/go-proxy/internal/v2/oapigen"
 )
 
 // heartbeatInterval keeps idle SSE connections from being closed by
@@ -41,11 +44,33 @@ type EventSource struct {
 	currentPlay    map[string]string         // player_id → most recent play_id
 }
 
-// playerSnapshot is the subset of v2 PlayerRecord fields that drive
-// diff detection. control_revision change → player.updated; absence
-// → player.deleted; new appearance → player.created.
+// playerSnapshot tracks the per-player state used for diff detection.
+//   - rev:   control_revision; flips on PATCH writes.
+//   - hash:  fnv64a of the marshalled body; changes on ANY field
+//            update including non-PATCH metric drains (RTT, buffer,
+//            byte counters). A snapshot is "changed" when either
+//            differs from the prior, ensuring chart-feeding fields
+//            propagate even between PATCHes.
 type playerSnapshot struct {
-	rev string
+	rev  string
+	hash uint64
+}
+
+// bodyHash returns a fast 64-bit fingerprint of a marshalled
+// PlayerRecord body. fnv-1a is non-cryptographic but plenty for
+// equality detection between consecutive snapshots of the same
+// resource.
+func bodyHash(body []byte) uint64 {
+	const (
+		offset64 uint64 = 14695981039346656037
+		prime64  uint64 = 1099511628211
+	)
+	h := offset64
+	for _, b := range body {
+		h ^= uint64(b)
+		h *= prime64
+	}
+	return h
 }
 
 // NewEventSource constructs and starts the source. Heartbeat ticker +
@@ -159,11 +184,40 @@ func (s *EventSource) handleSessionSnapshot(snap SessionSnapshot) {
 			continue
 		}
 		pid := rec.Id.String()
-		body, err := json.Marshal(rec)
+		// Marshal the typed record + the raw v1 session map under
+		// `raw_session`. v2-compat consumers (the dashboards that
+		// rely on the v1 chart engine) read RTT samples / byte
+		// counters / etc. from raw_session because those fields
+		// aren't on the typed shape. Cost: ~5KB per event per
+		// session — fine for an internal harness.
+		// DEBUG (keep these until issue resolved)
+		_, hasWin := sess["_rttWindow"]
+		rtt, _ := sess["client_rtt_ms"].(float64)
+		log.Printf("V2_SSE_MARSHAL sess.rtt=%.2f sess.hasWin=%v sess.keys=%d", rtt, hasWin, len(sess))
+		body, err := json.Marshal(struct {
+			oapigen.PlayerRecord
+			RawSession map[string]any `json:"raw_session,omitempty"`
+		}{rec, sess})
 		if err != nil {
 			continue
 		}
-		next[pid] = playerSnapshot{rev: rec.ControlRevision}
+		// DEBUG: re-parse the body to confirm what actually ended up in JSON.
+		var verify map[string]any
+		_ = json.Unmarshal(body, &verify)
+		vrs, _ := verify["raw_session"].(map[string]any)
+		_, vHasWin := vrs["_rttWindow"]
+		vRtt, _ := vrs["client_rtt_ms"].(float64)
+		log.Printf("V2_SSE_VERIFY post-marshal raw_session: rtt=%.2f hasWin=%v keys=%d", vRtt, vHasWin, len(vrs))
+		// Hash the marshalled body so we emit on ANY observable
+		// field change, not just on control_revision (which only
+		// flips on PATCH writes). RTT samples, buffer-depth updates,
+		// byte counters etc. all need to reach the chart engine —
+		// they're stamped onto the v1 session map by
+		// normalizeSessionsForResponse but don't bump
+		// control_revision. Without this, RTT/buffer charts stay
+		// flat because no v2 event fires.
+		h := bodyHash(body)
+		next[pid] = playerSnapshot{rev: rec.ControlRevision, hash: h}
 		if sid := getString(sess, "session_id"); sid != "" {
 			nextSession[sid] = pid
 		}
@@ -172,7 +226,7 @@ func (s *EventSource) handleSessionSnapshot(snap SessionSnapshot) {
 		switch {
 		case !hadPrev:
 			s.publishPlayerEvent("player.created", body)
-		case prev.rev != rec.ControlRevision:
+		case prev.rev != rec.ControlRevision || prev.hash != h:
 			s.publishPlayerEvent("player.updated", body)
 		}
 	}

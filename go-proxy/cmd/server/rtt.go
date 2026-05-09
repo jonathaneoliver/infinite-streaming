@@ -115,7 +115,22 @@ type RTTWindow struct {
 	// rather than dropping to zero.
 	lastAvgUs, lastMaxUs, lastMinUs uint32
 	haveLastDrain                   bool
+	// Multi-consumer dedup: every broadcast tick now fans out to
+	// several normalize callers (v1 SSE, v1 REST, v2 SSE source, v2
+	// SessionList, v2 SessionByPlayerID). Without dedup, the first
+	// caller drains and the rest see count=0 and get stale=true
+	// replay even though fresh samples exist. lastDrainAt lets a
+	// drain within mergeWindow re-use the prior sample without
+	// resetting the window.
+	lastDrainAt time.Time
 }
+
+// mergeWindow is the dedup span: any drain within this much time of
+// the previous successful drain returns the previous sample without
+// touching the running aggregator. Set comfortably larger than the
+// longest realistic same-tick consumer fanout (~tens of ms) and
+// comfortably smaller than the broadcast cadence (250ms).
+const rttMergeWindow = 100 * time.Millisecond
 
 type rttSample struct {
 	avgMs, maxMs, minMs, minLifetimeMs, varMs, rtoMs float32
@@ -164,10 +179,27 @@ func (w *RTTWindow) drainAndReset() rttSample {
 	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	// Multi-consumer dedup: a same-tick re-read returns the previous
+	// sample without resetting state, so all consumers in one
+	// broadcast tick see identical fresh values instead of one fresh
+	// + N stale.
+	if w.haveLastDrain && !w.lastDrainAt.IsZero() && time.Since(w.lastDrainAt) < rttMergeWindow {
+		return rttSample{
+			avgMs:         float32(w.lastAvgUs) / 1000,
+			maxMs:         float32(w.lastMaxUs) / 1000,
+			minMs:         float32(w.lastMinUs) / 1000,
+			minLifetimeMs: float32(w.latestMinLifetimeUs) / 1000,
+			varMs:         float32(w.latestVarUs) / 1000,
+			rtoMs:         float32(w.latestRTOUs) / 1000,
+			hasData:       true,
+			// Not stale — same-tick re-read of a fresh drain.
+		}
+	}
 	if w.count == 0 {
 		if !w.haveLastDrain {
 			return rttSample{}
 		}
+		w.lastDrainAt = time.Now()
 		return rttSample{
 			avgMs:         float32(w.lastAvgUs) / 1000,
 			maxMs:         float32(w.lastMaxUs) / 1000,
@@ -193,6 +225,7 @@ func (w *RTTWindow) drainAndReset() rttSample {
 	w.lastMaxUs = w.maxUs
 	w.lastMinUs = w.minUs
 	w.haveLastDrain = true
+	w.lastDrainAt = time.Now()
 	w.sumUs = 0
 	w.count = 0
 	w.maxUs = 0
