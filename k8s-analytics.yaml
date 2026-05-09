@@ -13,9 +13,11 @@
 #
 # Schemas + Grafana provisioning are inlined here so the manifest is
 # self-contained — `kubectl apply -f` is enough to bring the analytics
-# tier up. If the source files in analytics/clickhouse/init.d/ or
-# analytics/grafana/provisioning/ change, regenerate this file with
-# `make analytics-regen-k8s-manifest`.
+# tier up. The canonical SQL lives in analytics/clickhouse/init.d/*.sql
+# and the canonical Grafana provisioning in analytics/grafana/; this
+# file is a hand-mirror. There is no regen target — edit both places
+# when changing schemas, users, or dashboards. (A `make analytics-check-
+# mirror` drift check is tracked as a follow-up; not yet wired.)
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -379,6 +381,58 @@ data:
     -- forwarder bumps it on session-end / star / unstar via ALTER UPDATE.
     ALTER TABLE infinite_streaming.network_requests
         ADD COLUMN IF NOT EXISTS classification LowCardinality(String) DEFAULT 'other' CODEC(ZSTD(1));
+  02-llm-reader.sql: |
+    -- Mirror of analytics/clickhouse/init.d/02-llm-reader.sql — edit both.
+    -- See that file for the migration runbook (`make analytics-migrate
+    -- SQL-FILE=...` for live clusters) and the full per-cap rationale.
+    --
+    -- LLM tool-use reader (issue #413, part of epic #412).
+    --
+    -- The forwarder's AI-analysis path (`/analytics/api/session_chat`) lets an
+    -- LLM author SQL via a `query` tool. We pass that SQL through unchecked
+    -- because all safety lives here, in this user's settings profile, enforced
+    -- server-side. The LLM literally cannot escape these limits — `readonly = 1`
+    -- blocks `SET`, and every cap carries the `READONLY` constraint so the
+    -- profile itself is also unchangeable.
+    --
+    -- Identity: `IDENTIFIED WITH no_password` matches the existing `default`
+    -- user. The threat model is "constrain what *our* code can do over this
+    -- connection," not "keep network attackers out" — the default user already
+    -- accepts unauthenticated connections from the same network, with no
+    -- profile constraints. Adding a password here would be theatre: anyone
+    -- on the docker bridge / cluster network could just connect as `default`
+    -- and bypass every limit.
+
+    CREATE SETTINGS PROFILE IF NOT EXISTS llm_readonly SETTINGS
+        -- readonly=1: only SELECT / SHOW / DESCRIBE / EXISTS; SET is rejected.
+        readonly = 1 READONLY,
+        -- 10 s wall-clock per query. Verified server-enforced (Code 159).
+        max_execution_time = 10 READONLY,
+        -- 1 GB peak memory per query. Verified server-enforced.
+        max_memory_usage = 1000000000 READONLY,
+        -- 10 M rows scanned per query — the real input cap. Verified
+        -- server-enforced (Code 158, TOO_MANY_ROWS).
+        max_rows_to_read = 10000000 READONLY,
+        -- max_result_rows / max_result_bytes / result_overflow_mode are
+        -- COOPERATIVE in ClickHouse 24.8: settings are visible and
+        -- READONLY but plain streaming SELECTs are not truncated server-
+        -- side. The forwarder's `query` tool (#415) enforces a hard 10k-
+        -- row / 10 MB cap when reading the response. Documented here so
+        -- tooling that respects them does, and so the values stay tied
+        -- to the same intent.
+        max_result_rows = 10000 READONLY,
+        max_result_bytes = 10485760 READONLY,
+        result_overflow_mode = 'break' READONLY;
+
+    CREATE USER IF NOT EXISTS llm_reader
+        IDENTIFIED WITH no_password
+        SETTINGS PROFILE 'llm_readonly';
+
+    GRANT SELECT ON infinite_streaming.* TO llm_reader;
+    GRANT SELECT ON system.tables TO llm_reader;
+    GRANT SELECT ON system.columns TO llm_reader;
+    GRANT SELECT ON system.parts TO llm_reader;
+    GRANT SELECT ON system.parts_columns TO llm_reader;
 ---
 apiVersion: apps/v1
 kind: StatefulSet
