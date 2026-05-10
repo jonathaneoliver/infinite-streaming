@@ -75,10 +75,34 @@ func (s *Server) PostApiV2PlayersPlayerIdFaultRules(w http.ResponseWriter, r *ht
 			current = []any{}
 		}
 		// Server-fill rule id if omitted.
-		if id, _ := newRule["id"].(string); id == "" {
-			newRule["id"] = newRevision() // good-enough monotonic id
+		newID, _ := newRule["id"].(string)
+		if newID == "" {
+			newID = newRevision() // good-enough monotonic id
+			newRule["id"] = newID
 		}
-		current = append(current, newRule)
+		// Replace-by-id: if a rule with this id already exists,
+		// overwrite it in place. Otherwise append. The dashboard's
+		// PATCH→404→POST fallback would otherwise keep stacking
+		// duplicates of the same v1-all (or v1-segment, etc.) rule
+		// every time the rule's PATCH 404s and falls through, and
+		// translateFaultRules's first-match-wins would render the
+		// oldest one — silently dropping every later edit (Daisy
+		// 2026-05-10 fault-slider edits not honored).
+		replaced := false
+		for i, existing := range current {
+			ex, ok := existing.(map[string]any)
+			if !ok {
+				continue
+			}
+			if exID, _ := ex["id"].(string); exID == newID {
+				current[i] = newRule
+				replaced = true
+				break
+			}
+		}
+		if !replaced {
+			current = append(current, newRule)
+		}
 		if err := translateFaultRules(sess, current); err != nil {
 			return err
 		}
