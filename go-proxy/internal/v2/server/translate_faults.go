@@ -28,15 +28,30 @@ import "fmt"
 // surface a 501 with detail.
 
 // supportedFaultTypes lists the v2 FaultRule.type values that map to
-// v1 surface failure_type. Other v2 types (corrupted, request_*_hang,
-// etc.) need v1 plumbing changes that don't exist yet.
+// v1 surface failure_type. The translator stores these verbatim on
+// the v1 session as `<surface>_failure_type`; the proxy's request
+// handler is the consumer that knows how to act on each type. The
+// dashboard's failure-type radios drive every value here.
 var supportedFaultTypes = map[string]bool{
-	"none":      true,
-	"404":       true,
-	"500":       true,
-	"503":       true,
-	"timeout":   true,
-	"corrupted": true,
+	"none":                       true,
+	"404":                        true,
+	"403":                        true,
+	"500":                        true,
+	"503":                        true,
+	"timeout":                    true,
+	"corrupted":                  true,
+	"connection_refused":         true,
+	"dns_failure":                true,
+	"rate_limiting":              true,
+	"request_connect_reset":      true,
+	"request_connect_delayed":    true,
+	"request_connect_hang":       true,
+	"request_first_byte_reset":   true,
+	"request_first_byte_delayed": true,
+	"request_first_byte_hang":    true,
+	"request_body_reset":         true,
+	"request_body_delayed":       true,
+	"request_body_hang":          true,
 }
 
 // v1SurfaceForRequestKind returns the v1 field-name prefix for a v2
