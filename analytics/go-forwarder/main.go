@@ -775,6 +775,25 @@ func serveHTTP(ctx context.Context, cfg config) {
 			    transport_consecutive_failures,
 			    fault_count_transfer_active_timeout,
 			    fault_count_transfer_idle_timeout,
+			    -- Per-category fault *configuration*: any non-empty value
+			    -- (e.g. '404') means a fault of that type was configured
+			    -- at this moment — whether or not any request actually
+			    -- fired. The picker wants the "configured" signal: "the
+			    -- segment-404 test I ran yesterday" is interesting even
+			    -- if no segment requests landed during the window.
+			    -- go-proxy stamps the sentinel 'none' for an untouched
+			    -- category; the agg-level anyIf below filters that out
+			    -- alongside the empty string.
+			    master_manifest_failure_type,
+			    manifest_failure_type,
+			    segment_failure_type,
+			    all_failure_type,
+			    transport_failure_type,
+			    -- transport_fault_active is a separate UInt8 flag: 1 means
+			    -- a transport fault is *currently firing* (nftables rule
+			    -- in effect), not just configured. max() rolls per-snapshot
+			    -- to per-(session,play) below.
+			    transport_fault_active,
 			    classification,
 			    lagInFrame(video_bitrate_mbps, 1, video_bitrate_mbps) OVER w AS prev_bitrate,
 			    lagInFrame(video_resolution,   1, video_resolution)   OVER w AS prev_resolution
@@ -834,6 +853,29 @@ func serveHTTP(ctx context.Context, cfg config) {
 			    countIf(last_event = 'segment_stall')  AS segment_stall_count,
 			    countIf(last_event = 'restart')        AS restart_count,
 			    countIf(last_event = 'error')          AS error_event_count,
+			    -- Per-state snapshot counts feed the State-footprint
+			    -- mini-bar on the picker. Cadence is approximately fixed
+			    -- so snapshot count is a close stand-in for time-weighted
+			    -- share; if cadence variance becomes a problem the future
+			    -- fix is runningDifference(ts) summed by state.
+			    countIf(player_state = 'playing')   AS state_playing,
+			    countIf(player_state = 'buffering') AS state_buffering,
+			    countIf(player_state = 'stalled')   AS state_stalled,
+			    countIf(player_state = 'paused')    AS state_paused,
+			    countIf(player_state = 'idle')      AS state_idle,
+			    countIf(player_state = 'ended')     AS state_ended,
+			    -- Per-category fault-injection presence: the most recent
+			    -- "real" failure_type seen during the (session,play).
+			    -- go-proxy stamps the sentinel 'none' when a category is
+			    -- untouched, so the picker treats both '' and 'none' as
+			    -- "not configured". Empty result here means the chip
+			    -- doesn't light up.
+			    anyIf(master_manifest_failure_type, master_manifest_failure_type != '' AND master_manifest_failure_type != 'none') AS fault_master_type,
+			    anyIf(manifest_failure_type,        manifest_failure_type        != '' AND manifest_failure_type        != 'none') AS fault_manifest_type,
+			    anyIf(segment_failure_type,         segment_failure_type         != '' AND segment_failure_type         != 'none') AS fault_segment_type,
+			    anyIf(all_failure_type,             all_failure_type             != '' AND all_failure_type             != 'none') AS fault_all_type,
+			    anyIf(transport_failure_type,       transport_failure_type       != '' AND transport_failure_type       != 'none') AS fault_transport_type,
+			    max(transport_fault_active) AS transport_fault_active,
 			    -- Tiered retention class (issue #342). Same value on
 			    -- every row of (session_id, play_id) once the
 			    -- forwarder's session-end / star path stamps it; before
@@ -861,6 +903,42 @@ func serveHTTP(ctx context.Context, cfg config) {
 			  agg.frames_displayed, agg.first_frame_s,
 			  agg.user_marked_count, agg.frozen_count, agg.segment_stall_count,
 			  agg.restart_count, agg.error_event_count,
+			  agg.state_playing, agg.state_buffering, agg.state_stalled,
+			  agg.state_paused, agg.state_idle, agg.state_ended,
+			  agg.fault_master_type, agg.fault_manifest_type, agg.fault_segment_type,
+			  agg.fault_all_type, agg.fault_transport_type, agg.transport_fault_active,
+			  -- Synthesized classification labels (issue #447, supersedes
+			  -- #443/#444). Single source of truth: any chip on the picker,
+			  -- the multi-select label filter, and the "Interesting"
+			  -- classification predicate all key off this array. Empty
+			  -- array == nothing notable.
+			  arrayFilter(x -> x != '', [
+			    if(agg.error_event_count    > 0, 'error_event',   ''),
+			    if(agg.frozen_count         > 0, 'frozen',        ''),
+			    if(agg.segment_stall_count  > 0, 'segment_stall', ''),
+			    if(agg.restart_count        > 0, 'restart',       ''),
+			    if(agg.user_marked_count    > 0, 'user_marked',   ''),
+			    if(agg.last_player_error   != '', concat('player_error:', toString(agg.last_player_error)), ''),
+			    if(agg.fault_master_type    != '', 'fault_master',    ''),
+			    if(agg.fault_manifest_type  != '', 'fault_manifest',  ''),
+			    if(agg.fault_segment_type   != '', 'fault_segment',   ''),
+			    if(agg.fault_all_type       != '', 'fault_all',       ''),
+			    if(agg.fault_transport_type != '', 'fault_transport', ''),
+			    if(agg.transport_fault_active > 0, 'transport_active',  ''),
+			    if(agg.active_timeouts > 0,        'timeout_active',    ''),
+			    if(agg.idle_timeouts > 0,          'timeout_idle',      ''),
+			    if(agg.downshifts >= 4 OR agg.upshifts >= 4, 'high_abr_churn', ''),
+			    -- Startup: never reached 'playing' over a session that
+			    -- ran long enough we'd expect a first frame. 5s wall-clock
+			    -- avoids labelling sessions that were closed immediately.
+			    if(agg.state_playing = 0
+			       AND dateDiff('second', agg.started, agg.last_seen) >= 5,
+			       'startup_failed', ''),
+			    -- TTFF > 3s with a first frame actually delivered. Skip
+			    -- when first_frame_s is 0 — that means "no first frame
+			    -- recorded", caught above as startup_failed.
+			    if(agg.first_frame_s > 3.0, 'startup_slow', '')
+			  ]) AS labels,
 			  agg.classification
 			FROM agg
 			LEFT JOIN net_counts
