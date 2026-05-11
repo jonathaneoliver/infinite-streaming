@@ -39,12 +39,52 @@ import (
 )
 
 // hasInterestingSignal returns true if the snapshot map carries any
-// of the 5 last_event values that drive the picker's "Flags" chips.
-// Matches reclassifySession's SQL predicate exactly so chip + filter
-// + retention tier agree on what "interesting" means.
+// signal that produces a non-empty `labels[]` entry in the
+// /api/sessions response. Matches reclassifySession's SQL predicate
+// exactly so picker chips, multi-select filter, and retention tier
+// agree on what "interesting" means.
+//
+// Mirrors every per-row label-emitting condition in /api/sessions:
+// last_event in the five chip types, non-empty player_error, any
+// non-empty fault-type configuration, transport_fault_active, or a
+// non-zero transfer-timeout counter. Agg-level labels (high_abr_churn,
+// startup_failed, startup_slow) aren't checked here — those require
+// session-wide aggregation and only need to land at session-end
+// reclassification, where the SQL probe in reclassifySession sees the
+// full (session, play).
 func hasInterestingSignal(s map[string]interface{}) bool {
 	switch strings.ToLower(strings.TrimSpace(getStr(s, "player_metrics_last_event"))) {
 	case "user_marked", "frozen", "segment_stall", "restart", "error":
+		return true
+	}
+	// player_error is a free-text field stamped by the player; the
+	// proxy never sentinelizes it with 'none' the way it does for
+	// failure_type columns, so empty-string is sufficient.
+	if strings.TrimSpace(getStr(s, "player_metrics_player_error")) != "" {
+		return true
+	}
+	for _, k := range []string{
+		"master_manifest_failure_type",
+		"manifest_failure_type",
+		"segment_failure_type",
+		"all_failure_type",
+		"transport_failure_type",
+	} {
+		v := strings.TrimSpace(getStr(s, k))
+		if v != "" && v != "none" {
+			return true
+		}
+	}
+	// Per-snapshot scalar interest signals available in the same map.
+	// Kept in sync with the SQL labels[] in main.go so a "transport
+	// flap only" or "timeout only" session does light up retention.
+	if getU64(s, "transport_fault_active") > 0 {
+		return true
+	}
+	if getU64(s, "fault_count_transfer_active_timeout") > 0 {
+		return true
+	}
+	if getU64(s, "fault_count_transfer_idle_timeout") > 0 {
 		return true
 	}
 	return false
@@ -127,16 +167,42 @@ func reclassifySession(ctx context.Context, cfg config, sessionID, playID string
 	if sessionID == "" {
 		return errors.New("session id required")
 	}
-	// 1. Determine whether the session is interesting. The signals
-	// match the per-row "Flags" column on the picker exactly — any of
-	// the 5 chip types appearing as a last_event value. Keeping the
-	// predicate narrow (just last_event) means the filter chip on
-	// the picker, the auto-classifier, and the retention tier all
-	// agree on what "interesting" means.
+	// 1. Determine whether the session is interesting. The predicate
+	// matches the per-row label-emitting conditions used by
+	// /api/sessions to synthesize `labels[]`, so the picker's chip
+	// row, the multi-select label filter, and the retention tier all
+	// land on the same answer for those signals. Agg-level startup
+	// labels (startup_failed, startup_slow) also drive retention via
+	// the duration / state_playing / first_frame_s clauses below.
+	// `high_abr_churn` alone is NOT promoted to retention-class
+	// "interesting" — it's a busy-but-fine signal that surfaces as a
+	// chip but doesn't justify 90-day storage on its own.
 	probe := fmt.Sprintf(`
-		SELECT count() FROM %s.%s
-		WHERE session_id = {session:String} AND play_id = {play:String}
-		  AND last_event IN ('user_marked', 'frozen', 'segment_stall', 'restart', 'error')
+		WITH agg AS (
+		  SELECT
+		    countIf(last_event IN ('user_marked','frozen','segment_stall','restart','error')) AS evt_hits,
+		    countIf(player_error != '') AS err_hits,
+		    countIf((master_manifest_failure_type != '' AND master_manifest_failure_type != 'none')
+		         OR (manifest_failure_type        != '' AND manifest_failure_type        != 'none')
+		         OR (segment_failure_type         != '' AND segment_failure_type         != 'none')
+		         OR (all_failure_type             != '' AND all_failure_type             != 'none')
+		         OR (transport_failure_type       != '' AND transport_failure_type       != 'none')
+		         OR transport_fault_active = 1) AS fault_hits,
+		    max(fault_count_transfer_active_timeout) AS active_timeouts,
+		    max(fault_count_transfer_idle_timeout)  AS idle_timeouts,
+		    countIf(video_bitrate_mbps > 0) AS bitrate_samples,
+		    countIf(player_state = 'playing') AS state_playing,
+		    max(video_first_frame_time_s) AS first_frame_s,
+		    dateDiff('second', min(ts), max(ts)) AS duration_s
+		  FROM %s.%s
+		  WHERE session_id = {session:String} AND play_id = {play:String}
+		)
+		SELECT if(
+		  evt_hits > 0 OR err_hits > 0 OR fault_hits > 0
+		    OR active_timeouts > 0 OR idle_timeouts > 0
+		    OR (state_playing = 0 AND duration_s >= 5)
+		    OR first_frame_s > 3.0,
+		  1, 0) FROM agg
 		FORMAT TSV`, cfg.chDatabase, cfg.chTable)
 	body, err := chQueryBytes(ctx, cfg, probe, map[string]string{
 		"session": sessionID,

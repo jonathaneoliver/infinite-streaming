@@ -2146,6 +2146,24 @@
                 r.segment_stall_count = n('segment_stall_count');
                 r.restart_count       = n('restart_count');
                 r.error_event_count   = n('error_event_count');
+
+                // Synthesized classification labels (issue #447).
+                // Forwarder returns labels[] in /api/sessions; if the
+                // forwarder is older than #447 fall back to a synthetic
+                // array built from the existing counters so the chips
+                // and label filter degrade gracefully.
+                if (!Array.isArray(r.labels)) {
+                    const synth = [];
+                    if (r.user_marked_count   > 0) synth.push('user_marked');
+                    if (r.frozen_count        > 0) synth.push('frozen');
+                    if (r.error_event_count   > 0) synth.push('error_event');
+                    if (r.segment_stall_count > 0) synth.push('segment_stall');
+                    if (r.restart_count       > 0) synth.push('restart');
+                    if (r.last_player_error && String(r.last_player_error).length > 0) {
+                        synth.push('player_error:' + r.last_player_error);
+                    }
+                    r.labels = synth;
+                }
                 r.is_critical = (r.user_marked_count > 0)
                             || (r.frozen_count > 0)
                             || (r.error_event_count > 0)
@@ -2212,33 +2230,155 @@
                 return `<span style="color:${color};font-weight:${n === 0 ? '400' : '600'};">${n}</span>`;
             };
 
-            // (D) Flags column — visible chip per "really bad" event
-            // type so a row with a 911 / freeze / hard error stands
-            // out without the user having to read every counter. Each
-            // chip carries a count + tooltip; only chips with > 0 are
-            // rendered. Empty cell when the session is clean.
-            const FLAG_DEFS = [
-                // [key, icon, label, color, severity]
-                { key: 'user_marked_count',   icon: '🚨', label: '911 / user flag',     color: '#dc2626', severity: 1 },
-                { key: 'frozen_count',        icon: '❄️', label: 'frozen',              color: '#7c3aed', severity: 1 },
-                { key: 'error_event_count',   icon: '⛔', label: 'error event',         color: '#b91c1c', severity: 1 },
-                { key: 'segment_stall_count', icon: '⏸',  label: 'segment stall',       color: '#c2410c', severity: 2 },
-                { key: 'restart_count',       icon: '🔄', label: 'restart',             color: '#b45309', severity: 2 }
-            ];
-            const fmtFlags = (_, r) => {
-                const chips = [];
-                for (const f of FLAG_DEFS) {
-                    const c = Number(r[f.key]) || 0;
-                    if (c <= 0) continue;
-                    const tip = `${c} ${f.label}${c === 1 ? '' : 's'}`;
-                    chips.push(
-                        `<span title="${escapeHtml(tip)}" style="display:inline-block;` +
-                        `padding:1px 6px;margin:0 2px 0 0;border-radius:10px;` +
-                        `background:${f.color};color:#fff;` +
-                        `font:600 11px system-ui;line-height:1.4;">${f.icon} ${c}</span>`
-                    );
+            // (D) Flags column — chip per synthesized label from the
+            // forwarder's labels[] array (issue #447). Each known label
+            // has an icon + color + display name; unknown labels fall
+            // through to a neutral grey chip showing the raw label.
+            // Empty cell when labels[] is empty (session is clean).
+            //
+            // Counter-derived labels (user_marked / frozen / etc) also
+            // tag the corresponding chip with their count from the row,
+            // so a "5 stalls" tooltip still works.
+            const LABEL_CATALOG = {
+                'user_marked':      { icon: '🚨', name: '911 / user flag', color: '#dc2626', countKey: 'user_marked_count' },
+                'frozen':           { icon: '❄️', name: 'frozen',           color: '#7c3aed', countKey: 'frozen_count' },
+                'error_event':      { icon: '⛔', name: 'error event',      color: '#b91c1c', countKey: 'error_event_count' },
+                'segment_stall':    { icon: '⏸',  name: 'segment stall',    color: '#c2410c', countKey: 'segment_stall_count' },
+                'restart':          { icon: '🔄', name: 'restart',          color: '#b45309', countKey: 'restart_count' },
+                'fault_master':     { icon: '🧨', name: 'master fault',     color: '#0369a1' },
+                'fault_manifest':   { icon: '🧨', name: 'manifest fault',   color: '#075985' },
+                'fault_segment':    { icon: '🧨', name: 'segment fault',    color: '#155e75' },
+                'fault_all':        { icon: '🧨', name: 'all-tab fault',    color: '#134e4a' },
+                'fault_transport':  { icon: '📡', name: 'transport fault',  color: '#3f3f46' },
+                'transport_active': { icon: '📡', name: 'transport active', color: '#52525b' },
+                'timeout_active':   { icon: '⏱',  name: 'active timeout',   color: '#7c2d12' },
+                'timeout_idle':     { icon: '⏱',  name: 'idle timeout',     color: '#9a3412' },
+                'high_abr_churn':   { icon: '〰️', name: 'high ABR churn',   color: '#a16207' },
+                'startup_failed':   { icon: '🚫', name: 'startup failed',   color: '#7f1d1d' },
+                'startup_slow':     { icon: '🐢', name: 'startup slow',     color: '#9a3412' }
+            };
+            // player_error:<msg> is a parameterized label — split on
+            // first ':' so the chip shows the message in its tooltip.
+            const decomposeLabel = (lab) => {
+                const s = String(lab || '');
+                const i = s.indexOf(':');
+                if (i < 0) return { key: s, payload: '' };
+                return { key: s.slice(0, i), payload: s.slice(i + 1) };
+            };
+            const renderLabelChip = (lab, r) => {
+                const { key, payload } = decomposeLabel(lab);
+                if (key === 'player_error') {
+                    const tip = payload || 'player_error';
+                    return `<span title="${escapeHtml(tip)}" style="display:inline-block;` +
+                           `padding:1px 6px;margin:0 2px 2px 0;border-radius:10px;` +
+                           `background:#991b1b;color:#fff;font:600 11px system-ui;line-height:1.4;">` +
+                           `⚠ player error</span>`;
                 }
-                return chips.join('') || '<span style="color:#9ca3af;">—</span>';
+                const meta = LABEL_CATALOG[key];
+                if (!meta) {
+                    // Unknown label — render a neutral grey chip. Future
+                    // labels (e.g. Markov scorer #442) light up here
+                    // without code changes.
+                    return `<span title="${escapeHtml(lab)}" style="display:inline-block;` +
+                           `padding:1px 6px;margin:0 2px 2px 0;border-radius:10px;` +
+                           `background:#6b7280;color:#fff;font:600 11px system-ui;line-height:1.4;">` +
+                           `${escapeHtml(key)}</span>`;
+                }
+                const count = meta.countKey ? (Number(r[meta.countKey]) || 0) : 0;
+                const label = count > 0 ? `${count} ${meta.name}${count === 1 ? '' : 's'}` : meta.name;
+                const suffix = count > 0 ? ` ${count}` : '';
+                return `<span title="${escapeHtml(label)}" style="display:inline-block;` +
+                       `padding:1px 6px;margin:0 2px 2px 0;border-radius:10px;` +
+                       `background:${meta.color};color:#fff;font:600 11px system-ui;line-height:1.4;">` +
+                       `${meta.icon}${suffix}</span>`;
+            };
+            const fmtFlags = (_, r) => {
+                const labels = Array.isArray(r.labels) ? r.labels : [];
+                if (labels.length === 0) return '<span style="color:#9ca3af;">—</span>';
+                return labels.map(l => renderLabelChip(l, r)).join('');
+            };
+
+            // Player-state pill — color-codes the existing State column
+            // using the same palette session-shell.js renders on the
+            // PLAYERSTATE swim lane (issue #447). 'unknown' / empty
+            // values fall through to a dashed grey pill.
+            const PLAYER_STATE_PILL_COLOR = {
+                'playing':   '#16a34a',
+                'buffering': '#f59e0b',
+                'stalled':   '#dc2626',
+                'paused':    '#9333ea',
+                'idle':      '#6b7280',
+                'ended':     '#1f2937'
+            };
+            const fmtStatePill = (v) => {
+                const raw = String(v == null ? '' : v).trim();
+                const key = raw.toLowerCase();
+                if (!raw) return '<span style="color:#9ca3af;">—</span>';
+                const c = PLAYER_STATE_PILL_COLOR[key] || '#9ca3af';
+                return `<span style="display:inline-block;padding:1px 8px;border-radius:10px;` +
+                       `background:${c};color:#fff;font:600 11px system-ui;letter-spacing:0.02em;">` +
+                       `${escapeHtml(raw)}</span>`;
+            };
+
+            // Startup chip — coarse classification of how a session
+            // got off the ground (issue #447). Derived client-side from
+            // first_frame_s + state_playing + duration_ms so we don't
+            // need a new forwarder column. Order matters: FAIL beats
+            // SLOW beats OK because a session that never reached
+            // 'playing' is a worse outcome than one that took 4s.
+            const fmtStartup = (_, r) => {
+                const ttff   = Number(r.first_frame_s)  || 0;
+                const played = Number(r.state_playing)  || 0;
+                const dur    = Number(r.duration_ms)    || 0;
+                const pill = (label, bg, tip) =>
+                    `<span title="${escapeHtml(tip)}" style="display:inline-block;` +
+                    `padding:1px 6px;border-radius:10px;background:${bg};color:#fff;` +
+                    `font:600 11px system-ui;">${label}</span>`;
+                if (played === 0 && dur >= 5000) {
+                    return pill('FAIL', '#dc2626',
+                        `never reached 'playing' over ${Math.round(dur/1000)}s — startup failure`);
+                }
+                if (ttff > 3) {
+                    return pill('SLOW', '#f59e0b',
+                        `time-to-first-frame ${ttff.toFixed(2)}s (> 3.0s threshold)`);
+                }
+                if (ttff > 0) {
+                    return pill('OK', '#16a34a',
+                        `time-to-first-frame ${ttff.toFixed(2)}s`);
+                }
+                return '<span title="no first-frame measurement yet" style="color:#9ca3af;">—</span>';
+            };
+
+            // State-footprint mini-bar — stacked share of player_state
+            // values across the session's snapshots (issue #447). Each
+            // segment width is proportional to that state's snapshot
+            // count; tooltip lists the percentages. Approximate because
+            // it weighs snapshots not wall-clock time, but cadence is
+            // ~fixed so the visual ratio holds for forensic glance.
+            const STATE_FOOTPRINT_SEGMENTS = [
+                ['playing',   'state_playing',   '#16a34a'],
+                ['buffering', 'state_buffering', '#f59e0b'],
+                ['stalled',   'state_stalled',   '#dc2626'],
+                ['paused',    'state_paused',    '#9333ea'],
+                ['idle',      'state_idle',      '#6b7280'],
+                ['ended',     'state_ended',     '#1f2937']
+            ];
+            const fmtStateBar = (_, r) => {
+                let total = 0;
+                for (const [, key] of STATE_FOOTPRINT_SEGMENTS) total += Number(r[key]) || 0;
+                if (total === 0) return '<span style="color:#9ca3af;">—</span>';
+                const segs = [];
+                const tipParts = [];
+                for (const [name, key, color] of STATE_FOOTPRINT_SEGMENTS) {
+                    const n = Number(r[key]) || 0;
+                    if (n <= 0) continue;
+                    const pct = (n / total) * 100;
+                    segs.push(`<span style="display:inline-block;width:${pct.toFixed(2)}%;height:10px;background:${color};"></span>`);
+                    tipParts.push(`${name} ${pct.toFixed(1)}%`);
+                }
+                return `<span title="${escapeHtml(tipParts.join(' · '))}" style="display:inline-flex;width:64px;height:10px;` +
+                       `border:1px solid var(--border-color,#e5e7eb);border-radius:2px;overflow:hidden;` +
+                       `background:#f3f4f6;vertical-align:middle;">${segs.join('')}</span>`;
             };
 
             // (C) Health score 0-100 with green/amber/red.
@@ -2268,21 +2408,14 @@
             // Session row. Each select narrows the next; the table at the
             // bottom shows the rows that match all active filters.
             const distinct = (key) => Array.from(new Set(rows.map(r => r[key] || '').filter(v => v))).sort();
-            const filters = { player_id: '', group_id: '', content_id: '', play_id: '', classification: 'all' };
-            // "Interesting" matches the per-row Flags column exactly:
-            // any of the 5 chip-types (user_marked / frozen / error
-            // event / segment_stall / restart) is non-zero. A row
-            // showing Flags = '—' is by definition not interesting,
-            // and the filter respects that. Server-side auto-classifier
-            // (forwarder/classification.go) uses the same predicate.
-            const isInterestingRow = (r) => {
-                if (Number(r.user_marked_count) > 0) return true;
-                if (Number(r.frozen_count) > 0) return true;
-                if (Number(r.error_event_count) > 0) return true;
-                if (Number(r.segment_stall_count) > 0) return true;
-                if (Number(r.restart_count) > 0) return true;
-                return false;
-            };
+            const filters = { player_id: '', group_id: '', content_id: '', play_id: '', classification: 'all', labels: new Set() };
+            // "Interesting" == the row's synthesized labels[] is
+            // non-empty. Single source of truth (issue #447): the
+            // per-row Flags column renders the same labels, and the
+            // forwarder's auto-classifier predicate matches the
+            // per-row label-emitting conditions. A row showing Flags
+            // = '—' is by definition not interesting.
+            const isInterestingRow = (r) => Array.isArray(r.labels) && r.labels.length > 0;
             const matchesClassification = (r) => {
                 switch (filters.classification) {
                     case 'all':         return true;
@@ -2292,12 +2425,28 @@
                     default:            return true;
                 }
             };
+            // Multi-select label filter: empty set → no constraint;
+            // otherwise the row's labels[] must be a superset of the
+            // selected labels (intersection AND). For parameterized
+            // labels (e.g. `player_error:<msg>`) we match on the prefix
+            // before ':' so the filter chip matches any message.
+            const labelMatchesFilter = (selected, labels) => {
+                if (!selected || selected.size === 0) return true;
+                if (!Array.isArray(labels) || labels.length === 0) return false;
+                const rowKeys = new Set(labels.map(l => {
+                    const i = String(l).indexOf(':');
+                    return i < 0 ? String(l) : String(l).slice(0, i);
+                }));
+                for (const k of selected) if (!rowKeys.has(k)) return false;
+                return true;
+            };
             const matches = (r) =>
                 (!filters.player_id  || r.player_id  === filters.player_id) &&
                 (!filters.group_id   || r.group_id   === filters.group_id) &&
                 (!filters.content_id || r.content_id === filters.content_id) &&
                 (!filters.play_id    || r.play_id    === filters.play_id) &&
-                matchesClassification(r);
+                matchesClassification(r) &&
+                labelMatchesFilter(filters.labels, r.labels);
 
             const wrap = document.createElement('div');
             wrap.style.cssText = 'display:flex;flex-direction:column;gap:10px;';
@@ -2432,13 +2581,76 @@
             matchCount.style.cssText = 'margin-left:auto;font-size:12px;color:var(--text-secondary);';
             filterRow.appendChild(matchCount);
 
+            // Label-filter row: one toggleable chip per distinct label
+            // present in the currently loaded rows (issue #447). Empty
+            // selection imposes no constraint. Multiple selected labels
+            // intersect (row must carry all of them). Hidden when no
+            // session in the corpus has any labels yet.
+            const labelRow = document.createElement('div');
+            labelRow.style.cssText = 'display:flex;flex-wrap:wrap;gap:6px;align-items:center;font-size:12px;';
+            const labelRowLbl = document.createElement('span');
+            labelRowLbl.textContent = 'Labels:';
+            labelRowLbl.style.cssText = labelCss;
+            labelRow.appendChild(labelRowLbl);
+            const labelChipHost = document.createElement('span');
+            labelChipHost.style.cssText = 'display:flex;flex-wrap:wrap;gap:4px;';
+            labelRow.appendChild(labelChipHost);
+            const renderLabelFilterChips = () => {
+                const counts = new Map();
+                for (const r of rows) {
+                    if (!Array.isArray(r.labels)) continue;
+                    for (const lab of r.labels) {
+                        const i = String(lab).indexOf(':');
+                        const key = i < 0 ? String(lab) : String(lab).slice(0, i);
+                        counts.set(key, (counts.get(key) || 0) + 1);
+                    }
+                }
+                // Keep any *currently selected* label visible even if no
+                // session in the freshly loaded set has it — otherwise an
+                // auto-refresh that drops the matching session would
+                // leave the user with an empty table and no chip to
+                // deselect.
+                for (const sel of filters.labels) {
+                    if (!counts.has(sel)) counts.set(sel, 0);
+                }
+                if (counts.size === 0) {
+                    labelRow.style.display = 'none';
+                    return;
+                }
+                labelRow.style.display = 'flex';
+                const keys = Array.from(counts.keys()).sort((a, b) => counts.get(b) - counts.get(a));
+                labelChipHost.replaceChildren();
+                for (const k of keys) {
+                    const meta = LABEL_CATALOG[k] || (k === 'player_error' ? { icon: '⚠', name: 'player error', color: '#991b1b' } : null);
+                    const display = meta ? `${meta.icon} ${meta.name}` : k;
+                    const active = filters.labels.has(k);
+                    const btn = document.createElement('button');
+                    btn.type = 'button';
+                    btn.dataset.labelChip = k;
+                    btn.textContent = `${display} · ${counts.get(k)}`;
+                    btn.style.cssText = 'padding:2px 8px;border-radius:12px;border:1px solid var(--border-color,#d1d5db);' +
+                        'font:500 11px system-ui;cursor:pointer;' +
+                        (active
+                            ? `background:${(meta && meta.color) || '#1d4ed8'};color:#fff;font-weight:700;`
+                            : 'background:var(--bg-secondary,#f3f4f6);color:var(--text-primary,#111827);');
+                    btn.title = active ? 'Click to remove from filter' : 'Click to require this label';
+                    btn.addEventListener('click', () => {
+                        if (filters.labels.has(k)) filters.labels.delete(k);
+                        else filters.labels.add(k);
+                        renderLabelFilterChips();
+                        refreshSelects();
+                    });
+                    labelChipHost.appendChild(btn);
+                }
+            };
+
             // Sessions list as a scrollable table.
             const tableWrap = document.createElement('div');
             tableWrap.style.cssText = 'max-height:60vh;overflow:auto;background:var(--bg-primary);border:1px solid var(--border-color, #e5e7eb);border-radius:6px;';
             const table = document.createElement('table');
             table.style.cssText = 'width:100%;border-collapse:collapse;font:12px ui-monospace,Menlo,monospace;';
             tableWrap.appendChild(table);
-            wrap.append(heading, rangeRow, filterRow, tableWrap);
+            wrap.append(heading, rangeRow, filterRow, labelRow, tableWrap);
             banner.replaceChildren(wrap);
 
             const showCustomInputs = () => {
@@ -2480,6 +2692,7 @@
             });
 
             const refreshSelects = () => {
+                renderLabelFilterChips();
                 const visible = rows.filter(matches);
                 const fillSelect = (sel, key) => {
                     const candidates = (key === 'player_id'  ? rows :
@@ -2601,7 +2814,9 @@
                           + `style="color:#1d4ed8;text-decoration:none;font-weight:600;`
                           + `position:relative;z-index:2;">${escapeHtml(text)}</a>`;
                   } },
-                { label: 'State',       key: 'last_state',       type: 'string' },
+                { label: 'State',       key: 'last_state',       type: 'string', html: true, format: fmtStatePill },
+                { label: 'Startup',     key: 'first_frame_s',    type: 'number', html: true, format: fmtStartup },
+                { label: 'State %',     key: '__state_bar',      type: 'string', html: true, format: fmtStateBar },
                 { label: 'Issues',      key: 'issues_count',     type: 'number', html: true, format: fmtIssuesBadge },
                 { label: 'Flags',       key: '__flags',          type: 'string', html: true, format: fmtFlags },
                 { label: 'Health',      key: 'health_score',     type: 'number', html: true, format: fmtHealth },
@@ -2810,7 +3025,9 @@
             clearBtn.addEventListener('click', () => {
                 filters.player_id = filters.group_id = filters.content_id = filters.play_id = '';
                 filters.classification = 'all';
+                filters.labels.clear();
                 renderClassChips();
+                renderLabelFilterChips();
                 refreshSelects();
             });
 
