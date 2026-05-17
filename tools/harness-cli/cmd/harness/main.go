@@ -128,6 +128,8 @@ func main() {
 		exit(cmdNetwork(client, args[1:], g.asJSON))
 	case "archive":
 		exit(cmdArchive(client, args[1:], g.asJSON))
+	case "groups":
+		exit(cmdGroups(client, args[1:], g.asJSON))
 	case "help", "--help", "-h":
 		fmt.Fprint(os.Stdout, usage)
 	default:

@@ -739,6 +739,121 @@ func (c *Client) ArchiveBundles(ctx context.Context) ([]byte, error) {
 	}, "GET /analytics/api/v2/bundles")
 }
 
+// ----- Player groups ------------------------------------------------------
+
+// Groups returns all player groups. Wraps GET /api/v2/player-groups
+// + un-wraps the {items:[…]} list envelope.
+func (c *Client) Groups(ctx context.Context) ([]proxy.PlayerGroup, error) {
+	resp, err := c.proxy.GetApiV2PlayerGroups(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if err := checkProxyError(resp, "GET /api/v2/player-groups"); err != nil {
+		return nil, err
+	}
+	var page struct {
+		Items []proxy.PlayerGroup `json:"items"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&page); err != nil {
+		return nil, err
+	}
+	return page.Items, nil
+}
+
+// Group fetches one group + its ETag (for the next PATCH).
+func (c *Client) Group(ctx context.Context, groupID string) (*proxy.PlayerGroup, string, error) {
+	uid, err := uuid.Parse(groupID)
+	if err != nil {
+		return nil, "", fmt.Errorf("invalid group_id %q: %w", groupID, err)
+	}
+	resp, err := c.proxy.GetApiV2PlayerGroupsGroupId(ctx, uid)
+	if err != nil {
+		return nil, "", err
+	}
+	defer resp.Body.Close()
+	if err := checkProxyError(resp, "GET /api/v2/player-groups/"+groupID); err != nil {
+		return nil, "", err
+	}
+	var grp proxy.PlayerGroup
+	if err := json.NewDecoder(resp.Body).Decode(&grp); err != nil {
+		return nil, "", err
+	}
+	etag := strings.Trim(resp.Header.Get("ETag"), `"`)
+	return &grp, etag, nil
+}
+
+// CreateGroup POSTs a new group. Member ids must be valid UUIDs.
+func (c *Client) CreateGroup(ctx context.Context, body proxy.PostApiV2PlayerGroupsJSONRequestBody) (*proxy.PlayerGroup, string, error) {
+	resp, err := c.proxy.PostApiV2PlayerGroups(ctx, body)
+	if err != nil {
+		return nil, "", err
+	}
+	defer resp.Body.Close()
+	if err := checkProxyError(resp, "POST /api/v2/player-groups"); err != nil {
+		return nil, "", err
+	}
+	var grp proxy.PlayerGroup
+	if err := json.NewDecoder(resp.Body).Decode(&grp); err != nil {
+		return nil, "", err
+	}
+	etag := strings.Trim(resp.Header.Get("ETag"), `"`)
+	return &grp, etag, nil
+}
+
+// PatchGroup applies a merge-patch (label / labels / member_player_ids).
+// Snapshots into the special "(group)" player slot so undo can find it.
+func (c *Client) PatchGroup(ctx context.Context, groupID, action string, patch proxy.PlayerGroupPatch) (string, error) {
+	uid, err := uuid.Parse(groupID)
+	if err != nil {
+		return "", fmt.Errorf("invalid group_id %q: %w", groupID, err)
+	}
+	before, etag, err := c.Group(ctx, groupID)
+	if err != nil {
+		return "", err
+	}
+	params := &proxy.PatchApiV2PlayerGroupsGroupIdParams{IfMatch: quoteETag(etag)}
+	resp, err := c.proxy.PatchApiV2PlayerGroupsGroupIdWithApplicationMergePatchPlusJSONBody(
+		ctx, uid, params, patch,
+	)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if err := checkProxyError(resp, "PATCH /api/v2/player-groups/"+groupID); err != nil {
+		return "", err
+	}
+	newETag := strings.Trim(resp.Header.Get("ETag"), `"`)
+	if c.Snap != nil && action != "" {
+		beforeJSON, _ := json.Marshal(before)
+		patchJSON, _ := json.Marshal(patch)
+		_, _ = c.Snap.Save(snapshot.Snapshot{
+			PlayerID:   "group-" + groupID,
+			Action:     action,
+			EtagBefore: etag,
+			EtagAfter:  newETag,
+			Before:     beforeJSON,
+			Patch:      patchJSON,
+		})
+	}
+	return newETag, nil
+}
+
+// DeleteGroup removes a player group. Members stay; only the group
+// metadata is deleted.
+func (c *Client) DeleteGroup(ctx context.Context, groupID string) error {
+	uid, err := uuid.Parse(groupID)
+	if err != nil {
+		return fmt.Errorf("invalid group_id %q: %w", groupID, err)
+	}
+	resp, err := c.proxy.DeleteApiV2PlayerGroupsGroupId(ctx, uid)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	return checkProxyError(resp, "DELETE /api/v2/player-groups/"+groupID)
+}
+
 // PatchRaw is the universal escape hatch — sends a hand-crafted
 // merge-patch+json body straight at PATCH /api/v2/players/{id}.
 // Used by `harness undo` (replay) and `harness raw` (Phase 7). The
