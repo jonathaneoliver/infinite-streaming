@@ -34,12 +34,12 @@ function setMode(m: YMaxMode) {
 // i.e. no sticky viewport. All four charts in the panel share this
 // coord state so the toolbar's toggle and each chart's toggle stay
 // in lockstep regardless of which one the operator clicked.
-const liveChecked = computed(() => coord.state.viewport === null);
+const liveChecked = computed(() => coord.state.range === null);
 
 /** Always togglePause — both directions preserve liveSpanMs.
  *  See MetricsLineChart.onLiveToggleClick for rationale. */
 function onLiveToggleClick() {
-  coord.togglePause();
+  coord.toggleLive();
 }
 </script>
 

@@ -1,27 +1,20 @@
 /**
- * useChartCoordination(playerId) — shared per-session chart state so
- * the bandwidth / RTT / buffer / FPS charts in one card behave as one
- * coordinated unit:
+ * useChartCoordination(playerId) — shared per-session chart state.
  *
- *   - One pause flag: pausing any chart pauses all of them.
- *   - One viewport: zooming/panning any chart syncs the others.
- *   - One window length: changing the rolling window length once
- *     applies everywhere.
+ * The brush IS the source of truth for what's currently displayed.
+ * Charts, the brush rail, the Live toggle's checked state, and the
+ * brush-end-row panel projection all derive from a single computed
+ * `effectiveRange`. There are no separate "viewport" / "paused" /
+ * "userMovedBrush" / "live span" flags scattered across watchers —
+ * every state transition goes through `setRange` / `setLiveSpan` /
+ * `toggleLive` and propagates via Vue's reactive graph in one
+ * direction. No cycles, no defensive `if (a === b) return` guards,
+ * no version counter.
  *
- * Backing store: module-level Map keyed by playerId so the state
- * survives component remount AND is shared across charts on the same
- * session card.
- *
- * Reactivity model: callers may pass either a plain string (legacy) or
- * a `Ref<string>` (TS12 — picker swap without :key remount). When a
- * ref is supplied, the `state` getter + every computed + every mutator
- * re-read `playerIdRef.value` on access, so switching the active
- * player in Testing.vue's picker propagates to every chart in the
- * same SessionDisplay instance without forcing a remount.
- *
- * Matches the legacy session-shell.js semantics: 10-minute default
- * window, viewport in ms relative to the latest sample's wall clock,
- * paused freezes the viewport.
+ * Backing store: module-level Map keyed by playerId so state
+ * survives component remount AND is shared across charts on the
+ * same session card. Pass either a plain string (legacy) or a
+ * `Ref<string>` (picker-swap-aware).
  */
 import { computed, isRef, reactive, ref, type Ref } from 'vue';
 
@@ -32,32 +25,46 @@ export interface ChartViewport {
   max: number;
 }
 
+/** Default "rolling window" span — what the brush sits at on a
+ *  fresh session before any zoom gesture, and the cap for Alt+wheel
+ *  zoom-out. Exported so chart components clamping their own
+ *  zoom-out paths use the same value. */
+export const DEFAULT_FOCUS_MS = 10 * 60 * 1000;
+
+/** Tolerance for "is the right edge at the live sample?" — used by
+ *  isAtLiveEdge to decide whether a drag/zoom should snap back to
+ *  live-tracking mode. */
+const LIVE_EDGE_TOLERANCE_MS = 2_000;
+
 export interface ChartCoordinationState {
-  paused: boolean;
+  /** UI: whether the events-timeline panel is in expanded-height mode. */
   expanded: boolean;
-  /** explicit viewport set by the user (pan, drag-zoom); null = follow live */
-  viewport: ChartViewport | null;
-  /** running "latest sample timestamp" maintained by member charts */
+
+  /** Latest sample timestamp, maintained by chart ingest paths via
+   *  `noteSample`. The right edge of "live tracking" mode. */
   lastSampleMs: number;
-  /** how many ms wide the rolling window is when live-following */
-  windowMs: number;
-  /** When set and the chart is live (not paused) AND no sticky
-   *  viewport, the visible range becomes
-   *  `[lastSampleMs - liveSpanMs, lastSampleMs]`. Lets Alt+wheel zoom
-   *  while keeping the chart anchored at the live edge (matches the
-   *  legacy `installLiveWheelAnchor` behaviour). null = no zoom, use
-   *  full `windowMs`. */
-  liveSpanMs: number | null;
-  /** monotonic version counter so charts react to viewport changes */
-  version: number;
+
   /** Y-axis upper bound for the bandwidth chart (undefined = auto). */
   bandwidthYMax: number | undefined;
-  /** Synchronized "selected event" cursor — ms-since-epoch.
-   *  When non-null every member chart (line charts + events
-   *  timeline) draws a vertical marker at this x position so the
-   *  operator can see exactly where the prev/next-selected event
-   *  sits across all panels. null = no cursor (default). */
+
+  /** Synchronized "selected event" cursor — ms-since-epoch. When
+   *  non-null every member chart draws a vertical marker at this x
+   *  position so the operator can see exactly where the prev/next
+   *  selected event sits across all panels. null = no cursor. */
   cursorMs: number | null;
+
+  /** The single source of truth for "what range is currently
+   *  displayed". null → operator is following live (chart x-axis is
+   *  `[lastSampleMs - liveSpan, lastSampleMs]`). {min, max} →
+   *  operator has pinned to this range. */
+  range: ChartViewport | null;
+
+  /** The span the operator wants while range === null. Updated ONLY
+   *  by explicit user gestures: chart Alt+wheel at live edge,
+   *  brush-rail Alt+wheel at live edge, brush drag-end at live edge.
+   *  Never auto-derived from incidental brush motion. Defaults to
+   *  DEFAULT_FOCUS_MS (10 min). */
+  liveSpan: number;
 }
 
 const states = new Map<string, ChartCoordinationState>();
@@ -72,15 +79,12 @@ function writeExpandedStored(v: boolean) {
 
 function freshState(): ChartCoordinationState {
   return reactive<ChartCoordinationState>({
-    paused: false,
     expanded: readExpandedStored(),
-    viewport: null,
     lastSampleMs: 0,
-    windowMs: 10 * 60 * 1000,
-    liveSpanMs: null,
-    version: 0,
     bandwidthYMax: undefined,
     cursorMs: null,
+    range: null,
+    liveSpan: DEFAULT_FOCUS_MS,
   });
 }
 
@@ -94,11 +98,9 @@ function ensureState(pid: string): ChartCoordinationState {
 }
 
 export function useChartCoordination(playerIdInput: string | Ref<string>) {
-  // Normalise input — accept both a plain string (legacy callers) and
-  // a reactive ref (new picker-swap-aware callers). When a ref is
-  // provided, every getter + computed + mutator below threads through
-  // `playerIdRef.value` so changes propagate to the consumer's
-  // reactive context without a component remount.
+  // Normalise input — accept a plain string or a reactive ref. When
+  // a ref is provided, every getter and mutator threads through
+  // playerIdRef.value so a picker-swap propagates without remount.
   const playerIdRef: Ref<string> = isRef(playerIdInput)
     ? playerIdInput
     : ref(playerIdInput);
@@ -107,27 +109,28 @@ export function useChartCoordination(playerIdInput: string | Ref<string>) {
     return ensureState(playerIdRef.value);
   }
 
-  const effectiveViewport = computed<ChartViewport>(() => {
+  /** The single source of truth for what's currently displayed.
+   *  Derives from `state.range` (pinned) or
+   *  `[lastSampleMs - liveSpan, lastSampleMs]` (following live).
+   *
+   *  Every chart x-axis, the brush window, the Live-toggle's checked
+   *  state, the network-log brush, the brush-end-row projection
+   *  watcher — all bind to this. No further sync needed. */
+  const effectiveRange = computed<ChartViewport>(() => {
     const s = cur();
-    if (s.viewport) return s.viewport;
+    if (s.range) return s.range;
     const end = s.lastSampleMs || Date.now();
-    // When live (no sticky viewport) and the user has chosen a tighter
-    // zoom span via Alt+wheel, the visible range follows the live edge
-    // with that span — same as the legacy live-anchored wheel zoom.
-    const span = s.liveSpanMs != null ? s.liveSpanMs : s.windowMs;
-    return { min: end - span, max: end };
+    return { min: end - s.liveSpan, max: end };
   });
 
-  /** Wall-clock anchored tick positions for the visible viewport.
-   *  Returns an array of ms-since-epoch timestamps, picked at a "nice"
-   *  interval (1s / 5s / 10s / 30s / 1m / 5m / 10m / 30m) so the chart
-   *  shows ~6 vertical gridlines across the window. Both Chart.js
-   *  (afterBuildTicks) and vis-timeline (addCustomTime) consume this
-   *  same array so the gridlines line up vertically across the
-   *  bandwidth / RTT / buffer / FPS / events-timeline panels in one
+  /** Wall-clock anchored tick positions for the visible range.
+   *  Returns ms-since-epoch timestamps at a "nice" interval so the
+   *  chart shows ~6 vertical gridlines. Both Chart.js
+   *  (afterBuildTicks) and vis-timeline (addCustomTime) consume the
+   *  same array so gridlines line up across all panels in one
    *  session card. */
   const tickPositions = computed<number[]>(() => {
-    const v = effectiveViewport.value;
+    const v = effectiveRange.value;
     const span = Math.max(1, v.max - v.min);
     const target = span / 6;
     const NICE_MS = [1_000, 5_000, 10_000, 30_000, 60_000, 5 * 60_000, 10 * 60_000, 30 * 60_000];
@@ -136,82 +139,53 @@ export function useChartCoordination(playerIdInput: string | Ref<string>) {
       if (n >= target) { interval = n; break; }
     }
     // Snap each tick to wall-clock boundaries of the chosen interval
-    // so e.g. 60-second ticks land on :00, :01:00, :02:00 — matches
-    // how the user mentally reads clock time across the gridlines.
+    // so e.g. 60-second ticks land on :00, :01:00, :02:00.
     const aligned = Math.floor(v.max / interval) * interval;
     const out: number[] = [];
     for (let t = aligned; t >= v.min; t -= interval) out.push(t);
     return out.reverse();
   });
 
+  /** True when the chart's right edge is within tolerance of the
+   *  latest sample — used by chart pan/zoom-end paths to decide
+   *  whether to snap back into live-tracking mode. */
+  function isAtLiveEdge(rightEdgeMs: number): boolean {
+    const s = cur();
+    if (!s.lastSampleMs) return false;
+    return Math.abs(s.lastSampleMs - rightEdgeMs) <= LIVE_EDGE_TOLERANCE_MS;
+  }
+
   function noteSample(ts: number) {
     const s = cur();
     if (ts > s.lastSampleMs) s.lastSampleMs = ts;
   }
 
-  function setViewport(v: ChartViewport | null) {
-    const s = cur();
-    const span = v ? Math.round((v.max - v.min) / 1000) : 'null';
-    const trace = new Error().stack?.split('\n').slice(2, 5).join(' | ').slice(0, 200) ?? '';
-    console.log('[CC] setViewport span=' + span + 's | ' + trace);
-    s.viewport = v;
-    s.version++;
+  /** Set the pinned range (or null = resume following live). The
+   *  single setter that handles every pan/drag/zoom/Live-toggle
+   *  state transition. */
+  function setRange(r: ChartViewport | null) {
+    cur().range = r;
   }
 
-  /** Snapshot the current live viewport so the chart freezes here.
-   *  Without this, even though `paused = true`, the effectiveViewport
-   *  keeps sliding with `lastSampleMs` because each new tick advances
-   *  the "live window" end. Capturing once at pause-time is what makes
-   *  the line / state charts visibly stop scrolling.
-   *
-   *  Honours `liveSpanMs` if set, so pausing after an Alt+wheel zoom
-   *  preserves the zoomed range — the user gets a frozen view of
-   *  exactly what they were watching, not a snap-out to the full
-   *  window. */
-  function snapshotLiveViewport() {
-    const s = cur();
-    // If there's already an explicit viewport (set by a brush drag
-    // or an Alt+drag-zoom on a chart), DON'T overwrite it. The whole
-    // point of pausing is to freeze whatever the operator was looking
-    // at; if they had a custom range it IS the visible window. The
-    // legacy "snapshot to [lastSample - liveSpanMs, ...]" path runs
-    // only when no sticky viewport exists — i.e. we're live-tracking
-    // and need to freeze at the live edge.
-    if (s.viewport) return;
-    const end = s.lastSampleMs || Date.now();
-    const span = s.liveSpanMs != null ? s.liveSpanMs : s.windowMs;
-    s.viewport = { min: end - span, max: end };
+  /** Set the live-edge span (used when range === null). Only updated
+   *  by explicit user gestures. Pass any positive number; <= 0
+   *  reverts to DEFAULT_FOCUS_MS. */
+  function setLiveSpan(ms: number) {
+    cur().liveSpan = ms > 0 ? ms : DEFAULT_FOCUS_MS;
   }
 
-  function togglePause() {
+  /** Single Live-toggle handler used by chart toolbars, the lane
+   *  toolbar, and the focus-window Live button. Pinned → following =
+   *  clear range. Following → pinned = snapshot current
+   *  effectiveRange. */
+  function toggleLive() {
     const s = cur();
-    s.paused = !s.paused;
-    if (s.paused) {
-      snapshotLiveViewport();
-    } else {
-      // Returning to live drops any sticky user viewport so the next
-      // tick's effectiveViewport snaps back to "now" (the live edge).
-      s.viewport = null;
+    if (s.range !== null) {
+      s.range = null;
+      return;
     }
-    s.version++;
-  }
-
-  function setPaused(p: boolean) {
-    const s = cur();
-    if (s.paused === p) return;
-    s.paused = p;
-    if (p) snapshotLiveViewport();
-    else s.viewport = null;
-    s.version++;
-  }
-
-  /** Set the live-edge zoom span. Bumps the version so charts react.
-   *  Pass null to clear (revert to full `windowMs`). Has no effect on
-   *  the paused branch — paused mode uses sticky `viewport`. */
-  function setLiveSpanMs(ms: number | null) {
-    const s = cur();
-    s.liveSpanMs = ms;
-    s.version++;
+    const snap = effectiveRange.value;
+    s.range = { min: snap.min, max: snap.max };
   }
 
   function toggleExpanded() {
@@ -220,24 +194,14 @@ export function useChartCoordination(playerIdInput: string | Ref<string>) {
     writeExpandedStored(s.expanded);
   }
 
-  function setWindowMs(ms: number) {
-    const s = cur();
-    s.windowMs = Math.max(5_000, ms);
-    s.viewport = null;
-    s.version++;
-  }
-
   function setBandwidthYMax(v: number | undefined) {
     cur().bandwidthYMax = v;
   }
 
   /** Move the synchronized "selected event" cursor. Pass null to
-   *  hide it. Bumps version so chart watchers re-render the marker
-   *  layer in lock-step. */
+   *  hide it. */
   function setCursorMs(ms: number | null) {
-    const s = cur();
-    s.cursorMs = ms;
-    s.version++;
+    cur().cursorMs = ms;
   }
 
   return {
@@ -246,25 +210,23 @@ export function useChartCoordination(playerIdInput: string | Ref<string>) {
     // touch `coord.state.X` therefore depend on playerIdRef and
     // re-evaluate when the active player switches.
     get state(): ChartCoordinationState { return cur(); },
-    effectiveViewport,
+    effectiveRange,
     tickPositions,
+    isAtLiveEdge,
     noteSample,
-    setViewport,
-    togglePause,
-    setPaused,
-    setLiveSpanMs,
+    setRange,
+    setLiveSpan,
+    toggleLive,
     toggleExpanded,
-    setWindowMs,
     setBandwidthYMax,
     setCursorMs,
   };
 }
 
-/** Format a ms-since-epoch timestamp as `HH:MM:SS.mmm` (24h, zero-padded
- *  to 3-digit ms) — used by both Chart.js x-axis labels and vis-timeline
- *  custom-time labels so the gridline labels match across every chart in
- *  a session card. Exported so the components don't drift from this
- *  format. */
+/** Format a ms-since-epoch timestamp as `HH:MM:SS.mmm` (24h,
+ *  zero-padded to 3-digit ms) — used by both Chart.js x-axis labels
+ *  and vis-timeline custom-time labels so the gridline labels match
+ *  across every chart in a session card. */
 export function fmtTickHMSms(ms: number): string {
   const d = new Date(ms);
   const hh = String(d.getHours()).padStart(2, '0');

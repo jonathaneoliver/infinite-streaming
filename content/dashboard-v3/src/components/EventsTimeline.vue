@@ -29,7 +29,7 @@
  */
 import { computed, onBeforeUnmount, ref, toRef, watch } from 'vue';
 import { ensureVisTimeline } from '@/composables/useChartJs';
-import { useChartCoordination } from '@/composables/useChartCoordination';
+import { useChartCoordination, DEFAULT_FOCUS_MS } from '@/composables/useChartCoordination';
 import type { Stream } from '@/composables/useSessionTimeSeries';
 
 interface LaneCfg { label: string; color: string }
@@ -399,7 +399,7 @@ async function ensureTimeline(): Promise<void> {
       itemsDS = new vis.DataSet([]);
       groupsDS = new vis.DataSet([]);
       rebuildGroups();
-      const vp = coord.effectiveViewport.value;
+      const vp = coord.effectiveRange.value;
       timeline = new vis.Timeline(container.value, itemsDS, groupsDS, {
         stack: false,
         showCurrentTime: true,
@@ -446,14 +446,12 @@ async function ensureTimeline(): Promise<void> {
         // — drop the sticky viewport, preserve the zoom span via
         // liveSpanMs, and stay unpaused. Any further Alt+wheel will
         // then take the left-edge-only path.
-        const lastTs = coord.state.lastSampleMs;
-        if (lastTs && b >= lastTs - LIVE_EDGE_TOLERANCE_MS) {
-          coord.setViewport(null);
-          coord.setLiveSpanMs(b - a);
+        if (coord.isAtLiveEdge(b)) {
+          coord.setLiveSpan(b - a);
+          coord.setRange(null);
           return;
         }
-        if (!coord.state.paused) coord.setPaused(true);
-        coord.setViewport({ min: a, max: b });
+        coord.setRange({ min: a, max: b });
       });
       installLiveWheelAnchor();
     } finally {
@@ -728,7 +726,7 @@ async function drainNewRows() {
       const row = chRowToIngest(raw[i]);
       if (!row) continue;
       if (row.ts <= lastIngestedMs) continue; // belt-and-suspenders
-      if (coord.state.paused) {
+      if (coord.state.range !== null) {
         pendingLive.push(row);
       } else {
         ingest(row);
@@ -754,9 +752,9 @@ watch(
 // order so the coalescing logic produces the same lane segments it
 // would have produced live.
 watch(
-  () => coord.state.paused,
-  (paused) => {
-    if (paused || !pendingLive.length) return;
+  () => coord.state.range,
+  (range) => {
+    if (range !== null || !pendingLive.length) return;
     const drained = pendingLive.splice(0, pendingLive.length);
     for (const r of drained) ingest(r);
   },
@@ -786,7 +784,7 @@ watch(
 );
 
 watch(
-  () => [coord.state.version, coord.state.paused, coord.state.lastSampleMs] as const,
+  () => coord.effectiveRange.value,
   () => {
     if (!timeline) return;
     // Skip while the operator is mid-pan — a live sample arriving
@@ -794,7 +792,7 @@ watch(
     // visibly fighting the drag (and breaking the final rangechanged
     // event's intent).
     if (userInteracting) return;
-    const vp = coord.effectiveViewport.value;
+    const vp = coord.effectiveRange.value;
     suppressNextRangeChange = true;
     timeline.setWindow(vp.min, vp.max, { animation: false });
   },
@@ -823,20 +821,31 @@ function installLiveWheelAnchor() {
   el.addEventListener(
     'wheel',
     (e: WheelEvent) => {
+      // Horizontal scroll → pan. Same semantics as MetricsLineChart;
+      // see gh#461.
+      if (!e.altKey && Math.abs(e.deltaX) > Math.abs(e.deltaY)) {
+        e.preventDefault();
+        e.stopPropagation();
+        const widthPx = el.clientWidth;
+        if (widthPx <= 0) return;
+        const current = coord.effectiveRange.value;
+        const span = current.max - current.min;
+        const dms = (e.deltaX / widthPx) * span;
+        coord.setRange({ min: current.min + dms, max: current.max + dms });
+        return;
+      }
       if (!e.altKey) return;
       e.preventDefault();
       e.stopPropagation();
       const factor = e.deltaY < 0 ? 0.9 : 1 / 0.9;
       const MIN_SPAN_MS = 1_000;
       const MAX_SPAN_MS = 24 * 3600 * 1000;
-      const lastTs = coord.state.lastSampleMs;
-      const vp = coord.state.viewport;
+      const vp = coord.state.range;
 
       if (vp == null) {
-        const windowMs = coord.state.windowMs;
-        const currentSpan = coord.state.liveSpanMs != null ? coord.state.liveSpanMs : windowMs;
-        const nextSpan = Math.max(MIN_SPAN_MS, Math.min(windowMs, currentSpan * factor));
-        coord.setLiveSpanMs(nextSpan >= windowMs ? null : nextSpan);
+        const currentSpan = coord.state.liveSpan;
+        const nextSpan = Math.max(MIN_SPAN_MS, Math.min(DEFAULT_FOCUS_MS, currentSpan * factor));
+        coord.setLiveSpan(nextSpan);
         return;
       }
 
@@ -847,14 +856,12 @@ function installLiveWheelAnchor() {
       const anchorTime = vp.min + frac * currentSpan;
       let newStart = anchorTime - frac * nextSpan;
       let newEnd = newStart + nextSpan;
-      if (lastTs && newEnd >= lastTs - LIVE_EDGE_TOLERANCE_MS) {
-        coord.setViewport(null);
-        coord.setLiveSpanMs(nextSpan);
-        if (coord.state.paused) coord.setPaused(false);
+      if (coord.isAtLiveEdge(newEnd)) {
+        coord.setLiveSpan(nextSpan);
+        coord.setRange(null);
         return;
       }
-      if (!coord.state.paused) coord.setPaused(true);
-      coord.setViewport({ min: newStart, max: newEnd });
+      coord.setRange({ min: newStart, max: newEnd });
     },
     { capture: true, passive: false },
   );
@@ -862,16 +869,16 @@ function installLiveWheelAnchor() {
 
 const expandedClass = computed(() => (coord.state.expanded ? 'expanded' : ''));
 // Live toggle is "checked" when we're currently following live —
-// i.e. no sticky viewport. Reacts to all transitions (click, brush
+// i.e. no sticky range. Reacts to all transitions (click, brush
 // drag, pan, zoom-snap-to-live) because every reader binds against
-// the shared `coord.state.viewport`.
-const liveChecked = computed(() => coord.state.viewport === null);
+// the shared `coord.state.range`.
+const liveChecked = computed(() => coord.state.range === null);
 
 /** Always togglePause — both directions preserve liveSpanMs.
  *  See MetricsLineChart.onLiveToggleClick for rationale. */
 function onLiveToggleClick() {
   userInteracted = false;
-  coord.togglePause();
+  coord.toggleLive();
 }
 
 /**
@@ -930,7 +937,7 @@ onBeforeUnmount(() => {
           type="button"
           class="btn live-toggle"
           :class="{ checked: liveChecked }"
-          @click="coord.togglePause(); userInteracted = false"
+          @click="coord.toggleLive(); userInteracted = false"
           :title="liveChecked ? 'Pause at current live edge' : 'Resume following live (drops zoom and pan)'"
         >
           {{ liveChecked ? '●' : '○' }} Live

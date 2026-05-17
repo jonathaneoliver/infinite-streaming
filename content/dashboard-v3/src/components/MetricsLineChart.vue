@@ -18,7 +18,7 @@
  */
 import { computed, onBeforeUnmount, ref, toRef, watch, type PropType } from 'vue';
 import { ensureChartJs } from '@/composables/useChartJs';
-import { useChartCoordination, fmtTickHMSms, type ChartViewport } from '@/composables/useChartCoordination';
+import { useChartCoordination, fmtTickHMSms, DEFAULT_FOCUS_MS, type ChartViewport } from '@/composables/useChartCoordination';
 import type { Stream } from '@/composables/useSessionTimeSeries';
 import { tsOfRow, chRowToPlayerRecord } from '@/composables/chRowAdapter';
 import type { PlayerRecord } from '@/repo/v2-repo';
@@ -77,14 +77,12 @@ const LIVE_EDGE_TOLERANCE_MS = 2000;
  *  span via liveSpanMs, stay unpaused. Mirrors the EventsTimeline
  *  rangechanged path so chart / lane behave identically. */
 function applyViewportOrSnapToLive(min: number, max: number) {
-  const lastTs = coord.state.lastSampleMs;
-  if (lastTs && max >= lastTs - LIVE_EDGE_TOLERANCE_MS) {
-    coord.setViewport(null);
-    coord.setLiveSpanMs(max - min);
-    if (coord.state.paused) coord.setPaused(false);
+  if (coord.isAtLiveEdge(max)) {
+    coord.setLiveSpan(max - min);
+    coord.setRange(null);
     return;
   }
-  coord.setViewport({ min, max });
+  coord.setRange({ min, max });
 }
 
 
@@ -167,7 +165,7 @@ async function ensure(): Promise<any> {
 
 function createChartInstance(Chart: any): any {
   dataset = props.series.map(() => []);
-  const initialViewport = coord.effectiveViewport.value;
+  const initialViewport = coord.effectiveRange.value;
   const usesY2 = props.series.some((s) => s.axis === 'y2');
 
   // Pin chart plot-area edges across every chart in the panel so the
@@ -317,17 +315,13 @@ function createChartInstance(Chart: any): any {
             modifierKey: undefined,
             onPanStart: ({ chart: c }: any) => {
               // Pre-seed coord.viewport with the chart's CURRENT visible
-              // range before setPaused fires. setPaused → snapshotLive‑
-              // Viewport would otherwise overwrite viewport with
-              // `[lastSample − liveSpanMs, lastSample]` (the live‑edge
-              // window), flashing the chart back to live mid‑pan. The
-              // snapshot helper now skips when a viewport already
-              // exists, so seeding it here is enough.
+              // Pin the range to the chart's current visible window so
+              // effectiveRange stops following live mid-pan. setRange
+              // collapses what used to be setViewport + setPaused.
               const sx = c?.scales?.x;
               if (sx && Number.isFinite(sx.min) && Number.isFinite(sx.max)) {
-                coord.setViewport({ min: sx.min, max: sx.max });
+                coord.setRange({ min: sx.min, max: sx.max });
               }
-              if (!coord.state.paused) coord.setPaused(true);
             },
             onPanComplete: ({ chart: c }: any) => {
               const sx = c.scales?.x;
@@ -435,7 +429,9 @@ function installRightDragPan() {
     const sx = chart.scales?.x;
     if (!sx) return;
     dragState = { startX: e.clientX, startMin: sx.min, startMax: sx.max };
-    if (!coord.state.paused) coord.setPaused(true);
+    // Pin from the start so effectiveRange stops sliding while the
+    // user is dragging (setRange handles both range + paused mirror).
+    coord.setRange({ min: sx.min, max: sx.max });
   });
   window.addEventListener('mousemove', (e) => {
     if (!dragState || !chart) return;
@@ -445,7 +441,7 @@ function installRightDragPan() {
     const span = dragState.startMax - dragState.startMin;
     const dx = e.clientX - dragState.startX;
     const dv = (dx / widthPx) * span;
-    coord.setViewport({ min: dragState.startMin - dv, max: dragState.startMax - dv });
+    coord.setRange({ min: dragState.startMin - dv, max: dragState.startMax - dv });
   });
   window.addEventListener('mouseup', (e) => {
     if (e.button === 2) dragState = null;
@@ -471,20 +467,36 @@ function installLiveWheelAnchor() {
   c.addEventListener(
     'wheel',
     (e: WheelEvent) => {
+      // Horizontal scroll (trackpad two-finger swipe left/right or
+      // mouse horizontal scroll) → pan the chart by deltaX scaled
+      // against the chart's plot-area width. No Alt required; plain
+      // vertical scroll still falls through to page scroll. See
+      // gh#461.
+      if (!e.altKey && Math.abs(e.deltaX) > Math.abs(e.deltaY)) {
+        e.preventDefault();
+        e.stopPropagation();
+        const chartArea = chart?.chartArea;
+        if (!chartArea || chartArea.right <= chartArea.left) return;
+        const widthPx = chartArea.right - chartArea.left;
+        const current = coord.effectiveRange.value;
+        const span = current.max - current.min;
+        const dms = (e.deltaX / widthPx) * span;
+        coord.setRange({ min: current.min + dms, max: current.max + dms });
+        return;
+      }
       if (!e.altKey) return;
       e.preventDefault();
       e.stopPropagation();
       const factor = e.deltaY < 0 ? 0.9 : 1 / 0.9;
       const MIN_SPAN_MS = 1_000;
       const MAX_SPAN_MS = 24 * 3600 * 1000;
-      const vp = coord.state.viewport;
+      const vp = coord.state.range;
 
-      // LIVE — left-edge-only via liveSpanMs.
+      // LIVE — left-edge-only via liveSpan.
       if (vp == null) {
-        const windowMs = coord.state.windowMs;
-        const currentSpan = coord.state.liveSpanMs != null ? coord.state.liveSpanMs : windowMs;
-        const nextSpan = Math.max(MIN_SPAN_MS, Math.min(windowMs, currentSpan * factor));
-        coord.setLiveSpanMs(nextSpan >= windowMs ? null : nextSpan);
+        const currentSpan = coord.state.liveSpan;
+        const nextSpan = Math.max(MIN_SPAN_MS, Math.min(DEFAULT_FOCUS_MS, currentSpan * factor));
+        coord.setLiveSpan(nextSpan);
         return;
       }
 
@@ -568,8 +580,8 @@ function pushSample(p: PlayerRecord, x: number) {
   // producing a chart-vs-lane time-axis mismatch. Chart.js with
   // `animation: false` handles tens of thousands of points fine.
   if (mutated) {
-    if (!coord.state.paused && !coord.state.viewport) {
-      applyViewport({ min: x - coord.state.windowMs, max: x });
+    if (coord.state.range === null) {
+      applyViewport({ min: x - DEFAULT_FOCUS_MS, max: x });
     }
     safeChartUpdate();
   }
@@ -675,7 +687,7 @@ async function drainNewRows() {
       if (!Number.isFinite(x)) continue;
       if (x <= lastIngestedMs) continue; // belt-and-suspenders
       const p = chRowToPlayerRecord(row);
-      if (coord.state.paused) {
+      if (coord.state.range !== null) {
         pendingLive.push({ p, x });
       } else {
         pushSample(p, x);
@@ -695,13 +707,13 @@ watch(
   { immediate: true },
 );
 
-// Resume drain — flush any samples that arrived during pause in
+// Resume drain — flush any samples that arrived while pinned in
 // chronological order, so the chart catches up to the live edge in
 // one pass. insertByX dedupes by x so re-runs stay safe.
 watch(
-  () => coord.state.paused,
-  (paused) => {
-    if (paused || !pendingLive.length) return;
+  () => coord.state.range,
+  (range) => {
+    if (range !== null || !pendingLive.length) return;
     const drained = pendingLive.splice(0, pendingLive.length);
     for (const { p, x } of drained) pushSample(p, x);
   },
@@ -719,14 +731,18 @@ watch(
   },
 );
 
-// React to coordinated state changes (other charts in the same session
-// zooming / panning / pausing).
+// React to the coordinated visible range. `effectiveRange` collapses
+// the old (version, paused, lastSampleMs) tuple — it changes whenever
+// the range pin shifts (chart pan, brush drag, Live toggle) AND when
+// lastSampleMs advances (only while in live-tracking mode; when pinned
+// the new sample doesn't move the effective range, so the chart
+// correctly stays parked).
 watch(
-  () => [coord.state.version, coord.state.paused, coord.state.lastSampleMs] as const,
+  () => coord.effectiveRange.value,
   () => {
     if (!chart) return;
     try {
-      applyViewport(coord.effectiveViewport.value);
+      applyViewport(coord.effectiveRange.value);
     } catch (err) {
       console.warn('chart viewport apply skipped:', err);
     }
@@ -780,7 +796,7 @@ function toggleExpand() {
 // Live toggle is "checked" when we're currently following live —
 // i.e. no sticky viewport. Reactive across all charts because every
 // MetricsLineChart instance reads from the shared `coord.state`.
-const liveChecked = computed(() => coord.state.viewport === null);
+const liveChecked = computed(() => coord.state.range === null);
 
 /** Click handler — always togglePause. Both directions preserve the
  *  current `liveSpanMs` so going PINNED → LIVE doesn't reset the zoom
@@ -788,7 +804,7 @@ const liveChecked = computed(() => coord.state.viewport === null);
  *  span on the way back" was rejected — kept ripping the focus bar
  *  away from the zoom the user picked.) */
 function onLiveToggleClick() {
-  coord.togglePause();
+  coord.toggleLive();
 }
 
 onBeforeUnmount(() => {
