@@ -18,6 +18,7 @@ const faultUsage = `harness fault <subcommand>
 Subcommands:
   list <target>                       show current fault_rules
   add  <target> [flags]               POST a new fault rule
+  edit <target> <rule_id> [flags]     PATCH one rule's fields
   rm   <target> <rule_id>             DELETE one rule by id (short id ok)
   clear <target>                      PATCH fault_rules → []
 
@@ -52,6 +53,8 @@ func cmdFault(client *api.Client, args []string, asJSON bool) error {
 		return cmdFaultAdd(client, args[1:], asJSON)
 	case "rm", "remove", "delete":
 		return cmdFaultRm(client, args[1:], asJSON)
+	case "edit":
+		return cmdFaultEdit(client, args[1:], asJSON)
 	case "clear":
 		return cmdFaultClear(client, args[1:], asJSON)
 	default:
@@ -218,6 +221,71 @@ func cmdFaultRm(client *api.Client, args []string, asJSON bool) error {
 		})
 	}
 	fmt.Printf("removed rule %s from %s (etag %s)\n", shortRuleID(ruleID), pid, shortRev(newETag))
+	return nil
+}
+
+func cmdFaultEdit(client *api.Client, args []string, asJSON bool) error {
+	if len(args) < 2 {
+		return errors.New("usage: harness fault edit <target> <rule_id> [flags]")
+	}
+	fs := flag.NewFlagSet("fault edit", flag.ContinueOnError)
+	typ := fs.String("type", "", "change fault type")
+	freq := fs.Int("frequency", -1, "change cadence numerator")
+	mode := fs.String("mode", "", "change mode (requests|seconds|failures_per_seconds)")
+	cons := fs.Int("consecutive", -1, "change consecutive count")
+	if err := fs.Parse(args[2:]); err != nil {
+		return err
+	}
+	ctx := context.Background()
+	pid, err := client.Resolve(ctx, args[0])
+	if err != nil {
+		return err
+	}
+	ruleID := args[1]
+	if len(ruleID) < 32 {
+		rec, _, err := client.Player(ctx, pid)
+		if err != nil {
+			return err
+		}
+		full, err := matchRuleID(ruleID, rec.FaultRules)
+		if err != nil {
+			return err
+		}
+		ruleID = full
+	}
+	// Merge-patch + the generated FaultRule type don't co-operate:
+	// FaultRule.Type has no `omitempty`, so the typed marshal would
+	// send `"type":""` for partial PATCHes that don't touch type, and
+	// the server rejects empty type strings with a 501. Build the
+	// patch body by hand and ship via PatchRaw — but call through the
+	// EditFaultRule path so snapshot is captured.
+	patchMap := map[string]any{}
+	if *typ != "" {
+		patchMap["type"] = *typ
+	}
+	if *freq >= 0 {
+		patchMap["frequency"] = *freq
+	}
+	if *cons >= 0 {
+		patchMap["consecutive"] = *cons
+	}
+	if *mode != "" {
+		patchMap["mode"] = *mode
+	}
+	if len(patchMap) == 0 {
+		return errors.New("nothing to patch — pass --type/--frequency/--mode/--consecutive")
+	}
+	action := fmt.Sprintf("fault edit %s", shortRuleID(ruleID))
+	newETag, err := client.EditFaultRuleRaw(ctx, pid, ruleID, action, patchMap)
+	if err != nil {
+		return err
+	}
+	if asJSON {
+		return format.JSON(os.Stdout, map[string]any{
+			"player_id": pid, "rule_id": ruleID, "patch": patchMap, "etag": newETag,
+		})
+	}
+	fmt.Printf("patched rule %s on %s (etag %s)\n", shortRuleID(ruleID), pid, shortRev(newETag))
 	return nil
 }
 

@@ -410,6 +410,149 @@ func (c *Client) ClearShape(ctx context.Context, playerID, action string) (strin
 	return newETag, nil
 }
 
+// CreatePlayer POSTs a new player. Does not snapshot (there's no
+// before-state) but returns the created record + its initial ETag.
+func (c *Client) CreatePlayer(ctx context.Context, req proxy.PlayerCreateRequest) (*proxy.PlayerRecord, string, error) {
+	resp, err := c.proxy.PostApiV2Players(ctx, req)
+	if err != nil {
+		return nil, "", err
+	}
+	defer resp.Body.Close()
+	if err := checkProxyError(resp, "POST /api/v2/players"); err != nil {
+		return nil, "", err
+	}
+	var rec proxy.PlayerRecord
+	if err := json.NewDecoder(resp.Body).Decode(&rec); err != nil {
+		return nil, "", fmt.Errorf("decode created player: %w", err)
+	}
+	etag := strings.Trim(resp.Header.Get("ETag"), `"`)
+	return &rec, etag, nil
+}
+
+// DeletePlayer removes a player. Snapshots first when action != ""
+// (so undo can recreate via POST + restore — though that's a Phase 5
+// follow-up; today undo of a delete is documented as not-supported).
+func (c *Client) DeletePlayer(ctx context.Context, playerID, action string) error {
+	before, _, err := c.preMutate(ctx, playerID, action)
+	if err != nil {
+		return err
+	}
+	resp, err := c.proxy.DeleteApiV2PlayersPlayerId(ctx, proxy.PlayerId(playerID))
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if err := checkProxyError(resp, "DELETE /api/v2/players/"+playerID); err != nil {
+		return err
+	}
+	if err := c.postMutate(playerID, action, "", "(deleted)", before, map[string]string{"op": "delete"}); err != nil {
+		return err
+	}
+	return nil
+}
+
+// DeleteAllPlayers nukes the entire player list. Snapshots a single
+// "before" capturing the prior count; per-player rollback is not
+// supported (would need N POSTs with reconstructed labels/shape).
+func (c *Client) DeleteAllPlayers(ctx context.Context, action string) error {
+	if c.Snap != nil && action != "" {
+		players, err := c.Players(ctx)
+		if err != nil {
+			return err
+		}
+		beforeJSON, _ := json.Marshal(players)
+		snap := snapshot.Snapshot{
+			PlayerID:   "(all)",
+			Action:     action,
+			Before:     beforeJSON,
+			Patch:      json.RawMessage(`{"op":"delete-all"}`),
+		}
+		if _, err := c.Snap.Save(snap); err != nil {
+			return err
+		}
+	}
+	resp, err := c.proxy.DeleteApiV2Players(ctx)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if err := checkProxyError(resp, "DELETE /api/v2/players"); err != nil {
+		return err
+	}
+	return nil
+}
+
+// EditFaultRuleRaw is a partial-update PATCH where the body is a
+// hand-built map. Necessary because the typed FaultRule has a
+// non-omitempty Type field — sending `{"type": ""}` for an
+// edit-frequency-only request fails server-side with 501.
+func (c *Client) EditFaultRuleRaw(ctx context.Context, playerID, ruleID, action string, patchMap map[string]any) (string, error) {
+	body, err := json.Marshal(patchMap)
+	if err != nil {
+		return "", err
+	}
+	before, etag, err := c.preMutate(ctx, playerID, action)
+	if err != nil {
+		return "", err
+	}
+	if etag == "" {
+		_, e, err := c.Player(ctx, playerID)
+		if err != nil {
+			return "", err
+		}
+		etag = e
+	}
+	params := &proxy.PatchApiV2PlayersPlayerIdFaultRulesRuleIdParams{IfMatch: quoteETag(etag)}
+	resp, err := c.proxy.PatchApiV2PlayersPlayerIdFaultRulesRuleIdWithBody(
+		ctx, proxy.PlayerId(playerID), proxy.RuleId(ruleID), params,
+		"application/merge-patch+json", bytes.NewReader(body),
+	)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if err := checkProxyError(resp, "PATCH /api/v2/players/"+playerID+"/fault_rules/"+ruleID); err != nil {
+		return "", err
+	}
+	newETag := strings.Trim(resp.Header.Get("ETag"), `"`)
+	if err := c.postMutate(playerID, action, etag, newETag, before, patchMap); err != nil {
+		return newETag, err
+	}
+	return newETag, nil
+}
+
+// EditFaultRule PATCHes one fault rule in place. Used by
+// `harness fault edit`.
+func (c *Client) EditFaultRule(ctx context.Context, playerID, ruleID, action string, patch proxy.FaultRule) (string, error) {
+	before, etag, err := c.preMutate(ctx, playerID, action)
+	if err != nil {
+		return "", err
+	}
+	if etag == "" {
+		_, e, err := c.Player(ctx, playerID)
+		if err != nil {
+			return "", err
+		}
+		etag = e
+	}
+	params := &proxy.PatchApiV2PlayersPlayerIdFaultRulesRuleIdParams{IfMatch: quoteETag(etag)}
+	resp, err := c.proxy.PatchApiV2PlayersPlayerIdFaultRulesRuleIdWithApplicationMergePatchPlusJSONBody(
+		ctx, proxy.PlayerId(playerID), proxy.RuleId(ruleID), params, patch,
+	)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if err := checkProxyError(resp, "PATCH /api/v2/players/"+playerID+"/fault_rules/"+ruleID); err != nil {
+		return "", err
+	}
+	newETag := strings.Trim(resp.Header.Get("ETag"), `"`)
+	if err := c.postMutate(playerID, action, etag, newETag, before, patch); err != nil {
+		return newETag, err
+	}
+	return newETag, nil
+}
+
 // PatchRaw is the universal escape hatch — sends a hand-crafted
 // merge-patch+json body straight at PATCH /api/v2/players/{id}.
 // Used by `harness undo` (replay) and `harness raw` (Phase 7). The
