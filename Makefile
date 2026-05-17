@@ -72,11 +72,14 @@ buildx-push:
 # (separate from the handlers so main.go stays clean). Output drops in
 # api/openapi/{proxy,forwarder}/swagger.{json,yaml}; v2 hand-written
 # specs live in api/openapi/v2/.
-SWAG := $(or $(SWAG),$(shell go env GOPATH)/bin/swag)
+SWAG         := $(or $(SWAG),$(shell go env GOPATH)/bin/swag)
+OAPICODEGEN  := $(or $(OAPICODEGEN),$(shell go env GOPATH)/bin/oapi-codegen)
 
 openapi-tools:
 	go install github.com/swaggo/swag/v2/cmd/swag@v2.0.0
+	go install github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen@v2.7.0
 	@echo "installed: $(SWAG)"
+	@echo "installed: $(OAPICODEGEN)"
 
 openapi:
 	@test -x "$(SWAG)" || { echo "swag not installed — run 'make openapi-tools'"; exit 1; }
@@ -98,6 +101,12 @@ openapi:
 	@if [ -f api/openapi/v2/forwarder.yaml ]; then \
 	  cp api/openapi/v2/forwarder.yaml content/dashboard/api-docs/forwarder-v2.yaml; \
 	fi
+	@if [ -f api/openapi/v2/proxy.yaml ] && [ -x "$(OAPICODEGEN)" ]; then \
+	  cd go-proxy/internal/v2/oapigen && $(OAPICODEGEN) -config config.yaml ../../../../api/openapi/v2/proxy.yaml; \
+	  echo "v2 server interface regenerated: go-proxy/internal/v2/oapigen/oapigen.gen.go"; \
+	else \
+	  echo "skipping v2 codegen — oapi-codegen not installed (run 'make openapi-tools')"; \
+	fi
 	@echo "specs regenerated under api/openapi/"
 	@echo "scalar UI mirror: content/dashboard/api-docs/{proxy,forwarder,proxy-v2,forwarder-v2}.{json,yaml}"
 
@@ -105,6 +114,7 @@ openapi-clean:
 	rm -rf api/openapi/proxy api/openapi/forwarder
 	rm -f content/dashboard/api-docs/proxy.json content/dashboard/api-docs/forwarder.json
 	rm -f content/dashboard/api-docs/proxy-v2.yaml content/dashboard/api-docs/forwarder-v2.yaml
+	rm -f go-proxy/internal/v2/oapigen/oapigen.gen.go
 
 K3S_REGISTRY ?= localhost:5000
 K3S_SERVER_REPO ?= infinite-streaming

@@ -34,6 +34,7 @@ import (
 	"github.com/vishvananda/netlink"
 	_ "modernc.org/sqlite"
 
+	v2server "github.com/jonathaneoliver/infinite-streaming/go-proxy/internal/v2/server"
 )
 
 //go:embed templates/index.html
@@ -1695,6 +1696,11 @@ func main() {
 	router.HandleFunc("/close-socket", app.handleCloseSocket).Methods(http.MethodGet)
 	router.HandleFunc("/terminate-worker", app.handleTerminateWorker).Methods(http.MethodGet)
 	router.HandleFunc("/force-close", app.handleForceClose).Methods(http.MethodGet)
+
+	// v2 harness API. Mounts every /api/v2/* route. v1 paths above stay
+	// unchanged. Phase B: read-only handlers backed by the v1 adapter;
+	// mutation/SSE endpoints still 501.
+	v2server.Mount(router, v2server.New(NewV2Adapter(app)))
 
 	router.PathPrefix("/").HandlerFunc(app.handleProxy)
 
