@@ -71,7 +71,7 @@ func cmdShape(client *api.Client, args []string, asJSON bool) error {
 		if *rate >= 0 || *delay >= 0 || *loss >= 0 {
 			return errors.New("--clear is mutually exclusive with --rate/--delay/--loss")
 		}
-		newETag, err := client.ClearShape(ctx, pid, "")
+		newETag, err := client.ClearShape(ctx, pid, "shape clear")
 		if err != nil {
 			return err
 		}
@@ -103,7 +103,8 @@ func cmdShape(client *api.Client, args []string, asJSON bool) error {
 		v := float32(*loss)
 		shape.LossPct = &v
 	}
-	newETag, err := client.PatchShape(ctx, pid, "", &shape)
+	action := fmt.Sprintf("shape rate=%v delay=%v loss=%v", *rate, *delay, *loss)
+	newETag, err := client.PatchShape(ctx, pid, action, &shape)
 	if err != nil {
 		return err
 	}

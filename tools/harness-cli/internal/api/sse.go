@@ -156,3 +156,47 @@ func splitBasic(s string) (string, string) {
 	}
 	return user, pass
 }
+
+// EventsParams configures /api/v2/events (proxy SSE — lifecycle
+// events, not the forwarder's timeseries). Type filters narrow the
+// stream server-side.
+type EventsParams struct {
+	PlayerID string   // optional — filter to one player's events
+	Types    []string // optional — repeated `type=` query params
+}
+
+// Events opens an SSE stream against the PROXY's /api/v2/events
+// (note: no /analytics prefix — events is proxy-side, not forwarder).
+// Same callback shape as Timeseries.
+func (c *Client) Events(ctx context.Context, p EventsParams, onFrame func(SSEFrame) error) error {
+	q := url.Values{}
+	if p.PlayerID != "" {
+		q.Set("player_id", p.PlayerID)
+	}
+	for _, t := range p.Types {
+		q.Add("type", t)
+	}
+	endpoint := c.BaseURL + "/api/v2/events"
+	if encoded := q.Encode(); encoded != "" {
+		endpoint += "?" + encoded
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return fmt.Errorf("events: build request: %w", err)
+	}
+	req.Header.Set("Accept", "text/event-stream")
+	req.Header.Set("Cache-Control", "no-cache")
+	if c.BasicAuth != "" {
+		req.SetBasicAuth(splitBasic(c.BasicAuth))
+	}
+	resp, err := c.HTTP.Do(req)
+	if err != nil {
+		return fmt.Errorf("events: open stream: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 8*1024))
+		return fmt.Errorf("events: %d %s: %s", resp.StatusCode, resp.Status, strings.TrimSpace(string(body)))
+	}
+	return scanSSE(resp.Body, onFrame)
+}

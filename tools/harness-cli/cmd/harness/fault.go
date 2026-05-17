@@ -158,7 +158,11 @@ func cmdFaultAdd(client *api.Client, args []string, asJSON bool) error {
 		rule.Filter = filter
 	}
 
-	newETag, err := client.AddFaultRule(ctx, pid, "", rule)
+	action := fmt.Sprintf("fault add type=%s", *typ)
+	if *kindCSV != "" {
+		action += " kind=" + *kindCSV
+	}
+	newETag, err := client.AddFaultRule(ctx, pid, action, rule)
 	if err != nil {
 		return err
 	}
@@ -201,7 +205,8 @@ func cmdFaultRm(client *api.Client, args []string, asJSON bool) error {
 		}
 		ruleID = full
 	}
-	newETag, err := client.DeleteFaultRule(ctx, pid, ruleID, "")
+	action := "fault rm " + shortRuleID(ruleID)
+	newETag, err := client.DeleteFaultRule(ctx, pid, ruleID, action)
 	if err != nil {
 		return err
 	}
@@ -225,7 +230,7 @@ func cmdFaultClear(client *api.Client, args []string, asJSON bool) error {
 	if err != nil {
 		return err
 	}
-	newETag, err := client.ClearFaultRules(ctx, pid, "")
+	newETag, err := client.ClearFaultRules(ctx, pid, "fault clear")
 	if err != nil {
 		return err
 	}

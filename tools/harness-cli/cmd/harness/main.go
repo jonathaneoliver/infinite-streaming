@@ -19,8 +19,10 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/jonathaneoliver/infinite-streaming/tools/harness-cli/internal/api"
+	"github.com/jonathaneoliver/infinite-streaming/tools/harness-cli/internal/snapshot"
 )
 
 const usage = `harness — drive the InfiniteStream test harness.
@@ -40,19 +42,29 @@ Commands:
   players show <player_id>      print full player record + ETag
   fault list|add|rm|clear       per-rule fault_rules CRUD (ETag-aware)
   shape <target>                PATCH player.shape (rate/delay/loss/clear)
-  tail <target|all>             /api/v2/timeseries network stream (SSE)
+  tail <target|all>             network stream SSE (/api/v2/timeseries)
+  ts <target>                   combined samples+network stream
+  events <target|all>           lifecycle SSE (/api/v2/events)
+  snapshot list|show            show prior mutation snapshots
+  undo [<target>]               replay the most recent snapshot
 
-Coming in subsequent commits:
-  ts <target>                   full timeseries subscription (samples + network)
-  archive <subcommand>          /api/v2/snapshots, /session_events, /network_requests
+Coming in subsequent phases:
+  players create|rm|prune       create/delete players
+  fault edit <target> <rule>    per-rule PATCH
+  labels|timeouts|content       player-record PATCH for remaining fields
+  play <subcommand>             play-scoped GET/PATCH + play.fault.*
+  network <target>              live HAR from /players/{id}/network
+  archive <subcommand>          forwarder reads (plays, snapshots, network, events, heatmap, bundle)
   groups <subcommand>           player groups
-  snapshot / undo / history     CLI-side undo stack
-  finding add ...               write to .claude/findings/
-  procedure <name> ...          multi-step (soak, ABR sweep)
+  info / raw / bundles          escape hatches + introspection
+  procedure / finding           multi-step ops + finding capture
 
 Targets are resolved against the live player list. A target may be a
 full UUID, a >=6-char hex prefix, a label value (device/name), a
 player IP, or a substring of the User-Agent.
+
+Mutations are snapshotted to ~/.claude/state/harness/<repo>/ so
+'harness undo' can replay them.
 `
 
 type globalFlags struct {
@@ -70,10 +82,18 @@ func main() {
 		os.Exit(2)
 	}
 
+	snap, err := openSnapshotStore()
+	if err != nil {
+		// Snapshot store failures shouldn't abort read-only commands;
+		// warn and continue without undo coverage. Mutation commands
+		// will then save no snapshot but otherwise work.
+		fmt.Fprintln(os.Stderr, "warn: snapshot store unavailable:", err)
+	}
 	client, err := api.New(api.Options{
 		BaseURL:   g.base,
 		Insecure:  g.insecure,
 		BasicAuth: g.basicAuth,
+		Snap:      snap,
 	})
 	if err != nil {
 		fail(err)
@@ -88,6 +108,14 @@ func main() {
 		exit(cmdShape(client, args[1:], g.asJSON))
 	case "tail":
 		exit(cmdTail(client, args[1:], g.asJSON))
+	case "ts":
+		exit(cmdTs(client, args[1:], g.asJSON))
+	case "events":
+		exit(cmdEvents(client, args[1:], g.asJSON))
+	case "snapshot", "snap":
+		exit(cmdSnapshot(client, args[1:], g.asJSON))
+	case "undo":
+		exit(cmdUndo(client, args[1:], g.asJSON))
 	case "help", "--help", "-h":
 		fmt.Fprint(os.Stdout, usage)
 	default:
@@ -118,4 +146,21 @@ func exit(err error) {
 func fail(err error) {
 	fmt.Fprintln(os.Stderr, "error:", err)
 	os.Exit(1)
+}
+
+// openSnapshotStore picks a per-repo snapshot directory keyed by the
+// working tree's basename. Worktrees of the same repo share state
+// (e.g. `timeseries-441` and `harness-cli-greenfield` both write to
+// `~/.claude/state/harness/<basename>/`). Override with
+// $HARNESS_REPO_NAME when running outside a checkout (CI, scripts).
+func openSnapshotStore() (*snapshot.Store, error) {
+	repo := os.Getenv("HARNESS_REPO_NAME")
+	if repo == "" {
+		wd, err := os.Getwd()
+		if err != nil {
+			return nil, err
+		}
+		repo = filepath.Base(wd)
+	}
+	return snapshot.Open(repo)
 }

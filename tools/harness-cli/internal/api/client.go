@@ -35,6 +35,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jonathaneoliver/infinite-streaming/tools/harness-cli/internal/snapshot"
 	"github.com/jonathaneoliver/infinite-streaming/tools/harness-cli/internal/v2gen/forwarder"
 	"github.com/jonathaneoliver/infinite-streaming/tools/harness-cli/internal/v2gen/proxy"
 )
@@ -58,6 +59,10 @@ type Options struct {
 	// Timeout caps individual requests. SSE subscriptions (later) will
 	// use their own context, not this timeout.
 	Timeout time.Duration
+	// Snap, when non-nil, enables snapshot-before-mutate. The CLI's
+	// main() opens a Store from the working tree's basename so
+	// snapshots live under ~/.claude/state/harness/<repo>/.
+	Snap *snapshot.Store
 }
 
 // Client wraps both v2 clients (proxy + forwarder) so commands don't
@@ -67,6 +72,12 @@ type Client struct {
 	BaseURL   string
 	HTTP      *http.Client
 	BasicAuth string
+
+	// Snap is optional. When non-nil and a mutation method is called
+	// with a non-empty `action` argument, the facade fetches the
+	// player, runs the mutation, and writes a Snapshot covering the
+	// before-state + the wire patch. `harness undo` consumes these.
+	Snap *snapshot.Store
 
 	proxy     *proxy.Client
 	forwarder *forwarder.Client
@@ -119,6 +130,7 @@ func New(opts Options) (*Client, error) {
 		BaseURL:   base,
 		HTTP:      httpClient,
 		BasicAuth: opts.BasicAuth,
+		Snap:      opts.Snap,
 		proxy:     pc,
 		forwarder: fc,
 	}, nil
@@ -206,11 +218,62 @@ func (c *Client) Player(ctx context.Context, playerID string) (*proxy.PlayerReco
 
 // ----- Mutations ----------------------------------------------------------
 
+// preMutate captures the player's before-state when snapshot is on.
+// Returns (record, etag) — both empty when Snap is nil or action is
+// empty. Errors propagate to the caller so a snapshot failure prevents
+// the mutation (per the no-silent-failure design).
+func (c *Client) preMutate(ctx context.Context, playerID, action string) (*proxy.PlayerRecord, string, error) {
+	if c.Snap == nil || action == "" {
+		return nil, "", nil
+	}
+	rec, etag, err := c.Player(ctx, playerID)
+	if err != nil {
+		return nil, "", err
+	}
+	return rec, etag, nil
+}
+
+// postMutate writes the snapshot file when snapshot is on. Patch is
+// the wire body that was just sent (any JSON-encodable struct). A
+// snapshot write error is *surfaced* (returned) — if the mutation
+// landed but the snapshot didn't, the operator should know so they
+// can decide whether to re-run; pretending otherwise would silently
+// erode undo coverage.
+func (c *Client) postMutate(playerID, action, etagBefore, etagAfter string, before *proxy.PlayerRecord, patch any) error {
+	if c.Snap == nil || action == "" {
+		return nil
+	}
+	beforeJSON, err := json.Marshal(before)
+	if err != nil {
+		return fmt.Errorf("snapshot: marshal before: %w", err)
+	}
+	patchJSON, err := json.Marshal(patch)
+	if err != nil {
+		return fmt.Errorf("snapshot: marshal patch: %w", err)
+	}
+	snap := snapshot.Snapshot{
+		PlayerID:   playerID,
+		Action:     action,
+		EtagBefore: etagBefore,
+		EtagAfter:  etagAfter,
+		Before:     beforeJSON,
+		Patch:      patchJSON,
+	}
+	if _, err := c.Snap.Save(snap); err != nil {
+		return err
+	}
+	return nil
+}
+
 // PatchPlayer applies a JSON-merge-patch to a player record using
-// If-Match. If etag is empty we fetch one first (cost of an extra GET
-// in exchange for a one-call signature for ad-hoc CLI use). Returns
-// the new ETag after the PATCH.
-func (c *Client) PatchPlayer(ctx context.Context, playerID, etag string, patch proxy.PlayerPatch) (string, error) {
+// If-Match. The etag is fetched automatically if needed (or as part
+// of snapshot prep). Action is a short label written into the
+// snapshot for replay; empty disables snapshotting.
+func (c *Client) PatchPlayer(ctx context.Context, playerID, action string, patch proxy.PlayerPatch) (string, error) {
+	before, etag, err := c.preMutate(ctx, playerID, action)
+	if err != nil {
+		return "", err
+	}
 	if etag == "" {
 		_, e, err := c.Player(ctx, playerID)
 		if err != nil {
@@ -229,12 +292,20 @@ func (c *Client) PatchPlayer(ctx context.Context, playerID, etag string, patch p
 	if err := checkProxyError(resp, "PATCH /api/v2/players/"+playerID); err != nil {
 		return "", err
 	}
-	return strings.Trim(resp.Header.Get("ETag"), `"`), nil
+	newETag := strings.Trim(resp.Header.Get("ETag"), `"`)
+	if err := c.postMutate(playerID, action, etag, newETag, before, patch); err != nil {
+		return newETag, err
+	}
+	return newETag, nil
 }
 
 // AddFaultRule POSTs a new fault rule onto a player. The proxy
-// generates the rule_id if rule.Id is unset. Returns the new ETag.
-func (c *Client) AddFaultRule(ctx context.Context, playerID, etag string, rule proxy.FaultRule) (string, error) {
+// generates the rule_id if rule.Id is unset.
+func (c *Client) AddFaultRule(ctx context.Context, playerID, action string, rule proxy.FaultRule) (string, error) {
+	before, etag, err := c.preMutate(ctx, playerID, action)
+	if err != nil {
+		return "", err
+	}
 	if etag == "" {
 		_, e, err := c.Player(ctx, playerID)
 		if err != nil {
@@ -251,11 +322,19 @@ func (c *Client) AddFaultRule(ctx context.Context, playerID, etag string, rule p
 	if err := checkProxyError(resp, "POST /api/v2/players/"+playerID+"/fault_rules"); err != nil {
 		return "", err
 	}
-	return strings.Trim(resp.Header.Get("ETag"), `"`), nil
+	newETag := strings.Trim(resp.Header.Get("ETag"), `"`)
+	if err := c.postMutate(playerID, action, etag, newETag, before, rule); err != nil {
+		return newETag, err
+	}
+	return newETag, nil
 }
 
 // DeleteFaultRule removes a single fault rule by rule_id.
-func (c *Client) DeleteFaultRule(ctx context.Context, playerID, ruleID, etag string) (string, error) {
+func (c *Client) DeleteFaultRule(ctx context.Context, playerID, ruleID, action string) (string, error) {
+	before, etag, err := c.preMutate(ctx, playerID, action)
+	if err != nil {
+		return "", err
+	}
 	if etag == "" {
 		_, e, err := c.Player(ctx, playerID)
 		if err != nil {
@@ -274,21 +353,24 @@ func (c *Client) DeleteFaultRule(ctx context.Context, playerID, ruleID, etag str
 	if err := checkProxyError(resp, "DELETE /api/v2/players/"+playerID+"/fault_rules/"+ruleID); err != nil {
 		return "", err
 	}
-	return strings.Trim(resp.Header.Get("ETag"), `"`), nil
+	newETag := strings.Trim(resp.Header.Get("ETag"), `"`)
+	if err := c.postMutate(playerID, action, etag, newETag, before, map[string]string{"deleted_rule_id": ruleID}); err != nil {
+		return newETag, err
+	}
+	return newETag, nil
 }
 
 // ClearFaultRules drops all fault rules in one PATCH by sending an
 // empty array. Equivalent to N deletes but atomic w.r.t. ETag.
-func (c *Client) ClearFaultRules(ctx context.Context, playerID, etag string) (string, error) {
+func (c *Client) ClearFaultRules(ctx context.Context, playerID, action string) (string, error) {
 	empty := []proxy.FaultRule{}
-	return c.PatchPlayer(ctx, playerID, etag, proxy.PlayerPatch{FaultRules: &empty})
+	return c.PatchPlayer(ctx, playerID, action, proxy.PlayerPatch{FaultRules: &empty})
 }
 
-// PatchShape PATCHes player.shape only. A nil pointer omits the key
-// (no-op for shape); use ClearShape to send the explicit-null body
-// that clears all shaping server-side.
-func (c *Client) PatchShape(ctx context.Context, playerID, etag string, shape *proxy.Shape) (string, error) {
-	return c.PatchPlayer(ctx, playerID, etag, proxy.PlayerPatch{Shape: shape})
+// PatchShape PATCHes player.shape only. A nil pointer omits the key;
+// use ClearShape to send the explicit-null merge-patch sentinel.
+func (c *Client) PatchShape(ctx context.Context, playerID, action string, shape *proxy.Shape) (string, error) {
+	return c.PatchPlayer(ctx, playerID, action, proxy.PlayerPatch{Shape: shape})
 }
 
 // ClearShape sends `{"shape": null}` — the merge-patch sentinel that
@@ -296,7 +378,11 @@ func (c *Client) PatchShape(ctx context.Context, playerID, etag string, shape *p
 // the generated typed body (PlayerPatch.Shape is `*Shape`, so nil
 // means "omit the key"), so we ship the raw JSON via the body-reader
 // variant of the generated client.
-func (c *Client) ClearShape(ctx context.Context, playerID, etag string) (string, error) {
+func (c *Client) ClearShape(ctx context.Context, playerID, action string) (string, error) {
+	before, etag, err := c.preMutate(ctx, playerID, action)
+	if err != nil {
+		return "", err
+	}
 	if etag == "" {
 		_, e, err := c.Player(ctx, playerID)
 		if err != nil {
@@ -315,6 +401,39 @@ func (c *Client) ClearShape(ctx context.Context, playerID, etag string) (string,
 	}
 	defer resp.Body.Close()
 	if err := checkProxyError(resp, "PATCH /api/v2/players/"+playerID+" (clear shape)"); err != nil {
+		return "", err
+	}
+	newETag := strings.Trim(resp.Header.Get("ETag"), `"`)
+	if err := c.postMutate(playerID, action, etag, newETag, before, map[string]any{"shape": nil}); err != nil {
+		return newETag, err
+	}
+	return newETag, nil
+}
+
+// PatchRaw is the universal escape hatch — sends a hand-crafted
+// merge-patch+json body straight at PATCH /api/v2/players/{id}.
+// Used by `harness undo` (replay) and `harness raw` (Phase 7). The
+// caller is responsible for body shape; this method does not
+// snapshot (the snapshot machinery would be circular for undo, and
+// `raw` is a debug escape hatch that wants to opt out).
+func (c *Client) PatchRaw(ctx context.Context, playerID, etag string, body []byte) (string, error) {
+	if etag == "" {
+		_, e, err := c.Player(ctx, playerID)
+		if err != nil {
+			return "", err
+		}
+		etag = e
+	}
+	params := &proxy.PatchApiV2PlayersPlayerIdParams{IfMatch: quoteETag(etag)}
+	resp, err := c.proxy.PatchApiV2PlayersPlayerIdWithBody(
+		ctx, proxy.PlayerId(playerID), params,
+		"application/merge-patch+json", bytes.NewReader(body),
+	)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if err := checkProxyError(resp, "PATCH /api/v2/players/"+playerID+" (raw)"); err != nil {
 		return "", err
 	}
 	return strings.Trim(resp.Header.Get("ETag"), `"`), nil
