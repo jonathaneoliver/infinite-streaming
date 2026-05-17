@@ -21,7 +21,7 @@ import (
 
 	"github.com/gorilla/mux"
 
-	"github.com/jonathaneoliver/infinite-streaming/go-proxy/internal/v2/oapigen"
+	oapigen "github.com/jonathaneoliver/infinite-streaming/go-proxy/pkg/v2oapigen"
 )
 
 // Server implements oapigen.ServerInterface.

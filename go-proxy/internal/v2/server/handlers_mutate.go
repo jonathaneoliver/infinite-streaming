@@ -6,7 +6,8 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/jonathaneoliver/infinite-streaming/go-proxy/internal/v2/oapigen"
+	oapigen "github.com/jonathaneoliver/infinite-streaming/go-proxy/pkg/v2oapigen"
+	"github.com/jonathaneoliver/infinite-streaming/go-proxy/pkg/v2translate"
 )
 
 // Phase D mutation handlers. The mutation pipeline is uniform:
@@ -81,7 +82,7 @@ func (s *Server) PostApiV2Players(w http.ResponseWriter, r *http.Request) {
 		)
 		return
 	}
-	rec, ok := playerFromSession(record)
+	rec, ok := v2translate.PlayerFromSession(record)
 	if !ok {
 		writeProblem(w, http.StatusInternalServerError, "https://harness/errors/internal", "post-create translation failed", "", nil)
 		return
@@ -308,7 +309,7 @@ func (s *Server) PatchApiV2PlayersPlayerId(w http.ResponseWriter, r *http.Reques
 		}
 	}
 
-	rec, ok := playerFromSession(post)
+	rec, ok := v2translate.PlayerFromSession(post)
 	if !ok {
 		writeProblem(w, http.StatusInternalServerError, "https://harness/errors/internal", "post-patch translation failed", "", nil)
 		return
@@ -340,6 +341,8 @@ func unsupportedPaths(paths []string) []string {
 		case p == "shape.pattern", strings.HasPrefix(p, "shape.pattern."):
 		case p == "shape":
 		case p == "fault_rules":
+		case p == "transfer_timeouts", strings.HasPrefix(p, "transfer_timeouts."):
+		case p == "content", strings.HasPrefix(p, "content."):
 		default:
 			bad = append(bad, p)
 		}
@@ -419,7 +422,103 @@ func applyPatchToSession(s map[string]any, patch map[string]any) error {
 			}
 		}
 	}
+	if tt, hasTT := patch["transfer_timeouts"]; hasTT {
+		applyTransferTimeoutsPatch(s, tt)
+	}
+	if c, hasC := patch["content"]; hasC {
+		applyContentPatch(s, c)
+	}
 	return nil
+}
+
+// applyTransferTimeoutsPatch — projects v2 transfer_timeouts patch onto
+// the v1 `transfer_*_timeout_seconds` + `transfer_timeout_applies_*`
+// fields. Setting transfer_timeouts: null wipes everything to defaults
+// (segments-only, both timeouts disabled).
+func applyTransferTimeoutsPatch(s map[string]any, tt any) {
+	if tt == nil {
+		s["transfer_active_timeout_seconds"] = 0
+		s["transfer_idle_timeout_seconds"] = 0
+		s["transfer_timeout_applies_segments"] = true
+		s["transfer_timeout_applies_manifests"] = false
+		s["transfer_timeout_applies_master"] = false
+		return
+	}
+	m, ok := tt.(map[string]any)
+	if !ok {
+		return
+	}
+	if v, present := m["active_timeout_seconds"]; present {
+		s["transfer_active_timeout_seconds"] = toIntZero(v)
+	}
+	if v, present := m["idle_timeout_seconds"]; present {
+		s["transfer_idle_timeout_seconds"] = toIntZero(v)
+	}
+	if v, present := m["applies_segments"]; present {
+		s["transfer_timeout_applies_segments"] = toBool(v)
+	}
+	if v, present := m["applies_manifests"]; present {
+		s["transfer_timeout_applies_manifests"] = toBool(v)
+	}
+	if v, present := m["applies_master"]; present {
+		s["transfer_timeout_applies_master"] = toBool(v)
+	}
+}
+
+// applyContentPatch — projects v2 content patch onto the v1
+// `content_*` fields consumed by the master playlist mutator (see
+// main.go ~line 5062).
+func applyContentPatch(s map[string]any, c any) {
+	if c == nil {
+		s["content_strip_codecs"] = false
+		s["content_strip_average_bandwidth"] = false
+		s["content_overstate_bandwidth"] = false
+		s["content_live_offset"] = 0
+		s["content_allowed_variants"] = []any{}
+		return
+	}
+	m, ok := c.(map[string]any)
+	if !ok {
+		return
+	}
+	if v, present := m["strip_codecs"]; present {
+		s["content_strip_codecs"] = toBool(v)
+	}
+	if v, present := m["strip_average_bandwidth"]; present {
+		s["content_strip_average_bandwidth"] = toBool(v)
+	}
+	if v, present := m["overstate_bandwidth"]; present {
+		s["content_overstate_bandwidth"] = toBool(v)
+	}
+	if v, present := m["live_offset"]; present {
+		s["content_live_offset"] = toIntZero(v)
+	}
+	if v, present := m["allowed_variants"]; present {
+		if v == nil {
+			s["content_allowed_variants"] = []any{}
+		} else if arr, ok := v.([]any); ok {
+			s["content_allowed_variants"] = arr
+		}
+	}
+}
+
+func toIntZero(v any) int {
+	switch n := v.(type) {
+	case float64:
+		return int(n)
+	case int:
+		return n
+	case int64:
+		return int(n)
+	}
+	return 0
+}
+
+func toBool(v any) bool {
+	if b, ok := v.(bool); ok {
+		return b
+	}
+	return false
 }
 
 func applyLabelsPatch(s map[string]any, labels any) {

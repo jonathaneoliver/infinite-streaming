@@ -10,7 +10,7 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/jonathaneoliver/infinite-streaming/go-proxy/internal/v2/oapigen"
+	oapigen "github.com/jonathaneoliver/infinite-streaming/go-proxy/pkg/v2oapigen"
 )
 
 // Phase L: play-scope mutation handlers via snapshot+restore.

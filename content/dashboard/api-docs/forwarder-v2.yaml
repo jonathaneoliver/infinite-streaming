@@ -188,14 +188,7 @@ paths:
           description: Snapshot rows
           content:
             application/json:
-              schema:
-                type: object
-                required: [items]
-                properties:
-                  items:
-                    type: array
-                    items: { type: object, additionalProperties: true }
-                  next_cursor: { type: string, nullable: true }
+              schema: { $ref: '#/components/schemas/SnapshotPage' }
 
   /api/v2/network_requests:
     get:
@@ -512,13 +505,74 @@ components:
                 heatmap:          { type: string, format: uri }
                 bundle:           { type: string, format: uri }
 
+    SnapshotRow:
+      description: |
+        One archived player snapshot. The row IS a `proxy.yaml#PlayerRecord`
+        captured at `ts`, plus the row-level metadata (`ts`, `revision`)
+        ClickHouse needs to key/order it. The dashboard's live and replay
+        renderers can therefore consume snapshots through the same model
+        graph (`PlayerRecord` → `Player`); see `content/shared/v2-models.js`
+        and `content/shared/v2-archive-models.js`.
+      allOf:
+        - $ref: 'proxy.yaml#/components/schemas/PlayerRecord'
+        - type: object
+          required: [ts]
+          properties:
+            ts:
+              type: string
+              format: date-time
+              description: Snapshot capture time (ClickHouse `event_time`).
+            revision:
+              type: string
+              description: |
+                `control_revision` at capture time. Already present on
+                `PlayerRecord`; surfaced here so consumers don't need to
+                deep-dive to dedup adjacent snapshots.
+            play_id:
+              type: string
+              description: |
+                Convenience denormalisation of `current_play.id` so query
+                pushdown (`?play_id=`) doesn't need a JSON path
+                expression. Plain string (not UUID) — v1 short-hex
+                play_ids round-trip unchanged for legacy archive rows;
+                v2-minted plays are always UUIDs.
+
+    SnapshotPage:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/SnapshotRow' }
+        next_cursor: { type: string, nullable: true }
+
+    NetworkRequestRow:
+      description: |
+        One archived HAR row. The row IS a
+        `proxy.yaml#NetworkLogEntry`, plus the columnar keys ClickHouse
+        uses to bucket and join it back to its play. Lets dashboard
+        replay reuse the live `NetworkLogEntry` view.
+      allOf:
+        - $ref: 'proxy.yaml#/components/schemas/NetworkLogEntry'
+        - type: object
+          required: [ts, player_id]
+          properties:
+            ts:
+              type: string
+              format: date-time
+              description: Request start time (ClickHouse `event_time`).
+            player_id:
+              type: string
+              format: uuid
+              description: Owning player. Denormalised for filter pushdown.
+
     NetworkRequestsPage:
       type: object
       required: [items]
       properties:
         items:
           type: array
-          items: { type: object, additionalProperties: true }
+          items: { $ref: '#/components/schemas/NetworkRequestRow' }
         next_cursor: { type: string, nullable: true }
 
     AggregateResult:

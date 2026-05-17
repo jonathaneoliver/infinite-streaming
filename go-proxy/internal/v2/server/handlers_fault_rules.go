@@ -6,7 +6,7 @@ import (
 	"io"
 	"net/http"
 
-	"github.com/jonathaneoliver/infinite-streaming/go-proxy/internal/v2/oapigen"
+	oapigen "github.com/jonathaneoliver/infinite-streaming/go-proxy/pkg/v2oapigen"
 )
 
 // Per-rule fault sub-resource handlers (player scope only — play-scope
