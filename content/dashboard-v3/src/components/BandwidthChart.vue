@@ -22,13 +22,17 @@
  * Y-max is controlled by the panel-level BitrateChartPanelToolbar via
  * the shared chart-coordination state.
  */
-import { computed } from 'vue';
+import { computed, toRef } from 'vue';
 import MetricsLineChart, { type SeriesSpec } from './MetricsLineChart.vue';
 import { useChartCoordination } from '@/composables/useChartCoordination';
+import type { Stream } from '@/composables/useSessionTimeSeries';
 import type { PlayerRecord } from '@/repo/v2-repo';
 
-const props = defineProps<{ playerId: string }>();
-const coord = useChartCoordination(props.playerId);
+const props = defineProps<{
+  playerId: string;
+  samplesStream: Stream<Record<string, unknown>>;
+}>();
+const coord = useChartCoordination(toRef(props, 'playerId'));
 const yMax = computed(() => coord.state.bandwidthYMax);
 
 const series: SeriesSpec[] = [
@@ -123,6 +127,7 @@ const series: SeriesSpec[] = [
     title="Bandwidth"
     unit="Mbps"
     :series="series"
+    :samples-stream="samplesStream"
     :y-min="0"
     :y-max="yMax"
   />

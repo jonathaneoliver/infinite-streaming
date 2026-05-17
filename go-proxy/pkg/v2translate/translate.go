@@ -789,13 +789,33 @@ func GroupsFromSessions(sessions []map[string]any) []oapigen.PlayerGroup {
 		}
 		playerUUID, err := uuid.Parse(pid)
 		if err != nil {
-			continue
+			// v1 short-form (e.g. "427a6bf3") never parses as UUID, but
+			// PlayerFromSession surfaces the same session under the
+			// stable v5 derivation. Mirror that here so the group's
+			// member list lines up with /api/v2/players — without this
+			// the picker's groupIdOf map never resolves the short-form
+			// pill back to its group, so only the natively-UUID member
+			// gets the grouped highlight.
+			playerUUID = derivePlayerUUID(pid)
 		}
 		g, exists := byID[gid]
 		if !exists {
-			groupUUID, err := StableGroupUUID(gid)
-			if err != nil {
-				continue
+			// v2-created groups store the v1 tag as a canonical UUIDv4
+			// (handlers_groups.PostApiV2PlayerGroups uses uuid.New()),
+			// so when the tag parses we use it directly — this keeps
+			// POST's `id` and GET's `id` identical, which is what the
+			// v3 client relies on for disband/lookup. Legacy v1 tags
+			// (e.g. "G1234") aren't parseable and fall through to the
+			// stable v5 derivation as before.
+			var groupUUID openapi_types.UUID
+			if u, perr := uuid.Parse(gid); perr == nil {
+				groupUUID = u
+			} else {
+				var err error
+				groupUUID, err = StableGroupUUID(gid)
+				if err != nil {
+					continue
+				}
 			}
 			label := gid
 			g = &oapigen.PlayerGroup{

@@ -19,6 +19,13 @@ const props = defineProps<{
   /** Stable id used for localStorage + ?open_folds= deep-linking.
    *  Omit to opt out of persistence (state stays per-tab). */
   persistKey?: string;
+  /** When true, mount the slot eagerly (display: none when collapsed
+   *  instead of removed from the DOM). Required for chart panels in
+   *  the v3 session-viewer so the chart's `watch(player.value)` runs
+   *  during the bulk snapshot replay even if the user has the
+   *  section folded — without this, opening the section after replay
+   *  shows the chart with only the latest sample. */
+  eager?: boolean;
 }>();
 
 const STORAGE_PREFIX = 'testing_session_collapse_';
@@ -78,14 +85,16 @@ const isOpen = ref<boolean>(resolveInitial());
 
 // `<details>` fires a native `toggle` event with `.open` set. Mirror it
 // into our ref and persist.
-function onToggle(e: Event) {
-  const det = e.currentTarget as HTMLDetailsElement;
-  isOpen.value = det.open;
-  if (props.persistKey) {
-    writeStored(props.persistKey, det.open);
-    // eslint-disable-next-line no-console
-    console.debug('[CollapsibleSection] persisted', props.persistKey, '=', det.open);
-  }
+/** Click on the header — flip open state and persist. Owns the state
+ *  in Vue's reactivity rather than delegating to native `<details>`
+ *  toggle: the native event has races (Vue patches `:open` on every
+ *  re-render, the listener attaches AFTER the initial setAttribute,
+ *  etc) that meant the persistence write didn't always run. With a
+ *  plain div + click handler the write is guaranteed for every user
+ *  toggle. */
+function toggle() {
+  isOpen.value = !isOpen.value;
+  if (props.persistKey) writeStored(props.persistKey, isOpen.value);
 }
 
 // If `persistKey` arrives async (rare), re-resolve once it's set.
@@ -103,24 +112,28 @@ watch(
 </script>
 
 <template>
-  <details class="panel" :open="isOpen" @toggle="onToggle">
-    <summary class="head">
+  <div class="panel" :class="{ open: isOpen }">
+    <div class="head" role="button" tabindex="0"
+         @click="toggle"
+         @keydown.enter.prevent="toggle"
+         @keydown.space.prevent="toggle"
+         :aria-expanded="isOpen">
       <span class="icon">▶</span>
       <span class="title">{{ title }}</span>
       <span class="badge"><slot name="badge" /></span>
-    </summary>
-    <div class="body">
+    </div>
+    <div v-if="eager || isOpen" v-show="eager ? isOpen : true" class="body">
       <slot />
     </div>
-  </details>
+  </div>
 </template>
 
 <style scoped>
 .panel {
   background: #fff;
   border: 1px solid #e5e7eb;
-  border-radius: 8px;
-  margin-bottom: 12px;
+  border-radius: 4px;
+  margin-bottom: 2px;
   overflow: hidden;
 }
 .head {
@@ -129,49 +142,51 @@ watch(
   user-select: none;
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 12px 16px;
-  font-size: 13px;
+  gap: 6px;
+  padding: 1px 8px;
+  font-size: 11px;
   font-weight: 600;
   color: #1f2937;
   background: #f9fafb;
   border-bottom: 1px solid transparent;
+  line-height: 1.15;
+  min-height: 18px;
 }
-.head::-webkit-details-marker { display: none; }
-.panel[open] > .head {
+.panel.open > .head {
   border-bottom-color: #e5e7eb;
 }
 .head:hover { background: #f3f4f6; }
+.head:focus-visible { outline: 2px solid #3b82f6; outline-offset: -2px; }
 
 .icon {
   display: inline-block;
-  width: 14px;
-  font-size: 10px;
+  width: 10px;
+  font-size: 9px;
   color: #6b7280;
   transition: transform 0.15s ease;
 }
-.panel[open] > .head .icon {
+.panel.open > .head .icon {
   transform: rotate(90deg);
 }
 
 .title {
   flex: 1;
   text-transform: uppercase;
-  letter-spacing: 0.4px;
-  font-size: 12px;
+  letter-spacing: 0.3px;
+  font-size: 11px;
 }
 
 .badge {
-  font-size: 11px;
+  font-size: 10px;
   font-weight: 500;
   color: #6b7280;
   background: #f3f4f6;
-  padding: 2px 8px;
-  border-radius: 10px;
+  padding: 1px 6px;
+  border-radius: 8px;
 }
 .badge:empty { display: none; }
 
 .body {
-  padding: 16px;
+  padding: 10px 12px;
 }
 </style>

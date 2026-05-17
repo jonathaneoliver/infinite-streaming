@@ -678,10 +678,18 @@ func (a *v2Adapter) LinkGroup(groupID string, playerIDs []string) []string {
 	if a == nil || a.app == nil || groupID == "" || len(playerIDs) == 0 {
 		return nil
 	}
-	wanted := map[string]struct{}{}
+	// Match each wanted player_id via matchesPlayerID rather than a
+	// plain string-equality map. Devices report their player_id in
+	// whatever case they like (iPad reports the UUID uppercase), but
+	// oapigen canonicalises incoming UUIDs to lowercase, so a raw
+	// `wanted[pid]` lookup misses every time and link returns 0 → 409
+	// "no eligible members". matchesPlayerID handles UUID equality
+	// (case-insensitive) AND the v1 short-form → v5(playerUUIDNamespace)
+	// derivation that every other v2 mutation path uses.
+	wantedRaw := make([]string, 0, len(playerIDs))
 	for _, p := range playerIDs {
 		if p != "" {
-			wanted[p] = struct{}{}
+			wantedRaw = append(wantedRaw, p)
 		}
 	}
 	current := a.app.getSessionList()
@@ -689,7 +697,14 @@ func (a *v2Adapter) LinkGroup(groupID string, playerIDs []string) []string {
 	var linked []string
 	for i, s := range updated {
 		pid := getString(s, "player_id")
-		if _, ok := wanted[pid]; !ok {
+		matched := false
+		for _, want := range wantedRaw {
+			if matchesPlayerID(pid, want) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
 			continue
 		}
 		updated[i]["group_id"] = groupID

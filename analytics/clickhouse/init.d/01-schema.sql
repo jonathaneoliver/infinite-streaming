@@ -198,7 +198,13 @@ CREATE TABLE IF NOT EXISTS infinite_streaming.session_snapshots
 )
 ENGINE = MergeTree
 PARTITION BY toYYYYMMDD(ts)
-ORDER BY (session_id, ts)
+-- ORDER BY player_id first because the dashboard queries are
+-- always `WHERE player_id = X AND ts BETWEEN ?` (one EventSource
+-- per device per page); leading on player_id gives one primary-
+-- key range scan per query instead of a bloom-filter granule
+-- prune across N session_id chunks. session_id stays bloom-
+-- indexed below for the rare replay-by-session case.
+ORDER BY (player_id, ts)
 -- Tiered retention by classification column (issue #342):
 --   * 'other'       → 30 d (default)
 --   * 'interesting' → 90 d
@@ -333,6 +339,12 @@ CREATE TABLE IF NOT EXISTS infinite_streaming.network_requests
 (
     ts                       DateTime64(3, 'UTC')   CODEC(Delta, ZSTD(1)),
     session_id               String                 CODEC(ZSTD(1)),
+    -- player_id (canonical v2 UUID) on every HAR row so dashboard
+    -- queries can filter by the same identifier as snapshots. Inline
+    -- here (vs the historical post-hoc ALTER below) because it now
+    -- participates in the primary ORDER BY tuple — ALTER-added
+    -- columns can't be in the sort key on first init.
+    player_id                LowCardinality(String) CODEC(ZSTD(1)),
     play_id                  LowCardinality(String) CODEC(ZSTD(1)),
     method                   LowCardinality(String) CODEC(ZSTD(1)),
     url                      String                 CODEC(ZSTD(3)),
@@ -372,7 +384,11 @@ CREATE TABLE IF NOT EXISTS infinite_streaming.network_requests
 )
 ENGINE = MergeTree
 PARTITION BY toYYYYMMDD(ts)
-ORDER BY (session_id, ts, entry_fingerprint)
+-- ORDER BY player_id first for the same reason as session_snapshots:
+-- the dashboard's network log filter is always WHERE player_id = X
+-- AND ts BETWEEN ?. entry_fingerprint stays as the dedupe component
+-- of the sort tuple so per-request UPSERT semantics still work.
+ORDER BY (player_id, ts, entry_fingerprint)
 -- Tiered retention by classification column — see comment on
 -- session_snapshots above. Both tables share the same retention
 -- policy so paired (snapshots, network) data ages out together.
@@ -385,3 +401,12 @@ SETTINGS index_granularity = 8192;
 -- forwarder bumps it on session-end / star / unstar via ALTER UPDATE.
 ALTER TABLE infinite_streaming.network_requests
     ADD COLUMN IF NOT EXISTS classification LowCardinality(String) DEFAULT 'other' CODEC(ZSTD(1));
+
+-- player_id (canonical v2 UUID) on every HAR row so the v2
+-- /api/v2/network_requests endpoint can filter by the same identifier
+-- the dashboard uses everywhere else (live SSE, snapshots, groups).
+-- Forwarder builds a sessionID→playerID map from incoming session
+-- snapshots and stamps player_id at insert time. Old rows keep the
+-- empty default — they remain queryable by session_id only.
+ALTER TABLE infinite_streaming.network_requests
+    ADD COLUMN IF NOT EXISTS player_id LowCardinality(String) CODEC(ZSTD(1));

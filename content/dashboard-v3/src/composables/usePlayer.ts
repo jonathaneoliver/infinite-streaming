@@ -27,6 +27,7 @@
 import { computed, ref, watch, type Ref } from 'vue';
 import { useQuery, useMutation, useQueryClient, type QueryClient } from '@tanstack/vue-query';
 import * as repo from '@/repo/v2-repo';
+import { isLivePlayerId } from '@/repo/v2-repo';
 import type {
   PlayerRecord,
   Shape,
@@ -89,6 +90,11 @@ export function usePlayer(playerId: Ref<string>) {
     // the cached state is a permanent 4xx — no point polling for a
     // player_id the server has already said is malformed/missing.
     refetchInterval: (q: any) => {
+      // Archive playerIds (v3 session-viewer) are static historical
+      // data — no point polling. The SSE chain is also skipped for
+      // these (see usePlayerSSE.ts); polling would just re-fire the
+      // chart watcher with the same archived record every 5s.
+      if (!isLivePlayerId(playerId.value)) return false;
       const errStatus = (q?.state?.error as any)?.status;
       if (typeof errStatus === 'number' && errStatus >= 400 && errStatus < 500) return false;
       return sseState.value === 'closed' ? 5_000 : false;
@@ -170,11 +176,18 @@ export function usePlayer(playerId: Ref<string>) {
   // the canonical casing (via the case-insensitive lookup in v2-repo)
   // we switch the SSE filter to that, so events flow even when the
   // user pasted a URL with the wrong case.
+  //
+  // For `archive:` ids (v3 session-viewer) we MUST NOT do the canonical
+  // swap: the cached PlayerRecord's `id` field is the original live
+  // player UUID, NOT the synthetic archive id. Swapping would subscribe
+  // SSE to that live UUID and pour current-time events into the chart,
+  // which then trims away the archived history on every push.
   const sseId = ref<string>(playerId.value);
   watch(playerId, (v) => { sseId.value = v; });
   watch(
     () => player.value?.id,
     (canonicalId) => {
+      if (!isLivePlayerId(playerId.value)) return;
       if (canonicalId && canonicalId !== sseId.value) sseId.value = canonicalId;
     },
   );

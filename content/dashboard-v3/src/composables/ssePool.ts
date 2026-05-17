@@ -1,22 +1,25 @@
 /**
- * ssePool — shared singleton EventSource for `/api/v2/events?include=raw`
- * (no player_id filter, gets every player event). Used by both:
+ * ssePool — shared subscription to `/api/v2/events?include=raw` (the
+ * proxy's all-players control-plane stream). Used by both:
  *
  *   - usePlayers()    — the picker. Wants every player's events.
- *   - usePlayerSSE()  — per-player. Auto-detects this pool and
- *                       piggybacks on it (filtering by player_id in
- *                       JS) rather than opening a duplicate socket.
+ *   - usePlayerSSE()  — per-player. Filters by player_id in JS.
  *
- * The motivation is twofold:
- *   1. Chrome caps per-origin connections at 6 — when testing.html
- *      opened one filtered SSE per player_id plus one unfiltered, it
- *      blew the cap and got `ERR_ABORTED`d.
- *   2. Even under the cap, any open EventSource keeps the tab in the
- *      "loading" state. Fewer sockets = spinner stops sooner.
- *
- * Pool semantics: created on first subscriber, closed when the last
- * subscriber releases.
+ * One EventSource per page, fanned out to local subscribers. With
+ * the dashboard now served over TLS + HTTP/2 (TS11), multiple tabs
+ * multiplex onto a single TCP connection per origin — the
+ * SharedWorker indirection from TS10 was removed because the
+ * per-origin connection cap that motivated it disappears under h2.
  */
+
+const ALL_POOL_URL = '/api/v2/events?include=raw';
+const ALL_POOL_EVENT_TYPES = [
+  'heartbeat',
+  'player.created',
+  'player.updated',
+  'player.controls.updated',
+  'player.deleted',
+];
 
 export type ConnectionState = 'connecting' | 'open' | 'closed';
 
@@ -62,7 +65,7 @@ function fanOut(
 
 function ensureSocket() {
   if (allEs) return;
-  const es = new EventSource('/api/v2/events?include=raw');
+  const es = new EventSource(ALL_POOL_URL);
   allEs = es;
   setAllState('connecting');
   es.addEventListener('open', () => setAllState('open'));
@@ -106,11 +109,7 @@ export function subscribeAllPlayers(sub: AllPlayersSubscriber): { release: () =>
     release() {
       allSubs.delete(sub);
       if (allSubs.size === 0 && allEs) {
-        try {
-          allEs.close();
-        } catch {
-          /* ignore */
-        }
+        try { allEs.close(); } catch { /* ignore */ }
         allEs = null;
         allState = 'connecting';
       }

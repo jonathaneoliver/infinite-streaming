@@ -425,18 +425,24 @@ func parseSSEData(frame []byte) []byte {
 	return nil
 }
 
-func batchInsertNet(ctx context.Context, cfg config, in <-chan netRow) {
+func batchInsertNet(ctx context.Context, cfg config, ring *Ring, in <-chan netRow) {
 	buf := make([]netRow, 0, cfg.flushBatch)
+	entries := make([]*ringEntry, 0, cfg.flushBatch)
 	tick := time.NewTicker(cfg.flushEvery)
 	defer tick.Stop()
 	flush := func() {
 		if len(buf) == 0 {
 			return
 		}
+		ring.MarkInserting(entries)
 		if err := insertNet(ctx, cfg, buf); err != nil {
 			log.Printf("net insert failed (%d rows dropped): %v", len(buf), err)
+			ring.RevertInserting(entries)
+		} else {
+			ring.MarkConfirmed(entries)
 		}
 		buf = buf[:0]
+		entries = entries[:0]
 	}
 	for {
 		select {
@@ -448,7 +454,14 @@ func batchInsertNet(ctx context.Context, cfg config, in <-chan netRow) {
 				flush()
 				return
 			}
-			buf = append(buf, r)
+			rowCopy := r
+			fp := fmt.Sprintf("%d", rowCopy.EntryFingerprint)
+			e := ring.Add(
+				ringKey{PlayerID: rowCopy.PlayerID},
+				kindNetwork, nowMs(), fp, rowCopy.PlayID, &rowCopy,
+			)
+			buf = append(buf, rowCopy)
+			entries = append(entries, e)
 			if len(buf) >= cfg.flushBatch {
 				flush()
 			}

@@ -20,6 +20,22 @@ export type ContentManipulation = components['schemas']['ContentManipulation'];
 export type Labels = components['schemas']['Labels'];
 export type NetworkLogEntry = components['schemas']['NetworkLogEntry'];
 
+/**
+ * Single source of truth for the "is this id pointing at a live
+ * server-managed player vs. a finished play served from the
+ * ClickHouse archive" branch. Archive ids are minted by the
+ * session-viewer page as `archive:<sessionId>:<playId>` so getPlayer
+ * et al. can route to the local snapshot store instead of HTTP, and
+ * SessionDisplay can skip live-only behaviours (SSE subscription,
+ * 1 Hz cache patches, live-edge brush chase).
+ *
+ * Use this helper instead of inlining `id.startsWith('archive:')` so
+ * that future renaming of the prefix happens in one place.
+ */
+export function isLivePlayerId(id: string): boolean {
+  return !id.startsWith('archive:');
+}
+
 export class RepoError extends Error {
   constructor(
     public readonly status: number,
@@ -104,7 +120,36 @@ async function resolveCanonicalId(id: string): Promise<string | null> {
   return canonicalIdCache.get(id.toLowerCase()) ?? null;
 }
 
+// Side-channel store for archive/replay PlayerRecord objects. The v3
+// session-viewer page primes this map as it scrubs through historical
+// snapshots, then calls qc.setQueryData/invalidate so the standard
+// usePlayer() chain reads from cache without going to the network.
+// Archive ids carry an `archive:` prefix; anything else falls through
+// to the live `/api/v2/players/<id>` fetch path.
+const archiveStore = new Map<string, PlayerRecord>();
+const archiveNetworkStore = new Map<string, NetworkLogEntry[]>();
+export function setArchivePlayer(id: string, p: PlayerRecord) {
+  archiveStore.set(id, p);
+}
+export function setArchiveNetworkLog(id: string, rows: NetworkLogEntry[]) {
+  archiveNetworkStore.set(id, rows);
+}
+export function clearArchivePlayer(id: string) {
+  archiveStore.delete(id);
+  archiveNetworkStore.delete(id);
+}
+
 export async function getPlayer(playerId: string): Promise<{ player: PlayerRecord; etag?: string }> {
+  if (!isLivePlayerId(playerId)) {
+    const cached = archiveStore.get(playerId);
+    if (cached) return { player: cached, etag: undefined };
+    // Throw a 4xx so usePlayer's refetchOnMount guard treats it as a
+    // permanent miss and stops re-firing. The session-viewer page
+    // primes the cache *before* mounting the child components, so the
+    // first call should already find the entry — this branch only
+    // fires if the page mounts before the snapshot stream resolves.
+    throw Object.assign(new Error('archive snapshot not yet loaded'), { status: 404 });
+  }
   const id = canonicalIdFor(playerId);
   try {
     const { data, etag } = await request<PlayerRecord>(
@@ -215,10 +260,24 @@ export async function getPlayerNetworkLog(
   playerId: string,
   limit = 200,
 ): Promise<NetworkLogEntry[]> {
-  const { data } = await request<{ items: NetworkLogEntry[] }>(
-    `/api/v2/players/${encodeURIComponent(canonicalIdFor(playerId))}/network?limit=${limit}`,
-  );
-  return data.items ?? [];
+  if (!isLivePlayerId(playerId)) {
+    return archiveNetworkStore.get(playerId) ?? [];
+  }
+  try {
+    const { data } = await request<{ items: NetworkLogEntry[] }>(
+      `/api/v2/players/${encodeURIComponent(canonicalIdFor(playerId))}/network?limit=${limit}`,
+    );
+    return data.items ?? [];
+  } catch (err) {
+    // Treat 404 as "player no longer exists" rather than an error.
+    // When a session is released, SSE-driven cache invalidations can
+    // race a refetch for the just-deleted player_id, producing a
+    // noisy console 404 that's already correct behaviour on the
+    // server. Return empty so the UI just shows an empty log instead
+    // of an error state.
+    if ((err as any)?.status === 404) return [];
+    throw err;
+  }
 }
 
 // ----- Player groups -----
@@ -229,9 +288,14 @@ export async function listGroups(): Promise<PlayerGroup[]> {
 }
 
 export async function linkGroup(playerIds: string[]): Promise<PlayerGroup> {
+  // The v2 spec names the field `member_player_ids` (matches
+  // PlayerGroup.member_player_ids on read). The earlier `player_ids`
+  // payload was a v1-ism — the handler rejected it with 400
+  // "member_player_ids required" and the useMutation swallowed the
+  // error, which is why bulk-link in Testing.vue silently no-op'd.
   const { data } = await request<PlayerGroup>('/api/v2/player-groups', {
     method: 'POST',
-    body: JSON.stringify({ player_ids: playerIds }),
+    body: JSON.stringify({ member_player_ids: playerIds }),
   });
   return data;
 }
@@ -241,6 +305,26 @@ export async function disbandGroup(groupId: string, ifMatch?: string): Promise<v
     method: 'DELETE',
     ifMatch,
   });
+}
+
+/** PATCH a group's membership. The handler diffs against the current
+ *  set and removes/adds via the v1 store accordingly. If-Match comes
+ *  from the group's `control_revision`. */
+export async function updateGroupMembers(
+  groupId: string,
+  memberPlayerIds: string[],
+  ifMatch: string,
+): Promise<PlayerGroup> {
+  const { data } = await request<PlayerGroup>(
+    `/api/v2/player-groups/${encodeURIComponent(groupId)}`,
+    {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/merge-patch+json' },
+      body: JSON.stringify({ member_player_ids: memberPlayerIds }),
+      ifMatch,
+    },
+  );
+  return data;
 }
 
 // ----- Diagnostics -----

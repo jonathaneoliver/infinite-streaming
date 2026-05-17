@@ -7,9 +7,13 @@
  * legacy two-axis layout.
  */
 import MetricsLineChart, { type SeriesSpec } from './MetricsLineChart.vue';
+import type { Stream } from '@/composables/useSessionTimeSeries';
 import type { PlayerRecord } from '@/repo/v2-repo';
 
-defineProps<{ playerId: string }>();
+defineProps<{
+  playerId: string;
+  samplesStream: Stream<Record<string, unknown>>;
+}>();
 
 const series: SeriesSpec[] = [
   {
@@ -38,9 +42,9 @@ const series: SeriesSpec[] = [
     title="Buffer & live offset"
     unit="buffer (s)"
     :series="series"
+    :samples-stream="samplesStream"
     :y-min="0"
     y2-title="offset (s)"
     :y2-min="0"
-    :window-seconds="180"
   />
 </template>

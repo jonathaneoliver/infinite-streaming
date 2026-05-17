@@ -28,10 +28,9 @@
  * favour of consuming that.
  */
 import { computed, onBeforeUnmount, ref, toRef, watch } from 'vue';
-import { usePlayer } from '@/composables/usePlayer';
 import { ensureVisTimeline } from '@/composables/useChartJs';
 import { useChartCoordination } from '@/composables/useChartCoordination';
-import type { PlayerRecord } from '@/repo/v2-repo';
+import type { Stream } from '@/composables/useSessionTimeSeries';
 
 interface LaneCfg { label: string; color: string }
 const EVENT_LANES: Record<string, LaneCfg> = {
@@ -78,9 +77,89 @@ function displayResColor(res: string | null | undefined): string {
   return '#6b7280';
 }
 
-const props = defineProps<{ playerId: string }>();
-const { player } = usePlayer(toRef(props, 'playerId'));
-const coord = useChartCoordination(props.playerId);
+const props = defineProps<{
+  playerId: string;
+  /** Samples stream from SessionDisplay's useSessionTimeSeries model.
+   *  Each row is a CH session_snapshots projection (lanes_v1 bundle).
+   *  EventsTimeline derives swim-lane segments from successive rows. */
+  samplesStream: Stream<Record<string, unknown>>;
+}>();
+const coord = useChartCoordination(toRef(props, 'playerId'));
+
+/** Adapter — map a CH session_snapshots row (wire shape from the v3
+ *  /api/v3/timeseries endpoint) to the small subset of fields ingest()
+ *  reads. Keeps ingest() agnostic to the row shape so the next storage
+ *  layer (materialised lanes_v2) can change column names without
+ *  touching the lane-derivation logic. */
+interface IngestRow {
+  ts: number;
+  state: string;
+  waitingReason: string;
+  videoResolution: string;
+  videoBitrateMbps: number | null;
+  stalls: number | null;
+  droppedFrames: number | null;
+  error: string;
+  firstFrameTimeS: number | null;
+  videoStartTimeS: number | null;
+  loopCountServer: number | null;
+  controlRevision: string | null;
+  playId: string | null;
+  manifestVariants: { bandwidth?: number; resolution?: string }[] | null;
+}
+
+function tsOfRow(row: Record<string, unknown>): number {
+  const v = row.ts;
+  if (typeof v === 'number') return v;
+  if (typeof v !== 'string' || !v) return NaN;
+  if (v.length > 10 && v.charAt(10) === ' ') {
+    return Date.parse(v.replace(' ', 'T') + 'Z');
+  }
+  return Date.parse(v);
+}
+
+function num(v: unknown): number | null {
+  if (v == null) return null;
+  if (typeof v === 'number') return Number.isFinite(v) ? v : null;
+  if (typeof v === 'string') { const n = Number(v); return Number.isFinite(n) ? n : null; }
+  return null;
+}
+
+function chRowToIngest(row: Record<string, unknown>): IngestRow | null {
+  const t = tsOfRow(row);
+  if (!Number.isFinite(t)) return null;
+  // manifest_variants is stored as a JSON string in CH. Parse once
+  // here so the lane resolver below can iterate it like an array.
+  let variants: IngestRow['manifestVariants'] = null;
+  const mv = row.manifest_variants;
+  if (typeof mv === 'string' && mv.length > 0 && mv !== 'null') {
+    try { const parsed = JSON.parse(mv); if (Array.isArray(parsed)) variants = parsed; }
+    catch { /* ignore malformed manifest JSON */ }
+  } else if (Array.isArray(mv)) {
+    variants = mv as IngestRow['manifestVariants'];
+  }
+  // control_revision is UInt64 in CH → JSON string from JSONEachRow.
+  // Stringify defensively so the diff comparator stays stable across
+  // numeric vs. string representations.
+  const rev = row.control_revision;
+  const controlRevision = rev == null ? null : String(rev);
+  return {
+    ts: t,
+    state: String(row.player_state ?? '').trim(),
+    waitingReason: String(row.waiting_reason ?? '').trim(),
+    videoResolution: String(row.video_resolution ?? '').trim(),
+    videoBitrateMbps: num(row.video_bitrate_mbps),
+    stalls: num(row.stall_count),
+    droppedFrames: num(row.dropped_frames),
+    error: String(row.player_error ?? ''),
+    firstFrameTimeS: num(row.video_first_frame_time_s),
+    videoStartTimeS: num(row.video_start_time_s),
+    loopCountServer: num(row.loop_count_server),
+    controlRevision,
+    playId: typeof row.play_id === 'string' ? row.play_id : null,
+    manifestVariants: variants,
+  };
+}
 
 const container = ref<HTMLDivElement | null>(null);
 
@@ -90,6 +169,10 @@ let itemsDS: any = null;
 let groupsDS: any = null;
 let nextId = 1;
 let suppressNextRangeChange = false;
+/** Tolerance for "right edge is at the live sample" — absorbs the gap
+ *  between when a wheel event fires and when the next sample arrives.
+ *  Same 2s tolerance the brush-drop-at-live heuristic uses. */
+const LIVE_EDGE_TOLERANCE_MS = 2000;
 let userInteracted = false;
 
 interface TimelineRangeItem {
@@ -154,7 +237,6 @@ const STATEFUL_LANES = new Set(['PLAYERSTATE', 'DISPLAY_RES']);
 // Sample-tracking memory for diff-based POINT-event detection.
 let prevStalls: number | null = null;
 let prevDropped: number | null = null;
-let prevPlayerRestarts: number | null = null;
 let prevLoopServer: number | null = null;
 let prevControlRev: string | null = null;
 let prevError: string | null = null;
@@ -162,6 +244,10 @@ let prevPlayId: string | null = null;
 let prevFirstFrame: number | null = null;
 let prevVideoStart: number | null = null;
 let prevVariantMbps: number | null = null;
+// Watermark of the latest CH row already fed through `ingest()`. The
+// samples-stream watcher uses this to consume only NEW rows on each
+// version bump (the stream cache holds the full backfill + live tail).
+let lastIngestedMs = -Infinity;
 
 function fmtTime(ms: number): string {
   const d = new Date(ms);
@@ -179,13 +265,12 @@ function variantLabel(mbps: number, resolution: string): string {
  *  tolerant (±max(0.5 Mbps, 5% of the variant's Mbps)) so EWMA drift
  *  doesn't lose the match. Returns '' if no variant is close enough,
  *  so the caller can fall back to the player-reported resolution. */
-function manifestResolutionForBitrate(p: PlayerRecord, targetMbps: number): string {
+function manifestResolutionForBitrate(
+  variants: IngestRow['manifestVariants'],
+  targetMbps: number,
+): string {
   if (!Number.isFinite(targetMbps)) return '';
-  const variants =
-    (p as any)?.current_play?.manifest?.variants ??
-    (p as any)?.raw_session?.manifest_variants ??
-    null;
-  if (!Array.isArray(variants) || variants.length === 0) return '';
+  if (!variants || variants.length === 0) return '';
   let best: string | null = null;
   let bestDelta = Infinity;
   for (const v of variants) {
@@ -201,18 +286,6 @@ function manifestResolutionForBitrate(p: PlayerRecord, targetMbps: number): stri
     }
   }
   return best ?? '';
-}
-
-function tsFor(p: PlayerRecord): number {
-  if (p.player_metrics?.event_time) {
-    const v = Date.parse(p.player_metrics.event_time);
-    if (Number.isFinite(v)) return v;
-  }
-  if (p.last_seen_at) {
-    const v = Date.parse(p.last_seen_at);
-    if (Number.isFinite(v)) return v;
-  }
-  return Date.now();
 }
 
 function laneClose(key: string, t: number) {
@@ -334,28 +407,31 @@ async function ensureTimeline(): Promise<void> {
         start: new Date(vp.min),
         end: new Date(vp.max),
       });
-      // Click on the strip toggles pause / live, matching the
-      // line-chart canvas behaviour (MetricsLineChart). vis-timeline's
-      // 'click' event only fires on a real click — not after a drag —
-      // so panning doesn't accidentally toggle.
-      timeline.on('click', () => {
-        coord.togglePause();
-      });
+      // Pause/live transitions come from the Live toggle button, the
+      // brush rail, and the rangechanged handler below (pan / zoom
+      // auto-pin). Clicks on the strip itself do nothing — earlier
+      // versions toggled pause on click but it produced too many
+      // accidental pauses.
       timeline.on('rangechanged', (rc: any) => {
         if (suppressNextRangeChange) { suppressNextRangeChange = false; return; }
         if (!rc?.byUser) return;
         userInteracted = true;
-        // With the Alt+wheel live-anchor listener below capturing
-        // wheel events in live mode, the only user-driven rangechange
-        // left here is PAN (drag). Pan auto-pauses, mirroring the
-        // chartjs pan handler. In paused mode the Alt+wheel listener
-        // falls through to vis-timeline's mouse-anchored zoom, which
-        // also fires rangechanged → we set the sticky viewport in
-        // both branches.
-        if (!coord.state.paused) coord.setPaused(true);
         const a = rc.start instanceof Date ? rc.start.getTime() : Date.parse(rc.start);
         const b = rc.end instanceof Date ? rc.end.getTime() : Date.parse(rc.end);
-        if (Number.isFinite(a) && Number.isFinite(b)) coord.setViewport({ min: a, max: b });
+        if (!Number.isFinite(a) || !Number.isFinite(b)) return;
+        // Snap-back-to-live: if a mouse-anchored zoom or pan ends with
+        // the right edge at the live sample, return to live tracking
+        // — drop the sticky viewport, preserve the zoom span via
+        // liveSpanMs, and stay unpaused. Any further Alt+wheel will
+        // then take the left-edge-only path.
+        const lastTs = coord.state.lastSampleMs;
+        if (lastTs && b >= lastTs - LIVE_EDGE_TOLERANCE_MS) {
+          coord.setViewport(null);
+          coord.setLiveSpanMs(b - a);
+          return;
+        }
+        if (!coord.state.paused) coord.setPaused(true);
+        coord.setViewport({ min: a, max: b });
       });
       installLiveWheelAnchor();
     } finally {
@@ -367,9 +443,8 @@ async function ensureTimeline(): Promise<void> {
 }
 
 /* ─── Per-tick event derivation ─────────────────────────────────── */
-function ingest(p: PlayerRecord) {
-  const pm = p.player_metrics;
-  const t = tsFor(p);
+function ingest(r: IngestRow) {
+  const t = r.ts;
   coord.noteSample(t);
 
   // Track play_id transitions for the POINT-event diff trackers (so
@@ -379,12 +454,11 @@ function ingest(p: PlayerRecord) {
   // metric ticks, and that flicker would otherwise erase the whole
   // PLAYERSTATE / VARIANT / DISPLAY_RES history (visible as the
   // PLAYERSTATE bar suddenly vanishing). Real "new play" transitions
-  // surface naturally via `player_metrics.state` going through
+  // surface naturally via `player_state` going through
   // idle/loading/playing — that's what drives the lane segmentation.
-  const playId = p.current_play?.id ?? null;
-  if (playId !== prevPlayId) {
-    prevPlayId = playId;
-    prevStalls = prevDropped = prevPlayerRestarts = null;
+  if (r.playId !== prevPlayId) {
+    prevPlayId = r.playId;
+    prevStalls = prevDropped = null;
     prevLoopServer = null;
     prevError = null;
     prevFirstFrame = prevVideoStart = null;
@@ -392,47 +466,23 @@ function ingest(p: PlayerRecord) {
 
   // STATEFUL LANES — push every heartbeat as an event into a flat
   // array. The renderer coalesces runs of same-label entries below.
-  // This is the legacy session-shell.js pattern, robust against the
-  // empty-vs-null / case-flicker / play_id-resync issues that broke
-  // the incremental open-range approach.
-  const stateNorm = String(pm?.state ?? '').trim();
-  const reasonNorm = String(pm?.waiting_reason ?? '').trim();
-  if (stateNorm) {
-    statefulEvents.push({ ts: t, type: 'PLAYERSTATE', state: stateNorm, reason: reasonNorm });
+  if (r.state) {
+    statefulEvents.push({ ts: t, type: 'PLAYERSTATE', state: r.state, reason: r.waitingReason });
   }
 
-  // DISPLAY_RES — the decoded video resolution being displayed (what
-  // the user actually sees on-screen as video content). Sourced from
-  // `pm.video_resolution`, matching the legacy session-shell.js:2352
-  // — the lane label is "DISPLAY RES" but the value is the active
-  // variant's decoded size. (`pm.display_resolution` is the player's
-  // window/viewport size and is reported on its own field, not used
-  // for this lane.)
-  const videoResNorm = String(pm?.video_resolution ?? '').trim();
-  if (videoResNorm) {
-    statefulEvents.push({ ts: t, type: 'DISPLAY_RES', resolution: videoResNorm });
+  // DISPLAY_RES — the decoded video resolution being displayed.
+  if (r.videoResolution) {
+    statefulEvents.push({ ts: t, type: 'DISPLAY_RES', resolution: r.videoResolution });
   }
 
-  // VARIANT — same heartbeat-push pattern. Keyed on the MANIFEST's
-  // canonical resolution for the rung (legacy parity, via
-  // `manifestResolutionForBitrate()`), so iPad's churn through
-  // intermediate `video_resolution` reports during a switch doesn't
-  // create phantom lanes for one rung.
-  const mbpsRaw = pm?.video_bitrate_mbps ?? null;
-  if (mbpsRaw != null && Number.isFinite(mbpsRaw) && mbpsRaw > 0) {
+  // VARIANT — keyed on the MANIFEST's canonical resolution for the
+  // rung so transient `video_resolution` flicker during a switch
+  // doesn't create phantom lanes.
+  const mbpsRaw = r.videoBitrateMbps;
+  if (mbpsRaw != null && mbpsRaw > 0) {
     const mbpsRounded = Math.round(mbpsRaw * 10) / 10;
-    // Only emit when the manifest has a matching variant — that's the
-    // canonical (resolution, bitrate) pair. Falling back to the player's
-    // reported `video_resolution` here would seed phantom lanes during
-    // ABR transitions (player reports an intermediate decoded size like
-    // 2560x1440 while the active rung is actually 3840x2160 · 29.9
-    // Mbps), and those phantom lanes would never collapse even after
-    // the manifest loads. Skip emission until we have the manifest.
-    const variantRes = manifestResolutionForBitrate(p, mbpsRounded);
+    const variantRes = manifestResolutionForBitrate(r.manifestVariants, mbpsRounded);
     if (variantRes) {
-      // Emit PLAYBACK SHIFT_UP / SHIFT_DOWN as POINT events on real
-      // rung changes — incremental tracker is fine here since these
-      // are points, not coalesced ranges.
       if (prevVariantMbps != null) {
         if (mbpsRaw > prevVariantMbps + 0.01) {
           pushPoint('PLAYBACK', t, 'SHIFT UP', '#3b82f6', `\n${prevVariantMbps.toFixed(2)} → ${mbpsRaw.toFixed(2)} Mbps`);
@@ -453,58 +503,78 @@ function ingest(p: PlayerRecord) {
     }
   }
 
-  // IMPAIRMENT — STALL on stall counter increments; ERROR when error
-  // string changes; FROZEN on dropped-frame surge (heuristic).
-  if (pm?.stalls != null && prevStalls != null && pm.stalls > prevStalls) {
-    const delta = pm.stalls - prevStalls;
-    pushPoint('IMPAIRMENT', t, 'STALL', '#000000', `\n+${delta} (total ${pm.stalls})`);
+  // IMPAIRMENT — STALL on counter increments; ERROR on string change;
+  // FROZEN on dropped-frame surge (heuristic).
+  if (r.stalls != null && prevStalls != null && r.stalls > prevStalls) {
+    pushPoint('IMPAIRMENT', t, 'STALL', '#000000', `\n+${r.stalls - prevStalls} (total ${r.stalls})`);
   }
-  if (pm?.dropped_frames != null && prevDropped != null && pm.dropped_frames > prevDropped + 10) {
-    pushPoint('IMPAIRMENT', t, 'FROZEN', '#4c1d95', `\n+${pm.dropped_frames - prevDropped} dropped`);
+  if (r.droppedFrames != null && prevDropped != null && r.droppedFrames > prevDropped + 10) {
+    pushPoint('IMPAIRMENT', t, 'FROZEN', '#4c1d95', `\n+${r.droppedFrames - prevDropped} dropped`);
   }
-  if (pm?.error && pm.error !== prevError) {
-    pushPoint('IMPAIRMENT', t, 'ERROR', '#e11d48', `\n${pm.error}`);
-    prevError = pm.error;
+  if (r.error && r.error !== prevError) {
+    pushPoint('IMPAIRMENT', t, 'ERROR', '#e11d48', `\n${r.error}`);
+    prevError = r.error;
   }
-  if (pm?.stalls != null) prevStalls = pm.stalls;
-  if (pm?.dropped_frames != null) prevDropped = pm.dropped_frames;
+  if (r.stalls != null) prevStalls = r.stalls;
+  if (r.droppedFrames != null) prevDropped = r.droppedFrames;
 
-  // PLAYBACK — RESTART on player_restarts increments; FIRST_FRAME +
-  // PLAYBACK_START once at the play boundary.
-  if (pm?.player_restarts != null && prevPlayerRestarts != null && pm.player_restarts > prevPlayerRestarts) {
-    const delta = pm.player_restarts - prevPlayerRestarts;
-    pushPoint('PLAYBACK', t, 'RESTART', '#a855f7', `\n+${delta}`);
+  // PLAYBACK — FIRST_FRAME + START TIME on first observation per play.
+  // (Legacy RESTART event was driven by `player_restarts`, which isn't
+  // persisted in CH; drop until the schema gains it.)
+  if (r.firstFrameTimeS != null && r.firstFrameTimeS > 0 && prevFirstFrame !== r.firstFrameTimeS) {
+    pushPoint('PLAYBACK', t, 'FIRST FRAME', '#14b8a6', `\n${r.firstFrameTimeS.toFixed(3)}s`);
+    prevFirstFrame = r.firstFrameTimeS;
   }
-  if (pm?.player_restarts != null) prevPlayerRestarts = pm.player_restarts;
-  if (pm?.first_frame_time_s != null && pm.first_frame_time_s > 0 && prevFirstFrame !== pm.first_frame_time_s) {
-    pushPoint('PLAYBACK', t, 'FIRST FRAME', '#14b8a6', `\n${pm.first_frame_time_s.toFixed(3)}s`);
-    prevFirstFrame = pm.first_frame_time_s;
-  }
-  if (pm?.video_start_time_s != null && pm.video_start_time_s > 0 && prevVideoStart !== pm.video_start_time_s) {
-    pushPoint('PLAYBACK', t, 'START TIME', '#15803d', `\n${pm.video_start_time_s.toFixed(3)}s`);
-    prevVideoStart = pm.video_start_time_s;
+  if (r.videoStartTimeS != null && r.videoStartTimeS > 0 && prevVideoStart !== r.videoStartTimeS) {
+    pushPoint('PLAYBACK', t, 'START TIME', '#15803d', `\n${r.videoStartTimeS.toFixed(3)}s`);
+    prevVideoStart = r.videoStartTimeS;
   }
 
-  // SERVER — LOOP increments
-  const loop = p.loop_count_server ?? null;
-  if (loop != null && prevLoopServer != null && loop > prevLoopServer) {
-    const delta = loop - prevLoopServer;
-    pushPoint('LOOP_SERVER', t, 'LOOP', '#84cc16', `\n+${delta} (total ${loop})`);
+  // SERVER — LOOP increments.
+  if (r.loopCountServer != null && prevLoopServer != null && r.loopCountServer > prevLoopServer) {
+    pushPoint('LOOP_SERVER', t, 'LOOP', '#84cc16', `\n+${r.loopCountServer - prevLoopServer} (total ${r.loopCountServer})`);
   }
-  if (loop != null) prevLoopServer = loop;
+  if (r.loopCountServer != null) prevLoopServer = r.loopCountServer;
 
   // CONTROL — record any control_revision change.
-  const rev = p.control_revision ?? null;
-  if (rev && rev !== prevControlRev) {
-    if (prevControlRev != null) {
-      pushPoint('CONTROL', t, 'CONTROL CHANGE', '#7c3aed', `\n${prevControlRev} → ${rev}`);
+  if (r.controlRevision && r.controlRevision !== '0' && r.controlRevision !== prevControlRev) {
+    if (prevControlRev != null && prevControlRev !== '0') {
+      pushPoint('CONTROL', t, 'CONTROL CHANGE', '#7c3aed', `\n${prevControlRev} → ${r.controlRevision}`);
     }
-    prevControlRev = rev;
+    prevControlRev = r.controlRevision;
   }
 
-  // Rebuild stateful-lane items from the events array. Cheap because
-  // events typically number in the hundreds even for hour-long sessions.
-  renderStatefulLanes(t);
+  scheduleStatefulRender(t);
+}
+
+/** Adaptive render throttle — matches the pattern in MetricsLineChart.
+ *  renderStatefulLanes walks `statefulEvents` to coalesce runs into
+ *  vis-timeline items; that walk is O(events). For a 2h archive
+ *  replay we accumulate 5–10k events. At 1 Hz redraw the page burns
+ *  noticeable CPU on the event timeline alone, so back off as the
+ *  event array grows. */
+let pendingRenderTimer: number | null = null;
+let lastRenderAt = 0;
+let pendingRenderTs = 0;
+function pickRenderThrottleMs(): number {
+  const n = statefulEvents.length;
+  if (n >= 10_000) return 10_000;
+  if (n >= 2_500) return 5_000;
+  if (n >= 500) return 2_000;
+  return 1_000;
+}
+function scheduleStatefulRender(ts: number) {
+  pendingRenderTs = ts;
+  if (pendingRenderTimer != null) return;
+  const now = Date.now();
+  const throttleMs = pickRenderThrottleMs();
+  const dueAt = lastRenderAt + throttleMs;
+  const delay = Math.max(0, dueAt - now);
+  pendingRenderTimer = window.setTimeout(() => {
+    pendingRenderTimer = null;
+    lastRenderAt = Date.now();
+    renderStatefulLanes(pendingRenderTs);
+  }, delay);
 }
 
 /* ─── Stateful-lane render (legacy pushRanges pattern) ─────────────
@@ -602,14 +672,95 @@ function renderStatefulLanes(nowMs: number) {
   }
 }
 
+/* ─── Samples-stream consumer ──────────────────────────────────────
+ *
+ * Single feed: drain new rows from the unified time-series cache on
+ * every version bump. `lastIngestedMs` is the high-water mark so we
+ * only feed CH rows we haven't seen yet — the cache holds the full
+ * backfill burst plus every live delta, so a naive re-ingest of the
+ * whole range would re-emit every coalesced range.
+ *
+ * Pause-safe buffer: if the operator paused, hold the new rows in
+ * `pendingLive` and drain on resume. `scheduleStatefulRender`'s
+ * adaptive throttle collapses thousands of ingests into one DataSet
+ * update, so even the initial backfill of 5–10 k rows lands in a
+ * single render pass.
+ */
+const pendingLive: IngestRow[] = [];
+let drainToken = 0;
+async function drainNewRows() {
+  if (lastIngestedMs === Infinity) return; // never happens, defensive
+  const raw = props.samplesStream.inRange(
+    lastIngestedMs === -Infinity ? 0 : lastIngestedMs + 1,
+    Number.MAX_SAFE_INTEGER,
+  );
+  if (!raw.length) return;
+  await ensureTimeline();
+  const myToken = ++drainToken;
+  const CHUNK = 500;
+  let highWater = lastIngestedMs;
+  for (let start = 0; start < raw.length; start += CHUNK) {
+    if (myToken !== drainToken) return;
+    const end = Math.min(start + CHUNK, raw.length);
+    for (let i = start; i < end; i++) {
+      const row = chRowToIngest(raw[i]);
+      if (!row) continue;
+      if (row.ts <= lastIngestedMs) continue; // belt-and-suspenders
+      if (coord.state.paused) {
+        pendingLive.push(row);
+      } else {
+        ingest(row);
+      }
+      if (row.ts > highWater) highWater = row.ts;
+    }
+    if (end < raw.length) {
+      // Yield to the main thread between chunks so brush/scroll stay
+      // responsive while the backfill drains.
+      await new Promise<void>((r) => setTimeout(r, 0));
+    }
+  }
+  lastIngestedMs = highWater;
+}
+
 watch(
-  () => player.value,
-  async (p) => {
-    if (!p) return;
-    await ensureTimeline();
-    ingest(p);
-  },
+  () => props.samplesStream.version.value,
+  () => { void drainNewRows(); },
   { immediate: true },
+);
+
+// Resume drain — feed any buffered rows through `ingest()` in arrival
+// order so the coalescing logic produces the same lane segments it
+// would have produced live.
+watch(
+  () => coord.state.paused,
+  (paused) => {
+    if (paused || !pendingLive.length) return;
+    const drained = pendingLive.splice(0, pendingLive.length);
+    for (const r of drained) ingest(r);
+  },
+);
+
+// Player swap — reset all per-player state so a picker swap clears
+// the old session's lanes instead of accumulating both. Watching
+// playerId (a string prop) keeps this simple; SessionDisplay's
+// useSessionTimeSeries already re-subscribes the SSE stream.
+watch(
+  () => props.playerId,
+  () => {
+    statefulEvents.length = 0;
+    pendingLive.length = 0;
+    lastIngestedMs = -Infinity;
+    prevStalls = prevDropped = null;
+    prevLoopServer = null;
+    prevControlRev = null;
+    prevError = null;
+    prevPlayId = null;
+    prevFirstFrame = prevVideoStart = null;
+    prevVariantMbps = null;
+    if (itemsDS) {
+      try { itemsDS.clear(); } catch { /* ignore */ }
+    }
+  },
 );
 
 watch(
@@ -623,19 +774,22 @@ watch(
 );
 
 /**
- * Live-edge wheel zoom anchor — port of legacy session-shell.js
- * `ensureVisTimelineLiveWheelAnchor`. Same rule as the chartjs charts:
+ * Alt+wheel — handled entirely here so the wheel direction + zoom
+ * speed match every other surface (line charts, focus bar). We never
+ * fall through to vis-timeline's native zoom because its delta /
+ * factor curve differs from ours and the result felt inconsistent.
  *
- *   - LIVE  (not paused): Alt+wheel updates `coord.liveSpanMs`, the
- *     timeline tracks the live edge with the new span (cursor position
- *     ignored). preventDefault + stopPropagation so vis-timeline's own
- *     wheel handler doesn't double-zoom.
- *   - PAUSED: fall through to vis-timeline's default mouse-anchored
- *     wheel zoom (which fires `rangechanged` and refreshes the sticky
- *     viewport).
+ * Convention everywhere: wheel UP (`deltaY < 0`) → zoom IN (smaller
+ * span, factor 0.9).
  *
- * Capture-phase listener on the timeline container so we run before
- * vis-timeline's own handler. */
+ *   - AT LIVE (`viewport == null`): grow/shrink the span by moving
+ *     the LEFT edge only — right stays glued to the live sample.
+ *     Updates `coord.liveSpanMs`.
+ *   - OFF LIVE (`viewport != null`): mouse-anchored zoom. The
+ *     timestamp under the cursor stays fixed while both edges move.
+ *     If the new right edge reaches live, snap back to live tracking.
+ *
+ * Capture-phase listener so we run before vis-timeline's own handler. */
 function installLiveWheelAnchor() {
   const el = container.value;
   if (!el) return;
@@ -643,27 +797,89 @@ function installLiveWheelAnchor() {
     'wheel',
     (e: WheelEvent) => {
       if (!e.altKey) return;
-      if (coord.state.paused) return;
       e.preventDefault();
       e.stopPropagation();
       const factor = e.deltaY < 0 ? 0.9 : 1 / 0.9;
-      const windowMs = coord.state.windowMs;
-      const currentSpan =
-        coord.state.liveSpanMs != null ? coord.state.liveSpanMs : windowMs;
       const MIN_SPAN_MS = 1_000;
-      const nextSpan = Math.max(
-        MIN_SPAN_MS,
-        Math.min(windowMs, currentSpan * factor),
-      );
-      coord.setLiveSpanMs(nextSpan >= windowMs ? null : nextSpan);
+      const MAX_SPAN_MS = 24 * 3600 * 1000;
+      const lastTs = coord.state.lastSampleMs;
+      const vp = coord.state.viewport;
+
+      if (vp == null) {
+        const windowMs = coord.state.windowMs;
+        const currentSpan = coord.state.liveSpanMs != null ? coord.state.liveSpanMs : windowMs;
+        const nextSpan = Math.max(MIN_SPAN_MS, Math.min(windowMs, currentSpan * factor));
+        coord.setLiveSpanMs(nextSpan >= windowMs ? null : nextSpan);
+        return;
+      }
+
+      const currentSpan = vp.max - vp.min;
+      const nextSpan = Math.max(MIN_SPAN_MS, Math.min(MAX_SPAN_MS, currentSpan * factor));
+      const rect = el.getBoundingClientRect();
+      const frac = rect.width > 0 ? (e.clientX - rect.left) / rect.width : 0.5;
+      const anchorTime = vp.min + frac * currentSpan;
+      let newStart = anchorTime - frac * nextSpan;
+      let newEnd = newStart + nextSpan;
+      if (lastTs && newEnd >= lastTs - LIVE_EDGE_TOLERANCE_MS) {
+        coord.setViewport(null);
+        coord.setLiveSpanMs(nextSpan);
+        if (coord.state.paused) coord.setPaused(false);
+        return;
+      }
+      if (!coord.state.paused) coord.setPaused(true);
+      coord.setViewport({ min: newStart, max: newEnd });
     },
     { capture: true, passive: false },
   );
 }
 
 const expandedClass = computed(() => (coord.state.expanded ? 'expanded' : ''));
-const pauseLabel = computed(() => (coord.state.paused ? '▶ Live' : '⏸ Pause'));
-const zoomActive = computed(() => coord.state.viewport !== null || userInteracted);
+// Live toggle is "checked" when we're currently following live —
+// i.e. no sticky viewport. Reacts to all transitions (click, brush
+// drag, pan, zoom-snap-to-live) because every reader binds against
+// the shared `coord.state.viewport`.
+const liveChecked = computed(() => coord.state.viewport === null);
+
+/** Always togglePause — both directions preserve liveSpanMs.
+ *  See MetricsLineChart.onLiveToggleClick for rationale. */
+function onLiveToggleClick() {
+  userInteracted = false;
+  coord.togglePause();
+}
+
+/**
+ * "Selected event" cursor — synchronized vertical marker matching
+ * the line charts. vis-timeline ships an addCustomTime/setCustomTime
+ * API that draws a labelled vertical line; we add it once and
+ * shuffle position via setCustomTime, removing only when the cursor
+ * is cleared so the timeline doesn't accumulate stray markers across
+ * scope changes.
+ */
+const NAV_CURSOR_ID = 'nav-cursor';
+let navCursorAdded = false;
+watch(
+  () => coord.state.cursorMs,
+  async (ms) => {
+    await ensureTimeline();
+    if (!timeline) return;
+    if (ms == null || !Number.isFinite(ms)) {
+      if (navCursorAdded) {
+        try { timeline.removeCustomTime(NAV_CURSOR_ID); } catch { /* ignore */ }
+        navCursorAdded = false;
+      }
+      return;
+    }
+    if (!navCursorAdded) {
+      try {
+        timeline.addCustomTime(new Date(ms), NAV_CURSOR_ID);
+        navCursorAdded = true;
+      } catch { /* ignore */ }
+    } else {
+      try { timeline.setCustomTime(new Date(ms), NAV_CURSOR_ID); } catch { /* ignore */ }
+    }
+  },
+  { immediate: true },
+);
 
 onBeforeUnmount(() => {
   try { timeline?.destroy(); } catch { /* ignore */ }
@@ -678,25 +894,30 @@ onBeforeUnmount(() => {
     <div class="bar">
       <div class="title">Events</div>
       <div class="actions">
-        <button class="btn btn-expand" type="button" :class="{ active: coord.state.expanded }"
-          @click="coord.toggleExpanded()"
-          :title="coord.state.expanded ? 'Restore default chart height' : 'Double this chart\'s height for a closer look'">
-          <span class="chart-expand-icon">⤢</span>
-          {{ coord.state.expanded ? 'Collapse' : 'Expand' }}
-        </button>
-        <button class="btn" type="button" :class="{ active: zoomActive }"
-          @click="coord.resetZoom(); userInteracted = false" title="Snap back to live edge">
-          Reset Zoom
-        </button>
-        <button class="btn" type="button" :class="{ live: coord.state.paused }"
-          @click="coord.togglePause()">
-          {{ pauseLabel }}
+        <!-- No expand/collapse: swim-lane heights are content-defined
+             so doubling the chart height just adds empty space below
+             the lanes. The line charts (bandwidth/RTT/buffer/FPS)
+             get the toggle because their y-axes have meaningful
+             vertical scale. -->
+        <button
+          type="button"
+          class="btn live-toggle"
+          :class="{ checked: liveChecked }"
+          @click="coord.togglePause(); userInteracted = false"
+          :title="liveChecked ? 'Pause at current live edge' : 'Resume following live (drops zoom and pan)'"
+        >
+          {{ liveChecked ? '●' : '○' }} Live
         </button>
         <span class="hint">Alt+scroll · drag pan</span>
       </div>
     </div>
 
-    <!-- Static legend strip — every section's colour key. -->
+    <div class="strip-wrap" :class="expandedClass">
+      <div ref="container" class="strip" />
+    </div>
+
+    <!-- Colour key — placed BELOW the chart so the eye reads the
+         swim lanes first and consults the legend only as needed. -->
     <div class="legend">
       <span class="key"><span class="sw" style="background:#16a34a"/>Playing</span>
       <span class="key"><span class="sw" style="background:#f59e0b"/>Buffering</span>
@@ -708,11 +929,6 @@ onBeforeUnmount(() => {
       <span class="key"><span class="sw" style="background:#e11d48"/>Error</span>
       <span class="key"><span class="sw" style="background:#7c3aed"/>Control</span>
       <span class="key"><span class="sw" style="background:#84cc16"/>Loop</span>
-    </div>
-
-    <div class="strip-wrap" :class="expandedClass">
-      <div ref="container" class="strip" />
-      <div v-if="coord.state.paused" class="paused-badge">PAUSED</div>
     </div>
   </div>
 </template>
@@ -744,8 +960,21 @@ onBeforeUnmount(() => {
 }
 .btn:hover { background: #e5e7eb; }
 .btn.active { background: #e0e7ff; border-color: #818cf8; color: #312e81; }
-.btn.live { background: #10b981; border-color: #059669; color: white; }
-.btn.live:hover { background: #059669; }
+/* Live toggle: filled green when checked (following live), muted/
+ * outlined when unchecked (pinned). Mirrors MetricsLineChart. */
+.btn.live-toggle.checked {
+  background: #10b981;
+  border-color: #059669;
+  color: white;
+  font-weight: 600;
+}
+.btn.live-toggle.checked:hover { background: #059669; }
+.btn.live-toggle:not(.checked) {
+  background: #f3f4f6;
+  border-color: #d1d5db;
+  color: #6b7280;
+}
+.btn.live-toggle:not(.checked):hover { background: #e5e7eb; color: #374151; }
 .hint { font-size: 10px; color: #9ca3af; }
 
 .legend {
@@ -789,20 +1018,30 @@ onBeforeUnmount(() => {
   border-radius: 4px;
   min-height: inherit;
 }
-.paused-badge {
-  position: absolute;
-  top: 4px;
-  /* `right: 6px` would place it past the reserved gutter — shift in
-   * by 60+6 so it sits inside the plot area instead. */
-  right: 66px;
-  background: rgba(31, 41, 55, 0.85);
-  color: #fde68a;
-  padding: 1px 6px;
-  border-radius: 4px;
-  font-size: 10px;
-  font-weight: 700;
-  letter-spacing: 1px;
+/* "Selected event" custom-time line — full visual parity with the
+ * line-chart cursor: 1.5 px dashed blue line + a small filled
+ * triangle at the top. vis-timeline renders <div class="vis-custom-time">
+ * as a 1 px wide div spanning the full chart height; we hide its
+ * own background and use the left border to draw the dashed line.
+ * The down-arrow is a ::before pseudo-element absolute-positioned
+ * just above the chart area. */
+.events-timeline :deep(.vis-custom-time) {
+  background: transparent !important;
+  border-left: 1.5px dashed #1d4ed8 !important;
+  width: 0 !important;
   pointer-events: none;
+  z-index: 5;
+}
+.events-timeline :deep(.vis-custom-time::before) {
+  content: '';
+  position: absolute;
+  left: -5px;
+  top: 0;
+  width: 0;
+  height: 0;
+  border-left: 5px solid transparent;
+  border-right: 5px solid transparent;
+  border-top: 6px solid #1d4ed8;
 }
 
 /* vis-timeline label panel + labelset pinned to the SAME 60px width
