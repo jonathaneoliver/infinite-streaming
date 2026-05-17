@@ -1136,7 +1136,12 @@ function skipToEnd() {
   height: 30px;
   background: #d1fae5;
   border-radius: 6px;
-  overflow: visible;
+  /* Clip the brush window so it can't bleed past the rail edges
+   * (and onto the ⏮/⏭ scrub buttons) when the visible focus range
+   * extends past the data — e.g. a 10-min liveSpan on a fresh
+   * session that only has 1 min of samples puts brushRange.min 9
+   * min before scrubMin, which would be a -X% left value. */
+  overflow: hidden;
   cursor: crosshair;
 }
 .brush-rail .brush-tick {
