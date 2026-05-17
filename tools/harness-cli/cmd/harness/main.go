@@ -38,17 +38,21 @@ Global flags:
 Commands:
   players list                  list current v2 players (live)
   players show <player_id>      print full player record + ETag
+  fault list|add|rm|clear       per-rule fault_rules CRUD (ETag-aware)
+  shape <target>                PATCH player.shape (rate/delay/loss/clear)
+  tail <target|all>             /api/v2/timeseries network stream (SSE)
 
 Coming in subsequent commits:
-  fault apply|clear|list        per-rule fault_rules CRUD via v2 PATCH/POST
-  shape <player>                PATCH /players/<id>/shape
-  tail <player|all>             /api/v2/timeseries network stream
-  ts <player>                   full timeseries subscription (samples + network)
+  ts <target>                   full timeseries subscription (samples + network)
   archive <subcommand>          /api/v2/snapshots, /session_events, /network_requests
   groups <subcommand>           player groups
   snapshot / undo / history     CLI-side undo stack
   finding add ...               write to .claude/findings/
   procedure <name> ...          multi-step (soak, ABR sweep)
+
+Targets are resolved against the live player list. A target may be a
+full UUID, a >=6-char hex prefix, a label value (device/name), a
+player IP, or a substring of the User-Agent.
 `
 
 type globalFlags struct {
@@ -78,6 +82,12 @@ func main() {
 	switch args[0] {
 	case "players":
 		exit(cmdPlayers(client, args[1:], g.asJSON))
+	case "fault":
+		exit(cmdFault(client, args[1:], g.asJSON))
+	case "shape":
+		exit(cmdShape(client, args[1:], g.asJSON))
+	case "tail":
+		exit(cmdTail(client, args[1:], g.asJSON))
 	case "help", "--help", "-h":
 		fmt.Fprint(os.Stdout, usage)
 	default:

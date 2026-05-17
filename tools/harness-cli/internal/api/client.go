@@ -23,6 +23,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"encoding/base64"
@@ -201,6 +202,134 @@ func (c *Client) Player(ctx context.Context, playerID string) (*proxy.PlayerReco
 	}
 	etag := strings.Trim(resp.Header.Get("ETag"), `"`)
 	return &rec, etag, nil
+}
+
+// ----- Mutations ----------------------------------------------------------
+
+// PatchPlayer applies a JSON-merge-patch to a player record using
+// If-Match. If etag is empty we fetch one first (cost of an extra GET
+// in exchange for a one-call signature for ad-hoc CLI use). Returns
+// the new ETag after the PATCH.
+func (c *Client) PatchPlayer(ctx context.Context, playerID, etag string, patch proxy.PlayerPatch) (string, error) {
+	if etag == "" {
+		_, e, err := c.Player(ctx, playerID)
+		if err != nil {
+			return "", err
+		}
+		etag = e
+	}
+	params := &proxy.PatchApiV2PlayersPlayerIdParams{IfMatch: quoteETag(etag)}
+	resp, err := c.proxy.PatchApiV2PlayersPlayerIdWithApplicationMergePatchPlusJSONBody(
+		ctx, proxy.PlayerId(playerID), params, patch,
+	)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if err := checkProxyError(resp, "PATCH /api/v2/players/"+playerID); err != nil {
+		return "", err
+	}
+	return strings.Trim(resp.Header.Get("ETag"), `"`), nil
+}
+
+// AddFaultRule POSTs a new fault rule onto a player. The proxy
+// generates the rule_id if rule.Id is unset. Returns the new ETag.
+func (c *Client) AddFaultRule(ctx context.Context, playerID, etag string, rule proxy.FaultRule) (string, error) {
+	if etag == "" {
+		_, e, err := c.Player(ctx, playerID)
+		if err != nil {
+			return "", err
+		}
+		etag = e
+	}
+	params := &proxy.PostApiV2PlayersPlayerIdFaultRulesParams{IfMatch: quoteETag(etag)}
+	resp, err := c.proxy.PostApiV2PlayersPlayerIdFaultRules(ctx, proxy.PlayerId(playerID), params, rule)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if err := checkProxyError(resp, "POST /api/v2/players/"+playerID+"/fault_rules"); err != nil {
+		return "", err
+	}
+	return strings.Trim(resp.Header.Get("ETag"), `"`), nil
+}
+
+// DeleteFaultRule removes a single fault rule by rule_id.
+func (c *Client) DeleteFaultRule(ctx context.Context, playerID, ruleID, etag string) (string, error) {
+	if etag == "" {
+		_, e, err := c.Player(ctx, playerID)
+		if err != nil {
+			return "", err
+		}
+		etag = e
+	}
+	params := &proxy.DeleteApiV2PlayersPlayerIdFaultRulesRuleIdParams{IfMatch: quoteETag(etag)}
+	resp, err := c.proxy.DeleteApiV2PlayersPlayerIdFaultRulesRuleId(
+		ctx, proxy.PlayerId(playerID), proxy.RuleId(ruleID), params,
+	)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if err := checkProxyError(resp, "DELETE /api/v2/players/"+playerID+"/fault_rules/"+ruleID); err != nil {
+		return "", err
+	}
+	return strings.Trim(resp.Header.Get("ETag"), `"`), nil
+}
+
+// ClearFaultRules drops all fault rules in one PATCH by sending an
+// empty array. Equivalent to N deletes but atomic w.r.t. ETag.
+func (c *Client) ClearFaultRules(ctx context.Context, playerID, etag string) (string, error) {
+	empty := []proxy.FaultRule{}
+	return c.PatchPlayer(ctx, playerID, etag, proxy.PlayerPatch{FaultRules: &empty})
+}
+
+// PatchShape PATCHes player.shape only. A nil pointer omits the key
+// (no-op for shape); use ClearShape to send the explicit-null body
+// that clears all shaping server-side.
+func (c *Client) PatchShape(ctx context.Context, playerID, etag string, shape *proxy.Shape) (string, error) {
+	return c.PatchPlayer(ctx, playerID, etag, proxy.PlayerPatch{Shape: shape})
+}
+
+// ClearShape sends `{"shape": null}` — the merge-patch sentinel that
+// removes all kernel shaping in one PATCH. Can't be expressed through
+// the generated typed body (PlayerPatch.Shape is `*Shape`, so nil
+// means "omit the key"), so we ship the raw JSON via the body-reader
+// variant of the generated client.
+func (c *Client) ClearShape(ctx context.Context, playerID, etag string) (string, error) {
+	if etag == "" {
+		_, e, err := c.Player(ctx, playerID)
+		if err != nil {
+			return "", err
+		}
+		etag = e
+	}
+	params := &proxy.PatchApiV2PlayersPlayerIdParams{IfMatch: quoteETag(etag)}
+	body := bytes.NewReader([]byte(`{"shape": null}`))
+	resp, err := c.proxy.PatchApiV2PlayersPlayerIdWithBody(
+		ctx, proxy.PlayerId(playerID), params,
+		"application/merge-patch+json", body,
+	)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if err := checkProxyError(resp, "PATCH /api/v2/players/"+playerID+" (clear shape)"); err != nil {
+		return "", err
+	}
+	return strings.Trim(resp.Header.Get("ETag"), `"`), nil
+}
+
+// quoteETag wraps a raw revision token in the literal double-quotes
+// required by RFC 7232 If-Match. No-ops if already wrapped.
+func quoteETag(rev string) string {
+	if rev == "" {
+		return ""
+	}
+	if strings.HasPrefix(rev, `"`) && strings.HasSuffix(rev, `"`) {
+		return rev
+	}
+	return `"` + rev + `"`
 }
 
 // ----- Error envelope -----------------------------------------------------
