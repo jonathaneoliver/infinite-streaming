@@ -50,7 +50,7 @@ func (s *Server) PostApiV2PlayersPlayerIdFaultRules(w http.ResponseWriter, r *ht
 		return
 	}
 
-	pidStr := playerId.String()
+	pidStr := string(playerId)
 	if _, exists := s.v1.SessionByPlayerID(pidStr); !exists {
 		writePlayerNotFound(w, pidStr)
 		return
@@ -166,7 +166,7 @@ func (s *Server) PatchApiV2PlayersPlayerIdFaultRulesRuleId(w http.ResponseWriter
 		writeProblem(w, http.StatusBadRequest, "https://harness/errors/bad-request", "invalid merge patch body", perr.Error(), nil)
 		return
 	}
-	pidStr := playerId.String()
+	pidStr := string(playerId)
 	rulePath := "fault_rules." + string(ruleId)
 
 	if _, exists := s.v1.SessionByPlayerID(pidStr); !exists {
@@ -250,7 +250,7 @@ func (s *Server) DeleteApiV2PlayersPlayerIdFaultRulesRuleId(w http.ResponseWrite
 		)
 		return
 	}
-	pidStr := playerId.String()
+	pidStr := string(playerId)
 	rulePath := "fault_rules." + string(ruleId)
 	if _, exists := s.v1.SessionByPlayerID(pidStr); !exists {
 		writePlayerNotFound(w, pidStr)

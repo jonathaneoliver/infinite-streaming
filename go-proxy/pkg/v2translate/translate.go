@@ -411,18 +411,46 @@ func faultCountersFromSession(s map[string]any) *oapigen.FaultCounters {
 // playerUUID is the v2-canonical UUID for the parent player (used for
 // PlayRecord.PlayerId — we don't re-derive it).
 func currentPlayFromSession(s map[string]any, playerUUID uuid.UUID) *oapigen.PlayRecord {
+	master := getString(s, "master_manifest_url")
+	manifest := getString(s, "manifest_url")
 	playIDRaw := getString(s, "play_id")
 	if playIDRaw == "" {
-		// Some sessions track play_id only on network entries — try the
-		// most recent network entry if surfaced on the session.
 		playIDRaw = getString(s, "current_play_id")
 	}
-	if playIDRaw == "" {
+
+	// Surface a play whenever we have an explicit id OR enough manifest
+	// info to describe one. Web sessions (legacy testing.html, v3 grid)
+	// rarely emit play_id but the master URL is always present — that
+	// powers SessionDetails.master_manifest_url in the dashboard.
+	if playIDRaw == "" && master == "" && manifest == "" {
 		return nil
 	}
-	playUUID, err := uuid.Parse(playIDRaw)
-	if err != nil {
-		playUUID = derivePlayerUUID(playIDRaw) // re-use the v5 namespace for play_ids too
+
+	var playUUID uuid.UUID
+	if playIDRaw != "" {
+		if parsed, err := uuid.Parse(playIDRaw); err == nil {
+			playUUID = parsed
+		} else {
+			playUUID = derivePlayerUUID(playIDRaw)
+		}
+	} else {
+		// Derive a stable id from the player + master URL + start time
+		// so it stays the same across ticks. The variant manifest URL
+		// (`manifest_url`) is NOT in the seed: that one changes every
+		// time the player switches ABR rungs, which would make the
+		// synthetic play_id flicker through metric ticks and confuse
+		// any downstream code that watches play_id for transitions
+		// (the v3 dashboard's events timeline, in particular, was
+		// erasing its PLAYERSTATE history on every variant switch
+		// because of this). control_revision is part of the seed so
+		// a control mutation that re-issues a new play still gets a
+		// new id when expected.
+		startToken := getString(s, "session_start_time")
+		if startToken == "" {
+			startToken = getString(s, "first_request_time")
+		}
+		seed := playerUUID.String() + "|" + getString(s, "control_revision") + "|" + master + "|" + startToken
+		playUUID = derivePlayerUUID(seed)
 	}
 
 	rec := &oapigen.PlayRecord{
@@ -433,11 +461,24 @@ func currentPlayFromSession(s map[string]any, playerUUID uuid.UUID) *oapigen.Pla
 	if t, ok := getTime(s, "session_start_time", "first_request_time"); ok {
 		rec.StartedAt = t
 	}
-	if variants := manifestVariantsFromSession(s); variants != nil {
-		rec.Manifest = &oapigen.Manifest{Variants: variants}
-		if mu := getString(s, "manifest_url"); mu != "" {
-			rec.Manifest.MasterUrl = &mu
+	// Manifest projection: master_manifest_url is the master playlist
+	// the player loaded; manifest_url is the variant playlist most
+	// recently fetched. Prefer the explicit master, fall back to the
+	// variant (matches the legacy `session_master_manifest_url` /
+	// `session_manifest_url` distinction).
+	variants := manifestVariantsFromSession(s)
+	if variants != nil || master != "" || manifest != "" {
+		m := &oapigen.Manifest{}
+		if variants != nil {
+			m.Variants = variants
 		}
+		switch {
+		case master != "":
+			m.MasterUrl = &master
+		case manifest != "":
+			m.MasterUrl = &manifest
+		}
+		rec.Manifest = m
 	}
 	if pm := playerMetricsFromSession(s); pm != nil {
 		rec.PlayerMetrics = pm
@@ -580,6 +621,14 @@ func shapeFromSession(s map[string]any) *oapigen.Shape {
 		if t, ok := pattern["template"].(string); ok && t != "" {
 			tmpl := oapigen.PatternTemplate(t)
 			p.Template = &tmpl
+		}
+		if v, ok := numericFloatTranslate(pattern["margin_pct"]); ok {
+			mp := oapigen.PatternMarginPct(int(v))
+			p.MarginPct = &mp
+		}
+		if v, ok := numericFloatTranslate(pattern["default_step_seconds"]); ok {
+			ds := oapigen.PatternDefaultStepSeconds(int(v))
+			p.DefaultStepSeconds = &ds
 		}
 		if stepsAny, ok := pattern["steps"].([]any); ok {
 			for _, raw := range stepsAny {
@@ -884,6 +933,16 @@ func getTime(m map[string]any, keys ...string) (time.Time, bool) {
 			}
 			if t, err := time.Parse(time.RFC3339, s); err == nil {
 				return t, true
+			}
+			// Legacy v1 emits naive-ISO timestamps without a timezone
+			// designator, e.g. "2026-05-12T13:21:19.490". RFC3339 parsers
+			// reject those — fall back to fractional and second-precision
+			// ISO formats and treat them as UTC (which is what v1 stores).
+			if t, err := time.Parse("2006-01-02T15:04:05.999999999", s); err == nil {
+				return t.UTC(), true
+			}
+			if t, err := time.Parse("2006-01-02T15:04:05", s); err == nil {
+				return t.UTC(), true
 			}
 		case int64:
 			if x > 0 {

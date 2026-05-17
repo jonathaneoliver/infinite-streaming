@@ -51,6 +51,14 @@ thumbnails-test-dev-force:
 build:
 	docker build --no-cache --progress=plain -t infinite-streaming .
 
+# Vue 3 dashboard (Stage 0+ of the v3 migration). Builds to
+# content/dashboard/v3/ which the existing nginx /dashboard/ alias
+# serves automatically. Run manually during dev; the Dockerfile also
+# runs it as part of the image build so deployed containers ship the
+# latest bundle.
+build-dashboard-v3:
+	cd content/dashboard-v3 && npm install && npm run build
+
 buildkit:
 	DOCKER_BUILDKIT=1 docker build -t infinite-streaming .
 
@@ -367,6 +375,21 @@ test-deploy-dev:
 		--exclude='.git/' \
 		--exclude='.env' \
 		./ $(TEST_SSH):~/test-dev/
+	@# The dashboard-v3 Vite build output lives at content/dashboard/v3/
+	@# which is gitignored, so the --filter ':- .gitignore' rule above
+	@# hides it from rsync's source view and --delete then wipes it on
+	@# the remote (this bit you for the testing.html-→-dashboard.html
+	@# redirect on 2026-05-12). Build + push it as an extra rsync
+	@# whose source it can actually see. Skipped silently if
+	@# dashboard-v3 isn't set up yet.
+	@if [ -f content/dashboard-v3/package.json ]; then \
+		echo "Building & pushing dashboard-v3 (Vue)..."; \
+		(cd content/dashboard-v3 && npm run --silent build) && \
+		ssh -n $(TEST_SSH) 'mkdir -p ~/test-dev/content/dashboard/v3' && \
+		rsync -az --delete content/dashboard/v3/ $(TEST_SSH):~/test-dev/content/dashboard/v3/; \
+	else \
+		echo "dashboard-v3 not present, skipping Vue build"; \
+	fi
 	ssh -n $(TEST_SSH) 'printf "CONTENT_DIR=%s\nINFINITE_STREAM_RENDEZVOUS_URL=%s\nINFINITE_STREAM_ANNOUNCE_URL=%s\nINFINITE_STREAM_ANNOUNCE_LABEL=%s\n" "$(TEST_MEDIA_DIR)" "$(INFINITE_STREAM_RENDEZVOUS_URL)" "$(INFINITE_STREAM_ANNOUNCE_URL)" "$(INFINITE_STREAM_ANNOUNCE_LABEL)" > ~/test-dev/.env'
 	scp tests/deploy/override-dev.yml $(TEST_SSH):~/test-dev/docker-compose.override.yml
 	ssh $(TEST_SSH) 'cd ~/test-dev && docker compose build && docker compose up -d'

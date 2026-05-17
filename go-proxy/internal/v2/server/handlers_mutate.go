@@ -134,11 +134,11 @@ func (s *Server) DeleteApiV2PlayersPlayerId(w http.ResponseWriter, r *http.Reque
 		notImplemented(w, "DeleteApiV2PlayersPlayerId")
 		return
 	}
-	if !s.v1.DeletePlayer(playerId.String()) {
-		writePlayerNotFound(w, playerId.String())
+	if !s.v1.DeletePlayer(string(playerId)) {
+		writePlayerNotFound(w, string(playerId))
 		return
 	}
-	s.dropFieldRevs(playerId.String())
+	s.dropFieldRevs(string(playerId))
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -182,7 +182,7 @@ func (s *Server) PatchApiV2PlayersPlayerId(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	pidStr := playerId.String()
+	pidStr := string(playerId)
 
 	// Pre-check whether the player exists at all. Avoids creating a
 	// per-player FieldRevisions tracker for a UUID that doesn't
