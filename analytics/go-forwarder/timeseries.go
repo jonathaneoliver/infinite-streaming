@@ -1,5 +1,7 @@
-// v3 timeseries SSE endpoint — see plans/shiny-exploring-jellyfish.md
-// for the architecture writeup.
+// /api/v2/timeseries SSE endpoint — see plans/shiny-exploring-jellyfish.md
+// for the architecture writeup. (Wire path used to be /api/v3/timeseries
+// during early development; renamed to v2 because it's purely additive
+// on the v2 contract.)
 //
 // One EventSource per (player_id, play_id). The handler:
 //
@@ -65,13 +67,20 @@ const (
 	backfillCapNetwork = 5000
 )
 
-// mountV3Handlers wires the v3 timeseries endpoint into mux.
+// mountTimeseriesHandlers wires the timeseries SSE endpoint into mux.
 //
-// Mounted at /api/v3/timeseries; nginx exposes it externally as
-// /analytics/api/v3/timeseries via the same rewrite that handles the
-// existing v1 / v2 endpoints.
-func mountV3Handlers(mux *http.ServeMux, cfg config, ring *Ring) {
-	mux.HandleFunc("/api/v3/timeseries", makeTimeseriesHandler(cfg, ring))
+// Mounted at /api/v2/timeseries; nginx exposes it externally as
+// /analytics/api/v2/timeseries via the same rewrite that handles every
+// other /analytics/api/v2/* endpoint.
+//
+// Naming note: the wire path used to be /api/v3/timeseries during early
+// development. It was renamed to /api/v2/timeseries because it doesn't
+// break any v2 contract — same player_id/play_id identity, same backing
+// tables, same ProblemDetails error envelope, reusable BasicAuth scheme.
+// REST major versions mark breaking changes; this endpoint is purely
+// additive (a new transport + a new query convention) on top of v2.
+func mountTimeseriesHandlers(mux *http.ServeMux, cfg config, ring *Ring) {
+	mux.HandleFunc("/api/v2/timeseries", makeTimeseriesHandler(cfg, ring))
 }
 
 func makeTimeseriesHandler(cfg config, ring *Ring) http.HandlerFunc {

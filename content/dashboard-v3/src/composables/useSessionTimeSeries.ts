@@ -1,6 +1,6 @@
 /**
- * useSessionTimeSeries — single client-side consumer of the v3
- * /api/v3/timeseries SSE endpoint. One subscription per
+ * useSessionTimeSeries — single client-side consumer of the
+ * /api/v2/timeseries SSE endpoint. One subscription per
  * (player_id, play_id); exposes per-stream caches with the same
  * range-query API for every renderer (line charts, events
  * timeline, network log, focus-bar rail).
@@ -234,7 +234,7 @@ export function useSessionTimeSeries(
     }
     if (opts.strideMs && opts.strideMs > 0) params.set('stride_ms', String(opts.strideMs));
     if (opts.maxHz && opts.maxHz > 0) params.set('max_hz', String(opts.maxHz));
-    return '/analytics/api/v3/timeseries?' + params.toString();
+    return '/analytics/api/v2/timeseries?' + params.toString();
   }
 
   function connect() {

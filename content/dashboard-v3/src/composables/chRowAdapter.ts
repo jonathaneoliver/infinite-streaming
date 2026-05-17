@@ -1,6 +1,6 @@
 /**
  * chRowAdapter — adapter from a CH session_snapshots row (wire shape
- * from /api/v3/timeseries) to the v2 PlayerRecord shape the rest of
+ * from /api/v2/timeseries) to the v2 PlayerRecord shape the rest of
  * the dashboard expects (nested player_metrics / server_metrics, with
  * a couple of fields renamed).
  *

@@ -87,7 +87,7 @@ const props = defineProps<{
 const coord = useChartCoordination(toRef(props, 'playerId'));
 
 /** Adapter — map a CH session_snapshots row (wire shape from the v3
- *  /api/v3/timeseries endpoint) to the small subset of fields ingest()
+ *  /api/v2/timeseries endpoint) to the small subset of fields ingest()
  *  reads. Keeps ingest() agnostic to the row shape so the next storage
  *  layer (materialised lanes_v2) can change column names without
  *  touching the lane-derivation logic. */

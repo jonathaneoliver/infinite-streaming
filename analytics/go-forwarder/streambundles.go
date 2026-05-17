@@ -1,4 +1,4 @@
-// Column-projection bundles for the v3 /api/v3/timeseries endpoint.
+// Column-projection bundles for the /api/v2/timeseries endpoint.
 //
 // Each bundle names a curated subset of columns from one of the three
 // underlying stream tables (session_snapshots → samples,

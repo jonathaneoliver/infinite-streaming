@@ -357,7 +357,7 @@ func main() {
 	}()
 
 	// In-memory ring covering the recently-ingested rows for both
-	// streams. The v3 /api/v3/timeseries handler reads the ring +
+	// streams. The /api/v2/timeseries handler reads the ring +
 	// CH and dedupes on the boundary so the dashboard sees fresh
 	// data with no NDJSON-vs-pushLive merge race. Eviction runs
 	// once per second; pending/inserting rows are sticky regardless
@@ -855,7 +855,7 @@ func serveHTTP(ctx context.Context, cfg config, ring *Ring) {
 		w.Write([]byte("ok"))
 	})
 	mountV2Handlers(mux, cfg)
-	mountV3Handlers(mux, cfg, ring)
+	mountTimeseriesHandlers(mux, cfg, ring)
 	mux.HandleFunc("/api/sessions", func(w http.ResponseWriter, r *http.Request) {
 		since := r.URL.Query().Get("since")
 		until := r.URL.Query().Get("until")
