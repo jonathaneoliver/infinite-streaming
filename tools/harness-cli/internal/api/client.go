@@ -35,6 +35,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jonathaneoliver/infinite-streaming/tools/harness-cli/internal/snapshot"
 	"github.com/jonathaneoliver/infinite-streaming/tools/harness-cli/internal/v2gen/forwarder"
 	"github.com/jonathaneoliver/infinite-streaming/tools/harness-cli/internal/v2gen/proxy"
@@ -122,7 +123,12 @@ func New(opts Options) (*Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("proxy client: %w", err)
 	}
-	fc, err := forwarder.NewClient(base, forwarder.WithHTTPClient(httpClient), forwarder.WithRequestEditorFn(asForwarderEditor(editor)))
+	// Forwarder lives behind `/analytics/` at the edge — nginx strips
+	// the prefix before proxying. Wire the generated client's Server
+	// to <base>/analytics so all its typed /api/v2/* calls land at
+	// /analytics/api/v2/* externally. (sse.go does the same trick
+	// by hand for the SSE path; this generalises it.)
+	fc, err := forwarder.NewClient(base+"/analytics", forwarder.WithHTTPClient(httpClient), forwarder.WithRequestEditorFn(asForwarderEditor(editor)))
 	if err != nil {
 		return nil, fmt.Errorf("forwarder client: %w", err)
 	}
@@ -551,6 +557,186 @@ func (c *Client) EditFaultRule(ctx context.Context, playerID, ruleID, action str
 		return newETag, err
 	}
 	return newETag, nil
+}
+
+// ----- Play-scoped mutations ----------------------------------------------
+
+// Play returns one PlayRecord by play_id (proxy-side live read). Use
+// ArchivePlay (forwarder) for historical reads.
+func (c *Client) Play(ctx context.Context, playID string) (*proxy.PlayRecord, string, error) {
+	uid, err := uuid.Parse(playID)
+	if err != nil {
+		return nil, "", fmt.Errorf("invalid play_id %q: %w", playID, err)
+	}
+	resp, err := c.proxy.GetApiV2PlaysPlayId(ctx, uid)
+	if err != nil {
+		return nil, "", err
+	}
+	defer resp.Body.Close()
+	if err := checkProxyError(resp, "GET /api/v2/plays/"+playID); err != nil {
+		return nil, "", err
+	}
+	var rec proxy.PlayRecord
+	if err := json.NewDecoder(resp.Body).Decode(&rec); err != nil {
+		return nil, "", fmt.Errorf("decode play %s: %w", playID, err)
+	}
+	etag := strings.Trim(resp.Header.Get("ETag"), `"`)
+	return &rec, etag, nil
+}
+
+// PatchPlay applies a play-scoped merge-patch. Snapshots like other
+// mutations when action is non-empty.
+func (c *Client) PatchPlay(ctx context.Context, playID, action string, body []byte) (string, error) {
+	rec, etag, err := c.Play(ctx, playID)
+	if err != nil {
+		return "", err
+	}
+	uid, err := uuid.Parse(playID)
+	if err != nil {
+		return "", err
+	}
+	params := &proxy.PatchApiV2PlaysPlayIdParams{IfMatch: quoteETag(etag)}
+	resp, err := c.proxy.PatchApiV2PlaysPlayIdWithBody(
+		ctx, uid, params,
+		"application/merge-patch+json", bytes.NewReader(body),
+	)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if err := checkProxyError(resp, "PATCH /api/v2/plays/"+playID); err != nil {
+		return "", err
+	}
+	newETag := strings.Trim(resp.Header.Get("ETag"), `"`)
+	if c.Snap != nil && action != "" {
+		beforeJSON, _ := json.Marshal(rec)
+		_, _ = c.Snap.Save(snapshot.Snapshot{
+			PlayerID:   rec.PlayerId.String(),
+			Action:     action + " play=" + playID,
+			EtagBefore: etag,
+			EtagAfter:  newETag,
+			Before:     beforeJSON,
+			Patch:      body,
+		})
+	}
+	return newETag, nil
+}
+
+// ----- Network (live HAR) -------------------------------------------------
+
+// PlayerNetwork returns the live HAR-shaped network log for one
+// player. The raw JSON page envelope is decoded as-is so callers
+// don't need to know the entire pagination contract — the bytes are
+// the bytes.
+func (c *Client) PlayerNetwork(ctx context.Context, playerID string, params *proxy.GetApiV2PlayersPlayerIdNetworkParams) ([]byte, error) {
+	resp, err := c.proxy.GetApiV2PlayersPlayerIdNetwork(ctx, proxy.PlayerId(playerID), params)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if err := checkProxyError(resp, "GET /api/v2/players/"+playerID+"/network"); err != nil {
+		return nil, err
+	}
+	return io.ReadAll(resp.Body)
+}
+
+// ----- Archive reads (forwarder) ------------------------------------------
+
+// archiveGET is a thin wrapper that runs the supplied forwarder
+// closure and reads the body. Used by every archive command — those
+// commands care about presenting bytes, not interpreting them
+// (formatter lives in cmd/harness/archive.go).
+func (c *Client) archiveGET(call func() (*http.Response, error), ctx string) ([]byte, error) {
+	resp, err := call()
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 32*1024))
+		return nil, fmt.Errorf("%s: %d: %s", ctx, resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	return io.ReadAll(resp.Body)
+}
+
+// ArchivePlays lists ended plays from the forwarder archive.
+func (c *Client) ArchivePlays(ctx context.Context, params *forwarder.GetApiV2PlaysParams) ([]byte, error) {
+	return c.archiveGET(func() (*http.Response, error) {
+		return c.forwarder.GetApiV2Plays(ctx, params)
+	}, "GET /analytics/api/v2/plays")
+}
+
+// ArchivePlay fetches a single archived play with its _links bundle.
+func (c *Client) ArchivePlay(ctx context.Context, playID string) ([]byte, error) {
+	uid, err := uuid.Parse(playID)
+	if err != nil {
+		return nil, fmt.Errorf("invalid play_id %q: %w", playID, err)
+	}
+	return c.archiveGET(func() (*http.Response, error) {
+		return c.forwarder.GetApiV2PlaysPlayId(ctx, uid)
+	}, "GET /analytics/api/v2/plays/"+playID)
+}
+
+// ArchivePlaysAggregate runs aggregate stats across plays.
+func (c *Client) ArchivePlaysAggregate(ctx context.Context, params *forwarder.GetApiV2PlaysAggregateParams) ([]byte, error) {
+	return c.archiveGET(func() (*http.Response, error) {
+		return c.forwarder.GetApiV2PlaysAggregate(ctx, params)
+	}, "GET /analytics/api/v2/plays/aggregate")
+}
+
+// ArchiveSnapshots returns the session_snapshots rows for one play.
+func (c *Client) ArchiveSnapshots(ctx context.Context, params *forwarder.GetApiV2SnapshotsParams) ([]byte, error) {
+	return c.archiveGET(func() (*http.Response, error) {
+		return c.forwarder.GetApiV2Snapshots(ctx, params)
+	}, "GET /analytics/api/v2/snapshots")
+}
+
+// ArchiveNetworkRequests returns the network_requests rows.
+func (c *Client) ArchiveNetworkRequests(ctx context.Context, params *forwarder.GetApiV2NetworkRequestsParams) ([]byte, error) {
+	return c.archiveGET(func() (*http.Response, error) {
+		return c.forwarder.GetApiV2NetworkRequests(ctx, params)
+	}, "GET /analytics/api/v2/network_requests")
+}
+
+// ArchiveSessionEvents returns the derived session_events taxonomy.
+func (c *Client) ArchiveSessionEvents(ctx context.Context, params *forwarder.GetApiV2SessionEventsParams) ([]byte, error) {
+	return c.archiveGET(func() (*http.Response, error) {
+		return c.forwarder.GetApiV2SessionEvents(ctx, params)
+	}, "GET /analytics/api/v2/session_events")
+}
+
+// ArchiveSessionHeatmap returns the bucketed heatmap.
+func (c *Client) ArchiveSessionHeatmap(ctx context.Context, params *forwarder.GetApiV2SessionHeatmapParams) ([]byte, error) {
+	return c.archiveGET(func() (*http.Response, error) {
+		return c.forwarder.GetApiV2SessionHeatmap(ctx, params)
+	}, "GET /analytics/api/v2/session_heatmap")
+}
+
+// ArchivePlayBundle streams the ZIP bundle for a play. Returns the
+// open response body so callers can copy it to a file without
+// buffering. Caller MUST close the returned ReadCloser.
+func (c *Client) ArchivePlayBundle(ctx context.Context, playID string) (io.ReadCloser, error) {
+	uid, err := uuid.Parse(playID)
+	if err != nil {
+		return nil, fmt.Errorf("invalid play_id %q: %w", playID, err)
+	}
+	resp, err := c.forwarder.GetApiV2PlaysPlayIdBundle(ctx, uid)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 8*1024))
+		resp.Body.Close()
+		return nil, fmt.Errorf("GET bundle: %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	return resp.Body, nil
+}
+
+// ArchiveBundles returns the bundle catalogue (debug — Phase 7).
+func (c *Client) ArchiveBundles(ctx context.Context) ([]byte, error) {
+	return c.archiveGET(func() (*http.Response, error) {
+		return c.forwarder.GetBundles(ctx)
+	}, "GET /analytics/api/v2/bundles")
 }
 
 // PatchRaw is the universal escape hatch — sends a hand-crafted

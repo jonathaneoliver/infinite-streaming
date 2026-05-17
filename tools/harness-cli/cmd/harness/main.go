@@ -122,6 +122,12 @@ func main() {
 		exit(cmdTimeouts(client, args[1:], g.asJSON))
 	case "content":
 		exit(cmdContent(client, args[1:], g.asJSON))
+	case "play":
+		exit(cmdPlay(client, args[1:], g.asJSON))
+	case "network":
+		exit(cmdNetwork(client, args[1:], g.asJSON))
+	case "archive":
+		exit(cmdArchive(client, args[1:], g.asJSON))
 	case "help", "--help", "-h":
 		fmt.Fprint(os.Stdout, usage)
 	default:
