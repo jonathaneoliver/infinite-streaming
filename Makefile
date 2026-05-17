@@ -89,6 +89,24 @@ openapi-tools:
 	@echo "installed: $(SWAG)"
 	@echo "installed: $(OAPICODEGEN)"
 
+# Sync ONLY the hand-written v2 yaml files into the Scalar UI mirror
+# under content/dashboard/api-docs/. Use this after editing
+# api/openapi/v2/{proxy,forwarder}.yaml — it's a strict subset of
+# `make openapi` that skips the swag re-gen (which churns v1 specs from
+# Go source) and skips oapi-codegen (which regenerates server stubs).
+# When you only touched the v2 yaml, this is what you want.
+sync-api-docs:
+	@mkdir -p content/dashboard/api-docs
+	@if [ -f api/openapi/v2/proxy.yaml ]; then \
+	  cp api/openapi/v2/proxy.yaml content/dashboard/api-docs/proxy-v2.yaml; \
+	  echo "synced: content/dashboard/api-docs/proxy-v2.yaml"; \
+	fi
+	@if [ -f api/openapi/v2/forwarder.yaml ]; then \
+	  cp api/openapi/v2/forwarder.yaml content/dashboard/api-docs/forwarder-v2.yaml; \
+	  echo "synced: content/dashboard/api-docs/forwarder-v2.yaml"; \
+	fi
+	@echo "Scalar UI: /dashboard/api-docs/{proxy-v2,forwarder-v2}.html will pick up on next refresh"
+
 openapi:
 	@test -x "$(SWAG)" || { echo "swag not installed — run 'make openapi-tools'"; exit 1; }
 	@mkdir -p api/openapi/proxy api/openapi/forwarder
