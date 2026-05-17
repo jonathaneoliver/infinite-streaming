@@ -47,10 +47,7 @@ const bundleHref = computed(() => {
   if (playId.value) p.set('play_id', playId.value);
   return '/analytics/api/session_bundle?' + p.toString();
 });
-// Back-link points at the LEGACY picker — v3 sessions picker isn't
-// ready as the default yet. Flip to /dashboard/v3/sessions.html once
-// it is.
-const backHref = '/dashboard/sessions.html';
+const backHref = '/dashboard/v3/sessions.html';
 
 onMounted(async () => {
   // Look up the current starred state. The endpoint returns
