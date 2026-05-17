@@ -77,14 +77,12 @@ const LIVE_EDGE_TOLERANCE_MS = 2000;
  *  span via liveSpanMs, stay unpaused. Mirrors the EventsTimeline
  *  rangechanged path so chart / lane behave identically. */
 function applyViewportOrSnapToLive(min: number, max: number) {
-  const lastTs = coord.state.lastSampleMs;
-  if (lastTs && max >= lastTs - LIVE_EDGE_TOLERANCE_MS) {
-    coord.setViewport(null);
-    coord.setLiveSpanMs(max - min);
-    if (coord.state.paused) coord.setPaused(false);
+  if (coord.isAtLiveEdge(max)) {
+    coord.setLiveSpan(max - min);
+    coord.setRange(null);
     return;
   }
-  coord.setViewport({ min, max });
+  coord.setRange({ min, max });
 }
 
 
@@ -317,17 +315,13 @@ function createChartInstance(Chart: any): any {
             modifierKey: undefined,
             onPanStart: ({ chart: c }: any) => {
               // Pre-seed coord.viewport with the chart's CURRENT visible
-              // range before setPaused fires. setPaused → snapshotLive‑
-              // Viewport would otherwise overwrite viewport with
-              // `[lastSample − liveSpanMs, lastSample]` (the live‑edge
-              // window), flashing the chart back to live mid‑pan. The
-              // snapshot helper now skips when a viewport already
-              // exists, so seeding it here is enough.
+              // Pin the range to the chart's current visible window so
+              // effectiveRange stops following live mid-pan. setRange
+              // collapses what used to be setViewport + setPaused.
               const sx = c?.scales?.x;
               if (sx && Number.isFinite(sx.min) && Number.isFinite(sx.max)) {
-                coord.setViewport({ min: sx.min, max: sx.max });
+                coord.setRange({ min: sx.min, max: sx.max });
               }
-              if (!coord.state.paused) coord.setPaused(true);
             },
             onPanComplete: ({ chart: c }: any) => {
               const sx = c.scales?.x;
@@ -435,7 +429,9 @@ function installRightDragPan() {
     const sx = chart.scales?.x;
     if (!sx) return;
     dragState = { startX: e.clientX, startMin: sx.min, startMax: sx.max };
-    if (!coord.state.paused) coord.setPaused(true);
+    // Pin from the start so effectiveRange stops sliding while the
+    // user is dragging (setRange handles both range + paused mirror).
+    coord.setRange({ min: sx.min, max: sx.max });
   });
   window.addEventListener('mousemove', (e) => {
     if (!dragState || !chart) return;
@@ -445,7 +441,7 @@ function installRightDragPan() {
     const span = dragState.startMax - dragState.startMin;
     const dx = e.clientX - dragState.startX;
     const dv = (dx / widthPx) * span;
-    coord.setViewport({ min: dragState.startMin - dv, max: dragState.startMax - dv });
+    coord.setRange({ min: dragState.startMin - dv, max: dragState.startMax - dv });
   });
   window.addEventListener('mouseup', (e) => {
     if (e.button === 2) dragState = null;
@@ -484,7 +480,7 @@ function installLiveWheelAnchor() {
         const windowMs = coord.state.windowMs;
         const currentSpan = coord.state.liveSpan;
         const nextSpan = Math.max(MIN_SPAN_MS, Math.min(windowMs, currentSpan * factor));
-        coord.setLiveSpanMs(nextSpan >= windowMs ? null : nextSpan);
+        coord.setLiveSpan(nextSpan);
         return;
       }
 
@@ -792,7 +788,7 @@ const liveChecked = computed(() => coord.state.range === null);
  *  span on the way back" was rejected — kept ripping the focus bar
  *  away from the zoom the user picked.) */
 function onLiveToggleClick() {
-  coord.togglePause();
+  coord.toggleLive();
 }
 
 onBeforeUnmount(() => {

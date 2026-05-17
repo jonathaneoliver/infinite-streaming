@@ -39,7 +39,7 @@ const liveChecked = computed(() => coord.state.range === null);
 /** Always togglePause — both directions preserve liveSpanMs.
  *  See MetricsLineChart.onLiveToggleClick for rationale. */
 function onLiveToggleClick() {
-  coord.togglePause();
+  coord.toggleLive();
 }
 </script>
 
