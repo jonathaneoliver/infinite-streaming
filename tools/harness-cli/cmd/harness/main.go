@@ -37,27 +37,33 @@ Global flags:
   --basic USER:PW  HTTP Basic auth (default $HARNESS_BASIC_AUTH)
   --json           emit JSON instead of human-readable output
 
-Commands:
-  players list                  list current v2 players (live)
-  players show <player_id>      print full player record + ETag
-  fault list|add|rm|clear       per-rule fault_rules CRUD (ETag-aware)
-  shape <target>                PATCH player.shape (rate/delay/loss/clear)
-  tail <target|all>             network stream SSE (/api/v2/timeseries)
-  ts <target>                   combined samples+network stream
-  events <target|all>           lifecycle SSE (/api/v2/events)
-  snapshot list|show            show prior mutation snapshots
-  undo [<target>]               replay the most recent snapshot
+Commands (live mutations are snapshot-protected; see 'undo'):
+  players list|show|create|rm|prune
+  fault   list|add|edit|rm|clear
+  shape   <target> --rate --delay --loss [--clear|--show]
+  labels  show|set|rm|clear
+  timeouts <target> --active --idle [--applies-*|--show|--clear]
+  content  <target> --strip-* --overstate-* --live-offset [...]
+  play    show|patch
+  network <target>            live HAR from /players/{id}/network
+  groups  list|show|create|patch|add|remove|rm
 
-Coming in subsequent phases:
-  players create|rm|prune       create/delete players
-  fault edit <target> <rule>    per-rule PATCH
-  labels|timeouts|content       player-record PATCH for remaining fields
-  play <subcommand>             play-scoped GET/PATCH + play.fault.*
-  network <target>              live HAR from /players/{id}/network
-  archive <subcommand>          forwarder reads (plays, snapshots, network, events, heatmap, bundle)
-  groups <subcommand>           player groups
-  info / raw / bundles          escape hatches + introspection
-  procedure / finding           multi-step ops + finding capture
+Streaming:
+  tail    <target|all>         network rows (/api/v2/timeseries)
+  ts      <target|all>         combined samples+network rows
+  events  <target|all>         lifecycle SSE (/api/v2/events)
+
+Archive (read-only forwarder /analytics/api/v2/*):
+  archive plays|play|aggregate|snapshots|network|events|heatmap|bundle
+
+Operator/CLI:
+  snapshot list|show           mutation snapshots in ~/.claude/state/...
+  undo [<target>|<id>]         replay the most recent snapshot
+  finding add <target>         capture state+note into .claude/findings/
+  procedure soak|abr-sweep|fault-soak <target>
+                               multi-step composed test procedures
+  info [--bundles]             healthz + info across both services
+  raw <METHOD> <PATH>          escape hatch (no resolver, no snapshot)
 
 Targets are resolved against the live player list. A target may be a
 full UUID, a >=6-char hex prefix, a label value (device/name), a
@@ -134,6 +140,10 @@ func main() {
 		exit(cmdInfo(client, args[1:], g.asJSON))
 	case "raw":
 		exit(cmdRaw(client, args[1:], g.asJSON))
+	case "finding":
+		exit(cmdFinding(client, args[1:], g.asJSON))
+	case "procedure":
+		exit(cmdProcedure(client, args[1:], g.asJSON))
 	case "help", "--help", "-h":
 		fmt.Fprint(os.Stdout, usage)
 	default:
