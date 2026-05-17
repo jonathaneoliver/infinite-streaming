@@ -63,8 +63,9 @@ func cmdTimeouts(client *api.Client, args []string, asJSON bool) error {
 	}
 	if *clear {
 		// PlayerPatch.TransferTimeouts is `*TransferTimeouts`, so nil
-		// would omit the key. Send raw null instead.
-		newETag, err := client.PatchRaw(ctx, pid, "", []byte(`{"transfer_timeouts": null}`))
+		// would omit the key. Send raw null via the snapshot-aware
+		// helper so 'harness undo' can reverse the clear.
+		newETag, err := client.PatchRawWithSnapshot(ctx, pid, "timeouts clear", []byte(`{"transfer_timeouts": null}`))
 		if err != nil {
 			return err
 		}

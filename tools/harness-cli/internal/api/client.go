@@ -466,12 +466,15 @@ func (c *Client) DeleteAllPlayers(ctx context.Context, action string) error {
 		if err != nil {
 			return err
 		}
-		beforeJSON, _ := json.Marshal(players)
+		beforeJSON, err := json.Marshal(players)
+		if err != nil {
+			return fmt.Errorf("snapshot: marshal players: %w", err)
+		}
 		snap := snapshot.Snapshot{
-			PlayerID:   "(all)",
-			Action:     action,
-			Before:     beforeJSON,
-			Patch:      json.RawMessage(`{"op":"delete-all"}`),
+			PlayerID: "(all)",
+			Action:   action,
+			Before:   beforeJSON,
+			Patch:    json.RawMessage(`{"op":"delete-all"}`),
 		}
 		if _, err := c.Snap.Save(snap); err != nil {
 			return err
@@ -609,15 +612,20 @@ func (c *Client) PatchPlay(ctx context.Context, playID, action string, body []by
 	}
 	newETag := strings.Trim(resp.Header.Get("ETag"), `"`)
 	if c.Snap != nil && action != "" {
-		beforeJSON, _ := json.Marshal(rec)
-		_, _ = c.Snap.Save(snapshot.Snapshot{
+		beforeJSON, err := json.Marshal(rec)
+		if err != nil {
+			return newETag, fmt.Errorf("snapshot: marshal play: %w", err)
+		}
+		if _, err := c.Snap.Save(snapshot.Snapshot{
 			PlayerID:   rec.PlayerId.String(),
 			Action:     action + " play=" + playID,
 			EtagBefore: etag,
 			EtagAfter:  newETag,
 			Before:     beforeJSON,
 			Patch:      body,
-		})
+		}); err != nil {
+			return newETag, err
+		}
 	}
 	return newETag, nil
 }
@@ -825,16 +833,24 @@ func (c *Client) PatchGroup(ctx context.Context, groupID, action string, patch p
 	}
 	newETag := strings.Trim(resp.Header.Get("ETag"), `"`)
 	if c.Snap != nil && action != "" {
-		beforeJSON, _ := json.Marshal(before)
-		patchJSON, _ := json.Marshal(patch)
-		_, _ = c.Snap.Save(snapshot.Snapshot{
+		beforeJSON, err := json.Marshal(before)
+		if err != nil {
+			return newETag, fmt.Errorf("snapshot: marshal group: %w", err)
+		}
+		patchJSON, err := json.Marshal(patch)
+		if err != nil {
+			return newETag, fmt.Errorf("snapshot: marshal patch: %w", err)
+		}
+		if _, err := c.Snap.Save(snapshot.Snapshot{
 			PlayerID:   "group-" + groupID,
 			Action:     action,
 			EtagBefore: etag,
 			EtagAfter:  newETag,
 			Before:     beforeJSON,
 			Patch:      patchJSON,
-		})
+		}); err != nil {
+			return newETag, err
+		}
 	}
 	return newETag, nil
 }
@@ -854,12 +870,33 @@ func (c *Client) DeleteGroup(ctx context.Context, groupID string) error {
 	return checkProxyError(resp, "DELETE /api/v2/player-groups/"+groupID)
 }
 
+// PatchRawWithSnapshot is the snapshot-aware sibling of PatchRaw.
+// Use it from typed commands (labels rm, timeouts --clear,
+// content --clear) that need raw-body merge-patch but must still
+// participate in 'harness undo'. Empty action disables snapshotting
+// (matches the convention used by the typed mutation methods).
+func (c *Client) PatchRawWithSnapshot(ctx context.Context, playerID, action string, body []byte) (string, error) {
+	before, etag, err := c.preMutate(ctx, playerID, action)
+	if err != nil {
+		return "", err
+	}
+	newETag, err := c.PatchRaw(ctx, playerID, etag, body)
+	if err != nil {
+		return newETag, err
+	}
+	if err := c.postMutate(playerID, action, etag, newETag, before, json.RawMessage(body)); err != nil {
+		return newETag, err
+	}
+	return newETag, nil
+}
+
 // PatchRaw is the universal escape hatch — sends a hand-crafted
 // merge-patch+json body straight at PATCH /api/v2/players/{id}.
 // Used by `harness undo` (replay) and `harness raw` (Phase 7). The
 // caller is responsible for body shape; this method does not
 // snapshot (the snapshot machinery would be circular for undo, and
-// `raw` is a debug escape hatch that wants to opt out).
+// `raw` is a debug escape hatch that wants to opt out). Typed
+// commands that need raw bodies should use PatchRawWithSnapshot.
 func (c *Client) PatchRaw(ctx context.Context, playerID, etag string, body []byte) (string, error) {
 	if etag == "" {
 		_, e, err := c.Player(ctx, playerID)

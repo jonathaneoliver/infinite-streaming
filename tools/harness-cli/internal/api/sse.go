@@ -146,6 +146,16 @@ func scanSSE(r io.Reader, onFrame func(SSEFrame) error) error {
 	if err := sc.Err(); err != nil {
 		return fmt.Errorf("sse scan: %w", err)
 	}
+	// A server may close the stream right after `data:` lines without
+	// the terminating blank — flush whatever is buffered so the final
+	// row isn't silently dropped. The forwarder is exactly this kind
+	// of service when it batches and flushes on shutdown.
+	if len(dataLines) > 0 || current.Event != "" {
+		current.Data = strings.Join(dataLines, "\n")
+		if err := onFrame(current); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 

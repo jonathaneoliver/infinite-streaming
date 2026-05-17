@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jonathaneoliver/infinite-streaming/tools/harness-cli/internal/api"
 	"github.com/jonathaneoliver/infinite-streaming/tools/harness-cli/internal/format"
 	"github.com/jonathaneoliver/infinite-streaming/tools/harness-cli/internal/v2gen/proxy"
@@ -68,8 +69,13 @@ func cmdPlayersShow(client *api.Client, args []string, asJSON bool) error {
 	ctx := context.Background()
 	pid, err := client.Resolve(ctx, args[0])
 	if err != nil {
-		// Allow bypassing resolve when caller passed a clearly-shaped
-		// UUID — useful for players that have just disconnected.
+		// Allow bypassing resolve only when the input parses as a
+		// UUID — used for players that have just disconnected from
+		// the live list. Anything else is a target typo and should
+		// surface the resolver's "no match" / "ambiguous" message.
+		if _, perr := uuid.Parse(args[0]); perr != nil {
+			return err
+		}
 		pid = args[0]
 	}
 	player, etag, err := client.Player(ctx, pid)

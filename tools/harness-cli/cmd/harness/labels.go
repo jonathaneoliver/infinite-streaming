@@ -10,7 +10,6 @@ import (
 
 	"github.com/jonathaneoliver/infinite-streaming/tools/harness-cli/internal/api"
 	"github.com/jonathaneoliver/infinite-streaming/tools/harness-cli/internal/format"
-	"github.com/jonathaneoliver/infinite-streaming/tools/harness-cli/internal/snapshot"
 	"github.com/jonathaneoliver/infinite-streaming/tools/harness-cli/internal/v2gen/proxy"
 )
 
@@ -112,11 +111,6 @@ func cmdLabelsRm(client *api.Client, args []string, asJSON bool) error {
 	if err != nil {
 		return err
 	}
-	// Pre-fetch for snapshot since we're bypassing the typed facade.
-	rec, etag, err := client.Player(ctx, pid)
-	if err != nil {
-		return err
-	}
 	nulls := make(map[string]any, len(args[1:]))
 	for _, k := range args[1:] {
 		nulls[k] = nil
@@ -125,17 +119,7 @@ func cmdLabelsRm(client *api.Client, args []string, asJSON bool) error {
 	if err != nil {
 		return err
 	}
-	if client.Snap != nil {
-		beforeJSON, _ := json.Marshal(rec)
-		_, _ = client.Snap.Save(snapshot.Snapshot{
-			PlayerID:   pid,
-			Action:     "labels rm " + strings.Join(args[1:], ","),
-			EtagBefore: etag,
-			Before:     beforeJSON,
-			Patch:      body,
-		})
-	}
-	newETag, err := client.PatchRaw(ctx, pid, etag, body)
+	newETag, err := client.PatchRawWithSnapshot(ctx, pid, "labels rm "+strings.Join(args[1:], ","), body)
 	if err != nil {
 		return err
 	}

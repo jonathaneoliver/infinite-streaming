@@ -56,6 +56,8 @@ func cmdInfo(client *api.Client, args []string, asJSON bool) error {
 	if includeBundles {
 		if b, err := client.ArchiveBundles(ctx); err == nil {
 			out.Bundles = b
+		} else {
+			fmt.Fprintln(os.Stderr, "warn: bundles fetch failed:", err)
 		}
 	}
 
@@ -85,7 +87,10 @@ func cmdInfo(client *api.Client, args []string, asJSON bool) error {
 // non-2xx it returns nil so the rendered output shows the field as
 // absent (better than rendering an internal error per-field).
 func getJSON(ctx context.Context, client *api.Client, url string) json.RawMessage {
-	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil
+	}
 	if client.BasicAuth != "" {
 		req.SetBasicAuth(splitBasicAuth(client.BasicAuth))
 	}
@@ -102,7 +107,10 @@ func getJSON(ctx context.Context, client *api.Client, url string) json.RawMessag
 }
 
 func getStatus(ctx context.Context, client *api.Client, url string) string {
-	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return "bad-url: " + err.Error()
+	}
 	if client.BasicAuth != "" {
 		req.SetBasicAuth(splitBasicAuth(client.BasicAuth))
 	}

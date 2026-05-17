@@ -145,8 +145,12 @@ func procedureABRSweep(client *api.Client, args []string) error {
 		}
 	}
 	// Restore: clear shape so the sweep doesn't leave the player pinned.
+	// Use a background context — the operator-cancel ctx is already
+	// done if we got here via Ctrl-C, and the cleanup must still run.
 	fmt.Fprintln(os.Stderr, "abr-sweep: clearing shape")
-	_, _ = client.ClearShape(ctx, pid, "abr-sweep done")
+	if _, err := client.ClearShape(context.Background(), pid, "abr-sweep done"); err != nil {
+		fmt.Fprintln(os.Stderr, "warn: clear shape failed:", err)
+	}
 	return nil
 }
 
@@ -179,7 +183,9 @@ func procedureFaultSoak(client *api.Client, args []string) error {
 		t := types[i%len(types)]
 		fmt.Fprintf(os.Stderr, "[%s] fault %s/%s\n", time.Now().Format("15:04:05"), t, *kind)
 		// Clear previous then add new — keeps rule set bounded.
-		_, _ = client.ClearFaultRules(ctx, pid, "fault-soak rotate")
+		if _, err := client.ClearFaultRules(ctx, pid, "fault-soak rotate"); err != nil {
+			fmt.Fprintln(os.Stderr, "warn: rotate clear failed:", err)
+		}
 		rule := buildFaultRule(t, *kind)
 		if _, err := client.AddFaultRule(ctx, pid, fmt.Sprintf("fault-soak %s", t), rule); err != nil {
 			return err
@@ -190,7 +196,9 @@ func procedureFaultSoak(client *api.Client, args []string) error {
 		i++
 	}
 	fmt.Fprintln(os.Stderr, "fault-soak: clearing")
-	_, _ = client.ClearFaultRules(ctx, pid, "fault-soak done")
+	if _, err := client.ClearFaultRules(context.Background(), pid, "fault-soak done"); err != nil {
+		fmt.Fprintln(os.Stderr, "warn: final clear failed:", err)
+	}
 	return nil
 }
 

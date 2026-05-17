@@ -60,7 +60,7 @@ func cmdContent(client *api.Client, args []string, asJSON bool) error {
 		return format.JSON(os.Stdout, rec.Content)
 	}
 	if *clear {
-		newETag, err := client.PatchRaw(ctx, pid, "", []byte(`{"content": null}`))
+		newETag, err := client.PatchRawWithSnapshot(ctx, pid, "content clear", []byte(`{"content": null}`))
 		if err != nil {
 			return err
 		}

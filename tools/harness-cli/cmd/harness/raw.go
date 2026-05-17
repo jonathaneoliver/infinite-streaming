@@ -85,12 +85,14 @@ func cmdRaw(client *api.Client, args []string, _ bool) error {
 	}
 	defer resp.Body.Close()
 	fmt.Fprintf(os.Stderr, "→ %s %s\n← %d %s  etag=%s\n", method, url, resp.StatusCode, resp.Status, resp.Header.Get("ETag"))
-	_, err = io.Copy(os.Stdout, resp.Body)
-	if err != nil {
+	if _, err := io.Copy(os.Stdout, resp.Body); err != nil {
 		return err
 	}
 	if resp.StatusCode >= 400 {
-		os.Exit(1)
+		// Return an error so main's fail() handles exit — preserves
+		// the deferred body.Close() + any --body @file close that
+		// os.Exit would otherwise skip.
+		return fmt.Errorf("%s %s: %d %s", method, path, resp.StatusCode, resp.Status)
 	}
 	return nil
 }
