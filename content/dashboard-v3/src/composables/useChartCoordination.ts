@@ -58,6 +58,29 @@ export interface ChartCoordinationState {
    *  operator can see exactly where the prev/next-selected event
    *  sits across all panels. null = no cursor (default). */
   cursorMs: number | null;
+
+  /* ─── Brush-as-source-of-truth refactor (alongside old API) ───────
+   *
+   * `range` collapses what `viewport` + `paused` used to express:
+   *   null         → operator is following live (chart x-axis is
+   *                   `[lastSampleMs - liveSpan, lastSampleMs]`)
+   *   {min, max}   → operator has pinned to this range (chart x-axis
+   *                   is exactly this)
+   *
+   * `liveSpan` collapses `liveSpanMs ?? windowMs`. Defaults to
+   * DEFAULT_FOCUS_MS (10 min) and is updated ONLY by explicit user
+   * gestures: chart Alt+wheel at live edge, brush-rail Alt+wheel at
+   * live edge, drag-end at live edge. Never auto-derived from
+   * incidental brush motion (that was the source of the focus-bar
+   * auto-grow regression we fixed by removing the auto-feedback
+   * watcher).
+   *
+   * Once all consumers have migrated, this pair entirely supersedes
+   * `viewport`, `paused`, `liveSpanMs`, `windowMs`, and `version`.
+   * During the migration the new setters internally also update the
+   * old state so legacy reads stay coherent. */
+  range: ChartViewport | null;
+  liveSpan: number;
 }
 
 const states = new Map<string, ChartCoordinationState>();
@@ -70,17 +93,22 @@ function writeExpandedStored(v: boolean) {
   try { localStorage.setItem(EXPANDED_STORAGE_KEY, v ? 'true' : 'false'); } catch { /* ignore */ }
 }
 
+const DEFAULT_FOCUS_MS = 10 * 60 * 1000;
+const LIVE_EDGE_TOLERANCE_MS = 2_000;
+
 function freshState(): ChartCoordinationState {
   return reactive<ChartCoordinationState>({
     paused: false,
     expanded: readExpandedStored(),
     viewport: null,
     lastSampleMs: 0,
-    windowMs: 10 * 60 * 1000,
+    windowMs: DEFAULT_FOCUS_MS,
     liveSpanMs: null,
     version: 0,
     bandwidthYMax: undefined,
     cursorMs: null,
+    range: null,
+    liveSpan: DEFAULT_FOCUS_MS,
   });
 }
 
@@ -117,6 +145,27 @@ export function useChartCoordination(playerIdInput: string | Ref<string>) {
     const span = s.liveSpanMs != null ? s.liveSpanMs : s.windowMs;
     return { min: end - span, max: end };
   });
+
+  /** New API: the single source of truth for what's currently displayed.
+   *  Derives from `state.range` (when pinned) or `[lastSampleMs - liveSpan,
+   *  lastSampleMs]` (when following live). Replaces `effectiveViewport`
+   *  once all consumers migrate. */
+  const effectiveRange = computed<ChartViewport>(() => {
+    const s = cur();
+    if (s.range) return s.range;
+    const end = s.lastSampleMs || Date.now();
+    return { min: end - s.liveSpan, max: end };
+  });
+
+  /** True when the chart's right edge is within tolerance of the latest
+   *  sample — i.e. the operator's effective view is essentially "live".
+   *  Used by chart pan/zoom-end paths to decide whether to snap back
+   *  into live-tracking mode. */
+  function isAtLiveEdge(rightEdgeMs: number): boolean {
+    const s = cur();
+    if (!s.lastSampleMs) return false;
+    return Math.abs(s.lastSampleMs - rightEdgeMs) <= LIVE_EDGE_TOLERANCE_MS;
+  }
 
   /** Wall-clock anchored tick positions for the visible viewport.
    *  Returns an array of ms-since-epoch timestamps, picked at a "nice"
@@ -155,6 +204,10 @@ export function useChartCoordination(playerIdInput: string | Ref<string>) {
     const trace = new Error().stack?.split('\n').slice(2, 5).join(' | ').slice(0, 200) ?? '';
     console.log('[CC] setViewport span=' + span + 's | ' + trace);
     s.viewport = v;
+    // Mirror into the new `range` so old + new readers stay coherent
+    // during the migration. After Phase E, `viewport` goes away and
+    // only `range` is written.
+    s.range = v;
     s.version++;
   }
 
@@ -181,6 +234,7 @@ export function useChartCoordination(playerIdInput: string | Ref<string>) {
     const end = s.lastSampleMs || Date.now();
     const span = s.liveSpanMs != null ? s.liveSpanMs : s.windowMs;
     s.viewport = { min: end - span, max: end };
+    s.range = s.viewport;
   }
 
   function togglePause() {
@@ -192,6 +246,7 @@ export function useChartCoordination(playerIdInput: string | Ref<string>) {
       // Returning to live drops any sticky user viewport so the next
       // tick's effectiveViewport snaps back to "now" (the live edge).
       s.viewport = null;
+      s.range = null;
     }
     s.version++;
   }
@@ -200,8 +255,12 @@ export function useChartCoordination(playerIdInput: string | Ref<string>) {
     const s = cur();
     if (s.paused === p) return;
     s.paused = p;
-    if (p) snapshotLiveViewport();
-    else s.viewport = null;
+    if (p) {
+      snapshotLiveViewport();
+    } else {
+      s.viewport = null;
+      s.range = null;
+    }
     s.version++;
   }
 
@@ -211,7 +270,55 @@ export function useChartCoordination(playerIdInput: string | Ref<string>) {
   function setLiveSpanMs(ms: number | null) {
     const s = cur();
     s.liveSpanMs = ms;
+    // Mirror into the new `liveSpan`. Null clears back to default.
+    s.liveSpan = ms != null ? ms : DEFAULT_FOCUS_MS;
     s.version++;
+  }
+
+  /* ─── New API: setRange / setLiveSpan / toggleLive ─────────────────
+   * These are the brush-as-source-of-truth setters. They mirror into
+   * the OLD state too so consumers that haven't migrated yet keep
+   * seeing coherent reads. After Phase E the old state goes away. */
+
+  /** Set the pinned range (or null = resume following live). The
+   *  single setter that replaces every `setViewport`+`setPaused` pair.
+   *  `range === null` means "follow live"; non-null means "pinned". */
+  function setRange(r: ChartViewport | null) {
+    const s = cur();
+    s.range = r;
+    // Mirror into the deprecated state during migration.
+    s.viewport = r;
+    s.paused = r !== null;
+    s.version++;
+  }
+
+  /** Set the live-edge span (used when range === null). Only updated
+   *  by explicit user gestures: chart Alt+wheel at live edge,
+   *  brush-rail Alt+wheel at live edge, brush drag-end at live edge.
+   *  Defaults to DEFAULT_FOCUS_MS; setting <= 0 reverts to default. */
+  function setLiveSpan(ms: number) {
+    const s = cur();
+    const next = ms > 0 ? ms : DEFAULT_FOCUS_MS;
+    s.liveSpan = next;
+    // Mirror into the deprecated state. `liveSpanMs == null` was the
+    // old "no zoom, use windowMs" signal — by always writing a value
+    // we keep the old effectiveViewport math consistent.
+    s.liveSpanMs = next;
+    s.version++;
+  }
+
+  /** Single-handler Live toggle used by chart toolbars, lane toolbar,
+   *  and the focus-window Live button. Pinned → following = clear
+   *  range. Following → pinned = snapshot current effectiveRange. */
+  function toggleLive() {
+    const s = cur();
+    if (s.range !== null) {
+      setRange(null);
+      return;
+    }
+    // Currently following live; pin to current effectiveRange.
+    const snapshot = effectiveRange.value;
+    setRange({ min: snapshot.min, max: snapshot.max });
   }
 
   function toggleExpanded() {
@@ -247,12 +354,17 @@ export function useChartCoordination(playerIdInput: string | Ref<string>) {
     // re-evaluate when the active player switches.
     get state(): ChartCoordinationState { return cur(); },
     effectiveViewport,
+    effectiveRange,
+    isAtLiveEdge,
     tickPositions,
     noteSample,
     setViewport,
     togglePause,
     setPaused,
     setLiveSpanMs,
+    setRange,
+    setLiveSpan,
+    toggleLive,
     toggleExpanded,
     setWindowMs,
     setBandwidthYMax,
