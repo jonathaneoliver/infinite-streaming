@@ -1,0 +1,25 @@
+{
+  "name": "infinite-streaming-dashboard-v3",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vue-tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "gen-types": "openapi-typescript ${OPENAPI_PATH:-../../api/openapi/v2/proxy.yaml} --output src/types/v2.ts"
+  },
+  "dependencies": {
+    "vue": "^3.5.13",
+    "vue-router": "^4.5.0",
+    "@tanstack/vue-query": "^5.62.7",
+    "@vueuse/core": "^12.0.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^5.2.1",
+    "openapi-typescript": "^7.4.4",
+    "typescript": "^5.7.2",
+    "vite": "^6.0.3",
+    "vue-tsc": "^2.1.10"
+  }
+}

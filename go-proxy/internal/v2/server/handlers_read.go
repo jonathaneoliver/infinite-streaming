@@ -91,17 +91,17 @@ func (s *Server) GetApiV2Players(w http.ResponseWriter, r *http.Request, params 
 // GetApiV2PlayersPlayerId returns one player record.
 func (s *Server) GetApiV2PlayersPlayerId(w http.ResponseWriter, r *http.Request, playerId oapigen.PlayerId) {
 	if s.v1 == nil {
-		writePlayerNotFound(w, playerId.String())
+		writePlayerNotFound(w, string(playerId))
 		return
 	}
-	sess, ok := s.v1.SessionByPlayerID(playerId.String())
+	sess, ok := s.v1.SessionByPlayerID(string(playerId))
 	if !ok {
-		writePlayerNotFound(w, playerId.String())
+		writePlayerNotFound(w, string(playerId))
 		return
 	}
 	rec, ok := v2translate.PlayerFromSession(sess)
 	if !ok {
-		writePlayerNotFound(w, playerId.String())
+		writePlayerNotFound(w, string(playerId))
 		return
 	}
 	if rec.ControlRevision != "" {
@@ -124,11 +124,11 @@ func (s *Server) GetApiV2PlayersPlayerIdNetwork(w http.ResponseWriter, r *http.R
 		writeJSON(w, http.StatusOK, map[string]any{"items": []oapigen.NetworkLogEntry{}})
 		return
 	}
-	if _, ok := s.v1.SessionByPlayerID(playerId.String()); !ok {
-		writePlayerNotFound(w, playerId.String())
+	if _, ok := s.v1.SessionByPlayerID(string(playerId)); !ok {
+		writePlayerNotFound(w, string(playerId))
 		return
 	}
-	rows := s.v1.NetworkLogForPlayer(playerId.String(), limit)
+	rows := s.v1.NetworkLogForPlayer(string(playerId), limit)
 	items := make([]oapigen.NetworkLogEntry, 0, len(rows))
 	for _, row := range rows {
 		items = append(items, v2translate.NetworkEntryFromV1(row))

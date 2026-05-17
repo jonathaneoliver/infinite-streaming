@@ -85,7 +85,20 @@ func (a *App) startPathPingSampler(ctx context.Context) {
 					if holder == nil {
 						continue
 					}
-					ip := strings.TrimSpace(getString(session, "player_ip"))
+					// Prefer `origination_ip` (extracted from
+					// `X-Forwarded-For`) over `player_ip`: when the
+					// proxy runs inside Docker, the immediate peer is
+					// the bridge gateway (e.g. 172.21.0.1), so
+					// `player_ip` ends up reporting RTT to the bridge
+					// instead of the real client across the LAN /
+					// internet. `origination_ip` is the unwrapped real
+					// client IP. Fall back to `player_ip` if the
+					// origination IP isn't surfaced (legacy v1 sessions
+					// without an upstream proxy chain).
+					ip := strings.TrimSpace(getString(session, "origination_ip"))
+					if ip == "" {
+						ip = strings.TrimSpace(getString(session, "player_ip"))
+					}
 					// Keep the per-port ICMP filter in sync with
 					// shaping state (issue #404). When shaping is
 					// active we route ICMP-to-player_ip into the

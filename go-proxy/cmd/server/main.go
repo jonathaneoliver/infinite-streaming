@@ -4481,6 +4481,24 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 
 	// Extract client IP considering X-Forwarded-For
 	clientIP := extractClientIP(r.RemoteAddr, r.Header.Get("X-Forwarded-For"))
+	// Diagnostic: surface every overwrite where the new value looks
+	// like a Docker bridge / loopback / private IP that's replacing
+	// a previously-correct external value. The log gives us the URL,
+	// method, and raw headers that triggered the bad overwrite.
+	if prev := getString(sessionData, "player_ip"); prev != "" && prev != clientIP {
+		newIsExternal := isExternalIP(clientIP)
+		prevWasExternal := isExternalIP(prev)
+		if prevWasExternal && !newIsExternal {
+			log.Printf("[GO-PROXY][PLAYER-IP-OVERWRITE] %s %s session_id=%s prev=%s new=%s remote=%s xff=%q ua=%q",
+				r.Method, r.URL.RequestURI(),
+				sessionNumber,
+				prev, clientIP,
+				r.RemoteAddr,
+				r.Header.Get("X-Forwarded-For"),
+				r.Header.Get("User-Agent"),
+			)
+		}
+	}
 	sessionData["player_ip"] = clientIP
 	sessionData["x_forwarded_for"] = r.Header.Get("X-Forwarded-For")
 

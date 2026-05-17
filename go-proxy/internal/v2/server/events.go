@@ -46,15 +46,51 @@ type EventSource struct {
 }
 
 // playerSnapshot tracks the per-player state used for diff detection.
-//   - rev:   control_revision; flips on PATCH writes.
-//   - hash:  fnv64a of the marshalled body; changes on ANY field
-//            update including non-PATCH metric drains (RTT, buffer,
-//            byte counters). A snapshot is "changed" when either
-//            differs from the prior, ensuring chart-feeding fields
-//            propagate even between PATCHes.
+//   - rev:         control_revision; flips on PATCH writes.
+//   - hash:        fnv64a of the marshalled body; changes on ANY field
+//                  update including non-PATCH metric drains (RTT,
+//                  buffer, byte counters). A snapshot is "changed" when
+//                  either differs from the prior, ensuring
+//                  chart-feeding fields propagate even between PATCHes.
+//   - controlHash: fnv64a of just the control-surface projection
+//                  (labels / shape / fault_rules / transfer_timeouts /
+//                  content). Diffed independently so we can fire a
+//                  dedicated `player.controls.updated` event ONLY when
+//                  the user-editable surface actually changes — not on
+//                  every metrics tick. Dashboards subscribe to this
+//                  event instead of `player.updated` for control sync,
+//                  which kills the ETag-churn / 412-cascade caused by
+//                  the metrics tick bumping control_revision ~1Hz.
 type playerSnapshot struct {
-	rev  string
-	hash uint64
+	rev         string
+	hash        uint64
+	controlHash uint64
+}
+
+// controlsProjection extracts the user-editable control surface
+// from a PlayerRecord. The hash of this projection drives the
+// dedicated `player.controls.updated` event — when it changes,
+// dashboards know a PATCH/POST/DELETE landed and re-sync controls
+// without waiting on the next metrics tick.
+//
+// What counts as a "control": anything the dashboard exposes as an
+// editable widget (slider, dropdown, radio, checkbox). Read-only
+// metrics (RTT, buffer depth, byte counters) are EXCLUDED — they
+// belong to the existing `player.updated` firehose.
+func controlsProjection(rec oapigen.PlayerRecord) any {
+	return struct {
+		Labels           *oapigen.Labels              `json:"labels,omitempty"`
+		Shape            *oapigen.Shape               `json:"shape,omitempty"`
+		FaultRules       *[]oapigen.FaultRule         `json:"fault_rules,omitempty"`
+		TransferTimeouts *oapigen.TransferTimeouts    `json:"transfer_timeouts,omitempty"`
+		Content          *oapigen.ContentManipulation `json:"content,omitempty"`
+	}{
+		Labels:           rec.Labels,
+		Shape:            rec.Shape,
+		FaultRules:       rec.FaultRules,
+		TransferTimeouts: rec.TransferTimeouts,
+		Content:          rec.Content,
+	}
 }
 
 // bodyHash returns a fast 64-bit fingerprint of a marshalled
@@ -218,7 +254,13 @@ func (s *EventSource) handleSessionSnapshot(snap SessionSnapshot) {
 		// control_revision. Without this, RTT/buffer charts stay
 		// flat because no v2 event fires.
 		h := bodyHash(body)
-		next[pid] = playerSnapshot{rev: rec.ControlRevision, hash: h}
+		// Hash just the control-surface projection so we can fire
+		// `player.controls.updated` independently of the metrics
+		// tick. controlsBody includes only the fields user-editable
+		// from the dashboard — see controlsProjection() below.
+		ctrlBody, _ := json.Marshal(controlsProjection(rec))
+		ch := bodyHash(ctrlBody)
+		next[pid] = playerSnapshot{rev: rec.ControlRevision, hash: h, controlHash: ch}
 		if sid := getString(sess, "session_id"); sid != "" {
 			nextSession[sid] = pid
 		}
@@ -229,6 +271,14 @@ func (s *EventSource) handleSessionSnapshot(snap SessionSnapshot) {
 			s.publishPlayerEvent("player.created", body)
 		case prev.rev != rec.ControlRevision || prev.hash != h:
 			s.publishPlayerEvent("player.updated", body)
+		}
+		// Dedicated control-surface event. Fires on first sight
+		// AND when the control hash changes. Carries the same
+		// PlayerRecord body the dashboards already know how to
+		// parse — they can read just the control fields and
+		// ignore the rest.
+		if !hadPrev || prev.controlHash != ch {
+			s.publishPlayerEvent("player.controls.updated", body)
 		}
 	}
 

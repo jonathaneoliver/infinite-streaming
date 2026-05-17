@@ -102,11 +102,15 @@ func (e FaultRuleMode) Valid() bool {
 
 // Defines values for FaultRuleType.
 const (
+	ConnectionRefused       FaultRuleType = "connection_refused"
 	Corrupted               FaultRuleType = "corrupted"
+	DnsFailure              FaultRuleType = "dns_failure"
+	N403                    FaultRuleType = "403"
 	N404                    FaultRuleType = "404"
 	N500                    FaultRuleType = "500"
 	N503                    FaultRuleType = "503"
 	None                    FaultRuleType = "none"
+	RateLimiting            FaultRuleType = "rate_limiting"
 	RequestBodyDelayed      FaultRuleType = "request_body_delayed"
 	RequestBodyHang         FaultRuleType = "request_body_hang"
 	RequestBodyReset        FaultRuleType = "request_body_reset"
@@ -122,7 +126,13 @@ const (
 // Valid indicates whether the value is a known member of the FaultRuleType enum.
 func (e FaultRuleType) Valid() bool {
 	switch e {
+	case ConnectionRefused:
+		return true
 	case Corrupted:
+		return true
+	case DnsFailure:
+		return true
+	case N403:
 		return true
 	case N404:
 		return true
@@ -131,6 +141,8 @@ func (e FaultRuleType) Valid() bool {
 	case N503:
 		return true
 	case None:
+		return true
+	case RateLimiting:
 		return true
 	case RequestBodyDelayed:
 		return true
@@ -438,6 +450,7 @@ func (e ReplayGapEventType) Valid() bool {
 
 // Defines values for TransportFaultMode.
 const (
+	TransportFaultModeFailuresPerPackets TransportFaultMode = "failures_per_packets"
 	TransportFaultModeFailuresPerSeconds TransportFaultMode = "failures_per_seconds"
 	TransportFaultModeRequests           TransportFaultMode = "requests"
 	TransportFaultModeSeconds            TransportFaultMode = "seconds"
@@ -446,6 +459,8 @@ const (
 // Valid indicates whether the value is a known member of the TransportFaultMode enum.
 func (e TransportFaultMode) Valid() bool {
 	switch e {
+	case TransportFaultModeFailuresPerPackets:
+		return true
 	case TransportFaultModeFailuresPerSeconds:
 		return true
 	case TransportFaultModeRequests:
@@ -722,20 +737,30 @@ type FaultRule struct {
 	Id   *string        `json:"id,omitempty"`
 	Mode *FaultRuleMode `json:"mode,omitempty"`
 
-	// Type HTTP-layer fault types. `corrupted` is segment-only;
+	// Type HTTP-layer fault types.
+	//
+	// `corrupted` is segment-only.
 	// `request_*_hang/reset/delayed` are socket-phase faults that
-	// apply at any HTTP request kind. `none` disables this rule
-	// without removing it.
+	// apply at any HTTP request kind. `connection_refused` and
+	// `dns_failure` simulate origin-side reachability failures.
+	// `rate_limiting` returns 429-with-Retry-After.
+	//
+	// `none` disables this rule without removing it.
 	Type FaultRuleType `json:"type"`
 }
 
 // FaultRuleMode defines model for FaultRule.Mode.
 type FaultRuleMode string
 
-// FaultRuleType HTTP-layer fault types. `corrupted` is segment-only;
+// FaultRuleType HTTP-layer fault types.
+//
+// `corrupted` is segment-only.
 // `request_*_hang/reset/delayed` are socket-phase faults that
-// apply at any HTTP request kind. `none` disables this rule
-// without removing it.
+// apply at any HTTP request kind. `connection_refused` and
+// `dns_failure` simulate origin-side reachability failures.
+// `rate_limiting` returns 429-with-Retry-After.
+//
+// `none` disables this rule without removing it.
 type FaultRuleType string
 
 // HeartbeatEvent defines model for HeartbeatEvent.
@@ -1616,9 +1641,14 @@ type TransferTimeouts struct {
 // At most one transport fault per session — `drop` and `reject`
 // are mutually exclusive at the kernel rule level.
 type TransportFault struct {
-	Consecutive *int                `json:"consecutive,omitempty"`
-	Frequency   *int                `json:"frequency,omitempty"`
-	Mode        *TransportFaultMode `json:"mode,omitempty"`
+	Consecutive *int `json:"consecutive,omitempty"`
+	Frequency   *int `json:"frequency,omitempty"`
+
+	// Mode Cadence unit for transport faults. `failures_per_packets`
+	// switches the kernel rule to a per-packet sampler instead of
+	// a time-window sampler — useful for high-rate flows where
+	// a small percentage of dropped packets is the threat model.
+	Mode *TransportFaultMode `json:"mode,omitempty"`
 
 	// Type `drop` silently discards packets (player sees timeout-ish
 	// behaviour); `reject` sends an ICMP unreachable (player sees
@@ -1626,7 +1656,10 @@ type TransportFault struct {
 	Type TransportFaultType `json:"type"`
 }
 
-// TransportFaultMode defines model for TransportFault.Mode.
+// TransportFaultMode Cadence unit for transport faults. `failures_per_packets`
+// switches the kernel rule to a per-packet sampler instead of
+// a time-window sampler — useful for high-rate flows where
+// a small percentage of dropped packets is the threat model.
 type TransportFaultMode string
 
 // TransportFaultType `drop` silently discards packets (player sees timeout-ish
@@ -1708,10 +1741,10 @@ type PlayId = openapi_types.UUID
 type PlayIdFilter = openapi_types.UUID
 
 // PlayerId defines model for PlayerId.
-type PlayerId = openapi_types.UUID
+type PlayerId = string
 
 // PlayerIdFilter defines model for PlayerIdFilter.
-type PlayerIdFilter = openapi_types.UUID
+type PlayerIdFilter = string
 
 // RuleId defines model for RuleId.
 type RuleId = string
@@ -1727,7 +1760,8 @@ type basicAuthContextKey string
 
 // GetApiV2EventsParams defines parameters for GetApiV2Events.
 type GetApiV2EventsParams struct {
-	// PlayerId Filter SSE frames to one player.
+	// PlayerId Filter SSE frames to one player. Same client-defined format as
+	// the path PlayerId — UUIDv4, CFUUID, short hex, etc.
 	PlayerId *PlayerIdFilter `form:"player_id,omitempty" json:"player_id,omitempty"`
 
 	// PlayId Filter SSE frames to one play.
@@ -2425,7 +2459,7 @@ func (siw *ServerInterfaceWrapper) GetApiV2Events(w http.ResponseWriter, r *http
 
 	// ------------- Optional query parameter "player_id" -------------
 
-	err = runtime.BindQueryParameterWithOptions("form", true, false, "player_id", r.URL.Query(), &params.PlayerId, runtime.BindQueryParameterOptions{Type: "string", Format: "uuid"})
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "player_id", r.URL.Query(), &params.PlayerId, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
 	if err != nil {
 		var requiredError *runtime.RequiredParameterError
 		if errors.As(err, &requiredError) {
@@ -2799,7 +2833,7 @@ func (siw *ServerInterfaceWrapper) DeleteApiV2PlayersPlayerId(w http.ResponseWri
 	// ------------- Path parameter "player_id" -------------
 	var playerId PlayerId
 
-	err = runtime.BindStyledParameterWithOptions("simple", "player_id", mux.Vars(r)["player_id"], &playerId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "uuid"})
+	err = runtime.BindStyledParameterWithOptions("simple", "player_id", mux.Vars(r)["player_id"], &playerId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
 	if err != nil {
 		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "player_id", Err: err})
 		return
@@ -2831,7 +2865,7 @@ func (siw *ServerInterfaceWrapper) GetApiV2PlayersPlayerId(w http.ResponseWriter
 	// ------------- Path parameter "player_id" -------------
 	var playerId PlayerId
 
-	err = runtime.BindStyledParameterWithOptions("simple", "player_id", mux.Vars(r)["player_id"], &playerId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "uuid"})
+	err = runtime.BindStyledParameterWithOptions("simple", "player_id", mux.Vars(r)["player_id"], &playerId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
 	if err != nil {
 		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "player_id", Err: err})
 		return
@@ -2863,7 +2897,7 @@ func (siw *ServerInterfaceWrapper) PatchApiV2PlayersPlayerId(w http.ResponseWrit
 	// ------------- Path parameter "player_id" -------------
 	var playerId PlayerId
 
-	err = runtime.BindStyledParameterWithOptions("simple", "player_id", mux.Vars(r)["player_id"], &playerId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "uuid"})
+	err = runtime.BindStyledParameterWithOptions("simple", "player_id", mux.Vars(r)["player_id"], &playerId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
 	if err != nil {
 		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "player_id", Err: err})
 		return
@@ -2923,7 +2957,7 @@ func (siw *ServerInterfaceWrapper) PostApiV2PlayersPlayerIdFaultRules(w http.Res
 	// ------------- Path parameter "player_id" -------------
 	var playerId PlayerId
 
-	err = runtime.BindStyledParameterWithOptions("simple", "player_id", mux.Vars(r)["player_id"], &playerId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "uuid"})
+	err = runtime.BindStyledParameterWithOptions("simple", "player_id", mux.Vars(r)["player_id"], &playerId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
 	if err != nil {
 		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "player_id", Err: err})
 		return
@@ -2983,7 +3017,7 @@ func (siw *ServerInterfaceWrapper) DeleteApiV2PlayersPlayerIdFaultRulesRuleId(w 
 	// ------------- Path parameter "player_id" -------------
 	var playerId PlayerId
 
-	err = runtime.BindStyledParameterWithOptions("simple", "player_id", mux.Vars(r)["player_id"], &playerId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "uuid"})
+	err = runtime.BindStyledParameterWithOptions("simple", "player_id", mux.Vars(r)["player_id"], &playerId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
 	if err != nil {
 		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "player_id", Err: err})
 		return
@@ -3052,7 +3086,7 @@ func (siw *ServerInterfaceWrapper) PatchApiV2PlayersPlayerIdFaultRulesRuleId(w h
 	// ------------- Path parameter "player_id" -------------
 	var playerId PlayerId
 
-	err = runtime.BindStyledParameterWithOptions("simple", "player_id", mux.Vars(r)["player_id"], &playerId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "uuid"})
+	err = runtime.BindStyledParameterWithOptions("simple", "player_id", mux.Vars(r)["player_id"], &playerId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
 	if err != nil {
 		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "player_id", Err: err})
 		return
@@ -3121,7 +3155,7 @@ func (siw *ServerInterfaceWrapper) GetApiV2PlayersPlayerIdNetwork(w http.Respons
 	// ------------- Path parameter "player_id" -------------
 	var playerId PlayerId
 
-	err = runtime.BindStyledParameterWithOptions("simple", "player_id", mux.Vars(r)["player_id"], &playerId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "uuid"})
+	err = runtime.BindStyledParameterWithOptions("simple", "player_id", mux.Vars(r)["player_id"], &playerId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
 	if err != nil {
 		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "player_id", Err: err})
 		return
