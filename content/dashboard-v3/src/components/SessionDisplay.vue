@@ -405,10 +405,11 @@ function navNext() {
 }
 function recenterOnNav() {
   const ev = navCurrent.value; if (!ev) return;
-  const half = (windowEndMs.value - windowStartMs.value) / 2;
-  windowStartMs.value = clampStart(ev._ts - half);
-  windowEndMs.value = clampEnd(ev._ts + half);
-  userMovedBrush.value = true;
+  const current = brushRange.value;
+  const half = (current.max - current.min) / 2;
+  const newStart = clampStart(ev._ts - half);
+  const newEnd = clampEnd(ev._ts + half);
+  coord.setRange({ min: newStart, max: newEnd });
 }
 
 watch(navCurrent, (ev) => {
@@ -448,79 +449,30 @@ const railMarkers = computed(() => {
 
 /* ─── Brush + focus window ──────────────────────────────────────── */
 
-const windowStartMs = ref<number>(0);
-const windowEndMs = ref<number>(0);
-const windowSpanMs = computed(() => Math.max(1, windowEndMs.value - windowStartMs.value));
+/** Brush position derives directly from `coord.effectiveRange`. Drag
+ *  handlers compute new ranges from mouse deltas and write via
+ *  `coord.setRange`; there are no local windowStart/windowEnd refs,
+ *  no userMovedBrush flag. "Paused / pinned" IS `coord.state.range
+ *  !== null`. "Live edge" IS `coord.isAtLiveEdge(brushRange.max)`.
+ *
+ *  Fresh-session auto-grow happens automatically: as samples land,
+ *  `coord.state.lastSampleMs` advances, so `effectiveRange.max`
+ *  advances, so the brush widens up to `coord.state.liveSpan`
+ *  (default 10 min) without any auto-feedback watcher that could get
+ *  stuck. */
+const brushRange = computed(() => coord.effectiveRange.value);
+const windowSpanMs = computed(() => Math.max(1, brushRange.value.max - brushRange.value.min));
 
-const DEFAULT_FOCUS_MS = 10 * 60 * 1000;
-const userMovedBrush = ref(false);
-
-/** Same checked rule as the chart-toolbar Live toggles — the brush
- *  rail's Live button reflects the shared `coord.state.viewport`. */
-const brushLiveChecked = computed(() => coord.state.viewport === null);
-watch(timeRange, (r) => {
-  if (!r) return;
-  const fullSpan = r.max - r.min;
-  // When the brush is tracking the live edge (!userMovedBrush) we
-  // preserve whatever WIDTH it already has — so if the operator
-  // resized to 3 min and then dropped at live, the live-tracking
-  // window stays 3 min wide. Only fall back to DEFAULT_FOCUS_MS on
-  // the very first paint when no width exists yet.
-  if (!userMovedBrush.value) {
-    // Live-tracking: span is driven by coord.liveSpanMs (set by chart
-    // Alt+wheel) or DEFAULT_FOCUS_MS. Never carry forward the previous
-    // tick's currentSpan — that's what got the brush stuck at 30 s
-    // when a fresh session started narrow and we never grew past it.
-    // Capped at fullSpan so a very young session (1 s of data) doesn't
-    // try to show empty area before r.min.
-    const liveSpan = coord.state.liveSpanMs;
-    const targetSpan = liveSpan != null
-      ? Math.min(liveSpan, fullSpan)
-      : Math.min(DEFAULT_FOCUS_MS, fullSpan);
-    const newStart = Math.max(r.min, r.max - targetSpan);
-    windowStartMs.value = newStart;
-    windowEndMs.value = r.max;
-    return;
-  }
-  if (windowStartMs.value < r.min) windowStartMs.value = r.min;
-  if (windowEndMs.value > r.max) windowEndMs.value = r.max;
-  if (windowStartMs.value >= windowEndMs.value) {
-    const span = Math.min(DEFAULT_FOCUS_MS, fullSpan);
-    windowStartMs.value = Math.max(r.min, r.max - span);
-    windowEndMs.value = r.max;
-  }
-});
-
-// Chart Alt+wheel updates coord.liveSpanMs to narrow the visible
-// span around the live edge. The brush width tracks chart zoom
-// unconditionally — zooming on a chart IS a request to resize the
-// focus rail, regardless of whether the brush is currently pinned.
-// Position-pinning (userMovedBrush) governs WHERE the window lives,
-// not how wide it is.
-watch(
-  () => coord.state.liveSpanMs,
-  (span) => {
-    const r = timeRange.value;
-    if (!r) return;
-    const targetSpan = span ?? Math.min(DEFAULT_FOCUS_MS, r.max - r.min);
-    // Anchor at the CURRENT right edge when the user has parked the
-    // brush off live — Alt+wheel on a chart should only resize the
-    // span, not rip the window back to "now". When at live (or never
-    // moved off), anchor at r.max so the live-tracking semantics hold.
-    const anchorRight = userMovedBrush.value ? windowEndMs.value : r.max;
-    console.log('[BR] liveSpanMs watch span=' + (span ?? 'null') + ' → brush ' + Math.round(targetSpan/1000) + 's, anchor=' + (userMovedBrush.value ? 'current' : 'live'));
-    windowStartMs.value = Math.max(r.min, anchorRight - targetSpan);
-    windowEndMs.value = anchorRight;
-  },
-);
+/** Live toggle checked rule — same across every surface. */
+const brushLiveChecked = computed(() => coord.state.range === null);
 
 function clampStart(v: number) {
   const r = timeRange.value; if (!r) return v;
-  return Math.max(r.min, Math.min(v, windowEndMs.value - 1000));
+  return Math.max(r.min, Math.min(v, brushRange.value.max - 1000));
 }
 function clampEnd(v: number) {
   const r = timeRange.value; if (!r) return v;
-  return Math.min(r.max, Math.max(v, windowStartMs.value + 1000));
+  return Math.min(r.max, Math.max(v, brushRange.value.min + 1000));
 }
 
 /* ─── Brush drag handling ───────────────────────────────────────── */
@@ -541,13 +493,17 @@ function pxToMs(px: number): number {
 function onBrushMouseDown(e: MouseEvent, mode: 'pan' | 'resize-left' | 'resize-right') {
   e.preventDefault();
   e.stopPropagation();
-  userMovedBrush.value = true;
+  // Snapshot the start range BEFORE pinning — if the brush was
+  // following live, effectiveRange was advancing with each sample.
+  // Pinning stops that so the drag operates on a stable baseline.
+  const start = brushRange.value;
   dragState.value = {
     mode,
     startX: e.clientX,
-    startStart: windowStartMs.value,
-    startEnd: windowEndMs.value,
+    startStart: start.min,
+    startEnd: start.max,
   };
+  coord.setRange({ min: start.min, max: start.max });
   window.addEventListener('mousemove', onDragMove);
   window.addEventListener('mouseup', onDragEnd, { once: true });
 }
@@ -556,73 +512,51 @@ function onDragMove(e: MouseEvent) {
   const r = timeRange.value; if (!r) return;
   const dms = pxToMs(e.clientX - d.startX);
   const MIN_WINDOW_MS = 1000;
+  let s = d.startStart;
+  let f = d.startEnd;
   if (d.mode === 'pan') {
     const span = d.startEnd - d.startStart;
-    let s = d.startStart + dms;
-    let f = s + span;
+    s = d.startStart + dms;
+    f = s + span;
     if (s < r.min) { s = r.min; f = s + span; }
     if (f > r.max) { f = r.max; s = f - span; }
-    windowStartMs.value = s;
-    windowEndMs.value = f;
   } else if (d.mode === 'resize-left') {
-    let s = d.startStart + dms;
+    s = d.startStart + dms;
     if (s < r.min) s = r.min;
     if (s > d.startEnd - MIN_WINDOW_MS) s = d.startEnd - MIN_WINDOW_MS;
-    windowStartMs.value = s;
+    f = d.startEnd;
   } else if (d.mode === 'resize-right') {
-    let f = d.startEnd + dms;
+    f = d.startEnd + dms;
     if (f > r.max) f = r.max;
     if (f < d.startStart + MIN_WINDOW_MS) f = d.startStart + MIN_WINDOW_MS;
-    windowEndMs.value = f;
+    s = d.startStart;
   }
+  coord.setRange({ min: s, max: f });
 }
 function onDragEnd() {
+  const ended = brushRange.value;
   dragState.value = null;
   window.removeEventListener('mousemove', onDragMove);
-  const r = timeRange.value;
-  // RIGHT EDGE position determines the pinned-vs-following state.
-  // Drop within 2 s of the right edge → "live" (live mode: follow
-  // streaming edge; archive mode: snap to end-of-session). Works in
-  // BOTH modes — archive's r.max is the end of the playback, which
-  // is the same conceptual "Live" the operator sees.
-  // Drop away from r.max → pinned to the brush window.
-  // No paused guard: dragging right to live edge is itself an explicit
-  // unpause gesture (user is saying "follow the edge from here").
-  const atLiveEdge =
-    !!r
-    && r.max - windowEndMs.value <= 2000;
-  const dropSpan = windowEndMs.value - windowStartMs.value;
-  if (atLiveEdge) {
-    userMovedBrush.value = false;
-    if (coord.state.paused) coord.setPaused(false);
-  }
-
-  // BRUSH WIDTH on release becomes the new liveSpanMs — operator's
+  // BRUSH WIDTH on release becomes the new liveSpan — operator's
   // intent regardless of where the right edge ended up. Pinned drops
   // store the span so it survives the round trip when they later
   // click Live to return; live drops update the span immediately so
-  // every other chart's live-tracker uses the same width. Applies in
-  // BOTH live and archive modes — "live edge" in archive is just the
-  // right edge of the playback; the operator's brush width is the
-  // canonical span either way.
-  if (dropSpan > 0 && coord.state.liveSpanMs !== dropSpan) {
-    coord.setLiveSpanMs(dropSpan);
-  }
-
-  // Reconcile viewport with the new brush window. !userMovedBrush →
-  // clears viewport (charts follow live). userMovedBrush → pins
-  // viewport to the brush range.
-  applyWindowToViewport();
+  // every other chart's live-tracker uses the same width.
+  const dropSpan = ended.max - ended.min;
+  if (dropSpan > 0) coord.setLiveSpan(dropSpan);
+  // RIGHT EDGE within 2 s of the latest sample → snap to live
+  // (charts AND brush follow the right edge as new samples arrive).
+  // Otherwise leave the range pinned to whatever onDragMove last set.
+  if (coord.isAtLiveEdge(ended.max)) coord.setRange(null);
 }
-/** Alt+wheel on the brush rail zooms the focus-window duration.
- *
- *   - AT LIVE (right edge ≈ r.max): left-edge-only — right stays
- *     glued to live, span shrinks/grows from the left.
- *   - OFF LIVE: mouse-anchored — the time under the cursor stays
- *     fixed while both edges move. If the resulting right edge
- *     reaches live, snap the brush back to live tracking
- *     (userMovedBrush=false) so further zooms take the left-only
- *     path.
+
+/** Alt+wheel on the brush rail zooms the focus-window duration. Same
+ *  semantics as Alt+wheel on the chart toolbars:
+ *    - AT LIVE (brush.max ≈ lastSampleMs): grow/shrink span, keep
+ *      right edge glued to live. Updates liveSpan, range stays null.
+ *    - OFF LIVE: mouse-anchored — the time under the cursor stays
+ *      fixed while both edges move. If the new right edge reaches
+ *      live, snap to live tracking.
  *
  *  Plain wheel falls through to native page scroll. */
 function onRailWheel(e: WheelEvent) {
@@ -633,36 +567,34 @@ function onRailWheel(e: WheelEvent) {
   const r = timeRange.value;
   if (!rail || !r) return;
   const fullSpan = Math.max(1, r.max - r.min);
-  const currentSpan = Math.max(1, windowEndMs.value - windowStartMs.value);
+  const current = brushRange.value;
+  const currentSpan = Math.max(1, current.max - current.min);
   const factor = e.deltaY < 0 ? 0.9 : 1 / 0.9;
   const MIN_SPAN_MS = 1_000;
   const nextSpan = Math.max(MIN_SPAN_MS, Math.min(fullSpan, currentSpan * factor));
   if (nextSpan === currentSpan) return;
-  const atLive = r.max - windowEndMs.value <= 2000;
 
-  let newStart: number;
-  let newEnd: number;
-  if (atLive) {
-    newEnd = r.max;
-    newStart = Math.max(r.min, newEnd - nextSpan);
-  } else {
-    // Mouse-anchored: keep the timestamp under the cursor at the same
-    // x position in the rail after the zoom.
-    const rect = rail.getBoundingClientRect();
-    const frac = rect.width > 0 ? (e.clientX - rect.left) / rect.width : 0.5;
-    const anchorTime = r.min + frac * fullSpan;
-    const anchorFracInWindow = (anchorTime - windowStartMs.value) / currentSpan;
-    newStart = anchorTime - anchorFracInWindow * nextSpan;
-    newEnd = newStart + nextSpan;
-    if (newStart < r.min) { newStart = r.min; newEnd = newStart + nextSpan; }
-    if (newEnd > r.max) { newEnd = r.max; newStart = newEnd - nextSpan; }
+  if (coord.isAtLiveEdge(current.max)) {
+    coord.setLiveSpan(nextSpan);
+    coord.setRange(null);
+    return;
   }
-
-  windowStartMs.value = newStart;
-  windowEndMs.value = newEnd;
-  // Snap back to live tracking if the zoom landed at the live edge.
-  const endedAtLive = r.max - newEnd <= 2000;
-  userMovedBrush.value = !endedAtLive;
+  // Mouse-anchored: keep the timestamp under the cursor at the same
+  // x position in the rail after the zoom.
+  const rect = rail.getBoundingClientRect();
+  const frac = rect.width > 0 ? (e.clientX - rect.left) / rect.width : 0.5;
+  const anchorTime = r.min + frac * fullSpan;
+  const anchorFracInWindow = (anchorTime - current.min) / currentSpan;
+  let newStart = anchorTime - anchorFracInWindow * nextSpan;
+  let newEnd = newStart + nextSpan;
+  if (newStart < r.min) { newStart = r.min; newEnd = newStart + nextSpan; }
+  if (newEnd > r.max) { newEnd = r.max; newStart = newEnd - nextSpan; }
+  if (coord.isAtLiveEdge(newEnd)) {
+    coord.setLiveSpan(nextSpan);
+    coord.setRange(null);
+    return;
+  }
+  coord.setRange({ min: newStart, max: newEnd });
 }
 
 function onRailMouseDown(e: MouseEvent) {
@@ -674,15 +606,14 @@ function onRailMouseDown(e: MouseEvent) {
   if (rect.width <= 0) return;
   const frac = (e.clientX - rect.left) / rect.width;
   const target = railFracToMs(frac);
-  const span = windowEndMs.value - windowStartMs.value;
+  const current = brushRange.value;
+  const span = current.max - current.min;
   const r = timeRange.value; if (!r) return;
   let s = target - span / 2;
   let f = s + span;
   if (s < r.min) { s = r.min; f = s + span; }
   if (f > r.max) { f = r.max; s = f - span; }
-  windowStartMs.value = s;
-  windowEndMs.value = f;
-  userMovedBrush.value = true;
+  coord.setRange({ min: s, max: f });
 }
 
 /* ─── Brush-driven panel cursor ─────────────────────────────────── */
@@ -692,99 +623,18 @@ function playerKey(id: string) {
   return ['player', id] as const;
 }
 
-watch([windowStartMs, windowEndMs], () => {
-  // Reconcile chart viewport with the new brush window. `liveSpanMs`
-  // is set explicitly by user gestures (onDragEnd, chart Alt+wheel,
-  // brush-rail Alt+wheel) — NOT auto-fed from this watcher. Earlier
-  // versions did auto-feed, but during the fresh-session auto-grow
-  // phase that wrote the small early-tick width into liveSpanMs,
-  // which then capped subsequent grow ticks at that width. Result:
-  // brush stuck at e.g. 5 s after the second sample, never reaching
-  // the 10-min default.
-  applyWindowToViewport();
-});
-
-function applyWindowToViewport() {
-  // Three states for the chart viewport:
-  //  1. Operator has explicitly moved the brush — pin charts to that
-  //     window (frozen view).
-  //  2. Paused — same: pin charts to the window the operator pinned
-  //     by hitting pause.
-  //  3. Neither — hand the viewport back to coord by clearing it.
-  //     `effectiveViewport` then follows the right edge with the
-  //     coord's liveSpanMs / windowMs span. Works in both modes:
-  //     live = streaming edge advances; archive = right edge stays
-  //     at end-of-session.
-  if (!userMovedBrush.value && !coord.state.paused) {
-    if (coord.state.viewport != null) coord.setViewport(null);
-    return;
-  }
-  if (windowStartMs.value && windowEndMs.value && windowStartMs.value < windowEndMs.value) {
-    coord.setViewport({ min: windowStartMs.value, max: windowEndMs.value });
-  }
-}
-
+// Brush-end-row projection — runs in ALL contexts so SessionDisplay's
+// display panels (PlayerMetrics, SessionDetails, charts) always
+// reflect the state at the brush's right edge. When at the live
+// edge, lastAt(brush.max) returns the latest sample → panels show
+// essentially-current state. When brush moves back, panels show
+// that past moment. The cache key is the prefixed archive id so
+// this never collides with the live cache that outside mutation
+// panels (FaultRules etc.) read.
 watch(
-  () => coord.state.viewport,
-  (v) => {
-    console.log('[BR] coord.viewport watch', v ? `[span=${Math.round((v.max-v.min)/1000)}s]` : 'null', 'userMoved=' + userMovedBrush.value);
-    if (v) {
-      if (windowStartMs.value === v.min && windowEndMs.value === v.max) return;
-      console.log('[BR] coord.viewport set → brush ' + Math.round((v.max-v.min)/1000) + 's, userMovedBrush=true');
-      windowStartMs.value = v.min;
-      windowEndMs.value = v.max;
-      userMovedBrush.value = true;
-      return;
-    }
-    // viewport=null = explicit return to following live (via the Live
-    // toggle's checked → unchecked path or snap-back-to-live on zoom).
-    // Snap brush right edge to r.max and ALWAYS clear userMovedBrush
-    // so charts AND brush move together.
-    //
-    // Works for both modes: live = r.max is the latest streaming
-    // sample (== live edge); archive = r.max is the last archived
-    // sample (== end of the playback). Either way "Live" means
-    // "right edge of the available data".
-    //
-    // Span preference order:
-    //   1. liveSpanMs — set by chart Alt+wheel; the operator picked it
-    //   2. currentSpan — whatever the brush was when pinned (e.g. a
-    //      manual 5-min drag); preserves their inspection width
-    //   3. DEFAULT_FOCUS_MS — last-resort fallback on a fresh session
-    //      where neither has ever been set
-    const r = timeRange.value; if (!r) return;
-    const fullSpan = r.max - r.min;
-    const liveSpan = coord.state.liveSpanMs;
-    const currentSpan = windowEndMs.value - windowStartMs.value;
-    let targetSpan: number;
-    if (liveSpan != null) targetSpan = Math.min(liveSpan, fullSpan);
-    else if (currentSpan > 0) targetSpan = Math.min(currentSpan, fullSpan);
-    else targetSpan = Math.min(DEFAULT_FOCUS_MS, fullSpan);
-    const newStart = Math.max(r.min, r.max - targetSpan);
-    windowStartMs.value = newStart;
-    windowEndMs.value = r.max;
-    userMovedBrush.value = false;
-  },
-);
-
-// Panel-cursor sync: the SessionDetails / PlayerMetrics panels read
-// from the v2-archive store (or live cache in live mode). For archive
-// mode we project the row at the brush's right edge — adapted from
-// CH via chRowToPlayerRecord — into the archive store so panels stay
-// in sync with the focus window.
-// Brush-end-row projection — runs in ALL contexts (live and archive)
-// so SessionDisplay's display panels (PlayerMetrics, SessionDetails,
-// charts) always reflect the state at the brush's right edge.
-// When brush is at the live edge, lastAt(windowEnd) returns the
-// latest sample → panels effectively show live data with at most a
-// 1-sample lag. When brush moves back, panels show that past moment.
-// The cache key is the prefixed archive id so this never collides
-// with the live cache that mutation panels (outside SessionDisplay)
-// read.
-watch(
-  [windowEndMs, () => timeseries.samples.version.value],
-  () => {
-    const row = timeseries.samples.lastAt(windowEndMs.value);
+  [() => brushRange.value.max, () => timeseries.samples.version.value],
+  ([endMs]) => {
+    const row = timeseries.samples.lastAt(endMs);
     if (!row) return;
     const adapted = chRowToPlayerRecord(row);
     setArchivePlayer(archivePlayerId.value, adapted);
@@ -826,17 +676,19 @@ const scrubMax = computed(() => timeRange.value?.max ?? 0);
 
 function skipToStart() {
   const r = timeRange.value; if (!r) return;
-  const span = Math.max(1000, windowEndMs.value - windowStartMs.value);
-  windowStartMs.value = r.min;
-  windowEndMs.value = Math.min(r.max, r.min + span);
-  userMovedBrush.value = true;
+  const current = brushRange.value;
+  const span = Math.max(1000, current.max - current.min);
+  const newStart = r.min;
+  const newEnd = Math.min(r.max, r.min + span);
+  coord.setRange({ min: newStart, max: newEnd });
 }
 function skipToEnd() {
   const r = timeRange.value; if (!r) return;
-  const span = Math.max(1000, windowEndMs.value - windowStartMs.value);
-  windowEndMs.value = r.max;
-  windowStartMs.value = Math.max(r.min, r.max - span);
-  userMovedBrush.value = false;
+  const current = brushRange.value;
+  const span = Math.max(1000, current.max - current.min);
+  // Snap to live — clear range, set liveSpan to current brush width.
+  if (span > 0) coord.setLiveSpan(span);
+  coord.setRange(null);
 }
 
 </script>
@@ -869,7 +721,7 @@ function skipToEnd() {
           type="button"
           class="btn live-toggle brush-live-toggle"
           :class="{ checked: brushLiveChecked }"
-          @click="coord.togglePause()"
+          @click="coord.toggleLive()"
           :title="brushLiveChecked ? 'Pause at current live edge' : 'Resume following live'"
         >
           {{ brushLiveChecked ? '●' : '○' }} Live
@@ -911,8 +763,8 @@ function skipToEnd() {
             class="brush-window"
             :class="{ dragging: dragState }"
             :style="{
-              left: ((windowStartMs - scrubMin) / Math.max(1, scrubMax - scrubMin) * 100) + '%',
-              right: ((scrubMax - windowEndMs) / Math.max(1, scrubMax - scrubMin) * 100) + '%',
+              left: ((brushRange.min - scrubMin) / Math.max(1, scrubMax - scrubMin) * 100) + '%',
+              right: ((scrubMax - brushRange.max) / Math.max(1, scrubMax - scrubMin) * 100) + '%',
             }"
             @mousedown.stop="onBrushMouseDown($event, 'pan')"
           >
@@ -936,8 +788,8 @@ function skipToEnd() {
           v-if="timeRange"
           class="rail-focus-label"
           :style="{
-            left: ((windowStartMs - scrubMin) / Math.max(1, scrubMax - scrubMin) * 100) + '%',
-            right: ((scrubMax - windowEndMs) / Math.max(1, scrubMax - scrubMin) * 100) + '%',
+            left: ((brushRange.min - scrubMin) / Math.max(1, scrubMax - scrubMin) * 100) + '%',
+            right: ((scrubMax - brushRange.max) / Math.max(1, scrubMax - scrubMin) * 100) + '%',
           }"
         >
           <span class="focus-pill">{{ fmtDurShort(windowSpanMs) }} · at end</span>
