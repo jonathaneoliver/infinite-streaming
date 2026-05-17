@@ -991,9 +991,15 @@ components:
     SSEFrameUnion:
       description: |
         The polymorphic union of all `/api/v2/timeseries` SSE frame
-        `data` shapes. The frame's `event:` name discriminates.
-        Schemas below are reachable by event name; this `oneOf` is
-        for code-gen consumers.
+        `data` shapes. The frame's `event:` name (NOT a payload
+        property) discriminates which variant arrives — callers MUST
+        look at the SSE event-name line to know which schema applies.
+
+        OpenAPI's `discriminator` keyword requires a discriminator
+        property IN the payload, which SSE doesn't have, so this
+        union is bare-`oneOf`. Codegen consumers should write a thin
+        wrapper that reads the SSE `event:` line and casts to the
+        matching variant.
       oneOf:
         - $ref: '#/components/schemas/MetaEvent'
         - $ref: '#/components/schemas/SampleRow'
@@ -1002,16 +1008,6 @@ components:
         - $ref: '#/components/schemas/HeartbeatEvent'
         - $ref: '#/components/schemas/CompleteEvent'
         - $ref: '#/components/schemas/StreamErrorEvent'
-      discriminator:
-        propertyName: __event
-        mapping:
-          meta: '#/components/schemas/MetaEvent'
-          sample: '#/components/schemas/SampleRow'
-          network: '#/components/schemas/NetworkRow'
-          event: '#/components/schemas/EventRow'
-          heartbeat: '#/components/schemas/HeartbeatEvent'
-          complete: '#/components/schemas/CompleteEvent'
-          stream_error: '#/components/schemas/StreamErrorEvent'
 
     MetaEvent:
       description: |
