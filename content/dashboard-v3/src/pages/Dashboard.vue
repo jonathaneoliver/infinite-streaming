@@ -186,11 +186,11 @@ function fmtCount(n: number | null): string {
             player behaviour across devices.
           </p>
           <div class="links">
-            <a class="btn primary" href="/dashboard/v3/testing.html">Testing Monitor (v3) →</a>
-            <a class="btn secondary" href="/dashboard/v3/testing-session.html?nav=1">Testing Playback (v3) →</a>
+            <a class="btn primary" href="/dashboard/v3/testing.html">Testing Monitor →</a>
+            <a class="btn secondary" href="/dashboard/v3/testing-session.html?nav=1">Testing Playback →</a>
             <a class="btn secondary" href="/dashboard/playback.html">Playback</a>
             <a class="btn secondary" href="/dashboard/quartet.html">Quartet Comparison</a>
-            <a class="btn secondary" href="/dashboard/grid.html">Mosaic ⚠️</a>
+            <a class="btn secondary" href="/dashboard/v3/grid.html">Mosaic</a>
             <a class="btn secondary" href="/dashboard/mosaic-10ft.html">10ft UI</a>
             <a class="btn secondary" href="/dashboard/segment-duration-comparison.html">Live Offset (2s/4s/6s)</a>
           </div>
@@ -207,7 +207,7 @@ function fmtCount(n: number | null): string {
           </p>
           <div class="links">
             <a class="btn primary" href="/dashboard/go-monitor.html">Stream Monitor</a>
-            <a class="btn secondary" href="/dashboard/sessions.html">Archived Sessions</a>
+            <a class="btn secondary" href="/dashboard/v3/sessions.html">Archived Sessions</a>
           </div>
         </article>
       </section>
@@ -261,7 +261,6 @@ function fmtCount(n: number | null): string {
         </div>
         <div class="api-links">
           <a class="btn primary" href="/dashboard/api-docs/">All Specs</a>
-          <a class="btn primary" href="/dashboard/v2-console.html">v2 Console</a>
           <div class="group">
             <span class="group-label">v1</span>
             <a class="btn secondary" href="/dashboard/api-docs/proxy.html">go-proxy</a>

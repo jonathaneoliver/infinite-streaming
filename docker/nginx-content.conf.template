@@ -147,19 +147,15 @@ server {
         add_header Expires "0" always;
     }
 
-    # NOTE: No legacy→v3 URL rewrites here. v3 source links go to
-    # /dashboard/v3/*.html paths directly (see ShellLayout.vue) so
-    # new clicks land at v3 naturally. Keeping the legacy URLs as-is
-    # lets the operator manually edit a v3 URL down to its legacy
-    # equivalent in the browser to A/B-compare behaviour. Per-file
-    # cutover happens by changing source links + the underlying
-    # /dashboard/v3/<file>.html → /dashboard/<file>.html mapping at
-    # the page level, not via nginx rewrites.
+    # Legacy /dashboard/*.html pages (testing, testing-session,
+    # session-viewer, sessions, grid, dashboard) have been removed —
+    # their Vue 3 replacements live under /dashboard/v3/. Unmatched
+    # /dashboard/* requests fall back to the v3 landing.
 
     location /dashboard/ {
         ${INFINITE_STREAM_AUTH_DIRECTIVES}
         alias /content/dashboard/;
-        try_files $uri $uri/ /dashboard/dashboard.html;
+        try_files $uri $uri/ /dashboard/v3/dashboard.html;
     }
 
     location /testing/ {
@@ -168,7 +164,7 @@ server {
     }
 
     location = /dashboard.html {
-        return 302 /dashboard/dashboard.html;
+        return 302 /dashboard/v3/dashboard.html;
     }
 
     location / {
