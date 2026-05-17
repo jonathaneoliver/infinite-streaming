@@ -21,10 +21,14 @@
 //     proxies from idle-closing the connection.
 //  6. (archive only) Emits `event:complete` and closes.
 //
-// First-cut scope: the `events` stream is accepted by the wire
-// contract but the handler currently returns 501 if requested, since
-// the kind/priority taxonomy needs the multiIf SQL extraction from
-// /api/session_events. That's a follow-up.
+// Events stream: the kind/priority taxonomy SQL lives in
+// events_query.go (extracted from the legacy /api/v2/session_events
+// handler so both consumers compute it identically). Backfill runs
+// the SQL once over [from, to]; the live loop re-runs it on a
+// short poll interval with `from=highWaterTs` so new events past
+// the last seen timestamp surface as they appear. Dedupe uses
+// ts|type|info as the fingerprint (CH ts has ms precision, type +
+// info disambiguate events that land in the same millisecond).
 package main
 
 import (
@@ -101,15 +105,6 @@ func makeTimeseriesHandler(cfg config, ring *Ring) http.HandlerFunc {
 			return
 		}
 
-		// First-cut events stub.
-		for _, sel := range selections {
-			if sel.Stream == streamEvents {
-				writeProblemv2(w, http.StatusNotImplemented, "events stream not yet implemented",
-					"the v3 endpoint accepts streams=events but the kind/priority taxonomy SQL is still served via /api/v2/session_events. Follow-up: lift that SQL into a v3 bundle.")
-				return
-			}
-		}
-
 		ctx := r.Context()
 		flusher, ok := w.(http.Flusher)
 		if !ok {
@@ -161,7 +156,21 @@ func makeTimeseriesHandler(cfg config, ring *Ring) http.HandlerFunc {
 			return
 		}
 
-		streamLiveDeltas(ctx, w, flusher, subCh, selections, emittedIDs, params.playID)
+		// Events are derived from samples + network rows so there's no
+		// ring channel for them. If the caller asked for events, run
+		// a poller alongside the ring-driven live loop. The poller
+		// tracks the highest emitted ts and uses it as `from=` on each
+		// poll so subsequent runs only return new rows.
+		// SSE writes from the live ring loop and the events poll
+		// goroutine could otherwise interleave bytes mid-frame; share
+		// a mutex when both paths are active.
+		writeMu := &sync.Mutex{}
+		if selectionsHasEvents(selections) {
+			cancel := startEventsPoller(ctx, w, flusher, writeMu, cfg, params, emittedIDs)
+			defer cancel()
+		}
+
+		streamLiveDeltas(ctx, w, flusher, writeMu, subCh, selections, emittedIDs, params.playID)
 	}
 }
 
@@ -338,6 +347,11 @@ func emitBackfill(
 			return err
 		}
 		return emitBackfillFromRing(w, flusher, ring, key, sel.Stream, kindNetwork, params, seen, ringWindowMs)
+	case streamEvents:
+		// Events are derived at query time — no ring; backfill is the
+		// taxonomy SQL over [from, to]. Live continuation is handled
+		// by startEventsPoller after backfill returns.
+		return emitBackfillEvents(ctx, w, flusher, cfg, params, seen)
 	}
 	return nil
 }
@@ -432,7 +446,8 @@ func emitBackfillFromRing(w http.ResponseWriter, flusher http.Flusher,
 // match (case-insensitive). Empty string means "all plays for this
 // player", which is the default the dashboard uses.
 func streamLiveDeltas(ctx context.Context, w http.ResponseWriter, flusher http.Flusher,
-	subCh <-chan *ringEntry, selections []streamSelection, seen *emittedSet, playIDFilter string) {
+	writeMu *sync.Mutex, subCh <-chan *ringEntry, selections []streamSelection,
+	seen *emittedSet, playIDFilter string) {
 
 	enabled := map[streamKind]bool{}
 	for _, s := range selections {
@@ -448,10 +463,12 @@ func streamLiveDeltas(ctx context.Context, w http.ResponseWriter, flusher http.F
 		case <-ctx.Done():
 			return
 		case <-heartbeat.C:
-			writeSSEEvent(w, "heartbeat", "", map[string]any{
-				"ts": time.Now().UTC().Format(time.RFC3339Nano),
+			lockedWrite(writeMu, func() {
+				writeSSEEvent(w, "heartbeat", "", map[string]any{
+					"ts": time.Now().UTC().Format(time.RFC3339Nano),
+				})
+				flusher.Flush()
 			})
-			flusher.Flush()
 		case e, ok := <-subCh:
 			if !ok {
 				return
@@ -487,10 +504,35 @@ func streamLiveDeltas(ctx context.Context, w http.ResponseWriter, flusher http.F
 			if !seen.Add(stream, fp) {
 				continue
 			}
-			writeSSEEvent(w, string(streamToEventName(stream)), fp, payload)
-			flusher.Flush()
+			lockedWrite(writeMu, func() {
+				writeSSEEvent(w, string(streamToEventName(stream)), fp, payload)
+				flusher.Flush()
+			})
 		}
 	}
+}
+
+// lockedWrite serializes SSE writes when the events poller is also
+// active. If mu is nil it falls through — both branches are valid
+// since the poller is only started when the caller asked for events.
+func lockedWrite(mu *sync.Mutex, fn func()) {
+	if mu != nil {
+		mu.Lock()
+		defer mu.Unlock()
+	}
+	fn()
+}
+
+// selectionsHasEvents reports whether the resolved selections include
+// the events stream. The events stream is special because it doesn't
+// come off the ring — see startEventsPoller.
+func selectionsHasEvents(selections []streamSelection) bool {
+	for _, s := range selections {
+		if s.Stream == streamEvents {
+			return true
+		}
+	}
+	return false
 }
 
 func ringKindToStream(k ringKind) streamKind {
