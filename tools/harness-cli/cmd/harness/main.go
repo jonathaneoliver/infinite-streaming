@@ -130,6 +130,10 @@ func main() {
 		exit(cmdArchive(client, args[1:], g.asJSON))
 	case "groups":
 		exit(cmdGroups(client, args[1:], g.asJSON))
+	case "info":
+		exit(cmdInfo(client, args[1:], g.asJSON))
+	case "raw":
+		exit(cmdRaw(client, args[1:], g.asJSON))
 	case "help", "--help", "-h":
 		fmt.Fprint(os.Stdout, usage)
 	default:
