@@ -8,15 +8,22 @@
  *   - One window length: changing the rolling window length once
  *     applies everywhere.
  *
- * The state lives in a module-level Map keyed by playerId so it
- * survives component remount (e.g. when a section collapses + reopens)
- * and is shared across charts that mount independently of one another.
+ * Backing store: module-level Map keyed by playerId so the state
+ * survives component remount AND is shared across charts on the same
+ * session card.
+ *
+ * Reactivity model: callers may pass either a plain string (legacy) or
+ * a `Ref<string>` (TS12 — picker swap without :key remount). When a
+ * ref is supplied, the `state` getter + every computed + every mutator
+ * re-read `playerIdRef.value` on access, so switching the active
+ * player in Testing.vue's picker propagates to every chart in the
+ * same SessionDisplay instance without forcing a remount.
  *
  * Matches the legacy session-shell.js semantics: 10-minute default
  * window, viewport in ms relative to the latest sample's wall clock,
  * paused freezes the viewport.
  */
-import { computed, reactive } from 'vue';
+import { computed, isRef, reactive, ref, type Ref } from 'vue';
 
 export interface ChartViewport {
   /** ms-since-epoch start of the visible range */
@@ -45,28 +52,63 @@ export interface ChartCoordinationState {
   version: number;
   /** Y-axis upper bound for the bandwidth chart (undefined = auto). */
   bandwidthYMax: number | undefined;
+  /** Synchronized "selected event" cursor — ms-since-epoch.
+   *  When non-null every member chart (line charts + events
+   *  timeline) draws a vertical marker at this x position so the
+   *  operator can see exactly where the prev/next-selected event
+   *  sits across all panels. null = no cursor (default). */
+  cursorMs: number | null;
 }
 
 const states = new Map<string, ChartCoordinationState>();
 
-export function useChartCoordination(playerId: string) {
-  let state = states.get(playerId);
-  if (!state) {
-    state = reactive<ChartCoordinationState>({
-      paused: false,
-      expanded: false,
-      viewport: null,
-      lastSampleMs: 0,
-      windowMs: 10 * 60 * 1000,
-      liveSpanMs: null,
-      version: 0,
-      bandwidthYMax: undefined,
-    });
-    states.set(playerId, state);
+const EXPANDED_STORAGE_KEY = 'dashboard_v3_events_timeline_expanded';
+function readExpandedStored(): boolean {
+  try { return localStorage.getItem(EXPANDED_STORAGE_KEY) === 'true'; } catch { return false; }
+}
+function writeExpandedStored(v: boolean) {
+  try { localStorage.setItem(EXPANDED_STORAGE_KEY, v ? 'true' : 'false'); } catch { /* ignore */ }
+}
+
+function freshState(): ChartCoordinationState {
+  return reactive<ChartCoordinationState>({
+    paused: false,
+    expanded: readExpandedStored(),
+    viewport: null,
+    lastSampleMs: 0,
+    windowMs: 10 * 60 * 1000,
+    liveSpanMs: null,
+    version: 0,
+    bandwidthYMax: undefined,
+    cursorMs: null,
+  });
+}
+
+function ensureState(pid: string): ChartCoordinationState {
+  let s = states.get(pid);
+  if (!s) {
+    s = freshState();
+    states.set(pid, s);
   }
-  const s = state;
+  return s;
+}
+
+export function useChartCoordination(playerIdInput: string | Ref<string>) {
+  // Normalise input — accept both a plain string (legacy callers) and
+  // a reactive ref (new picker-swap-aware callers). When a ref is
+  // provided, every getter + computed + mutator below threads through
+  // `playerIdRef.value` so changes propagate to the consumer's
+  // reactive context without a component remount.
+  const playerIdRef: Ref<string> = isRef(playerIdInput)
+    ? playerIdInput
+    : ref(playerIdInput);
+
+  function cur(): ChartCoordinationState {
+    return ensureState(playerIdRef.value);
+  }
 
   const effectiveViewport = computed<ChartViewport>(() => {
+    const s = cur();
     if (s.viewport) return s.viewport;
     const end = s.lastSampleMs || Date.now();
     // When live (no sticky viewport) and the user has chosen a tighter
@@ -103,10 +145,15 @@ export function useChartCoordination(playerId: string) {
   });
 
   function noteSample(ts: number) {
+    const s = cur();
     if (ts > s.lastSampleMs) s.lastSampleMs = ts;
   }
 
   function setViewport(v: ChartViewport | null) {
+    const s = cur();
+    const span = v ? Math.round((v.max - v.min) / 1000) : 'null';
+    const trace = new Error().stack?.split('\n').slice(2, 5).join(' | ').slice(0, 200) ?? '';
+    console.log('[CC] setViewport span=' + span + 's | ' + trace);
     s.viewport = v;
     s.version++;
   }
@@ -122,12 +169,22 @@ export function useChartCoordination(playerId: string) {
    *  exactly what they were watching, not a snap-out to the full
    *  window. */
   function snapshotLiveViewport() {
+    const s = cur();
+    // If there's already an explicit viewport (set by a brush drag
+    // or an Alt+drag-zoom on a chart), DON'T overwrite it. The whole
+    // point of pausing is to freeze whatever the operator was looking
+    // at; if they had a custom range it IS the visible window. The
+    // legacy "snapshot to [lastSample - liveSpanMs, ...]" path runs
+    // only when no sticky viewport exists — i.e. we're live-tracking
+    // and need to freeze at the live edge.
+    if (s.viewport) return;
     const end = s.lastSampleMs || Date.now();
     const span = s.liveSpanMs != null ? s.liveSpanMs : s.windowMs;
     s.viewport = { min: end - span, max: end };
   }
 
   function togglePause() {
+    const s = cur();
     s.paused = !s.paused;
     if (s.paused) {
       snapshotLiveViewport();
@@ -140,6 +197,7 @@ export function useChartCoordination(playerId: string) {
   }
 
   function setPaused(p: boolean) {
+    const s = cur();
     if (s.paused === p) return;
     s.paused = p;
     if (p) snapshotLiveViewport();
@@ -147,65 +205,58 @@ export function useChartCoordination(playerId: string) {
     s.version++;
   }
 
-  /** Snap charts back to the full-window extent. Crucially, this does
-   *  NOT touch `paused` — legacy session-shell.js parity: Reset Zoom
-   *  is a viewport-only operation. If the user is paused and wants to
-   *  resume streaming, they click the Pause / Live button (which
-   *  reads "Live" while paused).
-   *
-   *  Live → viewport stays null AND any Alt+wheel live-span gets
-   *  cleared so `effectiveViewport` follows the full live window.
-   *
-   *  Paused → viewport must be re-snapshotted at the current frozen
-   *  time to the full window. We can't leave it null because
-   *  `effectiveViewport` would otherwise fall back to
-   *  `[lastSampleMs - windowMs, lastSampleMs]` which keeps sliding
-   *  with each new tick — defeating the pause. */
-  function resetZoom() {
-    s.liveSpanMs = null;
-    if (s.paused) {
-      snapshotLiveViewport();
-    } else {
-      s.viewport = null;
-    }
-    s.version++;
-  }
-
   /** Set the live-edge zoom span. Bumps the version so charts react.
    *  Pass null to clear (revert to full `windowMs`). Has no effect on
    *  the paused branch — paused mode uses sticky `viewport`. */
   function setLiveSpanMs(ms: number | null) {
+    const s = cur();
     s.liveSpanMs = ms;
     s.version++;
   }
 
   function toggleExpanded() {
+    const s = cur();
     s.expanded = !s.expanded;
+    writeExpandedStored(s.expanded);
   }
 
   function setWindowMs(ms: number) {
+    const s = cur();
     s.windowMs = Math.max(5_000, ms);
     s.viewport = null;
     s.version++;
   }
 
   function setBandwidthYMax(v: number | undefined) {
-    s.bandwidthYMax = v;
+    cur().bandwidthYMax = v;
+  }
+
+  /** Move the synchronized "selected event" cursor. Pass null to
+   *  hide it. Bumps version so chart watchers re-render the marker
+   *  layer in lock-step. */
+  function setCursorMs(ms: number | null) {
+    const s = cur();
+    s.cursorMs = ms;
+    s.version++;
   }
 
   return {
-    state: s,
+    // `state` is a getter so each property read flows through cur(),
+    // which reads playerIdRef.value. Vue templates / computeds that
+    // touch `coord.state.X` therefore depend on playerIdRef and
+    // re-evaluate when the active player switches.
+    get state(): ChartCoordinationState { return cur(); },
     effectiveViewport,
     tickPositions,
     noteSample,
     setViewport,
     togglePause,
     setPaused,
-    resetZoom,
     setLiveSpanMs,
     toggleExpanded,
     setWindowMs,
     setBandwidthYMax,
+    setCursorMs,
   };
 }
 

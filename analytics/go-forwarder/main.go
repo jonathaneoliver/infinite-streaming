@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -22,18 +23,82 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/google/uuid"
+	"github.com/jonathaneoliver/infinite-streaming/go-proxy/pkg/v2translate"
 )
 
+// init: relax TLS verification on every outgoing request. The
+// forwarder only talks to go-server (Docker-internal) and ClickHouse,
+// both reachable on private interfaces with self-signed certs once
+// TS11 flipped go-proxy to TLS. Verification would require shipping
+// the in-container CA into the forwarder image; trusting self-signed
+// for these internal hops is safe and matches `proxy_ssl_verify off`
+// on the nginx side.
+func init() {
+	if transport, ok := http.DefaultTransport.(*http.Transport); ok {
+		if transport.TLSClientConfig == nil {
+			transport.TLSClientConfig = &tls.Config{}
+		}
+		transport.TLSClientConfig.InsecureSkipVerify = true
+	}
+}
+
+// canonicalV2ID normalises a raw v1 identifier (player_id / play_id) to
+// the same canonical v2 form `v2translate` produces on read: parse as
+// UUID when possible, fall back to the stable v5 derivation otherwise.
+// Empty input → empty output (don't synthesise an id for missing data).
+//
+// Without this step the forwarder stored the raw short-form (e.g.
+// "427a6bf3") on ingest but emitted the v5-derived UUID
+// ("7046b635-…") on read; client-side archive queries built from
+// /api/v2/players (the v2 form) then matched no rows, so the
+// Focus Window came up empty for any non-UUID player.
+func canonicalV2ID(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	if u, err := uuid.Parse(raw); err == nil {
+		return u.String()
+	}
+	return v2translate.PlayerUUIDForRawID(raw).String()
+}
+
+// canonicalIDsFor returns the canonical player_id and play_id strings a
+// v3 client will use to look this row up. Routes through
+// v2translate.PlayerFromSession so the forwarder's stored ids stay in
+// lockstep with what `/api/v2/players` emits — including the fallback
+// play_id derivation for sessions whose raw v1 payload doesn't carry
+// `play_id` (web / hls.js / non-Apple devices).
+//
+// Returns empty strings when the session can't be projected (no
+// player_id at all); the caller still inserts the row but the play_id
+// column will be blank and the client won't be able to filter to that
+// row by play_id.
+func canonicalIDsFor(s map[string]interface{}) (string, string) {
+	rec, ok := v2translate.PlayerFromSession(s)
+	if !ok {
+		return canonicalV2ID(getStr(s, "player_id")), canonicalV2ID(getStr(s, "play_id"))
+	}
+	playerID := rec.Id.String()
+	playID := ""
+	if rec.CurrentPlay != nil {
+		playID = rec.CurrentPlay.Id.String()
+	}
+	return playerID, playID
+}
+
 type config struct {
-	sseURL        string
-	clickhouseURL string
-	chDatabase    string
-	chTable       string
-	chUser        string
-	chPassword    string
-	flushEvery    time.Duration
-	flushBatch    int
-	httpListen    string
+	sseURL         string
+	clickhouseURL  string
+	chDatabase     string
+	chTable        string
+	chUser         string
+	chPassword     string
+	flushEvery     time.Duration
+	flushBatch     int
+	httpListen     string
+	ringWindowSecs int // FORWARDER_LIVE_RING_SECONDS; see ring.go
 }
 
 func loadConfig() config {
@@ -51,8 +116,23 @@ func loadConfig() config {
 		flushEvery:    250 * time.Millisecond,
 		flushBatch:    500,
 		httpListen:    getenv("FORWARDER_HTTP_LISTEN", ":8080"),
+		// ring window default 600s (10 min) covers the dashboard's
+		// default focus window so most v3 queries skip ClickHouse
+		// entirely. Tunable down for memory-constrained deployments
+		// or up for "live tail covers more history" use cases.
+		ringWindowSecs: getenvInt("FORWARDER_LIVE_RING_SECONDS", 600),
 	}
 	return c
+}
+
+func getenvInt(key string, def int) int {
+	if v := os.Getenv(key); v != "" {
+		var n int
+		if _, err := fmt.Sscanf(v, "%d", &n); err == nil {
+			return n
+		}
+	}
+	return def
 }
 
 func getenv(key, def string) string {
@@ -276,16 +356,25 @@ func main() {
 		cancel()
 	}()
 
+	// In-memory ring covering the recently-ingested rows for both
+	// streams. The v3 /api/v3/timeseries handler reads the ring +
+	// CH and dedupes on the boundary so the dashboard sees fresh
+	// data with no NDJSON-vs-pushLive merge race. Eviction runs
+	// once per second; pending/inserting rows are sticky regardless
+	// of age (they exist nowhere else yet).
+	ring := NewRing(int64(cfg.ringWindowSecs)*1000, 0)
+	ring.StartEvictor(ctx.Done(), time.Second)
+
 	rows := make(chan row, 4096)
-	go batchInserter(ctx, cfg, rows)
-	go serveHTTP(ctx, cfg)
+	go batchInserter(ctx, cfg, ring, rows)
+	go serveHTTP(ctx, cfg, ring)
 
 	// Network log archival: subscribe to go-proxy's /api/network/stream
 	// SSE endpoint and forward each per-request event to ClickHouse so
 	// the session-viewer can replay them after the session is gone.
 	netRows := make(chan netRow, 8192)
 	netSeenSet := newNetSeen(50000)
-	go batchInsertNet(ctx, cfg, netRows)
+	go batchInsertNet(ctx, cfg, ring, netRows)
 	go runNetworkStream(ctx, cfg, netSeenSet, netRows)
 
 	// Auto-classifier: when a snapshot carries an interesting signal
@@ -389,13 +478,13 @@ func handlePayload(data []byte, cache *fingerprintCache, netSeen *netSeen, out c
 		// Stamp the sessionID→playerID map so the network row writer
 		// (runNetworkStream → entryToRow) can carry the v2 player_id
 		// onto every HAR row at insert time.
-		sessionToPlayerID.set(sessionID, getStr(s, "player_id"))
+		sessionToPlayerID.set(sessionID, canonicalV2ID(getStr(s, "player_id")))
 		out <- toRow(ts, payload.Revision, sessionID, s)
 		// Queue auto-classifier if this snapshot carries any of the
 		// "really bad things" signals. Debounced — repeated marks
 		// for the same (session,play) coalesce to one mutation.
 		if classifyQ != nil && hasInterestingSignal(s) {
-			classifyQ.mark(sessionID, getStr(s, "play_id"))
+			classifyQ.mark(sessionID, canonicalV2ID(getStr(s, "play_id")))
 		}
 	}
 	cache.prune(active)
@@ -435,12 +524,19 @@ func snapshotEventTimeAsCHTimestamp(s map[string]interface{}, fallback string) s
 
 func toRow(ts string, revision uint64, sessionID string, s map[string]interface{}) row {
 	full, _ := json.Marshal(s)
+	// Store the v2-canonical ids the v3 client will use to look this
+	// row up. canonicalIDsFor routes through v2translate.PlayerFromSession
+	// so the play_id fallback derivation (used when the raw SSE map
+	// doesn't carry `play_id`, which is most non-Apple clients) matches
+	// what `/api/v2/players` emits. Without that fallback the column
+	// stays empty and the v3 client's play_id filter excludes every row.
+	playerCanonical, playCanonical := canonicalIDsFor(s)
 	return row{
 		Ts:                       ts,
 		Revision:                 revision,
 		SessionID:                sessionID,
-		PlayID:                   getStr(s, "play_id"),
-		PlayerID:                 getStr(s, "player_id"),
+		PlayID:                   playCanonical,
+		PlayerID:                 playerCanonical,
 		GroupID:                  getStr(s, "group_id"),
 		UserAgent:                getStr(s, "user_agent"),
 		ManifestURL:              getStr(s, "manifest_url"),
@@ -656,18 +752,30 @@ func getU64(m map[string]interface{}, key string) uint64 {
 	return 0
 }
 
-func batchInserter(ctx context.Context, cfg config, in <-chan row) {
+func batchInserter(ctx context.Context, cfg config, ring *Ring, in <-chan row) {
 	buf := make([]row, 0, cfg.flushBatch)
+	entries := make([]*ringEntry, 0, cfg.flushBatch)
 	tick := time.NewTicker(cfg.flushEvery)
 	defer tick.Stop()
 	flush := func() {
 		if len(buf) == 0 {
 			return
 		}
+		// State transitions: pending → inserting → confirmed.
+		// On INSERT failure we revert inserting → pending so the
+		// ring's read path keeps surfacing the rows (they exist
+		// nowhere else yet). We don't currently retry the failed
+		// batch — the rows go to /dev/null for CH, which matches
+		// today's behaviour. Follow-up: bounded retry queue.
+		ring.MarkInserting(entries)
 		if err := insert(ctx, cfg, buf); err != nil {
 			log.Printf("insert failed (%d rows dropped): %v", len(buf), err)
+			ring.RevertInserting(entries)
+		} else {
+			ring.MarkConfirmed(entries)
 		}
 		buf = buf[:0]
+		entries = entries[:0]
 	}
 	for {
 		select {
@@ -679,7 +787,16 @@ func batchInserter(ctx context.Context, cfg config, in <-chan row) {
 				flush()
 				return
 			}
-			buf = append(buf, r)
+			// Pin the row in the ring as `pending` before queueing
+			// for INSERT. The pointer we get back lets us flip state
+			// in lockstep with the batch's lifecycle.
+			rowCopy := r
+			e := ring.Add(
+				ringKey{PlayerID: rowCopy.PlayerID},
+				kindSample, nowMs(), rowCopy.Ts, rowCopy.PlayID, &rowCopy,
+			)
+			buf = append(buf, rowCopy)
+			entries = append(entries, e)
 			if len(buf) >= cfg.flushBatch {
 				flush()
 			}
@@ -732,12 +849,13 @@ func insert(ctx context.Context, cfg config, rows []row) error {
 //	GET /api/sessions?since=<rfc3339>
 //	GET /api/snapshots?session=<id>&from=<rfc3339>&to=<rfc3339>&limit=<n>
 //	GET /healthz
-func serveHTTP(ctx context.Context, cfg config) {
+func serveHTTP(ctx context.Context, cfg config, ring *Ring) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.Write([]byte("ok"))
 	})
 	mountV2Handlers(mux, cfg)
+	mountV3Handlers(mux, cfg, ring)
 	mux.HandleFunc("/api/sessions", func(w http.ResponseWriter, r *http.Request) {
 		since := r.URL.Query().Get("since")
 		until := r.URL.Query().Get("until")
@@ -1092,12 +1210,31 @@ func serveHTTP(ctx context.Context, cfg config) {
 		if session == "" {
 			session = r.URL.Query().Get("session_id")
 		}
-		if session == "" {
-			http.Error(w, "missing session_id", http.StatusBadRequest)
+		// player_id is an alternative way to identify the rows when the
+		// caller doesn't have (or want to plumb) the session_id — the
+		// live testing-session / testing pages drive this path so they
+		// can stop client-side session-id lookups. session_id wins if
+		// both are supplied so explicit deep links keep working.
+		playerID := r.URL.Query().Get("player_id")
+		if session == "" && playerID == "" {
+			http.Error(w, "missing session_id or player_id", http.StatusBadRequest)
 			return
 		}
-		params := map[string]string{"session": session}
-		clauses := []string{"session_id = {session:String}"}
+
+		params := map[string]string{}
+		clauses := []string{}
+		if session != "" {
+			clauses = append(clauses, "session_id = {session:String}")
+			params["session"] = session
+		}
+		if playerID != "" {
+			// Case-insensitive: device-side player_ids often arrive in
+			// the case the player reported (often uppercase) while v2
+			// /api/v2/players normalises to lowercase. lowerUTF8 on both
+			// sides papers over the mismatch.
+			clauses = append(clauses, "lowerUTF8(player_id) = lowerUTF8({player:String})")
+			params["player"] = playerID
+		}
 		// HAR events come from network_requests, which on iOS often
 		// has play_id='' on variant/segment URLs (the iOS player
 		// strips the query param). Filter HAR by time range derived
@@ -1105,26 +1242,42 @@ func serveHTTP(ctx context.Context, cfg config) {
 		// We qualify ts as `nr.ts` because the inner sub-selects
 		// alias `toString(ts) AS ts` and that String alias would
 		// otherwise shadow the column in the WHERE clause.
-		harClauses := []string{"session_id = {session:String}"}
+		harClauses := append([]string{}, clauses...)
 		if v := r.URL.Query().Get("play_id"); v != "" {
 			var pidPred string
 			if v == "—" {
 				pidPred = "play_id = ''"
 			} else {
-				pidPred = "play_id = {play:String}"
+				pidPred = "lowerUTF8(play_id) = lowerUTF8({play:String})"
 				params["play"] = v
 			}
 			clauses = append(clauses, pidPred)
+			// Inner subqueries need an identifying WHERE that mirrors
+			// whichever id(s) the caller supplied.
+			idWhere := []string{}
+			if session != "" {
+				idWhere = append(idWhere, "session_id = {session:String}")
+			}
+			if playerID != "" {
+				idWhere = append(idWhere, "lowerUTF8(player_id) = lowerUTF8({player:String})")
+			}
+			idClause := strings.Join(idWhere, " AND ")
 			harClauses = append(harClauses, fmt.Sprintf(
-				"nr.ts BETWEEN (SELECT min(ts) FROM %s.%s WHERE session_id = {session:String} AND %s) "+
-					"AND (SELECT max(ts) FROM %s.%s WHERE session_id = {session:String} AND %s)",
-				cfg.chDatabase, cfg.chTable, pidPred,
-				cfg.chDatabase, cfg.chTable, pidPred))
+				"nr.ts BETWEEN (SELECT min(ts) FROM %s.%s WHERE %s AND %s) "+
+					"AND (SELECT max(ts) FROM %s.%s WHERE %s AND %s)",
+				cfg.chDatabase, cfg.chTable, idClause, pidPred,
+				cfg.chDatabase, cfg.chTable, idClause, pidPred))
 		}
-		limit := 500
+		// Default 5000 is enough for a quick smoke test; cap 50000
+		// accommodates long sessions where ABR upshift / downshift
+		// noise (often > 60% of events) crowds out rare fault events
+		// at smaller LIMITs. The DESC sort keeps the most-recent N
+		// regardless, so raising the cap is "show more history" not
+		// "fix correctness".
+		limit := 5000
 		if v := r.URL.Query().Get("limit"); v != "" {
 			var n int
-			if _, err := fmt.Sscanf(v, "%d", &n); err == nil && n > 0 && n <= 5000 {
+			if _, err := fmt.Sscanf(v, "%d", &n); err == nil && n > 0 && n <= 50000 {
 				limit = n
 			}
 		}
@@ -1459,7 +1612,12 @@ func serveHTTP(ctx context.Context, cfg config) {
 			  WHERE prev_url_ts != retry_ts
 			    AND dateDiff('millisecond', prev_url_ts, retry_ts) BETWEEN 1 AND 4000
 			)
-			ORDER BY ts ASC
+			-- DESC so the LIMIT keeps the *most recent* N events. ASC
+			-- caused rare events (HTTP 4xx fault injection, errors) to
+			-- be squeezed out of the result by high-volume ABR upshifts
+			-- / downshifts that dominate the oldest 500 rows on a long
+			-- session. Consumers sort client-side for display.
+			ORDER BY ts DESC
 			LIMIT %d
 			FORMAT JSONEachRow`,
 			// stall_or_buffer_pairs / rate_shifts / base CTEs

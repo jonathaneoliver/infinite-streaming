@@ -3,7 +3,7 @@
  * MetricsLineChart.vue — streaming line chart with the same UX the
  * legacy session-shell.js charts had:
  *
- *   - Toolbar: Reset Zoom · Pause/Live · Expand · zoom hint
+ *   - Toolbar: Live toggle · Expand · zoom hint
  *   - Alt + wheel / drag = zoom (x-axis only)
  *   - Right-click drag = pan
  *   - Left click (no drag) = toggle pause
@@ -17,9 +17,10 @@
  * has data to show. The chart never holds more than ~2× window worth.
  */
 import { computed, onBeforeUnmount, ref, toRef, watch, type PropType } from 'vue';
-import { usePlayer } from '@/composables/usePlayer';
 import { ensureChartJs } from '@/composables/useChartJs';
 import { useChartCoordination, fmtTickHMSms, type ChartViewport } from '@/composables/useChartCoordination';
+import type { Stream } from '@/composables/useSessionTimeSeries';
+import { tsOfRow, chRowToPlayerRecord } from '@/composables/chRowAdapter';
 import type { PlayerRecord } from '@/repo/v2-repo';
 
 export type SeriesAccessor = (p: PlayerRecord) => number | null | undefined;
@@ -47,36 +48,45 @@ const props = defineProps({
   y2Title: { type: String, default: '' },
   y2Min: { type: Number, default: 0 },
   y2Max: { type: Number, default: undefined },
+  /** Samples stream from SessionDisplay's useSessionTimeSeries model.
+   *  Each row is one CH session_snapshots projection (charts_minimal
+   *  bundle); the chart adapts it to the synthetic PlayerRecord shape
+   *  the per-series accessors expect. */
+  samplesStream: { type: Object as PropType<Stream<Record<string, unknown>>>, required: true },
 });
 
 const canvas = ref<HTMLCanvasElement | null>(null);
 const wrap = ref<HTMLDivElement | null>(null);
 const canvasWrap = ref<HTMLDivElement | null>(null);
-const { player } = usePlayer(toRef(props, 'playerId'));
-const coord = useChartCoordination(props.playerId);
+const coord = useChartCoordination(toRef(props, 'playerId'));
 
 let chart: any = null;
-let lastSampleKey: string | null = null;
 let dataset: Array<Array<{ x: number; y: number }>> = [];
-let clickStartX = 0;
-let clickStartY = 0;
-let clickDragged = false;
+// Watermark of the latest CH row already pushed through the chart.
+// Read by the samples-stream watcher to drain only NEW rows on each
+// version bump (the cache holds the full backfill + live tail).
+let lastIngestedMs = -Infinity;
 
-function tsFor(p: PlayerRecord): number {
-  if (p.player_metrics?.event_time) {
-    const v = Date.parse(p.player_metrics.event_time);
-    if (Number.isFinite(v)) return v;
+/** Tolerance for "right edge is at the live sample" — matches the
+ *  brush-drop-at-live heuristic in SessionDisplay. */
+const LIVE_EDGE_TOLERANCE_MS = 2000;
+
+/** Pan- / zoom-complete handler: pin the new range as a sticky
+ *  viewport UNLESS the right edge has reached the live sample, in
+ *  which case return to live tracking — drop viewport, preserve the
+ *  span via liveSpanMs, stay unpaused. Mirrors the EventsTimeline
+ *  rangechanged path so chart / lane behave identically. */
+function applyViewportOrSnapToLive(min: number, max: number) {
+  const lastTs = coord.state.lastSampleMs;
+  if (lastTs && max >= lastTs - LIVE_EDGE_TOLERANCE_MS) {
+    coord.setViewport(null);
+    coord.setLiveSpanMs(max - min);
+    if (coord.state.paused) coord.setPaused(false);
+    return;
   }
-  if (p.last_seen_at) {
-    const v = Date.parse(p.last_seen_at);
-    if (Number.isFinite(v)) return v;
-  }
-  return Date.now();
+  coord.setViewport({ min, max });
 }
 
-function sampleKey(p: PlayerRecord): string {
-  return `${p.control_revision}|${p.last_seen_at ?? ''}|${p.player_metrics?.event_time ?? ''}`;
-}
 
 /** Pick a "nice" tick interval based on the visible span. Snaps to
  *  one of the wall-clock-friendly steps so gridlines land on real
@@ -178,7 +188,11 @@ function createChartInstance(Chart: any): any {
         borderColor: s.color,
         backgroundColor: s.color + '22',
         data: dataset[i],
-        tension: s.stepped ? 0 : 0.25,
+        // Straight line segments between samples — no curve fitting.
+        // Stepped series (player state) keep tension 0 too. Smoothing
+        // implies measurements that weren't taken; for instrumentation
+        // data, straight-line is the truthful representation.
+        tension: 0,
         stepped: !!s.stepped,
         pointRadius: 0,
         borderWidth: 2,
@@ -186,6 +200,46 @@ function createChartInstance(Chart: any): any {
         yAxisID: s.axis === 'y2' ? 'y2' : 'y',
       })),
     },
+    /**
+     * Inline plugin: vertical "selected event" cursor.
+     * Reads `coord.state.cursorMs` (set from SessionViewer prev/next)
+     * and draws a single dashed line at that x-position so the
+     * operator can see exactly where the selected event lines up
+     * across every chart in the card. Drawn after the datasets so it
+     * sits on top of the lines, but below the tooltip/legend.
+     */
+    plugins: [{
+      id: 'navCursorLine',
+      afterDatasetsDraw(c: any) {
+        const ms = coord.state.cursorMs;
+        if (ms == null || !Number.isFinite(ms)) return;
+        const sx = c.scales?.x;
+        const sy = c.scales?.y;
+        if (!sx || !sy) return;
+        if (ms < sx.min || ms > sx.max) return;
+        const x = sx.getPixelForValue(ms);
+        const ctx = c.ctx;
+        ctx.save();
+        ctx.beginPath();
+        ctx.moveTo(x, sy.top);
+        ctx.lineTo(x, sy.bottom);
+        ctx.lineWidth = 1.5;
+        ctx.strokeStyle = '#1d4ed8';
+        ctx.setLineDash([4, 3]);
+        ctx.stroke();
+        // Tiny down-arrow at the top of the line so the eye finds
+        // the cursor immediately on dense charts.
+        ctx.beginPath();
+        ctx.setLineDash([]);
+        ctx.moveTo(x - 4, sy.top);
+        ctx.lineTo(x + 4, sy.top);
+        ctx.lineTo(x, sy.top + 5);
+        ctx.closePath();
+        ctx.fillStyle = '#1d4ed8';
+        ctx.fill();
+        ctx.restore();
+      },
+    }],
     options: {
       responsive: true,
       maintainAspectRatio: false,
@@ -261,17 +315,32 @@ function createChartInstance(Chart: any): any {
             mode: 'x',
             threshold: 2,
             modifierKey: undefined,
-            onPanStart: () => {
+            onPanStart: ({ chart: c }: any) => {
+              // Pre-seed coord.viewport with the chart's CURRENT visible
+              // range before setPaused fires. setPaused → snapshotLive‑
+              // Viewport would otherwise overwrite viewport with
+              // `[lastSample − liveSpanMs, lastSample]` (the live‑edge
+              // window), flashing the chart back to live mid‑pan. The
+              // snapshot helper now skips when a viewport already
+              // exists, so seeding it here is enough.
+              const sx = c?.scales?.x;
+              if (sx && Number.isFinite(sx.min) && Number.isFinite(sx.max)) {
+                coord.setViewport({ min: sx.min, max: sx.max });
+              }
               if (!coord.state.paused) coord.setPaused(true);
             },
             onPanComplete: ({ chart: c }: any) => {
               const sx = c.scales?.x;
               if (!sx) return;
-              coord.setViewport({ min: sx.min, max: sx.max });
+              applyViewportOrSnapToLive(sx.min, sx.max);
             },
           },
           zoom: {
-            wheel: { enabled: true, modifierKey: 'alt' },
+            // Wheel disabled here — `installLiveWheelAnchor` handles
+            // Alt+wheel itself with a unified mouse-anchored math
+            // shared across the player state lane and focus bar so
+            // direction + speed are identical across all three.
+            wheel: { enabled: false },
             drag: {
               enabled: true,
               modifierKey: 'alt',
@@ -289,7 +358,7 @@ function createChartInstance(Chart: any): any {
             onZoomComplete: ({ chart: c }: any) => {
               const sx = c.scales?.x;
               if (!sx) return;
-              coord.setViewport({ min: sx.min, max: sx.max });
+              applyViewportOrSnapToLive(sx.min, sx.max);
             },
           },
         },
@@ -344,7 +413,6 @@ function createChartInstance(Chart: any): any {
   // panes from a left-button drag. We swap the underlying pointerdown
   // event so right-drag triggers pan and suppresses contextmenu.
   installRightDragPan();
-  installClickPause();
   installLiveWheelAnchor();
   installContextMenuSuppress();
   return chart;
@@ -354,66 +422,6 @@ function installContextMenuSuppress() {
   const c = canvas.value;
   if (!c) return;
   c.addEventListener('contextmenu', (e) => e.preventDefault());
-}
-
-function installClickPause() {
-  // Bind on the WRAPPER, not the canvas. The legend area is drawn on
-  // the canvas by Chart.js, but the zoom plugin attaches its own
-  // listeners directly on the canvas element and can swallow the click
-  // before our handler runs. The wrapper sits one level up so the
-  // event always bubbles to us.
-  const el = canvasWrap.value;
-  if (!el) return;
-
-  /** Is `(clientX,clientY)` inside the Chart.js legend hit-box? Chart
-   *  v4 exposes `chart.legend.{top,bottom,left,right}` in canvas-local
-   *  pixel coordinates. We translate the click into the same space and
-   *  test the rectangle. Clicking legend items toggles series
-   *  visibility (Chart.js handles that internally); we must NOT also
-   *  toggle pause when the user is just hiding a line. */
-  function pointInLegend(clientX: number, clientY: number): boolean {
-    const c = canvas.value;
-    if (!c || !chart?.legend) return false;
-    const r = c.getBoundingClientRect();
-    // Translate to CSS-pixel canvas coords. Chart.js uses devicePixelRatio
-    // internally; legend.{top,…} is reported in CSS pixels matching the
-    // bounding rect, no extra scaling needed.
-    const x = clientX - r.left;
-    const y = clientY - r.top;
-    const l = chart.legend;
-    return (
-      typeof l.top === 'number' &&
-      typeof l.bottom === 'number' &&
-      typeof l.left === 'number' &&
-      typeof l.right === 'number' &&
-      x >= l.left && x <= l.right && y >= l.top && y <= l.bottom
-    );
-  }
-
-  // Same heuristic for the chart title / panel toolbar widgets that
-  // sit ABOVE the plot area. Currently we only have the legend below
-  // the chart, so just the legend check is needed.
-
-  el.addEventListener('mousedown', (e) => {
-    if (e.button !== 0) return;
-    clickStartX = e.clientX;
-    clickStartY = e.clientY;
-    clickDragged = false;
-  });
-  el.addEventListener('mousemove', (e) => {
-    if (e.buttons === 0) return;
-    if (Math.abs(e.clientX - clickStartX) > 3 || Math.abs(e.clientY - clickStartY) > 3) {
-      clickDragged = true;
-    }
-  });
-  el.addEventListener('click', (e) => {
-    if (e.altKey) return;
-    if (clickDragged) return;
-    // Don't toggle pause when the user is interacting with the Chart.js
-    // legend (show/hide a series) or the chart's toolbar/title area.
-    if (pointInLegend(e.clientX, e.clientY)) return;
-    coord.togglePause();
-  });
 }
 
 let dragState: { startX: number; startMin: number; startMax: number } | null = null;
@@ -464,32 +472,83 @@ function installLiveWheelAnchor() {
     'wheel',
     (e: WheelEvent) => {
       if (!e.altKey) return;
-      if (coord.state.paused) return; // plugin handles mouse-anchored zoom
       e.preventDefault();
       e.stopPropagation();
       const factor = e.deltaY < 0 ? 0.9 : 1 / 0.9;
-      const windowMs = coord.state.windowMs;
-      const currentSpan =
-        coord.state.liveSpanMs != null ? coord.state.liveSpanMs : windowMs;
       const MIN_SPAN_MS = 1_000;
-      const nextSpan = Math.max(
-        MIN_SPAN_MS,
-        Math.min(windowMs, currentSpan * factor),
-      );
-      // Clearing the override (back to full window) when we'd otherwise
-      // pin at windowMs lets future "no override" callers (e.g. reset)
-      // observe a clean state.
-      coord.setLiveSpanMs(nextSpan >= windowMs ? null : nextSpan);
+      const MAX_SPAN_MS = 24 * 3600 * 1000;
+      const vp = coord.state.viewport;
+
+      // LIVE — left-edge-only via liveSpanMs.
+      if (vp == null) {
+        const windowMs = coord.state.windowMs;
+        const currentSpan = coord.state.liveSpanMs != null ? coord.state.liveSpanMs : windowMs;
+        const nextSpan = Math.max(MIN_SPAN_MS, Math.min(windowMs, currentSpan * factor));
+        coord.setLiveSpanMs(nextSpan >= windowMs ? null : nextSpan);
+        return;
+      }
+
+      // OFF-LIVE — mouse-anchored zoom on the chartArea. Pin to
+      // viewport, snap back to live if the new right edge reaches
+      // the live sample.
+      const currentSpan = vp.max - vp.min;
+      const nextSpan = Math.max(MIN_SPAN_MS, Math.min(MAX_SPAN_MS, currentSpan * factor));
+      const chartArea = chart?.chartArea;
+      let frac = 0.5;
+      if (chartArea && chartArea.right > chartArea.left) {
+        const rect = c.getBoundingClientRect();
+        const xInArea = e.clientX - rect.left - chartArea.left;
+        const widthPx = chartArea.right - chartArea.left;
+        frac = Math.max(0, Math.min(1, xInArea / widthPx));
+      }
+      const anchorTime = vp.min + frac * currentSpan;
+      const newStart = anchorTime - frac * nextSpan;
+      const newEnd = newStart + nextSpan;
+      applyViewportOrSnapToLive(newStart, newEnd);
     },
     { capture: true, passive: false },
   );
 }
 
-function pushSample(p: PlayerRecord) {
+/** Binary-insert a {x,y} point into `data` so the array stays sorted
+ *  ascending by x. Mirrors legacy session-shell.js `insertByTsAsc` —
+ *  needed because samples can arrive out of order in two scenarios:
+ *
+ *    1. v3 session-viewer's bulk replay fires N async watcher
+ *       callbacks that resolve concurrently — without sorting the
+ *       line zigzags ("scribble") even though the source data is in
+ *       order
+ *    2. Live mode with SSE jitter where a delayed metrics frame
+ *       arrives after a fresher one
+ *
+ *  Duplicate x values overwrite — last write wins for that timestamp.
+ *  O(log n) lookup + O(n) shift; chart pushSample is dominated by
+ *  Chart.js update() cost anyway. */
+function insertByX(data: { x: number; y: number }[], point: { x: number; y: number }) {
+  if (!data.length || point.x >= data[data.length - 1].x) {
+    if (data.length && data[data.length - 1].x === point.x) {
+      data[data.length - 1] = point;
+    } else {
+      data.push(point);
+    }
+    return;
+  }
+  let lo = 0; let hi = data.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (data[mid].x < point.x) lo = mid + 1; else hi = mid;
+  }
+  if (lo < data.length && data[lo].x === point.x) {
+    data[lo] = point;
+  } else {
+    data.splice(lo, 0, point);
+  }
+}
+
+
+function pushSample(p: PlayerRecord, x: number) {
   if (!chart || !chart.data?.datasets) return;
-  const x = tsFor(p);
   coord.noteSample(x);
-  const cutoff = x - coord.state.windowMs * 2;
   let mutated = false;
   for (let i = 0; i < props.series.length; i++) {
     const s = props.series[i];
@@ -498,10 +557,16 @@ function pushSample(p: PlayerRecord) {
     if (y == null || !Number.isFinite(y)) continue;
     const data = dataset[i];
     if (!data) continue;
-    data.push({ x, y: Number(y) });
-    while (data.length && data[0].x < cutoff) data.shift();
+    insertByX(data, { x, y: Number(y) });
     mutated = true;
   }
+  // Retention is the time-series cache's job (SOFT_CAP_SAMPLES) —
+  // the chart used to trim at `x - windowMs * 2` to bound memory,
+  // but `windowMs` is the *visible* window, not retention. When the
+  // operator zooms in (focusSpan shrinks → setWindowMs shrinks) the
+  // trim was killing older points the PLAYERSTATE lane still had,
+  // producing a chart-vs-lane time-axis mismatch. Chart.js with
+  // `animation: false` handles tens of thousands of points fine.
   if (mutated) {
     if (!coord.state.paused && !coord.state.viewport) {
       applyViewport({ min: x - coord.state.windowMs, max: x });
@@ -515,26 +580,143 @@ function pushSample(p: PlayerRecord) {
 // and can leave Chart.js in a half-applied state. The chart will
 // catch up on the next reactive tick anyway, so swallowing transient
 // failures is safe.
+//
+// Updates are coalesced to a max of one per second via setTimeout.
+// Two reasons setTimeout beats requestAnimationFrame here:
+//   1. requestAnimationFrame is throttled / paused when the tab is
+//      backgrounded — during a bulk archive replay the rAF callback
+//      can hold off indefinitely, and the queued chart.update never
+//      fires, so the canvas stays blank
+//   2. Even at 60 Hz, the session-viewer bulk replay (17k+ snapshots
+//      pushed through one watcher each) needs only "the chart catches
+//      up periodically so the operator sees progress"; 60× per second
+//      is wasted work, 1× per second is plenty
+// Live (testing-session) mode also benefits — at 1 Hz the cadence
+// matches the server's metrics emit rate, so no work is wasted re-
+// rendering a chart that hasn't changed.
+/** Adaptive update throttle. Chart.js's render cost grows roughly
+ *  linearly with `totalPoints × series`, so a fixed 1 s cadence
+ *  becomes the dominant cost once the chart has thousands of points
+ *  (a 2 h archive replay can sit at ~30 k points across all series).
+ *  Tier the throttle to keep redraws bounded while live mode stays
+ *  responsive at the metrics emit cadence:
+ *
+ *     <   500 pts → 1 s   (live testing-session, fresh)
+ *     <  5000 pts → 2 s   (live after ~30 minutes)
+ *     <  20000 pts → 5 s  (archive replay or very long live)
+ *     >= 20000 pts → 10 s (very long archive)
+ *
+ *  Picked from observed paint times on test-dev: a 30k-point chart
+ *  takes ~80 ms per update — at 1 Hz that's 8 % CPU just for one
+ *  chart, with 4 charts on the page that's already 32 %. 10 s drops
+ *  that to ~3 % even for the worst case. */
+let pendingUpdateTimer: number | null = null;
+let lastUpdateAt = 0;
+function pickThrottleMs(): number {
+  const n = (chart?.data?.datasets ?? []).reduce(
+    (acc: number, d: any) => acc + (Array.isArray(d?.data) ? d.data.length : 0), 0);
+  if (n >= 20_000) return 10_000;
+  if (n >= 5_000) return 5_000;
+  if (n >= 500) return 2_000;
+  return 1_000;
+}
 function safeChartUpdate() {
   if (!chart) return;
-  try { chart.update('none'); } catch (err) { console.warn('chart update skipped:', err); }
+  if (pendingUpdateTimer != null) return;
+  const now = Date.now();
+  const throttleMs = pickThrottleMs();
+  const dueAt = lastUpdateAt + throttleMs;
+  const delay = Math.max(0, dueAt - now);
+  pendingUpdateTimer = window.setTimeout(() => {
+    pendingUpdateTimer = null;
+    lastUpdateAt = Date.now();
+    if (!chart) return;
+    try { chart.update('none'); } catch (err) { console.warn('chart update skipped:', err); }
+  }, delay);
+}
+
+/* ─── Samples-stream consumer ──────────────────────────────────────
+ *
+ * Single feed: drain new CH rows from the time-series cache on every
+ * version bump. `lastIngestedMs` is the watermark — only NEW rows
+ * (ts > watermark) get pushed. Backfill burst lands in one drain
+ * pass; live tail is one extra row per flush.
+ *
+ * Pause buffer: while paused, queued rows hold in `pendingLive` so
+ * the chart's trim cutoff (`pushSample` removes points older than
+ * `x - windowMs * 2`) can't advance and silently drop pre-pause
+ * archive history off the left edge.
+ */
+const pendingLive: { p: PlayerRecord; x: number }[] = [];
+let drainToken = 0;
+
+async function drainNewRows() {
+  if (!chart) {
+    try { await ensure(); }
+    catch (err) { console.warn('chart ensure failed:', err); return; }
+  }
+  if (!chart) return;
+  const raw = props.samplesStream.inRange(
+    lastIngestedMs === -Infinity ? 0 : lastIngestedMs + 1,
+    Number.MAX_SAFE_INTEGER,
+  );
+  if (!raw.length) return;
+  const myToken = ++drainToken;
+  // Chunked iteration with main-thread yields keeps brush + scroll
+  // responsive when the initial backfill hits (5–10 k rows).
+  const CHUNK = 500;
+  let highWater = lastIngestedMs;
+  for (let start = 0; start < raw.length; start += CHUNK) {
+    if (myToken !== drainToken) return;
+    const end = Math.min(start + CHUNK, raw.length);
+    for (let i = start; i < end; i++) {
+      const row = raw[i];
+      const x = tsOfRow(row);
+      if (!Number.isFinite(x)) continue;
+      if (x <= lastIngestedMs) continue; // belt-and-suspenders
+      const p = chRowToPlayerRecord(row);
+      if (coord.state.paused) {
+        pendingLive.push({ p, x });
+      } else {
+        pushSample(p, x);
+      }
+      if (x > highWater) highWater = x;
+    }
+    if (end < raw.length) {
+      await new Promise<void>((r) => setTimeout(r, 0));
+    }
+  }
+  lastIngestedMs = highWater;
 }
 
 watch(
-  () => player.value,
-  async (p) => {
-    if (!p) return;
-    const k = sampleKey(p);
-    if (k === lastSampleKey) return;
-    lastSampleKey = k;
-    try {
-      await ensure();
-      pushSample(p);
-    } catch (err) {
-      console.warn('chart sample push failed:', err);
-    }
+  () => props.samplesStream.version.value,
+  () => { void drainNewRows(); },
+  { immediate: true },
+);
+
+// Resume drain — flush any samples that arrived during pause in
+// chronological order, so the chart catches up to the live edge in
+// one pass. insertByX dedupes by x so re-runs stay safe.
+watch(
+  () => coord.state.paused,
+  (paused) => {
+    if (paused || !pendingLive.length) return;
+    const drained = pendingLive.splice(0, pendingLive.length);
+    for (const { p, x } of drained) pushSample(p, x);
   },
-  { immediate: true, deep: false },
+);
+
+// Player swap — reset all per-player state so a picker swap clears
+// the old chart instead of accumulating both.
+watch(
+  () => props.playerId,
+  () => {
+    pendingLive.length = 0;
+    lastIngestedMs = -Infinity;
+    for (const arr of dataset) arr.length = 0;
+    safeChartUpdate();
+  },
 );
 
 // React to coordinated state changes (other charts in the same session
@@ -548,7 +730,13 @@ watch(
     } catch (err) {
       console.warn('chart viewport apply skipped:', err);
     }
-    safeChartUpdate();
+    // Viewport / pause changes are axis-only updates — render
+    // directly so brush drag feels as smooth as the vis-timeline
+    // events panel. safeChartUpdate's adaptive throttle exists for
+    // data-arrival churn (pushSample / drainNewRows insert many
+    // points per second); applying it here would delay pan response
+    // up to several seconds when a dataset has thousands of points.
+    try { chart.update('none'); } catch (err) { console.warn('chart pan render skipped:', err); }
   },
 );
 
@@ -561,23 +749,47 @@ watch(
   },
 );
 
+
 // Per-chart-instance expand toggle. The legacy let the operator double
 // a single chart's vertical resolution without disturbing the others,
 // so they could eyeball a specific signal closely. Local ref, not
 // shared via `coord` — each of bandwidth / RTT / buffer / FPS toggles
-// independently.
-const expandedLocal = ref(false);
+// independently. Persisted to localStorage under a per-title key so
+// the operator's chosen tall layout survives reloads.
+const EXPAND_STORAGE_PREFIX = 'dashboard_v3_chart_expand_';
+function expandStorageKey() {
+  return EXPAND_STORAGE_PREFIX + String(props.title || 'chart').toLowerCase().replace(/\s+/g, '-');
+}
+function readExpandStored(): boolean {
+  try { return localStorage.getItem(expandStorageKey()) === 'true'; } catch { return false; }
+}
+function writeExpandStored(v: boolean) {
+  try { localStorage.setItem(expandStorageKey(), v ? 'true' : 'false'); } catch { /* ignore */ }
+}
+const expandedLocal = ref<boolean>(readExpandStored());
 const expandedClass = computed(() => (expandedLocal.value ? 'expanded' : ''));
 function toggleExpand() {
   expandedLocal.value = !expandedLocal.value;
+  writeExpandStored(expandedLocal.value);
   // Chart.js with maintainAspectRatio:false honours the new container
   // height via its ResizeObserver. The 150ms CSS transition can race
   // the observer's settled-callback though, so call resize() after the
   // transition completes to make sure the plot fills the new box.
   setTimeout(() => { try { chart?.resize(); } catch { /* ignore */ } }, 200);
 }
-const pauseLabel = computed(() => (coord.state.paused ? '▶ Live' : '⏸ Pause'));
-const zoomActive = computed(() => coord.state.viewport !== null);
+// Live toggle is "checked" when we're currently following live —
+// i.e. no sticky viewport. Reactive across all charts because every
+// MetricsLineChart instance reads from the shared `coord.state`.
+const liveChecked = computed(() => coord.state.viewport === null);
+
+/** Click handler — always togglePause. Both directions preserve the
+ *  current `liveSpanMs` so going PINNED → LIVE doesn't reset the zoom
+ *  span the user dialed in. (The earlier asymmetric "go to default
+ *  span on the way back" was rejected — kept ripping the focus bar
+ *  away from the zoom the user picked.) */
+function onLiveToggleClick() {
+  coord.togglePause();
+}
 
 onBeforeUnmount(() => {
   try { chart?.destroy(); } catch { /* ignore */ }
@@ -602,30 +814,20 @@ onBeforeUnmount(() => {
         </button>
         <button
           type="button"
-          class="btn"
-          :class="{ active: zoomActive }"
-          @click="coord.resetZoom()"
-          title="Snap back to live edge and clear any zoom"
+          class="btn live-toggle"
+          :class="{ checked: liveChecked }"
+          @click="onLiveToggleClick"
+          :title="liveChecked ? 'Pause at current live edge' : 'Resume following live (drops zoom and pan)'"
         >
-          Reset Zoom
-        </button>
-        <button
-          type="button"
-          class="btn"
-          :class="{ live: coord.state.paused }"
-          @click="coord.togglePause()"
-          title="Freeze the chart at the current view"
-        >
-          {{ pauseLabel }}
+          {{ liveChecked ? '●' : '○' }} Live
         </button>
         <span class="hint" title="Hold Alt (Option on Mac) while scrolling or dragging to zoom; right-click-drag to pan">
-          Alt/⌥+scroll/drag · right-drag pan · click pause
+          Alt/⌥+scroll/drag · right-drag pan
         </span>
       </div>
     </div>
     <div ref="canvasWrap" class="canvas-wrap" :class="expandedClass">
       <canvas ref="canvas" />
-      <div v-if="coord.state.paused" class="paused-badge">PAUSED</div>
     </div>
   </div>
 </template>
@@ -670,12 +872,22 @@ onBeforeUnmount(() => {
   border-color: #818cf8;
   color: #312e81;
 }
-.btn.live {
+/* Live toggle: filled green when checked (following live), muted/
+ * outlined when unchecked (pinned). The hollow vs filled dot in the
+ * label reinforces the state at a glance. */
+.btn.live-toggle.checked {
   background: #10b981;
   border-color: #059669;
   color: white;
+  font-weight: 600;
 }
-.btn.live:hover { background: #059669; }
+.btn.live-toggle.checked:hover { background: #059669; }
+.btn.live-toggle:not(.checked) {
+  background: #f3f4f6;
+  border-color: #d1d5db;
+  color: #6b7280;
+}
+.btn.live-toggle:not(.checked):hover { background: #e5e7eb; color: #374151; }
 
 .hint {
   font-size: 10px;
@@ -700,18 +912,4 @@ onBeforeUnmount(() => {
   color: #ffffff;
 }
 .btn-expand.active:hover { background: #1d4ed8; }
-
-.paused-badge {
-  position: absolute;
-  top: 8px;
-  right: 8px;
-  background: rgba(31, 41, 55, 0.85);
-  color: #fde68a;
-  padding: 2px 8px;
-  border-radius: 4px;
-  font-size: 10px;
-  font-weight: 700;
-  letter-spacing: 1px;
-  pointer-events: none;
-}
 </style>

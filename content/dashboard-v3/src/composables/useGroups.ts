@@ -25,12 +25,25 @@ export function useGroups() {
     refetchOnWindowFocus: true,
   });
 
+  // Surface mutation failures — without an onError handler the
+  // TanStack Query mutation just logs to its internal state and the
+  // UI never moves, which is exactly how the earlier
+  // `{player_ids: ...}` POST regression slipped through.
+  function reportMutationError(action: string, err: unknown) {
+    const msg = (err as any)?.message ?? String(err);
+    console.error(`[useGroups] ${action} failed`, err);
+    if (typeof window !== 'undefined') {
+      window.alert(`${action} failed: ${msg}`);
+    }
+  }
+
   const link = useMutation({
     mutationFn: (playerIds: string[]) => repo.linkGroup(playerIds),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: key() });
       qc.invalidateQueries({ queryKey: ['players'] });
     },
+    onError: (err) => reportMutationError('Group sessions', err),
   });
 
   const disband = useMutation({
@@ -39,6 +52,19 @@ export function useGroups() {
       qc.invalidateQueries({ queryKey: key() });
       qc.invalidateQueries({ queryKey: ['players'] });
     },
+    onError: (err) => reportMutationError('Disband group', err),
+  });
+
+  /** Update a group's membership wholesale. Caller provides the
+   *  desired final list; handler diffs against the current set. */
+  const updateMembers = useMutation({
+    mutationFn: (args: { groupId: string; memberPlayerIds: string[]; ifMatch: string }) =>
+      repo.updateGroupMembers(args.groupId, args.memberPlayerIds, args.ifMatch),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: key() });
+      qc.invalidateQueries({ queryKey: ['players'] });
+    },
+    onError: (err) => reportMutationError('Update group membership', err),
   });
 
   return {
@@ -46,5 +72,7 @@ export function useGroups() {
     isLoading: query.isLoading,
     link: (playerIds: string[]) => link.mutate(playerIds),
     disband: (groupId: string) => disband.mutate(groupId),
+    updateMembers: (groupId: string, memberPlayerIds: string[], ifMatch: string) =>
+      updateMembers.mutate({ groupId, memberPlayerIds, ifMatch }),
   };
 }

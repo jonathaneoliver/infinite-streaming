@@ -15,16 +15,82 @@
  *
  * Polled at 2 Hz; SSE-driven feed lands in a follow-up.
  */
-import { computed, nextTick, ref, toRef, watch } from 'vue';
-import { useQuery } from '@tanstack/vue-query';
-import * as repo from '@/repo/v2-repo';
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, toRef, watch } from 'vue';
 import type { NetworkLogEntry } from '@/repo/v2-repo';
 import { usePlayer } from '@/composables/usePlayer';
-import NetworkLogBrush, { type BrushTick } from './NetworkLogBrush.vue';
+import { useChartCoordination } from '@/composables/useChartCoordination';
+import type { Stream } from '@/composables/useSessionTimeSeries';
 
-const props = defineProps<{ playerId: string }>();
+const props = defineProps<{
+  playerId: string;
+  /** Network stream from the parent SessionDisplay's
+   *  useSessionTimeSeries model. Supplies every per-request row for
+   *  this (player, play), server-filtered to the current play_id,
+   *  with the ring + CH boundary already deduplicated. */
+  networkStream: Stream<Record<string, unknown>>;
+}>();
 const playerIdRef = toRef(props, 'playerId');
 const { sseState } = usePlayer(playerIdRef);
+const coord = useChartCoordination(playerIdRef);
+
+/** Rows to highlight for the synchronized "selected event" cursor.
+ *
+ *  Three-tier fallback so SOMETHING always lights up when a cursor
+ *  is set, since events rarely line up with a request's lifetime
+ *  (player-side stalls, downshifts, etc. happen between requests):
+ *
+ *    1. Containing requests — any rows whose [ts, ts+duration]
+ *       interval includes the cursor time. Multiple can match
+ *       (overlapping partial-segment fetches); highlight all.
+ *    2. Predecessor — the most recent request that started at or
+ *       before the cursor. Maps "where in the request stream did
+ *       this event happen?" to the obvious answer "right after this
+ *       last request started."
+ *    3. Successor — first row after the cursor, only when the
+ *       cursor sits before any logged request (e.g. cursor at
+ *       session start before traffic began).
+ */
+const currentRowKeys = computed<Set<string>>(() => {
+  const ms = coord.state.cursorMs;
+  const out = new Set<string>();
+  if (ms == null || !Number.isFinite(ms)) return out;
+  const arr = allRows.value;
+  if (!arr.length) return out;
+
+  let foundContaining = false;
+  for (const r of arr) {
+    if (r.ts <= ms && ms <= r.ts + Math.max(1, r.duration)) {
+      out.add(rowKey(r));
+      foundContaining = true;
+    }
+  }
+  if (foundContaining) return out;
+
+  // Predecessor — largest ts ≤ cursorMs. allRows isn't guaranteed
+  // sorted by ts (depends on the forwarder's ORDER BY), so scan.
+  let bestPred: typeof arr[number] | null = null;
+  let bestPredTs = -Infinity;
+  let bestSucc: typeof arr[number] | null = null;
+  let bestSuccTs = Infinity;
+  for (const r of arr) {
+    if (r.ts <= ms) {
+      if (r.ts > bestPredTs) { bestPredTs = r.ts; bestPred = r; }
+    } else {
+      if (r.ts < bestSuccTs) { bestSuccTs = r.ts; bestSucc = r; }
+    }
+  }
+  if (bestPred) out.add(rowKey(bestPred));
+  else if (bestSucc) out.add(rowKey(bestSucc));
+  return out;
+});
+function rowKey(r: { ts: number; entry: NetworkLogEntry }): string {
+  // Same join key as the v-for :key so the class application lines up
+  // with the rendered row. URL alone isn't unique (retries), so we
+  // pair with ts. (sortedRows :key is the array index, but mapping by
+  // index requires the computed to know the current sort order — far
+  // simpler to key by ts+url and check Set.has() in the template.)
+  return r.ts + '|' + (r.entry.url ?? r.entry.path ?? '');
+}
 
 type SortCol = 'time' | 'method' | 'path' | 'bytes' | 'mbps' | 'duration' | 'status';
 type SortDir = 'asc' | 'desc';
@@ -41,48 +107,46 @@ const paused = ref(false);
 
 const rowsScrollRef = ref<HTMLDivElement | null>(null);
 
-const brushStartMs = ref<number | null>(null);
-const brushEndMs = ref<number | null>(null);
-function onBrushChange(v: { startMs: number; endMs: number } | null) {
-  if (v) {
-    brushStartMs.value = v.startMs;
-    brushEndMs.value = v.endMs;
-  } else {
-    brushStartMs.value = null;
-    brushEndMs.value = null;
-  }
+/** Adapt a raw row from the v3 /api/v3/timeseries stream (CH row
+ *  shape — `ts` string in CH format, Int64 fields as JSON strings,
+ *  `faulted` as 0/1) to the NetworkLogEntry shape the renderer
+ *  expects. The wire shape is intentionally kept close to CH's
+ *  storage; the dashboard does the conversion once on read. */
+function chRowToEntry(raw: Record<string, unknown>): NetworkLogEntry {
+  const tsRaw = raw.ts as string | undefined;
+  const timestamp = tsRaw && tsRaw.length > 10 && tsRaw.charAt(10) === ' '
+    ? tsRaw.replace(' ', 'T') + 'Z'
+    : (tsRaw ?? '');
+  const toNum = (v: unknown): number => {
+    if (typeof v === 'number') return v;
+    if (typeof v === 'string') return Number(v);
+    return 0;
+  };
+  return {
+    timestamp,
+    method: (raw.method as string) ?? '',
+    url: (raw.url as string) ?? '',
+    upstream_url: (raw.upstream_url as string) ?? '',
+    path: (raw.path as string) ?? '',
+    request_kind: (raw.request_kind as string) ?? '',
+    status: toNum(raw.status),
+    bytes_in: toNum(raw.bytes_in),
+    bytes_out: toNum(raw.bytes_out),
+    content_type: (raw.content_type as string) ?? '',
+    play_id: (raw.play_id as string) ?? '',
+    ttfb_ms: toNum(raw.ttfb_ms),
+    total_ms: toNum(raw.total_ms),
+    dns_ms: toNum(raw.dns_ms),
+    connect_ms: toNum(raw.connect_ms),
+    tls_ms: toNum(raw.tls_ms),
+    transfer_ms: toNum(raw.transfer_ms),
+    client_wait_ms: toNum(raw.client_wait_ms),
+    faulted: !!raw.faulted && raw.faulted !== 0,
+    fault_type: (raw.fault_type as string) ?? '',
+    fault_action: (raw.fault_action as string) ?? '',
+    fault_category: (raw.fault_category as string) ?? '',
+  } as NetworkLogEntry;
 }
-
-const query = useQuery({
-  queryKey: computed(() => ['network', playerIdRef.value] as const),
-  queryFn: () => repo.getPlayerNetworkLog(playerIdRef.value, 500),
-  // Stop polling once the server has rejected this player_id outright
-  // (400 / 404). Otherwise refetch every 2s while not paused.
-  refetchInterval: (q: any) => {
-    const s = (q?.state?.error as any)?.status;
-    if (typeof s === 'number' && s >= 400 && s < 500) return false;
-    return paused.value ? false : 2_000;
-  },
-  refetchIntervalInBackground: false,
-  staleTime: 1_000,
-  retry: (n, err: any) => {
-    const s = err?.status;
-    if (typeof s === 'number' && s >= 400 && s < 500) return false;
-    return n < 1;
-  },
-  refetchOnMount: (q: any) => {
-    const s = (q?.state?.error as any)?.status;
-    return !(typeof s === 'number' && s >= 400 && s < 500);
-  },
-  refetchOnWindowFocus: (q: any) => {
-    const s = (q?.state?.error as any)?.status;
-    return !(typeof s === 'number' && s >= 400 && s < 500);
-  },
-  refetchOnReconnect: (q: any) => {
-    const s = (q?.state?.error as any)?.status;
-    return !(typeof s === 'number' && s >= 400 && s < 500);
-  },
-});
 
 interface Row {
   entry: NetworkLogEntry;
@@ -123,12 +187,24 @@ function isSuccessful(e: NetworkLogEntry): boolean {
 }
 
 /** All rows, before brush + toggles — used to feed the overview rail
- *  so the user always sees every request regardless of current filter. */
+ *  so the user always sees every request regardless of current filter.
+ *
+ *  Sourced from the parent SessionDisplay's unified time-series
+ *  model (`networkStream`). The stream is server-filtered by play_id
+ *  and merges ring + CH on the boundary, so the table no longer
+ *  needs to dedupe or worry about stale-play leakage. Reading the
+ *  stream's `version` ref registers the computed as a dep so it
+ *  re-runs on every delta. */
 const allRows = computed<Row[]>(() => {
-  const items = (query.data.value ?? []) as NetworkLogEntry[];
+  // Touch `version` so Vue tracks deltas; inRange() ALSO touches
+  // the underlying array ref via tsOf, but reading version is a
+  // belt-and-suspenders guarantee against shallowRef quirks.
+  void props.networkStream.version.value;
+  const raw = props.networkStream.inRange(0, Number.MAX_SAFE_INTEGER);
   const built: Row[] = [];
-  for (const e of items) {
-    const r = buildRow(e);
+  for (const obj of raw) {
+    const entry = chRowToEntry(obj);
+    const r = buildRow(entry);
     if (!r) continue;
     built.push(r);
   }
@@ -139,24 +215,9 @@ const rows = computed<Row[]>(() => {
   return allRows.value.filter((r) => {
     if (faultedOnly.value && !r.entry.faulted) return false;
     if (hideSuccessful.value && isSuccessful(r.entry)) return false;
-    if (brushStartMs.value != null && brushEndMs.value != null) {
-      const reqStart = r.ts;
-      const reqEnd = r.ts + r.duration;
-      // Keep any row whose extent overlaps the brush range.
-      if (reqEnd < brushStartMs.value) return false;
-      if (reqStart > brushEndMs.value) return false;
-    }
     return true;
   });
 });
-
-const brushTicks = computed<BrushTick[]>(() =>
-  allRows.value.map((r) => ({
-    ts: r.ts,
-    status: Number(r.entry.status ?? 0),
-    faulted: !!r.entry.faulted,
-  })),
-);
 
 /** Summary line: total request count + breakdowns by kind / fault /
  *  slow + lifetime bytes-in. Matches the legacy `.netwf-summary`. */
@@ -368,12 +429,14 @@ function phaseStyle(r: Row): PhaseStyle | null {
 }
 
 function refresh() {
-  query.refetch();
+  // Refresh is a no-op on the streaming model — new deltas arrive
+  // via SSE automatically. We keep the button for muscle memory;
+  // a future iteration could expose a reconnect() that re-opens
+  // the EventSource if the operator wants to force a re-backfill.
 }
 
 function togglePause() {
   paused.value = !paused.value;
-  if (!paused.value) refresh();
 }
 
 // Follow-latest: when on, scroll the row list to the latest row each
@@ -392,6 +455,69 @@ watch(
     });
   },
 );
+
+// Position the highlighted row inside the .rows scroll container
+// without touching the OUTER page scroll. scrollIntoView() would
+// walk up every scroll ancestor (panel → CollapsibleSection → page)
+// and yank the page to the network log — annoying when the operator
+// is mid-scroll elsewhere. Instead, set scrollTop directly so only
+// the inner container moves; if the row is already inside the
+// visible band, do nothing (scrollIntoView's `block: 'nearest'`
+// equivalent without the side effect).
+watch(
+  () => coord.state.cursorMs,
+  () => {
+    if (currentRowKeys.value.size === 0) return;
+    nextTick(() => {
+      const el = rowsScrollRef.value;
+      if (!el) return;
+      const target = el.querySelector('.row.cursor-current') as HTMLElement | null;
+      if (!target) return;
+      const containerTop = el.scrollTop;
+      const containerBottom = containerTop + el.clientHeight;
+      const rowTop = target.offsetTop;
+      const rowBottom = rowTop + target.offsetHeight;
+      if (rowTop < containerTop) {
+        // Above the viewport — scroll up so the row sits at the top.
+        el.scrollTop = rowTop;
+      } else if (rowBottom > containerBottom) {
+        // Below — scroll down just enough to land the row at bottom.
+        el.scrollTop = rowBottom - el.clientHeight;
+      }
+      // Otherwise it's already visible; leave scrollTop alone.
+    });
+  },
+);
+
+/* ─── Wheel hijack ─────────────────────────────────────────────────
+ *
+ * Plain mouse-wheel inside the network-log row container should scroll
+ * the PAGE, not the inner overflow box. Trapping wheel events on a
+ * long inner-scroll region is the legacy session-shell.js parity
+ * behaviour — operators expect the page to keep scrolling when they
+ * roll past the rail, and only opt into row scrolling explicitly.
+ *
+ *   - plain wheel  → preventDefault + window.scrollBy (page moves)
+ *   - Alt+wheel    → native overflow scroll inside the rows container
+ *
+ * Capture-phase listener so we run before the browser's default
+ * overflow handler, with `passive: false` so preventDefault is allowed.
+ */
+onMounted(() => {
+  const el = rowsScrollRef.value;
+  if (!el) return;
+  el.addEventListener('wheel', onRowsWheel, { capture: true, passive: false });
+});
+onBeforeUnmount(() => {
+  const el = rowsScrollRef.value;
+  if (!el) return;
+  el.removeEventListener('wheel', onRowsWheel, { capture: true } as EventListenerOptions);
+});
+function onRowsWheel(e: WheelEvent) {
+  if (e.altKey) return; // operator opted in — let the rows scroll
+  e.preventDefault();
+  window.scrollBy({ top: e.deltaY, left: e.deltaX, behavior: 'auto' });
+}
 </script>
 
 <template>
@@ -419,13 +545,11 @@ watch(
       <span class="sse" :data-state="sseState">{{ sseState }}</span>
     </div>
 
-    <NetworkLogBrush
-      v-if="brushTicks.length"
-      :ticks="brushTicks"
-      :brush-start-ms="brushStartMs"
-      :brush-end-ms="brushEndMs"
-      @update:brush="onBrushChange"
-    />
+    <!-- In-panel brush retired in the timeseries migration —
+         SessionDisplay's page-level focus bar is the single brush
+         surface. NetworkLog now shows whatever the network stream
+         delivers for the current play. -->
+
 
     <!-- Summary line: count breakdown + lifetime bytes (matches legacy
          .netwf-summary). Shown beneath the brush so it picks up the
@@ -471,7 +595,7 @@ watch(
           v-for="(r, i) in sortedRows"
           :key="i"
           class="row"
-          :class="rowFaultClass(r)"
+          :class="[rowFaultClass(r), { 'cursor-current': currentRowKeys.has(rowKey(r)) }]"
           :title="tooltipFor(r)"
         >
           <div class="cell c-time">{{ fmtTime(r.ts) }}</div>
@@ -645,6 +769,25 @@ watch(
 }
 
 .row:hover { background: #f9fafb; }
+
+/* "Selected event" cursor — synchronized with the chart cursor. A
+ * row is highlighted when its [ts, ts+duration] interval contains
+ * cursorMs. Visual treatment is intentionally loud: a 2px dashed
+ * blue line top + bottom, saturated blue background tint, a 4px
+ * left-edge gutter in solid blue, and z-index lift so the borders
+ * aren't visually cropped by the next row's top-border. Multiple
+ * rows can light up simultaneously (overlapping partial fetches),
+ * which correctly conveys "everything in flight at that moment." */
+.row.cursor-current {
+  position: relative;
+  background: rgba(29, 78, 216, 0.14);
+  border-top: 2px dashed #1d4ed8;
+  border-bottom: 2px dashed #1d4ed8;
+  box-shadow: inset 4px 0 0 #1d4ed8;
+  z-index: 2;
+}
+.row.cursor-current:hover { background: rgba(29, 78, 216, 0.20); }
+
 .row-faulted { background: #fef2f2; }
 .row-faulted:hover { background: #fee2e2; }
 .row-slow { background: #fffbeb; }

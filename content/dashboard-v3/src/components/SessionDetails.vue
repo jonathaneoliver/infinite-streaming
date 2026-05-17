@@ -54,6 +54,11 @@ const fields = computed(() => {
   const sm = p.server_metrics ?? null;
   const raw = (p as any).raw_session ?? null;
   const port = raw?.x_forwarded_port_external ?? raw?.x_forwarded_port ?? null;
+  // Group ID lives on the v1 session passthrough (the v2 PlayerRecord
+  // doesn't model it as a first-class field yet). Show "—" when
+  // ungrouped so the operator can confirm linking actually landed.
+  const gid = raw?.group_id;
+  const groupValue = typeof gid === 'string' && gid.length ? gid : '—';
   // Master URL is the manifest entry the player loaded; the legacy
   // page also showed the "Last Request URL" (the most-recent network
   // log entry's URL); we don't track that here yet so omit it.
@@ -61,6 +66,7 @@ const fields = computed(() => {
     { label: 'Player ID', value: p.id ?? '—' },
     { label: 'Display ID', value: String(p.display_id ?? '—') },
     { label: 'Play ID', value: cp?.id ?? '—' },
+    { label: 'Group ID', value: groupValue },
     { label: 'Origination IP', value: p.origination_ip ?? '—' },
     { label: 'Player IP', value: p.player_ip ?? '—' },
     { label: 'Port', value: port != null ? String(port) : '—' },

@@ -66,12 +66,27 @@ const menu = ref({
 });
 
 function mintPlayerId(): string {
-  if (typeof crypto !== 'undefined' && crypto.getRandomValues) {
-    const bytes = new Uint8Array(6);
-    crypto.getRandomValues(bytes);
-    return Array.from(bytes).map((b) => b.toString(16).padStart(2, '0')).join('').slice(0, 8);
+  // Mint a canonical v4 UUID so the player_id is already in the v2
+  // form everywhere (URL, v1 shaper register, /api/v2/players, archive
+  // lookup). Previously this returned an 8-char hex short form, which
+  // the v2 layer transparently v5-derived to a UUID on read — but the
+  // forwarder then stored the raw short form and the v3 archive
+  // queries (built from /api/v2/players.id) missed every row.
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID();
   }
-  return Math.random().toString(36).slice(2, 10);
+  // Fallback for ancient environments without crypto.randomUUID:
+  // hand-assemble a UUIDv4 with proper version/variant bits.
+  const bytes = new Uint8Array(16);
+  if (typeof crypto !== 'undefined' && crypto.getRandomValues) {
+    crypto.getRandomValues(bytes);
+  } else {
+    for (let i = 0; i < 16; i++) bytes[i] = Math.floor(Math.random() * 256);
+  }
+  bytes[6] = (bytes[6] & 0x0f) | 0x40; // version 4
+  bytes[8] = (bytes[8] & 0x3f) | 0x80; // variant
+  const hex = Array.from(bytes).map((b) => b.toString(16).padStart(2, '0')).join('');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
 /** Rewrite the tile URL to the shaper port (last 3 digits → `081`) and
@@ -94,6 +109,10 @@ function buildTestingUrl(url: string, playerId: string): string {
   if (currentPort !== '5173' && currentPort.length >= 4) {
     absolute.hostname = window.location.hostname;
     absolute.port = currentPort.slice(0, -3) + '081';
+    // Inherit the page's protocol — go-proxy now serves TLS on the
+    // shaper ports so the dashboard's HTTPS page can embed playback
+    // without mixed-content blocking. `window.location.protocol`
+    // includes the trailing colon, exactly what URL.protocol expects.
     absolute.protocol = window.location.protocol;
   }
   absolute.searchParams.set('player_id', playerId);
@@ -164,10 +183,14 @@ const rows = computed(() => clampInt(params.rows, DEFAULT_ROWS, 1, 6));
 const total = computed(() => cols.value * rows.value);
 const gridStyle = computed(() => ({ gridTemplateColumns: `repeat(${cols.value}, 1fr)` }));
 
-const protocol = computed(() => params.protocol || 'all'); // hls | dash | both | all
-const codec    = computed(() => params.codec    || 'all'); // h264 | hevc | av1 | all
+// Default filters target the most common test combo (HLS + H264 + 6 s
+// segments) so a fresh page load lands on a useful slice without the
+// operator picking from "all" each time. URL params still win — drop
+// `?protocol=…&codec=…&segs=…` to override.
+const protocol = computed(() => params.protocol || 'hls'); // hls | dash | both | all
+const codec    = computed(() => params.codec    || 'h264'); // h264 | hevc | av1 | all
 const segs     = computed<'2' | '6' | 'll' | 'all'>(() => {
-  const v = params.segs;
+  const v = params.segs ?? '6';
   if (v === '2' || v === '6' || v === 'll') return v;
   return 'all';
 });

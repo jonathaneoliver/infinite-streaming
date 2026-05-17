@@ -91,18 +91,13 @@ export function useSessionMetrics(opts: UseSessionMetricsOptions) {
 
   async function resolveSessionId(): Promise<string | null> {
     if (sessionId.value) return sessionId.value;
-    if (!opts.playerId.value) {
-      console.log('[USM] resolveSessionId: no playerId, skipping');
-      return null;
-    }
+    if (!opts.playerId.value) return null;
     if (!lookupInFlight) {
-      console.log('[USM] resolveSessionId: starting GET for', opts.playerId.value);
       lookupInFlight = (async () => {
         try {
           const { player } = await repo.getPlayer(opts.playerId.value);
           const raw = (player as any).raw_session;
           const sid = raw?.session_id;
-          console.log('[USM] resolveSessionId: GET ok, session_id =', sid);
           if (sid != null) sessionId.value = String(sid);
         } catch (e: any) {
           console.warn('[USM] resolveSessionId: GET failed', e?.status, e?.message);
@@ -110,8 +105,6 @@ export function useSessionMetrics(opts: UseSessionMetricsOptions) {
           lookupInFlight = null;
         }
       })();
-    } else {
-      console.log('[USM] resolveSessionId: lookup already in flight');
     }
     await lookupInFlight;
     return sessionId.value;
@@ -227,32 +220,21 @@ export function useSessionMetrics(opts: UseSessionMetricsOptions) {
   let postEnabled = true;
 
   function send(eventType: string, extra: Record<string, unknown> = {}): void {
-    if (!postEnabled) {
-      console.log('[USM] send skipped: postEnabled=false', eventType);
-      return;
-    }
+    if (!postEnabled) return;
     const payload = buildPayload(eventType, extra);
     const fields = Object.keys(payload).filter((k) => payload[k] !== undefined);
-    if (!fields.length) {
-      console.log('[USM] send skipped: empty payload', eventType, 'videoEl=', !!opts.videoEl.value);
-      return;
-    }
-    console.log('[USM] send queued', eventType, 'fields=', fields.length, 'sessionId=', sessionId.value);
+    if (!fields.length) return;
     tail = tail
       .catch(() => {})
       .then(async () => {
         const sid = await resolveSessionId();
-        if (!sid) {
-          console.log('[USM] send dropped: sessionId still null after resolve', eventType);
-          return; // not yet registered; next heartbeat will retry
-        }
+        if (!sid) return; // not yet registered; next heartbeat will retry
         try {
-          const r = await fetch(`/api/session/${encodeURIComponent(sid)}/metrics`, {
+          await fetch(`/api/session/${encodeURIComponent(sid)}/metrics`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ set: payload, fields }),
           });
-          console.log('[USM] POST', eventType, '→', r.status, 'sid=', sid);
         } catch (err) {
           console.warn('[USM] POST failed', eventType, err);
         }
@@ -395,7 +377,6 @@ export function useSessionMetrics(opts: UseSessionMetricsOptions) {
   watch(
     opts.videoEl,
     (v, old) => {
-      console.log('[USM] videoEl watcher fired — was=', !!old, 'now=', !!v);
       if (old) detachVideo();
       if (v) attachVideo(v);
     },
@@ -405,7 +386,6 @@ export function useSessionMetrics(opts: UseSessionMetricsOptions) {
   watch(
     opts.hlsInst,
     (h, old) => {
-      console.log('[USM] hlsInst watcher fired — was=', !!old, 'now=', !!h);
       if (old) detachHls();
       if (h) attachHls(h);
     },
@@ -419,11 +399,8 @@ export function useSessionMetrics(opts: UseSessionMetricsOptions) {
   });
 
   /* ─── 1Hz heartbeat ───────────────────────────────────────────────── */
-  console.log('[USM] composable initialised, heartbeat every', heartbeatMs, 'ms — playerId=', opts.playerId.value);
   heartbeatTimer = setInterval(() => {
-    const has = !!opts.videoEl.value;
-    console.log('[USM] heartbeat tick — hasVideoEl=', has, 'sessionId=', sessionId.value);
-    if (has) send('heartbeat');
+    if (opts.videoEl.value) send('heartbeat');
   }, heartbeatMs);
 
   /* ─── Cleanup ─────────────────────────────────────────────────────── */

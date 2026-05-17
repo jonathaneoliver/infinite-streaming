@@ -127,8 +127,13 @@ function patchSurface(surface: Exclude<Surface, 'transport'>, partial: Partial<F
     : ({
         id: 'v1-' + surface,
         type: (partial.type as FaultRule['type']) ?? 'none',
-        mode: (partial.mode as FaultRule['mode']) ?? 'requests',
-        consecutive: partial.consecutive ?? 1,
+        // Default mode = "every N seconds". Operators reach for the
+        // time-based cadence first ("inject a fault every 5 s") far
+        // more often than the request-counter mode, so make that the
+        // happy-path default everywhere. Matches transport's existing
+        // default below.
+        mode: (partial.mode as FaultRule['mode']) ?? 'failures_per_seconds',
+        consecutive: partial.consecutive ?? 0,
         frequency: partial.frequency ?? 0,
         filter: surface === 'all' ? undefined : { request_kind: [surface as any] },
         ...partial,
@@ -142,7 +147,7 @@ function patchTransport(partial: { type?: string; mode?: string; frequency?: num
     type: (partial.type ?? cur?.type ?? 'drop') as 'drop' | 'reject',
     mode: (partial.mode ?? cur?.mode ?? 'failures_per_seconds') as
       | 'failures_per_seconds' | 'failures_per_packets' | 'seconds' | 'requests',
-    consecutive: partial.consecutive ?? cur?.consecutive ?? 1,
+    consecutive: partial.consecutive ?? cur?.consecutive ?? 0,
     frequency: partial.frequency ?? cur?.frequency ?? 0,
   };
   setTransportFault(next);
@@ -182,8 +187,8 @@ function getFreq(surface: Surface): number {
 }
 function getCons(surface: Surface): number {
   if (localCons.value[surface] !== null) return localCons.value[surface]!;
-  if (surface === 'transport') return transportFault.value?.consecutive ?? 1;
-  return ruleFor(surface)?.consecutive ?? 1;
+  if (surface === 'transport') return transportFault.value?.consecutive ?? 0;
+  return ruleFor(surface)?.consecutive ?? 0;
 }
 function getType(surface: Surface): string {
   if (surface === 'transport') {
@@ -194,7 +199,10 @@ function getType(surface: Surface): string {
 }
 function getMode(surface: Surface): string {
   if (surface === 'transport') return transportFault.value?.mode ?? 'failures_per_seconds';
-  return ruleFor(surface)?.mode ?? 'requests';
+  // Same "every N seconds" default as patchSurface, so the dropdown
+  // matches the value we'd write if the operator nudges any other
+  // control on this surface.
+  return ruleFor(surface)?.mode ?? 'failures_per_seconds';
 }
 
 function onTypeChange(surface: Surface, e: Event) {

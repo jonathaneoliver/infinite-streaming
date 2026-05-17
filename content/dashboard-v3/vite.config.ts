@@ -34,7 +34,16 @@ export default defineConfig({
         // and right-clicking a tile deep-links into v3 testing-session
         // (the legacy /dashboard/grid.html still works and opens the
         // legacy testing-session.html; this is the parallel path).
-        grid: resolve(__dirname, 'grid.html')
+        grid: resolve(__dirname, 'grid.html'),
+        // Stage 6 — v3-native archive replay page. Parallel to legacy
+        // /dashboard/session-viewer.html (which uses session-shell.js +
+        // session-replay.js); this build reuses the live page's
+        // composables in replay mode driven by archived snapshots.
+        'session-viewer': resolve(__dirname, 'session-viewer.html'),
+        // Stage 6 (cont.) — archived-sessions picker. The session-viewer
+        // entry above expects a deep-link with session_id; this is the
+        // browse page that lists every play.
+        sessions: resolve(__dirname, 'sessions.html')
       }
     }
   },

@@ -1706,11 +1706,19 @@ func main() {
 
 	ports := []int{30081, 30181, 30281, 30381, 30481, 30581, 30681, 30781, 30881}
 
+	// TLS + HTTP/2 on every listener so the dashboard (served HTTPS
+	// by nginx at port 21000/30000) can embed HLS playback URLs
+	// pointing here without browsers blocking mixed content. Cert
+	// is the same self-signed pair launch.sh writes for nginx; we
+	// reuse it so there's exactly one identity to trust per dev
+	// machine. h2 turns on automatically once TLS is in play.
+	const tlsCertFile = "/etc/nginx/certs/localhost.pem"
+	const tlsKeyFile = "/etc/nginx/certs/localhost-key.pem"
 	errorCh := make(chan error, len(ports))
 	for _, port := range ports {
 		addr := fmt.Sprintf(":%d", port)
 		go func(bind string) {
-			log.Printf("go-proxy listening on %s", bind)
+			log.Printf("go-proxy listening on %s (TLS)", bind)
 			srv := &http.Server{
 				Addr:    bind,
 				Handler: router,
@@ -1720,7 +1728,7 @@ func main() {
 				// read. Issue #401.
 				ConnContext: withTCPConnContext,
 			}
-			errorCh <- srv.ListenAndServe()
+			errorCh <- srv.ListenAndServeTLS(tlsCertFile, tlsKeyFile)
 		}(addr)
 	}
 
@@ -2953,6 +2961,24 @@ func (a *App) applyShapePattern(port int, steps []NftShapeStep, delayMs int, los
 			"nftables_pattern_enabled": false,
 			"nftables_pattern_steps":   []NftShapeStep{},
 		}, "")
+		// Disarming the pattern loop leaves the kernel at whatever
+		// rate the last pattern step applied. Reassert the session's
+		// static shape so the user-visible "Limit" matches reality —
+		// without this the proxy reports pattern_enabled=false +
+		// bandwidth=N but the kernel keeps shaping at the old pattern
+		// rate (issue: ramp-pattern → sliders=0 didn't tear down the
+		// shaper). Walks every session bound to this port so a port
+		// hosting a group still drops the rate cleanly. Runs after
+		// the session update above so applySessionShaping sees the
+		// freshly cleared pattern_enabled flag and doesn't no-op via
+		// its "pattern owns the rate" guard.
+		for _, sess := range a.getSessionList() {
+			if portStr := getString(sess, "x_forwarded_port"); portStr != "" {
+				if p, err := strconv.Atoi(portStr); err == nil && p == port {
+					a.applySessionShaping(sess, port)
+				}
+			}
+		}
 		return nil
 	}
 	if err := a.traffic.UpdateNetem(port, delayMs, loss); err != nil {
@@ -4254,7 +4280,12 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 				assignedNum, _ := strconv.Atoi(assigned)
 				newPort := replaceThirdFromLastDigit(externalPort, assignedNum)
 				host := hostWithoutPort(r.Host)
-				newURL := fmt.Sprintf("http://%s:%s/%s", host, newPort, escapedPath)
+				// Preserve the request's scheme — go-proxy now serves
+				// TLS on every shaper port (issue TS11), so an HTTPS
+				// dashboard must redirect to https:// to avoid mixed
+				// content. Plain HTTP requests redirect to http://.
+				scheme := requestScheme(r)
+				newURL := fmt.Sprintf("%s://%s:%s/%s", scheme, host, newPort, escapedPath)
 				if r.URL.RawQuery != "" {
 					newURL = newURL + "?" + r.URL.RawQuery
 				}
@@ -4303,11 +4334,18 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 			log.Printf("PORT_MAP_DERIVE external=%s internal=%s allocated=%d", assignedExternalPort, assignedInternalPort, allocated)
 		}
 		groupID := extractGroupId(playerID)
+		// Optional play_id from the client. iOS/tvOS/Roku don't mint one
+		// (the v2 read path derives a stable fallback), but the v3 web
+		// player (VideoPlayerFrame) does — surfacing it here lets the
+		// forwarder archive each web play under its operator-known id
+		// instead of the server-side derivation.
+		playID := r.URL.Query().Get("play_id")
 		sessionData := SessionData{
 			"session_number":                           fmt.Sprintf("%d", allocated),
 			"sid":                                      fmt.Sprintf("%d", allocated),
 			"session_id":                               fmt.Sprintf("%d", allocated),
 			"player_id":                                playerID,
+			"play_id":                                  playID,
 			"group_id":                                 groupID,
 			"control_revision":                         newControlRevision(),
 			"headers_player_id":                        playerHeader,
@@ -4440,7 +4478,8 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 		}
 		a.recordSessionStart(sessionData, manifestURL)
 		host := hostWithoutPort(r.Host)
-		newURL := fmt.Sprintf("http://%s:%s/%s", host, assignedExternalPort, escapedPath)
+		scheme := requestScheme(r)
+		newURL := fmt.Sprintf("%s://%s:%s/%s", scheme, host, assignedExternalPort, escapedPath)
 		if r.URL.RawQuery != "" {
 			newURL = newURL + "?" + r.URL.RawQuery
 		}
@@ -7560,6 +7599,23 @@ func countActiveSessionsForIP(sessions []SessionData, requesterIP string) int {
 		}
 	}
 	return count
+}
+
+// requestScheme returns "https" or "http" for the incoming request.
+// Used by redirect handlers so the per-session port URL in the
+// Location header matches the dashboard's origin and the browser
+// doesn't block the hop as mixed content. r.TLS is non-nil when the
+// request arrived over TLS directly; falling back to
+// X-Forwarded-Proto handles a future TLS-terminating reverse proxy
+// upstream of go-proxy.
+func requestScheme(r *http.Request) string {
+	if r.TLS != nil {
+		return "https"
+	}
+	if proto := r.Header.Get("X-Forwarded-Proto"); proto != "" {
+		return proto
+	}
+	return "http"
 }
 
 func hostWithoutPort(hostport string) string {

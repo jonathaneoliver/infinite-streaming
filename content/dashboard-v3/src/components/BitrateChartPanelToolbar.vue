@@ -5,16 +5,16 @@
  * top of the Bitrate Chart panel:
  *
  *   Bitrate Y Max [Auto/5/10/20/30/40/50/100 Mbps]
- *   Reset Zoom   ⏸ Pause / ▶ Live   ⤢ Expand   Alt-zoom hint
+ *   ● Live (toggle)   ⤢ Expand   Alt-zoom hint
  *
  * All controls drive the shared useChartCoordination(playerId) state
  * so a single click affects every chart in the panel in lockstep.
  */
-import { computed } from 'vue';
+import { computed, toRef } from 'vue';
 import { useChartCoordination } from '@/composables/useChartCoordination';
 
 const props = defineProps<{ playerId: string }>();
-const coord = useChartCoordination(props.playerId);
+const coord = useChartCoordination(toRef(props, 'playerId'));
 
 type YMaxMode = 'auto' | '5' | '10' | '20' | '30' | '40' | '50' | '100';
 const modes: YMaxMode[] = ['auto', '5', '10', '20', '30', '40', '50', '100'];
@@ -30,8 +30,17 @@ function setMode(m: YMaxMode) {
   coord.setBandwidthYMax(m === 'auto' ? undefined : Number(m));
 }
 
-const pauseLabel = computed(() => (coord.state.paused ? '▶ Live' : '⏸ Pause'));
-const zoomActive = computed(() => coord.state.viewport !== null);
+// Live toggle is "checked" when we're currently following live —
+// i.e. no sticky viewport. All four charts in the panel share this
+// coord state so the toolbar's toggle and each chart's toggle stay
+// in lockstep regardless of which one the operator clicked.
+const liveChecked = computed(() => coord.state.viewport === null);
+
+/** Always togglePause — both directions preserve liveSpanMs.
+ *  See MetricsLineChart.onLiveToggleClick for rationale. */
+function onLiveToggleClick() {
+  coord.togglePause();
+}
 </script>
 
 <template>
@@ -52,21 +61,13 @@ const zoomActive = computed(() => coord.state.viewport !== null);
 
     <div class="actions">
       <button
-        class="btn"
         type="button"
-        :class="{ active: zoomActive }"
-        @click="coord.resetZoom()"
-        title="Snap back to live edge"
+        class="btn live-toggle"
+        :class="{ checked: liveChecked }"
+        @click="onLiveToggleClick"
+        :title="liveChecked ? 'Pause at current live edge' : 'Resume following live (drops zoom and pan)'"
       >
-        Reset Zoom
-      </button>
-      <button
-        class="btn"
-        type="button"
-        :class="{ live: coord.state.paused }"
-        @click="coord.togglePause()"
-      >
-        {{ pauseLabel }}
+        {{ liveChecked ? '●' : '○' }} Live
       </button>
       <button
         class="btn"
@@ -78,7 +79,7 @@ const zoomActive = computed(() => coord.state.viewport !== null);
         ⤢
       </button>
       <span class="hint" title="Hold Alt (Option on Mac) while scrolling or dragging to zoom; right-click-drag to pan">
-        Alt/⌥+scroll/drag · right-drag pan · click pause
+        Alt/⌥+scroll/drag · right-drag pan
       </span>
     </div>
   </div>
@@ -150,12 +151,22 @@ const zoomActive = computed(() => coord.state.viewport !== null);
   border-color: #818cf8;
   color: #312e81;
 }
-.btn.live {
+/* Live toggle: filled green when checked, muted/outlined when
+ * unchecked. Same scheme as MetricsLineChart / EventsTimeline so
+ * all the toggles in the panel match visually. */
+.btn.live-toggle.checked {
   background: #10b981;
   border-color: #059669;
   color: white;
+  font-weight: 600;
 }
-.btn.live:hover { background: #059669; }
+.btn.live-toggle.checked:hover { background: #059669; }
+.btn.live-toggle:not(.checked) {
+  background: #f3f4f6;
+  border-color: #d1d5db;
+  color: #6b7280;
+}
+.btn.live-toggle:not(.checked):hover { background: #e5e7eb; color: #374151; }
 .hint {
   font-size: 10px;
   color: #9aa0a6;

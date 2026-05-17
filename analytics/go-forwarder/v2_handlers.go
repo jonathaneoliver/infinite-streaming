@@ -104,7 +104,11 @@ func v2SnapshotsHandler(w http.ResponseWriter, r *http.Request, cfg config) {
 	params := map[string]string{}
 	clauses := []string{}
 	if playerID != "" {
-		clauses = append(clauses, "player_id = {player:String}")
+		// Case-insensitive match: device-side UUIDs (iPad, Apple TV,
+		// Roku) often arrive uppercase, but the live v2 /api/v2/players
+		// endpoint hands the dashboard lowercase. Without lowerUTF8 on
+		// both sides the WHERE fails to match either side's case.
+		clauses = append(clauses, "lowerUTF8(player_id) = lowerUTF8({player:String})")
 		params["player"] = playerID
 	}
 	if sessionID != "" {
@@ -116,7 +120,8 @@ func v2SnapshotsHandler(w http.ResponseWriter, r *http.Request, cfg config) {
 		if playID == "—" {
 			clauses = append(clauses, "play_id = ''")
 		} else {
-			clauses = append(clauses, "play_id = {play:String}")
+			// Same case-fold rationale as player_id.
+			clauses = append(clauses, "lowerUTF8(play_id) = lowerUTF8({play:String})")
 			params["play"] = playID
 		}
 	}
@@ -240,7 +245,8 @@ func v2NetworkRequestsHandler(w http.ResponseWriter, r *http.Request, cfg config
 	// no subquery. session_id remains as a transitional bridge for
 	// dashboards that still pass the small numeric port slot.
 	if playerID != "" {
-		clauses = append(clauses, "player_id = {pid:String}")
+		// Case-insensitive match — see snapshots handler comment.
+		clauses = append(clauses, "lowerUTF8(player_id) = lowerUTF8({pid:String})")
 		params["pid"] = playerID
 	}
 	if sessionID != "" {
@@ -252,7 +258,7 @@ func v2NetworkRequestsHandler(w http.ResponseWriter, r *http.Request, cfg config
 		if playID == "—" {
 			clauses = append(clauses, "play_id = ''")
 		} else {
-			clauses = append(clauses, "play_id = {play:String}")
+			clauses = append(clauses, "lowerUTF8(play_id) = lowerUTF8({play:String})")
 			params["play"] = playID
 		}
 	}
@@ -292,7 +298,11 @@ func v2NetworkRequestsHandler(w http.ResponseWriter, r *http.Request, cfg config
 		    faulted, fault_type, fault_action, fault_category
 		  FROM %s.network_requests
 		  WHERE %s
-		  ORDER BY ts ASC
+		  -- DESC so the LIMIT keeps the most recent N rows. ASC
+		  -- caused rare 4xx / faulted rows to be squeezed out by
+		  -- bulk 200s on long sessions; the NetworkLog table sorts
+		  -- client-side so display order is unaffected.
+		  ORDER BY ts DESC
 		  LIMIT %d
 		)
 		FORMAT JSONEachRow`,

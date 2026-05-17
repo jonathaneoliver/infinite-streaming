@@ -7,9 +7,13 @@
  * readable. Matches the legacy chart layout.
  */
 import MetricsLineChart, { type SeriesSpec } from './MetricsLineChart.vue';
+import type { Stream } from '@/composables/useSessionTimeSeries';
 import type { PlayerRecord } from '@/repo/v2-repo';
 
-defineProps<{ playerId: string }>();
+defineProps<{
+  playerId: string;
+  samplesStream: Stream<Record<string, unknown>>;
+}>();
 
 const series: SeriesSpec[] = [
   {
@@ -47,9 +51,9 @@ const series: SeriesSpec[] = [
     title="Round-trip time"
     unit="ms"
     :series="series"
+    :samples-stream="samplesStream"
     :y-min="0"
     y2-title="RTO (ms)"
     :y2-min="0"
-    :window-seconds="180"
   />
 </template>

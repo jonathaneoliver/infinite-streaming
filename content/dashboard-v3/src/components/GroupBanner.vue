@@ -15,22 +15,33 @@ import { computed, toRef } from 'vue';
 import { usePlayer } from '@/composables/usePlayer';
 import { useGroups } from '@/composables/useGroups';
 import { usePlayers } from '@/composables/usePlayers';
+import { deviceFromUA, groupNameFor } from '@/composables/useSessionLabels';
 import * as repo from '@/repo/v2-repo';
 
 const props = defineProps<{ playerId: string }>();
 const { player } = usePlayer(toRef(props, 'playerId'));
-const { groups, link, disband } = useGroups();
+const { groups, disband, updateMembers } = useGroups();
 const { players } = usePlayers();
 
-const groupId = computed<string | null>(() => {
-  const raw = (player.value as any)?.raw_session;
-  const gid = raw?.group_id;
-  return typeof gid === 'string' && gid.length ? gid : null;
+// Identify the active player's group via membership rather than by
+// matching raw_session.group_id against PlayerGroup.id. The server
+// derives `g.id` as a stable v5 UUID under a fixed namespace
+// (v2translate.StableGroupUUID), so g.id never equals the raw v1
+// group_id string — comparing them gave a null groupInfo and the
+// banner fell through to "(only you)" even when peers were present.
+const groupInfo = computed(() => {
+  return (
+    (groups.value ?? []).find((g) =>
+      Array.isArray(g.member_player_ids) && g.member_player_ids.includes(props.playerId),
+    ) ?? null
+  );
 });
 
-const groupInfo = computed(() => {
-  if (!groupId.value) return null;
-  return (groups.value ?? []).find((g) => g.id === groupId.value) ?? null;
+const groupId = computed<string | null>(() => {
+  // Surface the v2 PlayerGroup id (v5 derivation) for the "Ungroup"
+  // call + chip label. raw_session.group_id is the v1 tag; we don't
+  // need it directly now that membership drives groupInfo.
+  return groupInfo.value ? String(groupInfo.value.id) : null;
 });
 
 const memberNames = computed(() => {
@@ -39,31 +50,51 @@ const memberNames = computed(() => {
     .filter((id) => id !== props.playerId)
     .map((id) => {
       const p = (players.value ?? []).find((x) => x.id === id);
-      return p?.display_id ? `#${p.display_id}` : id.slice(0, 8);
+      if (!p) return id.slice(0, 8);
+      const num = p.display_id != null ? `#${p.display_id}` : id.slice(0, 8);
+      const device = deviceFromUA(p.user_agent ?? null);
+      return device ? `${num} ${device}` : num;
     });
 });
 
-const candidates = computed(() => {
-  return (players.value ?? [])
-    .filter((p) => p.id !== props.playerId)
-    .filter((p) => {
-      const raw = (p as any).raw_session;
-      const otherGid = raw?.group_id;
-      return !otherGid || otherGid === groupId.value;
-    });
+/** Group name shared with the pill badge in Testing.vue. */
+const groupName = computed<string>(() => {
+  if (!groupInfo.value) return '';
+  return groupNameFor(
+    {
+      id: String(groupInfo.value.id),
+      member_player_ids: groupInfo.value.member_player_ids,
+    },
+    players.value ?? [],
+  );
 });
 
-import { ref } from 'vue';
-const groupWith = ref<string>('');
+/** Member count drives the Leave vs Disband split.
+ *  - 2 members: only "Ungroup" makes sense (the surviving 1 is a
+ *    degenerate group, so leaving == disbanding).
+ *  - 3+ members: surface both Leave (only this session exits) and
+ *    Disband (drop the whole group). */
+const memberCount = computed<number>(
+  () => groupInfo.value?.member_player_ids?.length ?? 0,
+);
 
-function linkSelected() {
-  if (!groupWith.value) return;
-  link([props.playerId, groupWith.value]);
-  groupWith.value = '';
+function disbandGroup() {
+  if (groupId.value) disband(groupId.value);
 }
 
-function ungroup() {
-  if (groupId.value) disband(groupId.value);
+function leaveGroup() {
+  const g = groupInfo.value;
+  if (!g) return;
+  const rev = g.control_revision;
+  if (!rev) {
+    // No revision means the listGroups poll hasn't caught up to the
+    // most recent membership write; ask the user to retry rather
+    // than racing the PATCH without an If-Match.
+    window.alert('Group revision not yet known — try again in a moment.');
+    return;
+  }
+  const remaining = (g.member_player_ids ?? []).filter((id) => id !== props.playerId);
+  updateMembers(String(g.id), remaining, rev);
 }
 
 async function deleteSession() {
@@ -79,29 +110,31 @@ async function deleteSession() {
 </script>
 
 <template>
+  <!-- Group banner now exists only to surface grouped state + Delete
+       Session. Linking happens in the pill rail (Testing.vue's
+       Group(N) trigger), so the "Group with…" select form is gone. -->
   <div v-if="player" class="group-controls-row">
     <div class="row">
       <template v-if="groupId">
         <span class="banner grouped">
           🔗 Grouped with: <strong>{{ memberNames.join(', ') || '(only you)' }}</strong>
-          <span class="chip">{{ groupInfo?.label || groupId.slice(0, 8) }}</span>
+          <span class="chip">{{ groupName }}</span>
         </span>
-        <button type="button" class="btn btn-warn" @click="ungroup">Ungroup</button>
-      </template>
-      <template v-else>
-        <label class="link-form">
-          Group with
-          <select v-model="groupWith">
-            <option value="">— select session —</option>
-            <option v-for="p in candidates" :key="p.id" :value="p.id">
-              #{{ p.display_id }} {{ p.player_ip || p.origination_ip || '' }}
-            </option>
-          </select>
-        </label>
-        <button type="button" class="btn btn-primary" :disabled="!groupWith" @click="linkSelected">
-          Group
+        <!-- "Ungroup" = this session leaves; "Delete Group" = drop the
+             whole group. With only 2 members, leaving leaves a
+             degenerate 1-member group, so we surface only "Delete
+             Group" in that case. -->
+        <button
+          v-if="memberCount >= 3"
+          type="button"
+          class="btn btn-secondary"
+          @click="leaveGroup"
+        >
+          Ungroup
         </button>
-        <span v-if="!candidates.length" class="hint">No other sessions available to group with.</span>
+        <button type="button" class="btn btn-warn" @click="disbandGroup">
+          Delete Group
+        </button>
       </template>
 
       <button type="button" class="btn btn-danger ml-auto" @click="deleteSession">
@@ -148,21 +181,6 @@ async function deleteSession() {
   font-weight: 500;
 }
 
-.link-form {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  color: #5f6368;
-}
-.link-form select {
-  background: #fff;
-  border: 1px solid #dadce0;
-  border-radius: 6px;
-  padding: 4px 8px;
-  font-size: 13px;
-  min-width: 220px;
-}
-
 .btn {
   background: #f1f3f4;
   border: 1px solid #dadce0;
@@ -175,13 +193,14 @@ async function deleteSession() {
 }
 .btn:hover { background: #e8eaed; }
 .btn:disabled { opacity: 0.5; cursor: not-allowed; }
-.btn-primary { background: #1a73e8; color: white; border-color: #1a73e8; }
-.btn-primary:hover { background: #1765cc; }
+/* "Ungroup" = neutral, this session leaves; visually muted so it
+ * doesn't read as destructive next to "Delete Group". */
+.btn-secondary { background: #e5e7eb; color: #1f2937; border-color: #d1d5db; font-size: 11px; padding: 4px 10px; }
+.btn-secondary:hover { background: #d1d5db; }
 .btn-warn { background: #ef4444; color: white; border-color: #ef4444; font-size: 11px; padding: 4px 10px; }
 .btn-warn:hover { background: #dc2626; }
 .btn-danger { background: #fee2e2; color: #991b1b; border-color: #fca5a5; }
 .btn-danger:hover { background: #fecaca; }
 
-.hint { color: #9aa0a6; font-size: 12px; font-style: italic; }
 .ml-auto { margin-left: auto; }
 </style>

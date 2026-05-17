@@ -115,7 +115,14 @@ services:
     restart: unless-stopped
 
   forwarder:
-    build: ./analytics/go-forwarder
+    # Build context is the repo root so the Dockerfile can COPY both
+    # analytics/go-forwarder/ AND go-proxy/ — the forwarder's go.mod
+    # uses a `replace` directive (../../go-proxy) to share the v2
+    # translator + oapigen types with the proxy module. Without the
+    # wider context that path doesn't exist inside the build container.
+    build:
+      context: .
+      dockerfile: analytics/go-forwarder/Dockerfile
     image: infinite-streaming-forwarder
     container_name: infinite-streaming-forwarder
     volumes:

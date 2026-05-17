@@ -30,8 +30,8 @@
  *   - onHeartbeat:        SSE keep-alive (no payload)
  */
 import { onScopeDispose, ref, watch, type Ref } from 'vue';
+import { isLivePlayerId } from '@/repo/v2-repo';
 import {
-  isAllPoolActive,
   subscribeAllPlayers,
   type AllPlayersSubscriber,
   type ConnectionState as PoolState,
@@ -47,143 +47,44 @@ type Handlers = {
 
 export type ConnectionState = PoolState;
 
-/* ─── Per-player-id pool (fallback when all-pool not active) ────── */
-
-interface PerPlayerEntry {
-  es: EventSource;
-  state: ConnectionState;
-  subscribers: Set<Handlers>;
-  stateRefs: Set<Ref<ConnectionState>>;
-}
-
-const perPlayerPool = new Map<string, PerPlayerEntry>();
-
-function parsePayload(e: MessageEvent): any {
-  try {
-    return JSON.parse((e as MessageEvent).data).data;
-  } catch {
-    return null;
-  }
-}
-
-function getOrCreatePerPlayer(pid: string): PerPlayerEntry {
-  const cached = perPlayerPool.get(pid);
-  if (cached) return cached;
-  const url = `/api/v2/events?include=raw&player_id=${encodeURIComponent(pid)}`;
-  const es = new EventSource(url);
-  const entry: PerPlayerEntry = {
-    es,
-    state: 'connecting',
-    subscribers: new Set(),
-    stateRefs: new Set(),
-  };
-
-  function setState(s: ConnectionState) {
-    entry.state = s;
-    for (const r of entry.stateRefs) r.value = s;
-  }
-  function fan(method: keyof Handlers, payload?: any) {
-    for (const h of entry.subscribers) {
-      try {
-        const fn = h[method];
-        if (typeof fn === 'function') (fn as any)(payload);
-      } catch (err) {
-        console.warn('[usePlayerSSE] subscriber threw', err);
-      }
-    }
-  }
-
-  es.addEventListener('open', () => setState('open'));
-  es.addEventListener('error', () => {
-    if (es.readyState === EventSource.CLOSED) setState('closed');
-  });
-  es.addEventListener('heartbeat', () => fan('onHeartbeat'));
-  es.addEventListener('player.created', (e) => {
-    const d = parsePayload(e as MessageEvent);
-    if (d) fan('onCreated', d);
-  });
-  es.addEventListener('player.updated', (e) => {
-    const d = parsePayload(e as MessageEvent);
-    if (d) fan('onUpdated', d);
-  });
-  es.addEventListener('player.controls.updated', (e) => {
-    const d = parsePayload(e as MessageEvent);
-    if (d) fan('onControlsUpdated', d);
-  });
-  es.addEventListener('player.deleted', (e) => {
-    const d = parsePayload(e as MessageEvent);
-    if (d) fan('onDeleted', d);
-  });
-
-  perPlayerPool.set(pid, entry);
-  return entry;
-}
-
-function releasePerPlayer(pid: string, handlers: Handlers, stateRef: Ref<ConnectionState>) {
-  const entry = perPlayerPool.get(pid);
-  if (!entry) return;
-  entry.subscribers.delete(handlers);
-  entry.stateRefs.delete(stateRef);
-  if (entry.subscribers.size === 0) {
-    try {
-      entry.es.close();
-    } catch {
-      /* ignore */
-    }
-    perPlayerPool.delete(pid);
-  }
-}
-
 /* ─── Public composable ─────────────────────────────────────────── */
 
 export function usePlayerSSE(playerId: Ref<string | null | undefined>, handlers: Handlers) {
   const state = ref<ConnectionState>('connecting');
 
-  // Active subscription handle. Tagged union so cleanup picks the
-  // right release path.
-  type Sub =
-    | { kind: 'all'; pid: string; release: () => void }
-    | { kind: 'per'; pid: string }
-    | null;
+  // Active subscription handle — always the all-pool path now.
+  type Sub = { pid: string; release: () => void } | null;
   let sub: Sub = null;
 
   function attach(pid: string) {
-    if (isAllPoolActive()) {
-      // Filter events from the shared all-players socket by player_id.
-      const filtered: AllPlayersSubscriber = {
-        onCreated: (d) => {
-          if (d?.id === pid) handlers.onCreated?.(d);
-        },
-        onUpdated: (d) => {
-          if (d?.id === pid) handlers.onUpdated?.(d);
-        },
-        onControlsUpdated: (d) => {
-          if (d?.id === pid) handlers.onControlsUpdated?.(d);
-        },
-        onDeleted: (d) => {
-          if (d?.id === pid || d?.player_id === pid) handlers.onDeleted?.(d);
-        },
-        onHeartbeat: () => handlers.onHeartbeat?.(),
-        onStateChange: (s) => { state.value = s; },
-      };
-      const handle = subscribeAllPlayers(filtered);
-      sub = { kind: 'all', pid, release: handle.release };
-    } else {
-      const entry = getOrCreatePerPlayer(pid);
-      entry.subscribers.add(handlers);
-      entry.stateRefs.add(state);
-      state.value = entry.state;
-      sub = { kind: 'per', pid };
-    }
+    // Always go through the shared all-players SSE — opening a per-
+    // player SSE in parallel doubles the EventSource count per page,
+    // which (under HTTP/1.1's 6-per-origin cap) starves the second
+    // browser tab's REST polls. The all-pool socket is server-side
+    // unfiltered; we filter client-side by player_id.
+    const filtered: AllPlayersSubscriber = {
+      onCreated: (d) => {
+        if (d?.id === pid) handlers.onCreated?.(d);
+      },
+      onUpdated: (d) => {
+        if (d?.id === pid) handlers.onUpdated?.(d);
+      },
+      onControlsUpdated: (d) => {
+        if (d?.id === pid) handlers.onControlsUpdated?.(d);
+      },
+      onDeleted: (d) => {
+        if (d?.id === pid || d?.player_id === pid) handlers.onDeleted?.(d);
+      },
+      onHeartbeat: () => handlers.onHeartbeat?.(),
+      onStateChange: (s) => { state.value = s; },
+    };
+    const handle = subscribeAllPlayers(filtered);
+    sub = { pid, release: handle.release };
   }
 
   function detach() {
     if (!sub) return;
-    if (sub.kind === 'all') {
-      sub.release();
-    } else {
-      releasePerPlayer(sub.pid, handlers, state);
-    }
+    sub.release();
     sub = null;
     state.value = 'closed';
   }
@@ -192,6 +93,17 @@ export function usePlayerSSE(playerId: Ref<string | null | undefined>, handlers:
     playerId,
     (pid) => {
       detach();
+      // Skip SSE entirely for archive playerIds. The v3 session-viewer
+      // uses synthetic ids like `archive:<sid>:<pid>` to reuse the
+      // live-mode usePlayer chain over historical data. Subscribing
+      // those to /api/v2/events would either 404 (no live player) or
+      // — worse — feed unrelated live events into the chart's
+      // pushSample loop, where the current-time `event_time` on those
+      // events triggers the trim cutoff and wipes the archived history.
+      if (pid && !isLivePlayerId(pid)) {
+        state.value = 'closed';
+        return;
+      }
       if (pid) attach(pid);
     },
     { immediate: true },

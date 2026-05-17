@@ -25,6 +25,7 @@
 import { computed, ref, watch } from 'vue';
 import { usePlayers } from '@/composables/usePlayers';
 import { useGroups } from '@/composables/useGroups';
+import { deviceContentLabel, groupNameFor } from '@/composables/useSessionLabels';
 import type { PlayerRecord } from '@/repo/v2-repo';
 import * as repo from '@/repo/v2-repo';
 import ShapeSliders from '@/components/ShapeSliders.vue';
@@ -32,19 +33,16 @@ import NetworkShapingPattern from '@/components/NetworkShapingPattern.vue';
 import TransferTimeouts from '@/components/TransferTimeouts.vue';
 import ContentManipulation from '@/components/ContentManipulation.vue';
 import FaultRules from '@/components/FaultRules.vue';
-import SessionDetails from '@/components/SessionDetails.vue';
-import PlayerMetrics from '@/components/PlayerMetrics.vue';
-import NetworkLog from '@/components/NetworkLog.vue';
 import GroupBanner from '@/components/GroupBanner.vue';
-import BandwidthChart from '@/components/BandwidthChart.vue';
-import RTTChart from '@/components/RTTChart.vue';
-import BufferChart from '@/components/BufferChart.vue';
-import FPSChart from '@/components/FPSChart.vue';
-import EventsTimeline from '@/components/EventsTimeline.vue';
+import SessionDetails from '@/components/SessionDetails.vue';
 import CollapsibleSection from '@/components/CollapsibleSection.vue';
 import ShellLayout from '@/components/ShellLayout.vue';
-import BitrateChartPanelToolbar from '@/components/BitrateChartPanelToolbar.vue';
 import StatusBanners from '@/components/StatusBanners.vue';
+// Shared display half — same component testing-session.html and
+// session-viewer.html mount. Brings historical preload + brush +
+// accordion + cursor sync along automatically. Brush stays hidden
+// while live-following; appears once the operator pauses.
+import SessionDisplay from '@/components/SessionDisplay.vue';
 
 const { players, isLoading, isError, error, sseState, refetch, deletePlayer } = usePlayers();
 const { groups, link, disband } = useGroups();
@@ -85,6 +83,11 @@ const activePlayer = computed<PlayerRecord | null>(() => {
   if (!activeId.value) return null;
   return players.value.find((p) => p.id === activeId.value) ?? null;
 });
+
+// play_id comes straight off the active PlayerRecord; SessionDisplay
+// passes player_id (the live UUID) to the forwarder for archive
+// lookups, no client-side session resolution needed.
+const activePlayIdRef = computed<string | null>(() => activePlayer.value?.current_play?.id ?? null);
 
 /** Per-player group_id lookup (sourced from PlayerGroup.member_player_ids). */
 const groupIdOf = computed(() => {
@@ -157,11 +160,6 @@ async function releaseAll() {
   }
 }
 
-async function releaseOne(id: string) {
-  if (!confirm(`Release session ${id}?`)) return;
-  try { await deletePlayer(id); } catch (e) { console.error(e); }
-}
-
 function portOf(p: PlayerRecord): string {
   const raw = (p as any).raw_session ?? {};
   const port = raw.x_forwarded_port_external ?? raw.x_forwarded_port ?? null;
@@ -170,9 +168,22 @@ function portOf(p: PlayerRecord): string {
 
 function pillLabel(p: PlayerRecord): string {
   const port = portOf(p);
-  const idShort = p.id.slice(0, 8);
   const portSuffix = port ? ` (Port ${port})` : '';
-  return `Session #${p.display_id ?? '?'}${portSuffix} · ${idShort}`;
+  const tail = deviceContentLabel(p);
+  // Drop the trailing " · …" entirely if we can't infer device or
+  // content — a hex UUID slice doesn't help a human, so don't show
+  // anything rather than fall back to it.
+  const tailSuffix = tail ? ` · ${tail}` : '';
+  return `Session #${p.display_id ?? '?'}${portSuffix}${tailSuffix}`;
+}
+
+/** Stable group-badge text shared with the GroupBanner chip. */
+function groupBadgeFor(playerId: string): string {
+  const gid = groupIdOf.value.get(playerId);
+  if (!gid) return '';
+  const g = (groups.value ?? []).find((x) => x.id === gid);
+  if (!g) return `Group ${gid.slice(0, 6)}`;
+  return groupNameFor(g, players.value ?? []);
 }
 
 const sortedPlayers = computed<PlayerRecord[]>(() => {
@@ -183,19 +194,6 @@ const sortedPlayers = computed<PlayerRecord[]>(() => {
   });
 });
 
-const linkStatus = computed<string>(() => {
-  if (selected.value.size < 2) return 'Select 2+ sessions to group';
-  return `${selected.value.size} sessions selected`;
-});
-
-const showBufferChart = computed(() => {
-  const pm = activePlayer.value?.player_metrics;
-  return pm != null && (pm.buffer_depth_s != null || pm.live_offset_s != null);
-});
-const showFpsChart = computed(() => {
-  const pm = activePlayer.value?.player_metrics;
-  return pm != null && (pm.frames_displayed != null || pm.dropped_frames != null);
-});
 </script>
 
 <template>
@@ -215,9 +213,9 @@ const showFpsChart = computed(() => {
 
       <StatusBanners />
 
-      <div class="panel">
-        <div class="panel-header">
-          <div class="panel-title">
+      <div class="page-card">
+        <div class="page-card-header">
+          <div class="page-card-title">
             Active Sessions
             <span v-if="players.length" class="count-badge">{{ players.length }}</span>
           </div>
@@ -227,20 +225,6 @@ const showFpsChart = computed(() => {
               Release All Sessions
             </button>
           </div>
-        </div>
-
-        <!-- Group-controls bar — only meaningful with 2+ sessions, same
-             as legacy renderSessionTabs gating. -->
-        <div v-if="sortedPlayers.length > 1" class="group-controls">
-          <button
-            class="btn btn-sm btn-secondary"
-            type="button"
-            :disabled="selected.size < 2"
-            @click="linkSelected"
-          >
-            Group Selected Sessions
-          </button>
-          <span class="status-message">{{ linkStatus }}</span>
         </div>
 
         <div v-if="isLoading" class="empty">Loading sessions…</div>
@@ -276,8 +260,21 @@ const showFpsChart = computed(() => {
               />
               {{ pillLabel(p) }}
               <span v-if="groupIdOf.get(p.id)" class="group-badge">
-                {{ groupIdOf.get(p.id)?.slice(0, 6) }}
+                {{ groupBadgeFor(p.id) }}
               </span>
+            </button>
+            <!-- "Group" appears at the tail of the pill rail once the
+                 operator has ticked 2+ checkboxes. This replaces the
+                 separate group-controls bar — the action lives where the
+                 selection happens. -->
+            <button
+              v-if="selected.size >= 2"
+              class="group-trigger"
+              type="button"
+              @click="linkSelected"
+              :title="`Group ${selected.size} selected sessions`"
+            >
+              Group ({{ selected.size }})
             </button>
           </div>
 
@@ -286,56 +283,51 @@ const showFpsChart = computed(() => {
           <template v-if="activePlayer">
             <GroupBanner :player-id="activePlayer.id" />
 
-            <h3 class="session-controls-heading">
-              Session Controls
-              <button class="btn btn-sm btn-text" type="button" @click="releaseOne(activePlayer.id)">
-                Release this session
-              </button>
-            </h3>
-
-            <CollapsibleSection title="Session Details">
+            <!-- Session Details sits above the control panels for
+                 quick "what am I looking at" reference. SessionDisplay
+                 below suppresses its duplicate via :hide-session-details. -->
+            <CollapsibleSection title="Session Details" persist-key="session-details">
               <SessionDetails :player-id="activePlayer.id" />
             </CollapsibleSection>
 
-            <CollapsibleSection title="Player Metrics">
-              <PlayerMetrics :player-id="activePlayer.id" />
-            </CollapsibleSection>
+            <h3 class="session-controls-heading">Session Controls</h3>
 
-            <CollapsibleSection title="Fault Injection" :open="true">
+            <!-- Control panels — same as testing-session.html. These
+                 mutate live server state so they stay outside
+                 SessionDisplay (which is read-only). The Delete
+                 Session affordance lives on GroupBanner above, so no
+                 inline release button is needed here. -->
+            <CollapsibleSection title="Fault Injection" :open="true" persist-key="fault-injection">
               <FaultRules :player-id="activePlayer.id" />
             </CollapsibleSection>
 
-            <CollapsibleSection title="Content Manipulation">
+            <CollapsibleSection title="Content Manipulation" persist-key="content-manipulation">
               <ContentManipulation :player-id="activePlayer.id" />
             </CollapsibleSection>
 
-            <CollapsibleSection title="Server Timeouts">
+            <CollapsibleSection title="Server Timeouts" persist-key="server-timeouts">
               <TransferTimeouts :player-id="activePlayer.id" />
             </CollapsibleSection>
 
-            <CollapsibleSection title="Network Shaping" :open="true">
+            <CollapsibleSection title="Network Shaping" :open="true" persist-key="network-shaping">
               <ShapeSliders :player-id="activePlayer.id" />
               <h3 class="subhead">Pattern</h3>
               <NetworkShapingPattern :player-id="activePlayer.id" />
             </CollapsibleSection>
 
-            <CollapsibleSection title="Player State">
-              <EventsTimeline :player-id="activePlayer.id" />
-            </CollapsibleSection>
+            <h3 class="session-controls-heading">Session Display</h3>
 
-            <CollapsibleSection title="Bitrate Chart etc">
-              <BitrateChartPanelToolbar :player-id="activePlayer.id" />
-              <div class="chart-stack">
-                <BandwidthChart :player-id="activePlayer.id" />
-                <RTTChart :player-id="activePlayer.id" />
-                <BufferChart v-if="showBufferChart" :player-id="activePlayer.id" />
-                <FPSChart v-if="showFpsChart" :player-id="activePlayer.id" />
-              </div>
-            </CollapsibleSection>
-
-            <CollapsibleSection title="Network Log">
-              <NetworkLog :player-id="activePlayer.id" />
-            </CollapsibleSection>
+            <!-- Display half — historical preload + Focus Window fold
+                 + cursor sync, shared with testing-session.html and
+                 session-viewer.html. Brush + event filter + nav-bar
+                 live inside the Focus Window fold (collapse via its
+                 chevron to hide). -->
+            <SessionDisplay
+              :player-id="activePlayer.id"
+              :play-id="activePlayIdRef"
+              mode="live"
+              hide-session-details
+            />
           </template>
         </template>
       </div>
@@ -346,7 +338,6 @@ const showFpsChart = computed(() => {
 <style scoped>
 .page {
   padding: 24px;
-  max-width: 1200px;
   margin: 0 auto;
 }
 
@@ -364,14 +355,14 @@ const showFpsChart = computed(() => {
   margin-top: 2px;
 }
 
-.panel {
+.page-card {
   background: #fff;
   border: 1px solid #e5e7eb;
   border-radius: 12px;
   padding: 16px;
   box-shadow: 0 1px 3px rgba(60, 64, 67, 0.05);
 }
-.panel-header {
+.page-card-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -379,7 +370,7 @@ const showFpsChart = computed(() => {
   gap: 12px;
   flex-wrap: wrap;
 }
-.panel-title {
+.page-card-title {
   font-size: 16px;
   font-weight: 600;
   color: #202124;
@@ -447,23 +438,32 @@ const showFpsChart = computed(() => {
 .sse[data-state='open']       { background: #d1fae5; color: #065f46; }
 .sse[data-state='closed']     { background: #fee2e2; color: #991b1b; }
 
-.group-controls {
-  display: flex;
-  gap: 10px;
-  align-items: center;
-  margin-bottom: 12px;
-  padding: 6px 0;
-}
-.status-message {
-  font-size: 12px;
-  color: #5f6368;
-}
-
 .session-tabs {
   display: flex;
   flex-wrap: wrap;
+  align-items: center;
   gap: 10px;
   margin-bottom: 16px;
+}
+
+/* Tail-of-rail "Group (N)" trigger — appears only when ≥2 pills are
+ * ticked. Visually adjacent to the last pill so the action reads as
+ * "and now group these N". */
+.group-trigger {
+  background: #10b981;
+  color: white;
+  border: 1px solid #059669;
+  border-radius: 999px;
+  padding: 8px 16px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s ease, box-shadow 0.15s ease;
+  box-shadow: 0 4px 10px rgba(16, 185, 129, 0.25);
+}
+.group-trigger:hover {
+  background: #059669;
+  box-shadow: 0 6px 14px rgba(5, 150, 105, 0.32);
 }
 .session-tab {
   display: inline-flex;

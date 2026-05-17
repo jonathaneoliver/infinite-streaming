@@ -15,20 +15,18 @@ import NetworkShapingPattern from '@/components/NetworkShapingPattern.vue';
 import TransferTimeouts from '@/components/TransferTimeouts.vue';
 import ContentManipulation from '@/components/ContentManipulation.vue';
 import FaultRules from '@/components/FaultRules.vue';
-import SessionDetails from '@/components/SessionDetails.vue';
-import PlayerMetrics from '@/components/PlayerMetrics.vue';
 import GroupBanner from '@/components/GroupBanner.vue';
-import NetworkLog from '@/components/NetworkLog.vue';
 import VideoPlayerFrame from '@/components/VideoPlayerFrame.vue';
-import BandwidthChart from '@/components/BandwidthChart.vue';
-import RTTChart from '@/components/RTTChart.vue';
-import BufferChart from '@/components/BufferChart.vue';
-import FPSChart from '@/components/FPSChart.vue';
-import EventsTimeline from '@/components/EventsTimeline.vue';
+import SessionDetails from '@/components/SessionDetails.vue';
 import CollapsibleSection from '@/components/CollapsibleSection.vue';
 import ShellLayout from '@/components/ShellLayout.vue';
-import BitrateChartPanelToolbar from '@/components/BitrateChartPanelToolbar.vue';
 import StatusBanners from '@/components/StatusBanners.vue';
+// Display half (Session Details / Player Metrics / Player State /
+// Bitrate charts / Network Log + Focus Window fold) is shared with
+// SessionViewer via SessionDisplay.vue. SessionDisplay resolves
+// historical via player_id directly against the forwarder — no
+// client-side session lookup needed.
+import SessionDisplay from '@/components/SessionDisplay.vue';
 
 const params = useUrlSearchParams<{ player_id?: string; url?: string }>('history');
 const playerId = computed(() => params.player_id ?? '');
@@ -81,69 +79,17 @@ console.log('[TS] page boot', {
 
 const { player, isLoading, isError, error, sseState } = usePlayer(playerId);
 
+// play_id falls out of the live PlayerRecord directly; the forwarder
+// accepts player_id alongside play_id, so SessionDisplay can query
+// archive data without a session_id lookup.
+const playIdRef = computed<string | null>(() => player.value?.current_play?.id ?? null);
+
 const masterUrl = computed<string>(() => player.value?.current_play?.manifest?.master_url ?? 'Loading…');
 const displayId = computed<string>(() => {
   const n = player.value?.display_id;
   return typeof n === 'number' ? `#${n}` : '';
 });
 
-// Lightweight request-kind tallies fed by the network log query.
-// Used as a CollapsibleSection badge on Session Details — matches the
-// legacy `M:{master}/Man:{manifest}/Seg:{segment}` count.
-import { useQuery } from '@tanstack/vue-query';
-import * as repo from '@/repo/v2-repo';
-const netQuery = useQuery({
-  queryKey: computed(() => ['network', playerId.value, 'tally'] as const),
-  queryFn: () => repo.getPlayerNetworkLog(playerId.value, 500),
-  enabled: computed(() => playerId.value.length > 0),
-  refetchInterval: (q: any) => {
-    const s = (q?.state?.error as any)?.status;
-    if (typeof s === 'number' && s >= 400 && s < 500) return false;
-    return 5_000;
-  },
-  refetchIntervalInBackground: false,
-  retry: (n, err: any) => {
-    const s = err?.status;
-    if (typeof s === 'number' && s >= 400 && s < 500) return false;
-    return n < 1;
-  },
-  refetchOnMount: (q: any) => {
-    const s = (q?.state?.error as any)?.status;
-    return !(typeof s === 'number' && s >= 400 && s < 500);
-  },
-  refetchOnWindowFocus: (q: any) => {
-    const s = (q?.state?.error as any)?.status;
-    return !(typeof s === 'number' && s >= 400 && s < 500);
-  },
-  refetchOnReconnect: (q: any) => {
-    const s = (q?.state?.error as any)?.status;
-    return !(typeof s === 'number' && s >= 400 && s < 500);
-  },
-});
-// Buffer + FPS charts only render once the player has reported a
-// usable sample (matches legacy `showBufferDepthChart`). The Bandwidth
-// + RTT charts always render because the server can report them even
-// before the player ever ticks.
-const showBufferChart = computed(() => {
-  const pm = player.value?.player_metrics;
-  return pm != null && (pm.buffer_depth_s != null || pm.live_offset_s != null);
-});
-const showFpsChart = computed(() => {
-  const pm = player.value?.player_metrics;
-  return pm != null && (pm.frames_displayed != null || pm.dropped_frames != null);
-});
-
-const kindTally = computed(() => {
-  const items = (netQuery.data.value ?? []) as { request_kind?: string }[];
-  let m = 0, mn = 0, sg = 0;
-  for (const e of items) {
-    const k = (e.request_kind ?? '').toLowerCase();
-    if (k === 'master_manifest') m++;
-    else if (k === 'manifest' || k === 'audio_manifest') mn++;
-    else if (k === 'segment' || k === 'partial' || k === 'init' || k === 'audio_segment') sg++;
-  }
-  return { master: m, manifest: mn, segment: sg };
-});
 </script>
 
 <template>
@@ -192,26 +138,28 @@ const kindTally = computed(() => {
              CollapsibleSection component reads/writes
              `testing_session_collapse_<key>` to localStorage (matches
              legacy) and honours `?open_folds=<key>,<key>` deep links. -->
-        <CollapsibleSection title="Playback" :open="true" persist-key="playback">
+        <!-- persist-key bumped to playback-v2 — older "playback" key
+             may have been stored collapsed; reset to default-open so
+             returning operators see the video frame on landing. New
+             toggles still persist under the v2 key normally. -->
+        <CollapsibleSection title="Playback" :open="true" persist-key="playback-v2">
           <VideoPlayerFrame :player-id="playerId" :url-override="urlOverride" />
+        </CollapsibleSection>
+
+        <!-- Session Details sits above the control panels on live
+             pages: it's the "what am I looking at" summary the
+             operator reads before adjusting fault rules / shaping.
+             SessionDisplay below omits its internal duplicate via
+             :hide-session-details. -->
+        <CollapsibleSection title="Session Details" persist-key="session-details">
+          <SessionDetails :player-id="playerId" />
         </CollapsibleSection>
 
         <h3 class="session-controls-heading">Session Controls</h3>
 
-        <!-- Panel order below mirrors legacy testing-session.html so
-             muscle memory carries over. Default-open flags match the
-             legacy resolveSectionDefault(...) values. -->
-        <CollapsibleSection title="Session Details" persist-key="session-details">
-          <template #badge>
-            M:{{ kindTally.master }} / Man:{{ kindTally.manifest }} / Seg:{{ kindTally.segment }}
-          </template>
-          <SessionDetails :player-id="playerId" />
-        </CollapsibleSection>
-
-        <CollapsibleSection title="Player Metrics" persist-key="player-metrics">
-          <PlayerMetrics :player-id="playerId" />
-        </CollapsibleSection>
-
+        <!-- Control panels — order mirrors legacy testing-session.html.
+             These mutate server state and so are LIVE-only; the
+             archive session-viewer omits them. -->
         <CollapsibleSection title="Fault Injection" :open="true" persist-key="fault-injection">
           <FaultRules :player-id="playerId" />
         </CollapsibleSection>
@@ -230,28 +178,22 @@ const kindTally = computed(() => {
           <NetworkShapingPattern :player-id="playerId" />
         </CollapsibleSection>
 
-        <CollapsibleSection title="Player State" :open="true" persist-key="player-state">
-          <EventsTimeline :player-id="playerId" />
-        </CollapsibleSection>
+        <h3 class="session-controls-heading">Session Display</h3>
 
-        <CollapsibleSection title="Bitrate Chart etc" :open="true" persist-key="bitrate-chart">
-          <BitrateChartPanelToolbar :player-id="playerId" />
-          <div class="chart-stack">
-            <BandwidthChart :player-id="playerId" />
-            <RTTChart :player-id="playerId" />
-            <BufferChart v-if="showBufferChart" :player-id="playerId" />
-            <FPSChart v-if="showFpsChart" :player-id="playerId" />
-          </div>
-        </CollapsibleSection>
-
-        <CollapsibleSection title="Network Log" persist-key="network-log">
-          <template #badge>
-            <span v-if="player?.fault_counters">
-              {{ Object.values(player.fault_counters).reduce((a, n) => a + Number(n || 0), 0) }} faults
-            </span>
-          </template>
-          <NetworkLog :player-id="playerId" />
-        </CollapsibleSection>
+        <!-- Display half — same component the archive session-viewer
+             mounts. The brush + accordion + nav-bar live inside the
+             Focus Window fold (collapse via its chevron to hide).
+             SessionDisplay queries archive history with player_id
+             (no session lookup); play_id comes straight from the
+             live PlayerRecord. Empty until forwarder ingest catches
+             up — display panels still render via the live SSE path
+             during that window. -->
+        <SessionDisplay
+          :player-id="playerId"
+          :play-id="playIdRef"
+          mode="live"
+          hide-session-details
+        />
 
       </template>
       </main>
@@ -315,7 +257,6 @@ const kindTally = computed(() => {
 
 .content {
   padding: 24px;
-  max-width: 1200px;
   margin: 0 auto;
 }
 

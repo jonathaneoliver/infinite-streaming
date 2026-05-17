@@ -366,6 +366,32 @@ test-go:
 
 test-deploy-all: test-deploy-compose test-deploy-ghcr test-deploy-registry
 
+# Frontend-only hot deploy — rebuild the Vue dashboard locally, push
+# just the static bundle into the running test-dev container WITHOUT
+# rebuilding the image or recreating any service. go-proxy / go-live /
+# go-upload / nginx stay running so in-flight sessions (iPad, Apple
+# TV, etc.) keep their playback path. Use this for any change under
+# content/dashboard-v3/. Use `make test-deploy-dev` only when Go
+# services, the Dockerfile, or analytics binaries actually change.
+#
+# The trick: docker-compose.yml mounts `./content` from the host onto
+# `/content` inside the go-server container (bind mount). rsync-ing
+# files to ~/test-dev/content/dashboard/v3/ on the host therefore
+# appears INSTANTLY inside the container — nginx serves the new
+# bundle on the next request, no docker cp / docker exec / reload
+# needed.
+test-deploy-frontend:
+	@echo "=== Frontend-only hot deploy (no container recreate) ==="
+	@if [ ! -f content/dashboard-v3/package.json ]; then \
+		echo "dashboard-v3 not present — nothing to deploy"; exit 1; \
+	fi
+	@echo "Building dashboard-v3 (Vue)..."
+	@cd content/dashboard-v3 && npm run --silent build
+	@echo "rsync → host:~/test-dev/content/dashboard/v3/ (bind-mounted into container)..."
+	ssh -n $(TEST_SSH) 'mkdir -p ~/test-dev/content/dashboard/v3'
+	rsync -az --delete content/dashboard/v3/ $(TEST_SSH):~/test-dev/content/dashboard/v3/
+	@echo "✓ test-dev frontend updated; sessions untouched."
+
 test-deploy-dev:
 	@echo "=== Dev: local working tree (port 21000) ==="
 	ssh -n $(TEST_SSH) 'mkdir -p ~/test-dev'
@@ -374,6 +400,7 @@ test-deploy-dev:
 		--filter=':- .gitignore' \
 		--exclude='.git/' \
 		--exclude='.env' \
+		--exclude='certs/' \
 		./ $(TEST_SSH):~/test-dev/
 	@# The dashboard-v3 Vite build output lives at content/dashboard/v3/
 	@# which is gitignored, so the --filter ':- .gitignore' rule above

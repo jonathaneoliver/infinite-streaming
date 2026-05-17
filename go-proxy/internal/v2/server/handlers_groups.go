@@ -237,7 +237,13 @@ func buildGroupRecord(gid string, label *string, labels *oapigen.Labels, memberI
 	for _, p := range memberIDs {
 		if u, err := uuid.Parse(p); err == nil {
 			members = append(members, u)
+			continue
 		}
+		// v1 short-form pids (not parseable as UUID directly) round-trip
+		// via the same v5 derivation the read path uses — without this
+		// the response member list silently drops members the adapter
+		// just linked.
+		members = append(members, v2translate.PlayerUUIDForRawID(p))
 	}
 	return oapigen.PlayerGroup{
 		Id:              groupUUID,

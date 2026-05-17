@@ -46,7 +46,7 @@ interface NavSection {
  *  has a valid origin to work from. v3 pages stay on localhost so HMR
  *  keeps working there. */
 const DEV_PORT = '5173';
-const DEV_BACKEND = 'http://jonathanoliver-ubuntu.local:21000';
+const DEV_BACKEND = 'https://jonathanoliver-ubuntu.local:21000';
 
 function rewriteHrefForDev(href: string): string {
   if (typeof window === 'undefined') return href;
@@ -81,7 +81,7 @@ const sections: NavSection[] = [
       { id: 'playback',      icon: '▶️', text: 'Playback',        href: '/dashboard/playback.html' },
       { id: 'test-playback', icon: '🧭', text: 'Testing Playback',href: '/dashboard/v3/testing-session.html?nav=1' },
       { id: 'testing',       icon: '🧪', text: 'Testing Monitor', href: '/dashboard/v3/testing.html' },
-      { id: 'sessions',      icon: '⏪', text: 'Sessions',         href: '/dashboard/sessions.html' },
+      { id: 'sessions',      icon: '⏪', text: 'Sessions',         href: '/dashboard/v3/sessions.html' },
       { id: 'quartet',       icon: '🎬', text: 'Quartet',          href: '/dashboard/quartet.html', alpha: true },
       { id: 'segment-duration', icon: '⏱️', text: 'Live Offset',   href: '/dashboard/segment-duration-comparison.html', alpha: true },
     ],

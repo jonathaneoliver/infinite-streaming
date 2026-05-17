@@ -41,8 +41,22 @@ const patternRunning = computed(() => {
   return !!(p && Array.isArray(p.steps) && p.steps.length);
 });
 
-// What the slider displays. Local wins during drag; model wins otherwise.
-const dispRate = computed(() => localRate.value ?? player.value?.shape?.rate_mbps ?? 0);
+// What the slider displays. Local wins during drag; model wins
+// otherwise. When a pattern is running we display the kernel-
+// enforced runtime rate (`pattern_rate_runtime_mbps`) instead of the
+// static `rate_mbps` so the slider tracks the pattern as it steps,
+// matching the legacy behaviour the operator expects. Slider is
+// disabled in that mode (see `patternRunning`) so the moving handle
+// is read-only.
+const dispRate = computed(() => {
+  if (localRate.value !== null) return localRate.value;
+  const sh = player.value?.shape;
+  if (patternRunning.value) {
+    const rt = sh?.pattern_rate_runtime_mbps;
+    if (rt != null && Number.isFinite(rt)) return rt;
+  }
+  return sh?.rate_mbps ?? 0;
+});
 const dispDelay = computed(() => localDelay.value ?? player.value?.shape?.delay_ms ?? 0);
 const dispLoss = computed(() => localLoss.value ?? player.value?.shape?.loss_pct ?? 0);
 

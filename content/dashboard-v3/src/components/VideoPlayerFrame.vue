@@ -67,6 +67,32 @@ function normalizeStreamUrl(url: string): string {
   }
 }
 
+/** Web-minted play_id for this playback. Apple/Roku clients self-report
+ *  a play_id; the v3 web player previously relied on the server-side
+ *  v5 fallback derivation, which made archive lookups fragile. Minting
+ *  here and surfacing via `?play_id=<uuid>` lets the proxy store the
+ *  same id the dashboard later queries by.
+ *  Bumped on Retry / Restart via mintPlayId() so each new playback gets
+ *  a fresh row in the archive. */
+function mintPlayId(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID();
+  }
+  // Fallback for environments without crypto.randomUUID (mirrors the
+  // Grid.vue helper). Hand-assembled UUIDv4 with proper version bits.
+  const bytes = new Uint8Array(16);
+  if (typeof crypto !== 'undefined' && crypto.getRandomValues) {
+    crypto.getRandomValues(bytes);
+  } else {
+    for (let i = 0; i < 16; i++) bytes[i] = Math.floor(Math.random() * 256);
+  }
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = Array.from(bytes).map((b) => b.toString(16).padStart(2, '0')).join('');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+const webPlayId = ref<string>(mintPlayId());
+
 const masterUrl = computed<string | null>(() => {
   // Explicit override beats whatever the player record says.
   let raw: string | null = null;
@@ -81,7 +107,18 @@ const masterUrl = computed<string | null>(() => {
   if (!raw) return null;
   const normalized = normalizeStreamUrl(raw);
   if (normalized !== raw) console.log('[VPF] masterUrl normalized to shaper port', normalized);
-  return normalized;
+  // Attach our minted play_id so the proxy records it on session
+  // creation; this is what shows up in /api/v2/players.current_play.id
+  // and in the forwarder's session_snapshots.play_id column.
+  try {
+    const u = new URL(normalized, window.location.href);
+    if (!u.searchParams.get('play_id') && webPlayId.value) {
+      u.searchParams.set('play_id', webPlayId.value);
+    }
+    return u.toString();
+  } catch {
+    return normalized;
+  }
 });
 
 type Engine = 'auto' | 'hlsjs' | 'shaka' | 'videojs' | 'native';

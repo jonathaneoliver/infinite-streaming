@@ -6,14 +6,23 @@
  * The frames_displayed counter is monotonically non-decreasing per
  * play; we keep the previous (count, time) pair and divide by elapsed
  * wall time. Resets to zero on a new play (counter goes down).
+ *
+ * Reads from the unified samples stream rather than usePlayer so the
+ * chart is fed by the same backfill+live source as every other chart;
+ * the per-row delta state below mirrors what the stream watcher inside
+ * MetricsLineChart does, but here it's exposed via a `__derived` field
+ * the synthetic PlayerRecord adapter passes through.
  */
-import { computed, ref, toRef, watch } from 'vue';
+import { computed, ref, watch } from 'vue';
 import MetricsLineChart, { type SeriesSpec } from './MetricsLineChart.vue';
-import { usePlayer } from '@/composables/usePlayer';
+import type { Stream } from '@/composables/useSessionTimeSeries';
+import { tsOfRow } from '@/composables/chRowAdapter';
 import type { PlayerRecord } from '@/repo/v2-repo';
 
-const props = defineProps<{ playerId: string }>();
-const { player } = usePlayer(toRef(props, 'playerId'));
+const props = defineProps<{
+  playerId: string;
+  samplesStream: Stream<Record<string, unknown>>;
+}>();
 
 // per-instance state: previous frame counters + the derived rate to
 // surface to MetricsLineChart through the synthetic accessor below.
@@ -24,49 +33,66 @@ let prevFrames: number | null = null;
 let prevDropped: number | null = null;
 let prevTs: number | null = null;
 let prevPlayId: string | null = null;
+let lastSeenMs = -Infinity;
+
+function num(v: unknown): number | null {
+  if (v == null) return null;
+  if (typeof v === 'number') return Number.isFinite(v) ? v : null;
+  if (typeof v === 'string') { const n = Number(v); return Number.isFinite(n) ? n : null; }
+  return null;
+}
 
 watch(
-  () => player.value,
-  (p) => {
-    if (!p) return;
-    const pm = p.player_metrics;
-    if (!pm) return;
-    const t = (() => {
-      if (pm.event_time) {
-        const v = Date.parse(pm.event_time);
-        if (Number.isFinite(v)) return v;
+  () => props.samplesStream.version.value,
+  () => {
+    const raw = props.samplesStream.inRange(
+      lastSeenMs === -Infinity ? 0 : lastSeenMs + 1,
+      Number.MAX_SAFE_INTEGER,
+    );
+    if (!raw.length) return;
+    for (const row of raw) {
+      const t = tsOfRow(row);
+      if (!Number.isFinite(t) || t <= lastSeenMs) continue;
+      lastSeenMs = t;
+      const fr = num(row.frames_displayed);
+      const dr = num(row.dropped_frames);
+      const playId = typeof row.play_id === 'string' ? row.play_id : null;
+      if (playId !== prevPlayId) {
+        prevPlayId = playId;
+        prevFrames = fr;
+        prevDropped = dr;
+        prevTs = t;
+        displayedFps.value = null;
+        droppedFps.value = null;
+        continue;
       }
-      if (p.last_seen_at) {
-        const v = Date.parse(p.last_seen_at);
-        if (Number.isFinite(v)) return v;
+      if (prevTs != null && prevFrames != null && fr != null && t > prevTs) {
+        const dt = (t - prevTs) / 1000;
+        displayedFps.value = dt > 0 ? Math.max(0, (fr - prevFrames) / dt) : null;
       }
-      return Date.now();
-    })();
-    const playId = p.current_play?.id ?? null;
-    if (playId !== prevPlayId) {
-      prevPlayId = playId;
-      prevFrames = pm.frames_displayed ?? null;
-      prevDropped = pm.dropped_frames ?? null;
+      if (prevTs != null && prevDropped != null && dr != null && t > prevTs) {
+        const dt = (t - prevTs) / 1000;
+        droppedFps.value = dt > 0 ? Math.max(0, (dr - prevDropped) / dt) : null;
+      }
+      prevFrames = fr;
+      prevDropped = dr;
       prevTs = t;
-      displayedFps.value = null;
-      droppedFps.value = null;
-      return;
     }
-    const fr = pm.frames_displayed ?? null;
-    const dr = pm.dropped_frames ?? null;
-    if (prevTs != null && prevFrames != null && fr != null && t > prevTs) {
-      const dt = (t - prevTs) / 1000;
-      displayedFps.value = dt > 0 ? Math.max(0, (fr - prevFrames) / dt) : null;
-    }
-    if (prevTs != null && prevDropped != null && dr != null && t > prevTs) {
-      const dt = (t - prevTs) / 1000;
-      droppedFps.value = dt > 0 ? Math.max(0, (dr - prevDropped) / dt) : null;
-    }
-    prevFrames = fr;
-    prevDropped = dr;
-    prevTs = t;
   },
   { immediate: true },
+);
+
+// Reset on player swap so the next play's counters don't get a
+// spurious huge delta against the previous player's last frame count.
+watch(
+  () => props.playerId,
+  () => {
+    prevFrames = prevDropped = prevTs = null;
+    prevPlayId = null;
+    lastSeenMs = -Infinity;
+    displayedFps.value = null;
+    droppedFps.value = null;
+  },
 );
 
 const series = computed<SeriesSpec[]>(() => [
@@ -88,6 +114,7 @@ const series = computed<SeriesSpec[]>(() => [
     axis: 'y2',
   },
 ]);
+
 </script>
 
 <template>
@@ -96,7 +123,7 @@ const series = computed<SeriesSpec[]>(() => [
     title="Frame rate (derived)"
     unit="fps"
     :series="series"
-    :window-seconds="180"
+    :samples-stream="samplesStream"
     :y-min="0"
     y2-title="dropped (count)"
     :y2-min="0"
