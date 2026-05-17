@@ -107,7 +107,7 @@ const paused = ref(false);
 
 const rowsScrollRef = ref<HTMLDivElement | null>(null);
 
-/** Adapt a raw row from the v3 /api/v3/timeseries stream (CH row
+/** Adapt a raw row from the /api/v2/timeseries stream (CH row
  *  shape — `ts` string in CH format, Int64 fields as JSON strings,
  *  `faulted` as 0/1) to the NetworkLogEntry shape the renderer
  *  expects. The wire shape is intentionally kept close to CH's

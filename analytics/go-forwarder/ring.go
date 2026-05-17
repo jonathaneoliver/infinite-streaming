@@ -2,7 +2,7 @@
 // row the forwarder ingests until ClickHouse has confirmed the insert.
 // Two purposes:
 //
-//   1. The read side of the v3 /api/v3/timeseries endpoint can answer
+//   1. The read side of the /api/v2/timeseries endpoint can answer
 //      "what's the latest sample/network entry?" from RAM without
 //      waiting on the 100–250 ms ingest-to-visible latency that the
 //      JSONEachRow batch path imposes. The ring covers the freshness
