@@ -21,9 +21,10 @@ import (
 	"strings"
 )
 
-// streamKind names the three top-level data streams the v3 endpoint
-// can emit. Mirrors ringKind for samples/network (events are derived
-// at query time so they don't pass through the ring).
+// streamKind names the three top-level data streams the v2
+// timeseries endpoint can emit. Mirrors ringKind for samples/network
+// (events are derived at query time so they don't pass through the
+// ring).
 type streamKind string
 
 const (
@@ -52,7 +53,7 @@ type bundleDef struct {
 	Columns []string
 }
 
-// bundleRegistry — initial set per the v3 design. Each entry's column
+// bundleRegistry — initial set per the v2 timeseries design. Each entry's column
 // list is a curated projection of the underlying CH table. The `all`
 // bundle is an alias that expands to lanes_v1 + network + events.
 //

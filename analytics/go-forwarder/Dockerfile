@@ -10,6 +10,11 @@ WORKDIR /src
 COPY go.work ./
 COPY go-proxy/ ./go-proxy/
 COPY analytics/go-forwarder/ ./analytics/go-forwarder/
+# Drop ./tools/harness-cli from the workspace — that module is in the
+# dev host's go.work for editor convenience but isn't part of the
+# forwarder build. Skipping the COPY (instead of pulling the whole
+# tools/ tree into the image) keeps the build context tight.
+RUN go work edit -dropuse ./tools/harness-cli || true
 WORKDIR /src/analytics/go-forwarder
 RUN CGO_ENABLED=0 GOFLAGS=-trimpath go build -o /out/forwarder .
 
