@@ -18,7 +18,7 @@
  */
 import { computed, onBeforeUnmount, ref, toRef, watch, type PropType } from 'vue';
 import { ensureChartJs } from '@/composables/useChartJs';
-import { useChartCoordination, fmtTickHMSms, type ChartViewport } from '@/composables/useChartCoordination';
+import { useChartCoordination, fmtTickHMSms, DEFAULT_FOCUS_MS, type ChartViewport } from '@/composables/useChartCoordination';
 import type { Stream } from '@/composables/useSessionTimeSeries';
 import { tsOfRow, chRowToPlayerRecord } from '@/composables/chRowAdapter';
 import type { PlayerRecord } from '@/repo/v2-repo';
@@ -477,9 +477,8 @@ function installLiveWheelAnchor() {
 
       // LIVE — left-edge-only via liveSpan.
       if (vp == null) {
-        const windowMs = coord.state.windowMs;
         const currentSpan = coord.state.liveSpan;
-        const nextSpan = Math.max(MIN_SPAN_MS, Math.min(windowMs, currentSpan * factor));
+        const nextSpan = Math.max(MIN_SPAN_MS, Math.min(DEFAULT_FOCUS_MS, currentSpan * factor));
         coord.setLiveSpan(nextSpan);
         return;
       }
@@ -565,7 +564,7 @@ function pushSample(p: PlayerRecord, x: number) {
   // `animation: false` handles tens of thousands of points fine.
   if (mutated) {
     if (coord.state.range === null) {
-      applyViewport({ min: x - coord.state.windowMs, max: x });
+      applyViewport({ min: x - DEFAULT_FOCUS_MS, max: x });
     }
     safeChartUpdate();
   }

@@ -29,7 +29,7 @@
  */
 import { computed, onBeforeUnmount, ref, toRef, watch } from 'vue';
 import { ensureVisTimeline } from '@/composables/useChartJs';
-import { useChartCoordination } from '@/composables/useChartCoordination';
+import { useChartCoordination, DEFAULT_FOCUS_MS } from '@/composables/useChartCoordination';
 import type { Stream } from '@/composables/useSessionTimeSeries';
 
 interface LaneCfg { label: string; color: string }
@@ -830,9 +830,8 @@ function installLiveWheelAnchor() {
       const vp = coord.state.range;
 
       if (vp == null) {
-        const windowMs = coord.state.windowMs;
         const currentSpan = coord.state.liveSpan;
-        const nextSpan = Math.max(MIN_SPAN_MS, Math.min(windowMs, currentSpan * factor));
+        const nextSpan = Math.max(MIN_SPAN_MS, Math.min(DEFAULT_FOCUS_MS, currentSpan * factor));
         coord.setLiveSpan(nextSpan);
         return;
       }
