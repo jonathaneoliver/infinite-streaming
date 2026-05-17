@@ -167,7 +167,7 @@ async function ensure(): Promise<any> {
 
 function createChartInstance(Chart: any): any {
   dataset = props.series.map(() => []);
-  const initialViewport = coord.effectiveViewport.value;
+  const initialViewport = coord.effectiveRange.value;
   const usesY2 = props.series.some((s) => s.axis === 'y2');
 
   // Pin chart plot-area edges across every chart in the panel so the
@@ -477,12 +477,12 @@ function installLiveWheelAnchor() {
       const factor = e.deltaY < 0 ? 0.9 : 1 / 0.9;
       const MIN_SPAN_MS = 1_000;
       const MAX_SPAN_MS = 24 * 3600 * 1000;
-      const vp = coord.state.viewport;
+      const vp = coord.state.range;
 
-      // LIVE — left-edge-only via liveSpanMs.
+      // LIVE — left-edge-only via liveSpan.
       if (vp == null) {
         const windowMs = coord.state.windowMs;
-        const currentSpan = coord.state.liveSpanMs != null ? coord.state.liveSpanMs : windowMs;
+        const currentSpan = coord.state.liveSpan;
         const nextSpan = Math.max(MIN_SPAN_MS, Math.min(windowMs, currentSpan * factor));
         coord.setLiveSpanMs(nextSpan >= windowMs ? null : nextSpan);
         return;
@@ -568,7 +568,7 @@ function pushSample(p: PlayerRecord, x: number) {
   // producing a chart-vs-lane time-axis mismatch. Chart.js with
   // `animation: false` handles tens of thousands of points fine.
   if (mutated) {
-    if (!coord.state.paused && !coord.state.viewport) {
+    if (coord.state.range === null) {
       applyViewport({ min: x - coord.state.windowMs, max: x });
     }
     safeChartUpdate();
@@ -675,7 +675,7 @@ async function drainNewRows() {
       if (!Number.isFinite(x)) continue;
       if (x <= lastIngestedMs) continue; // belt-and-suspenders
       const p = chRowToPlayerRecord(row);
-      if (coord.state.paused) {
+      if (coord.state.range !== null) {
         pendingLive.push({ p, x });
       } else {
         pushSample(p, x);
@@ -695,13 +695,13 @@ watch(
   { immediate: true },
 );
 
-// Resume drain — flush any samples that arrived during pause in
+// Resume drain — flush any samples that arrived while pinned in
 // chronological order, so the chart catches up to the live edge in
 // one pass. insertByX dedupes by x so re-runs stay safe.
 watch(
-  () => coord.state.paused,
-  (paused) => {
-    if (paused || !pendingLive.length) return;
+  () => coord.state.range,
+  (range) => {
+    if (range !== null || !pendingLive.length) return;
     const drained = pendingLive.splice(0, pendingLive.length);
     for (const { p, x } of drained) pushSample(p, x);
   },
@@ -719,14 +719,18 @@ watch(
   },
 );
 
-// React to coordinated state changes (other charts in the same session
-// zooming / panning / pausing).
+// React to the coordinated visible range. `effectiveRange` collapses
+// the old (version, paused, lastSampleMs) tuple — it changes whenever
+// the range pin shifts (chart pan, brush drag, Live toggle) AND when
+// lastSampleMs advances (only while in live-tracking mode; when pinned
+// the new sample doesn't move the effective range, so the chart
+// correctly stays parked).
 watch(
-  () => [coord.state.version, coord.state.paused, coord.state.lastSampleMs] as const,
+  () => coord.effectiveRange.value,
   () => {
     if (!chart) return;
     try {
-      applyViewport(coord.effectiveViewport.value);
+      applyViewport(coord.effectiveRange.value);
     } catch (err) {
       console.warn('chart viewport apply skipped:', err);
     }
@@ -780,7 +784,7 @@ function toggleExpand() {
 // Live toggle is "checked" when we're currently following live —
 // i.e. no sticky viewport. Reactive across all charts because every
 // MetricsLineChart instance reads from the shared `coord.state`.
-const liveChecked = computed(() => coord.state.viewport === null);
+const liveChecked = computed(() => coord.state.range === null);
 
 /** Click handler — always togglePause. Both directions preserve the
  *  current `liveSpanMs` so going PINNED → LIVE doesn't reset the zoom
