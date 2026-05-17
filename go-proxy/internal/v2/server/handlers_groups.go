@@ -7,7 +7,8 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/jonathaneoliver/infinite-streaming/go-proxy/internal/v2/oapigen"
+	oapigen "github.com/jonathaneoliver/infinite-streaming/go-proxy/pkg/v2oapigen"
+	"github.com/jonathaneoliver/infinite-streaming/go-proxy/pkg/v2translate"
 )
 
 // Phase F handlers for /api/v2/player-groups{,/{group_id}}.
@@ -229,7 +230,7 @@ func buildGroupRecord(gid string, label *string, labels *oapigen.Labels, memberI
 		// Should never happen for v2-created groups (always UUIDv4),
 		// but legacy v1 group_ids aren't parseable. Fall back to
 		// stableGroupUUID.
-		stable, _ := stableGroupUUID(gid)
+		stable, _ := v2translate.StableGroupUUID(gid)
 		groupUUID = stable
 	}
 	members := make([]uuid.UUID, 0, len(memberIDs))

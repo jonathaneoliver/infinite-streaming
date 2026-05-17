@@ -102,8 +102,8 @@ openapi:
 	  cp api/openapi/v2/forwarder.yaml content/dashboard/api-docs/forwarder-v2.yaml; \
 	fi
 	@if [ -f api/openapi/v2/proxy.yaml ] && [ -x "$(OAPICODEGEN)" ]; then \
-	  cd go-proxy/internal/v2/oapigen && $(OAPICODEGEN) -config config.yaml ../../../../api/openapi/v2/proxy.yaml; \
-	  echo "v2 server interface regenerated: go-proxy/internal/v2/oapigen/oapigen.gen.go"; \
+	  cd go-proxy/pkg/v2oapigen && $(OAPICODEGEN) -config config.yaml ../../../api/openapi/v2/proxy.yaml; \
+	  echo "v2 server interface regenerated: go-proxy/pkg/v2oapigen/oapigen.gen.go"; \
 	else \
 	  echo "skipping v2 codegen — oapi-codegen not installed (run 'make openapi-tools')"; \
 	fi
@@ -114,7 +114,7 @@ openapi-clean:
 	rm -rf api/openapi/proxy api/openapi/forwarder
 	rm -f content/dashboard/api-docs/proxy.json content/dashboard/api-docs/forwarder.json
 	rm -f content/dashboard/api-docs/proxy-v2.yaml content/dashboard/api-docs/forwarder-v2.yaml
-	rm -f go-proxy/internal/v2/oapigen/oapigen.gen.go
+	rm -f go-proxy/pkg/v2oapigen/oapigen.gen.go
 
 K3S_REGISTRY ?= localhost:5000
 K3S_SERVER_REPO ?= infinite-streaming
@@ -302,9 +302,15 @@ ANALYTICS_SSE_URL ?= http://infinite-streaming:30081/api/sessions/stream
 # Build + push the forwarder image into the cluster's registry. Same
 # image is shared across stacks (cluster-agnostic).
 analytics-build-forwarder-k3s:
+	# Context is the repo root so the Dockerfile can COPY both
+	# go-proxy/ AND analytics/go-forwarder/ — same reason as the
+	# compose `forwarder` service. Without the wider context the
+	# go.mod replace path (../../go-proxy) doesn't resolve inside
+	# the build container.
 	docker buildx build --platform linux/amd64 \
 		-t $(K3S_REGISTRY)/infinite-streaming-forwarder:dev \
-		--push ./analytics/go-forwarder
+		-f analytics/go-forwarder/Dockerfile \
+		--push .
 
 # Apply the analytics manifest into the cluster pointed at by
 # $(KUBECONFIG_FILE). Idempotent.
@@ -382,10 +388,21 @@ analytics-update:
 # pulling go-server into the recreate.
 analytics-rebuild-forwarder:
 	@echo "=== Rebuilding forwarder on test-dev (no go-server restart) ==="
-	ssh $(TEST_SSH) 'mkdir -p ~/test-dev/analytics/go-forwarder'
+	ssh $(TEST_SSH) 'mkdir -p ~/test-dev/analytics/go-forwarder ~/test-dev/go-proxy'
 	rsync -az --delete \
-		/Users/jonathanoliver/Projects/smashing/analytics/go-forwarder/ \
+		/Users/jonathanoliver/Projects/smashing-api-v2-441/analytics/go-forwarder/ \
 		$(TEST_SSH):~/test-dev/analytics/go-forwarder/
+	# go-proxy is referenced via the forwarder's go.mod replace
+	# directive (../../go-proxy). The forwarder's Dockerfile build
+	# context is now the repo root, so we must keep the sibling
+	# go-proxy in sync too — otherwise the build sees stale shared
+	# code and the v2 endpoints diverge from what the proxy emits.
+	rsync -az --delete \
+		/Users/jonathanoliver/Projects/smashing-api-v2-441/go-proxy/ \
+		$(TEST_SSH):~/test-dev/go-proxy/
+	rsync -az \
+		/Users/jonathanoliver/Projects/smashing-api-v2-441/go.work \
+		$(TEST_SSH):~/test-dev/go.work
 	ssh $(TEST_SSH) 'cd ~/test-dev && docker compose build forwarder && docker compose up -d --no-deps forwarder'
 
 # Apply a ClickHouse migration without restarting anything. Pipes the

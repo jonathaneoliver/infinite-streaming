@@ -27,6 +27,7 @@ import (
 type netRow struct {
 	Ts                   string  `json:"ts"`
 	SessionID            string  `json:"session_id"`
+	PlayerID             string  `json:"player_id"`
 	PlayID               string  `json:"play_id"`
 	Method               string  `json:"method"`
 	URL                  string  `json:"url"`
@@ -91,6 +92,51 @@ type netEntry struct {
 type nameValue struct {
 	Name  string `json:"name"`
 	Value string `json:"value"`
+}
+
+// sessionToPlayerID is the in-memory map populated from each session
+// snapshot the forwarder ingests (handlePayload). The network row
+// writer reads from it at insert time so every HAR row carries the
+// canonical v2 player_id alongside the legacy session_id. Concurrent-
+// safe via RWMutex; the snapshot stream and the network stream run
+// in separate goroutines.
+var sessionToPlayerID = newSessionPlayerMap()
+
+type sessionPlayerMap struct {
+	mu sync.RWMutex
+	m  map[string]string
+}
+
+func newSessionPlayerMap() *sessionPlayerMap {
+	return &sessionPlayerMap{m: make(map[string]string)}
+}
+
+func (s *sessionPlayerMap) set(sessionID, playerID string) {
+	if sessionID == "" || playerID == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.m[sessionID] = playerID
+}
+
+func (s *sessionPlayerMap) lookup(sessionID string) string {
+	if sessionID == "" {
+		return ""
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.m[sessionID]
+}
+
+func (s *sessionPlayerMap) prune(active map[string]struct{}) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for k := range s.m {
+		if _, ok := active[k]; !ok {
+			delete(s.m, k)
+		}
+	}
 }
 
 // netSeen tracks fingerprints already inserted, per session. Bounded
@@ -186,7 +232,7 @@ func jsonOrEmpty(v interface{}) string {
 	return string(b)
 }
 
-func entryToRow(sessionID string, e *netEntry) netRow {
+func entryToRow(sessionID, playerID string, e *netEntry) netRow {
 	faulted := uint8(0)
 	if e.Faulted {
 		faulted = 1
@@ -194,6 +240,7 @@ func entryToRow(sessionID string, e *netEntry) netRow {
 	return netRow{
 		Ts:                   e.Timestamp.UTC().Format("2006-01-02 15:04:05.000"),
 		SessionID:            sessionID,
+		PlayerID:             playerID,
 		PlayID:               e.PlayID,
 		Method:               e.Method,
 		URL:                  e.URL,
@@ -289,7 +336,7 @@ func streamNetworkSSE(ctx context.Context, cfg config, seen *netSeen, out chan<-
 			continue
 		}
 		select {
-		case out <- entryToRow(ev.SessionID, &ev.Entry):
+		case out <- entryToRow(ev.SessionID, sessionToPlayerID.lookup(ev.SessionID), &ev.Entry):
 		case <-ctx.Done():
 			return ctx.Err()
 		}

@@ -386,6 +386,10 @@ func handlePayload(data []byte, cache *fingerprintCache, netSeen *netSeen, out c
 		// happen now that `saveSessionByID` stamps proxy now() on every
 		// merge (issue #403 follow-up).
 		ts := snapshotEventTimeAsCHTimestamp(s, fallback)
+		// Stamp the sessionID→playerID map so the network row writer
+		// (runNetworkStream → entryToRow) can carry the v2 player_id
+		// onto every HAR row at insert time.
+		sessionToPlayerID.set(sessionID, getStr(s, "player_id"))
 		out <- toRow(ts, payload.Revision, sessionID, s)
 		// Queue auto-classifier if this snapshot carries any of the
 		// "really bad things" signals. Debounced — repeated marks
@@ -400,6 +404,7 @@ func handlePayload(data []byte, cache *fingerprintCache, netSeen *netSeen, out c
 	if netSeen != nil {
 		netSeen.prune(active)
 	}
+	sessionToPlayerID.prune(active)
 }
 
 func fingerprint(s map[string]interface{}) string {
@@ -732,6 +737,7 @@ func serveHTTP(ctx context.Context, cfg config) {
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.Write([]byte("ok"))
 	})
+	mountV2Handlers(mux, cfg)
 	mux.HandleFunc("/api/sessions", func(w http.ResponseWriter, r *http.Request) {
 		since := r.URL.Query().Get("since")
 		until := r.URL.Query().Get("until")
@@ -1074,11 +1080,20 @@ func serveHTTP(ctx context.Context, cfg config) {
 	// Notable session events for the jump-list. Returns rows like
 	//   { ts, type: 'stall'|'error'|'fault_on'|'downshift', info }
 	// sorted by ts so the UI can render them as a chronological list.
-	// GET /api/session_events?session=<id>&play_id=<id>&limit=<n>
-	mux.HandleFunc("/api/session_events", func(w http.ResponseWriter, r *http.Request) {
+	//
+	// Accepts both legacy (?session=) and v2 (?session_id=) parameter
+	// names so the same handler serves /api/session_events AND
+	// /api/v2/session_events (registered below as an alias). v2 path
+	// returns NDJSON identically — the events JSON shape is already
+	// the same; only the URL changes for callers that want to use the
+	// v2 endpoint set uniformly.
+	sessionEventsHandler := func(w http.ResponseWriter, r *http.Request) {
 		session := r.URL.Query().Get("session")
 		if session == "" {
-			http.Error(w, "missing session", http.StatusBadRequest)
+			session = r.URL.Query().Get("session_id")
+		}
+		if session == "" {
+			http.Error(w, "missing session_id", http.StatusBadRequest)
 			return
 		}
 		params := map[string]string{"session": session}
@@ -1472,7 +1487,9 @@ func serveHTTP(ctx context.Context, cfg config) {
 			cfg.chDatabase, harWhere,
 			limit)
 		proxyClickHouseJSON(w, r, cfg, query, params)
-	})
+	}
+	mux.HandleFunc("/api/session_events", sessionEventsHandler)
+	mux.HandleFunc("/api/v2/session_events", sessionEventsHandler)
 
 	// Per-request HAR-style log for the session-viewer's network log
 	// fold. Returns rows in the same shape the live go-proxy endpoint

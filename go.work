@@ -1,0 +1,11 @@
+go 1.25.0
+
+// Joins the two Go modules in this repo so the analytics forwarder can
+// import shared packages from go-proxy (oapigen types + v1→v2
+// translator) without a third repo or vendoring. Both modules retain
+// their own go.mod and ship as independent binaries; go.work only
+// affects the local build path resolver.
+use (
+	./analytics/go-forwarder
+	./go-proxy
+)
