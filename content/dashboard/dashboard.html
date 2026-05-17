@@ -139,6 +139,7 @@
                     </div>
                 </div>
             </div>
+
         </div>
 
         <!-- Recent Activity -->
@@ -181,6 +182,31 @@
             <div class="alert-content">
                 <div class="alert-title">Resource Intensive Tools</div>
                 <div>The Mosaic Player runs 16 simultaneous video players and can be resource intensive. Use single-player test pages for lighter debugging.</div>
+            </div>
+        </div>
+
+        <!-- API Reference -->
+        <div class="card" style="margin-top: 32px;">
+            <div class="card-body" style="display: flex; align-items: center; gap: 24px; flex-wrap: wrap;">
+                <div style="flex: 1; min-width: 240px;">
+                    <div style="font-weight: 600; margin-bottom: 4px;">📖 API Reference</div>
+                    <div style="color: var(--text-secondary); font-size: 13px; line-height: 1.5;">
+                        Live OpenAPI docs for the go-proxy and forwarder HTTP surfaces. v1 is generated from the running server; v2 is the player/play model under design.
+                    </div>
+                </div>
+                <div style="display: flex; gap: 16px; flex-wrap: wrap; align-items: center;">
+                    <a href="/dashboard/api-docs/" class="btn btn-primary btn-sm">All Specs</a>
+                    <div style="display: flex; gap: 6px; flex-wrap: wrap;">
+                        <span style="color: var(--text-secondary); font-size: 12px; align-self: center; margin-right: 4px;">v1</span>
+                        <a href="/dashboard/api-docs/proxy.html" class="btn btn-secondary btn-sm">go-proxy</a>
+                        <a href="/dashboard/api-docs/forwarder.html" class="btn btn-secondary btn-sm">forwarder</a>
+                    </div>
+                    <div style="display: flex; gap: 6px; flex-wrap: wrap;">
+                        <span style="color: var(--text-secondary); font-size: 12px; align-self: center; margin-right: 4px;">v2 (draft)</span>
+                        <a href="/dashboard/api-docs/proxy-v2.html" class="btn btn-secondary btn-sm">go-proxy</a>
+                        <a href="/dashboard/api-docs/forwarder-v2.html" class="btn btn-secondary btn-sm">forwarder</a>
+                    </div>
+                </div>
             </div>
         </div>
     </div>
