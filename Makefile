@@ -89,6 +89,36 @@ openapi-tools:
 	@echo "installed: $(SWAG)"
 	@echo "installed: $(OAPICODEGEN)"
 
+# Build + install the harness CLI to ~/.local/bin/harness (or override
+# via HARNESS_CLI_BIN). The CLI is the operator-facing surface for the
+# v2 forwarder + proxy APIs; see tools/harness-cli/ for source.
+# Run `make gen-harness-cli-client` first if you've edited any
+# api/openapi/v2/*.yaml file; otherwise the committed generated
+# clients (tools/harness-cli/internal/v2gen/{proxy,forwarder}.gen.go)
+# are used as-is.
+HARNESS_CLI_BIN ?= $(HOME)/.local/bin/harness
+
+harness-cli:
+	@mkdir -p $(dir $(HARNESS_CLI_BIN))
+	cd tools/harness-cli && go build -o $(HARNESS_CLI_BIN) ./cmd/harness
+	@echo "installed: $(HARNESS_CLI_BIN)"
+	@case ":$$PATH:" in *":$(patsubst %/,%,$(dir $(HARNESS_CLI_BIN))):"*) ;; \
+	  *) echo "warn: $(dir $(HARNESS_CLI_BIN)) is not on \$$PATH — add it or set HARNESS_CLI_BIN" ;; \
+	esac
+
+# Regenerate the typed Go clients under tools/harness-cli/internal/v2gen/
+# from api/openapi/v2/{proxy,forwarder}.yaml. Idempotent; safe to run
+# repeatedly. Requires oapi-codegen on $PATH (install via
+# `make openapi-tools`). The generated *.gen.go files ARE committed
+# so the CLI builds without contributors needing oapi-codegen.
+gen-harness-cli-client:
+	@test -x "$(OAPICODEGEN)" || { echo "oapi-codegen not installed — run 'make openapi-tools'"; exit 1; }
+	@test -f api/openapi/v2/proxy.yaml || { echo "api/openapi/v2/proxy.yaml missing"; exit 1; }
+	@test -f api/openapi/v2/forwarder.yaml || { echo "api/openapi/v2/forwarder.yaml missing"; exit 1; }
+	cd tools/harness-cli/internal/v2gen/proxy && $(OAPICODEGEN) -config config.yaml ../../../../../api/openapi/v2/proxy.yaml
+	cd tools/harness-cli/internal/v2gen/forwarder && $(OAPICODEGEN) -config config.yaml ../../../../../api/openapi/v2/forwarder.yaml
+	@echo "regenerated: tools/harness-cli/internal/v2gen/{proxy,forwarder}/*.gen.go"
+
 # Sync ONLY the hand-written v2 yaml files into the Scalar UI mirror
 # under content/dashboard/api-docs/. Use this after editing
 # api/openapi/v2/{proxy,forwarder}.yaml — it's a strict subset of
