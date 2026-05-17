@@ -169,6 +169,12 @@ let itemsDS: any = null;
 let groupsDS: any = null;
 let nextId = 1;
 let suppressNextRangeChange = false;
+/** Set during a user pan/zoom drag (between vis-timeline's
+ *  `rangechange` and `rangechanged`). The coord-version watcher
+ *  skips its setWindow while this is true so an incoming live
+ *  sample doesn't yank the timeline back to the live edge in the
+ *  middle of the operator's drag. */
+let userInteracting = false;
 /** Tolerance for "right edge is at the live sample" — absorbs the gap
  *  between when a wheel event fires and when the next sample arrives.
  *  Same 2s tolerance the brush-drop-at-live heuristic uses. */
@@ -412,9 +418,25 @@ async function ensureTimeline(): Promise<void> {
       // auto-pin). Clicks on the strip itself do nothing — earlier
       // versions toggled pause on click but it produced too many
       // accidental pauses.
+      // Track active drag so the coord-version watcher can skip its
+      // setWindow while the operator is mid-pan. `rangechange` (no
+      // 'd') fires continuously during drag; `rangechanged` fires
+      // once at release.
+      timeline.on('rangechange', (rc: any) => {
+        if (rc?.byUser) userInteracting = true;
+      });
       timeline.on('rangechanged', (rc: any) => {
-        if (suppressNextRangeChange) { suppressNextRangeChange = false; return; }
-        if (!rc?.byUser) return;
+        userInteracting = false;
+        // The suppress flag is only for our own programmatic setWindow
+        // calls (which fire rangechanged with byUser=false). NEVER let
+        // it consume a real user pan — earlier versions did, and when
+        // a new sample arrived mid-drag the version watcher would set
+        // the flag, then the user's pan-end rangechanged got dropped
+        // and the chart snapped back to live.
+        if (!rc?.byUser) {
+          if (suppressNextRangeChange) suppressNextRangeChange = false;
+          return;
+        }
         userInteracted = true;
         const a = rc.start instanceof Date ? rc.start.getTime() : Date.parse(rc.start);
         const b = rc.end instanceof Date ? rc.end.getTime() : Date.parse(rc.end);
@@ -767,6 +789,11 @@ watch(
   () => [coord.state.version, coord.state.paused, coord.state.lastSampleMs] as const,
   () => {
     if (!timeline) return;
+    // Skip while the operator is mid-pan — a live sample arriving
+    // during drag would otherwise call setWindow with the live edge,
+    // visibly fighting the drag (and breaking the final rangechanged
+    // event's intent).
+    if (userInteracting) return;
     const vp = coord.effectiveViewport.value;
     suppressNextRangeChange = true;
     timeline.setWindow(vp.min, vp.max, { animation: false });

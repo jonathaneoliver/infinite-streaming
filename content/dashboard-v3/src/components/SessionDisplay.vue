@@ -49,39 +49,29 @@ import {
 } from '@/repo/v2-repo';
 
 const props = defineProps<{
-  /** Canonical player UUID. Used identically in live and archive
-   *  modes — SSE registration, v3 timeseries subscription, panel cache
-   *  keying. (session_id retired: SSE keys by player_id only and the
-   *  v3 endpoint resolves rows by player_id.) */
+  /** Canonical player UUID. */
   playerId: string;
-  /** Play id. In live mode usually null (subscribe across plays); in
-   *  archive mode the specific play being replayed. */
+  /** Play id. Pass a specific id to lock onto one play (archive
+   *  replay style); pass null to let the v3 timeseries server pick
+   *  the latest play and follow rotations. */
   playId: string | null;
-  /** archive = sticky brush + replay banner visible; live = brush
-   *  hidden until paused. The v3 timeseries server decides actual
-   *  liveness via its `meta.live` event regardless of this prop. */
-  mode: 'live' | 'archive';
-  /** Suppress the internal Session Details panel. The live testing
+  /** Suppress the internal Session Details panel. The active-testing
    *  pages mount their own Session Details right before Fault Injection
    *  (above the control panels), so they pass this flag and SessionDisplay
    *  omits the duplicate panel from its stack. */
   hideSessionDetails?: boolean;
 }>();
 
-/** Live vs archive switches the brush-rail visibility default and
- *  whether to extend timeRange.max with `coord.lastSampleMs` for the
- *  live edge. Driven by the `mode` prop — the page knows which one
- *  it's rendering. The v3 stream subscription works the same in both
- *  modes (player_id + optional play_id). */
-const isLive = computed(() => props.mode !== 'archive');
-
 const playIdRef = computed(() => props.playId);
 
-// usePlayer subscribes to live SSE + the all-pool stream. In live
-// mode the TanStack cache is fed by SSE; in archive mode usePlayer's
-// GET will 404 (player isn't in the proxy roster) — that's fine,
-// nothing reads `livePlayer.value` in archive mode.
-const livePlayerIdRef = computed(() => (isLive.value ? props.playerId : ''));
+// Always subscribe to the live SSE. When the player is active the
+// TanStack cache gets continuous PlayerRecord updates (for outside-
+// SessionDisplay mutation panels — FaultRules, NetworkShaping, etc.
+// in TestingSession). When the player is dead the GET 404s once and
+// SSE idles — harmless. SessionDisplay's own display panels read
+// from the archive store (fed by the projection watcher below), so
+// this subscription only matters for mutation-side consumers.
+const livePlayerIdRef = computed(() => props.playerId);
 const { player: livePlayer } = usePlayer(livePlayerIdRef);
 
 // Defensive: only adopt usePlayer's canonical-case id when it
@@ -100,14 +90,14 @@ const apiPlayerIdRef = computed(() => {
 });
 
 // Internal cache key for the side-channel archive store (v2-repo).
-// In archive mode we synthesize an `archive:<player_id>:<play_id>`
-// key so the panel cursor (set by the windowEndMs watcher below)
-// doesn't collide with the live cache for the same player_id. In
-// live mode the raw player_id IS the cache key.
+// Always uses an `archive:<player_id>:<play_id>` prefix so the
+// brush-projection write doesn't collide with the live cache that
+// outside mutation panels (FaultRules etc.) read for editing. The
+// `archive:` prefix also tells usePlayer/usePlayerSSE NOT to start
+// a second SSE subscription (we already have one via livePlayerIdRef
+// for the live cache).
 const archivePlayerId = computed(() =>
-  isLive.value
-    ? props.playerId
-    : `archive:${props.playerId}:${props.playId ?? 'all'}`,
+  `archive:${props.playerId}:${props.playId ?? 'all'}`,
 );
 
 // Event accordion source. The events stream isn't on the v3 timeseries
@@ -135,7 +125,14 @@ const { events: sessionEvents } = useArchivedSessionEvents(apiPlayerIdRef, playI
 //   - playIdRef is null in live mode (server returns rows across all
 //     plays so the brush handles boundary moves naturally) and the
 //     specific archived play in archive mode.
-const timeseriesPlayId = computed<string | null>(() => isLive.value ? null : props.playId);
+// Pass the prop through directly. Caller controls follow-latest
+// (null) vs locked-play (specific id) — Testing/TestingSession can
+// pass null to track the active play across rotations; SessionViewer
+// passes the URL play_id to lock onto one historical play. Either
+// way the v3 timeseries SSE handles backfill + live deltas in the
+// same stream, so an in-progress play visited from session-viewer
+// will still receive live updates via the ring overlay.
+const timeseriesPlayId = playIdRef;
 const timeseries = useSessionTimeSeries(
   apiPlayerIdRef,
   timeseriesPlayId,
@@ -152,13 +149,15 @@ const timeseries = useSessionTimeSeries(
 const coord = useChartCoordination(archivePlayerId);
 
 /** Effective time range for the brush rail. Reads the cached
- *  rangeBounds of the samples stream as the historical span; in live
- *  mode extend `max` with `coord.lastSampleMs` so the rail's right
- *  edge tracks the live tail even when the cache hasn't received the
- *  freshest CH backfill yet. */
+ *  rangeBounds of the samples stream as the historical span; always
+ *  extends `max` with `coord.lastSampleMs` so the rail's right edge
+ *  tracks the latest sample even when the cache hasn't received the
+ *  freshest CH backfill yet. For a dead play `lastSampleMs` is 0
+ *  (or the last archived sample's ts) and the rail bounds come
+ *  entirely from `rangeBounds`. */
 const timeRange = computed<{ min: number; max: number } | null>(() => {
   const ar = timeseries.samples.rangeBounds.value;
-  const live = isLive.value ? (coord.state.lastSampleMs || 0) : 0;
+  const live = coord.state.lastSampleMs || 0;
   if (!ar && !live) return null;
   if (!ar) return { min: live, max: live };
   if (!live) return ar;
@@ -582,23 +581,31 @@ function onDragEnd() {
   window.removeEventListener('mousemove', onDragMove);
   const r = timeRange.value;
   // RIGHT EDGE position determines the pinned-vs-following state.
-  // Drop within 2 s of the live sample → following live (charts and
-  // brush re-anchor at r.max via the watchers below).
-  // Drop away from live → pinned to the brush window.
+  // Drop within 2 s of the right edge → "live" (live mode: follow
+  // streaming edge; archive mode: snap to end-of-session). Works in
+  // BOTH modes — archive's r.max is the end of the playback, which
+  // is the same conceptual "Live" the operator sees.
+  // Drop away from r.max → pinned to the brush window.
+  // No paused guard: dragging right to live edge is itself an explicit
+  // unpause gesture (user is saying "follow the edge from here").
   const atLiveEdge =
     !!r
-    && props.mode !== 'archive'
-    && !coord.state.paused
     && r.max - windowEndMs.value <= 2000;
   const dropSpan = windowEndMs.value - windowStartMs.value;
-  if (atLiveEdge) userMovedBrush.value = false;
+  if (atLiveEdge) {
+    userMovedBrush.value = false;
+    if (coord.state.paused) coord.setPaused(false);
+  }
 
   // BRUSH WIDTH on release becomes the new liveSpanMs — operator's
   // intent regardless of where the right edge ended up. Pinned drops
   // store the span so it survives the round trip when they later
   // click Live to return; live drops update the span immediately so
-  // every other chart's live-tracker uses the same width.
-  if (isLive.value && dropSpan > 0 && coord.state.liveSpanMs !== dropSpan) {
+  // every other chart's live-tracker uses the same width. Applies in
+  // BOTH live and archive modes — "live edge" in archive is just the
+  // right edge of the playback; the operator's brush width is the
+  // canonical span either way.
+  if (dropSpan > 0 && coord.state.liveSpanMs !== dropSpan) {
     coord.setLiveSpanMs(dropSpan);
   }
 
@@ -631,7 +638,7 @@ function onRailWheel(e: WheelEvent) {
   const MIN_SPAN_MS = 1_000;
   const nextSpan = Math.max(MIN_SPAN_MS, Math.min(fullSpan, currentSpan * factor));
   if (nextSpan === currentSpan) return;
-  const atLive = isLive.value && r.max - windowEndMs.value <= 2000;
+  const atLive = r.max - windowEndMs.value <= 2000;
 
   let newStart: number;
   let newEnd: number;
@@ -654,7 +661,7 @@ function onRailWheel(e: WheelEvent) {
   windowStartMs.value = newStart;
   windowEndMs.value = newEnd;
   // Snap back to live tracking if the zoom landed at the live edge.
-  const endedAtLive = isLive.value && r.max - newEnd <= 2000;
+  const endedAtLive = r.max - newEnd <= 2000;
   userMovedBrush.value = !endedAtLive;
 }
 
@@ -686,51 +693,29 @@ function playerKey(id: string) {
 }
 
 watch([windowStartMs, windowEndMs], () => {
-  // Brush WIDTH drives coord.liveSpanMs in live-tracking mode so
-  // chart Alt+wheel zoom and brush drag stay in sync. We do NOT feed
-  // back into coord.windowMs anymore — doing so capped the wheel
-  // anchor's zoom-out at the current brush width and trips the
-  // "snap to null" branch, jumping from e.g. 1 min straight back to
-  // 10 min. windowMs stays the slow-changing "max default rolling
-  // window" (10 min); liveSpanMs is the active zoom span.
-  //
-  // Auto-feedback to liveSpanMs only when we're NOT actively dragging
-  // — the brush watcher fires on every windowStart/End change, and
-  // mid-drag the right edge can briefly be within the 2 s live
-  // tolerance even when the operator is on their way OFF live. That
-  // would flip userMovedBrush back to false and the liveSpanMs
-  // watcher would yank the brush right edge to r.max, fighting the
-  // drag. onDragEnd handles the "released AT live → update span"
-  // case explicitly instead.
-  const focusSpan = windowEndMs.value - windowStartMs.value;
-  if (
-    focusSpan > 0
-    && isLive.value
-    && !userMovedBrush.value
-    && coord.state.liveSpanMs !== focusSpan
-  ) {
-    coord.setLiveSpanMs(focusSpan);
-  }
+  // Reconcile chart viewport with the new brush window. `liveSpanMs`
+  // is set explicitly by user gestures (onDragEnd, chart Alt+wheel,
+  // brush-rail Alt+wheel) — NOT auto-fed from this watcher. Earlier
+  // versions did auto-feed, but during the fresh-session auto-grow
+  // phase that wrote the small early-tick width into liveSpanMs,
+  // which then capped subsequent grow ticks at that width. Result:
+  // brush stuck at e.g. 5 s after the second sample, never reaching
+  // the 10-min default.
   applyWindowToViewport();
 });
 
 function applyWindowToViewport() {
   // Three states for the chart viewport:
   //  1. Operator has explicitly moved the brush — pin charts to that
-  //     window (frozen view, even on live mode).
+  //     window (frozen view).
   //  2. Paused — same: pin charts to the window the operator pinned
   //     by hitting pause.
-  //  3. Neither, AND we're in live mode — hand the viewport back to
-  //     coord by clearing it. `effectiveViewport` then follows the
-  //     live edge with the coord's `windowMs` span, so the charts
-  //     keep advancing as new samples arrive. This is what `>>` and
-  //     drag-to-live-edge both want.
-  //
-  // Archive mode never falls into the "hand back to coord" branch —
-  // there is no live edge to follow, and `effectiveViewport`'s
-  // live-edge fallback would snap the charts to `[lastSample -
-  // windowMs, lastSample]`, throwing away the brush window.
-  if (props.mode !== 'archive' && !userMovedBrush.value && !coord.state.paused) {
+  //  3. Neither — hand the viewport back to coord by clearing it.
+  //     `effectiveViewport` then follows the right edge with the
+  //     coord's liveSpanMs / windowMs span. Works in both modes:
+  //     live = streaming edge advances; archive = right edge stays
+  //     at end-of-session.
+  if (!userMovedBrush.value && !coord.state.paused) {
     if (coord.state.viewport != null) coord.setViewport(null);
     return;
   }
@@ -753,14 +738,20 @@ watch(
     }
     // viewport=null = explicit return to following live (via the Live
     // toggle's checked → unchecked path or snap-back-to-live on zoom).
-    // Snap brush right edge to live and ALWAYS clear userMovedBrush
-    // so charts AND brush move together. Span preference order:
+    // Snap brush right edge to r.max and ALWAYS clear userMovedBrush
+    // so charts AND brush move together.
+    //
+    // Works for both modes: live = r.max is the latest streaming
+    // sample (== live edge); archive = r.max is the last archived
+    // sample (== end of the playback). Either way "Live" means
+    // "right edge of the available data".
+    //
+    // Span preference order:
     //   1. liveSpanMs — set by chart Alt+wheel; the operator picked it
     //   2. currentSpan — whatever the brush was when pinned (e.g. a
     //      manual 5-min drag); preserves their inspection width
     //   3. DEFAULT_FOCUS_MS — last-resort fallback on a fresh session
     //      where neither has ever been set
-    if (!isLive.value) return;
     const r = timeRange.value; if (!r) return;
     const fullSpan = r.max - r.min;
     const liveSpan = coord.state.liveSpanMs;
@@ -781,10 +772,18 @@ watch(
 // mode we project the row at the brush's right edge — adapted from
 // CH via chRowToPlayerRecord — into the archive store so panels stay
 // in sync with the focus window.
+// Brush-end-row projection — runs in ALL contexts (live and archive)
+// so SessionDisplay's display panels (PlayerMetrics, SessionDetails,
+// charts) always reflect the state at the brush's right edge.
+// When brush is at the live edge, lastAt(windowEnd) returns the
+// latest sample → panels effectively show live data with at most a
+// 1-sample lag. When brush moves back, panels show that past moment.
+// The cache key is the prefixed archive id so this never collides
+// with the live cache that mutation panels (outside SessionDisplay)
+// read.
 watch(
   [windowEndMs, () => timeseries.samples.version.value],
   () => {
-    if (isLive.value) return;
     const row = timeseries.samples.lastAt(windowEndMs.value);
     if (!row) return;
     const adapted = chRowToPlayerRecord(row);
@@ -865,6 +864,17 @@ function skipToEnd() {
       </span>
     </div>
     <div v-else class="brush">
+      <div class="brush-top-row">
+        <button
+          type="button"
+          class="btn live-toggle brush-live-toggle"
+          :class="{ checked: brushLiveChecked }"
+          @click="coord.togglePause()"
+          :title="brushLiveChecked ? 'Pause at current live edge' : 'Resume following live'"
+        >
+          {{ brushLiveChecked ? '●' : '○' }} Live
+        </button>
+      </div>
       <div class="brush-row">
         <button
           type="button"
@@ -1121,15 +1131,6 @@ function skipToEnd() {
       </div>
 
       <div class="brush-actions">
-        <button
-          type="button"
-          class="btn live-toggle"
-          :class="{ checked: brushLiveChecked }"
-          @click="coord.togglePause()"
-          :title="brushLiveChecked ? 'Pause at current live edge' : 'Resume following live'"
-        >
-          {{ brushLiveChecked ? '●' : '○' }} Live
-        </button>
         <span class="brush-status">
           <template v-if="loading">streaming · {{ samplesCount.toLocaleString() }} snapshots</template>
           <template v-else-if="error"><span class="brush-status-err">error: {{ error }}</span></template>
@@ -1213,6 +1214,34 @@ function skipToEnd() {
   position: relative;
 }
 .brush-row { display: flex; align-items: stretch; gap: 8px; }
+
+/* Top row above the scrub rail — right-aligned Live toggle. Own row
+ * so it never overlaps the ⏮/⏭ buttons regardless of rail width. */
+.brush-top-row {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 6px;
+}
+.brush-live-toggle {
+  font-size: 11px;
+  padding: 3px 10px;
+  border-radius: 4px;
+  border: 1px solid #d1d5db;
+  cursor: pointer;
+  font-weight: 500;
+}
+.brush-live-toggle.checked {
+  background: #10b981;
+  border-color: #059669;
+  color: white;
+  font-weight: 600;
+}
+.brush-live-toggle.checked:hover { background: #059669; }
+.brush-live-toggle:not(.checked) {
+  background: #f3f4f6;
+  color: #6b7280;
+}
+.brush-live-toggle:not(.checked):hover { background: #e5e7eb; color: #374151; }
 
 .brush-skip {
   width: 32px;

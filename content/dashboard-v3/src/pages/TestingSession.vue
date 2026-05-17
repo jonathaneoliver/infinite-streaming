@@ -191,7 +191,6 @@ const displayId = computed<string>(() => {
         <SessionDisplay
           :player-id="playerId"
           :play-id="playIdRef"
-          mode="live"
           hide-session-details
         />
 

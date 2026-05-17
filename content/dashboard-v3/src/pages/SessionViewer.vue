@@ -109,7 +109,6 @@ onMounted(async () => {
           <SessionDisplay
             :player-id="playerId"
             :play-id="playId"
-            mode="archive"
           />
         </template>
       </main>

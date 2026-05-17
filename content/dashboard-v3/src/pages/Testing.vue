@@ -325,7 +325,6 @@ const sortedPlayers = computed<PlayerRecord[]>(() => {
             <SessionDisplay
               :player-id="activePlayer.id"
               :play-id="activePlayIdRef"
-              mode="live"
               hide-session-details
             />
           </template>

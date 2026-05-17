@@ -503,15 +503,26 @@ watch(
  * Capture-phase listener so we run before the browser's default
  * overflow handler, with `passive: false` so preventDefault is allowed.
  */
-onMounted(() => {
-  const el = rowsScrollRef.value;
-  if (!el) return;
-  el.addEventListener('wheel', onRowsWheel, { capture: true, passive: false });
-});
+// `.rows` is only rendered when `sortedRows.length > 0`, so on first
+// mount the ref is null. Watch the ref and (re)attach on every
+// appearance — covers the empty→populated transition AND any future
+// teardown if the table is fully filtered out and then refills.
+let attachedRowsEl: HTMLDivElement | null = null;
+watch(rowsScrollRef, (el) => {
+  if (attachedRowsEl && attachedRowsEl !== el) {
+    attachedRowsEl.removeEventListener('wheel', onRowsWheel, { capture: true } as EventListenerOptions);
+    attachedRowsEl = null;
+  }
+  if (el && el !== attachedRowsEl) {
+    el.addEventListener('wheel', onRowsWheel, { capture: true, passive: false });
+    attachedRowsEl = el;
+  }
+}, { immediate: true });
 onBeforeUnmount(() => {
-  const el = rowsScrollRef.value;
-  if (!el) return;
-  el.removeEventListener('wheel', onRowsWheel, { capture: true } as EventListenerOptions);
+  if (attachedRowsEl) {
+    attachedRowsEl.removeEventListener('wheel', onRowsWheel, { capture: true } as EventListenerOptions);
+    attachedRowsEl = null;
+  }
 });
 function onRowsWheel(e: WheelEvent) {
   if (e.altKey) return; // operator opted in — let the rows scroll
