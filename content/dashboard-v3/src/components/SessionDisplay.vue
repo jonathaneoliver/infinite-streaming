@@ -560,12 +560,32 @@ function onDragEnd() {
  *
  *  Plain wheel falls through to native page scroll. */
 function onRailWheel(e: WheelEvent) {
-  if (!e.altKey) return;
-  e.preventDefault();
-  e.stopPropagation();
   const rail = railRef.value;
   const r = timeRange.value;
   if (!rail || !r) return;
+  // Horizontal scroll → pan the brush. deltaX/railWidth maps directly
+  // to fraction-of-full-data-range so a one-rail-width swipe pans by
+  // the entire visible data span. Unlike the line charts, the brush
+  // is CLAMPED to [r.min, r.max] so it never leaves the rail. See
+  // gh#461.
+  if (!e.altKey && Math.abs(e.deltaX) > Math.abs(e.deltaY)) {
+    e.preventDefault();
+    e.stopPropagation();
+    const widthPx = rail.clientWidth;
+    if (widthPx <= 0) return;
+    const current = brushRange.value;
+    const span = current.max - current.min;
+    const dms = (e.deltaX / widthPx) * (r.max - r.min);
+    let s = current.min + dms;
+    let f = current.max + dms;
+    if (s < r.min) { s = r.min; f = s + span; }
+    if (f > r.max) { f = r.max; s = f - span; }
+    coord.setRange({ min: s, max: f });
+    return;
+  }
+  if (!e.altKey) return;
+  e.preventDefault();
+  e.stopPropagation();
   const fullSpan = Math.max(1, r.max - r.min);
   const current = brushRange.value;
   const currentSpan = Math.max(1, current.max - current.min);

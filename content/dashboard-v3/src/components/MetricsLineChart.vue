@@ -467,6 +467,23 @@ function installLiveWheelAnchor() {
   c.addEventListener(
     'wheel',
     (e: WheelEvent) => {
+      // Horizontal scroll (trackpad two-finger swipe left/right or
+      // mouse horizontal scroll) → pan the chart by deltaX scaled
+      // against the chart's plot-area width. No Alt required; plain
+      // vertical scroll still falls through to page scroll. See
+      // gh#461.
+      if (!e.altKey && Math.abs(e.deltaX) > Math.abs(e.deltaY)) {
+        e.preventDefault();
+        e.stopPropagation();
+        const chartArea = chart?.chartArea;
+        if (!chartArea || chartArea.right <= chartArea.left) return;
+        const widthPx = chartArea.right - chartArea.left;
+        const current = coord.effectiveRange.value;
+        const span = current.max - current.min;
+        const dms = (e.deltaX / widthPx) * span;
+        coord.setRange({ min: current.min + dms, max: current.max + dms });
+        return;
+      }
       if (!e.altKey) return;
       e.preventDefault();
       e.stopPropagation();

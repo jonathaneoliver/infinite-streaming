@@ -821,6 +821,19 @@ function installLiveWheelAnchor() {
   el.addEventListener(
     'wheel',
     (e: WheelEvent) => {
+      // Horizontal scroll → pan. Same semantics as MetricsLineChart;
+      // see gh#461.
+      if (!e.altKey && Math.abs(e.deltaX) > Math.abs(e.deltaY)) {
+        e.preventDefault();
+        e.stopPropagation();
+        const widthPx = el.clientWidth;
+        if (widthPx <= 0) return;
+        const current = coord.effectiveRange.value;
+        const span = current.max - current.min;
+        const dms = (e.deltaX / widthPx) * span;
+        coord.setRange({ min: current.min + dms, max: current.max + dms });
+        return;
+      }
       if (!e.altKey) return;
       e.preventDefault();
       e.stopPropagation();
