@@ -270,38 +270,22 @@ function fmtMs(ms: number): string {
 function buildEventRow(raw: Record<string, unknown>): Row | null {
   const ts = tsOf(raw);
   if (!Number.isFinite(ts)) return null;
-  // event rows from /api/v2/timeseries don't currently project
-  // play_id / attempt_id (events_query.go derives events on the fly
-  // from snapshots + network_requests via UNION ALL, and the columns
-  // don't ride through). attemptId is resolved post-build via a
-  // temporal join against the samples stream (see attemptIdAtTs);
-  // playId falls back to the URL.
+  // Since issue #469 the events stream rides on the new
+  // session_events table — every event row carries player_id /
+  // play_id / attempt_id stamped at ingest by the eventclass
+  // classifier package. Fall back to the URL play_id for old plays
+  // that landed before the cutover (their event rows don't exist in
+  // session_events; if the dashboard sees one it was synthesised
+  // somewhere else).
   return {
     ts,
     source: 'event',
-    playerId: asLowerId(realPlayerId()),
-    playId: asLowerId(props.playId || ''),
-    attemptId: '',
+    playerId: asLowerId(raw.player_id ?? realPlayerId()),
+    playId: asLowerId(raw.play_id ?? props.playId ?? ''),
+    attemptId: asStr(raw.attempt_id),
     raw,
     eventName: pickEventName(raw, ['event_name', 'type']),
   };
-}
-
-/** For event rows, find the attempt_id that was in effect at the
- *  event's timestamp by scanning the samples stream for the latest
- *  snapshot with ts <= event.ts. Returns '' if no prior snapshot is
- *  cached (event arrived before its play's first sample, or samples
- *  haven't loaded yet). Cheap enough at dashboard-cache sizes — the
- *  scan is linear over the chronologically-sorted snapshot list. */
-function attemptIdAtTs(snapshots: { ts: number; attemptId: string }[], ts: number): string {
-  if (snapshots.length === 0) return '';
-  let lo = 0, hi = snapshots.length - 1, best = -1;
-  while (lo <= hi) {
-    const mid = (lo + hi) >> 1;
-    if (snapshots[mid].ts <= ts) { best = mid; lo = mid + 1; }
-    else { hi = mid - 1; }
-  }
-  return best >= 0 ? snapshots[best].attemptId : '';
 }
 
 /** Look up the first non-empty string field from a fallback chain.
@@ -516,17 +500,6 @@ const rowsWithFields = computed<RowWithFields[]>(() => {
   // direction the operator picks below.
   const chrono = allRows.value.slice().sort((a, b) => a.ts - b.ts);
   const mode = displayMode.value;
-  // Index of (ts, attemptId) for snapshot rows in chronological
-  // order. Event rows use this to inherit the attempt_id that was
-  // in effect at the event's timestamp — events_query.go doesn't
-  // project attempt_id today so the dashboard does the temporal
-  // join client-side.
-  const snapAttemptIndex: { ts: number; attemptId: string }[] = [];
-  for (const r of chrono) {
-    if (r.source === 'snapshot' && r.attemptId) {
-      snapAttemptIndex.push({ ts: r.ts, attemptId: r.attemptId });
-    }
-  }
   // Only snapshots participate in the diff — every network /
   // event row is unique by construction so a per-row diff is
   // either uninformative (everything different every time) or
@@ -563,14 +536,7 @@ const rowsWithFields = computed<RowWithFields[]>(() => {
       fields = fieldsFromRaw(r.raw, EVENT_SKIP);
     }
     fields = sortFields(fields, r.source);
-    // Backfill attempt_id for event rows by temporal join against the
-    // sorted snapshot index. Network rows already carry it from the
-    // raw row; snapshots define it.
-    let attemptId = r.attemptId;
-    if (r.source === 'event' && !attemptId) {
-      attemptId = attemptIdAtTs(snapAttemptIndex, r.ts);
-    }
-    out[i] = { ...r, attemptId, fields };
+    out[i] = { ...r, fields };
     if (r.source === 'snapshot') prevSnapshot = r.raw;
   }
   return out;
