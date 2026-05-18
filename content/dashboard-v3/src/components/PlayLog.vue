@@ -19,6 +19,7 @@
  */
 import { computed, nextTick, onBeforeUnmount, ref, toRef, watch } from 'vue';
 import { usePlayer } from '@/composables/usePlayer';
+import { useChartCoordination } from '@/composables/useChartCoordination';
 import type { Stream } from '@/composables/useSessionTimeSeries';
 
 const props = defineProps<{
@@ -36,13 +37,22 @@ const props = defineProps<{
 }>();
 
 const playerIdRef = toRef(props, 'playerId');
-const { sseState } = usePlayer(playerIdRef);
+usePlayer(playerIdRef); // keep the SSE subscription warm
+const coord = useChartCoordination(playerIdRef);
 
 const showSnapshots = ref(true);
 const showNetwork = ref(true);
 const showEvents = ref(true);
-const paused = ref(false);
-const followLatest = ref(true);
+
+/** Follow-latest mirrors the page-level focus bar's "Live" state.
+ *  When the operator drags the brush back to a historical window,
+ *  range !== null and we stop auto-scrolling to bottom. When they
+ *  toggle Live back on, range is null and the auto-scroll resumes.
+ *  See BitrateChartPanelToolbar.vue for the canonical pattern. */
+const liveChecked = computed(() => coord.state.range === null);
+function onLiveToggleClick() {
+  coord.toggleLive();
+}
 
 /** Raw column toggle — when on, the row shows a dedicated `raw` cell
  *  containing `session_json` (snapshots) or the full raw row pretty-
@@ -540,17 +550,14 @@ function rawValueFor(r: Row): string {
   }
 }
 
-function togglePause() {
-  paused.value = !paused.value;
-}
-
 // Follow-latest: snap the inner scroll container to the end when new
-// rows arrive (mirrors NetworkLog.vue's behaviour).
+// rows arrive — gated by the page-level focus bar's live state.
+// When the brush is pinned (coord.state.range !== null) the operator
+// is reading history; don't yank the scroll out from under them.
 watch(
   () => sortedRows.value.length,
   () => {
-    if (!followLatest.value) return;
-    if (paused.value) return;
+    if (!liveChecked.value) return;
     nextTick(() => {
       const el = rowsScrollRef.value;
       if (!el) return;
@@ -595,15 +602,18 @@ function onRowsWheel(e: WheelEvent) {
       <label class="opt"><input type="checkbox" v-model="showNetwork" /> Network ({{ counts.net }})</label>
       <label class="opt"><input type="checkbox" v-model="showEvents" /> Events ({{ counts.evt }})</label>
       <label class="opt"><input type="checkbox" v-model="showRaw" /> Raw</label>
-      <button class="btn" type="button" @click="togglePause">
-        {{ paused ? '▶ Live' : '⏸ Pause' }}
-      </button>
-      <label class="opt">
-        <input type="checkbox" v-model="followLatest" />
-        Follow latest
-      </label>
       <span class="count">{{ counts.total }} row{{ counts.total === 1 ? '' : 's' }}</span>
-      <span class="sse" :data-state="sseState">{{ sseState }}</span>
+      <button
+        type="button"
+        class="btn live-toggle"
+        :class="{ checked: liveChecked }"
+        @click="onLiveToggleClick"
+        :title="liveChecked
+          ? 'Pause auto-scroll at the current row. Drops follow-latest until you toggle back.'
+          : 'Resume following live — drops any pinned brush window.'"
+      >
+        {{ liveChecked ? '●' : '○' }} Live
+      </button>
     </div>
 
     <div class="toolbar mode-row">
@@ -709,17 +719,28 @@ function onRowsWheel(e: WheelEvent) {
 .btn:hover { background: #e5e7eb; }
 .opt { display: inline-flex; align-items: center; gap: 4px; cursor: pointer; }
 .count { font-variant-numeric: tabular-nums; }
-.sse {
-  text-transform: uppercase;
-  padding: 2px 6px;
-  border-radius: 8px;
-  font-weight: 600;
-  font-size: 10px;
+
+/* Live toggle — same scheme as BitrateChartPanelToolbar /
+ * MetricsLineChart / EventsTimeline so all the toggles in the
+ * session card match visually. Anchored to the right of the
+ * toolbar so it lands in the same screen position as the chart
+ * panels' Live buttons. */
+.btn.live-toggle {
   margin-left: auto;
 }
-.sse[data-state='open'] { background: #d1fae5; color: #065f46; }
-.sse[data-state='connecting'] { background: #fef3c7; color: #92400e; }
-.sse[data-state='closed'] { background: #fee2e2; color: #991b1b; }
+.btn.live-toggle.checked {
+  background: #10b981;
+  border-color: #059669;
+  color: white;
+  font-weight: 600;
+}
+.btn.live-toggle.checked:hover { background: #059669; }
+.btn.live-toggle:not(.checked) {
+  background: #f3f4f6;
+  border-color: #d1d5db;
+  color: #6b7280;
+}
+.btn.live-toggle:not(.checked):hover { background: #e5e7eb; color: #374151; }
 
 .empty {
   font-size: 13px;
