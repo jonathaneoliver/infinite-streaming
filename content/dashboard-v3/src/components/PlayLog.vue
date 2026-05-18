@@ -402,8 +402,21 @@ function rowFlags(r: Row): { text: string; color: string } {
 }
 function rowFaultClass(r: Row): string {
   if (r.source !== 'network') return '';
+  // Precedence (highest first):
+  //   row-faulted    — proxy flagged a transport-level failure
+  //   row-status-5xx — server returned 5xx
+  //   row-slow       — segment took >6s
+  //   row-status-4xx — client error
+  //   row-status-2xx — ok
+  // Each class has its own tint so the operator can scan a long log
+  // and see clusters of bad rows at a glance, same idea as the
+  // status-* badge colours NetworkLog uses on its status column.
   if (!!r.raw.faulted && r.raw.faulted !== 0) return 'row-faulted';
+  const status = numOrZero(r.raw.status);
+  if (status >= 500) return 'row-status-5xx';
   if (isSlowNetwork(r)) return 'row-slow';
+  if (status >= 400) return 'row-status-4xx';
+  if (status >= 200 && status < 300) return 'row-status-2xx';
   return '';
 }
 
@@ -964,16 +977,28 @@ function onRowsWheel(e: WheelEvent) {
 .row.src-marker    { background: #fef9c3; }
 .row.src-marker:hover { background: #fef08a; }
 
-/* Network-row tints — same backgrounds NetworkLog.vue uses so the
- * two panels agree visually. Placed AFTER the src-* rules so source
- * order breaks the specificity tie in favour of the fault tint —
- * otherwise .row.src-network's white background wins and the red
- * only appears on hover, when .row.row-faulted:hover (which has the
- * pseudo-class) bumps to a higher specificity. */
-.row.row-faulted { background: #fef2f2; }
-.row.row-faulted:hover { background: #fee2e2; }
-.row.row-slow { background: #fffbeb; }
+/* Network-row tints by HTTP status / fault flag.
+ *
+ * Placed AFTER the .row.src-* rules so source order breaks the CSS
+ * specificity tie in favour of the fault / status tint — otherwise
+ * .row.src-network's white background wins and the colour only
+ * appears on hover (when the :hover pseudo-class bumps specificity).
+ *
+ * Backgrounds picked to be light enough that chips/text stay legible
+ * but distinct enough that a long scroll separates green/yellow/
+ * amber/red clusters at a glance. Tracks the same palette
+ * NetworkLog.vue uses for its status-chip backgrounds.
+ */
+.row.row-status-2xx { background: #ecfdf5; }    /* light green — OK */
+.row.row-status-2xx:hover { background: #d1fae5; }
+.row.row-status-4xx { background: #fefce8; }    /* light yellow — 4xx */
+.row.row-status-4xx:hover { background: #fef9c3; }
+.row.row-slow { background: #fffbeb; }          /* amber — slow segment */
 .row.row-slow:hover { background: #fef3c7; }
+.row.row-status-5xx { background: #fef2f2; }    /* light red — 5xx */
+.row.row-status-5xx:hover { background: #fee2e2; }
+.row.row-faulted { background: #fee2e2; }       /* red — transport-level fault */
+.row.row-faulted:hover { background: #fecaca; }
 
 .cell {
   white-space: nowrap;
