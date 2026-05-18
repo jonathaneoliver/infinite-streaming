@@ -44,10 +44,16 @@ const showEvents = ref(true);
 const paused = ref(false);
 const followLatest = ref(true);
 
-/** "All fields" shows every non-empty key=value pair on the row.
- *  "Changed fields" shows only the keys whose value differs from the
- *  previous chronologically-earlier row of the same source — useful
- *  for spotting state transitions without re-reading the rest. */
+/** Display mode for SNAPSHOT rows only. Snapshots are dense
+ *  state-dumps where most fields stay constant across heartbeats;
+ *  showing every field on every row drowns out the actual deltas.
+ *  Network + event rows are inherently distinct per row so they
+ *  always render every field regardless of this setting.
+ *
+ *  - "all": every non-empty key=value pair on the snapshot row.
+ *  - "changed": only the keys whose value differs from the
+ *    previous chronologically-earlier snapshot row. Lets the
+ *    operator scan state transitions on a thrashing player. */
 type DisplayMode = 'all' | 'changed';
 const displayMode = ref<DisplayMode>('all');
 
@@ -69,6 +75,11 @@ interface Row {
    *  the per-row field list (and to diff against the previous row
    *  of the same source for "Changed fields" mode). */
   raw: Record<string, unknown>;
+  /** Event rows: the value of `raw.type` lifted to a top-level
+   *  badge so the event name is always visible regardless of the
+   *  chip ordering / diff filter. Empty for snapshot + network
+   *  rows. */
+  eventName?: string;
 }
 
 interface DisplayedField {
@@ -195,6 +206,7 @@ function buildEventRow(raw: Record<string, unknown>): Row | null {
     playId: props.playId || '',
     restartId: '',
     raw,
+    eventName: asStr(raw.type),
   };
 }
 
@@ -216,12 +228,17 @@ function formatValue(v: unknown): string {
 
 /** Walk the raw row's top-level keys (skipping identity + noise
  *  fields), emit name=value pairs sorted alphabetically. Empty
- *  values are dropped — they'd just be visual noise. */
-function fieldsFromRaw(raw: Record<string, unknown>): DisplayedField[] {
+ *  values are dropped — they'd just be visual noise.
+ *
+ *  `extraSkip` lets a caller hide keys it's already rendering
+ *  elsewhere — used for event rows to omit `type` (lifted to the
+ *  eventName badge) so it doesn't appear twice. */
+function fieldsFromRaw(raw: Record<string, unknown>, extraSkip?: Set<string>): DisplayedField[] {
   const out: DisplayedField[] = [];
   const keys = Object.keys(raw).sort();
   for (const k of keys) {
     if (SKIP_KEYS.has(k)) continue;
+    if (extraSkip && extraSkip.has(k)) continue;
     const v = raw[k];
     if (v == null) continue;
     const formatted = formatValue(v);
@@ -230,6 +247,8 @@ function fieldsFromRaw(raw: Record<string, unknown>): DisplayedField[] {
   }
   return out;
 }
+
+const EVENT_SKIP = new Set(['type']);
 
 const allRows = computed<Row[]>(() => {
   // Touch each stream's version so Vue re-runs the computed on every
@@ -274,32 +293,33 @@ interface RowWithFields extends Row {
 }
 
 const rowsWithFields = computed<RowWithFields[]>(() => {
-  // Build chronological copy for diff math.
+  // Build chronological copy so the diff against the previous
+  // snapshot is well-defined regardless of the display sort
+  // direction the operator picks below.
   const chrono = allRows.value.slice().sort((a, b) => a.ts - b.ts);
-  const prev: Partial<Record<Source, Record<string, unknown>>> = {};
   const mode = displayMode.value;
+  // Only snapshots participate in the diff — every network /
+  // event row is unique by construction so a per-row diff is
+  // either uninformative (everything different every time) or
+  // misleading (status=200 chip vanishes because the previous
+  // request was also 200, hiding the steady-state success).
+  let prevSnapshot: Record<string, unknown> | null = null;
   const out: RowWithFields[] = new Array(chrono.length);
   for (let i = 0; i < chrono.length; i++) {
     const r = chrono[i];
     let fields: DisplayedField[];
-    if (mode === 'all') {
-      fields = fieldsFromRaw(r.raw);
+    const skip = r.source === 'event' ? EVENT_SKIP : undefined;
+    if (r.source === 'snapshot' && mode === 'changed' && prevSnapshot) {
+      const prevByKey = new Map<string, string>();
+      for (const f of fieldsFromRaw(prevSnapshot)) prevByKey.set(f.name, f.value);
+      fields = fieldsFromRaw(r.raw, skip).filter((f) => prevByKey.get(f.name) !== f.value);
     } else {
-      // 'changed' — emit only keys whose formatted value differs from
-      // the previous same-source row. The very first row of a source
-      // has no prior, so its full field set acts as the baseline.
-      const prevRaw = prev[r.source];
-      const current = fieldsFromRaw(r.raw);
-      if (!prevRaw) {
-        fields = current;
-      } else {
-        const prevByKey = new Map<string, string>();
-        for (const f of fieldsFromRaw(prevRaw)) prevByKey.set(f.name, f.value);
-        fields = current.filter((f) => prevByKey.get(f.name) !== f.value);
-      }
+      // Snapshot in 'all' mode, first-ever snapshot in 'changed'
+      // mode (no prior to diff against), or any non-snapshot row.
+      fields = fieldsFromRaw(r.raw, skip);
     }
     out[i] = { ...r, fields };
-    prev[r.source] = r.raw;
+    if (r.source === 'snapshot') prevSnapshot = r.raw;
   }
   return out;
 });
@@ -429,9 +449,10 @@ function onRowsWheel(e: WheelEvent) {
     </div>
 
     <div class="toolbar mode-row">
-      <span class="mode-label">Fields:</span>
-      <label class="opt"><input type="radio" value="all" v-model="displayMode" /> All fields</label>
-      <label class="opt"><input type="radio" value="changed" v-model="displayMode" /> Changed only (vs previous of same source)</label>
+      <span class="mode-label">Snapshot fields:</span>
+      <label class="opt"><input type="radio" value="all" v-model="displayMode" /> All</label>
+      <label class="opt"><input type="radio" value="changed" v-model="displayMode" /> Changed only (vs previous snapshot)</label>
+      <span class="mode-hint">Network &amp; event rows always show every field.</span>
     </div>
 
     <p class="note">
@@ -452,7 +473,7 @@ function onRowsWheel(e: WheelEvent) {
         <div class="cell c-player">player_id</div>
         <div class="cell c-play">play_id</div>
         <div class="cell c-restart">restart_id</div>
-        <div class="cell c-fields">{{ displayMode === 'all' ? 'fields' : 'changed fields' }}</div>
+        <div class="cell c-fields">fields</div>
       </div>
 
       <div class="rows" ref="rowsScrollRef">
@@ -470,7 +491,12 @@ function onRowsWheel(e: WheelEvent) {
           <div class="cell c-play" :title="r.playId">{{ shortId(r.playId) }}</div>
           <div class="cell c-restart" :title="r.restartId">{{ shortId(r.restartId) }}</div>
           <div class="cell c-fields">
-            <span v-if="r.fields.length === 0" class="kv-empty">—</span>
+            <span
+              v-if="r.eventName"
+              class="event-name"
+              :title="'event_name=' + r.eventName"
+            >{{ r.eventName }}</span>
+            <span v-if="r.fields.length === 0 && !r.eventName" class="kv-empty">—</span>
             <span
               v-for="f in r.fields"
               :key="f.name"
@@ -552,6 +578,10 @@ function onRowsWheel(e: WheelEvent) {
 .mode-label {
   font-weight: 600;
   color: #374151;
+}
+.mode-hint {
+  color: #9ca3af;
+  font-size: 11px;
 }
 
 .row {
@@ -661,6 +691,18 @@ function onRowsWheel(e: WheelEvent) {
 .kv-empty {
   color: #9ca3af;
   font-size: 10px;
+}
+
+/* Event name — leading badge so the operator always sees "stall"
+ * "downshift" etc. without scanning the kv chips for `type=`. */
+.event-name {
+  background: #f59e0b;
+  color: #fff;
+  border-radius: 4px;
+  padding: 1px 8px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.3px;
 }
 
 /* Source-specific tints on the kv chips so a glance at a row tells
