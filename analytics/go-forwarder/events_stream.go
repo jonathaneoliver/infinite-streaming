@@ -77,7 +77,7 @@ func emitBackfillEvents(
 		if !seen.Add(streamMarkers, fp) {
 			continue
 		}
-		writeSSEEvent(w, "event", fp, row)
+		writeSSEEvent(w, "marker", fp, row)
 	}
 	flusher.Flush()
 	return nil
@@ -149,7 +149,7 @@ func startEventsPoller(
 					continue
 				}
 				lockedWrite(writeMu, func() {
-					writeSSEEvent(w, "event", fp, row)
+					writeSSEEvent(w, "marker", fp, row)
 					flusher.Flush()
 				})
 				if ts := stringField(row, "ts"); ts > highWater {
