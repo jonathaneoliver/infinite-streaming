@@ -93,6 +93,7 @@ paths:
       parameters:
         - $ref: '#/components/parameters/PlayerIdFilter'
         - $ref: '#/components/parameters/PlayIdFilter'
+        - $ref: '#/components/parameters/RestartIdFilter'
         - $ref: '#/components/parameters/From'
         - $ref: '#/components/parameters/To'
         - $ref: '#/components/parameters/LabelFilter'
@@ -190,6 +191,7 @@ paths:
       parameters:
         - $ref: '#/components/parameters/PlayerIdFilter'
         - $ref: '#/components/parameters/PlayIdFilter'
+        - $ref: '#/components/parameters/RestartIdFilter'
         - $ref: '#/components/parameters/From'
         - $ref: '#/components/parameters/To'
         - $ref: '#/components/parameters/LabelFilter'
@@ -211,6 +213,7 @@ paths:
       parameters:
         - $ref: '#/components/parameters/PlayerIdFilter'
         - $ref: '#/components/parameters/PlayIdFilter'
+        - $ref: '#/components/parameters/RestartIdFilter'
         - $ref: '#/components/parameters/From'
         - $ref: '#/components/parameters/To'
         - $ref: '#/components/parameters/LabelFilter'
@@ -251,6 +254,7 @@ paths:
       parameters:
         - $ref: '#/components/parameters/PlayerIdFilter'
         - $ref: '#/components/parameters/PlayIdFilter'
+        - $ref: '#/components/parameters/RestartIdFilter'
         - $ref: '#/components/parameters/From'
         - $ref: '#/components/parameters/To'
         - $ref: '#/components/parameters/LabelFilter'
@@ -288,6 +292,7 @@ paths:
       parameters:
         - $ref: '#/components/parameters/PlayerIdFilter'
         - $ref: '#/components/parameters/PlayIdFilter'
+        - $ref: '#/components/parameters/RestartIdFilter'
         - in: query
           name: buckets
           schema: { type: integer, minimum: 10, maximum: 1000, default: 240 }
@@ -525,11 +530,25 @@ components:
       in: query
       name: play_id
       schema: { type: string, format: uuid }
+      description: |
+        Filter to one play. Player-supplied UUID; rotates only on
+        content-selection / fresh app or page load. Stable across
+        in-app restart events.
     PlayId:
       in: path
       name: play_id
       required: true
       schema: { type: string, format: uuid }
+    RestartIdFilter:
+      in: query
+      name: restart_id
+      schema: { type: string, format: uuid }
+      description: |
+        Filter to one recovery attempt within a play. Player-supplied
+        UUID; rotates on every `restart` event (user-reload or
+        auto-recovery). Stable outside restart boundaries. Use to
+        narrow a query to "what happened in this specific restart"
+        rather than "the whole play".
     From:
       in: query
       name: from
@@ -823,7 +842,9 @@ components:
         - last_seen_at
       properties:
         # ---- identifiers ----
-        play_id:           { type: string, format: uuid }
+        play_id:           { type: string, format: uuid, description: "Player-supplied UUID. Rotates only on content-selection / fresh app or page load. Stable across in-app restart events." }
+        restart_id:        { type: string, format: uuid, nullable: true, description: "Last restart_id observed for this play. Rotates on every restart event. May be null if the play hasn't yet experienced a restart." }
+        restart_episodes:  { type: integer, description: "count(distinct restart_id) for this play. 1 means no restarts beyond the initial; N>1 means N-1 recovery attempts." }
         player_id:         { type: string, format: uuid }
         session_id:        { type: string, description: "Per-player numeric session counter ('1', '2', …). Empty when archive predates session_id stamping." }
         group_id:          { type: string, description: "Optional session-group id from harness label." }

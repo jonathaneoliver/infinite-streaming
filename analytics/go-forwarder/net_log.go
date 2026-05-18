@@ -29,6 +29,7 @@ type netRow struct {
 	SessionID            string  `json:"session_id"`
 	PlayerID             string  `json:"player_id"`
 	PlayID               string  `json:"play_id"`
+	RestartID            string  `json:"restart_id"`
 	Method               string  `json:"method"`
 	URL                  string  `json:"url"`
 	UpstreamURL          string  `json:"upstream_url"`
@@ -71,6 +72,7 @@ type netEntry struct {
 	BytesOut             int64         `json:"bytes_out"`
 	ContentType          string        `json:"content_type"`
 	PlayID               string        `json:"play_id"`
+	RestartID            string        `json:"restart_id"`
 	RequestHeaders       []nameValue   `json:"request_headers"`
 	ResponseHeaders      []nameValue   `json:"response_headers"`
 	QueryString          []nameValue   `json:"query_string"`
@@ -242,6 +244,7 @@ func entryToRow(sessionID, playerID string, e *netEntry) netRow {
 		SessionID:            sessionID,
 		PlayerID:             playerID,
 		PlayID:               e.PlayID,
+		RestartID:            e.RestartID,
 		Method:               e.Method,
 		URL:                  e.URL,
 		UpstreamURL:          e.UpstreamURL,

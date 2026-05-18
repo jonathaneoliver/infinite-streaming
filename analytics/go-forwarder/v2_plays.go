@@ -56,6 +56,7 @@ func v2PlaysListHandler(w http.ResponseWriter, r *http.Request, cfg config) {
 	clauses, params, err := buildPlaysFilter(
 		q.Get("player_id"),
 		q.Get("play_id"),
+		q.Get("restart_id"),
 		q.Get("from"),
 		q.Get("to"),
 		q.Get("classification"),
@@ -88,7 +89,7 @@ func v2PlayDetailHandler(w http.ResponseWriter, r *http.Request, cfg config, pla
 		writeProblemv2(w, http.StatusBadRequest, "bad request", "play_id required")
 		return
 	}
-	clauses, params, err := buildPlaysFilter("", playID, "", "", "")
+	clauses, params, err := buildPlaysFilter("", playID, "", "", "", "")
 	if err != nil {
 		writeProblemv2(w, http.StatusBadRequest, "bad request", err.Error())
 		return
@@ -109,7 +110,7 @@ func v2PlayDetailHandler(w http.ResponseWriter, r *http.Request, cfg config, pla
 // the plays aggregation. Empty inputs are skipped. Returns an error only
 // when a value is malformed in a way ClickHouse can't recover from
 // (today: nothing — all values are passed through as parameters).
-func buildPlaysFilter(playerID, playID, from, to, classification string) ([]string, map[string]string, error) {
+func buildPlaysFilter(playerID, playID, restartID, from, to, classification string) ([]string, map[string]string, error) {
 	params := map[string]string{}
 	// play_id != '' filters out pre-stamp legacy rows; the v1 endpoint
 	// surfaces them as the literal "—" but v2 plays are defined to be
@@ -122,6 +123,13 @@ func buildPlaysFilter(playerID, playID, from, to, classification string) ([]stri
 	if playID != "" {
 		clauses = append(clauses, "lowerUTF8(play_id) = lowerUTF8({play:String})")
 		params["play"] = playID
+	}
+	if restartID != "" {
+		// Plays don't usually have a single restart_id, but filtering by
+		// it narrows a list response to plays that contain this specific
+		// recovery attempt — useful when piecing a multi-play debug.
+		clauses = append(clauses, "lowerUTF8(restart_id) = lowerUTF8({restart:String})")
+		params["restart"] = restartID
 	}
 	if from != "" {
 		clauses = append(clauses, "ts >= parseDateTime64BestEffort({from:String})")
@@ -140,7 +148,7 @@ func buildPlaysFilter(playerID, playID, from, to, classification string) ([]stri
 			return nil, nil, errors.New("classification must be one of: interesting, other, favourite")
 		}
 	}
-	if playerID == "" && playID == "" && from == "" && to == "" {
+	if playerID == "" && playID == "" && restartID == "" && from == "" && to == "" {
 		// Bound the scan when the caller didn't — the snapshots table
 		// is partitioned by toYYYYMMDD(ts), so without a time bound
 		// ClickHouse would read every partition.
@@ -175,7 +183,7 @@ func queryPlaySummaries(ctx context.Context, cfg config, clauses []string, param
 	query := fmt.Sprintf(`
 		WITH base AS (
 		  SELECT
-		    session_id, play_id, ts,
+		    session_id, play_id, restart_id, ts,
 		    player_id, group_id, content_id,
 		    player_state, player_error, last_event,
 		    stall_count, dropped_frames, frames_displayed,
@@ -238,12 +246,21 @@ func queryPlaySummaries(ctx context.Context, cfg config, clauses []string, param
 		    countIf(last_event = 'segment_stall') AS segment_stall_count,
 		    countIf(last_event = 'restart')       AS restart_count,
 		    countIf(last_event = 'error')         AS error_event_count,
-		    any(classification) AS classification
+		    any(classification) AS classification,
+		    -- restart_id projection: last value observed in the play
+		    -- (argMax by ts) plus the count of distinct ids so callers
+		    -- can quickly see "how many recovery attempts in this
+		    -- play". Filters out empty restart_id values (pre-stamp
+		    -- legacy rows) so a play that's never restarted reports
+		    -- restart_episodes=0, not "" pollution.
+		    argMaxIf(restart_id, ts, restart_id != '')    AS restart_id,
+		    uniqExact(restart_id) - if(countIf(restart_id = '') > 0, 1, 0) AS restart_episodes
 		  FROM base
 		  GROUP BY play_id
 		)
 		SELECT
 		  agg.play_id, agg.player_id,
+		  agg.restart_id, agg.restart_episodes,
 		  agg.session_id, agg.group_id, agg.content_id,
 		  toString(agg.started_at)   AS started_at,
 		  toString(agg.last_seen_at) AS last_seen_at,

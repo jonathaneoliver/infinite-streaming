@@ -126,12 +126,20 @@ type NetworkLogEntry struct {
 	ContentType string    `json:"content_type"`
 
 	// PlayID identifies the playback episode this request belongs to.
-	// The player generates a fresh UUID at every loadStream / reload
-	// and passes it as `?play_id=...` on every URL. HAR snapshots
-	// filter by the current play_id by default, so a freeze 8 minutes
-	// into a session shows just that play's network log instead of
-	// the whole ring buffer. Issue #280.
+	// The player generates a fresh UUID at every content-selection
+	// boundary (new video / fresh page-load / app launch) and passes
+	// it as `?play_id=...` on every URL. Stable across in-app restart
+	// events (user-reload, auto-recovery). Issue #280.
 	PlayID string `json:"play_id,omitempty"`
+
+	// RestartID identifies the recovery attempt within a playback
+	// episode. The player generates a fresh UUID at every `restart`
+	// event (user-reload OR auto-recovery) and passes it as
+	// `?restart_id=...` on every URL. PlayID stays the same across
+	// such restarts; RestartID rotates. Lets analytics ask both
+	// "how did this play perform" (group by play_id) and "how many
+	// recovery attempts within the play" (count distinct restart_id).
+	RestartID string `json:"restart_id,omitempty"`
 
 	// HTTP-level metadata captured per-request. Sensitive headers
 	// (Cookie / Authorization / Set-Cookie) are filtered before they
@@ -1994,6 +2002,17 @@ func (a *App) handlePostSessionMetrics(w http.ResponseWriter, r *http.Request) {
 	// ground-truth live offset that's independent of the client's clock:
 	//   trueOffsetMs = server_received_at_ms - playhead_wallclock_ms
 	metricsOnly["server_received_at_ms"] = time.Now().UnixMilli()
+	// Propagate play_id + restart_id from the URL query (issue #280).
+	// The metrics POST is the only signal we receive between manifest
+	// requests on long-running iOS sessions; without picking up the
+	// player's current ids here, restart_id rotations would lag until
+	// the next manifest fetch.
+	if v := strings.TrimSpace(r.URL.Query().Get("play_id")); v != "" {
+		metricsOnly["play_id"] = v
+	}
+	if v := strings.TrimSpace(r.URL.Query().Get("restart_id")); v != "" {
+		metricsOnly["restart_id"] = v
+	}
 	a.saveSessionByID(id, metricsOnly)
 	lastEvent := strings.ToLower(strings.TrimSpace(getString(metricsOnly, "player_metrics_last_event")))
 	if isSignificantPlayerEvent(lastEvent) {
@@ -4226,14 +4245,19 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 	// order via capturedQueryString.
 	requestHeaders := capturedHeaders(r.Header)
 	queryString := capturedQueryString(r.URL)
-	// Extract the player's `play_id` query param (issue #280). Used to
-	// scope HAR snapshots to a single playback episode. Stamped onto
-	// every NetworkLogEntry created in this handler via the logEntry
-	// closure below.
+	// Extract the player's `play_id` + `restart_id` query params (issue
+	// #280). Used to scope HAR snapshots to a single playback episode
+	// and to track recovery attempts within it. Stamped onto every
+	// NetworkLogEntry created in this handler via the logEntry closure
+	// below.
 	playID := strings.TrimSpace(r.URL.Query().Get("play_id"))
+	restartID := strings.TrimSpace(r.URL.Query().Get("restart_id"))
 	logEntry := func(sessionID string, entry NetworkLogEntry) {
 		if entry.PlayID == "" {
 			entry.PlayID = playID
+		}
+		if entry.RestartID == "" {
+			entry.RestartID = restartID
 		}
 		a.addNetworkLogEntry(sessionID, entry)
 	}
@@ -4509,13 +4533,18 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 	sessionData["last_request"] = nowISO()
 	sessionData["last_request_url"] = filename
 	sessionData["user_agent"] = r.UserAgent()
-	// Stamp the player's current play_id on the session so the SSE stream
-	// (and downstream analytics) can partition by playback episode. The
-	// player regenerates play_id at every fresh loadStream boundary
-	// (issue #280); when this value differs from the prior snapshot,
-	// that's a "new playback started" signal in replay views.
+	// Stamp the player's current play_id + restart_id on the session
+	// so the SSE stream (and downstream analytics) can partition by
+	// playback episode (play_id) and recovery attempt (restart_id).
+	// Both are player-supplied; the proxy never synthesises them.
+	// When the player has not yet sent a value, the field stays empty
+	// on the session map — downstream tables get blank rather than
+	// the proxy guessing.
 	if playID != "" {
 		sessionData["play_id"] = playID
+	}
+	if restartID != "" {
+		sessionData["restart_id"] = restartID
 	}
 
 	// Extract client IP considering X-Forwarded-For
@@ -5917,6 +5946,9 @@ func (a *App) addNetworkLogEntry(sessionID string, entry NetworkLogEntry) {
 	if entry.PlayID == "" {
 		entry.PlayID = a.sessionStickyPlayID(sessionID)
 	}
+	if entry.RestartID == "" {
+		entry.RestartID = a.sessionStickyRestartID(sessionID)
+	}
 	rb := a.getOrCreateNetworkLog(sessionID)
 	rb.Add(entry)
 	if a.networkHub != nil {
@@ -5928,6 +5960,18 @@ func (a *App) addNetworkLogEntry(sessionID string, entry NetworkLogEntry) {
 // atomic snapshot without cloning the whole list. Returns "" if the
 // session isn't tracked or has no play_id stamped yet.
 func (a *App) sessionStickyPlayID(sessionID string) string {
+	return a.sessionStickyField(sessionID, "play_id")
+}
+
+// sessionStickyRestartID is the restart_id counterpart of
+// sessionStickyPlayID. The player rotates restart_id on every restart
+// event (user-reload or auto-recovery); the proxy stores the latest
+// value and stamps it onto network log entries that don't carry one.
+func (a *App) sessionStickyRestartID(sessionID string) string {
+	return a.sessionStickyField(sessionID, "restart_id")
+}
+
+func (a *App) sessionStickyField(sessionID, field string) string {
 	snap := a.sessionsSnap.Load()
 	if snap == nil {
 		return ""
@@ -5937,8 +5981,8 @@ func (a *App) sessionStickyPlayID(sessionID string) string {
 		if id != sessionID {
 			continue
 		}
-		pid, _ := s["play_id"].(string)
-		return pid
+		v, _ := s[field].(string)
+		return v
 	}
 	return ""
 }

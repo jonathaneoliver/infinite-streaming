@@ -404,12 +404,21 @@ func faultCountersFromSession(s map[string]any) *oapigen.FaultCounters {
 	return &out
 }
 
-// currentPlayFromSession synthesises the active play (if any) from the
-// session's most-recent play_id + manifest_variants snapshot. Returns
-// nil when the session has no active play observed.
+// currentPlayFromSession projects the active play (if any) from the
+// session's player-supplied play_id + manifest_variants snapshot.
+// Returns nil when the session has no active play to surface.
 //
 // playerUUID is the v2-canonical UUID for the parent player (used for
 // PlayRecord.PlayerId — we don't re-derive it).
+//
+// The proxy NEVER synthesises a play_id. play_id (and restart_id) are
+// minted by the player at well-defined boundaries (new content for
+// play_id; restart event for restart_id) and propagated as URL query
+// params on every request. If the player hasn't yet supplied a
+// play_id, PlayRecord.Id is left zero — downstream tables get blank
+// rather than the proxy guessing. See ticket on the bug where the
+// previous control_revision-seeded synthesis caused snapshots-side
+// play_id to rotate on every label change.
 func currentPlayFromSession(s map[string]any, playerUUID uuid.UUID) *oapigen.PlayRecord {
 	master := getString(s, "master_manifest_url")
 	manifest := getString(s, "manifest_url")
@@ -417,6 +426,7 @@ func currentPlayFromSession(s map[string]any, playerUUID uuid.UUID) *oapigen.Pla
 	if playIDRaw == "" {
 		playIDRaw = getString(s, "current_play_id")
 	}
+	restartIDRaw := getString(s, "restart_id")
 
 	// Surface a play whenever we have an explicit id OR enough manifest
 	// info to describe one. Web sessions (legacy testing.html, v3 grid)
@@ -431,32 +441,30 @@ func currentPlayFromSession(s map[string]any, playerUUID uuid.UUID) *oapigen.Pla
 		if parsed, err := uuid.Parse(playIDRaw); err == nil {
 			playUUID = parsed
 		} else {
+			// Player sent a non-UUID identifier (older client / test
+			// harness). Hash it deterministically so the same id always
+			// maps to the same UUID — but don't invent one from session
+			// state. If the client didn't send a play_id at all, Id
+			// stays zero (uuid.Nil).
 			playUUID = derivePlayerUUID(playIDRaw)
 		}
-	} else {
-		// Derive a stable id from the player + master URL + start time
-		// so it stays the same across ticks. The variant manifest URL
-		// (`manifest_url`) is NOT in the seed: that one changes every
-		// time the player switches ABR rungs, which would make the
-		// synthetic play_id flicker through metric ticks and confuse
-		// any downstream code that watches play_id for transitions
-		// (the v3 dashboard's events timeline, in particular, was
-		// erasing its PLAYERSTATE history on every variant switch
-		// because of this). control_revision is part of the seed so
-		// a control mutation that re-issues a new play still gets a
-		// new id when expected.
-		startToken := getString(s, "session_start_time")
-		if startToken == "" {
-			startToken = getString(s, "first_request_time")
-		}
-		seed := playerUUID.String() + "|" + getString(s, "control_revision") + "|" + master + "|" + startToken
-		playUUID = derivePlayerUUID(seed)
 	}
+	// playUUID == uuid.Nil when no player_id was supplied; that's fine —
+	// downstream consumers treat the zero UUID as "no play yet".
 
 	rec := &oapigen.PlayRecord{
 		Id:              playUUID,
 		PlayerId:        playerUUID,
 		ControlRevision: getString(s, "control_revision"),
+	}
+	if restartIDRaw != "" {
+		if parsed, err := uuid.Parse(restartIDRaw); err == nil {
+			r := parsed
+			rec.RestartId = &r
+		} else {
+			r := derivePlayerUUID(restartIDRaw)
+			rec.RestartId = &r
+		}
 	}
 	if t, ok := getTime(s, "session_start_time", "first_request_time"); ok {
 		rec.StartedAt = t

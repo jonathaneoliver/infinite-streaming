@@ -739,13 +739,21 @@ type PlayDetail struct {
 		ByStatus        *map[string]int `json:"by_status,omitempty"`
 		TotalRequests   *int            `json:"total_requests,omitempty"`
 	} `json:"network_summary,omitempty"`
+
+	// PlayId Player-supplied UUID. Rotates only on content-selection / fresh app or page load. Stable across in-app restart events.
 	PlayId            openapi_types.UUID `json:"play_id"`
 	PlayerId          openapi_types.UUID `json:"player_id"`
 	ResolutionChanges *int               `json:"resolution_changes,omitempty"`
 
 	// RestartCount Mid-play player-recovery restarts.
-	RestartCount    *int `json:"restart_count,omitempty"`
-	SegmentFailures *int `json:"segment_failures,omitempty"`
+	RestartCount *int `json:"restart_count,omitempty"`
+
+	// RestartEpisodes count(distinct restart_id) for this play. 1 means no restarts beyond the initial; N>1 means N-1 recovery attempts.
+	RestartEpisodes *int `json:"restart_episodes,omitempty"`
+
+	// RestartId Last restart_id observed for this play. Rotates on every restart event. May be null if the play hasn't yet experienced a restart.
+	RestartId       *openapi_types.UUID `json:"restart_id,omitempty"`
+	SegmentFailures *int                `json:"segment_failures,omitempty"`
 
 	// SegmentStallCount Stalls waiting on a segment fetch.
 	SegmentStallCount *int `json:"segment_stall_count,omitempty"`
@@ -840,14 +848,22 @@ type PlaySummary struct {
 	NetEvents *int `json:"net_events,omitempty"`
 
 	// NetFaults Rows with faulted = 1.
-	NetFaults         *int               `json:"net_faults,omitempty"`
+	NetFaults *int `json:"net_faults,omitempty"`
+
+	// PlayId Player-supplied UUID. Rotates only on content-selection / fresh app or page load. Stable across in-app restart events.
 	PlayId            openapi_types.UUID `json:"play_id"`
 	PlayerId          openapi_types.UUID `json:"player_id"`
 	ResolutionChanges *int               `json:"resolution_changes,omitempty"`
 
 	// RestartCount Mid-play player-recovery restarts.
-	RestartCount    *int `json:"restart_count,omitempty"`
-	SegmentFailures *int `json:"segment_failures,omitempty"`
+	RestartCount *int `json:"restart_count,omitempty"`
+
+	// RestartEpisodes count(distinct restart_id) for this play. 1 means no restarts beyond the initial; N>1 means N-1 recovery attempts.
+	RestartEpisodes *int `json:"restart_episodes,omitempty"`
+
+	// RestartId Last restart_id observed for this play. Rotates on every restart event. May be null if the play hasn't yet experienced a restart.
+	RestartId       *openapi_types.UUID `json:"restart_id,omitempty"`
+	SegmentFailures *int                `json:"segment_failures,omitempty"`
 
 	// SegmentStallCount Stalls waiting on a segment fetch.
 	SegmentStallCount *int `json:"segment_stall_count,omitempty"`
@@ -1077,6 +1093,9 @@ type PlayIdFilter = openapi_types.UUID
 // PlayerIdFilter defines model for PlayerIdFilter.
 type PlayerIdFilter = openapi_types.UUID
 
+// RestartIdFilter defines model for RestartIdFilter.
+type RestartIdFilter = openapi_types.UUID
+
 // StrideMs defines model for StrideMs.
 type StrideMs = int
 
@@ -1128,7 +1147,18 @@ type basicAuthContextKey string
 // GetApiV2NetworkRequestsParams defines parameters for GetApiV2NetworkRequests.
 type GetApiV2NetworkRequestsParams struct {
 	PlayerId *PlayerIdFilter `form:"player_id,omitempty" json:"player_id,omitempty"`
-	PlayId   *PlayIdFilter   `form:"play_id,omitempty" json:"play_id,omitempty"`
+
+	// PlayId Filter to one play. Player-supplied UUID; rotates only on
+	// content-selection / fresh app or page load. Stable across
+	// in-app restart events.
+	PlayId *PlayIdFilter `form:"play_id,omitempty" json:"play_id,omitempty"`
+
+	// RestartId Filter to one recovery attempt within a play. Player-supplied
+	// UUID; rotates on every `restart` event (user-reload or
+	// auto-recovery). Stable outside restart boundaries. Use to
+	// narrow a query to "what happened in this specific restart"
+	// rather than "the whole play".
+	RestartId *RestartIdFilter `form:"restart_id,omitempty" json:"restart_id,omitempty"`
 
 	// From ISO 8601 lower bound on the row timestamp. Inclusive.
 	From *From `form:"from,omitempty" json:"from,omitempty"`
@@ -1167,7 +1197,18 @@ type GetApiV2NetworkRequestsParamsFaultCategory string
 // GetApiV2PlaysParams defines parameters for GetApiV2Plays.
 type GetApiV2PlaysParams struct {
 	PlayerId *PlayerIdFilter `form:"player_id,omitempty" json:"player_id,omitempty"`
-	PlayId   *PlayIdFilter   `form:"play_id,omitempty" json:"play_id,omitempty"`
+
+	// PlayId Filter to one play. Player-supplied UUID; rotates only on
+	// content-selection / fresh app or page load. Stable across
+	// in-app restart events.
+	PlayId *PlayIdFilter `form:"play_id,omitempty" json:"play_id,omitempty"`
+
+	// RestartId Filter to one recovery attempt within a play. Player-supplied
+	// UUID; rotates on every `restart` event (user-reload or
+	// auto-recovery). Stable outside restart boundaries. Use to
+	// narrow a query to "what happened in this specific restart"
+	// rather than "the whole play".
+	RestartId *RestartIdFilter `form:"restart_id,omitempty" json:"restart_id,omitempty"`
 
 	// From ISO 8601 lower bound on the row timestamp. Inclusive.
 	From *From `form:"from,omitempty" json:"from,omitempty"`
@@ -1243,7 +1284,18 @@ type GetApiV2PlaysAggregateParamsClassification string
 // GetApiV2SessionEventsParams defines parameters for GetApiV2SessionEvents.
 type GetApiV2SessionEventsParams struct {
 	PlayerId *PlayerIdFilter `form:"player_id,omitempty" json:"player_id,omitempty"`
-	PlayId   *PlayIdFilter   `form:"play_id,omitempty" json:"play_id,omitempty"`
+
+	// PlayId Filter to one play. Player-supplied UUID; rotates only on
+	// content-selection / fresh app or page load. Stable across
+	// in-app restart events.
+	PlayId *PlayIdFilter `form:"play_id,omitempty" json:"play_id,omitempty"`
+
+	// RestartId Filter to one recovery attempt within a play. Player-supplied
+	// UUID; rotates on every `restart` event (user-reload or
+	// auto-recovery). Stable outside restart boundaries. Use to
+	// narrow a query to "what happened in this specific restart"
+	// rather than "the whole play".
+	RestartId *RestartIdFilter `form:"restart_id,omitempty" json:"restart_id,omitempty"`
 
 	// From ISO 8601 lower bound on the row timestamp. Inclusive.
 	From *From `form:"from,omitempty" json:"from,omitempty"`
@@ -1278,14 +1330,36 @@ type GetApiV2SessionEventsParams struct {
 // GetApiV2SessionHeatmapParams defines parameters for GetApiV2SessionHeatmap.
 type GetApiV2SessionHeatmapParams struct {
 	PlayerId *PlayerIdFilter `form:"player_id,omitempty" json:"player_id,omitempty"`
-	PlayId   *PlayIdFilter   `form:"play_id,omitempty" json:"play_id,omitempty"`
-	Buckets  *int            `form:"buckets,omitempty" json:"buckets,omitempty"`
+
+	// PlayId Filter to one play. Player-supplied UUID; rotates only on
+	// content-selection / fresh app or page load. Stable across
+	// in-app restart events.
+	PlayId *PlayIdFilter `form:"play_id,omitempty" json:"play_id,omitempty"`
+
+	// RestartId Filter to one recovery attempt within a play. Player-supplied
+	// UUID; rotates on every `restart` event (user-reload or
+	// auto-recovery). Stable outside restart boundaries. Use to
+	// narrow a query to "what happened in this specific restart"
+	// rather than "the whole play".
+	RestartId *RestartIdFilter `form:"restart_id,omitempty" json:"restart_id,omitempty"`
+	Buckets   *int             `form:"buckets,omitempty" json:"buckets,omitempty"`
 }
 
 // GetApiV2SnapshotsParams defines parameters for GetApiV2Snapshots.
 type GetApiV2SnapshotsParams struct {
 	PlayerId *PlayerIdFilter `form:"player_id,omitempty" json:"player_id,omitempty"`
-	PlayId   *PlayIdFilter   `form:"play_id,omitempty" json:"play_id,omitempty"`
+
+	// PlayId Filter to one play. Player-supplied UUID; rotates only on
+	// content-selection / fresh app or page load. Stable across
+	// in-app restart events.
+	PlayId *PlayIdFilter `form:"play_id,omitempty" json:"play_id,omitempty"`
+
+	// RestartId Filter to one recovery attempt within a play. Player-supplied
+	// UUID; rotates on every `restart` event (user-reload or
+	// auto-recovery). Stable outside restart boundaries. Use to
+	// narrow a query to "what happened in this specific restart"
+	// rather than "the whole play".
+	RestartId *RestartIdFilter `form:"restart_id,omitempty" json:"restart_id,omitempty"`
 
 	// From ISO 8601 lower bound on the row timestamp. Inclusive.
 	From *From `form:"from,omitempty" json:"from,omitempty"`
@@ -2589,6 +2663,18 @@ func NewGetApiV2NetworkRequestsRequest(server string, params *GetApiV2NetworkReq
 
 		}
 
+		if params.RestartId != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "restart_id", *params.RestartId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: "uuid"}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
 		if params.From != nil {
 
 			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "from", *params.From, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: "date-time"}); err != nil {
@@ -2766,6 +2852,18 @@ func NewGetApiV2PlaysRequest(server string, params *GetApiV2PlaysParams) (*http.
 		if params.PlayId != nil {
 
 			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "play_id", *params.PlayId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: "uuid"}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
+		if params.RestartId != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "restart_id", *params.RestartId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: "uuid"}); err != nil {
 				return nil, err
 			} else {
 				for _, qp := range strings.Split(queryFrag, "&") {
@@ -3119,6 +3217,18 @@ func NewGetApiV2SessionEventsRequest(server string, params *GetApiV2SessionEvent
 
 		}
 
+		if params.RestartId != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "restart_id", *params.RestartId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: "uuid"}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
 		if params.From != nil {
 
 			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "from", *params.From, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: "date-time"}); err != nil {
@@ -3257,6 +3367,18 @@ func NewGetApiV2SessionHeatmapRequest(server string, params *GetApiV2SessionHeat
 
 		}
 
+		if params.RestartId != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "restart_id", *params.RestartId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: "uuid"}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
 		if params.Buckets != nil {
 
 			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "buckets", *params.Buckets, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "integer", Format: ""}); err != nil {
@@ -3326,6 +3448,18 @@ func NewGetApiV2SnapshotsRequest(server string, params *GetApiV2SnapshotsParams)
 		if params.PlayId != nil {
 
 			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "play_id", *params.PlayId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: "uuid"}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
+		if params.RestartId != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "restart_id", *params.RestartId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: "uuid"}); err != nil {
 				return nil, err
 			} else {
 				for _, qp := range strings.Split(queryFrag, "&") {

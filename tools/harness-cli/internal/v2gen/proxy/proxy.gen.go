@@ -989,7 +989,11 @@ type PlayRecord struct {
 	// inherit player's. Auto-cleared on play end.
 	FaultRules *[]FaultRule `json:"fault_rules,omitempty"`
 
-	// Id UUIDv7. Server-issued, time-sortable.
+	// Id Player-supplied UUID identifying this playback episode.
+	// Rotated by the player on content-selection boundaries (new
+	// video / fresh page-load / app launch). **Sticky across
+	// in-app restart events** (user-reload, auto-recovery). May
+	// be the zero UUID before the player has supplied a value.
 	Id openapi_types.UUID `json:"id"`
 
 	// Labels Free-form k/v tags. Propagated to ClickHouse archive rows at insert
@@ -1009,6 +1013,14 @@ type PlayRecord struct {
 	// a typed projection). All fields nullable — the player may not
 	// report every field on every tick.
 	PlayerMetrics *PlayerMetrics `json:"player_metrics,omitempty"`
+
+	// RestartId Player-supplied UUID identifying one recovery attempt
+	// within this play. The player rotates it on every `restart`
+	// event (user-reload OR auto-recovery), but keeps it stable
+	// outside restart boundaries. Null when the player has not
+	// yet supplied one. Use to count or filter recovery attempts
+	// within a single play (`count(distinct restart_id)`).
+	RestartId *openapi_types.UUID `json:"restart_id,omitempty"`
 
 	// ServerMetrics Read-only server-observed transport telemetry. Sourced from
 	// v1's TCP_INFO poll (RTT family) + ICMP path ping + per-session

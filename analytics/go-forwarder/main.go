@@ -149,6 +149,7 @@ type row struct {
 	Revision                 uint64  `json:"revision"`
 	SessionID                string  `json:"session_id"`
 	PlayID                   string  `json:"play_id"`
+	RestartID                string  `json:"restart_id"`
 	PlayerID                 string  `json:"player_id"`
 	GroupID                  string  `json:"group_id"`
 	UserAgent                string  `json:"user_agent"`
@@ -536,6 +537,10 @@ func toRow(ts string, revision uint64, sessionID string, s map[string]interface{
 		Revision:                 revision,
 		SessionID:                sessionID,
 		PlayID:                   playCanonical,
+		// restart_id is player-supplied and sticky on the session map
+		// at go-proxy:4517-4519 — pull it straight from the v1 payload
+		// (no canonicalisation; it's already a UUID string).
+		RestartID:                getStr(s, "restart_id"),
 		PlayerID:                 playerCanonical,
 		GroupID:                  getStr(s, "group_id"),
 		UserAgent:                getStr(s, "user_agent"),

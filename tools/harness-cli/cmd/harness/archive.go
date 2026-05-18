@@ -31,7 +31,7 @@ const archiveUsage = `harness archive <subcommand>
 
 Subcommands (all read-only — forwarder /analytics/api/v2/*):
   plays [--limit N] [--from ISO] [--to ISO] [--classification C]
-        [--player-id UUID] [--play-id UUID]
+        [--player-id UUID] [--play-id UUID] [--restart-id UUID]
                                   list plays (one row per archived playback)
   play <play_id>                  one play + _links
   aggregate [--from --to --classification]
@@ -105,6 +105,7 @@ func cmdArchivePlays(client *api.Client, args []string, asJSON bool) error {
 	classification := fs.String("classification", "", "interesting|other|favourite")
 	playerID := fs.String("player-id", "", "filter to one player_id (UUID)")
 	playID := fs.String("play-id", "", "filter to one play_id (UUID)")
+	restartID := fs.String("restart-id", "", "filter to one restart_id (UUID) — plays containing this recovery attempt")
 	from := fs.String("from", "", "ISO 8601 lower bound (e.g. 2026-05-17T00:00:00Z)")
 	to := fs.String("to", "", "ISO 8601 upper bound (exclusive)")
 	if err := fs.Parse(args); err != nil {
@@ -132,6 +133,13 @@ func cmdArchivePlays(client *api.Client, args []string, asJSON bool) error {
 			return fmt.Errorf("invalid --play-id %q: %w", *playID, err)
 		}
 		params.PlayId = &pid
+	}
+	if *restartID != "" {
+		rid, err := uuid.Parse(*restartID)
+		if err != nil {
+			return fmt.Errorf("invalid --restart-id %q: %w", *restartID, err)
+		}
+		params.RestartId = &rid
 	}
 	if *from != "" {
 		t, err := time.Parse(time.RFC3339, *from)

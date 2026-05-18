@@ -12,6 +12,14 @@ CREATE TABLE IF NOT EXISTS infinite_streaming.session_snapshots
     revision              UInt64                      CODEC(DoubleDelta, ZSTD(1)),
     session_id            String                      CODEC(ZSTD(1)),
     play_id               LowCardinality(String)      CODEC(ZSTD(1)),
+    -- restart_id: player-supplied UUID per recovery attempt within a
+    -- play. Rotates on every `restart` event (user-reload OR
+    -- auto-recovery); stable outside restart boundaries. Empty when
+    -- the player hasn't yet supplied one. Use with play_id to count
+    -- recovery attempts per play: count(distinct restart_id) GROUP
+    -- BY play_id. See bug #4 fix that removed the proxy synthesis
+    -- which previously made play_id rotate on every control mutation.
+    restart_id            LowCardinality(String)      CODEC(ZSTD(1)),
     player_id             LowCardinality(String)      CODEC(ZSTD(1)),
     group_id              LowCardinality(String)      CODEC(ZSTD(1)),
     user_agent            String                      CODEC(ZSTD(1)),
@@ -231,6 +239,7 @@ ALTER TABLE infinite_streaming.session_snapshots
 -- Bring older deployments up to date if the column predates this column.
 ALTER TABLE infinite_streaming.session_snapshots
     ADD COLUMN IF NOT EXISTS play_id LowCardinality(String) CODEC(ZSTD(1)),
+    ADD COLUMN IF NOT EXISTS restart_id LowCardinality(String) CODEC(ZSTD(1)),
     ADD COLUMN IF NOT EXISTS content_id LowCardinality(String) CODEC(ZSTD(1)),
     ADD COLUMN IF NOT EXISTS last_event LowCardinality(String) CODEC(ZSTD(1)),
     ADD COLUMN IF NOT EXISTS trigger_type LowCardinality(String) CODEC(ZSTD(1)),
@@ -346,6 +355,9 @@ CREATE TABLE IF NOT EXISTS infinite_streaming.network_requests
     -- columns can't be in the sort key on first init.
     player_id                LowCardinality(String) CODEC(ZSTD(1)),
     play_id                  LowCardinality(String) CODEC(ZSTD(1)),
+    -- restart_id mirrors session_snapshots — see comment there.
+    -- Stamped onto every HAR row from the session's sticky restart_id.
+    restart_id               LowCardinality(String) CODEC(ZSTD(1)),
     method                   LowCardinality(String) CODEC(ZSTD(1)),
     url                      String                 CODEC(ZSTD(3)),
     upstream_url             String                 CODEC(ZSTD(3)),
@@ -410,3 +422,8 @@ ALTER TABLE infinite_streaming.network_requests
 -- empty default — they remain queryable by session_id only.
 ALTER TABLE infinite_streaming.network_requests
     ADD COLUMN IF NOT EXISTS player_id LowCardinality(String) CODEC(ZSTD(1));
+
+-- restart_id on HAR rows mirrors session_snapshots — stamped from the
+-- session's sticky restart_id at insert. Old rows keep the empty default.
+ALTER TABLE infinite_streaming.network_requests
+    ADD COLUMN IF NOT EXISTS restart_id LowCardinality(String) CODEC(ZSTD(1));

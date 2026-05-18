@@ -1091,7 +1091,23 @@ components:
         id:
           type: string
           format: uuid
-          description: UUIDv7. Server-issued, time-sortable.
+          description: |
+            Player-supplied UUID identifying this playback episode.
+            Rotated by the player on content-selection boundaries (new
+            video / fresh page-load / app launch). **Sticky across
+            in-app restart events** (user-reload, auto-recovery). May
+            be the zero UUID before the player has supplied a value.
+        restart_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: |
+            Player-supplied UUID identifying one recovery attempt
+            within this play. The player rotates it on every `restart`
+            event (user-reload OR auto-recovery), but keeps it stable
+            outside restart boundaries. Null when the player has not
+            yet supplied one. Use to count or filter recovery attempts
+            within a single play (`count(distinct restart_id)`).
         player_id:        { type: string, format: uuid }
         control_revision: { type: string }
         labels:
