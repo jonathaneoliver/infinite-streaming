@@ -184,6 +184,10 @@ func setClassification(ctx context.Context, cfg config, sessionID, playID, value
 	}{
 		{"session_snapshots", fmt.Sprintf("ALTER TABLE %s.%s UPDATE classification = {cls:String} %s", cfg.chDatabase, cfg.chTable, whereSafe)},
 		{"network_requests", fmt.Sprintf("ALTER TABLE %s.network_requests UPDATE classification = {cls:String} %s", cfg.chDatabase, whereSafe)},
+		// Mirror the same classification onto write-time events (issue
+		// #469) so they age out on the same TTL tier as the parent
+		// snapshot / network row that produced them. Same WHERE shape.
+		{"session_events", fmt.Sprintf("ALTER TABLE %s.session_events UPDATE classification = {cls:String} %s", cfg.chDatabase, whereSafe)},
 	}
 	for _, u := range updates {
 		if _, err := chQueryBytes(ctx, cfg, u.query, params); err != nil {

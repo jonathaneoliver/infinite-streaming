@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jonathaneoliver/infinite-streaming/analytics/go-forwarder/eventclass"
 	"github.com/jonathaneoliver/infinite-streaming/go-proxy/pkg/v2translate"
 )
 
@@ -367,8 +368,16 @@ func main() {
 	ring := NewRing(int64(cfg.ringWindowSecs)*1000, 0)
 	ring.StartEvictor(ctx.Done(), time.Second)
 
+	// Write-time event classification (issue #469). Every snapshot /
+	// netRow flows through the eventclass registry; emitted events
+	// land here and get batch-inserted into session_events. Replaces
+	// the read-time CTE in events_query.go.
+	events := make(chan eventclass.Event, eventsChanBuf)
+	prevSnaps := newPrevSnapshotCache()
+	go batchInsertEvents(ctx, cfg, events)
+
 	rows := make(chan row, 4096)
-	go batchInserter(ctx, cfg, ring, rows)
+	go batchInserter(ctx, cfg, ring, rows, prevSnaps, events)
 	go serveHTTP(ctx, cfg, ring)
 
 	// Network log archival: subscribe to go-proxy's /api/network/stream
@@ -376,7 +385,7 @@ func main() {
 	// the session-viewer can replay them after the session is gone.
 	netRows := make(chan netRow, 8192)
 	netSeenSet := newNetSeen(50000)
-	go batchInsertNet(ctx, cfg, ring, netRows)
+	go batchInsertNet(ctx, cfg, ring, netRows, events)
 	go runNetworkStream(ctx, cfg, netSeenSet, netRows)
 
 	// Auto-classifier: when a snapshot carries an interesting signal
@@ -781,7 +790,8 @@ func getU64(m map[string]interface{}, key string) uint64 {
 	return 0
 }
 
-func batchInserter(ctx context.Context, cfg config, ring *Ring, in <-chan row) {
+func batchInserter(ctx context.Context, cfg config, ring *Ring, in <-chan row,
+	prevSnaps *prevSnapshotCache, events chan<- eventclass.Event) {
 	buf := make([]row, 0, cfg.flushBatch)
 	entries := make([]*ringEntry, 0, cfg.flushBatch)
 	tick := time.NewTicker(cfg.flushEvery)
@@ -826,6 +836,10 @@ func batchInserter(ctx context.Context, cfg config, ring *Ring, in <-chan row) {
 			)
 			buf = append(buf, rowCopy)
 			entries = append(entries, e)
+			// Write-time event classification (issue #469). Runs
+			// against the row's own classification tier so events
+			// inherit the same TTL bucket as the snapshot.
+			emitClassifiedEventsForSnapshot(&rowCopy, prevSnaps, events)
 			if len(buf) >= cfg.flushBatch {
 				flush()
 			}

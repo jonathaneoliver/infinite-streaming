@@ -20,6 +20,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/jonathaneoliver/infinite-streaming/analytics/go-forwarder/eventclass"
 )
 
 // netRow is the JSONEachRow shape for network_requests. Tags match the
@@ -428,7 +430,8 @@ func parseSSEData(frame []byte) []byte {
 	return nil
 }
 
-func batchInsertNet(ctx context.Context, cfg config, ring *Ring, in <-chan netRow) {
+func batchInsertNet(ctx context.Context, cfg config, ring *Ring, in <-chan netRow,
+	events chan<- eventclass.Event) {
 	buf := make([]netRow, 0, cfg.flushBatch)
 	entries := make([]*ringEntry, 0, cfg.flushBatch)
 	tick := time.NewTicker(cfg.flushEvery)
@@ -465,6 +468,8 @@ func batchInsertNet(ctx context.Context, cfg config, ring *Ring, in <-chan netRo
 			)
 			buf = append(buf, rowCopy)
 			entries = append(entries, e)
+			// Write-time event classification (issue #469).
+			emitClassifiedEventsForNetwork(&rowCopy, events)
 			if len(buf) >= cfg.flushBatch {
 				flush()
 			}
