@@ -44,6 +44,12 @@ const showEvents = ref(true);
 const paused = ref(false);
 const followLatest = ref(true);
 
+/** Raw column toggle — when on, the row shows a dedicated `raw` cell
+ *  containing `session_json` (snapshots) or the full raw row pretty-
+ *  printed (network/events). When off, the column is hidden entirely
+ *  AND session_json is filtered from the kv chips. */
+const showRaw = ref(false);
+
 /** Display mode for SNAPSHOT rows only. Snapshots are dense
  *  state-dumps where most fields stay constant across heartbeats;
  *  showing every field on every row drowns out the actual deltas.
@@ -90,7 +96,9 @@ interface DisplayedField {
 /** Field keys handled by the identity columns; skip in the kv panel
  *  to avoid duplicating what's already visible on every row. Also
  *  skips monotonic-noise fields whose change-on-every-row would
- *  dominate the "Changed fields" view. */
+ *  dominate the "Changed fields" view. `session_json` is here too —
+ *  it's a huge blob, surfaced in the Raw column when that toggle is
+ *  on, otherwise hidden from the chip list entirely. */
 const SKIP_KEYS = new Set([
   'ts', 'timestamp', 'event_time',     // rendered as _time
   'player_id', 'id',                   // rendered as player_id
@@ -99,6 +107,7 @@ const SKIP_KEYS = new Set([
   'revision',                          // monotonic counter
   'server_received_at_ms',             // monotonic counter (server clock)
   'entry_fingerprint',                 // CH dedupe key
+  'session_json',                      // shown only in the optional Raw column
 ]);
 
 function tsOf(raw: Record<string, unknown>): number {
@@ -383,6 +392,22 @@ function shortId(id: string): string {
   return id.length > 8 ? id.slice(0, 8) : id;
 }
 
+/** Raw column value — full `session_json` for snapshot rows, falls
+ *  back to a pretty-print of the whole raw row for network / event
+ *  rows (which don't have a session_json field). The cell template
+ *  truncates visually; the value lives in the title attr for hover. */
+function rawValueFor(r: Row): string {
+  if (r.source === 'snapshot') {
+    const sj = r.raw['session_json'];
+    if (typeof sj === 'string' && sj.length > 0) return sj;
+  }
+  try {
+    return JSON.stringify(r.raw, null, 2);
+  } catch {
+    return String(r.raw);
+  }
+}
+
 function togglePause() {
   paused.value = !paused.value;
 }
@@ -437,6 +462,7 @@ function onRowsWheel(e: WheelEvent) {
       <label class="opt"><input type="checkbox" v-model="showSnapshots" /> Snapshots ({{ counts.snap }})</label>
       <label class="opt"><input type="checkbox" v-model="showNetwork" /> Network ({{ counts.net }})</label>
       <label class="opt"><input type="checkbox" v-model="showEvents" /> Events ({{ counts.evt }})</label>
+      <label class="opt"><input type="checkbox" v-model="showRaw" /> Raw</label>
       <button class="btn" type="button" @click="togglePause">
         {{ paused ? '▶ Live' : '⏸ Pause' }}
       </button>
@@ -466,7 +492,7 @@ function onRowsWheel(e: WheelEvent) {
     </p>
 
     <div v-if="!sortedRows.length" class="empty">No rows yet.</div>
-    <div v-else class="table-wrap">
+    <div v-else class="table-wrap" :class="{ 'with-raw': showRaw }">
       <div class="row head">
         <div class="cell c-time sortable" @click="clickSort('time')">_time<span class="arr">{{ arrow('time') }}</span></div>
         <div class="cell c-source sortable" @click="clickSort('source')">source<span class="arr">{{ arrow('source') }}</span></div>
@@ -474,6 +500,7 @@ function onRowsWheel(e: WheelEvent) {
         <div class="cell c-play">play_id</div>
         <div class="cell c-restart">restart_id</div>
         <div class="cell c-fields">fields</div>
+        <div v-if="showRaw" class="cell c-raw">raw</div>
       </div>
 
       <div class="rows" ref="rowsScrollRef">
@@ -503,6 +530,9 @@ function onRowsWheel(e: WheelEvent) {
               class="kv"
               :title="f.name + '=' + f.value"
             ><span class="kv-name">{{ f.name }}</span>=<span class="kv-value">{{ f.value }}</span></span>
+          </div>
+          <div v-if="showRaw" class="cell c-raw" :title="rawValueFor(r)">
+            <pre class="raw-pre">{{ rawValueFor(r) }}</pre>
           </div>
         </div>
       </div>
@@ -599,6 +629,19 @@ function onRowsWheel(e: WheelEvent) {
   font-family: ui-monospace, 'SF Mono', Menlo, monospace;
   align-items: start;
   border-top: 1px solid #f3f4f6;
+}
+
+/* When the Raw column is toggled on, the row grid grows by one slot
+ * and the fields column tightens so the raw cell has room. */
+.table-wrap.with-raw .row {
+  grid-template-columns:
+    var(--c-time, 96px)
+    var(--c-source, 76px)
+    var(--c-player, 90px)
+    var(--c-play, 90px)
+    var(--c-restart, 90px)
+    var(--c-fields, minmax(220px, 2fr))
+    var(--c-raw, minmax(280px, 3fr));
 }
 
 .row.head {
@@ -703,6 +746,29 @@ function onRowsWheel(e: WheelEvent) {
   font-size: 11px;
   font-weight: 700;
   letter-spacing: 0.3px;
+}
+
+/* Raw column — JSON blob, monospace, capped height. The full value
+ * lives in the title attr for hover, the cell shows the head with
+ * inner scroll for the rest. */
+.c-raw {
+  overflow: hidden;
+  max-width: 100%;
+}
+.raw-pre {
+  margin: 0;
+  font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+  font-size: 10px;
+  line-height: 1.35;
+  color: #1f2937;
+  background: #f9fafb;
+  border: 1px solid #e5e7eb;
+  border-radius: 3px;
+  padding: 4px 6px;
+  max-height: 96px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 /* Source-specific tints on the kv chips so a glance at a row tells
