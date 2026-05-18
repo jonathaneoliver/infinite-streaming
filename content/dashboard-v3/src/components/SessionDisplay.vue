@@ -37,6 +37,7 @@ import RTTChart from '@/components/RTTChart.vue';
 import BufferChart from '@/components/BufferChart.vue';
 import FPSChart from '@/components/FPSChart.vue';
 import NetworkLog from '@/components/NetworkLog.vue';
+import PlayLog from '@/components/PlayLog.vue';
 import BitrateChartPanelToolbar from '@/components/BitrateChartPanelToolbar.vue';
 import { useChartCoordination } from '@/composables/useChartCoordination';
 import { useArchivedSessionEvents, type SessionEvent } from '@/composables/useArchivedSessionEvents';
@@ -137,7 +138,11 @@ const timeseries = useSessionTimeSeries(
   apiPlayerIdRef,
   timeseriesPlayId,
   {
-    streams: ['samples', 'network'],
+    // 'events' added so the new "Play Log" fold (PlayLog.vue) can show
+    // typed events interleaved with snapshots + network rows on one
+    // chronological scroll. The bundle is auto-added when 'events' is
+    // in streams (useSessionTimeSeries.ts:215).
+    streams: ['samples', 'network', 'events'],
     bundles: ['charts_minimal', 'lanes_v1', 'session_details', 'network'],
   },
 );
@@ -1047,6 +1052,22 @@ function skipToEnd() {
            (or worse, show a brush in live-not-paused when nothing
            else does), so always opt out of it here. -->
       <NetworkLog :player-id="archivePlayerId" :network-stream="timeseries.network" />
+    </CollapsibleSection>
+
+    <CollapsibleSection title="Play Log" persist-key="play-log">
+      <!-- Time-multiplexed view of snapshots + network rows + events
+           interleaved on one chronological scroll, with checkbox
+           filters per source. The three streams come from the same
+           timeseries SSE pool the other panels use; PlayLog merges
+           them on the dashboard side rather than asking the
+           forwarder for a pre-joined view. -->
+      <PlayLog
+        :player-id="archivePlayerId"
+        :play-id="playIdRef"
+        :samples-stream="timeseries.samples"
+        :network-stream="timeseries.network"
+        :events-stream="timeseries.events"
+      />
     </CollapsibleSection>
   </div>
 </template>

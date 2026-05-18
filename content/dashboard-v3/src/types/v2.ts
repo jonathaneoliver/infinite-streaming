@@ -157,7 +157,11 @@ export interface paths {
             query?: never;
             header?: never;
             path: {
-                /** @description Player UUID. Stable per device. */
+                /**
+                 * @description Player identifier as the device sent it on the wire. Stable per
+                 *     device. Format is client-defined (UUIDv4, CFUUID, short hex, etc.);
+                 *     lookups are case-insensitive.
+                 */
                 player_id: components["parameters"]["PlayerId"];
             };
             cookie?: never;
@@ -168,7 +172,11 @@ export interface paths {
                 query?: never;
                 header?: never;
                 path: {
-                    /** @description Player UUID. Stable per device. */
+                    /**
+                     * @description Player identifier as the device sent it on the wire. Stable per
+                     *     device. Format is client-defined (UUIDv4, CFUUID, short hex, etc.);
+                     *     lookups are case-insensitive.
+                     */
                     player_id: components["parameters"]["PlayerId"];
                 };
                 cookie?: never;
@@ -200,7 +208,11 @@ export interface paths {
                 query?: never;
                 header?: never;
                 path: {
-                    /** @description Player UUID. Stable per device. */
+                    /**
+                     * @description Player identifier as the device sent it on the wire. Stable per
+                     *     device. Format is client-defined (UUIDv4, CFUUID, short hex, etc.);
+                     *     lookups are case-insensitive.
+                     */
                     player_id: components["parameters"]["PlayerId"];
                 };
                 cookie?: never;
@@ -280,7 +292,11 @@ export interface paths {
                     "If-Match": components["parameters"]["IfMatch"];
                 };
                 path: {
-                    /** @description Player UUID. Stable per device. */
+                    /**
+                     * @description Player identifier as the device sent it on the wire. Stable per
+                     *     device. Format is client-defined (UUIDv4, CFUUID, short hex, etc.);
+                     *     lookups are case-insensitive.
+                     */
                     player_id: components["parameters"]["PlayerId"];
                 };
                 cookie?: never;
@@ -313,7 +329,11 @@ export interface paths {
             query?: never;
             header?: never;
             path: {
-                /** @description Player UUID. Stable per device. */
+                /**
+                 * @description Player identifier as the device sent it on the wire. Stable per
+                 *     device. Format is client-defined (UUIDv4, CFUUID, short hex, etc.);
+                 *     lookups are case-insensitive.
+                 */
                 player_id: components["parameters"]["PlayerId"];
             };
             cookie?: never;
@@ -331,7 +351,11 @@ export interface paths {
                 };
                 header?: never;
                 path: {
-                    /** @description Player UUID. Stable per device. */
+                    /**
+                     * @description Player identifier as the device sent it on the wire. Stable per
+                     *     device. Format is client-defined (UUIDv4, CFUUID, short hex, etc.);
+                     *     lookups are case-insensitive.
+                     */
                     player_id: components["parameters"]["PlayerId"];
                 };
                 cookie?: never;
@@ -365,7 +389,11 @@ export interface paths {
             query?: never;
             header?: never;
             path: {
-                /** @description Player UUID. Stable per device. */
+                /**
+                 * @description Player identifier as the device sent it on the wire. Stable per
+                 *     device. Format is client-defined (UUIDv4, CFUUID, short hex, etc.);
+                 *     lookups are case-insensitive.
+                 */
                 player_id: components["parameters"]["PlayerId"];
             };
             cookie?: never;
@@ -412,7 +440,11 @@ export interface paths {
                     "If-Match": components["parameters"]["IfMatch"];
                 };
                 path: {
-                    /** @description Player UUID. Stable per device. */
+                    /**
+                     * @description Player identifier as the device sent it on the wire. Stable per
+                     *     device. Format is client-defined (UUIDv4, CFUUID, short hex, etc.);
+                     *     lookups are case-insensitive.
+                     */
                     player_id: components["parameters"]["PlayerId"];
                 };
                 cookie?: never;
@@ -450,7 +482,11 @@ export interface paths {
             query?: never;
             header?: never;
             path: {
-                /** @description Player UUID. Stable per device. */
+                /**
+                 * @description Player identifier as the device sent it on the wire. Stable per
+                 *     device. Format is client-defined (UUIDv4, CFUUID, short hex, etc.);
+                 *     lookups are case-insensitive.
+                 */
                 player_id: components["parameters"]["PlayerId"];
                 /**
                  * @description Stable identifier of a `FaultRule` within the resource's
@@ -501,7 +537,11 @@ export interface paths {
                     "If-Match": components["parameters"]["IfMatch"];
                 };
                 path: {
-                    /** @description Player UUID. Stable per device. */
+                    /**
+                     * @description Player identifier as the device sent it on the wire. Stable per
+                     *     device. Format is client-defined (UUIDv4, CFUUID, short hex, etc.);
+                     *     lookups are case-insensitive.
+                     */
                     player_id: components["parameters"]["PlayerId"];
                     /**
                      * @description Stable identifier of a `FaultRule` within the resource's
@@ -570,7 +610,11 @@ export interface paths {
                     "If-Match": components["parameters"]["IfMatch"];
                 };
                 path: {
-                    /** @description Player UUID. Stable per device. */
+                    /**
+                     * @description Player identifier as the device sent it on the wire. Stable per
+                     *     device. Format is client-defined (UUIDv4, CFUUID, short hex, etc.);
+                     *     lookups are case-insensitive.
+                     */
                     player_id: components["parameters"]["PlayerId"];
                     /**
                      * @description Stable identifier of a `FaultRule` within the resource's
@@ -971,7 +1015,10 @@ export interface paths {
         get: {
             parameters: {
                 query?: {
-                    /** @description Filter SSE frames to one player. */
+                    /**
+                     * @description Filter SSE frames to one player. Same client-defined format as
+                     *     the path PlayerId — UUIDv4, CFUUID, short hex, etc.
+                     */
                     player_id?: components["parameters"]["PlayerIdFilter"];
                     /** @description Filter SSE frames to one play. */
                     play_id?: components["parameters"]["PlayIdFilter"];
@@ -1487,9 +1534,23 @@ export interface components {
         PlayRecord: {
             /**
              * Format: uuid
-             * @description UUIDv7. Server-issued, time-sortable.
+             * @description Player-supplied UUID identifying this playback episode.
+             *     Rotated by the player on content-selection boundaries (new
+             *     video / fresh page-load / app launch). **Sticky across
+             *     in-app restart events** (user-reload, auto-recovery). May
+             *     be the zero UUID before the player has supplied a value.
              */
             id: string;
+            /**
+             * Format: uuid
+             * @description Player-supplied UUID identifying one recovery attempt
+             *     within this play. The player rotates it on every `restart`
+             *     event (user-reload OR auto-recovery), but keeps it stable
+             *     outside restart boundaries. Null when the player has not
+             *     yet supplied one. Use to count or filter recovery attempts
+             *     within a single play (`count(distinct restart_id)`).
+             */
+            restart_id?: string | null;
             /** Format: uuid */
             player_id: string;
             control_revision: string;
@@ -2345,7 +2406,11 @@ export interface components {
         };
     };
     parameters: {
-        /** @description Player UUID. Stable per device. */
+        /**
+         * @description Player identifier as the device sent it on the wire. Stable per
+         *     device. Format is client-defined (UUIDv4, CFUUID, short hex, etc.);
+         *     lookups are case-insensitive.
+         */
         PlayerId: string;
         /** @description Play UUIDv7 (server-issued, time-sortable). */
         PlayId: string;
@@ -2359,7 +2424,10 @@ export interface components {
         RuleId: string;
         /** @description Only return players whose current play matches this state. */
         StateFilter: "playing" | "paused" | "stalled" | "ended";
-        /** @description Filter SSE frames to one player. */
+        /**
+         * @description Filter SSE frames to one player. Same client-defined format as
+         *     the path PlayerId — UUIDv4, CFUUID, short hex, etc.
+         */
         PlayerIdFilter: string;
         /** @description Filter SSE frames to one play. */
         PlayIdFilter: string;
