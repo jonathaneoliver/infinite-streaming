@@ -429,3 +429,61 @@ ALTER TABLE infinite_streaming.network_requests
 -- session's sticky attempt_id at insert. Old rows keep the 0 default.
 ALTER TABLE infinite_streaming.network_requests
     ADD COLUMN IF NOT EXISTS attempt_id UInt32 DEFAULT 0 CODEC(ZSTD(1));
+
+-- Issue #469 — write-time event classification.
+--
+-- The forwarder runs each incoming snapshot / network row through the
+-- eventclass registry (analytics/go-forwarder/eventclass/) and emits one
+-- row here per detected event. Replaces the read-time multi-CTE
+-- UNION-ALL SQL in events_query.go so each event carries the same
+-- identity provenance as the row that produced it — most importantly
+-- attempt_id (UInt32 sticky counter), which the read-time path couldn't
+-- carry without a temporal join.
+--
+-- Schema parity notes:
+--   - Same key columns (player_id, play_id, attempt_id, session_id) and
+--     same codecs/cardinality types as session_snapshots so cross-table
+--     joins stay cheap.
+--   - `type` / `info` / `kind` / `priority` mirror what the legacy SQL
+--     used to emit — dashboard + harness consumers see no shape change.
+--   - event_fingerprint dedupes restarts of the forwarder against the
+--     same source row (ts + type + info + player + play). Same role as
+--     entry_fingerprint on network_requests.
+--   - 30-day TTL keyed off classification, matching the parent tables.
+CREATE TABLE IF NOT EXISTS infinite_streaming.session_events
+(
+    ts                       DateTime64(3, 'UTC')   CODEC(Delta, ZSTD(1)),
+    player_id                LowCardinality(String) CODEC(ZSTD(1)),
+    play_id                  LowCardinality(String) CODEC(ZSTD(1)),
+    attempt_id               UInt32                 DEFAULT 0 CODEC(ZSTD(1)),
+    session_id               String                 CODEC(ZSTD(1)),
+    -- Stable event type id, e.g. 'stall', 'restart', 'downshift',
+    -- 'http_5xx'. Same taxonomy strings the legacy SQL emitted — see
+    -- analytics/go-forwarder/eventclass/types.go for the closed set.
+    type                     LowCardinality(String) CODEC(ZSTD(1)),
+    -- Free-form details for the event ("2.34s", "frozen", "15.36→3.46
+    -- Mbps", "503 GET /seg.m4s"). Shape is type-specific; consumers
+    -- treat it as display-only.
+    info                     String                 CODEC(ZSTD(1)),
+    -- 'cause' vs 'effect' — operators sort cause-tagged events to the
+    -- top when triaging. multiIf table identical to the legacy SQL.
+    kind                     LowCardinality(String) CODEC(ZSTD(1)),
+    -- 1 (critical) … 4 (low). Closed set; matches the legacy SQL's
+    -- multiIf priority table.
+    priority                 UInt8                  DEFAULT 3,
+    -- Dedupe key over (player_id, play_id, ts_ms, type, info). Lets
+    -- the forwarder replay the SSE on reconnect without double-
+    -- inserting events for the same source row.
+    event_fingerprint        UInt64                 CODEC(ZSTD(1)),
+    -- Retention tier — inherits from the snapshot/network row that
+    -- generated the event. Same lifecycle as the parent tables.
+    classification           LowCardinality(String) DEFAULT 'other' CODEC(ZSTD(1)),
+    INDEX idx_play_id play_id TYPE bloom_filter GRANULARITY 4,
+    INDEX idx_type type TYPE bloom_filter GRANULARITY 4
+)
+ENGINE = MergeTree
+PARTITION BY toYYYYMMDD(ts)
+ORDER BY (player_id, ts, event_fingerprint)
+TTL toDateTime(ts) + INTERVAL 30 DAY DELETE WHERE classification = 'other',
+    toDateTime(ts) + INTERVAL 90 DAY DELETE WHERE classification = 'interesting'
+SETTINGS index_granularity = 8192;
