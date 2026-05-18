@@ -198,31 +198,31 @@ func (e NetworkRowMethod) Valid() bool {
 
 // Defines values for NetworkRowRequestKind.
 const (
-	Image    NetworkRowRequestKind = "image"
-	Init     NetworkRowRequestKind = "init"
-	Manifest NetworkRowRequestKind = "manifest"
-	Master   NetworkRowRequestKind = "master"
-	Other    NetworkRowRequestKind = "other"
-	Partial  NetworkRowRequestKind = "partial"
-	Segment  NetworkRowRequestKind = "segment"
+	NetworkRowRequestKindImage    NetworkRowRequestKind = "image"
+	NetworkRowRequestKindInit     NetworkRowRequestKind = "init"
+	NetworkRowRequestKindManifest NetworkRowRequestKind = "manifest"
+	NetworkRowRequestKindMaster   NetworkRowRequestKind = "master"
+	NetworkRowRequestKindOther    NetworkRowRequestKind = "other"
+	NetworkRowRequestKindPartial  NetworkRowRequestKind = "partial"
+	NetworkRowRequestKindSegment  NetworkRowRequestKind = "segment"
 )
 
 // Valid indicates whether the value is a known member of the NetworkRowRequestKind enum.
 func (e NetworkRowRequestKind) Valid() bool {
 	switch e {
-	case Image:
+	case NetworkRowRequestKindImage:
 		return true
-	case Init:
+	case NetworkRowRequestKindInit:
 		return true
-	case Manifest:
+	case NetworkRowRequestKindManifest:
 		return true
-	case Master:
+	case NetworkRowRequestKindMaster:
 		return true
-	case Other:
+	case NetworkRowRequestKindOther:
 		return true
-	case Partial:
+	case NetworkRowRequestKindPartial:
 		return true
-	case Segment:
+	case NetworkRowRequestKindSegment:
 		return true
 	default:
 		return false
@@ -231,25 +231,22 @@ func (e NetworkRowRequestKind) Valid() bool {
 
 // Defines values for PlayDetailClassification.
 const (
-	PlayDetailClassificationAbandoned    PlayDetailClassification = "abandoned"
-	PlayDetailClassificationClean        PlayDetailClassification = "clean"
-	PlayDetailClassificationErrored      PlayDetailClassification = "errored"
-	PlayDetailClassificationFaultInduced PlayDetailClassification = "fault-induced"
-	PlayDetailClassificationStalled      PlayDetailClassification = "stalled"
+	PlayDetailClassificationEmpty       PlayDetailClassification = ""
+	PlayDetailClassificationFavourite   PlayDetailClassification = "favourite"
+	PlayDetailClassificationInteresting PlayDetailClassification = "interesting"
+	PlayDetailClassificationOther       PlayDetailClassification = "other"
 )
 
 // Valid indicates whether the value is a known member of the PlayDetailClassification enum.
 func (e PlayDetailClassification) Valid() bool {
 	switch e {
-	case PlayDetailClassificationAbandoned:
+	case PlayDetailClassificationEmpty:
 		return true
-	case PlayDetailClassificationClean:
+	case PlayDetailClassificationFavourite:
 		return true
-	case PlayDetailClassificationErrored:
+	case PlayDetailClassificationInteresting:
 		return true
-	case PlayDetailClassificationFaultInduced:
-		return true
-	case PlayDetailClassificationStalled:
+	case PlayDetailClassificationOther:
 		return true
 	default:
 		return false
@@ -258,25 +255,22 @@ func (e PlayDetailClassification) Valid() bool {
 
 // Defines values for PlaySummaryClassification.
 const (
-	PlaySummaryClassificationAbandoned    PlaySummaryClassification = "abandoned"
-	PlaySummaryClassificationClean        PlaySummaryClassification = "clean"
-	PlaySummaryClassificationErrored      PlaySummaryClassification = "errored"
-	PlaySummaryClassificationFaultInduced PlaySummaryClassification = "fault-induced"
-	PlaySummaryClassificationStalled      PlaySummaryClassification = "stalled"
+	PlaySummaryClassificationEmpty       PlaySummaryClassification = ""
+	PlaySummaryClassificationFavourite   PlaySummaryClassification = "favourite"
+	PlaySummaryClassificationInteresting PlaySummaryClassification = "interesting"
+	PlaySummaryClassificationOther       PlaySummaryClassification = "other"
 )
 
 // Valid indicates whether the value is a known member of the PlaySummaryClassification enum.
 func (e PlaySummaryClassification) Valid() bool {
 	switch e {
-	case PlaySummaryClassificationAbandoned:
+	case PlaySummaryClassificationEmpty:
 		return true
-	case PlaySummaryClassificationClean:
+	case PlaySummaryClassificationFavourite:
 		return true
-	case PlaySummaryClassificationErrored:
+	case PlaySummaryClassificationInteresting:
 		return true
-	case PlaySummaryClassificationFaultInduced:
-		return true
-	case PlaySummaryClassificationStalled:
+	case PlaySummaryClassificationOther:
 		return true
 	default:
 		return false
@@ -285,25 +279,19 @@ func (e PlaySummaryClassification) Valid() bool {
 
 // Defines values for Classification.
 const (
-	ClassificationAbandoned    Classification = "abandoned"
-	ClassificationClean        Classification = "clean"
-	ClassificationErrored      Classification = "errored"
-	ClassificationFaultInduced Classification = "fault-induced"
-	ClassificationStalled      Classification = "stalled"
+	ClassificationFavourite   Classification = "favourite"
+	ClassificationInteresting Classification = "interesting"
+	ClassificationOther       Classification = "other"
 )
 
 // Valid indicates whether the value is a known member of the Classification enum.
 func (e Classification) Valid() bool {
 	switch e {
-	case ClassificationAbandoned:
+	case ClassificationFavourite:
 		return true
-	case ClassificationClean:
+	case ClassificationInteresting:
 		return true
-	case ClassificationErrored:
-		return true
-	case ClassificationFaultInduced:
-		return true
-	case ClassificationStalled:
+	case ClassificationOther:
 		return true
 	default:
 		return false
@@ -360,25 +348,19 @@ func (e GetApiV2NetworkRequestsParamsFaultCategory) Valid() bool {
 
 // Defines values for GetApiV2PlaysParamsClassification.
 const (
-	GetApiV2PlaysParamsClassificationAbandoned    GetApiV2PlaysParamsClassification = "abandoned"
-	GetApiV2PlaysParamsClassificationClean        GetApiV2PlaysParamsClassification = "clean"
-	GetApiV2PlaysParamsClassificationErrored      GetApiV2PlaysParamsClassification = "errored"
-	GetApiV2PlaysParamsClassificationFaultInduced GetApiV2PlaysParamsClassification = "fault-induced"
-	GetApiV2PlaysParamsClassificationStalled      GetApiV2PlaysParamsClassification = "stalled"
+	GetApiV2PlaysParamsClassificationFavourite   GetApiV2PlaysParamsClassification = "favourite"
+	GetApiV2PlaysParamsClassificationInteresting GetApiV2PlaysParamsClassification = "interesting"
+	GetApiV2PlaysParamsClassificationOther       GetApiV2PlaysParamsClassification = "other"
 )
 
 // Valid indicates whether the value is a known member of the GetApiV2PlaysParamsClassification enum.
 func (e GetApiV2PlaysParamsClassification) Valid() bool {
 	switch e {
-	case GetApiV2PlaysParamsClassificationAbandoned:
+	case GetApiV2PlaysParamsClassificationFavourite:
 		return true
-	case GetApiV2PlaysParamsClassificationClean:
+	case GetApiV2PlaysParamsClassificationInteresting:
 		return true
-	case GetApiV2PlaysParamsClassificationErrored:
-		return true
-	case GetApiV2PlaysParamsClassificationFaultInduced:
-		return true
-	case GetApiV2PlaysParamsClassificationStalled:
+	case GetApiV2PlaysParamsClassificationOther:
 		return true
 	default:
 		return false
@@ -387,25 +369,19 @@ func (e GetApiV2PlaysParamsClassification) Valid() bool {
 
 // Defines values for GetApiV2PlaysAggregateParamsClassification.
 const (
-	Abandoned    GetApiV2PlaysAggregateParamsClassification = "abandoned"
-	Clean        GetApiV2PlaysAggregateParamsClassification = "clean"
-	Errored      GetApiV2PlaysAggregateParamsClassification = "errored"
-	FaultInduced GetApiV2PlaysAggregateParamsClassification = "fault-induced"
-	Stalled      GetApiV2PlaysAggregateParamsClassification = "stalled"
+	GetApiV2PlaysAggregateParamsClassificationFavourite   GetApiV2PlaysAggregateParamsClassification = "favourite"
+	GetApiV2PlaysAggregateParamsClassificationInteresting GetApiV2PlaysAggregateParamsClassification = "interesting"
+	GetApiV2PlaysAggregateParamsClassificationOther       GetApiV2PlaysAggregateParamsClassification = "other"
 )
 
 // Valid indicates whether the value is a known member of the GetApiV2PlaysAggregateParamsClassification enum.
 func (e GetApiV2PlaysAggregateParamsClassification) Valid() bool {
 	switch e {
-	case Abandoned:
+	case GetApiV2PlaysAggregateParamsClassificationFavourite:
 		return true
-	case Clean:
+	case GetApiV2PlaysAggregateParamsClassificationInteresting:
 		return true
-	case Errored:
-		return true
-	case FaultInduced:
-		return true
-	case Stalled:
+	case GetApiV2PlaysAggregateParamsClassificationOther:
 		return true
 	default:
 		return false
@@ -699,70 +675,204 @@ type PlayDetail struct {
 		NetworkRequests *string `json:"network_requests,omitempty"`
 		Snapshots       *string `json:"snapshots,omitempty"`
 	} `json:"_links,omitempty"`
-	AvgQualityPct   *float32                  `json:"avg_quality_pct,omitempty"`
-	Classification  *PlayDetailClassification `json:"classification,omitempty"`
-	DisplayId       *int                      `json:"display_id,omitempty"`
-	Downshifts      *int                      `json:"downshifts,omitempty"`
-	DroppedFrames   *int                      `json:"dropped_frames,omitempty"`
-	DurationSeconds int                       `json:"duration_seconds"`
-	EndedAt         *time.Time                `json:"ended_at,omitempty"`
+	ActiveTimeouts *int     `json:"active_timeouts,omitempty"`
+	AllFailures    *int     `json:"all_failures,omitempty"`
+	AvgQualityPct  *float32 `json:"avg_quality_pct,omitempty"`
+
+	// BitrateShifts Sum of upshifts + downshifts.
+	BitrateShifts *int `json:"bitrate_shifts,omitempty"`
+
+	// Classification Tiered retention class stored on `session_snapshots`.
+	// - `''` (empty) — not yet classified
+	// - `interesting` — keep 90 days
+	// - `other` — keep 30 days (default)
+	// - `favourite` — keep forever (operator-starred)
+	//
+	// **Aspirational** values (`clean | stalled | errored |
+	// fault-induced | abandoned`) described in DESIGN.md are
+	// blocked on the `play_summaries` rollup table — they'll
+	// land here when that lands.
+	Classification *PlayDetailClassification `json:"classification,omitempty"`
+	ContentId      *string                   `json:"content_id,omitempty"`
+	Downshifts     *int                      `json:"downshifts,omitempty"`
+	DroppedFrames  *int                      `json:"dropped_frames,omitempty"`
+
+	// ErrorEventCount Explicit player_error events.
+	ErrorEventCount *int `json:"error_event_count,omitempty"`
 
 	// EventsSummary Count per event type.
-	EventsSummary   *map[string]int    `json:"events_summary,omitempty"`
-	FaultCategories *[]string          `json:"fault_categories,omitempty"`
-	FaultCountTotal *int               `json:"fault_count_total,omitempty"`
+	EventsSummary *map[string]int `json:"events_summary,omitempty"`
+
+	// FirstFrameS Time-to-first-frame, seconds.
+	FirstFrameS     *float32 `json:"first_frame_s,omitempty"`
+	FramesDisplayed *int     `json:"frames_displayed,omitempty"`
+
+	// FrozenCount Renderer-frozen events (≠ buffer stalls).
+	FrozenCount *int `json:"frozen_count,omitempty"`
+
+	// GroupId Optional session-group id from harness label.
+	GroupId         *string            `json:"group_id,omitempty"`
+	IdleTimeouts    *int               `json:"idle_timeouts,omitempty"`
 	Labels          *map[string]string `json:"labels,omitempty"`
-	MinQualityPct   *float32           `json:"min_quality_pct,omitempty"`
-	NetworkSummary  *struct {
+	LastPlayerError *string            `json:"last_player_error,omitempty"`
+	LastSeenAt      time.Time          `json:"last_seen_at"`
+
+	// LastState Last observed player_state (playing|paused|stalled|…).
+	LastState              *string `json:"last_state,omitempty"`
+	ManifestFailures       *int    `json:"manifest_failures,omitempty"`
+	MasterManifestFailures *int    `json:"master_manifest_failures,omitempty"`
+
+	// MetricEvents Total snapshot count for this play.
+	MetricEvents  *int     `json:"metric_events,omitempty"`
+	MinQualityPct *float32 `json:"min_quality_pct,omitempty"`
+
+	// NetErrors Rows with status >= 400.
+	NetErrors *int `json:"net_errors,omitempty"`
+
+	// NetEvents Total network rows seen.
+	NetEvents *int `json:"net_events,omitempty"`
+
+	// NetFaults Rows with faulted = 1.
+	NetFaults      *int `json:"net_faults,omitempty"`
+	NetworkSummary *struct {
 		ByFaultCategory *map[string]int `json:"by_fault_category,omitempty"`
 		ByStatus        *map[string]int `json:"by_status,omitempty"`
 		TotalRequests   *int            `json:"total_requests,omitempty"`
 	} `json:"network_summary,omitempty"`
-	PlayId      openapi_types.UUID `json:"play_id"`
-	PlayerError *string            `json:"player_error,omitempty"`
-	PlayerId    openapi_types.UUID `json:"player_id"`
+	PlayId            openapi_types.UUID `json:"play_id"`
+	PlayerId          openapi_types.UUID `json:"player_id"`
+	ResolutionChanges *int               `json:"resolution_changes,omitempty"`
 
-	// RebufferRatio stall_seconds / duration_seconds
-	RebufferRatio *float32  `json:"rebuffer_ratio,omitempty"`
-	ShapePattern  *string   `json:"shape_pattern,omitempty"`
-	StallCount    *int      `json:"stall_count,omitempty"`
-	StallSeconds  *float32  `json:"stall_seconds,omitempty"`
-	StartedAt     time.Time `json:"started_at"`
-	Upshifts      *int      `json:"upshifts,omitempty"`
+	// RestartCount Mid-play player-recovery restarts.
+	RestartCount    *int `json:"restart_count,omitempty"`
+	SegmentFailures *int `json:"segment_failures,omitempty"`
+
+	// SegmentStallCount Stalls waiting on a segment fetch.
+	SegmentStallCount *int `json:"segment_stall_count,omitempty"`
+
+	// SessionId Per-player numeric session counter ('1', '2', …). Empty when archive predates session_id stamping.
+	SessionId         *string   `json:"session_id,omitempty"`
+	Stalls            *int      `json:"stalls,omitempty"`
+	StartedAt         time.Time `json:"started_at"`
+	TransportFailures *int      `json:"transport_failures,omitempty"`
+	Upshifts          *int      `json:"upshifts,omitempty"`
+
+	// UserMarkedCount Operator pressed the 911 button N times.
+	UserMarkedCount *int `json:"user_marked_count,omitempty"`
 }
 
-// PlayDetailClassification defines model for PlayDetail.Classification.
+// PlayDetailClassification Tiered retention class stored on `session_snapshots`.
+// - `”` (empty) — not yet classified
+// - `interesting` — keep 90 days
+// - `other` — keep 30 days (default)
+// - `favourite` — keep forever (operator-starred)
+//
+// **Aspirational** values (`clean | stalled | errored |
+// fault-induced | abandoned`) described in DESIGN.md are
+// blocked on the `play_summaries` rollup table — they'll
+// land here when that lands.
 type PlayDetailClassification string
 
-// PlaySummary One row from the `play_summaries` table — finalised when a play
-// ends. Forwarder writes one row per `play.ended` SSE event from
-// the proxy.
+// PlaySummary One archived play, aggregated. Currently derived live from
+// `session_snapshots`; once the `play_summaries` rollup table
+// exists it'll be served from there instead (same wire shape).
+//
+// Field groups:
+//   - identifiers (play_id, player_id, session_id, content_id, …)
+//   - timing (started_at, last_seen_at)
+//   - quality (stalls, downshifts, dropped_frames, avg_quality_pct)
+//   - failure counters (master_manifest_failures, …, transport_failures)
+//   - signal counters (frozen_count, restart_count, …) used by the
+//     dashboard's "interesting" filter
 type PlaySummary struct {
-	AvgQualityPct   *float32                   `json:"avg_quality_pct,omitempty"`
-	Classification  *PlaySummaryClassification `json:"classification,omitempty"`
-	DisplayId       *int                       `json:"display_id,omitempty"`
-	Downshifts      *int                       `json:"downshifts,omitempty"`
-	DroppedFrames   *int                       `json:"dropped_frames,omitempty"`
-	DurationSeconds int                        `json:"duration_seconds"`
-	EndedAt         *time.Time                 `json:"ended_at,omitempty"`
-	FaultCategories *[]string                  `json:"fault_categories,omitempty"`
-	FaultCountTotal *int                       `json:"fault_count_total,omitempty"`
-	Labels          *map[string]string         `json:"labels,omitempty"`
-	MinQualityPct   *float32                   `json:"min_quality_pct,omitempty"`
-	PlayId          openapi_types.UUID         `json:"play_id"`
-	PlayerError     *string                    `json:"player_error,omitempty"`
-	PlayerId        openapi_types.UUID         `json:"player_id"`
+	ActiveTimeouts *int     `json:"active_timeouts,omitempty"`
+	AllFailures    *int     `json:"all_failures,omitempty"`
+	AvgQualityPct  *float32 `json:"avg_quality_pct,omitempty"`
 
-	// RebufferRatio stall_seconds / duration_seconds
-	RebufferRatio *float32  `json:"rebuffer_ratio,omitempty"`
-	ShapePattern  *string   `json:"shape_pattern,omitempty"`
-	StallCount    *int      `json:"stall_count,omitempty"`
-	StallSeconds  *float32  `json:"stall_seconds,omitempty"`
-	StartedAt     time.Time `json:"started_at"`
-	Upshifts      *int      `json:"upshifts,omitempty"`
+	// BitrateShifts Sum of upshifts + downshifts.
+	BitrateShifts *int `json:"bitrate_shifts,omitempty"`
+
+	// Classification Tiered retention class stored on `session_snapshots`.
+	// - `''` (empty) — not yet classified
+	// - `interesting` — keep 90 days
+	// - `other` — keep 30 days (default)
+	// - `favourite` — keep forever (operator-starred)
+	//
+	// **Aspirational** values (`clean | stalled | errored |
+	// fault-induced | abandoned`) described in DESIGN.md are
+	// blocked on the `play_summaries` rollup table — they'll
+	// land here when that lands.
+	Classification *PlaySummaryClassification `json:"classification,omitempty"`
+	ContentId      *string                    `json:"content_id,omitempty"`
+	Downshifts     *int                       `json:"downshifts,omitempty"`
+	DroppedFrames  *int                       `json:"dropped_frames,omitempty"`
+
+	// ErrorEventCount Explicit player_error events.
+	ErrorEventCount *int `json:"error_event_count,omitempty"`
+
+	// FirstFrameS Time-to-first-frame, seconds.
+	FirstFrameS     *float32 `json:"first_frame_s,omitempty"`
+	FramesDisplayed *int     `json:"frames_displayed,omitempty"`
+
+	// FrozenCount Renderer-frozen events (≠ buffer stalls).
+	FrozenCount *int `json:"frozen_count,omitempty"`
+
+	// GroupId Optional session-group id from harness label.
+	GroupId         *string            `json:"group_id,omitempty"`
+	IdleTimeouts    *int               `json:"idle_timeouts,omitempty"`
+	Labels          *map[string]string `json:"labels,omitempty"`
+	LastPlayerError *string            `json:"last_player_error,omitempty"`
+	LastSeenAt      time.Time          `json:"last_seen_at"`
+
+	// LastState Last observed player_state (playing|paused|stalled|…).
+	LastState              *string `json:"last_state,omitempty"`
+	ManifestFailures       *int    `json:"manifest_failures,omitempty"`
+	MasterManifestFailures *int    `json:"master_manifest_failures,omitempty"`
+
+	// MetricEvents Total snapshot count for this play.
+	MetricEvents  *int     `json:"metric_events,omitempty"`
+	MinQualityPct *float32 `json:"min_quality_pct,omitempty"`
+
+	// NetErrors Rows with status >= 400.
+	NetErrors *int `json:"net_errors,omitempty"`
+
+	// NetEvents Total network rows seen.
+	NetEvents *int `json:"net_events,omitempty"`
+
+	// NetFaults Rows with faulted = 1.
+	NetFaults         *int               `json:"net_faults,omitempty"`
+	PlayId            openapi_types.UUID `json:"play_id"`
+	PlayerId          openapi_types.UUID `json:"player_id"`
+	ResolutionChanges *int               `json:"resolution_changes,omitempty"`
+
+	// RestartCount Mid-play player-recovery restarts.
+	RestartCount    *int `json:"restart_count,omitempty"`
+	SegmentFailures *int `json:"segment_failures,omitempty"`
+
+	// SegmentStallCount Stalls waiting on a segment fetch.
+	SegmentStallCount *int `json:"segment_stall_count,omitempty"`
+
+	// SessionId Per-player numeric session counter ('1', '2', …). Empty when archive predates session_id stamping.
+	SessionId         *string   `json:"session_id,omitempty"`
+	Stalls            *int      `json:"stalls,omitempty"`
+	StartedAt         time.Time `json:"started_at"`
+	TransportFailures *int      `json:"transport_failures,omitempty"`
+	Upshifts          *int      `json:"upshifts,omitempty"`
+
+	// UserMarkedCount Operator pressed the 911 button N times.
+	UserMarkedCount *int `json:"user_marked_count,omitempty"`
 }
 
-// PlaySummaryClassification defines model for PlaySummary.Classification.
+// PlaySummaryClassification Tiered retention class stored on `session_snapshots`.
+// - `”` (empty) — not yet classified
+// - `interesting` — keep 90 days
+// - `other` — keep 30 days (default)
+// - `favourite` — keep forever (operator-starred)
+//
+// **Aspirational** values (`clean | stalled | errored |
+// fault-induced | abandoned`) described in DESIGN.md are
+// blocked on the `play_summaries` rollup table — they'll
+// land here when that lands.
 type PlaySummaryClassification string
 
 // PlaySummaryPage defines model for PlaySummaryPage.
@@ -1057,6 +1167,7 @@ type GetApiV2NetworkRequestsParamsFaultCategory string
 // GetApiV2PlaysParams defines parameters for GetApiV2Plays.
 type GetApiV2PlaysParams struct {
 	PlayerId *PlayerIdFilter `form:"player_id,omitempty" json:"player_id,omitempty"`
+	PlayId   *PlayIdFilter   `form:"play_id,omitempty" json:"play_id,omitempty"`
 
 	// From ISO 8601 lower bound on the row timestamp. Inclusive.
 	From *From `form:"from,omitempty" json:"from,omitempty"`
@@ -1068,7 +1179,9 @@ type GetApiV2PlaysParams struct {
 	// Example: `?label.test=foo&label.pytest_run=2026-05-08T05:00:00Z`.
 	Label *LabelFilter `form:"label,omitempty" json:"label,omitempty"`
 
-	// Classification Filter to plays of a specific classification.
+	// Classification Filter to plays of a specific classification (matches the
+	// column on `session_snapshots`). See PlaySummary.classification
+	// for the enum semantics and the planned richer enum.
 	Classification *GetApiV2PlaysParamsClassification `form:"classification,omitempty" json:"classification,omitempty"`
 	Limit          *Limit                             `form:"limit,omitempty" json:"limit,omitempty"`
 
@@ -1102,7 +1215,9 @@ type GetApiV2PlaysAggregateParams struct {
 	// Example: `?label.test=foo&label.pytest_run=2026-05-08T05:00:00Z`.
 	Label *LabelFilter `form:"label,omitempty" json:"label,omitempty"`
 
-	// Classification Filter to plays of a specific classification.
+	// Classification Filter to plays of a specific classification (matches the
+	// column on `session_snapshots`). See PlaySummary.classification
+	// for the enum semantics and the planned richer enum.
 	Classification *GetApiV2PlaysAggregateParamsClassification `form:"classification,omitempty" json:"classification,omitempty"`
 
 	// GroupBy Fields to group by. Comma-separated. Native fields (e.g.
@@ -2639,6 +2754,18 @@ func NewGetApiV2PlaysRequest(server string, params *GetApiV2PlaysParams) (*http.
 		if params.PlayerId != nil {
 
 			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "player_id", *params.PlayerId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: "uuid"}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
+		if params.PlayId != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "play_id", *params.PlayId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: "uuid"}); err != nil {
 				return nil, err
 			} else {
 				for _, qp := range strings.Split(queryFrag, "&") {

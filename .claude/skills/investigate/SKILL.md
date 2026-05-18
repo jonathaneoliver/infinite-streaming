@@ -162,9 +162,22 @@ would reproduce.
   as a string (or vice versa). `tonumber` and `tostring` are your
   friends.
 
+## Play-level context (optional setup)
+
+Before diving into the second-resolution window, pulling the **play summary** that contains the event gives one-line context (was this event isolated, or one of many?):
+
+```sh
+harness --insecure --json archive play <play_id> 2>/dev/null \
+  | jq '{play_id, started_at, last_seen_at, classification,
+         stalls, restart_count, frozen_count, error_event_count,
+         bitrate_shifts, last_player_error}'
+```
+
+If `error_event_count` is high or `last_player_error` is non-empty, you may be investigating a *symptom* of a broader play failure — say so up front so the user knows the single-event hypothesis is one slice of a bigger story. Then proceed with the windowed dive below.
+
 ## See also
 
-- `triage` — the menu that points here
+- `triage` — the menu that points here (also enumerates plays via the v2 plays endpoint)
 - `forensics` — when "why does this keep happening" needs multi-event
   causal analysis, dispatch there instead
 - `finding` — once you've nailed the hypothesis, capture it

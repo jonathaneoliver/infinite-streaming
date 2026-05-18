@@ -27,6 +27,19 @@ Rule of thumb: if the answer requires comparing two or more event clusters, or c
 - Which time window? Default 30 min ending at "now"; expand if the user named a specific range.
 - Which play_id? Optional. Restrict if specified, else span all plays in window.
 
+If the user named a player but not specific plays, **enumerate candidate plays first** using the v2 plays endpoint — it makes the comparison set concrete and surfaces which plays carry which trouble signals before you decide what to gather:
+
+```sh
+harness --insecure --json archive plays \
+  --player-id "$PID" \
+  --from "$FROM" --to "$TO" --limit 50 2>/dev/null \
+  | jq '.items[] | {play_id, started_at, classification, last_player_error,
+                     stalls, restart_count, frozen_count, error_event_count,
+                     bitrate_shifts, dropped_frames}'
+```
+
+Pick the 2-4 plays with the strongest signal contrast (e.g. one "clean" + one "stalled" for an A/B; or all 3 plays where `last_player_error` is non-empty for a same-error comparison). State which plays you picked and why before gathering — it tightens the subagent's prompt and prevents over-gathering on plays that don't help the question.
+
 ### 2. Recall first (mandatory)
 
 Before pulling fresh data or dispatching, check the findings library:

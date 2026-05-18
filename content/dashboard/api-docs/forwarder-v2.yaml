@@ -80,13 +80,19 @@ paths:
   /api/v2/plays:
     get:
       tags: [plays]
-      summary: List plays (cursor-paginated, label-filtered)
+      summary: List plays — one row per archived playback
       description: |
-        Source: `play_summaries` table when available, falling back to
-        deriving from `session_snapshots` for very recent plays whose
-        `play.ended` hasn't been seen yet.
+        v2 equivalent of v1's `/api/sessions`. One row per `play_id`,
+        ordered newest-first.
+
+        Today the row is derived live from `session_snapshots` (same
+        aggregation v1 runs). The `play_summaries` rollup table the
+        DESIGN.md describes is not yet materialized — fields tagged
+        "(derived)" in the schema reflect that and may move to the
+        rollup later without changing the wire shape.
       parameters:
         - $ref: '#/components/parameters/PlayerIdFilter'
+        - $ref: '#/components/parameters/PlayIdFilter'
         - $ref: '#/components/parameters/From'
         - $ref: '#/components/parameters/To'
         - $ref: '#/components/parameters/LabelFilter'
@@ -549,8 +555,11 @@ components:
       name: classification
       schema:
         type: string
-        enum: [clean, stalled, errored, fault-induced, abandoned]
-      description: Filter to plays of a specific classification.
+        enum: [interesting, other, favourite]
+      description: |
+        Filter to plays of a specific classification (matches the
+        column on `session_snapshots`). See PlaySummary.classification
+        for the enum semantics and the planned richer enum.
     StrideMs:
       in: query
       name: stride_ms
@@ -795,42 +804,84 @@ components:
 
     PlaySummary:
       description: |
-        One row from the `play_summaries` table — finalised when a play
-        ends. Forwarder writes one row per `play.ended` SSE event from
-        the proxy.
+        One archived play, aggregated. Currently derived live from
+        `session_snapshots`; once the `play_summaries` rollup table
+        exists it'll be served from there instead (same wire shape).
+
+        Field groups:
+        - identifiers (play_id, player_id, session_id, content_id, …)
+        - timing (started_at, last_seen_at)
+        - quality (stalls, downshifts, dropped_frames, avg_quality_pct)
+        - failure counters (master_manifest_failures, …, transport_failures)
+        - signal counters (frozen_count, restart_count, …) used by the
+          dashboard's "interesting" filter
       type: object
       required:
         - play_id
         - player_id
         - started_at
-        - duration_seconds
+        - last_seen_at
       properties:
+        # ---- identifiers ----
         play_id:           { type: string, format: uuid }
         player_id:         { type: string, format: uuid }
-        display_id:        { type: integer }
+        session_id:        { type: string, description: "Per-player numeric session counter ('1', '2', …). Empty when archive predates session_id stamping." }
+        group_id:          { type: string, description: "Optional session-group id from harness label." }
+        content_id:        { type: string }
+        # ---- timing ----
         started_at:        { type: string, format: date-time }
-        ended_at:          { type: string, format: date-time }
-        duration_seconds:  { type: integer }
+        last_seen_at:      { type: string, format: date-time }
         labels:
           type: object
           additionalProperties: { type: string }
-        # quality
-        stall_count:       { type: integer }
-        stall_seconds:     { type: number, format: float }
-        rebuffer_ratio:    { type: number, format: float, description: stall_seconds / duration_seconds }
-        downshifts:        { type: integer }
-        upshifts:          { type: integer }
+        # ---- terminal state ----
+        last_state:        { type: string, description: "Last observed player_state (playing|paused|stalled|…)." }
+        last_player_error: { type: string }
+        # ---- quality (derived) ----
+        stalls:            { type: integer }
         dropped_frames:    { type: integer }
-        avg_quality_pct:   { type: number, format: float }
-        min_quality_pct:   { type: number, format: float }
-        # harness signals
-        fault_count_total: { type: integer }
-        fault_categories:  { type: array, items: { type: string } }
-        shape_pattern:     { type: string }
-        player_error:      { type: string }
+        bitrate_shifts:    { type: integer, description: "Sum of upshifts + downshifts." }
+        upshifts:          { type: integer }
+        downshifts:        { type: integer }
+        resolution_changes: { type: integer }
+        avg_quality_pct:   { type: number, format: float, nullable: true }
+        min_quality_pct:   { type: number, format: float, nullable: true }
+        frames_displayed:  { type: integer }
+        first_frame_s:     { type: number, format: float, description: "Time-to-first-frame, seconds." }
+        # ---- failure counters (max-over-play, derived from per-snapshot consecutive counters) ----
+        master_manifest_failures: { type: integer }
+        manifest_failures:        { type: integer }
+        segment_failures:         { type: integer }
+        all_failures:             { type: integer }
+        transport_failures:       { type: integer }
+        active_timeouts:          { type: integer }
+        idle_timeouts:            { type: integer }
+        # ---- network rollup (joined from network_requests) ----
+        net_events:        { type: integer, description: "Total network rows seen." }
+        net_errors:        { type: integer, description: "Rows with status >= 400." }
+        net_faults:        { type: integer, description: "Rows with faulted = 1." }
+        # ---- per-event signal counts (drive the dashboard's "interesting" badges) ----
+        metric_events:        { type: integer, description: "Total snapshot count for this play." }
+        user_marked_count:    { type: integer, description: "Operator pressed the 911 button N times." }
+        frozen_count:         { type: integer, description: "Renderer-frozen events (≠ buffer stalls)." }
+        segment_stall_count:  { type: integer, description: "Stalls waiting on a segment fetch." }
+        restart_count:        { type: integer, description: "Mid-play player-recovery restarts." }
+        error_event_count:    { type: integer, description: "Explicit player_error events." }
+        # ---- tiered retention class ----
         classification:
           type: string
-          enum: [clean, stalled, errored, fault-induced, abandoned]
+          enum: ['', 'interesting', 'other', 'favourite']
+          description: |
+            Tiered retention class stored on `session_snapshots`.
+            - `''` (empty) — not yet classified
+            - `interesting` — keep 90 days
+            - `other` — keep 30 days (default)
+            - `favourite` — keep forever (operator-starred)
+
+            **Aspirational** values (`clean | stalled | errored |
+            fault-induced | abandoned`) described in DESIGN.md are
+            blocked on the `play_summaries` rollup table — they'll
+            land here when that lands.
 
     PlaySummaryPage:
       type: object

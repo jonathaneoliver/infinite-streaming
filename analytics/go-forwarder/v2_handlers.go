@@ -9,14 +9,16 @@ package main
 // rows through the same _absorbFromRemote path it uses for live SSE
 // frames — see content/shared/v2-archive-models.js.
 //
-// Scope (Phase 3b MVP):
-//   GET /api/v2/healthz          — liveness
-//   GET /api/v2/info             — version, retention
-//   GET /api/v2/snapshots        — SnapshotRow[] (PlayerRecord + {ts, revision, play_id})
-//   GET /api/v2/network_requests — NetworkRequestRow[] (NetworkLogEntry + {ts, player_id})
+// Scope:
+//   GET /api/v2/healthz             — liveness
+//   GET /api/v2/info                — version, retention
+//   GET /api/v2/snapshots           — SnapshotRow[] (PlayerRecord + {ts, revision, play_id})
+//   GET /api/v2/network_requests    — NetworkRequestRow[] (NetworkLogEntry + {ts, player_id})
+//   GET /api/v2/plays               — PlaySummary[] aggregated from session_snapshots
+//   GET /api/v2/plays/{play_id}     — single PlaySummary (404 if no archived rows)
 //
 // Out of scope here:
-//   /api/v2/plays + /api/v2/plays/aggregate (Level 3a follow-up)
+//   /api/v2/plays/aggregate (group-by metrics — separate handler)
 //   /api/v2/session_events + /api/v2/session_heatmap (no schema change needed; thin wrappers)
 //   /api/v2/plays/{id}/bundle (delegates to existing bundle.go)
 //   Cursor pagination (current impl is offset-style; cursor is a follow-up)
@@ -58,6 +60,8 @@ func mountV2Handlers(mux *http.ServeMux, cfg config) {
 	mux.HandleFunc("/api/v2/network_requests", func(w http.ResponseWriter, r *http.Request) {
 		v2NetworkRequestsHandler(w, r, cfg)
 	})
+
+	mountV2PlaysHandlers(mux, cfg)
 }
 
 // v2SnapshotsHandler queries session_snapshots, parses session_json

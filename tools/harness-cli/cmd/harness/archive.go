@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jonathaneoliver/infinite-streaming/tools/harness-cli/internal/api"
@@ -29,8 +30,9 @@ func parsePlayID(s string) (uuid.UUID, error) {
 const archiveUsage = `harness archive <subcommand>
 
 Subcommands (all read-only — forwarder /analytics/api/v2/*):
-  plays [--limit] [--from] [--to] [--classification]
-                                  list ended plays
+  plays [--limit N] [--from ISO] [--to ISO] [--classification C]
+        [--player-id UUID] [--play-id UUID]
+                                  list plays (one row per archived playback)
   play <play_id>                  one play + _links
   aggregate [--from --to --classification]
                                   aggregate stats across plays
@@ -100,7 +102,11 @@ func parseLimit(fs *flag.FlagSet, args []string) (*int, error) {
 func cmdArchivePlays(client *api.Client, args []string, asJSON bool) error {
 	fs := flag.NewFlagSet("archive plays", flag.ContinueOnError)
 	limit := fs.Int("limit", 0, "max plays")
-	classification := fs.String("classification", "", "clean|abandoned|errored|stalled|fault-induced")
+	classification := fs.String("classification", "", "interesting|other|favourite")
+	playerID := fs.String("player-id", "", "filter to one player_id (UUID)")
+	playID := fs.String("play-id", "", "filter to one play_id (UUID)")
+	from := fs.String("from", "", "ISO 8601 lower bound (e.g. 2026-05-17T00:00:00Z)")
+	to := fs.String("to", "", "ISO 8601 upper bound (exclusive)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -112,6 +118,34 @@ func cmdArchivePlays(client *api.Client, args []string, asJSON bool) error {
 	if *classification != "" {
 		c := forwarder.GetApiV2PlaysParamsClassification(*classification)
 		params.Classification = &c
+	}
+	if *playerID != "" {
+		pid, err := uuid.Parse(*playerID)
+		if err != nil {
+			return fmt.Errorf("invalid --player-id %q: %w", *playerID, err)
+		}
+		params.PlayerId = &pid
+	}
+	if *playID != "" {
+		pid, err := uuid.Parse(*playID)
+		if err != nil {
+			return fmt.Errorf("invalid --play-id %q: %w", *playID, err)
+		}
+		params.PlayId = &pid
+	}
+	if *from != "" {
+		t, err := time.Parse(time.RFC3339, *from)
+		if err != nil {
+			return fmt.Errorf("invalid --from %q (need RFC3339, e.g. 2026-05-17T00:00:00Z): %w", *from, err)
+		}
+		params.From = &t
+	}
+	if *to != "" {
+		t, err := time.Parse(time.RFC3339, *to)
+		if err != nil {
+			return fmt.Errorf("invalid --to %q (need RFC3339): %w", *to, err)
+		}
+		params.To = &t
 	}
 	body, err := client.ArchivePlays(context.Background(), params)
 	if err != nil {
@@ -133,7 +167,7 @@ func cmdArchivePlay(client *api.Client, args []string, asJSON bool) error {
 
 func cmdArchiveAggregate(client *api.Client, args []string, asJSON bool) error {
 	fs := flag.NewFlagSet("archive aggregate", flag.ContinueOnError)
-	classification := fs.String("classification", "", "clean|abandoned|errored|stalled|fault-induced")
+	classification := fs.String("classification", "", "interesting|other|favourite")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
