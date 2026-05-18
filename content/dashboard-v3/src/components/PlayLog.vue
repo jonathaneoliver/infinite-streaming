@@ -44,7 +44,14 @@ const showEvents = ref(true);
 const paused = ref(false);
 const followLatest = ref(true);
 
-type SortCol = 'time' | 'source' | 'name';
+/** "All fields" shows every non-empty key=value pair on the row.
+ *  "Changed fields" shows only the keys whose value differs from the
+ *  previous chronologically-earlier row of the same source — useful
+ *  for spotting state transitions without re-reading the rest. */
+type DisplayMode = 'all' | 'changed';
+const displayMode = ref<DisplayMode>('all');
+
+type SortCol = 'time' | 'source';
 type SortDir = 'asc' | 'desc';
 const sortCol = ref<SortCol | null>('time');
 const sortDir = ref<SortDir>('asc');
@@ -58,9 +65,30 @@ interface Row {
   playerId: string;
   playId: string;
   restartId: string;
-  name: string;
-  info: string;
+  /** Original payload as it came off the stream — used to compute
+   *  the per-row field list (and to diff against the previous row
+   *  of the same source for "Changed fields" mode). */
+  raw: Record<string, unknown>;
 }
+
+interface DisplayedField {
+  name: string;
+  value: string;
+}
+
+/** Field keys handled by the identity columns; skip in the kv panel
+ *  to avoid duplicating what's already visible on every row. Also
+ *  skips monotonic-noise fields whose change-on-every-row would
+ *  dominate the "Changed fields" view. */
+const SKIP_KEYS = new Set([
+  'ts', 'timestamp', 'event_time',     // rendered as _time
+  'player_id', 'id',                   // rendered as player_id
+  'play_id',                           // rendered as play_id
+  'restart_id',                        // rendered as restart_id
+  'revision',                          // monotonic counter
+  'server_received_at_ms',             // monotonic counter (server clock)
+  'entry_fingerprint',                 // CH dedupe key
+]);
 
 function tsOf(raw: Record<string, unknown>): number {
   const v = raw.ts ?? raw.timestamp;
@@ -97,64 +125,79 @@ function pathTail(url: string): string {
 function buildSnapshotRow(raw: Record<string, unknown>): Row | null {
   const ts = tsOf(raw);
   if (!Number.isFinite(ts)) return null;
-  // The samples stream wraps the raw CH row in a PlayerRecord-shaped
-  // projection — fields land at the top level (player_id, play_id,
-  // restart_id) AND under player_metrics for some derived fields.
-  const lastEvent = asStr(raw.last_event ?? (raw.player_metrics as Record<string, unknown> | undefined)?.last_event);
-  const state = asStr(raw.player_state ?? (raw.player_metrics as Record<string, unknown> | undefined)?.state);
   return {
     ts,
     source: 'snapshot',
     playerId: asStr(raw.player_id ?? props.playerId),
     playId: asStr(raw.play_id),
     restartId: asStr(raw.restart_id),
-    name: lastEvent || 'snapshot',
-    info: state ? `state=${state}` : '',
+    raw,
   };
 }
 
 function buildNetworkRow(raw: Record<string, unknown>): Row | null {
   const ts = tsOf(raw);
   if (!Number.isFinite(ts)) return null;
-  const method = asStr(raw.method) || 'GET';
-  const path = pathTail(asStr(raw.url) || asStr(raw.path));
-  const status = asStr(raw.status);
-  const faulted = !!raw.faulted && raw.faulted !== 0;
-  const faultTag = faulted ? ` ⚠${asStr(raw.fault_category) || asStr(raw.fault_type) || ''}` : '';
   return {
     ts,
     source: 'network',
     playerId: asStr(raw.player_id ?? props.playerId),
     playId: asStr(raw.play_id),
     restartId: asStr(raw.restart_id),
-    name: `${method} ${path}`,
-    info: `status=${status || '—'}${faultTag}`,
+    raw,
   };
 }
 
 function buildEventRow(raw: Record<string, unknown>): Row | null {
   const ts = tsOf(raw);
   if (!Number.isFinite(ts)) return null;
-  const type = asStr(raw.type) || 'event';
-  const info = asStr(raw.info);
-  const priority = asStr(raw.priority);
-  const kind = asStr(raw.kind);
   // event rows from /api/v2/timeseries don't currently project
   // play_id / restart_id (events_query.go derives events on the fly
-  // from snapshots + network_requests via UNION ALL, and the play_id
-  // column doesn't ride through). Fall back to the URL's play_id —
-  // within SessionViewer scope they're always identical, and live
-  // mode shows '—' which is the honest answer.
-  const playIdFallback = props.playId || '';
+  // from snapshots + network_requests via UNION ALL, and the columns
+  // don't ride through). Fall back to the URL's play_id — within
+  // SessionViewer scope they're always identical, and live mode
+  // shows '—' which is the honest answer.
   return {
     ts,
     source: 'event',
     playerId: props.playerId,
-    playId: playIdFallback,
+    playId: props.playId || '',
     restartId: '',
-    name: type,
-    info: [info, kind && `kind=${kind}`, priority && `p${priority}`].filter(Boolean).join(' · '),
+    raw,
   };
+}
+
+/** Render a single field value to a short display string. JSON-stringify
+ *  nested values; trim floats; tolerate everything else. */
+function formatValue(v: unknown): string {
+  if (v == null) return '';
+  if (typeof v === 'string') return v;
+  if (typeof v === 'number') {
+    // Trim long float tails — 3 sig figs is enough for buffer/bitrate
+    // ranges that dominate the diff view. Ints pass through unchanged.
+    if (Number.isInteger(v)) return String(v);
+    if (!Number.isFinite(v)) return String(v);
+    return Number(v.toFixed(3)).toString();
+  }
+  if (typeof v === 'boolean') return v ? 'true' : 'false';
+  try { return JSON.stringify(v); } catch { return String(v); }
+}
+
+/** Walk the raw row's top-level keys (skipping identity + noise
+ *  fields), emit name=value pairs sorted alphabetically. Empty
+ *  values are dropped — they'd just be visual noise. */
+function fieldsFromRaw(raw: Record<string, unknown>): DisplayedField[] {
+  const out: DisplayedField[] = [];
+  const keys = Object.keys(raw).sort();
+  for (const k of keys) {
+    if (SKIP_KEYS.has(k)) continue;
+    const v = raw[k];
+    if (v == null) continue;
+    const formatted = formatValue(v);
+    if (formatted === '') continue;
+    out.push({ name: k, value: formatted });
+  }
+  return out;
 }
 
 const allRows = computed<Row[]>(() => {
@@ -189,12 +232,49 @@ function sortValue(r: Row, c: SortCol): number | string {
   switch (c) {
     case 'time': return r.ts;
     case 'source': return r.source;
-    case 'name': return r.name;
   }
 }
 
-const sortedRows = computed<Row[]>(() => {
-  const list = allRows.value.slice();
+/** Row + the field list to render. Computed in chronological order
+ *  so the "Changed fields" diff against the previous same-source row
+ *  is well-defined regardless of the display sort. */
+interface RowWithFields extends Row {
+  fields: DisplayedField[];
+}
+
+const rowsWithFields = computed<RowWithFields[]>(() => {
+  // Build chronological copy for diff math.
+  const chrono = allRows.value.slice().sort((a, b) => a.ts - b.ts);
+  const prev: Partial<Record<Source, Record<string, unknown>>> = {};
+  const mode = displayMode.value;
+  const out: RowWithFields[] = new Array(chrono.length);
+  for (let i = 0; i < chrono.length; i++) {
+    const r = chrono[i];
+    let fields: DisplayedField[];
+    if (mode === 'all') {
+      fields = fieldsFromRaw(r.raw);
+    } else {
+      // 'changed' — emit only keys whose formatted value differs from
+      // the previous same-source row. The very first row of a source
+      // has no prior, so its full field set acts as the baseline.
+      const prevRaw = prev[r.source];
+      const current = fieldsFromRaw(r.raw);
+      if (!prevRaw) {
+        fields = current;
+      } else {
+        const prevByKey = new Map<string, string>();
+        for (const f of fieldsFromRaw(prevRaw)) prevByKey.set(f.name, f.value);
+        fields = current.filter((f) => prevByKey.get(f.name) !== f.value);
+      }
+    }
+    out[i] = { ...r, fields };
+    prev[r.source] = r.raw;
+  }
+  return out;
+});
+
+const sortedRows = computed<RowWithFields[]>(() => {
+  const list = rowsWithFields.value.slice();
   const col = sortCol.value;
   if (!col) return list;
   const sign = sortDir.value === 'asc' ? 1 : -1;
@@ -317,6 +397,12 @@ function onRowsWheel(e: WheelEvent) {
       <span class="sse" :data-state="sseState">{{ sseState }}</span>
     </div>
 
+    <div class="toolbar mode-row">
+      <span class="mode-label">Fields:</span>
+      <label class="opt"><input type="radio" value="all" v-model="displayMode" /> All fields</label>
+      <label class="opt"><input type="radio" value="changed" v-model="displayMode" /> Changed only (vs previous of same source)</label>
+    </div>
+
     <p class="note">
       Time-ordered merge of three sources. <strong>Snapshot</strong> = one
       `session_snapshots` row (player heartbeat or state-change post).
@@ -335,8 +421,7 @@ function onRowsWheel(e: WheelEvent) {
         <div class="cell c-player">player_id</div>
         <div class="cell c-play">play_id</div>
         <div class="cell c-restart">restart_id</div>
-        <div class="cell c-name sortable" @click="clickSort('name')">event_name<span class="arr">{{ arrow('name') }}</span></div>
-        <div class="cell c-info">info</div>
+        <div class="cell c-fields">{{ displayMode === 'all' ? 'fields' : 'changed fields' }}</div>
       </div>
 
       <div class="rows" ref="rowsScrollRef">
@@ -353,8 +438,15 @@ function onRowsWheel(e: WheelEvent) {
           <div class="cell c-player" :title="r.playerId">{{ shortId(r.playerId) }}</div>
           <div class="cell c-play" :title="r.playId">{{ shortId(r.playId) }}</div>
           <div class="cell c-restart" :title="r.restartId">{{ shortId(r.restartId) }}</div>
-          <div class="cell c-name" :title="r.name">{{ r.name }}</div>
-          <div class="cell c-info" :title="r.info">{{ r.info }}</div>
+          <div class="cell c-fields">
+            <span v-if="r.fields.length === 0" class="kv-empty">—</span>
+            <span
+              v-for="f in r.fields"
+              :key="f.name"
+              class="kv"
+              :title="f.name + '=' + f.value"
+            ><span class="kv-name">{{ f.name }}</span>=<span class="kv-value">{{ f.value }}</span></span>
+          </div>
         </div>
       </div>
     </div>
@@ -423,6 +515,14 @@ function onRowsWheel(e: WheelEvent) {
   background: #fff;
 }
 
+.mode-row {
+  margin-top: -2px;
+}
+.mode-label {
+  font-weight: 600;
+  color: #374151;
+}
+
 .row {
   display: grid;
   grid-template-columns:
@@ -431,13 +531,12 @@ function onRowsWheel(e: WheelEvent) {
     var(--c-player, 90px)
     var(--c-play, 90px)
     var(--c-restart, 90px)
-    var(--c-name, minmax(160px, 1.2fr))
-    var(--c-info, minmax(160px, 1.6fr));
+    var(--c-fields, minmax(320px, 4fr));
   gap: 8px;
-  padding: 3px 8px;
+  padding: 4px 8px;
   font-size: 11px;
   font-family: ui-monospace, 'SF Mono', Menlo, monospace;
-  align-items: center;
+  align-items: start;
   border-top: 1px solid #f3f4f6;
 }
 
@@ -497,4 +596,54 @@ function onRowsWheel(e: WheelEvent) {
 .sortable { cursor: pointer; user-select: none; }
 .sortable:hover { color: #1f2937; }
 .arr { font-size: 9px; margin-left: 2px; }
+
+/* Field column — flowing kv chips. Each chip wraps when the row is
+ * narrow; long values clamp on overflow so the row stays one
+ * "paragraph" of fields rather than smearing across the layout. */
+.c-fields {
+  white-space: normal;
+  overflow: hidden;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px 8px;
+  line-height: 1.55;
+}
+.kv {
+  background: #f3f4f6;
+  border: 1px solid #e5e7eb;
+  border-radius: 4px;
+  padding: 0 5px;
+  font-size: 10px;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  display: inline-block;
+}
+.kv-name {
+  color: #4b5563;
+  font-weight: 600;
+}
+.kv-value {
+  color: #111827;
+}
+.kv-empty {
+  color: #9ca3af;
+  font-size: 10px;
+}
+
+/* Source-specific tints on the kv chips so a glance at a row tells
+ * you which table it came from even when the fields column is the
+ * dominant visual area. */
+.row.src-network .kv {
+  background: #eff6ff;
+  border-color: #bfdbfe;
+}
+.row.src-network .kv-name { color: #1e3a8a; }
+
+.row.src-event .kv {
+  background: #fef3c7;
+  border-color: #fcd34d;
+}
+.row.src-event .kv-name { color: #92400e; }
 </style>
