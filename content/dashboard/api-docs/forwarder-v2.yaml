@@ -93,7 +93,7 @@ paths:
       parameters:
         - $ref: '#/components/parameters/PlayerIdFilter'
         - $ref: '#/components/parameters/PlayIdFilter'
-        - $ref: '#/components/parameters/RestartIdFilter'
+        - $ref: '#/components/parameters/AttemptIdFilter'
         - $ref: '#/components/parameters/From'
         - $ref: '#/components/parameters/To'
         - $ref: '#/components/parameters/LabelFilter'
@@ -191,7 +191,7 @@ paths:
       parameters:
         - $ref: '#/components/parameters/PlayerIdFilter'
         - $ref: '#/components/parameters/PlayIdFilter'
-        - $ref: '#/components/parameters/RestartIdFilter'
+        - $ref: '#/components/parameters/AttemptIdFilter'
         - $ref: '#/components/parameters/From'
         - $ref: '#/components/parameters/To'
         - $ref: '#/components/parameters/LabelFilter'
@@ -213,7 +213,7 @@ paths:
       parameters:
         - $ref: '#/components/parameters/PlayerIdFilter'
         - $ref: '#/components/parameters/PlayIdFilter'
-        - $ref: '#/components/parameters/RestartIdFilter'
+        - $ref: '#/components/parameters/AttemptIdFilter'
         - $ref: '#/components/parameters/From'
         - $ref: '#/components/parameters/To'
         - $ref: '#/components/parameters/LabelFilter'
@@ -254,7 +254,7 @@ paths:
       parameters:
         - $ref: '#/components/parameters/PlayerIdFilter'
         - $ref: '#/components/parameters/PlayIdFilter'
-        - $ref: '#/components/parameters/RestartIdFilter'
+        - $ref: '#/components/parameters/AttemptIdFilter'
         - $ref: '#/components/parameters/From'
         - $ref: '#/components/parameters/To'
         - $ref: '#/components/parameters/LabelFilter'
@@ -292,7 +292,7 @@ paths:
       parameters:
         - $ref: '#/components/parameters/PlayerIdFilter'
         - $ref: '#/components/parameters/PlayIdFilter'
-        - $ref: '#/components/parameters/RestartIdFilter'
+        - $ref: '#/components/parameters/AttemptIdFilter'
         - in: query
           name: buckets
           schema: { type: integer, minimum: 10, maximum: 1000, default: 240 }
@@ -539,16 +539,17 @@ components:
       name: play_id
       required: true
       schema: { type: string, format: uuid }
-    RestartIdFilter:
+    AttemptIdFilter:
       in: query
-      name: restart_id
-      schema: { type: string, format: uuid }
+      name: attempt_id
+      schema: { type: integer, minimum: 1 }
       description: |
         Filter to one recovery attempt within a play. Player-supplied
-        UUID; rotates on every `restart` event (user-reload or
-        auto-recovery). Stable outside restart boundaries. Use to
-        narrow a query to "what happened in this specific restart"
-        rather than "the whole play".
+        monotonically-incrementing counter; 1 on initial play, +1 per
+        `restart` event (user-restart OR auto-recovery). Stable
+        outside restart boundaries. Use to narrow a query to "what
+        happened in this specific attempt" rather than "the whole
+        play".
     From:
       in: query
       name: from
@@ -843,8 +844,8 @@ components:
       properties:
         # ---- identifiers ----
         play_id:           { type: string, format: uuid, description: "Player-supplied UUID. Rotates only on content-selection / fresh app or page load. Stable across in-app restart events." }
-        restart_id:        { type: string, format: uuid, nullable: true, description: "Last restart_id observed for this play. Rotates on every restart event. May be null if the play hasn't yet experienced a restart." }
-        restart_episodes:  { type: integer, description: "count(distinct restart_id) for this play. 1 means no restarts beyond the initial; N>1 means N-1 recovery attempts." }
+        attempt_id:        { type: integer, minimum: 1, nullable: true, description: "Highest attempt_id observed for this play (== total attempts). 1 means initial play with no restarts; N means N-1 recovery attempts after the initial." }
+        attempt_count:     { type: integer, description: "Alias for max(attempt_id) — kept as a stable name for callers that want the count semantic over the id semantic." }
         player_id:         { type: string, format: uuid }
         session_id:        { type: string, description: "Per-player numeric session counter ('1', '2', …). Empty when archive predates session_id stamping." }
         group_id:          { type: string, description: "Optional session-group id from harness label." }

@@ -19,6 +19,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -149,7 +150,7 @@ type row struct {
 	Revision                 uint64  `json:"revision"`
 	SessionID                string  `json:"session_id"`
 	PlayID                   string  `json:"play_id"`
-	RestartID                string  `json:"restart_id"`
+	AttemptID                uint32  `json:"attempt_id"`
 	PlayerID                 string  `json:"player_id"`
 	GroupID                  string  `json:"group_id"`
 	UserAgent                string  `json:"user_agent"`
@@ -537,10 +538,11 @@ func toRow(ts string, revision uint64, sessionID string, s map[string]interface{
 		Revision:                 revision,
 		SessionID:                sessionID,
 		PlayID:                   playCanonical,
-		// restart_id is player-supplied and sticky on the session map
-		// at go-proxy:4517-4519 — pull it straight from the v1 payload
-		// (no canonicalisation; it's already a UUID string).
-		RestartID:                getStr(s, "restart_id"),
+		// attempt_id is player-supplied and sticky on the session map
+		// at go-proxy:4517-4519 — pull it from the v1 payload (string
+		// form) and parse to uint32 here. 0 (the uint32 zero value)
+		// means "unknown" — pre-rename rows or non-iOS clients.
+		AttemptID:                parseAttemptID(s),
 		PlayerID:                 playerCanonical,
 		GroupID:                  getStr(s, "group_id"),
 		UserAgent:                getStr(s, "user_agent"),
@@ -700,6 +702,28 @@ func getStr(m map[string]interface{}, key string) string {
 		return v
 	}
 	return ""
+}
+
+// parseAttemptID reads the player's attempt_id off the session map.
+// Stored as either a string (URL-query path in go-proxy) or directly
+// as a number when iOS sends it in the body. 0 means "unknown" —
+// covers pre-rename rows and non-iOS clients.
+func parseAttemptID(m map[string]interface{}) uint32 {
+	switch v := m["attempt_id"].(type) {
+	case string:
+		if n, err := strconv.ParseUint(v, 10, 32); err == nil {
+			return uint32(n)
+		}
+	case float64: // JSON numbers decode to float64
+		if v >= 0 && v <= float64(^uint32(0)) {
+			return uint32(v)
+		}
+	case int:
+		if v >= 0 {
+			return uint32(v)
+		}
+	}
+	return 0
 }
 
 // getJSON returns m[key] re-encoded as a JSON string. Use for fields

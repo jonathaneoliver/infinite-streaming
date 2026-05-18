@@ -108,7 +108,7 @@ final class PlayerViewModel: ObservableObject {
     /// **start-fresh** boundaries: a new content selection, a catalogue
     /// filter swap, a user-pressed Reload, or the soak-rotation timer
     /// firing. **Stable across recovery attempts** (`retry()` /
-    /// auto-recovery) — those rotate `currentRestartID` instead.
+    /// auto-recovery) — those increment `currentAttemptID` instead.
     /// Threaded through every URL the player issues as `?play_id=...`
     /// so go-proxy can scope its NetworkLogEntry ring buffer per play.
     ///
@@ -120,22 +120,33 @@ final class PlayerViewModel: ObservableObject {
     /// - Soak rotation Task firing
     private var currentPlayID: String = UUID().uuidString
 
-    /// `restart_id` (bug #4) — a UUID regenerated on every player
-    /// `restart` event (user-reload OR auto-recovery). **Stable
-    /// across restarts** of a play that didn't happen — same play,
-    /// same id. Threaded as `?restart_id=...` on every URL alongside
-    /// `play_id`. Lets analytics ask both "how did this play
-    /// perform" (group by play_id) and "how many recovery attempts"
-    /// (count distinct restart_id).
+    /// `attempt_id` (bug #4) — a **monotonically-incrementing
+    /// integer**, 1-based, identifying which playback attempt within
+    /// this play the current activity belongs to. First playback of
+    /// any content is `attempt_id=1`; every `restart` event
+    /// (user-reload OR auto-recovery) increments it to 2, 3, 4…
+    /// Resets to 1 at every new play boundary (new content,
+    /// reload, content-filter swap).
     ///
-    /// Mintage points:
-    /// - VM init (here)
-    /// - `setSelectedContent` and content-swap in `applyContentFilter`
-    ///   (new play implies new restart epoch)
-    /// - `reload()` (user manual reload — emits `restart` event)
-    /// - `retry()` (auto-recovery — emits `restart` event)
-    /// - Soak rotation Task firing
-    private var currentRestartID: String = UUID().uuidString
+    /// Threaded as `?attempt_id=N` on every URL alongside `play_id`
+    /// so go-proxy stamps it on snapshots and network log entries.
+    /// Analytics can ask "how many recovery attempts in this play"
+    /// via `max(attempt_id) GROUP BY play_id`.
+    ///
+    /// Integer instead of UUID because the operator-facing question
+    /// is "which try is this" — a 1, 2, 3 counter answers that
+    /// directly. UUIDs were misleading on the first play (no restart
+    /// has happened yet, but a UUID implied otherwise).
+    ///
+    /// Mintage / reset / increment points:
+    /// - VM init (here)            → 1
+    /// - `setSelectedContent`      → reset to 1 (new play)
+    /// - content-swap in `applyContentFilter` → reset to 1
+    /// - `reload()` user-pressed   → reset to 1 (fresh play, see currentPlayID doc)
+    /// - `retry()` user-restart    → +1 (recovery within play)
+    /// - auto-recovery `retry()`   → +1
+    /// - Soak rotation Task firing → reset to 1
+    private var currentAttemptID: Int = 1
 
     /// `play_id` rotation period in seconds (issue #403). 0 = disabled.
     /// User-driven knob in Settings → Advanced; persisted to UserDefaults
@@ -430,10 +441,10 @@ final class PlayerViewModel: ObservableObject {
         log("setSelectedContent: tapped='\(name)' clipId='\(clipId)' chosen='\(chosen)' codec=\(codec.label) segment=\(segment.label) protocol=\(streamProtocol.label)")
         selectedContent = chosen
         // Content-selection boundary — bug #4 contract says both ids
-        // rotate. A new content choice is a new play; a new play starts
-        // a fresh restart epoch.
+        // rotate. A new content choice is a new play; attempt resets
+        // to 1 for the fresh play.
         regeneratePlayID()
-        regenerateRestartID()
+        resetAttemptID()
         buildURLAndLoad()
     }
 
@@ -565,9 +576,9 @@ final class PlayerViewModel: ObservableObject {
         if pick != selectedContent {
             selectedContent = pick
             // Filter forced a content swap — same boundary as
-            // setSelectedContent. Rotate both ids.
+            // setSelectedContent. New play, attempt resets to 1.
             regeneratePlayID()
-            regenerateRestartID()
+            resetAttemptID()
         }
         if wasPlaying { buildURLAndLoad() }
     }
@@ -611,12 +622,13 @@ final class PlayerViewModel: ObservableObject {
 
     private func buildURLAndLoad() {
         guard let server = activeServer, !selectedContent.isEmpty else { return }
-        // play_id / restart_id rotation is driven by the CALLER, not
+        // play_id / attempt_id rotation is driven by the CALLER, not
         // here — buildURLAndLoad is called both for "new content / new
         // play" boundaries and for "settings tweak, same play". The
-        // caller calls `regeneratePlayID()` / `regenerateRestartID()`
-        // explicitly when a boundary applies. See the property docs on
-        // currentPlayID / currentRestartID for the mintage points.
+        // caller calls `regeneratePlayID()` / `resetAttemptID()` /
+        // `incrementAttemptID()` explicitly when a boundary applies.
+        // See the property docs on currentPlayID / currentAttemptID
+        // for the mintage points.
         //
         // Anchor the age clock for the soak-rotation timer. Every
         // load resets the boundary; the Task is rescheduled at the
@@ -642,13 +654,13 @@ final class PlayerViewModel: ObservableObject {
             url = resolved
         }
         guard var final = url else { return }
-        // Append play_id + restart_id last so they survive the
+        // Append play_id + attempt_id last so they survive the
         // player_id strip above for k3s-dev's content port. (For HAR
         // scoping go-proxy reads both ids from URLs that hit it; the
         // content port stripping only affects routes that don't reach
         // go-proxy.)
         final = appendPlayID(to: final)
-        final = appendRestartID(to: final)
+        final = appendAttemptID(to: final)
         self.currentURL = final
         self.statusText = final.absoluteString
         loadStream(url: final)
@@ -684,10 +696,10 @@ final class PlayerViewModel: ObservableObject {
             let age = Int(Date().timeIntervalSince(self.playIdMintedAt))
             print("[PLAY_ID] rotating after \(age)s (target \(target)s)")
             // Soak-rotation deliberately starts a fresh play boundary
-            // — rotate both ids so the new play has its own restart
-            // epoch counter starting at 1.
+            // — rotate play_id and reset attempt to 1 so the new
+            // play's recovery counter starts clean.
             self.regeneratePlayID()
-            self.regenerateRestartID()
+            self.resetAttemptID()
             self.buildURLAndLoad()
         }
     }
@@ -717,22 +729,28 @@ final class PlayerViewModel: ObservableObject {
         currentPlayID = UUID().uuidString
     }
 
-    /// Replace any existing `restart_id` query item with the current
-    /// `currentRestartID`. Bug #4 fix.
-    private func appendRestartID(to url: URL) -> URL {
+    /// Replace any existing `attempt_id` query item with the current
+    /// `currentAttemptID`. Bug #4 fix.
+    private func appendAttemptID(to url: URL) -> URL {
         guard var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return url }
         var items = components.queryItems ?? []
-        items.removeAll { $0.name == "restart_id" }
-        items.append(URLQueryItem(name: "restart_id", value: currentRestartID))
+        items.removeAll { $0.name == "attempt_id" }
+        items.append(URLQueryItem(name: "attempt_id", value: String(currentAttemptID)))
         components.queryItems = items
         return components.url ?? url
     }
 
-    /// Mint a fresh `restart_id` UUID. Called from `reload()` and
-    /// `retry()` (the two restart-event emitters) and from content-
-    /// selection paths (a new play starts a new restart epoch).
-    private func regenerateRestartID() {
-        currentRestartID = UUID().uuidString
+    /// Reset the attempt counter to 1. Called at every new-play
+    /// boundary (new content, reload, content-filter swap, soak
+    /// rotation) — those start a fresh play with attempt=1.
+    private func resetAttemptID() {
+        currentAttemptID = 1
+    }
+
+    /// +1 the attempt counter. Called from `retry()` (user-restart
+    /// AND auto-recovery) — same play, next recovery attempt.
+    private func incrementAttemptID() {
+        currentAttemptID += 1
     }
 
     private func loadStream(url: URL) {
@@ -1009,12 +1027,12 @@ final class PlayerViewModel: ObservableObject {
         // recovery attempt registers in the per-play restart count.
         diagnostics.snapshotForRestart()
         playerRestarts += 1
-        // Rotate `restart_id` (per bug #4 contract) so analytics can
+        // Tick `attempt_id` (per bug #4 contract) so analytics can
         // count recovery attempts. Keep `play_id` stable — this is
         // still the same play.
-        regenerateRestartID()
+        incrementAttemptID()
         var refreshed = appendPlayID(to: url)
-        refreshed = appendRestartID(to: refreshed)
+        refreshed = appendAttemptID(to: refreshed)
         self.currentURL = refreshed
         Task { [weak self] in
             await self?.requestHARSnapshot(reason: "user_retry", force: true)
@@ -1069,12 +1087,12 @@ final class PlayerViewModel: ObservableObject {
         diagnostics.resetForFreshPlay()
         playerRestarts = 0
         profileShiftCount = 0
-        // Rotate BOTH ids: a new play boundary (play_id) AND a new
-        // restart epoch within it (restart_id). retry() differs —
-        // it keeps play_id stable because it's a within-play
-        // recovery attempt.
+        // Rotate play_id (new play boundary) AND reset attempt_id
+        // to 1 (fresh play, no recovery attempts yet). retry()
+        // differs — it keeps play_id stable and increments
+        // attempt_id because it's a within-play recovery attempt.
         regeneratePlayID()
-        regenerateRestartID()
+        resetAttemptID()
         let restartPayload = buildMetricsPayload(event: "restart", at: Date(), extra: [
             "player_metrics_restart_reason": "reload",
             "player_restarts": playerRestarts
@@ -1808,16 +1826,16 @@ extension PlayerViewModel {
         let loopIncrement = max(0, loopCount - lastReportedLoopCount)
         lastReportedLoopCount = loopCount
         var payload: [String: Any?] = [
-            // play_id + restart_id at the moment this event fires — go-proxy
+            // play_id + attempt_id at the moment this event fires — go-proxy
             // merges these into session_data so the resulting snapshot row
             // (and any network log entries stamped from this session)
-            // carry the current play / restart ids even when the event
+            // carry the current play / attempt ids even when the event
             // arrives between manifest fetches. The URL-query fallback in
             // patchSessionMetrics covers the same ground; including them
             // in the body too is belt-and-braces against a delayed event
             // that races a subsequent id rotation. Bug #4 fix.
             "play_id": currentPlayID,
-            "restart_id": currentRestartID,
+            "attempt_id": currentAttemptID,
             "player_metrics_source": "ios",
             "player_metrics_last_event": event,
             "player_metrics_trigger_type": event,
@@ -1918,14 +1936,14 @@ extension PlayerViewModel {
 
     fileprivate func patchSessionMetrics(sessionId: String, baseURL: URL, payload: [String: Any]) async {
         let pathURL = baseURL.appendingPathComponent("api/session").appendingPathComponent(sessionId).appendingPathComponent("metrics")
-        // Stamp play_id + restart_id on the URL so go-proxy's
+        // Stamp play_id + attempt_id on the URL so go-proxy's
         // handlePostSessionMetrics picks them up via its URL query
         // read. Without this the proxy only sees them on manifest
         // GETs — meaning an iPad mid-stream that hasn't re-fetched
         // its manifest after a restart would have its `restart` event
-        // land with the OLD restart_id. Bug #4 fix.
+        // land with the OLD attempt_id. Bug #4 fix.
         var url = appendPlayID(to: pathURL)
-        url = appendRestartID(to: url)
+        url = appendAttemptID(to: url)
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")

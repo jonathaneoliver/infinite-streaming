@@ -88,7 +88,7 @@ func v2SnapshotsHandler(w http.ResponseWriter, r *http.Request, cfg config) {
 	playerID := r.URL.Query().Get("player_id")
 	sessionID := r.URL.Query().Get("session_id")
 	playID := r.URL.Query().Get("play_id")
-	restartID := r.URL.Query().Get("restart_id")
+	attemptID := r.URL.Query().Get("attempt_id")
 	from := r.URL.Query().Get("from")
 	to := r.URL.Query().Get("to")
 	limit := parseLimit(r.URL.Query().Get("limit"), 500, 200000)
@@ -130,9 +130,9 @@ func v2SnapshotsHandler(w http.ResponseWriter, r *http.Request, cfg config) {
 			params["play"] = playID
 		}
 	}
-	if restartID != "" {
-		clauses = append(clauses, "lowerUTF8(restart_id) = lowerUTF8({restart:String})")
-		params["restart"] = restartID
+	if attemptID != "" {
+		clauses = append(clauses, "attempt_id = {attempt:UInt32}")
+		params["attempt"] = attemptID
 	}
 	if from != "" {
 		clauses = append(clauses, "ts >= parseDateTime64BestEffort({from:String})")
@@ -161,18 +161,18 @@ func v2SnapshotsHandler(w http.ResponseWriter, r *http.Request, cfg config) {
 	if strideMs > 0 {
 		query = fmt.Sprintf(`
 			SELECT toString(ts_max) AS ts, toString(rev_max) AS revision,
-			       any(play_id) AS play_id, any(restart_id) AS restart_id,
+			       any(play_id) AS play_id, any(attempt_id) AS attempt_id,
 			       session_json_max AS session_json
 			FROM (
 			  SELECT
 			    argMax(ts, ts) AS ts_max,
 			    argMax(revision, ts) AS rev_max,
 			    play_id,
-			    restart_id,
+			    attempt_id,
 			    argMax(session_json, ts) AS session_json_max
 			  FROM %s.%s
 			  WHERE %s
-			  GROUP BY intDiv(toUnixTimestamp64Milli(ts), %d), play_id, restart_id
+			  GROUP BY intDiv(toUnixTimestamp64Milli(ts), %d), play_id, attempt_id
 			)
 			GROUP BY ts_max, rev_max, session_json_max
 			ORDER BY ts_max %s
@@ -183,13 +183,13 @@ func v2SnapshotsHandler(w http.ResponseWriter, r *http.Request, cfg config) {
 	} else {
 		query = fmt.Sprintf(`
 			SELECT toString(ts_raw) AS ts, toString(rev_raw) AS revision,
-			       play_id, restart_id, session_json
+			       play_id, attempt_id, session_json
 			FROM (
 			  SELECT
 			    ts AS ts_raw,
 			    revision AS rev_raw,
 			    play_id,
-			    restart_id,
+			    attempt_id,
 			    session_json
 			  FROM %s.%s
 			  WHERE %s
@@ -245,7 +245,7 @@ func v2NetworkRequestsHandler(w http.ResponseWriter, r *http.Request, cfg config
 		sessionID = r.URL.Query().Get("session")
 	}
 	playID := r.URL.Query().Get("play_id")
-	restartID := r.URL.Query().Get("restart_id")
+	attemptID := r.URL.Query().Get("attempt_id")
 	from := r.URL.Query().Get("from")
 	to := r.URL.Query().Get("to")
 	limit := parseLimit(r.URL.Query().Get("limit"), 500, 5000)
@@ -275,9 +275,9 @@ func v2NetworkRequestsHandler(w http.ResponseWriter, r *http.Request, cfg config
 			params["play"] = playID
 		}
 	}
-	if restartID != "" {
-		clauses = append(clauses, "lowerUTF8(restart_id) = lowerUTF8({restart:String})")
-		params["restart"] = restartID
+	if attemptID != "" {
+		clauses = append(clauses, "attempt_id = {attempt:UInt32}")
+		params["attempt"] = attemptID
 	}
 	if from != "" {
 		clauses = append(clauses, "ts >= parseDateTime64BestEffort({from:String})")
@@ -300,7 +300,7 @@ func v2NetworkRequestsHandler(w http.ResponseWriter, r *http.Request, cfg config
 	query := fmt.Sprintf(`
 		SELECT
 		  toString(ts_raw) AS timestamp,
-		  session_id, player_id, play_id, restart_id,
+		  session_id, player_id, play_id, attempt_id,
 		  method, url, upstream_url, request_kind, content_type,
 		  status, bytes_in, bytes_out,
 		  ttfb_ms, total_ms, dns_ms, connect_ms, tls_ms, transfer_ms, client_wait_ms,
@@ -308,7 +308,7 @@ func v2NetworkRequestsHandler(w http.ResponseWriter, r *http.Request, cfg config
 		FROM (
 		  SELECT
 		    ts AS ts_raw,
-		    session_id, player_id, play_id, restart_id,
+		    session_id, player_id, play_id, attempt_id,
 		    method, url, upstream_url, request_kind, content_type,
 		    status, bytes_in, bytes_out,
 		    ttfb_ms, total_ms, dns_ms, connect_ms, tls_ms, transfer_ms, client_wait_ms,

@@ -675,9 +675,15 @@ type PlayDetail struct {
 		NetworkRequests *string `json:"network_requests,omitempty"`
 		Snapshots       *string `json:"snapshots,omitempty"`
 	} `json:"_links,omitempty"`
-	ActiveTimeouts *int     `json:"active_timeouts,omitempty"`
-	AllFailures    *int     `json:"all_failures,omitempty"`
-	AvgQualityPct  *float32 `json:"avg_quality_pct,omitempty"`
+	ActiveTimeouts *int `json:"active_timeouts,omitempty"`
+	AllFailures    *int `json:"all_failures,omitempty"`
+
+	// AttemptCount Alias for max(attempt_id) — kept as a stable name for callers that want the count semantic over the id semantic.
+	AttemptCount *int `json:"attempt_count,omitempty"`
+
+	// AttemptId Highest attempt_id observed for this play (== total attempts). 1 means initial play with no restarts; N means N-1 recovery attempts after the initial.
+	AttemptId     *int     `json:"attempt_id,omitempty"`
+	AvgQualityPct *float32 `json:"avg_quality_pct,omitempty"`
 
 	// BitrateShifts Sum of upshifts + downshifts.
 	BitrateShifts *int `json:"bitrate_shifts,omitempty"`
@@ -746,14 +752,8 @@ type PlayDetail struct {
 	ResolutionChanges *int               `json:"resolution_changes,omitempty"`
 
 	// RestartCount Mid-play player-recovery restarts.
-	RestartCount *int `json:"restart_count,omitempty"`
-
-	// RestartEpisodes count(distinct restart_id) for this play. 1 means no restarts beyond the initial; N>1 means N-1 recovery attempts.
-	RestartEpisodes *int `json:"restart_episodes,omitempty"`
-
-	// RestartId Last restart_id observed for this play. Rotates on every restart event. May be null if the play hasn't yet experienced a restart.
-	RestartId       *openapi_types.UUID `json:"restart_id,omitempty"`
-	SegmentFailures *int                `json:"segment_failures,omitempty"`
+	RestartCount    *int `json:"restart_count,omitempty"`
+	SegmentFailures *int `json:"segment_failures,omitempty"`
 
 	// SegmentStallCount Stalls waiting on a segment fetch.
 	SegmentStallCount *int `json:"segment_stall_count,omitempty"`
@@ -793,9 +793,15 @@ type PlayDetailClassification string
 //   - signal counters (frozen_count, restart_count, …) used by the
 //     dashboard's "interesting" filter
 type PlaySummary struct {
-	ActiveTimeouts *int     `json:"active_timeouts,omitempty"`
-	AllFailures    *int     `json:"all_failures,omitempty"`
-	AvgQualityPct  *float32 `json:"avg_quality_pct,omitempty"`
+	ActiveTimeouts *int `json:"active_timeouts,omitempty"`
+	AllFailures    *int `json:"all_failures,omitempty"`
+
+	// AttemptCount Alias for max(attempt_id) — kept as a stable name for callers that want the count semantic over the id semantic.
+	AttemptCount *int `json:"attempt_count,omitempty"`
+
+	// AttemptId Highest attempt_id observed for this play (== total attempts). 1 means initial play with no restarts; N means N-1 recovery attempts after the initial.
+	AttemptId     *int     `json:"attempt_id,omitempty"`
+	AvgQualityPct *float32 `json:"avg_quality_pct,omitempty"`
 
 	// BitrateShifts Sum of upshifts + downshifts.
 	BitrateShifts *int `json:"bitrate_shifts,omitempty"`
@@ -856,14 +862,8 @@ type PlaySummary struct {
 	ResolutionChanges *int               `json:"resolution_changes,omitempty"`
 
 	// RestartCount Mid-play player-recovery restarts.
-	RestartCount *int `json:"restart_count,omitempty"`
-
-	// RestartEpisodes count(distinct restart_id) for this play. 1 means no restarts beyond the initial; N>1 means N-1 recovery attempts.
-	RestartEpisodes *int `json:"restart_episodes,omitempty"`
-
-	// RestartId Last restart_id observed for this play. Rotates on every restart event. May be null if the play hasn't yet experienced a restart.
-	RestartId       *openapi_types.UUID `json:"restart_id,omitempty"`
-	SegmentFailures *int                `json:"segment_failures,omitempty"`
+	RestartCount    *int `json:"restart_count,omitempty"`
+	SegmentFailures *int `json:"segment_failures,omitempty"`
 
 	// SegmentStallCount Stalls waiting on a segment fetch.
 	SegmentStallCount *int `json:"segment_stall_count,omitempty"`
@@ -1066,6 +1066,9 @@ type StreamErrorEvent struct {
 	Message string `json:"message"`
 }
 
+// AttemptIdFilter defines model for AttemptIdFilter.
+type AttemptIdFilter = int
+
 // Classification defines model for Classification.
 type Classification string
 
@@ -1092,9 +1095,6 @@ type PlayIdFilter = openapi_types.UUID
 
 // PlayerIdFilter defines model for PlayerIdFilter.
 type PlayerIdFilter = openapi_types.UUID
-
-// RestartIdFilter defines model for RestartIdFilter.
-type RestartIdFilter = openapi_types.UUID
 
 // StrideMs defines model for StrideMs.
 type StrideMs = int
@@ -1153,12 +1153,13 @@ type GetApiV2NetworkRequestsParams struct {
 	// in-app restart events.
 	PlayId *PlayIdFilter `form:"play_id,omitempty" json:"play_id,omitempty"`
 
-	// RestartId Filter to one recovery attempt within a play. Player-supplied
-	// UUID; rotates on every `restart` event (user-reload or
-	// auto-recovery). Stable outside restart boundaries. Use to
-	// narrow a query to "what happened in this specific restart"
-	// rather than "the whole play".
-	RestartId *RestartIdFilter `form:"restart_id,omitempty" json:"restart_id,omitempty"`
+	// AttemptId Filter to one recovery attempt within a play. Player-supplied
+	// monotonically-incrementing counter; 1 on initial play, +1 per
+	// `restart` event (user-restart OR auto-recovery). Stable
+	// outside restart boundaries. Use to narrow a query to "what
+	// happened in this specific attempt" rather than "the whole
+	// play".
+	AttemptId *AttemptIdFilter `form:"attempt_id,omitempty" json:"attempt_id,omitempty"`
 
 	// From ISO 8601 lower bound on the row timestamp. Inclusive.
 	From *From `form:"from,omitempty" json:"from,omitempty"`
@@ -1203,12 +1204,13 @@ type GetApiV2PlaysParams struct {
 	// in-app restart events.
 	PlayId *PlayIdFilter `form:"play_id,omitempty" json:"play_id,omitempty"`
 
-	// RestartId Filter to one recovery attempt within a play. Player-supplied
-	// UUID; rotates on every `restart` event (user-reload or
-	// auto-recovery). Stable outside restart boundaries. Use to
-	// narrow a query to "what happened in this specific restart"
-	// rather than "the whole play".
-	RestartId *RestartIdFilter `form:"restart_id,omitempty" json:"restart_id,omitempty"`
+	// AttemptId Filter to one recovery attempt within a play. Player-supplied
+	// monotonically-incrementing counter; 1 on initial play, +1 per
+	// `restart` event (user-restart OR auto-recovery). Stable
+	// outside restart boundaries. Use to narrow a query to "what
+	// happened in this specific attempt" rather than "the whole
+	// play".
+	AttemptId *AttemptIdFilter `form:"attempt_id,omitempty" json:"attempt_id,omitempty"`
 
 	// From ISO 8601 lower bound on the row timestamp. Inclusive.
 	From *From `form:"from,omitempty" json:"from,omitempty"`
@@ -1290,12 +1292,13 @@ type GetApiV2SessionEventsParams struct {
 	// in-app restart events.
 	PlayId *PlayIdFilter `form:"play_id,omitempty" json:"play_id,omitempty"`
 
-	// RestartId Filter to one recovery attempt within a play. Player-supplied
-	// UUID; rotates on every `restart` event (user-reload or
-	// auto-recovery). Stable outside restart boundaries. Use to
-	// narrow a query to "what happened in this specific restart"
-	// rather than "the whole play".
-	RestartId *RestartIdFilter `form:"restart_id,omitempty" json:"restart_id,omitempty"`
+	// AttemptId Filter to one recovery attempt within a play. Player-supplied
+	// monotonically-incrementing counter; 1 on initial play, +1 per
+	// `restart` event (user-restart OR auto-recovery). Stable
+	// outside restart boundaries. Use to narrow a query to "what
+	// happened in this specific attempt" rather than "the whole
+	// play".
+	AttemptId *AttemptIdFilter `form:"attempt_id,omitempty" json:"attempt_id,omitempty"`
 
 	// From ISO 8601 lower bound on the row timestamp. Inclusive.
 	From *From `form:"from,omitempty" json:"from,omitempty"`
@@ -1336,12 +1339,13 @@ type GetApiV2SessionHeatmapParams struct {
 	// in-app restart events.
 	PlayId *PlayIdFilter `form:"play_id,omitempty" json:"play_id,omitempty"`
 
-	// RestartId Filter to one recovery attempt within a play. Player-supplied
-	// UUID; rotates on every `restart` event (user-reload or
-	// auto-recovery). Stable outside restart boundaries. Use to
-	// narrow a query to "what happened in this specific restart"
-	// rather than "the whole play".
-	RestartId *RestartIdFilter `form:"restart_id,omitempty" json:"restart_id,omitempty"`
+	// AttemptId Filter to one recovery attempt within a play. Player-supplied
+	// monotonically-incrementing counter; 1 on initial play, +1 per
+	// `restart` event (user-restart OR auto-recovery). Stable
+	// outside restart boundaries. Use to narrow a query to "what
+	// happened in this specific attempt" rather than "the whole
+	// play".
+	AttemptId *AttemptIdFilter `form:"attempt_id,omitempty" json:"attempt_id,omitempty"`
 	Buckets   *int             `form:"buckets,omitempty" json:"buckets,omitempty"`
 }
 
@@ -1354,12 +1358,13 @@ type GetApiV2SnapshotsParams struct {
 	// in-app restart events.
 	PlayId *PlayIdFilter `form:"play_id,omitempty" json:"play_id,omitempty"`
 
-	// RestartId Filter to one recovery attempt within a play. Player-supplied
-	// UUID; rotates on every `restart` event (user-reload or
-	// auto-recovery). Stable outside restart boundaries. Use to
-	// narrow a query to "what happened in this specific restart"
-	// rather than "the whole play".
-	RestartId *RestartIdFilter `form:"restart_id,omitempty" json:"restart_id,omitempty"`
+	// AttemptId Filter to one recovery attempt within a play. Player-supplied
+	// monotonically-incrementing counter; 1 on initial play, +1 per
+	// `restart` event (user-restart OR auto-recovery). Stable
+	// outside restart boundaries. Use to narrow a query to "what
+	// happened in this specific attempt" rather than "the whole
+	// play".
+	AttemptId *AttemptIdFilter `form:"attempt_id,omitempty" json:"attempt_id,omitempty"`
 
 	// From ISO 8601 lower bound on the row timestamp. Inclusive.
 	From *From `form:"from,omitempty" json:"from,omitempty"`
@@ -2663,9 +2668,9 @@ func NewGetApiV2NetworkRequestsRequest(server string, params *GetApiV2NetworkReq
 
 		}
 
-		if params.RestartId != nil {
+		if params.AttemptId != nil {
 
-			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "restart_id", *params.RestartId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: "uuid"}); err != nil {
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "attempt_id", *params.AttemptId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "integer", Format: ""}); err != nil {
 				return nil, err
 			} else {
 				for _, qp := range strings.Split(queryFrag, "&") {
@@ -2861,9 +2866,9 @@ func NewGetApiV2PlaysRequest(server string, params *GetApiV2PlaysParams) (*http.
 
 		}
 
-		if params.RestartId != nil {
+		if params.AttemptId != nil {
 
-			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "restart_id", *params.RestartId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: "uuid"}); err != nil {
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "attempt_id", *params.AttemptId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "integer", Format: ""}); err != nil {
 				return nil, err
 			} else {
 				for _, qp := range strings.Split(queryFrag, "&") {
@@ -3217,9 +3222,9 @@ func NewGetApiV2SessionEventsRequest(server string, params *GetApiV2SessionEvent
 
 		}
 
-		if params.RestartId != nil {
+		if params.AttemptId != nil {
 
-			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "restart_id", *params.RestartId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: "uuid"}); err != nil {
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "attempt_id", *params.AttemptId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "integer", Format: ""}); err != nil {
 				return nil, err
 			} else {
 				for _, qp := range strings.Split(queryFrag, "&") {
@@ -3367,9 +3372,9 @@ func NewGetApiV2SessionHeatmapRequest(server string, params *GetApiV2SessionHeat
 
 		}
 
-		if params.RestartId != nil {
+		if params.AttemptId != nil {
 
-			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "restart_id", *params.RestartId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: "uuid"}); err != nil {
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "attempt_id", *params.AttemptId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "integer", Format: ""}); err != nil {
 				return nil, err
 			} else {
 				for _, qp := range strings.Split(queryFrag, "&") {
@@ -3457,9 +3462,9 @@ func NewGetApiV2SnapshotsRequest(server string, params *GetApiV2SnapshotsParams)
 
 		}
 
-		if params.RestartId != nil {
+		if params.AttemptId != nil {
 
-			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "restart_id", *params.RestartId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: "uuid"}); err != nil {
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "attempt_id", *params.AttemptId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "integer", Format: ""}); err != nil {
 				return nil, err
 			} else {
 				for _, qp := range strings.Split(queryFrag, "&") {

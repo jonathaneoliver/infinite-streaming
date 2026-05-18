@@ -132,14 +132,15 @@ type NetworkLogEntry struct {
 	// events (user-reload, auto-recovery). Issue #280.
 	PlayID string `json:"play_id,omitempty"`
 
-	// RestartID identifies the recovery attempt within a playback
-	// episode. The player generates a fresh UUID at every `restart`
-	// event (user-reload OR auto-recovery) and passes it as
-	// `?restart_id=...` on every URL. PlayID stays the same across
-	// such restarts; RestartID rotates. Lets analytics ask both
-	// "how did this play perform" (group by play_id) and "how many
-	// recovery attempts within the play" (count distinct restart_id).
-	RestartID string `json:"restart_id,omitempty"`
+	// AttemptID identifies which playback attempt within a play this
+	// request belongs to. The player initialises it to 1 on every
+	// new play and increments by 1 at every `restart` event
+	// (user-reload OR auto-recovery), passing it as `?attempt_id=N`
+	// on every URL. PlayID stays the same across these attempts;
+	// AttemptID ticks up. Lets analytics ask both "how did this play
+	// perform" (group by play_id) and "how many recovery attempts
+	// within the play" (max attempt_id GROUP BY play_id).
+	AttemptID uint32 `json:"attempt_id,omitempty"`
 
 	// HTTP-level metadata captured per-request. Sensitive headers
 	// (Cookie / Authorization / Set-Cookie) are filtered before they
@@ -2002,16 +2003,16 @@ func (a *App) handlePostSessionMetrics(w http.ResponseWriter, r *http.Request) {
 	// ground-truth live offset that's independent of the client's clock:
 	//   trueOffsetMs = server_received_at_ms - playhead_wallclock_ms
 	metricsOnly["server_received_at_ms"] = time.Now().UnixMilli()
-	// Propagate play_id + restart_id from the URL query (issue #280).
+	// Propagate play_id + attempt_id from the URL query (issue #280).
 	// The metrics POST is the only signal we receive between manifest
 	// requests on long-running iOS sessions; without picking up the
-	// player's current ids here, restart_id rotations would lag until
-	// the next manifest fetch.
+	// player's current ids here, attempt_id increments would lag
+	// until the next manifest fetch.
 	if v := strings.TrimSpace(r.URL.Query().Get("play_id")); v != "" {
 		metricsOnly["play_id"] = v
 	}
-	if v := strings.TrimSpace(r.URL.Query().Get("restart_id")); v != "" {
-		metricsOnly["restart_id"] = v
+	if v := strings.TrimSpace(r.URL.Query().Get("attempt_id")); v != "" {
+		metricsOnly["attempt_id"] = v
 	}
 	a.saveSessionByID(id, metricsOnly)
 	lastEvent := strings.ToLower(strings.TrimSpace(getString(metricsOnly, "player_metrics_last_event")))
@@ -4245,19 +4246,25 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 	// order via capturedQueryString.
 	requestHeaders := capturedHeaders(r.Header)
 	queryString := capturedQueryString(r.URL)
-	// Extract the player's `play_id` + `restart_id` query params (issue
+	// Extract the player's `play_id` + `attempt_id` query params (issue
 	// #280). Used to scope HAR snapshots to a single playback episode
 	// and to track recovery attempts within it. Stamped onto every
 	// NetworkLogEntry created in this handler via the logEntry closure
 	// below.
 	playID := strings.TrimSpace(r.URL.Query().Get("play_id"))
-	restartID := strings.TrimSpace(r.URL.Query().Get("restart_id"))
+	attemptIDStr := strings.TrimSpace(r.URL.Query().Get("attempt_id"))
+	var attemptID uint32
+	if attemptIDStr != "" {
+		if n, err := strconv.ParseUint(attemptIDStr, 10, 32); err == nil {
+			attemptID = uint32(n)
+		}
+	}
 	logEntry := func(sessionID string, entry NetworkLogEntry) {
 		if entry.PlayID == "" {
 			entry.PlayID = playID
 		}
-		if entry.RestartID == "" {
-			entry.RestartID = restartID
+		if entry.AttemptID == 0 {
+			entry.AttemptID = attemptID
 		}
 		a.addNetworkLogEntry(sessionID, entry)
 	}
@@ -4533,9 +4540,9 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 	sessionData["last_request"] = nowISO()
 	sessionData["last_request_url"] = filename
 	sessionData["user_agent"] = r.UserAgent()
-	// Stamp the player's current play_id + restart_id on the session
+	// Stamp the player's current play_id + attempt_id on the session
 	// so the SSE stream (and downstream analytics) can partition by
-	// playback episode (play_id) and recovery attempt (restart_id).
+	// playback episode (play_id) and recovery attempt (attempt_id).
 	// Both are player-supplied; the proxy never synthesises them.
 	// When the player has not yet sent a value, the field stays empty
 	// on the session map — downstream tables get blank rather than
@@ -4543,8 +4550,11 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 	if playID != "" {
 		sessionData["play_id"] = playID
 	}
-	if restartID != "" {
-		sessionData["restart_id"] = restartID
+	// Store the raw string so sessionStickyField (a generic
+	// type-asserts-as-string helper) can read it back uniformly
+	// across the metrics POST + manifest GET paths.
+	if attemptIDStr != "" {
+		sessionData["attempt_id"] = attemptIDStr
 	}
 
 	// Extract client IP considering X-Forwarded-For
@@ -5946,8 +5956,8 @@ func (a *App) addNetworkLogEntry(sessionID string, entry NetworkLogEntry) {
 	if entry.PlayID == "" {
 		entry.PlayID = a.sessionStickyPlayID(sessionID)
 	}
-	if entry.RestartID == "" {
-		entry.RestartID = a.sessionStickyRestartID(sessionID)
+	if entry.AttemptID == 0 {
+		entry.AttemptID = a.sessionStickyAttemptID(sessionID)
 	}
 	rb := a.getOrCreateNetworkLog(sessionID)
 	rb.Add(entry)
@@ -5963,12 +5973,22 @@ func (a *App) sessionStickyPlayID(sessionID string) string {
 	return a.sessionStickyField(sessionID, "play_id")
 }
 
-// sessionStickyRestartID is the restart_id counterpart of
-// sessionStickyPlayID. The player rotates restart_id on every restart
-// event (user-reload or auto-recovery); the proxy stores the latest
-// value and stamps it onto network log entries that don't carry one.
-func (a *App) sessionStickyRestartID(sessionID string) string {
-	return a.sessionStickyField(sessionID, "restart_id")
+// sessionStickyAttemptID is the attempt_id counterpart of
+// sessionStickyPlayID. The player increments attempt_id on every
+// restart event (user-restart or auto-recovery); the proxy stores
+// the latest value and stamps it onto network log entries that
+// don't carry one. Returns 0 when nothing is stamped yet — the
+// uint32 zero-value harmlessly leaves the entry unstamped on the
+// CH side.
+func (a *App) sessionStickyAttemptID(sessionID string) uint32 {
+	v := a.sessionStickyField(sessionID, "attempt_id")
+	if v == "" {
+		return 0
+	}
+	if n, err := strconv.ParseUint(v, 10, 32); err == nil {
+		return uint32(n)
+	}
+	return 0
 }
 
 func (a *App) sessionStickyField(sessionID, field string) string {

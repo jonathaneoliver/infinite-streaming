@@ -9,7 +9,7 @@
  *
  * Operator-facing differences from NetworkLog: no timing bar (per
  * user request), source-toggle checkboxes, and uniform columns
- * (time / source / player_id / play_id / restart_id / name / info)
+ * (time / source / player_id / play_id / attempt_id / name / info)
  * that work for all three row shapes.
  *
  * No new server fetch — re-uses the three Streams the parent
@@ -93,7 +93,7 @@ interface Row {
   source: Source;
   playerId: string;
   playId: string;
-  restartId: string;
+  attemptId: string;
   /** Original payload as it came off the stream — used to compute
    *  the per-row field list (and to diff against the previous row
    *  of the same source for "Changed fields" mode). */
@@ -120,7 +120,7 @@ const SKIP_KEYS = new Set([
   'ts', 'timestamp', 'event_time',     // rendered as _time
   'player_id', 'id',                   // rendered as player_id
   'play_id',                           // rendered as play_id
-  'restart_id',                        // rendered as restart_id
+  'attempt_id',                        // rendered as attempt_id
   'revision',                          // monotonic counter
   'server_received_at_ms',             // monotonic counter (server clock)
   'entry_fingerprint',                 // CH dedupe key
@@ -167,7 +167,7 @@ function buildSnapshotRow(raw: Record<string, unknown>): Row | null {
     source: 'snapshot',
     playerId: asStr(raw.player_id ?? props.playerId),
     playId: asStr(raw.play_id),
-    restartId: asStr(raw.restart_id),
+    attemptId: asStr(raw.attempt_id),
     raw,
     eventName: pickEventName(raw, ['event_name', 'last_event', 'trigger_type']),
   };
@@ -198,7 +198,7 @@ function buildNetworkRow(raw: Record<string, unknown>): Row | null {
     source: 'network',
     playerId: asStr(raw.player_id ?? props.playerId),
     playId: asStr(raw.play_id),
-    restartId: asStr(raw.restart_id),
+    attemptId: asStr(raw.attempt_id),
     raw: enriched,
   };
 }
@@ -221,7 +221,7 @@ function buildEventRow(raw: Record<string, unknown>): Row | null {
   const ts = tsOf(raw);
   if (!Number.isFinite(ts)) return null;
   // event rows from /api/v2/timeseries don't currently project
-  // play_id / restart_id (events_query.go derives events on the fly
+  // play_id / attempt_id (events_query.go derives events on the fly
   // from snapshots + network_requests via UNION ALL, and the columns
   // don't ride through). Fall back to the URL's play_id — within
   // SessionViewer scope they're always identical, and live mode
@@ -231,7 +231,7 @@ function buildEventRow(raw: Record<string, unknown>): Row | null {
     source: 'event',
     playerId: props.playerId,
     playId: props.playId || '',
-    restartId: '',
+    attemptId: '',
     raw,
     eventName: pickEventName(raw, ['event_name', 'type']),
   };
@@ -624,7 +624,7 @@ function onRowsWheel(e: WheelEvent) {
       Time-ordered merge of three sources. <strong>Snapshot</strong> = one
       `session_snapshots` row (player heartbeat or state-change post).
       <strong>Network</strong> = one `network_requests` row. <strong>Event</strong>
-      = one derived row from the typed event taxonomy. `restart_id` on
+      = one derived row from the typed event taxonomy. `attempt_id` on
       event rows is blank — the events SSE doesn't yet project it (see
       `events_query.go`); within a single SessionViewer scope the
       `play_id` shown is the URL's play_id.
@@ -637,7 +637,7 @@ function onRowsWheel(e: WheelEvent) {
         <div class="cell c-source sortable" @click="clickSort('source')">source<span class="arr">{{ arrow('source') }}</span></div>
         <div class="cell c-player">player_id</div>
         <div class="cell c-play">play_id</div>
-        <div class="cell c-restart">restart_id</div>
+        <div class="cell c-attempt">attempt_id</div>
         <div class="cell c-eventname">event_name</div>
         <div class="cell c-fields">fields</div>
         <div v-if="showRaw" class="cell c-raw">raw</div>
@@ -656,7 +656,7 @@ function onRowsWheel(e: WheelEvent) {
           </div>
           <div class="cell c-player" :title="r.playerId">{{ shortId(r.playerId) }}</div>
           <div class="cell c-play" :title="r.playId">{{ shortId(r.playId) }}</div>
-          <div class="cell c-restart" :title="r.restartId">{{ shortId(r.restartId) }}</div>
+          <div class="cell c-attempt" :title="r.attemptId">{{ shortId(r.attemptId) }}</div>
           <div class="cell c-eventname">
             <span
               v-if="r.eventName"
@@ -765,7 +765,7 @@ function onRowsWheel(e: WheelEvent) {
     var(--c-source, 76px)
     var(--c-player, 90px)
     var(--c-play, 90px)
-    var(--c-restart, 90px)
+    var(--c-attempt, 90px)
     var(--c-eventname, minmax(120px, 160px))
     var(--c-fields, minmax(280px, 4fr));
   gap: 8px;
@@ -784,7 +784,7 @@ function onRowsWheel(e: WheelEvent) {
     var(--c-source, 76px)
     var(--c-player, 90px)
     var(--c-play, 90px)
-    var(--c-restart, 90px)
+    var(--c-attempt, 90px)
     var(--c-eventname, minmax(120px, 160px))
     var(--c-fields, minmax(200px, 2fr))
     var(--c-raw, minmax(280px, 3fr));
@@ -824,7 +824,7 @@ function onRowsWheel(e: WheelEvent) {
   text-overflow: ellipsis;
 }
 .c-time { color: #6b7280; }
-.c-player, .c-play, .c-restart {
+.c-player, .c-play, .c-attempt {
   color: #374151;
   font-variant-numeric: tabular-nums;
 }
@@ -882,7 +882,7 @@ function onRowsWheel(e: WheelEvent) {
   font-size: 10px;
 }
 
-/* event_name column — dedicated cell after restart_id. Lifted out
+/* event_name column — dedicated cell after attempt_id. Lifted out
  * of the alphabetical chip list since the operator always wants to
  * see "stall" / "downshift" / "buffering_start" / etc. on a fixed
  * column position regardless of mode or sort. */

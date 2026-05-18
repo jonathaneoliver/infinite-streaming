@@ -9,6 +9,7 @@
 package v2translate
 
 import (
+	"strconv"
 	"strings"
 	"time"
 
@@ -411,10 +412,10 @@ func faultCountersFromSession(s map[string]any) *oapigen.FaultCounters {
 // playerUUID is the v2-canonical UUID for the parent player (used for
 // PlayRecord.PlayerId — we don't re-derive it).
 //
-// The proxy NEVER synthesises a play_id. play_id (and restart_id) are
-// minted by the player at well-defined boundaries (new content for
-// play_id; restart event for restart_id) and propagated as URL query
-// params on every request. If the player hasn't yet supplied a
+// The proxy NEVER synthesises a play_id. play_id (and attempt_id) are
+// driven by the player at well-defined boundaries (new content for
+// play_id; restart event increments attempt_id) and propagated as
+// URL query params on every request. If the player hasn't yet supplied a
 // play_id, PlayRecord.Id is left zero — downstream tables get blank
 // rather than the proxy guessing. See ticket on the bug where the
 // previous control_revision-seeded synthesis caused snapshots-side
@@ -426,7 +427,7 @@ func currentPlayFromSession(s map[string]any, playerUUID uuid.UUID) *oapigen.Pla
 	if playIDRaw == "" {
 		playIDRaw = getString(s, "current_play_id")
 	}
-	restartIDRaw := getString(s, "restart_id")
+	attemptIDRaw := getString(s, "attempt_id")
 
 	// Surface a play whenever we have an explicit id OR enough manifest
 	// info to describe one. Web sessions (legacy testing.html, v3 grid)
@@ -457,13 +458,10 @@ func currentPlayFromSession(s map[string]any, playerUUID uuid.UUID) *oapigen.Pla
 		PlayerId:        playerUUID,
 		ControlRevision: getString(s, "control_revision"),
 	}
-	if restartIDRaw != "" {
-		if parsed, err := uuid.Parse(restartIDRaw); err == nil {
-			r := parsed
-			rec.RestartId = &r
-		} else {
-			r := derivePlayerUUID(restartIDRaw)
-			rec.RestartId = &r
+	if attemptIDRaw != "" {
+		if n, err := strconv.ParseUint(attemptIDRaw, 10, 32); err == nil {
+			a := int(n)
+			rec.AttemptId = &a
 		}
 	}
 	if t, ok := getTime(s, "session_start_time", "first_request_time"); ok {
