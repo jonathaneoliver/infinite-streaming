@@ -247,20 +247,21 @@ func queryPlaySummaries(ctx context.Context, cfg config, clauses []string, param
 		    countIf(last_event = 'restart')       AS restart_count,
 		    countIf(last_event = 'error')         AS error_event_count,
 		    any(classification) AS classification,
-		    -- restart_id projection: last value observed in the play
-		    -- (argMax by ts) plus the count of distinct ids so callers
-		    -- can quickly see "how many recovery attempts in this
-		    -- play". Filters out empty restart_id values (pre-stamp
-		    -- legacy rows) so a play that's never restarted reports
-		    -- restart_episodes=0, not "" pollution.
-		    argMaxIf(restart_id, ts, restart_id != '')    AS restart_id,
-		    uniqExact(restart_id) - if(countIf(restart_id = '') > 0, 1, 0) AS restart_episodes
+		    -- restart_id projection: last non-empty value observed in
+		    -- the play, plus the count of distinct non-empty ids so
+		    -- callers can quickly see "how many recovery attempts in
+		    -- this play". Aliased to *_last to avoid ClickHouse's
+		    -- ILLEGAL_AGGREGATION error when an aggregate alias
+		    -- shadows the underlying column referenced by another
+		    -- aggregate (uniqExactIf reads the underlying column).
+		    argMaxIf(restart_id, ts, restart_id != '')    AS restart_id_last,
+		    uniqExactIf(restart_id, restart_id != '')     AS restart_episodes
 		  FROM base
 		  GROUP BY play_id
 		)
 		SELECT
 		  agg.play_id, agg.player_id,
-		  agg.restart_id, agg.restart_episodes,
+		  agg.restart_id_last AS restart_id, agg.restart_episodes,
 		  agg.session_id, agg.group_id, agg.content_id,
 		  toString(agg.started_at)   AS started_at,
 		  toString(agg.last_seen_at) AS last_seen_at,
