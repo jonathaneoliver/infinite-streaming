@@ -23,6 +23,17 @@ func (snapshotRateClassifier) Classify(prev, cur *Snapshot) []Event {
 	if prev.VideoBitrate <= 0 || cur.VideoBitrate <= 0 {
 		return nil
 	}
+	// Edge-trigger: only fire when last_event transitions to a fresh
+	// rate_shift marker. The player keeps the marker on every
+	// subsequent snapshot until the next state change, so without
+	// this guard we'd emit one event per snapshot for the same
+	// transition (and with prev_bitrate==cur_bitrate after the
+	// initial transition, the info string would falsely read
+	// "X.XX→X.XX" — exactly the duplicate pattern observed in
+	// CH after the first deploy).
+	if prev.LastEvent == cur.LastEvent {
+		return nil
+	}
 	base := Event{
 		Ts: cur.Ts, PlayerID: cur.PlayerID, PlayID: cur.PlayID,
 		AttemptID: cur.AttemptID, SessionID: cur.SessionID,

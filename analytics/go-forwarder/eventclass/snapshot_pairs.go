@@ -67,6 +67,14 @@ func (p *pairClassifier) Classify(prev, cur *Snapshot) []Event {
 	if cur == nil {
 		return nil
 	}
+	// Edge-trigger on the start markers — only record the open pair
+	// when last_event TRANSITIONS to stall_start / buffering_start.
+	// Without this guard, every subsequent snapshot carrying the
+	// stale marker would overwrite the open entry and push start_ts
+	// forward, shrinking the eventually-emitted duration.
+	if prev != nil && prev.LastEvent == cur.LastEvent {
+		return nil
+	}
 	switch cur.LastEvent {
 	case "stall_start":
 		p.mu.Lock()
