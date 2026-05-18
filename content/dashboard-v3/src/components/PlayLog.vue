@@ -138,14 +138,45 @@ function buildSnapshotRow(raw: Record<string, unknown>): Row | null {
 function buildNetworkRow(raw: Record<string, unknown>): Row | null {
   const ts = tsOf(raw);
   if (!Number.isFinite(ts)) return null;
+  // Derive the operator-friendly summary fields the legacy NetworkLog
+  // panel surfaces (KB, Mbps, dur) and graft them onto the row so
+  // they appear in the kv chip list — both 'all' and 'changed' modes
+  // pick them up naturally, and the alphabetical chip order keeps
+  // them visually adjacent to status / bytes_out / transfer_ms.
+  const bytesOut = numOrZero(raw.bytes_out);
+  const transferMs = numOrZero(raw.transfer_ms);
+  const totalMs = numOrZero(raw.total_ms);
+  const summed = numOrZero(raw.dns_ms) + numOrZero(raw.connect_ms)
+    + numOrZero(raw.tls_ms) + numOrZero(raw.ttfb_ms) + transferMs;
+  const durMs = totalMs > 0 ? totalMs : summed;
+  const enriched: Record<string, unknown> = { ...raw };
+  if (bytesOut > 0) enriched.KB = (bytesOut / 1024);
+  if (transferMs > 0 && bytesOut > 0) {
+    enriched.Mbps = (bytesOut * 8) / (transferMs * 1000);
+  }
+  if (durMs > 0) enriched.dur = fmtMs(durMs);
   return {
     ts,
     source: 'network',
     playerId: asStr(raw.player_id ?? props.playerId),
     playId: asStr(raw.play_id),
     restartId: asStr(raw.restart_id),
-    raw,
+    raw: enriched,
   };
+}
+
+function numOrZero(v: unknown): number {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : 0;
+}
+
+/** Same human-readable ms/s formatter the NetworkLog panel uses, so
+ *  durations in the Play Log line up with the waterfall above it. */
+function fmtMs(ms: number): string {
+  if (!Number.isFinite(ms) || ms <= 0) return '';
+  if (ms < 1) return ms.toFixed(2) + ' ms';
+  if (ms < 1000) return ms.toFixed(0) + ' ms';
+  return (ms / 1000).toFixed(2) + ' s';
 }
 
 function buildEventRow(raw: Record<string, unknown>): Row | null {
