@@ -313,27 +313,30 @@ const enabledKind = ref<Record<'effect' | 'cause', boolean>>({
   cause: false,
 });
 
-// L1 — Priority tier
-type Priority = 1 | 2 | 3 | 4;
-const PRIORITY_ORDER: Priority[] = [1, 2, 3, 4];
-const PRIORITY_META: Record<Priority, { label: string; color: string; bg: string; border: string }> = {
-  1: { label: 'Critical', color: '#dc2626', bg: '#fee2e2', border: '#fca5a5' },
-  2: { label: 'High',     color: '#b45309', bg: '#fef3c7', border: '#fcd34d' },
-  3: { label: 'Medium',   color: '#1d4ed8', bg: '#dbeafe', border: '#93c5fd' },
-  4: { label: 'Low',      color: '#4b5563', bg: '#e5e7eb', border: '#9ca3af' },
+// L1 — Severity tier (issue #473, replaces numeric Priority 1..4).
+// String tiers, worst-first. Same vocabulary the forwarder writes to
+// session_events.labels[] and session_markers.severity so a single
+// filter UI sweeps both source-row labels and marker rows.
+type Severity = 'error' | 'critical' | 'warning' | 'info';
+const SEVERITY_ORDER: Severity[] = ['error', 'critical', 'warning', 'info'];
+const SEVERITY_META: Record<Severity, { label: string; color: string; bg: string; border: string }> = {
+  error:    { label: 'Error',    color: '#7f1d1d', bg: '#fee2e2', border: '#fca5a5' },
+  critical: { label: 'Critical', color: '#7c2d12', bg: '#ffedd5', border: '#fdba74' },
+  warning:  { label: 'Warning',  color: '#854d0e', bg: '#fef3c7', border: '#fcd34d' },
+  info:     { label: 'Info',     color: '#1f2937', bg: '#f0fdf4', border: '#a7f3d0' },
 };
 
-const expandedTiers = ref<Record<Priority, boolean>>({
-  1: true, 2: true, 3: false, 4: false,
+const expandedTiers = ref<Record<Severity, boolean>>({
+  error: true, critical: true, warning: false, info: false,
 });
-function toggleTier(p: Priority) {
+function toggleTier(p: Severity) {
   expandedTiers.value[p] = !expandedTiers.value[p];
 }
 
-const visiblePriority = ref<Record<Priority, boolean>>({
-  1: true, 2: true, 3: true, 4: false,
+const visiblePriority = ref<Record<Severity, boolean>>({
+  error: true, critical: true, warning: true, info: false,
 });
-function togglePriorityVisibility(p: Priority, e: MouseEvent) {
+function togglePriorityVisibility(p: Severity, e: MouseEvent) {
   e.stopPropagation();
   const willBeVisible = !visiblePriority.value[p];
   visiblePriority.value[p] = willBeVisible;
@@ -348,10 +351,10 @@ function togglePriorityVisibility(p: Priority, e: MouseEvent) {
 }
 
 const hiddenTypeKeys = ref<Set<string>>(new Set());
-function isTypeVisible(t: string, p: Priority): boolean {
+function isTypeVisible(t: string, p: Severity): boolean {
   return !hiddenTypeKeys.value.has(typeKey(t, p));
 }
-function toggleTypeVisibility(t: string, p: Priority, e: MouseEvent) {
+function toggleTypeVisibility(t: string, p: Severity, e: MouseEvent) {
   e.stopPropagation();
   const k = typeKey(t, p);
   const next = new Set(hiddenTypeKeys.value);
@@ -359,9 +362,9 @@ function toggleTypeVisibility(t: string, p: Priority, e: MouseEvent) {
   hiddenTypeKeys.value = next;
 }
 
-const lockedPriority = ref<Priority | null>(null);
+const lockedPriority = ref<Severity | null>(null);
 const lockedType = ref<string | null>(null);
-function selectTier(p: Priority) {
+function selectTier(p: Severity) {
   if (lockedPriority.value === p && !lockedType.value) {
     lockedPriority.value = null;
   } else {
@@ -371,7 +374,7 @@ function selectTier(p: Priority) {
     expandedTiers.value[p] = true;
   }
 }
-function selectType(t: string, p: Priority) {
+function selectType(t: string, p: Severity) {
   if (lockedType.value === t && lockedPriority.value === p) {
     lockedType.value = null;
   } else {
@@ -387,15 +390,25 @@ function clearScope() {
 }
 
 const expandedTypeKey = ref<string | null>(null);
-function typeKey(t: string, p: Priority): string { return `${p}|${t}`; }
-function toggleTypeExpand(t: string, p: Priority) {
+function typeKey(t: string, p: Severity): string { return `${p}|${t}`; }
+function toggleTypeExpand(t: string, p: Severity) {
   const k = typeKey(t, p);
   expandedTypeKey.value = expandedTypeKey.value === k ? null : k;
 }
 
-function eventPriority(ev: SessionEvent): Priority {
-  const p = ev.priority;
-  return (p === 1 || p === 2 || p === 3 || p === 4) ? p : 3;
+function eventSeverity(ev: SessionEvent): Severity {
+  // Prefer the string `severity` field (post-#473 markers carry it).
+  // Fall back to the legacy numeric `priority` for one release while
+  // older forwarder builds + historical rows roll out.
+  const sev = (ev as { severity?: string }).severity;
+  if (sev === 'error' || sev === 'critical' || sev === 'warning' || sev === 'info') return sev;
+  switch (ev.priority) {
+    case 1: return 'error';
+    case 2: return 'critical';
+    case 3: return 'warning';
+    case 4: return 'info';
+  }
+  return 'warning';
 }
 function eventKindCE(ev: SessionEvent): 'effect' | 'cause' {
   return ev.kind === 'cause' ? 'cause' : 'effect';
@@ -403,13 +416,13 @@ function eventKindCE(ev: SessionEvent): 'effect' | 'cause' {
 
 interface AnnotatedEvent extends SessionEvent {
   _ts: number;
-  _p: Priority;
+  _p: Severity;
 }
 
 const kindFilteredEvents = computed<AnnotatedEvent[]>(() =>
   sessionEvents.value
     .filter((ev) => enabledKind.value[eventKindCE(ev)])
-    .map((ev) => ({ ...ev, _ts: eventMs(ev), _p: eventPriority(ev) }))
+    .map((ev) => ({ ...ev, _ts: eventMs(ev), _p: eventSeverity(ev) }))
     .filter((ev) => Number.isFinite(ev._ts))
     .sort((a, b) => a._ts - b._ts),
 );
@@ -423,8 +436,8 @@ const filteredEvents = computed<AnnotatedEvent[]>(
   }),
 );
 
-const tierCounts = computed<Record<Priority, number>>(() => {
-  const c: Record<Priority, number> = { 1: 0, 2: 0, 3: 0, 4: 0 };
+const tierCounts = computed<Record<Severity, number>>(() => {
+  const c: Record<Severity, number> = { error: 0, critical: 0, warning: 0, info: 0 };
   for (const ev of kindFilteredEvents.value) c[ev._p]++;
   return c;
 });
@@ -435,16 +448,16 @@ function kindCount(k: 'effect' | 'cause'): number {
   return n;
 }
 
-const tierTypes = computed<Record<Priority, Array<{ type: string; count: number }>>>(() => {
-  const buckets: Record<Priority, Map<string, number>> = {
-    1: new Map(), 2: new Map(), 3: new Map(), 4: new Map(),
+const tierTypes = computed<Record<Severity, Array<{ type: string; count: number }>>>(() => {
+  const buckets: Record<Severity, Map<string, number>> = {
+    error: new Map(), critical: new Map(), warning: new Map(), info: new Map(),
   };
   for (const ev of kindFilteredEvents.value) {
     const t = String(ev.type ?? 'event');
     buckets[ev._p].set(t, (buckets[ev._p].get(t) ?? 0) + 1);
   }
-  const out = {} as Record<Priority, Array<{ type: string; count: number }>>;
-  for (const p of PRIORITY_ORDER) {
+  const out = {} as Record<Severity, Array<{ type: string; count: number }>>;
+  for (const p of SEVERITY_ORDER) {
     out[p] = [...buckets[p].entries()]
       .map(([type, count]) => ({ type, count }))
       .sort((a, b) => a.count - b.count);
@@ -461,7 +474,7 @@ const tierTypeInstances = computed<Record<string, AnnotatedEvent[]>>(() => {
   return out;
 });
 
-function selectInstance(ev: AnnotatedEvent, t: string, p: Priority) {
+function selectInstance(ev: AnnotatedEvent, t: string, p: Severity) {
   if (lockedType.value !== t || lockedPriority.value !== p) {
     lockedPriority.value = p;
     lockedType.value = t;
@@ -477,23 +490,23 @@ function selectInstance(ev: AnnotatedEvent, t: string, p: Priority) {
   }
 }
 
-function tierPreview(p: Priority): Array<{ type: string; count: number }> {
+function tierPreview(p: Severity): Array<{ type: string; count: number }> {
   return tierTypes.value[p].slice(0, 5);
 }
-function tierPreviewMore(p: Priority): number {
+function tierPreviewMore(p: Severity): number {
   return Math.max(0, tierTypes.value[p].length - 5);
 }
-function pickPreviewType(t: string, p: Priority) {
+function pickPreviewType(t: string, p: Severity) {
   expandedTiers.value[p] = true;
   selectType(t, p);
 }
 
 const scopeLabel = computed<string>(() => {
   if (lockedType.value && lockedPriority.value) {
-    return `${lockedType.value} (in ${PRIORITY_META[lockedPriority.value].label})`;
+    return `${lockedType.value} (in ${SEVERITY_META[lockedPriority.value].label})`;
   }
   if (lockedPriority.value) {
-    return `All ${PRIORITY_META[lockedPriority.value].label} events`;
+    return `All ${SEVERITY_META[lockedPriority.value].label} events`;
   }
   return `All events (${filteredEvents.value.length})`;
 });
@@ -557,7 +570,7 @@ const railMarkers = computed(() => {
     const isCurrent = !!cur && cur._ts === ev._ts && cur.type === ev.type;
     return {
       leftPct: pct,
-      color: PRIORITY_META[ev._p].color,
+      color: SEVERITY_META[ev._p].color,
       opacity: eventKindCE(ev) === 'effect' ? 1 : 0.4,
       isCurrent,
       ts: ev._ts,
@@ -962,7 +975,7 @@ function skipToEnd() {
         </div>
 
         <div
-          v-for="p in PRIORITY_ORDER"
+          v-for="p in SEVERITY_ORDER"
           :key="p"
           class="tier-group"
           :class="{
@@ -971,9 +984,9 @@ function skipToEnd() {
             'tier-active': lockedPriority === p && !lockedType,
           }"
           :style="{
-            '--tier-bg': PRIORITY_META[p].bg,
-            '--tier-border': PRIORITY_META[p].border,
-            '--tier-color': PRIORITY_META[p].color,
+            '--tier-bg': SEVERITY_META[p].bg,
+            '--tier-border': SEVERITY_META[p].border,
+            '--tier-color': SEVERITY_META[p].color,
           }"
         >
           <div class="tier-header">
@@ -989,11 +1002,11 @@ function skipToEnd() {
               type="button"
               class="tier-name-btn"
               @click="selectTier(p); expandedTiers[p] = true"
-              :title="`Walk all ${tierCounts[p]} ${PRIORITY_META[p].label} event(s) with prev/next`"
+              :title="`Walk all ${tierCounts[p]} ${SEVERITY_META[p].label} event(s) with prev/next`"
               :disabled="!tierCounts[p]"
             >
               <span class="tier-dot" />
-              <span class="tier-name">{{ PRIORITY_META[p].label }}</span>
+              <span class="tier-name">{{ SEVERITY_META[p].label }}</span>
               <span class="tier-count-pill">{{ tierCounts[p] }}</span>
             </button>
             <button
@@ -1001,7 +1014,7 @@ function skipToEnd() {
               class="tier-eye-btn"
               :class="{ off: !visiblePriority[p] }"
               @click="togglePriorityVisibility(p, $event)"
-              :title="visiblePriority[p] ? `Hide ${PRIORITY_META[p].label} events from the rail` : `Show ${PRIORITY_META[p].label} events on the rail`"
+              :title="visiblePriority[p] ? `Hide ${SEVERITY_META[p].label} events from the rail` : `Show ${SEVERITY_META[p].label} events on the rail`"
               :disabled="!tierCounts[p]"
             >
               <svg v-if="visiblePriority[p]" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">

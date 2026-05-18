@@ -372,52 +372,58 @@ const SNAPSHOT_SKIP = new Set(['event_name', 'last_event', 'trigger_type']);
 const NETWORK_KEEP_ORDER: readonly string[] = ['status', 'duration', 'KB', 'Mbps'];
 const NETWORK_KEEP = new Set(NETWORK_KEEP_ORDER);
 
-/** Flag column + row tint for network rows. Mirrors NetworkLog.vue's
- *  flagsFor / rowFaultClass so the two panels look the same when both
- *  are open on a stalling session. Snapshot / event / marker rows
- *  return empty — they have no faulted/slow concept. */
-function isSlowNetwork(r: Row): boolean {
-  if (r.source !== 'network') return false;
-  const transfer = numOrZero(r.raw.transfer_ms);
-  const kind = String(r.raw.request_kind ?? '').toLowerCase();
-  if (/manifest/.test(kind)) return false;
-  return transfer > 6_000;
-}
-function rowFlags(r: Row): { text: string; color: string } {
-  if (r.source !== 'network') return { text: '', color: '' };
-  const faulted = !!r.raw.faulted && r.raw.faulted !== 0;
-  const cat = String(r.raw.fault_category ?? '').toLowerCase();
-  let glyph = '';
-  if (faulted) {
-    if (cat === 'socket') glyph = '!✂';
-    else if (cat === 'transfer_timeout') glyph = '!⏱';
-    else if (cat === 'client_disconnect') glyph = '!↩';
-    else glyph = '!';
+/** Labels column + row tint, driven entirely by `r.raw.labels`
+ *  written at ingest (issue #473). Replaces the previous bespoke
+ *  rowFlags + rowFaultClass that read faulted / fault_category /
+ *  status independently. Both source-row labels (events / network)
+ *  AND marker-row severity flow through the same severity buckets,
+ *  so the dashboard renders consistently regardless of which table
+ *  the row came from. */
+function rowLabels(r: Row): string[] {
+  const raw = r.raw?.labels;
+  if (Array.isArray(raw)) return raw.filter((x): x is string => typeof x === 'string');
+  // Marker rows carry `severity` instead of a labels array; synthesize
+  // a single label from (severity, type) so they participate in the
+  // same chip/tint rendering as source-row labels.
+  if (r.source === 'marker') {
+    const sev = String(r.raw?.severity ?? '');
+    const type = String(r.raw?.type ?? '');
+    if (sev && type) return [`${sev}=${type}`];
   }
-  const slow = isSlowNetwork(r) ? '⏰' : '';
-  return {
-    text: glyph + slow,
-    color: faulted ? '#7f1d1d' : (slow ? '#92400e' : ''),
-  };
+  return [];
 }
-function rowFaultClass(r: Row): string {
-  if (r.source !== 'network') return '';
-  // Precedence (highest first):
-  //   row-faulted    — proxy flagged a transport-level failure
-  //   row-status-5xx — server returned 5xx
-  //   row-slow       — segment took >6s
-  //   row-status-4xx — client error
-  //   row-status-2xx — ok
-  // Each class has its own tint so the operator can scan a long log
-  // and see clusters of bad rows at a glance, same idea as the
-  // status-* badge colours NetworkLog uses on its status column.
-  if (!!r.raw.faulted && r.raw.faulted !== 0) return 'row-faulted';
-  const status = numOrZero(r.raw.status);
-  if (status >= 500) return 'row-status-5xx';
-  if (isSlowNetwork(r)) return 'row-slow';
-  if (status >= 400) return 'row-status-4xx';
-  if (status >= 200 && status < 300) return 'row-status-2xx';
+
+/** Pull the severity prefix from a label like 'critical=stall_frozen'.
+ *  Returns '' for labels that don't follow the schema. */
+function labelSeverity(label: string): string {
+  const eq = label.indexOf('=');
+  return eq > 0 ? label.slice(0, eq) : '';
+}
+
+/** Highest-severity tier present in a label set. Mirrors the
+ *  forwarder's worstSeverity() in labels.go so the dashboard row
+ *  tint matches what the server-side classifier "would" call this
+ *  row if asked for one number. */
+function worstSeverity(labels: string[]): string {
+  let hasError = false, hasCritical = false, hasWarning = false, hasInfo = false;
+  for (const l of labels) {
+    switch (labelSeverity(l)) {
+      case 'error':    hasError = true; break;
+      case 'critical': hasCritical = true; break;
+      case 'warning':  hasWarning = true; break;
+      case 'info':     hasInfo = true; break;
+    }
+  }
+  if (hasError) return 'error';
+  if (hasCritical) return 'critical';
+  if (hasWarning) return 'warning';
+  if (hasInfo) return 'info';
   return '';
+}
+
+function rowSeverityClass(r: Row): string {
+  const sev = worstSeverity(rowLabels(r));
+  return sev ? `severity-${sev}` : '';
 }
 
 const allRows = computed<Row[]>(() => {
@@ -772,7 +778,7 @@ function onRowsWheel(e: WheelEvent) {
       <div class="row head">
         <div class="cell c-time sortable" @click="clickSort('time')">_time<span class="arr">{{ arrow('time') }}</span></div>
         <div class="cell c-source sortable" @click="clickSort('source')">source<span class="arr">{{ arrow('source') }}</span></div>
-        <div class="cell c-flag" title="Network row flags — same glyphs as the NetworkLog panel: ! faulted (+ category), ⏰ slow segment (>6s)">flags</div>
+        <div class="cell c-labels" title="Severity-tagged labels (#473). Stamped at ingest by computeEventLabels / computeNetworkLabels; marker rows synthesize one from severity+type.">labels</div>
         <div class="cell c-player">player_id</div>
         <div class="cell c-play">play_id</div>
         <div class="cell c-attempt">attempt_id</div>
@@ -786,13 +792,21 @@ function onRowsWheel(e: WheelEvent) {
           v-for="(r, i) in sortedRows"
           :key="i"
           class="row"
-          :class="[`src-${r.source}`, rowFaultClass(r)]"
+          :class="[`src-${r.source}`, rowSeverityClass(r)]"
         >
           <div class="cell c-time">{{ fmtTime(r.ts) }}</div>
           <div class="cell c-source">
             <span class="src-tag" :class="`tag-${r.source}`">{{ r.source }}</span>
           </div>
-          <div class="cell c-flag" :style="{ color: rowFlags(r).color }" :title="rowFlags(r).text">{{ rowFlags(r).text }}</div>
+          <div class="cell c-labels">
+            <span
+              v-for="l in rowLabels(r)"
+              :key="l"
+              class="label-chip"
+              :class="`label-${labelSeverity(l)}`"
+              :title="l"
+            >{{ l.slice(l.indexOf('=') + 1) }}</span>
+          </div>
           <div class="cell c-player" :title="r.playerId">{{ shortId(r.playerId) }}</div>
           <div class="cell c-play" :title="r.playId">{{ shortId(r.playId) }}</div>
           <div class="cell c-attempt" :title="r.attemptId">{{ shortId(r.attemptId) }}</div>
@@ -913,7 +927,7 @@ function onRowsWheel(e: WheelEvent) {
   grid-template-columns:
     var(--c-time, 96px)
     var(--c-source, 76px)
-    var(--c-flag, 36px)
+    var(--c-labels, minmax(140px, 220px))
     var(--c-player, 90px)
     var(--c-play, 90px)
     var(--c-attempt, 90px)
@@ -933,20 +947,13 @@ function onRowsWheel(e: WheelEvent) {
   grid-template-columns:
     var(--c-time, 96px)
     var(--c-source, 76px)
-    var(--c-flag, 36px)
+    var(--c-labels, minmax(140px, 220px))
     var(--c-player, 90px)
     var(--c-play, 90px)
     var(--c-attempt, 90px)
     var(--c-eventname, minmax(140px, 280px))
     var(--c-fields, minmax(200px, 2fr))
     var(--c-raw, minmax(280px, 3fr));
-}
-
-.c-flag {
-  text-align: center;
-  font-weight: 700;
-  letter-spacing: -1px;
-  font-size: 11px;
 }
 
 .row.head {
@@ -977,28 +984,53 @@ function onRowsWheel(e: WheelEvent) {
 .row.src-marker    { background: #fef9c3; }
 .row.src-marker:hover { background: #fef08a; }
 
-/* Network-row tints by HTTP status / fault flag.
+/* Row tints by severity (issue #473). Driven by the worst label on
+ * the row; placed AFTER the .row.src-* rules so source order breaks
+ * the CSS specificity tie in favour of the severity tint —
+ * otherwise the source-background wins and the tint only shows on
+ * hover (when :hover bumps specificity).
  *
- * Placed AFTER the .row.src-* rules so source order breaks the CSS
- * specificity tie in favour of the fault / status tint — otherwise
- * .row.src-network's white background wins and the colour only
- * appears on hover (when the :hover pseudo-class bumps specificity).
- *
- * Backgrounds picked to be light enough that chips/text stay legible
- * but distinct enough that a long scroll separates green/yellow/
- * amber/red clusters at a glance. Tracks the same palette
- * NetworkLog.vue uses for its status-chip backgrounds.
+ * Same palette the existing PRIORITY_META filter uses in
+ * SessionDisplay.vue so the dashboard reads consistently:
+ *   error    — red    (was Critical / priority 1)
+ *   critical — orange (split out of priority 1, user-impact subset)
+ *   warning  — amber  (was High + Medium)
+ *   info     — light  (was Low)
  */
-.row.row-status-2xx { background: #ecfdf5; }    /* light green — OK */
-.row.row-status-2xx:hover { background: #d1fae5; }
-.row.row-status-4xx { background: #fefce8; }    /* light yellow — 4xx */
-.row.row-status-4xx:hover { background: #fef9c3; }
-.row.row-slow { background: #fffbeb; }          /* amber — slow segment */
-.row.row-slow:hover { background: #fef3c7; }
-.row.row-status-5xx { background: #fef2f2; }    /* light red — 5xx */
-.row.row-status-5xx:hover { background: #fee2e2; }
-.row.row-faulted { background: #fee2e2; }       /* red — transport-level fault */
-.row.row-faulted:hover { background: #fecaca; }
+.row.severity-error    { background: #fee2e2; }
+.row.severity-error:hover    { background: #fecaca; }
+.row.severity-critical { background: #ffedd5; }
+.row.severity-critical:hover { background: #fed7aa; }
+.row.severity-warning  { background: #fef3c7; }
+.row.severity-warning:hover  { background: #fde68a; }
+.row.severity-info     { background: #f0fdf4; }
+.row.severity-info:hover     { background: #dcfce7; }
+
+/* Label chips. Each chip is one `<severity>=<event>` string; the
+ * severity prefix drives the chip color, the value (after =) is the
+ * visible text. The full `severity=event` is in the title attribute
+ * for keyboard / hover lookup. */
+.c-labels {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px;
+  align-items: flex-start;
+}
+.label-chip {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 8px;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1.4;
+  letter-spacing: 0.2px;
+  border: 1px solid transparent;
+  white-space: nowrap;
+}
+.label-error    { background: #fecaca; color: #7f1d1d; border-color: #fca5a5; }
+.label-critical { background: #fed7aa; color: #7c2d12; border-color: #fdba74; }
+.label-warning  { background: #fde68a; color: #854d0e; border-color: #fcd34d; }
+.label-info     { background: #d1fae5; color: #14532d; border-color: #a7f3d0; }
 
 .cell {
   white-space: nowrap;
