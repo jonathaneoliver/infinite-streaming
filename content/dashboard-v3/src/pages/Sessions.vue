@@ -321,10 +321,34 @@ function isoToLocal(iso: string): string {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
+/** A play is "still live" — i.e. the viewer should follow the live
+ *  edge rather than pin to a fixed end_time — if its last_seen is
+ *  within LIVE_TAIL_MS of now AND no terminal-state marker is set.
+ *  Threshold is generous (60 s) so a heartbeat that's a few seconds
+ *  late doesn't kick us into archive mode. */
+const LIVE_TAIL_MS = 60_000;
+function endTimeFor(r: SessionRow): string {
+  const lastSeen = Date.parse(r.last_seen ?? '');
+  if (!Number.isFinite(lastSeen)) return 'live';
+  if (Date.now() - lastSeen < LIVE_TAIL_MS) return 'live';
+  return new Date(lastSeen).toISOString();
+}
+
 function viewerHref(r: SessionRow): string {
   if (!r.player_id) return '#';
   const qs = new URLSearchParams({ player_id: r.player_id });
   if (r.play_id && r.play_id !== '—') qs.set('play_id', r.play_id);
+  // Pass the play's time bounds so the viewer can scope its initial
+  // brush + SSE backfill to this play's range instead of inferring
+  // it from samples landing. end_time=live means "follow live edge"
+  // and is set when the play looks still-active.
+  if (r.started) {
+    const startMs = Date.parse(r.started);
+    if (Number.isFinite(startMs)) {
+      qs.set('start_time', new Date(startMs).toISOString());
+    }
+  }
+  qs.set('end_time', endTimeFor(r));
   return '/dashboard/v3/session-viewer.html?' + qs.toString();
 }
 function bundleHref(r: SessionRow): string {

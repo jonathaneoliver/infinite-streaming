@@ -67,6 +67,14 @@ const props = defineProps<{
    *  surrounding context for the same player. Default: false — the
    *  view is locked to this play. */
   showContext?: boolean;
+  /** Initial time window. Caller (SessionViewer reading the URL)
+   *  passes startMs (ms-since-epoch) and endMs. endMs = null means
+   *  "follow live edge" — the SSE backfills from startMs but doesn't
+   *  set a `to` bound, and the brush stays unpinned so it tracks
+   *  live samples as they arrive. Both null = legacy behaviour
+   *  (auto-pin brush to samples.rangeBounds when they land). */
+  startMs?: number | null;
+  endMs?: number | null;
 }>();
 
 const playIdRef = computed(() => props.playId);
@@ -139,11 +147,23 @@ const { events: sessionEvents } = useArchivedSessionEvents(apiPlayerIdRef, playI
 // way the v3 timeseries SSE handles backfill + live deltas in the
 // same stream, so an in-progress play visited from session-viewer
 // will still receive live updates via the ring overlay.
-// Cache the play's time bounds the first time samples land in
-// archive mode. They survive subsequent SSE re-subscriptions (e.g.
-// when "show context" widens the window) so toggling the filter
-// back off can still snap to the play's range.
-const playBoundsCache = ref<{ min: number; max: number } | null>(null);
+/** Initial time-window source of truth, in order of preference:
+ *    1. props.startMs / props.endMs   ← URL-driven (sessions.html)
+ *    2. samples.rangeBounds            ← legacy auto-pin once data lands
+ *
+ *  windowBoundsRef holds whichever is currently the truth. URL props
+ *  take precedence — when present, the brush pins to them immediately
+ *  on mount (no waiting for samples). When absent, falls back to the
+ *  rangeBounds watcher below. */
+const windowBoundsRef = ref<{ min: number; max: number } | null>(null);
+if (props.startMs != null && props.endMs != null) {
+  windowBoundsRef.value = { min: props.startMs, max: props.endMs };
+} else if (props.startMs != null && props.endMs == null) {
+  // end_time=live: start is anchored, end follows live edge. The
+  // window's "max" doesn't matter for the SSE (we leave toMs null
+  // below); set it to startMs for now and let lastSampleMs extend it.
+  windowBoundsRef.value = { min: props.startMs, max: props.startMs };
+}
 
 /** Effective play_id for the SSE subscription. `showContext = true`
  *  drops the play_id filter so rows from neighbouring plays of the
@@ -152,20 +172,24 @@ const effectivePlayIdRef = computed<string | null>(() =>
   props.showContext ? null : playIdRef.value,
 );
 
-/** Reactive fromMs / toMs — only set when showContext is on AND we
- *  have cached bounds (i.e. the play's data has loaded at least
- *  once). Widens 5 minutes before play start and after play end so
- *  the SSE backfill returns a meaningful before/after window. */
+/** Reactive fromMs / toMs for the SSE.
+ *  - Base case (showContext off): use the URL's startMs/endMs as-is.
+ *    endMs=null means "follow live" — pass through as null so SSE
+ *    tails the live edge.
+ *  - showContext on: widen by CONTEXT_PAD_MS on each side so the
+ *    operator can scroll through before/after; toMs stays null when
+ *    end_time was "live". */
 const CONTEXT_PAD_MS = 5 * 60 * 1000;
 const fromMsRef = computed<number | null>(() => {
-  if (!props.showContext) return null;
-  const b = playBoundsCache.value;
-  return b ? b.min - CONTEXT_PAD_MS : null;
+  const startMs = props.startMs ?? windowBoundsRef.value?.min ?? null;
+  if (startMs == null) return null;
+  return props.showContext ? startMs - CONTEXT_PAD_MS : startMs;
 });
 const toMsRef = computed<number | null>(() => {
-  if (!props.showContext) return null;
-  const b = playBoundsCache.value;
-  return b ? b.max + CONTEXT_PAD_MS : null;
+  // end_time=live (props.endMs == null but startMs set) → no upper
+  // bound on the SSE backfill, regardless of showContext.
+  if (props.endMs == null) return null;
+  return props.showContext ? props.endMs + CONTEXT_PAD_MS : props.endMs;
 });
 
 const timeseries = useSessionTimeSeries(
@@ -183,18 +207,19 @@ const timeseries = useSessionTimeSeries(
   },
 );
 
-// Capture the play's bounds the first time samples arrive in archive
-// mode. Cache stays put across re-subscribes so we can swing the
-// SSE between play-only and context windows without losing the
-// anchor.
+// Fallback: when the URL didn't carry start_time/end_time, capture
+// the play's bounds the first time samples arrive in archive mode
+// so windowBoundsRef can drive the SSE re-subscribe on showContext
+// toggles. Skipped when URL props are present — those take precedence.
 watch(
   () => timeseries.samples.rangeBounds.value,
   (b) => {
     if (!b) return;
-    if (props.showContext) return;       // wider window, don't anchor on it
-    if (!playIdRef.value) return;        // live mode
-    if (playBoundsCache.value !== null) return;
-    playBoundsCache.value = b;
+    if (props.startMs != null) return;   // URL gave us the truth
+    if (props.showContext) return;        // wider window, don't anchor on it
+    if (!playIdRef.value) return;         // live mode
+    if (windowBoundsRef.value !== null) return;
+    windowBoundsRef.value = b;
   },
   { immediate: true },
 );
@@ -205,24 +230,40 @@ watch(
 // sees a coord instance even though it gets consumed mostly later.
 const coord = useChartCoordination(archivePlayerId);
 
-// Auto-pin the focus-window brush to the play's range (-5s lead-in)
-// the first time samples arrive in archive mode. Without this, a
-// fresh navigation from sessions.html lands the operator on a
-// "last 10 minutes ending at the play's end" window — which for a
-// short play is mostly empty whitespace before the play started.
+// Pin the focus-window brush as soon as we know the time bounds.
+//   - URL gave us startMs + endMs (sessions.html click): pin
+//     immediately on mount, no waiting for samples.
+//   - URL gave us startMs + endMs=null ("live"): leave coord.range
+//     null so the brush follows the live edge.
+//   - URL gave us nothing (legacy / direct URL): wait for samples
+//     and pin to bounds.min - 5s when they land.
 // One-shot: don't fight subsequent operator drags or the
 // "show context" toggle widening.
 let hasPinnedBrush = false;
+function tryPinBrush(min: number | null, max: number | null) {
+  if (hasPinnedBrush) return;
+  if (min == null || max == null) return;
+  if (props.showContext) return;
+  if (coord.state.range !== null) return;
+  coord.setRange({ min, max });
+  hasPinnedBrush = true;
+}
+if (props.startMs != null && props.endMs != null) {
+  // URL-driven archive range: pin immediately.
+  tryPinBrush(props.startMs, props.endMs);
+} else if (props.startMs != null && props.endMs == null) {
+  // end_time=live: leave coord.range null so brush follows live
+  // edge. Treat as "pinned" for the fallback watcher's purposes.
+  hasPinnedBrush = true;
+}
 watch(
   () => timeseries.samples.rangeBounds.value,
   (b) => {
     if (hasPinnedBrush) return;
     if (!b) return;
-    if (props.showContext) return;        // operator already in wide mode
-    if (!playIdRef.value) return;         // live mode
-    if (coord.state.range !== null) return; // operator already moved brush
-    coord.setRange({ min: b.min - 5000, max: b.max });
-    hasPinnedBrush = true;
+    if (props.showContext) return;
+    if (!playIdRef.value) return;
+    tryPinBrush(b.min - 5000, b.max);
   },
   { immediate: true },
 );
