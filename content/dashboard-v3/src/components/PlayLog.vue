@@ -929,13 +929,6 @@ function onRowsWheel(e: WheelEvent) {
     var(--c-raw, minmax(280px, 3fr));
 }
 
-/* Network-row tints — matched to NetworkLog.vue so the two panels
- * agree visually when both are open on a stalling session. */
-.row.row-faulted { background: #fef2f2; }
-.row.row-faulted:hover { background: #fee2e2; }
-.row.row-slow { background: #fffbeb; }
-.row.row-slow:hover { background: #fef3c7; }
-
 .c-flag {
   text-align: center;
   font-weight: 700;
@@ -970,6 +963,17 @@ function onRowsWheel(e: WheelEvent) {
 .row.src-network  { background: #ffffff; }
 .row.src-marker    { background: #fef9c3; }
 .row.src-marker:hover { background: #fef08a; }
+
+/* Network-row tints — same backgrounds NetworkLog.vue uses so the
+ * two panels agree visually. Placed AFTER the src-* rules so source
+ * order breaks the specificity tie in favour of the fault tint —
+ * otherwise .row.src-network's white background wins and the red
+ * only appears on hover, when .row.row-faulted:hover (which has the
+ * pseudo-class) bumps to a higher specificity. */
+.row.row-faulted { background: #fef2f2; }
+.row.row-faulted:hover { background: #fee2e2; }
+.row.row-slow { background: #fffbeb; }
+.row.row-slow:hover { background: #fef3c7; }
 
 .cell {
   white-space: nowrap;
