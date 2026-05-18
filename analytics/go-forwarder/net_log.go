@@ -58,6 +58,11 @@ type netRow struct {
 	ResponseHeaders      string  `json:"response_headers"`
 	QueryString          string  `json:"query_string"`
 	EntryFingerprint     uint64  `json:"entry_fingerprint"`
+	// Labels — see the corresponding field on `row` in main.go.
+	// Same vocabulary; <severity>=<event> strings stamped at ingest
+	// from computeNetworkLabels(). Drives the dashboard's row tint
+	// and chip rendering. Issue #473.
+	Labels               []string `json:"labels,omitempty"`
 }
 
 // netEntry mirrors go-proxy's NetworkLogEntry. Only the fields we keep
@@ -460,6 +465,8 @@ func batchInsertNet(ctx context.Context, cfg config, ring *Ring, in <-chan netRo
 				flush()
 				return
 			}
+			// Stamp severity-tagged labels at write time (issue #473).
+			r.Labels = computeNetworkLabels(&r)
 			rowCopy := r
 			fp := fmt.Sprintf("%d", rowCopy.EntryFingerprint)
 			e := ring.Add(

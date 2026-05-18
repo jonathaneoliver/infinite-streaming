@@ -488,9 +488,15 @@ CREATE TABLE IF NOT EXISTS infinite_streaming.session_markers
     -- 'cause' vs 'effect' — operators sort cause-tagged events to the
     -- top when triaging. multiIf table identical to the legacy SQL.
     kind                     LowCardinality(String) CODEC(ZSTD(1)),
-    -- 1 (critical) … 4 (low). Closed set; matches the legacy SQL's
-    -- multiIf priority table.
+    -- 1 (critical) … 4 (low). DEPRECATED in #473 in favour of
+    -- `severity` below; kept populated by the forwarder for one
+    -- release so dashboards that still read it keep working.
     priority                 UInt8                  DEFAULT 3,
+    -- Severity tier as the canonical filter dimension after #473.
+    -- Shares vocabulary with source-row `labels[]` so a single
+    -- dashboard severity filter sweeps both this table AND
+    -- session_events / network_requests rows.
+    severity                 LowCardinality(String) DEFAULT '' CODEC(ZSTD(1)),
     -- Dedupe key over (player_id, play_id, ts_ms, type, info). Lets
     -- the forwarder replay the SSE on reconnect without double-
     -- inserting events for the same source row.

@@ -153,6 +153,11 @@ type chEvent struct {
 	Subtype          string `json:"subtype,omitempty"`
 	Info             string `json:"info"`
 	Kind             string `json:"kind"`
+	// Severity is the canonical tier as of issue #473 — string-typed,
+	// shares vocabulary with source-row labels (`error` / `critical`
+	// / `warning` / `info`). Priority below is the legacy UInt8 1..4
+	// kept populated for one release while consumers migrate.
+	Severity         string `json:"severity"`
 	Priority         uint8  `json:"priority"`
 	EventFingerprint uint64 `json:"event_fingerprint"`
 	// Classification is set to the column DEFAULT 'other' on insert;
@@ -181,6 +186,7 @@ func toChEvent(e eventclass.Event) chEvent {
 		Subtype:          e.Subtype,
 		Info:             e.Info,
 		Kind:             e.Kind(),
+		Severity:         e.Severity(stallDur),
 		Priority:         e.Priority(stallDur),
 		EventFingerprint: e.Fingerprint(),
 		Classification:   e.Classification,

@@ -88,8 +88,8 @@ type Event struct {
 }
 
 // Kind returns "cause" for fault-class types and "effect" otherwise.
-// Same multiIf table the legacy events_query.go used so dashboard
-// "sort cause first" behaviour stays stable.
+// Only the bucket-B types remain after issue #473; bucket-A markers
+// went to source-row labels.
 func (e Event) Kind() string {
 	switch e.Type {
 	case TypeMasterManifestFailure, TypeAllFailure,
@@ -97,9 +97,7 @@ func (e Event) Kind() string {
 		TypeTransportFailure,
 		TypeTransferActiveTimeout, TypeTransferIdleTimeout,
 		TypeFaultOn, TypeFaultOff,
-		TypeHTTP5xx, TypeHTTP4xx,
-		TypeRequestTimeout, TypeRequestIncomplete, TypeRequestFaulted,
-		TypeSlowRequest, TypeSlowSegment, TypeRequestRetry,
+		TypeRequestRetry,
 		TypeLoopServer:
 		return "cause"
 	default:
@@ -107,43 +105,56 @@ func (e Event) Kind() string {
 	}
 }
 
-// Priority returns 1..4 (1 = critical, 4 = low). Identical to the
-// legacy SQL's multiIf priority table — see eventsSQLTemplate's
-// `multiIf` block.
-//
-// `stallDurationS` is the parsed duration for stall events, used to
-// promote long stalls to priority 1; callers pass 0 for non-stalls.
+// Priority returns the legacy 1..4 numeric tier for back-compat with
+// dashboards that haven't migrated to Severity() yet (issue #473
+// transition window). 1=Critical/Error, 2=High, 3=Medium, 4=Low.
+// Maps deterministically from Severity().
 func (e Event) Priority(stallDurationS float64) uint8 {
-	switch e.Type {
-	case TypeUserMarked, TypeError, TypeMasterManifestFailure, TypeAllFailure:
+	switch e.Severity(stallDurationS) {
+	case "error":
 		return 1
+	case "critical":
+		return 1
+	case "warning":
+		return 3
+	case "info":
+		return 4
+	}
+	return 3
+}
+
+// Severity returns the string severity tier (error/critical/warning/
+// info) for a marker. Mirrors the source-row label vocabulary so the
+// dashboard's filter UI can iterate marker rows + source-row labels
+// into the same buckets. Replaces the previous numeric Priority()
+// (1..4) which is being deprecated over one release after #473.
+//
+// `stallDurationS` is the parsed duration for stall events — long
+// stalls (≥3s) promote to `critical` from `warning`. Callers pass 0
+// for non-stalls.
+func (e Event) Severity(stallDurationS float64) string {
+	switch e.Type {
+	// error — system-detected failure
+	case TypeError, TypeMasterManifestFailure, TypeAllFailure:
+		return "error"
+	// critical — user-visible impact
 	case TypeStall:
 		if stallDurationS >= 3 {
-			return 1
+			return "critical"
 		}
-		return 2
-	case TypeRestart:
-		return 2
+		return "warning"
+	// warning — degraded
 	case TypeManifestFailure, TypeSegmentFailure,
 		TypeTransportFailure,
 		TypeTransferActiveTimeout, TypeTransferIdleTimeout,
 		TypeFaultOn, TypeFaultOff,
-		TypeDownshift, TypeTimejump, TypeBuffering:
-		return 3
-	case TypeVideoBitrateChange:
-		if e.Subtype == SubtypeDown {
-			return 3
-		}
-		return 4
-	case TypeHTTP5xx, TypeRequestTimeout:
-		return 2
-	case TypeHTTP4xx, TypeRequestIncomplete, TypeRequestFaulted,
-		TypeSlowRequest, TypeSlowSegment:
-		return 3
-	case TypeRequestRetry, TypeUpshift, TypePlaybackStart, TypeLoopServer:
-		return 4
+		TypeBuffering:
+		return "warning"
+	// info — normal lifecycle
+	case TypeRequestRetry, TypeLoopServer:
+		return "info"
 	default:
-		return 3
+		return "warning"
 	}
 }
 
@@ -164,29 +175,18 @@ func (e Event) Fingerprint() uint64 {
 	return h.Sum64()
 }
 
-// Closed event-type set. Same strings the legacy events_query.go SQL
-// emitted — preserved verbatim so dashboards keep filtering on the
-// same identifiers after the cutover.
+// Closed event-type set — only bucket-B markers remain after issue
+// #473. Bucket-A re-labels of single source rows (upshift, downshift,
+// playback_start, http_4xx, http_5xx, slow_request, slow_segment,
+// request_timeout, request_incomplete, request_faulted, restart,
+// playback_start, timejump, user_marked, single-row stall variants)
+// are now `labels[]` on the source row instead — see labels.go in
+// the parent package.
 const (
+	// Pair-derived (start→end with duration).
 	TypeStall                 = "stall"
 	TypeBuffering             = "buffering"
-	TypeRestart               = "restart"
-	TypePlaybackStart         = "playback_start"
-	// TypeVideoBitrateChange covers both up- and down-shifts in the
-	// player's selected video rendition. The directional split lives
-	// on Event.Subtype ('up' / 'down') so dashboards can filter or
-	// group by it without two distinct Type values for what is one
-	// observation. (#470)
-	TypeVideoBitrateChange    = "video_bitrate_change"
-	SubtypeUp                 = "up"
-	SubtypeDown               = "down"
-	// Legacy values — kept so historical rows pre-#470 cutover still
-	// match Kind/Priority lookups. No new rows use these.
-	TypeDownshift             = "downshift"
-	TypeUpshift               = "upshift"
-	TypeTimejump              = "timejump"
-	TypeError                 = "error"
-	TypeUserMarked            = "user_marked"
+	// Counter-bump edges.
 	TypeMasterManifestFailure = "master_manifest_failure"
 	TypeAllFailure            = "all_failure"
 	TypeManifestFailure       = "manifest_failure"
@@ -194,16 +194,15 @@ const (
 	TypeTransportFailure      = "transport_failure"
 	TypeTransferActiveTimeout = "transfer_active_timeout"
 	TypeTransferIdleTimeout   = "transfer_idle_timeout"
+	TypeLoopServer            = "loop_server"
+	// transport_fault_active edge.
 	TypeFaultOn               = "fault_on"
 	TypeFaultOff              = "fault_off"
-	TypeLoopServer            = "loop_server"
-	TypeHTTP5xx               = "http_5xx"
-	TypeHTTP4xx               = "http_4xx"
-	TypeRequestTimeout        = "request_timeout"
-	TypeRequestIncomplete     = "request_incomplete"
-	TypeRequestFaulted        = "request_faulted"
-	TypeSlowRequest           = "slow_request"
-	TypeSlowSegment           = "slow_segment"
+	// player_error state change (only the variant where the error
+	// CHANGED mid-stream without a fresh last_event='error' POST —
+	// the explicit-marker variant lives on the source row's
+	// `error=player_error` label now).
+	TypeError                 = "error"
 	TypeRequestRetry          = "request_retry"
 )
 

@@ -295,6 +295,13 @@ type row struct {
 	LastRequest              string  `json:"last_request"`
 	SessionDuration          float32 `json:"session_duration"`
 	SessionJSON              string  `json:"session_json"`
+	// Labels are the row's <severity>=<event> tags computed at ingest
+	// time (issue #473). Source for the dashboard's severity-based
+	// row tint + chips and the auto-classification tier bump in
+	// classification.go's runClassifyLoop. Bucket-A markers (the ones
+	// that were pure re-labels of one source row) were retired in
+	// favor of these labels. CH type is Array(LowCardinality(String)).
+	Labels                   []string `json:"labels,omitempty"`
 }
 
 type ssePayload struct {
@@ -839,6 +846,11 @@ func batchInserter(ctx context.Context, cfg config, ring *Ring, in <-chan row,
 				flush()
 				return
 			}
+			// Stamp severity-tagged labels at write time (issue #473)
+			// — replaces bucket-A markers. The dashboard and the
+			// auto-classifier both read this column instead of the
+			// scattered per-event-type rules we used to maintain.
+			r.Labels = computeEventLabels(&r)
 			// Pin the row in the ring as `pending` before queueing
 			// for INSERT. The pointer we get back lets us flip state
 			// in lockstep with the batch's lifecycle.
