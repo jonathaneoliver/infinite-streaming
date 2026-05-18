@@ -387,25 +387,45 @@ const snapshotChangeRates = computed<Map<string, number>>(() => {
   return out;
 });
 
-/** Sort comparator that picks alphabetic or change-rate-ascending
- *  based on the current fieldOrder radio. Snapshots use change-rate
- *  when selected; network / event rows always fall back to
- *  alphabetic (no meaningful frequency to compute). */
+/** Sort comparator that picks alphabetic or change-rate-based
+ *  ordering. Snapshots use change-rate when selected; network /
+ *  event rows always fall back to alphabetic (no meaningful
+ *  frequency to compute — every row is unique).
+ *
+ *  Change-rate sort puts the most-operator-interesting fields first:
+ *
+ *    1. Rarely-but-not-never changing fields (rate > 0, low) —
+ *       state, last_event, video_resolution, … — these are
+ *       surprising transitions worth seeing.
+ *    2. More frequently changing fields (rate > 0, high) —
+ *       position_s, playhead_wallclock_ms, per-tick metrics.
+ *    3. Truly constant fields (rate == 0) — user_agent, content_id,
+ *       master_manifest_url, … — informative once, then dead weight.
+ *       Sink to the END.
+ *
+ *  Constants are demoted by treating their rate as +Infinity in the
+ *  sort key, so they always lose ties to anything that's ever
+ *  changed during the session. */
 function sortFields(fields: DisplayedField[], source: Source): DisplayedField[] {
   if (fieldOrder.value === 'alphabetic' || source !== 'snapshot') {
     // fieldsFromRaw already emits alphabetic — return as-is.
     return fields;
   }
   const rates = snapshotChangeRates.value;
+  const keyFor = (name: string): number => {
+    const r = rates.get(name);
+    // Unknown rate (e.g. only one snapshot observed so far) →
+    // demote alongside constants. Honest: "we don't have enough
+    // data to call this volatile, so don't pretend it is."
+    if (r == null) return Number.POSITIVE_INFINITY;
+    // Truly constant fields → infinity → land at the end.
+    if (r === 0) return Number.POSITIVE_INFINITY;
+    return r;
+  };
   return fields.slice().sort((a, b) => {
-    const ra = rates.get(a.name);
-    const rb = rates.get(b.name);
-    // Fields with no observed rate (first-row baseline, all-fields
-    // mode) sort to the END — they're effectively "rate unknown".
-    if (ra == null && rb == null) return a.name.localeCompare(b.name);
-    if (ra == null) return 1;
-    if (rb == null) return -1;
-    if (ra !== rb) return ra - rb;       // ascending: stable first
+    const ka = keyFor(a.name);
+    const kb = keyFor(b.name);
+    if (ka !== kb) return ka - kb;
     return a.name.localeCompare(b.name); // tie → alphabetic
   });
 }
@@ -596,7 +616,7 @@ function onRowsWheel(e: WheelEvent) {
     <div class="toolbar mode-row">
       <span class="mode-label">Field order:</span>
       <label class="opt"><input type="radio" value="alphabetic" v-model="fieldOrder" /> Alphabetic</label>
-      <label class="opt"><input type="radio" value="by-change-rate" v-model="fieldOrder" /> By change rate (rarely-changing first)</label>
+      <label class="opt"><input type="radio" value="by-change-rate" v-model="fieldOrder" /> By interest (changing fields first, constants last)</label>
       <span class="mode-hint">Snapshots only; network &amp; event rows stay alphabetic.</span>
     </div>
 
