@@ -169,6 +169,7 @@ function buildSnapshotRow(raw: Record<string, unknown>): Row | null {
     playId: asStr(raw.play_id),
     restartId: asStr(raw.restart_id),
     raw,
+    eventName: asStr(raw.last_event),
   };
 }
 
@@ -275,6 +276,10 @@ function fieldsFromRaw(raw: Record<string, unknown>, extraSkip?: Set<string>): D
 }
 
 const EVENT_SKIP = new Set(['type']);
+/** Snapshot keys lifted into the dedicated event_name column.
+ *  `trigger_type` is a sibling carrying the same value in current
+ *  iOS data — skipping it too avoids two chips that always agree. */
+const SNAPSHOT_SKIP = new Set(['last_event', 'trigger_type']);
 
 const allRows = computed<Row[]>(() => {
   // Touch each stream's version so Vue re-runs the computed on every
@@ -406,7 +411,9 @@ const rowsWithFields = computed<RowWithFields[]>(() => {
   for (let i = 0; i < chrono.length; i++) {
     const r = chrono[i];
     let fields: DisplayedField[];
-    const skip = r.source === 'event' ? EVENT_SKIP : undefined;
+    const skip = r.source === 'event' ? EVENT_SKIP
+      : r.source === 'snapshot' ? SNAPSHOT_SKIP
+      : undefined;
     if (r.source === 'snapshot' && mode === 'changed' && prevSnapshot) {
       const prevByKey = new Map<string, string>();
       for (const f of fieldsFromRaw(prevSnapshot)) prevByKey.set(f.name, f.value);
@@ -596,6 +603,7 @@ function onRowsWheel(e: WheelEvent) {
         <div class="cell c-player">player_id</div>
         <div class="cell c-play">play_id</div>
         <div class="cell c-restart">restart_id</div>
+        <div class="cell c-eventname">event_name</div>
         <div class="cell c-fields">fields</div>
         <div v-if="showRaw" class="cell c-raw">raw</div>
       </div>
@@ -614,13 +622,17 @@ function onRowsWheel(e: WheelEvent) {
           <div class="cell c-player" :title="r.playerId">{{ shortId(r.playerId) }}</div>
           <div class="cell c-play" :title="r.playId">{{ shortId(r.playId) }}</div>
           <div class="cell c-restart" :title="r.restartId">{{ shortId(r.restartId) }}</div>
-          <div class="cell c-fields">
+          <div class="cell c-eventname">
             <span
               v-if="r.eventName"
               class="event-name"
-              :title="'event_name=' + r.eventName"
+              :class="`event-name-${r.source}`"
+              :title="r.eventName"
             >{{ r.eventName }}</span>
-            <span v-if="r.fields.length === 0 && !r.eventName" class="kv-empty">—</span>
+            <span v-else class="event-name-empty">—</span>
+          </div>
+          <div class="cell c-fields">
+            <span v-if="r.fields.length === 0" class="kv-empty">—</span>
             <span
               v-for="f in r.fields"
               :key="f.name"
@@ -719,7 +731,8 @@ function onRowsWheel(e: WheelEvent) {
     var(--c-player, 90px)
     var(--c-play, 90px)
     var(--c-restart, 90px)
-    var(--c-fields, minmax(320px, 4fr));
+    var(--c-eventname, minmax(120px, 160px))
+    var(--c-fields, minmax(280px, 4fr));
   gap: 8px;
   padding: 4px 8px;
   font-size: 11px;
@@ -737,7 +750,8 @@ function onRowsWheel(e: WheelEvent) {
     var(--c-player, 90px)
     var(--c-play, 90px)
     var(--c-restart, 90px)
-    var(--c-fields, minmax(220px, 2fr))
+    var(--c-eventname, minmax(120px, 160px))
+    var(--c-fields, minmax(200px, 2fr))
     var(--c-raw, minmax(280px, 3fr));
 }
 
@@ -833,16 +847,35 @@ function onRowsWheel(e: WheelEvent) {
   font-size: 10px;
 }
 
-/* Event name — leading badge so the operator always sees "stall"
- * "downshift" etc. without scanning the kv chips for `type=`. */
+/* event_name column — dedicated cell after restart_id. Lifted out
+ * of the alphabetical chip list since the operator always wants to
+ * see "stall" / "downshift" / "buffering_start" / etc. on a fixed
+ * column position regardless of mode or sort. */
+.c-eventname {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 .event-name {
-  background: #f59e0b;
-  color: #fff;
+  display: inline-block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   border-radius: 4px;
   padding: 1px 8px;
   font-size: 11px;
   font-weight: 700;
   letter-spacing: 0.3px;
+}
+/* Source-tinted: events read as the "interesting thing", so they
+ * keep the loud amber. Snapshots are background heartbeat-ish data,
+ * so use a calmer grey-blue. */
+.event-name-event    { background: #f59e0b; color: #fff; }
+.event-name-snapshot { background: #e5e7eb; color: #1f2937; font-weight: 600; }
+.event-name-network  { background: #dbeafe; color: #1e3a8a; }
+.event-name-empty {
+  color: #9ca3af;
+  font-size: 11px;
 }
 
 /* Raw column — JSON blob, monospace, capped height. The full value
