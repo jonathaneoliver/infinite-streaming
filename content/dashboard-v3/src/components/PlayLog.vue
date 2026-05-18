@@ -31,9 +31,9 @@ const props = defineProps<{
    *  same id every event would have anyway.
    *  In live mode this is null, in which case event rows show '—'. */
   playId: string | null;
-  samplesStream: Stream<Record<string, unknown>>;
-  networkStream: Stream<Record<string, unknown>>;
   eventsStream: Stream<Record<string, unknown>>;
+  networkStream: Stream<Record<string, unknown>>;
+  markersStream: Stream<Record<string, unknown>>;
 }>();
 
 const playerIdRef = toRef(props, 'playerId');
@@ -363,12 +363,12 @@ const NETWORK_KEEP = new Set(NETWORK_KEEP_ORDER);
 const allRows = computed<Row[]>(() => {
   // Touch each stream's version so Vue re-runs the computed on every
   // delta, even though inRange() also touches the underlying ref.
-  void props.samplesStream.version.value;
-  void props.networkStream.version.value;
   void props.eventsStream.version.value;
+  void props.networkStream.version.value;
+  void props.markersStream.version.value;
   const built: Row[] = [];
   if (showSnapshots.value) {
-    for (const raw of props.samplesStream.inRange(0, Number.MAX_SAFE_INTEGER)) {
+    for (const raw of props.eventsStream.inRange(0, Number.MAX_SAFE_INTEGER)) {
       const r = buildSnapshotRow(raw);
       if (r) built.push(r);
     }
@@ -380,7 +380,7 @@ const allRows = computed<Row[]>(() => {
     }
   }
   if (showEvents.value) {
-    for (const raw of props.eventsStream.inRange(0, Number.MAX_SAFE_INTEGER)) {
+    for (const raw of props.markersStream.inRange(0, Number.MAX_SAFE_INTEGER)) {
       const r = buildEventRow(raw);
       if (r) built.push(r);
     }
@@ -407,8 +407,8 @@ interface RowWithFields extends Row {
  *  field that's truly constant sits at 0. Recomputed reactively
  *  with the snapshot stream — touches version so deltas re-run it. */
 const snapshotChangeRates = computed<Map<string, number>>(() => {
-  void props.samplesStream.version.value;
-  const snapshots = props.samplesStream.inRange(0, Number.MAX_SAFE_INTEGER);
+  void props.eventsStream.version.value;
+  const snapshots = props.eventsStream.inRange(0, Number.MAX_SAFE_INTEGER);
   if (snapshots.length < 2) return new Map();
   // Stable chronological order. The stream's natural order is
   // typically already ts-ascending, but sort defensively — change-

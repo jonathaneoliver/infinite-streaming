@@ -67,7 +67,7 @@ const keepaliveInterval = 15 * time.Second
 // stream during the backfill burst. Surfaced in `meta.server_caps`
 // so the client can adjust its memory budget honestly.
 const (
-	backfillCapSamples = 50000
+	backfillCapEvents = 50000
 	backfillCapNetwork = 5000
 )
 
@@ -226,7 +226,7 @@ func parseTimeseriesParams(r *http.Request) (timeseriesParams, error) {
 		return p, errBadParam("one of player_id or session_id is required")
 	}
 	if p.streams == "" {
-		return p, errBadParam("streams=samples,network,... is required")
+		return p, errBadParam("streams=events,network,markers is required")
 	}
 
 	p.limit = parseLimit(q.Get("limit"), 50000, 200000)
@@ -248,7 +248,7 @@ func parseTimeseriesParams(r *http.Request) (timeseriesParams, error) {
 	// (CH will reject unknown columns per-stream — clean 4xx surface).
 	if f := strings.TrimSpace(q.Get("fields")); f != "" {
 		list := splitCSV(f)
-		for _, sk := range []streamKind{streamSamples, streamNetwork, streamEvents} {
+		for _, sk := range []streamKind{streamEvents, streamNetwork, streamMarkers} {
 			p.fieldsByStream[sk] = list
 		}
 	}
@@ -353,7 +353,7 @@ func emitBackfill(
 	ringWindowMs int64,
 ) error {
 	switch sel.Stream {
-	case streamSamples:
+	case streamEvents:
 		if err := emitBackfillSamples(ctx, w, flusher, cfg, sel, params, seen); err != nil {
 			return err
 		}
@@ -363,7 +363,7 @@ func emitBackfill(
 			return err
 		}
 		return emitBackfillFromRing(w, flusher, ring, key, sel.Stream, kindNetwork, params, seen, ringWindowMs)
-	case streamEvents:
+	case streamMarkers:
 		// Events are derived at query time — no ring; backfill is the
 		// taxonomy SQL over [from, to]. Live continuation is handled
 		// by startEventsPoller after backfill returns.
@@ -384,10 +384,10 @@ func emitBackfillSamples(ctx context.Context, w http.ResponseWriter, flusher htt
 	}
 	for _, row := range rows {
 		ts := stringField(row, "ts")
-		if !seen.Add(streamSamples, ts) {
+		if !seen.Add(streamEvents, ts) {
 			continue
 		}
-		writeSSEEvent(w, "sample", ts, row)
+		writeSSEEvent(w, "event", ts, row)
 	}
 	flusher.Flush()
 	return nil
@@ -430,7 +430,7 @@ func emitBackfillFromRing(w http.ResponseWriter, flusher http.Flusher,
 		var payload any
 		var fp string
 		switch stream {
-		case streamSamples:
+		case streamEvents:
 			r, ok := e.Payload.(*row)
 			if !ok {
 				continue
@@ -544,7 +544,7 @@ func lockedWrite(mu *sync.Mutex, fn func()) {
 // come off the ring — see startEventsPoller.
 func selectionsHasEvents(selections []streamSelection) bool {
 	for _, s := range selections {
-		if s.Stream == streamEvents {
+		if s.Stream == streamMarkers {
 			return true
 		}
 	}
@@ -555,17 +555,22 @@ func ringKindToStream(k ringKind) streamKind {
 	if k == kindNetwork {
 		return streamNetwork
 	}
-	return streamSamples
+	return streamEvents
 }
 
+// streamToEventName maps a streamKind to the SSE `event:` name the
+// frame is written under. After issue #472's rename:
+//   streamEvents  → "event"   (player event, was "sample")
+//   streamNetwork → "network"
+//   streamMarkers → "marker"  (classifier output, was "event")
 func streamToEventName(s streamKind) string {
 	switch s {
-	case streamSamples:
-		return "sample"
-	case streamNetwork:
-		return "network"
 	case streamEvents:
 		return "event"
+	case streamNetwork:
+		return "network"
+	case streamMarkers:
+		return "marker"
 	}
 	return "data"
 }
@@ -603,8 +608,8 @@ func buildSamplesQuery(cfg config, sel streamSelection, params timeseriesParams)
 		return "", nil, errBadParam("at least one identity clause required")
 	}
 	limit := params.limit
-	if limit <= 0 || limit > backfillCapSamples {
-		limit = backfillCapSamples
+	if limit <= 0 || limit > backfillCapEvents {
+		limit = backfillCapEvents
 	}
 	// Subquery wrap so WHERE/ORDER BY operate on the native DateTime64
 	// `ts` column. Without the wrap, the outer SELECT's
@@ -737,7 +742,7 @@ func emitMeta(w http.ResponseWriter, flusher http.Flusher, selections []streamSe
 		"streams":     streams,
 		"columns":     cols,
 		"live":        live,
-		"server_caps": map[string]int{"samples": backfillCapSamples, "network": backfillCapNetwork},
+		"server_caps": map[string]int{"events": backfillCapEvents, "network": backfillCapNetwork},
 		"ring":        map[string]any{"window_seconds": ring.windowMs / 1000},
 		"from":        params.from,
 		"to":          params.to,

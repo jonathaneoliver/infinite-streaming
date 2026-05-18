@@ -231,7 +231,7 @@ func insertEvents(ctx context.Context, cfg config, rows []chEvent) error {
 			return err
 		}
 	}
-	q := fmt.Sprintf("INSERT INTO %s.session_events FORMAT JSONEachRow", cfg.chDatabase)
+	q := fmt.Sprintf("INSERT INTO %s.session_markers FORMAT JSONEachRow", cfg.chDatabase)
 	u, err := url.Parse(cfg.clickhouseURL)
 	if err != nil {
 		return err

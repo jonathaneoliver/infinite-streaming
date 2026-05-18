@@ -36,9 +36,10 @@ Subcommands (all read-only — forwarder /analytics/api/v2/*):
   play <play_id>                  one play + _links
   aggregate [--from --to --classification]
                                   aggregate stats across plays
-  snapshots <play_id> [--limit]
+  events <play_id> [--limit]      player events (formerly: snapshots)
   network <play_id> [--limit]
-  events <play_id> [--limit]
+  markers <play_id> [--limit]     classifier output (formerly: events)
+  snapshots <play_id> [--limit]   DEPRECATED alias of events
   heatmap <play_id>
   bundle <play_id> --out PATH     download play bundle ZIP
 
@@ -56,12 +57,18 @@ func cmdArchive(client *api.Client, args []string, asJSON bool) error {
 		return cmdArchivePlay(client, args[1:], asJSON)
 	case "aggregate":
 		return cmdArchiveAggregate(client, args[1:], asJSON)
-	case "snapshots":
-		return cmdArchiveSnapshots(client, args[1:], asJSON)
+	case "events", "snapshots":
+		// `events` is the canonical name (issue #472); `snapshots` is
+		// kept as a deprecated alias for one release cycle so saved
+		// scripts and CI invocations keep working.
+		return cmdArchiveEvents(client, args[1:], asJSON)
 	case "network":
 		return cmdArchiveNetwork(client, args[1:], asJSON)
-	case "events":
-		return cmdArchiveEvents(client, args[1:], asJSON)
+	case "markers":
+		// New (#472) — derived classifier output. Renamed from `events`
+		// at the same time the underlying CH table session_events was
+		// renamed to session_markers.
+		return cmdArchiveMarkers(client, args[1:], asJSON)
 	case "heatmap":
 		return cmdArchiveHeatmap(client, args[1:], asJSON)
 	case "bundle":
@@ -188,12 +195,12 @@ func cmdArchiveAggregate(client *api.Client, args []string, asJSON bool) error {
 	return printOrJSON(body, asJSON)
 }
 
-func cmdArchiveSnapshots(client *api.Client, args []string, asJSON bool) error {
+func cmdArchiveEvents(client *api.Client, args []string, asJSON bool) error {
 	if len(args) < 1 {
-		return errors.New("usage: harness archive snapshots <play_id> [--limit N]")
+		return errors.New("usage: harness archive events <play_id> [--limit N]")
 	}
 	playID := args[0]
-	fs := flag.NewFlagSet("archive snapshots", flag.ContinueOnError)
+	fs := flag.NewFlagSet("archive events", flag.ContinueOnError)
 	limit, err := parseLimit(fs, args[1:])
 	if err != nil {
 		return err
@@ -240,12 +247,12 @@ func cmdArchiveNetwork(client *api.Client, args []string, asJSON bool) error {
 	return printOrJSON(body, asJSON)
 }
 
-func cmdArchiveEvents(client *api.Client, args []string, asJSON bool) error {
+func cmdArchiveMarkers(client *api.Client, args []string, asJSON bool) error {
 	if len(args) < 1 {
-		return errors.New("usage: harness archive events <play_id> [--limit N]")
+		return errors.New("usage: harness archive markers <play_id> [--limit N]")
 	}
 	playID := args[0]
-	fs := flag.NewFlagSet("archive events", flag.ContinueOnError)
+	fs := flag.NewFlagSet("archive markers", flag.ContinueOnError)
 	limit, err := parseLimit(fs, args[1:])
 	if err != nil {
 		return err

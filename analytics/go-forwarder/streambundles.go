@@ -22,25 +22,31 @@ import (
 )
 
 // streamKind names the three top-level data streams the v2
-// timeseries endpoint can emit. Mirrors ringKind for samples/network
-// (events are derived at query time so they don't pass through the
+// timeseries endpoint can emit. Mirrors ringKind for events/network
+// (markers are derived at query time so they don't pass through the
 // ring).
+//
+// Issue #472 renamed the on-the-wire values: `samples` → `events`,
+// `events` → `markers`. The Go identifiers were rotated to match,
+// hence the const block below reads strangely at a glance:
+// streamEvents = "events" is the player-event stream (was samples),
+// streamMarkers = "markers" is the classifier output (was events).
 type streamKind string
 
 const (
-	streamSamples streamKind = "samples"
-	streamNetwork streamKind = "network"
 	streamEvents  streamKind = "events"
+	streamNetwork streamKind = "network"
+	streamMarkers streamKind = "markers"
 )
 
 func parseStreamKind(s string) (streamKind, bool) {
 	switch s {
-	case "samples":
-		return streamSamples, true
-	case "network":
-		return streamNetwork, true
 	case "events":
 		return streamEvents, true
+	case "network":
+		return streamNetwork, true
+	case "markers":
+		return streamMarkers, true
 	}
 	return "", false
 }
@@ -69,7 +75,7 @@ var bundleRegistry = map[string]bundleDef{
 	// window stays cheap.
 	"charts_minimal": {
 		Name:   "charts_minimal",
-		Stream: streamSamples,
+		Stream: streamEvents,
 		Columns: []string{
 			"ts",
 			"session_id", "play_id", "player_id",
@@ -135,7 +141,7 @@ var bundleRegistry = map[string]bundleDef{
 	// pre-segmented MV without breaking lanes_v1 consumers.
 	"lanes_v1": {
 		Name:   "lanes_v1",
-		Stream: streamSamples,
+		Stream: streamEvents,
 		Columns: []string{
 			"ts",
 			"session_id", "play_id", "player_id",
@@ -167,7 +173,7 @@ var bundleRegistry = map[string]bundleDef{
 	// session". Static-ish fields the user reads, not chart-fed.
 	"session_details": {
 		Name:   "session_details",
-		Stream: streamSamples,
+		Stream: streamEvents,
 		Columns: []string{
 			"ts",
 			"session_id", "play_id", "player_id", "group_id",
@@ -209,7 +215,7 @@ var bundleRegistry = map[string]bundleDef{
 	// columns. The timeseries handler delegates to the same SQL.
 	"events": {
 		Name:   "events",
-		Stream: streamEvents,
+		Stream: streamMarkers,
 		Columns: []string{
 			"ts", "type", "info", "kind", "priority",
 			"play_id", "player_id", "session_id",
@@ -354,11 +360,11 @@ func resolveSelection(
 //     ring/CH boundary.
 func mandatoryColumns(stream streamKind) []string {
 	switch stream {
-	case streamSamples:
+	case streamEvents:
 		return []string{"ts", "session_id", "play_id", "player_id"}
 	case streamNetwork:
 		return []string{"ts", "session_id", "play_id", "player_id", "entry_fingerprint"}
-	case streamEvents:
+	case streamMarkers:
 		return []string{"ts", "play_id", "player_id", "session_id"}
 	}
 	return nil

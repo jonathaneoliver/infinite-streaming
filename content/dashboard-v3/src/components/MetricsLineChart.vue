@@ -52,7 +52,7 @@ const props = defineProps({
    *  Each row is one CH session_snapshots projection (charts_minimal
    *  bundle); the chart adapts it to the synthetic PlayerRecord shape
    *  the per-series accessors expect. */
-  samplesStream: { type: Object as PropType<Stream<Record<string, unknown>>>, required: true },
+  eventsStream: { type: Object as PropType<Stream<Record<string, unknown>>>, required: true },
 });
 
 const canvas = ref<HTMLCanvasElement | null>(null);
@@ -63,7 +63,7 @@ const coord = useChartCoordination(toRef(props, 'playerId'));
 let chart: any = null;
 let dataset: Array<Array<{ x: number; y: number }>> = [];
 // Watermark of the latest CH row already pushed through the chart.
-// Read by the samples-stream watcher to drain only NEW rows on each
+// Read by the markers-stream watcher to drain only NEW rows on each
 // version bump (the cache holds the full backfill + live tail).
 let lastIngestedMs = -Infinity;
 
@@ -668,7 +668,7 @@ async function drainNewRows() {
     catch (err) { console.warn('chart ensure failed:', err); return; }
   }
   if (!chart) return;
-  const raw = props.samplesStream.inRange(
+  const raw = props.eventsStream.inRange(
     lastIngestedMs === -Infinity ? 0 : lastIngestedMs + 1,
     Number.MAX_SAFE_INTEGER,
   );
@@ -710,7 +710,7 @@ async function drainNewRows() {
 }
 
 watch(
-  () => props.samplesStream.version.value,
+  () => props.eventsStream.version.value,
   () => { void drainNewRows(); },
   { immediate: true },
 );

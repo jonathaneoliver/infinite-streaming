@@ -108,7 +108,7 @@ func loadConfig() config {
 		sseURL:        getenv("FORWARDER_SSE_URL", "http://go-server:30081/api/sessions/stream"),
 		clickhouseURL: getenv("FORWARDER_CLICKHOUSE_URL", "http://clickhouse:8123"),
 		chDatabase:    getenv("FORWARDER_CLICKHOUSE_DB", "infinite_streaming"),
-		chTable:       getenv("FORWARDER_CLICKHOUSE_TABLE", "session_snapshots"),
+		chTable:       getenv("FORWARDER_CLICKHOUSE_TABLE", "session_events"),
 		chUser:        getenv("FORWARDER_CLICKHOUSE_USER", "default"),
 		chPassword:    getenv("FORWARDER_CLICKHOUSE_PASSWORD", ""),
 		// flushEvery is the upper bound on per-row visibility lag — the
@@ -1298,8 +1298,14 @@ func serveHTTP(ctx context.Context, cfg config, ring *Ring) {
 		proxyClickHouseJSON(w, r, cfg, query, params)
 	}
 
-	mux.HandleFunc("/api/session_events", sessionEventsHandler)
-	mux.HandleFunc("/api/v2/session_events", sessionEventsHandler)
+	// Issue #472 renamed the endpoint: classifier output is now
+	// "markers", player POSTs are "events". The /session_events name
+	// is kept as a deprecated alias for one release cycle so
+	// in-flight harness scripts and saved dashboard tabs keep working.
+	mux.HandleFunc("/api/session_markers", sessionEventsHandler)
+	mux.HandleFunc("/api/v2/session_markers", sessionEventsHandler)
+	mux.HandleFunc("/api/session_events", sessionEventsHandler)   // deprecated alias
+	mux.HandleFunc("/api/v2/session_events", sessionEventsHandler) // deprecated alias
 
 	// Per-request HAR-style log for the session-viewer's network log
 	// fold. Returns rows in the same shape the live go-proxy endpoint

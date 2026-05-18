@@ -12,7 +12,7 @@ import type { PlayerRecord } from '@/repo/v2-repo';
 
 defineProps<{
   playerId: string;
-  samplesStream: Stream<Record<string, unknown>>;
+  eventsStream: Stream<Record<string, unknown>>;
 }>();
 
 const series: SeriesSpec[] = [
@@ -42,7 +42,7 @@ const series: SeriesSpec[] = [
     title="Buffer & live offset"
     unit="buffer (s)"
     :series="series"
-    :samples-stream="samplesStream"
+    :events-stream="eventsStream"
     :y-min="0"
     y2-title="offset (s)"
     :y2-min="0"

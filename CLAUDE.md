@@ -141,8 +141,8 @@ Shared modules (`content/shared/`):
 
 ### Analytics sidecar (`analytics/`)
 
-- `clickhouse/init.d/01-schema.sql` — `session_snapshots` + `network_requests` schema, 30-day TTL.
-- `go-forwarder/` — Go binary that subscribes to `/api/sessions/stream`, batches inserts into ClickHouse, and serves `/api/sessions`, `/api/snapshots`, `/api/session_events`, `/api/network_requests`, `/api/session_heatmap`, `/api/session_bundle` (ZIP) read-only via parameterized `{name:Type}` SQL placeholders.
+- `clickhouse/init.d/01-schema.sql` — `session_events` (player POSTs) + `network_requests` + `session_markers` (classifier output) schema, 30-day TTL. Old names (`session_snapshots`, `session_events` for classifier output) were rotated in issue #472 — keep this in mind when reading old commit messages.
+- `go-forwarder/` — Go binary that subscribes to `/api/sessions/stream`, batches inserts into ClickHouse, and serves `/api/sessions`, `/api/events` (alias: `/api/snapshots`), `/api/session_markers` (alias: `/api/session_events`), `/api/network_requests`, `/api/session_heatmap`, `/api/session_bundle` (ZIP) read-only via parameterized `{name:Type}` SQL placeholders.
 - `grafana/provisioning/` — dashboards-as-code; reload with `make analytics-update`.
 - See [`analytics/README.md`](analytics/README.md) for ops, schema, and the WAN-deploy auth runbook.
 

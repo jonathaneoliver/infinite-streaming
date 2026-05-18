@@ -1,9 +1,9 @@
 /**
- * useArchivedSessionEvents(playerId, playId)
+ * useArchivedSessionMarkers(playerId, playId)
  *
  * Fetches the notable-events list for the SessionViewer's rail markers
  * and jump-to-event dropdown. Mirrors the legacy session-replay.js
- * call to /analytics/api/v2/session_events (NDJSON) — one record per
+ * call to /analytics/api/v2/session_markers (NDJSON) — one record per
  * notable thing (STALL, ERROR, SHIFT_UP/DOWN, FROZEN, LOOP, USER_MARK,
  * RESTART, etc).
  *
@@ -48,7 +48,7 @@ function buildQuery(p: Record<string, string | number | undefined>): string {
   return parts.length ? '?' + parts.join('&') : '';
 }
 
-export function useArchivedSessionEvents(
+export function useArchivedSessionMarkers(
   playerId: Ref<string>,
   playId: Ref<string | null>,
 ) {
@@ -100,7 +100,7 @@ export function useArchivedSessionEvents(
         // historically squeezed out rare faults / errors.
         limit: 50000,
       });
-      const resp = await fetch('/analytics/api/v2/session_events' + qs, {
+      const resp = await fetch('/analytics/api/v2/session_markers' + qs, {
         headers: { Accept: 'application/x-ndjson' },
         signal: abort.signal,
       });

@@ -40,7 +40,7 @@ import NetworkLog from '@/components/NetworkLog.vue';
 import PlayLog from '@/components/PlayLog.vue';
 import BitrateChartPanelToolbar from '@/components/BitrateChartPanelToolbar.vue';
 import { useChartCoordination } from '@/composables/useChartCoordination';
-import { useArchivedSessionEvents, type SessionEvent } from '@/composables/useArchivedSessionEvents';
+import { useArchivedSessionMarkers, type SessionEvent } from '@/composables/useArchivedSessionMarkers';
 import { usePlayer } from '@/composables/usePlayer';
 import { useSessionTimeSeries } from '@/composables/useSessionTimeSeries';
 import { chRowToPlayerRecord, tsOfRow } from '@/composables/chRowAdapter';
@@ -120,7 +120,7 @@ const archivePlayerId = computed(() =>
 // tick markers, the priority/tier filter UI, and the prev/next nav
 // keep functioning unchanged. Filters by player_id + play_id only —
 // session_id retired.
-const { events: sessionEvents } = useArchivedSessionEvents(apiPlayerIdRef, playIdRef);
+const { events: sessionEvents } = useArchivedSessionMarkers(apiPlayerIdRef, playIdRef);
 
 // v3 unified time-series model. Single subscription per
 // SessionDisplay drives:
@@ -196,11 +196,11 @@ const timeseries = useSessionTimeSeries(
   apiPlayerIdRef,
   effectivePlayIdRef,
   {
-    // 'events' added so the new "Play Log" fold (PlayLog.vue) can show
-    // typed events interleaved with snapshots + network rows on one
-    // chronological scroll. The bundle is auto-added when 'events' is
-    // in streams (useSessionTimeSeries.ts:215).
-    streams: ['samples', 'network', 'events'],
+    // 'markers' added so the new "Play Log" fold (PlayLog.vue) can
+    // show classifier-derived markers interleaved with player events
+    // + network rows on one chronological scroll. The bundle is
+    // auto-added when 'markers' is in streams (useSessionTimeSeries).
+    streams: ['events', 'network', 'markers'],
     bundles: ['charts_minimal', 'lanes_v1', 'session_details', 'network'],
     fromMs: fromMsRef,
     toMs: toMsRef,
@@ -212,7 +212,7 @@ const timeseries = useSessionTimeSeries(
 // so windowBoundsRef can drive the SSE re-subscribe on showContext
 // toggles. Skipped when URL props are present — those take precedence.
 watch(
-  () => timeseries.samples.rangeBounds.value,
+  () => timeseries.events.rangeBounds.value,
   (b) => {
     if (!b) return;
     if (props.startMs != null) return;   // URL gave us the truth
@@ -257,7 +257,7 @@ if (props.startMs != null && props.endMs != null) {
   hasPinnedBrush = true;
 }
 watch(
-  () => timeseries.samples.rangeBounds.value,
+  () => timeseries.events.rangeBounds.value,
   (b) => {
     if (hasPinnedBrush) return;
     if (!b) return;
@@ -276,7 +276,7 @@ watch(
  *  (or the last archived sample's ts) and the rail bounds come
  *  entirely from `rangeBounds`. */
 const timeRange = computed<{ min: number; max: number } | null>(() => {
-  const ar = timeseries.samples.rangeBounds.value;
+  const ar = timeseries.events.rangeBounds.value;
   const live = coord.state.lastSampleMs || 0;
   if (!ar && !live) return null;
   if (!ar) return { min: live, max: live };
@@ -284,15 +284,15 @@ const timeRange = computed<{ min: number; max: number } | null>(() => {
   return { min: ar.min, max: Math.max(ar.max, live) };
 });
 
-const loading = computed(() => timeseries.samples.loading.value);
-const error = computed(() => timeseries.samples.error.value);
+const loading = computed(() => timeseries.events.loading.value);
+const error = computed(() => timeseries.events.error.value);
 const progressLabel = computed(() => loading.value ? 'Streaming snapshots…' : '');
 // Approximate count of rendered samples — used in the brush-rail
 // status line. The cache only grows; reading via inRange touches
 // `version` so this stays reactive on every flush.
 const samplesCount = computed(() => {
-  void timeseries.samples.version.value;
-  return timeseries.samples.inRange(0, Number.MAX_SAFE_INTEGER).length;
+  void timeseries.events.version.value;
+  return timeseries.events.inRange(0, Number.MAX_SAFE_INTEGER).length;
 });
 
 /* ─── Event filter ──────────────────────────────────────────────── */
@@ -772,9 +772,9 @@ function playerKey(id: string) {
 // this never collides with the live cache that outside mutation
 // panels (FaultRules etc.) read.
 watch(
-  [() => brushRange.value.max, () => timeseries.samples.version.value],
+  [() => brushRange.value.max, () => timeseries.events.version.value],
   ([endMs]) => {
-    const row = timeseries.samples.lastAt(endMs);
+    const row = timeseries.events.lastAt(endMs);
     if (!row) return;
     const adapted = chRowToPlayerRecord(row);
     setArchivePlayer(archivePlayerId.value, adapted);
@@ -1147,16 +1147,16 @@ function skipToEnd() {
     </CollapsibleSection>
 
     <CollapsibleSection title="Player State" :open="true" eager persist-key="player-state">
-      <EventsTimeline :player-id="archivePlayerId" :samples-stream="timeseries.samples" />
+      <EventsTimeline :player-id="archivePlayerId" :events-stream="timeseries.events" />
     </CollapsibleSection>
 
     <CollapsibleSection title="Bitrate Chart etc" :open="true" eager persist-key="bitrate-chart">
       <BitrateChartPanelToolbar :player-id="archivePlayerId" />
       <div class="chart-stack">
-        <BandwidthChart :player-id="archivePlayerId" :samples-stream="timeseries.samples" />
-        <RTTChart :player-id="archivePlayerId" :samples-stream="timeseries.samples" />
-        <BufferChart :player-id="archivePlayerId" :samples-stream="timeseries.samples" />
-        <FPSChart :player-id="archivePlayerId" :samples-stream="timeseries.samples" />
+        <BandwidthChart :player-id="archivePlayerId" :events-stream="timeseries.events" />
+        <RTTChart :player-id="archivePlayerId" :events-stream="timeseries.events" />
+        <BufferChart :player-id="archivePlayerId" :events-stream="timeseries.events" />
+        <FPSChart :player-id="archivePlayerId" :events-stream="timeseries.events" />
       </div>
     </CollapsibleSection>
 
@@ -1179,9 +1179,9 @@ function skipToEnd() {
       <PlayLog
         :player-id="archivePlayerId"
         :play-id="playIdRef"
-        :samples-stream="timeseries.samples"
-        :network-stream="timeseries.network"
         :events-stream="timeseries.events"
+        :network-stream="timeseries.network"
+        :markers-stream="timeseries.markers"
       />
     </CollapsibleSection>
   </div>

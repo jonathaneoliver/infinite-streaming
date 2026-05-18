@@ -74,7 +74,7 @@ func emitBackfillEvents(
 	for i := len(rows) - 1; i >= 0; i-- {
 		row := rows[i]
 		fp := eventFingerprint(row)
-		if !seen.Add(streamEvents, fp) {
+		if !seen.Add(streamMarkers, fp) {
 			continue
 		}
 		writeSSEEvent(w, "event", fp, row)
@@ -145,7 +145,7 @@ func startEventsPoller(
 			for i := len(rows) - 1; i >= 0; i-- {
 				row := rows[i]
 				fp := eventFingerprint(row)
-				if !seen.Add(streamEvents, fp) {
+				if !seen.Add(streamMarkers, fp) {
 					continue
 				}
 				lockedWrite(writeMu, func() {

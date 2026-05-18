@@ -33,7 +33,11 @@ import {
   inRangeAsc,
   evictOutsideViewport,
 } from './sessionTimeSeriesUtils';
-const V3_EVENT_TYPES = ['meta', 'sample', 'network', 'event', 'heartbeat', 'complete', 'stream_error'];
+// SSE event names this stream produces. Renamed in issue #472:
+//   'sample' → 'event'   (player POSTs)
+//   'event'  → 'marker'  (classifier output)
+// Frame shape on the wire is otherwise unchanged.
+const V3_EVENT_TYPES = ['meta', 'event', 'network', 'marker', 'heartbeat', 'complete', 'stream_error'];
 
 /**
  * Stream<T> — the per-stream surface every renderer consumes. Read
@@ -56,7 +60,7 @@ export interface Stream<T> {
 
 export interface UseSessionTimeSeriesOpts {
   /** Comma list of streams to subscribe to. Default: all three. */
-  streams?: ('samples' | 'network' | 'events')[];
+  streams?: ('events' | 'network' | 'markers')[];
   /** Bundle names. Default: charts_minimal,lanes_v1,network for samples+network. */
   bundles?: string[];
   /** Ad-hoc field list — applied to every enabled stream as a
@@ -81,9 +85,9 @@ export interface UseSessionTimeSeriesOpts {
 }
 
 export interface UseSessionTimeSeriesReturn {
-  samples: Stream<Record<string, unknown>>;
-  network: Stream<Record<string, unknown>>;
   events: Stream<Record<string, unknown>>;
+  network: Stream<Record<string, unknown>>;
+  markers: Stream<Record<string, unknown>>;
   /** True if the server is actively tailing this stream. False once
    *  it sends `event:complete` (archive replay or play ended). */
   live: Ref<boolean>;
@@ -141,25 +145,25 @@ export function useSessionTimeSeries(
     ? (opts.toMs as Ref<number | null | undefined>)
     : ref(opts.toMs);
 
-  const samplesArr = shallowRef<Record<string, unknown>[]>([]);
-  const networkArr = shallowRef<Record<string, unknown>[]>([]);
   const eventsArr = shallowRef<Record<string, unknown>[]>([]);
+  const networkArr = shallowRef<Record<string, unknown>[]>([]);
+  const markersArr = shallowRef<Record<string, unknown>[]>([]);
 
-  const samplesVersion = ref(0);
-  const networkVersion = ref(0);
   const eventsVersion = ref(0);
+  const networkVersion = ref(0);
+  const markersVersion = ref(0);
 
-  const samplesBounds = ref<{ min: number; max: number } | null>(null);
-  const networkBounds = ref<{ min: number; max: number } | null>(null);
   const eventsBounds = ref<{ min: number; max: number } | null>(null);
+  const networkBounds = ref<{ min: number; max: number } | null>(null);
+  const markersBounds = ref<{ min: number; max: number } | null>(null);
 
-  const samplesLoading = ref(false);
-  const networkLoading = ref(false);
   const eventsLoading = ref(false);
+  const networkLoading = ref(false);
+  const markersLoading = ref(false);
 
-  const samplesError = ref<string | null>(null);
-  const networkError = ref<string | null>(null);
   const eventsError = ref<string | null>(null);
+  const networkError = ref<string | null>(null);
+  const markersError = ref<string | null>(null);
 
   const live = ref(true);
   const connectionState = ref<'connecting' | 'open' | 'closed'>('closed');
@@ -174,9 +178,9 @@ export function useSessionTimeSeries(
   // bumps version + triggerRef once per stream that received rows.
   // This caps re-render cost at one pass per stream per second
   // regardless of upstream burst rate.
-  const samplesPending: Record<string, unknown>[] = [];
-  const networkPending: Record<string, unknown>[] = [];
   const eventsPending: Record<string, unknown>[] = [];
+  const networkPending: Record<string, unknown>[] = [];
+  const markersPending: Record<string, unknown>[] = [];
   let flushTimer: ReturnType<typeof setInterval> | null = null;
 
   function teardown() {
@@ -192,24 +196,24 @@ export function useSessionTimeSeries(
   }
 
   function resetCaches() {
-    samplesArr.value = [];
-    networkArr.value = [];
     eventsArr.value = [];
-    samplesPending.length = 0;
-    networkPending.length = 0;
+    networkArr.value = [];
+    markersArr.value = [];
     eventsPending.length = 0;
-    samplesVersion.value++;
-    networkVersion.value++;
+    networkPending.length = 0;
+    markersPending.length = 0;
     eventsVersion.value++;
-    samplesBounds.value = null;
-    networkBounds.value = null;
+    networkVersion.value++;
+    markersVersion.value++;
     eventsBounds.value = null;
-    samplesLoading.value = false;
-    networkLoading.value = false;
+    networkBounds.value = null;
+    markersBounds.value = null;
     eventsLoading.value = false;
-    samplesError.value = null;
-    networkError.value = null;
+    networkLoading.value = false;
+    markersLoading.value = false;
     eventsError.value = null;
+    networkError.value = null;
+    markersError.value = null;
     lastEventId = '';
   }
 
@@ -220,16 +224,16 @@ export function useSessionTimeSeries(
     const params = new URLSearchParams();
     params.set('player_id', pid);
     if (playId.value) params.set('play_id', playId.value);
-    const streams = opts.streams ?? ['samples', 'network'];
+    const streams = opts.streams ?? ['events', 'network'];
     params.set('streams', streams.join(','));
     if (opts.bundles && opts.bundles.length) {
       params.set('bundles', opts.bundles.join(','));
     } else {
       // Default bundle picks per stream; keeps the wire ergonomic.
       const defaults: string[] = [];
-      if (streams.includes('samples')) defaults.push('charts_minimal', 'lanes_v1');
+      if (streams.includes('events')) defaults.push('charts_minimal', 'lanes_v1');
       if (streams.includes('network')) defaults.push('network');
-      if (streams.includes('events')) defaults.push('events');
+      if (streams.includes('markers')) defaults.push('events');
       if (defaults.length) params.set('bundles', defaults.join(','));
     }
     if (opts.fields && opts.fields.length) {
@@ -265,7 +269,7 @@ export function useSessionTimeSeries(
     const url = buildUrl();
     if (!url) return;
     connectionState.value = 'connecting';
-    samplesLoading.value = true;
+    eventsLoading.value = true;
     networkLoading.value = true;
 
     es = new EventSource(url);
@@ -298,14 +302,14 @@ export function useSessionTimeSeries(
           if (typeof m?.live === 'boolean') live.value = m.live;
         } catch { /* ignore malformed meta */ }
         return;
-      case 'sample':
-        enqueueRow(data, samplesPending);
+      case 'event':
+        enqueueRow(data, eventsPending);
         return;
       case 'network':
         enqueueRow(data, networkPending);
         return;
-      case 'event':
-        enqueueRow(data, eventsPending);
+      case 'marker':
+        enqueueRow(data, markersPending);
         return;
       case 'heartbeat':
         return;
@@ -314,20 +318,20 @@ export function useSessionTimeSeries(
         // archive rows make it into the cache.
         flushAll();
         live.value = false;
-        samplesLoading.value = false;
-        networkLoading.value = false;
         eventsLoading.value = false;
+        networkLoading.value = false;
+        markersLoading.value = false;
         teardown();
         return;
       case 'stream_error':
         try {
           const m = JSON.parse(data);
           const msg = String(m?.message ?? 'stream error');
-          samplesError.value = msg;
-          networkError.value = msg;
           eventsError.value = msg;
+          networkError.value = msg;
+          markersError.value = msg;
         } catch {
-          samplesError.value = 'stream error';
+          eventsError.value = 'stream error';
         }
         return;
     }
@@ -345,9 +349,9 @@ export function useSessionTimeSeries(
    *  pass per stream. Bumps version + triggerRef once per stream
    *  that actually received rows. */
   function flushAll() {
-    drainQueue(samplesPending, samplesArr, samplesVersion, samplesBounds, samplesLoading);
-    drainQueue(networkPending, networkArr, networkVersion, networkBounds, networkLoading);
     drainQueue(eventsPending, eventsArr, eventsVersion, eventsBounds, eventsLoading);
+    drainQueue(networkPending, networkArr, networkVersion, networkBounds, networkLoading);
+    drainQueue(markersPending, markersArr, markersVersion, markersBounds, markersLoading);
   }
 
   function drainQueue(
@@ -492,29 +496,29 @@ export function useSessionTimeSeries(
   const SOFT_CAP_NETWORK = 5000;
   const SOFT_CAP_EVENTS = 50000;
   watch(
-    [samplesVersion, networkVersion, eventsVersion],
+    [eventsVersion, networkVersion, markersVersion],
     () => {
-      const bounds = mergedBounds(samplesBounds.value, networkBounds.value, eventsBounds.value);
+      const bounds = mergedBounds(eventsBounds.value, networkBounds.value, markersBounds.value);
       if (!bounds) return;
-      if (samplesArr.value.length > SOFT_CAP_SAMPLES) {
-        evictOutsideViewport(samplesArr.value, bounds.min, bounds.max, tsOf);
-        triggerRef(samplesArr);
+      if (eventsArr.value.length > SOFT_CAP_SAMPLES) {
+        evictOutsideViewport(eventsArr.value, bounds.min, bounds.max, tsOf);
+        triggerRef(eventsArr);
       }
       if (networkArr.value.length > SOFT_CAP_NETWORK) {
         evictOutsideViewport(networkArr.value, bounds.min, bounds.max, tsOf);
         triggerRef(networkArr);
       }
-      if (eventsArr.value.length > SOFT_CAP_EVENTS) {
-        evictOutsideViewport(eventsArr.value, bounds.min, bounds.max, tsOf);
-        triggerRef(eventsArr);
+      if (markersArr.value.length > SOFT_CAP_EVENTS) {
+        evictOutsideViewport(markersArr.value, bounds.min, bounds.max, tsOf);
+        triggerRef(markersArr);
       }
     },
   );
 
   return {
-    samples: makeStream(samplesArr, samplesVersion, samplesBounds, samplesLoading, samplesError),
-    network: makeStream(networkArr, networkVersion, networkBounds, networkLoading, networkError),
     events: makeStream(eventsArr, eventsVersion, eventsBounds, eventsLoading, eventsError),
+    network: makeStream(networkArr, networkVersion, networkBounds, networkLoading, networkError),
+    markers: makeStream(markersArr, markersVersion, markersBounds, markersLoading, markersError),
     live,
     connectionState,
     reconnect: connect,

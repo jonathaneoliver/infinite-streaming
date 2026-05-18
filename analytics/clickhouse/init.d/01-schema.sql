@@ -1,12 +1,18 @@
--- Analytics schema for InfiniteStream session snapshots.
+-- Analytics schema for InfiniteStream session events + classifier markers.
 --
--- One row per session per SSE broadcast tick. The forwarder dedupes by
--- payload fingerprint, so an unchanging session does not generate rows.
--- Grafana, ad-hoc SQL, and testing.html replay mode all read from here.
+-- Two coupled tables:
+--   - session_events:   one row per player metrics POST (was: session_snapshots).
+--   - session_markers:  one row per classifier-derived event (was: session_events).
+-- The forwarder dedupes events by payload fingerprint; markers by event_fingerprint.
+-- Grafana, ad-hoc SQL, the harness CLI, and the session viewer all read from here.
+--
+-- The rename (issue #472) was a vocabulary cleanup, not a data migration —
+-- existing data was preserved via RENAME TABLE. On fresh hosts these CREATEs
+-- use the new names from the start.
 
 CREATE DATABASE IF NOT EXISTS infinite_streaming;
 
-CREATE TABLE IF NOT EXISTS infinite_streaming.session_snapshots
+CREATE TABLE IF NOT EXISTS infinite_streaming.session_events
 (
     ts                    DateTime64(3, 'UTC')        CODEC(DoubleDelta, ZSTD(1)),
     revision              UInt64                      CODEC(DoubleDelta, ZSTD(1)),
@@ -229,17 +235,17 @@ TTL toDateTime(ts) + INTERVAL 30 DAY DELETE WHERE classification = 'other',
 SETTINGS index_granularity = 8192;
 
 -- Bloom filter on session_id for fast point lookups in replay mode.
-ALTER TABLE infinite_streaming.session_snapshots
+ALTER TABLE infinite_streaming.session_events
     ADD INDEX IF NOT EXISTS idx_session_id session_id TYPE bloom_filter(0.01) GRANULARITY 4;
 
-ALTER TABLE infinite_streaming.session_snapshots
+ALTER TABLE infinite_streaming.session_events
     ADD INDEX IF NOT EXISTS idx_player_id player_id TYPE bloom_filter(0.01) GRANULARITY 4;
 
-ALTER TABLE infinite_streaming.session_snapshots
+ALTER TABLE infinite_streaming.session_events
     ADD INDEX IF NOT EXISTS idx_play_id play_id TYPE bloom_filter(0.01) GRANULARITY 4;
 
 -- Bring older deployments up to date if the column predates this column.
-ALTER TABLE infinite_streaming.session_snapshots
+ALTER TABLE infinite_streaming.session_events
     ADD COLUMN IF NOT EXISTS play_id LowCardinality(String) CODEC(ZSTD(1)),
     ADD COLUMN IF NOT EXISTS attempt_id UInt32 DEFAULT 0 CODEC(ZSTD(1)),
     ADD COLUMN IF NOT EXISTS content_id LowCardinality(String) CODEC(ZSTD(1)),
@@ -338,7 +344,7 @@ ALTER TABLE infinite_streaming.session_snapshots
 -- Convert legacy manifest_variants UInt16 (broken: always stored 0 because
 -- the SSE field is an array, not a number) to String (JSON of the variant
 -- ladder). Safe MODIFY since the only existing values are zero.
-ALTER TABLE infinite_streaming.session_snapshots
+ALTER TABLE infinite_streaming.session_events
     MODIFY COLUMN IF EXISTS manifest_variants String CODEC(ZSTD(3));
 
 -- Per-request HAR-style log so the session-viewer's network log fold
@@ -357,7 +363,7 @@ CREATE TABLE IF NOT EXISTS infinite_streaming.network_requests
     -- columns can't be in the sort key on first init.
     player_id                LowCardinality(String) CODEC(ZSTD(1)),
     play_id                  LowCardinality(String) CODEC(ZSTD(1)),
-    -- attempt_id mirrors session_snapshots — see comment there.
+    -- attempt_id mirrors session_events — see comment there.
     -- Stamped onto every HAR row from the session's sticky attempt_id.
     attempt_id               UInt32                 DEFAULT 0 CODEC(ZSTD(1)),
     method                   LowCardinality(String) CODEC(ZSTD(1)),
@@ -390,7 +396,7 @@ CREATE TABLE IF NOT EXISTS infinite_streaming.network_requests
     entry_fingerprint        UInt64                 CODEC(ZSTD(1)),
     -- Tiered retention classification (issue #342) — must be inline
     -- because the TTL clause below references it. See full comment on
-    -- session_snapshots. The post-create ALTER ADD COLUMN IF NOT EXISTS
+    -- session_events. The post-create ALTER ADD COLUMN IF NOT EXISTS
     -- below is a no-op on fresh hosts but covers the upgrade path.
     classification           LowCardinality(String) DEFAULT 'other' CODEC(ZSTD(1)),
     INDEX idx_play_id play_id TYPE bloom_filter GRANULARITY 4,
@@ -398,13 +404,13 @@ CREATE TABLE IF NOT EXISTS infinite_streaming.network_requests
 )
 ENGINE = MergeTree
 PARTITION BY toYYYYMMDD(ts)
--- ORDER BY player_id first for the same reason as session_snapshots:
+-- ORDER BY player_id first for the same reason as session_events:
 -- the dashboard's network log filter is always WHERE player_id = X
 -- AND ts BETWEEN ?. entry_fingerprint stays as the dedupe component
 -- of the sort tuple so per-request UPSERT semantics still work.
 ORDER BY (player_id, ts, entry_fingerprint)
 -- Tiered retention by classification column — see comment on
--- session_snapshots above. Both tables share the same retention
+-- session_events above. Both tables share the same retention
 -- policy so paired (snapshots, network) data ages out together.
 TTL toDateTime(ts) + INTERVAL 30 DAY DELETE WHERE classification = 'other',
     toDateTime(ts) + INTERVAL 90 DAY DELETE WHERE classification = 'interesting'
@@ -425,7 +431,7 @@ ALTER TABLE infinite_streaming.network_requests
 ALTER TABLE infinite_streaming.network_requests
     ADD COLUMN IF NOT EXISTS player_id LowCardinality(String) CODEC(ZSTD(1));
 
--- attempt_id on HAR rows mirrors session_snapshots — stamped from the
+-- attempt_id on HAR rows mirrors session_events — stamped from the
 -- session's sticky attempt_id at insert. Old rows keep the 0 default.
 ALTER TABLE infinite_streaming.network_requests
     ADD COLUMN IF NOT EXISTS attempt_id UInt32 DEFAULT 0 CODEC(ZSTD(1));
@@ -442,7 +448,7 @@ ALTER TABLE infinite_streaming.network_requests
 --
 -- Schema parity notes:
 --   - Same key columns (player_id, play_id, attempt_id, session_id) and
---     same codecs/cardinality types as session_snapshots so cross-table
+--     same codecs/cardinality types as session_events so cross-table
 --     joins stay cheap.
 --   - `type` / `info` / `kind` / `priority` mirror what the legacy SQL
 --     used to emit — dashboard + harness consumers see no shape change.
@@ -450,7 +456,12 @@ ALTER TABLE infinite_streaming.network_requests
 --     same source row (ts + type + info + player + play). Same role as
 --     entry_fingerprint on network_requests.
 --   - 30-day TTL keyed off classification, matching the parent tables.
-CREATE TABLE IF NOT EXISTS infinite_streaming.session_events
+--
+-- Renamed from `session_events` to `session_markers` in issue #472; the
+-- old name was reassigned to the player-events table (was
+-- session_snapshots) so the vocabulary matches operators' mental model:
+-- a player emits an "event"; the classifier "marks" it.
+CREATE TABLE IF NOT EXISTS infinite_streaming.session_markers
 (
     ts                       DateTime64(3, 'UTC')   CODEC(Delta, ZSTD(1)),
     player_id                LowCardinality(String) CODEC(ZSTD(1)),

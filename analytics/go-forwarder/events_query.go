@@ -104,7 +104,7 @@ func buildEventsQuery(cfg config, p eventsQueryParams) (string, map[string]strin
 		`SELECT toString(ts) AS ts, player_id, play_id, attempt_id, session_id,
 		        type, subtype, info, kind, priority
 		 FROM (
-		   SELECT * FROM %s.session_events
+		   SELECT * FROM %s.session_markers
 		   WHERE %s
 		   ORDER BY ts DESC
 		   LIMIT %d

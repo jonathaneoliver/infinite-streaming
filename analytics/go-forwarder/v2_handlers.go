@@ -53,6 +53,14 @@ func mountV2Handlers(mux *http.ServeMux, cfg config) {
 		})
 	})
 
+	// /api/v2/events is the canonical name as of issue #472 — the
+	// underlying CH table session_snapshots was renamed to
+	// session_events. /api/v2/snapshots stays as a deprecated alias
+	// for one release cycle so harness CLI binaries from older
+	// release lines keep working.
+	mux.HandleFunc("/api/v2/events", func(w http.ResponseWriter, r *http.Request) {
+		v2SnapshotsHandler(w, r, cfg)
+	})
 	mux.HandleFunc("/api/v2/snapshots", func(w http.ResponseWriter, r *http.Request) {
 		v2SnapshotsHandler(w, r, cfg)
 	})
