@@ -1,11 +1,13 @@
 <script setup lang="ts">
 /**
  * PlayLog.vue — time-multiplexed scroll of three sources on one
- * chronological view:
+ * chronological view (post-#472 vocabulary):
  *
- *   - snapshot  (session_snapshots rows, via timeseries.samples)
- *   - network   (network_requests rows,  via timeseries.network)
- *   - event     (typed events,           via timeseries.events)
+ *   - event   (session_events rows, via timeseries.events) — one per
+ *             player metrics POST. Used to be called "snapshot".
+ *   - network (network_requests rows, via timeseries.network)
+ *   - marker  (session_markers rows, via timeseries.markers) — one
+ *             per classifier-derived event. Used to be called "event".
  *
  * Operator-facing differences from NetworkLog: no timing bar (per
  * user request), source-toggle checkboxes, and uniform columns
@@ -60,9 +62,12 @@ function realPlayerId(): string {
   return v;
 }
 
-const showSnapshots = ref(true);
-const showNetwork = ref(true);
+// Filter state, one per source. Names follow the post-#472
+// vocabulary: player POSTs = events, classifier output = markers,
+// network = HTTP requests.
 const showEvents = ref(true);
+const showNetwork = ref(true);
+const showMarkers = ref(true);
 
 /** Follow-latest mirrors the page-level focus bar's "Live" state.
  *  When the operator drags the brush back to a historical window,
@@ -124,7 +129,7 @@ const sortDir = ref<SortDir>('asc');
 
 const rowsScrollRef = ref<HTMLDivElement | null>(null);
 
-type Source = 'snapshot' | 'network' | 'event';
+type Source = 'event' | 'network' | 'marker';
 interface Row {
   ts: number;          // epoch ms
   source: Source;
@@ -213,7 +218,7 @@ function buildSnapshotRow(raw: Record<string, unknown>): Row | null {
   if (!Number.isFinite(ts)) return null;
   return {
     ts,
-    source: 'snapshot',
+    source: 'event',
     playerId: asLowerId(raw.player_id ?? realPlayerId()),
     playId: asLowerId(raw.play_id),
     attemptId: asStr(raw.attempt_id),
@@ -286,7 +291,7 @@ function buildEventRow(raw: Record<string, unknown>): Row | null {
   // somewhere else).
   return {
     ts,
-    source: 'event',
+    source: 'marker',
     playerId: asLowerId(raw.player_id ?? realPlayerId()),
     playId: asLowerId(raw.play_id ?? props.playId ?? ''),
     attemptId: asStr(raw.attempt_id),
@@ -374,7 +379,7 @@ const allRows = computed<Row[]>(() => {
   void props.networkStream.version.value;
   void props.markersStream.version.value;
   const built: Row[] = [];
-  if (showSnapshots.value) {
+  if (showEvents.value) {
     for (const raw of props.eventsStream.inRange(0, Number.MAX_SAFE_INTEGER)) {
       const r = buildSnapshotRow(raw);
       if (r) built.push(r);
@@ -386,7 +391,7 @@ const allRows = computed<Row[]>(() => {
       if (r) built.push(r);
     }
   }
-  if (showEvents.value) {
+  if (showMarkers.value) {
     for (const raw of props.markersStream.inRange(0, Number.MAX_SAFE_INTEGER)) {
       const r = buildEventRow(raw);
       if (r) built.push(r);
@@ -478,7 +483,7 @@ const snapshotChangeRates = computed<Map<string, number>>(() => {
  *  sort key, so they always lose ties to anything that's ever
  *  changed during the session. */
 function sortFields(fields: DisplayedField[], source: Source): DisplayedField[] {
-  if (fieldOrder.value === 'alphabetic' || source !== 'snapshot') {
+  if (fieldOrder.value === 'alphabetic' || source !== 'event') {
     // fieldsFromRaw already emits alphabetic — return as-is.
     return fields;
   }
@@ -530,11 +535,11 @@ const rowsWithFields = computed<RowWithFields[]>(() => {
       fields = NETWORK_KEEP_ORDER
         .map((k) => byKey.get(k))
         .filter((f): f is DisplayedField => f != null);
-    } else if (r.source === 'snapshot' && mode === 'changed' && prevSnapshot) {
+    } else if (r.source === 'event' && mode === 'changed' && prevSnapshot) {
       const prevByKey = new Map<string, string>();
       for (const f of fieldsFromRaw(prevSnapshot)) prevByKey.set(f.name, f.value);
       fields = fieldsFromRaw(r.raw, SNAPSHOT_SKIP).filter((f) => prevByKey.get(f.name) !== f.value);
-    } else if (r.source === 'snapshot') {
+    } else if (r.source === 'event') {
       // Snapshot in 'all' mode, or first-ever snapshot in 'changed'
       // mode (no prior to diff against).
       fields = fieldsFromRaw(r.raw, SNAPSHOT_SKIP);
@@ -544,7 +549,7 @@ const rowsWithFields = computed<RowWithFields[]>(() => {
     }
     fields = sortFields(fields, r.source);
     out[i] = { ...r, fields };
-    if (r.source === 'snapshot') prevSnapshot = r.raw;
+    if (r.source === 'event') prevSnapshot = r.raw;
   }
   return out;
 });
@@ -566,13 +571,13 @@ const sortedRows = computed<RowWithFields[]>(() => {
 });
 
 const counts = computed(() => {
-  let snap = 0, net = 0, evt = 0;
+  let evt = 0, net = 0, mrk = 0;
   for (const r of allRows.value) {
-    if (r.source === 'snapshot') snap++;
+    if (r.source === 'event') evt++;
     else if (r.source === 'network') net++;
-    else evt++;
+    else mrk++;
   }
-  return { snap, net, evt, total: allRows.value.length };
+  return { evt, net, mrk, total: allRows.value.length };
 });
 
 function clickSort(col: SortCol) {
@@ -613,7 +618,7 @@ function shortId(id: string): string {
  *  rows (which don't have a session_json field). The cell template
  *  truncates visually; the value lives in the title attr for hover. */
 function rawValueFor(r: Row): string {
-  if (r.source === 'snapshot') {
+  if (r.source === 'event') {
     const sj = r.raw['session_json'];
     if (typeof sj === 'string' && sj.length > 0) return sj;
   }
@@ -672,9 +677,9 @@ function onRowsWheel(e: WheelEvent) {
 <template>
   <div class="play-log">
     <div class="toolbar">
-      <label class="opt"><input type="checkbox" v-model="showSnapshots" /> Snapshots ({{ counts.snap }})</label>
-      <label class="opt"><input type="checkbox" v-model="showNetwork" /> Network ({{ counts.net }})</label>
       <label class="opt"><input type="checkbox" v-model="showEvents" /> Events ({{ counts.evt }})</label>
+      <label class="opt"><input type="checkbox" v-model="showNetwork" /> Network ({{ counts.net }})</label>
+      <label class="opt"><input type="checkbox" v-model="showMarkers" /> Markers ({{ counts.mrk }})</label>
       <label class="opt"><input type="checkbox" v-model="showRaw" /> Raw</label>
       <span class="count">{{ counts.total }} row{{ counts.total === 1 ? '' : 's' }}</span>
       <button
