@@ -157,6 +157,18 @@ function asStr(v: unknown): string {
   return '';
 }
 
+/** Normalise UUID identifiers to lowercase for cross-source
+ *  consistency. The iOS player POSTs `play_id` in Apple's preferred
+ *  uppercase form (e.g. `3127F2F4-BBBB-4D15-...`), but the rest of
+ *  the pipeline (proxy's `lowerUTF8` filters, dashboard URL params)
+ *  uses lowercase. Without this normalisation the same UUID can
+ *  render in two different cases depending on which row it came
+ *  from, and grouping by id breaks visually. */
+function asLowerId(v: unknown): string {
+  const s = asStr(v);
+  return s ? s.toLowerCase() : s;
+}
+
 /** Extract the path tail from a HAR URL, dropping the content-name
  *  prefix that's identical for every request on a play. */
 function pathTail(url: string): string {
@@ -175,8 +187,8 @@ function buildSnapshotRow(raw: Record<string, unknown>): Row | null {
   return {
     ts,
     source: 'snapshot',
-    playerId: asStr(raw.player_id ?? props.playerId),
-    playId: asStr(raw.play_id),
+    playerId: asLowerId(raw.player_id ?? props.playerId),
+    playId: asLowerId(raw.play_id),
     attemptId: asStr(raw.attempt_id),
     raw,
     eventName: pickEventName(raw, ['event_name', 'last_event', 'trigger_type']),
@@ -213,8 +225,8 @@ function buildNetworkRow(raw: Record<string, unknown>): Row | null {
   return {
     ts,
     source: 'network',
-    playerId: asStr(raw.player_id ?? props.playerId),
-    playId: asStr(raw.play_id),
+    playerId: asLowerId(raw.player_id ?? props.playerId),
+    playId: asLowerId(raw.play_id),
     attemptId: asStr(raw.attempt_id),
     raw: enriched,
     eventName: evName,
@@ -247,8 +259,8 @@ function buildEventRow(raw: Record<string, unknown>): Row | null {
   return {
     ts,
     source: 'event',
-    playerId: props.playerId,
-    playId: props.playId || '',
+    playerId: asLowerId(props.playerId),
+    playId: asLowerId(props.playId || ''),
     attemptId: '',
     raw,
     eventName: pickEventName(raw, ['event_name', 'type']),
@@ -315,12 +327,17 @@ const EVENT_SKIP = new Set(['event_name', 'type']);
 const SNAPSHOT_SKIP = new Set(['event_name', 'last_event', 'trigger_type']);
 
 /** Network rows: WHITELIST mode — only these four chips render in
- *  the fields column. The URL / method / phase timings / bytes_in
- *  / fault metadata / etc. that the raw network_requests row carries
- *  are all reachable from the Raw column when the operator wants
- *  them; here the operator wants the at-a-glance request summary.
- *  Keys match the derived fields built in buildNetworkRow. */
-const NETWORK_KEEP = new Set(['status', 'duration', 'KB', 'Mbps']);
+ *  the fields column, in this fixed order. The URL / method / phase
+ *  timings / bytes_in / fault metadata / etc. that the raw
+ *  network_requests row carries are all reachable from the Raw
+ *  column when the operator wants them; here the operator wants the
+ *  at-a-glance request summary. Keys match the derived fields built
+ *  in buildNetworkRow. `status` leads because operators scan for
+ *  4xx/5xx first — every other chip is per-row noise unless the
+ *  status is bad.
+ */
+const NETWORK_KEEP_ORDER: readonly string[] = ['status', 'duration', 'KB', 'Mbps'];
+const NETWORK_KEEP = new Set(NETWORK_KEEP_ORDER);
 
 const allRows = computed<Row[]>(() => {
   // Touch each stream's version so Vue re-runs the computed on every
@@ -474,9 +491,17 @@ const rowsWithFields = computed<RowWithFields[]>(() => {
     let fields: DisplayedField[];
     if (r.source === 'network') {
       // Network rows: whitelist mode — only status, duration, KB,
-      // Mbps render in the fields column. The URL / phase timings /
-      // fault metadata are reachable from the Raw column.
-      fields = fieldsFromRaw(r.raw).filter((f) => NETWORK_KEEP.has(f.name));
+      // Mbps render in the fields column, in NETWORK_KEEP_ORDER
+      // (status first — operators scan for 4xx/5xx before anything
+      // else). The URL / phase timings / fault metadata are
+      // reachable from the Raw column.
+      const byKey = new Map<string, DisplayedField>();
+      for (const f of fieldsFromRaw(r.raw)) {
+        if (NETWORK_KEEP.has(f.name)) byKey.set(f.name, f);
+      }
+      fields = NETWORK_KEEP_ORDER
+        .map((k) => byKey.get(k))
+        .filter((f): f is DisplayedField => f != null);
     } else if (r.source === 'snapshot' && mode === 'changed' && prevSnapshot) {
       const prevByKey = new Map<string, string>();
       for (const f of fieldsFromRaw(prevSnapshot)) prevByKey.set(f.name, f.value);
