@@ -687,7 +687,15 @@ async function drainNewRows() {
       if (!Number.isFinite(x)) continue;
       if (x <= lastIngestedMs) continue; // belt-and-suspenders
       const p = chRowToPlayerRecord(row);
-      if (coord.state.range !== null) {
+      // Pause buffer is only for samples arriving PAST the pinned
+      // window (the live-mode case: user pinned to inspect history,
+      // we don't want fresh live samples expanding the view). In
+      // archive replay (URL-driven start_time/end_time), the brush
+      // is pinned from before the first backfill sample lands, and
+      // every sample falls inside the range — those go straight to
+      // the chart so the chart actually shows the play.
+      const range = coord.state.range;
+      if (range !== null && x > range.max) {
         pendingLive.push({ p, x });
       } else {
         pushSample(p, x);

@@ -321,6 +321,20 @@ function isoToLocal(iso: string): string {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
+/** ClickHouse-aware ISO parser. ClickHouse emits timestamps as
+ *  "YYYY-MM-DD HH:MM:SS.fff" (space separator, no zone). `Date.parse`
+ *  of that form is implementation-defined and returns NaN on Safari /
+ *  older WebKit, which previously caused `endTimeFor` to fall through
+ *  to `'live'` for every row regardless of how old the session was.
+ *  Already-RFC3339 strings (with `T`) pass through unchanged. */
+function parseChIsoMs(v: string | null | undefined): number {
+  if (!v) return NaN;
+  const normalised = v.length > 10 && v.charAt(10) === ' '
+    ? v.replace(' ', 'T') + 'Z'
+    : v;
+  return Date.parse(normalised);
+}
+
 /** A play is "still live" — i.e. the viewer should follow the live
  *  edge rather than pin to a fixed end_time — if its last_seen is
  *  within LIVE_TAIL_MS of now AND no terminal-state marker is set.
@@ -328,7 +342,7 @@ function isoToLocal(iso: string): string {
  *  late doesn't kick us into archive mode. */
 const LIVE_TAIL_MS = 60_000;
 function endTimeFor(r: SessionRow): string {
-  const lastSeen = Date.parse(r.last_seen ?? '');
+  const lastSeen = parseChIsoMs(r.last_seen);
   if (!Number.isFinite(lastSeen)) return 'live';
   if (Date.now() - lastSeen < LIVE_TAIL_MS) return 'live';
   return new Date(lastSeen).toISOString();
@@ -343,7 +357,7 @@ function viewerHref(r: SessionRow): string {
   // it from samples landing. end_time=live means "follow live edge"
   // and is set when the play looks still-active.
   if (r.started) {
-    const startMs = Date.parse(r.started);
+    const startMs = parseChIsoMs(r.started);
     if (Number.isFinite(startMs)) {
       qs.set('start_time', new Date(startMs).toISOString());
     }

@@ -200,8 +200,15 @@ base AS (
   WHERE %s
   WINDOW w AS (PARTITION BY play_id ORDER BY ts)
 )
+-- Outer SELECT re-aliases event_ts back to ts so callers (HTTP JSON,
+-- the SSE event frame, the seen-set fingerprinter) keep seeing a
+-- field named "ts" with no change. The inner UNION ALL branches
+-- project event_ts (not ts) so that CH 24.x doesn't shadow the
+-- DateTime64 column ts with the toString'd String alias inside the
+-- per-branch WHERE — same ILLEGAL_TYPE_OF_ARGUMENT trap the comment
+-- in buildSamplesQuery warns about.
 SELECT
-  ts, type, info,
+  event_ts AS ts, type, info,
   multiIf(
     type IN ('master_manifest_failure', 'all_failure',
              'manifest_failure', 'segment_failure',
@@ -235,49 +242,49 @@ SELECT
     3
   ) AS priority
 FROM (
-  SELECT toString(start_ts) AS ts, 'stall' AS type,
+  SELECT toString(start_ts) AS event_ts, 'stall' AS type,
          concat(toString(round(duration_s, 2)), 's') AS info,
          duration_s
   FROM stall_or_buffer_pairs
   WHERE start_event = 'stall_start' AND duration_s > 0
   UNION ALL
-  SELECT toString(start_ts) AS ts, 'buffering' AS type,
+  SELECT toString(start_ts) AS event_ts, 'buffering' AS type,
          concat(toString(round(duration_s, 2)), 's') AS info,
          duration_s
   FROM stall_or_buffer_pairs
   WHERE start_event = 'buffering_start' AND duration_s > 0
   UNION ALL
-  SELECT toString(ts) AS ts, 'stall' AS type,
+  SELECT toString(ts) AS event_ts, 'stall' AS type,
          if(last_event = 'frozen', '(frozen)', '(segment)') AS info,
          0 AS duration_s
   FROM %s.%s WHERE %s AND last_event IN ('frozen', 'segment_stall')
   UNION ALL
-  SELECT toString(ts) AS ts, 'restart' AS type, '' AS info, 0 AS duration_s
+  SELECT toString(ts) AS event_ts, 'restart' AS type, '' AS info, 0 AS duration_s
   FROM %s.%s WHERE %s AND last_event = 'restart'
   UNION ALL
-  SELECT toString(ts) AS ts, 'playback_start' AS type, '' AS info, 0
+  SELECT toString(ts) AS event_ts, 'playback_start' AS type, '' AS info, 0
   FROM %s.%s WHERE %s AND last_event IN ('video_start_time', 'video_first_frame')
   UNION ALL
-  SELECT toString(ts) AS ts, 'downshift' AS type,
+  SELECT toString(ts) AS event_ts, 'downshift' AS type,
          concat(toString(round(prev_bitrate, 2)), '→', toString(round(video_bitrate_mbps, 2)), ' Mbps') AS info,
          0
   FROM rate_shifts WHERE last_event = 'rate_shift_down' AND prev_bitrate > 0 AND video_bitrate_mbps > 0
   UNION ALL
-  SELECT toString(ts) AS ts, 'upshift' AS type,
+  SELECT toString(ts) AS event_ts, 'upshift' AS type,
          concat(toString(round(prev_bitrate, 2)), '→', toString(round(video_bitrate_mbps, 2)), ' Mbps') AS info,
          0
   FROM rate_shifts WHERE last_event = 'rate_shift_up' AND prev_bitrate > 0 AND video_bitrate_mbps > 0
   UNION ALL
-  SELECT toString(ts) AS ts, 'timejump' AS type, '' AS info, 0
+  SELECT toString(ts) AS event_ts, 'timejump' AS type, '' AS info, 0
   FROM %s.%s WHERE %s AND last_event = 'timejump'
   UNION ALL
-  SELECT toString(ts) AS ts, 'error' AS type, player_error AS info, 0
+  SELECT toString(ts) AS event_ts, 'error' AS type, player_error AS info, 0
   FROM %s.%s WHERE %s AND last_event = 'error'
   UNION ALL
-  SELECT toString(ts) AS ts, 'user_marked' AS type, '' AS info, 0
+  SELECT toString(ts) AS event_ts, 'user_marked' AS type, '' AS info, 0
   FROM %s.%s WHERE %s AND last_event = 'user_marked'
   UNION ALL
-  SELECT toString(ts) AS ts, last_event AS type, '' AS info, 0
+  SELECT toString(ts) AS event_ts, last_event AS type, '' AS info, 0
   FROM %s.%s WHERE %s
     AND last_event != ''
     AND last_event NOT IN (
@@ -290,49 +297,49 @@ FROM (
       'timejump', 'error', 'user_marked'
     )
   UNION ALL
-  SELECT toString(ts) AS ts, 'error' AS type, player_error AS info, 0
+  SELECT toString(ts) AS event_ts, 'error' AS type, player_error AS info, 0
   FROM base WHERE rn > 1 AND player_error != '' AND prev_error != player_error
   UNION ALL
-  SELECT toString(ts) AS ts, 'master_manifest_failure' AS type, '' AS info, 0
+  SELECT toString(ts) AS event_ts, 'master_manifest_failure' AS type, '' AS info, 0
   FROM base WHERE rn > 1 AND master_manifest_consecutive_failures > prev_master_fail
   UNION ALL
-  SELECT toString(ts) AS ts, 'all_failure' AS type, '' AS info, 0
+  SELECT toString(ts) AS event_ts, 'all_failure' AS type, '' AS info, 0
   FROM base WHERE rn > 1 AND all_consecutive_failures > prev_all_fail
   UNION ALL
-  SELECT toString(ts) AS ts, 'manifest_failure' AS type, '' AS info, 0
+  SELECT toString(ts) AS event_ts, 'manifest_failure' AS type, '' AS info, 0
   FROM base WHERE rn > 1 AND manifest_consecutive_failures > prev_manifest_fail
   UNION ALL
-  SELECT toString(ts) AS ts, 'segment_failure' AS type, '' AS info, 0
+  SELECT toString(ts) AS event_ts, 'segment_failure' AS type, '' AS info, 0
   FROM base WHERE rn > 1 AND segment_consecutive_failures > prev_segment_fail
   UNION ALL
-  SELECT toString(ts) AS ts, 'transport_failure' AS type, '' AS info, 0
+  SELECT toString(ts) AS event_ts, 'transport_failure' AS type, '' AS info, 0
   FROM base WHERE rn > 1 AND transport_consecutive_failures > prev_transport_fail
   UNION ALL
-  SELECT toString(ts) AS ts, 'transfer_active_timeout' AS type, '' AS info, 0
+  SELECT toString(ts) AS event_ts, 'transfer_active_timeout' AS type, '' AS info, 0
   FROM base WHERE rn > 1 AND fault_count_transfer_active_timeout > prev_active_to
   UNION ALL
-  SELECT toString(ts) AS ts, 'transfer_idle_timeout' AS type, '' AS info, 0
+  SELECT toString(ts) AS event_ts, 'transfer_idle_timeout' AS type, '' AS info, 0
   FROM base WHERE rn > 1 AND fault_count_transfer_idle_timeout > prev_idle_to
   UNION ALL
-  SELECT toString(ts) AS ts, 'fault_on' AS type, '' AS info, 0
+  SELECT toString(ts) AS event_ts, 'fault_on' AS type, '' AS info, 0
   FROM base WHERE rn > 1 AND transport_fault_active = 1 AND prev_fault = 0
   UNION ALL
-  SELECT toString(ts) AS ts, 'fault_off' AS type, '' AS info, 0
+  SELECT toString(ts) AS event_ts, 'fault_off' AS type, '' AS info, 0
   FROM base WHERE rn > 1 AND transport_fault_active = 0 AND prev_fault = 1
   UNION ALL
-  SELECT toString(ts) AS ts, 'loop_server' AS type,
+  SELECT toString(ts) AS event_ts, 'loop_server' AS type,
          concat('loop ', toString(loop_count_server)) AS info, 0
   FROM base WHERE rn > 1 AND loop_count_server > prev_loop_server
   UNION ALL
-  SELECT toString(nr.ts) AS ts, 'http_5xx' AS type,
+  SELECT toString(nr.ts) AS event_ts, 'http_5xx' AS type,
          concat(toString(status), ' ', method, ' ', path) AS info, 0 AS duration_s
   FROM %s.network_requests AS nr WHERE %s AND status >= 500
   UNION ALL
-  SELECT toString(nr.ts) AS ts, 'http_4xx' AS type,
+  SELECT toString(nr.ts) AS event_ts, 'http_4xx' AS type,
          concat(toString(status), ' ', method, ' ', path) AS info, 0
   FROM %s.network_requests AS nr WHERE %s AND status >= 400 AND status < 500
   UNION ALL
-  SELECT toString(nr.ts) AS ts,
+  SELECT toString(nr.ts) AS event_ts,
          multiIf(
            positionCaseInsensitive(fault_type, 'timeout') > 0, 'request_timeout',
            positionCaseInsensitive(fault_type, 'corrupt') > 0
@@ -344,19 +351,19 @@ FROM (
          concat(fault_type, ' ', method, ' ', path) AS info, 0
   FROM %s.network_requests AS nr WHERE %s AND faulted = 1
   UNION ALL
-  SELECT toString(nr.ts) AS ts, 'slow_request' AS type,
+  SELECT toString(nr.ts) AS event_ts, 'slow_request' AS type,
          concat(toString(round(client_wait_ms, 0)), 'ms ', method, ' ', path) AS info, 0
   FROM %s.network_requests AS nr
   WHERE %s AND client_wait_ms > 2000 AND status < 400 AND faulted = 0
   UNION ALL
-  SELECT toString(nr.ts) AS ts, 'slow_segment' AS type,
+  SELECT toString(nr.ts) AS event_ts, 'slow_segment' AS type,
          concat(toString(round(transfer_ms, 0)), 'ms ', method, ' ', path) AS info, 0
   FROM %s.network_requests AS nr
   WHERE %s AND transfer_ms > 6000
     AND match(path, '\.(m4s|ts|mp4|m4a|m4v|aac|webm|mp3)($|\?)')
     AND status < 400 AND faulted = 0
   UNION ALL
-  SELECT toString(retry_ts) AS ts, 'request_retry' AS type,
+  SELECT toString(retry_ts) AS event_ts, 'request_retry' AS type,
          concat(method, ' ', path) AS info, 0
   FROM (
     SELECT nr.ts AS retry_ts, method, url, path,
@@ -367,6 +374,6 @@ FROM (
   WHERE prev_url_ts != retry_ts
     AND dateDiff('millisecond', prev_url_ts, retry_ts) BETWEEN 1 AND 4000
 )
-ORDER BY ts DESC
+ORDER BY event_ts DESC
 LIMIT %d
 FORMAT JSONEachRow`

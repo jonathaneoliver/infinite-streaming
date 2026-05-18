@@ -130,6 +130,22 @@ func makeTimeseriesHandler(cfg config, ring *Ring) http.HandlerFunc {
 
 		live := isStreamLive(ring, key, params.playerID, params.playID)
 
+		// `to` was supplied AND is in the past → this is an archive
+		// read of a closed window. Even if the player happens to
+		// still be active, the caller has asked for a bounded view,
+		// so the live tail (ring deltas + events poller) would push
+		// rows past `to` into the client's cache and the UI's brush
+		// rail / NetworkLog / PlayLog would then show rows outside
+		// the focus window. Treat as !live so we complete after
+		// backfill.
+		if params.to != "" {
+			if t, err := time.Parse(time.RFC3339Nano, params.to); err == nil {
+				if time.Since(t) > 5*time.Second {
+					live = false
+				}
+			}
+		}
+
 		emitMeta(w, flusher, selections, live, ring, params)
 
 		// Track the high-water timestamp emitted during backfill so

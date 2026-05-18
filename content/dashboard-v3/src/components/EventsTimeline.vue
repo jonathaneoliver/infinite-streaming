@@ -726,7 +726,12 @@ async function drainNewRows() {
       const row = chRowToIngest(raw[i]);
       if (!row) continue;
       if (row.ts <= lastIngestedMs) continue; // belt-and-suspenders
-      if (coord.state.range !== null) {
+      // Pause buffer is only for rows arriving PAST the pinned
+      // window — see MetricsLineChart.vue:679 for the reasoning.
+      // Archive replay pins the brush before backfill starts; those
+      // rows belong inside the range and must reach the timeline.
+      const range = coord.state.range;
+      if (range !== null && row.ts > range.max) {
         pendingLive.push(row);
       } else {
         ingest(row);
