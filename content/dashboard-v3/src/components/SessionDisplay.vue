@@ -61,6 +61,12 @@ const props = defineProps<{
    *  (above the control panels), so they pass this flag and SessionDisplay
    *  omits the duplicate panel from its stack. */
   hideSessionDetails?: boolean;
+  /** SessionViewer "show before/after" toggle. When true the SSE
+   *  drops the play_id filter and widens fromMs/toMs to the cached
+   *  play bounds ± 5 minutes so the operator can scroll through the
+   *  surrounding context for the same player. Default: false — the
+   *  view is locked to this play. */
+  showContext?: boolean;
 }>();
 
 const playIdRef = computed(() => props.playId);
@@ -133,10 +139,38 @@ const { events: sessionEvents } = useArchivedSessionEvents(apiPlayerIdRef, playI
 // way the v3 timeseries SSE handles backfill + live deltas in the
 // same stream, so an in-progress play visited from session-viewer
 // will still receive live updates via the ring overlay.
-const timeseriesPlayId = playIdRef;
+// Cache the play's time bounds the first time samples land in
+// archive mode. They survive subsequent SSE re-subscriptions (e.g.
+// when "show context" widens the window) so toggling the filter
+// back off can still snap to the play's range.
+const playBoundsCache = ref<{ min: number; max: number } | null>(null);
+
+/** Effective play_id for the SSE subscription. `showContext = true`
+ *  drops the play_id filter so rows from neighbouring plays of the
+ *  same player land in the caches. */
+const effectivePlayIdRef = computed<string | null>(() =>
+  props.showContext ? null : playIdRef.value,
+);
+
+/** Reactive fromMs / toMs — only set when showContext is on AND we
+ *  have cached bounds (i.e. the play's data has loaded at least
+ *  once). Widens 5 minutes before play start and after play end so
+ *  the SSE backfill returns a meaningful before/after window. */
+const CONTEXT_PAD_MS = 5 * 60 * 1000;
+const fromMsRef = computed<number | null>(() => {
+  if (!props.showContext) return null;
+  const b = playBoundsCache.value;
+  return b ? b.min - CONTEXT_PAD_MS : null;
+});
+const toMsRef = computed<number | null>(() => {
+  if (!props.showContext) return null;
+  const b = playBoundsCache.value;
+  return b ? b.max + CONTEXT_PAD_MS : null;
+});
+
 const timeseries = useSessionTimeSeries(
   apiPlayerIdRef,
-  timeseriesPlayId,
+  effectivePlayIdRef,
   {
     // 'events' added so the new "Play Log" fold (PlayLog.vue) can show
     // typed events interleaved with snapshots + network rows on one
@@ -144,7 +178,25 @@ const timeseries = useSessionTimeSeries(
     // in streams (useSessionTimeSeries.ts:215).
     streams: ['samples', 'network', 'events'],
     bundles: ['charts_minimal', 'lanes_v1', 'session_details', 'network'],
+    fromMs: fromMsRef,
+    toMs: toMsRef,
   },
+);
+
+// Capture the play's bounds the first time samples arrive in archive
+// mode. Cache stays put across re-subscribes so we can swing the
+// SSE between play-only and context windows without losing the
+// anchor.
+watch(
+  () => timeseries.samples.rangeBounds.value,
+  (b) => {
+    if (!b) return;
+    if (props.showContext) return;       // wider window, don't anchor on it
+    if (!playIdRef.value) return;        // live mode
+    if (playBoundsCache.value !== null) return;
+    playBoundsCache.value = b;
+  },
+  { immediate: true },
 );
 
 // coord declared up-front so the `timeRange` computed below can read
@@ -152,6 +204,28 @@ const timeseries = useSessionTimeSeries(
 // — and so any earlier reactive code (window watcher, brush clamps)
 // sees a coord instance even though it gets consumed mostly later.
 const coord = useChartCoordination(archivePlayerId);
+
+// Auto-pin the focus-window brush to the play's range (-5s lead-in)
+// the first time samples arrive in archive mode. Without this, a
+// fresh navigation from sessions.html lands the operator on a
+// "last 10 minutes ending at the play's end" window — which for a
+// short play is mostly empty whitespace before the play started.
+// One-shot: don't fight subsequent operator drags or the
+// "show context" toggle widening.
+let hasPinnedBrush = false;
+watch(
+  () => timeseries.samples.rangeBounds.value,
+  (b) => {
+    if (hasPinnedBrush) return;
+    if (!b) return;
+    if (props.showContext) return;        // operator already in wide mode
+    if (!playIdRef.value) return;         // live mode
+    if (coord.state.range !== null) return; // operator already moved brush
+    coord.setRange({ min: b.min - 5000, max: b.max });
+    hasPinnedBrush = true;
+  },
+  { immediate: true },
+);
 
 /** Effective time range for the brush rail. Reads the cached
  *  rangeBounds of the samples stream as the historical span; always

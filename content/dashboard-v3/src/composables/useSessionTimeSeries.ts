@@ -25,7 +25,7 @@
  * stream regardless of arrival rate. Keeps the JS thread responsive
  * even when the forwarder bursts a backfill of thousands of rows.
  */
-import { ref, shallowRef, triggerRef, watch, onScopeDispose, type Ref } from 'vue';
+import { ref, shallowRef, triggerRef, watch, onScopeDispose, isRef, type Ref } from 'vue';
 import {
   tsOf,
   binarySearchLE,
@@ -65,9 +65,15 @@ export interface UseSessionTimeSeriesOpts {
   fields?: string[];
   /** Initial backfill window. Defaults to last 10 minutes when
    *  unset; the brush rail will then drive subsequent fetches via
-   *  range queries. */
-  fromMs?: number;
-  toMs?: number;
+   *  range queries.
+   *
+   *  Accepts either a plain number (set-once at subscription time)
+   *  or a Ref — when a Ref, changes trigger an SSE re-subscribe with
+   *  the new window. SessionViewer uses the Ref form so its
+   *  "show context" toggle can widen the time range live without
+   *  rebuilding the composable. */
+  fromMs?: number | Ref<number | null | undefined>;
+  toMs?: number | Ref<number | null | undefined>;
   /** Per-(samples) downsample bucket. Live deltas always full-res. */
   strideMs?: number;
   /** Per-stream max delta rate hint. Server coalesces above this. */
@@ -123,6 +129,17 @@ export function useSessionTimeSeries(
   playId: Ref<string | null>,
   opts: UseSessionTimeSeriesOpts = {},
 ): UseSessionTimeSeriesReturn {
+
+  // Normalise fromMs / toMs to refs so the watcher below picks up
+  // changes uniformly whether the caller passed a plain number or
+  // a Ref. Plain numbers become non-reactive refs that just sit at
+  // their initial value.
+  const fromMsRef: Ref<number | null | undefined> = isRef(opts.fromMs)
+    ? (opts.fromMs as Ref<number | null | undefined>)
+    : ref(opts.fromMs);
+  const toMsRef: Ref<number | null | undefined> = isRef(opts.toMs)
+    ? (opts.toMs as Ref<number | null | undefined>)
+    : ref(opts.toMs);
 
   const samplesArr = shallowRef<Record<string, unknown>[]>([]);
   const networkArr = shallowRef<Record<string, unknown>[]>([]);
@@ -218,19 +235,24 @@ export function useSessionTimeSeries(
     if (opts.fields && opts.fields.length) {
       params.set('fields', opts.fields.join(','));
     }
-    if (opts.fromMs && opts.fromMs > 0) {
-      params.set('from', new Date(opts.fromMs).toISOString());
+    const fromMs = fromMsRef.value;
+    const toMs = toMsRef.value;
+    if (fromMs && fromMs > 0) {
+      params.set('from', new Date(fromMs).toISOString());
     } else if (!playId.value) {
-      // Live mode (no specific play_id): default backfill is the last
-      // 10 minutes so a fresh page load doesn't drag down a 24h
-      // history. Archive replay (playId set) gets no default `from`
-      // so the server returns ALL rows for that play (the play's
-      // bounded range naturally caps the row count below the
-      // server's per-stream limit).
+      // Live mode (no specific play_id) and no explicit from: default
+      // backfill is the last 10 minutes so a fresh page load doesn't
+      // drag down a 24h history. Archive replay (playId set) gets no
+      // default `from` so the server returns ALL rows for that play
+      // (the play's bounded range naturally caps the row count below
+      // the server's per-stream limit). When playId is null AND an
+      // explicit fromMs is set (SessionViewer's "show context" toggle),
+      // we fall through the first branch above with the operator-
+      // supplied window.
       params.set('from', new Date(Date.now() - DEFAULT_BACKFILL_MS).toISOString());
     }
-    if (opts.toMs && opts.toMs > 0) {
-      params.set('to', new Date(opts.toMs).toISOString());
+    if (toMs && toMs > 0) {
+      params.set('to', new Date(toMs).toISOString());
     }
     if (opts.strideMs && opts.strideMs > 0) params.set('stride_ms', String(opts.strideMs));
     if (opts.maxHz && opts.maxHz > 0) params.set('max_hz', String(opts.maxHz));
@@ -379,15 +401,27 @@ export function useSessionTimeSeries(
   const RECONNECT_DEBOUNCE_MS = 500;
   let lastPid = '';
   let lastPlayid: string | null = null;
+  let lastFrom: number | null = null;
+  let lastTo: number | null = null;
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   watch(
-    [playerId, playId],
-    ([pid, plyid]) => {
+    // fromMsRef / toMsRef join playerId + playId in the watch list so
+    // the SSE re-subscribes when SessionViewer's "show context" toggle
+    // widens the time window. Re-subscribe debounce + cache-reset
+    // semantics apply uniformly — caches are cleared on every change
+    // so a wider window doesn't leak rows from the prior subscription.
+    [playerId, playId, fromMsRef, toMsRef],
+    ([pid, plyid, fromMs, toMs]) => {
       const newPid = pid ?? '';
       const newPlayid = plyid ?? null;
-      if (newPid === lastPid && newPlayid === lastPlayid) return;
+      const newFrom = fromMs ?? null;
+      const newTo = toMs ?? null;
+      if (newPid === lastPid && newPlayid === lastPlayid
+          && newFrom === lastFrom && newTo === lastTo) return;
       lastPid = newPid;
       lastPlayid = newPlayid;
+      lastFrom = newFrom;
+      lastTo = newTo;
       if (reconnectTimer) clearTimeout(reconnectTimer);
       // Immediate teardown + resetCaches so the OLD player's EventSource
       // stops streaming and the cache doesn't leak stale samples into
@@ -404,9 +438,14 @@ export function useSessionTimeSeries(
         reconnectTimer = null;
         const finalPid = playerId.value ?? '';
         const finalPlayid = playId.value ?? null;
-        if (finalPid !== lastPid || finalPlayid !== lastPlayid) {
+        const finalFrom = fromMsRef.value ?? null;
+        const finalTo = toMsRef.value ?? null;
+        if (finalPid !== lastPid || finalPlayid !== lastPlayid
+            || finalFrom !== lastFrom || finalTo !== lastTo) {
           lastPid = finalPid;
           lastPlayid = finalPlayid;
+          lastFrom = finalFrom;
+          lastTo = finalTo;
         }
         connect();
       }, RECONNECT_DEBOUNCE_MS);

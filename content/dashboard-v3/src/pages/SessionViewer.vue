@@ -24,6 +24,16 @@ const qs = new URLSearchParams(window.location.search);
 const playerId = ref<string>(qs.get('player_id') ?? '');
 const playId = ref<string | null>(qs.get('play_id'));
 
+/** "Show before/after" toggle. When ON, SessionDisplay drops the
+ *  play_id filter on its SSE subscription and widens the time
+ *  window to play_bounds ± 5 min, so rows from neighbouring plays
+ *  for the same player become visible in the same panel layout.
+ *  Default OFF — the page is locked to this play, matching the
+ *  "click a session row, see that session" mental model from
+ *  sessions.html. */
+const showContext = ref<boolean>(false);
+function toggleShowContext() { showContext.value = !showContext.value; }
+
 // Starred state. Optimistically toggled on click, then synced from
 // the server response. Initial fetch in onMounted below.
 const starred = ref<boolean>(false);
@@ -94,6 +104,18 @@ onMounted(async () => {
               <button
                 type="button"
                 class="banner-btn"
+                :class="{ active: showContext }"
+                @click="toggleShowContext"
+                :disabled="!playId"
+                :title="showContext
+                  ? 'Snap back to this play only'
+                  : 'Show rows from before and after this play (same player, ±5 min)'"
+              >
+                {{ showContext ? '🔓 Showing context' : '🔒 This play only' }}
+              </button>
+              <button
+                type="button"
+                class="banner-btn"
                 :class="{ active: starred }"
                 @click="toggleStarred"
                 :disabled="!playId"
@@ -109,6 +131,7 @@ onMounted(async () => {
           <SessionDisplay
             :player-id="playerId"
             :play-id="playId"
+            :show-context="showContext"
           />
         </template>
       </main>
