@@ -912,11 +912,11 @@ function onRowsWheel(e: WheelEvent) {
 
 .row:hover { background: #f9fafb; }
 
-.row.src-snapshot { background: #fafafa; }
-.row.src-snapshot:hover { background: #f3f4f6; }
+.row.src-event { background: #fafafa; }
+.row.src-event:hover { background: #f3f4f6; }
 .row.src-network  { background: #ffffff; }
-.row.src-event    { background: #fef9c3; }
-.row.src-event:hover { background: #fef08a; }
+.row.src-marker    { background: #fef9c3; }
+.row.src-marker:hover { background: #fef08a; }
 
 .cell {
   white-space: nowrap;
@@ -939,9 +939,9 @@ function onRowsWheel(e: WheelEvent) {
   letter-spacing: 0.4px;
   border: 1px solid transparent;
 }
-.tag-snapshot { background: #e5e7eb; color: #374151; border-color: #d1d5db; }
-.tag-network  { background: #dbeafe; color: #1e3a8a; border-color: #bfdbfe; }
-.tag-event    { background: #fde68a; color: #92400e; border-color: #fcd34d; }
+.tag-event   { background: #e5e7eb; color: #374151; border-color: #d1d5db; }
+.tag-network { background: #dbeafe; color: #1e3a8a; border-color: #bfdbfe; }
+.tag-marker  { background: #fde68a; color: #92400e; border-color: #fcd34d; }
 
 .sortable { cursor: pointer; user-select: none; }
 .sortable:hover { color: #1f2937; }
@@ -1005,8 +1005,8 @@ function onRowsWheel(e: WheelEvent) {
 /* Source-tinted: events read as the "interesting thing", so they
  * keep the loud amber. Snapshots are background heartbeat-ish data,
  * so use a calmer grey-blue. */
-.event-name-event    { background: #f59e0b; color: #fff; }
-.event-name-snapshot { background: #e5e7eb; color: #1f2937; font-weight: 600; }
+.event-name-marker   { background: #f59e0b; color: #fff; }
+.event-name-event    { background: #e5e7eb; color: #1f2937; font-weight: 600; }
 .event-name-network  { background: #dbeafe; color: #1e3a8a; }
 .event-name-empty {
   color: #9ca3af;
@@ -1045,9 +1045,9 @@ function onRowsWheel(e: WheelEvent) {
 }
 .row.src-network .kv-name { color: #1e3a8a; }
 
-.row.src-event .kv {
+.row.src-marker .kv {
   background: #fef3c7;
   border-color: #fcd34d;
 }
-.row.src-event .kv-name { color: #92400e; }
+.row.src-marker .kv-name { color: #92400e; }
 </style>
