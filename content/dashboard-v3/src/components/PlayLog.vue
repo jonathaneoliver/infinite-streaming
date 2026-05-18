@@ -40,6 +40,26 @@ const playerIdRef = toRef(props, 'playerId');
 usePlayer(playerIdRef); // keep the SSE subscription warm
 const coord = useChartCoordination(playerIdRef);
 
+/** Real player UUID for display purposes. The `playerId` prop is the
+ *  shared cache key used by useChartCoordination + the streams cache;
+ *  in archive mode SessionDisplay synthesises it as
+ *  `archive:<real-uuid>:<play-or-all>` so live + archive caches stay
+ *  isolated. Snapshot + network rows carry the real player_id on the
+ *  raw row, so the column populates correctly for those — but event
+ *  rows (events_query.go doesn't project player_id today) fall back
+ *  to props.playerId and end up showing "archive:" instead of the
+ *  UUID. Parse the synthetic key here so event rows show the right
+ *  value too. */
+function realPlayerId(): string {
+  const v = props.playerId;
+  if (v.startsWith('archive:')) {
+    const after = v.slice('archive:'.length);
+    const colon = after.indexOf(':');
+    return colon > 0 ? after.slice(0, colon) : after;
+  }
+  return v;
+}
+
 const showSnapshots = ref(true);
 const showNetwork = ref(true);
 const showEvents = ref(true);
@@ -187,7 +207,7 @@ function buildSnapshotRow(raw: Record<string, unknown>): Row | null {
   return {
     ts,
     source: 'snapshot',
-    playerId: asLowerId(raw.player_id ?? props.playerId),
+    playerId: asLowerId(raw.player_id ?? realPlayerId()),
     playId: asLowerId(raw.play_id),
     attemptId: asStr(raw.attempt_id),
     raw,
@@ -225,7 +245,7 @@ function buildNetworkRow(raw: Record<string, unknown>): Row | null {
   return {
     ts,
     source: 'network',
-    playerId: asLowerId(raw.player_id ?? props.playerId),
+    playerId: asLowerId(raw.player_id ?? realPlayerId()),
     playId: asLowerId(raw.play_id),
     attemptId: asStr(raw.attempt_id),
     raw: enriched,
@@ -259,7 +279,7 @@ function buildEventRow(raw: Record<string, unknown>): Row | null {
   return {
     ts,
     source: 'event',
-    playerId: asLowerId(props.playerId),
+    playerId: asLowerId(realPlayerId()),
     playId: asLowerId(props.playId || ''),
     attemptId: '',
     raw,
