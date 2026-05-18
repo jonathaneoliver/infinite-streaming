@@ -169,7 +169,7 @@ function buildSnapshotRow(raw: Record<string, unknown>): Row | null {
     playId: asStr(raw.play_id),
     restartId: asStr(raw.restart_id),
     raw,
-    eventName: asStr(raw.last_event),
+    eventName: pickEventName(raw, ['event_name', 'last_event', 'trigger_type']),
   };
 }
 
@@ -233,8 +233,21 @@ function buildEventRow(raw: Record<string, unknown>): Row | null {
     playId: props.playId || '',
     restartId: '',
     raw,
-    eventName: asStr(raw.type),
+    eventName: pickEventName(raw, ['event_name', 'type']),
   };
+}
+
+/** Look up the first non-empty string field from a fallback chain.
+ *  Lets the event_name column survive future renames — when the
+ *  storage column is renamed to `event_name`, that key wins; until
+ *  then we fall back to source-specific legacy names (snapshots
+ *  carry `last_event` / `trigger_type`; events carry `type`). */
+function pickEventName(raw: Record<string, unknown>, keys: string[]): string {
+  for (const k of keys) {
+    const v = asStr(raw[k]);
+    if (v) return v;
+  }
+  return '';
 }
 
 /** Render a single field value to a short display string. JSON-stringify
@@ -275,11 +288,13 @@ function fieldsFromRaw(raw: Record<string, unknown>, extraSkip?: Set<string>): D
   return out;
 }
 
-const EVENT_SKIP = new Set(['type']);
-/** Snapshot keys lifted into the dedicated event_name column.
- *  `trigger_type` is a sibling carrying the same value in current
- *  iOS data — skipping it too avoids two chips that always agree. */
-const SNAPSHOT_SKIP = new Set(['last_event', 'trigger_type']);
+/** Keys lifted into the dedicated event_name column. Mirrors the
+ *  fallback chains in pickEventName so the value isn't shown twice
+ *  (once in the column, once as a chip). `event_name` covers the
+ *  post-rename storage; `last_event` / `trigger_type` / `type` cover
+ *  the legacy storage we still read from today. */
+const EVENT_SKIP = new Set(['event_name', 'type']);
+const SNAPSHOT_SKIP = new Set(['event_name', 'last_event', 'trigger_type']);
 
 const allRows = computed<Row[]>(() => {
   // Touch each stream's version so Vue re-runs the computed on every
