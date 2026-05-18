@@ -188,9 +188,9 @@ function buildNetworkRow(raw: Record<string, unknown>): Row | null {
   if (!Number.isFinite(ts)) return null;
   // Derive the operator-friendly summary fields the legacy NetworkLog
   // panel surfaces (KB, Mbps, dur) and graft them onto the row so
-  // they appear in the kv chip list — both 'all' and 'changed' modes
-  // pick them up naturally, and the alphabetical chip order keeps
-  // them visually adjacent to status / bytes_out / transfer_ms.
+  // they show as kv chips. NETWORK_KEEP (below) whitelists the chip
+  // list to just status + duration + KB + Mbps — every other raw
+  // field is dropped from the fields column for network rows.
   const bytesOut = numOrZero(raw.bytes_out);
   const transferMs = numOrZero(raw.transfer_ms);
   const totalMs = numOrZero(raw.total_ms);
@@ -202,7 +202,14 @@ function buildNetworkRow(raw: Record<string, unknown>): Row | null {
   if (transferMs > 0 && bytesOut > 0) {
     enriched.Mbps = (bytesOut * 8) / (transferMs * 1000);
   }
-  if (durMs > 0) enriched.dur = fmtMs(durMs);
+  if (durMs > 0) enriched.duration = fmtMs(durMs);
+  // event_name for network rows = method + path tail (the URL's
+  // content-name prefix is identical for every request and just
+  // adds noise). Full URL lives in raw.url and is reachable via the
+  // Raw column when the operator wants to see it verbatim.
+  const method = asStr(raw.method) || 'GET';
+  const path = pathTail(asStr(raw.url) || asStr(raw.path));
+  const evName = path ? `${method} ${path}` : method;
   return {
     ts,
     source: 'network',
@@ -210,6 +217,7 @@ function buildNetworkRow(raw: Record<string, unknown>): Row | null {
     playId: asStr(raw.play_id),
     attemptId: asStr(raw.attempt_id),
     raw: enriched,
+    eventName: evName,
   };
 }
 
@@ -305,6 +313,14 @@ function fieldsFromRaw(raw: Record<string, unknown>, extraSkip?: Set<string>): D
  *  the legacy storage we still read from today. */
 const EVENT_SKIP = new Set(['event_name', 'type']);
 const SNAPSHOT_SKIP = new Set(['event_name', 'last_event', 'trigger_type']);
+
+/** Network rows: WHITELIST mode — only these four chips render in
+ *  the fields column. The URL / method / phase timings / bytes_in
+ *  / fault metadata / etc. that the raw network_requests row carries
+ *  are all reachable from the Raw column when the operator wants
+ *  them; here the operator wants the at-a-glance request summary.
+ *  Keys match the derived fields built in buildNetworkRow. */
+const NETWORK_KEEP = new Set(['status', 'duration', 'KB', 'Mbps']);
 
 const allRows = computed<Row[]>(() => {
   // Touch each stream's version so Vue re-runs the computed on every
@@ -456,17 +472,22 @@ const rowsWithFields = computed<RowWithFields[]>(() => {
   for (let i = 0; i < chrono.length; i++) {
     const r = chrono[i];
     let fields: DisplayedField[];
-    const skip = r.source === 'event' ? EVENT_SKIP
-      : r.source === 'snapshot' ? SNAPSHOT_SKIP
-      : undefined;
-    if (r.source === 'snapshot' && mode === 'changed' && prevSnapshot) {
+    if (r.source === 'network') {
+      // Network rows: whitelist mode — only status, duration, KB,
+      // Mbps render in the fields column. The URL / phase timings /
+      // fault metadata are reachable from the Raw column.
+      fields = fieldsFromRaw(r.raw).filter((f) => NETWORK_KEEP.has(f.name));
+    } else if (r.source === 'snapshot' && mode === 'changed' && prevSnapshot) {
       const prevByKey = new Map<string, string>();
       for (const f of fieldsFromRaw(prevSnapshot)) prevByKey.set(f.name, f.value);
-      fields = fieldsFromRaw(r.raw, skip).filter((f) => prevByKey.get(f.name) !== f.value);
+      fields = fieldsFromRaw(r.raw, SNAPSHOT_SKIP).filter((f) => prevByKey.get(f.name) !== f.value);
+    } else if (r.source === 'snapshot') {
+      // Snapshot in 'all' mode, or first-ever snapshot in 'changed'
+      // mode (no prior to diff against).
+      fields = fieldsFromRaw(r.raw, SNAPSHOT_SKIP);
     } else {
-      // Snapshot in 'all' mode, first-ever snapshot in 'changed'
-      // mode (no prior to diff against), or any non-snapshot row.
-      fields = fieldsFromRaw(r.raw, skip);
+      // event row — every field except `type` (lifted to event_name).
+      fields = fieldsFromRaw(r.raw, EVENT_SKIP);
     }
     fields = sortFields(fields, r.source);
     out[i] = { ...r, fields };
@@ -787,7 +808,7 @@ function onRowsWheel(e: WheelEvent) {
     var(--c-player, 90px)
     var(--c-play, 90px)
     var(--c-attempt, 90px)
-    var(--c-eventname, minmax(120px, 160px))
+    var(--c-eventname, minmax(140px, 280px))
     var(--c-fields, minmax(280px, 4fr));
   gap: 8px;
   padding: 4px 8px;
@@ -806,7 +827,7 @@ function onRowsWheel(e: WheelEvent) {
     var(--c-player, 90px)
     var(--c-play, 90px)
     var(--c-attempt, 90px)
-    var(--c-eventname, minmax(120px, 160px))
+    var(--c-eventname, minmax(140px, 280px))
     var(--c-fields, minmax(200px, 2fr))
     var(--c-raw, minmax(280px, 3fr));
 }
