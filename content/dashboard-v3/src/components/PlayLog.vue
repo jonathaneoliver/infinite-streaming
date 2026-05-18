@@ -372,6 +372,41 @@ const SNAPSHOT_SKIP = new Set(['event_name', 'last_event', 'trigger_type']);
 const NETWORK_KEEP_ORDER: readonly string[] = ['status', 'duration', 'KB', 'Mbps'];
 const NETWORK_KEEP = new Set(NETWORK_KEEP_ORDER);
 
+/** Flag column + row tint for network rows. Mirrors NetworkLog.vue's
+ *  flagsFor / rowFaultClass so the two panels look the same when both
+ *  are open on a stalling session. Snapshot / event / marker rows
+ *  return empty — they have no faulted/slow concept. */
+function isSlowNetwork(r: Row): boolean {
+  if (r.source !== 'network') return false;
+  const transfer = numOrZero(r.raw.transfer_ms);
+  const kind = String(r.raw.request_kind ?? '').toLowerCase();
+  if (/manifest/.test(kind)) return false;
+  return transfer > 6_000;
+}
+function rowFlags(r: Row): { text: string; color: string } {
+  if (r.source !== 'network') return { text: '', color: '' };
+  const faulted = !!r.raw.faulted && r.raw.faulted !== 0;
+  const cat = String(r.raw.fault_category ?? '').toLowerCase();
+  let glyph = '';
+  if (faulted) {
+    if (cat === 'socket') glyph = '!✂';
+    else if (cat === 'transfer_timeout') glyph = '!⏱';
+    else if (cat === 'client_disconnect') glyph = '!↩';
+    else glyph = '!';
+  }
+  const slow = isSlowNetwork(r) ? '⏰' : '';
+  return {
+    text: glyph + slow,
+    color: faulted ? '#7f1d1d' : (slow ? '#92400e' : ''),
+  };
+}
+function rowFaultClass(r: Row): string {
+  if (r.source !== 'network') return '';
+  if (!!r.raw.faulted && r.raw.faulted !== 0) return 'row-faulted';
+  if (isSlowNetwork(r)) return 'row-slow';
+  return '';
+}
+
 const allRows = computed<Row[]>(() => {
   // Touch each stream's version so Vue re-runs the computed on every
   // delta, even though inRange() also touches the underlying ref.
@@ -724,6 +759,7 @@ function onRowsWheel(e: WheelEvent) {
       <div class="row head">
         <div class="cell c-time sortable" @click="clickSort('time')">_time<span class="arr">{{ arrow('time') }}</span></div>
         <div class="cell c-source sortable" @click="clickSort('source')">source<span class="arr">{{ arrow('source') }}</span></div>
+        <div class="cell c-flag" title="Network row flags — same glyphs as the NetworkLog panel: ! faulted (+ category), ⏰ slow segment (>6s)">flags</div>
         <div class="cell c-player">player_id</div>
         <div class="cell c-play">play_id</div>
         <div class="cell c-attempt">attempt_id</div>
@@ -737,12 +773,13 @@ function onRowsWheel(e: WheelEvent) {
           v-for="(r, i) in sortedRows"
           :key="i"
           class="row"
-          :class="`src-${r.source}`"
+          :class="[`src-${r.source}`, rowFaultClass(r)]"
         >
           <div class="cell c-time">{{ fmtTime(r.ts) }}</div>
           <div class="cell c-source">
             <span class="src-tag" :class="`tag-${r.source}`">{{ r.source }}</span>
           </div>
+          <div class="cell c-flag" :style="{ color: rowFlags(r).color }" :title="rowFlags(r).text">{{ rowFlags(r).text }}</div>
           <div class="cell c-player" :title="r.playerId">{{ shortId(r.playerId) }}</div>
           <div class="cell c-play" :title="r.playId">{{ shortId(r.playId) }}</div>
           <div class="cell c-attempt" :title="r.attemptId">{{ shortId(r.attemptId) }}</div>
@@ -863,6 +900,7 @@ function onRowsWheel(e: WheelEvent) {
   grid-template-columns:
     var(--c-time, 96px)
     var(--c-source, 76px)
+    var(--c-flag, 36px)
     var(--c-player, 90px)
     var(--c-play, 90px)
     var(--c-attempt, 90px)
@@ -882,12 +920,27 @@ function onRowsWheel(e: WheelEvent) {
   grid-template-columns:
     var(--c-time, 96px)
     var(--c-source, 76px)
+    var(--c-flag, 36px)
     var(--c-player, 90px)
     var(--c-play, 90px)
     var(--c-attempt, 90px)
     var(--c-eventname, minmax(140px, 280px))
     var(--c-fields, minmax(200px, 2fr))
     var(--c-raw, minmax(280px, 3fr));
+}
+
+/* Network-row tints — matched to NetworkLog.vue so the two panels
+ * agree visually when both are open on a stalling session. */
+.row.row-faulted { background: #fef2f2; }
+.row.row-faulted:hover { background: #fee2e2; }
+.row.row-slow { background: #fffbeb; }
+.row.row-slow:hover { background: #fef3c7; }
+
+.c-flag {
+  text-align: center;
+  font-weight: 700;
+  letter-spacing: -1px;
+  font-size: 11px;
 }
 
 .row.head {
