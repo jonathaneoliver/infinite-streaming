@@ -1958,13 +1958,43 @@ extension PlayerViewModel {
         }
     }
 
-    /// Stamp `Player-ID` + `X-Playback-Session-Id` headers on a URLSession
-    /// request so go-proxy can bind the request to our session for
-    /// failure-injection routing. Mirrors the legacy `applyPlayerHeaders`.
+    /// Stamp `Player-ID` + `X-Playback-Session-Id` + `User-Agent` headers
+    /// on a URLSession request so go-proxy can bind the request to our
+    /// session for failure-injection routing AND identify the device
+    /// family across every request the app makes (metrics POST, HAR
+    /// snapshot, session lookup, master preflight).
+    ///
+    /// The default URLSession User-Agent (`CFNetwork/… Darwin/…`) is
+    /// device-family agnostic, so the proxy's stored user_agent kept
+    /// getting overwritten between manifest fetches by these thinner
+    /// app-side POSTs and the iPad/iPhone/AppleTV label was lost.
+    /// Issue #471.
     fileprivate func applyPlayerHeaders(to request: inout URLRequest) {
         request.setValue(playerId, forHTTPHeaderField: "Player-ID")
         request.setValue(playerId, forHTTPHeaderField: "X-Playback-Session-Id")
+        request.setValue(Self.appUserAgent, forHTTPHeaderField: "User-Agent")
     }
+
+    /// Device-aware User-Agent shared across every URLSession request.
+    /// Format: `InfiniteStreamPlayer/<app-version> (<idiom>; <os> <version>)`
+    /// e.g. `InfiniteStreamPlayer/1.0 (iPad; iPadOS 26.1)`.
+    /// Computed once at first access — UIDevice / Bundle reads are stable
+    /// for the app's lifetime.
+    private static let appUserAgent: String = {
+        let device = UIDevice.current
+        let idiom: String
+        switch device.userInterfaceIdiom {
+        case .pad:     idiom = "iPad"
+        case .phone:   idiom = "iPhone"
+        case .tv:      idiom = "AppleTV"
+        case .carPlay: idiom = "CarPlay"
+        case .mac:     idiom = "Mac"
+        case .vision:  idiom = "Vision"
+        default:       idiom = "Apple"
+        }
+        let appVersion = (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "0"
+        return "InfiniteStreamPlayer/\(appVersion) (\(idiom); \(device.systemName) \(device.systemVersion))"
+    }()
 
     /// Migrate legacy `boss…` and `is…` UserDefaults keys to the new
     /// `is.flag.…` namespace so users upgrading from a pre-rework build

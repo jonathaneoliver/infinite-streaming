@@ -6391,6 +6391,23 @@ func (a *App) saveSessionByIDReturning(sessionID string, session SessionData) (S
 			for k, v := range session {
 				merged[k] = v
 			}
+			// Don't let a thinner user_agent overwrite a richer one
+			// already on the session (issue #471). AVPlayer's
+			// segment/manifest fetches arrive with a device-family
+			// token ("AppleCoreMedia/… (iPad; …)"); the app's
+			// URLSession metrics POSTs and HAR snapshot requests used
+			// to land with a thinner "CFNetwork/… Darwin/…" string
+			// that erased the iPad/iPhone/AppleTV label. iOS now
+			// stamps its own User-Agent on every request, but keep
+			// this guard for clients (web, Roku, future) that may
+			// not.
+			if existingUA := getString(s, "user_agent"); existingUA != "" {
+				if incomingUA, ok := session["user_agent"].(string); ok {
+					if hasDeviceFamilyToken(existingUA) && !hasDeviceFamilyToken(incomingUA) {
+						merged["user_agent"] = existingUA
+					}
+				}
+			}
 			existingRevision := getString(s, "control_revision")
 			incomingRevision := getString(session, "control_revision")
 			if isControlRevisionNewer(existingRevision, incomingRevision) {
@@ -6422,6 +6439,27 @@ func (a *App) saveSessionByIDReturning(sessionID string, session SessionData) (S
 		return nil, false
 	}
 	return cloneSession(merged), true
+}
+
+// hasDeviceFamilyToken reports whether the given User-Agent string
+// carries a token the harness device resolver and the dashboard's
+// device chips can identify. Used by saveSessionByID's user_agent
+// merge guard so a thinner per-request UA can't overwrite a richer
+// one already stored on the session. Issue #471.
+//
+// Match is case-insensitive on a small closed set. New device
+// families (Android, Tizen, etc.) get added here when they ship.
+func hasDeviceFamilyToken(ua string) bool {
+	if ua == "" {
+		return false
+	}
+	lower := strings.ToLower(ua)
+	for _, tok := range []string{"ipad", "iphone", "appletv", "apple tv", "roku", "android"} {
+		if strings.Contains(lower, tok) {
+			return true
+		}
+	}
+	return false
 }
 
 // isStalePlayerMetricsUpdate returns true when `incoming` carries a
