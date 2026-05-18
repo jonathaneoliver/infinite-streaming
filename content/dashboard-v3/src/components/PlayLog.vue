@@ -91,7 +91,10 @@ const showRaw = ref(false);
  *    previous chronologically-earlier snapshot row. Lets the
  *    operator scan state transitions on a thrashing player. */
 type DisplayMode = 'all' | 'changed';
-const displayMode = ref<DisplayMode>('all');
+// Default to 'changed' — operators almost always want to see what
+// actually moved between snapshots, not the ~50-field raw dump. Flip
+// to 'all' for forensics on a specific row.
+const displayMode = ref<DisplayMode>('changed');
 
 /** Field-ordering knob.
  *
@@ -108,7 +111,11 @@ const displayMode = ref<DisplayMode>('all');
  *  event rows fall back to alphabetic since every row is distinct
  *  and there's no meaningful frequency to compute. */
 type FieldOrder = 'alphabetic' | 'by-change-rate';
-const fieldOrder = ref<FieldOrder>('alphabetic');
+// Default to 'by-change-rate' — pairs naturally with 'changed' display
+// mode: the leading fields are the ones that just transitioned, the
+// constant-ish ones sink to the back. Alphabetic is the muscle-memory
+// fallback when you know the field name and want to scan for it.
+const fieldOrder = ref<FieldOrder>('by-change-rate');
 
 type SortCol = 'time' | 'source';
 type SortDir = 'asc' | 'desc';
