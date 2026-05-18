@@ -63,6 +63,23 @@ const showRaw = ref(false);
 type DisplayMode = 'all' | 'changed';
 const displayMode = ref<DisplayMode>('all');
 
+/** Field-ordering knob.
+ *
+ *  - "alphabetic": classic name sort. Predictable, easy to scan when
+ *    you know the field you're looking for.
+ *  - "by-change-rate": fields ordered ascending by how often they
+ *    change value between adjacent snapshots. Rarely-changing
+ *    fields (state, last_event, video_resolution, …) bubble to the
+ *    front; per-tick metrics like position_s and playhead_wallclock_ms
+ *    sink to the back. Especially handy in "Changed only" mode where
+ *    the leading fields are the interesting transitions.
+ *
+ *  Change rate is computed across snapshot rows only — network /
+ *  event rows fall back to alphabetic since every row is distinct
+ *  and there's no meaningful frequency to compute. */
+type FieldOrder = 'alphabetic' | 'by-change-rate';
+const fieldOrder = ref<FieldOrder>('alphabetic');
+
 type SortCol = 'time' | 'source';
 type SortDir = 'asc' | 'desc';
 const sortCol = ref<SortCol | null>('time');
@@ -301,6 +318,78 @@ interface RowWithFields extends Row {
   fields: DisplayedField[];
 }
 
+/** Per-field "change rate" across snapshot rows, in [0, 1]. A field
+ *  whose value flips between every adjacent pair sits at 1.0; a
+ *  field that's truly constant sits at 0. Recomputed reactively
+ *  with the snapshot stream — touches version so deltas re-run it. */
+const snapshotChangeRates = computed<Map<string, number>>(() => {
+  void props.samplesStream.version.value;
+  const snapshots = props.samplesStream.inRange(0, Number.MAX_SAFE_INTEGER);
+  if (snapshots.length < 2) return new Map();
+  // Stable chronological order. The stream's natural order is
+  // typically already ts-ascending, but sort defensively — change-
+  // rate math is meaningless under arbitrary order.
+  const chrono = snapshots
+    .map((raw) => ({ ts: tsOf(raw), raw }))
+    .filter((r) => Number.isFinite(r.ts))
+    .sort((a, b) => a.ts - b.ts);
+  if (chrono.length < 2) return new Map();
+  const changes = new Map<string, number>();
+  const seen = new Map<string, number>();
+  for (let i = 1; i < chrono.length; i++) {
+    const prev = fieldsFromRaw(chrono[i - 1].raw);
+    const cur = fieldsFromRaw(chrono[i].raw);
+    const prevByKey = new Map<string, string>();
+    for (const f of prev) prevByKey.set(f.name, f.value);
+    const seenThisPair = new Set<string>();
+    for (const f of cur) {
+      seenThisPair.add(f.name);
+      seen.set(f.name, (seen.get(f.name) ?? 0) + 1);
+      const prevValue = prevByKey.get(f.name);
+      if (prevValue !== undefined && prevValue !== f.value) {
+        changes.set(f.name, (changes.get(f.name) ?? 0) + 1);
+      }
+    }
+    // Fields present in `prev` but absent in `cur` count as a change
+    // too — the value moved from "something" to "nothing". Rare in
+    // practice but the math should be honest about it.
+    for (const f of prev) {
+      if (!seenThisPair.has(f.name)) {
+        seen.set(f.name, (seen.get(f.name) ?? 0) + 1);
+        changes.set(f.name, (changes.get(f.name) ?? 0) + 1);
+      }
+    }
+  }
+  const out = new Map<string, number>();
+  for (const [name, total] of seen) {
+    out.set(name, (changes.get(name) ?? 0) / total);
+  }
+  return out;
+});
+
+/** Sort comparator that picks alphabetic or change-rate-ascending
+ *  based on the current fieldOrder radio. Snapshots use change-rate
+ *  when selected; network / event rows always fall back to
+ *  alphabetic (no meaningful frequency to compute). */
+function sortFields(fields: DisplayedField[], source: Source): DisplayedField[] {
+  if (fieldOrder.value === 'alphabetic' || source !== 'snapshot') {
+    // fieldsFromRaw already emits alphabetic — return as-is.
+    return fields;
+  }
+  const rates = snapshotChangeRates.value;
+  return fields.slice().sort((a, b) => {
+    const ra = rates.get(a.name);
+    const rb = rates.get(b.name);
+    // Fields with no observed rate (first-row baseline, all-fields
+    // mode) sort to the END — they're effectively "rate unknown".
+    if (ra == null && rb == null) return a.name.localeCompare(b.name);
+    if (ra == null) return 1;
+    if (rb == null) return -1;
+    if (ra !== rb) return ra - rb;       // ascending: stable first
+    return a.name.localeCompare(b.name); // tie → alphabetic
+  });
+}
+
 const rowsWithFields = computed<RowWithFields[]>(() => {
   // Build chronological copy so the diff against the previous
   // snapshot is well-defined regardless of the display sort
@@ -327,6 +416,7 @@ const rowsWithFields = computed<RowWithFields[]>(() => {
       // mode (no prior to diff against), or any non-snapshot row.
       fields = fieldsFromRaw(r.raw, skip);
     }
+    fields = sortFields(fields, r.source);
     out[i] = { ...r, fields };
     if (r.source === 'snapshot') prevSnapshot = r.raw;
   }
@@ -479,6 +569,13 @@ function onRowsWheel(e: WheelEvent) {
       <label class="opt"><input type="radio" value="all" v-model="displayMode" /> All</label>
       <label class="opt"><input type="radio" value="changed" v-model="displayMode" /> Changed only (vs previous snapshot)</label>
       <span class="mode-hint">Network &amp; event rows always show every field.</span>
+    </div>
+
+    <div class="toolbar mode-row">
+      <span class="mode-label">Field order:</span>
+      <label class="opt"><input type="radio" value="alphabetic" v-model="fieldOrder" /> Alphabetic</label>
+      <label class="opt"><input type="radio" value="by-change-rate" v-model="fieldOrder" /> By change rate (rarely-changing first)</label>
+      <span class="mode-hint">Snapshots only; network &amp; event rows stay alphabetic.</span>
     </div>
 
     <p class="note">
