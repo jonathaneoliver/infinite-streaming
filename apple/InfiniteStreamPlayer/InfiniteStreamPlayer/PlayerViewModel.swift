@@ -99,10 +99,35 @@ final class PlayerViewModel: ObservableObject {
     /// AVPlayerViewController re-acquires the new player.
     @Published private(set) var playerEpoch: Int = 0
 
-    /// Stable identifier passed to go-proxy as `?player_id=...`. Kept
-    /// for the lifetime of the VM (i.e. one app session). Reload does
-    /// **not** rotate it — proxy session continuity matters.
-    let playerId: String = UUID().uuidString
+    /// Stable identifier passed to go-proxy as `?player_id=...`.
+    /// Persisted in `UserDefaults` under `isPlayerId` so it survives
+    /// app rebuilds (Xcode reinstall), relaunches, and iOS reboots —
+    /// only wiped on app uninstall or explicit "reset all data".
+    /// Without persistence every rebuild produced a new player_id
+    /// and the proxy / analytics layers treated it as a fresh device
+    /// session, breaking continuity for the operator who's just
+    /// iterating on the binary.
+    let playerId: String = {
+        let d = UserDefaults.standard
+        if let stored = d.string(forKey: "isPlayerId"),
+           UUID(uuidString: stored) != nil {
+            return stored
+        }
+        // Migration shim: stored-property closures run BEFORE
+        // init()'s body, which means migrateLegacyDefaults hasn't
+        // copied bossPlayerId → isPlayerId yet on the very first
+        // launch of a new build that upgrades a pre-rework install.
+        // Read the legacy key here so the migration isn't lost.
+        if let legacy = d.string(forKey: "bossPlayerId"),
+           UUID(uuidString: legacy) != nil {
+            d.set(legacy, forKey: "isPlayerId")
+            d.removeObject(forKey: "bossPlayerId")
+            return legacy
+        }
+        let fresh = UUID().uuidString
+        d.set(fresh, forKey: "isPlayerId")
+        return fresh
+    }()
 
     /// `play_id` (issue #280) — a UUID regenerated only on
     /// **start-fresh** boundaries: a new content selection, a catalogue
