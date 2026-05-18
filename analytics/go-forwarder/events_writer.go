@@ -100,6 +100,8 @@ func snapshotToEventclass(r *row) eventclass.Snapshot {
 		LastEvent:    r.LastEvent,
 		PlayerError:  r.PlayerError,
 		VideoBitrate: r.VideoBitrateMbps,
+		RateFromMbps: r.RateFromMbps,
+		RateToMbps:   r.RateToMbps,
 
 		ManifestConsecutiveFailures:       r.ManifestConsecutiveFailures,
 		SegmentConsecutiveFailures:        r.SegmentConsecutiveFailures,
@@ -148,6 +150,7 @@ type chEvent struct {
 	AttemptID        uint32 `json:"attempt_id"`
 	SessionID        string `json:"session_id"`
 	Type             string `json:"type"`
+	Subtype          string `json:"subtype,omitempty"`
 	Info             string `json:"info"`
 	Kind             string `json:"kind"`
 	Priority         uint8  `json:"priority"`
@@ -175,6 +178,7 @@ func toChEvent(e eventclass.Event) chEvent {
 		AttemptID:        e.AttemptID,
 		SessionID:        e.SessionID,
 		Type:             e.Type,
+		Subtype:          e.Subtype,
 		Info:             e.Info,
 		Kind:             e.Kind(),
 		Priority:         e.Priority(stallDur),

@@ -40,16 +40,12 @@ func (snapshotStateClassifier) Classify(prev, cur *Snapshot) []Event {
 	if cur == nil {
 		return nil
 	}
-	// Edge-trigger: only fire when last_event transitions into a new
-	// value. The player typically keeps last_event set to the most
-	// recent marker until something else happens, so without this
-	// guard every subsequent snapshot would re-emit the same event.
-	// The legacy SQL had the same edge case but tolerated it because
-	// dashboards filtered on (ts, type, info) tuples; the write-time
-	// path persists every row so the dedupe has to happen here.
-	if prev != nil && prev.LastEvent == cur.LastEvent {
-		return nil
-	}
+	// Issue #470: go-proxy is now 1:1 — every metrics POST from the
+	// player produces exactly one frame, no debounced re-emission of
+	// stale markers. Each call to this classifier corresponds to one
+	// player event, so the edge-trigger guard the previous commit
+	// added is no longer needed (and would suppress legitimate
+	// back-to-back events of the same type from a chatty player).
 	base := Event{
 		Ts: cur.Ts, PlayerID: cur.PlayerID, PlayID: cur.PlayID,
 		AttemptID: cur.AttemptID, SessionID: cur.SessionID,

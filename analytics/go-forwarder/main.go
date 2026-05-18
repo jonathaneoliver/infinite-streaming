@@ -164,6 +164,17 @@ type row struct {
 	BufferDepthS             float32 `json:"buffer_depth_s"`
 	NetworkBitrateMbps       float32 `json:"network_bitrate_mbps"`
 	VideoBitrateMbps         float32 `json:"video_bitrate_mbps"`
+	// Player-supplied from/to bitrate on rate_shift_down /
+	// rate_shift_up POSTs (issue #470). Authoritative transition
+	// values — eventclass.snapshotRateClassifier prefers these to
+	// the (prev.VideoBitrate, cur.VideoBitrate) inference because
+	// iOS emits a parallel `video_bitrate_change` POST in the same
+	// handler with the same new bitrate, briefly aliasing the
+	// inferred prev. `json:"-"` keeps these out of the CH insert
+	// body (no column in session_snapshots) — they're transient,
+	// read only at classify time.
+	RateFromMbps             float32 `json:"-"`
+	RateToMbps               float32 `json:"-"`
 	MeasuredMbps             float32 `json:"measured_mbps"`
 	MbpsShaperRate           float32 `json:"mbps_shaper_rate"`
 	MbpsShaperAvg            float32 `json:"mbps_shaper_avg"`
@@ -564,6 +575,8 @@ func toRow(ts string, revision uint64, sessionID string, s map[string]interface{
 		BufferDepthS:             getF32(s, "player_metrics_buffer_depth_s"),
 		NetworkBitrateMbps:       getF32(s, "player_metrics_network_bitrate_mbps"),
 		VideoBitrateMbps:         getF32(s, "player_metrics_video_bitrate_mbps"),
+		RateFromMbps:             getF32(s, "player_metrics_rate_from_mbps"),
+		RateToMbps:               getF32(s, "player_metrics_rate_to_mbps"),
 		MeasuredMbps:             getF32(s, "measured_mbps"),
 		MbpsShaperRate:           getF32(s, "mbps_shaper_rate"),
 		MbpsShaperAvg:            getF32(s, "mbps_shaper_avg"),

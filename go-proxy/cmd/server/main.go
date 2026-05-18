@@ -347,9 +347,11 @@ type App struct {
 	loopStateMu              sync.Mutex
 	loopStateBySession       map[string]ServerLoopState
 	sessionsHub              *SessionEventHub
-	sessionsBroadcastMu      sync.Mutex
-	sessionsBroadcastPending bool
-	sessionsBroadcastLatest  []SessionData
+	// Monotonic revision stamped on each /api/sessions/stream frame
+	// (handleSessionStream initial frame + emitSessionEvent per-event
+	// frames). Was named sessionsBroadcastSeq when the debounced
+	// full-state broadcast lived here; kept stable as the wire
+	// revision is consumer-visible.
 	sessionsBroadcastSeq     uint64
 	networkHub               *NetworkEventHub
 	uiStateVersionSeq        uint64
@@ -2014,10 +2016,16 @@ func (a *App) handlePostSessionMetrics(w http.ResponseWriter, r *http.Request) {
 	if v := strings.TrimSpace(r.URL.Query().Get("attempt_id")); v != "" {
 		metricsOnly["attempt_id"] = v
 	}
-	a.saveSessionByID(id, metricsOnly)
-	lastEvent := strings.ToLower(strings.TrimSpace(getString(metricsOnly, "player_metrics_last_event")))
-	if isSignificantPlayerEvent(lastEvent) {
-		a.flushSessionsBroadcast()
+	merged, ok := a.saveSessionByIDReturning(id, metricsOnly)
+	// Issue #470: emit one SSE frame per metrics POST. Every POST —
+	// heartbeat or otherwise — flows through so the forwarder writes
+	// exactly one snapshot row per event the player produced. The
+	// significance gate (`isSignificantPlayerEvent`) is gone because
+	// the previous "debounce + significance" pair was the source of
+	// the cadence aliasing and the stale-marker leak that produced
+	// duplicate session_events rows. Each frame stands on its own.
+	if ok {
+		a.emitSessionEvent(merged)
 	}
 	// "user_marked" (the 911 button) flows into the analytics tier
 	// via session_snapshots.last_event = 'user_marked'; the operator
@@ -2027,14 +2035,6 @@ func (a *App) handlePostSessionMetrics(w http.ResponseWriter, r *http.Request) {
 	// 30-day TTL is needed.
 	w.WriteHeader(http.StatusOK)
 	writeJSON(w, map[string]string{"status": "ok"})
-}
-
-func isSignificantPlayerEvent(event string) bool {
-	switch strings.ToLower(strings.TrimSpace(event)) {
-	case "stall_start", "stall_end", "segment_stall", "restart", "frozen", "error", "loop_marker", "playing", "buffering_start", "buffering_end", "rate_shift_up", "rate_shift_down", "video_first_frame", "video_start_time", "timejump", "user_marked":
-		return true
-	}
-	return false
 }
 
 
@@ -6335,7 +6335,13 @@ func (a *App) publishSnapshot(sessions []SessionData) {
 		session["ui_state_revision"] = uiRevision
 	}
 	a.sessionsSnap.Store(&sessions)
-	a.queueSessionsBroadcast(sessions)
+	// Issue #470: stopped broadcasting the full session list on every
+	// snapshot publish. /api/sessions/stream is now a per-event channel
+	// driven by emitSessionEvent; the debounced full-state path served
+	// only the forwarder and produced duplicates in session_events as
+	// stale `player_metrics_last_event` markers leaked across emissions.
+	// The in-memory snapshot (sessionsSnap) is still maintained because
+	// GET /api/sessions reads from it.
 }
 
 func (a *App) saveSessionList(sessions []SessionData) {
@@ -6345,11 +6351,29 @@ func (a *App) saveSessionList(sessions []SessionData) {
 }
 
 func (a *App) saveSessionByID(sessionID string, session SessionData) {
+	a.saveSessionByIDReturning(sessionID, session)
+}
+
+// saveSessionByIDReturning is saveSessionByID's worker; returns the
+// merged session post-merge so callers (the metrics POST handler) can
+// emit a per-event SSE frame containing exactly the row that was
+// just written. Returns nil + false when the merge was dropped as
+// stale (see isStalePlayerMetricsUpdate) so the caller knows not to
+// emit.
+//
+// Issue #470: the per-event emission path consumes this; the
+// pre-existing debounced full-state broadcast path is no longer used
+// for /api/sessions/stream — publishSnapshot still maintains the
+// in-memory snapshot for GET /api/sessions, but no longer queues a
+// hub broadcast.
+func (a *App) saveSessionByIDReturning(sessionID string, session SessionData) (SessionData, bool) {
 	a.sessionsMu.Lock()
 	defer a.sessionsMu.Unlock()
 	snap := a.getSessionList()
 	updated := make([]SessionData, len(snap))
 	copy(updated, snap)
+	var merged SessionData
+	var found bool
 	for i, s := range updated {
 		if getString(s, "session_id") == sessionID {
 			// Drop the merge if it's a player_metrics POST whose
@@ -6361,9 +6385,9 @@ func (a *App) saveSessionByID(sessionID string, session SessionData) {
 			// event_time jumps in session_snapshots and zigzag charts
 			// at step boundaries (issue #403 follow-up).
 			if isStalePlayerMetricsUpdate(s, session) {
-				return
+				return nil, false
 			}
-			merged := cloneSession(s)
+			merged = cloneSession(s)
 			for k, v := range session {
 				merged[k] = v
 			}
@@ -6389,10 +6413,15 @@ func (a *App) saveSessionByID(sessionID string, session SessionData) {
 				}
 			}
 			updated[i] = merged
+			found = true
 			break
 		}
 	}
 	a.publishSnapshot(updated)
+	if !found {
+		return nil, false
+	}
+	return cloneSession(merged), true
 }
 
 // isStalePlayerMetricsUpdate returns true when `incoming` carries a
@@ -7061,30 +7090,6 @@ func (a *App) buildSessionsEvent(normalized []SessionData, revision uint64, drop
 	return fmt.Sprintf("event: sessions\nid: %d\ndata: %s\n\n", revision, data)
 }
 
-func (a *App) queueSessionsBroadcast(sessions []SessionData) {
-	if a.sessionsHub == nil {
-		return
-	}
-	// Snapshot before stashing. The broadcast pipeline runs asynchronously
-	// (250ms timer → normalizeSessionsForResponse mutates the maps → SSE
-	// clients marshal them). Without this snapshot the pipeline shares maps
-	// with the calling handler, which continues to mutate sessionData
-	// between successive saveSessionList calls — that's the race that
-	// triggers `concurrent map iteration and map write` in json.Marshal.
-	snapshot := cloneSessionList(sessions)
-	a.sessionsBroadcastMu.Lock()
-	a.sessionsBroadcastLatest = snapshot
-	if a.sessionsBroadcastPending {
-		a.sessionsBroadcastMu.Unlock()
-		return
-	}
-	a.sessionsBroadcastPending = true
-	a.sessionsBroadcastMu.Unlock()
-	time.AfterFunc(250*time.Millisecond, func() {
-		a.flushSessionsBroadcast()
-	})
-}
-
 // cloneSessionList deep-copies the maps inside the slice so the result can
 // be iterated/mutated independently of the input. Primitives are shared by
 // value; nested map[string]interface{} and []interface{} are recursively
@@ -7126,16 +7131,28 @@ func cloneInterface(v interface{}) interface{} {
 	}
 }
 
-func (a *App) flushSessionsBroadcast() {
-	a.sessionsBroadcastMu.Lock()
-	sessions := a.sessionsBroadcastLatest
-	a.sessionsBroadcastLatest = nil
-	a.sessionsBroadcastPending = false
-	a.sessionsBroadcastMu.Unlock()
-	if sessions == nil {
+// emitSessionEvent broadcasts ONE session frame to /api/sessions/stream
+// clients immediately, no debounce. Issue #470: replaces the
+// debounced full-state broadcast as the way the forwarder learns
+// about playback events. One iOS metrics POST → one emit → one
+// session_snapshots row → N classified rows in session_events (one
+// per eventclass rule that matched).
+//
+// The session payload is the post-merge view of the row that was
+// just written (saveSessionByIDReturning's return value). It carries
+// the player's just-received `player_metrics_last_event` exactly
+// once: subsequent broadcasts (other than another metrics POST)
+// don't read this stream anymore, so the leak that drove the
+// duplicate-event bug in #469 is structurally impossible.
+//
+// Wire shape stays the existing `event: sessions\ndata: {...}` with
+// a single-element Sessions array so the forwarder consumes it with
+// no schema change.
+func (a *App) emitSessionEvent(session SessionData) {
+	if a.sessionsHub == nil || session == nil {
 		return
 	}
-	normalized := a.normalizeSessionsForResponse(sessions)
+	normalized := a.normalizeSessionsForResponse([]SessionData{session})
 	rev := atomic.AddUint64(&a.sessionsBroadcastSeq, 1)
 	preMarshaled := a.buildSessionsEvent(normalized, rev, 0, nil)
 	a.sessionsHub.Broadcast(normalized, rev, preMarshaled)

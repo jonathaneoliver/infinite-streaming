@@ -12,41 +12,37 @@ func init() {
 type snapshotRateClassifier struct{}
 
 func (snapshotRateClassifier) Classify(prev, cur *Snapshot) []Event {
-	if cur == nil || prev == nil {
-		// First row of a play has no prev — can't compute a shift
-		// without a baseline, so emit nothing (legacy SQL's
-		// lagInFrame would have left prev_bitrate = video_bitrate
-		// and the > 0 guard would still trip but the info string
-		// would collapse to "X.XX→X.XX" — we just drop the row).
+	if cur == nil {
 		return nil
 	}
-	if prev.VideoBitrate <= 0 || cur.VideoBitrate <= 0 {
+	// Issue #470: one POST per transition. Direction is in the event
+	// name (rate_shift_up / rate_shift_down) — clients dropped the
+	// parallel video_bitrate_change POST that previously duplicated
+	// the same observation under a different name.
+	if cur.LastEvent != "rate_shift_up" && cur.LastEvent != "rate_shift_down" {
 		return nil
 	}
-	// Edge-trigger: only fire when last_event transitions to a fresh
-	// rate_shift marker. The player keeps the marker on every
-	// subsequent snapshot until the next state change, so without
-	// this guard we'd emit one event per snapshot for the same
-	// transition (and with prev_bitrate==cur_bitrate after the
-	// initial transition, the info string would falsely read
-	// "X.XX→X.XX" — exactly the duplicate pattern observed in
-	// CH after the first deploy).
-	if prev.LastEvent == cur.LastEvent {
-		return nil
+	// Prefer the player-supplied from/to fields — clients track the
+	// actual transition internally and ship both halves in extras.
+	from, to := cur.RateFromMbps, cur.RateToMbps
+	if from <= 0 || to <= 0 {
+		// Fallback for clients (or replayed historical rows) that
+		// don't carry from/to extras.
+		if prev == nil || prev.VideoBitrate <= 0 || cur.VideoBitrate <= 0 {
+			return nil
+		}
+		from, to = prev.VideoBitrate, cur.VideoBitrate
 	}
 	base := Event{
 		Ts: cur.Ts, PlayerID: cur.PlayerID, PlayID: cur.PlayID,
 		AttemptID: cur.AttemptID, SessionID: cur.SessionID,
 		Classification: cur.Classification,
-		Info:           FormatBitrateShift(prev.VideoBitrate, cur.VideoBitrate),
+		Info:           FormatBitrateShift(from, to),
 	}
-	switch cur.LastEvent {
-	case "rate_shift_down":
+	if cur.LastEvent == "rate_shift_down" {
 		base.Type = TypeDownshift
-		return []Event{base}
-	case "rate_shift_up":
+	} else {
 		base.Type = TypeUpshift
-		return []Event{base}
 	}
-	return nil
+	return []Event{base}
 }

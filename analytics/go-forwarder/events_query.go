@@ -102,7 +102,7 @@ func buildEventsQuery(cfg config, p eventsQueryParams) (string, map[string]strin
 	// with ILLEGAL_TYPE_OF_ARGUMENT.
 	query := fmt.Sprintf(
 		`SELECT toString(ts) AS ts, player_id, play_id, attempt_id, session_id,
-		        type, info, kind, priority
+		        type, subtype, info, kind, priority
 		 FROM (
 		   SELECT * FROM %s.session_events
 		   WHERE %s

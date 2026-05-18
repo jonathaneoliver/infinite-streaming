@@ -67,14 +67,13 @@ func (p *pairClassifier) Classify(prev, cur *Snapshot) []Event {
 	if cur == nil {
 		return nil
 	}
-	// Edge-trigger on the start markers — only record the open pair
-	// when last_event TRANSITIONS to stall_start / buffering_start.
-	// Without this guard, every subsequent snapshot carrying the
-	// stale marker would overwrite the open entry and push start_ts
-	// forward, shrinking the eventually-emitted duration.
-	if prev != nil && prev.LastEvent == cur.LastEvent {
-		return nil
-	}
+	// Issue #470: 1:1 proxy emission means each stall_start /
+	// stall_end / buffering_start / buffering_end marker arrives in
+	// its own frame, exactly once. The legacy SQL's behaviour was
+	// "last stall_start wins" if the player erroneously sent two in
+	// a row before any stall_end (leadInFrame paired each row with
+	// its immediate successor) — preserved here by the natural
+	// overwrite-on-stall_start in the switch below.
 	switch cur.LastEvent {
 	case "stall_start":
 		p.mu.Lock()

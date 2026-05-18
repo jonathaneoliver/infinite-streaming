@@ -65,6 +65,18 @@ type Event struct {
 	// below). LowCardinality(String) on the CH side.
 	Type string
 
+	// Subtype is a directional / categorical discriminator within
+	// Type, used when the same observation has multiple meaningful
+	// flavours that downstream wants to filter or group on without
+	// proliferating Type values (issue #470).
+	//
+	//   Type='video_bitrate_change' → Subtype='up' | 'down'
+	//
+	// Empty for events that don't split. Consumers that want the
+	// coarse view query by Type; consumers that want the split add
+	// Subtype to the WHERE / GROUP BY.
+	Subtype string
+
 	// Info is a short, type-specific display string. Free-form
 	// otherwise.
 	Info string
@@ -118,6 +130,11 @@ func (e Event) Priority(stallDurationS float64) uint8 {
 		TypeFaultOn, TypeFaultOff,
 		TypeDownshift, TypeTimejump, TypeBuffering:
 		return 3
+	case TypeVideoBitrateChange:
+		if e.Subtype == SubtypeDown {
+			return 3
+		}
+		return 4
 	case TypeHTTP5xx, TypeRequestTimeout:
 		return 2
 	case TypeHTTP4xx, TypeRequestIncomplete, TypeRequestFaulted,
@@ -155,6 +172,16 @@ const (
 	TypeBuffering             = "buffering"
 	TypeRestart               = "restart"
 	TypePlaybackStart         = "playback_start"
+	// TypeVideoBitrateChange covers both up- and down-shifts in the
+	// player's selected video rendition. The directional split lives
+	// on Event.Subtype ('up' / 'down') so dashboards can filter or
+	// group by it without two distinct Type values for what is one
+	// observation. (#470)
+	TypeVideoBitrateChange    = "video_bitrate_change"
+	SubtypeUp                 = "up"
+	SubtypeDown               = "down"
+	// Legacy values — kept so historical rows pre-#470 cutover still
+	// match Kind/Priority lookups. No new rows use these.
 	TypeDownshift             = "downshift"
 	TypeUpshift               = "upshift"
 	TypeTimejump              = "timejump"
@@ -200,6 +227,14 @@ type Snapshot struct {
 	LastEvent     string
 	PlayerError   string
 	VideoBitrate  float32
+	// Player-supplied from/to values on rate_shift_down /
+	// rate_shift_up POSTs. The iOS player tracks
+	// `lastReportedRenditionMbps` internally; these fields are the
+	// authoritative transition and avoid the prev/cur ambiguity that
+	// would otherwise come from the iOS player firing a parallel
+	// `video_bitrate_change` POST right before the rate_shift.
+	RateFromMbps  float32
+	RateToMbps    float32
 
 	// Counter cohort — the read-time SQL detected events on the
 	// monotonic-increase boundary of each one. Same semantics here.

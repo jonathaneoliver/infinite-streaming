@@ -1698,23 +1698,21 @@ extension PlayerViewModel {
         let eventAt = Date()
         if let previous = lastReportedRenditionMbps {
             if mbps != previous {
+                // Issue #470: one POST per bitrate transition, with a
+                // directional event name (rate_shift_up / rate_shift_down).
+                // Previously we sent video_bitrate_change AND a parallel
+                // rate_shift_up/down for the same observation; that was
+                // the same moment with a renamed wrapper and caused
+                // prev/cur aliasing in the forwarder. Collapsed here.
                 profileShiftCount = max(0, profileShiftCount) + 1
-                let payload = buildMetricsPayload(event: "video_bitrate_change", at: eventAt, extra: [
-                    "player_metrics_video_bitrate_from_mbps": previous,
-                    "player_metrics_video_bitrate_to_mbps": mbps,
+                let event = mbps > previous ? "rate_shift_up" : "rate_shift_down"
+                let payload = buildMetricsPayload(event: event, at: eventAt, extra: [
+                    "player_metrics_rate_from_mbps": previous,
+                    "player_metrics_rate_to_mbps": mbps,
                     "player_metrics_profile_shift_count": profileShiftCount
                 ])
                 Task { [weak self] in await self?.sendPlayerMetrics(payload: payload) }
-            }
-            let delta = mbps - previous
-            if abs(delta) >= 0.1 {
-                let event = delta > 0 ? "rate_shift_up" : "rate_shift_down"
-                let payload = buildMetricsPayload(event: event, at: eventAt, extra: [
-                    "player_metrics_rate_from_mbps": previous,
-                    "player_metrics_rate_to_mbps": mbps
-                ])
-                Task { [weak self] in await self?.sendPlayerMetrics(payload: payload) }
-                // Note: rate shifts are intentionally NOT marked as
+                // Note: bitrate changes are intentionally NOT marked as
                 // play_id activity — on healthy ABR streams they happen
                 // routinely and would block soak rotation indefinitely.
             }

@@ -461,6 +461,15 @@ CREATE TABLE IF NOT EXISTS infinite_streaming.session_events
     -- 'http_5xx'. Same taxonomy strings the legacy SQL emitted — see
     -- analytics/go-forwarder/eventclass/types.go for the closed set.
     type                     LowCardinality(String) CODEC(ZSTD(1)),
+    -- Directional / categorical discriminator within `type`. Empty
+    -- by default — only set when the same observation has multiple
+    -- meaningful sub-flavours (e.g. type='video_bitrate_change' splits
+    -- into subtype='up' / 'down'; future: type='fault' → subtype='on' /
+    -- 'off'). LowCardinality keeps the storage cost effectively zero
+    -- even with hundreds of distinct values. Consumers that want the
+    -- coarse view query by `type`; consumers that want the split add
+    -- `WHERE subtype='up'` or `GROUP BY type, subtype` (#470).
+    subtype                  LowCardinality(String) DEFAULT '' CODEC(ZSTD(1)),
     -- Free-form details for the event ("2.34s", "frozen", "15.36→3.46
     -- Mbps", "503 GET /seg.m4s"). Shape is type-specific; consumers
     -- treat it as display-only.
