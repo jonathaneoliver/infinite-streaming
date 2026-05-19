@@ -498,7 +498,7 @@ private fun ManualServerSheet(
                     val cleanHost = host.trim()
                     val cleanPort = port.toIntOrNull() ?: 30000
                     if (cleanHost.isNotEmpty() && cleanPort in 1..65535) {
-                        onSubmit("http://$cleanHost:$cleanPort")
+                        onSubmit("https://$cleanHost:$cleanPort")
                     }
                 }, accent = true)
             }

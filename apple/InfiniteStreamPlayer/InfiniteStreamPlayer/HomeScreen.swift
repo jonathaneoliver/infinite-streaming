@@ -42,8 +42,10 @@ struct HomeScreen: View {
     }
 
     /// Top-of-screen header: brand label + serif title on the left,
-    /// active server label below. Matches the ServerPicker header shape
-    /// so the two screens read as siblings.
+    /// active server label below, settings gear on the trailing edge so
+    /// Server picker / Advanced flags are reachable without entering
+    /// playback first. Matches the ServerPicker header shape so the two
+    /// screens read as siblings.
     private var header: some View {
         HStack(alignment: .top, spacing: Space.s4) {
             VStack(alignment: .leading, spacing: Space.s2) {
@@ -58,7 +60,28 @@ struct HomeScreen: View {
                 }
             }
             Spacer()
+            settingsButton
         }
+    }
+
+    /// Gear icon → opens the SettingsOverlay (which AppRoot already
+    /// mounts above every route, gated by `vm.settingsOpen`). On tvOS
+    /// the focus engine picks this up as a focusable; on iPhone/iPad
+    /// it's a plain tap target.
+    private var settingsButton: some View {
+        Button {
+            vm.setSettingsOpen(true)
+        } label: {
+            Image(systemName: "gearshape")
+                .font(.system(size: isCompact ? 18 : 22, weight: .semibold))
+                .foregroundColor(Tokens.fg)
+                .padding(isCompact ? Space.s2 : Space.s3)
+                .background(Tokens.bgSoft)
+                .clipShape(Circle())
+                .cinematicFocusFollower(cornerRadius: 999)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Settings")
     }
 }
 

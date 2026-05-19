@@ -38,13 +38,13 @@ services:
   grafana:
     container_name: test-dev-grafana
     # No host port — reach Grafana via the test-dev nginx /grafana/
-    # prefix (e.g. http://jonathanoliver-ubuntu.local:21000/grafana/).
+    # prefix (e.g. https://jonathanoliver-ubuntu.local:21000/grafana/).
     ports: !override []
     environment:
       # Public root URL for the test-deploy-dev box — overrides the
       # docker-compose default localhost:30000 so Grafana's own
       # redirects (login flow, etc.) land back on the right host:port.
-      - GF_SERVER_ROOT_URL=http://jonathanoliver-ubuntu.local:21000/grafana/
+      - GF_SERVER_ROOT_URL=https://jonathanoliver-ubuntu.local:21000/grafana/
   forwarder:
     container_name: test-dev-forwarder
     environment:

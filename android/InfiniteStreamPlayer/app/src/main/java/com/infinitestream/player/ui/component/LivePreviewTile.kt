@@ -59,7 +59,7 @@ import com.infinitestream.player.ui.theme.tvFocus
  *                  carousel: only the 3 tiles around focus actually
  *                  decode, the rest render as cards.
  *
- * URL: `http://{host}:{apiPort}/go-live/{name}/playlist_6s_360p.m3u8`
+ * URL: `{scheme}://{host}:{apiPort}/go-live/{name}/playlist_6s_360p.m3u8`
  *
  * The 6 s segment variant keeps decoder workload low; the MTK c2.mtk.avc
  * decoder on the Google TV Streamer caps at 3 simultaneous instances,
@@ -113,7 +113,7 @@ fun LivePreviewTile(
             )
         }
         if (active && !appStopped) {
-            ActivePlayerSurface(
+            LiveVideoSurface(
                 content = content,
                 server = server,
                 onAcquireDecoderLease = onAcquireDecoderLease,
@@ -161,21 +161,32 @@ fun LivePreviewTile(
 }
 
 /**
- * Inner Composable that actually instantiates an ExoPlayer + PlayerView.
- * Pulled out so the whole player lifecycle is scoped to the active branch
- * — entering/leaving active state runs proper enterComposition / dispose
+ * 360p-capped, video-only, silent ExoPlayer surface used both by the
+ * Home LIVE preview tiles AND the Home hero band. Pulled out (and made
+ * `internal`) so [HomeScreen]'s Hero can reuse the same decoder-lease
+ * lifecycle without duplicating the muted-renderers / track-selection
+ * setup. The whole player lifecycle is scoped to the host Composable —
+ * entering/leaving runs proper enterComposition / DisposableEffect.onDispose
  * which release the hardware decoder slot back to the chip's pool.
  */
 @Composable
-private fun ActivePlayerSurface(
+internal fun LiveVideoSurface(
     content: ContentItem,
     server: ServerEnvironment,
     onAcquireDecoderLease: () -> Unit,
     onReleaseDecoderLease: () -> Unit,
+    // 360p for small preview tiles; 720p for the home Hero band (big
+    // surface, deserves a sharper feed). Encoding pipeline emits
+    // playlist_6s_<label>.m3u8 for each rung; pass any rung that
+    // exists for the clip. Default keeps the legacy tile behaviour
+    // unchanged.
+    resolutionLabel: String = "360p",
+    maxVideoWidth: Int = 640,
+    maxVideoHeight: Int = 360,
 ) {
     val context = LocalContext.current
     val tBuild = androidx.compose.runtime.remember(content.name) { android.os.SystemClock.uptimeMillis() }
-    val player = remember(content.name, server.host, server.apiPort) {
+    val player = remember(content.name, server.host, server.apiPort, resolutionLabel) {
         android.util.Log.i("InfiniteStream", "tile:build '${content.name}'")
         // Tile players use a RenderersFactory that builds *no* audio
         // renderers. Just disabling the audio track via TrackSelection
@@ -202,13 +213,13 @@ private fun ActivePlayerSurface(
             // Cap to 360p in case go-live decides to serve a master playlist
             // somewhere — otherwise we accidentally pull 1080 p+ for a tile.
             trackSelectionParameters = trackSelectionParameters.buildUpon()
-                .setMaxVideoSize(640, 360)
+                .setMaxVideoSize(maxVideoWidth, maxVideoHeight)
                 .setPreferredVideoMimeType(MimeTypes.VIDEO_H264)
                 .setTrackTypeDisabled(C.TRACK_TYPE_AUDIO, true)
                 .build()
             setMediaItem(
                 MediaItem.fromUri(
-                    "${server.apiUrl}/go-live/${content.name}/playlist_6s_360p.m3u8"
+                    "${server.apiUrl}/go-live/${content.name}/playlist_6s_${resolutionLabel}.m3u8"
                 )
             )
             prepare()

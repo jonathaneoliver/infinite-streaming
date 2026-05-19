@@ -6,9 +6,10 @@ data class ServerEnvironment(
     val host: String,
     val port: String,    // playback (HLS/DASH) port
     val apiPort: String, // REST API port
+    val scheme: String = "https",
 ) {
-    val baseUrl: String get() = "http://$host:$port"
-    val apiUrl: String get() = "http://$host:$apiPort"
+    val baseUrl: String get() = "$scheme://$host:$port"
+    val apiUrl: String get() = "$scheme://$host:$apiPort"
 }
 
 /** One content item discovered from /api/content. */
