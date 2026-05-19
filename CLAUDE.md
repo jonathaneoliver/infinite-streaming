@@ -141,8 +141,17 @@ Shared modules (`content/shared/`):
 
 ### Analytics sidecar (`analytics/`)
 
-- `clickhouse/init.d/01-schema.sql` — `session_events` (player POSTs) + `network_requests` + `session_markers` (classifier output) schema, 30-day TTL. Old names (`session_snapshots`, `session_events` for classifier output) were rotated in issue #472 — keep this in mind when reading old commit messages.
-- `go-forwarder/` — Go binary that subscribes to `/api/sessions/stream`, batches inserts into ClickHouse, and serves `/api/sessions`, `/api/events` (alias: `/api/snapshots`), `/api/session_markers` (alias: `/api/session_events`), `/api/network_requests`, `/api/session_heatmap`, `/api/session_bundle` (ZIP) read-only via parameterized `{name:Type}` SQL placeholders.
+Three ClickHouse tables after issue #474, each carrying a `labels Array(LowCardinality(String))` column with the same `<severity>=<event>` vocab (synthesized entries prefixed `*`, severities `error|critical|warning|info`):
+
+- `session_events` — one row per player metrics POST (was `session_snapshots` pre-#472).
+- `network_requests` — one row per HTTP request the proxy handled.
+- `control_events` — one row per server-side or operator-driven action (fault toggles, pattern step advances, harness mutations, session lifecycle). Source column distinguishes `harness` / `proxy` / `auto`. New in #474.
+
+Retired tables: `session_markers` (the derived classifier output) was dropped in #474; its semantic moved onto `labels[]` on the three tables above. When reading commits before #474, `session_snapshots` ≡ today's `session_events`, and the old `session_events` (classifier output) ≡ today's `session_markers` ≡ gone. The forwarder's `eventclass/` package is also gone — labels are computed inline in `labels.go`.
+
+- `clickhouse/init.d/01-schema.sql` — schema for all three live tables, 30-day TTL on `classification='other'`, 90 days on `'interesting'`, forever on `'favourite'` (#342).
+- `go-forwarder/` — Go binary that subscribes to `/api/sessions/stream` AND `/api/network/stream` AND `/api/control/stream`, batches inserts into ClickHouse, and serves `/api/sessions`, `/api/v2/snapshots`, `/api/v2/network_requests`, `/api/v2/control_events`, `/api/session_heatmap`, `/api/session_bundle` (ZIP) read-only via parameterized `{name:Type}` SQL placeholders. The unified `/api/v2/timeseries` SSE multiplexes `streams=events,network,control` over one connection.
+- Every ingest path **must** run `player_id` / `play_id` through `canonicalV2ID()` (lowercases UUIDs) before INSERT — see `.claude/projects/-Users-jonathanoliver-Projects-smashing/memory/case_sensitivity_ids.md` and the doc comment on `canonicalV2ID` in main.go. ClickHouse compares case-sensitively; iOS emits uppercase.
 - `grafana/provisioning/` — dashboards-as-code; reload with `make analytics-update`.
 - See [`analytics/README.md`](analytics/README.md) for ops, schema, and the WAN-deploy auth runbook.
 

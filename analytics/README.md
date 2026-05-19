@@ -17,9 +17,16 @@ down the live UI keeps working, archival just pauses until it restarts.
   queries use parameterized `{name:Type}` placeholders — no string
   interpolation of user input.
 - `clickhouse/init.d/01-schema.sql` — bootstrap schema. ClickHouse
-  applies it on first start. One wide `session_snapshots` table with
-  hot fields as typed columns and a `session_json` column for the long
-  tail. 30-day TTL.
+  applies it on first start. Three sibling tables (issue #474):
+  `session_events` (player POSTs — was `session_snapshots` pre-#472,
+  hot fields as typed columns + `session_json` blob for the long
+  tail), `network_requests` (per-request HAR rows), and
+  `control_events` (proxy/harness actions: fault toggles, pattern
+  steps, harness mutations, session lifecycle). Each table carries
+  a `labels Array(LowCardinality(String))` column with severity-
+  tagged classification tags. Retention: 30-day TTL on
+  `classification='other'`, 90 days on `'interesting'`, forever on
+  `'favourite'`.
 - `grafana/provisioning/` — datasource + starter dashboard, picked up
   automatically by Grafana.
 
@@ -50,10 +57,13 @@ NodePort 30081.
 ## Replay mode
 
 `testing.html?replay=1&session=<id>[&from=<rfc3339>][&to=<rfc3339>]`
-fetches snapshots from `/analytics/api/snapshots`, then re-feeds them
-through the same `applySessionsList` renderer the live stream uses.
-`Date.now` is briefly patched per snapshot so chart point timestamps
-line up with recorded `ts`.
+fetches archived rows from `/analytics/api/v2/snapshots` (the live alias
+for `session_events`), then re-feeds them through the same
+`applySessionsList` renderer the live stream uses. `Date.now` is
+briefly patched per row so chart point timestamps line up with recorded
+`ts`. The v3 dashboard `session-viewer.html` reads via the unified
+`/api/v2/timeseries` SSE instead, which multiplexes events, network,
+and control_events on one connection.
 
 ## Re-provisioning the dashboard
 
@@ -71,8 +81,14 @@ docker compose up -d --force-recreate grafana
 
 - Hot columns (used by charts and dashboards) are typed: `buffer_depth_s`,
   `network_bitrate_mbps`, `dropped_frames`, `player_state`, etc.
-- Everything else lives in `session_json`. Promote a column when a
-  query starts using it frequently.
+- Everything else lives in `session_json` on `session_events`. Promote
+  a column when a query starts using it frequently.
+- `labels[]` is the canonical "what's notable about this row" axis
+  across all three tables. Computed at ingest by `labels.go`'s
+  `computeEventLabels` / `computeNetworkLabels` / `computeControlLabels`.
+  Format: `<severity>=<event>`, with `*` prefix on the event portion
+  for synthesized labels that require cross-row state. Severities:
+  `error`, `critical`, `warning`, `info`.
 - `ORDER BY (session_id, ts)` makes per-session replay queries cheap.
 - `TTL toDateTime(ts) + INTERVAL 30 DAY` enforces retention; tune via
   `ALTER TABLE ... MODIFY TTL`.

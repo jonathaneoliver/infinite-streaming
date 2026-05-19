@@ -345,7 +345,11 @@ labels:
 override per-key.
 
 **Propagated to ClickHouse** at insert time as a `Map(String, String)` column on
-`session_snapshots`, `network_requests`, `session_events`, and `play_summaries`.
+`session_events`, `network_requests`, `control_events`, and `play_summaries`.
+(Naming note: pre-#472 `session_snapshots` = today's `session_events`;
+pre-#474 `session_events` for classifier output is gone — that semantic
+moved onto `labels Array(LowCardinality(String))` on the three source
+tables.)
 Rows are snapshotted with the labels in effect *at insert time* — labels
 added later don't retroactively appear on prior rows.
 
@@ -365,10 +369,11 @@ GET /analytics/api/v2/plays?label.test=test_abr&label.pytest_run=2026-05-08T05:0
 
 ### C. `play_summaries` for long-retention trends
 
-Raw archive tables (`network_requests`, `session_events`, `session_snapshots`)
-keep a 30-day TTL. The forwarder additionally writes a `play_summaries` row
-when a play ends (last snapshot received, idle timeout, or explicit
-`play.ended` SSE event). One row per play, ~200 bytes:
+Raw archive tables (`session_events`, `network_requests`, `control_events`)
+keep a 30-day TTL on `classification='other'`, 90 days on `'interesting'`,
+forever on `'favourite'` (#342). The forwarder additionally writes a
+`play_summaries` row when a play ends (last snapshot received, idle
+timeout, or explicit `play.ended` SSE event). One row per play, ~200 bytes:
 
 ```sql
 CREATE TABLE play_summaries (
@@ -442,12 +447,21 @@ Concrete flow:
 ### D. Filter pushdown on archive endpoints
 
 Every list endpoint accepts:
-- `label.<key>=<value>` (multiple → AND)
+- `label.<key>=<value>` (multiple → AND) — operator-defined Map labels.
 - `from`, `to` (RFC 3339 time bounds)
 - `status_min`, `status_max` (on `network_requests`)
 - `fault_category`, `fault_action` (on `network_requests`)
-- `event_type` (on `session_events`)
+- `source` (on `control_events`: `harness` | `proxy` | `auto`)
+- `event` (on `control_events`: repeatable; `event=fault_on&event=pattern_step`)
 - `limit`, `cursor` (cursor-paginated)
+
+Note: the row-level `labels Array(String)` column added in #473/#474
+(the `<severity>=<event>` ingest-time tags) is distinct from the
+operator-defined `labels Map(String, String)` documented above. Both
+exist on the three source tables; only the operator Map is filterable
+through `label.<key>=`. The row-level array is queryable via direct
+ClickHouse `labels` references and drives the dashboard's per-row
+severity tint + chip rendering.
 
 Replaces v1's "pull whole result set, filter client-side."
 
@@ -668,7 +682,10 @@ Why bounded ring: persistence is the archive's job, not the live
 stream's. The 5-min/10k window covers transient disconnects (CI proxy
 hiccups, mobile network blips, dashboard tab background-throttling)
 without taking on long-term storage. For longer windows, replay from
-the analytics archive (`/analytics/api/v2/session_events`).
+the analytics archive (`/analytics/api/v2/snapshots`,
+`/analytics/api/v2/network_requests`, `/analytics/api/v2/control_events`)
+or the unified `/analytics/api/v2/timeseries` SSE that multiplexes the
+three streams over one connection.
 
 Why surface gaps explicitly: silent replay holes look indistinguishable
 from real anomalies in downstream analysis. Kubernetes' watch streams
@@ -677,7 +694,7 @@ do this for the same reason.
 ### Pagination cursor
 
 All list endpoints on the forwarder (`/plays`, `/snapshots`,
-`/network_requests`, `/session_events`) use **opaque cursor
+`/network_requests`, `/control_events`) use **opaque cursor
 pagination** keyed on `(event_time, id)` against ClickHouse's primary
 index. Already declared in `forwarder.yaml` `components.parameters`
 (`Cursor`, `Limit`); spelled out here for the resolution log:
