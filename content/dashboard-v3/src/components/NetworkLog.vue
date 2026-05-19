@@ -164,6 +164,10 @@ interface Row {
   tls: number;
   wait: number;
   transfer: number;
+  // labels[] off the raw CH row (issue #474). Carried alongside the
+  // entry instead of on NetworkLogEntry itself because the OpenAPI-
+  // generated type doesn't know about labels yet.
+  labels: string[];
 }
 
 function num(v: unknown): number {
@@ -171,7 +175,7 @@ function num(v: unknown): number {
   return Number.isFinite(n) ? n : 0;
 }
 
-function buildRow(e: NetworkLogEntry): Row | null {
+function buildRow(e: NetworkLogEntry, labels: string[]): Row | null {
   const ts = e.timestamp ? Date.parse(e.timestamp) : NaN;
   if (!Number.isFinite(ts)) return null;
   const dns = Math.max(0, num(e.dns_ms));
@@ -185,7 +189,24 @@ function buildRow(e: NetworkLogEntry): Row | null {
   const transfer = Math.max(0, num(e.transfer_ms));
   let duration = num(e.total_ms);
   if (duration <= 0) duration = dns + connect + tls + wait + transfer;
-  return { entry: e, ts, duration, dns, connect, tls, wait, transfer };
+  return { entry: e, ts, duration, dns, connect, tls, wait, transfer, labels };
+}
+
+// Per-label rendering helpers — mirror PlayLog so chips look the
+// same across panels. Severity → CSS class for the tint; name strips
+// the severity prefix + the `*` synthMark for display, keeping the
+// raw form on hover via the title attr.
+function labelSeverity(label: string): 'info' | 'warning' | 'critical' | 'error' {
+  const eq = label.indexOf('=');
+  if (eq <= 0) return 'info';
+  const sev = label.slice(0, eq);
+  if (sev === 'error' || sev === 'critical' || sev === 'warning') return sev;
+  return 'info';
+}
+function labelName(label: string): string {
+  const eq = label.indexOf('=');
+  const tail = eq > 0 ? label.slice(eq + 1) : label;
+  return tail.startsWith('*') ? tail.slice(1) : tail;
 }
 
 function isSuccessful(e: NetworkLogEntry): boolean {
@@ -211,7 +232,10 @@ const allRows = computed<Row[]>(() => {
   const built: Row[] = [];
   for (const obj of raw) {
     const entry = chRowToEntry(obj);
-    const r = buildRow(entry);
+    const labels = Array.isArray((obj as { labels?: unknown }).labels)
+      ? ((obj as { labels: unknown[] }).labels).filter((x): x is string => typeof x === 'string')
+      : [];
+    const r = buildRow(entry, labels);
     if (!r) continue;
     built.push(r);
   }
@@ -598,6 +622,7 @@ function onRowsWheel(e: WheelEvent) {
       <div class="row head">
         <div class="cell c-time sortable" @click="clickSort('time')">Time<span class="arr">{{ arrow('time') }}</span></div>
         <div class="cell c-flags">⚑</div>
+        <div class="cell c-labels">Labels</div>
         <div class="cell c-method sortable" @click="clickSort('method')">M<span class="arr">{{ arrow('method') }}</span></div>
         <div class="cell c-path sortable" @click="clickSort('path')">Path<span class="arr">{{ arrow('path') }}</span></div>
         <div class="cell c-bytes sortable" @click="clickSort('bytes')">KB<span class="arr">{{ arrow('bytes') }}</span></div>
@@ -617,6 +642,16 @@ function onRowsWheel(e: WheelEvent) {
         >
           <div class="cell c-time">{{ fmtTime(r.ts) }}</div>
           <div class="cell c-flags" :style="{ color: flagsFor(r).color }">{{ flagsFor(r).text }}</div>
+          <div class="cell c-labels">
+            <span
+              v-for="l in r.labels"
+              :key="l"
+              class="nl-label-chip"
+              :class="'label-' + labelSeverity(l)"
+              :title="l"
+            >{{ labelName(l) }}</span>
+            <span v-if="!r.labels.length" class="dash">—</span>
+          </div>
           <div class="cell c-method">{{ r.entry.method ?? '?' }}</div>
           <div class="cell c-path" :title="r.entry.url ?? r.entry.path ?? ''">
             {{ r.entry.path || r.entry.url || '—' }}
@@ -761,6 +796,7 @@ function onRowsWheel(e: WheelEvent) {
   grid-template-columns:
     var(--c-time, 96px)
     var(--c-flags, 28px)
+    var(--c-labels, minmax(120px, 1fr))
     var(--c-method, 44px)
     var(--c-path, minmax(140px, 1fr))
     var(--c-bytes, 64px)
@@ -827,6 +863,24 @@ function onRowsWheel(e: WheelEvent) {
 }
 .c-time { color: #6b7280; }
 .c-flags { text-align: center; font-weight: 700; }
+.c-labels {
+  display: flex; flex-wrap: wrap; gap: 3px;
+  align-items: center; min-width: 0;
+}
+.nl-label-chip {
+  display: inline-block;
+  padding: 0 5px;
+  border-radius: 8px;
+  font: 600 10px system-ui;
+  line-height: 1.5;
+  border: 1px solid transparent;
+  white-space: nowrap;
+}
+.nl-label-chip.label-info     { background: #f0fdf4; color: #1f2937; border-color: #a7f3d0; }
+.nl-label-chip.label-warning  { background: #fef3c7; color: #854d0e; border-color: #fcd34d; }
+.nl-label-chip.label-critical { background: #fee2e2; color: #7f1d1d; border-color: #fca5a5; }
+.nl-label-chip.label-error    { background: #ffedd5; color: #7c2d12; border-color: #fdba74; }
+.dash { color: #9ca3af; }
 .c-path { color: #111827; }
 .c-bytes, .c-mbps, .c-dur { text-align: right; }
 .c-status {
