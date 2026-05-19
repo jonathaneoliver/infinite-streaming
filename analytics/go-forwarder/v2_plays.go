@@ -53,9 +53,12 @@ func playsDispatcher(cfg config) http.HandlerFunc {
 // v2PlaysListHandler answers GET /api/v2/plays.
 func v2PlaysListHandler(w http.ResponseWriter, r *http.Request, cfg config) {
 	q := r.URL.Query()
+	// Canonicalise — see canonicalV2ID()'s doc. Operators who curl
+	// the endpoint with an uppercase UUID would otherwise see an
+	// empty page silently.
 	clauses, params, err := buildPlaysFilter(
-		q.Get("player_id"),
-		q.Get("play_id"),
+		canonicalV2ID(q.Get("player_id")),
+		canonicalV2ID(q.Get("play_id")),
 		q.Get("attempt_id"),
 		q.Get("from"),
 		q.Get("to"),

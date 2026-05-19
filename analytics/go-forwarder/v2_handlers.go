@@ -69,7 +69,66 @@ func mountV2Handlers(mux *http.ServeMux, cfg config) {
 		v2NetworkRequestsHandler(w, r, cfg)
 	})
 
+	// /api/v2/control_events — issue #474 Milestone B. Read-only
+	// proxy/harness action log keyed by player_id / play_id, with
+	// from/to time filtering. Mirrors network_requests' shape so the
+	// dashboard's PlayLog can render all three tables uniformly.
+	mux.HandleFunc("/api/v2/control_events", func(w http.ResponseWriter, r *http.Request) {
+		v2ControlEventsHandler(w, r, cfg)
+	})
+
 	mountV2PlaysHandlers(mux, cfg)
+}
+
+// v2ControlEventsHandler returns control_events rows as NDJSON keyed
+// by ?player_id=, ?play_id=, ?from=, ?to=, ?limit=. Issue #474.
+func v2ControlEventsHandler(w http.ResponseWriter, r *http.Request, cfg config) {
+	q := r.URL.Query()
+	// Canonicalise to lowercase — see canonicalV2ID()'s doc on
+	// why this matters. An operator who curls the endpoint with
+	// an uppercase UUID would otherwise get an empty page.
+	playerID := canonicalV2ID(q.Get("player_id"))
+	if playerID == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":"player_id required"}`))
+		return
+	}
+	playID := canonicalV2ID(q.Get("play_id"))
+	from := q.Get("from")
+	to := q.Get("to")
+	limit := q.Get("limit")
+	if limit == "" {
+		limit = "1000"
+	}
+	params := map[string]string{
+		"player_id": playerID,
+		"limit":     limit,
+	}
+	where := []string{"player_id = {player_id:String}"}
+	if playID != "" {
+		params["play_id"] = playID
+		where = append(where, "play_id = {play_id:String}")
+	}
+	if from != "" {
+		params["from"] = from
+		where = append(where, "ts >= parseDateTime64BestEffortOrNull({from:String}, 3)")
+	}
+	if to != "" {
+		params["to"] = to
+		where = append(where, "ts <= parseDateTime64BestEffortOrNull({to:String}, 3)")
+	}
+	query := "SELECT ts, player_id, play_id, attempt_id, session_id, source, event, info, labels, event_fingerprint, classification " +
+		"FROM " + cfg.chDatabase + ".control_events WHERE " +
+		strings.Join(where, " AND ") +
+		" ORDER BY ts ASC LIMIT {limit:UInt32} FORMAT JSONEachRow"
+	body, err := chQueryBytes(r.Context(), cfg, query, params)
+	if err != nil {
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = w.Write([]byte(`{"error":"upstream query failed"}`))
+		return
+	}
+	w.Header().Set("Content-Type", "application/x-ndjson")
+	_, _ = w.Write(body)
 }
 
 // v2SnapshotsHandler queries session_snapshots, parses session_json

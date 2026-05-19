@@ -706,11 +706,13 @@ func (c *Client) ArchiveNetworkRequests(ctx context.Context, params *forwarder.G
 	}, "GET /analytics/api/v2/network_requests")
 }
 
-// ArchiveSessionEvents returns the derived session_events taxonomy.
-func (c *Client) ArchiveSessionEvents(ctx context.Context, params *forwarder.GetApiV2SessionEventsParams) ([]byte, error) {
+// ArchiveControlEvents returns the proxy/harness action log
+// (control_events). Issue #474 Milestone B replacement for the retired
+// ArchiveSessionEvents (session_markers).
+func (c *Client) ArchiveControlEvents(ctx context.Context, params *forwarder.GetApiV2ControlEventsParams) ([]byte, error) {
 	return c.archiveGET(func() (*http.Response, error) {
-		return c.forwarder.GetApiV2SessionEvents(ctx, params)
-	}, "GET /analytics/api/v2/session_events")
+		return c.forwarder.GetApiV2ControlEvents(ctx, params)
+	}, "GET /analytics/api/v2/control_events")
 }
 
 // ArchiveSessionHeatmap returns the bucketed heatmap.

@@ -24,19 +24,19 @@ const (
 
 // Defines values for BundleCatalogueStreamsStream.
 const (
+	BundleCatalogueStreamsStreamControl BundleCatalogueStreamsStream = "control"
 	BundleCatalogueStreamsStreamEvents  BundleCatalogueStreamsStream = "events"
 	BundleCatalogueStreamsStreamNetwork BundleCatalogueStreamsStream = "network"
-	BundleCatalogueStreamsStreamSamples BundleCatalogueStreamsStream = "samples"
 )
 
 // Valid indicates whether the value is a known member of the BundleCatalogueStreamsStream enum.
 func (e BundleCatalogueStreamsStream) Valid() bool {
 	switch e {
+	case BundleCatalogueStreamsStreamControl:
+		return true
 	case BundleCatalogueStreamsStreamEvents:
 		return true
 	case BundleCatalogueStreamsStreamNetwork:
-		return true
-	case BundleCatalogueStreamsStreamSamples:
 		return true
 	default:
 		return false
@@ -45,19 +45,61 @@ func (e BundleCatalogueStreamsStream) Valid() bool {
 
 // Defines values for BundleDefStream.
 const (
+	BundleDefStreamControl BundleDefStream = "control"
 	BundleDefStreamEvents  BundleDefStream = "events"
 	BundleDefStreamNetwork BundleDefStream = "network"
-	BundleDefStreamSamples BundleDefStream = "samples"
 )
 
 // Valid indicates whether the value is a known member of the BundleDefStream enum.
 func (e BundleDefStream) Valid() bool {
 	switch e {
+	case BundleDefStreamControl:
+		return true
 	case BundleDefStreamEvents:
 		return true
 	case BundleDefStreamNetwork:
 		return true
-	case BundleDefStreamSamples:
+	default:
+		return false
+	}
+}
+
+// Defines values for ControlEventRowClassification.
+const (
+	ControlEventRowClassificationFavourite   ControlEventRowClassification = "favourite"
+	ControlEventRowClassificationInteresting ControlEventRowClassification = "interesting"
+	ControlEventRowClassificationOther       ControlEventRowClassification = "other"
+)
+
+// Valid indicates whether the value is a known member of the ControlEventRowClassification enum.
+func (e ControlEventRowClassification) Valid() bool {
+	switch e {
+	case ControlEventRowClassificationFavourite:
+		return true
+	case ControlEventRowClassificationInteresting:
+		return true
+	case ControlEventRowClassificationOther:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for ControlEventRowSource.
+const (
+	ControlEventRowSourceAuto    ControlEventRowSource = "auto"
+	ControlEventRowSourceHarness ControlEventRowSource = "harness"
+	ControlEventRowSourceProxy   ControlEventRowSource = "proxy"
+)
+
+// Valid indicates whether the value is a known member of the ControlEventRowSource enum.
+func (e ControlEventRowSource) Valid() bool {
+	switch e {
+	case ControlEventRowSourceAuto:
+		return true
+	case ControlEventRowSourceHarness:
+		return true
+	case ControlEventRowSourceProxy:
 		return true
 	default:
 		return false
@@ -108,19 +150,19 @@ func (e EventRowPriority) Valid() bool {
 
 // Defines values for MetaEventStreams.
 const (
+	Control MetaEventStreams = "control"
 	Events  MetaEventStreams = "events"
 	Network MetaEventStreams = "network"
-	Samples MetaEventStreams = "samples"
 )
 
 // Valid indicates whether the value is a known member of the MetaEventStreams enum.
 func (e MetaEventStreams) Valid() bool {
 	switch e {
+	case Control:
+		return true
 	case Events:
 		return true
 	case Network:
-		return true
-	case Samples:
 		return true
 	default:
 		return false
@@ -316,6 +358,27 @@ func (e Order) Valid() bool {
 	}
 }
 
+// Defines values for GetApiV2ControlEventsParamsSource.
+const (
+	GetApiV2ControlEventsParamsSourceAuto    GetApiV2ControlEventsParamsSource = "auto"
+	GetApiV2ControlEventsParamsSourceHarness GetApiV2ControlEventsParamsSource = "harness"
+	GetApiV2ControlEventsParamsSourceProxy   GetApiV2ControlEventsParamsSource = "proxy"
+)
+
+// Valid indicates whether the value is a known member of the GetApiV2ControlEventsParamsSource enum.
+func (e GetApiV2ControlEventsParamsSource) Valid() bool {
+	switch e {
+	case GetApiV2ControlEventsParamsSourceAuto:
+		return true
+	case GetApiV2ControlEventsParamsSourceHarness:
+		return true
+	case GetApiV2ControlEventsParamsSourceProxy:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for GetApiV2NetworkRequestsParamsFaultCategory.
 const (
 	GetApiV2NetworkRequestsParamsFaultCategoryClientDisconnect GetApiV2NetworkRequestsParamsFaultCategory = "client_disconnect"
@@ -369,19 +432,19 @@ func (e GetApiV2PlaysParamsClassification) Valid() bool {
 
 // Defines values for GetApiV2PlaysAggregateParamsClassification.
 const (
-	GetApiV2PlaysAggregateParamsClassificationFavourite   GetApiV2PlaysAggregateParamsClassification = "favourite"
-	GetApiV2PlaysAggregateParamsClassificationInteresting GetApiV2PlaysAggregateParamsClassification = "interesting"
-	GetApiV2PlaysAggregateParamsClassificationOther       GetApiV2PlaysAggregateParamsClassification = "other"
+	Favourite   GetApiV2PlaysAggregateParamsClassification = "favourite"
+	Interesting GetApiV2PlaysAggregateParamsClassification = "interesting"
+	Other       GetApiV2PlaysAggregateParamsClassification = "other"
 )
 
 // Valid indicates whether the value is a known member of the GetApiV2PlaysAggregateParamsClassification enum.
 func (e GetApiV2PlaysAggregateParamsClassification) Valid() bool {
 	switch e {
-	case GetApiV2PlaysAggregateParamsClassificationFavourite:
+	case Favourite:
 		return true
-	case GetApiV2PlaysAggregateParamsClassificationInteresting:
+	case Interesting:
 		return true
-	case GetApiV2PlaysAggregateParamsClassificationOther:
+	case Other:
 		return true
 	default:
 		return false
@@ -486,6 +549,60 @@ type CompleteEvent struct {
 	Reason string `json:"reason"`
 }
 
+// ControlEventRow One archived `control_events` row. Server-side or operator-driven
+// action — fault toggles, pattern step advances, harness edits,
+// session lifecycle, etc. Issue #474 Milestone B.
+type ControlEventRow struct {
+	// AttemptId Sticky per-attempt counter from the proxy session map. 0 when
+	// unknown.
+	AttemptId *int64 `json:"attempt_id,omitempty"`
+
+	// Classification Retention tier — same lifecycle as the parent session.
+	Classification *ControlEventRowClassification `json:"classification,omitempty"`
+
+	// Event Closed-set action name. See issue #474 for the full vocab —
+	// e.g. `fault_on`, `pattern_step`, `loop_server`,
+	// `fault_rule_enabled`, `session_start`, `session_end`.
+	Event string `json:"event"`
+
+	// EventFingerprint FNV-64a hash over (player, play, ts_ms, source, event, info).
+	// Stable dedupe key for SSE reconnects.
+	EventFingerprint *string `json:"event_fingerprint,omitempty"`
+
+	// Info Optional JSON object as a string with extras
+	// (step / rate / duration for pattern_step, fault type for
+	// fault_on, etc.). Empty when the event needs no detail.
+	Info *string `json:"info,omitempty"`
+
+	// Labels Severity-tagged `<severity>=<event>` strings (synthesized
+	// entries carry a `*` prefix on the event portion). Same vocab
+	// as session_events / network_requests.labels.
+	Labels *[]string `json:"labels,omitempty"`
+
+	// PlayId Owning play (empty when not yet stamped).
+	PlayId *string `json:"play_id,omitempty"`
+
+	// PlayerId Owning player.
+	PlayerId openapi_types.UUID `json:"player_id"`
+
+	// SessionId Owning proxy session.
+	SessionId *string `json:"session_id,omitempty"`
+
+	// Source Who caused it — `harness` (operator), `proxy` (runtime
+	// auto-transition), `auto` (test runner placeholder).
+	Source ControlEventRowSource `json:"source"`
+
+	// Ts When the action occurred.
+	Ts time.Time `json:"ts"`
+}
+
+// ControlEventRowClassification Retention tier — same lifecycle as the parent session.
+type ControlEventRowClassification string
+
+// ControlEventRowSource Who caused it — `harness` (operator), `proxy` (runtime
+// auto-transition), `auto` (test runner placeholder).
+type ControlEventRowSource string
+
 // EventRow One row from the derived `events` taxonomy. **Not yet
 // implemented** — requesting `streams=events` returns 501. Spec
 // retained so the wire shape is stable across the lift.
@@ -564,7 +681,7 @@ type MetaEvent struct {
 	// ServerCaps Server-side ceilings the client should respect.
 	ServerCaps map[string]int `json:"server_caps"`
 
-	// Streams Resolved stream list (in order — samples, network, events).
+	// Streams Resolved stream list (in order — events, network, control).
 	Streams []MetaEventStreams `json:"streams"`
 
 	// To Echo of the `to=` request parameter (or empty).
@@ -1144,6 +1261,35 @@ type Problem = ProblemDetails
 // basicAuthContextKey is the context key for basicAuth security scheme
 type basicAuthContextKey string
 
+// GetApiV2ControlEventsParams defines parameters for GetApiV2ControlEvents.
+type GetApiV2ControlEventsParams struct {
+	PlayerId *PlayerIdFilter `form:"player_id,omitempty" json:"player_id,omitempty"`
+
+	// PlayId Filter to one play. Player-supplied UUID; rotates only on
+	// content-selection / fresh app or page load. Stable across
+	// in-app restart events.
+	PlayId *PlayIdFilter `form:"play_id,omitempty" json:"play_id,omitempty"`
+
+	// From ISO 8601 lower bound on the row timestamp. Inclusive.
+	From *From `form:"from,omitempty" json:"from,omitempty"`
+
+	// To ISO 8601 upper bound on the row timestamp. Exclusive.
+	To *To `form:"to,omitempty" json:"to,omitempty"`
+
+	// Source Filter to one source. `harness` = operator-initiated;
+	// `proxy` = runtime auto-transition; `auto` = automated runner
+	// (placeholder).
+	Source *GetApiV2ControlEventsParamsSource `form:"source,omitempty" json:"source,omitempty"`
+
+	// Event Filter to specific event names. Multiple values OR'd. Examples:
+	// `event=fault_on&event=pattern_step`.
+	Event *[]string `form:"event,omitempty" json:"event,omitempty"`
+	Limit *Limit    `form:"limit,omitempty" json:"limit,omitempty"`
+}
+
+// GetApiV2ControlEventsParamsSource defines parameters for GetApiV2ControlEvents.
+type GetApiV2ControlEventsParamsSource string
+
 // GetApiV2NetworkRequestsParams defines parameters for GetApiV2NetworkRequests.
 type GetApiV2NetworkRequestsParams struct {
 	PlayerId *PlayerIdFilter `form:"player_id,omitempty" json:"player_id,omitempty"`
@@ -1282,53 +1428,6 @@ type GetApiV2PlaysAggregateParams struct {
 
 // GetApiV2PlaysAggregateParamsClassification defines parameters for GetApiV2PlaysAggregate.
 type GetApiV2PlaysAggregateParamsClassification string
-
-// GetApiV2SessionEventsParams defines parameters for GetApiV2SessionEvents.
-type GetApiV2SessionEventsParams struct {
-	PlayerId *PlayerIdFilter `form:"player_id,omitempty" json:"player_id,omitempty"`
-
-	// PlayId Filter to one play. Player-supplied UUID; rotates only on
-	// content-selection / fresh app or page load. Stable across
-	// in-app restart events.
-	PlayId *PlayIdFilter `form:"play_id,omitempty" json:"play_id,omitempty"`
-
-	// AttemptId Filter to one recovery attempt within a play. Player-supplied
-	// monotonically-incrementing counter; 1 on initial play, +1 per
-	// `restart` event (user-restart OR auto-recovery). Stable
-	// outside restart boundaries. Use to narrow a query to "what
-	// happened in this specific attempt" rather than "the whole
-	// play".
-	AttemptId *AttemptIdFilter `form:"attempt_id,omitempty" json:"attempt_id,omitempty"`
-
-	// From ISO 8601 lower bound on the row timestamp. Inclusive.
-	From *From `form:"from,omitempty" json:"from,omitempty"`
-
-	// To ISO 8601 upper bound on the row timestamp. Exclusive.
-	To *To `form:"to,omitempty" json:"to,omitempty"`
-
-	// Label `label.<key>=<value>` query params. Multiple AND together.
-	// Example: `?label.test=foo&label.pytest_run=2026-05-08T05:00:00Z`.
-	Label *LabelFilter `form:"label,omitempty" json:"label,omitempty"`
-
-	// Type Filter to specific event types. Multiple values OR'd. Examples:
-	// `type=stall&type=downshift`.
-	Type  *[]string `form:"type,omitempty" json:"type,omitempty"`
-	Limit *Limit    `form:"limit,omitempty" json:"limit,omitempty"`
-
-	// Cursor Opaque keyset-pagination cursor — base64url-encoded
-	// `(event_time_micros, last_id)` tuple, server-issued in the
-	// previous response's `next_cursor`. Clients **must not** decode
-	// or fabricate cursors.
-	//
-	// When `cursor` is set, all filter params (`from`, `to`,
-	// `label.*`, etc.) are ignored — the cursor already encodes them.
-	// Pass a cursor that fails to decode → `400 Bad Request`.
-	//
-	// End-of-stream is signalled by `next_cursor: null` in the
-	// response body; no error / no 404 past the end. See
-	// `DESIGN.md § Pagination cursor`.
-	Cursor *Cursor `form:"cursor,omitempty" json:"cursor,omitempty"`
-}
 
 // GetApiV2SessionHeatmapParams defines parameters for GetApiV2SessionHeatmap.
 type GetApiV2SessionHeatmapParams struct {
@@ -2357,6 +2456,9 @@ type ClientInterface interface {
 	// GetBundles request
 	GetBundles(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// GetApiV2ControlEvents request
+	GetApiV2ControlEvents(ctx context.Context, params *GetApiV2ControlEventsParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// GetApiV2Healthz request
 	GetApiV2Healthz(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -2378,9 +2480,6 @@ type ClientInterface interface {
 	// GetApiV2PlaysPlayIdBundle request
 	GetApiV2PlaysPlayIdBundle(ctx context.Context, playId PlayId, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	// GetApiV2SessionEvents request
-	GetApiV2SessionEvents(ctx context.Context, params *GetApiV2SessionEventsParams, reqEditors ...RequestEditorFn) (*http.Response, error)
-
 	// GetApiV2SessionHeatmap request
 	GetApiV2SessionHeatmap(ctx context.Context, params *GetApiV2SessionHeatmapParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -2393,6 +2492,18 @@ type ClientInterface interface {
 
 func (c *Client) GetBundles(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewGetBundlesRequest(c.Server)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) GetApiV2ControlEvents(ctx context.Context, params *GetApiV2ControlEventsParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetApiV2ControlEventsRequest(c.Server, params)
 	if err != nil {
 		return nil, err
 	}
@@ -2487,18 +2598,6 @@ func (c *Client) GetApiV2PlaysPlayIdBundle(ctx context.Context, playId PlayId, r
 	return c.Client.Do(req)
 }
 
-func (c *Client) GetApiV2SessionEvents(ctx context.Context, params *GetApiV2SessionEventsParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewGetApiV2SessionEventsRequest(c.Server, params)
-	if err != nil {
-		return nil, err
-	}
-	req = req.WithContext(ctx)
-	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
-		return nil, err
-	}
-	return c.Client.Do(req)
-}
-
 func (c *Client) GetApiV2SessionHeatmap(ctx context.Context, params *GetApiV2SessionHeatmapParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewGetApiV2SessionHeatmapRequest(c.Server, params)
 	if err != nil {
@@ -2552,6 +2651,132 @@ func NewGetBundlesRequest(server string) (*http.Request, error) {
 	queryURL, err := serverURL.Parse(operationPath)
 	if err != nil {
 		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodGet, queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewGetApiV2ControlEventsRequest generates requests for GetApiV2ControlEvents
+func NewGetApiV2ControlEventsRequest(server string, params *GetApiV2ControlEventsParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v2/control_events")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		// queryValues collects non-styled parameters (passthrough, JSON)
+		// that are safe to round-trip through url.Values.Encode().
+		queryValues := queryURL.Query()
+		// rawQueryFragments collects pre-encoded query fragments from
+		// styled parameters, preserving literal commas as delimiters
+		// per the OpenAPI spec (e.g. "color=blue,black,brown").
+		var rawQueryFragments []string
+
+		if params.PlayerId != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "player_id", *params.PlayerId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: "uuid"}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
+		if params.PlayId != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "play_id", *params.PlayId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: "uuid"}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
+		if params.From != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "from", *params.From, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: "date-time"}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
+		if params.To != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "to", *params.To, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: "date-time"}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
+		if params.Source != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "source", *params.Source, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
+		if params.Event != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "event", *params.Event, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "array", Format: ""}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
+		if params.Limit != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "limit", *params.Limit, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "integer", Format: ""}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
+		if encoded := queryValues.Encode(); encoded != "" {
+			rawQueryFragments = append(rawQueryFragments, encoded)
+		}
+		queryURL.RawQuery = strings.Join(rawQueryFragments, "&")
 	}
 
 	req, err := http.NewRequest(http.MethodGet, queryURL.String(), nil)
@@ -3170,156 +3395,6 @@ func NewGetApiV2PlaysPlayIdBundleRequest(server string, playId PlayId) (*http.Re
 	return req, nil
 }
 
-// NewGetApiV2SessionEventsRequest generates requests for GetApiV2SessionEvents
-func NewGetApiV2SessionEventsRequest(server string, params *GetApiV2SessionEventsParams) (*http.Request, error) {
-	var err error
-
-	serverURL, err := url.Parse(server)
-	if err != nil {
-		return nil, err
-	}
-
-	operationPath := fmt.Sprintf("/api/v2/session_events")
-	if operationPath[0] == '/' {
-		operationPath = "." + operationPath
-	}
-
-	queryURL, err := serverURL.Parse(operationPath)
-	if err != nil {
-		return nil, err
-	}
-
-	if params != nil {
-		// queryValues collects non-styled parameters (passthrough, JSON)
-		// that are safe to round-trip through url.Values.Encode().
-		queryValues := queryURL.Query()
-		// rawQueryFragments collects pre-encoded query fragments from
-		// styled parameters, preserving literal commas as delimiters
-		// per the OpenAPI spec (e.g. "color=blue,black,brown").
-		var rawQueryFragments []string
-
-		if params.PlayerId != nil {
-
-			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "player_id", *params.PlayerId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: "uuid"}); err != nil {
-				return nil, err
-			} else {
-				for _, qp := range strings.Split(queryFrag, "&") {
-					rawQueryFragments = append(rawQueryFragments, qp)
-				}
-			}
-
-		}
-
-		if params.PlayId != nil {
-
-			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "play_id", *params.PlayId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: "uuid"}); err != nil {
-				return nil, err
-			} else {
-				for _, qp := range strings.Split(queryFrag, "&") {
-					rawQueryFragments = append(rawQueryFragments, qp)
-				}
-			}
-
-		}
-
-		if params.AttemptId != nil {
-
-			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "attempt_id", *params.AttemptId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "integer", Format: ""}); err != nil {
-				return nil, err
-			} else {
-				for _, qp := range strings.Split(queryFrag, "&") {
-					rawQueryFragments = append(rawQueryFragments, qp)
-				}
-			}
-
-		}
-
-		if params.From != nil {
-
-			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "from", *params.From, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: "date-time"}); err != nil {
-				return nil, err
-			} else {
-				for _, qp := range strings.Split(queryFrag, "&") {
-					rawQueryFragments = append(rawQueryFragments, qp)
-				}
-			}
-
-		}
-
-		if params.To != nil {
-
-			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "to", *params.To, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: "date-time"}); err != nil {
-				return nil, err
-			} else {
-				for _, qp := range strings.Split(queryFrag, "&") {
-					rawQueryFragments = append(rawQueryFragments, qp)
-				}
-			}
-
-		}
-
-		if params.Label != nil {
-
-			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "label", *params.Label, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "object", Format: ""}); err != nil {
-				return nil, err
-			} else {
-				for _, qp := range strings.Split(queryFrag, "&") {
-					rawQueryFragments = append(rawQueryFragments, qp)
-				}
-			}
-
-		}
-
-		if params.Type != nil {
-
-			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "type", *params.Type, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "array", Format: ""}); err != nil {
-				return nil, err
-			} else {
-				for _, qp := range strings.Split(queryFrag, "&") {
-					rawQueryFragments = append(rawQueryFragments, qp)
-				}
-			}
-
-		}
-
-		if params.Limit != nil {
-
-			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "limit", *params.Limit, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "integer", Format: ""}); err != nil {
-				return nil, err
-			} else {
-				for _, qp := range strings.Split(queryFrag, "&") {
-					rawQueryFragments = append(rawQueryFragments, qp)
-				}
-			}
-
-		}
-
-		if params.Cursor != nil {
-
-			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "cursor", *params.Cursor, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
-				return nil, err
-			} else {
-				for _, qp := range strings.Split(queryFrag, "&") {
-					rawQueryFragments = append(rawQueryFragments, qp)
-				}
-			}
-
-		}
-
-		if encoded := queryValues.Encode(); encoded != "" {
-			rawQueryFragments = append(rawQueryFragments, encoded)
-		}
-		queryURL.RawQuery = strings.Join(rawQueryFragments, "&")
-	}
-
-	req, err := http.NewRequest(http.MethodGet, queryURL.String(), nil)
-	if err != nil {
-		return nil, err
-	}
-
-	return req, nil
-}
-
 // NewGetApiV2SessionHeatmapRequest generates requests for GetApiV2SessionHeatmap
 func NewGetApiV2SessionHeatmapRequest(server string, params *GetApiV2SessionHeatmapParams) (*http.Request, error) {
 	var err error
@@ -3803,6 +3878,9 @@ type ClientWithResponsesInterface interface {
 	// GetBundlesWithResponse request
 	GetBundlesWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*GetBundlesResponse, error)
 
+	// GetApiV2ControlEventsWithResponse request
+	GetApiV2ControlEventsWithResponse(ctx context.Context, params *GetApiV2ControlEventsParams, reqEditors ...RequestEditorFn) (*GetApiV2ControlEventsResponse, error)
+
 	// GetApiV2HealthzWithResponse request
 	GetApiV2HealthzWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*GetApiV2HealthzResponse, error)
 
@@ -3823,9 +3901,6 @@ type ClientWithResponsesInterface interface {
 
 	// GetApiV2PlaysPlayIdBundleWithResponse request
 	GetApiV2PlaysPlayIdBundleWithResponse(ctx context.Context, playId PlayId, reqEditors ...RequestEditorFn) (*GetApiV2PlaysPlayIdBundleResponse, error)
-
-	// GetApiV2SessionEventsWithResponse request
-	GetApiV2SessionEventsWithResponse(ctx context.Context, params *GetApiV2SessionEventsParams, reqEditors ...RequestEditorFn) (*GetApiV2SessionEventsResponse, error)
 
 	// GetApiV2SessionHeatmapWithResponse request
 	GetApiV2SessionHeatmapWithResponse(ctx context.Context, params *GetApiV2SessionHeatmapParams, reqEditors ...RequestEditorFn) (*GetApiV2SessionHeatmapResponse, error)
@@ -3861,6 +3936,35 @@ func (r GetBundlesResponse) StatusCode() int {
 
 // ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
 func (r GetBundlesResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
+type GetApiV2ControlEventsResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+}
+
+// Status returns HTTPResponse.Status
+func (r GetApiV2ControlEventsResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r GetApiV2ControlEventsResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r GetApiV2ControlEventsResponse) ContentType() string {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.Header.Get("Content-Type")
 	}
@@ -4077,39 +4181,6 @@ func (r GetApiV2PlaysPlayIdBundleResponse) ContentType() string {
 	return ""
 }
 
-type GetApiV2SessionEventsResponse struct {
-	Body         []byte
-	HTTPResponse *http.Response
-	JSON200      *struct {
-		Items      []map[string]interface{} `json:"items"`
-		NextCursor *string                  `json:"next_cursor,omitempty"`
-	}
-}
-
-// Status returns HTTPResponse.Status
-func (r GetApiV2SessionEventsResponse) Status() string {
-	if r.HTTPResponse != nil {
-		return r.HTTPResponse.Status
-	}
-	return http.StatusText(0)
-}
-
-// StatusCode returns HTTPResponse.StatusCode
-func (r GetApiV2SessionEventsResponse) StatusCode() int {
-	if r.HTTPResponse != nil {
-		return r.HTTPResponse.StatusCode
-	}
-	return 0
-}
-
-// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
-func (r GetApiV2SessionEventsResponse) ContentType() string {
-	if r.HTTPResponse != nil {
-		return r.HTTPResponse.Header.Get("Content-Type")
-	}
-	return ""
-}
-
 type GetApiV2SessionHeatmapResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -4177,7 +4248,6 @@ type GetTimeseriesResponse struct {
 	HTTPResponse              *http.Response
 	ApplicationproblemJSON400 *ProblemDetails
 	ApplicationproblemJSON500 *ProblemDetails
-	ApplicationproblemJSON501 *ProblemDetails
 }
 
 // Status returns HTTPResponse.Status
@@ -4211,6 +4281,15 @@ func (c *ClientWithResponses) GetBundlesWithResponse(ctx context.Context, reqEdi
 		return nil, err
 	}
 	return ParseGetBundlesResponse(rsp)
+}
+
+// GetApiV2ControlEventsWithResponse request returning *GetApiV2ControlEventsResponse
+func (c *ClientWithResponses) GetApiV2ControlEventsWithResponse(ctx context.Context, params *GetApiV2ControlEventsParams, reqEditors ...RequestEditorFn) (*GetApiV2ControlEventsResponse, error) {
+	rsp, err := c.GetApiV2ControlEvents(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseGetApiV2ControlEventsResponse(rsp)
 }
 
 // GetApiV2HealthzWithResponse request returning *GetApiV2HealthzResponse
@@ -4276,15 +4355,6 @@ func (c *ClientWithResponses) GetApiV2PlaysPlayIdBundleWithResponse(ctx context.
 	return ParseGetApiV2PlaysPlayIdBundleResponse(rsp)
 }
 
-// GetApiV2SessionEventsWithResponse request returning *GetApiV2SessionEventsResponse
-func (c *ClientWithResponses) GetApiV2SessionEventsWithResponse(ctx context.Context, params *GetApiV2SessionEventsParams, reqEditors ...RequestEditorFn) (*GetApiV2SessionEventsResponse, error) {
-	rsp, err := c.GetApiV2SessionEvents(ctx, params, reqEditors...)
-	if err != nil {
-		return nil, err
-	}
-	return ParseGetApiV2SessionEventsResponse(rsp)
-}
-
 // GetApiV2SessionHeatmapWithResponse request returning *GetApiV2SessionHeatmapResponse
 func (c *ClientWithResponses) GetApiV2SessionHeatmapWithResponse(ctx context.Context, params *GetApiV2SessionHeatmapParams, reqEditors ...RequestEditorFn) (*GetApiV2SessionHeatmapResponse, error) {
 	rsp, err := c.GetApiV2SessionHeatmap(ctx, params, reqEditors...)
@@ -4333,6 +4403,22 @@ func ParseGetBundlesResponse(rsp *http.Response) (*GetBundlesResponse, error) {
 		}
 		response.JSON200 = &dest
 
+	}
+
+	return response, nil
+}
+
+// ParseGetApiV2ControlEventsResponse parses an HTTP response from a GetApiV2ControlEventsWithResponse call
+func ParseGetApiV2ControlEventsResponse(rsp *http.Response) (*GetApiV2ControlEventsResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &GetApiV2ControlEventsResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
 	}
 
 	return response, nil
@@ -4517,35 +4603,6 @@ func ParseGetApiV2PlaysPlayIdBundleResponse(rsp *http.Response) (*GetApiV2PlaysP
 	return response, nil
 }
 
-// ParseGetApiV2SessionEventsResponse parses an HTTP response from a GetApiV2SessionEventsWithResponse call
-func ParseGetApiV2SessionEventsResponse(rsp *http.Response) (*GetApiV2SessionEventsResponse, error) {
-	bodyBytes, err := io.ReadAll(rsp.Body)
-	defer func() { _ = rsp.Body.Close() }()
-	if err != nil {
-		return nil, err
-	}
-
-	response := &GetApiV2SessionEventsResponse{
-		Body:         bodyBytes,
-		HTTPResponse: rsp,
-	}
-
-	switch {
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
-		var dest struct {
-			Items      []map[string]interface{} `json:"items"`
-			NextCursor *string                  `json:"next_cursor,omitempty"`
-		}
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.JSON200 = &dest
-
-	}
-
-	return response, nil
-}
-
 // ParseGetApiV2SessionHeatmapResponse parses an HTTP response from a GetApiV2SessionHeatmapWithResponse call
 func ParseGetApiV2SessionHeatmapResponse(rsp *http.Response) (*GetApiV2SessionHeatmapResponse, error) {
 	bodyBytes, err := io.ReadAll(rsp.Body)
@@ -4627,13 +4684,6 @@ func ParseGetTimeseriesResponse(rsp *http.Response) (*GetTimeseriesResponse, err
 			return nil, err
 		}
 		response.ApplicationproblemJSON500 = &dest
-
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 501:
-		var dest ProblemDetails
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.ApplicationproblemJSON501 = &dest
 
 	}
 

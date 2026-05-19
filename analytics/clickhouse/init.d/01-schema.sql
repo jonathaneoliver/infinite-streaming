@@ -91,6 +91,12 @@ CREATE TABLE IF NOT EXISTS infinite_streaming.session_events
     avg_network_bitrate_mbps     Float32 CODEC(ZSTD(1)),
     buffer_end_s                 Float32 CODEC(ZSTD(1)),
     last_stall_time_s            Float32 CODEC(ZSTD(1)),
+    -- Authoritative buffering pair duration from the iOS player on
+    -- buffering_end POSTs (issue #474 Milestone A). Lets the forwarder
+    -- read duration off the row instead of computing from a write-time
+    -- cache. Older clients leave this at 0 — labels.go's cache then
+    -- fills in via end_ts - start_ts.
+    last_buffering_time_s        Float32 CODEC(ZSTD(1)),
     live_offset_s                Float32 CODEC(ZSTD(1)),
     playhead_wallclock_ms        Int64   CODEC(ZSTD(1)),
     seekable_end_s               Float32 CODEC(ZSTD(1)),
@@ -256,6 +262,7 @@ ALTER TABLE infinite_streaming.session_events
     ADD COLUMN IF NOT EXISTS avg_network_bitrate_mbps Float32 CODEC(ZSTD(1)),
     ADD COLUMN IF NOT EXISTS buffer_end_s Float32 CODEC(ZSTD(1)),
     ADD COLUMN IF NOT EXISTS last_stall_time_s Float32 CODEC(ZSTD(1)),
+    ADD COLUMN IF NOT EXISTS last_buffering_time_s Float32 CODEC(ZSTD(1)),
     ADD COLUMN IF NOT EXISTS live_offset_s Float32 CODEC(ZSTD(1)),
     ADD COLUMN IF NOT EXISTS playhead_wallclock_ms Int64 CODEC(ZSTD(1)),
     ADD COLUMN IF NOT EXISTS seekable_end_s Float32 CODEC(ZSTD(1)),
@@ -436,76 +443,48 @@ ALTER TABLE infinite_streaming.network_requests
 ALTER TABLE infinite_streaming.network_requests
     ADD COLUMN IF NOT EXISTS attempt_id UInt32 DEFAULT 0 CODEC(ZSTD(1));
 
--- Issue #469 — write-time event classification.
+-- session_markers retired in issue #474 Milestone C — replaced by
+-- per-row `labels[]` on session_events / network_requests and by
+-- discrete rows on control_events. The CREATE TABLE block previously
+-- here was removed; existing rows on running clusters age out via TTL
+-- once forwarder writes stop. New deployments never create the table.
+
+-- Issue #474 Milestone B — control_events.
 --
--- The forwarder runs each incoming snapshot / network row through the
--- eventclass registry (analytics/go-forwarder/eventclass/) and emits one
--- row here per detected event. Replaces the read-time multi-CTE
--- UNION-ALL SQL in events_query.go so each event carries the same
--- identity provenance as the row that produced it — most importantly
--- attempt_id (UInt32 sticky counter), which the read-time path couldn't
--- carry without a temporal join.
+-- Sibling of session_events / network_requests for server-side and
+-- operator-driven actions: fault toggles, pattern step advances,
+-- shaper changes, harness mutations (fault rule edits, label edits,
+-- session lifecycle, content swap). One row per discrete action.
 --
--- Schema parity notes:
---   - Same key columns (player_id, play_id, attempt_id, session_id) and
---     same codecs/cardinality types as session_events so cross-table
---     joins stay cheap.
---   - `type` / `info` / `kind` / `priority` mirror what the legacy SQL
---     used to emit — dashboard + harness consumers see no shape change.
---   - event_fingerprint dedupes restarts of the forwarder against the
---     same source row (ts + type + info + player + play). Same role as
---     entry_fingerprint on network_requests.
---   - 30-day TTL keyed off classification, matching the parent tables.
+-- `source` distinguishes who caused it:
+--   'harness' — operator-initiated via dashboard / harness CLI
+--   'proxy'   — runtime auto-transition (fault loop, pattern step,
+--               loop_server detection, proxy-detected session_end)
+--   'auto'    — automated test runner (placeholder; no emit path yet)
 --
--- Renamed from `session_events` to `session_markers` in issue #472; the
--- old name was reassigned to the player-events table (was
--- session_snapshots) so the vocabulary matches operators' mental model:
--- a player emits an "event"; the classifier "marks" it.
-CREATE TABLE IF NOT EXISTS infinite_streaming.session_markers
+-- `event` is the closed-set action vocabulary — see Milestone B body
+-- in issue #474. `info` is an optional JSON blob with extras (the
+-- changed field for control_change, step/rate/duration for
+-- pattern_step, etc.).
+--
+-- `labels[]` follows the same `<severity>=<event>` / `<severity>=*<event>`
+-- convention as the other two tables so the dashboard's severity
+-- filter sweeps all three uniformly.
+CREATE TABLE IF NOT EXISTS infinite_streaming.control_events
 (
     ts                       DateTime64(3, 'UTC')   CODEC(Delta, ZSTD(1)),
     player_id                LowCardinality(String) CODEC(ZSTD(1)),
     play_id                  LowCardinality(String) CODEC(ZSTD(1)),
     attempt_id               UInt32                 DEFAULT 0 CODEC(ZSTD(1)),
     session_id               String                 CODEC(ZSTD(1)),
-    -- Stable event type id, e.g. 'stall', 'restart', 'downshift',
-    -- 'http_5xx'. Same taxonomy strings the legacy SQL emitted — see
-    -- analytics/go-forwarder/eventclass/types.go for the closed set.
-    type                     LowCardinality(String) CODEC(ZSTD(1)),
-    -- Directional / categorical discriminator within `type`. Empty
-    -- by default — only set when the same observation has multiple
-    -- meaningful sub-flavours (e.g. type='video_bitrate_change' splits
-    -- into subtype='up' / 'down'; future: type='fault' → subtype='on' /
-    -- 'off'). LowCardinality keeps the storage cost effectively zero
-    -- even with hundreds of distinct values. Consumers that want the
-    -- coarse view query by `type`; consumers that want the split add
-    -- `WHERE subtype='up'` or `GROUP BY type, subtype` (#470).
-    subtype                  LowCardinality(String) DEFAULT '' CODEC(ZSTD(1)),
-    -- Free-form details for the event ("2.34s", "frozen", "15.36→3.46
-    -- Mbps", "503 GET /seg.m4s"). Shape is type-specific; consumers
-    -- treat it as display-only.
-    info                     String                 CODEC(ZSTD(1)),
-    -- 'cause' vs 'effect' — operators sort cause-tagged events to the
-    -- top when triaging. multiIf table identical to the legacy SQL.
-    kind                     LowCardinality(String) CODEC(ZSTD(1)),
-    -- 1 (critical) … 4 (low). DEPRECATED in #473 in favour of
-    -- `severity` below; kept populated by the forwarder for one
-    -- release so dashboards that still read it keep working.
-    priority                 UInt8                  DEFAULT 3,
-    -- Severity tier as the canonical filter dimension after #473.
-    -- Shares vocabulary with source-row `labels[]` so a single
-    -- dashboard severity filter sweeps both this table AND
-    -- session_events / network_requests rows.
-    severity                 LowCardinality(String) DEFAULT '' CODEC(ZSTD(1)),
-    -- Dedupe key over (player_id, play_id, ts_ms, type, info). Lets
-    -- the forwarder replay the SSE on reconnect without double-
-    -- inserting events for the same source row.
+    source                   LowCardinality(String) CODEC(ZSTD(1)),
+    event                    LowCardinality(String) CODEC(ZSTD(1)),
+    info                     String                 CODEC(ZSTD(3)),
+    labels                   Array(LowCardinality(String)) DEFAULT [] CODEC(ZSTD(1)),
     event_fingerprint        UInt64                 CODEC(ZSTD(1)),
-    -- Retention tier — inherits from the snapshot/network row that
-    -- generated the event. Same lifecycle as the parent tables.
     classification           LowCardinality(String) DEFAULT 'other' CODEC(ZSTD(1)),
     INDEX idx_play_id play_id TYPE bloom_filter GRANULARITY 4,
-    INDEX idx_type type TYPE bloom_filter GRANULARITY 4
+    INDEX idx_event   event   TYPE bloom_filter GRANULARITY 4
 )
 ENGINE = MergeTree
 PARTITION BY toYYYYMMDD(ts)

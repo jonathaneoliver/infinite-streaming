@@ -40,7 +40,20 @@ import NetworkLog from '@/components/NetworkLog.vue';
 import PlayLog from '@/components/PlayLog.vue';
 import BitrateChartPanelToolbar from '@/components/BitrateChartPanelToolbar.vue';
 import { useChartCoordination } from '@/composables/useChartCoordination';
-import { useArchivedSessionMarkers, type SessionEvent } from '@/composables/useArchivedSessionMarkers';
+// Issue #474 Milestone C: session_markers retired. The severity filter
+// derives its event list from `labels[]` on rows across all three
+// streams (events / network / control_events) instead of a dedicated
+// markers table. See `sessionEvents` computed below.
+interface SessionEvent {
+  ts?: string;
+  event_time?: string;
+  type?: string;
+  info?: string;
+  kind?: 'effect' | 'cause';
+  priority?: 1 | 2 | 3 | 4;
+  severity?: string;
+  [k: string]: unknown;
+}
 import { usePlayer } from '@/composables/usePlayer';
 import { useSessionTimeSeries } from '@/composables/useSessionTimeSeries';
 import { chRowToPlayerRecord, tsOfRow } from '@/composables/chRowAdapter';
@@ -120,7 +133,57 @@ const archivePlayerId = computed(() =>
 // tick markers, the priority/tier filter UI, and the prev/next nav
 // keep functioning unchanged. Filters by player_id + play_id only —
 // session_id retired.
-const { events: sessionEvents } = useArchivedSessionMarkers(apiPlayerIdRef, playIdRef);
+// Derived event list for the severity filter — projects every
+// labelled row across session_events / network_requests / control_events
+// into a SessionEvent. After issue #474 Milestone C this replaces the
+// useArchivedSessionMarkers fetch against the retired session_markers
+// table. One synthetic event per label; ts/severity/type come straight
+// from the row + label string.
+const sessionEvents = computed<SessionEvent[]>(() => {
+  // Trigger reactivity on each stream's version ref.
+  void timeseries.events.version.value;
+  void timeseries.network.version.value;
+  void timeseries.control.version.value;
+  const out: SessionEvent[] = [];
+  function emit(row: Record<string, unknown>, kind: 'effect' | 'cause') {
+    const labels = Array.isArray((row as { labels?: unknown }).labels)
+      ? ((row as { labels: unknown[] }).labels as string[])
+      : null;
+    if (!labels || labels.length === 0) return;
+    const ts = (row.ts as string | undefined) ?? '';
+    for (const l of labels) {
+      const eq = l.indexOf('=');
+      if (eq <= 0) continue;
+      const sev = l.slice(0, eq);
+      let type = l.slice(eq + 1);
+      // Strip the `*` synthesized-marker prefix for display — the
+      // filter UI treats `*manifest_failure` and `manifest_failure`
+      // as the same bucket type.
+      if (type.startsWith('*')) type = type.slice(1);
+      if (sev !== 'error' && sev !== 'critical' && sev !== 'warning' && sev !== 'info') continue;
+      out.push({ ts, type, severity: sev, kind });
+    }
+  }
+  // Cause / effect axis (post-#474 redefinition):
+  //   - cause  = something the operator / proxy deliberately introduced
+  //              to provoke a reaction. Every control_events row counts
+  //              (fault enables, pattern toggles, shaper edits, the
+  //              pattern_step ticks themselves). On network rows, only
+  //              the proxy-flagged `faulted=1` responses count — those
+  //              are the 1-in-10 HTTP 4xx/5xx returned by the fault
+  //              rules. An organic upstream 5xx the proxy didn't fault
+  //              stays an effect.
+  //   - effect = the player's / network's reaction. All session_events
+  //              rows (stalls, restarts, ABR shifts, errors) and the
+  //              clean network rows.
+  for (const r of timeseries.events.inRange(0, Number.MAX_SAFE_INTEGER)) emit(r, 'effect');
+  for (const r of timeseries.network.inRange(0, Number.MAX_SAFE_INTEGER)) {
+    const faulted = Number((r as { faulted?: unknown }).faulted) || 0;
+    emit(r, faulted ? 'cause' : 'effect');
+  }
+  for (const r of timeseries.control.inRange(0, Number.MAX_SAFE_INTEGER)) emit(r, 'cause');
+  return out;
+});
 
 // v3 unified time-series model. Single subscription per
 // SessionDisplay drives:
@@ -196,11 +259,11 @@ const timeseries = useSessionTimeSeries(
   apiPlayerIdRef,
   effectivePlayIdRef,
   {
-    // 'markers' added so the new "Play Log" fold (PlayLog.vue) can
-    // show classifier-derived markers interleaved with player events
-    // + network rows on one chronological scroll. The bundle is
-    // auto-added when 'markers' is in streams (useSessionTimeSeries).
-    streams: ['events', 'network', 'markers'],
+    // 'control' added so the PlayLog and severity filter can see
+    // proxy/harness action rows alongside player events + network
+    // rows. The control bundle is auto-added when 'control' is in
+    // streams (useSessionTimeSeries). Issue #474 Milestone C.
+    streams: ['events', 'network', 'control'],
     bundles: ['charts_minimal', 'lanes_v1', 'session_details', 'network'],
     fromMs: fromMsRef,
     toMs: toMsRef,
@@ -315,13 +378,20 @@ const enabledKind = ref<Record<'effect' | 'cause', boolean>>({
 
 // L1 — Severity tier (issue #473, replaces numeric Priority 1..4).
 // String tiers, worst-first. Same vocabulary the forwarder writes to
-// session_events.labels[] and session_markers.severity so a single
-// filter UI sweeps both source-row labels and marker rows.
+// session_events.labels[] and network_requests.labels[] so a single
+// filter UI sweeps both. Critical leads (user-visible playback
+// breakage like stall_severe / frozen / restart_auto_recovery); Error
+// sits next for system-detected error states (player_error).
 type Severity = 'error' | 'critical' | 'warning' | 'info';
-const SEVERITY_ORDER: Severity[] = ['error', 'critical', 'warning', 'info'];
+const SEVERITY_ORDER: Severity[] = ['critical', 'error', 'warning', 'info'];
 const SEVERITY_META: Record<Severity, { label: string; color: string; bg: string; border: string }> = {
-  error:    { label: 'Error',    color: '#7f1d1d', bg: '#fee2e2', border: '#fca5a5' },
-  critical: { label: 'Critical', color: '#7c2d12', bg: '#ffedd5', border: '#fdba74' },
+  // Critical wears the red palette (worst-looking — user-visible
+  // playback breakage); Error wears the orange palette. Swapped
+  // from the original assignment so the two tiers' visuals match
+  // operator intuition. The whole palette pair moves together so
+  // each tier keeps internal bg/border/text harmony.
+  error:    { label: 'Error',    color: '#7c2d12', bg: '#ffedd5', border: '#fdba74' },
+  critical: { label: 'Critical', color: '#7f1d1d', bg: '#fee2e2', border: '#fca5a5' },
   warning:  { label: 'Warning',  color: '#854d0e', bg: '#fef3c7', border: '#fcd34d' },
   info:     { label: 'Info',     color: '#1f2937', bg: '#f0fdf4', border: '#a7f3d0' },
 };
@@ -1194,7 +1264,7 @@ function skipToEnd() {
         :play-id="playIdRef"
         :events-stream="timeseries.events"
         :network-stream="timeseries.network"
-        :markers-stream="timeseries.markers"
+        :control-stream="timeseries.control"
       />
     </CollapsibleSection>
   </div>

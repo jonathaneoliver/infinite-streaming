@@ -172,17 +172,14 @@ func makeTimeseriesHandler(cfg config, ring *Ring) http.HandlerFunc {
 			return
 		}
 
-		// Events are derived from samples + network rows so there's no
-		// ring channel for them. If the caller asked for events, run
-		// a poller alongside the ring-driven live loop. The poller
-		// tracks the highest emitted ts and uses it as `from=` on each
-		// poll so subsequent runs only return new rows.
-		// SSE writes from the live ring loop and the events poll
-		// goroutine could otherwise interleave bytes mid-frame; share
-		// a mutex when both paths are active.
+		// control_events flow into CH via the proxy SSE bridge rather
+		// than the in-memory ring, so live deltas are picked up by a
+		// background poller alongside the ring-driven sample/network
+		// path. SSE writes from both paths share a mutex to keep
+		// frames intact. Issue #474 Milestone C.
 		writeMu := &sync.Mutex{}
-		if selectionsHasEvents(selections) {
-			cancel := startEventsPoller(ctx, w, flusher, writeMu, cfg, params, emittedIDs)
+		if selectionsHasControl(selections) {
+			cancel := startControlPoller(ctx, w, flusher, writeMu, cfg, params, emittedIDs)
 			defer cancel()
 		}
 
@@ -195,9 +192,12 @@ func makeTimeseriesHandler(cfg config, ring *Ring) http.HandlerFunc {
 func parseTimeseriesParams(r *http.Request) (timeseriesParams, error) {
 	q := r.URL.Query()
 	p := timeseriesParams{
-		playerID:       strings.TrimSpace(q.Get("player_id")),
+		// canonicalV2ID lowercases UUIDs — see its doc. ClickHouse
+		// stores the canonical form; an operator who hits this with an
+		// uppercase UUID would otherwise get an empty stream silently.
+		playerID:       canonicalV2ID(strings.TrimSpace(q.Get("player_id"))),
 		sessionID:      strings.TrimSpace(q.Get("session_id")),
-		playID:         strings.TrimSpace(q.Get("play_id")),
+		playID:         canonicalV2ID(strings.TrimSpace(q.Get("play_id"))),
 		from:           strings.TrimSpace(q.Get("from")),
 		to:             strings.TrimSpace(q.Get("to")),
 		streams:        strings.TrimSpace(q.Get("streams")),
@@ -248,7 +248,7 @@ func parseTimeseriesParams(r *http.Request) (timeseriesParams, error) {
 	// (CH will reject unknown columns per-stream — clean 4xx surface).
 	if f := strings.TrimSpace(q.Get("fields")); f != "" {
 		list := splitCSV(f)
-		for _, sk := range []streamKind{streamEvents, streamNetwork, streamMarkers} {
+		for _, sk := range []streamKind{streamEvents, streamNetwork, streamControl} {
 			p.fieldsByStream[sk] = list
 		}
 	}
@@ -363,11 +363,11 @@ func emitBackfill(
 			return err
 		}
 		return emitBackfillFromRing(w, flusher, ring, key, sel.Stream, kindNetwork, params, seen, ringWindowMs)
-	case streamMarkers:
-		// Events are derived at query time — no ring; backfill is the
-		// taxonomy SQL over [from, to]. Live continuation is handled
-		// by startEventsPoller after backfill returns.
-		return emitBackfillEvents(ctx, w, flusher, cfg, params, seen)
+	case streamControl:
+		// control_events doesn't pass through the ring. Backfill is a
+		// CH query; live continuation is handled by startControlPoller
+		// after backfill returns.
+		return emitBackfillControl(ctx, w, flusher, cfg, params, seen)
 	}
 	return nil
 }
@@ -539,12 +539,12 @@ func lockedWrite(mu *sync.Mutex, fn func()) {
 	fn()
 }
 
-// selectionsHasEvents reports whether the resolved selections include
-// the events stream. The events stream is special because it doesn't
-// come off the ring — see startEventsPoller.
-func selectionsHasEvents(selections []streamSelection) bool {
+// selectionsHasControl reports whether the resolved selections include
+// the control_events stream. control_events doesn't come off the ring
+// — see startControlPoller.
+func selectionsHasControl(selections []streamSelection) bool {
 	for _, s := range selections {
-		if s.Stream == streamMarkers {
+		if s.Stream == streamControl {
 			return true
 		}
 	}
@@ -559,18 +559,18 @@ func ringKindToStream(k ringKind) streamKind {
 }
 
 // streamToEventName maps a streamKind to the SSE `event:` name the
-// frame is written under. After issue #472's rename:
-//   streamEvents  → "event"   (player event, was "sample")
+// frame is written under.
+//   streamEvents  → "event"   (player event POST)
 //   streamNetwork → "network"
-//   streamMarkers → "marker"  (classifier output, was "event")
+//   streamControl → "control" (proxy / harness action)
 func streamToEventName(s streamKind) string {
 	switch s {
 	case streamEvents:
 		return "event"
 	case streamNetwork:
 		return "network"
-	case streamMarkers:
-		return "marker"
+	case streamControl:
+		return "control"
 	}
 	return "data"
 }

@@ -6,8 +6,10 @@
  *   - event   (session_events rows, via timeseries.events) — one per
  *             player metrics POST. Used to be called "snapshot".
  *   - network (network_requests rows, via timeseries.network)
- *   - marker  (session_markers rows, via timeseries.markers) — one
- *             per classifier-derived event. Used to be called "event".
+ *   - control (control_events rows, via timeseries.control) — one
+ *             per proxy/harness action (fault_on, pattern_step,
+ *             session_end, harness mutation, etc.). Replaced markers
+ *             in issue #474 Milestone C.
  *
  * Operator-facing differences from NetworkLog: no timing bar (per
  * user request), source-toggle checkboxes, and uniform columns
@@ -35,7 +37,7 @@ const props = defineProps<{
   playId: string | null;
   eventsStream: Stream<Record<string, unknown>>;
   networkStream: Stream<Record<string, unknown>>;
-  markersStream: Stream<Record<string, unknown>>;
+  controlStream: Stream<Record<string, unknown>>;
 }>();
 
 const playerIdRef = toRef(props, 'playerId');
@@ -62,12 +64,12 @@ function realPlayerId(): string {
   return v;
 }
 
-// Filter state, one per source. Names follow the post-#472
-// vocabulary: player POSTs = events, classifier output = markers,
-// network = HTTP requests.
+// Filter state, one per source. After issue #474 Milestone C the
+// third bucket is `control` (control_events) — proxy/harness actions
+// — replacing the retired `markers` (session_markers) bucket.
 const showEvents = ref(true);
 const showNetwork = ref(true);
-const showMarkers = ref(true);
+const showControl = ref(true);
 
 /** Follow-latest mirrors the page-level focus bar's "Live" state.
  *  When the operator drags the brush back to a historical window,
@@ -129,7 +131,7 @@ const sortDir = ref<SortDir>('asc');
 
 const rowsScrollRef = ref<HTMLDivElement | null>(null);
 
-type Source = 'event' | 'network' | 'marker';
+type Source = 'event' | 'network' | 'control';
 interface Row {
   ts: number;          // epoch ms
   source: Source;
@@ -282,21 +284,17 @@ function fmtMs(ms: number): string {
 function buildEventRow(raw: Record<string, unknown>): Row | null {
   const ts = tsOf(raw);
   if (!Number.isFinite(ts)) return null;
-  // Since issue #469 the events stream rides on the new
-  // session_events table — every event row carries player_id /
-  // play_id / attempt_id stamped at ingest by the eventclass
-  // classifier package. Fall back to the URL play_id for old plays
-  // that landed before the cutover (their event rows don't exist in
-  // session_events; if the dashboard sees one it was synthesised
-  // somewhere else).
+  // control_events rows (issue #474 Milestone B) carry their action
+  // name in the `event` column. `event_name` / `type` are kept as
+  // fallbacks for forwarder versions that haven't redeployed.
   return {
     ts,
-    source: 'marker',
+    source: 'control',
     playerId: asLowerId(raw.player_id ?? realPlayerId()),
     playId: asLowerId(raw.play_id ?? props.playId ?? ''),
     attemptId: asStr(raw.attempt_id),
     raw,
-    eventName: pickEventName(raw, ['event_name', 'type']),
+    eventName: pickEventName(raw, ['event', 'event_name', 'type']),
   };
 }
 
@@ -382,14 +380,8 @@ const NETWORK_KEEP = new Set(NETWORK_KEEP_ORDER);
 function rowLabels(r: Row): string[] {
   const raw = r.raw?.labels;
   if (Array.isArray(raw)) return raw.filter((x): x is string => typeof x === 'string');
-  // Marker rows carry `severity` instead of a labels array; synthesize
-  // a single label from (severity, type) so they participate in the
-  // same chip/tint rendering as source-row labels.
-  if (r.source === 'marker') {
-    const sev = String(r.raw?.severity ?? '');
-    const type = String(r.raw?.type ?? '');
-    if (sev && type) return [`${sev}=${type}`];
-  }
+  // control_events rows carry their own labels[] (see
+  // computeControlLabels in labels.go) so no synthesis is needed.
   return [];
 }
 
@@ -426,12 +418,93 @@ function rowSeverityClass(r: Row): string {
   return sev ? `severity-${sev}` : '';
 }
 
+/** Glyph + color for the Flags column. Network rows mirror
+ *  NetworkLog's flagsFor (so the two panels read the same at a
+ *  glance): `!✂` socket fault, `!⏱` transfer timeout, `!↩` client
+ *  disconnect, plain `!` for other faults, `⏰` for slow segments.
+ *  Event / control rows show no glyph — their signal lives in the
+ *  Labels column. */
+function rowFlags(r: Row): { text: string; color: string } {
+  if (r.source !== 'network') return { text: '', color: '' };
+  const raw = r.raw ?? {};
+  const faulted = Number((raw as { faulted?: unknown }).faulted) || 0;
+  const cat = String((raw as { fault_category?: unknown }).fault_category ?? '').toLowerCase();
+  const path = String((raw as { path?: unknown }).path ?? '');
+  const transferMs = Number((raw as { transfer_ms?: unknown }).transfer_ms) || 0;
+  let glyph = '';
+  if (faulted) {
+    if (cat === 'socket') glyph = '!✂';
+    else if (cat === 'transfer_timeout') glyph = '!⏱';
+    else if (cat === 'client_disconnect') glyph = '!↩';
+    else glyph = '!';
+  }
+  // Slow-segment glyph — same threshold + path check as NetworkLog.
+  const isSegment = /\.(m4s|ts|mp4|m4a|m4v|aac|webm|mp3)(\?|$)/i.test(path);
+  const slow = !faulted && transferMs > 6000 && isSegment ? '⏰' : '';
+  const text = glyph + slow;
+  const color = faulted ? '#7f1d1d' : (slow ? '#92400e' : '');
+  return { text, color };
+}
+
+/** Multi-line hover tooltip — mirrors NetworkLog.tooltipFor's layout
+ *  on network rows, falls back to the event_name + labels for event
+ *  and control rows. The native `title=` attribute renders this as
+ *  the OS-level tooltip; no JS popover plumbing needed. */
+function rowTooltip(r: Row): string {
+  const lines: string[] = [];
+  const raw = (r.raw ?? {}) as Record<string, unknown>;
+  if (r.source === 'network') {
+    const method = String(raw.method ?? 'GET');
+    const url = String(raw.url ?? raw.path ?? '');
+    lines.push(`${method} ${url}`);
+    const ft = String(raw.fault_type ?? '');
+    const cat = String(raw.fault_category ?? '');
+    if (ft) lines.push(`fault: ${ft}${cat ? ` (${cat})` : ''}`);
+    const action = String(raw.fault_action ?? '');
+    if (action) lines.push(`action: ${action}`);
+    const status = Number(raw.status) || 0;
+    if (status) lines.push(`status: ${status}`);
+    const dns = Number(raw.dns_ms) || 0;
+    const con = Number(raw.connect_ms) || 0;
+    const tls = Number(raw.tls_ms) || 0;
+    const wait = Number(raw.client_wait_ms) || 0;
+    const xfer = Number(raw.transfer_ms) || 0;
+    if (dns)  lines.push(`DNS ${dns.toFixed(0)} ms`);
+    if (con)  lines.push(`connect ${con.toFixed(0)} ms`);
+    if (tls)  lines.push(`TLS ${tls.toFixed(0)} ms`);
+    if (wait) lines.push(`wait ${wait.toFixed(0)} ms`);
+    if (xfer) lines.push(`transfer ${xfer.toFixed(0)} ms`);
+    const ct = String(raw.content_type ?? '');
+    if (ct) lines.push(`type: ${ct}`);
+    const bo = Number(raw.bytes_out) || 0;
+    const bi = Number(raw.bytes_in) || 0;
+    if (bo) lines.push(`bytes out: ${bo}`);
+    if (bi) lines.push(`bytes in: ${bi}`);
+  } else if (r.source === 'control') {
+    const ev = String(raw.event ?? '');
+    const src = String(raw.source ?? '');
+    if (ev) lines.push(`${src ? src + ' · ' : ''}${ev}`);
+    const info = String(raw.info ?? '');
+    if (info) lines.push(info);
+  } else {
+    if (r.eventName) lines.push(r.eventName);
+    const pe = String(raw.player_error ?? '');
+    if (pe) lines.push(`player_error: ${pe}`);
+  }
+  const labels = rowLabels(r);
+  if (labels.length) {
+    lines.push(''); // blank line separator before labels
+    for (const l of labels) lines.push(l);
+  }
+  return lines.join('\n');
+}
+
 const allRows = computed<Row[]>(() => {
   // Touch each stream's version so Vue re-runs the computed on every
   // delta, even though inRange() also touches the underlying ref.
   void props.eventsStream.version.value;
   void props.networkStream.version.value;
-  void props.markersStream.version.value;
+  void props.controlStream.version.value;
   const built: Row[] = [];
   if (showEvents.value) {
     for (const raw of props.eventsStream.inRange(0, Number.MAX_SAFE_INTEGER)) {
@@ -445,8 +518,8 @@ const allRows = computed<Row[]>(() => {
       if (r) built.push(r);
     }
   }
-  if (showMarkers.value) {
-    for (const raw of props.markersStream.inRange(0, Number.MAX_SAFE_INTEGER)) {
+  if (showControl.value) {
+    for (const raw of props.controlStream.inRange(0, Number.MAX_SAFE_INTEGER)) {
       const r = buildEventRow(raw);
       if (r) built.push(r);
     }
@@ -625,13 +698,13 @@ const sortedRows = computed<RowWithFields[]>(() => {
 });
 
 const counts = computed(() => {
-  let evt = 0, net = 0, mrk = 0;
+  let evt = 0, net = 0, ctl = 0;
   for (const r of allRows.value) {
     if (r.source === 'event') evt++;
     else if (r.source === 'network') net++;
-    else mrk++;
+    else ctl++;
   }
-  return { evt, net, mrk, total: allRows.value.length };
+  return { evt, net, ctl, total: allRows.value.length };
 });
 
 function clickSort(col: SortCol) {
@@ -733,7 +806,7 @@ function onRowsWheel(e: WheelEvent) {
     <div class="toolbar">
       <label class="opt"><input type="checkbox" v-model="showEvents" /> Events ({{ counts.evt }})</label>
       <label class="opt"><input type="checkbox" v-model="showNetwork" /> Network ({{ counts.net }})</label>
-      <label class="opt"><input type="checkbox" v-model="showMarkers" /> Markers ({{ counts.mrk }})</label>
+      <label class="opt"><input type="checkbox" v-model="showControl" /> Control ({{ counts.ctl }})</label>
       <label class="opt"><input type="checkbox" v-model="showRaw" /> Raw</label>
       <span class="count">{{ counts.total }} row{{ counts.total === 1 ? '' : 's' }}</span>
       <button
@@ -778,7 +851,8 @@ function onRowsWheel(e: WheelEvent) {
       <div class="row head">
         <div class="cell c-time sortable" @click="clickSort('time')">_time<span class="arr">{{ arrow('time') }}</span></div>
         <div class="cell c-source sortable" @click="clickSort('source')">source<span class="arr">{{ arrow('source') }}</span></div>
-        <div class="cell c-labels" title="Severity-tagged labels (#473). Stamped at ingest by computeEventLabels / computeNetworkLabels; marker rows synthesize one from severity+type.">labels</div>
+        <div class="cell c-flags" title="Glyph summary — faults / slow / source-specific markers. Network rows mirror the NetworkLog Flags column (!✂ socket, !⏱ timeout, !↩ disconnect, ⏰ slow segment); event/control rows show no flag.">⚑</div>
+        <div class="cell c-labels" title="Severity-tagged labels (#473/#474). Stamped at ingest by computeEventLabels / computeNetworkLabels / computeControlLabels.">labels</div>
         <div class="cell c-player">player_id</div>
         <div class="cell c-play">play_id</div>
         <div class="cell c-attempt">attempt_id</div>
@@ -793,11 +867,13 @@ function onRowsWheel(e: WheelEvent) {
           :key="i"
           class="row"
           :class="[`src-${r.source}`, rowSeverityClass(r)]"
+          :title="rowTooltip(r)"
         >
           <div class="cell c-time">{{ fmtTime(r.ts) }}</div>
           <div class="cell c-source">
             <span class="src-tag" :class="`tag-${r.source}`">{{ r.source }}</span>
           </div>
+          <div class="cell c-flags" :style="{ color: rowFlags(r).color }">{{ rowFlags(r).text }}</div>
           <div class="cell c-labels">
             <span
               v-for="l in rowLabels(r)"
@@ -927,6 +1003,7 @@ function onRowsWheel(e: WheelEvent) {
   grid-template-columns:
     var(--c-time, 96px)
     var(--c-source, 76px)
+    var(--c-flags, 32px)
     var(--c-labels, minmax(140px, 220px))
     var(--c-player, 90px)
     var(--c-play, 90px)
@@ -940,6 +1017,7 @@ function onRowsWheel(e: WheelEvent) {
   align-items: start;
   border-top: 1px solid #f3f4f6;
 }
+.c-flags { text-align: center; font-weight: 700; }
 
 /* When the Raw column is toggled on, the row grid grows by one slot
  * and the fields column tightens so the raw cell has room. */
@@ -947,6 +1025,7 @@ function onRowsWheel(e: WheelEvent) {
   grid-template-columns:
     var(--c-time, 96px)
     var(--c-source, 76px)
+    var(--c-flags, 32px)
     var(--c-labels, minmax(140px, 220px))
     var(--c-player, 90px)
     var(--c-play, 90px)
@@ -981,8 +1060,8 @@ function onRowsWheel(e: WheelEvent) {
 .row.src-event { background: #fafafa; }
 .row.src-event:hover { background: #f3f4f6; }
 .row.src-network  { background: #ffffff; }
-.row.src-marker    { background: #fef9c3; }
-.row.src-marker:hover { background: #fef08a; }
+.row.src-control    { background: #fef9c3; }
+.row.src-control:hover { background: #fef08a; }
 
 /* Row tints by severity (issue #473). Driven by the worst label on
  * the row; placed AFTER the .row.src-* rules so source order breaks
@@ -997,10 +1076,10 @@ function onRowsWheel(e: WheelEvent) {
  *   warning  — amber  (was High + Medium)
  *   info     — light  (was Low)
  */
-.row.severity-error    { background: #fee2e2; }
-.row.severity-error:hover    { background: #fecaca; }
-.row.severity-critical { background: #ffedd5; }
-.row.severity-critical:hover { background: #fed7aa; }
+.row.severity-error    { background: #ffedd5; }
+.row.severity-error:hover    { background: #fed7aa; }
+.row.severity-critical { background: #fee2e2; }
+.row.severity-critical:hover { background: #fecaca; }
 .row.severity-warning  { background: #fef3c7; }
 .row.severity-warning:hover  { background: #fde68a; }
 .row.severity-info     { background: #f0fdf4; }
@@ -1027,8 +1106,8 @@ function onRowsWheel(e: WheelEvent) {
   border: 1px solid transparent;
   white-space: nowrap;
 }
-.label-error    { background: #fecaca; color: #7f1d1d; border-color: #fca5a5; }
-.label-critical { background: #fed7aa; color: #7c2d12; border-color: #fdba74; }
+.label-error    { background: #fed7aa; color: #7c2d12; border-color: #fdba74; }
+.label-critical { background: #fecaca; color: #7f1d1d; border-color: #fca5a5; }
 .label-warning  { background: #fde68a; color: #854d0e; border-color: #fcd34d; }
 .label-info     { background: #d1fae5; color: #14532d; border-color: #a7f3d0; }
 
@@ -1159,9 +1238,9 @@ function onRowsWheel(e: WheelEvent) {
 }
 .row.src-network .kv-name { color: #1e3a8a; }
 
-.row.src-marker .kv {
+.row.src-control .kv {
   background: #fef3c7;
   border-color: #fcd34d;
 }
-.row.src-marker .kv-name { color: #92400e; }
+.row.src-control .kv-name { color: #92400e; }
 </style>

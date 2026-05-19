@@ -237,6 +237,7 @@ func (a *v2Adapter) MutatePlayer(playerID string, fn func(map[string]any) error)
 	if idx < 0 {
 		return nil, false, nil
 	}
+	before := cloneSession(current[idx])
 	mutable := cloneSession(current[idx])
 	if err := fn(mutable); err != nil {
 		return nil, true, err
@@ -245,6 +246,11 @@ func (a *v2Adapter) MutatePlayer(playerID string, fn func(map[string]any) error)
 	copy(updated, current)
 	updated[idx] = mutable
 	a.app.publishSnapshot(cloneSessionList(updated))
+	// Emit control_events for operator-driven changes. The v2 PATCH
+	// path does NOT route through applySessionSettingsUpdate, so
+	// without this hook every dashboard slider / fault edit / label
+	// change went unrecorded. Issue #474 follow-up.
+	a.app.emitControlEventsForDiff(getString(mutable, "session_id"), before, mutable)
 	return map[string]any(cloneSession(mutable)), true, nil
 }
 

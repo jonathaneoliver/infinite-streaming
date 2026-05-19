@@ -232,6 +232,11 @@ final class PlayerViewModel: ObservableObject {
     private var lastReportedStallCount: Int = 0
     private var lastReportedStallDuration: Double = 0
     private var lastReportedLoopCount: Int = 0
+    // Captured when the player enters the buffering state so the
+    // matching buffering_end POST can carry an authoritative duration
+    // in `player_metrics_last_buffering_time_s`. Mirrors the stall
+    // pair's `lastReportedStallDuration` shape. Issue #474 Milestone A.
+    private var bufferingStartedAt: Date?
     private let metricsHeartbeatSeconds: TimeInterval = 1
     // Tail of the serialized chain of in-flight metrics PATCHes. Each
     // new sendPlayerMetrics call chains onto this Task so URLSession
@@ -850,6 +855,7 @@ final class PlayerViewModel: ObservableObject {
         lastReportedRenditionMbps = nil
         lastReportedStallCount = 0
         lastReportedStallDuration = 0
+        bufferingStartedAt = nil
         zeroBufferStartedAt = nil
         metricsSessionId = nil
         metricsLastSessionLookup = nil
@@ -1551,10 +1557,17 @@ extension PlayerViewModel {
                     ])
                     Task { await self.sendPlayerMetrics(payload: stateChange) }
                     if state == "buffering" {
+                        self.bufferingStartedAt = eventAt
                         let payload = self.buildMetricsPayload(event: "buffering_start", at: eventAt)
                         Task { await self.sendPlayerMetrics(payload: payload) }
                     } else if previous == "buffering" {
-                        let payload = self.buildMetricsPayload(event: "buffering_end", at: eventAt)
+                        var extra: [String: Any] = [:]
+                        if let started = self.bufferingStartedAt {
+                            extra["player_metrics_last_buffering_time_s"] =
+                                self.roundSeconds(eventAt.timeIntervalSince(started))
+                        }
+                        self.bufferingStartedAt = nil
+                        let payload = self.buildMetricsPayload(event: "buffering_end", at: eventAt, extra: extra)
                         Task { await self.sendPlayerMetrics(payload: payload) }
                     }
                 } else if previous == nil {

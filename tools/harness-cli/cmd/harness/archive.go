@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -38,7 +39,8 @@ Subcommands (all read-only — forwarder /analytics/api/v2/*):
                                   aggregate stats across plays
   events <play_id> [--limit]      player events (formerly: snapshots)
   network <play_id> [--limit]
-  markers <play_id> [--limit]     classifier output (formerly: events)
+  control <play_id> [--source S] [--event E] [--limit N]
+                                  proxy / harness action log
   snapshots <play_id> [--limit]   DEPRECATED alias of events
   heatmap <play_id>
   bundle <play_id> --out PATH     download play bundle ZIP
@@ -64,11 +66,12 @@ func cmdArchive(client *api.Client, args []string, asJSON bool) error {
 		return cmdArchiveEvents(client, args[1:], asJSON)
 	case "network":
 		return cmdArchiveNetwork(client, args[1:], asJSON)
-	case "markers":
-		// New (#472) — derived classifier output. Renamed from `events`
-		// at the same time the underlying CH table session_events was
-		// renamed to session_markers.
-		return cmdArchiveMarkers(client, args[1:], asJSON)
+	// `markers` subcommand retired in issue #474 Milestone C. The
+	// session_markers table is gone; severity-tagged labels now ride on
+	// each session_events / network_requests row directly and discrete
+	// proxy/harness actions live on control_events.
+	case "control":
+		return cmdArchiveControl(client, args[1:], asJSON)
 	case "heatmap":
 		return cmdArchiveHeatmap(client, args[1:], asJSON)
 	case "bundle":
@@ -221,6 +224,65 @@ func cmdArchiveEvents(client *api.Client, args []string, asJSON bool) error {
 	return printOrJSON(body, asJSON)
 }
 
+// cmdArchiveControl wires the harness CLI to the new
+// /api/v2/control_events endpoint (issue #474 Milestone B). Mirrors
+// the existing `network` / `events` subcommands.
+func cmdArchiveControl(client *api.Client, args []string, asJSON bool) error {
+	if len(args) < 1 {
+		return errors.New("usage: harness archive control <play_id> [--source S] [--event E] [--limit N]")
+	}
+	playID := args[0]
+	fs := flag.NewFlagSet("archive control", flag.ContinueOnError)
+	source := fs.String("source", "", "filter to one source (harness|proxy|auto)")
+	var events arrayFlag
+	fs.Var(&events, "event", "filter to event name (repeatable)")
+	limit := fs.Int("limit", 0, "max rows")
+	if err := fs.Parse(args[1:]); err != nil {
+		return err
+	}
+	params := &forwarder.GetApiV2ControlEventsParams{}
+	pid, err := parsePlayID(playID)
+	if err != nil {
+		return err
+	}
+	params.PlayId = &pid
+	if *source != "" {
+		s := forwarder.GetApiV2ControlEventsParamsSource(*source)
+		if !s.Valid() {
+			return fmt.Errorf("invalid --source %q: expected harness|proxy|auto", *source)
+		}
+		params.Source = &s
+	}
+	if len(events) > 0 {
+		ev := []string(events)
+		params.Event = &ev
+	}
+	if *limit > 0 {
+		l := *limit
+		params.Limit = &l
+	}
+	body, err := client.ArchiveControlEvents(context.Background(), params)
+	if err != nil {
+		return err
+	}
+	return printOrJSON(body, asJSON)
+}
+
+// arrayFlag is a repeatable string flag (Cobra's StringSlice without
+// pulling in Cobra). Used for `--event foo --event bar` style CLI.
+type arrayFlag []string
+
+func (a *arrayFlag) String() string {
+	if a == nil {
+		return ""
+	}
+	return strings.Join(*a, ",")
+}
+func (a *arrayFlag) Set(v string) error {
+	*a = append(*a, v)
+	return nil
+}
+
 func cmdArchiveNetwork(client *api.Client, args []string, asJSON bool) error {
 	if len(args) < 1 {
 		return errors.New("usage: harness archive network <play_id> [--limit N]")
@@ -241,32 +303,6 @@ func cmdArchiveNetwork(client *api.Client, args []string, asJSON bool) error {
 		params.Limit = limit
 	}
 	body, err := client.ArchiveNetworkRequests(context.Background(), params)
-	if err != nil {
-		return err
-	}
-	return printOrJSON(body, asJSON)
-}
-
-func cmdArchiveMarkers(client *api.Client, args []string, asJSON bool) error {
-	if len(args) < 1 {
-		return errors.New("usage: harness archive markers <play_id> [--limit N]")
-	}
-	playID := args[0]
-	fs := flag.NewFlagSet("archive markers", flag.ContinueOnError)
-	limit, err := parseLimit(fs, args[1:])
-	if err != nil {
-		return err
-	}
-	params := &forwarder.GetApiV2SessionEventsParams{}
-	pid, err := parsePlayID(playID)
-	if err != nil {
-		return err
-	}
-	params.PlayId = &pid
-	if limit != nil {
-		params.Limit = limit
-	}
-	body, err := client.ArchiveSessionEvents(context.Background(), params)
 	if err != nil {
 		return err
 	}

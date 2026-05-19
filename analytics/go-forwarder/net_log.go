@@ -21,7 +21,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jonathaneoliver/infinite-streaming/analytics/go-forwarder/eventclass"
 )
 
 // netRow is the JSONEachRow shape for network_requests. Tags match the
@@ -57,7 +56,13 @@ type netRow struct {
 	RequestHeaders       string  `json:"request_headers"`
 	ResponseHeaders      string  `json:"response_headers"`
 	QueryString          string  `json:"query_string"`
-	EntryFingerprint     uint64  `json:"entry_fingerprint"`
+	// `,string` tag forces JSON serialization as a string. UInt64 values
+	// exceed JS's 2^53 safe-integer range, and the dashboard's per-row
+	// fpOf() compares fingerprints as strings — without `,string` the
+	// SSE-live overlay JSON would arrive as a precision-lossy JS Number
+	// and never match the same row's CH-backfill string, so the same
+	// network row got rendered twice in PlayLog.
+	EntryFingerprint     uint64  `json:"entry_fingerprint,string"`
 	// Labels — see the corresponding field on `row` in main.go.
 	// Same vocabulary; <severity>=<event> strings stamped at ingest
 	// from computeNetworkLabels(). Drives the dashboard's row tint
@@ -435,8 +440,7 @@ func parseSSEData(frame []byte) []byte {
 	return nil
 }
 
-func batchInsertNet(ctx context.Context, cfg config, ring *Ring, in <-chan netRow,
-	events chan<- eventclass.Event) {
+func batchInsertNet(ctx context.Context, cfg config, ring *Ring, in <-chan netRow) {
 	buf := make([]netRow, 0, cfg.flushBatch)
 	entries := make([]*ringEntry, 0, cfg.flushBatch)
 	tick := time.NewTicker(cfg.flushEvery)
@@ -475,8 +479,6 @@ func batchInsertNet(ctx context.Context, cfg config, ring *Ring, in <-chan netRo
 			)
 			buf = append(buf, rowCopy)
 			entries = append(entries, e)
-			// Write-time event classification (issue #469).
-			emitClassifiedEventsForNetwork(&rowCopy, events)
 			if len(buf) >= cfg.flushBatch {
 				flush()
 			}

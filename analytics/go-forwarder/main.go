@@ -26,7 +26,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/jonathaneoliver/infinite-streaming/analytics/go-forwarder/eventclass"
 	"github.com/jonathaneoliver/infinite-streaming/go-proxy/pkg/v2translate"
 )
 
@@ -51,11 +50,26 @@ func init() {
 // UUID when possible, fall back to the stable v5 derivation otherwise.
 // Empty input → empty output (don't synthesise an id for missing data).
 //
-// Without this step the forwarder stored the raw short-form (e.g.
-// "427a6bf3") on ingest but emitted the v5-derived UUID
-// ("7046b635-…") on read; client-side archive queries built from
-// /api/v2/players (the v2 form) then matched no rows, so the
-// Focus Window came up empty for any non-UUID player.
+// CRITICAL — every forwarder ingest path that writes a row keyed by
+// player_id / play_id MUST run those ids through THIS function before
+// the INSERT. ClickHouse string comparisons are case-sensitive; iOS
+// emits uppercase UUIDs ("DC08D893-…"); the v3 dashboard canonicalises
+// to lowercase for every WHERE clause. Skipping this step lands rows in
+// CH that look fine in a `SELECT *`, but the dashboard filter silently
+// matches zero — there's no error surface, just empty panels.
+//
+// Issue history:
+//   - First seen pre-#474: snapshots stored as raw short-form
+//     "427a6bf3" while reads produced the v5-derived UUID — Focus
+//     Window came up empty for any non-UUID player.
+//   - Issue #474 control_events repeat: the new ingest path skipped
+//     this step, control_events.player_id was uppercase, PlayLog's
+//     Control bucket stayed empty until canonicalV2ID was wired into
+//     entryToCtrlRow.
+//
+// Future ingest paths: a quick sanity check is `SELECT DISTINCT
+// player_id FROM your_new_table` next to the same query against
+// session_events — they should agree on case.
 func canonicalV2ID(raw string) string {
 	if raw == "" {
 		return ""
@@ -207,6 +221,11 @@ type row struct {
 	AvgNetworkBitrateMbps    float32 `json:"avg_network_bitrate_mbps"`
 	BufferEndS               float32 `json:"buffer_end_s"`
 	LastStallTimeS           float32 `json:"last_stall_time_s"`
+	// LastBufferingTimeS is the iOS player's authoritative duration
+	// for the most-recent buffering pair, populated on buffering_end.
+	// Forwarder reads from here when present; the labels.go pair
+	// cache is the fallback for clients that don't send the field.
+	LastBufferingTimeS       float32 `json:"last_buffering_time_s"`
 	LiveOffsetS              float32 `json:"live_offset_s"`
 	PlayheadWallclockMs      int64   `json:"playhead_wallclock_ms"`
 	SeekableEndS             float32 `json:"seekable_end_s"`
@@ -386,16 +405,10 @@ func main() {
 	ring := NewRing(int64(cfg.ringWindowSecs)*1000, 0)
 	ring.StartEvictor(ctx.Done(), time.Second)
 
-	// Write-time event classification (issue #469). Every snapshot /
-	// netRow flows through the eventclass registry; emitted events
-	// land here and get batch-inserted into session_events. Replaces
-	// the read-time CTE in events_query.go.
-	events := make(chan eventclass.Event, eventsChanBuf)
-	prevSnaps := newPrevSnapshotCache()
-	go batchInsertEvents(ctx, cfg, events)
-
+	// Snapshot ingest. Labels at write time replace the eventclass
+	// classifier registry retired in issue #474 Milestone C.
 	rows := make(chan row, 4096)
-	go batchInserter(ctx, cfg, ring, rows, prevSnaps, events)
+	go batchInserter(ctx, cfg, ring, rows)
 	go serveHTTP(ctx, cfg, ring)
 
 	// Network log archival: subscribe to go-proxy's /api/network/stream
@@ -403,8 +416,17 @@ func main() {
 	// the session-viewer can replay them after the session is gone.
 	netRows := make(chan netRow, 8192)
 	netSeenSet := newNetSeen(50000)
-	go batchInsertNet(ctx, cfg, ring, netRows, events)
+	go batchInsertNet(ctx, cfg, ring, netRows)
 	go runNetworkStream(ctx, cfg, netSeenSet, netRows)
+
+	// Control events (issue #474 Milestone B): subscribe to go-proxy's
+	// /api/control/stream and write into control_events. Mirrors the
+	// network log path exactly. Dedupe by event_fingerprint so SSE
+	// reconnects don't double-insert.
+	ctrlRows := make(chan ctrlRow, 4096)
+	ctrlSeenSet := newCtrlSeen(20000)
+	go batchInsertControl(ctx, cfg, ctrlRows)
+	go runControlStream(ctx, cfg, ctrlSeenSet, ctrlRows)
 
 	// Auto-classifier: when a snapshot carries an interesting signal
 	// (911 / frozen / hard error / fault counters), queue the
@@ -614,6 +636,7 @@ func toRow(ts string, revision uint64, sessionID string, s map[string]interface{
 		AvgNetworkBitrateMbps: getF32(s, "player_metrics_avg_network_bitrate_mbps"),
 		BufferEndS:            getF32(s, "player_metrics_buffer_end_s"),
 		LastStallTimeS:        getF32(s, "player_metrics_last_stall_time_s"),
+		LastBufferingTimeS:    getF32(s, "player_metrics_last_buffering_time_s"),
 		LiveOffsetS:           getF32(s, "player_metrics_live_offset_s"),
 		PlayheadWallclockMs:   int64(getU64(s, "player_metrics_playhead_wallclock_ms")),
 		SeekableEndS:          getF32(s, "player_metrics_seekable_end_s"),
@@ -810,8 +833,7 @@ func getU64(m map[string]interface{}, key string) uint64 {
 	return 0
 }
 
-func batchInserter(ctx context.Context, cfg config, ring *Ring, in <-chan row,
-	prevSnaps *prevSnapshotCache, events chan<- eventclass.Event) {
+func batchInserter(ctx context.Context, cfg config, ring *Ring, in <-chan row) {
 	buf := make([]row, 0, cfg.flushBatch)
 	entries := make([]*ringEntry, 0, cfg.flushBatch)
 	tick := time.NewTicker(cfg.flushEvery)
@@ -861,10 +883,6 @@ func batchInserter(ctx context.Context, cfg config, ring *Ring, in <-chan row,
 			)
 			buf = append(buf, rowCopy)
 			entries = append(entries, e)
-			// Write-time event classification (issue #469). Runs
-			// against the row's own classification tier so events
-			// inherit the same TTL bucket as the snapshot.
-			emitClassifiedEventsForSnapshot(&rowCopy, prevSnaps, events)
 			if len(buf) >= cfg.flushBatch {
 				flush()
 			}
@@ -982,6 +1000,37 @@ func serveHTTP(ctx context.Context, cfg config, ring *Ring) {
 			  %s
 			  GROUP BY session_id, play_id
 			),
+			-- Per-(session,play) label histogram across all three source
+			-- tables. Issue #474: every interesting signal is now a label
+			-- on session_events / network_requests / control_events; this
+			-- CTE lets the sessions picker render "N labels" with a
+			-- per-label breakdown without three roundtrips.
+			labels_unioned AS (
+			  SELECT session_id, play_id, arrayJoin(labels) AS label
+			  FROM %s.%s
+			  %s
+			  UNION ALL
+			  SELECT session_id, play_id, arrayJoin(labels) AS label
+			  FROM %s.network_requests
+			  %s
+			  UNION ALL
+			  SELECT session_id, play_id, arrayJoin(labels) AS label
+			  FROM %s.control_events
+			  %s
+			),
+			labels_per_pair AS (
+			  SELECT session_id, play_id, label, count() AS n
+			  FROM labels_unioned
+			  GROUP BY session_id, play_id, label
+			),
+			labels_agg AS (
+			  SELECT session_id, play_id,
+			         sum(n) AS labels_total,
+			         arrayDistinct(groupArray(label)) AS labels_distinct,
+			         groupArray((label, n)) AS label_pairs
+			  FROM labels_per_pair
+			  GROUP BY session_id, play_id
+			),
 			agg AS (
 			  SELECT
 			    session_id,
@@ -1053,14 +1102,25 @@ func serveHTTP(ctx context.Context, cfg config, ring *Ring) {
 			  agg.frames_displayed, agg.first_frame_s,
 			  agg.user_marked_count, agg.frozen_count, agg.segment_stall_count,
 			  agg.restart_count, agg.error_event_count,
-			  agg.classification
+			  agg.classification,
+			  ifNull(labels_agg.labels_total, 0) AS labels_total,
+			  ifNull(length(labels_agg.labels_distinct), 0) AS labels_distinct_count,
+			  ifNull(labels_agg.label_pairs, []) AS labels
 			FROM agg
 			LEFT JOIN net_counts
 			  ON agg.session_id = net_counts.session_id
 			 AND agg.raw_play_id = net_counts.play_id
+			LEFT JOIN labels_agg
+			  ON agg.session_id = labels_agg.session_id
+			 AND agg.raw_play_id = labels_agg.play_id
 			ORDER BY agg.started DESC
 			LIMIT 1000
-			FORMAT JSONEachRow`, cfg.chDatabase, cfg.chTable, where, cfg.chDatabase, where)
+			FORMAT JSONEachRow`,
+				cfg.chDatabase, cfg.chTable, where,
+				cfg.chDatabase, where,
+				cfg.chDatabase, cfg.chTable, where,
+				cfg.chDatabase, where,
+				cfg.chDatabase, where)
 		proxyClickHouseJSON(w, r, cfg, query, params)
 	})
 	mux.HandleFunc("/api/snapshot_count", func(w http.ResponseWriter, r *http.Request) {
@@ -1076,7 +1136,7 @@ func serveHTTP(ctx context.Context, cfg config, ring *Ring) {
 				clauses = append(clauses, "play_id = ''")
 			} else {
 				clauses = append(clauses, "play_id = {play:String}")
-				params["play"] = v
+				params["play"] = canonicalV2ID(v)
 			}
 		}
 		if v := r.URL.Query().Get("from"); v != "" {
@@ -1113,7 +1173,7 @@ func serveHTTP(ctx context.Context, cfg config, ring *Ring) {
 				clauses = append(clauses, "play_id = ''")
 			} else {
 				clauses = append(clauses, "play_id = {play:String}")
-				params["play"] = v
+				params["play"] = canonicalV2ID(v)
 			}
 		}
 		if v := r.URL.Query().Get("from"); v != "" {
@@ -1205,7 +1265,7 @@ func serveHTTP(ctx context.Context, cfg config, ring *Ring) {
 				clauses = append(clauses, "play_id = ''")
 			} else {
 				clauses = append(clauses, "play_id = {play:String}")
-				params["play"] = v
+				params["play"] = canonicalV2ID(v)
 			}
 		}
 		buckets := 120
@@ -1263,61 +1323,10 @@ func serveHTTP(ctx context.Context, cfg config, ring *Ring) {
 		proxyClickHouseJSON(w, r, cfg, query, params)
 	})
 
-	// Notable session events for the jump-list. Returns rows like
-	//   { ts, type: 'stall'|'error'|'fault_on'|'downshift', info }
-	// sorted by ts so the UI can render them as a chronological list.
-	//
-	// Accepts both legacy (?session=) and v2 (?session_id=) parameter
-	// names so the same handler serves /api/session_events AND
-	// /api/v2/session_events (registered below as an alias). v2 path
-	// returns NDJSON identically — the events JSON shape is already
-	// the same; only the URL changes for callers that want to use the
-	// v2 endpoint set uniformly.
-	sessionEventsHandler := func(w http.ResponseWriter, r *http.Request) {
-		session := r.URL.Query().Get("session")
-		if session == "" {
-			session = r.URL.Query().Get("session_id")
-		}
-		// player_id is an alternative way to identify the rows when the
-		// caller doesn't have (or want to plumb) the session_id — the
-		// live testing-session / testing pages drive this path so they
-		// can stop client-side session-id lookups. session_id wins if
-		// both are supplied so explicit deep links keep working.
-		playerID := r.URL.Query().Get("player_id")
-		if session == "" && playerID == "" {
-			http.Error(w, "missing session_id or player_id", http.StatusBadRequest)
-			return
-		}
-
-		limit := 5000
-		if v := r.URL.Query().Get("limit"); v != "" {
-			var n int
-			if _, err := fmt.Sscanf(v, "%d", &n); err == nil && n > 0 && n <= 50000 {
-				limit = n
-			}
-		}
-		ep := eventsQueryParams{
-			SessionID: session,
-			PlayerID:  playerID,
-			PlayID:    r.URL.Query().Get("play_id"),
-			Limit:     limit,
-		}
-		query, params, err := buildEventsQuery(cfg, ep)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		proxyClickHouseJSON(w, r, cfg, query, params)
-	}
-
-	// Issue #472 renamed the endpoint: classifier output is now
-	// "markers", player POSTs are "events". The /session_events name
-	// is kept as a deprecated alias for one release cycle so
-	// in-flight harness scripts and saved dashboard tabs keep working.
-	mux.HandleFunc("/api/session_markers", sessionEventsHandler)
-	mux.HandleFunc("/api/v2/session_markers", sessionEventsHandler)
-	mux.HandleFunc("/api/session_events", sessionEventsHandler)   // deprecated alias
-	mux.HandleFunc("/api/v2/session_events", sessionEventsHandler) // deprecated alias
+	// session_markers retired in issue #474 Milestone C. Notable
+	// events now live as `labels[]` on session_events / network_requests
+	// rows and as discrete rows on control_events; consumers iterate
+	// those three tables instead of the derived markers table.
 
 	// Per-request HAR-style log for the session-viewer's network log
 	// fold. Returns rows in the same shape the live go-proxy endpoint
@@ -1336,7 +1345,7 @@ func serveHTTP(ctx context.Context, cfg config, ring *Ring) {
 				clauses = append(clauses, "play_id = ''")
 			} else {
 				clauses = append(clauses, "play_id = {play:String}")
-				params["play"] = v
+				params["play"] = canonicalV2ID(v)
 			}
 		}
 		if v := r.URL.Query().Get("from"); v != "" {

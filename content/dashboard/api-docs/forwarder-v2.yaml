@@ -40,8 +40,8 @@ tags:
       multiplexes samples + network + events with ClickHouse
       backfill + live-ring overlay. One connection drives every
       chart + lane + panel in a session card; replaces the older
-      pattern of polling /api/v2/snapshots + /session_events +
-      /network_requests separately.
+      pattern of polling /api/v2/snapshots + /network_requests +
+      /control_events separately.
   - name: aggregate
     description: |
       Group-by + metric aggregation pushdowns. Avoids pulling raw rows
@@ -243,45 +243,47 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/NetworkRequestsPage' }
 
-  /api/v2/session_events:
+  /api/v2/control_events:
     get:
       tags: [archive]
-      summary: Chronological events (raw)
+      summary: Proxy / harness action log
       description: |
-        Player + harness events: ABR shifts, stalls, fault firings, errors.
-        v1's "session_events" name retained for source-table parity even
-        though the user-facing concept is plays.
+        One row per server-side or operator-driven action — fault toggles,
+        pattern step advances, shaper edits, session lifecycle, etc. Issue
+        #474 Milestone B replacement for the retired `session_events`
+        (markers) endpoint; severity-tagged labels now ride on
+        `session_events` / `network_requests` rows directly, and discrete
+        actions live here.
       parameters:
         - $ref: '#/components/parameters/PlayerIdFilter'
         - $ref: '#/components/parameters/PlayIdFilter'
-        - $ref: '#/components/parameters/AttemptIdFilter'
         - $ref: '#/components/parameters/From'
         - $ref: '#/components/parameters/To'
-        - $ref: '#/components/parameters/LabelFilter'
         - in: query
-          name: type
+          name: source
+          schema:
+            type: string
+            enum: [harness, proxy, auto]
+          description: |
+            Filter to one source. `harness` = operator-initiated;
+            `proxy` = runtime auto-transition; `auto` = automated runner
+            (placeholder).
+        - in: query
+          name: event
           explode: true
           schema:
             type: array
             items: { type: string }
           description: |
-            Filter to specific event types. Multiple values OR'd. Examples:
-            `type=stall&type=downshift`.
+            Filter to specific event names. Multiple values OR'd. Examples:
+            `event=fault_on&event=pattern_step`.
         - $ref: '#/components/parameters/Limit'
-        - $ref: '#/components/parameters/Cursor'
       responses:
         '200':
-          description: Event rows
+          description: Control event rows (NDJSON)
           content:
-            application/json:
-              schema:
-                type: object
-                required: [items]
-                properties:
-                  items:
-                    type: array
-                    items: { type: object, additionalProperties: true }
-                  next_cursor: { type: string, nullable: true }
+            application/x-ndjson:
+              schema: { $ref: '#/components/schemas/ControlEventRow' }
 
   /api/v2/session_heatmap:
     get:
@@ -334,7 +336,7 @@ paths:
   /api/v2/timeseries:
     get:
       tags: [timeseries]
-      summary: Subscribe to a player's samples / network / events stream
+      summary: Subscribe to a player's events / network / control stream
       operationId: getTimeseries
       description: |
         Opens a Server-Sent Events stream. The response is a sequence
@@ -476,14 +478,6 @@ paths:
             bundle, unknown stream, out-of-range `stride_ms`/`max_hz`.
             Emitted BEFORE any SSE headers so the client sees a normal
             HTTP error (not a stream that immediately closes).
-          content:
-            application/problem+json:
-              schema: { $ref: '#/components/schemas/ProblemDetails' }
-        '501':
-          description: |
-            `streams=events` requested but the events taxonomy SQL
-            hasn't been lifted into the timeseries backfill path yet.
-            Use the `/api/v2/session_events` endpoint as a workaround.
           content:
             application/problem+json:
               schema: { $ref: '#/components/schemas/ProblemDetails' }
@@ -669,7 +663,7 @@ components:
           progress).
       schema:
         type: string
-        pattern: '^(samples|network|events)(,(samples|network|events))*$'
+        pattern: '^(events|network|control)(,(events|network|control))*$'
         example: samples,network
 
     TimeseriesBundles:
@@ -1021,6 +1015,69 @@ components:
           items: { $ref: '#/components/schemas/NetworkRequestRow' }
         next_cursor: { type: string, nullable: true }
 
+    ControlEventRow:
+      description: |
+        One archived `control_events` row. Server-side or operator-driven
+        action — fault toggles, pattern step advances, harness edits,
+        session lifecycle, etc. Issue #474 Milestone B.
+      type: object
+      required: [ts, player_id, source, event]
+      properties:
+        ts:
+          type: string
+          format: date-time
+          description: When the action occurred.
+        player_id:
+          type: string
+          format: uuid
+          description: Owning player.
+        play_id:
+          type: string
+          description: Owning play (empty when not yet stamped).
+        attempt_id:
+          type: integer
+          format: int64
+          description: |
+            Sticky per-attempt counter from the proxy session map. 0 when
+            unknown.
+        session_id:
+          type: string
+          description: Owning proxy session.
+        source:
+          type: string
+          enum: [harness, proxy, auto]
+          description: |
+            Who caused it — `harness` (operator), `proxy` (runtime
+            auto-transition), `auto` (test runner placeholder).
+        event:
+          type: string
+          description: |
+            Closed-set action name. See issue #474 for the full vocab —
+            e.g. `fault_on`, `pattern_step`, `loop_server`,
+            `fault_rule_enabled`, `session_start`, `session_end`.
+        info:
+          type: string
+          description: |
+            Optional JSON object as a string with extras
+            (step / rate / duration for pattern_step, fault type for
+            fault_on, etc.). Empty when the event needs no detail.
+        labels:
+          type: array
+          items: { type: string }
+          description: |
+            Severity-tagged `<severity>=<event>` strings (synthesized
+            entries carry a `*` prefix on the event portion). Same vocab
+            as session_events / network_requests.labels.
+        event_fingerprint:
+          type: string
+          description: |
+            FNV-64a hash over (player, play, ts_ms, source, event, info).
+            Stable dedupe key for SSE reconnects.
+        classification:
+          type: string
+          enum: [other, interesting, favourite]
+          description: Retention tier — same lifecycle as the parent session.
+
     AggregateResult:
       description: |
         Group-by output. `groups` is one row per distinct combination of
@@ -1095,9 +1152,9 @@ components:
       properties:
         streams:
           type: array
-          description: Resolved stream list (in order — samples, network, events).
-          items: { type: string, enum: [samples, network, events] }
-          example: [samples, network]
+          description: Resolved stream list (in order — events, network, control).
+          items: { type: string, enum: [events, network, control] }
+          example: [events, network]
         columns:
           type: object
           description: |
@@ -1352,7 +1409,7 @@ components:
             properties:
               stream:
                 type: string
-                enum: [samples, network, events]
+                enum: [events, network, control]
               mandatory_columns:
                 type: array
                 items: { type: string }
@@ -1375,7 +1432,7 @@ components:
           example: charts_minimal
         stream:
           type: string
-          enum: [samples, network, events]
+          enum: [events, network, control]
         columns:
           type: array
           description: Wire-order list of columns the bundle projects.
