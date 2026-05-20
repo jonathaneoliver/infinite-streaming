@@ -212,6 +212,12 @@ async function loadRows(silent = false) {
       // its existing shape without a wider refactor.
       if (!r.started && (r as any).started_at) r.started = (r as any).started_at;
       if (!r.last_seen && (r as any).last_seen_at) r.last_seen = (r as any).last_seen_at;
+      // v2 names the [label, count] tuples `label_histogram`; v1 named
+      // them `labels`. The severity filter + per-row chips both read
+      // from r.labels, so alias to keep that surface intact.
+      if (!r.labels && Array.isArray((r as any).label_histogram)) {
+        r.labels = (r as any).label_histogram;
+      }
       const t0 = Date.parse(r.started ?? '');
       const t1 = Date.parse(r.last_seen ?? '');
       r.duration_ms = (Number.isFinite(t0) && Number.isFinite(t1) && t1 >= t0) ? (t1 - t0) : 0;
