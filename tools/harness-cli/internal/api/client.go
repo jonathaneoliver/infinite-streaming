@@ -416,6 +416,48 @@ func (c *Client) ClearShape(ctx context.Context, playerID, action string) (strin
 	return newETag, nil
 }
 
+// PatchShapeMap PATCHes the player's shape with an arbitrary map body,
+// allowing explicit nulls (e.g. `{"pattern": null}`) that the typed
+// `*Pattern` struct field can't express because of `omitempty` JSON
+// tags. Use this when setRate / setDelay / setLoss needs to disarm an
+// active pattern: the typed PatchShape path would just drop the nil
+// pointer and leave the pattern running. Same body-reader path
+// ClearShape uses, just with a richer payload.
+func (c *Client) PatchShapeMap(ctx context.Context, playerID, action string, shape map[string]any) (string, error) {
+	before, etag, err := c.preMutate(ctx, playerID, action)
+	if err != nil {
+		return "", err
+	}
+	if etag == "" {
+		_, e, err := c.Player(ctx, playerID)
+		if err != nil {
+			return "", err
+		}
+		etag = e
+	}
+	body, err := json.Marshal(map[string]any{"shape": shape})
+	if err != nil {
+		return "", err
+	}
+	params := &proxy.PatchApiV2PlayersPlayerIdParams{IfMatch: quoteETag(etag)}
+	resp, err := c.proxy.PatchApiV2PlayersPlayerIdWithBody(
+		ctx, proxy.PlayerId(playerID), params,
+		"application/merge-patch+json", bytes.NewReader(body),
+	)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if err := checkProxyError(resp, "PATCH /api/v2/players/"+playerID+" (shape map)"); err != nil {
+		return "", err
+	}
+	newETag := strings.Trim(resp.Header.Get("ETag"), `"`)
+	if err := c.postMutate(playerID, action, etag, newETag, before, map[string]any{"shape": shape}); err != nil {
+		return newETag, err
+	}
+	return newETag, nil
+}
+
 // CreatePlayer POSTs a new player. Does not snapshot (there's no
 // before-state) but returns the created record + its initial ETag.
 func (c *Client) CreatePlayer(ctx context.Context, req proxy.PlayerCreateRequest) (*proxy.PlayerRecord, string, error) {

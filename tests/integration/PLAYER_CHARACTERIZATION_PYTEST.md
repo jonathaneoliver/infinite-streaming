@@ -1,4 +1,14 @@
-# Player Characterization (Host Pytest)
+# Player Characterization (Host Pytest) — DEPRECATED
+
+> **Deprecated** as of 2026-05-20. Replaced by the Go test suite under
+> [`tests/characterization/`](../characterization/README.md) (tracking
+> issue #482). The Go suite covers iPhone / iPad / Apple TV / Android TV
+> / Web via `LaunchCLI` (no Appium needed for MVP) and emits per-test
+> JSON + a combined Markdown matrix via `cmd/characterize-report`.
+>
+> Kept here for 30 days as a fallback. Slated for removal 2026-06-20 once
+> the Go suite has run at least one full multi-platform sweep against
+> the test-dev environment.
 
 This is a host-side pytest port of the dashboard Player Characterization loop.
 

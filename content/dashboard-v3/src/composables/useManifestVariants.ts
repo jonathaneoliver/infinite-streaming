@@ -27,7 +27,7 @@ export function useManifestVariants(playerId: Ref<string> | string) {
     const typed = player.value?.current_play?.manifest?.variants;
     if (Array.isArray(typed) && typed.length) return typed;
     const flat = ((player.value as any)?.raw_session?.manifest_variants) as
-      | { url: string; bandwidth: number; resolution: string }[]
+      | { url: string; bandwidth: number; average_bandwidth?: number; resolution: string }[]
       | undefined;
     if (Array.isArray(flat)) return flat as ManifestVariant[];
     return [];

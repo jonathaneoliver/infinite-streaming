@@ -665,9 +665,10 @@ func (h *SessionEventHub) Broadcast(sessions []SessionData, revision uint64, pre
 }
 
 type PlaylistInfo struct {
-	URL        string `json:"url"`
-	Bandwidth  int    `json:"bandwidth"`
-	Resolution string `json:"resolution"`
+	URL              string `json:"url"`
+	Bandwidth        int    `json:"bandwidth"`
+	AverageBandwidth int    `json:"average_bandwidth,omitempty"`
+	Resolution       string `json:"resolution"`
 }
 
 type TcTrafficManager struct {
@@ -6061,9 +6062,10 @@ func (a *App) getContentType(target string) (string, bool, bool, bool, []Playlis
 							resolution = variant.Resolution
 						}
 						infos = append(infos, PlaylistInfo{
-							URL:        variant.URI,
-							Bandwidth:  int(variant.Bandwidth),
-							Resolution: resolution,
+							URL:              variant.URI,
+							Bandwidth:        int(variant.Bandwidth),
+							AverageBandwidth: int(variant.AverageBandwidth),
+							Resolution:       resolution,
 						})
 					}
 					return contentType, true, false, false, infos

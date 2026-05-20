@@ -283,10 +283,25 @@ func (s *Server) PatchApiV2PlayersPlayerId(w http.ResponseWriter, r *http.Reques
 	// These run after the SessionData write has been published so v1
 	// SSE consumers see the new field values before the kernel apply
 	// fires its own log lines.
-	// shape.pattern takes precedence over shape.rate_mbps when both
-	// are set — v1's pattern loop owns the rate while enabled. Fire
-	// pattern apply first so a "pattern + rate" body lands the
-	// pattern path (not the static-rate path).
+	//
+	// Precedence model when shape.pattern AND shape.rate_mbps are both
+	// touched:
+	//   - pattern being SET (non-null) → pattern path only. v1's pattern
+	//     step loop owns the kernel cap while enabled; the static rate
+	//     would just be overwritten on the next step tick anyway.
+	//   - pattern being NULLED (disarm) → BOTH paths. The pattern apply
+	//     tears down the step loop; the static apply then installs the
+	//     new rate cap on the kernel. Without the static apply the
+	//     kernel keeps whatever cap was last written by the pattern
+	//     loop (or none) and the new rate_mbps lives only in the
+	//     SessionData map — the bug operators see as "harness sets a
+	//     rate but the throughput doesn't change."
+	//   - pattern untouched → static path only (the common slider case
+	//     when no pattern was active).
+	//
+	// `post["_v2_shape_pattern"]` is the post-patch stash slot — set
+	// by applyPatternPatch when pattern is non-null, deleted when null.
+	patternIsActive := post["_v2_shape_pattern"] != nil
 	if patternTouched(paths) {
 		applyPatternFromSession(s, post, pidStr)
 		for _, p := range broadcastTouched {
@@ -294,7 +309,8 @@ func (s *Server) PatchApiV2PlayersPlayerId(w http.ResponseWriter, r *http.Reques
 				applyPatternFromSession(s, memberSess, p)
 			}
 		}
-	} else if shapeFieldsTouched(paths) {
+	}
+	if shapeFieldsTouched(paths) && !patternIsActive {
 		_ = s.v1.ApplyShapeToPlayer(pidStr)
 		for _, p := range broadcastTouched {
 			_ = s.v1.ApplyShapeToPlayer(p)

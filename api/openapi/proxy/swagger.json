@@ -57,6 +57,10 @@
             },
             "main.NetworkLogEntry": {
                 "properties": {
+                    "attempt_id": {
+                        "description": "AttemptID identifies which playback attempt within a play this\nrequest belongs to. The player initialises it to 1 on every\nnew play and increments by 1 at every `restart` event\n(user-reload OR auto-recovery), passing it as `?attempt_id=N`\non every URL. PlayID stays the same across these attempts;\nAttemptID ticks up. Lets analytics ask both \"how did this play\nperform\" (group by play_id) and \"how many recovery attempts\nwithin the play\" (max attempt_id GROUP BY play_id).",
+                        "type": "integer"
+                    },
                     "bytes_in": {
                         "type": "integer"
                     },
@@ -98,7 +102,7 @@
                         "type": "string"
                     },
                     "play_id": {
-                        "description": "PlayID identifies the playback episode this request belongs to.\nThe player generates a fresh UUID at every loadStream / reload\nand passes it as `?play_id=...` on every URL. HAR snapshots\nfilter by the current play_id by default, so a freeze 8 minutes\ninto a session shows just that play's network log instead of\nthe whole ring buffer. Issue #280.",
+                        "description": "PlayID identifies the playback episode this request belongs to.\nThe player generates a fresh UUID at every content-selection\nboundary (new video / fresh page-load / app launch) and passes\nit as `?play_id=...` on every URL. Stable across in-app restart\nevents (user-reload, auto-recovery). Issue #280.",
                         "type": "string"
                     },
                     "query_string": {
