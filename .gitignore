@@ -66,6 +66,10 @@ analytics/go-forwarder/go-forwarder
 tests/.hls_failure_probe_last_failed
 tests/integration/test_run.log
 
+# Characterization framework artifacts (per-run JSON/MD/HTML reports)
+tests/characterization/artifacts/
+tests/characterization/modes/artifacts/
+
 # Xcode user state
 apple/InfiniteStreamPlayer/InfiniteStreamPlayer.xcodeproj/project.xcworkspace/xcuserdata/
 
