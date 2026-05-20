@@ -506,7 +506,14 @@ func computeControlLabels(r *ctrlRow) []string {
 	case "timeouts_changed":
 		return []string{SevInfo + "=" + synthMark + "timeouts_changed"}
 	case "label_changed":
-		return []string{SevInfo + "=" + synthMark + "label_changed"}
+		// Carry every KV pair from the session's labels map onto the
+		// control_event's labels[] column, so they're queryable via the
+		// existing Sessions `--label-has` filter (no new filter UI
+		// needed). Issue #482 follow-up: bridge user KV labels (proxy
+		// `_v2_labels`) into the forwarder's classified labels surface.
+		out := []string{SevInfo + "=" + synthMark + "label_changed"}
+		out = append(out, kvLabelsFromInfo(r.Info)...)
+		return out
 	case "content_changed":
 		return []string{SevInfo + "=" + synthMark + "content_changed"}
 	case "session_start":
@@ -518,6 +525,51 @@ func computeControlLabels(r *ctrlRow) []string {
 		return []string{SevInfo + "=" + synthMark + "control_change"}
 	}
 	return nil
+}
+
+// kvLabelsFromInfo parses a label_changed control_event's `info` JSON
+// (the player's labels map at the moment of change) and renders each
+// pair as one `<sev>=<key>_<value>` label entry. Uses SevInfo because
+// KV labels are operator metadata, not failure signals — they should
+// inherit the existing `info=` chip color in the dashboard.
+//
+// Sanitises both key and value to [A-Za-z0-9_-] so the label stays in
+// the strict `<sev>=<event>` grammar.
+func kvLabelsFromInfo(info string) []string {
+	if info == "" {
+		return nil
+	}
+	var kv map[string]string
+	if err := json.Unmarshal([]byte(info), &kv); err != nil {
+		return nil
+	}
+	out := make([]string, 0, len(kv))
+	for k, v := range kv {
+		k = sanitizeLabelToken(k)
+		v = sanitizeLabelToken(v)
+		if k == "" || v == "" {
+			continue
+		}
+		out = append(out, SevInfo+"="+k+"_"+v)
+	}
+	return out
+}
+
+// sanitizeLabelToken keeps only [A-Za-z0-9_-]. Empty after stripping → "".
+func sanitizeLabelToken(s string) string {
+	if s == "" {
+		return ""
+	}
+	b := make([]byte, 0, len(s))
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		ok := (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+			(c >= '0' && c <= '9') || c == '_' || c == '-'
+		if ok {
+			b = append(b, c)
+		}
+	}
+	return string(b)
 }
 
 // patternModeFromInfo extracts the `mode` field from a pattern_*

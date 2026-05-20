@@ -2660,9 +2660,12 @@ func (a *App) emitHarnessSettingsChange(sessionID string, payload map[string]int
 		a.emitControlEventForSession(sessionID, "harness", event, info)
 		emitted = true
 	}
-	// Labels first — cheapest test.
-	if _, ok := payload["labels"]; ok {
-		emit("label_changed", "")
+	// Labels first — cheapest test. Carry the new labels payload in
+	// `info` so the forwarder can stamp each KV pair onto the row's
+	// labels[] array, making them queryable via the existing
+	// `--label-has` Sessions filter (issue #482 follow-up).
+	if v, ok := payload["labels"]; ok {
+		emit("label_changed", labelsInfoJSON(v))
 	}
 	if _, ok := payload["content_id"]; ok {
 		emit("content_changed", "")
@@ -3495,9 +3498,10 @@ func (a *App) emitControlEventsForDiff(sessionID string, before, after map[strin
 		a.emitControlEventForSession(sessionID, "harness", event, info)
 	}
 
-	// Labels — any change.
+	// Labels — any change. Carry new label set so the forwarder can
+	// surface KV pairs as queryable label entries (issue #482 follow-up).
 	if changed("labels") {
-		emit("label_changed", "")
+		emit("label_changed", labelsInfoJSON(after["labels"]))
 	}
 	// Content selection.
 	if changed("content_id") || changed("manifest_url") {
@@ -3581,6 +3585,41 @@ func (a *App) emitControlEventsForDiff(sessionID string, before, after map[strin
 }
 
 // sessionFieldsEqual compares two interface{} values pulled out of a
+// labelsInfoJSON marshals the labels map for embedding in a
+// label_changed control_event's Info string. Accepts the raw
+// session-map value (interface{}) — usually map[string]any or
+// map[string]string — and returns a stable JSON object string the
+// forwarder can parse to extract KV pairs. Empty / nil / wrong-type
+// input renders as "" (the forwarder treats that as "labels cleared").
+func labelsInfoJSON(v interface{}) string {
+	if v == nil {
+		return ""
+	}
+	flat := map[string]string{}
+	switch m := v.(type) {
+	case map[string]string:
+		for k, val := range m {
+			flat[k] = val
+		}
+	case map[string]any:
+		for k, val := range m {
+			if s, ok := val.(string); ok {
+				flat[k] = s
+			}
+		}
+	default:
+		return ""
+	}
+	if len(flat) == 0 {
+		return ""
+	}
+	b, err := json.Marshal(flat)
+	if err != nil {
+		return ""
+	}
+	return string(b)
+}
+
 // session map for the diff-based control_event emitter. Strings,
 // numbers, bools compare by ==; arrays / objects compare by JSON-
 // round-trip. Cheap because session-map values are small.
