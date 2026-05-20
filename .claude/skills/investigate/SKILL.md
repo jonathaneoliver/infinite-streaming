@@ -1,18 +1,32 @@
 ---
 name: investigate
 description: Deep-dive ONE specific event on a player — pull network log, samples, and player state from a focused time window around the event, then state an explicit hypothesis about cause. Invoke when the user says "investigate the X at Y", "why did Z happen at T", "what was happening around <timestamp>", or after `triage` has surfaced a specific event worth chasing. Output is timeline + evidence + hypothesis tagged confirmed/refuted/needs-test.
+last_reviewed: 2026-05-19
 ---
 
 # Investigate one event
 
 `triage` finds *what* broke. `investigate` finds *why* — for one specific event at one specific time.
 
+**Conventions:** this skill follows `.claude/skills/CONVENTIONS.md`. Most load-bearing for investigate: lead every shell command with the tool name; tag every causal claim `confirmed` / `refuted` / `needs-test`; display times in local, store in UTC; check `.claude/memory/` and `labels.go` before attributing meaning to a label or error code.
+
 ## Inputs you need
 
 - **target** — same resolver shape as `triage` (UUID, prefix, label, IP, UA substring)
 - **event timestamp** — either an explicit ISO time (`2026-05-17 18:29:27`), a clock time (`18:29:27` — assume today UTC), or a relative anchor (`the 262s stall`, in which case re-run triage and pick the matching event)
 
-If the user said "the worst stall" without a time, re-derive: run a quick triage events query, pick the P1 event with the largest duration in info, use its ts.
+### When the user gives only a play_id, no timestamp
+
+Frequent invocation shape: `investigate play_id=<uuid>` with no time. Resolve to a specific event before drilling:
+
+1. Pull the play summary: `harness --insecure --json query plays --play-id <play_id> --limit 1 | jq '.items[0].label_histogram'`.
+2. Pick the worst label in the histogram by severity (`critical=*` > `error=` > `warning=*stall_severe_midplay` > `warning=*stall_long_midplay` > other `warning=` > `info=`).
+3. Query events filtered by that label: `harness --insecure --json query events <play_id> --label-has '<the worst label>' --limit 5` and use the row's `.ts` as the window centre.
+4. From there, proceed with the normal flow below.
+
+State the picked event up front ("investigating the `critical=*stall_severe_midplay` at 20:53:57") so the operator can redirect if they wanted a different one.
+
+If the user said "the worst stall" without any other anchor, same path applies.
 
 ## The critical idiom
 
@@ -167,7 +181,7 @@ would reproduce.
 Before diving into the second-resolution window, pulling the **play summary** that contains the event gives one-line context (was this event isolated, or one of many?):
 
 ```sh
-harness --insecure --json archive play <play_id> 2>/dev/null \
+harness --insecure --json query play <play_id> 2>/dev/null \
   | jq '{play_id, started_at, last_seen_at, classification,
          stalls, restart_count, frozen_count, error_event_count,
          bitrate_shifts, last_player_error}'

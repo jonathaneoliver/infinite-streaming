@@ -1,11 +1,14 @@
 ---
 name: triage
 description: Quick health check at the *menu* level — either scan recent plays for ones needing attention (no target given, or "what's broken right now"), or drill the named player's current session for state + recent failures. Surfaces 3-6 worst signals with timestamps and a suggested next skill. Invoke when the user says "triage X", "what's wrong with X", "how's X doing", "any plays needing attention", "scan plays", "what's broken right now", or asks for a summary of recent failures. Does NOT drill into individual events (use `investigate` for that).
+last_reviewed: 2026-05-19
 ---
 
 # Triage — scan plays OR diagnose one player
 
 Read first: top of the file at `~/.local/bin/harness` is the `harness` CLI. If `which harness` fails, run `make harness-cli` in the repo root.
+
+**Conventions:** this skill follows the cross-skill rules in `.claude/skills/CONVENTIONS.md`. The load-bearing ones for triage: lead every shell command with the tool name (no `VAR=…` / `cd …` / `echo "header"; …` prefixes); tag causal claims `confirmed`/`refuted`/`needs-test`; display times in local, store in UTC. If the rollup is clean, say so in one line and stop — don't manufacture findings.
 
 Goal: in <10 seconds tell the user *what* is broken — at the *menu* level, not the *cause* level.
 
@@ -23,7 +26,7 @@ Pick mode by whether you have a resolvable target. If the user said "triage" alo
 
 ```sh
 # Default: last 6 hours. Widen with `from=…` if the user asked for a longer window.
-harness --insecure --json archive plays \
+harness --insecure --json query plays \
   --from $(date -u -v-6H '+%Y-%m-%dT%H:%M:%SZ') \
   --limit 200 2>/dev/null \
   | jq '.items' > /tmp/plays.json
@@ -146,7 +149,7 @@ If `last_seen_at` is more than 60 seconds old, the player has disconnected — s
 The live `players show` only sees the current play. To know whether the player has been stable across the last few hours or thrashing through many plays, ask the v2 plays endpoint:
 
 ```sh
-harness --insecure --json archive plays \
+harness --insecure --json query plays \
   --player-id "$PID" \
   --from $(date -u -v-6H '+%Y-%m-%dT%H:%M:%SZ') \
   --limit 50 2>/dev/null \
@@ -239,7 +242,7 @@ one next skill — don't list every option.
 
 ## The v2 plays endpoint, in one line
 
-`/api/v2/plays` returns one row per archived playback with the trouble-signal fields the dashboard uses for its "interesting" filter. CLI: `harness --insecure --json archive plays [--from ISO] [--player-id UUID] [--play-id UUID] [--classification interesting|other|favourite] [--limit N]`. Single-play detail: `harness --insecure --json archive play <play_id>`. Spec: `api/openapi/v2/forwarder.yaml § /api/v2/plays`.
+`/api/v2/plays` returns one row per archived playback with the trouble-signal fields the dashboard uses for its "interesting" filter. CLI: `harness --insecure --json query plays [--from ISO] [--player-id UUID] [--play-id UUID] [--classification interesting|other|favourite] [--limit N]`. Single-play detail: `harness --insecure --json query play <play_id>`. Spec: `api/openapi/v2/forwarder.yaml § /api/v2/plays`.
 
 ## See also
 
