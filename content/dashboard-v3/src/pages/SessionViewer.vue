@@ -13,10 +13,12 @@
  * routes display panels to the side-channel store in v2-repo instead
  * of the live `/api/v2/players` fetch.
  */
-import { ref, computed, onMounted } from 'vue';
+import { ref, computed } from 'vue';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/vue-query';
 import ShellLayout from '@/components/ShellLayout.vue';
 import SessionDisplay from '@/components/SessionDisplay.vue';
 import { parseTimeAny, canonicalUUID } from '@/composables/urlTimeFormat';
+import { getPlay, patchPlayClassification, type PlaySummary } from '@/repo/v2-repo';
 
 const qs = new URLSearchParams(window.location.search);
 // v3 canonical: identify an archived play by (player_id, play_id).
@@ -48,25 +50,52 @@ const endMs = ref<number | null>(parseTimeAny(qs.get('to') ?? qs.get('end_time')
 const showContext = ref<boolean>(false);
 function toggleShowContext() { showContext.value = !showContext.value; }
 
-// Starred state. Optimistically toggled on click, then synced from
-// the server response. Initial fetch in onMounted below.
-const starred = ref<boolean>(false);
-async function toggleStarred() {
+// Starred state — backed by TanStack so the optimistic flip, the
+// mutation rollback, and any future cache invalidations follow the
+// same contract as Sessions.vue / usePlayer.ts § makeGroupMutation.
+// No auto-refresh on this page, so cancelQueries is mostly defensive.
+const qc = useQueryClient();
+const playQueryKey = computed(() => ['play', playId.value] as const);
+const playQuery = useQuery<PlaySummary | null>({
+  queryKey: playQueryKey,
+  queryFn: () => getPlay(playId.value as string),
+  enabled: computed(() => !!playId.value),
+  // One-shot for the initial starred state; refetch on focus is
+  // enough — no point polling, this is a finished play.
+  refetchInterval: false,
+});
+const starred = computed<boolean>(
+  () => String(playQuery.data.value?.classification ?? '') === 'favourite',
+);
+
+const starMutation = useMutation({
+  mutationFn: (next: boolean) =>
+    patchPlayClassification(playId.value as string, next ? 'favourite' : 'auto'),
+  onMutate: async (next) => {
+    if (!playId.value) return { prev: undefined };
+    await qc.cancelQueries({ queryKey: playQueryKey.value });
+    const prev = qc.getQueryData<PlaySummary | null>(playQueryKey.value);
+    if (prev) {
+      qc.setQueryData<PlaySummary | null>(playQueryKey.value, {
+        ...prev,
+        classification: next ? 'favourite' : '',
+      });
+    }
+    return { prev };
+  },
+  onError: (_err, _vars, ctx) => {
+    if (ctx && 'prev' in ctx) {
+      qc.setQueryData(playQueryKey.value, ctx.prev);
+    }
+  },
+  onSuccess: (settled) => {
+    if (settled) qc.setQueryData(playQueryKey.value, settled);
+  },
+});
+
+function toggleStarred() {
   if (!playerId.value || !playId.value) return;
-  const next = !starred.value;
-  starred.value = next; // optimistic
-  try {
-    const url = `/analytics/api/v2/plays/${encodeURIComponent(playId.value)}`;
-    const cls = next ? 'favourite' : 'auto';
-    const resp = await fetch(url, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/merge-patch+json' },
-      body: JSON.stringify({ classification: cls }),
-    });
-    if (!resp.ok) throw new Error(`star ${resp.status}`);
-  } catch {
-    starred.value = !next; // rollback on failure
-  }
+  starMutation.mutate(!starred.value);
 }
 
 const bundleHref = computed(() => {
@@ -78,23 +107,9 @@ const bundleHref = computed(() => {
 });
 const backHref = '/dashboard/v3/sessions.html';
 
-onMounted(async () => {
-  // Look up the current starred state via the v2 play summary.
-  // classification === 'favourite' means starred. 404 just means the
-  // play hasn't archived any snapshots yet — treat as unstarred.
-  if (playerId.value && playId.value) {
-    try {
-      const url = `/analytics/api/v2/plays/${encodeURIComponent(playId.value)}`;
-      const resp = await fetch(url);
-      if (resp.ok) {
-        const j = await resp.json();
-        starred.value = String(j?.classification ?? '') === 'favourite';
-      }
-    } catch {
-      // Star lookup is non-essential; the toggle still works.
-    }
-  }
-});
+// (Initial starred-state lookup now lives in the playQuery above —
+// useQuery fires automatically when playId is set; the onMounted
+// fetch + try/catch is gone.)
 
 </script>
 

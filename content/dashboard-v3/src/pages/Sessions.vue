@@ -8,8 +8,10 @@
  * looks identical to /dashboard/sessions.html.
  */
 import { ref, computed, onMounted, onBeforeUnmount, watch } from 'vue';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/vue-query';
 import ShellLayout from '@/components/ShellLayout.vue';
 import { sessionViewerURL } from '@/composables/urlTimeFormat';
+import { listPlays, patchPlayClassification, type PlaySummary } from '@/repo/v2-repo';
 
 interface SessionRow {
   session_id: string;
@@ -120,9 +122,8 @@ const filters = ref<{
   labels: [], labelsExclude: [],
 });
 
-const rows = ref<SessionRow[]>([]);
-const loading = ref(false);
-const error = ref<string | null>(null);
+// rows / loading / error are computeds backed by playsQuery; declared
+// further down once the query is constructed.
 const sortKey = ref('started');
 const sortDir = ref<'asc' | 'desc'>('desc');
 // Force-bump on auto-refresh so `fmtRelTime` re-renders even if the
@@ -190,46 +191,63 @@ function deriveHealth(r: SessionRow): void {
   };
 }
 
-let reloadInFlight = false;
-async function loadRows(silent = false) {
-  if (reloadInFlight) return;
-  reloadInFlight = true;
-  if (!silent) loading.value = true;
-  error.value = null;
-  try {
+// Normalise one PlaySummary into a SessionRow: aliases v2 field
+// names (started_at/last_seen_at, label_histogram) to the v1 names the
+// rest of this page reads, derives health metrics, and computes
+// duration. Runs once per fetch inside the queryFn so the cache holds
+// processed rows and the render path stays cheap.
+function normalisePlay(p: PlaySummary): SessionRow {
+  const r: SessionRow = { ...(p as any), session_id: (p as any).session_id ?? '' };
+  if (!r.started && p.started_at) r.started = p.started_at;
+  if (!r.last_seen && p.last_seen_at) r.last_seen = p.last_seen_at;
+  if (!r.labels && Array.isArray(p.label_histogram)) r.labels = p.label_histogram;
+  const t0 = Date.parse(r.started ?? '');
+  const t1 = Date.parse(r.last_seen ?? '');
+  r.duration_ms = (Number.isFinite(t0) && Number.isFinite(t1) && t1 >= t0) ? (t1 - t0) : 0;
+  deriveHealth(r);
+  return r;
+}
+
+// Stable query key that refetches when the time range changes. The
+// range tuple is the only server-side filter; player/group/content/
+// classification/labels are post-fetch client-side filters.
+const playsQueryKey = computed(() => {
+  const { since, until } = computeRange();
+  return ['plays', since, until] as const;
+});
+
+const qc = useQueryClient();
+const playsQuery = useQuery<SessionRow[]>({
+  queryKey: playsQueryKey,
+  queryFn: async () => {
     const { since, until } = computeRange();
-    const qs = new URLSearchParams();
-    if (since) qs.set('from', since);
-    if (until) qs.set('to', until);
-    qs.set('limit', '5000');
-    const resp = await fetch('/analytics/api/v2/plays' + (qs.toString() ? '?' + qs : ''));
-    if (!resp.ok) throw new Error(`HTTP ${resp.status} (analytics forwarder reachable?)`);
-    const envelope = await resp.json();
-    const fresh: SessionRow[] = Array.isArray(envelope?.items) ? envelope.items : [];
-    for (const r of fresh) {
-      // v2 surfaces started_at/last_seen_at; alias to started/last_seen
-      // so the rest of the UI (sort keys, badges, fmt helpers) keeps
-      // its existing shape without a wider refactor.
-      if (!r.started && (r as any).started_at) r.started = (r as any).started_at;
-      if (!r.last_seen && (r as any).last_seen_at) r.last_seen = (r as any).last_seen_at;
-      // v2 names the [label, count] tuples `label_histogram`; v1 named
-      // them `labels`. The severity filter + per-row chips both read
-      // from r.labels, so alias to keep that surface intact.
-      if (!r.labels && Array.isArray((r as any).label_histogram)) {
-        r.labels = (r as any).label_histogram;
-      }
-      const t0 = Date.parse(r.started ?? '');
-      const t1 = Date.parse(r.last_seen ?? '');
-      r.duration_ms = (Number.isFinite(t0) && Number.isFinite(t1) && t1 >= t0) ? (t1 - t0) : 0;
-      deriveHealth(r);
-    }
-    rows.value = fresh;
-  } catch (e: any) {
-    error.value = String(e?.message ?? e);
-  } finally {
-    if (!silent) loading.value = false;
-    reloadInFlight = false;
-  }
+    const items = await listPlays({ from: since, to: until, limit: 5000 });
+    return items.map(normalisePlay);
+  },
+  // Match the legacy 5s cadence. TanStack pauses the interval while
+  // the tab is backgrounded — same effective behaviour as before.
+  refetchInterval: 5000,
+  // Keep prior rows visible while the refetch runs so the picker
+  // doesn't blank out between ticks.
+  placeholderData: (prev) => prev,
+});
+
+// Surfaces previously held by manual refs. computeds keep the rest of
+// the template trusting `rows`, `loading`, `error` unchanged.
+const rows = computed<SessionRow[]>(() => playsQuery.data.value ?? []);
+const loading = computed<boolean>(() => playsQuery.isLoading.value);
+const error = computed<string | null>(() => {
+  const e = playsQuery.error.value as Error | null;
+  return e ? String(e.message ?? e) : null;
+});
+
+// Stand-in for the old `void loadRows()` calls in user-driven range
+// changes. queryKey reactivity handles the refetch automatically when
+// activeRangeId / customFrom / customTo change; this is the explicit
+// "fetch now" for the rare cases the key didn't shift (eg. clicking
+// the same range button to force a refresh).
+function refreshPlays() {
+  void playsQuery.refetch();
 }
 
 const isInterestingRow = (r: SessionRow): boolean =>
@@ -500,7 +518,10 @@ function clearFilters() {
 
 function onRangeChange() {
   try { localStorage.setItem(RANGE_KEY, activeRangeId.value); } catch { /* ignore */ }
-  if (activeRangeId.value !== 'custom') void loadRows();
+  // Query key is reactive on (since, until); switching range triggers
+  // a refetch automatically. The "custom" branch waits for the user
+  // to fill in both inputs before applyCustomRange() flips since/until.
+  if (activeRangeId.value !== 'custom') refreshPlays();
 }
 function applyCustomRange() {
   customFrom.value = localToIso(customFromInput.value);
@@ -508,7 +529,7 @@ function applyCustomRange() {
   try {
     localStorage.setItem(RANGE_CUSTOM_KEY, JSON.stringify({ from: customFrom.value, to: customTo.value }));
   } catch { /* ignore */ }
-  void loadRows();
+  refreshPlays();
 }
 
 const customFromInput = ref(isoToLocal(customFrom.value));
@@ -737,34 +758,71 @@ function onHeaderClick(col: typeof COLUMNS[number]) {
   }
 }
 
-async function toggleStar(r: SessionRow, ev: MouseEvent) {
+// Star/unstar via the standard TanStack mutation contract used
+// throughout v3 (see composables/usePlayer.ts § makeGroupMutation):
+//   onMutate  — cancel in-flight refetches, snapshot, optimistic write
+//   onError   — restore the snapshot
+//   onSuccess — write the server-settled value back
+// cancelQueries is the key step that fixes the race the homegrown
+// loadRows() had: without it, the 5s refetch could land before the
+// ClickHouse ALTER UPDATE propagated and visibly revert the star.
+type ClassValue = 'favourite' | 'interesting' | 'other' | 'auto';
+type StarVars = { playId: string; target: ClassValue; optimistic: string };
+
+// Predicate matches every ['plays', since, until] cache entry — covers
+// past time-window selections that the user might switch back to.
+const playsQueryPredicate = { predicate: (q: any) => q.queryKey?.[0] === 'plays' };
+
+function applyClassificationToCaches(playId: string, value: string) {
+  qc.setQueriesData<SessionRow[]>(playsQueryPredicate, (old) =>
+    old?.map((r) => (r.play_id === playId ? { ...r, classification: value } : r)),
+  );
+}
+
+const starMutation = useMutation({
+  mutationFn: ({ playId, target }: StarVars) => patchPlayClassification(playId, target),
+  onMutate: async ({ playId, optimistic }) => {
+    // Pause every plays-keyed in-flight refetch so the optimistic
+    // write isn't stomped before the PATCH settles.
+    await qc.cancelQueries(playsQueryPredicate);
+    const prev = qc.getQueriesData<SessionRow[]>(playsQueryPredicate);
+    applyClassificationToCaches(playId, optimistic);
+    return { prev };
+  },
+  onError: (err: any, _vars, ctx) => {
+    if (ctx?.prev) {
+      for (const [key, snapshot] of ctx.prev) {
+        qc.setQueryData(key, snapshot);
+      }
+    }
+    window.alert(`Star toggle failed: ${err?.message ?? err}`);
+  },
+  onSuccess: (settled, { playId }) => {
+    // Server tells us the settled classification ('auto' resolves to
+    // interesting/other server-side). Write it into every cached
+    // plays-list so the chip + filter agree without another refetch.
+    if (typeof settled?.classification === 'string') {
+      applyClassificationToCaches(playId, settled.classification);
+    }
+  },
+});
+
+function toggleStar(r: SessionRow, ev: MouseEvent) {
   ev.stopPropagation();
   ev.preventDefault();
-  const wasStarred = String(r.classification || '') === 'favourite';
   if (!r.play_id || r.play_id === '—') {
     window.alert('Cannot star a row without a play_id (legacy pre-stamp row).');
     return;
   }
-  const url = `/analytics/api/v2/plays/${encodeURIComponent(r.play_id)}`;
-  // 'auto' lets the forwarder rerun the auto-classifier on unstar so
-  // the row drops back to interesting/other based on its content.
-  const next = wasStarred ? 'auto' : 'favourite';
-  r.classification = wasStarred ? '' : 'favourite';
-  try {
-    const resp = await fetch(url, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/merge-patch+json' },
-      body: JSON.stringify({ classification: next }),
-    });
-    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-    const body = await resp.json().catch(() => null);
-    if (body && typeof body.classification === 'string') {
-      r.classification = body.classification;
-    }
-  } catch (err: any) {
-    r.classification = wasStarred ? 'favourite' : '';
-    window.alert(`Star toggle failed: ${err?.message ?? err}`);
-  }
+  const wasStarred = String(r.classification || '') === 'favourite';
+  // For unstar: empty string optimistically (UI checks === 'favourite');
+  // server's auto-classifier will resolve to 'interesting' or 'other'
+  // and onSuccess writes the real value back.
+  starMutation.mutate({
+    playId: r.play_id,
+    target: wasStarred ? 'auto' : 'favourite',
+    optimistic: wasStarred ? '' : 'favourite',
+  });
 }
 
 function onRowClick(r: SessionRow, ev: MouseEvent) {
@@ -778,17 +836,13 @@ function onRowClick(r: SessionRow, ev: MouseEvent) {
   if (href !== '#') window.location.href = href;
 }
 
-let autoRefreshTimer: number | undefined;
 let clockTimer: number | undefined;
 onMounted(() => {
-  void loadRows();
-  // Auto-refresh every 5s (silent).
-  autoRefreshTimer = window.setInterval(() => void loadRows(true), 5000);
   // 1s clock tick so "1s ago" → "2s ago" updates without a fetch.
+  // The play list itself refetches every 5s via useQuery.refetchInterval.
   clockTimer = window.setInterval(() => { tick.value++; }, 1000);
 });
 onBeforeUnmount(() => {
-  if (autoRefreshTimer) clearInterval(autoRefreshTimer);
   if (clockTimer) clearInterval(clockTimer);
 });
 
