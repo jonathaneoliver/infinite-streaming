@@ -932,9 +932,10 @@ func insert(ctx context.Context, cfg config, rows []row) error {
 // serveHTTP runs the read-only query API. nginx proxies /analytics/api/*
 // here, so the browser never talks to ClickHouse directly. Endpoints:
 //
-//	GET /api/sessions?since=<rfc3339>
-//	GET /api/snapshots?session=<id>&from=<rfc3339>&to=<rfc3339>&limit=<n>
-//	GET /healthz
+//	GET   /api/v2/plays?from=<rfc3339>&to=<rfc3339>&limit=<n>
+//	PATCH /api/v2/plays/{play_id}     {classification: favourite|interesting|other|auto}
+//	GET   /api/snapshots?session=<id>&from=<rfc3339>&to=<rfc3339>&limit=<n>
+//	GET   /healthz
 func serveHTTP(ctx context.Context, cfg config, ring *Ring) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
@@ -942,187 +943,6 @@ func serveHTTP(ctx context.Context, cfg config, ring *Ring) {
 	})
 	mountV2Handlers(mux, cfg)
 	mountTimeseriesHandlers(mux, cfg, ring)
-	mux.HandleFunc("/api/sessions", func(w http.ResponseWriter, r *http.Request) {
-		since := r.URL.Query().Get("since")
-		until := r.URL.Query().Get("until")
-		params := map[string]string{}
-		var clauses []string
-		if since != "" {
-			clauses = append(clauses, "ts >= parseDateTime64BestEffort({since:String})")
-			params["since"] = since
-		} else {
-			clauses = append(clauses, "ts >= now() - INTERVAL 24 HOUR")
-		}
-		if until != "" {
-			clauses = append(clauses, "ts <= parseDateTime64BestEffort({until:String})")
-			params["until"] = until
-		}
-		where := "WHERE " + strings.Join(clauses, " AND ")
-		// Per-(session_id, play_id) row so the Session Viewer picker
-		// can offer per-playback granularity. A session that hosted
-		// three loadStream() calls produces three rows here, one per
-		// fresh play_id. Empty play_ids (rows ingested before go-proxy
-		// started stamping the field) are surfaced as "—" so they
-		// remain selectable rather than collapsing into one bucket.
-		// Per-(session_id, play_id) summary. We pre-window the rows so we
-		// can count ABR shifts (bitrate / resolution changes) using
-		// lagInFrame — the *count* of shifts isn't stored directly but
-		// the per-snapshot value is, and a transition between adjacent
-		// snapshots is a shift event.
-		query := fmt.Sprintf(`
-			WITH base AS (
-			  SELECT
-			    session_id, play_id, ts,
-			    player_id, group_id, content_id,
-			    player_state, player_error, last_event,
-			    stall_count, dropped_frames, frames_displayed,
-			    video_bitrate_mbps, video_resolution, video_quality_pct,
-			    video_first_frame_time_s,
-			    master_manifest_consecutive_failures,
-			    manifest_consecutive_failures,
-			    segment_consecutive_failures,
-			    all_consecutive_failures,
-			    transport_consecutive_failures,
-			    fault_count_transfer_active_timeout,
-			    fault_count_transfer_idle_timeout,
-			    classification,
-			    lagInFrame(video_bitrate_mbps, 1, video_bitrate_mbps) OVER w AS prev_bitrate,
-			    lagInFrame(video_resolution,   1, video_resolution)   OVER w AS prev_resolution
-			  FROM %s.%s
-			  %s
-			  WINDOW w AS (PARTITION BY session_id, play_id ORDER BY ts)
-			),
-			net_counts AS (
-			  SELECT session_id, play_id, count() AS net_rows,
-			         countIf(status >= 400) AS net_errors,
-			         countIf(faulted = 1)  AS net_faults
-			  FROM %s.network_requests
-			  %s
-			  GROUP BY session_id, play_id
-			),
-			-- Per-(session,play) label histogram across all three source
-			-- tables. Issue #474: every interesting signal is now a label
-			-- on session_events / network_requests / control_events; this
-			-- CTE lets the sessions picker render "N labels" with a
-			-- per-label breakdown without three roundtrips.
-			labels_unioned AS (
-			  SELECT session_id, play_id, arrayJoin(labels) AS label
-			  FROM %s.%s
-			  %s
-			  UNION ALL
-			  SELECT session_id, play_id, arrayJoin(labels) AS label
-			  FROM %s.network_requests
-			  %s
-			  UNION ALL
-			  SELECT session_id, play_id, arrayJoin(labels) AS label
-			  FROM %s.control_events
-			  %s
-			),
-			labels_per_pair AS (
-			  SELECT session_id, play_id, label, count() AS n
-			  FROM labels_unioned
-			  GROUP BY session_id, play_id, label
-			),
-			labels_agg AS (
-			  SELECT session_id, play_id,
-			         sum(n) AS labels_total,
-			         arrayDistinct(groupArray(label)) AS labels_distinct,
-			         groupArray((label, n)) AS label_pairs
-			  FROM labels_per_pair
-			  GROUP BY session_id, play_id
-			),
-			agg AS (
-			  SELECT
-			    session_id,
-			    play_id AS raw_play_id,
-			    any(player_id) AS player_id,
-			    any(group_id) AS group_id,
-			    any(content_id) AS content_id,
-			    min(ts) AS started,
-			    max(ts) AS last_seen,
-			    count() AS metric_events,
-			    max(stall_count) AS stalls,
-			    max(dropped_frames) AS dropped_frames,
-			    argMax(player_state, ts) AS last_state,
-			    argMax(player_error, ts) AS last_player_error,
-			    max(master_manifest_consecutive_failures) AS master_manifest_failures,
-			    max(manifest_consecutive_failures) AS manifest_failures,
-			    max(segment_consecutive_failures) AS segment_failures,
-			    max(all_consecutive_failures) AS all_failures,
-			    max(transport_consecutive_failures) AS transport_failures,
-			    max(fault_count_transfer_active_timeout) AS active_timeouts,
-			    max(fault_count_transfer_idle_timeout) AS idle_timeouts,
-			    countIf(video_bitrate_mbps != prev_bitrate AND video_bitrate_mbps > 0 AND prev_bitrate > 0)                       AS bitrate_shifts,
-			    countIf(video_bitrate_mbps < prev_bitrate AND prev_bitrate > 0 AND video_bitrate_mbps > 0)                         AS downshifts,
-			    countIf(video_bitrate_mbps > prev_bitrate AND prev_bitrate > 0 AND video_bitrate_mbps > 0)                         AS upshifts,
-			    countIf(video_resolution != prev_resolution AND video_resolution != '' AND prev_resolution != '')                  AS resolution_changes,
-			    round(avgIf(video_quality_pct, video_quality_pct > 0), 1) AS avg_quality_pct,
-			    round(minIf(video_quality_pct, video_quality_pct > 0), 1) AS min_quality_pct,
-			    max(frames_displayed) AS frames_displayed,
-			    round(max(video_first_frame_time_s), 2) AS first_frame_s,
-			    -- Per-event-type counts of "really bad things" so the
-			    -- session picker can flag rows distinctly.
-			    --   user_marked  → operator-pressed 911 button
-			    --   frozen       → picture frozen (≠ stall: stall is
-			    --                  buffer-empty, frozen is renderer
-			    --                  hung)
-			    --   segment_stall → stall waiting for a segment fetch
-			    --   restart      → mid-session restart (player-side
-			    --                  recovery attempt)
-			    --   error        → explicit player_error event
-			    countIf(last_event = 'user_marked')   AS user_marked_count,
-			    countIf(last_event = 'frozen')         AS frozen_count,
-			    countIf(last_event = 'segment_stall')  AS segment_stall_count,
-			    countIf(last_event = 'restart')        AS restart_count,
-			    countIf(last_event = 'error')          AS error_event_count,
-			    -- Tiered retention class (issue #342). Same value on
-			    -- every row of (session_id, play_id) once the
-			    -- forwarder's session-end / star path stamps it; before
-			    -- that, default 'other'. any() is fine here because
-			    -- once the mutation has settled all rows agree.
-			    any(classification) AS classification
-			  FROM base
-			  GROUP BY session_id, play_id
-			)
-			SELECT
-			  agg.session_id AS session_id,
-			  if(agg.raw_play_id = '', '—', agg.raw_play_id) AS play_id,
-			  agg.player_id, agg.group_id, agg.content_id,
-			  agg.started, agg.last_seen,
-			  agg.metric_events,
-			  agg.metric_events AS rows,
-			  ifNull(net_counts.net_rows,   0) AS net_events,
-			  ifNull(net_counts.net_errors, 0) AS net_errors,
-			  ifNull(net_counts.net_faults, 0) AS net_faults,
-			  agg.stalls, agg.dropped_frames, agg.last_state, agg.last_player_error,
-			  agg.master_manifest_failures, agg.manifest_failures, agg.segment_failures,
-			  agg.all_failures, agg.transport_failures, agg.active_timeouts, agg.idle_timeouts,
-			  agg.bitrate_shifts, agg.downshifts, agg.upshifts, agg.resolution_changes,
-			  agg.avg_quality_pct, agg.min_quality_pct,
-			  agg.frames_displayed, agg.first_frame_s,
-			  agg.user_marked_count, agg.frozen_count, agg.segment_stall_count,
-			  agg.restart_count, agg.error_event_count,
-			  agg.classification,
-			  ifNull(labels_agg.labels_total, 0) AS labels_total,
-			  ifNull(length(labels_agg.labels_distinct), 0) AS labels_distinct_count,
-			  ifNull(labels_agg.label_pairs, []) AS labels
-			FROM agg
-			LEFT JOIN net_counts
-			  ON agg.session_id = net_counts.session_id
-			 AND agg.raw_play_id = net_counts.play_id
-			LEFT JOIN labels_agg
-			  ON agg.session_id = labels_agg.session_id
-			 AND agg.raw_play_id = labels_agg.play_id
-			ORDER BY agg.started DESC
-			LIMIT 1000
-			FORMAT JSONEachRow`,
-				cfg.chDatabase, cfg.chTable, where,
-				cfg.chDatabase, where,
-				cfg.chDatabase, cfg.chTable, where,
-				cfg.chDatabase, where,
-				cfg.chDatabase, where)
-		proxyClickHouseJSON(w, r, cfg, query, params)
-	})
 	mux.HandleFunc("/api/snapshots", func(w http.ResponseWriter, r *http.Request) {
 		session := r.URL.Query().Get("session")
 		if session == "" {
@@ -1297,10 +1117,6 @@ func serveHTTP(ctx context.Context, cfg config, ring *Ring) {
 	// /api/session_bundle — ZIP of snapshots + HAR + events for one
 	// (session_id, play_id). Defined in bundle.go.
 	registerBundleHandler(mux, cfg)
-
-	// /api/sessions/{sid}/{pid}/{star,reclassify} — tiered retention
-	// classification (issue #342). Defined in classification.go.
-	registerClassificationHandlers(mux, cfg)
 
 	// /api/v2/characterization-runs — POST ingest + GET list/detail for
 	// reports the Go test framework uploads at end-of-sweep. Defined

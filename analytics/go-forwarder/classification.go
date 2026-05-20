@@ -153,6 +153,60 @@ func reclassifySession(ctx context.Context, cfg config, sessionID, playID string
 	return setClassification(ctx, cfg, sessionID, playID, target, force)
 }
 
+// reclassifyPlay is the play-scoped twin of reclassifySession: same
+// auto-classifier predicate, but the WHERE clause keys on play_id
+// alone (no session_id). Used by PATCH /api/v2/plays/{id}, where the
+// caller has a play_id but no session_id.
+func reclassifyPlay(ctx context.Context, cfg config, playID string, force bool) error {
+	if playID == "" {
+		return errors.New("play id required")
+	}
+	probe := fmt.Sprintf(`
+		SELECT count() FROM %s.%s
+		WHERE play_id = {play:String}
+		  AND last_event IN ('user_marked', 'frozen', 'segment_stall', 'restart', 'error')
+		FORMAT TSV`, cfg.chDatabase, cfg.chTable)
+	body, err := chQueryBytes(ctx, cfg, probe, map[string]string{"play": playID})
+	if err != nil {
+		return fmt.Errorf("auto-classifier probe: %w", err)
+	}
+	target := "other"
+	if c := strings.TrimSpace(string(body)); c != "" && c != "0" {
+		target = "interesting"
+	}
+	return setPlayClassification(ctx, cfg, playID, target, force)
+}
+
+// setPlayClassification is the play-scoped twin of setClassification.
+// Same three-table ALTER UPDATE pattern but keyed on play_id only, so
+// the v2 PATCH endpoint doesn't have to round-trip the session_id.
+func setPlayClassification(ctx context.Context, cfg config, playID, value string, force bool) error {
+	if playID == "" {
+		return errors.New("play id required")
+	}
+	whereSafe := "WHERE play_id = {play:String}"
+	if !force {
+		whereSafe += " AND classification != 'favourite'"
+	}
+	params := map[string]string{"play": playID, "cls": value}
+	updates := []struct {
+		label string
+		query string
+	}{
+		{"session_events", fmt.Sprintf("ALTER TABLE %s.%s UPDATE classification = {cls:String} %s", cfg.chDatabase, cfg.chTable, whereSafe)},
+		{"network_requests", fmt.Sprintf("ALTER TABLE %s.network_requests UPDATE classification = {cls:String} %s", cfg.chDatabase, whereSafe)},
+		{"control_events", fmt.Sprintf("ALTER TABLE %s.control_events UPDATE classification = {cls:String} %s", cfg.chDatabase, whereSafe)},
+	}
+	for _, u := range updates {
+		if _, err := chQueryBytes(ctx, cfg, u.query, params); err != nil {
+			log.Printf("ALTER UPDATE classification table=%s pid=%s value=%s err=%v",
+				u.label, playID, value, err)
+			return fmt.Errorf("ALTER UPDATE classification on %s: %w", u.label, err)
+		}
+	}
+	return nil
+}
+
 // setClassification writes `value` to every row of (session_id,
 // play_id) in both data tables via parallel ALTER UPDATE statements.
 // When `force=false`, doesn't overwrite an existing 'favourite' (the
@@ -196,107 +250,6 @@ func setClassification(ctx context.Context, cfg config, sessionID, playID, value
 		}
 	}
 	return nil
-}
-
-// registerClassificationHandlers wires up the star / unstar / reclassify
-// endpoints. URLs:
-//
-//   POST   /api/sessions/{session_id}/{play_id}/star
-//   DELETE /api/sessions/{session_id}/{play_id}/star
-//   POST   /api/sessions/{session_id}/{play_id}/reclassify
-//
-// `play_id` in the URL accepts the sentinel `—` for rows ingested
-// before the proxy stamped play_id (the picker uses the same
-// sentinel everywhere).
-//
-// We use net/http path parsing rather than gorilla/mux because the
-// rest of the forwarder is mux-free; small enough to roll our own.
-func registerClassificationHandlers(mux *http.ServeMux, cfg config) {
-	mux.HandleFunc("/api/sessions/", func(w http.ResponseWriter, r *http.Request) {
-		// Paths handled here:
-		//   /api/sessions/{sid}/{pid}/star
-		//   /api/sessions/{sid}/{pid}/reclassify
-		// Anything else under /api/sessions/ is delegated to the
-		// existing /api/sessions handler via 404.
-		path := strings.TrimPrefix(r.URL.Path, "/api/sessions/")
-		parts := strings.Split(path, "/")
-		if len(parts) != 3 {
-			http.NotFound(w, r)
-			return
-		}
-		sessionID := parts[0]
-		playID := parts[1]
-		action := parts[2]
-		if playID == "—" {
-			playID = ""
-		}
-		// Canonicalise — ClickHouse stores lowercase UUIDs; an
-		// uppercase URL segment would silently match no rows.
-		// See canonicalV2ID() doc.
-		playID = canonicalV2ID(playID)
-		if sessionID == "" {
-			http.Error(w, "session id required", http.StatusBadRequest)
-			return
-		}
-		switch action {
-		case "star":
-			handleStar(w, r, cfg, sessionID, playID)
-		case "reclassify":
-			handleReclassify(w, r, cfg, sessionID, playID)
-		default:
-			http.NotFound(w, r)
-		}
-	})
-}
-
-func handleStar(w http.ResponseWriter, r *http.Request, cfg config, sessionID, playID string) {
-	switch r.Method {
-	case http.MethodPost:
-		if err := setClassification(r.Context(), cfg, sessionID, playID, "favourite", true); err != nil {
-			http.Error(w, err.Error(), http.StatusBadGateway)
-			return
-		}
-		writeJSON(w, map[string]any{
-			"session_id":     sessionID,
-			"play_id":        playID,
-			"classification": "favourite",
-		})
-	case http.MethodDelete:
-		// Unstar = drop back to whatever the auto-classifier would
-		// say. force=true so we override the current 'favourite'.
-		if err := reclassifySession(r.Context(), cfg, sessionID, playID, true); err != nil {
-			http.Error(w, err.Error(), http.StatusBadGateway)
-			return
-		}
-		writeJSON(w, map[string]any{
-			"session_id": sessionID,
-			"play_id":    playID,
-			"unstarred":  true,
-		})
-	default:
-		w.Header().Set("Allow", "POST, DELETE")
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-	}
-}
-
-func handleReclassify(w http.ResponseWriter, r *http.Request, cfg config, sessionID, playID string) {
-	if r.Method != http.MethodPost {
-		w.Header().Set("Allow", "POST")
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	// force=false so a session that's currently 'favourite' stays
-	// 'favourite' — explicit user intent always wins over the
-	// auto-classifier.
-	if err := reclassifySession(r.Context(), cfg, sessionID, playID, false); err != nil {
-		http.Error(w, err.Error(), http.StatusBadGateway)
-		return
-	}
-	writeJSON(w, map[string]any{
-		"session_id":   sessionID,
-		"play_id":      playID,
-		"reclassified": true,
-	})
 }
 
 func writeJSON(w http.ResponseWriter, v any) {

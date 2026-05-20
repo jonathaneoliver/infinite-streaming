@@ -101,33 +101,6 @@ paths:
       summary: Per-second buffer + state heatmap
       tags:
       - archive
-  /api/sessions:
-    get:
-      description: Returns one row per (session_id, play_id) seen in the archive within
-        the time window.
-      parameters:
-      - description: ISO8601 lower bound (defaults to now-24h)
-        in: query
-        name: since
-        schema:
-          type: string
-      - description: ISO8601 upper bound
-        in: query
-        name: until
-        schema:
-          type: string
-      responses:
-        "200":
-          content:
-            application/json:
-              schema:
-                items:
-                  type: object
-                type: array
-          description: OK
-      summary: List archived sessions
-      tags:
-      - archive
   /api/snapshots:
     get:
       description: Each row is one normalized session-state record; the snapshot stream

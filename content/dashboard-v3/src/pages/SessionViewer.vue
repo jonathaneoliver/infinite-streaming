@@ -56,8 +56,13 @@ async function toggleStarred() {
   const next = !starred.value;
   starred.value = next; // optimistic
   try {
-    const url = `/analytics/api/sessions/${encodeURIComponent(playerId.value)}/${encodeURIComponent(playId.value)}/star`;
-    const resp = await fetch(url, { method: next ? 'POST' : 'DELETE' });
+    const url = `/analytics/api/v2/plays/${encodeURIComponent(playId.value)}`;
+    const cls = next ? 'favourite' : 'auto';
+    const resp = await fetch(url, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/merge-patch+json' },
+      body: JSON.stringify({ classification: cls }),
+    });
     if (!resp.ok) throw new Error(`star ${resp.status}`);
   } catch {
     starred.value = !next; // rollback on failure
@@ -74,15 +79,16 @@ const bundleHref = computed(() => {
 const backHref = '/dashboard/v3/sessions.html';
 
 onMounted(async () => {
-  // Look up the current starred state. The endpoint returns
-  // {"starred": true|false} (or 404 if the play hasn't been touched).
+  // Look up the current starred state via the v2 play summary.
+  // classification === 'favourite' means starred. 404 just means the
+  // play hasn't archived any snapshots yet — treat as unstarred.
   if (playerId.value && playId.value) {
     try {
-      const url = `/analytics/api/sessions/${encodeURIComponent(playerId.value)}/${encodeURIComponent(playId.value)}/star`;
+      const url = `/analytics/api/v2/plays/${encodeURIComponent(playId.value)}`;
       const resp = await fetch(url);
       if (resp.ok) {
         const j = await resp.json();
-        starred.value = !!j.starred;
+        starred.value = String(j?.classification ?? '') === 'favourite';
       }
     } catch {
       // Star lookup is non-essential; the toggle still works.

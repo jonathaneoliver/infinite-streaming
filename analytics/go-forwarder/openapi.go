@@ -8,7 +8,7 @@
 //
 // All endpoints are exposed externally under the /analytics/api/* prefix
 // (nginx rewrites the leading /analytics off before proxying), so consumer
-// URLs look like http://<host>:21000/analytics/api/sessions.
+// URLs look like http://<host>:21000/analytics/api/v2/plays.
 
 //	@title       Analytics forwarder API
 //	@version     1.0
@@ -27,16 +27,6 @@ package main
 //	@Success  200 {string} string "ok"
 //	@Router   /healthz [get]
 func docsHealthz() {}
-
-//	@Summary  List archived sessions
-//	@Description Returns one row per (session_id, play_id) seen in the archive within the time window.
-//	@Tags     archive
-//	@Produce  json
-//	@Param    since query string false "ISO8601 lower bound (defaults to now-24h)"
-//	@Param    until query string false "ISO8601 upper bound"
-//	@Success  200 {array} object
-//	@Router   /api/sessions [get]
-func docsArchivedSessions() {}
 
 //	@Summary  List session snapshots
 //	@Description Each row is one normalized session-state record; the snapshot stream emits these on every relevant change.
@@ -84,8 +74,3 @@ func docsSessionEvents() {}
 //	@Success  200 {file} binary
 //	@Router   /api/session_bundle [get]
 func docsSessionBundle() {}
-
-// Note: classification.go also registers `/api/sessions/` (with trailing
-// slash) for per-session lookups. That handler is undocumented here
-// pending a clearer canonical URL — the trailing-slash variant is a
-// workaround for ServeMux prefix matching, not a public API.

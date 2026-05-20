@@ -199,17 +199,19 @@ async function loadRows(silent = false) {
   try {
     const { since, until } = computeRange();
     const qs = new URLSearchParams();
-    if (since) qs.set('since', since);
-    if (until) qs.set('until', until);
-    const resp = await fetch('/analytics/api/sessions' + (qs.toString() ? '?' + qs : ''));
+    if (since) qs.set('from', since);
+    if (until) qs.set('to', until);
+    qs.set('limit', '5000');
+    const resp = await fetch('/analytics/api/v2/plays' + (qs.toString() ? '?' + qs : ''));
     if (!resp.ok) throw new Error(`HTTP ${resp.status} (analytics forwarder reachable?)`);
-    const body = await resp.text();
-    const fresh: SessionRow[] = [];
-    for (const line of body.split('\n')) {
-      if (!line) continue;
-      try { fresh.push(JSON.parse(line)); } catch { /* skip */ }
-    }
+    const envelope = await resp.json();
+    const fresh: SessionRow[] = Array.isArray(envelope?.items) ? envelope.items : [];
     for (const r of fresh) {
+      // v2 surfaces started_at/last_seen_at; alias to started/last_seen
+      // so the rest of the UI (sort keys, badges, fmt helpers) keeps
+      // its existing shape without a wider refactor.
+      if (!r.started && (r as any).started_at) r.started = (r as any).started_at;
+      if (!r.last_seen && (r as any).last_seen_at) r.last_seen = (r as any).last_seen_at;
       const t0 = Date.parse(r.started ?? '');
       const t1 = Date.parse(r.last_seen ?? '');
       r.duration_ms = (Number.isFinite(t0) && Number.isFinite(t1) && t1 >= t0) ? (t1 - t0) : 0;
@@ -733,14 +735,26 @@ async function toggleStar(r: SessionRow, ev: MouseEvent) {
   ev.stopPropagation();
   ev.preventDefault();
   const wasStarred = String(r.classification || '') === 'favourite';
-  const pid = (r.play_id && r.play_id !== '—') ? r.play_id : '—';
-  const url = `/analytics/api/sessions/${encodeURIComponent(r.session_id)}/${encodeURIComponent(pid)}/star`;
-  const method = wasStarred ? 'DELETE' : 'POST';
-  // Optimistic flip.
+  if (!r.play_id || r.play_id === '—') {
+    window.alert('Cannot star a row without a play_id (legacy pre-stamp row).');
+    return;
+  }
+  const url = `/analytics/api/v2/plays/${encodeURIComponent(r.play_id)}`;
+  // 'auto' lets the forwarder rerun the auto-classifier on unstar so
+  // the row drops back to interesting/other based on its content.
+  const next = wasStarred ? 'auto' : 'favourite';
   r.classification = wasStarred ? '' : 'favourite';
   try {
-    const resp = await fetch(url, { method });
+    const resp = await fetch(url, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/merge-patch+json' },
+      body: JSON.stringify({ classification: next }),
+    });
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const body = await resp.json().catch(() => null);
+    if (body && typeof body.classification === 'string') {
+      r.classification = body.classification;
+    }
   } catch (err: any) {
     r.classification = wasStarred ? 'favourite' : '';
     window.alert(`Star toggle failed: ${err?.message ?? err}`);
