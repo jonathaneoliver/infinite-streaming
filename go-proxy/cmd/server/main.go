@@ -1785,8 +1785,6 @@ func main() {
 	router.HandleFunc("/index.html", app.handleIndex).Methods(http.MethodGet)
 	router.HandleFunc("/api/sessions", app.handleGetSessions).Methods(http.MethodGet)
 	router.HandleFunc("/api/sessions/stream", app.handleSessionStream).Methods(http.MethodGet)
-	router.HandleFunc("/api/failure-settings/{id}", app.handleUpdateFailureSettings).Methods(http.MethodPost)
-	router.HandleFunc("/api/session/{id}/update", app.handleUpdateSessionSettings).Methods(http.MethodPost)
 	router.HandleFunc("/api/session/{id}", app.handleSession).Methods(http.MethodGet, http.MethodDelete)
 	router.HandleFunc("/api/session/{id}", app.handlePatchSession).Methods(http.MethodPatch)
 	router.HandleFunc("/api/session/{id}/metrics", app.handlePostSessionMetrics).Methods(http.MethodPost)
@@ -1798,9 +1796,6 @@ func main() {
 	router.HandleFunc("/api/control/stream", app.handleControlStream).Methods(http.MethodGet)
 	router.HandleFunc("/api/external-ips", app.handleGetExternalIPs).Methods(http.MethodGet)
 	router.HandleFunc("/api/clear-sessions", app.handleClearSessions).Methods(http.MethodPost)
-	router.HandleFunc("/api/session-group/link", app.handleLinkSessions).Methods(http.MethodPost)
-	router.HandleFunc("/api/session-group/unlink", app.handleUnlinkSession).Methods(http.MethodPost)
-	router.HandleFunc("/api/session-group/{groupId}", app.handleGetGroup).Methods(http.MethodGet)
 	router.HandleFunc("/myshows", app.handleMyShows).Methods(http.MethodGet)
 	router.HandleFunc("/debug", app.handleDebug).Methods(http.MethodGet)
 	router.HandleFunc("/api/nftables/status", app.handleNftStatus).Methods(http.MethodGet)
@@ -2231,25 +2226,6 @@ func (a *App) handlePostSessionMetrics(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]string{"status": "ok"})
 }
 
-
-func (a *App) handleUpdateFailureSettings(w http.ResponseWriter, r *http.Request) {
-	id := mux.Vars(r)["id"]
-	var payload map[string]interface{}
-	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-		writeJSON(w, map[string]string{"error": "invalid json"})
-		return
-	}
-	_, status, errMsg := a.applySessionSettingsUpdate(id, payload, "")
-	if status != http.StatusOK {
-		if errMsg == "" {
-			errMsg = "update failed"
-		}
-		w.WriteHeader(status)
-		writeJSON(w, map[string]string{"error": errMsg})
-		return
-	}
-	writeJSON(w, map[string]string{"message": "Settings updated successfully"})
-}
 
 func (a *App) applySessionSettingsUpdate(id string, payload map[string]interface{}, baseRevision string) (SessionData, int, string) {
 	if payload == nil {
@@ -2787,10 +2763,6 @@ func parseShapeStepsFromSession(session SessionData) []NftShapeStep {
 	return nil
 }
 
-func (a *App) handleUpdateSessionSettings(w http.ResponseWriter, r *http.Request) {
-	a.handleUpdateFailureSettings(w, r)
-}
-
 func (a *App) handleSession(w http.ResponseWriter, r *http.Request) {
 	id := mux.Vars(r)["id"]
 	if r.Method == http.MethodDelete {
@@ -2968,125 +2940,6 @@ func (a *App) handleClearSessions(w http.ResponseWriter, r *http.Request) {
 	}
 	a.saveSessionList([]SessionData{})
 	writeJSON(w, map[string]string{"message": "All sessions cleared successfully"})
-}
-
-func (a *App) handleLinkSessions(w http.ResponseWriter, r *http.Request) {
-	var payload struct {
-		SessionIds []string `json:"session_ids"`
-		GroupId    string   `json:"group_id"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-		w.WriteHeader(http.StatusBadRequest)
-		writeJSON(w, map[string]string{"error": "invalid json"})
-		return
-	}
-	if len(payload.SessionIds) < 2 {
-		w.WriteHeader(http.StatusBadRequest)
-		writeJSON(w, map[string]string{"error": "at least 2 sessions required"})
-		return
-	}
-	log.Printf("SESSION GROUP LINK request sessions=%v group_id=%s", payload.SessionIds, payload.GroupId)
-	controlRevision := newControlRevision()
-
-	// Generate a group ID if not provided
-	groupID := payload.GroupId
-	if groupID == "" {
-		groupID = fmt.Sprintf("G%d", time.Now().Unix()%10000)
-	}
-
-	linkedCount := 0
-	for _, targetID := range payload.SessionIds {
-		update := SessionData{
-			"session_id":       targetID,
-			"group_id":         groupID,
-			"control_revision": controlRevision,
-		}
-		a.saveSessionByID(targetID, update)
-		linkedCount++
-	}
-	log.Printf("SESSION GROUP LINK result group_id=%s linked=%d", groupID, linkedCount)
-
-	writeJSON(w, map[string]interface{}{
-		"message":      "Sessions linked successfully",
-		"group_id":     groupID,
-		"linked_count": linkedCount,
-	})
-}
-
-func (a *App) handleUnlinkSession(w http.ResponseWriter, r *http.Request) {
-	var payload struct {
-		SessionId   string `json:"session_id"`
-		GroupId     string `json:"group_id"`
-		UnlinkGroup bool   `json:"unlink_group"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-		w.WriteHeader(http.StatusBadRequest)
-		writeJSON(w, map[string]string{"error": "invalid json"})
-		return
-	}
-
-	sessions := a.getSessionList()
-	found := false
-	updated := 0
-	groupID := payload.GroupId
-	if groupID == "" && payload.SessionId != "" {
-		for _, session := range sessions {
-			if getString(session, "session_id") == payload.SessionId {
-				groupID = getString(session, "group_id")
-				break
-			}
-		}
-	}
-	controlRevision := newControlRevision()
-	if payload.UnlinkGroup && groupID != "" {
-		for _, session := range sessions {
-			if getString(session, "group_id") == groupID {
-				sid := getString(session, "session_id")
-				a.saveSessionByID(sid, SessionData{
-					"session_id":       sid,
-					"group_id":         "",
-					"control_revision": controlRevision,
-				})
-				updated++
-				found = true
-			}
-		}
-	} else if payload.SessionId != "" {
-		a.saveSessionByID(payload.SessionId, SessionData{
-			"session_id":       payload.SessionId,
-			"group_id":         "",
-			"control_revision": controlRevision,
-		})
-		updated++
-		found = true
-	}
-
-	if found {
-		writeJSON(w, map[string]interface{}{
-			"message":        "Session group updated successfully",
-			"group_id":       groupID,
-			"unlinked_count": updated,
-		})
-	} else {
-		w.WriteHeader(http.StatusNotFound)
-		writeJSON(w, map[string]string{"error": "Session not found"})
-	}
-}
-
-func (a *App) handleGetGroup(w http.ResponseWriter, r *http.Request) {
-	groupID := mux.Vars(r)["groupId"]
-	if groupID == "" {
-		w.WriteHeader(http.StatusBadRequest)
-		writeJSON(w, map[string]string{"error": "group_id required"})
-		return
-	}
-
-	groupSessions := a.getSessionsByGroupId(groupID)
-	writeJSON(w, map[string]interface{}{
-		"group_id": groupID,
-		"sessions": groupSessions,
-		"count":    len(groupSessions),
-	})
 }
 
 func (a *App) handleMyShows(w http.ResponseWriter, r *http.Request) {
@@ -8835,22 +8688,6 @@ func extractGroupId(playerID string) string {
 		return "G" + matches[1]
 	}
 	return ""
-}
-
-// getSessionsByGroupId returns all sessions that belong to the specified group
-func (a *App) getSessionsByGroupId(groupID string) []SessionData {
-	if groupID == "" {
-		return []SessionData{}
-	}
-	sessions := a.getSessionList()
-	var groupSessions []SessionData
-	for _, session := range sessions {
-		sessionGroupID := getString(session, "group_id")
-		if sessionGroupID == groupID {
-			groupSessions = append(groupSessions, session)
-		}
-	}
-	return groupSessions
 }
 
 // getGroupIdByPort returns the group ID for sessions on the specified port.

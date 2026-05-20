@@ -1123,40 +1123,6 @@ func serveHTTP(ctx context.Context, cfg config, ring *Ring) {
 				cfg.chDatabase, where)
 		proxyClickHouseJSON(w, r, cfg, query, params)
 	})
-	mux.HandleFunc("/api/snapshot_count", func(w http.ResponseWriter, r *http.Request) {
-		session := r.URL.Query().Get("session")
-		if session == "" {
-			http.Error(w, "missing session", http.StatusBadRequest)
-			return
-		}
-		params := map[string]string{"session": session}
-		clauses := []string{"session_id = {session:String}"}
-		if v := r.URL.Query().Get("play_id"); v != "" {
-			if v == "—" {
-				clauses = append(clauses, "play_id = ''")
-			} else {
-				clauses = append(clauses, "play_id = {play:String}")
-				params["play"] = canonicalV2ID(v)
-			}
-		}
-		if v := r.URL.Query().Get("from"); v != "" {
-			clauses = append(clauses, "ts >= parseDateTime64BestEffort({from:String})")
-			params["from"] = v
-		}
-		if v := r.URL.Query().Get("to"); v != "" {
-			clauses = append(clauses, "ts <= parseDateTime64BestEffort({to:String})")
-			params["to"] = v
-		}
-		query := fmt.Sprintf(`
-			SELECT
-			  count() AS count,
-			  toString(min(ts)) AS first_ts,
-			  toString(max(ts)) AS last_ts
-			FROM %s.%s
-			WHERE %s
-			FORMAT JSONEachRow`, cfg.chDatabase, cfg.chTable, strings.Join(clauses, " AND "))
-		proxyClickHouseJSON(w, r, cfg, query, params)
-	})
 	mux.HandleFunc("/api/snapshots", func(w http.ResponseWriter, r *http.Request) {
 		session := r.URL.Query().Get("session")
 		if session == "" {
@@ -1327,88 +1293,6 @@ func serveHTTP(ctx context.Context, cfg config, ring *Ring) {
 	// events now live as `labels[]` on session_events / network_requests
 	// rows and as discrete rows on control_events; consumers iterate
 	// those three tables instead of the derived markers table.
-
-	// Per-request HAR-style log for the session-viewer's network log
-	// fold. Returns rows in the same shape the live go-proxy endpoint
-	// emits ({entries: [...]}) so the existing UI code can consume it
-	// without modification.
-	mux.HandleFunc("/api/network_requests", func(w http.ResponseWriter, r *http.Request) {
-		session := r.URL.Query().Get("session")
-		if session == "" {
-			http.Error(w, "missing session", http.StatusBadRequest)
-			return
-		}
-		params := map[string]string{"session": session}
-		clauses := []string{"session_id = {session:String}"}
-		if v := r.URL.Query().Get("play_id"); v != "" {
-			if v == "—" {
-				clauses = append(clauses, "play_id = ''")
-			} else {
-				clauses = append(clauses, "play_id = {play:String}")
-				params["play"] = canonicalV2ID(v)
-			}
-		}
-		if v := r.URL.Query().Get("from"); v != "" {
-			clauses = append(clauses, "ts >= parseDateTime64BestEffort({from:String})")
-			params["from"] = v
-		}
-		if v := r.URL.Query().Get("to"); v != "" {
-			clauses = append(clauses, "ts <= parseDateTime64BestEffort({to:String})")
-			params["to"] = v
-		}
-		limit := 50000
-		if v := r.URL.Query().Get("limit"); v != "" {
-			var n int
-			if _, err := fmt.Sscanf(v, "%d", &n); err == nil && n > 0 && n <= 50000 {
-				limit = n
-			}
-		}
-		// Wrap the rows into the {entries:[...]} envelope go-proxy
-		// returns so the browser code can be source-agnostic. We let
-		// ClickHouse build the JSON via JSONObjectEachRow + manual
-		// envelope rather than a string concat in Go (cheaper, fewer
-		// escapes, and the formatter handles types).
-		query := fmt.Sprintf(`
-			SELECT
-			  toString(ts) AS timestamp,
-			  method, url, upstream_url, path, request_kind AS request_kind,
-			  status, bytes_in, bytes_out, content_type, play_id,
-			  request_range, response_content_range,
-			  dns_ms, connect_ms, tls_ms, ttfb_ms, transfer_ms, total_ms, client_wait_ms,
-			  faulted = 1 AS faulted, fault_type, fault_action, fault_category,
-			  request_headers, response_headers, query_string
-			FROM %s.network_requests
-			WHERE %s
-			ORDER BY ts ASC
-			LIMIT %d
-			FORMAT JSONEachRow`, cfg.chDatabase, strings.Join(clauses, " AND "), limit)
-		// We can't directly stream JSONEachRow as the {entries:[...]}
-		// envelope without rewriting the body. Buffer + assemble.
-		body, err := chQueryBytes(r.Context(), cfg, query, params)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadGateway)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set("Cache-Control", "no-store")
-		w.Write([]byte(`{"entries":[`))
-		first := true
-		for _, line := range bytes.Split(body, []byte("\n")) {
-			if len(line) == 0 {
-				continue
-			}
-			// Each line is one JSONObject; strings stored as JSON-encoded
-			// header arrays need to be re-parsed so the consumer sees
-			// real arrays rather than escaped strings. Cheap trick: a
-			// post-pass per row.
-			if !first {
-				w.Write([]byte(","))
-			}
-			w.Write(reinflateNetRowJSON(line))
-			first = false
-		}
-		w.Write([]byte("]}"))
-	})
 
 	// /api/session_bundle — ZIP of snapshots + HAR + events for one
 	// (session_id, play_id). Defined in bundle.go.

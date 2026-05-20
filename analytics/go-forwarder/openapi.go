@@ -38,17 +38,6 @@ func docsHealthz() {}
 //	@Router   /api/sessions [get]
 func docsArchivedSessions() {}
 
-//	@Summary  Count archived snapshots
-//	@Tags     archive
-//	@Produce  json
-//	@Param    session  query string false "session_id filter"
-//	@Param    play_id  query string false "play_id filter"
-//	@Param    from     query string false "ISO8601 lower bound"
-//	@Param    to       query string false "ISO8601 upper bound"
-//	@Success  200 {object} object "{count: N}"
-//	@Router   /api/snapshot_count [get]
-func docsSnapshotCount() {}
-
 //	@Summary  List session snapshots
 //	@Description Each row is one normalized session-state record; the snapshot stream emits these on every relevant change.
 //	@Tags     archive
@@ -85,19 +74,6 @@ func docsSessionHeatmap() {}
 //	@Success  200 {array} object
 //	@Router   /api/session_events [get]
 func docsSessionEvents() {}
-
-//	@Summary  Historical HAR-shaped network rows
-//	@Description Per-request rows mirrored from go-proxy's `/api/network/stream`, with `fault_category` / `fault_action` columns. ~10s ingestion lag from live.
-//	@Tags     archive
-//	@Produce  json
-//	@Param    session  query string false "session_id filter"
-//	@Param    play_id  query string false "play_id filter"
-//	@Param    from     query string false "ISO8601 lower bound"
-//	@Param    to       query string false "ISO8601 upper bound"
-//	@Param    limit    query int    false "max rows"
-//	@Success  200 {array} object
-//	@Router   /api/network_requests [get]
-func docsNetworkRequests() {}
 
 //	@Summary  Download a session bundle (ZIP)
 //	@Description Streams a ZIP containing snapshots, events, network rows, and a HAR file for the given play_id (or full session_id). Useful for offline forensics.

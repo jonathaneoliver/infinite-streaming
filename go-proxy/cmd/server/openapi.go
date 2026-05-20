@@ -153,28 +153,6 @@ func docsNftStatus() {}
 //	@Router   /api/nftables/capabilities [get]
 func docsNftCapabilities() {}
 
-//	@Summary  Link sessions into a fault-propagation group
-//	@Tags     groups
-//	@Param    body  body  LinkSessionsRequest true "{session_ids: [...]}"
-//	@Success  200
-//	@Router   /api/session-group/link [post]
-func docsLinkSessions() {}
-
-//	@Summary  Unlink a session from its group
-//	@Tags     groups
-//	@Param    body body UnlinkSessionRequest true "{session_id}"
-//	@Success  200
-//	@Router   /api/session-group/unlink [post]
-func docsUnlinkSession() {}
-
-//	@Summary  Get a session group
-//	@Tags     groups
-//	@Param    groupId path string true "group id"
-//	@Produce  json
-//	@Success  200 {object} object
-//	@Router   /api/session-group/{groupId} [get]
-func docsGetGroup() {}
-
 //	@Summary  External IPs the harness is reachable from
 //	@Tags     diagnostics
 //	@Produce  json
@@ -197,25 +175,6 @@ func docsVersion() {}
 //	@Success  200
 //	@Router   /api/session/{id}/metrics [post]
 func docsPostMetrics() {}
-
-//	@Summary  Legacy fault-settings POST (use PATCH instead)
-//	@Description Predates the PATCH envelope. Kept for backwards compat with older dashboard code.
-//	@Tags     internal
-//	@Deprecated
-//	@Param    id   path  string true "session_id"
-//	@Param    body body  object true "fault settings"
-//	@Success  200
-//	@Router   /api/failure-settings/{id} [post]
-func docsFailureSettings() {}
-
-//	@Summary  Legacy session-update POST (use PATCH instead)
-//	@Tags     internal
-//	@Deprecated
-//	@Param    id path string true "session_id"
-//	@Param    body body object true "settings"
-//	@Success  200
-//	@Router   /api/session/{id}/update [post]
-func docsSessionUpdate() {}
 
 // Request/response types referenced from the @Param / @Success blocks above.
 // These are *documentation* types — real handlers may use map[string]any
@@ -272,16 +231,6 @@ type BandwidthRequest struct {
 // LossRequest sets only the packet-loss percentage.
 type LossRequest struct {
 	LossPct float64 `json:"loss_pct"`
-}
-
-// LinkSessionsRequest groups sessions for fault propagation.
-type LinkSessionsRequest struct {
-	SessionIDs []string `json:"session_ids"`
-}
-
-// UnlinkSessionRequest removes one session from its current group.
-type UnlinkSessionRequest struct {
-	SessionID string `json:"session_id"`
 }
 
 // NetworkLogEntry is defined in main.go; swag picks up the real type
