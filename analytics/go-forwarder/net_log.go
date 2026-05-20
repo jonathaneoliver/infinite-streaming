@@ -251,11 +251,17 @@ func entryToRow(sessionID, playerID string, e *netEntry) netRow {
 	if e.Faulted {
 		faulted = 1
 	}
+	// Canonicalise — see canonicalV2ID()'s doc on case-sensitivity.
+	// `playerID` already came in canonicalised via sessionToPlayerID,
+	// but `e.PlayID` lands raw off the proxy SSE entry — historically
+	// uppercase from iOS clients. Without this, network_requests rows
+	// landed with mixed case and the dashboard / archive plays
+	// histogram missed them on lowercase JOINs.
 	return netRow{
 		Ts:                   e.Timestamp.UTC().Format("2006-01-02 15:04:05.000"),
 		SessionID:            sessionID,
-		PlayerID:             playerID,
-		PlayID:               e.PlayID,
+		PlayerID:             canonicalV2ID(playerID),
+		PlayID:               canonicalV2ID(e.PlayID),
 		AttemptID:            e.AttemptID,
 		Method:               e.Method,
 		URL:                  e.URL,

@@ -97,6 +97,8 @@ paths:
         - $ref: '#/components/parameters/From'
         - $ref: '#/components/parameters/To'
         - $ref: '#/components/parameters/LabelFilter'
+        - $ref: '#/components/parameters/LabelHasFilter'
+        - $ref: '#/components/parameters/LabelNotFilter'
         - $ref: '#/components/parameters/Classification'
         - $ref: '#/components/parameters/Limit'
         - $ref: '#/components/parameters/Cursor'
@@ -142,6 +144,8 @@ paths:
         - $ref: '#/components/parameters/From'
         - $ref: '#/components/parameters/To'
         - $ref: '#/components/parameters/LabelFilter'
+        - $ref: '#/components/parameters/LabelHasFilter'
+        - $ref: '#/components/parameters/LabelNotFilter'
         - $ref: '#/components/parameters/Classification'
         - in: query
           name: group_by
@@ -184,10 +188,14 @@ paths:
 
   # ---- Raw archive rows ---------------------------------------------------
 
-  /api/v2/snapshots:
+  /api/v2/events:
     get:
       tags: [archive]
-      summary: Session snapshots (raw)
+      summary: Player events (raw rows from session_events)
+      description: |
+        One row per player metrics POST (the source-of-truth player
+        event stream). Replaces the pre-#472 `/api/v2/snapshots`
+        name — that path is no longer served as of v2.0.0.
       parameters:
         - $ref: '#/components/parameters/PlayerIdFilter'
         - $ref: '#/components/parameters/PlayIdFilter'
@@ -195,6 +203,8 @@ paths:
         - $ref: '#/components/parameters/From'
         - $ref: '#/components/parameters/To'
         - $ref: '#/components/parameters/LabelFilter'
+        - $ref: '#/components/parameters/LabelHasFilter'
+        - $ref: '#/components/parameters/LabelNotFilter'
         - $ref: '#/components/parameters/StrideMs'
         - $ref: '#/components/parameters/Order'
         - $ref: '#/components/parameters/Limit'
@@ -204,7 +214,7 @@ paths:
           description: Snapshot rows
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/SnapshotPage' }
+              schema: { $ref: '#/components/schemas/EventPage' }
 
   /api/v2/network_requests:
     get:
@@ -217,6 +227,8 @@ paths:
         - $ref: '#/components/parameters/From'
         - $ref: '#/components/parameters/To'
         - $ref: '#/components/parameters/LabelFilter'
+        - $ref: '#/components/parameters/LabelHasFilter'
+        - $ref: '#/components/parameters/LabelNotFilter'
         - in: query
           name: status_min
           schema: { type: integer }
@@ -277,6 +289,8 @@ paths:
           description: |
             Filter to specific event names. Multiple values OR'd. Examples:
             `event=fault_on&event=pattern_step`.
+        - $ref: '#/components/parameters/LabelHasFilter'
+        - $ref: '#/components/parameters/LabelNotFilter'
         - $ref: '#/components/parameters/Limit'
       responses:
         '200':
@@ -564,6 +578,38 @@ components:
       description: |
         `label.<key>=<value>` query params. Multiple AND together.
         Example: `?label.test=foo&label.pytest_run=2026-05-08T05:00:00Z`.
+
+        Note — distinct from `label_has` / `label_not` (below). This
+        is the operator-defined `Map(String, String)` set via the
+        harness label PATCH; `label_has` / `label_not` filter against
+        the row-level `Array(String)` severity-tagged labels added in
+        #473 / #474.
+    LabelHasFilter:
+      in: query
+      name: label_has
+      explode: true
+      schema:
+        type: array
+        items: { type: string }
+      description: |
+        Row-level label inclusion filter. Repeatable; every value
+        must be present in the row's `labels[]` (AND-within-includes).
+        Format `<severity>=<event>` (with `*` prefix for synthesized
+        labels). Example:
+        `?label_has=warning%3Dhttp_4xx&label_has=info%3D%2Apattern_step`.
+    LabelNotFilter:
+      in: query
+      name: label_not
+      explode: true
+      schema:
+        type: array
+        items: { type: string }
+      description: |
+        Row-level label exclusion filter. Repeatable; none of the
+        values may be present in the row's `labels[]`
+        (AND-within-excludes). Combine with `label_has` for queries
+        like *"has http_4xx AND has-not fault_rule_enabled"*. Same
+        format as `label_has`.
     Classification:
       in: query
       name: classification
@@ -883,6 +929,42 @@ components:
         segment_stall_count:  { type: integer, description: "Stalls waiting on a segment fetch." }
         restart_count:        { type: integer, description: "Mid-play player-recovery restarts." }
         error_event_count:    { type: integer, description: "Explicit player_error events." }
+        # ---- row-level label histogram (issue #474 follow-up) ----
+        labels_total:
+          type: integer
+          description: |
+            Total labelled-row occurrences across session_events +
+            network_requests + control_events for this play_id. Same
+            number that drives the dashboard Sessions page's Labels
+            column count.
+        labels_distinct_count:
+          type: integer
+          description: |
+            Distinct `<severity>=<event>` label strings seen for this
+            play. `labels_total / labels_distinct_count` is the avg
+            occurrences per label kind.
+        label_histogram:
+          type: array
+          description: |
+            Per-label `(label, count)` pairs for this play_id,
+            unioned across all three source tables. Sorted by
+            occurrence descending. Use to render chip clouds on the
+            picker UI or to compose filters like "has http_4xx AND
+            has-not fault_rule_enabled" against batch reports.
+
+            Note: distinct from the operator-defined Map(String,String)
+            `labels` field above — those are harness-set name=value
+            tags; `label_histogram` is the ingest-time severity-tagged
+            classification labels.
+          items:
+            type: array
+            description: "[label_string, count] tuple."
+            minItems: 2
+            maxItems: 2
+            items:
+              oneOf:
+                - { type: string,  description: "label, e.g. 'warning=*manifest_failure'" }
+                - { type: integer, description: "occurrence count for this play" }
         # ---- tiered retention class ----
         classification:
           type: string
@@ -939,13 +1021,13 @@ components:
             _links:
               type: object
               properties:
-                snapshots:        { type: string, format: uri }
                 events:           { type: string, format: uri }
                 network_requests: { type: string, format: uri }
+                control_events:   { type: string, format: uri }
                 heatmap:          { type: string, format: uri }
                 bundle:           { type: string, format: uri }
 
-    SnapshotRow:
+    EventRow:
       description: |
         One archived player snapshot. The row IS a `proxy.yaml#PlayerRecord`
         captured at `ts`, plus the row-level metadata (`ts`, `revision`)
@@ -977,13 +1059,13 @@ components:
                 play_ids round-trip unchanged for legacy archive rows;
                 v2-minted plays are always UUIDs.
 
-    SnapshotPage:
+    EventPage:
       type: object
       required: [items]
       properties:
         items:
           type: array
-          items: { $ref: '#/components/schemas/SnapshotRow' }
+          items: { $ref: '#/components/schemas/EventRow' }
         next_cursor: { type: string, nullable: true }
 
     NetworkRequestRow:
@@ -1134,7 +1216,7 @@ components:
         - $ref: '#/components/schemas/MetaEvent'
         - $ref: '#/components/schemas/SampleRow'
         - $ref: '#/components/schemas/NetworkRow'
-        - $ref: '#/components/schemas/EventRow'
+        - $ref: '#/components/schemas/ControlEventRow'
         - $ref: '#/components/schemas/HeartbeatEvent'
         - $ref: '#/components/schemas/CompleteEvent'
         - $ref: '#/components/schemas/StreamErrorEvent'
@@ -1292,35 +1374,20 @@ components:
         fault_action: transfer_abandoned
         fault_category: client_disconnect
 
-    EventRow:
+    # (Pre-#474 the events SSE stream had its own derived row shape
+    # with kind/priority/info fields. After #474 the unified
+    # /api/v2/timeseries stream sends EventRow / NetworkRow /
+    # ControlEventRow directly off the three live tables; no
+    # separate "events taxonomy" schema remains.)
+    LegacyEventRow:
       description: |
-        One row from the derived `events` taxonomy. **Not yet
-        implemented** — requesting `streams=events` returns 501. Spec
-        retained so the wire shape is stable across the lift.
-
-        SSE wire shape: `event: event\nid: <ts>:<type>\ndata: <this object>\n\n`.
-
-        `kind` discriminates cause vs effect; `priority` is 1
-        (critical) through 4 (low) on the dashboard's classification
-        ladder.
+        Reserved name — the pre-#474 derived-events row used to live
+        here; retained as a placeholder so wire-shape diffs against
+        archived specs don't surprise anyone.
       type: object
-      required: [ts, type, kind, priority, play_id, player_id, session_id]
       additionalProperties: true
       properties:
         ts: { type: string, format: date-time }
-        type:
-          description: Event type name (e.g. stall, downshift, manifest_failure, all_failure, fault_on).
-          type: string
-        info:
-          description: Type-specific JSON payload.
-          type: object
-          additionalProperties: true
-        kind:
-          type: string
-          enum: [cause, effect]
-        priority:
-          type: integer
-          enum: [1, 2, 3, 4]
         play_id: { type: string }
         player_id: { type: string }
         session_id: { type: string }

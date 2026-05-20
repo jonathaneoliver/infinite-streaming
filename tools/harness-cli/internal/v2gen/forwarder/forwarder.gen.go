@@ -106,48 +106,6 @@ func (e ControlEventRowSource) Valid() bool {
 	}
 }
 
-// Defines values for EventRowKind.
-const (
-	Cause  EventRowKind = "cause"
-	Effect EventRowKind = "effect"
-)
-
-// Valid indicates whether the value is a known member of the EventRowKind enum.
-func (e EventRowKind) Valid() bool {
-	switch e {
-	case Cause:
-		return true
-	case Effect:
-		return true
-	default:
-		return false
-	}
-}
-
-// Defines values for EventRowPriority.
-const (
-	EventRowPriorityN1 EventRowPriority = 1
-	EventRowPriorityN2 EventRowPriority = 2
-	EventRowPriorityN3 EventRowPriority = 3
-	EventRowPriorityN4 EventRowPriority = 4
-)
-
-// Valid indicates whether the value is a known member of the EventRowPriority enum.
-func (e EventRowPriority) Valid() bool {
-	switch e {
-	case EventRowPriorityN1:
-		return true
-	case EventRowPriorityN2:
-		return true
-	case EventRowPriorityN3:
-		return true
-	case EventRowPriorityN4:
-		return true
-	default:
-		return false
-	}
-}
-
 // Defines values for MetaEventStreams.
 const (
 	Control MetaEventStreams = "control"
@@ -201,16 +159,16 @@ func (e NetworkRowFaultCategory) Valid() bool {
 
 // Defines values for NetworkRowFaulted.
 const (
-	NetworkRowFaultedN0 NetworkRowFaulted = 0
-	NetworkRowFaultedN1 NetworkRowFaulted = 1
+	N0 NetworkRowFaulted = 0
+	N1 NetworkRowFaulted = 1
 )
 
 // Valid indicates whether the value is a known member of the NetworkRowFaulted enum.
 func (e NetworkRowFaulted) Valid() bool {
 	switch e {
-	case NetworkRowFaultedN0:
+	case N0:
 		return true
-	case NetworkRowFaultedN1:
+	case N1:
 		return true
 	default:
 		return false
@@ -379,6 +337,24 @@ func (e GetApiV2ControlEventsParamsSource) Valid() bool {
 	}
 }
 
+// Defines values for GetApiV2EventsParamsOrder.
+const (
+	GetApiV2EventsParamsOrderAsc  GetApiV2EventsParamsOrder = "asc"
+	GetApiV2EventsParamsOrderDesc GetApiV2EventsParamsOrder = "desc"
+)
+
+// Valid indicates whether the value is a known member of the GetApiV2EventsParamsOrder enum.
+func (e GetApiV2EventsParamsOrder) Valid() bool {
+	switch e {
+	case GetApiV2EventsParamsOrderAsc:
+		return true
+	case GetApiV2EventsParamsOrderDesc:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for GetApiV2NetworkRequestsParamsFaultCategory.
 const (
 	GetApiV2NetworkRequestsParamsFaultCategoryClientDisconnect GetApiV2NetworkRequestsParamsFaultCategory = "client_disconnect"
@@ -445,24 +421,6 @@ func (e GetApiV2PlaysAggregateParamsClassification) Valid() bool {
 	case Interesting:
 		return true
 	case Other:
-		return true
-	default:
-		return false
-	}
-}
-
-// Defines values for GetApiV2SnapshotsParamsOrder.
-const (
-	GetApiV2SnapshotsParamsOrderAsc  GetApiV2SnapshotsParamsOrder = "asc"
-	GetApiV2SnapshotsParamsOrderDesc GetApiV2SnapshotsParamsOrder = "desc"
-)
-
-// Valid indicates whether the value is a known member of the GetApiV2SnapshotsParamsOrder enum.
-func (e GetApiV2SnapshotsParamsOrder) Valid() bool {
-	switch e {
-	case GetApiV2SnapshotsParamsOrderAsc:
-		return true
-	case GetApiV2SnapshotsParamsOrderDesc:
 		return true
 	default:
 		return false
@@ -603,35 +561,116 @@ type ControlEventRowClassification string
 // auto-transition), `auto` (test runner placeholder).
 type ControlEventRowSource string
 
-// EventRow One row from the derived `events` taxonomy. **Not yet
-// implemented** — requesting `streams=events` returns 501. Spec
-// retained so the wire shape is stable across the lift.
-//
-// SSE wire shape: `event: event\nid: <ts>:<type>\ndata: <this object>\n\n`.
-//
-// `kind` discriminates cause vs effect; `priority` is 1
-// (critical) through 4 (low) on the dashboard's classification
-// ladder.
-type EventRow struct {
-	// Info Type-specific JSON payload.
-	Info      *map[string]interface{} `json:"info,omitempty"`
-	Kind      EventRowKind            `json:"kind"`
-	PlayId    string                  `json:"play_id"`
-	PlayerId  string                  `json:"player_id"`
-	Priority  EventRowPriority        `json:"priority"`
-	SessionId string                  `json:"session_id"`
-	Ts        time.Time               `json:"ts"`
-
-	// Type Event type name (e.g. stall, downshift, manifest_failure, all_failure, fault_on).
-	Type                 string                 `json:"type"`
-	AdditionalProperties map[string]interface{} `json:"-"`
+// EventPage defines model for EventPage.
+type EventPage struct {
+	Items      []EventRow `json:"items"`
+	NextCursor *string    `json:"next_cursor,omitempty"`
 }
 
-// EventRowKind defines model for EventRow.Kind.
-type EventRowKind string
+// EventRow defines model for EventRow.
+type EventRow struct {
+	// Content Master playlist mutations applied at manifest serve time:
+	// strip CODECS, strip AVERAGE-BANDWIDTH, overstate bandwidth,
+	// allowed-variants whitelist, live-offset window. Takes effect
+	// on the next master manifest fetch.
+	// *Broadcasts to group on PATCH.*
+	Content *externalRef0.ContentManipulation `json:"content,omitempty"`
 
-// EventRowPriority defines model for EventRow.Priority.
-type EventRowPriority int
+	// ControlRevision Concurrency token. ETag/If-Match.
+	// *Shared across group members after any broadcast write.*
+	ControlRevision string `json:"control_revision"`
+
+	// CurrentPlay Currently-active play, or null when idle.
+	// *Per-device runtime state — does not broadcast to group.*
+	CurrentPlay *externalRef0.PlayRecord `json:"current_play,omitempty"`
+
+	// DisplayId Per-process counter. Recycles across restarts.
+	// *Per-device identity — does not broadcast to group.*
+	DisplayId int `json:"display_id"`
+
+	// FaultCounters Per-device fault hit counters.
+	// *Per-device runtime state — does not broadcast to group.*
+	FaultCounters *externalRef0.FaultCounters `json:"fault_counters,omitempty"`
+
+	// FaultRules HTTP fault rules, evaluated first-match-wins on each request.
+	// Empty array = no rules; absent = same as empty.
+	// *Broadcasts to group on PATCH (whole-array and per-rule
+	// sub-resource endpoints both broadcast).*
+	FaultRules *[]externalRef0.FaultRule `json:"fault_rules,omitempty"`
+
+	// FirstSeenAt *Server-observed lifecycle — does not broadcast to group.*
+	FirstSeenAt *time.Time `json:"first_seen_at,omitempty"`
+
+	// Id Player-supplied UUIDv4. Stable per device.
+	// *Per-device identity — does not broadcast to group.*
+	Id openapi_types.UUID `json:"id"`
+
+	// Labels Free-form key/value tags.
+	// *Broadcasts to group on PATCH.*
+	Labels *externalRef0.Labels `json:"labels,omitempty"`
+
+	// LastSeenAt *Server-observed lifecycle — does not broadcast to group.*
+	LastSeenAt *time.Time `json:"last_seen_at,omitempty"`
+
+	// LoopCountServer Server-counted loop boundaries observed on the manifest
+	// timeline. Independent of the player-reported value in
+	// `player_metrics.loop_count_player`.
+	// *Per-device runtime state — does not broadcast to group.*
+	LoopCountServer *int `json:"loop_count_server,omitempty"`
+
+	// OriginationIp *Server-observed lifecycle — does not broadcast to group.*
+	OriginationIp *string `json:"origination_ip,omitempty"`
+
+	// PlayId Convenience denormalisation of `current_play.id` so query
+	// pushdown (`?play_id=`) doesn't need a JSON path
+	// expression. Plain string (not UUID) — v1 short-hex
+	// play_ids round-trip unchanged for legacy archive rows;
+	// v2-minted plays are always UUIDs.
+	PlayId *string `json:"play_id,omitempty"`
+
+	// PlayerIp Player's self-reported IP (from the testing harness).
+	// Differs from `origination_ip` when the player is behind NAT.
+	// *Per-device identity — does not broadcast to group.*
+	PlayerIp *string `json:"player_ip,omitempty"`
+
+	// PlayerMetrics Read-only client-reported playback telemetry.
+	// *Per-device runtime state — does not broadcast to group.*
+	PlayerMetrics *externalRef0.PlayerMetrics `json:"player_metrics,omitempty"`
+
+	// Revision `control_revision` at capture time. Already present on
+	// `PlayerRecord`; surfaced here so consumers don't need to
+	// deep-dive to dedup adjacent snapshots.
+	Revision *string `json:"revision,omitempty"`
+
+	// ServerMetrics Read-only server-observed transport telemetry (TCP_INFO + ICMP path
+	// ping + per-session byte counters).
+	// *Per-device runtime state — does not broadcast to group.*
+	ServerMetrics *externalRef0.ServerMetrics `json:"server_metrics,omitempty"`
+
+	// ServerReceivedAtMs Server wall-clock (Unix epoch milliseconds) at the moment
+	// this snapshot was assembled. Pairs with
+	// `player_metrics.playhead_wallclock_ms` to compute live
+	// offset without trusting the client's clock.
+	// *Per-device runtime state — does not broadcast to group.*
+	ServerReceivedAtMs *int `json:"server_received_at_ms,omitempty"`
+
+	// Shape Network shaping (rate / delay / loss / transport_fault).
+	// *Broadcasts to group on PATCH.*
+	Shape *externalRef0.Shape `json:"shape,omitempty"`
+
+	// TransferTimeouts Server-side transfer timeouts (active + idle) applied during
+	// response generation. Per-protocol scope (segments / media
+	// manifests / master manifest).
+	// *Broadcasts to group on PATCH.*
+	TransferTimeouts *externalRef0.TransferTimeouts `json:"transfer_timeouts,omitempty"`
+
+	// Ts Snapshot capture time (ClickHouse `event_time`).
+	Ts time.Time `json:"ts"`
+
+	// UserAgent User-Agent string from the player's first request.
+	// *Per-device identity — does not broadcast to group.*
+	UserAgent *string `json:"user_agent,omitempty"`
+}
 
 // HeartbeatEvent Emitted every 15 s on the open SSE channel so proxies and
 // the client don't idle-close. Carries only the server `ts`
@@ -650,6 +689,17 @@ type Info struct {
 	RawRetentionDays     *int      `json:"raw_retention_days,omitempty"`
 	SummaryRetentionDays *int      `json:"summary_retention_days,omitempty"`
 	Version              *string   `json:"version,omitempty"`
+}
+
+// LegacyEventRow Reserved name — the pre-#474 derived-events row used to live
+// here; retained as a placeholder so wire-shape diffs against
+// archived specs don't surprise anyone.
+type LegacyEventRow struct {
+	PlayId               *string                `json:"play_id,omitempty"`
+	PlayerId             *string                `json:"player_id,omitempty"`
+	SessionId            *string                `json:"session_id,omitempty"`
+	Ts                   *time.Time             `json:"ts,omitempty"`
+	AdditionalProperties map[string]interface{} `json:"-"`
 }
 
 // MetaEvent First frame on every successful subscription. Names the
@@ -787,10 +837,10 @@ type NetworkRowRequestKind string
 type PlayDetail struct {
 	UnderscoreLinks *struct {
 		Bundle          *string `json:"bundle,omitempty"`
+		ControlEvents   *string `json:"control_events,omitempty"`
 		Events          *string `json:"events,omitempty"`
 		Heatmap         *string `json:"heatmap,omitempty"`
 		NetworkRequests *string `json:"network_requests,omitempty"`
-		Snapshots       *string `json:"snapshots,omitempty"`
 	} `json:"_links,omitempty"`
 	ActiveTimeouts *int `json:"active_timeouts,omitempty"`
 	AllFailures    *int `json:"all_failures,omitempty"`
@@ -834,11 +884,34 @@ type PlayDetail struct {
 	FrozenCount *int `json:"frozen_count,omitempty"`
 
 	// GroupId Optional session-group id from harness label.
-	GroupId         *string            `json:"group_id,omitempty"`
-	IdleTimeouts    *int               `json:"idle_timeouts,omitempty"`
-	Labels          *map[string]string `json:"labels,omitempty"`
-	LastPlayerError *string            `json:"last_player_error,omitempty"`
-	LastSeenAt      time.Time          `json:"last_seen_at"`
+	GroupId      *string `json:"group_id,omitempty"`
+	IdleTimeouts *int    `json:"idle_timeouts,omitempty"`
+
+	// LabelHistogram Per-label `(label, count)` pairs for this play_id,
+	// unioned across all three source tables. Sorted by
+	// occurrence descending. Use to render chip clouds on the
+	// picker UI or to compose filters like "has http_4xx AND
+	// has-not fault_rule_enabled" against batch reports.
+	//
+	// Note: distinct from the operator-defined Map(String,String)
+	// `labels` field above — those are harness-set name=value
+	// tags; `label_histogram` is the ingest-time severity-tagged
+	// classification labels.
+	LabelHistogram *[][]PlayDetail_LabelHistogram_Item `json:"label_histogram,omitempty"`
+	Labels         *map[string]string                  `json:"labels,omitempty"`
+
+	// LabelsDistinctCount Distinct `<severity>=<event>` label strings seen for this
+	// play. `labels_total / labels_distinct_count` is the avg
+	// occurrences per label kind.
+	LabelsDistinctCount *int `json:"labels_distinct_count,omitempty"`
+
+	// LabelsTotal Total labelled-row occurrences across session_events +
+	// network_requests + control_events for this play_id. Same
+	// number that drives the dashboard Sessions page's Labels
+	// column count.
+	LabelsTotal     *int      `json:"labels_total,omitempty"`
+	LastPlayerError *string   `json:"last_player_error,omitempty"`
+	LastSeenAt      time.Time `json:"last_seen_at"`
 
 	// LastState Last observed player_state (playing|paused|stalled|…).
 	LastState              *string `json:"last_state,omitempty"`
@@ -898,6 +971,17 @@ type PlayDetail struct {
 // land here when that lands.
 type PlayDetailClassification string
 
+// PlayDetailLabelHistogram0 label, e.g. 'warning=*manifest_failure'
+type PlayDetailLabelHistogram0 = string
+
+// PlayDetailLabelHistogram1 occurrence count for this play
+type PlayDetailLabelHistogram1 = int
+
+// PlayDetail_LabelHistogram_Item defines model for PlayDetail.label_histogram.Item.
+type PlayDetail_LabelHistogram_Item struct {
+	union json.RawMessage
+}
+
 // PlaySummary One archived play, aggregated. Currently derived live from
 // `session_snapshots`; once the `play_summaries` rollup table
 // exists it'll be served from there instead (same wire shape).
@@ -949,11 +1033,34 @@ type PlaySummary struct {
 	FrozenCount *int `json:"frozen_count,omitempty"`
 
 	// GroupId Optional session-group id from harness label.
-	GroupId         *string            `json:"group_id,omitempty"`
-	IdleTimeouts    *int               `json:"idle_timeouts,omitempty"`
-	Labels          *map[string]string `json:"labels,omitempty"`
-	LastPlayerError *string            `json:"last_player_error,omitempty"`
-	LastSeenAt      time.Time          `json:"last_seen_at"`
+	GroupId      *string `json:"group_id,omitempty"`
+	IdleTimeouts *int    `json:"idle_timeouts,omitempty"`
+
+	// LabelHistogram Per-label `(label, count)` pairs for this play_id,
+	// unioned across all three source tables. Sorted by
+	// occurrence descending. Use to render chip clouds on the
+	// picker UI or to compose filters like "has http_4xx AND
+	// has-not fault_rule_enabled" against batch reports.
+	//
+	// Note: distinct from the operator-defined Map(String,String)
+	// `labels` field above — those are harness-set name=value
+	// tags; `label_histogram` is the ingest-time severity-tagged
+	// classification labels.
+	LabelHistogram *[][]PlaySummary_LabelHistogram_Item `json:"label_histogram,omitempty"`
+	Labels         *map[string]string                   `json:"labels,omitempty"`
+
+	// LabelsDistinctCount Distinct `<severity>=<event>` label strings seen for this
+	// play. `labels_total / labels_distinct_count` is the avg
+	// occurrences per label kind.
+	LabelsDistinctCount *int `json:"labels_distinct_count,omitempty"`
+
+	// LabelsTotal Total labelled-row occurrences across session_events +
+	// network_requests + control_events for this play_id. Same
+	// number that drives the dashboard Sessions page's Labels
+	// column count.
+	LabelsTotal     *int      `json:"labels_total,omitempty"`
+	LastPlayerError *string   `json:"last_player_error,omitempty"`
+	LastSeenAt      time.Time `json:"last_seen_at"`
 
 	// LastState Last observed player_state (playing|paused|stalled|…).
 	LastState              *string `json:"last_state,omitempty"`
@@ -1007,6 +1114,17 @@ type PlaySummary struct {
 // blocked on the `play_summaries` rollup table — they'll
 // land here when that lands.
 type PlaySummaryClassification string
+
+// PlaySummaryLabelHistogram0 label, e.g. 'warning=*manifest_failure'
+type PlaySummaryLabelHistogram0 = string
+
+// PlaySummaryLabelHistogram1 occurrence count for this play
+type PlaySummaryLabelHistogram1 = int
+
+// PlaySummary_LabelHistogram_Item defines model for PlaySummary.label_histogram.Item.
+type PlaySummary_LabelHistogram_Item struct {
+	union json.RawMessage
+}
 
 // PlaySummaryPage defines model for PlaySummaryPage.
 type PlaySummaryPage struct {
@@ -1063,117 +1181,6 @@ type SampleRow struct {
 	AdditionalProperties map[string]interface{} `json:"-"`
 }
 
-// SnapshotPage defines model for SnapshotPage.
-type SnapshotPage struct {
-	Items      []SnapshotRow `json:"items"`
-	NextCursor *string       `json:"next_cursor,omitempty"`
-}
-
-// SnapshotRow defines model for SnapshotRow.
-type SnapshotRow struct {
-	// Content Master playlist mutations applied at manifest serve time:
-	// strip CODECS, strip AVERAGE-BANDWIDTH, overstate bandwidth,
-	// allowed-variants whitelist, live-offset window. Takes effect
-	// on the next master manifest fetch.
-	// *Broadcasts to group on PATCH.*
-	Content *externalRef0.ContentManipulation `json:"content,omitempty"`
-
-	// ControlRevision Concurrency token. ETag/If-Match.
-	// *Shared across group members after any broadcast write.*
-	ControlRevision string `json:"control_revision"`
-
-	// CurrentPlay Currently-active play, or null when idle.
-	// *Per-device runtime state — does not broadcast to group.*
-	CurrentPlay *externalRef0.PlayRecord `json:"current_play,omitempty"`
-
-	// DisplayId Per-process counter. Recycles across restarts.
-	// *Per-device identity — does not broadcast to group.*
-	DisplayId int `json:"display_id"`
-
-	// FaultCounters Per-device fault hit counters.
-	// *Per-device runtime state — does not broadcast to group.*
-	FaultCounters *externalRef0.FaultCounters `json:"fault_counters,omitempty"`
-
-	// FaultRules HTTP fault rules, evaluated first-match-wins on each request.
-	// Empty array = no rules; absent = same as empty.
-	// *Broadcasts to group on PATCH (whole-array and per-rule
-	// sub-resource endpoints both broadcast).*
-	FaultRules *[]externalRef0.FaultRule `json:"fault_rules,omitempty"`
-
-	// FirstSeenAt *Server-observed lifecycle — does not broadcast to group.*
-	FirstSeenAt *time.Time `json:"first_seen_at,omitempty"`
-
-	// Id Player-supplied UUIDv4. Stable per device.
-	// *Per-device identity — does not broadcast to group.*
-	Id openapi_types.UUID `json:"id"`
-
-	// Labels Free-form key/value tags.
-	// *Broadcasts to group on PATCH.*
-	Labels *externalRef0.Labels `json:"labels,omitempty"`
-
-	// LastSeenAt *Server-observed lifecycle — does not broadcast to group.*
-	LastSeenAt *time.Time `json:"last_seen_at,omitempty"`
-
-	// LoopCountServer Server-counted loop boundaries observed on the manifest
-	// timeline. Independent of the player-reported value in
-	// `player_metrics.loop_count_player`.
-	// *Per-device runtime state — does not broadcast to group.*
-	LoopCountServer *int `json:"loop_count_server,omitempty"`
-
-	// OriginationIp *Server-observed lifecycle — does not broadcast to group.*
-	OriginationIp *string `json:"origination_ip,omitempty"`
-
-	// PlayId Convenience denormalisation of `current_play.id` so query
-	// pushdown (`?play_id=`) doesn't need a JSON path
-	// expression. Plain string (not UUID) — v1 short-hex
-	// play_ids round-trip unchanged for legacy archive rows;
-	// v2-minted plays are always UUIDs.
-	PlayId *string `json:"play_id,omitempty"`
-
-	// PlayerIp Player's self-reported IP (from the testing harness).
-	// Differs from `origination_ip` when the player is behind NAT.
-	// *Per-device identity — does not broadcast to group.*
-	PlayerIp *string `json:"player_ip,omitempty"`
-
-	// PlayerMetrics Read-only client-reported playback telemetry.
-	// *Per-device runtime state — does not broadcast to group.*
-	PlayerMetrics *externalRef0.PlayerMetrics `json:"player_metrics,omitempty"`
-
-	// Revision `control_revision` at capture time. Already present on
-	// `PlayerRecord`; surfaced here so consumers don't need to
-	// deep-dive to dedup adjacent snapshots.
-	Revision *string `json:"revision,omitempty"`
-
-	// ServerMetrics Read-only server-observed transport telemetry (TCP_INFO + ICMP path
-	// ping + per-session byte counters).
-	// *Per-device runtime state — does not broadcast to group.*
-	ServerMetrics *externalRef0.ServerMetrics `json:"server_metrics,omitempty"`
-
-	// ServerReceivedAtMs Server wall-clock (Unix epoch milliseconds) at the moment
-	// this snapshot was assembled. Pairs with
-	// `player_metrics.playhead_wallclock_ms` to compute live
-	// offset without trusting the client's clock.
-	// *Per-device runtime state — does not broadcast to group.*
-	ServerReceivedAtMs *int `json:"server_received_at_ms,omitempty"`
-
-	// Shape Network shaping (rate / delay / loss / transport_fault).
-	// *Broadcasts to group on PATCH.*
-	Shape *externalRef0.Shape `json:"shape,omitempty"`
-
-	// TransferTimeouts Server-side transfer timeouts (active + idle) applied during
-	// response generation. Per-protocol scope (segments / media
-	// manifests / master manifest).
-	// *Broadcasts to group on PATCH.*
-	TransferTimeouts *externalRef0.TransferTimeouts `json:"transfer_timeouts,omitempty"`
-
-	// Ts Snapshot capture time (ClickHouse `event_time`).
-	Ts time.Time `json:"ts"`
-
-	// UserAgent User-Agent string from the player's first request.
-	// *Per-device identity — does not broadcast to group.*
-	UserAgent *string `json:"user_agent,omitempty"`
-}
-
 // StreamErrorEvent Emitted on transport / CH failures after the initial `meta`
 // frame. The connection closes shortly after; the client may
 // reconnect with a fresh subscription.
@@ -1197,6 +1204,12 @@ type From = time.Time
 
 // LabelFilter defines model for LabelFilter.
 type LabelFilter map[string]string
+
+// LabelHasFilter defines model for LabelHasFilter.
+type LabelHasFilter = []string
+
+// LabelNotFilter defines model for LabelNotFilter.
+type LabelNotFilter = []string
 
 // Limit defines model for Limit.
 type Limit = int
@@ -1284,11 +1297,95 @@ type GetApiV2ControlEventsParams struct {
 	// Event Filter to specific event names. Multiple values OR'd. Examples:
 	// `event=fault_on&event=pattern_step`.
 	Event *[]string `form:"event,omitempty" json:"event,omitempty"`
-	Limit *Limit    `form:"limit,omitempty" json:"limit,omitempty"`
+
+	// LabelHas Row-level label inclusion filter. Repeatable; every value
+	// must be present in the row's `labels[]` (AND-within-includes).
+	// Format `<severity>=<event>` (with `*` prefix for synthesized
+	// labels). Example:
+	// `?label_has=warning%3Dhttp_4xx&label_has=info%3D%2Apattern_step`.
+	LabelHas *LabelHasFilter `form:"label_has,omitempty" json:"label_has,omitempty"`
+
+	// LabelNot Row-level label exclusion filter. Repeatable; none of the
+	// values may be present in the row's `labels[]`
+	// (AND-within-excludes). Combine with `label_has` for queries
+	// like *"has http_4xx AND has-not fault_rule_enabled"*. Same
+	// format as `label_has`.
+	LabelNot *LabelNotFilter `form:"label_not,omitempty" json:"label_not,omitempty"`
+	Limit    *Limit          `form:"limit,omitempty" json:"limit,omitempty"`
 }
 
 // GetApiV2ControlEventsParamsSource defines parameters for GetApiV2ControlEvents.
 type GetApiV2ControlEventsParamsSource string
+
+// GetApiV2EventsParams defines parameters for GetApiV2Events.
+type GetApiV2EventsParams struct {
+	PlayerId *PlayerIdFilter `form:"player_id,omitempty" json:"player_id,omitempty"`
+
+	// PlayId Filter to one play. Player-supplied UUID; rotates only on
+	// content-selection / fresh app or page load. Stable across
+	// in-app restart events.
+	PlayId *PlayIdFilter `form:"play_id,omitempty" json:"play_id,omitempty"`
+
+	// AttemptId Filter to one recovery attempt within a play. Player-supplied
+	// monotonically-incrementing counter; 1 on initial play, +1 per
+	// `restart` event (user-restart OR auto-recovery). Stable
+	// outside restart boundaries. Use to narrow a query to "what
+	// happened in this specific attempt" rather than "the whole
+	// play".
+	AttemptId *AttemptIdFilter `form:"attempt_id,omitempty" json:"attempt_id,omitempty"`
+
+	// From ISO 8601 lower bound on the row timestamp. Inclusive.
+	From *From `form:"from,omitempty" json:"from,omitempty"`
+
+	// To ISO 8601 upper bound on the row timestamp. Exclusive.
+	To *To `form:"to,omitempty" json:"to,omitempty"`
+
+	// Label `label.<key>=<value>` query params. Multiple AND together.
+	// Example: `?label.test=foo&label.pytest_run=2026-05-08T05:00:00Z`.
+	//
+	// Note — distinct from `label_has` / `label_not` (below). This
+	// is the operator-defined `Map(String, String)` set via the
+	// harness label PATCH; `label_has` / `label_not` filter against
+	// the row-level `Array(String)` severity-tagged labels added in
+	// #473 / #474.
+	Label *LabelFilter `form:"label,omitempty" json:"label,omitempty"`
+
+	// LabelHas Row-level label inclusion filter. Repeatable; every value
+	// must be present in the row's `labels[]` (AND-within-includes).
+	// Format `<severity>=<event>` (with `*` prefix for synthesized
+	// labels). Example:
+	// `?label_has=warning%3Dhttp_4xx&label_has=info%3D%2Apattern_step`.
+	LabelHas *LabelHasFilter `form:"label_has,omitempty" json:"label_has,omitempty"`
+
+	// LabelNot Row-level label exclusion filter. Repeatable; none of the
+	// values may be present in the row's `labels[]`
+	// (AND-within-excludes). Combine with `label_has` for queries
+	// like *"has http_4xx AND has-not fault_rule_enabled"*. Same
+	// format as `label_has`.
+	LabelNot *LabelNotFilter `form:"label_not,omitempty" json:"label_not,omitempty"`
+
+	// StrideMs Downsample to one row per stride.
+	StrideMs *StrideMs                  `form:"stride_ms,omitempty" json:"stride_ms,omitempty"`
+	Order    *GetApiV2EventsParamsOrder `form:"order,omitempty" json:"order,omitempty"`
+	Limit    *Limit                     `form:"limit,omitempty" json:"limit,omitempty"`
+
+	// Cursor Opaque keyset-pagination cursor — base64url-encoded
+	// `(event_time_micros, last_id)` tuple, server-issued in the
+	// previous response's `next_cursor`. Clients **must not** decode
+	// or fabricate cursors.
+	//
+	// When `cursor` is set, all filter params (`from`, `to`,
+	// `label.*`, etc.) are ignored — the cursor already encodes them.
+	// Pass a cursor that fails to decode → `400 Bad Request`.
+	//
+	// End-of-stream is signalled by `next_cursor: null` in the
+	// response body; no error / no 404 past the end. See
+	// `DESIGN.md § Pagination cursor`.
+	Cursor *Cursor `form:"cursor,omitempty" json:"cursor,omitempty"`
+}
+
+// GetApiV2EventsParamsOrder defines parameters for GetApiV2Events.
+type GetApiV2EventsParamsOrder string
 
 // GetApiV2NetworkRequestsParams defines parameters for GetApiV2NetworkRequests.
 type GetApiV2NetworkRequestsParams struct {
@@ -1315,7 +1412,27 @@ type GetApiV2NetworkRequestsParams struct {
 
 	// Label `label.<key>=<value>` query params. Multiple AND together.
 	// Example: `?label.test=foo&label.pytest_run=2026-05-08T05:00:00Z`.
-	Label         *LabelFilter                                `form:"label,omitempty" json:"label,omitempty"`
+	//
+	// Note — distinct from `label_has` / `label_not` (below). This
+	// is the operator-defined `Map(String, String)` set via the
+	// harness label PATCH; `label_has` / `label_not` filter against
+	// the row-level `Array(String)` severity-tagged labels added in
+	// #473 / #474.
+	Label *LabelFilter `form:"label,omitempty" json:"label,omitempty"`
+
+	// LabelHas Row-level label inclusion filter. Repeatable; every value
+	// must be present in the row's `labels[]` (AND-within-includes).
+	// Format `<severity>=<event>` (with `*` prefix for synthesized
+	// labels). Example:
+	// `?label_has=warning%3Dhttp_4xx&label_has=info%3D%2Apattern_step`.
+	LabelHas *LabelHasFilter `form:"label_has,omitempty" json:"label_has,omitempty"`
+
+	// LabelNot Row-level label exclusion filter. Repeatable; none of the
+	// values may be present in the row's `labels[]`
+	// (AND-within-excludes). Combine with `label_has` for queries
+	// like *"has http_4xx AND has-not fault_rule_enabled"*. Same
+	// format as `label_has`.
+	LabelNot      *LabelNotFilter                             `form:"label_not,omitempty" json:"label_not,omitempty"`
 	StatusMin     *int                                        `form:"status_min,omitempty" json:"status_min,omitempty"`
 	StatusMax     *int                                        `form:"status_max,omitempty" json:"status_max,omitempty"`
 	FaultCategory *GetApiV2NetworkRequestsParamsFaultCategory `form:"fault_category,omitempty" json:"fault_category,omitempty"`
@@ -1366,7 +1483,27 @@ type GetApiV2PlaysParams struct {
 
 	// Label `label.<key>=<value>` query params. Multiple AND together.
 	// Example: `?label.test=foo&label.pytest_run=2026-05-08T05:00:00Z`.
+	//
+	// Note — distinct from `label_has` / `label_not` (below). This
+	// is the operator-defined `Map(String, String)` set via the
+	// harness label PATCH; `label_has` / `label_not` filter against
+	// the row-level `Array(String)` severity-tagged labels added in
+	// #473 / #474.
 	Label *LabelFilter `form:"label,omitempty" json:"label,omitempty"`
+
+	// LabelHas Row-level label inclusion filter. Repeatable; every value
+	// must be present in the row's `labels[]` (AND-within-includes).
+	// Format `<severity>=<event>` (with `*` prefix for synthesized
+	// labels). Example:
+	// `?label_has=warning%3Dhttp_4xx&label_has=info%3D%2Apattern_step`.
+	LabelHas *LabelHasFilter `form:"label_has,omitempty" json:"label_has,omitempty"`
+
+	// LabelNot Row-level label exclusion filter. Repeatable; none of the
+	// values may be present in the row's `labels[]`
+	// (AND-within-excludes). Combine with `label_has` for queries
+	// like *"has http_4xx AND has-not fault_rule_enabled"*. Same
+	// format as `label_has`.
+	LabelNot *LabelNotFilter `form:"label_not,omitempty" json:"label_not,omitempty"`
 
 	// Classification Filter to plays of a specific classification (matches the
 	// column on `session_snapshots`). See PlaySummary.classification
@@ -1402,7 +1539,27 @@ type GetApiV2PlaysAggregateParams struct {
 
 	// Label `label.<key>=<value>` query params. Multiple AND together.
 	// Example: `?label.test=foo&label.pytest_run=2026-05-08T05:00:00Z`.
+	//
+	// Note — distinct from `label_has` / `label_not` (below). This
+	// is the operator-defined `Map(String, String)` set via the
+	// harness label PATCH; `label_has` / `label_not` filter against
+	// the row-level `Array(String)` severity-tagged labels added in
+	// #473 / #474.
 	Label *LabelFilter `form:"label,omitempty" json:"label,omitempty"`
+
+	// LabelHas Row-level label inclusion filter. Repeatable; every value
+	// must be present in the row's `labels[]` (AND-within-includes).
+	// Format `<severity>=<event>` (with `*` prefix for synthesized
+	// labels). Example:
+	// `?label_has=warning%3Dhttp_4xx&label_has=info%3D%2Apattern_step`.
+	LabelHas *LabelHasFilter `form:"label_has,omitempty" json:"label_has,omitempty"`
+
+	// LabelNot Row-level label exclusion filter. Repeatable; none of the
+	// values may be present in the row's `labels[]`
+	// (AND-within-excludes). Combine with `label_has` for queries
+	// like *"has http_4xx AND has-not fault_rule_enabled"*. Same
+	// format as `label_has`.
+	LabelNot *LabelNotFilter `form:"label_not,omitempty" json:"label_not,omitempty"`
 
 	// Classification Filter to plays of a specific classification (matches the
 	// column on `session_snapshots`). See PlaySummary.classification
@@ -1447,56 +1604,6 @@ type GetApiV2SessionHeatmapParams struct {
 	AttemptId *AttemptIdFilter `form:"attempt_id,omitempty" json:"attempt_id,omitempty"`
 	Buckets   *int             `form:"buckets,omitempty" json:"buckets,omitempty"`
 }
-
-// GetApiV2SnapshotsParams defines parameters for GetApiV2Snapshots.
-type GetApiV2SnapshotsParams struct {
-	PlayerId *PlayerIdFilter `form:"player_id,omitempty" json:"player_id,omitempty"`
-
-	// PlayId Filter to one play. Player-supplied UUID; rotates only on
-	// content-selection / fresh app or page load. Stable across
-	// in-app restart events.
-	PlayId *PlayIdFilter `form:"play_id,omitempty" json:"play_id,omitempty"`
-
-	// AttemptId Filter to one recovery attempt within a play. Player-supplied
-	// monotonically-incrementing counter; 1 on initial play, +1 per
-	// `restart` event (user-restart OR auto-recovery). Stable
-	// outside restart boundaries. Use to narrow a query to "what
-	// happened in this specific attempt" rather than "the whole
-	// play".
-	AttemptId *AttemptIdFilter `form:"attempt_id,omitempty" json:"attempt_id,omitempty"`
-
-	// From ISO 8601 lower bound on the row timestamp. Inclusive.
-	From *From `form:"from,omitempty" json:"from,omitempty"`
-
-	// To ISO 8601 upper bound on the row timestamp. Exclusive.
-	To *To `form:"to,omitempty" json:"to,omitempty"`
-
-	// Label `label.<key>=<value>` query params. Multiple AND together.
-	// Example: `?label.test=foo&label.pytest_run=2026-05-08T05:00:00Z`.
-	Label *LabelFilter `form:"label,omitempty" json:"label,omitempty"`
-
-	// StrideMs Downsample to one row per stride.
-	StrideMs *StrideMs                     `form:"stride_ms,omitempty" json:"stride_ms,omitempty"`
-	Order    *GetApiV2SnapshotsParamsOrder `form:"order,omitempty" json:"order,omitempty"`
-	Limit    *Limit                        `form:"limit,omitempty" json:"limit,omitempty"`
-
-	// Cursor Opaque keyset-pagination cursor — base64url-encoded
-	// `(event_time_micros, last_id)` tuple, server-issued in the
-	// previous response's `next_cursor`. Clients **must not** decode
-	// or fabricate cursors.
-	//
-	// When `cursor` is set, all filter params (`from`, `to`,
-	// `label.*`, etc.) are ignored — the cursor already encodes them.
-	// Pass a cursor that fails to decode → `400 Bad Request`.
-	//
-	// End-of-stream is signalled by `next_cursor: null` in the
-	// response body; no error / no 404 past the end. See
-	// `DESIGN.md § Pagination cursor`.
-	Cursor *Cursor `form:"cursor,omitempty" json:"cursor,omitempty"`
-}
-
-// GetApiV2SnapshotsParamsOrder defines parameters for GetApiV2Snapshots.
-type GetApiV2SnapshotsParamsOrder string
 
 // GetTimeseriesParams defines parameters for GetTimeseries.
 type GetTimeseriesParams struct {
@@ -1581,45 +1688,29 @@ type GetTimeseriesParams struct {
 	LastEventID *TimeseriesLastEventId `json:"Last-Event-ID,omitempty"`
 }
 
-// Getter for additional properties for EventRow. Returns the specified
+// Getter for additional properties for LegacyEventRow. Returns the specified
 // element and whether it was found
-func (a EventRow) Get(fieldName string) (value interface{}, found bool) {
+func (a LegacyEventRow) Get(fieldName string) (value interface{}, found bool) {
 	if a.AdditionalProperties != nil {
 		value, found = a.AdditionalProperties[fieldName]
 	}
 	return
 }
 
-// Setter for additional properties for EventRow
-func (a *EventRow) Set(fieldName string, value interface{}) {
+// Setter for additional properties for LegacyEventRow
+func (a *LegacyEventRow) Set(fieldName string, value interface{}) {
 	if a.AdditionalProperties == nil {
 		a.AdditionalProperties = make(map[string]interface{})
 	}
 	a.AdditionalProperties[fieldName] = value
 }
 
-// Override default JSON handling for EventRow to handle AdditionalProperties
-func (a *EventRow) UnmarshalJSON(b []byte) error {
+// Override default JSON handling for LegacyEventRow to handle AdditionalProperties
+func (a *LegacyEventRow) UnmarshalJSON(b []byte) error {
 	object := make(map[string]json.RawMessage)
 	err := json.Unmarshal(b, &object)
 	if err != nil {
 		return err
-	}
-
-	if raw, found := object["info"]; found {
-		err = json.Unmarshal(raw, &a.Info)
-		if err != nil {
-			return fmt.Errorf("error reading 'info': %w", err)
-		}
-		delete(object, "info")
-	}
-
-	if raw, found := object["kind"]; found {
-		err = json.Unmarshal(raw, &a.Kind)
-		if err != nil {
-			return fmt.Errorf("error reading 'kind': %w", err)
-		}
-		delete(object, "kind")
 	}
 
 	if raw, found := object["play_id"]; found {
@@ -1638,14 +1729,6 @@ func (a *EventRow) UnmarshalJSON(b []byte) error {
 		delete(object, "player_id")
 	}
 
-	if raw, found := object["priority"]; found {
-		err = json.Unmarshal(raw, &a.Priority)
-		if err != nil {
-			return fmt.Errorf("error reading 'priority': %w", err)
-		}
-		delete(object, "priority")
-	}
-
 	if raw, found := object["session_id"]; found {
 		err = json.Unmarshal(raw, &a.SessionId)
 		if err != nil {
@@ -1662,14 +1745,6 @@ func (a *EventRow) UnmarshalJSON(b []byte) error {
 		delete(object, "ts")
 	}
 
-	if raw, found := object["type"]; found {
-		err = json.Unmarshal(raw, &a.Type)
-		if err != nil {
-			return fmt.Errorf("error reading 'type': %w", err)
-		}
-		delete(object, "type")
-	}
-
 	if len(object) != 0 {
 		a.AdditionalProperties = make(map[string]interface{})
 		for fieldName, fieldBuf := range object {
@@ -1684,51 +1759,37 @@ func (a *EventRow) UnmarshalJSON(b []byte) error {
 	return nil
 }
 
-// Override default JSON handling for EventRow to handle AdditionalProperties
-func (a EventRow) MarshalJSON() ([]byte, error) {
+// Override default JSON handling for LegacyEventRow to handle AdditionalProperties
+func (a LegacyEventRow) MarshalJSON() ([]byte, error) {
 	var err error
 	object := make(map[string]json.RawMessage)
 
-	if a.Info != nil {
-		object["info"], err = json.Marshal(a.Info)
+	if a.PlayId != nil {
+		object["play_id"], err = json.Marshal(a.PlayId)
 		if err != nil {
-			return nil, fmt.Errorf("error marshaling 'info': %w", err)
+			return nil, fmt.Errorf("error marshaling 'play_id': %w", err)
 		}
 	}
 
-	object["kind"], err = json.Marshal(a.Kind)
-	if err != nil {
-		return nil, fmt.Errorf("error marshaling 'kind': %w", err)
+	if a.PlayerId != nil {
+		object["player_id"], err = json.Marshal(a.PlayerId)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'player_id': %w", err)
+		}
 	}
 
-	object["play_id"], err = json.Marshal(a.PlayId)
-	if err != nil {
-		return nil, fmt.Errorf("error marshaling 'play_id': %w", err)
+	if a.SessionId != nil {
+		object["session_id"], err = json.Marshal(a.SessionId)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'session_id': %w", err)
+		}
 	}
 
-	object["player_id"], err = json.Marshal(a.PlayerId)
-	if err != nil {
-		return nil, fmt.Errorf("error marshaling 'player_id': %w", err)
-	}
-
-	object["priority"], err = json.Marshal(a.Priority)
-	if err != nil {
-		return nil, fmt.Errorf("error marshaling 'priority': %w", err)
-	}
-
-	object["session_id"], err = json.Marshal(a.SessionId)
-	if err != nil {
-		return nil, fmt.Errorf("error marshaling 'session_id': %w", err)
-	}
-
-	object["ts"], err = json.Marshal(a.Ts)
-	if err != nil {
-		return nil, fmt.Errorf("error marshaling 'ts': %w", err)
-	}
-
-	object["type"], err = json.Marshal(a.Type)
-	if err != nil {
-		return nil, fmt.Errorf("error marshaling 'type': %w", err)
+	if a.Ts != nil {
+		object["ts"], err = json.Marshal(a.Ts)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'ts': %w", err)
+		}
 	}
 
 	for fieldName, field := range a.AdditionalProperties {
@@ -2188,6 +2249,130 @@ func (a SampleRow) MarshalJSON() ([]byte, error) {
 	return json.Marshal(object)
 }
 
+// AsPlayDetailLabelHistogram0 returns the union data inside the PlayDetail_LabelHistogram_Item as a PlayDetailLabelHistogram0
+func (t PlayDetail_LabelHistogram_Item) AsPlayDetailLabelHistogram0() (PlayDetailLabelHistogram0, error) {
+	var body PlayDetailLabelHistogram0
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromPlayDetailLabelHistogram0 overwrites any union data inside the PlayDetail_LabelHistogram_Item as the provided PlayDetailLabelHistogram0
+func (t *PlayDetail_LabelHistogram_Item) FromPlayDetailLabelHistogram0(v PlayDetailLabelHistogram0) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergePlayDetailLabelHistogram0 performs a merge with any union data inside the PlayDetail_LabelHistogram_Item, using the provided PlayDetailLabelHistogram0
+func (t *PlayDetail_LabelHistogram_Item) MergePlayDetailLabelHistogram0(v PlayDetailLabelHistogram0) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsPlayDetailLabelHistogram1 returns the union data inside the PlayDetail_LabelHistogram_Item as a PlayDetailLabelHistogram1
+func (t PlayDetail_LabelHistogram_Item) AsPlayDetailLabelHistogram1() (PlayDetailLabelHistogram1, error) {
+	var body PlayDetailLabelHistogram1
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromPlayDetailLabelHistogram1 overwrites any union data inside the PlayDetail_LabelHistogram_Item as the provided PlayDetailLabelHistogram1
+func (t *PlayDetail_LabelHistogram_Item) FromPlayDetailLabelHistogram1(v PlayDetailLabelHistogram1) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergePlayDetailLabelHistogram1 performs a merge with any union data inside the PlayDetail_LabelHistogram_Item, using the provided PlayDetailLabelHistogram1
+func (t *PlayDetail_LabelHistogram_Item) MergePlayDetailLabelHistogram1(v PlayDetailLabelHistogram1) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+func (t PlayDetail_LabelHistogram_Item) MarshalJSON() ([]byte, error) {
+	b, err := t.union.MarshalJSON()
+	return b, err
+}
+
+func (t *PlayDetail_LabelHistogram_Item) UnmarshalJSON(b []byte) error {
+	err := t.union.UnmarshalJSON(b)
+	return err
+}
+
+// AsPlaySummaryLabelHistogram0 returns the union data inside the PlaySummary_LabelHistogram_Item as a PlaySummaryLabelHistogram0
+func (t PlaySummary_LabelHistogram_Item) AsPlaySummaryLabelHistogram0() (PlaySummaryLabelHistogram0, error) {
+	var body PlaySummaryLabelHistogram0
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromPlaySummaryLabelHistogram0 overwrites any union data inside the PlaySummary_LabelHistogram_Item as the provided PlaySummaryLabelHistogram0
+func (t *PlaySummary_LabelHistogram_Item) FromPlaySummaryLabelHistogram0(v PlaySummaryLabelHistogram0) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergePlaySummaryLabelHistogram0 performs a merge with any union data inside the PlaySummary_LabelHistogram_Item, using the provided PlaySummaryLabelHistogram0
+func (t *PlaySummary_LabelHistogram_Item) MergePlaySummaryLabelHistogram0(v PlaySummaryLabelHistogram0) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsPlaySummaryLabelHistogram1 returns the union data inside the PlaySummary_LabelHistogram_Item as a PlaySummaryLabelHistogram1
+func (t PlaySummary_LabelHistogram_Item) AsPlaySummaryLabelHistogram1() (PlaySummaryLabelHistogram1, error) {
+	var body PlaySummaryLabelHistogram1
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromPlaySummaryLabelHistogram1 overwrites any union data inside the PlaySummary_LabelHistogram_Item as the provided PlaySummaryLabelHistogram1
+func (t *PlaySummary_LabelHistogram_Item) FromPlaySummaryLabelHistogram1(v PlaySummaryLabelHistogram1) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergePlaySummaryLabelHistogram1 performs a merge with any union data inside the PlaySummary_LabelHistogram_Item, using the provided PlaySummaryLabelHistogram1
+func (t *PlaySummary_LabelHistogram_Item) MergePlaySummaryLabelHistogram1(v PlaySummaryLabelHistogram1) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+func (t PlaySummary_LabelHistogram_Item) MarshalJSON() ([]byte, error) {
+	b, err := t.union.MarshalJSON()
+	return b, err
+}
+
+func (t *PlaySummary_LabelHistogram_Item) UnmarshalJSON(b []byte) error {
+	err := t.union.UnmarshalJSON(b)
+	return err
+}
+
 // AsMetaEvent returns the union data inside the SSEFrameUnion as a MetaEvent
 func (t SSEFrameUnion) AsMetaEvent() (MetaEvent, error) {
 	var body MetaEvent
@@ -2266,22 +2451,22 @@ func (t *SSEFrameUnion) MergeNetworkRow(v NetworkRow) error {
 	return err
 }
 
-// AsEventRow returns the union data inside the SSEFrameUnion as a EventRow
-func (t SSEFrameUnion) AsEventRow() (EventRow, error) {
-	var body EventRow
+// AsControlEventRow returns the union data inside the SSEFrameUnion as a ControlEventRow
+func (t SSEFrameUnion) AsControlEventRow() (ControlEventRow, error) {
+	var body ControlEventRow
 	err := json.Unmarshal(t.union, &body)
 	return body, err
 }
 
-// FromEventRow overwrites any union data inside the SSEFrameUnion as the provided EventRow
-func (t *SSEFrameUnion) FromEventRow(v EventRow) error {
+// FromControlEventRow overwrites any union data inside the SSEFrameUnion as the provided ControlEventRow
+func (t *SSEFrameUnion) FromControlEventRow(v ControlEventRow) error {
 	b, err := json.Marshal(v)
 	t.union = b
 	return err
 }
 
-// MergeEventRow performs a merge with any union data inside the SSEFrameUnion, using the provided EventRow
-func (t *SSEFrameUnion) MergeEventRow(v EventRow) error {
+// MergeControlEventRow performs a merge with any union data inside the SSEFrameUnion, using the provided ControlEventRow
+func (t *SSEFrameUnion) MergeControlEventRow(v ControlEventRow) error {
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -2459,6 +2644,9 @@ type ClientInterface interface {
 	// GetApiV2ControlEvents request
 	GetApiV2ControlEvents(ctx context.Context, params *GetApiV2ControlEventsParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// GetApiV2Events request
+	GetApiV2Events(ctx context.Context, params *GetApiV2EventsParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// GetApiV2Healthz request
 	GetApiV2Healthz(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -2483,9 +2671,6 @@ type ClientInterface interface {
 	// GetApiV2SessionHeatmap request
 	GetApiV2SessionHeatmap(ctx context.Context, params *GetApiV2SessionHeatmapParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	// GetApiV2Snapshots request
-	GetApiV2Snapshots(ctx context.Context, params *GetApiV2SnapshotsParams, reqEditors ...RequestEditorFn) (*http.Response, error)
-
 	// GetTimeseries request
 	GetTimeseries(ctx context.Context, params *GetTimeseriesParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 }
@@ -2504,6 +2689,18 @@ func (c *Client) GetBundles(ctx context.Context, reqEditors ...RequestEditorFn) 
 
 func (c *Client) GetApiV2ControlEvents(ctx context.Context, params *GetApiV2ControlEventsParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewGetApiV2ControlEventsRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) GetApiV2Events(ctx context.Context, params *GetApiV2EventsParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetApiV2EventsRequest(c.Server, params)
 	if err != nil {
 		return nil, err
 	}
@@ -2600,18 +2797,6 @@ func (c *Client) GetApiV2PlaysPlayIdBundle(ctx context.Context, playId PlayId, r
 
 func (c *Client) GetApiV2SessionHeatmap(ctx context.Context, params *GetApiV2SessionHeatmapParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewGetApiV2SessionHeatmapRequest(c.Server, params)
-	if err != nil {
-		return nil, err
-	}
-	req = req.WithContext(ctx)
-	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
-		return nil, err
-	}
-	return c.Client.Do(req)
-}
-
-func (c *Client) GetApiV2Snapshots(ctx context.Context, params *GetApiV2SnapshotsParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewGetApiV2SnapshotsRequest(c.Server, params)
 	if err != nil {
 		return nil, err
 	}
@@ -2761,9 +2946,219 @@ func NewGetApiV2ControlEventsRequest(server string, params *GetApiV2ControlEvent
 
 		}
 
+		if params.LabelHas != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "label_has", *params.LabelHas, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "array", Format: ""}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
+		if params.LabelNot != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "label_not", *params.LabelNot, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "array", Format: ""}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
 		if params.Limit != nil {
 
 			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "limit", *params.Limit, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "integer", Format: ""}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
+		if encoded := queryValues.Encode(); encoded != "" {
+			rawQueryFragments = append(rawQueryFragments, encoded)
+		}
+		queryURL.RawQuery = strings.Join(rawQueryFragments, "&")
+	}
+
+	req, err := http.NewRequest(http.MethodGet, queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewGetApiV2EventsRequest generates requests for GetApiV2Events
+func NewGetApiV2EventsRequest(server string, params *GetApiV2EventsParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v2/events")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		// queryValues collects non-styled parameters (passthrough, JSON)
+		// that are safe to round-trip through url.Values.Encode().
+		queryValues := queryURL.Query()
+		// rawQueryFragments collects pre-encoded query fragments from
+		// styled parameters, preserving literal commas as delimiters
+		// per the OpenAPI spec (e.g. "color=blue,black,brown").
+		var rawQueryFragments []string
+
+		if params.PlayerId != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "player_id", *params.PlayerId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: "uuid"}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
+		if params.PlayId != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "play_id", *params.PlayId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: "uuid"}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
+		if params.AttemptId != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "attempt_id", *params.AttemptId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "integer", Format: ""}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
+		if params.From != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "from", *params.From, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: "date-time"}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
+		if params.To != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "to", *params.To, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: "date-time"}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
+		if params.Label != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "label", *params.Label, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "object", Format: ""}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
+		if params.LabelHas != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "label_has", *params.LabelHas, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "array", Format: ""}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
+		if params.LabelNot != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "label_not", *params.LabelNot, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "array", Format: ""}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
+		if params.StrideMs != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "stride_ms", *params.StrideMs, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "integer", Format: ""}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
+		if params.Order != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "order", *params.Order, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
+		if params.Limit != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "limit", *params.Limit, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "integer", Format: ""}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
+		if params.Cursor != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "cursor", *params.Cursor, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
 				return nil, err
 			} else {
 				for _, qp := range strings.Split(queryFrag, "&") {
@@ -2932,6 +3327,30 @@ func NewGetApiV2NetworkRequestsRequest(server string, params *GetApiV2NetworkReq
 		if params.Label != nil {
 
 			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "label", *params.Label, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "object", Format: ""}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
+		if params.LabelHas != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "label_has", *params.LabelHas, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "array", Format: ""}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
+		if params.LabelNot != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "label_not", *params.LabelNot, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "array", Format: ""}); err != nil {
 				return nil, err
 			} else {
 				for _, qp := range strings.Split(queryFrag, "&") {
@@ -3139,6 +3558,30 @@ func NewGetApiV2PlaysRequest(server string, params *GetApiV2PlaysParams) (*http.
 
 		}
 
+		if params.LabelHas != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "label_has", *params.LabelHas, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "array", Format: ""}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
+		if params.LabelNot != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "label_not", *params.LabelNot, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "array", Format: ""}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
 		if params.Classification != nil {
 
 			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "classification", *params.Classification, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
@@ -3244,6 +3687,30 @@ func NewGetApiV2PlaysAggregateRequest(server string, params *GetApiV2PlaysAggreg
 		if params.Label != nil {
 
 			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "label", *params.Label, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "object", Format: ""}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
+		if params.LabelHas != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "label_has", *params.LabelHas, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "array", Format: ""}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
+		if params.LabelNot != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "label_not", *params.LabelNot, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "array", Format: ""}); err != nil {
 				return nil, err
 			} else {
 				for _, qp := range strings.Split(queryFrag, "&") {
@@ -3462,168 +3929,6 @@ func NewGetApiV2SessionHeatmapRequest(server string, params *GetApiV2SessionHeat
 		if params.Buckets != nil {
 
 			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "buckets", *params.Buckets, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "integer", Format: ""}); err != nil {
-				return nil, err
-			} else {
-				for _, qp := range strings.Split(queryFrag, "&") {
-					rawQueryFragments = append(rawQueryFragments, qp)
-				}
-			}
-
-		}
-
-		if encoded := queryValues.Encode(); encoded != "" {
-			rawQueryFragments = append(rawQueryFragments, encoded)
-		}
-		queryURL.RawQuery = strings.Join(rawQueryFragments, "&")
-	}
-
-	req, err := http.NewRequest(http.MethodGet, queryURL.String(), nil)
-	if err != nil {
-		return nil, err
-	}
-
-	return req, nil
-}
-
-// NewGetApiV2SnapshotsRequest generates requests for GetApiV2Snapshots
-func NewGetApiV2SnapshotsRequest(server string, params *GetApiV2SnapshotsParams) (*http.Request, error) {
-	var err error
-
-	serverURL, err := url.Parse(server)
-	if err != nil {
-		return nil, err
-	}
-
-	operationPath := fmt.Sprintf("/api/v2/snapshots")
-	if operationPath[0] == '/' {
-		operationPath = "." + operationPath
-	}
-
-	queryURL, err := serverURL.Parse(operationPath)
-	if err != nil {
-		return nil, err
-	}
-
-	if params != nil {
-		// queryValues collects non-styled parameters (passthrough, JSON)
-		// that are safe to round-trip through url.Values.Encode().
-		queryValues := queryURL.Query()
-		// rawQueryFragments collects pre-encoded query fragments from
-		// styled parameters, preserving literal commas as delimiters
-		// per the OpenAPI spec (e.g. "color=blue,black,brown").
-		var rawQueryFragments []string
-
-		if params.PlayerId != nil {
-
-			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "player_id", *params.PlayerId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: "uuid"}); err != nil {
-				return nil, err
-			} else {
-				for _, qp := range strings.Split(queryFrag, "&") {
-					rawQueryFragments = append(rawQueryFragments, qp)
-				}
-			}
-
-		}
-
-		if params.PlayId != nil {
-
-			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "play_id", *params.PlayId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: "uuid"}); err != nil {
-				return nil, err
-			} else {
-				for _, qp := range strings.Split(queryFrag, "&") {
-					rawQueryFragments = append(rawQueryFragments, qp)
-				}
-			}
-
-		}
-
-		if params.AttemptId != nil {
-
-			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "attempt_id", *params.AttemptId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "integer", Format: ""}); err != nil {
-				return nil, err
-			} else {
-				for _, qp := range strings.Split(queryFrag, "&") {
-					rawQueryFragments = append(rawQueryFragments, qp)
-				}
-			}
-
-		}
-
-		if params.From != nil {
-
-			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "from", *params.From, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: "date-time"}); err != nil {
-				return nil, err
-			} else {
-				for _, qp := range strings.Split(queryFrag, "&") {
-					rawQueryFragments = append(rawQueryFragments, qp)
-				}
-			}
-
-		}
-
-		if params.To != nil {
-
-			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "to", *params.To, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: "date-time"}); err != nil {
-				return nil, err
-			} else {
-				for _, qp := range strings.Split(queryFrag, "&") {
-					rawQueryFragments = append(rawQueryFragments, qp)
-				}
-			}
-
-		}
-
-		if params.Label != nil {
-
-			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "label", *params.Label, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "object", Format: ""}); err != nil {
-				return nil, err
-			} else {
-				for _, qp := range strings.Split(queryFrag, "&") {
-					rawQueryFragments = append(rawQueryFragments, qp)
-				}
-			}
-
-		}
-
-		if params.StrideMs != nil {
-
-			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "stride_ms", *params.StrideMs, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "integer", Format: ""}); err != nil {
-				return nil, err
-			} else {
-				for _, qp := range strings.Split(queryFrag, "&") {
-					rawQueryFragments = append(rawQueryFragments, qp)
-				}
-			}
-
-		}
-
-		if params.Order != nil {
-
-			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "order", *params.Order, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
-				return nil, err
-			} else {
-				for _, qp := range strings.Split(queryFrag, "&") {
-					rawQueryFragments = append(rawQueryFragments, qp)
-				}
-			}
-
-		}
-
-		if params.Limit != nil {
-
-			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "limit", *params.Limit, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "integer", Format: ""}); err != nil {
-				return nil, err
-			} else {
-				for _, qp := range strings.Split(queryFrag, "&") {
-					rawQueryFragments = append(rawQueryFragments, qp)
-				}
-			}
-
-		}
-
-		if params.Cursor != nil {
-
-			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "cursor", *params.Cursor, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
 				return nil, err
 			} else {
 				for _, qp := range strings.Split(queryFrag, "&") {
@@ -3881,6 +4186,9 @@ type ClientWithResponsesInterface interface {
 	// GetApiV2ControlEventsWithResponse request
 	GetApiV2ControlEventsWithResponse(ctx context.Context, params *GetApiV2ControlEventsParams, reqEditors ...RequestEditorFn) (*GetApiV2ControlEventsResponse, error)
 
+	// GetApiV2EventsWithResponse request
+	GetApiV2EventsWithResponse(ctx context.Context, params *GetApiV2EventsParams, reqEditors ...RequestEditorFn) (*GetApiV2EventsResponse, error)
+
 	// GetApiV2HealthzWithResponse request
 	GetApiV2HealthzWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*GetApiV2HealthzResponse, error)
 
@@ -3904,9 +4212,6 @@ type ClientWithResponsesInterface interface {
 
 	// GetApiV2SessionHeatmapWithResponse request
 	GetApiV2SessionHeatmapWithResponse(ctx context.Context, params *GetApiV2SessionHeatmapParams, reqEditors ...RequestEditorFn) (*GetApiV2SessionHeatmapResponse, error)
-
-	// GetApiV2SnapshotsWithResponse request
-	GetApiV2SnapshotsWithResponse(ctx context.Context, params *GetApiV2SnapshotsParams, reqEditors ...RequestEditorFn) (*GetApiV2SnapshotsResponse, error)
 
 	// GetTimeseriesWithResponse request
 	GetTimeseriesWithResponse(ctx context.Context, params *GetTimeseriesParams, reqEditors ...RequestEditorFn) (*GetTimeseriesResponse, error)
@@ -3965,6 +4270,36 @@ func (r GetApiV2ControlEventsResponse) StatusCode() int {
 
 // ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
 func (r GetApiV2ControlEventsResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
+type GetApiV2EventsResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *EventPage
+}
+
+// Status returns HTTPResponse.Status
+func (r GetApiV2EventsResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r GetApiV2EventsResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r GetApiV2EventsResponse) ContentType() string {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.Header.Get("Content-Type")
 	}
@@ -4213,36 +4548,6 @@ func (r GetApiV2SessionHeatmapResponse) ContentType() string {
 	return ""
 }
 
-type GetApiV2SnapshotsResponse struct {
-	Body         []byte
-	HTTPResponse *http.Response
-	JSON200      *SnapshotPage
-}
-
-// Status returns HTTPResponse.Status
-func (r GetApiV2SnapshotsResponse) Status() string {
-	if r.HTTPResponse != nil {
-		return r.HTTPResponse.Status
-	}
-	return http.StatusText(0)
-}
-
-// StatusCode returns HTTPResponse.StatusCode
-func (r GetApiV2SnapshotsResponse) StatusCode() int {
-	if r.HTTPResponse != nil {
-		return r.HTTPResponse.StatusCode
-	}
-	return 0
-}
-
-// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
-func (r GetApiV2SnapshotsResponse) ContentType() string {
-	if r.HTTPResponse != nil {
-		return r.HTTPResponse.Header.Get("Content-Type")
-	}
-	return ""
-}
-
 type GetTimeseriesResponse struct {
 	Body                      []byte
 	HTTPResponse              *http.Response
@@ -4290,6 +4595,15 @@ func (c *ClientWithResponses) GetApiV2ControlEventsWithResponse(ctx context.Cont
 		return nil, err
 	}
 	return ParseGetApiV2ControlEventsResponse(rsp)
+}
+
+// GetApiV2EventsWithResponse request returning *GetApiV2EventsResponse
+func (c *ClientWithResponses) GetApiV2EventsWithResponse(ctx context.Context, params *GetApiV2EventsParams, reqEditors ...RequestEditorFn) (*GetApiV2EventsResponse, error) {
+	rsp, err := c.GetApiV2Events(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseGetApiV2EventsResponse(rsp)
 }
 
 // GetApiV2HealthzWithResponse request returning *GetApiV2HealthzResponse
@@ -4364,15 +4678,6 @@ func (c *ClientWithResponses) GetApiV2SessionHeatmapWithResponse(ctx context.Con
 	return ParseGetApiV2SessionHeatmapResponse(rsp)
 }
 
-// GetApiV2SnapshotsWithResponse request returning *GetApiV2SnapshotsResponse
-func (c *ClientWithResponses) GetApiV2SnapshotsWithResponse(ctx context.Context, params *GetApiV2SnapshotsParams, reqEditors ...RequestEditorFn) (*GetApiV2SnapshotsResponse, error) {
-	rsp, err := c.GetApiV2Snapshots(ctx, params, reqEditors...)
-	if err != nil {
-		return nil, err
-	}
-	return ParseGetApiV2SnapshotsResponse(rsp)
-}
-
 // GetTimeseriesWithResponse request returning *GetTimeseriesResponse
 func (c *ClientWithResponses) GetTimeseriesWithResponse(ctx context.Context, params *GetTimeseriesParams, reqEditors ...RequestEditorFn) (*GetTimeseriesResponse, error) {
 	rsp, err := c.GetTimeseries(ctx, params, reqEditors...)
@@ -4419,6 +4724,32 @@ func ParseGetApiV2ControlEventsResponse(rsp *http.Response) (*GetApiV2ControlEve
 	response := &GetApiV2ControlEventsResponse{
 		Body:         bodyBytes,
 		HTTPResponse: rsp,
+	}
+
+	return response, nil
+}
+
+// ParseGetApiV2EventsResponse parses an HTTP response from a GetApiV2EventsWithResponse call
+func ParseGetApiV2EventsResponse(rsp *http.Response) (*GetApiV2EventsResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &GetApiV2EventsResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest EventPage
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
 	}
 
 	return response, nil
@@ -4621,32 +4952,6 @@ func ParseGetApiV2SessionHeatmapResponse(rsp *http.Response) (*GetApiV2SessionHe
 		var dest struct {
 			Items []map[string]interface{} `json:"items"`
 		}
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.JSON200 = &dest
-
-	}
-
-	return response, nil
-}
-
-// ParseGetApiV2SnapshotsResponse parses an HTTP response from a GetApiV2SnapshotsWithResponse call
-func ParseGetApiV2SnapshotsResponse(rsp *http.Response) (*GetApiV2SnapshotsResponse, error) {
-	bodyBytes, err := io.ReadAll(rsp.Body)
-	defer func() { _ = rsp.Body.Close() }()
-	if err != nil {
-		return nil, err
-	}
-
-	response := &GetApiV2SnapshotsResponse{
-		Body:         bodyBytes,
-		HTTPResponse: rsp,
-	}
-
-	switch {
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
-		var dest SnapshotPage
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}

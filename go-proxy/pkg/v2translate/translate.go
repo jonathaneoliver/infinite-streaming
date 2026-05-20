@@ -9,6 +9,7 @@
 package v2translate
 
 import (
+	"encoding/json"
 	"strconv"
 	"strings"
 	"time"
@@ -496,9 +497,26 @@ func currentPlayFromSession(s map[string]any, playerUUID uuid.UUID) *oapigen.Pla
 }
 
 // manifestVariantsFromSession projects v1's `manifest_variants` slice
-// into the typed v2 ManifestVariant array. v1 stores variants as a
-// slice of either typed structs OR map[string]any (depending on
-// codepath); accept both.
+// into the typed v2 ManifestVariant array. The field lands here in one
+// of three concrete shapes:
+//
+//   - []any of map[string]any   — set when the session map crossed a
+//     JSON boundary (e.g. round-tripped through /api/sessions, or
+//     replayed from SSE).
+//   - []map[string]any          — alternate map form from the
+//     /api/setup bootstrap path.
+//   - []main.PlaylistInfo       — set DIRECTLY by go-proxy's manifest
+//     parsing path (main.go § handleProxiedRequest) with no JSON in
+//     between. This was the silent gap that made
+//     /api/v2/players.current_play.manifest.variants come up empty
+//     while the same player's /api/sessions row had variants. The
+//     reflection-free `default` branch below catches it (and any
+//     future typed-slice form) by re-marshalling through JSON.
+//
+// Round-tripping through json.Marshal/Unmarshal is the cheapest
+// type-agnostic adapter that doesn't pull a reflection dependency
+// into the package, and doesn't force v2translate to import the
+// proxy's main package for the PlaylistInfo type.
 func manifestVariantsFromSession(s map[string]any) *[]oapigen.ManifestVariant {
 	raw, ok := s["manifest_variants"]
 	if !ok || raw == nil {
@@ -516,6 +534,22 @@ func manifestVariantsFromSession(s map[string]any) *[]oapigen.ManifestVariant {
 		}
 	case []map[string]any:
 		for _, m := range arr {
+			out = append(out, manifestVariantFromMap(m))
+		}
+	default:
+		// Typed slice — re-marshal through JSON so we read it as a
+		// generic []map[string]any regardless of the concrete type.
+		// Cost: one tiny marshal per /api/v2/players request (5–10
+		// rows × ~80 bytes); negligible.
+		buf, err := json.Marshal(raw)
+		if err != nil {
+			return nil
+		}
+		var maps []map[string]any
+		if err := json.Unmarshal(buf, &maps); err != nil {
+			return nil
+		}
+		for _, m := range maps {
 			out = append(out, manifestVariantFromMap(m))
 		}
 	}

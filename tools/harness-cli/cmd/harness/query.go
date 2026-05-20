@@ -28,56 +28,72 @@ func parsePlayID(s string) (uuid.UUID, error) {
 	return id, nil
 }
 
-const archiveUsage = `harness archive <subcommand>
+const queryUsage = `harness query <subcommand>     (alias: harness q)
 
-Subcommands (all read-only — forwarder /analytics/api/v2/*):
-  plays [--limit N] [--from ISO] [--to ISO] [--classification C]
-        [--player-id UUID] [--play-id UUID] [--attempt-id N]
-                                  list plays (one row per archived playback)
-  play <play_id>                  one play + _links
+Read-only queries against the forwarder /analytics/api/v2/* surface.
+The underlying ClickHouse tables (session_events, network_requests,
+control_events) hold both live and historical rows up to the 30-day
+TTL — so these subcommands work for "what just happened" as well as
+"what happened last week". For a live SSE multiplex, use
+'harness ts <player> --streams events,network,control'.
+
+Subcommands:
+  plays    [--limit N] [--from ISO] [--to ISO] [--classification C]
+           [--player-id UUID] [--play-id UUID] [--attempt-id N]
+           [--label-has L ...] [--label-not L ...]
+                                  list plays (one row per archived
+                                  playback; includes labels_total +
+                                  label_histogram)
+  play     <play_id>              one play + _links
   aggregate [--from --to --classification]
                                   aggregate stats across plays
-  events <play_id> [--limit]      player events (formerly: snapshots)
-  network <play_id> [--limit]
-  control <play_id> [--source S] [--event E] [--limit N]
+  events   <play_id> [--limit N] [--label-has L ...] [--label-not L ...]
+                                  player events (session_events rows)
+  network  <play_id> [--limit N] [--label-has L ...] [--label-not L ...]
+                                  per-request HAR rows
+  control  <play_id> [--source S] [--event E] [--mode M]
+           [--label-has L ...] [--label-not L ...] [--limit N]
                                   proxy / harness action log
-  snapshots <play_id> [--limit]   DEPRECATED alias of events
-  heatmap <play_id>
-  bundle <play_id> --out PATH     download play bundle ZIP
+  heatmap  <play_id>
+  bundle   <play_id> --out PATH   download play bundle ZIP
+
+Label filters (issue #474 follow-up):
+  --label-has X    row must contain label X (repeatable; AND).
+  --label-not X    row must NOT contain label X (repeatable; AND).
+  Combine for tristate queries, e.g.
+    --label-has warning=http_4xx --label-not warning=*fault_rule_enabled
+  --mode M         (control only) shortcut → --label-has info=*pattern_step_M
 
 Pass --json globally for raw responses suitable for piping.
 `
 
-func cmdArchive(client *api.Client, args []string, asJSON bool) error {
+func cmdQuery(client *api.Client, args []string, asJSON bool) error {
 	if len(args) == 0 {
-		return errors.New(archiveUsage)
+		return errors.New(queryUsage)
 	}
 	switch args[0] {
 	case "plays":
-		return cmdArchivePlays(client, args[1:], asJSON)
+		return cmdQueryPlays(client, args[1:], asJSON)
 	case "play":
-		return cmdArchivePlay(client, args[1:], asJSON)
+		return cmdQueryPlay(client, args[1:], asJSON)
 	case "aggregate":
-		return cmdArchiveAggregate(client, args[1:], asJSON)
-	case "events", "snapshots":
-		// `events` is the canonical name (issue #472); `snapshots` is
-		// kept as a deprecated alias for one release cycle so saved
-		// scripts and CI invocations keep working.
-		return cmdArchiveEvents(client, args[1:], asJSON)
+		return cmdQueryAggregate(client, args[1:], asJSON)
+	case "events":
+		return cmdQueryEvents(client, args[1:], asJSON)
 	case "network":
-		return cmdArchiveNetwork(client, args[1:], asJSON)
+		return cmdQueryNetwork(client, args[1:], asJSON)
 	// `markers` subcommand retired in issue #474 Milestone C. The
 	// session_markers table is gone; severity-tagged labels now ride on
 	// each session_events / network_requests row directly and discrete
 	// proxy/harness actions live on control_events.
 	case "control":
-		return cmdArchiveControl(client, args[1:], asJSON)
+		return cmdQueryControl(client, args[1:], asJSON)
 	case "heatmap":
-		return cmdArchiveHeatmap(client, args[1:], asJSON)
+		return cmdQueryHeatmap(client, args[1:], asJSON)
 	case "bundle":
-		return cmdArchiveBundle(client, args[1:], asJSON)
+		return cmdQueryBundle(client, args[1:], asJSON)
 	default:
-		return fmt.Errorf("unknown archive subcommand: %s\n\n%s", args[0], archiveUsage)
+		return fmt.Errorf("unknown query subcommand: %s\n\n%s", args[0], queryUsage)
 	}
 }
 
@@ -109,8 +125,8 @@ func parseLimit(fs *flag.FlagSet, args []string) (*int, error) {
 	return &v, nil
 }
 
-func cmdArchivePlays(client *api.Client, args []string, asJSON bool) error {
-	fs := flag.NewFlagSet("archive plays", flag.ContinueOnError)
+func cmdQueryPlays(client *api.Client, args []string, asJSON bool) error {
+	fs := flag.NewFlagSet("query plays", flag.ContinueOnError)
 	limit := fs.Int("limit", 0, "max plays")
 	classification := fs.String("classification", "", "interesting|other|favourite")
 	playerID := fs.String("player-id", "", "filter to one player_id (UUID)")
@@ -118,10 +134,21 @@ func cmdArchivePlays(client *api.Client, args []string, asJSON bool) error {
 	attemptID := fs.Int("attempt-id", 0, "filter to one attempt_id (1-based int) — plays containing this recovery attempt")
 	from := fs.String("from", "", "ISO 8601 lower bound (e.g. 2026-05-17T00:00:00Z)")
 	to := fs.String("to", "", "ISO 8601 upper bound (exclusive)")
+	var labelHas, labelNot arrayFlag
+	fs.Var(&labelHas, "label-has", "row must have this label (repeatable; AND semantics)")
+	fs.Var(&labelNot, "label-not", "row must NOT have this label (repeatable; AND semantics)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	params := &forwarder.GetApiV2PlaysParams{}
+	if len(labelHas) > 0 {
+		v := forwarder.LabelHasFilter(labelHas)
+		params.LabelHas = &v
+	}
+	if len(labelNot) > 0 {
+		v := forwarder.LabelNotFilter(labelNot)
+		params.LabelNot = &v
+	}
 	if *limit > 0 {
 		v := *limit
 		params.Limit = &v
@@ -169,9 +196,9 @@ func cmdArchivePlays(client *api.Client, args []string, asJSON bool) error {
 	return printOrJSON(body, asJSON)
 }
 
-func cmdArchivePlay(client *api.Client, args []string, asJSON bool) error {
+func cmdQueryPlay(client *api.Client, args []string, asJSON bool) error {
 	if len(args) != 1 {
-		return errors.New("usage: harness archive play <play_id>")
+		return errors.New("usage: harness query play <play_id>")
 	}
 	body, err := client.ArchivePlay(context.Background(), args[0])
 	if err != nil {
@@ -180,8 +207,8 @@ func cmdArchivePlay(client *api.Client, args []string, asJSON bool) error {
 	return printOrJSON(body, asJSON)
 }
 
-func cmdArchiveAggregate(client *api.Client, args []string, asJSON bool) error {
-	fs := flag.NewFlagSet("archive aggregate", flag.ContinueOnError)
+func cmdQueryAggregate(client *api.Client, args []string, asJSON bool) error {
+	fs := flag.NewFlagSet("query aggregate", flag.ContinueOnError)
 	classification := fs.String("classification", "", "interesting|other|favourite")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -198,44 +225,62 @@ func cmdArchiveAggregate(client *api.Client, args []string, asJSON bool) error {
 	return printOrJSON(body, asJSON)
 }
 
-func cmdArchiveEvents(client *api.Client, args []string, asJSON bool) error {
+func cmdQueryEvents(client *api.Client, args []string, asJSON bool) error {
 	if len(args) < 1 {
-		return errors.New("usage: harness archive events <play_id> [--limit N]")
+		return errors.New("usage: harness query events <play_id> [--limit N] [--label-has L ...] [--label-not L ...]")
 	}
 	playID := args[0]
-	fs := flag.NewFlagSet("archive events", flag.ContinueOnError)
-	limit, err := parseLimit(fs, args[1:])
-	if err != nil {
+	fs := flag.NewFlagSet("query events", flag.ContinueOnError)
+	limit := fs.Int("limit", 0, "max rows")
+	var labelHas, labelNot arrayFlag
+	fs.Var(&labelHas, "label-has", "row must have this label (repeatable; AND semantics)")
+	fs.Var(&labelNot, "label-not", "row must NOT have this label (repeatable; AND semantics)")
+	if err := fs.Parse(args[1:]); err != nil {
 		return err
 	}
-	params := &forwarder.GetApiV2SnapshotsParams{}
+	params := &forwarder.GetApiV2EventsParams{}
 	pid, err := parsePlayID(playID)
 	if err != nil {
 		return err
 	}
 	params.PlayId = &pid
-	if limit != nil {
-		params.Limit = limit
+	if *limit > 0 {
+		l := *limit
+		params.Limit = &l
 	}
-	body, err := client.ArchiveSnapshots(context.Background(), params)
+	if len(labelHas) > 0 {
+		v := forwarder.LabelHasFilter(labelHas)
+		params.LabelHas = &v
+	}
+	if len(labelNot) > 0 {
+		v := forwarder.LabelNotFilter(labelNot)
+		params.LabelNot = &v
+	}
+	body, err := client.ArchiveEvents(context.Background(), params)
 	if err != nil {
 		return err
 	}
 	return printOrJSON(body, asJSON)
 }
 
-// cmdArchiveControl wires the harness CLI to the new
+// cmdQueryControl wires the harness CLI to the new
 // /api/v2/control_events endpoint (issue #474 Milestone B). Mirrors
-// the existing `network` / `events` subcommands.
-func cmdArchiveControl(client *api.Client, args []string, asJSON bool) error {
+// the existing `network` / `events` subcommands. `--mode` is a
+// shortcut that expands to `--label-has info=*pattern_step_<mode>`
+// (the densest pattern-locality signal — one row per step advance).
+func cmdQueryControl(client *api.Client, args []string, asJSON bool) error {
 	if len(args) < 1 {
-		return errors.New("usage: harness archive control <play_id> [--source S] [--event E] [--limit N]")
+		return errors.New("usage: harness query control <play_id> [--source S] [--event E] [--mode M] [--label-has L ...] [--label-not L ...] [--limit N]")
 	}
 	playID := args[0]
-	fs := flag.NewFlagSet("archive control", flag.ContinueOnError)
+	fs := flag.NewFlagSet("query control", flag.ContinueOnError)
 	source := fs.String("source", "", "filter to one source (harness|proxy|auto)")
 	var events arrayFlag
 	fs.Var(&events, "event", "filter to event name (repeatable)")
+	mode := fs.String("mode", "", "shortcut: --label-has info=*pattern_step_<mode>")
+	var labelHas, labelNot arrayFlag
+	fs.Var(&labelHas, "label-has", "row must have this label (repeatable; AND semantics)")
+	fs.Var(&labelNot, "label-not", "row must NOT have this label (repeatable; AND semantics)")
 	limit := fs.Int("limit", 0, "max rows")
 	if err := fs.Parse(args[1:]); err != nil {
 		return err
@@ -257,9 +302,20 @@ func cmdArchiveControl(client *api.Client, args []string, asJSON bool) error {
 		ev := []string(events)
 		params.Event = &ev
 	}
+	if *mode != "" {
+		labelHas = append(labelHas, "info=*pattern_step_"+*mode)
+	}
 	if *limit > 0 {
 		l := *limit
 		params.Limit = &l
+	}
+	if len(labelHas) > 0 {
+		v := forwarder.LabelHasFilter(labelHas)
+		params.LabelHas = &v
+	}
+	if len(labelNot) > 0 {
+		v := forwarder.LabelNotFilter(labelNot)
+		params.LabelNot = &v
 	}
 	body, err := client.ArchiveControlEvents(context.Background(), params)
 	if err != nil {
@@ -283,14 +339,17 @@ func (a *arrayFlag) Set(v string) error {
 	return nil
 }
 
-func cmdArchiveNetwork(client *api.Client, args []string, asJSON bool) error {
+func cmdQueryNetwork(client *api.Client, args []string, asJSON bool) error {
 	if len(args) < 1 {
-		return errors.New("usage: harness archive network <play_id> [--limit N]")
+		return errors.New("usage: harness query network <play_id> [--limit N] [--label-has L ...] [--label-not L ...]")
 	}
 	playID := args[0]
-	fs := flag.NewFlagSet("archive network", flag.ContinueOnError)
-	limit, err := parseLimit(fs, args[1:])
-	if err != nil {
+	fs := flag.NewFlagSet("query network", flag.ContinueOnError)
+	limit := fs.Int("limit", 0, "max rows")
+	var labelHas, labelNot arrayFlag
+	fs.Var(&labelHas, "label-has", "row must have this label (repeatable; AND semantics)")
+	fs.Var(&labelNot, "label-not", "row must NOT have this label (repeatable; AND semantics)")
+	if err := fs.Parse(args[1:]); err != nil {
 		return err
 	}
 	params := &forwarder.GetApiV2NetworkRequestsParams{}
@@ -299,8 +358,17 @@ func cmdArchiveNetwork(client *api.Client, args []string, asJSON bool) error {
 		return err
 	}
 	params.PlayId = &pid
-	if limit != nil {
-		params.Limit = limit
+	if *limit > 0 {
+		l := *limit
+		params.Limit = &l
+	}
+	if len(labelHas) > 0 {
+		v := forwarder.LabelHasFilter(labelHas)
+		params.LabelHas = &v
+	}
+	if len(labelNot) > 0 {
+		v := forwarder.LabelNotFilter(labelNot)
+		params.LabelNot = &v
 	}
 	body, err := client.ArchiveNetworkRequests(context.Background(), params)
 	if err != nil {
@@ -309,9 +377,9 @@ func cmdArchiveNetwork(client *api.Client, args []string, asJSON bool) error {
 	return printOrJSON(body, asJSON)
 }
 
-func cmdArchiveHeatmap(client *api.Client, args []string, asJSON bool) error {
+func cmdQueryHeatmap(client *api.Client, args []string, asJSON bool) error {
 	if len(args) < 1 {
-		return errors.New("usage: harness archive heatmap <play_id>")
+		return errors.New("usage: harness query heatmap <play_id>")
 	}
 	playID := args[0]
 	params := &forwarder.GetApiV2SessionHeatmapParams{}
@@ -327,15 +395,15 @@ func cmdArchiveHeatmap(client *api.Client, args []string, asJSON bool) error {
 	return printOrJSON(body, asJSON)
 }
 
-func cmdArchiveBundle(client *api.Client, args []string, asJSON bool) error {
-	fs := flag.NewFlagSet("archive bundle", flag.ContinueOnError)
+func cmdQueryBundle(client *api.Client, args []string, asJSON bool) error {
+	fs := flag.NewFlagSet("query bundle", flag.ContinueOnError)
 	out := fs.String("out", "", "output path (required; bundle is a ZIP)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	rest := fs.Args()
 	if len(rest) != 1 || *out == "" {
-		return errors.New("usage: harness archive bundle <play_id> --out PATH")
+		return errors.New("usage: harness query bundle <play_id> --out PATH")
 	}
 	playID := rest[0]
 	body, err := client.ArchivePlayBundle(context.Background(), playID)

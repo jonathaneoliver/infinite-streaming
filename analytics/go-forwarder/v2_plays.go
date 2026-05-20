@@ -68,9 +68,13 @@ func v2PlaysListHandler(w http.ResponseWriter, r *http.Request, cfg config) {
 		writeProblemv2(w, http.StatusBadRequest, "bad request", err.Error())
 		return
 	}
+	// Tristate label filter at the play level — see label_filter.go.
+	// Applied as a post-join predicate against the labels_agg CTE
+	// inside queryPlaySummaries.
+	labelHas, labelNot := readLabelFilters(q)
 	limit := parseLimit(q.Get("limit"), 500, 5000)
 
-	rows, err := queryPlaySummaries(r.Context(), cfg, clauses, params, limit)
+	rows, err := queryPlaySummariesFiltered(r.Context(), cfg, clauses, params, labelHas, labelNot, limit)
 	if err != nil {
 		writeProblemv2(w, http.StatusBadGateway, "clickhouse query failed", err.Error())
 		return
@@ -97,7 +101,7 @@ func v2PlayDetailHandler(w http.ResponseWriter, r *http.Request, cfg config, pla
 		writeProblemv2(w, http.StatusBadRequest, "bad request", err.Error())
 		return
 	}
-	rows, err := queryPlaySummaries(r.Context(), cfg, clauses, params, 1)
+	rows, err := queryPlaySummariesFiltered(r.Context(), cfg, clauses, params, nil, nil, 1)
 	if err != nil {
 		writeProblemv2(w, http.StatusBadGateway, "clickhouse query failed", err.Error())
 		return
@@ -159,12 +163,40 @@ func buildPlaysFilter(playerID, playID, attemptID, from, to, classification stri
 	return clauses, params, nil
 }
 
+// queryPlaySummariesFiltered is the entry point with the post-join
+// label-presence filter (issue #474 follow-up). labelHas / labelNot
+// are AND-required against the per-play labels_distinct array; pass
+// nil/empty for the no-filter case. Delegates to queryPlaySummaries
+// after appending the appropriate post-join clauses.
+func queryPlaySummariesFiltered(
+	ctx context.Context, cfg config,
+	clauses []string, params map[string]string,
+	labelHas, labelNot []string,
+	limit int,
+) ([]map[string]any, error) {
+	// The base clauses filter the snapshot/network rows. Label
+	// filters are applied AFTER labels_agg builds the per-play
+	// histogram — see the final WHERE in queryPlaySummaries. We
+	// pass them through the params map keyed by `label_has_N` /
+	// `label_not_N` and emit a `postClauses` placeholder the SQL
+	// template substitutes.
+	var post []string
+	post, params = applyLabelFilters(post, params, "labels_agg.labels_distinct", labelHas, labelNot)
+	return queryPlaySummaries(ctx, cfg, clauses, params, post, limit)
+}
+
 // queryPlaySummaries runs the per-play aggregation. Reuses v1's SQL
 // shape (lagInFrame window for ABR-shift counting, left-join against
 // network_requests for the net_* counters) but groups by play_id only —
 // session_id rides along as `any(session_id)` for the dashboard's
 // stable row key.
-func queryPlaySummaries(ctx context.Context, cfg config, clauses []string, params map[string]string, limit int) ([]map[string]any, error) {
+//
+// `postClauses` (issue #474 follow-up) are AND'd into the final
+// SELECT's WHERE — they run AFTER the labels_agg JOIN so callers can
+// filter by label presence/absence (e.g. plays that have
+// `warning=http_4xx` but NOT `info=*fault_rule_enabled`). Pass nil
+// when no label filter is in play.
+func queryPlaySummaries(ctx context.Context, cfg config, clauses []string, params map[string]string, postClauses []string, limit int) ([]map[string]any, error) {
 	where := "WHERE " + strings.Join(clauses, " AND ")
 	// network_requests doesn't carry a classification column, so the
 	// net_counts CTE skips the classification clause if present. The
@@ -214,6 +246,39 @@ func queryPlaySummaries(ctx context.Context, cfg config, clauses []string, param
 		  %s
 		  GROUP BY play_id
 		),
+		-- Per-play label histogram across all three source tables
+		-- (issue #474 follow-up so harness CLI's archive plays
+		-- carries the same per-row labels surface the dashboard's
+		-- Sessions page shows via /analytics/api/sessions).
+		-- lowerUTF8 on play_id makes the JOIN survive the case-
+		-- sensitivity gap where some legacy rows landed with
+		-- uppercase play_ids.
+		labels_unioned AS (
+		  SELECT lowerUTF8(play_id) AS play_id, arrayJoin(labels) AS label
+		  FROM %s.%s
+		  %s
+		  UNION ALL
+		  SELECT lowerUTF8(play_id) AS play_id, arrayJoin(labels) AS label
+		  FROM %s.network_requests
+		  %s
+		  UNION ALL
+		  SELECT lowerUTF8(play_id) AS play_id, arrayJoin(labels) AS label
+		  FROM %s.control_events
+		  %s
+		),
+		labels_per_play AS (
+		  SELECT play_id, label, count() AS n
+		  FROM labels_unioned
+		  GROUP BY play_id, label
+		),
+		labels_agg AS (
+		  SELECT play_id,
+		         sum(n) AS labels_total,
+		         arrayDistinct(groupArray(label)) AS labels_distinct,
+		         groupArray((label, n)) AS label_pairs
+		  FROM labels_per_play
+		  GROUP BY play_id
+		),
 		agg AS (
 		  SELECT
 		    play_id,
@@ -260,7 +325,8 @@ func queryPlaySummaries(ctx context.Context, cfg config, clauses []string, param
 		  GROUP BY play_id
 		)
 		SELECT
-		  agg.play_id, agg.player_id,
+		  agg.play_id   AS play_id,
+		  agg.player_id AS player_id,
 		  agg.attempt_id_max AS attempt_id,
 		  agg.attempt_id_max AS attempt_count,
 		  agg.session_id, agg.group_id, agg.content_id,
@@ -278,15 +344,34 @@ func queryPlaySummaries(ctx context.Context, cfg config, clauses []string, param
 		  agg.classification,
 		  ifNull(net_counts.net_rows,   0) AS net_events,
 		  ifNull(net_counts.net_errors, 0) AS net_errors,
-		  ifNull(net_counts.net_faults, 0) AS net_faults
+		  ifNull(net_counts.net_faults, 0) AS net_faults,
+		  ifNull(labels_agg.labels_total,           0)  AS labels_total,
+		  ifNull(length(labels_agg.labels_distinct), 0) AS labels_distinct_count,
+		  ifNull(labels_agg.label_pairs,           []) AS label_histogram
 		FROM agg
 		LEFT JOIN net_counts ON agg.play_id = net_counts.play_id
+		LEFT JOIN labels_agg ON lowerUTF8(agg.play_id) = labels_agg.play_id
+		%s
 		ORDER BY agg.started_at DESC
 		LIMIT %d
 		FORMAT JSONEachRow`,
 		cfg.chDatabase, cfg.chTable, where,
 		cfg.chDatabase, netWhere,
+		cfg.chDatabase, cfg.chTable, where,
+		cfg.chDatabase, netWhere,
+		cfg.chDatabase, netWhere,
+		postWhere(postClauses),
 		limit,
 	)
 	return queryClickHouseRows(ctx, cfg, query, params)
+}
+
+// postWhere emits a `WHERE …` fragment (or empty string when no
+// post-join filters were requested) so the outer SELECT's
+// label-filter pushdown only renders when needed.
+func postWhere(post []string) string {
+	if len(post) == 0 {
+		return ""
+	}
+	return "WHERE " + strings.Join(post, " AND ")
 }

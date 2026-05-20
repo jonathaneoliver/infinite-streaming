@@ -692,11 +692,13 @@ func (c *Client) ArchivePlaysAggregate(ctx context.Context, params *forwarder.Ge
 	}, "GET /analytics/api/v2/plays/aggregate")
 }
 
-// ArchiveSnapshots returns the session_snapshots rows for one play.
-func (c *Client) ArchiveSnapshots(ctx context.Context, params *forwarder.GetApiV2SnapshotsParams) ([]byte, error) {
+// ArchiveEvents returns the session_events rows for one play.
+// (Renamed from ArchiveSnapshots in v2.0.0 — the pre-#472 alias
+// /api/v2/snapshots was retired.)
+func (c *Client) ArchiveEvents(ctx context.Context, params *forwarder.GetApiV2EventsParams) ([]byte, error) {
 	return c.archiveGET(func() (*http.Response, error) {
-		return c.forwarder.GetApiV2Snapshots(ctx, params)
-	}, "GET /analytics/api/v2/snapshots")
+		return c.forwarder.GetApiV2Events(ctx, params)
+	}, "GET /analytics/api/v2/events")
 }
 
 // ArchiveNetworkRequests returns the network_requests rows.

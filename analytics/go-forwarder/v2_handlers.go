@@ -53,16 +53,12 @@ func mountV2Handlers(mux *http.ServeMux, cfg config) {
 		})
 	})
 
-	// /api/v2/events is the canonical name as of issue #472 — the
+	// /api/v2/events is the canonical name as of #472 / v2.0.0. The
 	// underlying CH table session_snapshots was renamed to
-	// session_events. /api/v2/snapshots stays as a deprecated alias
-	// for one release cycle so harness CLI binaries from older
-	// release lines keep working.
+	// session_events; the route name follows. The old /api/v2/snapshots
+	// alias retired with v2.0.0.
 	mux.HandleFunc("/api/v2/events", func(w http.ResponseWriter, r *http.Request) {
-		v2SnapshotsHandler(w, r, cfg)
-	})
-	mux.HandleFunc("/api/v2/snapshots", func(w http.ResponseWriter, r *http.Request) {
-		v2SnapshotsHandler(w, r, cfg)
+		v2EventsHandler(w, r, cfg)
 	})
 
 	mux.HandleFunc("/api/v2/network_requests", func(w http.ResponseWriter, r *http.Request) {
@@ -117,6 +113,9 @@ func v2ControlEventsHandler(w http.ResponseWriter, r *http.Request, cfg config) 
 		params["to"] = to
 		where = append(where, "ts <= parseDateTime64BestEffortOrNull({to:String}, 3)")
 	}
+	// Tristate label filter — see label_filter.go.
+	labelHas, labelNot := readLabelFilters(q)
+	where, params = applyLabelFilters(where, params, "labels", labelHas, labelNot)
 	query := "SELECT ts, player_id, play_id, attempt_id, session_id, source, event, info, labels, event_fingerprint, classification " +
 		"FROM " + cfg.chDatabase + ".control_events WHERE " +
 		strings.Join(where, " AND ") +
@@ -131,7 +130,7 @@ func v2ControlEventsHandler(w http.ResponseWriter, r *http.Request, cfg config) 
 	_, _ = w.Write(body)
 }
 
-// v2SnapshotsHandler queries session_snapshots, parses session_json
+// v2EventsHandler queries session_events, parses session_json
 // back into the v1 map[string]any shape the proxy emitted, and runs it
 // through v2translate.PlayerFromSession to land on the same
 // PlayerRecord shape live SSE delivers. The row's ts/revision/play_id
@@ -151,7 +150,7 @@ func v2ControlEventsHandler(w http.ResponseWriter, r *http.Request, cfg config) 
 //   - `Accept: application/x-ndjson` — streams JSONEachRow lines
 //     directly so a 200K-snapshot window doesn't buffer in the
 //     forwarder before painting starts.
-func v2SnapshotsHandler(w http.ResponseWriter, r *http.Request, cfg config) {
+func v2EventsHandler(w http.ResponseWriter, r *http.Request, cfg config) {
 	playerID := r.URL.Query().Get("player_id")
 	sessionID := r.URL.Query().Get("session_id")
 	playID := r.URL.Query().Get("play_id")
@@ -209,6 +208,9 @@ func v2SnapshotsHandler(w http.ResponseWriter, r *http.Request, cfg config) {
 		clauses = append(clauses, "ts < parseDateTime64BestEffort({to:String})")
 		params["to"] = to
 	}
+	// Tristate label filter — see label_filter.go.
+	labelHas, labelNot := readLabelFilters(r.URL.Query())
+	clauses, params = applyLabelFilters(clauses, params, "labels", labelHas, labelNot)
 	if len(clauses) == 0 {
 		clauses = append(clauses, "ts >= now() - INTERVAL 1 HOUR")
 	}
@@ -357,6 +359,9 @@ func v2NetworkRequestsHandler(w http.ResponseWriter, r *http.Request, cfg config
 	if faultedOnly {
 		clauses = append(clauses, "faulted = 1")
 	}
+	// Tristate label filter — see label_filter.go.
+	labelHas, labelNot := readLabelFilters(r.URL.Query())
+	clauses, params = applyLabelFilters(clauses, params, "labels", labelHas, labelNot)
 	if len(clauses) == 0 {
 		clauses = append(clauses, "ts >= now() - INTERVAL 1 HOUR")
 	}
