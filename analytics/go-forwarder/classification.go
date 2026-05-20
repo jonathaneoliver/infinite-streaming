@@ -180,6 +180,14 @@ func reclassifyPlay(ctx context.Context, cfg config, playID string, force bool) 
 // setPlayClassification is the play-scoped twin of setClassification.
 // Same three-table ALTER UPDATE pattern but keyed on play_id only, so
 // the v2 PATCH endpoint doesn't have to round-trip the session_id.
+//
+// `SETTINGS mutations_sync = 2` makes the ALTER UPDATE wait for the
+// mutation to be applied before returning. Without this CH's default
+// (mutations_sync = 0) returns immediately and the SELECT v2PlayPatchHandler
+// runs right after still reads the pre-mutation classification — the PATCH
+// response then carries a stale value and the dashboard's optimistic flip
+// visibly reverts before the next 5s refetch reconciles. Per-play volumes
+// are tiny so the wait is sub-second in practice.
 func setPlayClassification(ctx context.Context, cfg config, playID, value string, force bool) error {
 	if playID == "" {
 		return errors.New("play id required")
@@ -189,13 +197,14 @@ func setPlayClassification(ctx context.Context, cfg config, playID, value string
 		whereSafe += " AND classification != 'favourite'"
 	}
 	params := map[string]string{"play": playID, "cls": value}
+	const syncSuffix = " SETTINGS mutations_sync = 2"
 	updates := []struct {
 		label string
 		query string
 	}{
-		{"session_events", fmt.Sprintf("ALTER TABLE %s.%s UPDATE classification = {cls:String} %s", cfg.chDatabase, cfg.chTable, whereSafe)},
-		{"network_requests", fmt.Sprintf("ALTER TABLE %s.network_requests UPDATE classification = {cls:String} %s", cfg.chDatabase, whereSafe)},
-		{"control_events", fmt.Sprintf("ALTER TABLE %s.control_events UPDATE classification = {cls:String} %s", cfg.chDatabase, whereSafe)},
+		{"session_events", fmt.Sprintf("ALTER TABLE %s.%s UPDATE classification = {cls:String} %s"+syncSuffix, cfg.chDatabase, cfg.chTable, whereSafe)},
+		{"network_requests", fmt.Sprintf("ALTER TABLE %s.network_requests UPDATE classification = {cls:String} %s"+syncSuffix, cfg.chDatabase, whereSafe)},
+		{"control_events", fmt.Sprintf("ALTER TABLE %s.control_events UPDATE classification = {cls:String} %s"+syncSuffix, cfg.chDatabase, whereSafe)},
 	}
 	for _, u := range updates {
 		if _, err := chQueryBytes(ctx, cfg, u.query, params); err != nil {
