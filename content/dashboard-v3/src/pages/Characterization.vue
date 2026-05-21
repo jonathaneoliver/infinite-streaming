@@ -61,8 +61,8 @@ interface CharRunRow {
   run_id: string;
   test_name: string;
   platform: string;
-  started_at: string;
-  ended_at: string;
+  started_at_str?: string;
+  ended_at_str?: string;
   player_id: string;
   play_ids: string[];
   passed: number;

@@ -258,13 +258,16 @@ func handleCharacterizationList(w http.ResponseWriter, r *http.Request, cfg conf
 	}
 	if v := strings.TrimSpace(q.Get("from")); v != "" {
 		if ts, err := time.Parse(time.RFC3339, v); err == nil {
-			conditions = append(conditions, "started_at >= {from:DateTime64(3)}")
+			// CH 24.8 won't compare DateTime64(3) to a {x:DateTime64(3)}
+			// parameter directly (returns ILLEGAL_TYPE_OF_ARGUMENT) —
+			// pass as String and cast inline via toDateTime64.
+			conditions = append(conditions, "started_at >= toDateTime64({from:String}, 3)")
 			params["from"] = ts.UTC().Format("2006-01-02 15:04:05.000")
 		}
 	}
 	if v := strings.TrimSpace(q.Get("to")); v != "" {
 		if ts, err := time.Parse(time.RFC3339, v); err == nil {
-			conditions = append(conditions, "started_at < {to:DateTime64(3)}")
+			conditions = append(conditions, "started_at < toDateTime64({to:String}, 3)")
 			params["to"] = ts.UTC().Format("2006-01-02 15:04:05.000")
 		}
 	}
@@ -283,8 +286,8 @@ func handleCharacterizationList(w http.ResponseWriter, r *http.Request, cfg conf
 		    run_id,
 		    test_name,
 		    platform,
-		    toString(started_at) AS started_at,
-		    toString(ended_at)   AS ended_at,
+		    toString(started_at) AS started_at_str,
+		    toString(ended_at)   AS ended_at_str,
 		    player_id,
 		    play_ids,
 		    passed,
@@ -324,8 +327,8 @@ func handleCharacterizationDetail(w http.ResponseWriter, r *http.Request, cfg co
 		    run_id,
 		    test_name,
 		    platform,
-		    toString(started_at) AS started_at,
-		    toString(ended_at)   AS ended_at,
+		    toString(started_at) AS started_at_str,
+		    toString(ended_at)   AS ended_at_str,
 		    player_id,
 		    play_ids,
 		    passed,
