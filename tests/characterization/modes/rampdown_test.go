@@ -3,6 +3,9 @@ package modes
 import (
 	"context"
 	"fmt"
+	"os"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -36,7 +39,37 @@ import (
 // dropOverlapsWithLowerVariant in sweep.go removes entries whose cap
 // falls inside the next-lower variant's [avg×0.5, avg×1.5] range so we
 // don't test the same operational territory twice.
-var rampdownMargins = []int{50, 25, 10, 5, 0, -5, -10, -25, -50}
+//
+// Override with CHAR_RAMPDOWN_MARGINS=50,25,10,5,0 (csv) to run a
+// shorter sweep for fast iteration — e.g. dropping the negative
+// margins cuts the run roughly in half and avoids the deliberate
+// stall-floor exploration on the bottom variant.
+var rampdownMargins = parseRampdownMargins([]int{50, 25, 10, 5, 0, -5, -10, -25, -50})
+
+func parseRampdownMargins(defaults []int) []int {
+	raw := strings.TrimSpace(os.Getenv("CHAR_RAMPDOWN_MARGINS"))
+	if raw == "" {
+		return defaults
+	}
+	var out []int
+	for _, p := range strings.Split(raw, ",") {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		n, err := strconv.Atoi(p)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "CHAR_RAMPDOWN_MARGINS: invalid integer %q — ignoring override, using defaults\n", p)
+			return defaults
+		}
+		out = append(out, n)
+	}
+	if len(out) == 0 {
+		return defaults
+	}
+	fmt.Fprintf(os.Stderr, "CHAR_RAMPDOWN_MARGINS override active: %v\n", out)
+	return out
+}
 
 const (
 	rampdownMaxHold         = 60 * time.Second

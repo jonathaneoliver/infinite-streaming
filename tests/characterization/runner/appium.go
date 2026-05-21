@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
@@ -272,6 +273,74 @@ func (a *AppiumLauncher) Close() error {
 		}
 	}
 	return firstErr
+}
+
+// readAccessibilityValue finds an element by its accessibility id and
+// returns its `value` attribute. Used to read out the persistent
+// player_id from the iOS app's home screen BEFORE tapping into
+// playback — see ReadPlayerID below.
+func (a *AppiumLauncher) readAccessibilityValue(ctx context.Context, sessID, id string) (string, error) {
+	findBody := map[string]any{"using": "accessibility id", "value": id}
+	raw, err := a.doRequest(ctx, "POST", "/session/"+sessID+"/element", findBody)
+	if err != nil {
+		return "", err
+	}
+	var findResp struct {
+		Value map[string]string `json:"value"`
+	}
+	if err := json.Unmarshal(raw, &findResp); err != nil {
+		return "", fmt.Errorf("decode find element %q: %w", id, err)
+	}
+	var elementID string
+	for _, v := range findResp.Value {
+		elementID = v
+		break
+	}
+	if elementID == "" {
+		return "", fmt.Errorf("find element %q returned no id", id)
+	}
+	raw, err = a.doRequest(ctx, "GET",
+		fmt.Sprintf("/session/%s/element/%s/attribute/value", sessID, elementID), nil)
+	if err != nil {
+		return "", fmt.Errorf("read value %q: %w", id, err)
+	}
+	var valResp struct {
+		Value string `json:"value"`
+	}
+	if err := json.Unmarshal(raw, &valResp); err != nil {
+		return "", fmt.Errorf("decode value %q: %w", id, err)
+	}
+	return strings.TrimSpace(valResp.Value), nil
+}
+
+// ReadPlayerID reads the iOS app's persistent player_id off the
+// `home-player-id` accessibility node on the Home screen. The app
+// generates a UUID on first launch and persists it in UserDefaults,
+// then exposes it as a hidden AX node so test code can apply pre-
+// playback shape caps to the right player_id and avoid the cold-
+// start variant-pick race that wedges rampup step 1. See plan:
+// ~/.claude/plans/cold-start-shape-cap-race-fix.md.
+//
+// Returns an error if no Appium session is active for the device, or
+// the AX node isn't present (app build predates the iOS-side change).
+func (a *AppiumLauncher) ReadPlayerID(ctx context.Context, sess *Session) (string, error) {
+	if sess == nil {
+		return "", errors.New("ReadPlayerID: nil session")
+	}
+	a.mu.Lock()
+	sessID := a.sessions[sess.Device.UDID]
+	a.mu.Unlock()
+	if sessID == "" {
+		return "", errors.New("ReadPlayerID: no active appium session for device")
+	}
+	pid, err := a.readAccessibilityValue(ctx, sessID, "home-player-id")
+	if err != nil {
+		return "", err
+	}
+	if pid == "" {
+		return "", errors.New("ReadPlayerID: home-player-id node was empty")
+	}
+	return pid, nil
 }
 
 // tapByAccessibilityID finds an element by its accessibility identifier

@@ -39,6 +39,20 @@ struct HomeScreen: View {
         }
         .background(Tokens.bg.ignoresSafeArea())
         .onAppear { vm.fetchContentList() }
+        // Hidden accessibility node carrying the persistent player_id
+        // so the characterization test framework can read it via
+        // Appium BEFORE tapping Continue Watching. With the id in hand,
+        // the test applies the shape cap to the right player_id pre-
+        // playback, eliminating the cold-start variant-pick race that
+        // wedged rampup step 1 on first-launch devices. See plan:
+        // ~/.claude/plans/cold-start-shape-cap-race-fix.md.
+        .overlay(alignment: .topLeading) {
+            Text(vm.playerId)
+                .frame(width: 0, height: 0)
+                .opacity(0)
+                .accessibilityIdentifier("home-player-id")
+                .accessibilityValue(vm.playerId)
+        }
     }
 
     /// Top-of-screen header: brand label + serif title on the left,

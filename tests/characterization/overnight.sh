@@ -37,7 +37,7 @@ case $1 in
 esac
 PLATFORM=$1
 
-REPO_ROOT=$(cd "$(dirname "$0")/../../.." && pwd)
+REPO_ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 CHAR_ROOT=$REPO_ROOT/tests/characterization
 RUN_ID=$(date -u +%Y%m%dT%H%M%SZ)
 RUN_DIR=$CHAR_ROOT/artifacts/runs/${RUN_ID}-${PLATFORM}

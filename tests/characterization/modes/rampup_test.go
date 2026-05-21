@@ -157,38 +157,37 @@ func runRampup(t *testing.T, p runner.Platform) {
 
 	case conservativeStart:
 		// Cold-start at a fixed-conservative cap so the player picks the
-		// bottom variant from segment 1. After heartbeat we'll read the
-		// real manifest and adjust to the actual floor.
+		// bottom variant from segment 1. The iOS app surfaces its
+		// persistent player_id on the Home screen via an accessibility
+		// node (home-player-id) — we read it BEFORE tapping Continue
+		// Watching and apply the cap pre-playback. That closes the
+		// race that wedged step 1 under the old WaitForBind-then-apply
+		// flow. See plan: ~/.claude/plans/cold-start-shape-cap-race-fix.md.
 		setupCtx, setupCancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer setupCancel()
 		s, err := appium.LaunchToHome(setupCtx, *picked)
 		if err != nil {
 			t.Fatalf("LaunchToHome: %v", err)
 		}
-		t.Logf("parked on home; bootstrap unavailable — applying conservative %.3f Mbps cap before playback (will adjust to real floor once manifest is fetched)", conservativeWarmupCap)
-		// At this point we don't have a player_id yet — apply via the
-		// session's pre-heartbeat scope. We DO need a player_id for
-		// ApplyRate to work, so resume playback first under whatever
-		// the current shaper says (uncapped if first-ever launch on
-		// this session), then immediately apply the conservative cap.
-		// The brief window before the cap engages is OK because the
-		// player will be choosing its initial variant from cold and
-		// will downshift quickly once the cap bites.
-		if err := appium.ResumePlayback(setupCtx, *picked); err != nil {
-			t.Fatalf("ResumePlayback: %v", err)
+		pid, err := appium.ReadPlayerID(setupCtx, s)
+		if err != nil {
+			t.Fatalf("ReadPlayerID: %v (iOS app may predate the home-player-id AX node; rebuild app in Xcode)", err)
 		}
-		// In conservativeStart we don't have a pre-launch player record,
-		// so we can't pre-bind sess.PlayerID. Use WaitForBind which
-		// polls the players list and binds when the device appears.
-		if err := appium.WaitForBind(setupCtx, s); err != nil {
-			t.Fatalf("WaitForBind: %v", err)
-		}
-		// Now we have a player_id — clamp to the conservative cap
-		// ASAP so the player downshifts to the bottom variant.
+		s.PlayerID = pid
+		t.Logf("parked on home — discovered player_id %s via AX node", pid)
 		if err := s.ApplyRate(setupCtx, conservativeWarmupCap); err != nil {
 			t.Fatalf("apply conservative cap: %v", err)
 		}
+		t.Logf("applied conservative %.3f Mbps cap BEFORE resume playback", conservativeWarmupCap)
+		// Settle gap so the kernel tc/nftables rule is installed before
+		// the first manifest fetch — matches the coldStart branch.
 		time.Sleep(2 * time.Second)
+		if err := appium.ResumePlayback(setupCtx, *picked); err != nil {
+			t.Fatalf("ResumePlayback: %v", err)
+		}
+		if err := s.WaitForHeartbeat(setupCtx, 90*time.Second); err != nil {
+			t.Fatalf("WaitForHeartbeat: %v", err)
+		}
 		sess = s
 		t.Cleanup(func() {
 			cleanCtx, c := context.WithTimeout(context.Background(), 10*time.Second)
