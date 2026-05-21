@@ -3498,10 +3498,18 @@ func (a *App) emitControlEventsForDiff(sessionID string, before, after map[strin
 		a.emitControlEventForSession(sessionID, "harness", event, info)
 	}
 
-	// Labels — any change. Carry new label set so the forwarder can
-	// surface KV pairs as queryable label entries (issue #482 follow-up).
-	if changed("labels") {
-		emit("label_changed", labelsInfoJSON(after["labels"]))
+	// Labels — any change to the v1 `labels` slot (legacy direct PATCH)
+	// or the v2 `_v2_labels` slot (PATCH /api/v2/players Merge Patch
+	// writes here, see internal/v2/server/handlers_mutate.go § applyLabelsPatch).
+	// Both surface as `info=<key>_<value>` row labels via the forwarder's
+	// kvLabelsFromInfo helper (issue #487 — fixes the v2 path which was
+	// silently dropping labels because the diff check only looked at v1).
+	if changed("labels") || changed("_v2_labels") {
+		payload := after["_v2_labels"]
+		if payload == nil {
+			payload = after["labels"]
+		}
+		emit("label_changed", labelsInfoJSON(payload))
 	}
 	// Content selection.
 	if changed("content_id") || changed("manifest_url") {
