@@ -82,6 +82,7 @@ const sections: NavSection[] = [
       { id: 'test-playback', icon: '🧭', text: 'Testing Playback',href: '/dashboard/v3/testing-session.html?nav=1' },
       { id: 'testing',       icon: '🧪', text: 'Testing Monitor', href: '/dashboard/v3/testing.html' },
       { id: 'sessions',      icon: '⏪', text: 'Sessions',         href: '/dashboard/v3/sessions.html' },
+      { id: 'characterization', icon: '📈', text: 'Automated Testing', href: '/dashboard/v3/characterization.html' },
       { id: 'quartet',       icon: '🎬', text: 'Quartet',          href: '/dashboard/quartet.html', alpha: true },
       { id: 'segment-duration', icon: '⏱️', text: 'Live Offset',   href: '/dashboard/segment-duration-comparison.html', alpha: true },
     ],
