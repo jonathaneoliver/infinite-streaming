@@ -3,6 +3,8 @@ package modes
 import (
 	"context"
 	"fmt"
+	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -11,38 +13,35 @@ import (
 
 // Rampup — variant-aware ascending sweep.
 //
-// Mirror image of Rampdown. Start at a cap just above the *bottom*
-// variant's playable rate (its AVERAGE-BANDWIDTH × 1.10, the same +10%
-// margin row Rampdown lands on at its tail) and ramp UP through every
-// (variant, margin) step in ascending order, ending at top variant ×
-// 1.50.
+// Bootstrap (Option A): before any kill+launch, read the current
+// player record's manifest variants from the harness. Compute the
+// floor cap from those variants. THEN (for Appium) kill+launch the
+// app, park on home, apply the floor cap, resume playback. The player
+// starts cold under throttle — no cliff from "unconstrained warmup"
+// to "constrained sweep". For non-Appium launchers we fall back to
+// the legacy warmup-then-sweep path which has a brief cliff at step 1.
 //
-// Why start at bottom+10% (not at bottom -5% / 0 / +5% like Rampdown):
-// those lower caps deliberately stall the bottom variant, which is
-// useful for "how low can we go" characterization. Rampup is the
-// opposite question — "given a starting throughput that's barely
-// enough for the lowest variant, can the player walk UP the ladder
-// as the cap rises?" Stalling at the start would just delay the data
-// we care about.
-//
-// Pass condition: same as Rampdown — every variant visited, no
-// stalls/depletion on non-bottom variants. Headline metric becomes
-// the FIRST cap that the player started visiting a higher variant
-// (vs. Rampdown's "lowest sustainable cap"). The framework reports
-// the same Summary fields; reading them inverts naturally.
+// Why floor + 0% on bottom variant (was +10%): with TCP overhead
+// baked separately into the cap formula (runner.TCPOverheadPct=7),
+// margin=0 already produces "variant_avg × 1.07" — the
+// just-barely-sustainable rate. Lower margins (−5, −10, …, −50) are
+// rampdown territory; higher (+5, +10, +25, +50) are the climb.
 
-// Margins reuse the Rampdown set; the only difference is the order.
-// We filter out caps below the +10% floor for the bottom variant
-// (those are deliberate-stall territory, not interesting for rampup).
 var rampupMargins = rampdownMargins
 
-// rampupBottomMargin is the minimum margin we test on the bottom
-// variant. 0 means "start at the variant's AVG × TCP-overhead-only
-// cap" — i.e. the just-barely-sustainable rate. Below this we'd be
-// testing "how badly can the bottom variant stall" — that's Rampdown's
-// job. Higher variants get the full margin range (including negatives,
-// which test "approaching the variant from below").
-const rampupBottomMargin = 0
+// rampup deliberately skips the bottom variant — testing caps at
+// the bottom variant's range is rampdown's territory ("how low can we
+// go"). Rampup tests "given a constrained start, when does the player
+// climb?" — the floor for that is the second-from-bottom variant's
+// lowest surviving cap (after the dropOverlapsWithLowerVariant prune).
+//
+// conservativeWarmupCap is the rate cap we apply when bootstrap can't
+// find a previous heartbeating player (typically right after a wedge
+// purged the proxy's player record). 1.5 Mbps is well above any
+// realistic 360p variant rate and below most 540p rates — the player
+// will pick the bottom variant on cold start, fetch the manifest, then
+// we adjust to the real floor before the sweep.
+const conservativeWarmupCap = 1.5
 
 func TestRampupIPadSim(t *testing.T)   { runRampup(t, runner.PlatformIPadSim) }
 func TestRampupIPhone(t *testing.T)    { runRampup(t, runner.PlatformIPhone) }
@@ -51,8 +50,162 @@ func TestRampupAndroidTV(t *testing.T) { runRampup(t, runner.PlatformAndroidTV) 
 func TestRampupWeb(t *testing.T)       { runRampup(t, runner.PlatformWeb) }
 
 func runRampup(t *testing.T, p runner.Platform) {
-	sess := OpenSession(t, p)
+	// --- pick launcher + device ----------------------------------
+	mode, launcher, err := runner.PickMode()
+	if err != nil {
+		t.Skipf("PickMode: %v", err)
+	}
+	t.Logf("launch mode: %s", mode)
 
+	discCtx, discCancel := context.WithTimeout(context.Background(), 90*time.Second)
+	devs, err := launcher.Discover(discCtx)
+	discCancel()
+	if err != nil {
+		t.Fatalf("discover: %v", err)
+	}
+	wantUDID := strings.TrimSpace(os.Getenv("CHARACTERIZATION_DEVICE_UDID"))
+	var picked *runner.Device
+	for i := range devs {
+		if devs[i].Platform != p {
+			continue
+		}
+		if wantUDID != "" && !strings.EqualFold(devs[i].UDID, wantUDID) {
+			continue
+		}
+		picked = &devs[i]
+		break
+	}
+	if picked == nil {
+		t.Skipf("no %s device discovered (mode=%s)", p, mode)
+	}
+	t.Logf("picked device: %s", picked)
+
+	// --- bootstrap: read manifest BEFORE kill+launch -------------
+	bootCtx, bootCancel := context.WithTimeout(context.Background(), 15*time.Second)
+	preRec, preErr := runner.PreLaunchInfo(bootCtx, *picked)
+	bootCancel()
+
+	var preDesc []runner.VariantRate
+	var preFloor float64
+	if preErr != nil {
+		t.Logf("pre-launch info: %v (cold-start unavailable; will use warmup-then-adjust path)", preErr)
+	} else if preRec.CurrentPlay == nil || len(preRec.CurrentPlay.Manifest.Variants) == 0 {
+		t.Logf("pre-launch: no current play / no variants yet (cold-start unavailable)")
+	} else {
+		preDesc, err = runner.VariantSweep(preRec, rampupMargins)
+		if err != nil {
+			t.Logf("pre-launch VariantSweep: %v (cold-start unavailable)", err)
+		} else {
+			preDesc = dropOverlapsWithLowerVariant(preDesc)
+			preFloor = rampupFloorFrom(preDesc)
+			t.Logf("bootstrap: pre-launch floor = %.3f Mbps (from current player's manifest)", preFloor)
+		}
+	}
+
+	// --- open session ----------------------------------------------
+	// Three paths:
+	//   (1) Appium + bootstrap succeeded → cold-start at the true floor
+	//       (`preFloor`). Most accurate; matches the operational
+	//       intent of "player launches under the constraint".
+	//   (2) Appium + bootstrap failed → cold-start at a fixed
+	//       conservative cap (1.5 Mbps), then read the real manifest
+	//       once the player is running, then adjust to the true floor
+	//       before the sweep. No cliff; player picks the bottom variant
+	//       on cold start. Recovers from "previous wedge purged the
+	//       player record".
+	//   (3) Non-Appium → fall back to OpenSession + 100 Mbps warmup.
+	//       Cliff at sweep step 1 is inevitable; logged loudly.
+	appium, isAppium := launcher.(*runner.AppiumLauncher)
+	coldStart := isAppium && preFloor > 0
+	conservativeStart := isAppium && !coldStart
+
+	var sess *runner.Session
+	switch {
+	case coldStart:
+		setupCtx, setupCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer setupCancel()
+		s, err := appium.LaunchToHome(setupCtx, *picked)
+		if err != nil {
+			t.Fatalf("LaunchToHome: %v", err)
+		}
+		s.PlayerID = preRec.ID
+		t.Logf("parked on home; applying floor %.3f Mbps before resuming playback", preFloor)
+		if err := s.ApplyRate(setupCtx, preFloor); err != nil {
+			t.Fatalf("apply floor pre-resume: %v", err)
+		}
+		// Settle gap: PATCH /shape returns 200 OK once the proxy accepts
+		// the change, but tc rule installation happens slightly later.
+		// Without this, ResumePlayback can fire before tc has engaged.
+		time.Sleep(2 * time.Second)
+		if err := appium.ResumePlayback(setupCtx, *picked); err != nil {
+			t.Fatalf("ResumePlayback: %v", err)
+		}
+		if err := s.WaitForHeartbeat(setupCtx, 90*time.Second); err != nil {
+			t.Fatalf("WaitForHeartbeat: %v", err)
+		}
+		sess = s
+		t.Cleanup(func() {
+			cleanCtx, c := context.WithTimeout(context.Background(), 10*time.Second)
+			defer c()
+			if err := sess.ClearShape(cleanCtx); err != nil {
+				t.Logf("clear shape: %v", err)
+			}
+			if err := launcher.Close(); err != nil {
+				t.Logf("close launcher: %v", err)
+			}
+		})
+
+	case conservativeStart:
+		// Cold-start at a fixed-conservative cap so the player picks the
+		// bottom variant from segment 1. After heartbeat we'll read the
+		// real manifest and adjust to the actual floor.
+		setupCtx, setupCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer setupCancel()
+		s, err := appium.LaunchToHome(setupCtx, *picked)
+		if err != nil {
+			t.Fatalf("LaunchToHome: %v", err)
+		}
+		t.Logf("parked on home; bootstrap unavailable — applying conservative %.3f Mbps cap before playback (will adjust to real floor once manifest is fetched)", conservativeWarmupCap)
+		// At this point we don't have a player_id yet — apply via the
+		// session's pre-heartbeat scope. We DO need a player_id for
+		// ApplyRate to work, so resume playback first under whatever
+		// the current shaper says (uncapped if first-ever launch on
+		// this session), then immediately apply the conservative cap.
+		// The brief window before the cap engages is OK because the
+		// player will be choosing its initial variant from cold and
+		// will downshift quickly once the cap bites.
+		if err := appium.ResumePlayback(setupCtx, *picked); err != nil {
+			t.Fatalf("ResumePlayback: %v", err)
+		}
+		if err := s.WaitForHeartbeat(setupCtx, 90*time.Second); err != nil {
+			t.Fatalf("WaitForHeartbeat: %v", err)
+		}
+		// Now we have a player_id — clamp to the conservative cap
+		// ASAP so the player downshifts to the bottom variant.
+		if err := s.ApplyRate(setupCtx, conservativeWarmupCap); err != nil {
+			t.Fatalf("apply conservative cap: %v", err)
+		}
+		time.Sleep(2 * time.Second)
+		sess = s
+		t.Cleanup(func() {
+			cleanCtx, c := context.WithTimeout(context.Background(), 10*time.Second)
+			defer c()
+			if err := sess.ClearShape(cleanCtx); err != nil {
+				t.Logf("clear shape: %v", err)
+			}
+			if err := launcher.Close(); err != nil {
+				t.Logf("close launcher: %v", err)
+			}
+		})
+
+	default:
+		// Non-Appium fallback: OpenSession + legacy 100 Mbps warmup,
+		// step 1 will cliff.
+		t.Logf("cold-start unavailable (non-Appium launcher) — using legacy warmup path (rampup step 1 will cliff)")
+		sess = OpenSession(t, p)
+	}
+
+	// --- labels + play_id ---------------------------------------
 	runID := time.Now().UTC().Format("20060102T150405Z")
 	startLabels := map[string]string{
 		"test":     "rampup",
@@ -76,18 +229,30 @@ func runRampup(t *testing.T, p runner.Platform) {
 	ctx, cancel := context.WithTimeout(context.Background(), overall)
 	defer cancel()
 
-	// Warmup is still high — the test EVENTUALLY needs to know the
-	// ladder, and the warmup cap of 100 Mbps lets the player fetch
-	// the full manifest. We could start the actual sweep low, but
-	// the warmup itself stays loose to ensure manifest discovery.
-	if err := sess.ApplyRate(ctx, rampdownWarmupMbps); err != nil {
-		t.Fatalf("warmup apply %d Mbps: %v", rampdownWarmupMbps, err)
+	// --- variant ladder (post-launch — definitive) --------------
+	// coldStart: we already have preDesc; re-read for confirmation.
+	// conservativeStart: player just came up under 1.5 Mbps cap, manifest
+	//                    is being fetched; brief wait then read.
+	// default (non-Appium): legacy 100 Mbps warmup so manifest fetches.
+	switch {
+	case conservativeStart:
+		// Player is running under the conservative cap. Give the
+		// manifest a moment to land in the player's session record.
+		t.Logf("waiting %s for manifest to populate under conservative cap", rampdownWarmupHold)
+		if err := holdContext(ctx, rampdownWarmupHold); err != nil {
+			t.Fatalf("manifest-fetch hold: %v", err)
+		}
+	case !coldStart:
+		// Legacy fallback (non-Appium): 100 Mbps warmup so the player
+		// fetches the manifest fresh. Step 1 will cliff afterward.
+		if err := sess.ApplyRate(ctx, rampdownWarmupMbps); err != nil {
+			t.Fatalf("warmup apply: %v", err)
+		}
+		t.Logf("warmup: %d Mbps × %s", rampdownWarmupMbps, rampdownWarmupHold)
+		if err := holdContext(ctx, rampdownWarmupHold); err != nil {
+			t.Fatalf("warmup hold: %v", err)
+		}
 	}
-	t.Logf("warmup: %d Mbps × %s", rampdownWarmupMbps, rampdownWarmupHold)
-	if err := holdContext(ctx, rampdownWarmupHold); err != nil {
-		t.Fatalf("warmup hold: %v", err)
-	}
-
 	rec, err := sess.PlayerState(ctx)
 	if err != nil {
 		t.Fatalf("PlayerState: %v", err)
@@ -97,40 +262,33 @@ func runRampup(t *testing.T, p runner.Platform) {
 		t.Fatalf("VariantSweep: %v", err)
 	}
 	desc = dropOverlapsWithLowerVariant(desc)
-
-	// Find the bottom variant (last in desc). Filter by *variant identity*
-	// rather than recomputing a numeric floor — recomputing produces a
-	// value slightly above CapMbps thanks to float-precision differences
-	// between (raw_avg × margin/100 / 1e6) and the same quantity rounded
-	// to 3 dp at VariantRate-build time. That ">=" comparison would drop
-	// the boundary entry (bottom variant +10%) — exactly the row we want
-	// to start at.
 	if len(desc) == 0 {
 		t.Fatal("VariantSweep returned no entries")
 	}
-	bottomRes := desc[len(desc)-1].Resolution
 
-	// Ascending sweep: keep all non-bottom-variant entries; for the
-	// bottom variant keep only entries with margin ≥ rampupBottomMargin.
-	// Then reverse to ascending order.
+	// --- ascending step list ------------------------------------
+	// Skip the bottom variant entirely — its cap range is rampdown's
+	// territory. Rampup starts at the second-from-bottom variant's
+	// lowest surviving margin.
+	bottomRes := desc[len(desc)-1].Resolution
 	asc := make([]runner.VariantRate, 0, len(desc))
 	for _, v := range desc {
-		if v.Resolution == bottomRes && v.MarginPct < rampupBottomMargin {
+		if v.Resolution == bottomRes {
 			continue
 		}
 		asc = append(asc, v)
 	}
 	floor := 0.0
 	if len(asc) > 0 {
-		floor = asc[len(asc)-1].CapMbps // last in desc-order = lowest cap = the floor
+		floor = asc[len(asc)-1].CapMbps // last in desc-order = lowest = floor
 	}
-	// reverse in place
+	// reverse to ascending
 	for i, j := 0, len(asc)-1; i < j; i, j = i+1, j-1 {
 		asc[i], asc[j] = asc[j], asc[i]
 	}
 
-	t.Logf("sweep plan: %d steps ascending from %.3f Mbps (bottom variant + %d%%)",
-		len(asc), floor, rampupBottomMargin)
+	t.Logf("sweep plan: %d steps ascending from %.3f Mbps (skipping bottom variant — rampdown's territory)",
+		len(asc), floor)
 	for i, v := range asc {
 		t.Logf("  [%2d] %-10s  %+3d%%  cap=%6.3f Mbps   avg=%.3f peak=%.3f Mbps  (source=%s)",
 			i, v.Resolution, v.MarginPct, v.CapMbps,
@@ -145,7 +303,7 @@ func runRampup(t *testing.T, p runner.Platform) {
 
 	report := RunVariantSweep(ctx, t, sess, "rampup", steps, time.Second,
 		rampdownMinHold, rampdownMaxHold, rampdownEarlyExitWindow, rampdownEarlyExitTol)
-	report.Variants = unionRungs(desc) // same ladder, descending — Finalize is order-agnostic
+	report.Variants = unionRungs(desc)
 	if playID != "" {
 		report.PlayIDs = []string{playID}
 	}
@@ -186,7 +344,6 @@ func runRampup(t *testing.T, p runner.Platform) {
 		t.Logf("label play (end): %v", err)
 	}
 
-	// Pass criteria — identical to Rampdown.
 	if report.Summary.SampleCount == 0 {
 		t.Fatal("no samples collected")
 	}
@@ -201,14 +358,14 @@ func runRampup(t *testing.T, p runner.Platform) {
 	}
 	t.Logf("variants visited (samples per rung): %v", report.Summary.VariantSampleCounts)
 
-	bottomRes := ""
+	bottomReportRes := ""
 	if n := len(report.Variants); n > 0 {
-		bottomRes = report.Variants[n-1].Resolution
+		bottomReportRes = report.Variants[n-1].Resolution
 	}
 	upperFailures := []string{}
 	for i := range report.Steps {
 		st := &report.Steps[i]
-		if st.Variant == nil || st.Variant.Resolution == bottomRes {
+		if st.Variant == nil || st.Variant.Resolution == bottomReportRes {
 			continue
 		}
 		if st.ExitReason == "skipped-player-wedged" {
@@ -227,4 +384,27 @@ func runRampup(t *testing.T, p runner.Platform) {
 		t.Errorf("player stalled / depleted buffer at %d non-bottom variant(s):\n  %s",
 			len(upperFailures), joinLines(upperFailures))
 	}
+
+	// Quiet the linter — preDesc is only used to compute preFloor
+	// above when bootstrap succeeds.
+	_ = preDesc
+}
+
+// rampupFloorFrom returns the lowest cap from a desc-order
+// VariantSweep, skipping the bottom variant entirely (its cap range is
+// rampdown's territory). Floor = the second-from-bottom variant's
+// lowest surviving cap.
+func rampupFloorFrom(desc []runner.VariantRate) float64 {
+	if len(desc) == 0 {
+		return 0
+	}
+	bottomRes := desc[len(desc)-1].Resolution
+	floor := 0.0
+	for _, v := range desc {
+		if v.Resolution == bottomRes {
+			continue // skip bottom variant entirely
+		}
+		floor = v.CapMbps // sweep is desc-sorted; last surviving = lowest
+	}
+	return floor
 }

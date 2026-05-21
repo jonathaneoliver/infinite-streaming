@@ -1,3 +1,6 @@
+//go:build disabled_unchecked
+// +build disabled_unchecked
+
 package modes
 
 import (

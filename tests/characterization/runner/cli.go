@@ -201,6 +201,7 @@ type devicectlListResult struct {
 			} `json:"deviceProperties"`
 			HardwareProperties struct {
 				Platform string `json:"platform"`
+				Udid     string `json:"udid"` // hardware UDID — what Appium's xcuitest driver wants
 			} `json:"hardwareProperties"`
 			ConnectionProperties struct {
 				PairingState string `json:"pairingState"`
@@ -228,9 +229,19 @@ func discoverDevicectl(ctx context.Context) ([]Device, error) {
 		if platform == "" {
 			continue
 		}
+		// Prefer the hardware UDID (which Appium's xcuitest driver
+		// requires) over the CoreDevice identifier. devicectl accepts
+		// either — its --device flag takes any of uuid|ecid|serial_number
+		// |udid|name|dns_name — so using the hardware UDID keeps both
+		// CLI launcher and Appium launcher happy. For simulators the
+		// two are the same; for real iOS/tvOS they differ.
+		udid := d.HardwareProperties.Udid
+		if udid == "" {
+			udid = d.Identifier
+		}
 		out = append(out, Device{
 			Platform: platform,
-			UDID:     d.Identifier,
+			UDID:     udid,
 			Label:    d.DeviceProperties.Name,
 		})
 	}

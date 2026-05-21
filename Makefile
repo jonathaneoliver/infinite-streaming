@@ -776,3 +776,27 @@ test-ios-sim-metrics:
 	IOS_METRICS_DURATION=$(IOS_METRICS_DURATION) \
 	IOS_SCORE_MIN=$(IOS_SCORE_MIN) \
 	pytest tests/integration -k ios_simulator_pyramid_metrics -m integration -vv --api-base $(IOS_API_BASE)
+
+# ── ABR characterization (rampup + rampdown + pyramid, one platform) ──
+# Runs the three vetted characterization tests back-to-back via
+# tests/characterization/overnight.sh. Designed for overnight
+# runs: per-test logs survive a partial failure; JSON/HTML reports
+# land in tests/characterization/artifacts/ (persistent across runs).
+#
+# Override per-test timeout: PER_TEST_TIMEOUT=180m make characterize-iphone
+# Override launch mode:      LAUNCH_MODE=manual make characterize-iphone
+
+characterize-ipad-sim:
+	./tests/characterization/overnight.sh ipad-sim
+
+characterize-iphone:
+	./tests/characterization/overnight.sh iphone
+
+characterize-appletv:
+	./tests/characterization/overnight.sh apple-tv
+
+characterize-androidtv:
+	./tests/characterization/overnight.sh android-tv
+
+characterize-web:
+	./tests/characterization/overnight.sh web

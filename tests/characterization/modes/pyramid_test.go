@@ -89,7 +89,7 @@ func runPyramid(t *testing.T, p runner.Platform) {
 	bottomRes := desc[len(desc)-1].Resolution
 	asc := make([]runner.VariantRate, 0, len(desc))
 	for _, v := range desc {
-		if v.Resolution == bottomRes && v.MarginPct < rampupBottomMargin {
+		if v.Resolution == bottomRes {
 			continue
 		}
 		asc = append(asc, v)
@@ -185,14 +185,14 @@ func runPyramid(t *testing.T, p runner.Platform) {
 	}
 	t.Logf("variants visited (samples per rung): %v", report.Summary.VariantSampleCounts)
 
-	bottomRes := ""
+	bottomReportRes := ""
 	if n := len(report.Variants); n > 0 {
-		bottomRes = report.Variants[n-1].Resolution
+		bottomReportRes = report.Variants[n-1].Resolution
 	}
 	upperFailures := []string{}
 	for i := range report.Steps {
 		st := &report.Steps[i]
-		if st.Variant == nil || st.Variant.Resolution == bottomRes {
+		if st.Variant == nil || st.Variant.Resolution == bottomReportRes {
 			continue
 		}
 		if st.ExitReason == "skipped-player-wedged" {

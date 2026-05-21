@@ -122,6 +122,30 @@ func ListPlayers(ctx context.Context) ([]PlayerRecord, error) {
 	return players, nil
 }
 
+// PreLaunchInfo returns the full player record of the heartbeating
+// player currently matching the supplied device — without launching
+// anything. Used by tests that need to read the *current* play's
+// manifest variants BEFORE a kill+launch cycle wipes the live
+// current_play state. The canonical example is rampup pre-computing
+// the floor cap, so playback can start cold under throttle instead
+// of cliff-diving from unconstrained → constrained mid-stream.
+//
+// Returns an error when no heartbeating player matches the device
+// (first-ever launch on this hardware, or the previous play already
+// timed out). Callers should fall back to a post-launch / warmup-then-
+// adjust path in that case.
+func PreLaunchInfo(ctx context.Context, d Device) (*PlayerRecord, error) {
+	players, err := ListPlayers(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("pre-launch info: %w", err)
+	}
+	p, ok := pickPlayerFor(d, players)
+	if !ok {
+		return nil, fmt.Errorf("pre-launch info: no heartbeating player matches %s", d)
+	}
+	return ShowPlayer(ctx, p.ID)
+}
+
 // ShowPlayer returns the full player record + harness ETag. The wrapper
 // drops the ETag for now (Phase 0 doesn't mutate); add it back when the
 // runner needs optimistic concurrency.
