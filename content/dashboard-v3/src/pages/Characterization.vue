@@ -308,10 +308,23 @@ const grouped = computed<RunGroup[]>(() => {
 });
 
 function shortRunID(runID: string): string {
-  // 20260521T155558Z → 2026-05-21 15:55
-  const m = runID.match(/^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})/);
+  // run_id is a UTC timestamp the test framework stamps at start, e.g.
+  // "20260521T155558Z". Convert to the browser's local timezone for
+  // display — UTC stays the canonical wire value (per project memory:
+  // local for display, UTC for storage).
+  const m = runID.match(/^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z$/);
   if (!m) return runID;
-  return `${m[1]}-${m[2]}-${m[3]} ${m[4]}:${m[5]}`;
+  const iso = `${m[1]}-${m[2]}-${m[3]}T${m[4]}:${m[5]}:${m[6]}Z`;
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return runID;
+  // YYYY-MM-DD HH:MM in the user's local zone, with a small tz hint
+  // so it's unambiguous on a screen that may also show wire UTC.
+  const y = d.getFullYear();
+  const mo = String(d.getMonth() + 1).padStart(2, '0');
+  const da = String(d.getDate()).padStart(2, '0');
+  const h = String(d.getHours()).padStart(2, '0');
+  const mi = String(d.getMinutes()).padStart(2, '0');
+  return `${y}-${mo}-${da} ${h}:${mi}`;
 }
 
 function playerShort(p: string): string {
