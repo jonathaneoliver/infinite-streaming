@@ -170,6 +170,13 @@ private struct ContinueWatchingHero: View {
                     vm.setSelectedContent(item.name)
                     onPlay()
                 }
+                // Stable handle for UI automation (Appium / XCUITest).
+                // The id is the same across the Continue Watching and the
+                // Now Playing rendering — the tile is always "what would
+                // resume if you tap me." Combined with isButton trait so
+                // XCUITest treats it as a tap target, not a generic view.
+                .accessibilityIdentifier("home-continue-watching")
+                .accessibilityAddTraits(.isButton)
             }
         }
     }
