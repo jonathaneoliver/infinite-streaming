@@ -8,10 +8,20 @@ import (
 	"time"
 )
 
+// TCPOverheadPct is the framework's per-cap allowance for TCP+IP+TLS+
+// HTTP framing overhead. Applied multiplicatively on top of any test
+// margin so that "margin 0" means "cap = variant_avg × 1.07" — the
+// just-barely-sustainable real-world cap. Empirically the on-wire
+// overhead is 5-8% across the throughput range we test (per-packet TCP
+// headers ≈ 2.7%, TLS framing ≈ 3-5%, HTTP/2 frames ≈ 1-2%); 7% is the
+// midpoint and covers low-rate connection-setup amortization concerns
+// without being wasteful at the top of the ladder.
+const TCPOverheadPct = 7
+
 // VariantRate is one rung of the current play's ladder, with the cap rate
 // the characterization sweep should apply for it: the variant's
 // AVERAGE-BANDWIDTH (preferred — long-term sustainable) or BANDWIDTH (peak
-// per HLS spec) × (1 + marginPct/100) for TCP/IP+TLS+HTTP framing overhead.
+// per HLS spec) × (1 + marginPct/100) × (1 + TCPOverheadPct/100).
 //
 // Both AvgBps + PeakBps are recorded for diagnostics — Source tells you
 // which one fed the cap calc. RawBps is kept as an alias of "the one we
@@ -62,7 +72,15 @@ func VariantRatesDesc(rec *PlayerRecord, marginPct int) ([]VariantRate, error) {
 		if bps <= 0 {
 			continue
 		}
-		cap := float64(bps) * (1 + float64(marginPct)/100) / 1_000_000
+		// cap = raw × (1 + margin/100) × (1 + TCP_overhead/100) / 1e6
+		// The TCP overhead factor is a framework constant — operators
+		// only pick margin; the framework adds 7% on top so margin=0
+		// produces a just-barely-sustainable cap (i.e. variant_avg
+		// PLUS the on-wire framing tax).
+		cap := float64(bps) *
+			(1 + float64(marginPct)/100) *
+			(1 + float64(TCPOverheadPct)/100) /
+			1_000_000
 		// Round to 3 decimal places — same precision the harness CLI uses
 		// so the dashboard and the framework apply identical numbers.
 		cap = math.Round(cap*1000) / 1000

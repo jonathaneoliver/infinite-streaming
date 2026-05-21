@@ -9,7 +9,7 @@ import (
 	"github.com/jonathaneoliver/infinite-streaming/tests/characterization/runner"
 )
 
-// Smooth — variant-aware ramp_down at multiple margins.
+// Rampdown — variant-aware ramp_down at multiple margins.
 //
 // For each variant in the current play's manifest we apply 6 caps in
 // descending order (×1.50, ×1.25, ×1.10, ×1.05, ×1.00, ×0.95), merged
@@ -17,11 +17,11 @@ import (
 // that would have caused the cap to *increase* vs. the previous step gets
 // dropped (happens on tight ladders where var_low×1.50 > var_high×0.95).
 //
-// Each step is held for up to smoothMaxHold (60 s) but exits early as
-// soon as the buffer has been stable across the last smoothEarlyExitWindow
+// Each step is held for up to rampdownMaxHold (60 s) but exits early as
+// soon as the buffer has been stable across the last rampdownEarlyExitWindow
 // (15 s) — a stable buffer proves this cap is safe for the current variant
 // without waiting for a stall that won't happen. Minimum hold is
-// smoothMinHold (15 s) so the early-exit predicate has enough data to fire.
+// rampdownMinHold (15 s) so the early-exit predicate has enough data to fire.
 //
 // Pass condition: every variant in the ladder appears in
 // Summary.VariantSampleCounts > 0. The headline operational finding is
@@ -29,24 +29,31 @@ import (
 // above SustainableBufferS (1 s) with zero stalls. Anything below that is
 // where the player starts depleting / stalling.
 
-var smoothMargins = []int{50, 25, 10, 5, 0, -5}
+// Symmetric 9-margin grid around each variant's AVG-bandwidth (TCP
+// overhead is layered separately in runner.TCPOverheadPct, applied
+// inside the CapMbps formula). Negative margins are required for the
+// rampdown tail where we deliberately stall the bottom variant.
+// dropOverlapsWithLowerVariant in sweep.go removes entries whose cap
+// falls inside the next-lower variant's [avg×0.5, avg×1.5] range so we
+// don't test the same operational territory twice.
+var rampdownMargins = []int{50, 25, 10, 5, 0, -5, -10, -25, -50}
 
 const (
-	smoothMaxHold         = 60 * time.Second
-	smoothMinHold         = 15 * time.Second
-	smoothEarlyExitWindow = 15 * time.Second
-	smoothEarlyExitTol    = 0.5 // s of buffer-drop tolerance over the window
-	smoothWarmupMbps      = 100
-	smoothWarmupHold      = 15 * time.Second
+	rampdownMaxHold         = 60 * time.Second
+	rampdownMinHold         = 15 * time.Second
+	rampdownEarlyExitWindow = 15 * time.Second
+	rampdownEarlyExitTol    = 0.5 // s of buffer-drop tolerance over the window
+	rampdownWarmupMbps      = 100
+	rampdownWarmupHold      = 15 * time.Second
 )
 
-func TestSmoothIPadSim(t *testing.T)   { runSmooth(t, runner.PlatformIPadSim) }
-func TestSmoothIPhone(t *testing.T)    { runSmooth(t, runner.PlatformIPhone) }
-func TestSmoothAppleTV(t *testing.T)   { runSmooth(t, runner.PlatformAppleTV) }
-func TestSmoothAndroidTV(t *testing.T) { runSmooth(t, runner.PlatformAndroidTV) }
-func TestSmoothWeb(t *testing.T)       { runSmooth(t, runner.PlatformWeb) }
+func TestRampdownIPadSim(t *testing.T)   { runRampdown(t, runner.PlatformIPadSim) }
+func TestRampdownIPhone(t *testing.T)    { runRampdown(t, runner.PlatformIPhone) }
+func TestRampdownAppleTV(t *testing.T)   { runRampdown(t, runner.PlatformAppleTV) }
+func TestRampdownAndroidTV(t *testing.T) { runRampdown(t, runner.PlatformAndroidTV) }
+func TestRampdownWeb(t *testing.T)       { runRampdown(t, runner.PlatformWeb) }
 
-func runSmooth(t *testing.T, p runner.Platform) {
+func runRampdown(t *testing.T, p runner.Platform) {
 	sess := OpenSession(t, p)
 
 	// Tag the current play with searchable metadata BEFORE the sweep
@@ -54,7 +61,7 @@ func runSmooth(t *testing.T, p runner.Platform) {
 	// least we know which play_id corresponds to which test run.
 	runID := time.Now().UTC().Format("20060102T150405Z")
 	startLabels := map[string]string{
-		"test":     "smooth",
+		"test":     "rampdown",
 		"platform": string(p),
 		"run_id":   runID,
 	}
@@ -77,17 +84,17 @@ func runSmooth(t *testing.T, p runner.Platform) {
 	// plus warmup + slack. Realistically half of those exit early in <30s
 	// so usual runtime is ~20 min, but we set the upper bound to avoid
 	// flake from a slow stall-recovery scenario.
-	overall := smoothWarmupHold + 60*time.Minute
+	overall := rampdownWarmupHold + 60*time.Minute
 	ctx, cancel := context.WithTimeout(context.Background(), overall)
 	defer cancel()
 
 	// Warmup at 100 Mbps so the proxy's avg_network_bitrate is real (not
 	// "uncapped, infinite") and the player picks its preferred top variant.
-	if err := sess.ApplyRate(ctx, smoothWarmupMbps); err != nil {
-		t.Fatalf("warmup apply %d Mbps: %v", smoothWarmupMbps, err)
+	if err := sess.ApplyRate(ctx, rampdownWarmupMbps); err != nil {
+		t.Fatalf("warmup apply %d Mbps: %v", rampdownWarmupMbps, err)
 	}
-	t.Logf("warmup: %d Mbps × %s", smoothWarmupMbps, smoothWarmupHold)
-	if err := holdContext(ctx, smoothWarmupHold); err != nil {
+	t.Logf("warmup: %d Mbps × %s", rampdownWarmupMbps, rampdownWarmupHold)
+	if err := holdContext(ctx, rampdownWarmupHold); err != nil {
 		t.Fatalf("warmup hold: %v", err)
 	}
 
@@ -97,15 +104,16 @@ func runSmooth(t *testing.T, p runner.Platform) {
 	if err != nil {
 		t.Fatalf("PlayerState: %v", err)
 	}
-	sweep, err := runner.VariantSweep(rec, smoothMargins)
+	sweep, err := runner.VariantSweep(rec, rampdownMargins)
 	if err != nil {
 		t.Fatalf("VariantSweep: %v", err)
 	}
+	sweep = dropOverlapsWithLowerVariant(sweep)
 
 	// Pre-sweep dump — every limit gets logged so the operator can sanity
 	// check before the sweep runs.
 	t.Logf("sweep plan: %d steps (margins %v, max-hold %s, early-exit when buffer stable %s)",
-		len(sweep), smoothMargins, smoothMaxHold, smoothEarlyExitWindow)
+		len(sweep), rampdownMargins, rampdownMaxHold, rampdownEarlyExitWindow)
 	for i, v := range sweep {
 		t.Logf("  [%2d] %-10s  %+3d%%  cap=%6.3f Mbps   avg=%.3f peak=%.3f Mbps  (source=%s)",
 			i, v.Resolution, v.MarginPct, v.CapMbps,
@@ -117,11 +125,11 @@ func runSmooth(t *testing.T, p runner.Platform) {
 	steps := make([]runner.Step, len(sweep))
 	for i, v := range sweep {
 		v := v
-		steps[i] = runner.Step{RateMbps: v.CapMbps, Hold: smoothMaxHold, Variant: &v}
+		steps[i] = runner.Step{RateMbps: v.CapMbps, Hold: rampdownMaxHold, Variant: &v}
 	}
 
-	report := RunVariantSweep(ctx, t, sess, "smooth", steps, time.Second,
-		smoothMinHold, smoothMaxHold, smoothEarlyExitWindow, smoothEarlyExitTol)
+	report := RunVariantSweep(ctx, t, sess, "rampdown", steps, time.Second,
+		rampdownMinHold, rampdownMaxHold, rampdownEarlyExitWindow, rampdownEarlyExitTol)
 	// We need the per-variant rung list (not the per-step list) for
 	// Finalize's classify-by-variant pass.
 	report.Variants = unionRungs(sweep)
@@ -131,14 +139,14 @@ func runSmooth(t *testing.T, p runner.Platform) {
 	report.Finalize(time.Now())
 
 	out := runner.DefaultOutDir(t.TempDir())
-	// Filename pattern: smooth-<platform>-<player8>-<run_id>.<ext>
+	// Filename pattern: rampdown-<platform>-<player8>-<run_id>.<ext>
 	// Including the 8-char player_id prefix makes parallel runs on
 	// different devices land in distinct files without collision.
 	playerShort := sess.PlayerID
 	if len(playerShort) > 8 {
 		playerShort = playerShort[:8]
 	}
-	base := fmt.Sprintf("smooth-%s-%s-%s", p, playerShort, runID)
+	base := fmt.Sprintf("rampdown-%s-%s-%s", p, playerShort, runID)
 	jsonPath, err := runner.WriteReport(out, base, report)
 	if err != nil {
 		t.Fatalf("write report: %v", err)

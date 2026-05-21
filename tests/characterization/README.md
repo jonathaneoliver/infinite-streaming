@@ -4,9 +4,46 @@ Go test suite replacing the python `test_player_characterization_pytest.py`. Dri
 
 Tracks issue #482. Roku is out of scope.
 
+## What do I need installed?
+
+Three personas — install only what your devices require:
+
+| persona | tools needed | how to install | `LAUNCH_MODE` |
+|---|---|---|---|
+| **Web only** (Chrome) | `harness` CLI | `make harness-cli` | `manual` |
+| **Sim / real iOS** (iPad sim, iPhone) | + Xcode (gives `xcrun`) | App Store, or `xcode-select --install` | `cli` (default) |
+| **Android TV** | + Android Platform Tools (`adb`) | `brew install --cask android-platform-tools` | `cli` |
+| **Apple TV with automation** ¹ | + Appium server + signed WebDriverAgent for tvOS | `brew install node && npm install -g appium && appium driver install xcuitest`, then build `WebDriverAgent.xcodeproj` once via Xcode | `appium` |
+
+¹ Apple TV works on `cli` too if you wake the device manually before each test. `appium` adds programmatic wake + screenshots.
+
+**Don't know what you need?** Run the preflight diagnostic — it tells you what's available and recommends a mode:
+
+```sh
+go test -C tests/characterization ./runner/... -v -run TestPreflight
+```
+
+Sample output:
+
+```
+PREFLIGHT — what your environment supports
+  ✓ harness CLI          /Users/me/.local/bin/harness
+  ✓ proxy via harness    reachable
+  ✓ xcrun                Xcode command-line tools
+  ✗ adb                  Android Platform Tools     (fix: `brew install --cask android-platform-tools`)
+  ✗ Appium server        not reachable              (fix: only needed for Apple TV automation)
+
+DEVICES (currently discoverable)
+  iphone     Jonathans iPhone        EBB41BDC-...
+  appletv    appletv                 7312834B-...
+
+RECOMMENDED LAUNCH_MODE=cli
+  why: Xcode and/or adb available; CLI handles sim + real iOS + Android TV
+```
+
 ## Status
 
-Phases 0, 0.5, 1, 2, 3, 5 landed: scaffolding, both `Manual` + `CLI` launchers, all 7 characterization modes wired per platform, and the aggregator binary. Phase 4 (Appium) is the optional upgrade and not yet implemented.
+Phases 0, 0.5, 1, 2, 3, 4 (minimum-viable), 5 landed: scaffolding, all three launchers (`Manual` / `CLI` / `Appium`), all 7 characterization modes wired per platform, the aggregator binary, and the preflight diagnostic. Appium covers Launch / Kill / Screenshot — full UI automation (content selection, settings, 911 / Reload buttons) needs accessibility identifiers in the player apps; not yet implemented.
 
 ## Layout
 
@@ -80,9 +117,11 @@ The framework supports three launch modes, picked by `$LAUNCH_MODE`:
 
 | Mode | Env | What it needs | What it does |
 |---|---|---|---|
-| `manual` | `LAUNCH_MODE=manual` | nothing | prompts the operator + observes via harness |
-| `cli` (default) | `LAUNCH_MODE=cli` or unset | xcrun + simctl + adb on $PATH | kills + relaunches the app; relies on `skipHomeOnLaunch=true` for auto-resume |
-| `appium` | `LAUNCH_MODE=appium` | Appium server + WDA + xcuitest/uiautomator2 drivers | full UI automation |
+| `manual` | `-launch-mode=manual` (or `LAUNCH_MODE=manual`) | nothing | prompts the operator + observes via harness |
+| `cli` (default) | `-launch-mode=cli` (or unset) | xcrun + simctl + adb on $PATH | kills + relaunches the app; relies on `skipHomeOnLaunch=true` for auto-resume |
+| `appium` | `-launch-mode=appium` (or `LAUNCH_MODE=appium`) | Appium server + WDA + xcuitest/uiautomator2 drivers | Launch + Kill + Screenshot; full UI automation needs accessibility identifiers in the apps |
+
+The `-launch-mode` flag is preferred over the env var — keeps `go` as the first token of the bash command so Claude Code (and similar tooling with command allowlists) doesn't re-prompt every invocation.
 
 `manual` and `cli` are implemented. `appium` is the optional Phase 4.
 

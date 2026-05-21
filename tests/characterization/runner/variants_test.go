@@ -29,13 +29,13 @@ func TestVariantRatesDescPrefersAverage(t *testing.T) {
 			t.Errorf("rates not descending at %d: %.3f vs %.3f", i, rates[i-1].CapMbps, rates[i].CapMbps)
 		}
 	}
-	// Top rung (2160p) should be 10.845 Mbps × 1.05 = 11.387 Mbps.
-	if got := rates[0].CapMbps; got < 11.38 || got > 11.39 {
-		t.Errorf("top cap %.3f Mbps, want ~11.387 (2160p avg × 1.05)", got)
+	// Top rung (10.845 Mbps avg) × 1.05 (margin) × 1.07 (TCP) ≈ 12.184.
+	if got := rates[0].CapMbps; got < 12.17 || got > 12.20 {
+		t.Errorf("top cap %.3f Mbps, want ~12.184 (top avg × 1.05 × 1.07 TCP)", got)
 	}
-	// Bottom rung (360p) should be 0.725 Mbps × 1.05 = 0.761 Mbps.
-	if got := rates[len(rates)-1].CapMbps; got < 0.76 || got > 0.762 {
-		t.Errorf("bottom cap %.3f Mbps, want ~0.761 (360p avg × 1.05)", got)
+	// Bottom rung (0.725 Mbps avg) × 1.05 × 1.07 ≈ 0.815.
+	if got := rates[len(rates)-1].CapMbps; got < 0.81 || got > 0.82 {
+		t.Errorf("bottom cap %.3f Mbps, want ~0.815 (bottom avg × 1.05 × 1.07 TCP)", got)
 	}
 	// All five should report source=average since avg was populated.
 	for _, r := range rates {
@@ -56,8 +56,9 @@ func TestVariantRatesDescFallsBackToPeak(t *testing.T) {
 	if rates[0].Source != "peak" {
 		t.Errorf("source=%q want peak (avg=0 forces fallback)", rates[0].Source)
 	}
-	if rates[0].CapMbps != 1.0 {
-		t.Errorf("CapMbps=%.3f want 1.000 (0%% margin)", rates[0].CapMbps)
+	// 1.0 Mbps × 1.0 (0% margin) × 1.07 (TCP) = 1.07
+	if got := rates[0].CapMbps; got < 1.06 || got > 1.08 {
+		t.Errorf("CapMbps=%.3f want ~1.070 (peak 1.0 × 0%% margin × 1.07 TCP)", got)
 	}
 }
 
@@ -76,8 +77,9 @@ func TestVariantRatesDescNegativeMarginAccepted(t *testing.T) {
 	if err != nil {
 		t.Fatalf("VariantRatesDesc(-5): %v (negative margins must be allowed)", err)
 	}
-	if rates[0].CapMbps != 0.95 {
-		t.Errorf("CapMbps=%.3f want 0.950 (1.0 Mbps × 0.95)", rates[0].CapMbps)
+	// 1.0 Mbps × 0.95 × 1.07 (TCP) ≈ 1.017
+	if got := rates[0].CapMbps; got < 1.01 || got > 1.02 {
+		t.Errorf("CapMbps=%.3f want ~1.017 (peak 1.0 × −5%% × 1.07 TCP)", got)
 	}
 }
 
@@ -103,12 +105,13 @@ func TestVariantSweepProducesStrictDescent(t *testing.T) {
 				i, sweep[i-1].CapMbps, sweep[i].CapMbps)
 		}
 	}
-	// First cap = 1080p × 1.50 = 7.484 Mbps; last = 360p × 0.95 = 0.689 Mbps.
-	if got := sweep[0].CapMbps; got < 7.48 || got > 7.49 {
-		t.Errorf("first cap %.3f Mbps, want ~7.484", got)
+	// First cap = 1080p × 1.50 × 1.07 (TCP) ≈ 8.007 Mbps;
+	// last = 360p × 0.95 × 1.07 ≈ 0.737 Mbps.
+	if got := sweep[0].CapMbps; got < 8.00 || got > 8.02 {
+		t.Errorf("first cap %.3f Mbps, want ~8.007", got)
 	}
-	if got := sweep[len(sweep)-1].CapMbps; got < 0.688 || got > 0.690 {
-		t.Errorf("last cap %.3f Mbps, want ~0.689", got)
+	if got := sweep[len(sweep)-1].CapMbps; got < 0.736 || got > 0.738 {
+		t.Errorf("last cap %.3f Mbps, want ~0.737", got)
 	}
 }
 

@@ -38,7 +38,7 @@ func TestPickMode(t *testing.T) {
 		{"", LaunchCLI, false},
 		{"cli", LaunchCLI, false},
 		{"manual", LaunchManual, false},
-		{"appium", LaunchAppium, true}, // unimplemented yet
+		{"appium", LaunchAppium, false}, // returns AppiumLauncher; health check is lazy
 		{"bogus", 0, true},
 	}
 	for _, tc := range cases {
