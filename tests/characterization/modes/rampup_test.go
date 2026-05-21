@@ -177,8 +177,11 @@ func runRampup(t *testing.T, p runner.Platform) {
 		if err := appium.ResumePlayback(setupCtx, *picked); err != nil {
 			t.Fatalf("ResumePlayback: %v", err)
 		}
-		if err := s.WaitForHeartbeat(setupCtx, 90*time.Second); err != nil {
-			t.Fatalf("WaitForHeartbeat: %v", err)
+		// In conservativeStart we don't have a pre-launch player record,
+		// so we can't pre-bind sess.PlayerID. Use WaitForBind which
+		// polls the players list and binds when the device appears.
+		if err := appium.WaitForBind(setupCtx, s); err != nil {
+			t.Fatalf("WaitForBind: %v", err)
 		}
 		// Now we have a player_id — clamp to the conservative cap
 		// ASAP so the player downshifts to the bottom variant.

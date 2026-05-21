@@ -19,6 +19,16 @@ Claude Code's `Bash(<tool>:*)` permission rules match only the **first token** o
 
 Why this matters: every re-prompt interrupts the operator's flow and undermines their `.claude/settings.json` allowlist. The user explicitly configured `Bash(harness:*)`, `Bash(jq:*)`, `Bash(date:*)`, etc. — respect that.
 
+## 1a. Using the harness CLI
+
+Every skill in this directory shells out to `harness`. Before guessing flag names, output shapes, or subcommand boundaries, consult:
+
+- [`harness/SKILL.md`](harness/SKILL.md) — Claude-discoverable wrapper, lists when to use sibling skills vs. raw harness.
+- [`.claude/standards/harness-cli.md`](../standards/harness-cli.md) — canonical gotchas (flag-name traps, `--json` stdout-vs-stderr contract, label-encoding round-trip).
+- [`tools/harness-cli/README.md`](../../tools/harness-cli/README.md) — full subcommand surface + common patterns.
+
+The shortest correct path is usually: read the standards file once, run the command, only retry on failure after reading the printed usage block (which lists every flag for that subcommand).
+
 ## 2. No guessing during triage / investigation
 
 Every causal claim must be **tagged**:

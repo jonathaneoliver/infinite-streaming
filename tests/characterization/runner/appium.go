@@ -172,6 +172,14 @@ func (a *AppiumLauncher) ResumePlayback(ctx context.Context, d Device) error {
 	return nil
 }
 
+// WaitForBind polls the harness players list until the device shows
+// up as heartbeating, then sets sess.PlayerID. Used by tests that
+// drive launch in phases (LaunchToHome → ResumePlayback → bind) and
+// don't have a known player_id to pre-set on the session.
+func (a *AppiumLauncher) WaitForBind(ctx context.Context, sess *Session) error {
+	return a.waitForHeartbeat(ctx, sess)
+}
+
 // waitForHeartbeat polls the harness players list until the device
 // shows up as heartbeating, then binds its player_id to the session.
 func (a *AppiumLauncher) waitForHeartbeat(ctx context.Context, sess *Session) error {
