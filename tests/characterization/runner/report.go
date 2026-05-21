@@ -1,10 +1,12 @@
 package runner
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"math"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -403,7 +405,36 @@ func WriteReport(outdir, basename string, r *Report) (string, error) {
 	if err := os.WriteFile(mdPath, []byte(md), 0o644); err != nil {
 		return "", fmt.Errorf("write %s: %w", mdPath, err)
 	}
+	// Fire-and-forget upload to the forwarder so the dashboard's
+	// Automated Testing page can render the full report from CH. The
+	// on-disk JSON above stays as the authoritative source — failure
+	// here logs but doesn't fail the test (an unreachable forwarder
+	// shouldn't make a clean test FAIL).
+	go uploadReportToForwarder(jsonPath)
 	return jsonPath, nil
+}
+
+// uploadReportToForwarder shells out to `harness post characterization
+// <jsonPath>`. Run async because the upload can take a second or two
+// against a slow forwarder and we don't want to block test cleanup.
+func uploadReportToForwarder(jsonPath string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	args := []string{"post", "characterization", jsonPath}
+	if HarnessInsecure {
+		args = append([]string{"--insecure"}, args...)
+	}
+	cmd := exec.CommandContext(ctx, HarnessBin, args...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		// Stay quiet on success; on failure write one line so the
+		// operator sees the upload didn't land. Test pass/fail
+		// criteria are unaffected.
+		fmt.Fprintf(os.Stderr, "characterization upload failed: %v: %s\n",
+			err, strings.TrimSpace(string(out)))
+		return
+	}
+	fmt.Fprintf(os.Stderr, "characterization upload: %s\n", strings.TrimSpace(string(out)))
 }
 
 func renderMarkdown(r *Report) string {

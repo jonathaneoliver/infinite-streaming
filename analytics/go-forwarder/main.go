@@ -1418,6 +1418,11 @@ func serveHTTP(ctx context.Context, cfg config, ring *Ring) {
 	// classification (issue #342). Defined in classification.go.
 	registerClassificationHandlers(mux, cfg)
 
+	// /api/v2/characterization-runs — POST ingest + GET list/detail for
+	// reports the Go test framework uploads at end-of-sweep. Defined
+	// in characterization.go.
+	registerCharacterizationHandlers(mux, cfg)
+
 	srv := &http.Server{
 		Addr:              cfg.httpListen,
 		Handler:           mux,
