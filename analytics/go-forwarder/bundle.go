@@ -147,7 +147,7 @@ func safeFilenameSegment(s string) string {
 }
 
 // session.json — at-a-glance summary that opens first. Reuses the
-// /api/sessions per-play row plus a couple of derived fields the picker
+// /api/v2/plays per-play row plus a couple of derived fields the picker
 // already computes, so the bundle reads naturally next to a screenshot
 // of the picker row.
 func writeSessionMetadata(ctx context.Context, zw *zip.Writer, cfg config, sessionID, playID string) error {

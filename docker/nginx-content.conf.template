@@ -287,32 +287,6 @@ server {
         add_header Expires "0" always;
     }
 
-    location ~ ^/api/failure-settings/ {
-        proxy_pass https://go_proxy;
-            proxy_ssl_verify off;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Port $server_port;
-        add_header Access-Control-Allow-Origin * always;
-        add_header Cache-Control "no-cache, no-store, must-revalidate" always;
-        add_header Pragma "no-cache" always;
-        add_header Expires "0" always;
-    }
-
-    location ~ ^/api/session-group/ {
-        proxy_pass https://go_proxy;
-            proxy_ssl_verify off;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Port $server_port;
-        add_header Access-Control-Allow-Origin * always;
-        add_header Cache-Control "no-cache, no-store, must-revalidate" always;
-        add_header Pragma "no-cache" always;
-        add_header Expires "0" always;
-    }
-
     location ~ ^/api/nftables/ {
         proxy_pass https://go_proxy;
             proxy_ssl_verify off;

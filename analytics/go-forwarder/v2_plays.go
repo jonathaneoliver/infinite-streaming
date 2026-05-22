@@ -8,6 +8,12 @@ package main
 // from / to / limit filters, and wraps the result in the v2 envelope
 // ({items, next_cursor}).
 //
+// PATCH /api/v2/plays/{play_id} writes the tiered-retention
+// classification (#342). Live-play mutations (labels / shape /
+// fault_rules) live on go-proxy's PATCH /api/v2/plays/{id} — this
+// forwarder handler exists because classification only applies once a
+// play is archived in ClickHouse.
+//
 // Today the query reads session_snapshots + network_requests live, the
 // same way v1 does. The aspirational play_summaries rollup table is
 // blocked on `play.ended` SSE plumbing — when it lands, swap the FROM
@@ -15,8 +21,10 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 )
@@ -43,11 +51,101 @@ func playsDispatcher(cfg config) http.HandlerFunc {
 				writeProblemv2(w, http.StatusNotFound, "not found", "no nested resources under /api/v2/plays/{play_id} yet")
 				return
 			}
+			if r.Method == http.MethodPatch {
+				v2PlayPatchHandler(w, r, cfg, canonicalV2ID(playID))
+				return
+			}
 			v2PlayDetailHandler(w, r, cfg, playID)
 		default:
 			writeProblemv2(w, http.StatusNotFound, "not found", "")
 		}
 	}
+}
+
+// v2PlayPatchHandler answers PATCH /api/v2/plays/{play_id}. Today the
+// only supported field is `classification`, which drives the tiered
+// retention TTL (#342). Star = `favourite`; unstar = `auto` which re-
+// runs the auto-classifier and writes whatever it returns
+// (interesting | other). Explicit values `interesting` / `other` are
+// also accepted for operator-driven reclassification.
+//
+// Live-play mutations live on go-proxy's PATCH /api/v2/plays/{id};
+// this handler exists in the forwarder because classification only
+// makes sense once the play is archived in ClickHouse.
+func v2PlayPatchHandler(w http.ResponseWriter, r *http.Request, cfg config, playID string) {
+	if playID == "" {
+		writeProblemv2(w, http.StatusBadRequest, "bad request", "play_id required")
+		return
+	}
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1<<16))
+	if err != nil {
+		writeProblemv2(w, http.StatusBadRequest, "bad request", "read body failed")
+		return
+	}
+	var patch map[string]any
+	if len(body) > 0 {
+		if err := json.Unmarshal(body, &patch); err != nil {
+			writeProblemv2(w, http.StatusBadRequest, "bad request", "invalid json body")
+			return
+		}
+	}
+	if len(patch) == 0 {
+		writeProblemv2(w, http.StatusBadRequest, "bad request", "empty patch")
+		return
+	}
+	for k := range patch {
+		if k != "classification" {
+			writeProblemv2(w, http.StatusNotImplemented, "not implemented",
+				fmt.Sprintf("PATCH /api/v2/plays only supports {classification} today; got %q", k))
+			return
+		}
+	}
+	clsRaw, ok := patch["classification"].(string)
+	if !ok {
+		writeProblemv2(w, http.StatusBadRequest, "bad request", "classification must be a string")
+		return
+	}
+	cls := strings.ToLower(strings.TrimSpace(clsRaw))
+	switch cls {
+	case "favourite", "interesting", "other":
+		if err := setPlayClassification(r.Context(), cfg, playID, cls, true); err != nil {
+			writeProblemv2(w, http.StatusBadGateway, "clickhouse update failed", err.Error())
+			return
+		}
+	case "auto":
+		if err := reclassifyPlay(r.Context(), cfg, playID, true); err != nil {
+			writeProblemv2(w, http.StatusBadGateway, "clickhouse update failed", err.Error())
+			return
+		}
+	default:
+		writeProblemv2(w, http.StatusBadRequest, "bad request",
+			"classification must be one of: favourite, interesting, other, auto")
+		return
+	}
+	// Round-trip the post-patch detail so the caller sees the settled
+	// classification (auto mode runs the predicate before returning).
+	clauses, params, err := buildPlaysFilter("", playID, "", "", "", "")
+	if err != nil {
+		writeProblemv2(w, http.StatusInternalServerError, "internal", err.Error())
+		return
+	}
+	rows, err := queryPlaySummariesFiltered(r.Context(), cfg, clauses, params, nil, nil, 1)
+	if err != nil {
+		writeProblemv2(w, http.StatusBadGateway, "clickhouse query failed", err.Error())
+		return
+	}
+	if len(rows) == 0 {
+		// Mutation went through but the play has no archived snapshots
+		// yet — surface the requested classification so the UI can flip
+		// optimistically. (Rare: the row would have to have been GC'd
+		// between the ALTER UPDATE and the SELECT.)
+		writeJSONv2(w, http.StatusOK, map[string]any{
+			"play_id":        playID,
+			"classification": cls,
+		})
+		return
+	}
+	writeJSONv2(w, http.StatusOK, rows[0])
 }
 
 // v2PlaysListHandler answers GET /api/v2/plays.
@@ -249,7 +347,7 @@ func queryPlaySummaries(ctx context.Context, cfg config, clauses []string, param
 		-- Per-play label histogram across all three source tables
 		-- (issue #474 follow-up so harness CLI's archive plays
 		-- carries the same per-row labels surface the dashboard's
-		-- Sessions page shows via /analytics/api/sessions).
+		-- Sessions page reads via /analytics/api/v2/plays).
 		-- lowerUTF8 on play_id makes the JOIN survive the case-
 		-- sensitivity gap where some legacy rows landed with
 		-- uppercase play_ids.

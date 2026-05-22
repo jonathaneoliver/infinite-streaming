@@ -22,14 +22,6 @@ components:
         value:
           type: string
       type: object
-    main.LinkSessionsRequest:
-      properties:
-        session_ids:
-          items:
-            type: string
-          type: array
-          uniqueItems: false
-      type: object
     main.LossRequest:
       properties:
         loss_pct:
@@ -236,11 +228,6 @@ components:
         rate_mbps:
           type: number
       type: object
-    main.UnlinkSessionRequest:
-      properties:
-        session_id:
-          type: string
-      type: object
 externalDocs:
   description: ""
   url: ""
@@ -275,32 +262,6 @@ paths:
       summary: External IPs the harness is reachable from
       tags:
       - diagnostics
-  /api/failure-settings/{id}:
-    post:
-      deprecated: true
-      description: Predates the PATCH envelope. Kept for backwards compat with older
-        dashboard code.
-      parameters:
-      - description: session_id
-        in: path
-        name: id
-        required: true
-        schema:
-          type: string
-      requestBody:
-        content:
-          text/plain:
-            schema:
-              title: body
-              type: object
-        description: fault settings
-        required: true
-      responses:
-        "200":
-          description: OK
-      summary: Legacy fault-settings POST (use PATCH instead)
-      tags:
-      - internal
   /api/network/stream:
     get:
       description: |-
@@ -470,59 +431,6 @@ paths:
       summary: Global nftables status
       tags:
       - shaping
-  /api/session-group/{groupId}:
-    get:
-      parameters:
-      - description: group id
-        in: path
-        name: groupId
-        required: true
-        schema:
-          type: string
-      responses:
-        "200":
-          content:
-            application/json:
-              schema:
-                type: object
-          description: OK
-      summary: Get a session group
-      tags:
-      - groups
-  /api/session-group/link:
-    post:
-      requestBody:
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/main.LinkSessionsRequest'
-              description: '{session_ids: [...]}'
-              summary: body
-        description: '{session_ids: [...]}'
-        required: true
-      responses:
-        "200":
-          description: OK
-      summary: Link sessions into a fault-propagation group
-      tags:
-      - groups
-  /api/session-group/unlink:
-    post:
-      requestBody:
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/main.UnlinkSessionRequest'
-              description: '{session_id}'
-              summary: body
-        description: '{session_id}'
-        required: true
-      responses:
-        "200":
-          description: OK
-      summary: Unlink a session from its group
-      tags:
-      - groups
   /api/session/{id}:
     delete:
       description: Removes the session from the in-memory map and frees its dedicated
@@ -651,30 +559,6 @@ paths:
       summary: Get one session's network ring buffer
       tags:
       - network
-  /api/session/{id}/update:
-    post:
-      deprecated: true
-      parameters:
-      - description: session_id
-        in: path
-        name: id
-        required: true
-        schema:
-          type: string
-      requestBody:
-        content:
-          text/plain:
-            schema:
-              title: body
-              type: object
-        description: settings
-        required: true
-      responses:
-        "200":
-          description: OK
-      summary: Legacy session-update POST (use PATCH instead)
-      tags:
-      - internal
   /api/sessions:
     get:
       responses:

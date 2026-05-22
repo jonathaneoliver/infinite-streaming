@@ -127,6 +127,33 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/PlayDetail' }
         '404': { $ref: '#/components/responses/Problem' }
+    patch:
+      tags: [plays]
+      summary: Update an archived play's classification
+      description: |
+        Today the only supported field is `classification`, which drives
+        the tiered TTL (#342): `favourite` is starred (kept forever),
+        `interesting` / `other` set the auto-classifier tier directly, and
+        `auto` re-runs the auto-classifier and writes whatever it returns.
+        ALTER UPDATEs all three archive tables in one shot.
+      requestBody:
+        required: true
+        content:
+          application/merge-patch+json:
+            schema:
+              type: object
+              properties:
+                classification:
+                  type: string
+                  enum: [favourite, interesting, other, auto]
+      responses:
+        '200':
+          description: Updated; body is the post-patch play summary.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PlaySummary' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
 
   /api/v2/plays/aggregate:
     get:
