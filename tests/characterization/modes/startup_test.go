@@ -48,11 +48,44 @@ const (
 var startupBoundaries = []startupBoundary{startupAppCold, startupChannelChange}
 
 const (
-	startupCapMbpsDefault     = 30.0 // wide enough to let the player pick top variant most of the time
 	startupObserveWindow      = 30 * time.Second
 	startupBufferReach5SLimit = 20 * time.Second // pass threshold (informational, not asserted)
 	startupSamplerPeriod      = 500 * time.Millisecond
 )
+
+// startupCapMarginFraction is the headroom multiplied onto each
+// variant's AVERAGE-BANDWIDTH to derive its "just-pick-this-variant"
+// cap. avg × (1 + headroom) × (1 + TCPOverhead) sits below the next
+// variant's avg, so the player's variant-selection algorithm should
+// land on this rung. Tuned to match what AVPlayer settles on in
+// practice — too low and the player won't pick the intended variant;
+// too high and it overshoots.
+const startupCapMarginFraction = 0.20
+
+// computeStartupCaps derives one cap per video variant from the
+// manifest. Each cap is variant.avg × 1.20 × 1.07 (TCP overhead) —
+// enough headroom that the player picks that variant comfortably,
+// but below the next variant's avg.
+//
+// Returns the caps in DESCENDING order (top variant first) so the
+// most interesting case (no-constraint) runs first.
+//
+// Override CHAR_STARTUP_CAPS=30,8,3 to bypass and use a literal list.
+func computeStartupCaps(bws map[string]runner.VariantBandwidth) []float64 {
+	avgs := make([]float64, 0, len(bws))
+	for _, bw := range bws {
+		if bw.AvgMbps > 0 {
+			avgs = append(avgs, bw.AvgMbps)
+		}
+	}
+	sort.Sort(sort.Reverse(sort.Float64Slice(avgs)))
+	out := make([]float64, 0, len(avgs))
+	for _, avg := range avgs {
+		cap := avg * (1 + startupCapMarginFraction) * (1 + float64(runner.TCPOverheadPct)/100)
+		out = append(out, math.Round(cap*1000)/1000)
+	}
+	return out
+}
 
 func TestStartupIPadSim(t *testing.T)   { runStartup(t, runner.PlatformIPadSim) }
 func TestStartupIPhone(t *testing.T)    { runStartup(t, runner.PlatformIPhone) }
@@ -68,25 +101,9 @@ func runStartup(t *testing.T, p runner.Platform) {
 	if target == setupClip {
 		t.Fatalf("target clip and setup clip must differ (both = %q)", target)
 	}
-	capMbps := envFloat("CHAR_STARTUP_CAP_MBPS", startupCapMbpsDefault)
 	reps := envInt("CHAR_STARTUP_REPS", 3)
 	if reps <= 0 {
 		reps = 1
-	}
-
-	runID := time.Now().UTC().Format("20060102T150405Z")
-	startLabels := map[string]string{
-		"test":        "startup",
-		"platform":    string(p),
-		"run_id":      runID,
-		"clip_target": target,
-		"clip_setup":  setupClip,
-		"cap_mbps":    fmt.Sprintf("%.3f", capMbps),
-	}
-	if err := sess.LabelPlay(context.Background(), startLabels); err != nil {
-		t.Logf("label play (start): %v (test continues)", err)
-	} else {
-		t.Logf("labeled play with %v", startLabels)
 	}
 
 	picked := pickedDevice(sess)
@@ -96,26 +113,60 @@ func runStartup(t *testing.T, p runner.Platform) {
 		t.Skip("startup test requires -launch-mode=appium")
 	}
 
-	cycleCount := len(startupBoundaries) * reps
-	// Per-cycle budget: setup (~30s app_cold, ~5s channel) + observe
-	// (30s) + cleanup. Worst case ~90s × 6 cycles + slack.
-	overall := time.Duration(cycleCount)*90*time.Second + 3*time.Minute
-	ctx, cancel := context.WithTimeout(context.Background(), overall)
-	defer cancel()
-
-	t.Logf("cycle plan: %d cycles (%d boundaries × %d reps), target=%s setup=%s cap=%.3f Mbps",
-		cycleCount, len(startupBoundaries), reps, target, setupClip, capMbps)
-	t.Logf("every cycle measures startup OF %q — boundary type is the only variable", target)
-
-	// Capture the manifest's variant bandwidths up front so each cycle's
-	// log line + result struct carries (avg=X peak=Y) context for any
-	// variant it mentions. Best-effort — OpenSession may have a player
-	// that hasn't yet fetched the manifest, in which case bws is empty
-	// and annotations skip the bandwidth portion.
+	// Capture the manifest's variant bandwidths up front. They drive
+	// the cap matrix (one cap per variant unless CHAR_STARTUP_CAPS
+	// overrides) AND annotate every variant mention in the cycle logs.
+	// OpenSession should leave us with a player that has its manifest
+	// fetched; if not, computeStartupCaps below will return an empty
+	// list and the test fails fast with a clear message.
 	bws := map[string]runner.VariantBandwidth{}
 	if rec, err := sess.PlayerState(context.Background()); err == nil {
 		bws = runner.VariantBandwidthByResolution(rec)
 	}
+
+	// Caps: env override has priority; otherwise derive one cap per
+	// variant from the manifest (variant.avg × 1.20 × 1.07 — just
+	// above sustainable for THAT variant, below the next variant's
+	// avg). Sorted descending so the no-constraint case runs first.
+	caps := envFloatList("CHAR_STARTUP_CAPS", nil)
+	if len(caps) == 0 {
+		caps = computeStartupCaps(bws)
+	}
+	if len(caps) == 0 {
+		t.Fatalf("no caps to test (manifest variants unavailable AND CHAR_STARTUP_CAPS not set)")
+	}
+
+	runID := time.Now().UTC().Format("20060102T150405Z")
+	capStrs := make([]string, len(caps))
+	for i, c := range caps {
+		capStrs[i] = fmt.Sprintf("%.3f", c)
+	}
+	startLabels := map[string]string{
+		"test":        "startup",
+		"platform":    string(p),
+		"run_id":      runID,
+		"clip_target": target,
+		"clip_setup":  setupClip,
+		"caps_mbps":   strings.Join(capStrs, ","),
+	}
+	if err := sess.LabelPlay(context.Background(), startLabels); err != nil {
+		t.Logf("label play (start): %v (test continues)", err)
+	} else {
+		t.Logf("labeled play with %v", startLabels)
+	}
+
+	cycleCount := len(caps) * len(startupBoundaries) * reps
+	// Per-cycle budget: setup (~30s app_cold, ~5s channel) + observe
+	// (30s) + cleanup. Worst case ~90s per cycle + slack.
+	overall := time.Duration(cycleCount)*90*time.Second + 3*time.Minute
+	ctx, cancel := context.WithTimeout(context.Background(), overall)
+	defer cancel()
+
+	t.Logf("cycle plan: %d cycles (%d caps × %d boundaries × %d reps), target=%s setup=%s",
+		cycleCount, len(caps), len(startupBoundaries), reps, target, setupClip)
+	t.Logf("caps (Mbps): %v", caps)
+	t.Logf("every cycle measures startup OF %q — boundary type AND cap are the independent variables", target)
+
 	if len(bws) > 0 {
 		t.Logf("variant ladder (manifest):")
 		for res, bw := range bws {
@@ -126,19 +177,22 @@ func runStartup(t *testing.T, p runner.Platform) {
 	var allCycles []runner.StartupCycleResult
 	cycleIdx := 0
 
-	for rep := 0; rep < reps; rep++ {
-		for _, boundary := range startupBoundaries {
-			cycleIdx++
-			result := runStartupCycle(ctx, t, sess, appium, *picked, boundary, target, setupClip, capMbps, cycleIdx, bws)
-			allCycles = append(allCycles, result)
-			firstAnnot := runner.AnnotateVariant(bws, result.FirstVariantPicked, capMbps)
-			settledAnnot := runner.AnnotateVariant(bws, result.SettledVariant, capMbps)
-			t.Logf("  [%2d] %-16s clip=%-30s cap=%.2f Mbps first_var=%-10s %s settled=%-10s %s ttff=%.2fs reach5sbuf=%.1fs shifts=%d stalls=%d",
-				cycleIdx, boundary, result.ContentClipID, capMbps,
-				result.FirstVariantPicked, firstAnnot,
-				result.SettledVariant, settledAnnot,
-				result.TimeToFirstFrameS, result.ReachedFiveSBufferAtS,
-				result.UpshiftsIn30S, result.StallsIn30S)
+	for _, capMbps := range caps {
+		t.Logf("== cap=%.3f Mbps ==", capMbps)
+		for rep := 0; rep < reps; rep++ {
+			for _, boundary := range startupBoundaries {
+				cycleIdx++
+				result := runStartupCycle(ctx, t, sess, appium, *picked, boundary, target, setupClip, capMbps, cycleIdx, bws)
+				allCycles = append(allCycles, result)
+				firstAnnot := runner.AnnotateVariant(bws, result.FirstVariantPicked, capMbps)
+				settledAnnot := runner.AnnotateVariant(bws, result.SettledVariant, capMbps)
+				t.Logf("  [%2d] %-16s cap=%6.3f first_var=%-10s %s settled=%-10s %s ttff=%.2fs reach5sbuf=%.1fs shifts=%d stalls=%d",
+					cycleIdx, boundary, capMbps,
+					result.FirstVariantPicked, firstAnnot,
+					result.SettledVariant, settledAnnot,
+					result.TimeToFirstFrameS, result.ReachedFiveSBufferAtS,
+					result.UpshiftsIn30S, result.StallsIn30S)
+			}
 		}
 	}
 
@@ -497,13 +551,19 @@ func populateStartupCycleResult(r runner.StartupCycleResult, samples []runner.Sa
 		baselineSample = &samples[newPlayFirstSampleIdx-1]
 	}
 
-	// Sample-walk for buffer + variant trajectory + counters. Use
-	// BufferEndS as primary buffer signal (BufferDepthS is unreliable
-	// on AVPlayer per avplayer-quirks.md).
+	// Sample-walk for buffer + variant trajectory + counters.
+	//
+	// IMPORTANT: use BufferDepthS, not BufferEndS. BufferEndS is the
+	// ABSOLUTE playhead-time of the buffer end (e.g. 972.906 means
+	// "the buffered data ends at second 972.906 of the stream"), not
+	// the depth. On a stream that's been playing for many seconds,
+	// BufferEndS is naturally hundreds of seconds and trivially
+	// exceeds any depth threshold. BufferDepthS (the actual seconds
+	// of buffer ahead of playhead) is the correct field — and it IS
+	// reliable on the iPad sim per the runs we've inspected, despite
+	// the avplayer-quirks note (which may apply only to certain iOS
+	// versions or specific failure modes).
 	bufField := func(s runner.Sample) float64 {
-		if s.BufferEndS > 0 {
-			return s.BufferEndS
-		}
 		return s.BufferDepthS
 	}
 	var firstNB, lastNB float64
@@ -670,6 +730,31 @@ func envOr(key, dflt string) string {
 		return v
 	}
 	return dflt
+}
+
+// envFloatList parses a comma-separated list of floats from env.
+// Empty / unset / malformed → returns dflt unchanged.
+func envFloatList(key string, dflt []float64) []float64 {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		return dflt
+	}
+	out := []float64{}
+	for _, p := range strings.Split(v, ",") {
+		t := strings.TrimSpace(p)
+		if t == "" {
+			continue
+		}
+		f, err := strconv.ParseFloat(t, 64)
+		if err != nil {
+			return dflt
+		}
+		out = append(out, f)
+	}
+	if len(out) == 0 {
+		return dflt
+	}
+	return out
 }
 
 func envFloat(key string, dflt float64) float64 {
