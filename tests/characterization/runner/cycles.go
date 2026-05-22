@@ -51,6 +51,31 @@ type CycleID struct {
 // even risk them. Anything else gets rewritten to `_`.
 var labelValueOK = regexp.MustCompile(`[^A-Za-z0-9_:.\-]`)
 
+// uuidShape catches strings that look like a UUID (with or without
+// dashes). Used by CanonicalUUID to decide whether to lowercase.
+var uuidShape = regexp.MustCompile(`^[0-9A-Fa-f]{8}-?[0-9A-Fa-f]{4}-?[0-9A-Fa-f]{4}-?[0-9A-Fa-f]{4}-?[0-9A-Fa-f]{12}$`)
+
+// CanonicalUUID lowercases s if it looks like a UUID, else returns
+// s unchanged. ClickHouse stores UUIDs lowercase (the forwarder's
+// canonicalV2ID does this on every ingest path); iOS sometimes emits
+// uppercase (e.g. when read via the `home-player-id` accessibility
+// node). OTel attributes that should join to CH rows MUST go
+// through this — see `case_sensitivity_ids` memory and the SigNoz
+// JOIN story in #494.
+//
+// Pass-through for non-UUID strings (labels like `cycle_id`, free
+// text, etc.). The regex check keeps the helper safe to apply to
+// any attribute value.
+func CanonicalUUID(s string) string {
+	if s == "" {
+		return ""
+	}
+	if uuidShape.MatchString(s) {
+		return strings.ToLower(s)
+	}
+	return s
+}
+
 // sanitizeLabelValue replaces forbidden characters with `_`. Idempotent.
 func sanitizeLabelValue(v string) string {
 	return labelValueOK.ReplaceAllString(v, "_")
@@ -168,7 +193,7 @@ func StartCycle(ctx context.Context, sess *Session, cid CycleID) (time.Time, err
 		attribute.String("boundary", cid.Boundary),
 		attribute.String("fault", cid.Fault),
 		attribute.String("cap_mbps", cid.CapMbps),
-		attribute.String("player_id", sess.PlayerID),
+		attribute.String("player_id", CanonicalUUID(sess.PlayerID)),
 	))
 	rememberActiveCycleSpan(span)
 
@@ -227,7 +252,10 @@ func AnnotateActiveCycle(key, value string) {
 	if s == nil {
 		return
 	}
-	s.SetAttributes(attribute.String(key, value))
+	// CanonicalUUID is a no-op for non-UUID values, so it's safe to
+	// apply unconditionally — the case_sensitivity_ids gotcha bites
+	// anywhere a UUID is written without canonicalization.
+	s.SetAttributes(attribute.String(key, CanonicalUUID(value)))
 }
 
 // MarkActiveCycleFailed flags the currently-active cycle span as
@@ -306,7 +334,7 @@ func StartTestRunSpan(ctx context.Context, name string, runMeta map[string]strin
 		if k == "" || v == "" {
 			continue
 		}
-		attrs = append(attrs, attribute.String(k, v))
+		attrs = append(attrs, attribute.String(k, CanonicalUUID(v)))
 	}
 	return Tracer().Start(ctx, name, trace.WithAttributes(attrs...))
 }
