@@ -167,6 +167,13 @@ type StartupCycleResult struct {
 	// Used by the result-builder to detect the new-play transition
 	// for accurate TTFF measurement.
 	PrePlayID string `json:"pre_play_id,omitempty"`
+	// PlayID is the play_id this cycle actually MEASURES — the play
+	// the boundary started. Populated from the first sample whose
+	// play_id differs from PrePlayID (i.e. the new play). Empty when
+	// the new play never appeared during the observation window.
+	// Required by the session-viewer link on the Characterization
+	// page: ?player_id=<PlayerID>&play_id=<PlayID>.
+	PlayID string `json:"play_id,omitempty"`
 	// TimeToFirstFrameS reads the iOS app's reported video first-frame
 	// time. The most-watched UX number.
 	TimeToFirstFrameS float64 `json:"time_to_first_frame_s,omitempty"`

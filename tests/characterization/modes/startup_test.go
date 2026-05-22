@@ -137,22 +137,29 @@ func runStartup(t *testing.T, p runner.Platform) {
 	}
 
 	runID := time.Now().UTC().Format("20060102T150405Z")
-	capStrs := make([]string, len(caps))
-	for i, c := range caps {
-		capStrs[i] = fmt.Sprintf("%.3f", c)
-	}
-	startLabels := map[string]string{
+	// Run-scope labels (test identity, platform, clip selection) are
+	// stamped via LabelPlay directly — they're constant across all
+	// cycles and only need to land ONCE. Per-cycle identity
+	// (cycle_id, cycle_idx, rep, boundary, cap_mbps) is written by
+	// runner.StartCycle inside runStartupCycle below; that overwrite
+	// is what the dashboard's cycle-band overlay reads. See
+	// .claude/standards/characterization-principles.md § 9.
+	//
+	// `caps_mbps` (the WHOLE list) is deliberately omitted — the
+	// forwarder rejects label values containing `,` (silent drop;
+	// see reference_labelplay_value_encoding.md). The active cap for
+	// each cycle is carried on `cap_mbps` instead.
+	runLabels := map[string]string{
 		"test":        "startup",
 		"platform":    string(p),
 		"run_id":      runID,
 		"clip_target": target,
 		"clip_setup":  setupClip,
-		"caps_mbps":   strings.Join(capStrs, ","),
 	}
-	if err := sess.LabelPlay(context.Background(), startLabels); err != nil {
+	if err := sess.LabelPlay(context.Background(), runLabels); err != nil {
 		t.Logf("label play (start): %v (test continues)", err)
 	} else {
-		t.Logf("labeled play with %v", startLabels)
+		t.Logf("labeled play with %v", runLabels)
 	}
 
 	cycleCount := len(caps) * len(startupBoundaries) * reps
@@ -182,7 +189,7 @@ func runStartup(t *testing.T, p runner.Platform) {
 		for rep := 0; rep < reps; rep++ {
 			for _, boundary := range startupBoundaries {
 				cycleIdx++
-				result := runStartupCycle(ctx, t, sess, appium, *picked, boundary, target, setupClip, capMbps, cycleIdx, bws)
+				result := runStartupCycle(ctx, t, sess, appium, *picked, boundary, target, setupClip, capMbps, cycleIdx, rep, bws)
 				allCycles = append(allCycles, result)
 				firstAnnot := runner.AnnotateVariant(bws, result.FirstVariantPicked, capMbps)
 				settledAnnot := runner.AnnotateVariant(bws, result.SettledVariant, capMbps)
@@ -232,7 +239,12 @@ func runStartup(t *testing.T, p runner.Platform) {
 		t.Logf("chart write skipped: %v", err)
 	}
 
-	// Post-run summary labels — one per boundary's median TTFF / reach.
+	// Close the last cycle's band explicitly so the dashboard overlay
+	// renders a trailing edge. Without this, the final cycle's band
+	// extends past the end-of-run in the archived view.
+	if err := runner.EndCycle(context.Background(), sess); err != nil {
+		t.Logf("EndCycle: %v", err)
+	}
 	endLabels := map[string]string{
 		"completed":     time.Now().UTC().Format("20060102T150405Z"),
 		"cycle_count":   fmt.Sprintf("%d", len(allCycles)),
@@ -265,7 +277,7 @@ func runStartup(t *testing.T, p runner.Platform) {
 func runStartupCycle(
 	ctx context.Context, t *testing.T,
 	sess *runner.Session, appium *runner.AppiumLauncher, dev runner.Device,
-	boundary startupBoundary, targetClip, setupClip string, capMbps float64, idx int,
+	boundary startupBoundary, targetClip, setupClip string, capMbps float64, idx, rep int,
 	bws map[string]runner.VariantBandwidth,
 ) runner.StartupCycleResult {
 	result := runner.StartupCycleResult{
@@ -273,6 +285,20 @@ func runStartupCycle(
 		BoundaryType:  string(boundary),
 		ContentClipID: targetClip,
 		CapMbps:       capMbps,
+	}
+
+	// Stamp the cycle identity onto the player via the standard
+	// schema. The label PATCH lands BEFORE the boundary fires so
+	// the dashboard's cycle-band overlay shows the band starting
+	// exactly at boundary-time, not after observation begins.
+	if _, err := runner.StartCycle(ctx, sess, runner.CycleID{
+		Test:     "startup",
+		Idx:      idx,
+		Rep:      rep,
+		Boundary: string(boundary),
+		CapMbps:  fmt.Sprintf("%g", capMbps),
+	}); err != nil {
+		t.Logf("[%d] StartCycle: %v (band rendering may be missing)", idx, err)
 	}
 
 	// Capture the play_id active BEFORE this cycle's boundary fires.
@@ -531,6 +557,9 @@ func populateStartupCycleResult(r runner.StartupCycleResult, samples []runner.Sa
 		}
 		if r.PrePlayID == "" || (s.PlayID != "" && s.PlayID != r.PrePlayID) {
 			newPlayFirstSampleIdx = i
+			if s.PlayID != "" {
+				r.PlayID = s.PlayID
+			}
 			break
 		}
 	}

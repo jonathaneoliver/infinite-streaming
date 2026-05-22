@@ -71,15 +71,19 @@ func runAbort(t *testing.T, p runner.Platform) {
 	sess := OpenSession(t, p)
 
 	runID := time.Now().UTC().Format("20060102T150405Z")
-	startLabels := map[string]string{
+	// Run-scope labels — constant across all cycles. Per-cycle
+	// identity (cycle_id, cycle_idx, rep, fault, cap_mbps) is
+	// written by runner.StartCycle inside runOneAbortCycle below.
+	// See .claude/standards/characterization-principles.md § 9.
+	runLabels := map[string]string{
 		"test":     "abort",
 		"platform": string(p),
 		"run_id":   runID,
 	}
-	if err := sess.LabelPlay(context.Background(), startLabels); err != nil {
+	if err := sess.LabelPlay(context.Background(), runLabels); err != nil {
 		t.Logf("label play (start): %v (test continues)", err)
 	} else {
-		t.Logf("labeled play with %v", startLabels)
+		t.Logf("labeled play with %v", runLabels)
 	}
 	playID, err := sess.CurrentPlayID(context.Background())
 	if err != nil {
@@ -154,7 +158,7 @@ func runAbort(t *testing.T, p runner.Platform) {
 	for rep := 0; rep < reps; rep++ {
 		for _, shape := range abortShapes {
 			cycleIdx++
-			result := runOneAbortCycle(ctx, t, sess, sampler, shape, topResolutions, videoDirs, cycleIdx)
+			result := runOneAbortCycle(ctx, t, sess, sampler, shape, topResolutions, videoDirs, cycleIdx, rep)
 			allCycles = append(allCycles, result)
 			t.Logf("  [%2d] %-32s  abort=%t kind=%-25s retry=%t range=%t downshift=%q stalled=%t recoveryS=%.1f",
 				cycleIdx, shape.name, result.AbortDetected, result.AbortKind,
@@ -203,7 +207,11 @@ func runAbort(t *testing.T, p runner.Platform) {
 		t.Logf("chart write skipped: %v", err)
 	}
 
-	// Post-run labels — one count per shape that succeeded.
+	// Close the last cycle's band so the dashboard overlay renders
+	// a trailing edge in the archive.
+	if err := runner.EndCycle(context.Background(), sess); err != nil {
+		t.Logf("EndCycle: %v", err)
+	}
 	endLabels := map[string]string{
 		"completed":     time.Now().UTC().Format("20060102T150405Z"),
 		"cycle_count":   fmt.Sprintf("%d", len(allCycles)),
@@ -240,8 +248,25 @@ func runOneAbortCycle(
 	ctx context.Context, t *testing.T,
 	sess *runner.Session, sampler *runner.Sampler,
 	shape abortShape, topResolutions []string,
-	videoDirs []string, idx int,
+	videoDirs []string, idx, rep int,
 ) runner.AbortCycleResult {
+	// Stamp cycle identity onto the player BEFORE the fault arms so
+	// the dashboard's cycle-band overlay shows the band starting at
+	// boundary-time. CapMbps reflects the throttled rate when the
+	// shape uses throttling; "none" otherwise (raw fault types).
+	capLabel := "none"
+	if shape.useThrottle {
+		capLabel = fmt.Sprintf("%g", abortThrottleRateMbps)
+	}
+	if _, err := runner.StartCycle(ctx, sess, runner.CycleID{
+		Test:    "abort",
+		Idx:     idx,
+		Rep:     rep,
+		Fault:   shape.name,
+		CapMbps: capLabel,
+	}); err != nil {
+		t.Logf("[%d] StartCycle: %v (band rendering may be missing)", idx, err)
+	}
 	// Pre-cycle: ensure clean state, then fill buffer at the high rate.
 	if err := sess.ClearFaults(ctx); err != nil {
 		t.Logf("[%d] clear faults pre-cycle: %v (continuing)", idx, err)

@@ -1,6 +1,6 @@
 # Startup characterization test
 
-What the test measures, what each field means, and how to interpret a row of results. **Read this before reasoning about a startup_test result OR before editing `tests/characterization/modes/startup_test.go`.**
+What the test measures, what each field means, and how to interpret a row of results. **Read this before reasoning about a startup_test result OR before editing `tests/characterization/modes/startup_test.go`.** The cross-test rules in [`characterization-principles.md`](characterization-principles.md) apply — this doc only covers what's startup-specific.
 
 ## What the test is doing
 

@@ -2,7 +2,7 @@
 
 What the test measures, what each field means, and how to interpret a row of results. **Read this before reasoning about an abort_test result OR before editing `tests/characterization/modes/abort_test.go`.**
 
-Related — the wire-level behaviour of each fault type is documented separately at `.claude/standards/fault-injection-wire-contract.md`. Read that first; this doc covers the test scaffolding around those wire shapes.
+Related — the wire-level behaviour of each fault type is documented separately at `.claude/standards/fault-injection-wire-contract.md`. Read that first; this doc covers the test scaffolding around those wire shapes. The cross-test rules in [`characterization-principles.md`](characterization-principles.md) apply — this doc only covers what's abort-specific.
 
 ## What the test is doing
 
