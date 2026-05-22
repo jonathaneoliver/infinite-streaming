@@ -490,13 +490,21 @@ function startedAtLocal(iso: string): string {
                     v-if="g.cards[t]!.hasReport"
                     type="button"
                     class="btn btn-secondary btn-sm"
+                    :class="{ 'btn-active': expandedSteps.get(charRunKey(g.run_id, t))?.open }"
                     @click="toggleSteps(g.run_id, t)"
                   >
                     {{ expandedSteps.get(charRunKey(g.run_id, t))?.open ? 'Details ▲' : 'Details ▼' }}
                   </button>
                   <a :href="playViewerHref(g.cards[t]!.play.play_id, g.cards[t]!.play.player_id)" class="btn btn-secondary btn-sm" title="Open the live samples replay (Chart.js timeline)">Replay</a>
                 </div>
-                <div v-if="expandedSteps.get(charRunKey(g.run_id, t))?.open" class="steps-panel">
+                <!-- Details panel renders below the cards row at full
+                     width — see .run-row-details below this card grid.
+                     The inline template that was here is dead code
+                     gated by v-if="false" so the markup stays as a
+                     reference until the row-level renderer is verified
+                     in production. -->
+                <template v-if="false">
+                  <div v-if="expandedSteps.get(charRunKey(g.run_id, t))?.open" class="steps-panel">
                   <div v-if="expandedSteps.get(charRunKey(g.run_id, t))?.loading" class="steps-loading">loading…</div>
                   <div v-else-if="expandedSteps.get(charRunKey(g.run_id, t))?.error" class="steps-error">
                     error: {{ expandedSteps.get(charRunKey(g.run_id, t))?.error }}
@@ -532,8 +540,8 @@ function startedAtLocal(iso: string): string {
                         <tbody>
                           <tr v-for="(v, i) in expandedSteps.get(charRunKey(g.run_id, t))!.report!.variants!" :key="i">
                             <td class="mono">{{ v.resolution }}</td>
-                            <td class="mono">{{ v.avg_bps != null ? (v.avg_bps / 1_000_000).toFixed(3) : '—' }}</td>
-                            <td class="mono">{{ v.peak_bps != null ? (v.peak_bps / 1_000_000).toFixed(3) : '—' }}</td>
+                            <td class="mono">{{ v.avg_bps != null ? (v.avg_bps! / 1_000_000).toFixed(3) : '—' }}</td>
+                            <td class="mono">{{ v.peak_bps != null ? (v.peak_bps! / 1_000_000).toFixed(3) : '—' }}</td>
                             <td class="mono">{{ expandedSteps.get(charRunKey(g.run_id, t))!.report!.summary?.variant_sample_counts?.[i] ?? 0 }}</td>
                           </tr>
                         </tbody>
@@ -567,17 +575,17 @@ function startedAtLocal(iso: string): string {
                               <td>
                                 <span v-if="c.abort_detected" class="status-chip chip-pass">YES</span>
                                 <span v-else class="status-chip chip-fail">NO</span>
-                                <span v-if="c.abort_at_s != null && c.abort_detected" class="muted"> @ {{ c.abort_at_s.toFixed(1) }}s</span>
+                                <span v-if="c.abort_at_s != null && c.abort_detected" class="muted"> @ {{ c.abort_at_s!.toFixed(1) }}s</span>
                               </td>
                               <td class="mono">{{ c.abort_kind || '—' }}</td>
                               <td>{{ c.retry_found ? 'yes' : 'no' }}</td>
                               <td>{{ c.retry_had_range ? 'yes' : (c.retry_found ? 'no' : '—') }}</td>
-                              <td class="mono">{{ c.downshifted_to || '—' }}<span v-if="c.downshifted_to && c.downshift_after_s != null" class="muted"> ({{ c.downshift_after_s.toFixed(1) }}s)</span></td>
+                              <td class="mono">{{ c.downshifted_to || '—' }}<span v-if="c.downshifted_to && c.downshift_after_s != null" class="muted"> ({{ c.downshift_after_s!.toFixed(1) }}s)</span></td>
                               <td>
                                 <span v-if="c.player_stalled" class="status-chip chip-fail">YES</span>
                                 <span v-else>no</span>
                               </td>
-                              <td>{{ c.recovery_s != null ? c.recovery_s.toFixed(1) + 's' : '—' }}</td>
+                              <td>{{ c.recovery_s != null ? c.recovery_s!.toFixed(1) + 's' : '—' }}</td>
                             </tr>
                           </tbody>
                         </table>
@@ -608,11 +616,11 @@ function startedAtLocal(iso: string): string {
                             <tr v-for="(c, i) in expandedSteps.get(charRunKey(g.run_id, t))!.report!.startup_cycles!" :key="i">
                               <td>{{ c.cycle_idx ?? i + 1 }}</td>
                               <td class="mono">{{ c.boundary_type ?? '—' }}</td>
-                              <td class="mono">{{ c.content_clip_id ? c.content_clip_id.slice(0, 24) : '—' }}</td>
-                              <td class="mono">{{ c.cap_mbps != null ? c.cap_mbps.toFixed(2) : '—' }}</td>
+                              <td class="mono">{{ c.content_clip_id ? c.content_clip_id!.slice(0, 24) : '—' }}</td>
+                              <td class="mono">{{ c.cap_mbps != null ? c.cap_mbps!.toFixed(2) : '—' }}</td>
                               <td class="mono">{{ c.first_variant_picked || '—' }}</td>
-                              <td>{{ c.time_to_first_frame_s != null ? c.time_to_first_frame_s.toFixed(2) + 's' : '—' }}</td>
-                              <td>{{ c.reached_5s_buffer_at_s ? c.reached_5s_buffer_at_s.toFixed(1) + 's' : 'never' }}</td>
+                              <td>{{ c.time_to_first_frame_s != null ? c.time_to_first_frame_s!.toFixed(2) + 's' : '—' }}</td>
+                              <td>{{ c.reached_5s_buffer_at_s ? c.reached_5s_buffer_at_s!.toFixed(1) + 's' : 'never' }}</td>
                               <td class="mono">{{ c.settled_variant || '—' }}</td>
                               <td>{{ (c.upshifts_in_30s ?? 0) }}/{{ (c.downshifts_in_30s ?? 0) }}</td>
                               <td>
@@ -647,7 +655,7 @@ function startedAtLocal(iso: string): string {
                             <tr v-for="(s, i) in expandedSteps.get(charRunKey(g.run_id, t))!.report!.steps!" :key="i">
                               <td>{{ i + 1 }}</td>
                               <td class="mono">{{ s.rate_mbps?.toFixed(3) }}</td>
-                              <td class="mono">{{ s.variant?.resolution ?? '—' }} <span v-if="s.variant?.margin_pct != null" class="muted">{{ fmtPct(s.variant.margin_pct) }}</span></td>
+                              <td class="mono">{{ s.variant?.resolution ?? '—' }} <span v-if="s.variant?.margin_pct != null" class="muted">{{ fmtPct(s.variant!.margin_pct) }}</span></td>
                               <td>{{ s.exit_reason ?? '—' }}</td>
                               <td>{{ fmtSeconds(s.hold_actual_s ?? s.hold_s) }}</td>
                               <td>{{ s.min_buffer_s?.toFixed(1) ?? '—' }} / {{ s.max_buffer_s?.toFixed(1) ?? '—' }}</td>
@@ -661,12 +669,168 @@ function startedAtLocal(iso: string): string {
                   </template>
                   <div v-else class="steps-loading">(no report data)</div>
                 </div>
+                </template>
               </div>
               <div v-else class="run-card-body empty-card">
                 (no play landed for this test in this run)
               </div>
             </div>
           </div>
+
+          <!-- Row-level Details panel — renders below the run-cards
+               grid at FULL PAGE WIDTH when any card in this run is
+               expanded. The card-level Details button still controls
+               state via expandedSteps; the panel itself lives here. -->
+          <template v-for="t in TEST_NAMES" :key="`detail-${t}`">
+            <div v-if="expandedSteps.get(charRunKey(g.run_id, t))?.open && g.cards[t]" class="run-row-details">
+              <div class="run-row-details-header">
+                <span class="details-test-label">Details — {{ t }}</span>
+                <span v-if="g.cards[t]" class="details-test-status" :class="g.cards[t]!.passed ? 'chip-pass' : 'chip-fail'">
+                  {{ g.cards[t]!.passed ? 'PASS' : 'FAIL' }}
+                </span>
+                <button type="button" class="btn btn-secondary btn-sm" @click="toggleSteps(g.run_id, t)">Close ▲</button>
+              </div>
+              <div v-if="expandedSteps.get(charRunKey(g.run_id, t))?.loading" class="steps-loading">loading…</div>
+              <div v-else-if="expandedSteps.get(charRunKey(g.run_id, t))?.error" class="steps-error">
+                error: {{ expandedSteps.get(charRunKey(g.run_id, t))?.error }}
+              </div>
+              <template v-else-if="expandedSteps.get(charRunKey(g.run_id, t))?.report">
+                <div class="details-grid">
+                  <!-- Summary block -->
+                  <div class="details-section">
+                    <div class="details-section-title">Summary</div>
+                    <table class="summary-table">
+                      <tbody>
+                        <tr v-if="expandedSteps.get(charRunKey(g.run_id, t))!.report!.summary?.lowest_sustainable_cap_mbps"><td class="label">lowest sustainable cap</td><td class="value mono">{{ fmtMbps(expandedSteps.get(charRunKey(g.run_id, t))!.report!.summary!.lowest_sustainable_cap_mbps) }}</td></tr>
+                        <tr v-if="expandedSteps.get(charRunKey(g.run_id, t))!.report!.summary?.bottom_variant_floor_mbps"><td class="label">bottom variant floor</td><td class="value mono">{{ fmtMbps(expandedSteps.get(charRunKey(g.run_id, t))!.report!.summary!.bottom_variant_floor_mbps) }}</td></tr>
+                        <tr v-if="expandedSteps.get(charRunKey(g.run_id, t))!.report!.summary?.highest_stalling_cap_mbps"><td class="label">highest stalling cap</td><td class="value mono">{{ fmtMbps(expandedSteps.get(charRunKey(g.run_id, t))!.report!.summary!.highest_stalling_cap_mbps) }}</td></tr>
+                        <tr><td class="label">stalls</td><td class="value mono">{{ expandedSteps.get(charRunKey(g.run_id, t))!.report!.summary?.total_stalls ?? 0 }} ({{ (expandedSteps.get(charRunKey(g.run_id, t))!.report!.summary?.total_stall_seconds ?? 0).toFixed(1) }}s)</td></tr>
+                        <tr><td class="label">profile shifts</td><td class="value mono">{{ expandedSteps.get(charRunKey(g.run_id, t))!.report!.summary?.profile_shifts ?? 0 }}</td></tr>
+                        <tr><td class="label">dropped frames</td><td class="value mono">{{ expandedSteps.get(charRunKey(g.run_id, t))!.report!.summary?.dropped_frames ?? 0 }}</td></tr>
+                        <tr><td class="label">samples</td><td class="value mono">{{ expandedSteps.get(charRunKey(g.run_id, t))!.report!.summary?.sample_count ?? 0 }}</td></tr>
+                        <tr v-if="expandedSteps.get(charRunKey(g.run_id, t))!.report!.summary?.min_bitrate_mbps != null">
+                          <td class="label">bitrate min / mean / max</td>
+                          <td class="value mono">{{ expandedSteps.get(charRunKey(g.run_id, t))!.report!.summary!.min_bitrate_mbps?.toFixed(2) }} / {{ expandedSteps.get(charRunKey(g.run_id, t))!.report!.summary!.mean_bitrate_mbps?.toFixed(2) }} / {{ expandedSteps.get(charRunKey(g.run_id, t))!.report!.summary!.max_bitrate_mbps?.toFixed(2) }} Mbps</td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  </div>
+
+                  <!-- Variants block -->
+                  <div v-if="expandedSteps.get(charRunKey(g.run_id, t))!.report!.variants?.length" class="details-section">
+                    <div class="details-section-title">Variants ({{ expandedSteps.get(charRunKey(g.run_id, t))!.report!.variants!.length }})</div>
+                    <table class="steps-table">
+                      <thead>
+                        <tr><th>resolution</th><th>avg Mbps</th><th>peak Mbps</th><th>samples</th></tr>
+                      </thead>
+                      <tbody>
+                        <tr v-for="(v, i) in expandedSteps.get(charRunKey(g.run_id, t))!.report!.variants!" :key="i">
+                          <td class="mono">{{ v.resolution }}</td>
+                          <td class="mono">{{ v.avg_bps != null ? (v.avg_bps! / 1_000_000).toFixed(3) : '—' }}</td>
+                          <td class="mono">{{ v.peak_bps != null ? (v.peak_bps! / 1_000_000).toFixed(3) : '—' }}</td>
+                          <td class="mono">{{ expandedSteps.get(charRunKey(g.run_id, t))!.report!.summary?.variant_sample_counts?.[i] ?? 0 }}</td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+
+                <!-- Abort cycles block — full-width row -->
+                <div v-if="expandedSteps.get(charRunKey(g.run_id, t))!.report!.abort_cycles?.length" class="details-section">
+                  <div class="details-section-title">Abort Cycles ({{ expandedSteps.get(charRunKey(g.run_id, t))!.report!.abort_cycles!.length }})</div>
+                  <div class="steps-tablewrap">
+                    <table class="steps-table">
+                      <thead>
+                        <tr>
+                          <th>#</th><th>fault shape</th><th>pre variant</th><th>abort</th><th>kind</th><th>retry</th><th>range</th><th>downshift</th><th>stalled</th><th>recovery</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        <tr v-for="(c, i) in expandedSteps.get(charRunKey(g.run_id, t))!.report!.abort_cycles!" :key="i">
+                          <td>{{ c.cycle_idx ?? i + 1 }}</td>
+                          <td class="mono">{{ c.fault_shape ?? '—' }}</td>
+                          <td class="mono">{{ c.pre_variant ?? '—' }}</td>
+                          <td>
+                            <span v-if="c.abort_detected" class="status-chip chip-pass">YES</span>
+                            <span v-else class="status-chip chip-fail">NO</span>
+                            <span v-if="c.abort_at_s != null && c.abort_detected" class="muted"> @ {{ c.abort_at_s!.toFixed(1) }}s</span>
+                          </td>
+                          <td class="mono">{{ c.abort_kind || '—' }}</td>
+                          <td>{{ c.retry_found ? 'yes' : 'no' }}</td>
+                          <td>{{ c.retry_had_range ? 'yes' : (c.retry_found ? 'no' : '—') }}</td>
+                          <td class="mono">{{ c.downshifted_to || '—' }}<span v-if="c.downshifted_to && c.downshift_after_s != null" class="muted"> ({{ c.downshift_after_s!.toFixed(1) }}s)</span></td>
+                          <td>
+                            <span v-if="c.player_stalled" class="status-chip chip-fail">YES</span>
+                            <span v-else>no</span>
+                          </td>
+                          <td>{{ c.recovery_s != null ? c.recovery_s!.toFixed(1) + 's' : '—' }}</td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+
+                <!-- Startup cycles block — full-width row -->
+                <div v-if="expandedSteps.get(charRunKey(g.run_id, t))!.report!.startup_cycles?.length" class="details-section">
+                  <div class="details-section-title">Startup Cycles ({{ expandedSteps.get(charRunKey(g.run_id, t))!.report!.startup_cycles!.length }})</div>
+                  <div class="steps-tablewrap">
+                    <table class="steps-table">
+                      <thead>
+                        <tr>
+                          <th>#</th><th>boundary</th><th>clip</th><th>cap Mbps</th><th>first var</th><th>ttff</th><th>5s buf at</th><th>settled</th><th>shifts ↑/↓</th><th>stalls</th><th>net bw start/end</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        <tr v-for="(c, i) in expandedSteps.get(charRunKey(g.run_id, t))!.report!.startup_cycles!" :key="i">
+                          <td>{{ c.cycle_idx ?? i + 1 }}</td>
+                          <td class="mono">{{ c.boundary_type ?? '—' }}</td>
+                          <td class="mono">{{ c.content_clip_id ? c.content_clip_id!.slice(0, 24) : '—' }}</td>
+                          <td class="mono">{{ c.cap_mbps != null ? c.cap_mbps!.toFixed(2) : '—' }}</td>
+                          <td class="mono">{{ c.first_variant_picked || '—' }}</td>
+                          <td>{{ c.time_to_first_frame_s != null ? c.time_to_first_frame_s!.toFixed(2) + 's' : '—' }}</td>
+                          <td>{{ c.reached_5s_buffer_at_s ? c.reached_5s_buffer_at_s!.toFixed(1) + 's' : 'never' }}</td>
+                          <td class="mono">{{ c.settled_variant || '—' }}</td>
+                          <td>{{ (c.upshifts_in_30s ?? 0) }}/{{ (c.downshifts_in_30s ?? 0) }}</td>
+                          <td>
+                            <span v-if="(c.stalls_in_30s ?? 0) > 0" class="status-chip chip-fail">{{ c.stalls_in_30s }}</span>
+                            <span v-else>0</span>
+                          </td>
+                          <td class="mono">{{ (c.network_bitrate_at_start_mbps ?? 0).toFixed(1) }}/{{ (c.network_bitrate_at_30s_mbps ?? 0).toFixed(1) }}</td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+
+                <!-- Steps block — full-width row -->
+                <div v-if="expandedSteps.get(charRunKey(g.run_id, t))!.report!.steps?.length" class="details-section">
+                  <div class="details-section-title">Steps ({{ expandedSteps.get(charRunKey(g.run_id, t))!.report!.steps!.length }})</div>
+                  <div class="steps-tablewrap">
+                    <table class="steps-table">
+                      <thead>
+                        <tr>
+                          <th>#</th><th>cap</th><th>variant</th><th>exit</th><th>held</th><th>min/max buf</th><th>stalls</th><th>shifts</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        <tr v-for="(s, i) in expandedSteps.get(charRunKey(g.run_id, t))!.report!.steps!" :key="i">
+                          <td>{{ i + 1 }}</td>
+                          <td class="mono">{{ s.rate_mbps?.toFixed(3) }}</td>
+                          <td class="mono">{{ s.variant?.resolution ?? '—' }} <span v-if="s.variant?.margin_pct != null" class="muted">{{ fmtPct(s.variant!.margin_pct) }}</span></td>
+                          <td>{{ s.exit_reason ?? '—' }}</td>
+                          <td>{{ fmtSeconds(s.hold_actual_s ?? s.hold_s) }}</td>
+                          <td>{{ s.min_buffer_s?.toFixed(1) ?? '—' }} / {{ s.max_buffer_s?.toFixed(1) ?? '—' }}</td>
+                          <td>{{ s.stalls_delta ?? 0 }}</td>
+                          <td>{{ s.shifts_delta ?? 0 }}</td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </template>
+              <div v-else class="steps-loading">(no report data)</div>
+            </div>
+          </template>
         </div>
       </div>
     </main>
@@ -728,6 +892,56 @@ function startedAtLocal(iso: string): string {
 .metric-headline .value { color: #111827; font-weight: 600; }
 
 .steps-panel { margin-top: 10px; padding-top: 10px; border-top: 1px dashed #d1d5db; }
+
+/* Full-width row-level Details panel — replaces the in-card inline panel.
+ * Sits below the cards grid, spans the full row width, gives tables room
+ * to breathe. */
+.run-row-details {
+  margin-top: 12px;
+  padding: 16px;
+  background: #ffffff;
+  border: 1px solid #d1d5db;
+  border-left: 3px solid #1d4ed8;
+  border-radius: 6px;
+}
+.run-row-details-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 12px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid #e5e7eb;
+}
+.details-test-label {
+  font-size: 14px;
+  font-weight: 600;
+  color: #111827;
+  text-transform: capitalize;
+}
+.details-test-status {
+  font-size: 11px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 10px;
+  letter-spacing: 0.5px;
+}
+.run-row-details-header .btn { margin-left: auto; }
+
+/* Two-column grid for Summary + Variants when both present (compact
+ * side-by-side at row width). Larger cycle/step tables stay
+ * full-width below. */
+.details-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: 16px;
+  margin-bottom: 12px;
+}
+
+.btn-active {
+  background: #dbeafe;
+  border-color: #1d4ed8;
+  color: #1d4ed8;
+}
 .steps-loading { color: #6b7280; font-style: italic; font-size: 12px; }
 .steps-error { color: #b91c1c; font-size: 12px; }
 .steps-tablewrap { overflow-x: auto; max-height: 360px; overflow-y: auto; border: 1px solid #e5e7eb; border-radius: 4px; }
