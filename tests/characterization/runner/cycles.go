@@ -153,6 +153,13 @@ func StartCycle(ctx context.Context, sess *Session, cid CycleID) (time.Time, err
 
 	// Start the cycle span. Use the run-level context if the caller
 	// passed one; otherwise this becomes a root span.
+	//
+	// player_id is captured at cycle-start so spans JOIN cleanly to
+	// our existing `session_events` / `network_requests` /
+	// `control_events` tables on the same column. play_id is added
+	// later via AnnotateActiveCycle — for startup cycles the
+	// boundary STARTS a new play, so play_id isn't known until the
+	// post-cycle sample walk populates it.
 	_, span := Tracer().Start(ctx, "cycle", trace.WithAttributes(
 		attribute.String("test", cid.Test),
 		attribute.String("cycle_id", cid.ComposeID()),
@@ -161,6 +168,7 @@ func StartCycle(ctx context.Context, sess *Session, cid CycleID) (time.Time, err
 		attribute.String("boundary", cid.Boundary),
 		attribute.String("fault", cid.Fault),
 		attribute.String("cap_mbps", cid.CapMbps),
+		attribute.String("player_id", sess.PlayerID),
 	))
 	rememberActiveCycleSpan(span)
 
@@ -194,6 +202,59 @@ func EndCycleFailed(ctx context.Context, sess *Session, reason string) error {
 	}
 	endActiveCycleSpan(codes.Error, reason)
 	return sess.LabelPlay(ctx, map[string]string{"cycle_id": ""})
+}
+
+// AnnotateActiveCycle adds a single key/value attribute to the
+// currently-active cycle span — for facts discovered DURING the
+// cycle (play_id, downshift target, recovery_s, etc.) that weren't
+// known at StartCycle time.
+//
+// Most-common use: `runner.AnnotateActiveCycle("play_id", playID)`
+// after sample analysis identifies the play_id the cycle measured.
+// That's the join key for cross-schema queries between traces and
+// our existing `session_events` / `network_requests` tables.
+//
+// No-op when no cycle span is active or when OTel is disabled.
+// Empty values are silently dropped to keep the span attribute set
+// uncluttered.
+func AnnotateActiveCycle(key, value string) {
+	if value == "" {
+		return
+	}
+	activeCycleSpanMu.Lock()
+	s := activeCycleSpan
+	activeCycleSpanMu.Unlock()
+	if s == nil {
+		return
+	}
+	s.SetAttributes(attribute.String(key, value))
+}
+
+// MarkActiveCycleFailed flags the currently-active cycle span as
+// failed and adds a span event recording the reason — but does NOT
+// end the span. Use this from inside a cycle runner (runStartupCycle,
+// runOneAbortCycle) once a per-cycle pass criterion has been
+// evaluated. The next StartCycle (or EndCycle) closes the span; the
+// Error status persists because Ok->Error overrides but Error->Ok
+// does not, per the OTel SDK's monotonic status rule.
+//
+// Safe to call multiple times in one cycle — each call adds another
+// `cycle_failed` event and re-sets the Error status. The trace
+// captures every distinct failure reason for a single cycle.
+//
+// No-op when no cycle span is active (e.g. between EndCycle and the
+// next StartCycle) or when OTel is disabled.
+func MarkActiveCycleFailed(reason string) {
+	activeCycleSpanMu.Lock()
+	s := activeCycleSpan
+	activeCycleSpanMu.Unlock()
+	if s == nil {
+		return
+	}
+	s.AddEvent("cycle_failed", trace.WithAttributes(
+		attribute.String("reason", reason),
+	))
+	s.SetStatus(codes.Error, reason)
 }
 
 // activeCycleSpan tracks the most recently-started cycle span so the

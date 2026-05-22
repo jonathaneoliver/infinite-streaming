@@ -76,9 +76,10 @@ func runAbort(t *testing.T, p runner.Platform) {
 	// written by runner.StartCycle inside runOneAbortCycle below.
 	// See .claude/standards/characterization-principles.md § 9.
 	runLabels := map[string]string{
-		"test":     "abort",
-		"platform": string(p),
-		"run_id":   runID,
+		"test":      "abort",
+		"platform":  string(p),
+		"run_id":    runID,
+		"player_id": sess.PlayerID,
 	}
 	if err := sess.LabelPlay(context.Background(), runLabels); err != nil {
 		t.Logf("label play (start): %v (test continues)", err)
@@ -360,6 +361,11 @@ func runOneAbortCycle(
 	queryFrom := armedAt.Add(-2 * time.Second)
 	queryTo := time.Now()
 	playID, _ := sess.CurrentPlayID(ctx)
+	// Annotate the cycle span with play_id — for abort tests one
+	// play_id spans all cycles in the run, but stamping it per-cycle
+	// keeps trace JOINs to session_events / network_requests simple
+	// (no need to walk the test_run span to find the play_id).
+	runner.AnnotateActiveCycle("play_id", playID)
 	rows, err := runner.FetchNetworkRows(ctx, sess.PlayerID, playID, queryFrom, queryTo, 500)
 	if err != nil {
 		t.Logf("[%d] FetchNetworkRows: %v — abort detection may be incomplete", idx, err)
@@ -374,6 +380,17 @@ func runOneAbortCycle(
 		t.Logf("[%d] WaitForTopAndBuffer (recovery): %v", idx, err)
 	}
 	result.RecoveryS = time.Since(recoveryStart).Seconds()
+
+	// Per-cycle pass criterion — mirrors the end-of-run missed[]/
+	// stalled[] aggregators (lines ~258-262). Flags the cycle's OTel
+	// span as failed so Jaeger / Tempo colour the span red; the
+	// end-of-run t.Errorf still aggregates for the test exit code.
+	if !result.AbortDetected {
+		runner.MarkActiveCycleFailed(fmt.Sprintf("abort not observed for fault_shape=%s", result.FaultShape))
+	}
+	if result.PlayerStalled {
+		runner.MarkActiveCycleFailed(fmt.Sprintf("player stalled post-arm (fault_shape=%s)", result.FaultShape))
+	}
 	return result
 }
 

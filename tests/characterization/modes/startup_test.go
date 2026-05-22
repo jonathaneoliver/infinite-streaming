@@ -155,6 +155,10 @@ func runStartup(t *testing.T, p runner.Platform) {
 		"run_id":      runID,
 		"clip_target": target,
 		"clip_setup":  setupClip,
+		// player_id on the test_run span — cycle spans get their
+		// own per-cycle player_id (can differ across app_cold reps
+		// where ReadPlayerID rebinds sess.PlayerID).
+		"player_id": sess.PlayerID,
 	}
 	if err := sess.LabelPlay(context.Background(), runLabels); err != nil {
 		t.Logf("label play (start): %v (test continues)", err)
@@ -434,6 +438,25 @@ func runStartupCycle(
 	}
 
 	result = populateStartupCycleResult(result, samples, rows, bws)
+
+	// Annotate the cycle span with the new play_id once it's known
+	// (each startup boundary STARTS a new play; the id surfaces from
+	// the first post-boundary sample). This is the join key for
+	// cross-schema CH queries between traces and session_events /
+	// network_requests / control_events.
+	runner.AnnotateActiveCycle("play_id", result.PlayID)
+
+	// Per-cycle pass criterion — same logic as the end-of-run slow[]
+	// aggregator (line ~290). Marking it here flags the cycle's OTel
+	// span as failed so trace backends colour it red; the end-of-run
+	// t.Errorf still aggregates across cycles for the test exit code.
+	if result.ReachedFiveSBufferAtS == 0 || result.ReachedFiveSBufferAtS > startupBufferReach5SLimit.Seconds() {
+		runner.MarkActiveCycleFailed(fmt.Sprintf(
+			"never reached 5s buffer within %.0fs (got %.1fs)",
+			startupBufferReach5SLimit.Seconds(),
+			result.ReachedFiveSBufferAtS,
+		))
+	}
 	return result
 }
 
