@@ -15,6 +15,7 @@
  */
 import { computed, ref, onMounted } from 'vue';
 import ShellLayout from '@/components/ShellLayout.vue';
+import SessionViewerLink from '@/components/SessionViewerLink.vue';
 
 type TestName = 'rampup' | 'rampdown' | 'pyramid' | 'abort' | 'startup';
 const TEST_NAMES: TestName[] = ['rampup', 'rampdown', 'pyramid', 'abort', 'startup'];
@@ -226,6 +227,10 @@ interface StartupCycleRow {
   cap_mbps?: number;
   started_at?: string;
   player_id?: string;
+  // The new play started by this cycle's boundary. Populated by the
+  // Go runner from the first sample whose play_id != pre_play_id;
+  // see StartupCycleResult.PlayID. Required for SessionViewerLink.
+  play_id?: string;
   first_master_at_s?: number;
   first_variant_at_s?: number;
   first_segment_at_s?: number;
@@ -399,6 +404,26 @@ function startedAtLocal(iso: string): string {
   const d = new Date(iso);
   return d.toLocaleString();
 }
+
+// Cycle-window helpers — convert a cycle's per-test timing surface
+// into a [startMs, endMs] pair the SessionViewerLink can render. The
+// link itself adds ±10s pre/post-roll, so these return the cycle's
+// canonical bounds (no padding).
+//
+// Observation windows are constants here mirroring the Go side
+// (startupObserveWindow / abortObserveWindow). Keep in sync — when a
+// test's window changes, update both.
+const STARTUP_OBSERVE_WINDOW_MS = 30_000;
+const ABORT_OBSERVE_WINDOW_MS = 60_000;
+
+function startupCycleWindow(c: StartupCycleRow): { startMs: number; endMs: number } {
+  const startMs = c.started_at ? Date.parse(c.started_at) : NaN;
+  return { startMs, endMs: startMs + STARTUP_OBSERVE_WINDOW_MS };
+}
+function abortCycleWindow(c: AbortCycleRow): { startMs: number; endMs: number } {
+  const startMs = c.armed_at ? Date.parse(c.armed_at) : NaN;
+  return { startMs, endMs: startMs + ABORT_OBSERVE_WINDOW_MS };
+}
 </script>
 
 <template>
@@ -413,6 +438,13 @@ function startedAtLocal(iso: string): string {
         <div class="page-subtitle">
           Characterization runs grouped by run_id. Each run produces up to three plays (rampup / rampdown / pyramid).
           Click a card to open the play in the Session Viewer.
+        </div>
+        <div class="page-callout">
+          <strong>How to run:</strong> Characterization tests run from the developer host, not this UI — this page only displays results that have already been archived. Trigger a run with <code>go test</code> on the host:
+          <pre class="page-callout-code">go test -C tests/characterization ./modes/... -v \
+  -run <span class="muted">TestStartupIPadSim</span> \
+  -timeout 30m -count=1 -launch-mode=appium</pre>
+          Available <code>-run</code> values: <code>TestStartupIPadSim</code>, <code>TestAbortIPadSim</code>, <code>TestRampupIPadSim</code> (and <code>IPhone</code>, <code>AppleTV</code>, <code>AndroidTV</code>, <code>Web</code> variants per test). The run uploads its report via <code>harness post characterization</code> and lands here within a few seconds.
         </div>
       </div>
 
@@ -742,7 +774,7 @@ function startedAtLocal(iso: string): string {
                     <table class="steps-table">
                       <thead>
                         <tr>
-                          <th>#</th><th>fault shape</th><th>pre variant</th><th>abort</th><th>kind</th><th>retry</th><th>range</th><th>downshift</th><th>stalled</th><th>recovery</th>
+                          <th>#</th><th>fault shape</th><th>pre variant</th><th>abort</th><th>kind</th><th>retry</th><th>range</th><th>downshift</th><th>stalled</th><th>recovery</th><th>view</th>
                         </tr>
                       </thead>
                       <tbody>
@@ -764,6 +796,14 @@ function startedAtLocal(iso: string): string {
                             <span v-else>no</span>
                           </td>
                           <td>{{ c.recovery_s != null ? c.recovery_s!.toFixed(1) + 's' : '—' }}</td>
+                          <td>
+                            <SessionViewerLink
+                              :player-id="expandedSteps.get(charRunKey(g.run_id, t))!.report!.player_id ?? ''"
+                              :play-id="expandedSteps.get(charRunKey(g.run_id, t))!.report!.play_ids?.[0]"
+                              :start-ms="abortCycleWindow(c).startMs"
+                              :end-ms="abortCycleWindow(c).endMs"
+                            />
+                          </td>
                         </tr>
                       </tbody>
                     </table>
@@ -777,7 +817,7 @@ function startedAtLocal(iso: string): string {
                     <table class="steps-table">
                       <thead>
                         <tr>
-                          <th>#</th><th>boundary</th><th>clip</th><th>cap Mbps</th><th>first var</th><th>ttff</th><th>5s buf at</th><th>settled</th><th>shifts ↑/↓</th><th>stalls</th><th>net bw start/end</th>
+                          <th>#</th><th>boundary</th><th>clip</th><th>cap Mbps</th><th>first var</th><th>ttff</th><th>5s buf at</th><th>settled</th><th>shifts ↑/↓</th><th>stalls</th><th>net bw start/end</th><th>view</th>
                         </tr>
                       </thead>
                       <tbody>
@@ -796,6 +836,14 @@ function startedAtLocal(iso: string): string {
                             <span v-else>0</span>
                           </td>
                           <td class="mono">{{ (c.network_bitrate_at_start_mbps ?? 0).toFixed(1) }}/{{ (c.network_bitrate_at_30s_mbps ?? 0).toFixed(1) }}</td>
+                          <td>
+                            <SessionViewerLink
+                              :player-id="c.player_id ?? expandedSteps.get(charRunKey(g.run_id, t))!.report!.player_id ?? ''"
+                              :play-id="c.play_id"
+                              :start-ms="startupCycleWindow(c).startMs"
+                              :end-ms="startupCycleWindow(c).endMs"
+                            />
+                          </td>
                         </tr>
                       </tbody>
                     </table>
@@ -844,6 +892,35 @@ function startedAtLocal(iso: string): string {
 .page-header { padding: 16px 0; }
 .page-title { font-size: 24px; font-weight: 600; color: var(--text-primary, #111827); }
 .page-subtitle { color: var(--text-secondary, #6b7280); margin-top: 6px; font-size: 14px; }
+.page-callout {
+  margin-top: 12px;
+  padding: 10px 14px;
+  background: #f0f9ff;
+  border: 1px solid #bae6fd;
+  border-radius: 6px;
+  color: #0c4a6e;
+  font-size: 13px;
+  line-height: 1.5;
+}
+.page-callout code {
+  background: #e0f2fe;
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-size: 12px;
+  font-family: ui-monospace, monospace;
+}
+.page-callout-code {
+  margin: 6px 0;
+  padding: 8px 10px;
+  background: #082f49;
+  color: #e0f2fe;
+  border-radius: 4px;
+  font-size: 12px;
+  font-family: ui-monospace, monospace;
+  overflow-x: auto;
+  white-space: pre;
+}
+.page-callout-code .muted { color: #7dd3fc; }
 
 .panel { background: var(--bg-card, #ffffff); border: 1px solid var(--border, #e5e7eb); border-radius: 8px; margin-bottom: 16px; }
 .panel-header { padding: 12px 16px; border-bottom: 1px solid var(--border, #e5e7eb); }

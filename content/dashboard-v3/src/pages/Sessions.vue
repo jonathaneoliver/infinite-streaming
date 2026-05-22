@@ -9,6 +9,7 @@
  */
 import { ref, computed, onMounted, onBeforeUnmount, watch } from 'vue';
 import ShellLayout from '@/components/ShellLayout.vue';
+import { sessionViewerURL } from '@/composables/urlTimeFormat';
 
 interface SessionRow {
   session_id: string;
@@ -547,20 +548,19 @@ function endTimeFor(r: SessionRow): string {
 
 function viewerHref(r: SessionRow): string {
   if (!r.player_id) return '#';
-  const qs = new URLSearchParams({ player_id: r.player_id });
-  if (r.play_id && r.play_id !== '—') qs.set('play_id', r.play_id);
-  // Pass the play's time bounds so the viewer can scope its initial
-  // brush + SSE backfill to this play's range instead of inferring
-  // it from samples landing. end_time=live means "follow live edge"
-  // and is set when the play looks still-active.
-  if (r.started) {
-    const startMs = parseChIsoMs(r.started);
-    if (Number.isFinite(startMs)) {
-      qs.set('start_time', new Date(startMs).toISOString());
-    }
-  }
-  qs.set('end_time', endTimeFor(r));
-  return '/dashboard/v3/session-viewer.html?' + qs.toString();
+  // Time bounds so the viewer scopes its initial brush + SSE
+  // backfill to this play's range instead of inferring from samples.
+  // toMs=null when the play looks still-active — the viewer drops
+  // the upper bound and follows the live edge.
+  const startMs = r.started ? parseChIsoMs(r.started) : NaN;
+  const lastSeen = r.last_seen ? parseChIsoMs(r.last_seen) : NaN;
+  const stillLive = Number.isFinite(lastSeen) && (Date.now() - lastSeen) < LIVE_TAIL_MS;
+  return sessionViewerURL({
+    playerId: r.player_id,
+    playId: r.play_id && r.play_id !== '—' ? r.play_id : undefined,
+    fromMs: Number.isFinite(startMs) ? startMs : undefined,
+    toMs: stillLive ? undefined : (Number.isFinite(lastSeen) ? lastSeen : undefined),
+  });
 }
 function bundleHref(r: SessionRow): string {
   if (!r.player_id) return '#';

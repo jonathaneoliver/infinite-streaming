@@ -16,32 +16,27 @@
 import { ref, computed, onMounted } from 'vue';
 import ShellLayout from '@/components/ShellLayout.vue';
 import SessionDisplay from '@/components/SessionDisplay.vue';
+import { parseTimeAny, canonicalUUID } from '@/composables/urlTimeFormat';
 
 const qs = new URLSearchParams(window.location.search);
 // v3 canonical: identify an archived play by (player_id, play_id).
 // session_id was the legacy proxy-port handle — not needed here since
 // the v3 timeseries endpoint and the SSE pool both key by player_id.
-const playerId = ref<string>(qs.get('player_id') ?? '');
-const playId = ref<string | null>(qs.get('play_id'));
+// UUIDs are lowercased — CH stores them lowercase and iOS sometimes
+// emits uppercase (case_sensitivity_ids memory).
+const playerId = ref<string>(canonicalUUID(qs.get('player_id') ?? ''));
+const playId = ref<string | null>(qs.get('play_id') ? canonicalUUID(qs.get('play_id')!) : null);
 
-/** Initial time window. sessions.html passes start_time + end_time
- *  on the link so the viewer can scope its initial brush + SSE
- *  backfill without waiting for samples to land. end_time = "live"
- *  means "this play is still active — follow the live edge". */
-function parseIsoMs(v: string | null): number | null {
-  if (!v) return null;
-  const ms = Date.parse(v);
-  return Number.isFinite(ms) ? ms : null;
-}
-const startMs = ref<number | null>(parseIsoMs(qs.get('start_time')));
-const endTimeRaw = qs.get('end_time');
-// endMs = null sentinel means "follow live" — either an explicit
-// `live`/`now` value or simply absent.
-const endMs = ref<number | null>(
-  (endTimeRaw === 'live' || endTimeRaw === 'now')
-    ? null
-    : parseIsoMs(endTimeRaw),
-);
+/** Initial time window. New canonical param names are `from` / `to`
+ *  (shorter, no `:` in compact ISO → no `%3A` clutter). Legacy
+ *  `start_time` / `end_time` still accepted so already-copied links
+ *  keep working. parseTimeAny handles BOTH compact ISO basic
+ *  (`20260522T170417Z`) and traditional ISO (`2026-05-22T17:04:17Z`).
+ *
+ *  `to` absent OR `to=live`/`to=now` ⇒ follow live edge.
+ */
+const startMs = ref<number | null>(parseTimeAny(qs.get('from') ?? qs.get('start_time')));
+const endMs = ref<number | null>(parseTimeAny(qs.get('to') ?? qs.get('end_time')));
 
 /** "Show before/after" toggle. When ON, SessionDisplay drops the
  *  play_id filter on its SSE subscription and widens the time
