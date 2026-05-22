@@ -144,6 +144,36 @@ The CLI launcher expects each player app to be built with `skipHomeOnLaunch=true
 | `LAUNCH_MODE` | `cli` | `manual` \| `cli` \| `appium` |
 | `CHARACTERIZATION_OUTDIR` | `t.TempDir()` | persistent artifacts directory (set for CI / aggregator use) |
 | `CHARACTERIZATION_DEVICE_UDID` | unset = first-match | target a specific device by UDID. Use to run parallel tests across multiple sims of the same platform — each terminal exports its own UDID, no race for the same device. |
+| `CHAR_OTEL_ENDPOINT` | unset | OTLP HTTP collector URL — e.g. `http://localhost:4318`. When set, every cycle emits an OpenTelemetry span to the configured backend (alongside the cycle_id label PATCH). See **Tracing** below. |
+| `CHAR_OTEL_STDOUT` | unset | non-empty enables the stdout span exporter (verbose, debug only). |
+| `CHAR_OTEL_DISABLE` | unset | non-empty forces the no-op tracer regardless of `CHAR_OTEL_ENDPOINT`. |
+
+## Tracing (OpenTelemetry, issue #493)
+
+Each cycle emits an OpenTelemetry `cycle` span, nested under a `test_run` span carrying the run-scope identity. Spans are **additive** to the existing cycle_id label PATCH — the dashboard's CycleBandsRail still reads from `control_events`; the spans are the cross-cycle / cross-run query surface.
+
+Standard backends consume these directly: Tempo, Jaeger, Honeycomb, Datadog, Grafana Trace View, GitHub Actions OTel exporter.
+
+**View locally with Jaeger** (no other infra required):
+
+```sh
+docker run --rm -d -p 4318:4318 -p 16686:16686 \
+  --name jaeger jaegertracing/all-in-one:1
+export CHAR_OTEL_ENDPOINT=http://localhost:4318
+
+# run any characterization test
+go test -C tests/characterization ./modes/... -v -run TestAbortIPadSim -timeout 30m -launch-mode=appium
+
+# browse: http://localhost:16686 — Service: characterization
+docker rm -f jaeger
+```
+
+**Span shape**:
+
+- `test_run` (root) — attrs: `test`, `platform`, `run_id`, `clip_target` (where applicable)
+- `cycle` (child × N) — attrs: `test`, `cycle_id`, `cycle_idx`, `rep`, `boundary` (startup-style) OR `fault` (abort/retry-style), `cap_mbps`. `status=error` on cycles that didn't meet pass criteria.
+
+See `.claude/standards/characterization-principles.md § 9` for the cycle-label schema the spans mirror.
 
 ## Why a separate module
 

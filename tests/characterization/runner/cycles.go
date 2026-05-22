@@ -5,7 +5,12 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
+
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // CycleID is the standard cycle-identity label set required at every
@@ -114,6 +119,11 @@ func (c CycleID) labelSet() map[string]string {
 // time — those rows are what the dashboard's cycle-band overlay reads
 // to draw bands across the play timeline.
 //
+// In parallel, an OpenTelemetry span is started for the cycle
+// (issue #493). Span attributes mirror the CycleID fields; the
+// previous cycle's span (if any) is ended first so each test's run
+// produces a clean parent → child → sibling-cycle trace shape.
+//
 // Cycles end IMPLICITLY when the next StartCycle overwrites cycle_id.
 // To explicitly close the last cycle of a run (so the band has a
 // trailing edge in the archive instead of trailing off-screen), call
@@ -122,6 +132,11 @@ func (c CycleID) labelSet() map[string]string {
 // Returns the timestamp even on label error — the cycle is still
 // happening; the only thing lost is the queryability of its boundary.
 // Drivers SHOULD log the error and continue.
+//
+// The ctx passed in is used to PARENT the span. If callers want the
+// cycle span to be a child of a `test_run` span, they must pass the
+// context they got back from StartTestRunSpan. Otherwise the cycle
+// is a root span — still useful, just unparented in the trace view.
 func StartCycle(ctx context.Context, sess *Session, cid CycleID) (time.Time, error) {
 	now := time.Now()
 	if sess == nil {
@@ -130,6 +145,25 @@ func StartCycle(ctx context.Context, sess *Session, cid CycleID) (time.Time, err
 	if cid.Test == "" {
 		return now, fmt.Errorf("StartCycle: CycleID.Test is required")
 	}
+
+	// Close the prior cycle's span first so siblings don't overlap in
+	// the timeline view. EndCycle (or the next StartCycle) closes the
+	// LAST one at run end — handled in EndCycle below.
+	endActiveCycleSpan(codes.Ok, "")
+
+	// Start the cycle span. Use the run-level context if the caller
+	// passed one; otherwise this becomes a root span.
+	_, span := Tracer().Start(ctx, "cycle", trace.WithAttributes(
+		attribute.String("test", cid.Test),
+		attribute.String("cycle_id", cid.ComposeID()),
+		attribute.Int("cycle_idx", cid.Idx),
+		attribute.Int("rep", cid.Rep),
+		attribute.String("boundary", cid.Boundary),
+		attribute.String("fault", cid.Fault),
+		attribute.String("cap_mbps", cid.CapMbps),
+	))
+	rememberActiveCycleSpan(span)
+
 	return now, sess.LabelPlay(ctx, cid.labelSet())
 }
 
@@ -138,12 +172,80 @@ func StartCycle(ctx context.Context, sess *Session, cid CycleID) (time.Time, err
 // keys (test, run_id, …) are left intact so the operator can still see
 // what the LAST cycle was during the post-run cool-down period.
 //
-// Idempotent — calling twice in a row is a no-op since the second
-// PATCH writes the same value. Safe to call before EVERY StartCycle
-// when defensive (the next StartCycle will overwrite cycle_id again).
+// Also ends the active cycle span (issue #493). Idempotent — calling
+// twice in a row is a no-op since the second PATCH writes the same
+// value and the span is already ended.
 func EndCycle(ctx context.Context, sess *Session) error {
 	if sess == nil {
 		return fmt.Errorf("EndCycle: nil session")
 	}
+	endActiveCycleSpan(codes.Ok, "")
 	return sess.LabelPlay(ctx, map[string]string{"cycle_id": ""})
+}
+
+// EndCycleFailed is EndCycle for cycles that didn't meet pass
+// criteria (e.g. never reached 5s buffer, player stalled, abort
+// undetected). Sets the span status to Error so trace backends can
+// surface failed cycles in their default filtering. The label PATCH
+// is unchanged — failure is a property of the trace, not the label.
+func EndCycleFailed(ctx context.Context, sess *Session, reason string) error {
+	if sess == nil {
+		return fmt.Errorf("EndCycleFailed: nil session")
+	}
+	endActiveCycleSpan(codes.Error, reason)
+	return sess.LabelPlay(ctx, map[string]string{"cycle_id": ""})
+}
+
+// activeCycleSpan tracks the most recently-started cycle span so the
+// next StartCycle (or EndCycle) can close it. One pointer per process
+// — characterization tests run cycles strictly sequentially, never
+// concurrently, so there's no ambiguity about which is "active."
+var (
+	activeCycleSpanMu sync.Mutex
+	activeCycleSpan   trace.Span
+)
+
+func rememberActiveCycleSpan(s trace.Span) {
+	activeCycleSpanMu.Lock()
+	activeCycleSpan = s
+	activeCycleSpanMu.Unlock()
+}
+
+func endActiveCycleSpan(code codes.Code, description string) {
+	activeCycleSpanMu.Lock()
+	s := activeCycleSpan
+	activeCycleSpan = nil
+	activeCycleSpanMu.Unlock()
+	if s == nil {
+		return
+	}
+	if code != codes.Ok {
+		s.SetStatus(code, description)
+	}
+	s.End()
+}
+
+// StartTestRunSpan begins a top-level span for one test invocation.
+// Cycle spans started under the returned context become its children
+// — gives trace backends a clean per-run aggregation surface (look at
+// the test_run span to see all cycles, their durations, and any
+// failed status), instead of N unparented sibling spans.
+//
+// Caller MUST call the returned shutdown function (or span.End()
+// directly via the returned span) at run end so the span duration
+// closes and the trace flushes.
+//
+// runMeta becomes span attributes — typically {test, platform,
+// run_id, clip_target} for startup, {test, platform, run_id} for
+// abort. Run-scope LabelPlay calls write the same data into the
+// player's labels[]; this writes it into the trace.
+func StartTestRunSpan(ctx context.Context, name string, runMeta map[string]string) (context.Context, trace.Span) {
+	attrs := make([]attribute.KeyValue, 0, len(runMeta))
+	for k, v := range runMeta {
+		if k == "" || v == "" {
+			continue
+		}
+		attrs = append(attrs, attribute.String(k, v))
+	}
+	return Tracer().Start(ctx, name, trace.WithAttributes(attrs...))
 }

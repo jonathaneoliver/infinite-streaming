@@ -162,11 +162,34 @@ func runStartup(t *testing.T, p runner.Platform) {
 		t.Logf("labeled play with %v", runLabels)
 	}
 
+	// OTel tracing (issue #493). Spans are emitted alongside the
+	// existing label_changed control_events — same semantic content,
+	// different transport. The trace becomes queryable in any
+	// standard backend (Tempo / Jaeger / Honeycomb / Datadog) when
+	// CHAR_OTEL_ENDPOINT points at one. No-op otherwise.
+	otelShutdown, otelErr := runner.InitTracing(context.Background(), runLabels)
+	if otelErr != nil {
+		t.Logf("InitTracing: %v (continuing without traces)", otelErr)
+	}
+	defer func() {
+		if otelShutdown != nil {
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := otelShutdown(shutdownCtx); err != nil {
+				t.Logf("otel shutdown: %v", err)
+			}
+		}
+	}()
+	runCtx, runSpan := runner.StartTestRunSpan(context.Background(), "test_run", runLabels)
+	defer runSpan.End()
+
 	cycleCount := len(caps) * len(startupBoundaries) * reps
 	// Per-cycle budget: setup (~30s app_cold, ~5s channel) + observe
 	// (30s) + cleanup. Worst case ~90s per cycle + slack.
 	overall := time.Duration(cycleCount)*90*time.Second + 3*time.Minute
-	ctx, cancel := context.WithTimeout(context.Background(), overall)
+	// Derive from runCtx (carries the test_run span) so cycle spans
+	// become its children.
+	ctx, cancel := context.WithTimeout(runCtx, overall)
 	defer cancel()
 
 	t.Logf("cycle plan: %d cycles (%d caps × %d boundaries × %d reps), target=%s setup=%s",

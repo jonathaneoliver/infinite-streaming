@@ -113,6 +113,34 @@ The session-viewer's cycle-band overlay queries `control_events` where `event = 
 
 This means consumers don't need cycle_start / cycle_end as distinct event types — the existing `label_changed` semantics already encode "cycle boundary." Don't introduce new event types unless a future test needs metadata that can't fit on a label value.
 
+### OpenTelemetry spans (parallel transport)
+
+Issue #493. Every cycle ALSO emits an OpenTelemetry `cycle` span with
+the same semantic content as the cycle_id label (test, boundary,
+fault, cap_mbps, cycle_idx, rep). Cycle spans nest under a per-test-
+invocation `test_run` span carrying the run-scope labels. Failed
+cycles get `span.status = error` so trace backends surface them in
+default filtering.
+
+Spans are additive — the `label_changed` control_events path keeps
+working unchanged; the dashboard's CycleBandsRail still reads from
+control_events. The trace surface is for cross-cycle aggregates,
+TraceQL queries, and CI integration that the bespoke control_events
+SQL doesn't offer.
+
+Configuration via env vars (in `tests/characterization/runner/otel.go`):
+- `CHAR_OTEL_ENDPOINT` — OTLP HTTP collector URL (e.g.
+  `http://localhost:4318`). Spans stream to the configured backend
+  in real time.
+- `CHAR_OTEL_STDOUT` — non-empty enables the stdout exporter
+  (debug only — pollutes test output).
+- `CHAR_OTEL_DISABLE` — non-empty forces the no-op tracer.
+
+With nothing set, spans accumulate in-memory and are dropped at
+shutdown — same effective behavior as before #493, zero cost. Point
+at a local Jaeger (`docker run --rm -p 4318:4318 -p 16686:16686
+jaegertracing/all-in-one:1.x`) to view the trace.
+
 ### What does NOT belong in cycle labels
 
 - **Free-form notes / descriptions** — go in `harness finding add` instead.

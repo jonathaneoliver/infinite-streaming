@@ -85,6 +85,27 @@ func runAbort(t *testing.T, p runner.Platform) {
 	} else {
 		t.Logf("labeled play with %v", runLabels)
 	}
+
+	// OTel tracing (issue #493). Spans are emitted alongside the
+	// existing label_changed control_events — same semantic content,
+	// different transport. The trace becomes queryable in any
+	// standard backend (Tempo / Jaeger / Honeycomb / Datadog) when
+	// CHAR_OTEL_ENDPOINT points at one. No-op otherwise.
+	otelShutdown, otelErr := runner.InitTracing(context.Background(), runLabels)
+	if otelErr != nil {
+		t.Logf("InitTracing: %v (continuing without traces)", otelErr)
+	}
+	defer func() {
+		if otelShutdown != nil {
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := otelShutdown(shutdownCtx); err != nil {
+				t.Logf("otel shutdown: %v", err)
+			}
+		}
+	}()
+	runCtx, runSpan := runner.StartTestRunSpan(context.Background(), "test_run", runLabels)
+	defer runSpan.End()
 	playID, err := sess.CurrentPlayID(context.Background())
 	if err != nil {
 		t.Logf("CurrentPlayID: %v (test continues)", err)
@@ -101,7 +122,11 @@ func runAbort(t *testing.T, p runner.Platform) {
 	cycleCount := len(abortShapes) * reps
 	// Each cycle: fill (≤90s) + observe (30s) + recovery (≤90s) = ~3 min worst case.
 	overall := time.Duration(cycleCount)*3*time.Minute + 2*time.Minute
-	ctx, cancel := context.WithTimeout(context.Background(), overall)
+	// Derive from runCtx (carries the test_run span) so cycle spans
+	// become its children. The label_changed PATCH path still uses
+	// context.Background() because the span is irrelevant to the HTTP
+	// client; the cycle span is started from this ctx instead.
+	ctx, cancel := context.WithTimeout(runCtx, overall)
 	defer cancel()
 
 	// Warmup at the high rate so the player picks its top variant and
