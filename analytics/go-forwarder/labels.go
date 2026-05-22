@@ -555,7 +555,17 @@ func kvLabelsFromInfo(info string) []string {
 	return out
 }
 
-// sanitizeLabelToken keeps only [A-Za-z0-9_-]. Empty after stripping → "".
+// sanitizeLabelToken keeps only [A-Za-z0-9_:.-]. Empty after stripping → "".
+//
+// `:` and `.` were added (was [A-Za-z0-9_-]) so structured label values
+// — most notably the characterization-test cycle_id format
+// `<test>:<axis>:<cap>:<rep>` (e.g. `startup:app_cold:cap0.8:rep0`) —
+// survive sanitization into labels[] intact, instead of collapsing to
+// `startupapp_coldcap08rep0`. That collapse made
+// `hasAny(labels, ['info=cycle_id_startup:app_cold:cap0.8:rep0'])`
+// grep impossible. See .claude/standards/characterization-principles.md § 9.
+//
+// `,` and `=` remain forbidden (they're the label-grammar separators).
 func sanitizeLabelToken(s string) string {
 	if s == "" {
 		return ""
@@ -564,7 +574,7 @@ func sanitizeLabelToken(s string) string {
 	for i := 0; i < len(s); i++ {
 		c := s[i]
 		ok := (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
-			(c >= '0' && c <= '9') || c == '_' || c == '-'
+			(c >= '0' && c <= '9') || c == '_' || c == '-' || c == ':' || c == '.'
 		if ok {
 			b = append(b, c)
 		}
