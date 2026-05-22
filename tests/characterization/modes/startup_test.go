@@ -3,8 +3,9 @@ package modes
 import (
 	"context"
 	"fmt"
+	"math"
 	"os"
-	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -106,18 +107,38 @@ func runStartup(t *testing.T, p runner.Platform) {
 		cycleCount, len(startupBoundaries), reps, target, setupClip, capMbps)
 	t.Logf("every cycle measures startup OF %q — boundary type is the only variable", target)
 
+	// Capture the manifest's variant bandwidths up front so each cycle's
+	// log line + result struct carries (avg=X peak=Y) context for any
+	// variant it mentions. Best-effort — OpenSession may have a player
+	// that hasn't yet fetched the manifest, in which case bws is empty
+	// and annotations skip the bandwidth portion.
+	bws := map[string]runner.VariantBandwidth{}
+	if rec, err := sess.PlayerState(context.Background()); err == nil {
+		bws = runner.VariantBandwidthByResolution(rec)
+	}
+	if len(bws) > 0 {
+		t.Logf("variant ladder (manifest):")
+		for res, bw := range bws {
+			t.Logf("  %-12s avg=%.3f peak=%.3f Mbps", res, bw.AvgMbps, bw.PeakMbps)
+		}
+	}
+
 	var allCycles []runner.StartupCycleResult
 	cycleIdx := 0
 
 	for rep := 0; rep < reps; rep++ {
 		for _, boundary := range startupBoundaries {
 			cycleIdx++
-			result := runStartupCycle(ctx, t, sess, appium, *picked, boundary, target, setupClip, capMbps, cycleIdx)
+			result := runStartupCycle(ctx, t, sess, appium, *picked, boundary, target, setupClip, capMbps, cycleIdx, bws)
 			allCycles = append(allCycles, result)
-			t.Logf("  [%2d] %-16s clip=%-40s first_var=%-12s ttff=%.2fs reach5sbuf=%.1fs settled=%s shifts=+%d/-%d stalls=%d",
-				cycleIdx, boundary, result.ContentClipID, result.FirstVariantPicked,
+			firstAnnot := runner.AnnotateVariant(bws, result.FirstVariantPicked, capMbps)
+			settledAnnot := runner.AnnotateVariant(bws, result.SettledVariant, capMbps)
+			t.Logf("  [%2d] %-16s clip=%-30s cap=%.2f Mbps first_var=%-10s %s settled=%-10s %s ttff=%.2fs reach5sbuf=%.1fs shifts=%d stalls=%d",
+				cycleIdx, boundary, result.ContentClipID, capMbps,
+				result.FirstVariantPicked, firstAnnot,
+				result.SettledVariant, settledAnnot,
 				result.TimeToFirstFrameS, result.ReachedFiveSBufferAtS,
-				result.SettledVariant, result.UpshiftsIn30S, result.DownshiftsIn30S, result.StallsIn30S)
+				result.UpshiftsIn30S, result.StallsIn30S)
 		}
 	}
 
@@ -191,12 +212,22 @@ func runStartupCycle(
 	ctx context.Context, t *testing.T,
 	sess *runner.Session, appium *runner.AppiumLauncher, dev runner.Device,
 	boundary startupBoundary, targetClip, setupClip string, capMbps float64, idx int,
+	bws map[string]runner.VariantBandwidth,
 ) runner.StartupCycleResult {
 	result := runner.StartupCycleResult{
 		CycleIdx:      idx,
 		BoundaryType:  string(boundary),
 		ContentClipID: targetClip,
 		CapMbps:       capMbps,
+	}
+
+	// Capture the play_id active BEFORE this cycle's boundary fires.
+	// populateStartupCycleResult uses this to detect the new-play
+	// transition for accurate TTFF measurement (filters out residual
+	// metrics from the previous play). Best-effort — empty on the very
+	// first cycle when no prior play exists.
+	if priorPlayID, err := sess.CurrentPlayID(ctx); err == nil {
+		result.PrePlayID = priorPlayID
 	}
 
 	// Clear any leftover proxy state from the previous cycle (or test).
@@ -299,7 +330,7 @@ func runStartupCycle(
 		t.Logf("[%d] FetchNetworkRows: %v — first-request timings will be empty", idx, err)
 	}
 
-	result = populateStartupCycleResult(result, samples, rows)
+	result = populateStartupCycleResult(result, samples, rows, bws)
 	return result
 }
 
@@ -307,22 +338,31 @@ func runStartupCycle(
 // + network rows) and fills the StartupCycleResult fields. Pure — no
 // network calls or proxy state mutations — so it's testable in
 // isolation.
-func populateStartupCycleResult(r runner.StartupCycleResult, samples []runner.Sample, rows []runner.NetworkRow) runner.StartupCycleResult {
+//
+// Key rules (each one was a known measurement bug we fixed):
+//   - First-variant + settled-variant are derived from SEGMENT fetches,
+//     not playlist fetches. A playlist fetch means "the player
+//     considered this variant"; a segment fetch means "the player
+//     COMMITTED to it." Audio playlists are excluded from the
+//     first-variant signal (they're a separate media group, not a
+//     video variant).
+//   - TTFF is read from the iOS player's own video_first_frame_time_s
+//     measurement, sampled AFTER the new play_id has appeared. This
+//     filters out residual metrics from the previous play.
+//   - Shifts/stalls deltas use the LAST pre-armed sample as baseline
+//     (not the FIRST post-armed sample, which already reflects any
+//     shifts that happened during boundary setup).
+func populateStartupCycleResult(r runner.StartupCycleResult, samples []runner.Sample, rows []runner.NetworkRow, bws map[string]runner.VariantBandwidth) runner.StartupCycleResult {
 	t0 := r.StartedAt
 
-	// First-request kinds. Rows are typically newest-first; flip so
-	// we walk chronologically.
+	// Chrono-sort network rows for the rest of the walk.
 	chronoRows := make([]runner.NetworkRow, len(rows))
 	copy(chronoRows, rows)
-	// Stable sort would be nicer; for now do a simple bubble (n is small).
-	for i := 0; i < len(chronoRows); i++ {
-		for j := i + 1; j < len(chronoRows); j++ {
-			if chronoRows[j].Ts.Before(chronoRows[i].Ts) {
-				chronoRows[i], chronoRows[j] = chronoRows[j], chronoRows[i]
-			}
-		}
-	}
-	var firstReqs []runner.NetworkRow
+	sort.Slice(chronoRows, func(i, j int) bool { return chronoRows[i].Ts.Before(chronoRows[j].Ts) })
+
+	// First-request kinds: master / variant playlist / first segment.
+	// We DON'T set FirstVariantPicked here — that comes from the
+	// FIRST SEGMENT (committed) not the first playlist (peek).
 	for _, row := range chronoRows {
 		if row.Ts.Before(t0) {
 			continue
@@ -332,31 +372,143 @@ func populateStartupCycleResult(r runner.StartupCycleResult, samples []runner.Sa
 		}
 		if r.FirstVariantAtS == 0 && row.RequestKind == "manifest" {
 			r.FirstVariantAtS = row.Ts.Sub(t0).Seconds()
-			r.FirstVariantPicked = variantFromURL(row.URL)
 		}
 		if r.FirstSegmentAtS == 0 && row.RequestKind == "segment" {
 			r.FirstSegmentAtS = row.Ts.Sub(t0).Seconds()
 		}
-		if len(firstReqs) < 5 {
-			firstReqs = append(firstReqs, row)
-		}
-	}
-	if len(firstReqs) > 0 {
-		r.FirstReqDNSMs = medianFloat(firstReqs, func(n runner.NetworkRow) float64 { return 0 })  // dns_ms not in NetworkRow yet
-		r.FirstReqConnectMs = medianFloat(firstReqs, func(n runner.NetworkRow) float64 { return 0 }) // connect_ms not in NetworkRow yet
-		r.FirstReqTLSMs = medianFloat(firstReqs, func(n runner.NetworkRow) float64 { return 0 })     // tls_ms not in NetworkRow yet
 	}
 
-	// Sample-derived fields. Walk samples and extract trajectory.
-	var stallStart, upStart int
-	var prevStalls, prevShifts int
-	var firstNB float64
-	var lastNB float64
-	var firstTTFF float64
+	// Per-variant activity (segment fetches + playlist fetches per dir).
+	// Skip audio (its dir is conventionally "audio").
+	activity := map[string]*runner.VariantActivity{}
+	getOrInit := func(dir string) *runner.VariantActivity {
+		v, ok := activity[dir]
+		if !ok {
+			v = &runner.VariantActivity{VariantDir: dir}
+			activity[dir] = v
+		}
+		return v
+	}
+	for _, row := range chronoRows {
+		if row.Ts.Before(t0) {
+			continue
+		}
+		dir := runner.VariantDirFromPath(row.URL)
+		if dir == "" || dir == "audio" {
+			continue
+		}
+		dt := row.Ts.Sub(t0).Seconds()
+		switch row.RequestKind {
+		case "manifest":
+			a := getOrInit(dir)
+			a.PlaylistFetches++
+		case "segment":
+			a := getOrInit(dir)
+			a.SegmentFetches++
+			if a.FirstSegmentAtS == 0 {
+				a.FirstSegmentAtS = dt
+			}
+			a.LastSegmentAtS = dt
+		}
+	}
+
+	// Resolve VariantActivity to a stable, dashboard-friendly slice
+	// sorted by first-segment-time (most-recent first uses first then last).
+	for _, a := range activity {
+		a.ActiveDurationS = math.Max(0, a.LastSegmentAtS-a.FirstSegmentAtS)
+		a.PeekedButNeverUsed = a.PlaylistFetches > 0 && a.SegmentFetches == 0
+		// Resolve resolution + bandwidth from the manifest if we can.
+		// VariantDir is e.g. "2160p"; map it to a manifest resolution
+		// by suffix matching. Heuristic: variant dir "2160p" matches
+		// resolution "3840x2160".
+		for res, bw := range bws {
+			// resolution "3840x2160" → height "2160"; variant dir "2160p"
+			// → strip trailing "p". Match on that.
+			height := resolutionHeight(res)
+			vd := strings.TrimSuffix(a.VariantDir, "p")
+			if height != "" && height == vd {
+				a.Resolution = res
+				a.AvgMbps = bw.AvgMbps
+				a.PeakMbps = bw.PeakMbps
+				break
+			}
+		}
+	}
+	r.VariantActivity = make([]runner.VariantActivity, 0, len(activity))
+	for _, a := range activity {
+		r.VariantActivity = append(r.VariantActivity, *a)
+	}
+	sort.Slice(r.VariantActivity, func(i, j int) bool {
+		// Variants that fetched ANY segment come first, ordered by
+		// first-segment time. Peeked-only variants come after.
+		ai, aj := r.VariantActivity[i], r.VariantActivity[j]
+		if ai.SegmentFetches > 0 && aj.SegmentFetches == 0 {
+			return true
+		}
+		if aj.SegmentFetches > 0 && ai.SegmentFetches == 0 {
+			return false
+		}
+		return ai.FirstSegmentAtS < aj.FirstSegmentAtS
+	})
+
+	// First variant: FIRST variant the player fetched a SEGMENT from.
+	// Bandwidth context from the manifest lookup. Skip audio.
+	for _, a := range r.VariantActivity {
+		if a.SegmentFetches > 0 {
+			r.FirstVariantPicked = a.Resolution
+			if r.FirstVariantPicked == "" {
+				r.FirstVariantPicked = a.VariantDir
+			}
+			r.FirstVariantAvgMbps = a.AvgMbps
+			r.FirstVariantPeakMbps = a.PeakMbps
+			break
+		}
+	}
+
+	// Detect new-play transition by play_id change. Pre-armed samples
+	// (or post-armed samples that still carry the OLD play_id) are
+	// the previous play's metrics. Find the first sample whose play_id
+	// differs from PrePlayID — that's the moment the new play's
+	// metrics are authoritative.
+	var newPlayFirstSampleIdx = -1
+	for i, s := range samples {
+		if s.Ts.Before(t0) {
+			continue
+		}
+		if r.PrePlayID == "" || (s.PlayID != "" && s.PlayID != r.PrePlayID) {
+			newPlayFirstSampleIdx = i
+			break
+		}
+	}
+
+	// Pre-arm baseline samples (the LAST sample before t0) for the
+	// shifts/stalls/dropped counter deltas.
+	var baselineSample *runner.Sample
+	for i := range samples {
+		s := samples[len(samples)-1-i] // walk reverse
+		if s.Ts.Before(t0) {
+			baselineSample = &s
+			break
+		}
+	}
+	if baselineSample == nil && newPlayFirstSampleIdx > 0 {
+		// No pre-armed samples — use the LAST sample from the OLD play
+		// (the one before the new-play transition) as the baseline.
+		baselineSample = &samples[newPlayFirstSampleIdx-1]
+	}
+
+	// Sample-walk for buffer + variant trajectory + counters. Use
+	// BufferEndS as primary buffer signal (BufferDepthS is unreliable
+	// on AVPlayer per avplayer-quirks.md).
+	bufField := func(s runner.Sample) float64 {
+		if s.BufferEndS > 0 {
+			return s.BufferEndS
+		}
+		return s.BufferDepthS
+	}
+	var firstNB, lastNB float64
 	resAt5, resAt15, resAt30 := "", "", ""
-	cntByRes := map[string]int{}
 	last10sCnts := map[string]int{}
-	var maxBuffer float64
 	for _, s := range samples {
 		if s.Ts.Before(t0) {
 			continue
@@ -366,22 +518,12 @@ func populateStartupCycleResult(r runner.StartupCycleResult, samples []runner.Sa
 			firstNB = s.NetworkBitrateMbps
 		}
 		lastNB = s.NetworkBitrateMbps
-		// initial buffer thresholds
-		if s.BufferDepthS > maxBuffer {
-			maxBuffer = s.BufferDepthS
-		}
-		if r.ReachedFiveSBufferAtS == 0 && s.BufferDepthS >= 5.0 {
+		bd := bufField(s)
+		if r.ReachedFiveSBufferAtS == 0 && bd >= 5.0 {
 			r.ReachedFiveSBufferAtS = dt
 		}
-		if r.ReachedFifteenSBufferAtS == 0 && s.BufferDepthS >= 15.0 {
+		if r.ReachedFifteenSBufferAtS == 0 && bd >= 15.0 {
 			r.ReachedFifteenSBufferAtS = dt
-		}
-		if firstTTFF == 0 && s.VideoBitrateMbps > 0 {
-			firstTTFF = dt
-		}
-		// variant trajectory
-		if s.VideoResolution != "" {
-			cntByRes[s.VideoResolution]++
 		}
 		if dt >= 5 && resAt5 == "" {
 			resAt5 = s.VideoResolution
@@ -395,49 +537,112 @@ func populateStartupCycleResult(r runner.StartupCycleResult, samples []runner.Sa
 		if dt >= 20 {
 			last10sCnts[s.VideoResolution]++
 		}
-		// counter deltas — captured at end via prev-tracking
-		if upStart == 0 {
-			prevShifts = s.ProfileShiftCount
-			prevStalls = s.Stalls
-			upStart = 1
+	}
+
+	// TTFF: read iOS's own first-frame measurement from the FIRST
+	// sample after the new-play transition that has a non-zero value.
+	// This is per-play (resets when play_id changes) so it's clean
+	// even when the previous play's samples were still in flight.
+	var ttff float64
+	if newPlayFirstSampleIdx >= 0 {
+		for i := newPlayFirstSampleIdx; i < len(samples); i++ {
+			if samples[i].VideoFirstFrameTimeS > 0 {
+				ttff = samples[i].VideoFirstFrameTimeS
+				break
+			}
 		}
-		_ = stallStart
 	}
-	if upStart > 0 && len(samples) > 0 {
+	r.TimeToFirstFrameS = ttff
+
+	// Counter deltas — last-sample-minus-baseline. If no baseline
+	// (no pre-armed sample, no new-play transition), report 0.
+	if len(samples) > 0 && baselineSample != nil {
 		last := samples[len(samples)-1]
-		r.UpshiftsIn30S = 0 // we don't separate upshifts vs downshifts in the sample; profile_shift_count covers both
-		// Compute combined shift delta (rampdown's per-step machinery has up/down separation; we don't here).
-		r.UpshiftsIn30S = max0(last.ProfileShiftCount - prevShifts)
-		r.StallsIn30S = max0(last.Stalls - prevStalls)
-		r.DroppedFramesIn30S = max0(last.DroppedFrames)
+		shiftDelta := max0(last.ProfileShiftCount - baselineSample.ProfileShiftCount)
+		stallDelta := max0(last.Stalls - baselineSample.Stalls)
+		droppedDelta := max0(last.DroppedFrames - baselineSample.DroppedFrames)
+		// ProfileShiftCount is a combined counter (up + down). We don't
+		// have per-direction info; lump into UpshiftsIn30S and leave
+		// DownshiftsIn30S=0. Standards doc notes this.
+		r.UpshiftsIn30S = shiftDelta
+		r.StallsIn30S = stallDelta
+		r.DroppedFramesIn30S = droppedDelta
 	}
+
 	r.NetworkBitrateAtStartMbps = firstNB
 	r.NetworkBitrateAt30SMbps = lastNB
-	r.TimeToFirstFrameS = firstTTFF
 	r.VariantAt5S = resAt5
 	r.VariantAt15S = resAt15
 	r.VariantAt30S = resAt30
-	// settled variant = majority in last 10s
-	var best string
-	var bestN int
-	for k, n := range last10sCnts {
-		if n > bestN {
-			best = k
-			bestN = n
+
+	// Settled variant: majority of SEGMENT fetches in the last 10 s.
+	// Falls back to the majority sample-reported resolution if no
+	// segment activity. Audio-skipped (variantDirFromPath returns
+	// "audio" for audio segments; we don't include them in the
+	// segment-fetch tally below).
+	var settledFromSegments string
+	segmentsBy := map[string]int{}
+	windowEnd := t0.Add(30 * time.Second)
+	windowStart := windowEnd.Add(-10 * time.Second)
+	for _, row := range chronoRows {
+		if row.Ts.Before(windowStart) || row.Ts.After(windowEnd) {
+			continue
+		}
+		if row.RequestKind != "segment" {
+			continue
+		}
+		dir := runner.VariantDirFromPath(row.URL)
+		if dir == "" || dir == "audio" {
+			continue
+		}
+		segmentsBy[dir]++
+	}
+	if len(segmentsBy) > 0 {
+		var best string
+		var bestN int
+		for k, n := range segmentsBy {
+			if n > bestN {
+				best = k
+				bestN = n
+			}
+		}
+		// Map dir → resolution via the activity lookup we already built.
+		settledFromSegments = best
+		for _, a := range r.VariantActivity {
+			if a.VariantDir == best && a.Resolution != "" {
+				settledFromSegments = a.Resolution
+				r.SettledVariantAvgMbps = a.AvgMbps
+				r.SettledVariantPeakMbps = a.PeakMbps
+				break
+			}
 		}
 	}
-	r.SettledVariant = best
+	if settledFromSegments == "" {
+		// Fallback: majority sample resolution in last-10s window.
+		var best string
+		var bestN int
+		for k, n := range last10sCnts {
+			if n > bestN {
+				best = k
+				bestN = n
+			}
+		}
+		settledFromSegments = best
+	}
+	r.SettledVariant = settledFromSegments
 
 	return r
 }
 
-func variantFromURL(url string) string {
-	// e.g. ".../playlist_6s_2160p.m3u8" → "2160p"
-	re := regexp.MustCompile(`playlist[_-]?\d*s?[_-]?([A-Za-z0-9]+)\.m3u8`)
-	if m := re.FindStringSubmatch(url); m != nil {
-		return m[1]
+// resolutionHeight returns the "height" portion of a manifest
+// resolution string. "3840x2160" → "2160". Used to match variant
+// directory names like "2160p" back to manifest entries.
+func resolutionHeight(res string) string {
+	i := strings.Index(res, "x")
+	if i < 0 {
+		return ""
 	}
-	return ""
+	return res[i+1:]
 }
 
 func tapPlaybackBack(ctx context.Context, appium *runner.AppiumLauncher, dev runner.Device) error {
@@ -493,25 +698,6 @@ func countSettleMisses(cs []runner.StartupCycleResult) int {
 		}
 	}
 	return n
-}
-
-func medianFloat(rows []runner.NetworkRow, pick func(runner.NetworkRow) float64) float64 {
-	if len(rows) == 0 {
-		return 0
-	}
-	xs := make([]float64, len(rows))
-	for i, r := range rows {
-		xs[i] = pick(r)
-	}
-	// simple sort
-	for i := 0; i < len(xs); i++ {
-		for j := i + 1; j < len(xs); j++ {
-			if xs[j] < xs[i] {
-				xs[i], xs[j] = xs[j], xs[i]
-			}
-		}
-	}
-	return xs[len(xs)/2]
 }
 
 func max0(n int) int {

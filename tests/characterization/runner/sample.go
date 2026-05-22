@@ -17,10 +17,22 @@ type Sample struct {
 	State                 string    `json:"state"`
 	LastEvent             string    `json:"last_event"`
 	BufferDepthS          float64   `json:"buffer_depth_s"`
+	// BufferEndS — most-distant loaded segment, seconds from playhead.
+	// More reliable on AVPlayer where BufferDepthS often reports 0.
+	BufferEndS            float64   `json:"buffer_end_s,omitempty"`
 	Stalls                int       `json:"stalls"`
 	StallTimeS            float64   `json:"stall_time_s"`
 	ProfileShiftCount     int       `json:"profile_shift_count"`
 	VideoBitrateMbps      float64   `json:"video_bitrate_mbps"`
+	// VideoFirstFrameTimeS — player's own measurement of time from
+	// play-start to first decoded frame. Per-play (resets on new
+	// play_id). Authoritative for TTFF.
+	VideoFirstFrameTimeS  float64   `json:"video_first_frame_time_s,omitempty"`
+	// PlayID — the current play's UUID. Changes when the player
+	// starts a new play (channel change, app relaunch, etc).
+	// Used by startup_test to find the new-play transition for
+	// accurate TTFF measurement.
+	PlayID                string    `json:"play_id,omitempty"`
 	VideoQualityPct       float64   `json:"video_quality_pct"`
 	// VideoResolution is the player's currently-DISPLAYED variant
 	// ("960x540"). Lags the actually-being-fetched variant by a few
@@ -130,16 +142,23 @@ func (s *Sampler) tick(ctx context.Context) {
 		s.append(Sample{Ts: now, AppliedRateMbps: rate})
 		return
 	}
+	playID := ""
+	if rec.CurrentPlay != nil {
+		playID = rec.CurrentPlay.ID
+	}
 	s.append(Sample{
 		Ts:                    now,
 		AppliedRateMbps:       rate,
 		State:                 m.State,
 		LastEvent:             m.LastEvent,
 		BufferDepthS:          m.BufferDepthS,
+		BufferEndS:            m.BufferEndS,
 		Stalls:                m.Stalls,
 		StallTimeS:            m.StallTimeS,
 		ProfileShiftCount:     m.ProfileShiftCount,
 		VideoBitrateMbps:      m.VideoBitrateMbps,
+		VideoFirstFrameTimeS:  m.VideoFirstFrameTimeS,
+		PlayID:                playID,
 		VideoQualityPct:       m.VideoQualityPct,
 		VideoResolution:       m.VideoResolution,
 		NetworkBitrateMbps:    m.NetworkBitrateMbps,

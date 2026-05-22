@@ -160,6 +160,58 @@ func VariantSweep(rec *PlayerRecord, margins []int) ([]VariantRate, error) {
 	return out, nil
 }
 
+// VariantBandwidth captures the per-rung bandwidth from the manifest
+// (avg + peak in Mbps, both rounded to 3 decimals for log brevity).
+// Keyed by resolution string (e.g. "3840x2160").
+type VariantBandwidth struct {
+	AvgMbps  float64 `json:"avg_mbps"`
+	PeakMbps float64 `json:"peak_mbps"`
+}
+
+// VariantBandwidthByResolution returns a map of resolution →
+// {avg,peak} Mbps for every variant in the bound player's manifest.
+// Used by tests that want to annotate log lines with the bandwidth
+// context for a variant they're discussing — operator decisions read
+// better when "settled=1440p" is followed by "(avg=10.845 peak=15.364)"
+// instead of forcing the reader to remember the ladder.
+//
+// Audio entries (resolution=="") are dropped. Returns an empty map
+// when the manifest hasn't been fetched yet.
+func VariantBandwidthByResolution(rec *PlayerRecord) map[string]VariantBandwidth {
+	out := map[string]VariantBandwidth{}
+	if rec == nil || rec.CurrentPlay == nil {
+		return out
+	}
+	for _, v := range rec.CurrentPlay.Manifest.Variants {
+		res := strings.TrimSpace(v.Resolution)
+		if res == "" {
+			continue
+		}
+		out[res] = VariantBandwidth{
+			AvgMbps:  math.Round(float64(v.AverageBandwidth)/1000) / 1000,
+			PeakMbps: math.Round(float64(v.Bandwidth)/1000) / 1000,
+		}
+	}
+	return out
+}
+
+// AnnotateVariant renders a one-liner "(avg=X peak=Y cap=Z)" string
+// for log lines that mention a variant resolution. Empty resolution
+// → empty string. Missing capMbps (≤0) → omit the cap portion.
+// Missing variant in the lookup → still emit the cap if present.
+func AnnotateVariant(bws map[string]VariantBandwidth, resolution string, capMbps float64) string {
+	bw, ok := bws[resolution]
+	switch {
+	case ok && capMbps > 0:
+		return fmt.Sprintf("(avg=%.3f peak=%.3f cap=%.3f)", bw.AvgMbps, bw.PeakMbps, capMbps)
+	case ok:
+		return fmt.Sprintf("(avg=%.3f peak=%.3f)", bw.AvgMbps, bw.PeakMbps)
+	case capMbps > 0:
+		return fmt.Sprintf("(cap=%.3f)", capMbps)
+	}
+	return ""
+}
+
 // videoVariantDirRE extracts the variant id from a per-variant playlist
 // URL like "playlist_6s_2160p.m3u8" → "2160p". The id is also the
 // segment-directory name under the content root (segments live in

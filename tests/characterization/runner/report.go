@@ -43,6 +43,83 @@ type Report struct {
 	// test — one entry per (boundary_type, rep) cold-start cycle.
 	// See .claude/standards/startup-characterization-test.md.
 	StartupCycles []StartupCycleResult `json:"startup_cycles,omitempty"`
+	// RetryCycles is populated by the retry/backoff characterization
+	// test (Phase 1 of #492) — one entry per (fault_shape, rep)
+	// persistent-fault cycle. See
+	// .claude/standards/retry-backoff-characterization-test.md.
+	RetryCycles []RetryCycleResult `json:"retry_cycles,omitempty"`
+}
+
+// RetryCycleResult captures one persistent-fault observation. The
+// test arms a fault that fires on EVERY matching request (no
+// frequency=0 one-shot — that's the abort test). We observe how
+// many times the player retries, what the gap between retries is
+// (backoff curve), whether/when it downshifts, and whether it
+// eventually gives up on the failing variant.
+//
+// Field semantics + how to interpret outcomes:
+// see .claude/standards/retry-backoff-characterization-test.md.
+type RetryCycleResult struct {
+	CycleIdx   int    `json:"cycle_idx"`
+	FaultShape string `json:"fault_shape"`
+	PreVariant string `json:"pre_variant"`
+	// PreVariantDir is the segment-directory name the test scoped
+	// the fault to (e.g. "2160p"). Constant across the cycle.
+	PreVariantDir string    `json:"pre_variant_dir"`
+	PreBufferS    float64   `json:"pre_buffer_s"`
+	ArmedAt       time.Time `json:"armed_at"`
+	ObserveWindowS float64  `json:"observe_window_s"`
+
+	// PerURLRetries is one entry per faulted URL observed during the
+	// window. Order: temporal — sorted by the URL's first attempt.
+	PerURLRetries []URLRetryInfo `json:"per_url_retries,omitempty"`
+
+	// Aggregate counters across all faulted URLs in the window.
+	FaultedURLs            int `json:"faulted_urls"`
+	TotalFailedFetches     int `json:"total_failed_fetches"`
+	MeanRetryIntervalMs    float64 `json:"mean_retry_interval_ms,omitempty"`
+	MedianRetryIntervalMs  float64 `json:"median_retry_interval_ms,omitempty"`
+
+	// Downshift markers from two independent sources.
+	// "Decided" = sample's VideoResolution flips post-arm (the player
+	// announced its new choice). "Committed" = a new manifest URL
+	// appears in network_requests post-arm (the player actually started
+	// fetching from the new variant).
+	DownshiftDecidedAtS    float64 `json:"downshift_decided_at_s,omitempty"`
+	DownshiftDecidedTo     string  `json:"downshift_decided_to,omitempty"`
+	DownshiftCommittedAtS  float64 `json:"downshift_committed_at_s,omitempty"`
+	DownshiftCommittedTo   string  `json:"downshift_committed_to,omitempty"`
+
+	// Give-up = a URL stopped getting retries with a gap > 30s before
+	// the end of the observation window. GaveUpURL is the first URL
+	// the player abandoned (empty if none).
+	GaveUpURL  string  `json:"gave_up_url,omitempty"`
+	GaveUpAtS  float64 `json:"gave_up_at_s,omitempty"`
+
+	// Recovery — time for the player to return to its pre-cycle
+	// variant + healthy buffer after the fault is released. Captured
+	// by WaitForTopAndBuffer post-cycle. 0 = never recovered in the
+	// recovery window.
+	RecoveryS float64 `json:"recovery_s,omitempty"`
+
+	// PlayerStalled = position frozen for >5s post-arm.
+	PlayerStalled bool `json:"player_stalled"`
+}
+
+// URLRetryInfo is one URL's retry history within an observation window.
+type URLRetryInfo struct {
+	URL              string   `json:"url"`
+	AttemptCount     int      `json:"attempt_count"`
+	// IntervalsMs[i] = ms between attempt i and attempt i+1.
+	// len(IntervalsMs) = AttemptCount - 1.
+	IntervalsMs      []int64  `json:"intervals_ms,omitempty"`
+	FirstAttemptAtS  float64  `json:"first_attempt_at_s"`
+	LastAttemptAtS   float64  `json:"last_attempt_at_s"`
+	AllFaulted       bool     `json:"all_faulted"`
+	// FaultKinds is the set of fault_type/fault_action values the
+	// proxy stamped on this URL's rows. Usually a single value but
+	// recorded as a list in case the proxy applied different shapes.
+	FaultKinds []string `json:"fault_kinds,omitempty"`
 }
 
 // StartupCycleResult captures one cold-start observation. The test
@@ -73,7 +150,23 @@ type StartupCycleResult struct {
 	FirstSegmentAtS float64 `json:"first_segment_at_s,omitempty"`
 	// FirstVariantPicked is the resolution/variant the player chose
 	// first (read from the first variant-playlist URL it fetched).
+	// Audio playlists are skipped — only video-variant playlists
+	// count.
 	FirstVariantPicked string `json:"first_variant_picked,omitempty"`
+	// FirstVariantAvgMbps / FirstVariantPeakMbps — manifest bandwidth
+	// values for the first variant picked. Empty when the variant
+	// can't be looked up (audio, unknown).
+	FirstVariantAvgMbps  float64 `json:"first_variant_avg_mbps,omitempty"`
+	FirstVariantPeakMbps float64 `json:"first_variant_peak_mbps,omitempty"`
+	// SettledVariantAvgMbps / SettledVariantPeakMbps — same for the
+	// settled variant. Lets the dashboard show "1440p (avg=10.8
+	// peak=15.4)" without recomputing from the manifest.
+	SettledVariantAvgMbps  float64 `json:"settled_variant_avg_mbps,omitempty"`
+	SettledVariantPeakMbps float64 `json:"settled_variant_peak_mbps,omitempty"`
+	// PrePlayID is the play_id active BEFORE the boundary fired.
+	// Used by the result-builder to detect the new-play transition
+	// for accurate TTFF measurement.
+	PrePlayID string `json:"pre_play_id,omitempty"`
 	// TimeToFirstFrameS reads the iOS app's reported video first-frame
 	// time. The most-watched UX number.
 	TimeToFirstFrameS float64 `json:"time_to_first_frame_s,omitempty"`
@@ -106,6 +199,51 @@ type StartupCycleResult struct {
 	// fresh app_cold.
 	NetworkBitrateAtStartMbps float64 `json:"network_bitrate_at_start_mbps,omitempty"`
 	NetworkBitrateAt30SMbps   float64 `json:"network_bitrate_at_30s_mbps,omitempty"`
+
+	// VariantActivity — per-variant breakdown over the observation
+	// window. One entry per variant the player TOUCHED (fetched the
+	// playlist or any segment). The dashboard renders this so the
+	// operator can see "the player fetched 1440p's playlist but
+	// never fetched any segments from it" — i.e. it peeked at a
+	// variant without committing.
+	VariantActivity []VariantActivity `json:"variant_activity,omitempty"`
+}
+
+// VariantActivity summarises one variant's activity during a startup
+// cycle's observation window. Drives "where did the player spend its
+// time" + "did it commit to this variant or just peek at it" analysis.
+type VariantActivity struct {
+	// Resolution is the variant's resolution string (e.g. "3840x2160")
+	// OR the segment-directory name (e.g. "2160p") when we couldn't
+	// resolve to a manifest entry. Audio is excluded.
+	Resolution string `json:"resolution"`
+	// VariantDir is the segment-directory name (e.g. "2160p"). This
+	// is the canonical identifier — Resolution may be empty for
+	// dirs we couldn't map back to the manifest.
+	VariantDir string `json:"variant_dir"`
+	// PlaylistFetches counts the variant playlist GETs in the window.
+	PlaylistFetches int `json:"playlist_fetches"`
+	// SegmentFetches counts segment GETs in the window. A variant
+	// with PlaylistFetches>0 AND SegmentFetches==0 is "peeked but
+	// never used" — the player evaluated it (master/manifest level)
+	// but never committed to consuming bytes from it.
+	SegmentFetches int `json:"segment_fetches"`
+	// First/LastSegmentAtS — seconds from cycle StartedAt to the
+	// first/last segment fetch from this variant. Zero when no
+	// segments were fetched.
+	FirstSegmentAtS float64 `json:"first_segment_at_s,omitempty"`
+	LastSegmentAtS  float64 `json:"last_segment_at_s,omitempty"`
+	// ActiveDurationS = LastSegmentAtS - FirstSegmentAtS. Rough
+	// "time the player was actively using this variant" — accurate
+	// only when the player fetched consecutively (no gaps).
+	ActiveDurationS float64 `json:"active_duration_s,omitempty"`
+	// PeekedButNeverUsed: playlist fetched but no segments. Operationally
+	// interesting — the player considered but rejected this variant.
+	PeekedButNeverUsed bool `json:"peeked_but_never_used,omitempty"`
+	// Manifest-declared bandwidth context (optional). Looked up from
+	// VariantBandwidthByResolution at result-build time.
+	AvgMbps  float64 `json:"avg_mbps,omitempty"`
+	PeakMbps float64 `json:"peak_mbps,omitempty"`
 }
 
 // AbortCycleResult captures the player's reaction to one server-

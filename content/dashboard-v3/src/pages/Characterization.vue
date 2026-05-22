@@ -16,8 +16,8 @@
 import { computed, ref, onMounted } from 'vue';
 import ShellLayout from '@/components/ShellLayout.vue';
 
-type TestName = 'rampup' | 'rampdown' | 'pyramid' | 'abort';
-const TEST_NAMES: TestName[] = ['rampup', 'rampdown', 'pyramid', 'abort'];
+type TestName = 'rampup' | 'rampdown' | 'pyramid' | 'abort' | 'startup';
+const TEST_NAMES: TestName[] = ['rampup', 'rampdown', 'pyramid', 'abort', 'startup'];
 
 interface PlayRow {
   play_id: string;
@@ -219,6 +219,32 @@ interface AbortCycleRow {
   post_bw_est_mbps?: number;
 }
 
+interface StartupCycleRow {
+  cycle_idx?: number;
+  boundary_type?: string;
+  content_clip_id?: string;
+  cap_mbps?: number;
+  started_at?: string;
+  player_id?: string;
+  first_master_at_s?: number;
+  first_variant_at_s?: number;
+  first_segment_at_s?: number;
+  first_variant_picked?: string;
+  time_to_first_frame_s?: number;
+  reached_5s_buffer_at_s?: number;
+  reached_15s_buffer_at_s?: number;
+  variant_at_5s?: string;
+  variant_at_15s?: string;
+  variant_at_30s?: string;
+  upshifts_in_30s?: number;
+  downshifts_in_30s?: number;
+  stalls_in_30s?: number;
+  dropped_frames_in_30s?: number;
+  settled_variant?: string;
+  network_bitrate_at_start_mbps?: number;
+  network_bitrate_at_30s_mbps?: number;
+}
+
 interface ReportBlob {
   mode?: string;
   platform?: string;
@@ -231,6 +257,7 @@ interface ReportBlob {
   variants?: Array<{ resolution: string; avg_bps?: number; peak_bps?: number; source?: string }>;
   summary?: CharRunSummary;
   abort_cycles?: AbortCycleRow[];
+  startup_cycles?: StartupCycleRow[];
 }
 
 // Per-card expand state + cache. Map key = (run_id, test_name).
@@ -551,6 +578,48 @@ function startedAtLocal(iso: string): string {
                                 <span v-else>no</span>
                               </td>
                               <td>{{ c.recovery_s != null ? c.recovery_s.toFixed(1) + 's' : '—' }}</td>
+                            </tr>
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+
+                    <!-- Startup cycles block — populated only by the startup test -->
+                    <div v-if="expandedSteps.get(charRunKey(g.run_id, t))!.report!.startup_cycles?.length" class="details-section">
+                      <div class="details-section-title">Startup Cycles ({{ expandedSteps.get(charRunKey(g.run_id, t))!.report!.startup_cycles!.length }})</div>
+                      <div class="steps-tablewrap">
+                        <table class="steps-table">
+                          <thead>
+                            <tr>
+                              <th>#</th>
+                              <th>boundary</th>
+                              <th>clip</th>
+                              <th>cap Mbps</th>
+                              <th>first var</th>
+                              <th>ttff</th>
+                              <th>5s buf at</th>
+                              <th>settled</th>
+                              <th>shifts ↑/↓</th>
+                              <th>stalls</th>
+                              <th>net bw start/end</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            <tr v-for="(c, i) in expandedSteps.get(charRunKey(g.run_id, t))!.report!.startup_cycles!" :key="i">
+                              <td>{{ c.cycle_idx ?? i + 1 }}</td>
+                              <td class="mono">{{ c.boundary_type ?? '—' }}</td>
+                              <td class="mono">{{ c.content_clip_id ? c.content_clip_id.slice(0, 24) : '—' }}</td>
+                              <td class="mono">{{ c.cap_mbps != null ? c.cap_mbps.toFixed(2) : '—' }}</td>
+                              <td class="mono">{{ c.first_variant_picked || '—' }}</td>
+                              <td>{{ c.time_to_first_frame_s != null ? c.time_to_first_frame_s.toFixed(2) + 's' : '—' }}</td>
+                              <td>{{ c.reached_5s_buffer_at_s ? c.reached_5s_buffer_at_s.toFixed(1) + 's' : 'never' }}</td>
+                              <td class="mono">{{ c.settled_variant || '—' }}</td>
+                              <td>{{ (c.upshifts_in_30s ?? 0) }}/{{ (c.downshifts_in_30s ?? 0) }}</td>
+                              <td>
+                                <span v-if="(c.stalls_in_30s ?? 0) > 0" class="status-chip chip-fail">{{ c.stalls_in_30s }}</span>
+                                <span v-else>0</span>
+                              </td>
+                              <td class="mono">{{ (c.network_bitrate_at_start_mbps ?? 0).toFixed(1) }}/{{ (c.network_bitrate_at_30s_mbps ?? 0).toFixed(1) }}</td>
                             </tr>
                           </tbody>
                         </table>

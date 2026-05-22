@@ -49,6 +49,11 @@ type PlayerRecord struct {
 		LastEvent              string  `json:"last_event"`
 		EventTime              string  `json:"event_time"`
 		BufferDepthS           float64 `json:"buffer_depth_s"`
+		// BufferEndS is the most-distant loaded segment position, in
+		// seconds from the playhead. More reliable than BufferDepthS
+		// on AVPlayer (iOS), which often reports 0 even during normal
+		// playback — see .claude/standards/avplayer-quirks.md.
+		BufferEndS             float64 `json:"buffer_end_s"`
 		Stalls                 int     `json:"stalls"`
 		StallTimeS             float64 `json:"stall_time_s"`
 		LastStallTimeS         float64 `json:"last_stall_time_s"`
@@ -57,6 +62,12 @@ type PlayerRecord struct {
 		VideoBitrateMbps       float64 `json:"video_bitrate_mbps"`
 		VideoQualityPct        float64 `json:"video_quality_pct"`
 		VideoResolution        string  `json:"video_resolution"`
+		// VideoFirstFrameTimeS is the player's own measurement of time
+		// from play-start to first decoded frame. Per-play (reset on
+		// new play_id). Authoritative for TTFF, vs deriving it from
+		// "first sample with bitrate > 0" which can be polluted by a
+		// previous play's residual metrics.
+		VideoFirstFrameTimeS   float64 `json:"first_frame_time_s"`
 		NetworkBitrateMbps     float64 `json:"network_bitrate_mbps"`
 		AvgNetworkBitrateMbps  float64 `json:"avg_network_bitrate_mbps"`
 		DroppedFrames          int     `json:"dropped_frames"`
