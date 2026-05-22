@@ -22,13 +22,19 @@ import (
 // for the full data-model + how-to-read-outcomes documentation. Don't
 // reason about what a field means from name alone; read the doc.
 
-// Default clip_ids for the channel_change cycles. Override via env
-// when the test-dev content roster changes. Both must exist in
-// `/api/content`. Without two distinct clip_ids, channel_change can't
-// run — the test skips that boundary and reports only app_cold.
+// Target clip and a distinct "setup" clip. EVERY cycle measures the
+// startup of the SAME target clip — keeping the destination constant
+// is what lets us compare across boundary types without content
+// variance polluting the result. The setup clip exists only to put
+// the player in a "currently playing something else" state before a
+// channel_change cycle measures the switch TO the target.
+//
+// Override via CHAR_STARTUP_CLIP_TARGET / CHAR_STARTUP_CLIP_SETUP env.
+// Both must exist in `/api/content`; the setup clip MUST be distinct
+// from the target.
 const (
-	defaultStartupClipA = "insane_fpv_shots_hydrofoil_windsurfing"
-	defaultStartupClipB = "bucks_bunny"
+	defaultStartupClipTarget = "insane_fpv_shots_hydrofoil_windsurfing"
+	defaultStartupClipSetup  = "bucks_bunny"
 )
 
 type startupBoundary string
@@ -56,8 +62,11 @@ func TestStartupWeb(t *testing.T)       { runStartup(t, runner.PlatformWeb) }
 func runStartup(t *testing.T, p runner.Platform) {
 	sess := OpenSession(t, p)
 
-	clipA := envOr("CHAR_STARTUP_CLIP_A", defaultStartupClipA)
-	clipB := envOr("CHAR_STARTUP_CLIP_B", defaultStartupClipB)
+	target := envOr("CHAR_STARTUP_CLIP_TARGET", defaultStartupClipTarget)
+	setupClip := envOr("CHAR_STARTUP_CLIP_SETUP", defaultStartupClipSetup)
+	if target == setupClip {
+		t.Fatalf("target clip and setup clip must differ (both = %q)", target)
+	}
 	capMbps := envFloat("CHAR_STARTUP_CAP_MBPS", startupCapMbpsDefault)
 	reps := envInt("CHAR_STARTUP_REPS", 3)
 	if reps <= 0 {
@@ -66,12 +75,12 @@ func runStartup(t *testing.T, p runner.Platform) {
 
 	runID := time.Now().UTC().Format("20060102T150405Z")
 	startLabels := map[string]string{
-		"test":     "startup",
-		"platform": string(p),
-		"run_id":   runID,
-		"clip_a":   clipA,
-		"clip_b":   clipB,
-		"cap_mbps": fmt.Sprintf("%.3f", capMbps),
+		"test":        "startup",
+		"platform":    string(p),
+		"run_id":      runID,
+		"clip_target": target,
+		"clip_setup":  setupClip,
+		"cap_mbps":    fmt.Sprintf("%.3f", capMbps),
 	}
 	if err := sess.LabelPlay(context.Background(), startLabels); err != nil {
 		t.Logf("label play (start): %v (test continues)", err)
@@ -93,8 +102,9 @@ func runStartup(t *testing.T, p runner.Platform) {
 	ctx, cancel := context.WithTimeout(context.Background(), overall)
 	defer cancel()
 
-	t.Logf("cycle plan: %d cycles (%d boundaries × %d reps), cap=%.3f Mbps, clip_a=%s clip_b=%s",
-		cycleCount, len(startupBoundaries), reps, capMbps, clipA, clipB)
+	t.Logf("cycle plan: %d cycles (%d boundaries × %d reps), target=%s setup=%s cap=%.3f Mbps",
+		cycleCount, len(startupBoundaries), reps, target, setupClip, capMbps)
+	t.Logf("every cycle measures startup OF %q — boundary type is the only variable", target)
 
 	var allCycles []runner.StartupCycleResult
 	cycleIdx := 0
@@ -102,13 +112,7 @@ func runStartup(t *testing.T, p runner.Platform) {
 	for rep := 0; rep < reps; rep++ {
 		for _, boundary := range startupBoundaries {
 			cycleIdx++
-			// For channel_change cycles, swap the target each rep so
-			// we test both directions (A→B then B→A then A→B…).
-			targetClip := clipA
-			if boundary == startupChannelChange && rep%2 == 0 {
-				targetClip = clipB
-			}
-			result := runStartupCycle(ctx, t, sess, appium, *picked, boundary, targetClip, capMbps, cycleIdx)
+			result := runStartupCycle(ctx, t, sess, appium, *picked, boundary, target, setupClip, capMbps, cycleIdx)
 			allCycles = append(allCycles, result)
 			t.Logf("  [%2d] %-16s clip=%-40s first_var=%-12s ttff=%.2fs reach5sbuf=%.1fs settled=%s shifts=+%d/-%d stalls=%d",
 				cycleIdx, boundary, result.ContentClipID, result.FirstVariantPicked,
@@ -186,7 +190,7 @@ func runStartup(t *testing.T, p runner.Platform) {
 func runStartupCycle(
 	ctx context.Context, t *testing.T,
 	sess *runner.Session, appium *runner.AppiumLauncher, dev runner.Device,
-	boundary startupBoundary, targetClip string, capMbps float64, idx int,
+	boundary startupBoundary, targetClip, setupClip string, capMbps float64, idx int,
 ) runner.StartupCycleResult {
 	result := runner.StartupCycleResult{
 		CycleIdx:      idx,
@@ -200,12 +204,13 @@ func runStartupCycle(
 	_ = sess.SetSegmentTimeout(ctx, 0)
 
 	// Boundary-specific setup. After this block the player should be
-	// transitioning into a fresh play (or about to). StartedAt marks
-	// t=0 for every per-cycle measurement.
+	// about to BEGIN playback of targetClip. Every cycle lands on the
+	// same target — boundary type is the only experimental variable.
+	// StartedAt marks t=0 for every per-cycle measurement.
 	switch boundary {
 	case startupAppCold:
-		// Kill the app outright so the next launch is genuinely cold —
-		// no in-process AVPlayer state, no learned bandwidth estimate.
+		// Kill the app so the next launch is genuinely cold — no
+		// in-process AVPlayer state, no learned bandwidth estimate.
 		if err := appium.Kill(ctx, dev); err != nil {
 			t.Logf("[%d] Kill: %v (continuing — app may already be killed)", idx, err)
 		}
@@ -220,6 +225,7 @@ func runStartupCycle(
 		}
 		s.PlayerID = pid
 		result.PlayerID = pid
+		sess.PlayerID = pid
 		if err := s.ApplyRate(ctx, capMbps); err != nil {
 			t.Fatalf("[%d] ApplyRate %.2f: %v", idx, capMbps, err)
 		}
@@ -227,30 +233,36 @@ func runStartupCycle(
 		// actually engage after the HTTP PATCH returns.
 		time.Sleep(2 * time.Second)
 		result.StartedAt = time.Now()
-		if err := appium.ResumePlayback(ctx, dev); err != nil {
-			t.Fatalf("[%d] ResumePlayback: %v", idx, err)
+		// Land on the SAME target_clip every time (not Continue
+		// Watching, which would be path-dependent on the last play).
+		if err := appium.TapTileByClipID(ctx, s, targetClip); err != nil {
+			t.Fatalf("[%d] TapTileByClipID %s: %v (LiveRow may not have rendered the tile yet)", idx, targetClip, err)
 		}
-		// Bind to whatever player_id ends up reporting.
-		sess.PlayerID = pid
 
 	case startupChannelChange:
-		// Player should currently be playing (set up by the previous
-		// cycle or by OpenSession). Tap back → home, then tap the
-		// target tile to start a fresh play on a (presumably)
-		// different content item.
-		//
-		// Note: the AX scope for the back button only matches when
-		// PlaybackScreen is mounted, so a best-effort tap is fine — if
-		// we're already on Home (no in-flight playback) the tap is a
-		// no-op.
+		// Two-phase: (a) put the player in a "currently playing
+		// setupClip" state, then (b) measure the switch TO targetClip.
+		// Without phase (a) we can't reliably reproduce the
+		// channel_change scenario from inside a single test run.
 		if err := tapPlaybackBack(ctx, appium, dev); err != nil {
-			t.Logf("[%d] back-to-home: %v (continuing — may already be on home)", idx, err)
+			t.Logf("[%d] back-to-home (pre-setup): %v (continuing)", idx, err)
 		}
 		time.Sleep(500 * time.Millisecond)
-		// Reapply the cap before the next play starts so the new play
-		// fetches under the throttle. PlayerID survives kill+launch on
-		// iOS (UserDefaults-backed) but channel_change doesn't relaunch
-		// the app, so the same player_id is fine.
+		if err := appium.TapTileByClipID(ctx, sess, setupClip); err != nil {
+			t.Fatalf("[%d] setup TapTileByClipID %s: %v", idx, setupClip, err)
+		}
+		// Let setupClip start playing properly — manifest fetched,
+		// first segment in buffer — so the channel_change is a clean
+		// warm-AVPlayer transition rather than "cancelled before it
+		// even started." 4 s is enough on a healthy network; bump if
+		// the test runs on a slower path.
+		time.Sleep(4 * time.Second)
+
+		// Now the channel change measurement begins.
+		if err := tapPlaybackBack(ctx, appium, dev); err != nil {
+			t.Logf("[%d] back-to-home (pre-target): %v (continuing)", idx, err)
+		}
+		time.Sleep(500 * time.Millisecond)
 		if err := sess.ApplyRate(ctx, capMbps); err != nil {
 			t.Fatalf("[%d] ApplyRate %.2f: %v", idx, capMbps, err)
 		}

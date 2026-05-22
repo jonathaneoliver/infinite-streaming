@@ -8,8 +8,12 @@ Characterizes the player's behavior when playback begins, across two lifecycle b
 
 | Boundary | What it models | Setup per cycle |
 |---|---|---|
-| `app_cold` | First play after the user kills/relaunches the app, or first play after device boot. No in-process AVPlayer state — fresh URLSession, fresh bandwidth estimate, fresh DNS/TLS caches at the OS layer. | `appium.Kill` → `LaunchToHome` → `ReadPlayerID` from AX node → `ApplyRate(cap)` → 2 s settle → `ResumePlayback` (tap Continue Watching). |
-| `channel_change` | User switches from one content item to a different one without leaving the app. AVPlayer instance survives, learned bandwidth estimate carries, TCP keepalive / TLS session ticket likely reused. | (player is currently playing something) → tap playback-back-button → tap `home-tile-<other-clip>` to start a fresh play on a different content item. |
+| `app_cold` | First play after the user kills/relaunches the app, or first play after device boot. No in-process AVPlayer state — fresh URLSession, fresh bandwidth estimate, fresh DNS/TLS caches at the OS layer. | `appium.Kill` → `LaunchToHome` → `ReadPlayerID` from AX node → `ApplyRate(cap)` → 2 s settle → tap `home-tile-<TARGET>` |
+| `channel_change` | User switches from one content item to a different one without leaving the app. AVPlayer instance survives, learned bandwidth estimate carries, TCP keepalive / TLS session ticket likely reused. | (1) tap back → home → tap `home-tile-<SETUP>` → let setupClip play 4 s; (2) tap back → home → ApplyRate(cap) → 2 s settle → tap `home-tile-<TARGET>` |
+
+**Crucial design rule: every cycle measures startup of the SAME `target` clip.** The content identity is held constant so the only experimental variable is the boundary type. If app_cold and channel_change measured *different* content, any cross-boundary comparison would conflate "warm vs cold" with "different segment sizes / variant ladders / first-byte caches at origin / etc."
+
+The `setup` clip exists only to put the player into a "currently playing something else" state for channel_change. It plays for 4 s (long enough that AVPlayer has fetched the master + variant + first segment) before the measured switch to `target` begins.
 
 Each cycle applies a single network cap (`CHAR_STARTUP_CAP_MBPS`, default 30 Mbps — wide enough that most platforms pick the top variant). Then a 30-second observation window collects:
 
@@ -18,14 +22,14 @@ Each cycle applies a single network cap (`CHAR_STARTUP_CAP_MBPS`, default 30 Mbp
 
 A `StartupCycleResult` is built from those two streams. See the next section.
 
-Default matrix: 2 boundaries × 3 reps = 6 cycles. The channel_change cycles alternate direction each rep (rep 0 goes A→B, rep 1 goes B→A, rep 2 goes A→B) so we test both ends of the round-trip on the same content roster.
+Default matrix: 2 boundaries × 3 reps = 6 cycles. **All 6 measure startup of the same target.** Override via `CHAR_STARTUP_CLIP_TARGET` / `CHAR_STARTUP_CLIP_SETUP` env (must be distinct).
 
 ## Per-cycle fields — what each one means
 
 | Field | Source | What it tells you |
 |---|---|---|
 | `boundary_type` | test config | `app_cold` or `channel_change` (the independent variable) |
-| `content_clip_id` | test config | which content the cycle SWITCHED TO (informational) |
+| `content_clip_id` | test config | the target clip — held CONSTANT across all cycles in a run. Cross-cycle comparisons within a run are valid because this never changes. |
 | `cap_mbps` | test config | the network cap applied before resume |
 | `started_at` | wall clock | t=0 reference; everything else is relative |
 | `player_id` | AX node read at home screen (`home-player-id`) | persistent UUID — same value across app_cold reps (UserDefaults-backed) |
