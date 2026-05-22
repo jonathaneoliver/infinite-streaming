@@ -19,7 +19,11 @@ Claude Code's `Bash(<tool>:*)` permission rules match only the **first token** o
 
 Why this matters: every re-prompt interrupts the operator's flow and undermines their `.claude/settings.json` allowlist. The user explicitly configured `Bash(harness:*)`, `Bash(jq:*)`, `Bash(date:*)`, etc. — respect that.
 
-## 1a. Using the harness CLI
+## 1a. Touching fault-injection wire behaviour
+
+The proxy's HTTP fault types (`request_body_*`, `request_first_byte_*`, `request_connect_*`, `corrupted`, `transfer_active_timeout`) each produce a SPECIFIC wire shape that characterization tests interpret against. The canonical reference is [`.claude/standards/fault-injection-wire-contract.md`](../standards/fault-injection-wire-contract.md) — read it before editing `go-proxy/cmd/server/main.go § applySocketFault` or any fault-type case branch. Subtle behaviour changes (e.g. "X" filler vs real upstream bytes) silently invalidate test results. If you need a new behaviour, add a new fault-type name; don't repurpose an existing one.
+
+## 1b. Using the harness CLI
 
 Every skill in this directory shells out to `harness`. Before guessing flag names, output shapes, or subcommand boundaries, consult:
 

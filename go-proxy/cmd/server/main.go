@@ -4592,7 +4592,30 @@ func isSocketFaultType(faultType string) bool {
 	}
 }
 
-func applySocketFault(w http.ResponseWriter, faultType, contentType string) (string, error) {
+// applySocketFault hijacks the client TCP connection and emits the
+// wire shape for the named fault. Each fault produces a SPECIFIC,
+// CONTRACTUAL on-the-wire pattern that characterization tests (in
+// particular tests/characterization/modes/abort_test.go) interpret
+// against. Subtle behaviour changes silently invalidate that test's
+// results.
+//
+// **DO NOT CHANGE WIRE BEHAVIOURS OF EXISTING FAULT TYPES.**
+// If a different shape is needed, add a new fault-type name; don't
+// repurpose an old one.
+//
+// The canonical reference for every fault type's wire shape AND the
+// real-world failure mode it models is:
+//
+//   .claude/standards/fault-injection-wire-contract.md
+//
+// Read it before editing this function or any of the case branches
+// below. The doc lists: TCP-level shape, what the client OS surfaces,
+// and which real failure scenarios each shape reproduces.
+//
+// Related: isSocketFaultType (keep allowlist in sync), the
+// `corrupted` and `transfer_active_timeout` paths which model
+// different failure surfaces (see the standards doc).
+func applySocketFault(w http.ResponseWriter, faultType, contentType, upstreamURL string) (string, error) {
 	hj, ok := w.(http.Hijacker)
 	if !ok {
 		return "", fmt.Errorf("hijack unsupported")
@@ -4601,7 +4624,26 @@ func applySocketFault(w http.ResponseWriter, faultType, contentType string) (str
 	if err != nil {
 		return "", err
 	}
-	midBody := bytes.Repeat([]byte("X"), socketMidBodyBytes)
+	// For body_* fault types we send a chunk of REAL upstream bytes
+	// (a valid prefix of the segment / playlist response) before the
+	// fault closes the socket. This makes the failure shape match
+	// real-world mid-transfer aborts: the client receives parseable
+	// media data, then a clean close or RST. Fake "X" filler used to
+	// be written here, but that's the `corrupted` failure type's
+	// territory — `request_body_*` is for "the connection died
+	// mid-stream while real data was flowing." See abort
+	// characterization test (modes/abort_test.go).
+	//
+	// On upstream-fetch failure we fall back to "X" filler so the
+	// fault still applies — losing some realism but preserving the
+	// close behaviour the rule promises.
+	var midBody []byte
+	if needsRealBodyBytes(faultType) {
+		midBody = fetchUpstreamBodyPrefix(upstreamURL, socketMidBodyBytes)
+		if len(midBody) == 0 {
+			midBody = bytes.Repeat([]byte("X"), socketMidBodyBytes)
+		}
+	}
 	switch faultType {
 	case "request_connect_reset":
 		closeSocketAsReject(conn)
@@ -4670,6 +4712,46 @@ func applySocketFault(w http.ResponseWriter, faultType, contentType string) (str
 		_ = conn.Close()
 		return "", fmt.Errorf("unsupported socket fault type: %s", faultType)
 	}
+}
+
+// needsRealBodyBytes reports whether the named socket fault writes a
+// prefix of the upstream body to the client before the close behaviour
+// fires. The connect_* and first_byte_* shapes never write any body
+// bytes; only the body_* shapes do.
+func needsRealBodyBytes(faultType string) bool {
+	switch faultType {
+	case "request_body_reset", "request_body_hang", "request_body_delayed":
+		return true
+	}
+	return false
+}
+
+// fetchUpstreamBodyPrefix issues a short-timeout GET to the upstream
+// URL and returns up to `limit` bytes of the response body. Returns
+// nil on any failure (DNS, connect, non-2xx, timeout); caller falls
+// back to synthetic filler when the prefix isn't available.
+//
+// Bounded by a 2s timeout so a stuck upstream doesn't extend the
+// fault application latency past what the operator armed the rule for.
+func fetchUpstreamBodyPrefix(upstreamURL string, limit int) []byte {
+	if upstreamURL == "" || limit <= 0 {
+		return nil
+	}
+	client := &http.Client{Timeout: 2 * time.Second}
+	resp, err := client.Get(upstreamURL)
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		return nil
+	}
+	buf := make([]byte, limit)
+	n, _ := io.ReadFull(resp.Body, buf)
+	if n <= 0 {
+		return nil
+	}
+	return buf[:n]
 }
 
 func normalizeTransportFaultType(raw string) string {
@@ -5370,7 +5452,7 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if isSocketFaultType(failureType) {
-			socketAction, err := applySocketFault(w, failureType, contentType)
+			socketAction, err := applySocketFault(w, failureType, contentType, upstreamURL)
 			if err != nil {
 				actionTaken = "fallback_http_503"
 				w.WriteHeader(http.StatusServiceUnavailable)

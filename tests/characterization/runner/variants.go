@@ -4,7 +4,9 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"regexp"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -156,4 +158,63 @@ func VariantSweep(rec *PlayerRecord, margins []int) ([]VariantRate, error) {
 		}
 	}
 	return out, nil
+}
+
+// videoVariantDirRE extracts the variant id from a per-variant playlist
+// URL like "playlist_6s_2160p.m3u8" → "2160p". The id is also the
+// segment-directory name under the content root (segments live in
+// /<content>/<id>/segment_NN.m4s).
+//
+// Heuristic — works for the test-dev encoder's filename convention.
+// Different encoders may use different schemes; for those cases the
+// caller can override by passing url substrings directly.
+var videoVariantDirRE = regexp.MustCompile(`(?:^|/)playlist[_-]?[0-9]*s?[_-]?([A-Za-z0-9]+)\.m3u8$`)
+
+// VideoVariantDirs returns the segment-directory names for every video
+// variant in the bound player's current manifest. Audio variants (and
+// any entry with an empty Resolution) are excluded.
+//
+// Used by the abort characterization test to scope fault injection to
+// only the video portion of the stream — without that scope, faults
+// fire on whichever segment hits first (audio or video), and audio
+// hits dominate because audio segments are smaller / more frequent.
+//
+// Returns an error when the manifest hasn't been fetched yet.
+func VideoVariantDirs(rec *PlayerRecord) ([]string, error) {
+	if rec == nil || rec.CurrentPlay == nil {
+		return nil, errors.New("video variant dirs: player has no current play")
+	}
+	variants := rec.CurrentPlay.Manifest.Variants
+	if len(variants) == 0 {
+		return nil, errors.New("video variant dirs: manifest has no variants")
+	}
+	seen := map[string]bool{}
+	out := []string{}
+	for _, v := range variants {
+		if strings.TrimSpace(v.Resolution) == "" {
+			continue // audio-only / unresolved — skip
+		}
+		dir := variantDirFromPlaylistURL(v.URL)
+		if dir == "" || seen[dir] {
+			continue
+		}
+		seen[dir] = true
+		out = append(out, dir)
+	}
+	if len(out) == 0 {
+		return nil, errors.New("video variant dirs: no video entries derived from manifest")
+	}
+	return out, nil
+}
+
+func variantDirFromPlaylistURL(url string) string {
+	if m := videoVariantDirRE.FindStringSubmatch(url); m != nil {
+		return m[1]
+	}
+	// Fallback: strip ".m3u8", take part after final underscore or slash.
+	stem := strings.TrimSuffix(url, ".m3u8")
+	if i := strings.LastIndexAny(stem, "_/-"); i >= 0 {
+		return stem[i+1:]
+	}
+	return stem
 }

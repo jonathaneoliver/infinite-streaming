@@ -128,6 +128,18 @@ func runAbort(t *testing.T, p runner.Platform) {
 	topResolutions := []string{variants[0].Resolution}
 	t.Logf("top variant: %s (%.3f Mbps avg)", topResolutions[0], float64(variants[0].AvgBps)/1_000_000)
 
+	// Scope the fault injections to ONLY video segments by enumerating
+	// the video variant directory names from the manifest. Without this
+	// scope, faults fire on whichever segment hits the proxy first —
+	// often an audio segment (smaller / more frequent), which doesn't
+	// give the video-side characterization we want. See plan and issue
+	// #491 for the long-term variant-identity filter.
+	videoDirs, err := runner.VideoVariantDirs(rec)
+	if err != nil {
+		t.Fatalf("VideoVariantDirs: %v", err)
+	}
+	t.Logf("video variant scope: %v (audio + other surfaces excluded)", videoDirs)
+
 	// Start a sampler so each cycle has post-armedAt samples to scan
 	// for downshift / stall.
 	sampler := runner.NewSampler(sess, abortSamplerPeriod)
@@ -142,7 +154,7 @@ func runAbort(t *testing.T, p runner.Platform) {
 	for rep := 0; rep < reps; rep++ {
 		for _, shape := range abortShapes {
 			cycleIdx++
-			result := runOneAbortCycle(ctx, t, sess, sampler, shape, topResolutions, cycleIdx)
+			result := runOneAbortCycle(ctx, t, sess, sampler, shape, topResolutions, videoDirs, cycleIdx)
 			allCycles = append(allCycles, result)
 			t.Logf("  [%2d] %-32s  abort=%t kind=%-25s retry=%t range=%t downshift=%q stalled=%t recoveryS=%.1f",
 				cycleIdx, shape.name, result.AbortDetected, result.AbortKind,
@@ -227,7 +239,8 @@ func runAbort(t *testing.T, p runner.Platform) {
 func runOneAbortCycle(
 	ctx context.Context, t *testing.T,
 	sess *runner.Session, sampler *runner.Sampler,
-	shape abortShape, topResolutions []string, idx int,
+	shape abortShape, topResolutions []string,
+	videoDirs []string, idx int,
 ) runner.AbortCycleResult {
 	// Pre-cycle: ensure clean state, then fill buffer at the high rate.
 	if err := sess.ClearFaults(ctx); err != nil {
@@ -265,7 +278,7 @@ func runOneAbortCycle(
 		}
 		sampler.SetAppliedRate(abortThrottleRateMbps)
 	} else {
-		if err := sess.ArmFault(ctx, shape.name, "segment", 1); err != nil {
+		if err := sess.ArmFault(ctx, shape.name, "segment", videoDirs...); err != nil {
 			t.Fatalf("[%d] arm fault %s: %v", idx, shape.name, err)
 		}
 	}

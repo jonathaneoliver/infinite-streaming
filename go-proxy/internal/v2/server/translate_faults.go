@@ -146,6 +146,12 @@ func applyOneFaultRule(s map[string]any, rule map[string]any, used map[string]bo
 	// Reject filter shapes the v1 model can't express.
 	filterAny, hasFilter := rule["filter"]
 	var filter map[string]any
+	// urlPatterns is the list of URL-substring entries the rule's
+	// filter.url_match maps to. Written verbatim to the v1 surface's
+	// `_failure_urls` slice — the legacy v1 matcher (shouldApplyFailure)
+	// then scopes the fault to URLs whose pathBase / pathParent matches
+	// any of these strings.
+	var urlPatterns []string
 	if hasFilter && filterAny != nil {
 		f, ok := filterAny.(map[string]any)
 		if !ok {
@@ -154,11 +160,35 @@ func applyOneFaultRule(s map[string]any, rule map[string]any, used map[string]bo
 		if _, has := f["variant"]; has {
 			return &unsupportedFaultRuleError{RuleID: id, Reason: "filter.variant requires v1 variant tracking (not yet wired)"}
 		}
-		if _, has := f["url_match"]; has {
-			return &unsupportedFaultRuleError{RuleID: id, Reason: "filter.url_match requires v1 substring matching on a per-rule scope (not yet wired)"}
-		}
 		if _, has := f["codec"]; has {
 			return &unsupportedFaultRuleError{RuleID: id, Reason: "filter.codec requires v1 variant tracking (not yet wired)"}
+		}
+		if um, has := f["url_match"]; has && um != nil {
+			umMap, ok := um.(map[string]any)
+			if !ok {
+				return &unsupportedFaultRuleError{RuleID: id, Reason: "filter.url_match must be an object"}
+			}
+			umMode, _ := umMap["mode"].(string)
+			switch umMode {
+			case "substring", "basename", "exact", "":
+				// v1's matcher treats every entry as
+				// substring-or-pathParent-or-pathBase, so all three
+				// modes collapse to the same v1 behaviour. mode="" is
+				// the schema's effective default (also substring).
+			case "regex":
+				return &unsupportedFaultRuleError{RuleID: id, Reason: "filter.url_match.mode=regex is not yet wired (v1's matcher is substring-only)"}
+			default:
+				return &unsupportedFaultRuleError{RuleID: id, Reason: fmt.Sprintf("filter.url_match.mode=%q is not recognised", umMode)}
+			}
+			rawPatterns, _ := umMap["patterns"].([]any)
+			for _, p := range rawPatterns {
+				if str, ok := p.(string); ok && str != "" {
+					urlPatterns = append(urlPatterns, str)
+				}
+			}
+			if len(urlPatterns) == 0 {
+				return &unsupportedFaultRuleError{RuleID: id, Reason: "filter.url_match.patterns must contain at least one non-empty string"}
+			}
 		}
 		filter = f
 	}
@@ -233,6 +263,22 @@ func applyOneFaultRule(s map[string]any, rule map[string]any, used map[string]bo
 		s[surface+"_failure_frequency"] = frequency
 		s[surface+"_consecutive_failures"] = consecutive
 		s[surface+"_failure_mode"] = mode
+		// v1's shouldApplyFailure short-circuits to "none" when the
+		// surface's URL filter is empty. For a rule WITH url_match
+		// patterns, write the patterns verbatim — the legacy matcher
+		// will scope the fault to URLs whose pathBase / pathParent
+		// matches any of them. For a rule WITHOUT a url filter, set
+		// the legacy "All" sentinel so the matcher applies the rule
+		// to every URL on the surface.
+		if len(urlPatterns) > 0 {
+			out := make([]any, 0, len(urlPatterns))
+			for _, p := range urlPatterns {
+				out = append(out, p)
+			}
+			s[surface+"_failure_urls"] = out
+		} else {
+			s[surface+"_failure_urls"] = []any{"All"}
+		}
 		switch mode {
 		case "failures_per_seconds":
 			s[surface+"_consecutive_units"] = "requests"

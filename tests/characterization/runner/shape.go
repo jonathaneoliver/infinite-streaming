@@ -63,28 +63,41 @@ func (s *Session) SetSegmentTimeout(ctx context.Context, active time.Duration) e
 	return err
 }
 
-// ArmFault posts a once-only fault rule on the bound player. The
+// ArmFault posts a one-shot fault rule on the bound player. The
 // next request matching `kind` (e.g. "segment") triggers the named
-// `shape` (e.g. "request_first_byte_hang"). Frequency defaults to 1
-// (every matching request — the rule is then cleared via ClearFaults).
+// `shape` (e.g. "request_first_byte_hang"); the rule does not
+// repeat (frequency=0 means "no next cycle"). Caller clears the
+// rule via ClearFaults after the observation window.
+//
+// Cadence semantics for one-shot:
+//   - consecutive=1: fault is "on" for one matching request.
+//   - frequency=0:   no next cycle; the fault fires once and stays off.
+//
+// urlPatterns optionally scopes the fault to URLs whose pathBase
+// or pathParent matches any of the supplied substrings. Empty
+// patterns ⇒ match every URL on the surface. The abort test
+// passes the list of video variant directory names so audio
+// segments aren't affected.
 //
 // Used by the abort characterization test to inject a single HTTP-
 // layer fault and observe the player's recovery.
-func (s *Session) ArmFault(ctx context.Context, shape, kind string, frequency int) error {
+func (s *Session) ArmFault(ctx context.Context, shape, kind string, urlPatterns ...string) error {
 	if s == nil || s.PlayerID == "" {
 		return fmt.Errorf("arm fault: no player bound")
 	}
 	if shape == "" || kind == "" {
 		return fmt.Errorf("arm fault: shape and kind required")
 	}
-	if frequency <= 0 {
-		frequency = 1
-	}
 	args := []string{
 		"fault", "add", s.PlayerID,
 		"--type", shape,
 		"--kind", kind,
-		"--frequency", strconv.Itoa(frequency),
+		"--frequency", "0",
+		"--consecutive", "1",
+		"--mode", "requests",
+	}
+	if len(urlPatterns) > 0 {
+		args = append(args, "--url-substr", strings.Join(urlPatterns, ","))
 	}
 	_, err := runHarness(ctx, args...)
 	return err
