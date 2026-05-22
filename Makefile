@@ -488,7 +488,7 @@ analytics-rebuild-forwarder:
 	@echo "=== Rebuilding forwarder on test-dev (no go-server restart) ==="
 	ssh $(TEST_SSH) 'mkdir -p ~/test-dev/analytics/go-forwarder ~/test-dev/go-proxy'
 	rsync -az --delete \
-		/Users/jonathanoliver/Projects/smashing-api-v2-441/analytics/go-forwarder/ \
+		$(CURDIR)/analytics/go-forwarder/ \
 		$(TEST_SSH):~/test-dev/analytics/go-forwarder/
 	# go-proxy is referenced via the forwarder's go.mod replace
 	# directive (../../go-proxy). The forwarder's Dockerfile build
@@ -496,10 +496,10 @@ analytics-rebuild-forwarder:
 	# go-proxy in sync too — otherwise the build sees stale shared
 	# code and the v2 endpoints diverge from what the proxy emits.
 	rsync -az --delete \
-		/Users/jonathanoliver/Projects/smashing-api-v2-441/go-proxy/ \
+		$(CURDIR)/go-proxy/ \
 		$(TEST_SSH):~/test-dev/go-proxy/
 	rsync -az \
-		/Users/jonathanoliver/Projects/smashing-api-v2-441/go.work \
+		$(CURDIR)/go.work \
 		$(TEST_SSH):~/test-dev/go.work
 	ssh $(TEST_SSH) 'cd ~/test-dev && docker compose build forwarder && docker compose up -d --no-deps forwarder'
 
