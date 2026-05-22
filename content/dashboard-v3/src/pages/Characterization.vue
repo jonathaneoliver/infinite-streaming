@@ -16,8 +16,8 @@
 import { computed, ref, onMounted } from 'vue';
 import ShellLayout from '@/components/ShellLayout.vue';
 
-type TestName = 'rampup' | 'rampdown' | 'pyramid';
-const TEST_NAMES: TestName[] = ['rampup', 'rampdown', 'pyramid'];
+type TestName = 'rampup' | 'rampdown' | 'pyramid' | 'abort';
+const TEST_NAMES: TestName[] = ['rampup', 'rampdown', 'pyramid', 'abort'];
 
 interface PlayRow {
   play_id: string;
@@ -198,6 +198,27 @@ interface StepRow {
   bitrate_max_mbps?: number;
 }
 
+interface AbortCycleRow {
+  cycle_idx?: number;
+  fault_shape?: string;
+  pre_variant?: string;
+  pre_buffer_s?: number;
+  pre_bw_est_mbps?: number;
+  armed_at?: string;
+  abort_detected?: boolean;
+  abort_kind?: string;
+  abort_at_s?: number;
+  abort_url?: string;
+  retry_found?: boolean;
+  retry_had_range?: boolean;
+  retry_range_start?: number;
+  player_stalled?: boolean;
+  downshifted_to?: string;
+  downshift_after_s?: number;
+  recovery_s?: number;
+  post_bw_est_mbps?: number;
+}
+
 interface ReportBlob {
   mode?: string;
   platform?: string;
@@ -209,6 +230,7 @@ interface ReportBlob {
   steps?: StepRow[];
   variants?: Array<{ resolution: string; avg_bps?: number; peak_bps?: number; source?: string }>;
   summary?: CharRunSummary;
+  abort_cycles?: AbortCycleRow[];
 }
 
 // Per-card expand state + cache. Map key = (run_id, test_name).
@@ -491,6 +513,50 @@ function startedAtLocal(iso: string): string {
                       </table>
                     </div>
 
+                    <!-- Abort cycles block — populated only by the abort test -->
+                    <div v-if="expandedSteps.get(charRunKey(g.run_id, t))!.report!.abort_cycles?.length" class="details-section">
+                      <div class="details-section-title">Abort Cycles ({{ expandedSteps.get(charRunKey(g.run_id, t))!.report!.abort_cycles!.length }})</div>
+                      <div class="steps-tablewrap">
+                        <table class="steps-table">
+                          <thead>
+                            <tr>
+                              <th>#</th>
+                              <th>fault shape</th>
+                              <th>pre variant</th>
+                              <th>abort</th>
+                              <th>kind</th>
+                              <th>retry</th>
+                              <th>range</th>
+                              <th>downshift</th>
+                              <th>stalled</th>
+                              <th>recovery</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            <tr v-for="(c, i) in expandedSteps.get(charRunKey(g.run_id, t))!.report!.abort_cycles!" :key="i">
+                              <td>{{ c.cycle_idx ?? i + 1 }}</td>
+                              <td class="mono">{{ c.fault_shape ?? '—' }}</td>
+                              <td class="mono">{{ c.pre_variant ?? '—' }}</td>
+                              <td>
+                                <span v-if="c.abort_detected" class="status-chip chip-pass">YES</span>
+                                <span v-else class="status-chip chip-fail">NO</span>
+                                <span v-if="c.abort_at_s != null && c.abort_detected" class="muted"> @ {{ c.abort_at_s.toFixed(1) }}s</span>
+                              </td>
+                              <td class="mono">{{ c.abort_kind || '—' }}</td>
+                              <td>{{ c.retry_found ? 'yes' : 'no' }}</td>
+                              <td>{{ c.retry_had_range ? 'yes' : (c.retry_found ? 'no' : '—') }}</td>
+                              <td class="mono">{{ c.downshifted_to || '—' }}<span v-if="c.downshifted_to && c.downshift_after_s != null" class="muted"> ({{ c.downshift_after_s.toFixed(1) }}s)</span></td>
+                              <td>
+                                <span v-if="c.player_stalled" class="status-chip chip-fail">YES</span>
+                                <span v-else>no</span>
+                              </td>
+                              <td>{{ c.recovery_s != null ? c.recovery_s.toFixed(1) + 's' : '—' }}</td>
+                            </tr>
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+
                     <!-- Steps block -->
                     <div v-if="expandedSteps.get(charRunKey(g.run_id, t))!.report!.steps?.length" class="details-section">
                       <div class="details-section-title">Steps ({{ expandedSteps.get(charRunKey(g.run_id, t))!.report!.steps!.length }})</div>
@@ -572,7 +638,7 @@ function startedAtLocal(iso: string): string {
 .run-duration { color: #6b7280; }
 .run-started { color: #9ca3af; font-size: 12px; margin-left: auto; }
 
-.run-cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+.run-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
 .run-card { background: var(--bg-secondary, #f9fafb); border: 1px solid #e5e7eb; border-radius: 6px; padding: 12px; }
 .run-card.pass { border-left: 3px solid #16a34a; }
 .run-card.fail { border-left: 3px solid #dc2626; }

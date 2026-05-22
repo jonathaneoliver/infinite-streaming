@@ -36,6 +36,33 @@ type Report struct {
 	Steps     []Step        `json:"steps"`
 	Samples   []Sample      `json:"samples"`
 	Summary   Summary       `json:"summary"`
+	// AbortCycles is populated by the abort characterization test —
+	// one entry per (fault_shape, rep) cycle. Empty for sweep modes.
+	AbortCycles []AbortCycleResult `json:"abort_cycles,omitempty"`
+}
+
+// AbortCycleResult captures the player's reaction to one server-
+// driven segment-fetch abort. See plan:
+// ~/.claude/plans/abort-characterization-test.md.
+type AbortCycleResult struct {
+	CycleIdx        int       `json:"cycle_idx"`
+	FaultShape      string    `json:"fault_shape"` // e.g. "server_timeout" | "request_first_byte_hang"
+	PreVariant      string    `json:"pre_variant"`
+	PreBufferS      float64   `json:"pre_buffer_s"`
+	PreBwEstMbps    float64   `json:"pre_bw_est_mbps"`
+	ArmedAt         time.Time `json:"armed_at"`
+	AbortDetected   bool      `json:"abort_detected"`
+	AbortKind       string    `json:"abort_kind"` // fault_type/fault_action from the network row
+	AbortAtS        float64   `json:"abort_at_s"`
+	AbortURL        string    `json:"abort_url"`
+	RetryFound      bool      `json:"retry_found"`
+	RetryHadRange   bool      `json:"retry_had_range"`
+	RetryRangeStart int64     `json:"retry_range_start"`
+	PlayerStalled   bool      `json:"player_stalled"`
+	DownshiftedTo   string    `json:"downshifted_to,omitempty"`
+	DownshiftAfterS float64   `json:"downshift_after_s"`
+	RecoveryS       float64   `json:"recovery_s"`
+	PostBwEstMbps   float64   `json:"post_bw_est_mbps"`
 }
 
 // Step is one applied-rate hold in a sweep. For variant-aware sweeps the
