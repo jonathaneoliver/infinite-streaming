@@ -313,6 +313,31 @@ func (a *AppiumLauncher) readAccessibilityValue(ctx context.Context, sessID, id 
 	return strings.TrimSpace(valResp.Value), nil
 }
 
+// TapTileByClipID taps a specific content tile in the Home screen's
+// LIVE row, identified by its clip_id (e.g. "bucks_bunny"). Used by
+// the startup characterization test's channel_change mode to switch
+// from one content item to a different one without going through the
+// Continue Watching shortcut.
+//
+// Requires the iOS app to surface `home-tile-<clip_id>` accessibility
+// identifiers on each LivePreviewTile (see
+// .claude/standards/startup-characterization-test.md).
+func (a *AppiumLauncher) TapTileByClipID(ctx context.Context, sess *Session, clipID string) error {
+	if sess == nil {
+		return errors.New("TapTileByClipID: nil session")
+	}
+	if clipID == "" {
+		return errors.New("TapTileByClipID: empty clip_id")
+	}
+	a.mu.Lock()
+	sessID := a.sessions[sess.Device.UDID]
+	a.mu.Unlock()
+	if sessID == "" {
+		return errors.New("TapTileByClipID: no active appium session for device")
+	}
+	return a.tapByAccessibilityID(ctx, sessID, "home-tile-"+clipID)
+}
+
 // ReadPlayerID reads the iOS app's persistent player_id off the
 // `home-player-id` accessibility node on the Home screen. The app
 // generates a UUID on first launch and persists it in UserDefaults,

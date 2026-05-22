@@ -39,6 +39,73 @@ type Report struct {
 	// AbortCycles is populated by the abort characterization test —
 	// one entry per (fault_shape, rep) cycle. Empty for sweep modes.
 	AbortCycles []AbortCycleResult `json:"abort_cycles,omitempty"`
+	// StartupCycles is populated by the startup characterization
+	// test — one entry per (boundary_type, rep) cold-start cycle.
+	// See .claude/standards/startup-characterization-test.md.
+	StartupCycles []StartupCycleResult `json:"startup_cycles,omitempty"`
+}
+
+// StartupCycleResult captures one cold-start observation. The test
+// applies a network cap, triggers the boundary (app kill+launch or
+// channel change), then observes the first ~30s of playback.
+//
+// Field semantics + how to interpret outcomes:
+// see .claude/standards/startup-characterization-test.md.
+type StartupCycleResult struct {
+	CycleIdx int    `json:"cycle_idx"`
+	// BoundaryType is "app_cold" (kill app → launch → resume playback)
+	// or "channel_change" (already playing → back → tap a different
+	// content tile). See standards doc.
+	BoundaryType string `json:"boundary_type"`
+	// ContentClipID is the content the player switched TO this cycle
+	// — informational only; for app_cold cycles it's the Continue
+	// Watching tile's clip_id.
+	ContentClipID string `json:"content_clip_id,omitempty"`
+	CapMbps       float64   `json:"cap_mbps"`
+	StartedAt     time.Time `json:"started_at"`
+	// PlayerID can be set if we read the home AX node before resume.
+	PlayerID string `json:"player_id,omitempty"`
+	// FirstMasterAtS, FirstVariantAtS, FirstSegmentAtS — seconds from
+	// cycle start to the first observed network request of each kind.
+	// All measured from StartedAt.
+	FirstMasterAtS  float64 `json:"first_master_at_s,omitempty"`
+	FirstVariantAtS float64 `json:"first_variant_at_s,omitempty"`
+	FirstSegmentAtS float64 `json:"first_segment_at_s,omitempty"`
+	// FirstVariantPicked is the resolution/variant the player chose
+	// first (read from the first variant-playlist URL it fetched).
+	FirstVariantPicked string `json:"first_variant_picked,omitempty"`
+	// TimeToFirstFrameS reads the iOS app's reported video first-frame
+	// time. The most-watched UX number.
+	TimeToFirstFrameS float64 `json:"time_to_first_frame_s,omitempty"`
+	// First-request connection-stage timings (medians across the first
+	// ~5 requests). Reveal TLS resumption (low tls_ms), TCP keepalive
+	// reuse (zero connect_ms), DNS cache hit (zero dns_ms).
+	FirstReqDNSMs     float64 `json:"first_req_dns_ms,omitempty"`
+	FirstReqConnectMs float64 `json:"first_req_connect_ms,omitempty"`
+	FirstReqTLSMs     float64 `json:"first_req_tls_ms,omitempty"`
+	// Initial buffer trajectory. ReachedXBufferAtS is when buffer
+	// first crossed N seconds after StartedAt. 0 = never reached.
+	ReachedFiveSBufferAtS    float64 `json:"reached_5s_buffer_at_s,omitempty"`
+	ReachedFifteenSBufferAtS float64 `json:"reached_15s_buffer_at_s,omitempty"`
+	// Variant trajectory: VideoResolution sampled at marks.
+	VariantAt5S  string `json:"variant_at_5s,omitempty"`
+	VariantAt15S string `json:"variant_at_15s,omitempty"`
+	VariantAt30S string `json:"variant_at_30s,omitempty"`
+	// Deltas across the 30s observation window.
+	UpshiftsIn30S      int `json:"upshifts_in_30s"`
+	DownshiftsIn30S    int `json:"downshifts_in_30s"`
+	StallsIn30S        int `json:"stalls_in_30s"`
+	DroppedFramesIn30S int `json:"dropped_frames_in_30s"`
+	// SettledVariant is the resolution with the majority of samples
+	// in the last 10 s of the 30 s window. Empty if the player never
+	// stabilised.
+	SettledVariant string `json:"settled_variant,omitempty"`
+	// NetworkBitrateAtStartMbps is the player's own bandwidth estimate
+	// on the FIRST sample post-StartedAt. Non-zero on channel_change
+	// when the player kept its previous-content estimate; zero on
+	// fresh app_cold.
+	NetworkBitrateAtStartMbps float64 `json:"network_bitrate_at_start_mbps,omitempty"`
+	NetworkBitrateAt30SMbps   float64 `json:"network_bitrate_at_30s_mbps,omitempty"`
 }
 
 // AbortCycleResult captures the player's reaction to one server-

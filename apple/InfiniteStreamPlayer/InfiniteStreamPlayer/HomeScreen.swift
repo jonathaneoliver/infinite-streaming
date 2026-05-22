@@ -331,6 +331,13 @@ private struct LiveRow: View {
                                         }
                                     }
                                     .id(item.id)
+                                    // Accessibility identifier per tile so the
+                                    // characterization framework can tap a
+                                    // specific content tile by clip_id (used
+                                    // by the startup test's channel_change
+                                    // mode — see
+                                    // .claude/standards/startup-characterization-test.md).
+                                    .accessibilityIdentifier("home-tile-\(item.clipId)")
                                 }
                             }
                         }
