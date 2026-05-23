@@ -46,7 +46,11 @@ export default defineConfig({
         sessions: resolve(__dirname, 'sessions.html'),
         // Stage 7 — characterization-run summary page. Pre-filters
         // /api/v2/plays on info=test_* labels and groups by run_id.
-        characterization: resolve(__dirname, 'characterization.html')
+        characterization: resolve(__dirname, 'characterization.html'),
+        // Stage 8 (#497) — AI chat fleet-mode entry. Lives at
+        // /dashboard/v3/ask.html. The side-panel variant of the same
+        // chat is also mounted on other v3 pages.
+        ask: resolve(__dirname, 'ask.html')
       }
     }
   },

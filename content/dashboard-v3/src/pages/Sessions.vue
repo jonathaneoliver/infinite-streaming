@@ -10,6 +10,7 @@
 import { ref, computed, onMounted, onBeforeUnmount, watch } from 'vue';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/vue-query';
 import ShellLayout from '@/components/ShellLayout.vue';
+import ChatPanel from '@/components/chat/ChatPanel.vue';
 import { sessionViewerURL } from '@/composables/urlTimeFormat';
 import { listPlays, patchPlayClassification, type PlaySummary } from '@/repo/v2-repo';
 
@@ -1146,8 +1147,35 @@ const showCustomInputs = computed(() => activeRangeId.value === 'custom');
         </div>
       </div>
     </main>
+
+    <!-- AI chat side panel (#497). Default collapsed so the page
+         lays out unchanged; expand via the ◀ button. -->
+    <Teleport to="body">
+      <div class="chat-dock">
+        <ChatPanel
+          :scope="{ kind: 'fleet' }"
+          scope-key="sessions:fleet"
+          variant="panel"
+          :start-collapsed="true"
+        />
+      </div>
+    </Teleport>
   </ShellLayout>
 </template>
+
+<style>
+/* Unscoped — Teleport-to-body element needs the parent style applied
+   directly. Pinned to the right edge, full viewport height. */
+.chat-dock {
+  position: fixed;
+  top: var(--header-height, 64px);
+  right: 0;
+  bottom: 0;
+  z-index: 50;
+  box-shadow: var(--shadow-md);
+  background: #fff;
+}
+</style>
 
 <style scoped>
 .page-title-bar { font-size: 16px; font-weight: 600; }
