@@ -63,7 +63,7 @@ templates:
     label: "Local Ollama"
     base_url: "http://localhost:11434/v1"
     requires_api_key: false
-    api_key_help: "No API key needed; ensure Ollama is running locally"
+    api_key_help: "No API key needed; ensure Ollama is running locally. The dashboard discovers installed models via /v1/models — if discovery fails with CORS, set OLLAMA_ORIGINS to the dashboard's origin and restart Ollama."
     supports_tools: true
     models:
       - id: "llama3.1:70b"
@@ -73,6 +73,46 @@ templates:
           output_per_mtok: 0
       - id: "qwen2.5:72b"
         label: "Qwen 2.5 72B"
+        pricing:
+          input_per_mtok: 0
+          output_per_mtok: 0
+
+  # ChatGPT subscription via LiteLLM's OAuth device flow. LiteLLM
+  # holds the OAuth token and exposes the subscription-accessible
+  # models (gpt-5.4, gpt-5.4-pro, gpt-5.3-codex, …) as OAI-compat.
+  # Run LiteLLM locally (`litellm --chatgpt-login`, then
+  # `litellm --port 4000`) and the dashboard's /v1/models discovery
+  # will populate the dropdown with whatever models the subscription
+  # tier exposes.
+  #
+  # Pricing is zero from the forwarder's perspective — the calls
+  # bill against the ChatGPT subscription's flat-rate quota, not
+  # per-token. The cost ledger records 0 USD for these calls; the
+  # global budget cap is still enforced as a safety rail.
+  - name: chatgpt-via-litellm
+    label: "ChatGPT subscription (via LiteLLM)"
+    base_url: "http://localhost:4000/v1"
+    requires_api_key: false
+    api_key_help: "Run `litellm --chatgpt-login` on the box that runs the browser to authenticate via OAuth; then `litellm --port 4000`. LiteLLM caches the token and exposes the subscription-bound models as OAI-compat. Tool-use across LiteLLM's Responses-API bridge is not yet verified; pick a non-Codex model if you see tool_call regressions."
+    supports_tools: true
+    models:
+      - id: "chatgpt/gpt-5.4"
+        label: "GPT-5.4 (flagship, subscription)"
+        pricing:
+          input_per_mtok: 0
+          output_per_mtok: 0
+      - id: "chatgpt/gpt-5.4-pro"
+        label: "GPT-5.4 Pro (Pro subscription only)"
+        pricing:
+          input_per_mtok: 0
+          output_per_mtok: 0
+      - id: "chatgpt/gpt-5.3-codex"
+        label: "GPT-5.3 Codex"
+        pricing:
+          input_per_mtok: 0
+          output_per_mtok: 0
+      - id: "chatgpt/gpt-5.3-instant"
+        label: "GPT-5.3 Instant"
         pricing:
           input_per_mtok: 0
           output_per_mtok: 0

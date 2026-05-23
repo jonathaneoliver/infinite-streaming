@@ -83,6 +83,27 @@ watch(() => settings.value.profile, () => {
 // providers gate /v1/models behind auth).
 watch(() => settings.value.apiKey, () => discover());
 
+// Detect a local-loopback base_url where CORS is the most likely
+// culprit for a discovery failure — Ollama in particular ships
+// with a tight default origin allowlist (localhost / 127.0.0.1
+// only) so any other origin (https://test-dev.foo) gets a
+// preflight 403 that surfaces here as "Failed to fetch".
+const looksLocalLoopback = computed(() => {
+  const u = currentProfile.value?.base_url ?? '';
+  return /:\/\/(localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\])/i.test(u);
+});
+
+const discoveryHint = computed(() => {
+  if (!discovery.value.error) return '';
+  if (looksLocalLoopback.value) {
+    const origin = window.location.origin;
+    return `Likely an Ollama CORS gate. Set OLLAMA_ORIGINS="${origin}" ` +
+      `(launchctl setenv on macOS, env var when running ollama serve) ` +
+      `and restart Ollama.`;
+  }
+  return `Model discovery failed (${discovery.value.error}); showing catalog defaults.`;
+});
+
 function onProfileChange(e: Event) {
   update({ profile: (e.target as HTMLSelectElement).value });
 }
@@ -133,9 +154,11 @@ function onKeyInput(e: Event) {
             >{{ discovery.loading ? '…' : '↻' }}</button>
           </div>
         </label>
-        <p v-if="discovery.error && !discovery.loading" class="row help muted">
-          Model discovery failed ({{ discovery.error }}); showing catalog defaults.
-        </p>
+        <p
+          v-if="discovery.error && !discovery.loading"
+          class="row help"
+          :class="{ muted: !looksLocalLoopback, hint: looksLocalLoopback }"
+        >{{ discoveryHint }}</p>
         <p v-else-if="discovery.models && discovery.models.length > 0" class="row help muted">
           {{ discovery.models.length }} model{{ discovery.models.length === 1 ? '' : 's' }} discovered from provider.
         </p>
@@ -228,6 +251,18 @@ function onKeyInput(e: Event) {
 .row.help.muted {
   font-style: italic;
   opacity: 0.85;
+}
+.row.help.hint {
+  color: var(--warning);
+  background: var(--warning-light);
+  margin: 0 16px 12px;
+  padding: 8px 12px;
+  border-radius: var(--radius-sm);
+  font-style: normal;
+  font-family: ui-monospace, SFMono-Regular, monospace;
+  font-size: 11px;
+  line-height: 1.5;
+  word-break: break-word;
 }
 .row.note {
   padding: 24px 20px;
