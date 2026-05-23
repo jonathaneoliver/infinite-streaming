@@ -115,6 +115,17 @@ type config struct {
 	flushBatch     int
 	httpListen     string
 	ringWindowSecs int // FORWARDER_LIVE_RING_SECONDS; see ring.go
+
+	// AI chat backend (#497). All optional — leave llmProfilesPath
+	// empty to disable the /api/v2/chat endpoint entirely.
+	llmProfilesPath    string  // FORWARDER_LLM_PROFILES_PATH
+	llmPromptPath      string  // FORWARDER_LLM_PROMPT_PATH (system prompt markdown)
+	llmReaderUser      string  // FORWARDER_CLICKHOUSE_LLM_USER (default "llm_reader")
+	llmReaderPassword  string  // FORWARDER_CLICKHOUSE_LLM_PASSWORD
+	llmBudgetUSD       float64 // FORWARDER_LLM_BUDGET_USD (default 5.00)
+	llmMaxToolCalls    int     // FORWARDER_LLM_MAX_TOOL_CALLS (default 20)
+	llmMaxInputTokens  int     // FORWARDER_LLM_MAX_INPUT_TOKENS (default 80000)
+	claudeDir          string  // FORWARDER_CLAUDE_DIR — mount of the project's .claude/ dir
 }
 
 func loadConfig() config {
@@ -137,8 +148,30 @@ func loadConfig() config {
 		// entirely. Tunable down for memory-constrained deployments
 		// or up for "live tail covers more history" use cases.
 		ringWindowSecs: getenvInt("FORWARDER_LIVE_RING_SECONDS", 600),
+
+		// AI chat backend. Empty llmProfilesPath disables the
+		// endpoint entirely; non-empty turns it on with the catalog
+		// loaded at startup.
+		llmProfilesPath:   getenv("FORWARDER_LLM_PROFILES_PATH", ""),
+		llmPromptPath:     getenv("FORWARDER_LLM_PROMPT_PATH", ""),
+		llmReaderUser:     getenv("FORWARDER_CLICKHOUSE_LLM_USER", "llm_reader"),
+		llmReaderPassword: getenv("FORWARDER_CLICKHOUSE_LLM_PASSWORD", ""),
+		llmBudgetUSD:      getenvFloat("FORWARDER_LLM_BUDGET_USD", 5.00),
+		llmMaxToolCalls:   getenvInt("FORWARDER_LLM_MAX_TOOL_CALLS", 20),
+		llmMaxInputTokens: getenvInt("FORWARDER_LLM_MAX_INPUT_TOKENS", 80000),
+		claudeDir:         getenv("FORWARDER_CLAUDE_DIR", ""),
 	}
 	return c
+}
+
+func getenvFloat(key string, def float64) float64 {
+	if v := os.Getenv(key); v != "" {
+		var f float64
+		if _, err := fmt.Sscanf(v, "%f", &f); err == nil {
+			return f
+		}
+	}
+	return def
 }
 
 func getenvInt(key string, def int) int {
@@ -943,6 +976,34 @@ func serveHTTP(ctx context.Context, cfg config, ring *Ring) {
 	})
 	mountV2Handlers(mux, cfg)
 	mountTimeseriesHandlers(mux, cfg, ring)
+
+	// AI chat backend (#497). Default-on with embedded profile
+	// catalog + system prompt — operators don't need to mount any
+	// files. Set FORWARDER_LLM_DISABLED=1 to turn off. Override the
+	// catalog or prompt by setting FORWARDER_LLM_PROFILES_PATH /
+	// FORWARDER_LLM_PROMPT_PATH.
+	//
+	// Failure to load the catalog is logged but doesn't take the
+	// whole forwarder down — the chat endpoint is non-critical
+	// infra.
+	if os.Getenv("FORWARDER_LLM_DISABLED") != "1" {
+		if _, err := LoadLLMCatalog(cfg.llmProfilesPath); err != nil {
+			log.Printf("llm chat disabled: %v", err)
+		} else {
+			h, err := newChatHandler(cfg)
+			if err != nil {
+				log.Printf("llm chat disabled: %v", err)
+			} else {
+				mountChatHandlers(mux, h)
+				src := "embedded defaults"
+				if cfg.llmProfilesPath != "" {
+					src = cfg.llmProfilesPath
+				}
+				log.Printf("llm chat enabled at /api/v2/chat (catalog=%s, budget=$%.2f/day)",
+					src, cfg.llmBudgetUSD)
+			}
+		}
+	}
 	mux.HandleFunc("/api/snapshots", func(w http.ResponseWriter, r *http.Request) {
 		session := r.URL.Query().Get("session")
 		if session == "" {
