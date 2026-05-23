@@ -135,8 +135,12 @@ type BudgetStatus struct {
 
 // ReadBudget loads the budget surface in one round-trip.
 func ReadBudget(ctx context.Context, cfg config, capUSD float64) (*BudgetStatus, error) {
+	// toUInt32 on count() — CH renders UInt64 as JSON strings to
+	// avoid JS precision loss, which would break the json.Unmarshal
+	// into our uint32 field. Cap is symbolic: at ~10^9 calls/day
+	// we have bigger problems than overflow.
 	q := fmt.Sprintf(`
-		SELECT sum(if(cost_usd >= 0, cost_usd, 0)) AS spent, count() AS calls
+		SELECT sum(if(cost_usd >= 0, cost_usd, 0)) AS spent, toUInt32(count()) AS calls
 		FROM %s.llm_calls
 		WHERE toDate(ts, 'UTC') = today()
 		FORMAT JSONEachRow`, cfg.chDatabase)

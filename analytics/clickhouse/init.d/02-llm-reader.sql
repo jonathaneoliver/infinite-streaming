@@ -16,10 +16,11 @@
 -- FORWARDER_CLICKHOUSE_LLM_PASSWORD.
 
 CREATE SETTINGS PROFILE IF NOT EXISTS llm_reader_caps SETTINGS
-    -- Read-only — no writes, no settings overrides via the request.
+    -- Read-only — no writes, no DDL, no setting changes within the
+    -- connection. `readonly = 1` is sufficient: it blocks DML, DDL,
+    -- AND further setting changes, so the LLM cannot relax any of
+    -- the caps below from its own query.
     readonly = 1,
-    -- LLM cannot relax any of these from its query.
-    readonly_settings = 1,
     -- Wall-clock cap. Most LLM queries return in <500 ms; the few
     -- that explore (group-by across a wide window) get 10s to plan
     -- + scan + return. Anything past that gets cut.
