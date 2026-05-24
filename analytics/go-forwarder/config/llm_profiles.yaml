@@ -20,7 +20,11 @@
 templates:
   - name: anthropic-claude
     label: "Anthropic Claude (API)"
-    base_url: "https://api.anthropic.com/v1/openai/"
+    # Anthropic's OAI-compat endpoint is /v1/ — the OpenAI SDK
+    # appends /chat/completions giving /v1/chat/completions.
+    # (Not /v1/openai/ — that returns 404.)
+    # https://platform.claude.com/docs/en/api/openai-sdk
+    base_url: "https://api.anthropic.com/v1/"
     requires_api_key: true
     api_key_help: "Get an API key from console.anthropic.com → API Keys"
     supports_tools: true
