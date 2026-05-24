@@ -297,20 +297,36 @@ type Step struct {
 	ExitReason string `json:"exit_reason,omitempty"`
 
 	// Per-step result aggregates, computed in RunSweep* helpers.
-	MinBufferS       float64 `json:"min_buffer_s,omitempty"`
-	MaxBufferS       float64 `json:"max_buffer_s,omitempty"`
-	StallsDelta      int     `json:"stalls_delta,omitempty"`
+	//
+	// Buffer envelope. BufferAtStartS / BufferAtEndS are the first
+	// and last sample's BufferDepthS; together with Min/Max they
+	// paint the full per-step buffer story (start → trough → recovery
+	// → end) without forcing the operator to open the session viewer.
+	MinBufferS     float64 `json:"min_buffer_s,omitempty"`
+	MaxBufferS     float64 `json:"max_buffer_s,omitempty"`
+	BufferAtStartS float64 `json:"buffer_at_start_s,omitempty"`
+	BufferAtEndS   float64 `json:"buffer_at_end_s,omitempty"`
+
+	StallsDelta int `json:"stalls_delta,omitempty"`
 	// ProfileShiftsDelta counts how many ABR transitions the player
 	// reported during this step (delta of profile_shift_count). A value
 	// > 1 means the player thrashed between variants within the step —
 	// distinct from "no transitions" or "one clean downshift."
 	ProfileShiftsDelta int     `json:"profile_shifts_delta,omitempty"`
 	MeanBitrateMbps    float64 `json:"mean_bitrate_mbps,omitempty"`
+	// MaxBitrateMbps is the peak video bitrate the player picked
+	// during the step — distinguishes "settled at variant X" from
+	// "spiked to a richer variant briefly before settling lower".
+	MaxBitrateMbps float64 `json:"max_bitrate_mbps,omitempty"`
 	// MeanNetworkBitrateMbps is the player's measured network throughput
 	// averaged over the step. Should be close to (but slightly below) the
 	// applied cap if the proxy's tc is enforcing properly.
 	MeanNetworkBitrateMbps float64 `json:"mean_network_bitrate_mbps,omitempty"`
-	SampleCount            int     `json:"sample_count,omitempty"`
+	// MaxNetworkBitrateMbps is the peak measured throughput during
+	// the step. Useful for catching brief over-cap excursions that
+	// the mean would hide.
+	MaxNetworkBitrateMbps float64 `json:"max_network_bitrate_mbps,omitempty"`
+	SampleCount           int     `json:"sample_count,omitempty"`
 
 	// --- variant tracking (filled by Finalize on variant-aware reports) ---
 
@@ -389,6 +405,12 @@ func (st *Step) PopulateStepResult(stepSamples []Sample) {
 	st.SampleCount = len(stepSamples)
 	st.MinBufferS = stepSamples[0].BufferDepthS
 	st.MaxBufferS = stepSamples[0].BufferDepthS
+	// First / last sample's buffer = start / end of the step window.
+	// The buffer envelope (start / min / max / end) gives the full
+	// shape — start tells you what cushion the step inherited; end
+	// tells you what it left for the next step.
+	st.BufferAtStartS = stepSamples[0].BufferDepthS
+	st.BufferAtEndS = stepSamples[len(stepSamples)-1].BufferDepthS
 	var bitrateSum, netSum float64
 	var bitrateN, netN int
 	startStalls := stepSamples[0].Stalls
@@ -405,10 +427,16 @@ func (st *Step) PopulateStepResult(stepSamples []Sample) {
 		if s.VideoBitrateMbps > 0 {
 			bitrateSum += s.VideoBitrateMbps
 			bitrateN++
+			if s.VideoBitrateMbps > st.MaxBitrateMbps {
+				st.MaxBitrateMbps = s.VideoBitrateMbps
+			}
 		}
 		if s.NetworkBitrateMbps > 0 {
 			netSum += s.NetworkBitrateMbps
 			netN++
+			if s.NetworkBitrateMbps > st.MaxNetworkBitrateMbps {
+				st.MaxNetworkBitrateMbps = s.NetworkBitrateMbps
+			}
 		}
 	}
 	if bitrateN > 0 {
