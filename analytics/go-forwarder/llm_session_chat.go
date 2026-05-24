@@ -122,6 +122,7 @@ func mountChatHandlers(mux *http.ServeMux, h *chatHandler) {
 	mux.HandleFunc("/api/v2/chat", h.handleChat)
 	mux.HandleFunc("/api/v2/chat/profiles", h.handleProfiles)
 	mux.HandleFunc("/api/v2/chat/budget", h.handleBudget)
+	mux.HandleFunc("/api/v2/chat/discover-models", h.handleDiscoverModels)
 }
 
 // handleProfiles returns the catalog. No secrets — pure config.
@@ -136,6 +137,92 @@ func (h *chatHandler) handleProfiles(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSONv2(w, http.StatusOK, cat)
+}
+
+// handleDiscoverModels proxies the OAI-compat GET /v1/models call
+// to a user-supplied {base_url, api_key}. The browser can't always
+// do this directly — hosted providers (Anthropic, OpenAI, HF) don't
+// send CORS headers because they're not browser-facing APIs. The
+// forwarder has no such restriction.
+//
+// Body: { base_url: "https://...", api_key: "..." }
+// Returns: { models: ["id1", "id2", ...], source: "server" }
+// or { error: "...", models: [], source: "server" } on upstream failure.
+func (h *chatHandler) handleDiscoverModels(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeProblemv2(w, http.StatusMethodNotAllowed, "method not allowed", "")
+		return
+	}
+	var body struct {
+		BaseURL string `json:"base_url"`
+		APIKey  string `json:"api_key"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeProblemv2(w, http.StatusBadRequest, "bad request", err.Error())
+		return
+	}
+	if body.BaseURL == "" {
+		writeProblemv2(w, http.StatusBadRequest, "bad request", "base_url required")
+		return
+	}
+	url := strings.TrimRight(body.BaseURL, "/") + "/models"
+
+	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		writeJSONv2(w, http.StatusOK, map[string]any{
+			"models": []string{},
+			"source": "server",
+			"error":  err.Error(),
+		})
+		return
+	}
+	req.Header.Set("Accept", "application/json")
+	if body.APIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+body.APIKey)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		writeJSONv2(w, http.StatusOK, map[string]any{
+			"models": []string{},
+			"source": "server",
+			"error":  err.Error(),
+		})
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		writeJSONv2(w, http.StatusOK, map[string]any{
+			"models": []string{},
+			"source": "server",
+			"error":  fmt.Sprintf("upstream %d", resp.StatusCode),
+		})
+		return
+	}
+	var upstream struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&upstream); err != nil {
+		writeJSONv2(w, http.StatusOK, map[string]any{
+			"models": []string{},
+			"source": "server",
+			"error":  fmt.Sprintf("parse upstream: %s", err.Error()),
+		})
+		return
+	}
+	ids := make([]string, 0, len(upstream.Data))
+	for _, m := range upstream.Data {
+		if m.ID != "" {
+			ids = append(ids, m.ID)
+		}
+	}
+	writeJSONv2(w, http.StatusOK, map[string]any{
+		"models": ids,
+		"source": "server",
+	})
 }
 
 // handleBudget returns the current global budget state.
