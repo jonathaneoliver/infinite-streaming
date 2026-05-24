@@ -78,12 +78,13 @@ type ChatRequest struct {
 // ChatScope tells the system prompt + ledger what context the
 // dashboard is asking from.
 type ChatScope struct {
-	Kind   string `json:"kind"`              // "fleet" | "play" | "range" | "characterization" | ""
-	PlayID string `json:"play_id,omitempty"`
-	From   string `json:"from,omitempty"`    // for "range"
-	To     string `json:"to,omitempty"`
-	RunID  string `json:"run_id,omitempty"`  // for "characterization"
-	Cycle  int    `json:"cycle,omitempty"`
+	Kind     string `json:"kind"`                // "fleet" | "play" | "range" | "characterization" | ""
+	PlayerID string `json:"player_id,omitempty"` // for "play" / "range" — bot uses it to build citations
+	PlayID   string `json:"play_id,omitempty"`
+	From     string `json:"from,omitempty"`      // for "range"
+	To       string `json:"to,omitempty"`
+	RunID    string `json:"run_id,omitempty"`    // for "characterization"
+	Cycle    int    `json:"cycle,omitempty"`
 }
 
 // chatHandler is the registered handler for POST /api/v2/chat.
@@ -657,13 +658,17 @@ func (h *chatHandler) buildSystemPrompt(scope ChatScope) string {
 		b.WriteString("\n\n# Current scope\n\n")
 		switch scope.Kind {
 		case "play":
-			fmt.Fprintf(&b, "The user is looking at a single play. play_id=%s. "+
-				"Anchor your reasoning to this play; use get_play_summary first.\n",
-				scope.PlayID)
+			fmt.Fprintf(&b, "The user is looking at a single play. "+
+				"player_id=%s, play_id=%s. Anchor your reasoning to this play; "+
+				"use get_play_summary first. When you cite this play, you already "+
+				"have both IDs — pass them straight to cite() without re-fetching.\n",
+				scope.PlayerID, scope.PlayID)
 		case "range":
 			fmt.Fprintf(&b, "The user has brushed a time range on a play. "+
-				"play_id=%s, from=%s, to=%s. Focus on events inside this window; "+
-				"use surrounding context as needed.\n", scope.PlayID, scope.From, scope.To)
+				"player_id=%s, play_id=%s, from=%s, to=%s. Focus on events inside "+
+				"this window; use surrounding context as needed. Both IDs are in "+
+				"hand for cite() — no get_play_summary needed just to deep-link.\n",
+				scope.PlayerID, scope.PlayID, scope.From, scope.To)
 		case "fleet":
 			b.WriteString("The user is on the plays picker — fleet-wide question. " +
 				"Use find_plays to find candidates; cite each clickable result.\n")

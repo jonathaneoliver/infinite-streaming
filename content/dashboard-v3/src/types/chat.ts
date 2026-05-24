@@ -50,6 +50,10 @@ export interface ToolCall {
 /** Scope hint sent to the backend. */
 export interface ChatScope {
   kind?: '' | 'fleet' | 'play' | 'range' | 'characterization';
+  // player_id is helpful context on play / range scopes — the bot
+  // can build deep-link citations without first calling
+  // get_play_summary to look it up.
+  player_id?: string;
   play_id?: string;
   from?: string;
   to?: string;

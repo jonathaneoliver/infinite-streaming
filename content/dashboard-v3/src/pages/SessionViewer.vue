@@ -17,6 +17,7 @@ import { ref, computed } from 'vue';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/vue-query';
 import ShellLayout from '@/components/ShellLayout.vue';
 import SessionDisplay from '@/components/SessionDisplay.vue';
+import ChatPanel from '@/components/chat/ChatPanel.vue';
 import { parseTimeAny, canonicalUUID } from '@/composables/urlTimeFormat';
 import { getPlay, patchPlayClassification, type PlaySummary } from '@/repo/v2-repo';
 
@@ -186,8 +187,39 @@ const backHref = '/dashboard/v3/sessions.html';
         </template>
       </main>
     </div>
+
+    <!-- AI chat side panel scoped to this play (#497). Default
+         collapsed so the existing chart layout is undisturbed.
+         Brush-range integration (scope.kind='range' + from/to
+         reactive to the brush) is a follow-up; for now scope
+         is play-only. -->
+    <Teleport to="body">
+      <div class="chat-dock" v-if="playId && playerId">
+        <ChatPanel
+          :scope="{ kind: 'play', play_id: playId, player_id: playerId }"
+          :scope-key="`viewer:${playId}`"
+          variant="panel"
+          :start-collapsed="true"
+        />
+      </div>
+    </Teleport>
   </ShellLayout>
 </template>
+
+<style>
+/* Unscoped — Teleport-to-body element needs the parent style applied
+   directly. Pinned to the right edge, full viewport height below the
+   header. Same pattern as Sessions.vue. */
+.chat-dock {
+  position: fixed;
+  top: var(--header-height, 64px);
+  right: 0;
+  bottom: 0;
+  z-index: 50;
+  box-shadow: var(--shadow-md);
+  background: #fff;
+}
+</style>
 
 <style scoped>
 .page { display: flex; }
