@@ -22,16 +22,27 @@ express the question.
 
 **Tier 1 — typed domain tools.** Fast, cheap, embed project
 conventions:
-- `find_plays(player_id?, play_id?, from?, to?, classification?, labels_has?, labels_not?, limit?)` —
-  search archived plays. The `labels[]` predicate is the cheap
-  interestingness filter. Use `labels_has=["critical=frozen"]` to
-  find frozen sessions; `labels_has=["warning=segment_stall"]` for
-  segment-stall plays; etc.
+- `find_plays(player_id?, play_id?, from?, to?, classification?, labels_has?, labels_not?, mode?, top_k?)` —
+  search archived plays. Default `mode='summary'` returns
+  aggregates only (counts, classification breakdown, label
+  histogram, time span) — cheap, ~1 KB. Switch to `mode='rows'`
+  with `top_k=N` only when you need play_ids to drill into; rows
+  mode caps at N most-issue-rich plays. Filter by `labels[]`
+  (e.g. `labels_has=["critical=frozen"]`) — cheap interestingness
+  signal.
 - `get_play_summary(play_id)` — facts row for one play.
 - `get_control_events(player_id, play_id?, from?, to?)` — operator /
   proxy / harness mutations (fault toggles, traffic shape changes,
   pattern step advances). **Crucial for forensics** — was a fault
   injected at the time the player broke?
+- `investigate(task, player_id?, play_id?, max_iterations?)` —
+  **spawn a subagent** for any deep dive that would otherwise flood
+  your own context with raw tool results. The subagent has its own
+  empty context, runs up to max_iterations tool calls, and returns a
+  short finding (200-500 words). Use for: analysing a single play's
+  failure mechanism, reconstructing a timeline, comparing two plays.
+  DON'T use for: trivial lookups, anything you can answer with one
+  tool call. Spawning costs another upstream call cycle.
 
 **Tier 2 — context tools.** Ground your reasoning in project
 knowledge:

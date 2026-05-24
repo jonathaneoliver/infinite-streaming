@@ -105,6 +105,7 @@ func newChatHandler(cfg config) (*chatHandler, error) {
 	reg.RegisterAll(Tier2Tools(cfg, cfg.claudeDir))
 	reg.Register(CiteTool())
 	reg.Register(QueryTool(cfg))
+	reg.Register(InvestigateTool(cfg))
 
 	prompt := embeddedSystemPrompt
 	if cfg.llmPromptPath != "" {
@@ -309,6 +310,20 @@ func (h *chatHandler) handleChat(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+
+	// Stash subagent context for the investigate tool — see
+	// llm_tool_investigate.go. The tool retrieves this via
+	// ctx.Value(subagentCtxKey{}) and uses the same creds/profile
+	// to spawn an inner chat loop with a restricted tool set.
+	subCtx := &subagentContext{
+		cfg:      h.cfg,
+		baseURL:  baseURL,
+		apiKey:   req.APIKey,
+		profile:  req.Profile,
+		model:    req.Model,
+		registry: h.registry,
+	}
+	r = r.WithContext(context.WithValue(r.Context(), subagentCtxKey{}, subCtx))
 
 	h.streamChat(w, r, req, tmpl, baseURL, cat)
 }

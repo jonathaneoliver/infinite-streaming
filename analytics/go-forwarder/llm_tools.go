@@ -129,9 +129,27 @@ func (r *ToolRegistry) ToOpenAITools() []LLMTool {
 	return out
 }
 
+// MaxToolResultBytes caps the size of any single tool result that
+// goes back into LLM history. find_plays / query() on a wide window
+// can naturally emit 100K-1M of JSON; carrying that across turns
+// blows past every model's context. When a tool exceeds the cap,
+// Dispatch replaces the result with a short stub that names the
+// tool and hints at narrower follow-ups. The bot reads the stub
+// and either re-calls with tighter args (mode='summary', a
+// smaller limit, a labels_has filter) or proceeds from earlier
+// reasoning.
+//
+// 100 KB is a generous default — keeps a get_play_timeline window
+// or a labels histogram intact, catches the catastrophic dumps.
+const MaxToolResultBytes = 100_000
+
 // Dispatch runs the named tool with the given args. Returns the
 // JSON result string. If the tool isn't registered or fails, returns
 // an error-shaped JSON string the LLM can read and self-correct from.
+//
+// Enforces MaxToolResultBytes after every successful call — even
+// if the underlying tool ignores its own limit args, the dispatcher
+// won't let an oversized payload land in history.
 func (r *ToolRegistry) Dispatch(ctx context.Context, name string, args json.RawMessage, emit ToolEmitter) string {
 	t, ok := r.Get(name)
 	if !ok {
@@ -140,6 +158,16 @@ func (r *ToolRegistry) Dispatch(ctx context.Context, name string, args json.RawM
 	out, err := t.Execute(ctx, args, emit)
 	if err != nil {
 		return mustJSON(map[string]any{"error": err.Error()})
+	}
+	if len(out) > MaxToolResultBytes {
+		return mustJSON(map[string]any{
+			"_truncated":   true,
+			"_tool":        name,
+			"_orig_bytes":  len(out),
+			"_cap_bytes":   MaxToolResultBytes,
+			"_preview":     out[:512] + "…",
+			"_hint":        "result exceeded the dispatcher byte cap; re-call with mode='summary', a tighter labels_has filter, or a smaller limit. raw_query users: add an aggregation (count(), group by) instead of fetching rows.",
+		})
 	}
 	return out
 }
