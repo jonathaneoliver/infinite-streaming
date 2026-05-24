@@ -161,7 +161,11 @@ function shortRunId(runID: string | null): string {
   if (!m) return runID;
   const utc = new Date(`${m[1]}-${m[2]}-${m[3]}T${m[4]}:${m[5]}:${m[6]}Z`);
   if (!Number.isFinite(utc.getTime())) return runID;
-  return utc.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  // hour12: false so the harness pill matches the "Started" column's
+  // 24-hour format (which is built from getHours() / pad()). Without
+  // this, en-US users would see 12-hour ("12:01 AM") on the pill but
+  // 24-hour ("00:01") on the row — visually disorienting.
+  return utc.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
 }
 
 // Compact "harness pill" payload — what's shown on the row when the
