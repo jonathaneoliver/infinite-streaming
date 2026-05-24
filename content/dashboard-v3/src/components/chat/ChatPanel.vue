@@ -15,7 +15,8 @@ import { useChat } from '@/composables/useChat';
 import { useChatSettings } from '@/composables/useChatSettings';
 import { useLLMBudget } from '@/composables/useLLMBudget';
 import { useLLMProfiles } from '@/composables/useLLMProfiles';
-import type { ChatScope } from '@/types/chat';
+import { saveFinding } from '@/repo/chat-repo';
+import type { ChatScope, FindingProposal } from '@/types/chat';
 import CitationCard from './CitationCard.vue';
 import ChatSettings from './ChatSettings.vue';
 
@@ -39,7 +40,7 @@ const scopeKey = computed(() =>
 );
 
 const { settings, isConfigured } = useChatSettings();
-const { state, committedTurns, isStreaming, send, cancel, reset } = useChat({
+const { state, committedTurns, isStreaming, send, cancel, reset, compact } = useChat({
   scopeKey: scopeKey.value,
   scope: () => props.scope,
 });
@@ -179,9 +180,53 @@ const contextWarn = computed(() => {
 
 const tokenMeterTip = computed(() =>
   contextWarn.value
-    ? 'Context >80% of the model window — Clear (⟲) to start fresh'
+    ? 'Context >80% of the model window — Clear (⟲) or Compact (📦) to free space'
     : 'Cumulative tokens; last input size shown as ctx'
 );
+
+// Pre-send projection: lastIn (full history we'd resend) + the
+// new user message we're about to add. Rough token estimate uses
+// the 4-bytes-per-token rule (English-heavy chat with tool JSON;
+// pessimistic for prose, optimistic for code). Better than nothing.
+const projectedNextInput = computed(() => {
+  const lastIn = tokenTotals.value.lastIn;
+  const draftTokens = Math.ceil(draft.value.length / 4);
+  return lastIn + draftTokens;
+});
+
+// Block the Send button when the next request would land at >95%
+// of the model window. Tighter than the 80% warning threshold —
+// 80-95% the user gets the amber meter and can keep going; past
+// 95% we're trying to prevent a mid-stream "context length
+// exceeded" error rather than just nudging.
+const SEND_BLOCK_RATIO = 0.95;
+const overBudget_context = computed(() => {
+  const cw = contextWindow.value;
+  if (!cw) return false;
+  return projectedNextInput.value / cw > SEND_BLOCK_RATIO;
+});
+const sendBlockedTip = computed(() => {
+  if (!overBudget_context.value) return '';
+  const cw = contextWindow.value!;
+  const pct = Math.round((projectedNextInput.value / cw) * 100);
+  return `This send would land at ~${pct}% of the model's context window. ` +
+    `Compact (📦) the conversation or Clear (⟲) it before sending again.`;
+});
+
+// Save / Discard handlers for propose_finding cards.
+async function onSaveFinding(p: FindingProposal) {
+  const res = await saveFinding(p.slug, p.markdown);
+  p.saved = res.ok;
+  p.savedPath = res.path;
+  p.error = res.error;
+}
+function onDiscardFinding(p: FindingProposal) {
+  // Mark as saved-locally so the card collapses; nothing on the server
+  // to roll back (we only wrote on Save).
+  p.saved = true;
+  p.savedPath = undefined;
+  p.error = 'discarded';
+}
 </script>
 
 <template>
@@ -209,6 +254,12 @@ const tokenMeterTip = computed(() =>
       >{{ providerChip.short }}</button>
       <span class="spacer" />
       <template v-if="!collapsed">
+        <button
+          class="head-btn"
+          @click="compact"
+          :disabled="isStreaming || committedTurns.length < 2"
+          title="Compact conversation — replaces history with an LLM-generated summary, keeps the UI scroll-back"
+        >📦</button>
         <button class="head-btn" @click="reset" title="Clear conversation">⟲</button>
         <button class="head-btn" @click="showSettings = true" title="Chat settings">⚙</button>
       </template>
@@ -245,6 +296,25 @@ const tokenMeterTip = computed(() =>
                 :key="c.span_id"
                 :citation="c"
               />
+            </div>
+            <div v-if="turn.assistant.findings && turn.assistant.findings.length" class="findings-rail">
+              <div v-for="p in turn.assistant.findings" :key="p.slug" class="finding-card" :class="{ saved: p.saved }">
+                <div class="finding-head">
+                  <span class="finding-icon">📓</span>
+                  <code class="finding-slug">{{ p.slug }}</code>
+                  <span v-if="p.saved && p.savedPath" class="finding-status ok" :title="p.savedPath">✓ saved</span>
+                  <span v-else-if="p.saved && p.error === 'discarded'" class="finding-status muted">discarded</span>
+                  <span v-else-if="p.error" class="finding-status err">{{ p.error }}</span>
+                </div>
+                <details class="finding-body">
+                  <summary>preview ({{ p.markdown.length }} bytes)</summary>
+                  <pre>{{ p.markdown }}</pre>
+                </details>
+                <div v-if="!p.saved" class="finding-actions">
+                  <button class="primary" @click="onSaveFinding(p)">Save</button>
+                  <button class="secondary" @click="onDiscardFinding(p)">Discard</button>
+                </div>
+              </div>
             </div>
             <details v-if="turn.assistant.toolCalls.length" class="tools">
               <summary>{{ turn.assistant.toolCalls.length }} tool call{{ turn.assistant.toolCalls.length === 1 ? '' : 's' }}</summary>
@@ -302,8 +372,12 @@ const tokenMeterTip = computed(() =>
             v-else
             class="send"
             @click="onSend"
-            :disabled="!isConfigured || !draft.trim()"
+            :disabled="!isConfigured || !draft.trim() || overBudget_context"
+            :title="overBudget_context ? sendBlockedTip : ''"
           >Send</button>
+        </div>
+        <div v-if="overBudget_context" class="ctx-block-banner">
+          {{ sendBlockedTip }}
         </div>
         <div v-if="tokenText" class="token-meter" :class="{ warn: contextWarn }" :title="tokenMeterTip">
           {{ tokenText }}
@@ -546,6 +620,58 @@ const tokenMeterTip = computed(() =>
   color: var(--warning);
   font-weight: 700;
 }
+.ctx-block-banner {
+  font-size: 11px;
+  color: var(--error);
+  background: var(--error-light);
+  padding: 6px 8px;
+  border-radius: var(--radius-sm);
+  line-height: 1.4;
+  margin-top: 4px;
+}
+
+/* Finding proposal cards — emitted by propose_finding(), rendered
+   inline under the assistant turn. Save commits the file via the
+   forwarder; Discard just dismisses (no server state to roll back). */
+.findings-rail { display: flex; flex-direction: column; gap: 6px; }
+.finding-card {
+  border: 1px solid #a855f7;
+  background: #faf5ff;
+  border-radius: var(--radius-md);
+  padding: 8px 10px;
+  font-size: 12px;
+}
+.finding-card.saved { opacity: 0.65; }
+.finding-head { display: flex; align-items: center; gap: 6px; }
+.finding-icon { font-size: 13px; }
+.finding-slug { font: 600 11px ui-monospace, SFMono-Regular, monospace; }
+.finding-status { font-size: 11px; margin-left: auto; }
+.finding-status.ok { color: var(--success); font-weight: 600; }
+.finding-status.muted { color: var(--text-secondary); font-style: italic; }
+.finding-status.err { color: var(--error); }
+.finding-body { font-size: 11px; margin-top: 6px; }
+.finding-body summary { cursor: pointer; color: var(--text-secondary); }
+.finding-body pre {
+  margin-top: 4px;
+  padding: 6px;
+  background: #fff;
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-sm);
+  white-space: pre-wrap;
+  font: 11px ui-monospace, SFMono-Regular, monospace;
+  max-height: 240px;
+  overflow-y: auto;
+}
+.finding-actions { display: flex; gap: 6px; justify-content: flex-end; margin-top: 6px; }
+.finding-actions .primary, .finding-actions .secondary {
+  font: 500 12px 'Google Sans', system-ui, sans-serif;
+  border-radius: var(--radius-sm);
+  padding: 4px 12px;
+  cursor: pointer;
+  border: none;
+}
+.finding-actions .primary { background: #a855f7; color: #fff; }
+.finding-actions .secondary { background: var(--surface); color: var(--text-primary); border: 1px solid var(--border); }
 .send, .cancel, .primary {
   background: var(--primary-blue);
   color: #fff;

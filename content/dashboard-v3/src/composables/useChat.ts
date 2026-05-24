@@ -155,6 +155,10 @@ export function useChat(opts: UseChatOptions) {
           case 'citation':
             state.inflight.citations.push(ev.citation);
             break;
+          case 'finding_proposed':
+            if (!state.inflight.findings) state.inflight.findings = [];
+            state.inflight.findings.push(ev.proposal);
+            break;
           case 'usage':
             state.inflight.usage = {
               input_tokens: ev.input_tokens,
@@ -234,6 +238,88 @@ export function useChat(opts: UseChatOptions) {
     saveHistory(opts.scopeKey, null, []);
   }
 
+  /**
+   * Compact the conversation: ask the LLM to summarise the current
+   * history, then replace it with that summary. Keeps the thread
+   * conceptually intact (the bot still knows what was discussed)
+   * but collapses ~50K tokens of tool-result spam into ~1K of prose.
+   *
+   * The committedTurns UI is preserved so the operator can scroll
+   * back through the original conversation; only the WIRE history
+   * (what gets sent on the next chat call) is replaced.
+   */
+  async function compact() {
+    if (state.history.length < 4 || state.inflight) return;
+    if (!isConfigured.value) {
+      state.error = 'Configure profile + model + api_key before compacting.';
+      return;
+    }
+    const compactPrompt: ChatMessage = {
+      role: 'user',
+      content:
+        'CONTEXT COMPACTION REQUEST: produce a ~300-word summary of this conversation ' +
+        'suitable for replacing the message history. Lead with the original question. ' +
+        'Then list: (1) tagged conclusions reached (with play_ids / timestamps), ' +
+        '(2) tool results that mattered (label histograms, top plays found, etc.), ' +
+        '(3) open questions still being investigated. Output as plain prose markdown ' +
+        'with no preamble. The next turn will use your summary as its only context.',
+    };
+    abortCtrl = new AbortController();
+    let summary = '';
+    try {
+      const iter = streamChat({
+        chat_id: state.chatId || undefined,
+        profile: settings.value.profile,
+        model: settings.value.model,
+        api_key: settings.value.apiKey,
+        base_url: settings.value.baseUrlOverride || undefined,
+        messages: [...state.history, compactPrompt],
+      }, abortCtrl.signal);
+      for await (const ev of iter) {
+        if (ev.type === 'text_delta') summary += ev.delta;
+        if (ev.type === 'done') break;
+        if (ev.type === 'error') {
+          state.error = `compact failed: ${ev.message}`;
+          return;
+        }
+      }
+    } catch (err: any) {
+      if (err?.name !== 'AbortError') state.error = err?.message ?? String(err);
+      return;
+    } finally {
+      abortCtrl = null;
+    }
+    if (!summary.trim()) {
+      state.error = 'compact produced empty summary; not replacing history';
+      return;
+    }
+    // Replace wire history with one summary turn the next chat call
+    // will see as "what was said before".
+    state.history = [
+      {
+        role: 'user',
+        content:
+          'EARLIER CONVERSATION SUMMARY (compacted ' + new Date().toISOString() + '):\n\n' +
+          summary,
+      },
+      {
+        role: 'assistant',
+        content: 'Acknowledged. Continuing from the summary above.',
+      },
+    ];
+    // Push a marker turn into the UI rail so the operator sees the
+    // compaction happened.
+    committedTurns.value.push({
+      userText: '(compacted conversation history)',
+      assistant: {
+        text: summary,
+        citations: [],
+        toolCalls: [],
+        done: true,
+      },
+    });
+  }
+
   // A render-friendly view of the committed turns (one entry per user
   // message; the assistant turn carries text + citations + tool calls).
   const committedTurns = ref<{ userText: string; assistant: AssistantTurn }[]>([]);
@@ -246,5 +332,6 @@ export function useChat(opts: UseChatOptions) {
     send,
     cancel,
     reset,
+    compact,
   };
 }

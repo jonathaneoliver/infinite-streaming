@@ -92,6 +92,17 @@ export interface Citation {
   cycle?: number;
 }
 
+/** A finding proposed by the bot for the operator to Save / Discard. */
+export interface FindingProposal {
+  slug: string;
+  markdown: string;
+  tags?: string[];
+  // UI-only state after a Save attempt. Backend never sees these.
+  saved?: boolean;
+  savedPath?: string;
+  error?: string;
+}
+
 /** SSE event shapes emitted by /api/v2/chat. */
 export type ChatEvent =
   | { type: 'meta'; chat_id: string; request_id: string }
@@ -99,6 +110,7 @@ export type ChatEvent =
   | { type: 'tool_call'; id: string; name: string; args: string }
   | { type: 'tool_result'; id: string; ok: boolean; summary: string }
   | { type: 'citation'; citation: Citation }
+  | { type: 'finding_proposed'; proposal: FindingProposal }
   | { type: 'usage'; input_tokens: number; output_tokens: number; cost_usd: number; duration_ms: number; tool_calls_count: number }
   | { type: 'done' }
   | { type: 'error'; kind: string; message: string };
@@ -108,6 +120,8 @@ export interface AssistantTurn {
   text: string;
   citations: Citation[];
   toolCalls: { id: string; name: string; args: string; result?: { ok: boolean; summary: string } }[];
+  /** Finding proposals emitted by the bot via propose_finding(). */
+  findings?: FindingProposal[];
   usage?: { input_tokens: number; output_tokens: number; cost_usd: number; duration_ms: number; tool_calls_count: number };
   error?: { kind: string; message: string };
   done: boolean;

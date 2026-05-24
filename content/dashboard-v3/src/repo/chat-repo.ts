@@ -100,14 +100,27 @@ function parseSSEFrame(frame: string): ChatEvent | null {
     return null;
   }
   switch (eventType) {
-    case 'meta':        return { type: 'meta',        chat_id: data.chat_id, request_id: data.request_id };
-    case 'text_delta':  return { type: 'text_delta',  delta: data.delta ?? '' };
-    case 'tool_call':   return { type: 'tool_call',   id: data.id, name: data.name, args: data.args };
-    case 'tool_result': return { type: 'tool_result', id: data.id, ok: !!data.ok, summary: data.summary ?? '' };
-    case 'citation':    return { type: 'citation',    citation: data as Citation };
-    case 'usage':       return { type: 'usage',       input_tokens: data.input_tokens, output_tokens: data.output_tokens, cost_usd: data.cost_usd, duration_ms: data.duration_ms, tool_calls_count: data.tool_calls_count };
-    case 'done':        return { type: 'done' };
-    case 'error':       return { type: 'error',       kind: data.kind ?? '', message: data.message ?? '' };
-    default:            return null;
+    case 'meta':              return { type: 'meta',             chat_id: data.chat_id, request_id: data.request_id };
+    case 'text_delta':        return { type: 'text_delta',       delta: data.delta ?? '' };
+    case 'tool_call':         return { type: 'tool_call',        id: data.id, name: data.name, args: data.args };
+    case 'tool_result':       return { type: 'tool_result',      id: data.id, ok: !!data.ok, summary: data.summary ?? '' };
+    case 'citation':          return { type: 'citation',         citation: data as Citation };
+    case 'finding_proposed':  return { type: 'finding_proposed', proposal: { slug: data.slug, markdown: data.markdown, tags: data.tags } };
+    case 'usage':             return { type: 'usage',            input_tokens: data.input_tokens, output_tokens: data.output_tokens, cost_usd: data.cost_usd, duration_ms: data.duration_ms, tool_calls_count: data.tool_calls_count };
+    case 'done':              return { type: 'done' };
+    case 'error':             return { type: 'error',            kind: data.kind ?? '', message: data.message ?? '' };
+    default:                  return null;
   }
+}
+
+/** POST a proposed finding to disk. Backend writes to
+ *  cfg.claudeDir/findings/<slug>.md and returns the path. */
+export async function saveFinding(slug: string, markdown: string): Promise<{ ok: boolean; path?: string; error?: string }> {
+  const resp = await fetch(`${CHAT_BASE}/findings/save`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ slug, markdown }),
+  });
+  const body = await resp.json().catch(() => ({}));
+  return { ok: !!body.ok, path: body.path, error: body.error || (resp.ok ? '' : `HTTP ${resp.status}`) };
 }

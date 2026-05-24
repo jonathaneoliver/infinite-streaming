@@ -106,6 +106,7 @@ func newChatHandler(cfg config) (*chatHandler, error) {
 	reg.Register(CiteTool())
 	reg.Register(QueryTool(cfg))
 	reg.Register(InvestigateTool(cfg))
+	reg.Register(ProposeFindingTool())
 
 	prompt := embeddedSystemPrompt
 	if cfg.llmPromptPath != "" {
@@ -125,6 +126,42 @@ func mountChatHandlers(mux *http.ServeMux, h *chatHandler) {
 	mux.HandleFunc("/api/v2/chat/profiles", h.handleProfiles)
 	mux.HandleFunc("/api/v2/chat/budget", h.handleBudget)
 	mux.HandleFunc("/api/v2/chat/discover-models", h.handleDiscoverModels)
+	mux.HandleFunc("/api/v2/chat/findings/save", h.handleSaveFinding)
+}
+
+// handleSaveFinding writes a proposed finding to disk. Called by
+// the dashboard when the operator clicks Save on a finding_proposed
+// card. The forwarder NEVER writes a finding from the propose
+// tool directly — the operator's click is the commit signal.
+//
+// Body: { slug: "...", markdown: "..." }
+// Returns: { ok: true, path: "..." } or { ok: false, error: "..." }
+func (h *chatHandler) handleSaveFinding(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeProblemv2(w, http.StatusMethodNotAllowed, "method not allowed", "")
+		return
+	}
+	var body struct {
+		Slug     string `json:"slug"`
+		Markdown string `json:"markdown"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeProblemv2(w, http.StatusBadRequest, "bad request", err.Error())
+		return
+	}
+	path, err := saveFinding(h.cfg, body.Slug, body.Markdown)
+	if err != nil {
+		writeJSONv2(w, http.StatusBadRequest, map[string]any{
+			"ok":    false,
+			"error": err.Error(),
+		})
+		return
+	}
+	writeJSONv2(w, http.StatusOK, map[string]any{
+		"ok":   true,
+		"path": path,
+		"note": "file written to disk — commit to git when ready (the forwarder doesn't touch git)",
+	})
 }
 
 // handleProfiles returns the catalog. No secrets — pure config.
