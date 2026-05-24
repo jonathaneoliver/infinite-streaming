@@ -81,6 +81,43 @@ templates:
           input_per_mtok: 0
           output_per_mtok: 0
 
+  # Local MLX server (`mlx_lm.server`). Faster than Ollama on Apple
+  # Silicon — bypasses llama.cpp/GGUF and uses Metal directly.
+  # Launch on the operator's Mac:
+  #   mlx_lm.server --model mlx-community/Qwen3-Coder-8B-Instruct-4bit \
+  #                 --host 0.0.0.0 --port 8080
+  # Then set FORWARDER_LLM_BASE_URL_MLX_LOCAL=http://<mac-lan-ip>:8080/v1
+  # in the test-dev .env (mDNS doesn't resolve inside Docker, so
+  # use the LAN IP not <hostname>.local).
+  - name: mlx-local
+    label: "Local MLX (mlx_lm.server)"
+    base_url: "http://localhost:8080/v1"
+    requires_api_key: false
+    api_key_help: "No API key needed; ensure mlx_lm.server is running locally with --host 0.0.0.0. Override the base URL via FORWARDER_LLM_BASE_URL_MLX_LOCAL or per-browser in chat settings if MLX is on a remote Mac."
+    supports_tools: true
+    models:
+      # Qwen2.5 Coder 7B — dense, ~4 GB on disk, ~5 min download.
+      # Best starter model for verifying the MLX wiring; Qwen 3
+      # Coder series doesn't have an 8B-class variant on mlx-community.
+      - id: "mlx-community/Qwen2.5-Coder-7B-Instruct-4bit"
+        label: "Qwen2.5 Coder 7B (4bit, MLX) — fast"
+        pricing:
+          input_per_mtok: 0
+          output_per_mtok: 0
+      # Qwen3 Coder 30B MoE — 3B active per token, ~17 GB on disk.
+      # Best tool-use behaviour at near-3B-dense speed. Requires
+      # ≥24 GB unified memory.
+      - id: "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit"
+        label: "Qwen3 Coder 30B-A3B MoE (4bit, MLX) — best tool use"
+        pricing:
+          input_per_mtok: 0
+          output_per_mtok: 0
+      - id: "mlx-community/Qwen3-Coder-Next-4bit"
+        label: "Qwen3 Coder Next (4bit, MLX) — latest agentic"
+        pricing:
+          input_per_mtok: 0
+          output_per_mtok: 0
+
   # ChatGPT subscription via LiteLLM's OAuth device flow. LiteLLM
   # holds the OAuth token and exposes the subscription-accessible
   # models (gpt-5.4, gpt-5.4-pro, gpt-5.3-codex, …) as OAI-compat.
