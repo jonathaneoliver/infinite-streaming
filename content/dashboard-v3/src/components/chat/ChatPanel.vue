@@ -14,6 +14,7 @@ import { computed, nextTick, ref, watch } from 'vue';
 import { useChat } from '@/composables/useChat';
 import { useChatSettings } from '@/composables/useChatSettings';
 import { useLLMBudget } from '@/composables/useLLMBudget';
+import { useLLMProfiles } from '@/composables/useLLMProfiles';
 import type { ChatScope } from '@/types/chat';
 import CitationCard from './CitationCard.vue';
 import ChatSettings from './ChatSettings.vue';
@@ -43,6 +44,41 @@ const { state, committedTurns, isStreaming, send, cancel, reset } = useChat({
   scope: () => props.scope,
 });
 const { data: budget } = useLLMBudget();
+const { data: catalog } = useLLMProfiles();
+
+// "Who am I talking to" chip in the header. Shows the active
+// provider's short label + model id so a misconfigured panel
+// (e.g. accidentally on HF when you meant local MLX) is obvious
+// before the first send. Clicks open the settings modal so the
+// chip doubles as an affordance for "fix this".
+const providerChip = computed(() => {
+  if (!isConfigured.value) {
+    return { label: 'not configured', short: '⚠', tip: 'Click to configure profile / model / API key', warn: true };
+  }
+  const t = catalog.value?.templates.find(x => x.name === settings.value.profile);
+  // Catalog may not be loaded yet — fall back to raw names.
+  const provLabel = t?.label ?? settings.value.profile;
+  const modelLabel = t?.models.find(m => m.id === settings.value.model)?.label ?? settings.value.model;
+  // Short forms for the compact panel-header pill.
+  // anthropic-claude → "anthropic"; mlx-local → "mlx"; etc.
+  const provShort = (settings.value.profile || '')
+    .replace(/-claude.*$/, '')
+    .replace(/^chatgpt-via-/, '')
+    .replace(/^local-?/, '')
+    .replace(/^huggingface$/, 'hf');
+  // Model short form: drop org prefix and well-known suffixes so
+  // "mlx-community/Qwen2.5-Coder-7B-Instruct-4bit" → "Qwen2.5-Coder-7B-4bit"
+  const modelShort = (settings.value.model || '')
+    .replace(/^[^/]+\//, '')
+    .replace(/-Instruct(?=-|$)/, '')
+    .replace(/-(\d+bit)$/, '-$1');
+  return {
+    label: `${provLabel} · ${modelLabel}`,
+    short: `${provShort} · ${modelShort}`,
+    tip: `Provider: ${provLabel}\nModel: ${modelLabel}\nClick to change`,
+    warn: false,
+  };
+});
 
 const showSettings = ref(false);
 const collapsed = ref(props.variant === 'panel' ? props.startCollapsed : false);
@@ -99,6 +135,13 @@ const overBudget = computed(() =>
       <span class="scope-pill" v-if="scope.kind && !collapsed">
         {{ scope.kind }}{{ scope.play_id ? `:${scope.play_id.slice(0, 8)}…` : '' }}
       </span>
+      <button
+        v-if="!collapsed"
+        class="provider-chip"
+        :class="{ warn: providerChip.warn }"
+        :title="providerChip.tip"
+        @click="showSettings = true"
+      >{{ providerChip.short }}</button>
       <span class="spacer" />
       <template v-if="!collapsed">
         <button class="head-btn" @click="reset" title="Clear conversation">⟲</button>
@@ -246,6 +289,29 @@ const overBudget = computed(() =>
   background: var(--surface-hover);
   padding: 1px 6px;
   border-radius: var(--radius-full);
+}
+/* Provider/model chip — clickable; opens settings. The whole
+   point is that "which LLM am I talking to" is obvious before any
+   send. Slight visual weight (border + monospace) sets it apart
+   from the lighter scope pill. */
+.provider-chip {
+  font: 600 10px ui-monospace, SFMono-Regular, monospace;
+  color: #0f766e;
+  background: #ecfdf5;
+  border: 1px solid #6ee7b7;
+  padding: 1px 6px;
+  border-radius: var(--radius-full);
+  cursor: pointer;
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.provider-chip:hover { background: #d1fae5; }
+.provider-chip.warn {
+  color: #7c2d12;
+  background: #fef3c7;
+  border-color: #fcd34d;
 }
 .spacer { flex: 1; }
 .collapse-btn, .head-btn {
