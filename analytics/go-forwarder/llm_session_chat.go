@@ -101,7 +101,7 @@ type chatHandler struct {
 func newChatHandler(cfg config) (*chatHandler, error) {
 	reg := NewToolRegistry()
 	reg.RegisterAll(Tier1Tools(cfg))
-	reg.RegisterAll(Tier2Tools(cfg.claudeDir))
+	reg.RegisterAll(Tier2Tools(cfg, cfg.claudeDir))
 	reg.Register(CiteTool())
 	reg.Register(QueryTool(cfg))
 

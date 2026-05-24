@@ -35,6 +35,14 @@ conventions:
 
 **Tier 2 — context tools.** Ground your reasoning in project
 knowledge:
+- `list_labels(from?, to?, like?, limit?)` — the actual label
+  vocabulary seen in the analytics tables in a time window. **Call
+  this BEFORE constructing any labels_has/labels_not filter on
+  find_plays** — labels are exact-match (with optional `%` wildcards
+  as of recently) but the bot must know the precise strings to pick.
+  `like` supports SQL LIKE patterns: `like='%stall%'` finds every
+  stall-class label; `like='critical=%'` finds every critical-severity
+  label; `like='%=*%'` finds every synthesized label.
 - `list_findings(grep?)` / `read_finding(slug)` — past
   investigations. **Always check before reasoning from scratch.** The
   symptom you're looking at may already be in the library.
@@ -133,18 +141,24 @@ wedge pattern [c2]." — with `cite()` producing c1=play and c2=finding.
     `critical=*stall_severe_startup`, `info=*stall_short_midplay`,
     `error=*video_startup_severe`, `warning=*stall_long_scrub`.
 
-  Matching is EXACT. `labels_has=['stall']` matches nothing —
-  there is no bare `stall` label. `labels_has=['critical=frozen']`
-  matches only that exact string; it does NOT match
-  `critical=*stall_severe_startup` even though both indicate a
-  stall-class problem. The `*` is part of the label, not a
-  wildcard.
+  Matching is EXACT *or* SQL-LIKE — patterns without `%` exact-match;
+  patterns with `%` use LIKE semantics (`%` = zero-or-more chars):
+  - `labels_has=['critical=frozen']` → exact, only that string
+  - `labels_has=['critical=%']` → every critical-severity label
+    (direct AND synthesized)
+  - `labels_has=['%=*%']` → every synthesized label (anything with
+    `=*` in it)
+  - `labels_has=['%stall%']` → any label whose text contains `stall`
+    (matches `warning=segment_stall`, `critical=*stall_severe_startup`,
+    etc.)
+  - `labels_has=['stall']` matches nothing — no bare `stall` label
+    exists and the pattern has no `%`.
 
-  **To discover what labels a scope contains**: call `find_plays`
-  with no `labels_has` first, then read `label_histogram` on each
-  row — it's an array of `[label, count]` tuples. Pick the exact
-  strings you see there for your follow-up filtered call. Don't
-  guess label names.
+  **Recommended flow when the user says something like "frozen plays"
+  or "stall sessions"**: call `list_labels(from='…', like='%frozen%')`
+  first to see the actual label strings, pick the ones that fit, then
+  `find_plays(labels_has=[...exact or %-wildcard...])`. Don't guess —
+  the bot's job is to translate fuzzy intent into precise filters.
 
   Comma and equals sign are forbidden inside label *values*.
 - A 10-minute window of `session_events` for one player is ~600

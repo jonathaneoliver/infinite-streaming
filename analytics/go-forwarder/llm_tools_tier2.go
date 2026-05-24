@@ -19,6 +19,8 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+
+	"github.com/jonathaneoliver/infinite-streaming/analytics/go-forwarder/internal/plays"
 )
 
 // safeName allows only [a-zA-Z0-9._/-] in path components — prevents
@@ -42,17 +44,20 @@ func validateSlug(name string) error {
 	return nil
 }
 
-// Tier2Tools builds the context tool set. claudeDir is the absolute
-// path to the project's .claude/ directory (mounted into the
-// container; FORWARDER_CLAUDE_DIR env var).
-func Tier2Tools(claudeDir string) []Tool {
+// Tier2Tools builds the context tool set. cfg is the forwarder
+// config — used to construct the plays.Backend for list_labels.
+// claudeDir is the absolute path to the project's .claude/ directory
+// (mounted into the container; FORWARDER_CLAUDE_DIR env var).
+func Tier2Tools(cfg config, claudeDir string) []Tool {
 	if claudeDir == "" {
 		// Empty dir = tools degrade to "no knowledge available"
 		// instead of failing — the chat still works, just without
 		// findings/standards/skills citations.
 		claudeDir = "/dev/null/.claude"
 	}
+	be := playsBackend(cfg)
 	return []Tool{
+		listLabelsTool(be),
 		listFindingsTool(claudeDir),
 		readFindingTool(claudeDir),
 		listStandardsTool(claudeDir),
@@ -60,6 +65,59 @@ func Tier2Tools(claudeDir string) []Tool {
 		listSkillsTool(claudeDir),
 		readSkillTool(claudeDir),
 		readConventionsTool(claudeDir),
+	}
+}
+
+// --- Labels ---
+
+func listLabelsTool(be plays.Backend) Tool {
+	return Tool{
+		Name: "list_labels",
+		Description: "List the distinct labels actually observed across the analytics " +
+			"tables in a time window, with their counts. Call this BEFORE constructing " +
+			"any labels_has / labels_not filter on find_plays — the bot must know the " +
+			"exact label vocabulary before searching. Labels are " +
+			"`<severity>=<event>` strings; synthesized variants carry a `*` on the " +
+			"event side (e.g. `critical=*stall_severe_startup`). Optional `like` " +
+			"argument narrows with SQL LIKE semantics (`%` = any, e.g. " +
+			"`like='%stall%'`, `like='critical=%'`, `like='%=*%'` for all synthesized). " +
+			"Default window: last 24h.",
+		Tier: 2,
+		Parameters: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"from":  map[string]any{"type": "string", "description": "ISO timestamp lower bound (default: 24h ago)."},
+				"to":    map[string]any{"type": "string", "description": "ISO timestamp upper bound (default: now)."},
+				"like":  map[string]any{"type": "string", "description": "Optional SQL LIKE pattern. Examples: 'critical=%', '%stall%', '%=*%' for all synthesized labels."},
+				"limit": map[string]any{"type": "integer", "minimum": 1, "maximum": 2000, "default": 200},
+			},
+		},
+		Execute: func(ctx context.Context, args json.RawMessage, _ ToolEmitter) (string, error) {
+			var a struct {
+				From  string `json:"from"`
+				To    string `json:"to"`
+				Like  string `json:"like"`
+				Limit int    `json:"limit"`
+			}
+			if len(args) > 0 {
+				if err := json.Unmarshal(args, &a); err != nil {
+					return "", fmt.Errorf("parse args: %w", err)
+				}
+			}
+			rows, err := plays.ListLabels(ctx, be, plays.LabelListFilter{
+				From:  a.From,
+				To:    a.To,
+				Like:  a.Like,
+				Limit: a.Limit,
+			})
+			if err != nil {
+				return "", err
+			}
+			return mustJSON(map[string]any{
+				"count":  len(rows),
+				"labels": rows,
+			}), nil
+		},
 	}
 }
 
