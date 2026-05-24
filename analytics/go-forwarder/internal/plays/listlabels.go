@@ -55,7 +55,7 @@ func ListLabels(ctx context.Context, b Backend, f LabelListFilter) ([]LabelCount
 	outerWhere := ""
 	if f.Like != "" {
 		params["like"] = escapeLikeUnderscores(f.Like)
-		outerWhere = "WHERE label LIKE {like:String} ESCAPE '\\\\'"
+		outerWhere = "WHERE label LIKE {like:String}"
 	}
 
 	query := fmt.Sprintf(`

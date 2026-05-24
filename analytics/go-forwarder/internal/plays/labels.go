@@ -37,23 +37,25 @@ func (f LabelFilter) applyTo(clauses []string, params map[string]string, column 
 		// array) lets each Has entry be a glob. Multiple Has entries
 		// AND together via separate clauses.
 		clauses = append(clauses,
-			"arrayExists(x -> x LIKE {"+key+":String} ESCAPE '\\\\', "+column+")")
+			"arrayExists(x -> x LIKE {"+key+":String}, "+column+")")
 	}
 	for i, v := range f.Not {
 		key := "label_not_" + itoa(i)
 		params[key] = escapeLikeUnderscores(v)
 		clauses = append(clauses,
-			"NOT arrayExists(x -> x LIKE {"+key+":String} ESCAPE '\\\\', "+column+")")
+			"NOT arrayExists(x -> x LIKE {"+key+":String}, "+column+")")
 	}
 	return clauses, params
 }
 
-// escapeLikeUnderscores turns `_` into `\_` so the ESCAPE clause
-// treats it as a literal. Without this, a pattern like
-// `critical=segment_stall` would silently match
-// `critical=segmentXstall` (where X is any char) and break the
-// existing exact-match contract for callers that don't know about
-// LIKE semantics. `%` stays unescaped — that's the wildcard.
+// escapeLikeUnderscores turns `_` into `\_` so it's treated as a
+// literal underscore. ClickHouse's LIKE uses `\` as the default
+// escape character (no ESCAPE clause needed — CH rejects that
+// syntax). Without this, a pattern like `critical=segment_stall`
+// would silently match `critical=segmentXstall` (where X is any
+// char) and break the existing exact-match contract for callers
+// that don't know about LIKE semantics. `%` stays unescaped —
+// that's the wildcard.
 func escapeLikeUnderscores(s string) string {
 	if !strings.ContainsRune(s, '_') {
 		return s
