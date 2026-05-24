@@ -174,16 +174,33 @@ export function useChat(opts: UseChatOptions) {
     } finally {
       // Commit the inflight turn into history so the next send sees it.
       if (state.inflight) {
-        const finalAssistant: ChatMessage = {
-          role: 'assistant',
-          content: state.inflight.text,
-        };
-        state.history.push(finalAssistant);
-        // Hold the inflight on the side so the UI can render the
-        // tool-call + citation rails alongside the final text.
+        const inflight = state.inflight;
+        const hasContent = (inflight.text ?? '').trim().length > 0;
+        const hasToolCalls = inflight.toolCalls.length > 0;
+        if (hasContent || hasToolCalls) {
+          // Real assistant turn — append to wire history.
+          const finalAssistant: ChatMessage = {
+            role: 'assistant',
+            content: inflight.text,
+          };
+          state.history.push(finalAssistant);
+        } else {
+          // Empty assistant turn (error / cancel mid-stream). Don't
+          // poison history — Anthropic rejects assistant turns with
+          // no content and no tool_calls. Also unstick the user
+          // message we appended for this attempt so the next send
+          // doesn't see a dangling user message followed by another
+          // user message.
+          if (state.history.length > 0 &&
+              state.history[state.history.length - 1].role === 'user') {
+            state.history.pop();
+          }
+        }
+        // Always show the turn in the UI (text or error or just a
+        // tool-call attempt) so the operator sees what happened.
         committedTurns.value.push({
           userText: userMsg.content ?? '',
-          assistant: state.inflight,
+          assistant: inflight,
         });
         state.inflight = null;
       }

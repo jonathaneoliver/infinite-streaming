@@ -281,6 +281,17 @@ func (h *chatHandler) handleChat(w http.ResponseWriter, r *http.Request) {
 		req.Model = tmpl.Models[0].ID
 	}
 
+	// Sanitise inbound history — Anthropic (and OpenAI's strict
+	// mode) reject assistant messages with no content AND no
+	// tool_calls. Such messages slip into localStorage when a turn
+	// errors mid-stream (e.g. the previous Anthropic 404 left
+	// content=""). Drop them so the historic conversation is sendable
+	// regardless of how it got into that state. Also drop any orphan
+	// tool messages whose tool_call_id no longer points at an
+	// assistant message — same shape of corruption from cancelled
+	// mid-loop turns.
+	req.Messages = sanitiseHistory(req.Messages)
+
 	// Pre-flight budget check.
 	if h.cfg.llmBudgetUSD > 0 {
 		spent, err := SpentTodayUSD(r.Context(), h.cfg)
@@ -523,6 +534,40 @@ loop:
 	}
 
 	_ = emit("done", map[string]any{})
+}
+
+// sanitiseHistory drops messages that would make the upstream
+// reject the whole turn:
+//   - assistant messages with no content AND no tool_calls (e.g.
+//     left behind by a previous turn that errored mid-stream)
+//   - tool messages whose tool_call_id doesn't match a tool_call
+//     in any preceding assistant message (orphan from cancelled
+//     mid-loop turn)
+//
+// Single forward pass so we can build the valid tool_call_id set
+// as we go.
+func sanitiseHistory(in []LLMMessage) []LLMMessage {
+	out := make([]LLMMessage, 0, len(in))
+	validToolCallIDs := map[string]struct{}{}
+	for _, m := range in {
+		switch m.Role {
+		case "assistant":
+			if m.Content == "" && len(m.ToolCalls) == 0 {
+				// Empty assistant turn — drop.
+				continue
+			}
+			for _, tc := range m.ToolCalls {
+				validToolCallIDs[tc.ID] = struct{}{}
+			}
+		case "tool":
+			if _, ok := validToolCallIDs[m.ToolCallID]; !ok {
+				// Orphan tool response — drop.
+				continue
+			}
+		}
+		out = append(out, m)
+	}
+	return out
 }
 
 // toolCallAssembly accumulates a single tool call's incremental
