@@ -34,16 +34,19 @@ templates:
         pricing:
           input_per_mtok: 15.00
           output_per_mtok: 75.00
+        context_window: 200000
       - id: "claude-sonnet-4-6"
         label: "Claude Sonnet 4.6 (fast, balanced)"
         pricing:
           input_per_mtok: 3.00
           output_per_mtok: 15.00
+        context_window: 200000
       - id: "claude-haiku-4-5"
         label: "Claude Haiku 4.5 (cheapest)"
         pricing:
           input_per_mtok: 1.00
           output_per_mtok: 5.00
+        context_window: 200000
 
   - name: huggingface
     label: "HuggingFace Inference Providers"
@@ -59,6 +62,7 @@ templates:
         pricing:
           input_per_mtok: 0.11
           output_per_mtok: 0.80
+        context_window: 1000000
       # Qwen3-Coder 480B MoE — flagship. Slightly more expensive than
       # Next but stronger on long-horizon reasoning.
       - id: "Qwen/Qwen3-Coder-480B-A35B-Instruct"
@@ -66,6 +70,7 @@ templates:
         pricing:
           input_per_mtok: 0.22
           output_per_mtok: 0.90
+        context_window: 256000
       # Qwen3-Coder 30B MoE — same architecture as the 480B flagship
       # but trained smaller; tighter context cost vs Next.
       - id: "Qwen/Qwen3-Coder-30B-A3B-Instruct"
@@ -73,6 +78,7 @@ templates:
         pricing:
           input_per_mtok: 0.15
           output_per_mtok: 0.60
+        context_window: 256000
       # Qwen2.5-Coder 32B — older generation; useful comparison
       # baseline for the 3-series.
       - id: "Qwen/Qwen2.5-Coder-32B-Instruct"
@@ -80,16 +86,19 @@ templates:
         pricing:
           input_per_mtok: 0.66
           output_per_mtok: 0.80
+        context_window: 131072
       - id: "meta-llama/Llama-3.3-70B-Instruct"
         label: "Llama 3.3 70B Instruct"
         pricing:
           input_per_mtok: 0.88
           output_per_mtok: 0.88
+        context_window: 131072
       - id: "Qwen/Qwen2.5-72B-Instruct"
         label: "Qwen 2.5 72B Instruct"
         pricing:
           input_per_mtok: 0.90
           output_per_mtok: 0.90
+        context_window: 131072
 
   - name: ollama
     label: "Local Ollama"
@@ -103,11 +112,13 @@ templates:
         pricing:
           input_per_mtok: 0
           output_per_mtok: 0
+        context_window: 131072
       - id: "qwen2.5:72b"
         label: "Qwen 2.5 72B"
         pricing:
           input_per_mtok: 0
           output_per_mtok: 0
+        context_window: 131072
 
   # Local MLX server (`mlx_lm.server`). Faster than Ollama on Apple
   # Silicon — bypasses llama.cpp/GGUF and uses Metal directly.
@@ -132,6 +143,7 @@ templates:
         pricing:
           input_per_mtok: 0
           output_per_mtok: 0
+        context_window: 131072
       # Qwen3 Coder 30B MoE — 3B active per token, ~17 GB on disk.
       # Best tool-use behaviour at near-3B-dense speed. Requires
       # ≥24 GB unified memory.
@@ -140,11 +152,13 @@ templates:
         pricing:
           input_per_mtok: 0
           output_per_mtok: 0
+        context_window: 256000
       - id: "mlx-community/Qwen3-Coder-Next-4bit"
         label: "Qwen3 Coder Next (4bit, MLX) — latest agentic"
         pricing:
           input_per_mtok: 0
           output_per_mtok: 0
+        context_window: 1000000
 
   # ChatGPT subscription via LiteLLM's OAuth device flow. LiteLLM
   # holds the OAuth token and exposes the subscription-accessible

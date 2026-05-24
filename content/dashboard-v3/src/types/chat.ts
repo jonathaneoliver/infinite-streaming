@@ -19,6 +19,11 @@ export interface ChatModel {
   id: string;
   label: string;
   pricing: { input_per_mtok: number; output_per_mtok: number };
+  // Maximum context window in tokens. Optional — when missing the
+  // UI shows the running totals without a denominator. Source of
+  // truth is the catalog YAML (one place for "what does the
+  // provider quote"); per-model docs e.g. anthropic.com/pricing.
+  context_window?: number;
 }
 
 export interface ChatCatalog {

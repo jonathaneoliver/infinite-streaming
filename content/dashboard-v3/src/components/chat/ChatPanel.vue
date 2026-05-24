@@ -117,6 +117,71 @@ const budgetText = computed(() => {
 const overBudget = computed(() =>
   budget.value ? budget.value.spent_usd >= budget.value.cap_usd && budget.value.cap_usd > 0 : false
 );
+
+// Running per-conversation token totals — derived from
+// committedTurns' usage events. Re-computed on every turn append.
+// Note: this is *cumulative session*, not "tokens about to be sent
+// next turn" — but since every turn sends the FULL history, the
+// last turn's input_tokens IS roughly "current context size" (plus
+// any tools the LLM is about to receive in the next call).
+const tokenTotals = computed(() => {
+  let inSum = 0, outSum = 0, lastIn = 0;
+  for (const t of committedTurns.value) {
+    if (t.assistant.usage) {
+      inSum += t.assistant.usage.input_tokens || 0;
+      outSum += t.assistant.usage.output_tokens || 0;
+      lastIn = t.assistant.usage.input_tokens || lastIn;
+    }
+  }
+  return { inSum, outSum, lastIn };
+});
+
+const contextWindow = computed<number | null>(() => {
+  const t = catalog.value?.templates.find(x => x.name === settings.value.profile);
+  const m = t?.models.find(mm => mm.id === settings.value.model);
+  return m?.context_window ?? null;
+});
+
+// Compact "10.2K" style for the footer. Tokens grow fast; raw
+// digits would push the footer wide.
+function compactTokens(n: number): string {
+  if (n < 1000) return `${n}`;
+  if (n < 10_000) return `${(n / 1000).toFixed(1)}K`;
+  if (n < 1_000_000) return `${Math.round(n / 1000)}K`;
+  return `${(n / 1_000_000).toFixed(1)}M`;
+}
+
+const tokenText = computed(() => {
+  const { inSum, outSum, lastIn } = tokenTotals.value;
+  const cw = contextWindow.value;
+  // No turns yet, nothing to show.
+  if (inSum === 0 && outSum === 0) return '';
+  const parts = [
+    `${compactTokens(inSum)}↑`,
+    `${compactTokens(outSum)}↓`,
+  ];
+  if (cw && lastIn > 0) {
+    const pct = Math.round((lastIn / cw) * 100);
+    parts.push(`${compactTokens(lastIn)} / ${compactTokens(cw)} ctx (${pct}%)`);
+  } else if (lastIn > 0) {
+    parts.push(`${compactTokens(lastIn)} ctx`);
+  }
+  return parts.join(' · ');
+});
+
+// Visual warning when context is >80% of the window — usually
+// time to ⟲ clear or trigger a manual compact via a fresh chat.
+const contextWarn = computed(() => {
+  const cw = contextWindow.value;
+  const lastIn = tokenTotals.value.lastIn;
+  return cw && lastIn > 0 && (lastIn / cw) > 0.8;
+});
+
+const tokenMeterTip = computed(() =>
+  contextWarn.value
+    ? 'Context >80% of the model window — Clear (⟲) to start fresh'
+    : 'Cumulative tokens; last input size shown as ctx'
+);
 </script>
 
 <template>
@@ -239,6 +304,9 @@ const overBudget = computed(() =>
             @click="onSend"
             :disabled="!isConfigured || !draft.trim()"
           >Send</button>
+        </div>
+        <div v-if="tokenText" class="token-meter" :class="{ warn: contextWarn }" :title="tokenMeterTip">
+          {{ tokenText }}
         </div>
       </footer>
     </template>
@@ -467,6 +535,17 @@ const overBudget = computed(() =>
   font-variant-numeric: tabular-nums;
 }
 .budget.over { color: var(--error); font-weight: 600; }
+.token-meter {
+  font: 500 10px ui-monospace, SFMono-Regular, monospace;
+  color: var(--text-secondary);
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  margin-top: -2px;
+}
+.token-meter.warn {
+  color: var(--warning);
+  font-weight: 700;
+}
 .send, .cancel, .primary {
   background: var(--primary-blue);
   color: #fff;

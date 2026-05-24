@@ -37,6 +37,12 @@ type LLMModel struct {
 	ID      string     `yaml:"id"      json:"id"`
 	Label   string     `yaml:"label"   json:"label"`
 	Pricing LLMPricing `yaml:"pricing" json:"pricing"`
+	// ContextWindow is the model's maximum context size in tokens.
+	// Surfaced in the chat panel's footer so the operator can see
+	// how close they're getting to the model's hard limit before
+	// the next send fails mid-stream. Zero = unknown (UI hides
+	// the denominator).
+	ContextWindow int `yaml:"context_window,omitempty" json:"context_window,omitempty"`
 }
 
 // LLMTemplate is one profile (Anthropic / HF / Ollama / …).
