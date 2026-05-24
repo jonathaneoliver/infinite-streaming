@@ -42,14 +42,27 @@ const color = computed(() => KIND_COLORS[props.citation.kind] ?? '#5f6368');
 const href = computed(() => {
   const c = props.citation;
   switch (c.kind) {
-    case 'play':
-      return c.play_id
-        ? `/dashboard/v3/session-viewer.html?play_id=${encodeURIComponent(c.play_id)}${c.at ? `&at=${encodeURIComponent(c.at)}` : ''}`
-        : null;
-    case 'range':
-      return c.play_id
-        ? `/dashboard/v3/session-viewer.html?play_id=${encodeURIComponent(c.play_id)}${c.from ? `&from=${encodeURIComponent(c.from)}` : ''}${c.to ? `&to=${encodeURIComponent(c.to)}` : ''}`
-        : null;
+    case 'play': {
+      // session-viewer requires BOTH player_id + play_id; without
+      // player_id it bails. cite() enforces this server-side too,
+      // but defend on render so a malformed citation doesn't
+      // produce a broken-looking button.
+      if (!c.player_id || !c.play_id) return null;
+      const p = new URLSearchParams();
+      p.set('player_id', c.player_id);
+      p.set('play_id', c.play_id);
+      if (c.at) p.set('at', c.at);
+      return `/dashboard/v3/session-viewer.html?${p.toString()}`;
+    }
+    case 'range': {
+      if (!c.player_id || !c.play_id) return null;
+      const p = new URLSearchParams();
+      p.set('player_id', c.player_id);
+      p.set('play_id', c.play_id);
+      if (c.from) p.set('from', c.from);
+      if (c.to) p.set('to', c.to);
+      return `/dashboard/v3/session-viewer.html?${p.toString()}`;
+    }
     case 'run':
       return c.run_id
         ? `/dashboard/v3/characterization.html?run_id=${encodeURIComponent(c.run_id)}${c.cycle ? `&cycle=${c.cycle}` : ''}`

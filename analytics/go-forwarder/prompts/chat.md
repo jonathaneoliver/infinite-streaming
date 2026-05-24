@@ -72,8 +72,10 @@ the dashboard renders. Reference the citation's `span_id` in your
 prose so the UI correlates the card with the right span.
 
 Kinds and required fields:
-- `play` — `play_id`, `at` (mm:ss.ms or ISO timestamp)
-- `range` — `play_id`, `from`, `to`
+- `play` — **player_id + play_id** + `at` (mm:ss.ms or ISO timestamp).
+  The session-viewer page bails without player_id; both IDs are in
+  every `find_plays` / `get_play_summary` row.
+- `range` — **player_id + play_id** + `from` + `to`
 - `finding` — `slug`
 - `standard` — `name`
 - `skill` — `name`

@@ -64,6 +64,9 @@ export interface Citation {
   span_id: string;
   kind: CitationKind;
   label: string;
+  // player_id is REQUIRED on play / range kinds — session-viewer
+  // won't load without it. cite() enforces this server-side.
+  player_id?: string;
   play_id?: string;
   at?: string;
   from?: string;
