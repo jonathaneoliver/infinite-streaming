@@ -17,6 +17,7 @@ const DEFAULT: ChatSettings = {
   profile: '',
   model: '',
   apiKey: '',
+  baseUrlOverride: '',
 };
 
 function readStored(): ChatSettings {
@@ -29,6 +30,7 @@ function readStored(): ChatSettings {
       profile: typeof parsed.profile === 'string' ? parsed.profile : '',
       model: typeof parsed.model === 'string' ? parsed.model : '',
       apiKey: typeof parsed.apiKey === 'string' ? parsed.apiKey : '',
+      baseUrlOverride: typeof parsed.baseUrlOverride === 'string' ? parsed.baseUrlOverride : '',
     };
   } catch {
     return { ...DEFAULT };

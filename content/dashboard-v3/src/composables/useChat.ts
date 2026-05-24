@@ -126,6 +126,11 @@ export function useChat(opts: UseChatOptions) {
         profile: settings.value.profile,
         model: settings.value.model,
         api_key: settings.value.apiKey,
+        // Empty override = forwarder uses the catalog's base_url.
+        // Non-empty = forwarder calls THIS url (e.g. a remote
+        // Ollama). NB: the URL must be reachable from the
+        // forwarder's network, not just the browser's.
+        base_url: settings.value.baseUrlOverride || undefined,
         messages: state.history,
         scope: opts.scope(),
       }, abortCtrl.signal);

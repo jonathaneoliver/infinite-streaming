@@ -27,11 +27,21 @@ const currentProfile = computed(() => {
 // Catalog defaults: typed {id, label} models from the YAML.
 const catalogModels = computed(() => currentProfile.value?.models ?? []);
 
-// Live discovery: hit {base_url}/v1/models from the browser. For
-// Ollama this is the source of truth (operator may have any model
-// pulled locally); for hosted providers it supplements the catalog.
+// Effective base URL: per-user override wins; falls back to the
+// catalog template's base_url. The override survives a profile
+// change so a user who points at a remote Ollama doesn't lose
+// their setting by toggling between providers — they have to
+// clear it explicitly to revert.
+const effectiveBaseUrl = computed(() =>
+  settings.value.baseUrlOverride.trim() || currentProfile.value?.base_url || '',
+);
+
+// Live discovery: hit {base_url}/v1/models. For Ollama this is the
+// source of truth (operator may have any model pulled locally); for
+// hosted providers it supplements the catalog. Honours the
+// per-user override.
 const { state: discovery, discover } = useDiscoveredModels(
-  () => currentProfile.value?.base_url ?? '',
+  () => effectiveBaseUrl.value,
   () => settings.value.apiKey,
 );
 
@@ -89,8 +99,7 @@ watch(() => settings.value.apiKey, () => discover());
 // only) so any other origin (https://test-dev.foo) gets a
 // preflight 403 that surfaces here as "Failed to fetch".
 const looksLocalLoopback = computed(() => {
-  const u = currentProfile.value?.base_url ?? '';
-  return /:\/\/(localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\])/i.test(u);
+  return /:\/\/(localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\])/i.test(effectiveBaseUrl.value);
 });
 
 const discoveryHint = computed(() => {
@@ -106,6 +115,9 @@ const discoveryHint = computed(() => {
 
 function onProfileChange(e: Event) {
   update({ profile: (e.target as HTMLSelectElement).value });
+}
+function onBaseUrlInput(e: Event) {
+  update({ baseUrlOverride: (e.target as HTMLInputElement).value });
 }
 function onModelChange(e: Event) {
   update({ model: (e.target as HTMLSelectElement).value });
@@ -136,6 +148,26 @@ function onKeyInput(e: Event) {
             </option>
           </select>
         </label>
+
+        <label class="row">
+          <span class="label">Base URL</span>
+          <input
+            type="text"
+            :value="settings.baseUrlOverride"
+            @input="onBaseUrlInput"
+            :placeholder="currentProfile?.base_url || 'override the provider URL'"
+            autocomplete="off"
+            spellcheck="false"
+          />
+        </label>
+        <p class="row help muted">
+          Optional override of the provider's base URL. Useful for a
+          remote Ollama on another Mac
+          (<code>http://my-mac.local:11434/v1</code>) or any
+          self-hosted OAI-compat endpoint. The URL must be reachable
+          from the forwarder container's network, not just from your
+          browser.
+        </p>
 
         <label class="row">
           <span class="label">Model</span>

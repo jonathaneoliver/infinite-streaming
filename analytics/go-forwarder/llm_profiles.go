@@ -93,11 +93,53 @@ func LoadLLMCatalog(path string) (*LLMCatalog, error) {
 	if len(c.Templates) == 0 {
 		return nil, fmt.Errorf("llm profiles: %s has zero templates", source)
 	}
+	// Per-template base_url override via env. Lets a deploy point
+	// the "Local Ollama" entry at e.g. a remote Mac on the LAN
+	// (`http://my-mac.local:11434/v1`) without touching the embedded
+	// catalog. Pattern: FORWARDER_LLM_BASE_URL_<TEMPLATE_NAME>,
+	// uppercased + hyphens → underscores. Examples:
+	//   FORWARDER_LLM_BASE_URL_OLLAMA=http://my-mac.local:11434/v1
+	//   FORWARDER_LLM_BASE_URL_CHATGPT_VIA_LITELLM=http://litellm:4000/v1
+	applyEnvBaseURLOverrides(&c)
 	llmCatalog.mu.Lock()
 	llmCatalog.value = &c
 	llmCatalog.path = source
 	llmCatalog.mu.Unlock()
 	return &c, nil
+}
+
+// applyEnvBaseURLOverrides walks every template and, if the env var
+// FORWARDER_LLM_BASE_URL_<NAME> is set, replaces that template's
+// base_url. Logs each override for operator visibility.
+func applyEnvBaseURLOverrides(c *LLMCatalog) {
+	for i := range c.Templates {
+		t := &c.Templates[i]
+		envName := "FORWARDER_LLM_BASE_URL_" + envSafeName(t.Name)
+		if v := os.Getenv(envName); v != "" {
+			old := t.BaseURL
+			t.BaseURL = v
+			fmt.Printf("llm profiles: %s base_url overridden by %s: %s → %s\n",
+				t.Name, envName, old, v)
+		}
+	}
+}
+
+// envSafeName uppercases and replaces hyphens with underscores so
+// "chatgpt-via-litellm" → "CHATGPT_VIA_LITELLM" for env-var lookup.
+func envSafeName(name string) string {
+	b := make([]byte, len(name))
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		switch {
+		case c >= 'a' && c <= 'z':
+			b[i] = c - 32 // upper
+		case c == '-':
+			b[i] = '_'
+		default:
+			b[i] = c
+		}
+	}
+	return string(b)
 }
 
 // LLMCatalogValue returns the cached catalog. Returns nil before

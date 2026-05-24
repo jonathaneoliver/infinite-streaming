@@ -138,6 +138,11 @@ services:
       - FORWARDER_CLICKHOUSE_DB=infinite_streaming
       - FORWARDER_CLICKHOUSE_TABLE=session_events
       - FORWARDER_LOG_FILE=/media/logs/forwarder.log
+      # Per-template base_url override for the AI chat catalog
+      # (#497). Lets a deploy point the Ollama / LiteLLM template at
+      # a real LAN address instead of the container's localhost.
+      # See llm_profiles.go applyEnvBaseURLOverrides.
+      - FORWARDER_LLM_BASE_URL_OLLAMA=${FORWARDER_LLM_BASE_URL_OLLAMA:-}
     depends_on:
       clickhouse:
         condition: service_started

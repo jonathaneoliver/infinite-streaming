@@ -30,6 +30,12 @@ export interface ChatSettings {
   profile: string;     // template name
   model: string;       // model id within the template
   apiKey: string;      // BYO key; never leaves the browser except per-request
+  // Override the profile's catalog base_url. Empty = use the catalog
+  // default. Useful for pointing at a remote Ollama / self-hosted
+  // OAI-compat endpoint. NB: the forwarder makes the upstream call,
+  // so the URL must be reachable from the forwarder's network — not
+  // just from the browser.
+  baseUrlOverride: string;
 }
 
 /** One message in the chat history. Mirrors LLMMessage on the wire. */
