@@ -49,9 +49,37 @@ templates:
     label: "HuggingFace Inference Providers"
     base_url: "https://router.huggingface.co/v1"
     requires_api_key: true
-    api_key_help: "Get a token from huggingface.co/settings/tokens (read access)"
+    api_key_help: "Get a token from huggingface.co/settings/tokens (read access). Prices vary by which backend HF routes to (Together / Fireworks / Novita); listed values are typical defaults — check actual cost in the ledger after the first run."
     supports_tools: true
     models:
+      # Qwen3-Coder-Next — best tool-use behaviour at the cheapest
+      # hosted rate. Recommended default for our chat backend.
+      - id: "Qwen/Qwen3-Coder-Next"
+        label: "Qwen3 Coder Next — best tool use, cheapest"
+        pricing:
+          input_per_mtok: 0.11
+          output_per_mtok: 0.80
+      # Qwen3-Coder 480B MoE — flagship. Slightly more expensive than
+      # Next but stronger on long-horizon reasoning.
+      - id: "Qwen/Qwen3-Coder-480B-A35B-Instruct"
+        label: "Qwen3 Coder 480B MoE — flagship agentic"
+        pricing:
+          input_per_mtok: 0.22
+          output_per_mtok: 0.90
+      # Qwen3-Coder 30B MoE — same architecture as the 480B flagship
+      # but trained smaller; tighter context cost vs Next.
+      - id: "Qwen/Qwen3-Coder-30B-A3B-Instruct"
+        label: "Qwen3 Coder 30B-A3B MoE"
+        pricing:
+          input_per_mtok: 0.15
+          output_per_mtok: 0.60
+      # Qwen2.5-Coder 32B — older generation; useful comparison
+      # baseline for the 3-series.
+      - id: "Qwen/Qwen2.5-Coder-32B-Instruct"
+        label: "Qwen2.5 Coder 32B Instruct"
+        pricing:
+          input_per_mtok: 0.66
+          output_per_mtok: 0.80
       - id: "meta-llama/Llama-3.3-70B-Instruct"
         label: "Llama 3.3 70B Instruct"
         pricing:
