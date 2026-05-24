@@ -20,6 +20,8 @@ import SessionDisplay from '@/components/SessionDisplay.vue';
 import ChatPanel from '@/components/chat/ChatPanel.vue';
 import { parseTimeAny, canonicalUUID } from '@/composables/urlTimeFormat';
 import { getPlay, patchPlayClassification, type PlaySummary } from '@/repo/v2-repo';
+import { useChartCoordination } from '@/composables/useChartCoordination';
+import type { ChatScope } from '@/types/chat';
 
 const qs = new URLSearchParams(window.location.search);
 // v3 canonical: identify an archived play by (player_id, play_id).
@@ -40,6 +42,39 @@ const playId = ref<string | null>(qs.get('play_id') ? canonicalUUID(qs.get('play
  */
 const startMs = ref<number | null>(parseTimeAny(qs.get('from') ?? qs.get('start_time')));
 const endMs = ref<number | null>(parseTimeAny(qs.get('to') ?? qs.get('end_time')));
+
+/** Same per-player coord instance SessionDisplay uses. Reading
+ *  effectiveRange here gives us the live brush window for the AI
+ *  chat scope — no event plumbing, both components read the same
+ *  module-level reactive state by playerId. */
+const coord = useChartCoordination(playerId);
+
+/** Brush-vs-full-play detection. If the brush covers the whole
+ *  play (or play bounds aren't known yet), treat as scope='play';
+ *  if it's a strict subset, scope='range' with from/to so the
+ *  bot's system-prompt preamble flips to "focus on this window".
+ *  Tolerance handles tiny rounding gaps between the brush extent
+ *  and the play's started_at / last_seen_at. */
+const BRUSH_FULL_TOLERANCE_MS = 1500;
+const chatScope = computed<ChatScope>(() => {
+  if (!playId.value || !playerId.value) return { kind: 'fleet' };
+  const brush = coord.effectiveRange.value;
+  const summary = playQuery.data.value;
+  const playStart = summary?.started_at ? Date.parse(summary.started_at) : NaN;
+  const playEnd = summary?.last_seen_at ? Date.parse(summary.last_seen_at) : NaN;
+  const isFullPlay = !Number.isFinite(playStart) || !Number.isFinite(playEnd)
+    || (brush.min <= playStart + BRUSH_FULL_TOLERANCE_MS && brush.max >= playEnd - BRUSH_FULL_TOLERANCE_MS);
+  if (isFullPlay) {
+    return { kind: 'play', play_id: playId.value, player_id: playerId.value };
+  }
+  return {
+    kind: 'range',
+    play_id: playId.value,
+    player_id: playerId.value,
+    from: new Date(brush.min).toISOString(),
+    to: new Date(brush.max).toISOString(),
+  };
+});
 
 /** "Show before/after" toggle. When ON, SessionDisplay drops the
  *  play_id filter on its SSE subscription and widens the time
@@ -188,15 +223,18 @@ const backHref = '/dashboard/v3/sessions.html';
       </main>
     </div>
 
-    <!-- AI chat side panel scoped to this play (#497). Default
-         collapsed so the existing chart layout is undisturbed.
-         Brush-range integration (scope.kind='range' + from/to
-         reactive to the brush) is a follow-up; for now scope
-         is play-only. -->
+    <!-- AI chat side panel — scope reflects the chart's brush.
+         When the brush covers the full play, scope is
+         {kind: 'play'}; when the brush is a strict subset,
+         scope is {kind: 'range', from, to} so the bot focuses
+         on events inside that window. SessionViewer and
+         SessionDisplay share the same useChartCoordination
+         instance (keyed by player_id), so brushRange is
+         reactive without any event plumbing. -->
     <Teleport to="body">
       <div class="chat-dock" v-if="playId && playerId">
         <ChatPanel
-          :scope="{ kind: 'play', play_id: playId, player_id: playerId }"
+          :scope="chatScope"
           :scope-key="`viewer:${playId}`"
           variant="panel"
           :start-collapsed="true"
