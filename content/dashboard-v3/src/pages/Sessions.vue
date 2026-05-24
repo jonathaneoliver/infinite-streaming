@@ -110,6 +110,12 @@ const filters = ref<{
   content_id: string;
   play_id: string;
   classification: 'all' | 'starred' | 'interesting' | 'other';
+  // Test-harness origin filter. 'all' = no constraint, 'only' = keep
+  // plays stamped by the characterization framework (have an
+  // info=run_id_… label), 'hide' = exclude them so manual sessions
+  // surface without test-noise. See Characterization.vue for how
+  // the framework stamps these labels at the start of each run.
+  harness: 'all' | 'only' | 'hide';
   // Tristate label filter:
   //   - labels:        AND-required INCLUDES (row.labels must contain every entry)
   //   - labelsExclude: AND-required EXCLUDES (row.labels must contain NONE of these)
@@ -120,8 +126,59 @@ const filters = ref<{
 }>({
   player_id: '', group_id: '', content_id: '', play_id: '',
   classification: 'all',
+  harness: 'all',
   labels: [], labelsExclude: [],
 });
+
+// Test-harness label extraction. The characterization framework
+// stamps each play it runs with:
+//   info=run_id_<utc-compact>   e.g. info=run_id_20260524T070148Z
+//   info=platform_<name>        e.g. info=platform_ipad-sim
+//   info=test_<name>            e.g. info=test_rampup
+// These three label PREFIXES (with their value tail) are how
+// Characterization.vue groups plays into runs; this page lifts the
+// same convention to surface "this play came from the harness" on
+// the picker.
+function findLabelTail(r: SessionRow, prefix: string): string | null {
+  const pairs = Array.isArray(r.labels) ? r.labels : [];
+  for (const [label] of pairs) {
+    const s = String(label);
+    if (s.startsWith(prefix)) return s.slice(prefix.length);
+  }
+  return null;
+}
+function harnessRunId(r: SessionRow): string | null { return findLabelTail(r, 'info=run_id_'); }
+function harnessPlatform(r: SessionRow): string | null { return findLabelTail(r, 'info=platform_'); }
+function harnessTest(r: SessionRow): string | null { return findLabelTail(r, 'info=test_'); }
+function isHarnessRow(r: SessionRow): boolean { return harnessRunId(r) !== null; }
+
+// Pretty-print the UTC compact run_id (20260524T070148Z) as local
+// hh:mm. Falls back to the raw string if it doesn't match the
+// expected shape (older runs, manual stamps, etc.).
+function shortRunId(runID: string | null): string {
+  if (!runID) return '';
+  const m = runID.match(/^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z$/);
+  if (!m) return runID;
+  const utc = new Date(`${m[1]}-${m[2]}-${m[3]}T${m[4]}:${m[5]}:${m[6]}Z`);
+  if (!Number.isFinite(utc.getTime())) return runID;
+  return utc.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
+// Compact "harness pill" payload — what's shown on the row when the
+// play was stamped by the test framework. Null when the play isn't a
+// harness run.
+function harnessPill(r: SessionRow): { runId: string; platform: string; test: string; tooltip: string } | null {
+  const runID = harnessRunId(r);
+  if (!runID) return null;
+  const platform = harnessPlatform(r) ?? 'unknown';
+  const test = harnessTest(r) ?? '—';
+  return {
+    runId: shortRunId(runID),
+    platform,
+    test,
+    tooltip: `Test harness run\nrun_id: ${runID}\nplatform: ${platform}\ntest: ${test}`,
+  };
+}
 
 // rows / loading / error are computeds backed by playsQuery; declared
 // further down once the query is constructed.
@@ -285,6 +342,14 @@ function matchesLabels(r: SessionRow): boolean {
   return true;
 }
 
+function matchesHarness(r: SessionRow): boolean {
+  switch (filters.value.harness) {
+    case 'all':  return true;
+    case 'only': return isHarnessRow(r);
+    case 'hide': return !isHarnessRow(r);
+  }
+}
+
 function matches(r: SessionRow): boolean {
   const f = filters.value;
   return (!f.player_id || r.player_id === f.player_id)
@@ -292,6 +357,7 @@ function matches(r: SessionRow): boolean {
     && (!f.content_id || r.content_id === f.content_id)
     && (!f.play_id || r.play_id === f.play_id)
     && matchesClassification(r)
+    && matchesHarness(r)
     && matchesLabels(r);
 }
 
@@ -513,6 +579,7 @@ function clearFilters() {
   filters.value.content_id = '';
   filters.value.play_id = '';
   filters.value.classification = 'all';
+  filters.value.harness = 'all';
   filters.value.labels = [];
   filters.value.labelsExclude = [];
 }
@@ -938,6 +1005,22 @@ const showCustomInputs = computed(() => activeRangeId.value === 'custom');
               >{{ c.label }}</button>
             </div>
 
+            <div class="class-chip-wrap" title="Filter by test-harness origin (plays stamped with info=run_id_… by the characterization framework)">
+              <span class="ctrl-label-text">Harness:</span>
+              <button
+                v-for="c in ([
+                  { value: 'all',  label: 'All' },
+                  { value: 'only', label: '🧪 Only' },
+                  { value: 'hide', label: 'Hide' }
+                ] as const)"
+                :key="c.value"
+                type="button"
+                class="class-chip"
+                :class="{ active: filters.harness === c.value }"
+                @click="filters.harness = c.value"
+              >{{ c.label }}</button>
+            </div>
+
             <button type="button" class="btn btn-secondary" @click="clearFilters">Clear filters</button>
             <span class="match-count">{{ matchCount }}</span>
           </div>
@@ -1096,7 +1179,17 @@ const showCustomInputs = computed(() => activeRangeId.value === 'custom');
                   </td>
                   <td>{{ fmtDur(r.duration_ms) }}</td>
                   <td>{{ r.player_id || '' }}</td>
-                  <td>{{ r.content_id || '' }}</td>
+                  <td>
+                    <div>{{ r.content_id || '' }}</div>
+                    <div v-if="harnessPill(r)" class="harness-pill" :title="harnessPill(r)!.tooltip">
+                      🧪
+                      <span class="harness-test">{{ harnessPill(r)!.test }}</span>
+                      <span class="harness-sep">·</span>
+                      <span class="harness-platform">{{ harnessPill(r)!.platform }}</span>
+                      <span class="harness-sep">·</span>
+                      <span class="harness-run">{{ harnessPill(r)!.runId }}</span>
+                    </div>
+                  </td>
                   <td class="cell-play-id">
                     <a v-if="r.play_id && r.player_id" :href="viewerHref(r)" class="play-id-link">{{ r.play_id }}</a>
                     <template v-else>{{ r.play_id || '' }}</template>
@@ -1243,6 +1336,28 @@ const showCustomInputs = computed(() => activeRangeId.value === 'custom');
   font-weight: 700;
   border-color: #1d4ed8;
 }
+
+/* Harness origin pill — sub-line under the content cell when a
+   play was stamped by the characterization framework. Compact;
+   reuses the colour palette of the test-runner page so the visual
+   tie between Sessions ↔ Characterization is obvious. */
+.harness-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 2px;
+  padding: 1px 6px;
+  border-radius: 10px;
+  background: #ecfdf5;
+  border: 1px solid #6ee7b7;
+  color: #065f46;
+  font: 500 10px ui-monospace, SFMono-Regular, monospace;
+  white-space: nowrap;
+}
+.harness-test { font-weight: 700; }
+.harness-platform { color: #047857; }
+.harness-run { color: #065f46; opacity: 0.85; }
+.harness-sep { color: #34d399; }
 
 .btn {
   display: inline-block;
