@@ -197,6 +197,10 @@ interface StepRow {
   shifts_delta?: number;
   bitrate_min_mbps?: number;
   bitrate_max_mbps?: number;
+  // Optional explicit window — populated by the Go runner once we
+  // teach it to stamp per-step boundaries. When absent, stepWindow
+  // derives cumulatively from report.started_at + prior steps' hold.
+  started_at?: string;
 }
 
 interface AbortCycleRow {
@@ -423,6 +427,38 @@ function startupCycleWindow(c: StartupCycleRow): { startMs: number; endMs: numbe
 function abortCycleWindow(c: AbortCycleRow): { startMs: number; endMs: number } {
   const startMs = c.armed_at ? Date.parse(c.armed_at) : NaN;
   return { startMs, endMs: startMs + ABORT_OBSERVE_WINDOW_MS };
+}
+
+// stepWindow derives the [startMs, endMs] for a single step in a
+// non-cycle-style test (rampup / rampdown / pyramid). Steps don't
+// carry explicit timestamps in older runner output, so fall back to
+// cumulative hold-time from report.started_at:
+//   step[0].start  = report.started_at
+//   step[i].start  = report.started_at + sum(steps[0..i-1].hold_actual_s)
+//   step[i].end    = step[i].start + step[i].hold_actual_s
+// Inaccurate by whatever overhead the runner has between steps
+// (variant probe, settle wait, etc.) — close enough for a viewer
+// pre-roll. The runner can ship a per-step started_at later and
+// this helper transparently prefers it.
+function stepWindow(report: ReportBlob, stepIdx: number): { startMs: number; endMs: number } {
+  const steps = report.steps ?? [];
+  const s = steps[stepIdx];
+  if (!s) return { startMs: NaN, endMs: NaN };
+  let startMs: number;
+  if (s.started_at) {
+    startMs = Date.parse(s.started_at);
+  } else {
+    const reportStart = report.started_at ? Date.parse(report.started_at) : NaN;
+    if (!Number.isFinite(reportStart)) return { startMs: NaN, endMs: NaN };
+    let offsetMs = 0;
+    for (let i = 0; i < stepIdx; i++) {
+      const prev = steps[i];
+      offsetMs += ((prev?.hold_actual_s ?? prev?.hold_s ?? 0)) * 1000;
+    }
+    startMs = reportStart + offsetMs;
+  }
+  const holdMs = ((s.hold_actual_s ?? s.hold_s ?? 0)) * 1000;
+  return { startMs, endMs: startMs + holdMs };
 }
 </script>
 
@@ -857,7 +893,7 @@ function abortCycleWindow(c: AbortCycleRow): { startMs: number; endMs: number } 
                     <table class="steps-table">
                       <thead>
                         <tr>
-                          <th>#</th><th>cap</th><th>variant</th><th>exit</th><th>held</th><th>min/max buf</th><th>stalls</th><th>shifts</th>
+                          <th>#</th><th>cap</th><th>variant</th><th>exit</th><th>held</th><th>min/max buf</th><th>stalls</th><th>shifts</th><th>view</th>
                         </tr>
                       </thead>
                       <tbody>
@@ -870,6 +906,14 @@ function abortCycleWindow(c: AbortCycleRow): { startMs: number; endMs: number } 
                           <td>{{ s.min_buffer_s?.toFixed(1) ?? '—' }} / {{ s.max_buffer_s?.toFixed(1) ?? '—' }}</td>
                           <td>{{ s.stalls_delta ?? 0 }}</td>
                           <td>{{ s.shifts_delta ?? 0 }}</td>
+                          <td>
+                            <SessionViewerLink
+                              :player-id="expandedSteps.get(charRunKey(g.run_id, t))!.report!.player_id ?? ''"
+                              :play-id="expandedSteps.get(charRunKey(g.run_id, t))!.report!.play_ids?.[0]"
+                              :start-ms="stepWindow(expandedSteps.get(charRunKey(g.run_id, t))!.report!, i).startMs"
+                              :end-ms="stepWindow(expandedSteps.get(charRunKey(g.run_id, t))!.report!, i).endMs"
+                            />
+                          </td>
                         </tr>
                       </tbody>
                     </table>
