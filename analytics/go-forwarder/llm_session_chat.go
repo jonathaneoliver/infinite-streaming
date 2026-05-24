@@ -293,6 +293,13 @@ func (h *chatHandler) handleChat(w http.ResponseWriter, r *http.Request) {
 	// mid-loop turns.
 	req.Messages = sanitiseHistory(req.Messages)
 
+	// Trim old fat tool results so the conversation doesn't grow
+	// unboundedly. A typical find_plays call returns 20-50 KB of
+	// JSON; carrying 10 of those in history blows past every
+	// model's context window. Keep the most recent 3 tool results
+	// verbatim, stub out older ones whose body is >2 KB.
+	req.Messages = trimOldToolResults(req.Messages)
+
 	// Pre-flight budget check.
 	if h.cfg.llmBudgetUSD > 0 {
 		spent, err := SpentTodayUSD(r.Context(), h.cfg)
@@ -535,6 +542,57 @@ loop:
 	}
 
 	_ = emit("done", map[string]any{})
+}
+
+// Tool-result trimming bounds. These are conservative defaults —
+// the bot still gets recent verbatim results to chain reasoning,
+// while older ones shrink to a stub so the conversation doesn't
+// drift into context-overflow territory after ~10 tool-heavy turns.
+const (
+	toolKeepRecent     = 3    // last N tool messages stay verbatim
+	toolTrimThreshold  = 2000 // older messages > this byte count get stubbed
+)
+
+// trimOldToolResults replaces the content of old tool messages
+// with a tiny JSON stub describing what was there. Only fires on
+// messages older than toolKeepRecent AND larger than the
+// threshold — small results (e.g. cite() acknowledgements) pass
+// through untouched even when far back in history.
+//
+// The stub format teaches the LLM that data was here but is no
+// longer in context — so it can either ask the user, re-call the
+// tool, or proceed with reasoning from earlier text it kept.
+func trimOldToolResults(in []LLMMessage) []LLMMessage {
+	// Find all tool-message indices in reverse so we can split
+	// "recent N" from "older candidates".
+	toolIndices := []int{}
+	for i := len(in) - 1; i >= 0; i-- {
+		if in[i].Role == "tool" {
+			toolIndices = append(toolIndices, i)
+		}
+	}
+	if len(toolIndices) <= toolKeepRecent {
+		return in
+	}
+	out := make([]LLMMessage, len(in))
+	copy(out, in)
+	for _, idx := range toolIndices[toolKeepRecent:] {
+		msg := out[idx]
+		if len(msg.Content) <= toolTrimThreshold {
+			continue
+		}
+		stub := fmt.Sprintf(
+			`{"_truncated":true,"_tool":%q,"_orig_bytes":%d,"_note":"older tool result trimmed for context budget; re-call the tool or ask the user if you need this data"}`,
+			msg.Name, len(msg.Content),
+		)
+		out[idx] = LLMMessage{
+			Role:       msg.Role,
+			ToolCallID: msg.ToolCallID,
+			Name:       msg.Name,
+			Content:    stub,
+		}
+	}
+	return out
 }
 
 // sanitiseHistory drops messages that would make the upstream
