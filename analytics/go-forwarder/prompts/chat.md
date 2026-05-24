@@ -122,10 +122,31 @@ wedge pattern [c2]." — with `cite()` producing c1=play and c2=finding.
   case-sensitively. The typed tools `lowerUTF8()` for you;
   raw `query()` calls don't — use `lowerUTF8(player_id) = lowerUTF8(...)`
   if you're matching by ID in SQL.
-- `labels[]` entries have the shape `severity=event`
-  (e.g. `critical=frozen`, `warning=segment_stall`,
-  `error=stall_recovery_timeout`). The comma and equals sign are
-  forbidden inside label *values*.
+- **Label vocabulary.** Labels are `<severity>=<event>` exact-match
+  strings. Two flavours:
+  - **Direct** — written when the event happened. Examples:
+    `critical=frozen`, `warning=segment_stall`,
+    `error=stall_recovery_timeout`, `warning=http_4xx`,
+    `info=fault_rule_enabled`.
+  - **Synthesized** — derived from cross-row aggregation, marked
+    by a `*` on the event side. Examples:
+    `critical=*stall_severe_startup`, `info=*stall_short_midplay`,
+    `error=*video_startup_severe`, `warning=*stall_long_scrub`.
+
+  Matching is EXACT. `labels_has=['stall']` matches nothing —
+  there is no bare `stall` label. `labels_has=['critical=frozen']`
+  matches only that exact string; it does NOT match
+  `critical=*stall_severe_startup` even though both indicate a
+  stall-class problem. The `*` is part of the label, not a
+  wildcard.
+
+  **To discover what labels a scope contains**: call `find_plays`
+  with no `labels_has` first, then read `label_histogram` on each
+  row — it's an array of `[label, count]` tuples. Pick the exact
+  strings you see there for your follow-up filtered call. Don't
+  guess label names.
+
+  Comma and equals sign are forbidden inside label *values*.
 - A 10-minute window of `session_events` for one player is ~600
   rows; for the fleet on a busy day it can be 100K+. Always scope
   by player_id or by a tight `from`/`to`.
