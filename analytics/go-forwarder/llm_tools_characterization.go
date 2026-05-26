@@ -85,7 +85,15 @@ func listCharacterizationRunsTool(cfg config) Tool {
 				params["classification"] = a.Classification
 			}
 			if a.Since != "" {
-				conds = append(conds, "started_at >= parseDateTime64BestEffort({since:String}, 3, 'UTC')")
+				// parseDateTime64BestEffort returns Nullable(DateTime64),
+				// and CH 24.8 refuses `DateTime64 >= Nullable(DateTime64)`
+				// (No operation greaterOrEquals between String and
+				// DateTime64). Use the *OrZero variant — returns a
+				// concrete DateTime64 so the comparison binds. The bot
+				// only ever passes a real ISO timestamp here, so the
+				// "Zero" fallback (epoch) just disables the filter
+				// rather than corrupting it.
+				conds = append(conds, "started_at >= parseDateTime64BestEffortOrZero({since:String}, 3, 'UTC')")
 				params["since"] = a.Since
 			}
 			q := fmt.Sprintf(`
