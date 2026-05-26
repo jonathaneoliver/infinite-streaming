@@ -43,6 +43,13 @@ import StatusBanners from '@/components/StatusBanners.vue';
 // accordion + cursor sync along automatically. Brush stays hidden
 // while live-following; appears once the operator pauses.
 import SessionDisplay from '@/components/SessionDisplay.vue';
+import ChatPanel from '@/components/chat/ChatPanel.vue';
+import type { ChatScope } from '@/types/chat';
+
+// AI chat scope — testing-fleet kind. No specific session in scope;
+// the bot's job here is fleet triage ("which sessions need
+// attention") or harness-knowledge Q&A about the picker as a whole.
+const chatScope: ChatScope = { kind: 'testing-fleet' };
 
 const { players, isLoading, isError, error, sseState, refetch, deletePlayer } = usePlayers();
 const { groups, link, disband } = useGroups();
@@ -331,8 +338,33 @@ const sortedPlayers = computed<PlayerRecord[]>(() => {
         </template>
       </div>
     </div>
+    <Teleport to="body">
+      <div class="chat-dock">
+        <ChatPanel
+          :scope="chatScope"
+          scope-key="testing-fleet"
+          variant="panel"
+          :start-collapsed="true"
+        />
+      </div>
+    </Teleport>
   </ShellLayout>
 </template>
+
+<style>
+/* Unscoped — Teleport-to-body element needs the parent style applied
+   directly. Same pattern as SessionViewer.vue / Sessions.vue /
+   Characterization.vue / TestingSession.vue. */
+.chat-dock {
+  position: fixed;
+  top: var(--header-height, 64px);
+  right: 0;
+  bottom: 0;
+  z-index: 50;
+  box-shadow: var(--shadow-md);
+  background: #fff;
+}
+</style>
 
 <style scoped>
 .page {

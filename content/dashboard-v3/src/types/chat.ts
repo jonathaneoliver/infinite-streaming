@@ -60,7 +60,8 @@ export interface ToolCall {
 
 /** Scope hint sent to the backend. */
 export interface ChatScope {
-  kind?: '' | 'fleet' | 'play' | 'range' | 'characterization';
+  kind?: '' | 'fleet' | 'play' | 'range' | 'characterization'
+       | 'testing-session' | 'testing-fleet';
   // player_id is helpful context on play / range scopes — the bot
   // can build deep-link citations without first calling
   // get_play_summary to look it up.
@@ -74,6 +75,11 @@ export interface ChatScope {
   // test_name) row in the characterization_runs table — i.e. one
   // expanded card on Characterization.vue.
   test_name?: string;
+  // session_id is the proxy port handle for a LIVE testing session
+  // (1-8 on testing-session.html). Distinct from session_events.session_id
+  // — this one is the proxy routing key the operator is mutating.
+  // Empty on testing-fleet scope; populated on testing-session.
+  session_id?: string;
 }
 
 /** Citation kinds — the dashboard renders one CitationCard per kind. */

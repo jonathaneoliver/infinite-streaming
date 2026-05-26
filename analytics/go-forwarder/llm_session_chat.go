@@ -88,14 +88,29 @@ type ChatRequest struct {
 // ChatScope tells the system prompt + ledger what context the
 // dashboard is asking from.
 type ChatScope struct {
-	Kind     string `json:"kind"`                // "fleet" | "play" | "range" | "characterization" | ""
-	PlayerID string `json:"player_id,omitempty"` // for "play" / "range" — bot uses it to build citations
+	Kind     string `json:"kind"`                // see below for the closed set
+	PlayerID string `json:"player_id,omitempty"` // for "play" / "range" / "testing-session" — citations + scope
 	PlayID   string `json:"play_id,omitempty"`
 	From     string `json:"from,omitempty"`      // for "range"
 	To       string `json:"to,omitempty"`
 	RunID    string `json:"run_id,omitempty"`    // for "characterization"
 	Cycle    int    `json:"cycle,omitempty"`
+	TestName string `json:"test_name,omitempty"` // narrows characterization to one (run_id, test_name)
+	// SessionID is the proxy port handle (1-8) for a LIVE testing
+	// session — DIFFERENT from session_events.session_id. Populated
+	// on the "testing-session" scope kind; empty elsewhere.
+	SessionID string `json:"session_id,omitempty"`
 }
+
+// Closed set of Kind values. The system prompt's `# Modes` section
+// has a block for each.
+//   ""                 — no scope (legacy clients)
+//   "fleet"            — picker pages (sessions.html, ask.html)
+//   "play"             — one archived play (session-viewer, brush=full)
+//   "range"            — brushed window on one archived play
+//   "characterization" — characterization test run (with optional run_id+test_name)
+//   "testing-session"  — LIVE testing session (testing-session.html)
+//   "testing-fleet"    — testing picker page (testing.html)
 
 // chatHandler is the registered handler for POST /api/v2/chat.
 // Holds the per-process tool registry + cached catalog. Built once
@@ -984,6 +999,28 @@ func (h *chatHandler) buildSystemPrompt(scope ChatScope, operatorTZ string) stri
 		case "characterization":
 			fmt.Fprintf(&b, "The user is on a characterization run. run_id=%s, cycle=%d.\n",
 				scope.RunID, scope.Cycle)
+		case "testing-session":
+			fmt.Fprintf(&b, "The user is on a LIVE testing session — they are "+
+				"actively running a test (configuring faults / shaping the "+
+				"network / running patterns), NOT investigating an archive. "+
+				"player_id=%s, session_id=%s (proxy port handle). They are "+
+				"likely to ask 'what fault would simulate X' / 'what's the right "+
+				"shape for Y' / 'why is the player doing Z right now'. Read "+
+				"the harness-cli + fault-injection-wire-contract standards "+
+				"BEFORE recommending specific harness commands or proxy "+
+				"settings — do NOT invent flag names. You MAY recommend "+
+				"copy-pasteable harness commands or UI button clicks; you "+
+				"may NOT mutate the proxy directly (no such tools exposed "+
+				"on this surface; operator clicks the buttons themselves).\n",
+				scope.PlayerID, scope.SessionID)
+		case "testing-fleet":
+			b.WriteString("The user is on the testing-monitor picker — " +
+				"they're choosing which session to drill into, or asking " +
+				"about the active test fleet as a whole. Likely questions: " +
+				"'which sessions need attention', 'is anything misbehaving " +
+				"across the fleet'. Use find_plays / get_play_summary for " +
+				"current-session triage; cite testing-session pages with " +
+				"the player_id as the deep-link target.\n")
 		}
 	}
 	return b.String()
