@@ -1786,6 +1786,11 @@ func main() {
 
 	go app.trackPortThroughput()
 	app.restoreTransportFaultSchedules()
+	// Re-install tc rate/delay/loss state for every session that
+	// survived the proxy restart. Without this, pre-existing sessions
+	// keep their session-map values but the kernel forgot — they end
+	// up uncapped. Issue #480.
+	app.restoreShapeApplication()
 	// 100 ms TCP_INFO sampler — folds smoothed RTT / jitter / lifetime
 	// min / RTO into per-session windows that get drained on each
 	// snapshot broadcast (issue #401). Linux-only kernel read; the
@@ -3963,6 +3968,47 @@ func (a *App) restoreTransportFaultSchedules() {
 		faultType, consecutive, consecutiveUnits, frequency := transportFaultConfigFromSession(session)
 		a.armTransportFaultLoop(port, faultType, consecutive, consecutiveUnits, frequency)
 	}
+}
+
+// restoreShapeApplication re-applies the tc rate/delay/loss state for
+// every session in the loaded session map. Required on boot because
+// the container's network namespace is recreated on restart — tc
+// classes/filters don't survive, but the session map (persisted on
+// disk via saveSessionList) does. Without this, sessions that
+// pre-existed the restart end up running uncapped, which silently
+// breaks both operator-set rate overrides and the deployment baseline
+// cap (issue #480). Matches restoreTransportFaultSchedules' pattern.
+func (a *App) restoreShapeApplication() {
+	if a.traffic == nil {
+		return
+	}
+	seenPorts := map[int]struct{}{}
+	restored, skipped := 0, 0
+	for _, session := range a.getSessionList() {
+		portStr := getString(session, "x_forwarded_port")
+		if portStr == "" {
+			skipped++
+			continue
+		}
+		port, err := strconv.Atoi(portStr)
+		if err != nil {
+			skipped++
+			continue
+		}
+		if _, ok := seenPorts[port]; ok {
+			continue
+		}
+		seenPorts[port] = struct{}{}
+		// applySessionShaping reads nftables_bandwidth_mbps + delay + loss
+		// from the session map, runs them through a.effectiveRate (so
+		// rate=0 resolves to the deployment baseline), and installs the
+		// kernel state. Pattern is owned by applySessionShaping's early
+		// return when pattern_enabled is set; we don't need to special-
+		// case it here.
+		a.applySessionShaping(session, port)
+		restored++
+	}
+	log.Printf("shape restoration on boot: restored=%d skipped=%d baseline_mbps=%d", restored, skipped, a.defaultRateMbps)
 }
 
 func (a *App) handleNftPattern(w http.ResponseWriter, r *http.Request) {
