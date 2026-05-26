@@ -59,10 +59,20 @@ const fields = computed(() => {
   // ungrouped so the operator can confirm linking actually landed.
   const gid = raw?.group_id;
   const groupValue = typeof gid === 'string' && gid.length ? gid : '—';
+  // Test-framework labels: only surface `test` + `run_id` when set
+  // (operator-supplied via `harness labels set` from the test runner).
+  // Skip when absent — non-test sessions shouldn't see empty rows.
+  // Other test labels (cycle_idx, cap_mbps, total_stalls, etc.)
+  // intentionally omitted — many of those are stamped outcomes that
+  // duplicate measurement data and would confuse the operator. Issue
+  // followup for richer label categorization if needed.
+  const labels: Record<string, string> = (p as any).labels ?? {};
+  const testLabel = typeof labels.test === 'string' ? labels.test : '';
+  const runIDLabel = typeof labels.run_id === 'string' ? labels.run_id : '';
   // Master URL is the manifest entry the player loaded; the legacy
   // page also showed the "Last Request URL" (the most-recent network
   // log entry's URL); we don't track that here yet so omit it.
-  return [
+  const out: { label: string; value: string }[] = [
     { label: 'Player ID', value: p.id ?? '—' },
     { label: 'Display ID', value: String(p.display_id ?? '—') },
     { label: 'Play ID', value: cp?.id ?? '—' },
@@ -79,6 +89,12 @@ const fields = computed(() => {
     { label: 'Loops (server)', value: String(p.loop_count_server ?? 0) },
     { label: 'Control Rev', value: p.control_revision ?? '—' },
   ];
+  // Append test labels at the END so they don't push lifecycle
+  // identifiers off-screen on narrow viewports, but still surface
+  // when present.
+  if (testLabel) out.push({ label: 'Test', value: testLabel });
+  if (runIDLabel) out.push({ label: 'Run ID', value: runIDLabel });
+  return out;
 });
 
 const developerFields = computed(() => {
