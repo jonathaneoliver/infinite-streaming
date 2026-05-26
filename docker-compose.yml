@@ -14,9 +14,14 @@ services:
     user: "0:0"
     volumes:
       - ${CONTENT_DIR:-./sample-content}:/media
+      # Mounted to match the forwarder's /claude mount so this init
+      # can pre-create + chmod the subdirs the forwarder (distroless
+      # nonroot UID 65532) needs to write into. Host source comes
+      # from FORWARDER_CLAUDE_DIR_HOST; defaults match the forwarder.
+      - ${FORWARDER_CLAUDE_DIR_HOST:-./.claude}:/claude
     command: >-
-      sh -c "mkdir -p /media/logs /media/grafana &&
-             chmod 0777 /media/logs /media/grafana"
+      sh -c "mkdir -p /media/logs /media/grafana /claude/chats &&
+             chmod 0777 /media/logs /media/grafana /claude/chats"
     restart: "no"
     networks:
       - app_network
