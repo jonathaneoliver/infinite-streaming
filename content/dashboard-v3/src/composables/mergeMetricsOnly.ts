@@ -25,7 +25,23 @@ const METRIC_GROUPS = [
 ] as const satisfies readonly (keyof PlayerRecord)[];
 
 // Top-level scalars that are server-derived runtime state.
-const METRIC_SCALARS = ['last_seen_at', 'loop_count_server'] as const satisfies readonly (keyof PlayerRecord)[];
+// user_agent / origination_ip / player_ip / first_seen_at added
+// 2026-05-26 — these are server-set fields populated AFTER the
+// initial /api/v2/players/{id} fetch (the iOS app's first metrics
+// POST sets user_agent; proxy sets the IPs on first request; etc.).
+// Without merging them, the cache stays empty forever (until the
+// user hard-refreshes) because SSE metric ticks were silently
+// dropping the populated values. server_received_at_ms is
+// readonly server clock — also safe to merge.
+const METRIC_SCALARS = [
+  'last_seen_at',
+  'loop_count_server',
+  'user_agent',
+  'origination_ip',
+  'player_ip',
+  'first_seen_at',
+  'server_received_at_ms',
+] as const satisfies readonly (keyof PlayerRecord)[];
 
 export function mergeMetricsOnly(
   existing: PlayerRecord,
