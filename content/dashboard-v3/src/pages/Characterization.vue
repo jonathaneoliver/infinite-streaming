@@ -16,6 +16,8 @@
 import { computed, ref, onMounted } from 'vue';
 import ShellLayout from '@/components/ShellLayout.vue';
 import SessionViewerLink from '@/components/SessionViewerLink.vue';
+import ChatPanel from '@/components/chat/ChatPanel.vue';
+import type { ChatScope } from '@/types/chat';
 
 type TestName = 'rampup' | 'rampdown' | 'pyramid' | 'abort' | 'startup';
 const TEST_NAMES: TestName[] = ['rampup', 'rampdown', 'pyramid', 'abort', 'startup'];
@@ -282,6 +284,24 @@ interface ReportBlob {
 
 // Per-card expand state + cache. Map key = (run_id, test_name).
 const expandedSteps = ref<Map<string, { open: boolean; report?: ReportBlob; loading?: boolean; error?: string }>>(new Map());
+
+// Chat scope: narrows to a single (run_id, test_name) when exactly
+// one Details card is expanded. If zero or 2+ cards are open the
+// chat falls back to characterization-fleet scope so the bot reasons
+// about the whole page.
+const chatScope = computed<ChatScope>(() => {
+  const open: { run_id: string; test_name: string }[] = [];
+  for (const [key, entry] of expandedSteps.value.entries()) {
+    if (entry.open) {
+      const [run_id, test_name] = key.split('|');
+      open.push({ run_id, test_name });
+    }
+  }
+  if (open.length === 1) {
+    return { kind: 'characterization', run_id: open[0].run_id, test_name: open[0].test_name };
+  }
+  return { kind: 'characterization' };
+});
 
 async function toggleSteps(runID: string, testName: TestName) {
   const key = charRunKey(runID, testName);
@@ -958,8 +978,32 @@ function stepWindow(report: ReportBlob, stepIdx: number): { startMs: number; end
         </div>
       </div>
     </main>
+    <Teleport to="body">
+      <div class="chat-dock">
+        <ChatPanel
+          :scope="chatScope"
+          scope-key="characterization:fleet"
+          variant="panel"
+          :start-collapsed="true"
+        />
+      </div>
+    </Teleport>
   </ShellLayout>
 </template>
+
+<style>
+/* Unscoped — Teleport-to-body element needs the parent style applied
+   directly. Same pattern as Sessions.vue / SessionViewer.vue. */
+.chat-dock {
+  position: fixed;
+  top: var(--header-height, 64px);
+  right: 0;
+  bottom: 0;
+  z-index: 50;
+  box-shadow: var(--shadow-md);
+  background: #fff;
+}
+</style>
 
 <style scoped>
 /* Light-theme palette to match Sessions.vue. Reads var(--bg-*, …)

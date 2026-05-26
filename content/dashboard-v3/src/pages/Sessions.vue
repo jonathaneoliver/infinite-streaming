@@ -1276,7 +1276,20 @@ const showCustomInputs = computed(() => activeRangeId.value === 'custom');
 
 <style scoped>
 .page-title-bar { font-size: 16px; font-weight: 600; }
-.ism-content-wide { width: 100%; padding: 16px 24px; box-sizing: border-box; }
+.ism-content-wide {
+  width: 100%;
+  padding: 16px 24px;
+  box-sizing: border-box;
+  /* min-width: 0 + overflow-x: hidden so the inner table-wrap +
+     table can shrink with the available width when the AI panel
+     widens. Without this, a child that picked a min-content width
+     bigger than the shrunk parent (e.g. the picker-table when many
+     columns are present) pushes ism-content-wide past its parent
+     and into the AI dock area. Same class of bug as
+     SessionViewer.vue's .content; same fix. */
+  min-width: 0;
+  overflow-x: hidden;
+}
 .page-header { margin-bottom: 20px; }
 .page-title { font-size: 32px; font-weight: 400; margin-bottom: 8px; color: var(--text-primary); }
 .page-subtitle { font-size: 14px; color: var(--text-secondary); }

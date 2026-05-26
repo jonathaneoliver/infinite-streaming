@@ -1464,7 +1464,11 @@ function skipToEnd() {
 .brush-labels-row {
   position: relative;
   margin: 4px 40px 0;
-  height: 16px;
+  /* Two-line: edge labels (scrubMin/scrubMax) on the first line,
+     focus-label pills on the second so the centered pill cannot
+     overlap the date+time edge strings when the rail is narrow
+     or the focus window is near an edge. */
+  height: 34px;
   font-size: 10.5px;
   color: #6b7280;
   font-family: ui-monospace, monospace;
@@ -1474,7 +1478,7 @@ function skipToEnd() {
 .rail-edge-label:last-child  { right: 0; }
 .rail-focus-label {
   position: absolute;
-  top: 0;
+  top: 16px;
   display: inline-flex;
   align-items: baseline;
   gap: 6px;

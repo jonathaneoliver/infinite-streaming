@@ -260,11 +260,24 @@ const backHref = '/dashboard/v3/sessions.html';
 </style>
 
 <style scoped>
-.page { display: flex; }
+.page { display: flex; min-width: 0; }
 .content {
   padding: 14px 20px;
   margin: 0 auto;
   flex: 1;
+  /* min-width: 0 — flex items default to min-width: auto, which
+     lets intrinsic child widths (timeline/chart canvases sized to
+     their original viewport) push the item past its flex parent.
+     Setting min-width: 0 lets flex shrink .content to its parent's
+     bounds when the AI panel reduces available space. */
+  min-width: 0;
+  /* overflow-x: hidden — safety net for any grand-child (a Chart.js
+     canvas, vis-timeline) that still renders at an explicit pixel
+     width bigger than .content. Without this they'd bleed past
+     .content's right edge into the AI dock area. Charts that need
+     to be readable at narrow widths should observe their container
+     and call .resize() — this is a clip, not a layout fix for them. */
+  overflow-x: hidden;
 }
 .header-title { font-size: 16px; font-weight: 600; }
 

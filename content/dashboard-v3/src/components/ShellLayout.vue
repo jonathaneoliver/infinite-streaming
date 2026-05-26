@@ -123,8 +123,37 @@ function onStorage(e: StorageEvent) {
     collapsed.value = e.newValue === '1';
   }
 }
-onMounted(() => window.addEventListener('storage', onStorage));
-onBeforeUnmount(() => window.removeEventListener('storage', onStorage));
+
+// Publish the header's real rendered height to --header-height on
+// :root so floating siblings (notably the Teleport-to-body chat
+// dock) can position their `top` flush with the header's bottom
+// regardless of header height tweaks (banner row, mobile, etc.).
+// Previously the chat dock relied on a 64px fallback and ended up
+// overlapping the header when the var wasn't set.
+const headerEl = ref<HTMLElement | null>(null);
+let headerObs: ResizeObserver | null = null;
+function publishHeaderHeight() {
+  const h = headerEl.value?.getBoundingClientRect().height ?? 64;
+  document.documentElement.style.setProperty('--header-height', `${Math.round(h)}px`);
+}
+onMounted(() => {
+  window.addEventListener('storage', onStorage);
+  // ism-header is the only <header class="ism-header"> in the tree.
+  headerEl.value = document.querySelector('.ism-header');
+  publishHeaderHeight();
+  if (headerEl.value && typeof ResizeObserver !== 'undefined') {
+    headerObs = new ResizeObserver(publishHeaderHeight);
+    headerObs.observe(headerEl.value);
+  }
+  window.addEventListener('resize', publishHeaderHeight);
+});
+onBeforeUnmount(() => {
+  window.removeEventListener('storage', onStorage);
+  window.removeEventListener('resize', publishHeaderHeight);
+  headerObs?.disconnect();
+  headerObs = null;
+  document.documentElement.style.removeProperty('--header-height');
+});
 
 const appClass = computed(() => ({
   'has-sidebar': true,
@@ -341,6 +370,13 @@ const appClass = computed(() => ({
   min-width: 0;
   display: flex;
   flex-direction: column;
+  /* Reserve space for the floating ChatPanel dock (when present)
+     so widening the panel reflows the page instead of covering
+     the chart content. ChatPanel writes its current width into
+     --chat-panel-width on :root (see ChatPanel.vue's onMounted
+     / resize handler); default 0 means no panel mounted. */
+  padding-right: var(--chat-panel-width, 0px);
+  transition: padding-right 60ms ease-out;
 }
 
 .ism-header {
