@@ -61,6 +61,26 @@ const CONTROL_FIELDS = [
 
 const CONTROL_SET = new Set<string>(CONTROL_FIELDS);
 
+// Metric BLOB fields — server-derived nested objects. The proxy
+// sometimes emits SSE `updated` events with PARTIAL blobs (e.g. on
+// state-change events only carrying state + event_time + a few
+// timing values). If we replaced the whole blob wholesale, we'd
+// lose every field the partial didn't include — then the panel
+// shows "—" for fields the data actually has, until the next full
+// snapshot ~1s later restores them.
+//
+// Solution: deep-merge these per-field. Stale-by-one-tick is
+// always better than blank; the next full snapshot restores the
+// up-to-date value.
+const METRIC_BLOBS = [
+  'player_metrics',
+  'server_metrics',
+  'fault_counters',
+  'current_play',
+] as const satisfies readonly (keyof PlayerRecord)[];
+
+const METRIC_BLOB_SET = new Set<string>(METRIC_BLOBS);
+
 export function mergeMetricsOnly(
   existing: PlayerRecord,
   incoming: PlayerRecord,
@@ -70,7 +90,33 @@ export function mergeMetricsOnly(
     if (CONTROL_SET.has(k as string)) continue;          // operator-mutable; preserve existing
     const v = (incoming as any)[k];
     if (v === undefined) continue;                       // missing in tick → keep existing
+    // Metric BLOBS get deep-merged: existing fields are preserved
+    // for any keys the incoming blob doesn't have. Anything else
+    // (scalars, strings) gets the incoming value as-is.
+    if (METRIC_BLOB_SET.has(k as string) && v !== null && typeof v === 'object') {
+      const prev = (existing as any)[k];
+      if (prev !== null && typeof prev === 'object') {
+        out[k] = mergeShallow(prev, v);
+        continue;
+      }
+    }
     out[k] = v;
   }
   return out as PlayerRecord;
+}
+
+/**
+ * mergeShallow — clone `prev`, then copy every DEFINED key from
+ * `next` over the top. A defined null in `next` overwrites; a true
+ * `undefined` (missing key) preserves prev's value. Used for the
+ * metric BLOBS to absorb partial SSE updates without losing fields.
+ */
+function mergeShallow<T extends object>(prev: T, next: Partial<T>): T {
+  const out: any = { ...prev };
+  for (const k of Object.keys(next) as (keyof T)[]) {
+    const v = (next as any)[k];
+    if (v === undefined) continue;
+    out[k] = v;
+  }
+  return out as T;
 }
