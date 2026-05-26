@@ -99,16 +99,66 @@ func showShape(client *api.Client, ctx context.Context, pid string, asJSON bool)
 	if err != nil {
 		return err
 	}
+	// Read the deployment baseline so we can distinguish "operator
+	// hasn't set anything" (rate==null/0; effective = baseline) from
+	// "operator explicitly set N Mbps" (rate==N>0; effective = N).
+	// Failure to fetch info is non-fatal — we just lose the baseline
+	// annotation and fall back to printing whatever Shape carries.
+	info, infoErr := client.Info(ctx)
 	if asJSON {
 		return format.JSON(os.Stdout, map[string]any{
-			"player_id": pid, "shape": rec.Shape, "etag": etag,
+			"player_id":         pid,
+			"shape":             rec.Shape,
+			"etag":              etag,
+			"default_rate_mbps": info.DefaultRateMbps,
 		})
 	}
-	if rec.Shape == nil {
-		fmt.Printf("%s: no shaping\n", pid)
-		return nil
+	rateOverride := operatorRateMbps(rec.Shape)
+	switch {
+	case rateOverride > 0:
+		// Explicit override. Note where it sits relative to baseline so
+		// the operator can tell at a glance whether they're tighter
+		// than the deployment floor.
+		var hint string
+		if info.DefaultRateMbps > 0 {
+			switch {
+			case rateOverride < float64(info.DefaultRateMbps):
+				hint = fmt.Sprintf(" (tighter than baseline %d Mbps)", info.DefaultRateMbps)
+			case rateOverride > float64(info.DefaultRateMbps):
+				hint = fmt.Sprintf(" (above baseline %d Mbps)", info.DefaultRateMbps)
+			default:
+				hint = " (matches baseline)"
+			}
+		}
+		fmt.Printf("%s: rate override %g Mbps%s\n", pid, rateOverride, hint)
+	case info.DefaultRateMbps > 0:
+		// "No override" on a deployment with a baseline → baseline applies.
+		fmt.Printf("%s: at baseline (no override) — kernel cap %d Mbps\n", pid, info.DefaultRateMbps)
+	default:
+		// "No override" on a deployment with no baseline → truly unlimited.
+		if infoErr != nil {
+			fmt.Printf("%s: no shaping (couldn't read /api/v2/info: %v)\n", pid, infoErr)
+		} else {
+			fmt.Printf("%s: no shaping (deployment baseline is 0 — unlimited)\n", pid)
+		}
 	}
-	return format.JSON(os.Stdout, rec.Shape)
+	if rec.Shape != nil {
+		// Emit the full Shape too — the human-readable summary above
+		// covers the rate dimension; this surfaces delay/loss/pattern
+		// so the operator sees the full picture in one command.
+		return format.JSON(os.Stdout, rec.Shape)
+	}
+	return nil
+}
+
+// operatorRateMbps extracts the operator's rate override from a Shape.
+// Returns 0 when the shape is nil, the field is unset, or the field
+// is 0 — all three mean "no override" under the issue #480 framing.
+func operatorRateMbps(sh *proxy.Shape) float64 {
+	if sh == nil || sh.RateMbps == nil {
+		return 0
+	}
+	return float64(*sh.RateMbps)
 }
 
 func showPattern_(client *api.Client, ctx context.Context, pid string, asJSON bool) error {
