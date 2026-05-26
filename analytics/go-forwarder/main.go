@@ -248,6 +248,11 @@ type row struct {
 	LoopCountServer          uint32  `json:"loop_count_server"`
 	PlayerRestarts           uint32  `json:"player_restarts"`
 	ProfileShiftCount        uint32  `json:"profile_shift_count"`
+	// EffectiveRateLimitMbps is the kernel-enforced cap at write time:
+	// max(operator override, deployment baseline). 0 means uncapped.
+	// Distinct from nftables_bandwidth_mbps (operator intent). Stamped
+	// by the proxy in normalizeSessionsForResponse. Issue #480.
+	EffectiveRateLimitMbps   float32 `json:"effective_rate_limit_mbps"`
 	LastEvent                string  `json:"last_event"`
 	TriggerType              string  `json:"trigger_type"`
 	EventTime                string  `json:"event_time"`
@@ -668,6 +673,8 @@ func toRow(ts string, revision uint64, sessionID string, s map[string]interface{
 		// key. profile_shift_count IS prefixed.
 		PlayerRestarts:           uint32(getU64(s, "player_restarts")),
 		ProfileShiftCount:        uint32(getU64(s, "player_metrics_profile_shift_count")),
+		// proxy stamps this top-level on every session normalize.
+		EffectiveRateLimitMbps:   getF32(s, "effective_rate_limit_mbps"),
 		LastEvent:                getStr(s, "player_metrics_last_event"),
 		TriggerType:              getStr(s, "player_metrics_trigger_type"),
 		EventTime:                getStr(s, "player_metrics_event_time"),

@@ -68,44 +68,60 @@ const series: SeriesSpec[] = [
   {
     label: 'Limit (rate_mbps)',
     color: '#f59e0b',
-    // The displayed "Limit" is the *effective* shaper ceiling at this
-    // moment, in priority order:
+    // Mirror legacy session-shell.js:2397-2408 — the displayed "Limit"
+    // is the *effective* shaper ceiling at this moment, which depends
+    // on whether a pattern is running:
     //   1. Pattern enabled & runtime rate set → that's what the kernel
     //      is actually enforcing right now (`pattern_rate_runtime_mbps`)
     //   2. Otherwise, if a pattern step is active → that step's rate
-    //   3. Otherwise, if operator override active → `shape.rate_mbps`
-    //      (positive means operator dragged the slider; 0 means
-    //      "no override," which under issue #480 means "use baseline")
-    //   4. Otherwise → `raw_session.effective_rate_limit_mbps` — the
-    //      proxy-derived field that always reflects what the kernel
-    //      is enforcing (operator override OR deployment baseline).
-    //      0 means truly uncapped.
+    //   3. Otherwise → the static `shape.rate_mbps`
+    //   4. Otherwise → 0 (no shaping configured; still draw the line
+    //      so the operator can see "no ceiling enforced" rather than a
+    //      missing series)
+    //
+    // NB: this series reflects OPERATOR OVERRIDE only — when the slider
+    // is at 0 ("no override") the line drops to 0 because there is no
+    // operator-imposed limit. The deployment baseline is plotted by
+    // the separate "Effective Limit" series (hidden by default; toggle
+    // via legend). Issue #480.
     accessor: (p: PlayerRecord) => {
       const sh = p.shape;
-      if (sh) {
-        const runtime = sh.pattern_rate_runtime_mbps;
-        if (sh.pattern && Number.isFinite(runtime as number) && (runtime as number) >= 0) {
-          return runtime as number;
-        }
-        const stepIdx = Number(sh.pattern_step_runtime ?? sh.pattern_step ?? 0);
-        const steps = sh.pattern?.steps ?? [];
-        if (stepIdx > 0 && stepIdx <= steps.length) {
-          const r = Number(steps[stepIdx - 1]?.rate_mbps);
-          if (Number.isFinite(r) && r >= 0) return r;
-        }
-        // Operator override is positive iff the slider was dragged off
-        // the "no override" position. shape.rate_mbps is undefined when
-        // there's no override → fall through to the baseline.
-        if (Number.isFinite(sh.rate_mbps as number) && (sh.rate_mbps as number) > 0) {
-          return sh.rate_mbps as number;
-        }
+      if (!sh) return 0;
+      const runtime = sh.pattern_rate_runtime_mbps;
+      if (sh.pattern && Number.isFinite(runtime as number) && (runtime as number) >= 0) {
+        return runtime as number;
       }
-      // Fall back to the deployment baseline (or 0 when truly uncapped).
-      // raw_session is the v1 passthrough; effective_rate_limit_mbps is
-      // stamped by the proxy on every snapshot. Issue #480.
-      const eff = (p as any).raw_session?.effective_rate_limit_mbps;
-      if (Number.isFinite(eff)) return eff as number;
+      const stepIdx = Number(sh.pattern_step_runtime ?? sh.pattern_step ?? 0);
+      const steps = sh.pattern?.steps ?? [];
+      if (stepIdx > 0 && stepIdx <= steps.length) {
+        const r = Number(steps[stepIdx - 1]?.rate_mbps);
+        if (Number.isFinite(r) && r >= 0) return r;
+      }
+      if (Number.isFinite(sh.rate_mbps as number)) return sh.rate_mbps as number;
       return 0;
+    },
+    stepped: true,
+  },
+  {
+    // Effective Limit — kernel-enforced cap at this instant: max of
+    // operator override and deployment baseline; 0 only when truly
+    // uncapped. Distinct from "Limit (rate_mbps)" above which reflects
+    // operator intent only. Off by default — the operator enables it
+    // when investigating "why is throughput capped at X with no
+    // visible operator limit?"
+    //
+    // First-class CH column (issue #480): proxy stamps
+    // effective_rate_limit_mbps on every normalize, forwarder writes
+    // it to session_events, charts_minimal exposes it, chRowAdapter
+    // projects it onto raw_session. Historically accurate — reflects
+    // the baseline AT THE TIME of the archive sample, not today's.
+    label: 'Effective Limit',
+    color: '#dc2626',
+    hidden: true,
+    accessor: (p: PlayerRecord) => {
+      const eff = (p as any).raw_session?.effective_rate_limit_mbps;
+      if (Number.isFinite(eff) && (eff as number) > 0) return eff as number;
+      return null;
     },
     stepped: true,
   },

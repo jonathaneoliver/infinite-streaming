@@ -125,6 +125,13 @@ var bundleRegistry = map[string]bundleDef{
 			"nftables_pattern_rate_runtime_mbps",
 			"nftables_pattern_step",
 			"nftables_pattern_steps",
+			// effective_rate_limit_mbps — kernel-enforced cap at this
+			// instant: max(operator override, deployment baseline).
+			// Distinct from the operator-intent nftables_bandwidth_mbps
+			// above. Lets the dashboard chart's "Effective Limit"
+			// series read direct from CH instead of deriving
+			// client-side. Issue #480.
+			"effective_rate_limit_mbps",
 			// Server's view of the player's active variant — the
 			// "Server Variant" line that pairs with "Player Variant"
 			// for catching server↔player rendition disagreement.
