@@ -132,6 +132,33 @@ var bundleRegistry = map[string]bundleDef{
 		},
 	},
 
+	// panel_v1 — fills the PlayerMetrics grid on the testing /
+	// session-viewer pages with the fields charts_minimal + lanes_v1
+	// don't already cover. Without this bundle the brush-end-row
+	// projection (SessionDisplay → chRowToPlayerRecord → archive cache)
+	// can only fill ~19 of the 28 PlayerMetrics labels, and the panel
+	// shows "—" for fields the data actually has.
+	"panel_v1": {
+		Name:   "panel_v1",
+		Stream: streamEvents,
+		Columns: []string{
+			"ts",
+			"session_id", "play_id", "player_id",
+			"position_s",
+			"playback_rate",
+			"seekable_end_s",
+			"live_edge_s",
+			"metrics_source",
+			"loop_count_player",
+			"last_stall_time_s",
+			"video_quality_pct",
+			"playhead_wallclock_ms",
+			"trigger_type",
+			"player_restarts",
+			"profile_shift_count",
+		},
+	},
+
 	// lanes_v1 — what EventsTimeline.vue needs to derive its swim
 	// lanes (PLAYERSTATE / VARIANT / DISPLAY_RES / PLAYBACK /
 	// IMPAIRMENT / CONTROL). A future `lanes_v2` can ship as a

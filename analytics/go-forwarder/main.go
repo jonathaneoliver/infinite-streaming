@@ -246,6 +246,8 @@ type row struct {
 	PlaybackRate             float32 `json:"playback_rate"`
 	LoopCountPlayer          uint32  `json:"loop_count_player"`
 	LoopCountServer          uint32  `json:"loop_count_server"`
+	PlayerRestarts           uint32  `json:"player_restarts"`
+	ProfileShiftCount        uint32  `json:"profile_shift_count"`
 	LastEvent                string  `json:"last_event"`
 	TriggerType              string  `json:"trigger_type"`
 	EventTime                string  `json:"event_time"`
@@ -661,6 +663,11 @@ func toRow(ts string, revision uint64, sessionID string, s map[string]interface{
 		PlaybackRate:             getF32(s, "player_metrics_playback_rate"),
 		LoopCountPlayer:          uint32(getU64(s, "loop_count_player")),
 		LoopCountServer:          uint32(getU64(s, "loop_count_server")),
+		// player_restarts is sent at the top level of iOS POST (not
+		// nested under player_metrics_*) — matches the v2translate
+		// key. profile_shift_count IS prefixed.
+		PlayerRestarts:           uint32(getU64(s, "player_restarts")),
+		ProfileShiftCount:        uint32(getU64(s, "player_metrics_profile_shift_count")),
 		LastEvent:                getStr(s, "player_metrics_last_event"),
 		TriggerType:              getStr(s, "player_metrics_trigger_type"),
 		EventTime:                getStr(s, "player_metrics_event_time"),

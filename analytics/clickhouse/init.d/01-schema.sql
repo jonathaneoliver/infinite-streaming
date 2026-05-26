@@ -79,6 +79,8 @@ CREATE TABLE IF NOT EXISTS infinite_streaming.session_events
     playback_rate         Float32                     CODEC(ZSTD(1)),
     loop_count_player     UInt32                      DEFAULT 0,
     loop_count_server     UInt32                      DEFAULT 0,
+    player_restarts       UInt32                      DEFAULT 0,
+    profile_shift_count   UInt32                      DEFAULT 0,
 
     -- Player events (discrete signals embedded in the heartbeat snapshot;
     -- testing.html derives event-lane points from transitions in these).
@@ -265,6 +267,8 @@ ALTER TABLE infinite_streaming.session_events
     ADD COLUMN IF NOT EXISTS last_buffering_time_s Float32 CODEC(ZSTD(1)),
     ADD COLUMN IF NOT EXISTS live_offset_s Float32 CODEC(ZSTD(1)),
     ADD COLUMN IF NOT EXISTS playhead_wallclock_ms Int64 CODEC(ZSTD(1)),
+    ADD COLUMN IF NOT EXISTS player_restarts UInt32 DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS profile_shift_count UInt32 DEFAULT 0,
     ADD COLUMN IF NOT EXISTS seekable_end_s Float32 CODEC(ZSTD(1)),
     ADD COLUMN IF NOT EXISTS metrics_source LowCardinality(String) CODEC(ZSTD(1)),
     ADD COLUMN IF NOT EXISTS video_first_frame_time_s Float32 CODEC(ZSTD(1)),

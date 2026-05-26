@@ -277,7 +277,7 @@ const timeseries = useSessionTimeSeries(
     // rows. The control bundle is auto-added when 'control' is in
     // streams (useSessionTimeSeries). Issue #474 Milestone C.
     streams: ['events', 'network', 'control'],
-    bundles: ['charts_minimal', 'lanes_v1', 'session_details', 'network'],
+    bundles: ['charts_minimal', 'lanes_v1', 'panel_v1', 'session_details', 'network'],
     fromMs: fromMsRef,
     toMs: toMsRef,
   },
