@@ -101,9 +101,9 @@ func InvestigateTool(cfg config) Tool {
 				"max_iterations": map[string]any{
 					"type":        "integer",
 					"minimum":     1,
-					"maximum":     20,
-					"default":     10,
-					"description": "Hard cap on tool-use rounds inside the subagent. 10 is plenty for most one-play investigations.",
+					"maximum":     30,
+					"default":     15,
+					"description": "Hard cap on tool-use rounds inside the subagent. 15 is plenty for most one-play investigations; bump to 20-30 only for forensic deep-dives that cross multiple plays. The subagent is instructed to ALWAYS commit a tagged finding before the cap fires, even if partial.",
 				},
 			},
 			"required": []string{"task"},
@@ -126,7 +126,7 @@ func InvestigateTool(cfg config) Tool {
 				return "", fmt.Errorf("subagent context not threaded — server bug")
 			}
 			if a.MaxIterations == 0 {
-				a.MaxIterations = 10
+				a.MaxIterations = 15
 			}
 			result, usage, err := runSubagent(ctx, sub, a.Task, a.PlayerID, a.PlayID, a.MaxIterations)
 			if err != nil {
@@ -276,9 +276,14 @@ func runSubagent(
 		_ = finishReason
 	}
 	// Hit max iterations without a final text response — return
-	// what we have plus a marker.
+	// what we have plus a marker. If the subagent produced NO text
+	// at all (just tool calls), surface that explicitly so the parent
+	// doesn't get an empty string + invisible failure mode.
 	last := lastAssistantText(messages)
-	return last + "\n\n[subagent hit max_iterations cap; conclusions may be incomplete]", usage, nil
+	if strings.TrimSpace(last) == "" {
+		last = "[subagent produced no text — only tool calls. Parent should not retry without changing the question.]"
+	}
+	return last + fmt.Sprintf("\n\n[subagent hit max_iterations cap (%d) without committing a final synthesis; conclusions are incomplete. Parent: do NOT re-spawn investigate() with the same task — either widen max_iterations or split into smaller sub-questions.]", maxIter), usage, nil
 }
 
 func lastAssistantText(msgs []LLMMessage) string {
@@ -315,6 +320,20 @@ main agent doesn't need them, just your synthesis.
 
 If the data doesn't support a confident answer, say so in one line
 and stop. Don't manufacture a finding.
+
+**Commit-before-cap rule:** you have a finite max_iterations budget.
+By iteration N-2 (where N is your cap), STOP gathering and write
+your synthesis. Returning an empty / continue-thinking message at
+the cap wastes the parent's tool-call budget AND its token spend.
+Always commit a partial finding tagged needs-test rather than
+returning empty. The parent reads "what you found" — not "I was
+about to find more."
+
+**Don't re-call the same tool with the same args.** If list_findings
+returned count=0, the library is empty for that query — don't call
+it again with the same arguments hoping for a different result.
+Same for any tool: empty / no-match results are real answers, not
+errors to retry past.
 
 `)
 	b.WriteString("# Your task\n\n")

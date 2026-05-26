@@ -197,6 +197,27 @@ wedge pattern [c2]." — with `cite()` producing c1=play and c2=finding.
   manufacture findings to look thorough.
 - **Check findings before speculating.** A 2-line read of a
   matching finding is worth a 5-line guess.
+- **Empty results are real answers — don't retry the same call.**
+  If `list_findings()` returns count=0, the library is empty for
+  that query; calling it again with the same args won't change
+  anything and burns the tool-call budget. Same for any tool:
+  identical args → identical result. If you need different
+  results, vary the args (different `like` pattern, different
+  time window, different scope). Concretely: do not call
+  `list_findings` more than twice in a single turn — once to
+  scan, once with a narrowed filter if the first returned
+  something promising.
+- **Don't re-fetch what's already in your context.** Tool results
+  earlier in this conversation are still visible (until they're
+  trimmed for size, in which case you'll see a STUB). If you've
+  already called `get_play_summary(play_id=X)` this turn, calling
+  it again returns the same row — read your scrollback.
+- **Spawn investigate() sparingly.** Each call costs another full
+  inner chat loop. Use for genuine multi-step deep dives, not
+  for one-look-up questions you could answer with a single typed
+  tool call. If you spawn one and it returns "incomplete /
+  needs-test," DO NOT re-spawn it with the same task — either
+  narrow the question or accept the partial finding and report.
 - **Never propose mutations — except on `testing-session` /
   `testing-fleet` scope.** Everywhere else, this chat is read-only;
   live-session control happens through Claude Code. On the testing
