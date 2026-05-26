@@ -29,6 +29,7 @@ import StatusBanners from '@/components/StatusBanners.vue';
 import SessionDisplay from '@/components/SessionDisplay.vue';
 import ChatPanel from '@/components/chat/ChatPanel.vue';
 import type { ChatScope } from '@/types/chat';
+import { useBaselineRate } from '@/composables/useBaselineRate';
 
 const params = useUrlSearchParams<{ player_id?: string; url?: string }>('history');
 const playerId = computed(() => params.player_id ?? '');
@@ -81,6 +82,13 @@ console.log('[TS] page boot', {
 
 const { player, isLoading, isError, error, sseState } = usePlayer(playerId);
 
+// Deployment baseline rate cap (issue #480). >0 means new sessions
+// and "no override" PATCHes resolve to this cap on the kernel; the
+// chip in the header makes it explicit so an operator who drags the
+// slider to 0 understands why throughput plateaus instead of
+// running unlimited.
+const { baselineMbps } = useBaselineRate();
+
 // play_id falls out of the live PlayerRecord directly; the forwarder
 // accepts player_id alongside play_id, so SessionDisplay can query
 // archive data without a session_id lookup.
@@ -111,6 +119,11 @@ const chatScope = computed<ChatScope>(() => ({
 <template>
   <ShellLayout active-page="test-playback">
     <template #header-right>
+      <span
+        v-if="baselineMbps > 0"
+        class="baseline-chip"
+        :title="`Every new session, and any operator action that clears the rate slider, resolves to this deployment baseline at the kernel level. Override per-session via the network shaping slider. See issue #480.`"
+      >Baseline: {{ baselineMbps }} Mbps</span>
       <span class="player-id" v-if="playerId">{{ playerId }}</span>
       <span class="sse" :data-state="sseState">{{ sseState }}</span>
     </template>
@@ -294,6 +307,23 @@ const chatScope = computed<ChatScope>(() => ({
 .sse[data-state='connecting'] { background: #fef3c7; color: #92400e; }
 .sse[data-state='open']       { background: #d1fae5; color: #065f46; }
 .sse[data-state='closed']     { background: #fee2e2; color: #991b1b; }
+
+/* Issue #480 — deployment baseline chip. Same chip metrics as the
+ * player-id / sse chips so the header reads as a single chip row.
+ * Color is intentionally distinct (amber on a neutral background)
+ * to signal "deployment-level config, not per-session state." */
+.baseline-chip {
+  font-family: ui-monospace, monospace;
+  background: #fef3c7;
+  color: #92400e;
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  white-space: nowrap;
+  cursor: help;
+}
 
 .content {
   padding: 24px;

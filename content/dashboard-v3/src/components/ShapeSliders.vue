@@ -21,11 +21,18 @@
  */
 import { computed, ref, toRef, watch } from 'vue';
 import { usePlayer } from '@/composables/usePlayer';
+import { useBaselineRate } from '@/composables/useBaselineRate';
 
 const props = defineProps<{ playerId: string }>();
 const { player, setRate, setDelay, setLoss, isShapeWriting } = usePlayer(
   toRef(props, 'playerId'),
 );
+
+// Deployment baseline rate cap (issue #480). When the slider is at 0
+// ("no operator override") the kernel still enforces this baseline,
+// so the throughput display labels the 0 case with "(baseline N)" so
+// operators don't think they're seeing unlimited.
+const { baselineMbps } = useBaselineRate();
 
 // Per-field "local intent" during drag. null means "no drag — read from model".
 const localRate = ref<number | null>(null);
@@ -152,7 +159,16 @@ watch(
         :disabled="patternRunning"
         @input="onRateInput"
       />
-      <span class="val">{{ dispRate.toFixed(1) }} Mbps</span>
+      <span class="val">
+        {{ dispRate.toFixed(1) }} Mbps
+        <!-- When the slider is at 0 ("no operator override") and the
+             deployment has a baseline (#480), make it explicit that the
+             kernel will still cap at the baseline. Operator otherwise
+             reads "0 Mbps" and wonders why throughput isn't unlimited. -->
+        <span v-if="dispRate === 0 && baselineMbps > 0" class="baseline-hint">
+          (baseline {{ baselineMbps }})
+        </span>
+      </span>
     </div>
   </div>
 </template>
@@ -206,5 +222,16 @@ watch(
   color: #f59e0b;
   font-weight: normal;
   font-style: italic;
+}
+
+/* Issue #480 — surfaces the deployment baseline when the operator is
+ * NOT overriding. Same amber as the .hint above so it reads as "this
+ * is meta-state, not the value you set" without making the slider
+ * row visually noisy. */
+.baseline-hint {
+  margin-left: 4px;
+  font-size: 11px;
+  color: #92400e;
+  font-weight: normal;
 }
 </style>
