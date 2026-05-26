@@ -68,30 +68,43 @@ const series: SeriesSpec[] = [
   {
     label: 'Limit (rate_mbps)',
     color: '#f59e0b',
-    // Mirror legacy session-shell.js:2397-2408 — the displayed "Limit"
-    // is the *effective* shaper ceiling at this moment, which depends
-    // on whether a pattern is running:
+    // The displayed "Limit" is the *effective* shaper ceiling at this
+    // moment, in priority order:
     //   1. Pattern enabled & runtime rate set → that's what the kernel
     //      is actually enforcing right now (`pattern_rate_runtime_mbps`)
     //   2. Otherwise, if a pattern step is active → that step's rate
-    //   3. Otherwise → the static `shape.rate_mbps`
-    //   4. Otherwise → 0 (no shaping configured; still draw the line
-    //      so the operator can see "no ceiling enforced" rather than a
-    //      missing series)
+    //   3. Otherwise, if operator override active → `shape.rate_mbps`
+    //      (positive means operator dragged the slider; 0 means
+    //      "no override," which under issue #480 means "use baseline")
+    //   4. Otherwise → `raw_session.effective_rate_limit_mbps` — the
+    //      proxy-derived field that always reflects what the kernel
+    //      is enforcing (operator override OR deployment baseline).
+    //      0 means truly uncapped.
     accessor: (p: PlayerRecord) => {
       const sh = p.shape;
-      if (!sh) return 0;
-      const runtime = sh.pattern_rate_runtime_mbps;
-      if (sh.pattern && Number.isFinite(runtime as number) && (runtime as number) >= 0) {
-        return runtime as number;
+      if (sh) {
+        const runtime = sh.pattern_rate_runtime_mbps;
+        if (sh.pattern && Number.isFinite(runtime as number) && (runtime as number) >= 0) {
+          return runtime as number;
+        }
+        const stepIdx = Number(sh.pattern_step_runtime ?? sh.pattern_step ?? 0);
+        const steps = sh.pattern?.steps ?? [];
+        if (stepIdx > 0 && stepIdx <= steps.length) {
+          const r = Number(steps[stepIdx - 1]?.rate_mbps);
+          if (Number.isFinite(r) && r >= 0) return r;
+        }
+        // Operator override is positive iff the slider was dragged off
+        // the "no override" position. shape.rate_mbps is undefined when
+        // there's no override → fall through to the baseline.
+        if (Number.isFinite(sh.rate_mbps as number) && (sh.rate_mbps as number) > 0) {
+          return sh.rate_mbps as number;
+        }
       }
-      const stepIdx = Number(sh.pattern_step_runtime ?? sh.pattern_step ?? 0);
-      const steps = sh.pattern?.steps ?? [];
-      if (stepIdx > 0 && stepIdx <= steps.length) {
-        const r = Number(steps[stepIdx - 1]?.rate_mbps);
-        if (Number.isFinite(r) && r >= 0) return r;
-      }
-      if (Number.isFinite(sh.rate_mbps as number)) return sh.rate_mbps as number;
+      // Fall back to the deployment baseline (or 0 when truly uncapped).
+      // raw_session is the v1 passthrough; effective_rate_limit_mbps is
+      // stamped by the proxy on every snapshot. Issue #480.
+      const eff = (p as any).raw_session?.effective_rate_limit_mbps;
+      if (Number.isFinite(eff)) return eff as number;
       return 0;
     },
     stepped: true,
