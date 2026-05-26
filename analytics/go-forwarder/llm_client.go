@@ -64,6 +64,15 @@ type LLMToolCallFunc struct {
 type LLMUsage struct {
 	InputTokens  uint32 `json:"input_tokens"`
 	OutputTokens uint32 `json:"output_tokens"`
+	// Cache token counts — populated only by the Anthropic native
+	// client (StreamChatAnthropic). Zero for OAI-compat callers.
+	// CacheCreationInputTokens are billed at 1.25× base input;
+	// CacheReadInputTokens are billed at 0.10× base input. The
+	// regular InputTokens field excludes both (Anthropic counts them
+	// separately in the usage response — verified against
+	// platform.claude.com/docs/en/build-with-claude/prompt-caching).
+	CacheCreationInputTokens uint32 `json:"cache_creation_input_tokens,omitempty"`
+	CacheReadInputTokens     uint32 `json:"cache_read_input_tokens,omitempty"`
 }
 
 // LLMRequest is what the chat endpoint hands to the client. It maps
@@ -74,10 +83,27 @@ type LLMRequest struct {
 	APIKey  string
 	Model   string
 
+	// Profile is the catalog template name (e.g. "anthropic-claude",
+	// "huggingface", "mlx-local"). Used by StreamChatRouted to pick
+	// the right backend — Anthropic-claude calls the native /v1/messages
+	// client (for cache_control support); everything else stays on
+	// OAI-compat. Empty string falls back to OAI-compat.
+	Profile string
+
 	Messages    []LLMMessage
 	Tools       []LLMTool
 	Temperature float64
 	MaxTokens   int
+}
+
+// StreamChatRouted dispatches to the right client based on Profile.
+// Call this from chat handlers instead of StreamChat directly so the
+// anthropic-native path is automatically picked up for that profile.
+func StreamChatRouted(ctx context.Context, req LLMRequest) (<-chan LLMEvent, error) {
+	if req.Profile == "anthropic-claude" {
+		return StreamChatAnthropic(ctx, req)
+	}
+	return StreamChat(ctx, req)
 }
 
 // LLMEvent is a streamed event yielded by Stream(). One of TextDelta,

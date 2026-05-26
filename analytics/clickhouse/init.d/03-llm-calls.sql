@@ -36,9 +36,20 @@ CREATE TABLE IF NOT EXISTS infinite_streaming.llm_calls
     -- Spend accounting.
     input_tokens      UInt32                DEFAULT 0       CODEC(ZSTD(1)),
     output_tokens     UInt32                DEFAULT 0       CODEC(ZSTD(1)),
+    -- Cache token counts (issue #511). Populated only on the
+    -- anthropic-claude profile (the only one with explicit
+    -- cache_control support). Other profiles leave both at 0.
+    -- cache_creation_input_tokens = tokens WRITTEN to the cache
+    -- (billed at 1.25x base input price); cache_read_input_tokens =
+    -- tokens READ from the cache (billed at 0.10x base input price,
+    -- i.e. 90% discount). Regular input_tokens above EXCLUDES both
+    -- — Anthropic counts them separately in the API response.
+    cache_creation_input_tokens UInt32      DEFAULT 0       CODEC(ZSTD(1)),
+    cache_read_input_tokens     UInt32      DEFAULT 0       CODEC(ZSTD(1)),
     -- cost_usd: -1 means "unknown" (user-customized model whose
     -- pricing isn't in the profile catalog); the budget guard
-    -- treats unknown as zero (allowed but not tallied).
+    -- treats unknown as zero (allowed but not tallied). Includes
+    -- cache write surcharge and cache read discount.
     cost_usd          Float64               DEFAULT 0       CODEC(ZSTD(1)),
 
     -- Outcome.
@@ -57,6 +68,13 @@ PARTITION BY toYYYYMM(ts)
 ORDER BY (ts, chat_id, request_id)
 TTL toDateTime(ts) + INTERVAL 90 DAY
 SETTINGS index_granularity = 8192;
+
+-- Schema migration for existing deployments (issue #511 — add cache
+-- token columns on hosts created before this migration). No-op for
+-- fresh hosts.
+ALTER TABLE infinite_streaming.llm_calls
+    ADD COLUMN IF NOT EXISTS cache_creation_input_tokens UInt32 DEFAULT 0 CODEC(ZSTD(1)),
+    ADD COLUMN IF NOT EXISTS cache_read_input_tokens     UInt32 DEFAULT 0 CODEC(ZSTD(1));
 
 -- Grant the llm_reader user SELECT on llm_calls so the LLM can see
 -- its own spend ("how much have I cost today?") via the query tool.

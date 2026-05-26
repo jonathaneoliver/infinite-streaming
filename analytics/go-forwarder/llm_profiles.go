@@ -187,11 +187,43 @@ func (c *LLMCatalog) FindModel(templateName, modelID string) *LLMModel {
 // as zero so the user isn't blocked, but the ledger surfaces the
 // gap.
 func (c *LLMCatalog) CostUSD(templateName, modelID string, inputTokens, outputTokens uint32) float64 {
+	return c.CostUSDWithCache(templateName, modelID, inputTokens, outputTokens, 0, 0)
+}
+
+// Anthropic prompt-cache pricing multipliers (issue #511). Sourced
+// from platform.claude.com/docs/en/build-with-claude/prompt-caching.
+// These apply across all current Claude models (Opus, Sonnet, Haiku)
+// — they're parameters of the caching feature, not per-model rates.
+const (
+	cacheCreationMultiplier = 1.25 // ephemeral cache write — 25% surcharge over base input
+	cacheReadMultiplier     = 0.10 // ephemeral cache read  — 90% discount off base input
+)
+
+// CostUSDWithCache computes cost accounting for Anthropic cache token
+// counts (issue #511). The Anthropic native client populates these;
+// other providers leave them at 0, in which case this collapses to
+// CostUSD's classic input+output formula.
+//
+// Anthropic's accounting: input_tokens, cache_creation_input_tokens,
+// and cache_read_input_tokens are DISJOINT — input_tokens is the
+// "regular" portion that's neither cached nor caching. So total cost =
+//   input_tokens          × input_price × 1.00 +
+//   cache_creation_tokens × input_price × 1.25 +
+//   cache_read_tokens     × input_price × 0.10 +
+//   output_tokens         × output_price
+func (c *LLMCatalog) CostUSDWithCache(templateName, modelID string,
+	inputTokens, outputTokens, cacheCreation, cacheRead uint32) float64 {
 	m := c.FindModel(templateName, modelID)
 	if m == nil {
 		return -1
 	}
 	const mTok = 1_000_000.0
-	return (float64(inputTokens)/mTok)*m.Pricing.InputPerMTok +
-		(float64(outputTokens)/mTok)*m.Pricing.OutputPerMTok
+	in := float64(inputTokens) / mTok
+	out := float64(outputTokens) / mTok
+	cc := float64(cacheCreation) / mTok
+	cr := float64(cacheRead) / mTok
+	return in*m.Pricing.InputPerMTok +
+		cc*m.Pricing.InputPerMTok*cacheCreationMultiplier +
+		cr*m.Pricing.InputPerMTok*cacheReadMultiplier +
+		out*m.Pricing.OutputPerMTok
 }

@@ -34,6 +34,14 @@ type LLMCallRow struct {
 	ScopeRunID      string  `json:"scope_run_id"`
 	InputTokens     uint32  `json:"input_tokens"`
 	OutputTokens    uint32  `json:"output_tokens"`
+	// Cache token counts — populated only on the anthropic-claude
+	// profile (the only one with explicit cache_control support).
+	// Other profiles leave both at 0. cache_creation = tokens we
+	// just WROTE to the cache (1.25x base input price); cache_read =
+	// tokens we read FROM the cache (0.10x base input price). Issue
+	// #511 — added 2026-05-25.
+	CacheCreationInputTokens uint32 `json:"cache_creation_input_tokens"`
+	CacheReadInputTokens     uint32 `json:"cache_read_input_tokens"`
 	CostUSD         float64 `json:"cost_usd"`
 	DurationMs      uint32  `json:"duration_ms"`
 	ToolCallsCount  uint16  `json:"tool_calls_count"`
