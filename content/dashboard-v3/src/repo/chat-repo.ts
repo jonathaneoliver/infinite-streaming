@@ -33,6 +33,12 @@ export interface ChatRequestBody {
   scope?: ChatScope;
   one_shot?: boolean;
   temperature?: number;
+  // operator_tz is the browser's IANA timezone (e.g.
+  // "America/Los_Angeles"). The forwarder uses it to tell the LLM
+  // how to render timestamps as `LOCAL (UTC)` per
+  // .claude/standards/timestamp-display.md. Set automatically by
+  // useChat — callers don't need to pass it.
+  operator_tz?: string;
 }
 
 /**

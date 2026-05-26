@@ -70,6 +70,10 @@ export interface ChatScope {
   to?: string;
   run_id?: string;
   cycle?: number;
+  // test_name narrows a characterization scope to one (run_id,
+  // test_name) row in the characterization_runs table — i.e. one
+  // expanded card on Characterization.vue.
+  test_name?: string;
 }
 
 /** Citation kinds — the dashboard renders one CitationCard per kind. */

@@ -65,6 +65,111 @@ func Tier2Tools(cfg config, claudeDir string) []Tool {
 		listSkillsTool(claudeDir),
 		readSkillTool(claudeDir),
 		readConventionsTool(claudeDir),
+		readChatTool(claudeDir),
+		listChatsTool(claudeDir),
+	}
+}
+
+// --- Chats (auto-persisted by llm_chat_persistence.go) ---
+
+func readChatTool(claudeDir string) Tool {
+	return Tool{
+		Name: "read_chat",
+		Description: "Read the full markdown transcript of a past chat conversation " +
+			"(stored at <claudeDir>/chats/<chat_id>.md). Use to reference an earlier " +
+			"investigation: 'what did we conclude about play X last week?'. Returns " +
+			"the verbatim file including all tool calls + raw results + citations. " +
+			"Get a chat_id from list_chats(scope_kind?, since?) or from a finding " +
+			"that referenced it.",
+		Tier: 2,
+		Parameters: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"chat_id": map[string]any{"type": "string", "description": "Chat ID (hex slug, e.g. 'a1b2c3d4e5f6')."},
+			},
+			"required": []string{"chat_id"},
+		},
+		Execute: func(ctx context.Context, args json.RawMessage, _ ToolEmitter) (string, error) {
+			var a struct{ ChatID string `json:"chat_id"` }
+			if err := json.Unmarshal(args, &a); err != nil {
+				return "", fmt.Errorf("parse args: %w", err)
+			}
+			if err := validateSlug(a.ChatID); err != nil {
+				return "", err
+			}
+			path := filepath.Join(claudeDir, "chats", a.ChatID+".md")
+			body, err := os.ReadFile(path)
+			if err != nil {
+				if os.IsNotExist(err) {
+					return mustJSON(map[string]any{"found": false, "chat_id": a.ChatID}), nil
+				}
+				return "", fmt.Errorf("read: %w", err)
+			}
+			return mustJSON(map[string]any{
+				"found":    true,
+				"chat_id":  a.ChatID,
+				"markdown": string(body),
+				"bytes":    len(body),
+			}), nil
+		},
+	}
+}
+
+func listChatsTool(claudeDir string) Tool {
+	return Tool{
+		Name: "list_chats",
+		Description: "List recent chat conversations persisted to disk. Returns one " +
+			"row per chat with chat_id + size + mtime. Optional `since` filters by " +
+			"modification time. Useful for finding a chat to read_chat into context.",
+		Tier: 2,
+		Parameters: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"limit": map[string]any{"type": "integer", "minimum": 1, "maximum": 200, "default": 50},
+			},
+		},
+		Execute: func(ctx context.Context, args json.RawMessage, _ ToolEmitter) (string, error) {
+			var a struct{ Limit int `json:"limit"` }
+			if len(args) > 0 {
+				_ = json.Unmarshal(args, &a)
+			}
+			if a.Limit == 0 {
+				a.Limit = 50
+			}
+			dir := filepath.Join(claudeDir, "chats")
+			entries, err := os.ReadDir(dir)
+			if err != nil {
+				if os.IsNotExist(err) {
+					return mustJSON(map[string]any{"count": 0, "chats": []any{}}), nil
+				}
+				return "", fmt.Errorf("readdir: %w", err)
+			}
+			type row struct {
+				ChatID  string `json:"chat_id"`
+				Bytes   int64  `json:"bytes"`
+				ModTime string `json:"mtime"`
+			}
+			rows := []row{}
+			for _, e := range entries {
+				if e.IsDir() || !strings.HasSuffix(e.Name(), ".md") {
+					continue
+				}
+				info, err := e.Info()
+				if err != nil {
+					continue
+				}
+				rows = append(rows, row{
+					ChatID:  strings.TrimSuffix(e.Name(), ".md"),
+					Bytes:   info.Size(),
+					ModTime: info.ModTime().UTC().Format("2006-01-02T15:04:05Z"),
+				})
+			}
+			sort.Slice(rows, func(i, j int) bool { return rows[i].ModTime > rows[j].ModTime })
+			if len(rows) > a.Limit {
+				rows = rows[:a.Limit]
+			}
+			return mustJSON(map[string]any{"count": len(rows), "chats": rows}), nil
+		},
 	}
 }
 

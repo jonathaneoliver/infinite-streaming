@@ -36,6 +36,20 @@ function storageKey(scopeKey: string): string {
   return STORAGE_PREFIX + (scopeKey || 'default');
 }
 
+// Browser-side IANA timezone for the operator. Passed on every
+// chat request so the forwarder's system-prompt preamble can tell
+// the LLM how to render timestamps as `LOCAL (UTC)` per
+// .claude/standards/timestamp-display.md. Empty string when the
+// Intl API isn't available (very old browsers, JS-disabled iframes)
+// — the forwarder will fall back to UTC-only and tell the operator.
+function getOperatorTZ(): string {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || '';
+  } catch {
+    return '';
+  }
+}
+
 function loadHistory(scopeKey: string): { chatId: string | null; history: ChatMessage[] } {
   if (typeof localStorage === 'undefined') return { chatId: null, history: [] };
   try {
@@ -133,6 +147,7 @@ export function useChat(opts: UseChatOptions) {
         base_url: settings.value.baseUrlOverride || undefined,
         messages: state.history,
         scope: opts.scope(),
+        operator_tz: getOperatorTZ(),
       }, abortCtrl.signal);
 
       for await (const ev of iter) {

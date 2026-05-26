@@ -35,6 +35,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -66,6 +67,15 @@ type ChatRequest struct {
 
 	// Scope hint for the system prompt + ledger. Optional.
 	Scope ChatScope `json:"scope"`
+
+	// OperatorTZ is the operator's IANA timezone (e.g.
+	// "America/Los_Angeles"), supplied by the browser via
+	// Intl.DateTimeFormat().resolvedOptions().timeZone. Used by
+	// the system prompt's scope preamble so the bot can convert
+	// UTC tool results into LOCAL (UTC) prose per
+	// .claude/standards/timestamp-display.md. Empty = legacy
+	// client; the bot will say so and fall back to UTC-only.
+	OperatorTZ string `json:"operator_tz,omitempty"`
 
 	// One-shot mode: a single user turn → single assistant turn.
 	// Tool-use within that single turn is still allowed.
@@ -102,6 +112,7 @@ type chatHandler struct {
 func newChatHandler(cfg config) (*chatHandler, error) {
 	reg := NewToolRegistry()
 	reg.RegisterAll(Tier1Tools(cfg))
+	reg.RegisterAll(CharacterizationTools(cfg))
 	reg.RegisterAll(Tier2Tools(cfg, cfg.claudeDir))
 	reg.Register(CiteTool())
 	reg.Register(QueryTool(cfg))
@@ -127,6 +138,113 @@ func mountChatHandlers(mux *http.ServeMux, h *chatHandler) {
 	mux.HandleFunc("/api/v2/chat/budget", h.handleBudget)
 	mux.HandleFunc("/api/v2/chat/discover-models", h.handleDiscoverModels)
 	mux.HandleFunc("/api/v2/chat/findings/save", h.handleSaveFinding)
+	mux.HandleFunc("/api/v2/chat/handoffs", h.handleHandoffList)
+	mux.HandleFunc("/api/v2/chat/handoffs/", h.handleHandoff)
+}
+
+// handleHandoffList returns a JSON index of persisted chats so
+// Claude Code (or a future browse UI) can enumerate them.
+// GET /api/v2/chat/handoffs?limit=50
+// Response: { count, chats: [{chat_id, bytes, mtime}, ...] }
+func (h *chatHandler) handleHandoffList(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeProblemv2(w, http.StatusMethodNotAllowed, "method not allowed", "")
+		return
+	}
+	if h.cfg.claudeDir == "" {
+		writeProblemv2(w, http.StatusServiceUnavailable, "chat persistence disabled", "FORWARDER_CLAUDE_DIR unset")
+		return
+	}
+	limit := 100
+	if s := r.URL.Query().Get("limit"); s != "" {
+		var n int
+		_, _ = fmt.Sscanf(s, "%d", &n)
+		if n > 0 && n < 1000 {
+			limit = n
+		}
+	}
+	dir := filepath.Join(h.cfg.claudeDir, "chats")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			writeJSONv2(w, http.StatusOK, map[string]any{"count": 0, "chats": []any{}})
+			return
+		}
+		writeProblemv2(w, http.StatusInternalServerError, "readdir failed", err.Error())
+		return
+	}
+	type row struct {
+		ChatID  string `json:"chat_id"`
+		Bytes   int64  `json:"bytes"`
+		ModTime string `json:"mtime"`
+	}
+	rows := []row{}
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".md") {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		rows = append(rows, row{
+			ChatID:  strings.TrimSuffix(e.Name(), ".md"),
+			Bytes:   info.Size(),
+			ModTime: info.ModTime().UTC().Format("2006-01-02T15:04:05Z"),
+		})
+	}
+	// Newest first.
+	for i := 1; i < len(rows); i++ {
+		for j := i; j > 0 && rows[j].ModTime > rows[j-1].ModTime; j-- {
+			rows[j], rows[j-1] = rows[j-1], rows[j]
+		}
+	}
+	if len(rows) > limit {
+		rows = rows[:limit]
+	}
+	writeJSONv2(w, http.StatusOK, map[string]any{"count": len(rows), "chats": rows})
+}
+
+// handleHandoff returns the markdown of a persisted chat by ID.
+// Path: GET /api/v2/chat/handoffs/{chat_id}[.md]
+// Response: text/markdown (the raw file). 404 if unknown.
+//
+// This is the URL the dashboard's handoff button can offer as an
+// alternative to `cat ~/.claude/chats/<id>.md` for operators who
+// don't have shell access to the host. Same file either way.
+func (h *chatHandler) handleHandoff(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeProblemv2(w, http.StatusMethodNotAllowed, "method not allowed", "")
+		return
+	}
+	id := strings.TrimPrefix(r.URL.Path, "/api/v2/chat/handoffs/")
+	id = strings.TrimSuffix(id, ".md")
+	if id == "" {
+		writeProblemv2(w, http.StatusBadRequest, "chat_id required", "")
+		return
+	}
+	if id != sanitiseChatID(id) {
+		writeProblemv2(w, http.StatusBadRequest, "invalid chat_id", "")
+		return
+	}
+	if h.cfg.claudeDir == "" {
+		writeProblemv2(w, http.StatusServiceUnavailable, "chat persistence disabled", "FORWARDER_CLAUDE_DIR unset")
+		return
+	}
+	path := filepath.Join(h.cfg.claudeDir, "chats", id+".md")
+	body, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			writeProblemv2(w, http.StatusNotFound, "no chat with that id", id)
+			return
+		}
+		writeProblemv2(w, http.StatusInternalServerError, "read failed", err.Error())
+		return
+	}
+	w.Header().Set("Content-Type", "text/markdown; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Content-Disposition", fmt.Sprintf("inline; filename=\"chat-%s.md\"", id))
+	_, _ = w.Write(body)
 }
 
 // handleSaveFinding writes a proposed finding to disk. Called by
@@ -406,9 +524,14 @@ func (h *chatHandler) streamChat(
 	history := make([]LLMMessage, 0, len(req.Messages)+1)
 	history = append(history, LLMMessage{
 		Role:    "system",
-		Content: h.buildSystemPrompt(req.Scope),
+		Content: h.buildSystemPrompt(req.Scope, req.OperatorTZ),
 	})
 	history = append(history, req.Messages...)
+	// Persistence boundary: anything appended to `history` past this
+	// index is new content produced by this turn (assistant + tool
+	// messages). The user's new turn is req.Messages[last]. We
+	// capture both for the chat-file append at end of streamChat.
+	persistStartIdx := len(history)
 
 	startedAt := time.Now()
 	usage := LLMUsage{}
@@ -433,10 +556,11 @@ loop:
 		default:
 		}
 
-		stream, err := StreamChat(r.Context(), LLMRequest{
+		stream, err := StreamChatRouted(r.Context(), LLMRequest{
 			BaseURL:     baseURL,
 			APIKey:      req.APIKey,
 			Model:       req.Model,
+			Profile:     req.Profile, // picks anthropic-native vs OAI-compat
 			Messages:    history,
 			Tools:       h.registry.ToOpenAITools(),
 			Temperature: orDefault(req.Temperature, 0.2),
@@ -484,6 +608,8 @@ loop:
 			if ev.Usage != nil {
 				usage.InputTokens += ev.Usage.InputTokens
 				usage.OutputTokens += ev.Usage.OutputTokens
+				usage.CacheCreationInputTokens += ev.Usage.CacheCreationInputTokens
+				usage.CacheReadInputTokens += ev.Usage.CacheReadInputTokens
 			}
 			if ev.FinishReason != "" {
 				finishReason = ev.FinishReason
@@ -557,40 +683,87 @@ loop:
 
 	// Compute cost, write ledger, emit usage + done.
 	durationMs := uint32(time.Since(startedAt).Milliseconds())
-	costUSD := cat.CostUSD(req.Profile, req.Model, usage.InputTokens, usage.OutputTokens)
+	costUSD := cat.CostUSDWithCache(req.Profile, req.Model,
+		usage.InputTokens, usage.OutputTokens,
+		usage.CacheCreationInputTokens, usage.CacheReadInputTokens)
 
 	_ = emit("usage", map[string]any{
-		"input_tokens":     usage.InputTokens,
-		"output_tokens":    usage.OutputTokens,
-		"cost_usd":         costUSD,
-		"duration_ms":      durationMs,
-		"tool_calls_count": toolCallsCount,
+		"input_tokens":               usage.InputTokens,
+		"output_tokens":              usage.OutputTokens,
+		"cache_creation_input_tokens": usage.CacheCreationInputTokens,
+		"cache_read_input_tokens":     usage.CacheReadInputTokens,
+		"cost_usd":                   costUSD,
+		"duration_ms":                durationMs,
+		"tool_calls_count":           toolCallsCount,
 	})
 
 	// Ledger write — best effort.
 	row := LLMCallRow{
-		Ts:             time.Now().UTC().Format("2006-01-02 15:04:05.000"),
-		ChatID:         req.ChatID,
-		RequestID:      requestID,
-		KeyHash:        HashAPIKey(req.APIKey),
-		Profile:        req.Profile,
-		BaseURL:        baseURL,
-		Model:          req.Model,
-		OneShot:        bool2u8(req.OneShot),
-		ScopeKind:      req.Scope.Kind,
-		ScopePlayID:    req.Scope.PlayID,
-		ScopeRunID:     req.Scope.RunID,
-		InputTokens:    usage.InputTokens,
-		OutputTokens:   usage.OutputTokens,
-		CostUSD:        costUSD,
-		DurationMs:     durationMs,
-		ToolCallsCount: uint16(toolCallsCount),
-		Status:         status,
-		ErrorKind:      errKind,
-		PromptVersion:  promptVersion(h.systemPrompt),
+		Ts:                       time.Now().UTC().Format("2006-01-02 15:04:05.000"),
+		ChatID:                   req.ChatID,
+		RequestID:                requestID,
+		KeyHash:                  HashAPIKey(req.APIKey),
+		Profile:                  req.Profile,
+		BaseURL:                  baseURL,
+		Model:                    req.Model,
+		OneShot:                  bool2u8(req.OneShot),
+		ScopeKind:                req.Scope.Kind,
+		ScopePlayID:              req.Scope.PlayID,
+		ScopeRunID:               req.Scope.RunID,
+		InputTokens:              usage.InputTokens,
+		OutputTokens:             usage.OutputTokens,
+		CacheCreationInputTokens: usage.CacheCreationInputTokens,
+		CacheReadInputTokens:     usage.CacheReadInputTokens,
+		CostUSD:                  costUSD,
+		DurationMs:               durationMs,
+		ToolCallsCount:           uint16(toolCallsCount),
+		Status:                   status,
+		ErrorKind:                errKind,
+		PromptVersion:            promptVersion(h.systemPrompt),
 	}
 	if err := InsertLLMCall(context.Background(), h.cfg, row); err != nil {
 		log.Printf("llm_calls insert failed: %v", err)
+	}
+
+	// Persist the turn to disk. Best-effort: log on failure but
+	// don't fail the response. The "new" content is:
+	//   - last user message in req.Messages (their query this turn)
+	//   - everything appended to history past persistStartIdx
+	newMsgs := make([]LLMMessage, 0, 1+len(history)-persistStartIdx)
+	if n := len(req.Messages); n > 0 {
+		// The last req.Message is always a user turn (the client
+		// just appended it). Older user msgs are already persisted
+		// from prior turns; don't duplicate.
+		newMsgs = append(newMsgs, req.Messages[n-1])
+	}
+	if persistStartIdx < len(history) {
+		newMsgs = append(newMsgs, history[persistStartIdx:]...)
+	}
+	// PriorMessages = everything the client sent EXCEPT the new
+	// user turn (the last item). Used only on first persist of
+	// this chat — backfills the browser-localStorage history so a
+	// chat that pre-dates persistence still has its context
+	// captured when persistence first succeeds for that chat_id.
+	var priorMsgs []LLMMessage
+	if n := len(req.Messages); n > 1 {
+		priorMsgs = req.Messages[:n-1]
+	}
+	if path, err := PersistChatTurn(h.cfg.claudeDir, PersistChatTurnInput{
+		ChatID:         req.ChatID,
+		Scope:          req.Scope,
+		Profile:        req.Profile,
+		Model:          req.Model,
+		BaseURL:        baseURL,
+		PriorMessages:  priorMsgs,
+		NewMessages:    newMsgs,
+		Usage:          usage,
+		CostUSD:        costUSD,
+		DurationMs:     durationMs,
+		ToolCallsCount: toolCallsCount,
+		Status:         status,
+		ErrorKind:      errKind,
+	}); err != nil {
+		log.Printf("chat persist failed (chat_id=%s path=%s): %v", req.ChatID, path, err)
 	}
 
 	_ = emit("done", map[string]any{})
@@ -761,9 +934,35 @@ func promptVersion(prompt string) string {
 
 // buildSystemPrompt prepends a small scope preamble to the configured
 // system prompt so the model knows what the dashboard is asking about.
-func (h *chatHandler) buildSystemPrompt(scope ChatScope) string {
+// operatorTZ is the operator's IANA timezone string — when present it
+// is surfaced so the bot can render timestamps as LOCAL (UTC) per
+// .claude/standards/timestamp-display.md.
+func (h *chatHandler) buildSystemPrompt(scope ChatScope, operatorTZ string) string {
 	var b strings.Builder
 	b.WriteString(h.systemPrompt)
+	if operatorTZ != "" {
+		// Compute the current offset in the operator's zone so the bot
+		// has both the IANA name (for correctness across DST) and a
+		// human-readable label (so it can format "08:43 PDT" rather
+		// than the noisier "America/Los_Angeles").
+		now := time.Now()
+		if loc, err := time.LoadLocation(operatorTZ); err == nil {
+			abbr, _ := now.In(loc).Zone()
+			fmt.Fprintf(&b, "\n\n# Operator timezone\n\n"+
+				"operator_tz = %s (currently %s, offset %s). Render every "+
+				"conversational timestamp as `HH:MM:SS %s (HH:MM:SS UTC)`. "+
+				"Tool results come back in UTC — convert before display. "+
+				"Wire/storage/URL formats stay UTC-only.\n",
+				operatorTZ, abbr, now.In(loc).Format("-0700"), abbr)
+		} else {
+			// Bad zone string from client — note it so the bot doesn't
+			// silently invent an offset.
+			fmt.Fprintf(&b, "\n\n# Operator timezone\n\n"+
+				"operator_tz string %q from the client did not resolve to a "+
+				"valid IANA zone. Fall back to UTC-only timestamps and tell "+
+				"the operator the timezone wasn't usable.\n", operatorTZ)
+		}
+	}
 	if scope.Kind != "" {
 		b.WriteString("\n\n# Current scope\n\n")
 		switch scope.Kind {
