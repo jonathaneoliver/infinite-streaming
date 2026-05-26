@@ -211,6 +211,7 @@ func (s *Server) PatchApiV2PlayersPlayerId(w http.ResponseWriter, r *http.Reques
 	// is empty when the player isn't in any group — broadcast becomes
 	// a no-op.
 	var groupID string
+	srv := s // capture the Server receiver before the closure shadows it
 	post, found, mErr := s.v1.MutatePlayer(pidStr, func(s map[string]any) error {
 		// Re-check under sessionsMu. Another v2 PATCH that won the
 		// outer race would have updated FieldRevisions before
@@ -218,7 +219,7 @@ func (s *Server) PatchApiV2PlayersPlayerId(w http.ResponseWriter, r *http.Reques
 		if conflicts := fr.Conflicts(ifMatch, paths); len(conflicts) > 0 {
 			return conflictErr{paths: conflicts}
 		}
-		if err := applyPatchToSession(s, patch); err != nil {
+		if err := applyPatchToSession(srv, s, patch); err != nil {
 			return err
 		}
 		// Stamp control_revision (RFC3339Nano) + FieldRevisions
@@ -264,7 +265,7 @@ func (s *Server) PatchApiV2PlayersPlayerId(w http.ResponseWriter, r *http.Reques
 	var broadcastTouched []string
 	if groupID != "" {
 		touched, bErr := s.v1.BroadcastPatch(groupID, pidStr, rev, func(member map[string]any) error {
-			return applyPatchToSession(member, patch)
+			return applyPatchToSession(srv, member, patch)
 		})
 		if bErr != nil {
 			// Broadcast failure on a sibling member shouldn't 500
@@ -416,12 +417,12 @@ func patternTouched(paths []string) bool {
 // Other v2 paths are admitted via unsupportedPaths but stored as
 // `_v2_unsupported.<path>` for Phase debugging visibility — they
 // don't drive any kernel state.
-func applyPatchToSession(s map[string]any, patch map[string]any) error {
+func applyPatchToSession(srv *Server, s map[string]any, patch map[string]any) error {
 	if labels, hasLabels := patch["labels"]; hasLabels {
 		applyLabelsPatch(s, labels)
 	}
 	if shape, hasShape := patch["shape"]; hasShape {
-		applyShapePatch(s, shape)
+		applyShapePatch(srv, s, shape)
 	}
 	if rulesAny, hasRules := patch["fault_rules"]; hasRules {
 		if rulesAny == nil {
@@ -564,10 +565,29 @@ func applyLabelsPatch(s map[string]any, labels any) {
 	s["_v2_labels"] = current
 }
 
-func applyShapePatch(s map[string]any, shape any) {
+// effectiveRate resolves a requested rate (Mbps) against the deployment
+// baseline (issue #480). A requested 0 means "no operator override" —
+// on prod (baseline=0) it stays 0 (unlimited); on test-dev (baseline>0)
+// it pins to the baseline so no slider/CLI path can bypass the cap.
+// Positive requests pass through unchanged.
+func effectiveRate(srv *Server, requested float64) float64 {
+	if requested > 0 {
+		return requested
+	}
+	if srv != nil && srv.v1 != nil {
+		if baseline := srv.v1.DefaultRateMbps(); baseline > 0 {
+			return float64(baseline)
+		}
+	}
+	return 0
+}
+
+func applyShapePatch(srv *Server, s map[string]any, shape any) {
 	if shape == nil {
-		// Wholesale wipe — clear every translated v1 field.
-		s["nftables_bandwidth_mbps"] = float64(0)
+		// Wholesale wipe — clear every translated v1 field. Rate
+		// resolves to the baseline so "clear all overrides" returns to
+		// the deployment floor instead of unlimited.
+		s["nftables_bandwidth_mbps"] = effectiveRate(srv, 0)
 		s["nftables_delay_ms"] = 0
 		s["nftables_packet_loss"] = float64(0)
 		s["transport_failure_type"] = "none"
@@ -583,9 +603,9 @@ func applyShapePatch(s map[string]any, shape any) {
 	}
 	if v, present := shapeMap["rate_mbps"]; present {
 		if v == nil {
-			s["nftables_bandwidth_mbps"] = float64(0)
+			s["nftables_bandwidth_mbps"] = effectiveRate(srv, 0)
 		} else if f, ok := numericFloat(v); ok {
-			s["nftables_bandwidth_mbps"] = f
+			s["nftables_bandwidth_mbps"] = effectiveRate(srv, f)
 		}
 	}
 	if v, present := shapeMap["delay_ms"]; present {

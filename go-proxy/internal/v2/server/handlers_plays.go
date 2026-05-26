@@ -299,7 +299,7 @@ func (s *Server) PatchApiV2PlaysPlayId(w http.ResponseWriter, r *http.Request, p
 		snap := snapshotV1FieldsForPaths(sess, paths)
 		recordPlayOverrideSnapshot(sess, playIDStr, snap)
 
-		if err := applyPatchToSession(sess, patch); err != nil {
+		if err := applyPatchToSession(s, sess, patch); err != nil {
 			return err
 		}
 		sess["control_revision"] = rev

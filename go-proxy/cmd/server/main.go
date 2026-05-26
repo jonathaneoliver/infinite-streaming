@@ -333,6 +333,13 @@ type App struct {
 	upstreamHost             string
 	upstreamPort             string
 	maxSessions              int
+	// defaultRateMbps is the baseline rate cap (Mbps) applied to every
+	// new player session via setDefault on `nftables_bandwidth_mbps` in
+	// normalizeSessionsForResponse. Read once at boot from
+	// INFINITE_STREAM_DEFAULT_RATE_MBPS. 0 = no cap (today's behaviour);
+	// non-zero = the deployment's interpretation of "no operator
+	// override." See issue #480.
+	defaultRateMbps          int
 	client                   *http.Client
 	portMap                  PortMapping
 	shapeMu                  sync.Mutex
@@ -1723,6 +1730,16 @@ func main() {
 	upstreamHost := getenvAny([]string{"INFINITE_STREAM_UPSTREAM_HOST", "INFINITE_UPSTREAM_HOST", "ISM_UPSTREAM_HOST"}, "127.0.0.1")
 	upstreamPort := getenvAny([]string{"INFINITE_STREAM_UPSTREAM_PORT", "INFINITE_UPSTREAM_PORT", "ISM_UPSTREAM_PORT"}, "30000")
 	maxSessions := getenvIntAny([]string{"INFINITE_STREAM_MAX_SESSIONS", "INFINITE_MAX_SESSIONS", "ISM_MAX_SESSIONS"}, 8)
+	defaultRateMbps := getenvInt("INFINITE_STREAM_DEFAULT_RATE_MBPS", 0)
+	if defaultRateMbps < 0 {
+		log.Printf("INFINITE_STREAM_DEFAULT_RATE_MBPS=%d invalid (negative); using 0", defaultRateMbps)
+		defaultRateMbps = 0
+	}
+	if defaultRateMbps > 0 {
+		log.Printf("baseline rate cap: %d Mbps (issue #480; new sessions default to this rate)", defaultRateMbps)
+	} else {
+		log.Printf("baseline rate cap: unlimited (INFINITE_STREAM_DEFAULT_RATE_MBPS=0 or unset)")
+	}
 	interfaceName := getenvAny([]string{"INFINITE_STREAM_TC_INTERFACE", "INFINITE_TC_INTERFACE", "TC_INTERFACE"}, "eth0")
 	tcDebug := getenvBoolAny([]string{"INFINITE_STREAM_TC_DEBUG", "INFINITE_TC_DEBUG", "TC_DEBUG"}, false)
 	eventStore, eventStoreErr := newSessionEventStore(getenv("GO_PROXY_SESSION_EVENTS_DB", defaultSessionEventsDB))
@@ -1737,7 +1754,8 @@ func main() {
 		traffic:       NewTcTrafficManager(interfaceName, tcDebug),
 		upstreamHost:  upstreamHost,
 		upstreamPort:  upstreamPort,
-		maxSessions:   maxSessions,
+		maxSessions:      maxSessions,
+		defaultRateMbps:  defaultRateMbps,
 		portMap:       loadPortMapping(),
 		client: &http.Client{
 			Transport: &http.Transport{
@@ -4187,6 +4205,12 @@ func (a *App) handleNftShape(w http.ResponseWriter, r *http.Request) {
 			parsed, _ := strconv.ParseFloat(v, 64)
 			rateMbps = parsed
 		}
+	}
+	// "No operator override" (rate_mbps=0) resolves to the deployment
+	// baseline. On prod (defaultRateMbps=0) this is a no-op; on test-dev
+	// it pins the session to the baseline cap. Issue #480.
+	if rateMbps == 0 && a.defaultRateMbps > 0 {
+		rateMbps = float64(a.defaultRateMbps)
 	}
 	delayMs := 0
 	if val, ok := payload["delay_ms"]; ok {
@@ -7540,7 +7564,12 @@ func (a *App) normalizeSessionsForResponse(sessions []SessionData) []SessionData
 				session["nftables_pattern_steps"] = []NftShapeStep{}
 			}
 		}
-		setDefault("nftables_bandwidth_mbps", 0)
+		// Default the rate cap to the deployment baseline (issue #480).
+		// 0 = "no cap" (production-style); positive = "no operator
+		// override" interpreted as the baseline (test-dev). setDefault
+		// only writes when the session lacks the field, so operator
+		// PATCHes that explicitly set a value are preserved.
+		setDefault("nftables_bandwidth_mbps", float64(a.defaultRateMbps))
 		setDefault("nftables_delay_ms", 0)
 		setDefault("nftables_packet_loss", 0)
 		setDefault("nftables_pattern_enabled", false)
