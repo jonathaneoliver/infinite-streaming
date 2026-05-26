@@ -10,7 +10,7 @@
  * with a small budget meter. Sized to fit comfortably in either a
  * sidebar slot (~360px wide) or a full-page column (`fluid` prop).
  */
-import { computed, nextTick, ref, watch } from 'vue';
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue';
 import { useChat } from '@/composables/useChat';
 import { useChatSettings } from '@/composables/useChatSettings';
 import { useLLMBudget } from '@/composables/useLLMBudget';
@@ -84,6 +84,83 @@ const providerChip = computed(() => {
 const showSettings = ref(false);
 const collapsed = ref(props.variant === 'panel' ? props.startCollapsed : false);
 
+// User-resizable panel width. Singleton key — every panel-variant
+// instance on every page shares the same width so dragging on
+// Sessions also widens the panel on SessionViewer. Bounds enforced
+// at apply-time, not save-time, so a future viewport shrink still
+// honours the upper clamp.
+const PANEL_WIDTH_KEY = 'isLLMChatPanelWidth';
+const PANEL_WIDTH_MIN = 320;
+const PANEL_WIDTH_DEFAULT = 380;
+function loadPanelWidth(): number {
+  if (typeof localStorage === 'undefined') return PANEL_WIDTH_DEFAULT;
+  const raw = parseInt(localStorage.getItem(PANEL_WIDTH_KEY) || '', 10);
+  return Number.isFinite(raw) && raw >= PANEL_WIDTH_MIN ? raw : PANEL_WIDTH_DEFAULT;
+}
+const panelWidth = ref<number>(loadPanelWidth());
+const panelStyle = computed(() => {
+  if (props.variant !== 'panel' || collapsed.value) return {};
+  const maxPx = (typeof window !== 'undefined' ? window.innerWidth : 1920) * 0.9;
+  return { width: `${Math.min(panelWidth.value, maxPx)}px` };
+});
+
+// Publish the panel's current effective width to a CSS variable on
+// :root so ShellLayout (and any other layout that wants to reserve
+// space) can reflow with padding-right: var(--chat-panel-width).
+// Without this the floating dock covers the page content under it.
+// Only the 'panel' variant pushes a width; 'fluid' (Ask page) is
+// inline, no dock to reserve for. Collapsed state contributes the
+// 36px collapse handle width so the page never goes fully under it.
+function publishedWidthPx(): number {
+  if (props.variant !== 'panel') return 0;
+  if (collapsed.value) return 36;
+  const maxPx = (typeof window !== 'undefined' ? window.innerWidth : 1920) * 0.9;
+  return Math.min(panelWidth.value, maxPx);
+}
+function syncCssVar() {
+  if (typeof document === 'undefined') return;
+  document.documentElement.style.setProperty('--chat-panel-width', `${publishedWidthPx()}px`);
+}
+watch([panelWidth, collapsed], () => syncCssVar(), { immediate: false });
+onMounted(() => {
+  syncCssVar();
+  window.addEventListener('resize', syncCssVar);
+});
+onUnmounted(() => {
+  // Multiple ChatPanel instances can mount (one per page); the last
+  // surviving one would normally clear the var here. In practice
+  // only one is alive per route, so clearing is fine — if a future
+  // page mounts two, switch to a refcount.
+  if (typeof document !== 'undefined') {
+    document.documentElement.style.removeProperty('--chat-panel-width');
+  }
+  window.removeEventListener('resize', syncCssVar);
+});
+
+function startResize(ev: PointerEvent) {
+  if (props.variant !== 'panel' || collapsed.value) return;
+  ev.preventDefault();
+  const startX = ev.clientX;
+  const startWidth = panelWidth.value;
+  const onMove = (e: PointerEvent) => {
+    // Dock is right-anchored, so dragging LEFT grows the panel.
+    const next = startWidth + (startX - e.clientX);
+    const maxPx = window.innerWidth * 0.9;
+    panelWidth.value = Math.min(Math.max(next, PANEL_WIDTH_MIN), maxPx);
+  };
+  const onUp = () => {
+    window.removeEventListener('pointermove', onMove);
+    window.removeEventListener('pointerup', onUp);
+    try { localStorage.setItem(PANEL_WIDTH_KEY, String(Math.round(panelWidth.value))); } catch {}
+    document.body.style.userSelect = '';
+    document.body.style.cursor = '';
+  };
+  window.addEventListener('pointermove', onMove);
+  window.addEventListener('pointerup', onUp);
+  document.body.style.userSelect = 'none';
+  document.body.style.cursor = 'col-resize';
+}
+
 const draft = ref('');
 const scroller = ref<HTMLElement | null>(null);
 
@@ -108,6 +185,39 @@ watch(() => committedTurns.value.length + (state.inflight?.text.length ?? 0), as
     scroller.value.scrollTop = scroller.value.scrollHeight;
   }
 });
+
+// Handoff button state. Shows a small popover with copy-able
+// commands so the operator can paste into Claude Code and have it
+// resume the investigation with full tool-call history + raw
+// results. Server has already persisted every turn to
+// <claudeDir>/chats/<chat_id>.md.
+const showHandoff = ref(false);
+const handoffCopied = ref('');
+
+function handoffCatCommand(): string {
+  const id = state.chatId || '(no chat yet — send a message first)';
+  // The host path matches what test-dev maps to inside the container.
+  // For other deploys an operator can adapt; the URL fallback always works.
+  return `cat ~/test-dev/.claude/chats/${id}.md`;
+}
+function handoffUrl(): string {
+  const id = state.chatId || '';
+  if (!id) return '';
+  return `${window.location.origin}/analytics/api/v2/chat/handoffs/${id}`;
+}
+async function copyHandoff(kind: 'cat' | 'url') {
+  const text = kind === 'cat' ? handoffCatCommand() : handoffUrl();
+  if (!text) return;
+  try {
+    await navigator.clipboard.writeText(text);
+    handoffCopied.value = kind;
+    setTimeout(() => { handoffCopied.value = ''; }, 1500);
+  } catch {
+    // Clipboard API blocked (file:// or no perms). Fall back to a
+    // browser prompt the user can copy from manually.
+    window.prompt('Copy this:', text);
+  }
+}
 
 const budgetText = computed(() => {
   if (!budget.value) return '';
@@ -233,7 +343,14 @@ function onDiscardFinding(p: FindingProposal) {
   <aside
     class="chat-panel"
     :class="{ collapsed, fluid: variant === 'fluid' }"
+    :style="panelStyle"
   >
+    <div
+      v-if="variant === 'panel' && !collapsed"
+      class="resize-handle"
+      title="Drag to resize"
+      @pointerdown="startResize"
+    ></div>
     <header class="chat-head">
       <button
         v-if="variant === 'panel'"
@@ -260,10 +377,42 @@ function onDiscardFinding(p: FindingProposal) {
           :disabled="isStreaming || committedTurns.length < 2"
           title="Compact conversation — replaces history with an LLM-generated summary, keeps the UI scroll-back"
         >📦</button>
+        <button
+          class="head-btn"
+          @click="showHandoff = !showHandoff"
+          :disabled="!state.chatId"
+          title="Hand off to Claude Code — show command/URL to fetch this conversation"
+        >🤝</button>
         <button class="head-btn" @click="reset" title="Clear conversation">⟲</button>
         <button class="head-btn" @click="showSettings = true" title="Chat settings">⚙</button>
       </template>
     </header>
+
+    <div v-if="showHandoff && !collapsed" class="handoff-popover">
+      <div class="handoff-row">
+        <label class="handoff-label">Read in Claude Code (host shell):</label>
+        <div class="handoff-line">
+          <code>{{ handoffCatCommand() }}</code>
+          <button class="copy-btn" @click="copyHandoff('cat')">
+            {{ handoffCopied === 'cat' ? '✓' : '📋' }}
+          </button>
+        </div>
+      </div>
+      <div class="handoff-row">
+        <label class="handoff-label">…or fetch over HTTP:</label>
+        <div class="handoff-line">
+          <code>{{ handoffUrl() }}</code>
+          <button class="copy-btn" @click="copyHandoff('url')">
+            {{ handoffCopied === 'url' ? '✓' : '📋' }}
+          </button>
+        </div>
+      </div>
+      <div class="handoff-tip">
+        Paste either into Claude Code and ask it to continue. Conversation
+        includes full tool calls + raw results, not just the chat summary.
+      </div>
+      <button class="handoff-close" @click="showHandoff = false">Close</button>
+    </div>
 
     <template v-if="!collapsed">
       <div v-if="!isConfigured" class="empty">
@@ -395,6 +544,7 @@ function onDiscardFinding(p: FindingProposal) {
 .chat-panel {
   display: flex;
   flex-direction: column;
+  position: relative;
   width: 380px;
   max-width: 100%;
   height: 100%;
@@ -404,8 +554,38 @@ function onDiscardFinding(p: FindingProposal) {
   overflow: hidden;
 }
 .chat-panel.collapsed {
-  width: 36px;
+  width: 36px !important;
   align-items: stretch;
+}
+
+/* Left-edge drag handle for the panel variant. Sits inside the
+   fixed-position dock (right-anchored), so dragging LEFT widens
+   the panel. 6px hit-zone; the visible affordance is a slim grey
+   bar that brightens on hover. */
+.resize-handle {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 6px;
+  height: 100%;
+  cursor: col-resize;
+  background: transparent;
+  z-index: 2;
+  touch-action: none;
+}
+.resize-handle::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 2px;
+  width: 2px;
+  height: 100%;
+  background: var(--border-light, #e5e7eb);
+  transition: background 0.15s ease;
+}
+.resize-handle:hover::before,
+.resize-handle:active::before {
+  background: var(--accent, #3b82f6);
 }
 .chat-panel.fluid {
   width: 100%;
@@ -466,6 +646,57 @@ function onDiscardFinding(p: FindingProposal) {
   border-radius: var(--radius-sm);
 }
 .collapse-btn:hover, .head-btn:hover { background: var(--surface-hover); }
+.head-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+.handoff-popover {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  background: var(--surface, #f9fafb);
+  border-bottom: 1px solid var(--border-light, #e5e7eb);
+  font-size: 12px;
+}
+.handoff-row { display: flex; flex-direction: column; gap: 3px; }
+.handoff-label { color: var(--text-secondary, #6b7280); font-size: 11px; }
+.handoff-line {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  background: #fff;
+  border: 1px solid var(--border-light, #e5e7eb);
+  border-radius: 4px;
+  padding: 4px 8px;
+}
+.handoff-line code {
+  flex: 1;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.copy-btn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 2px 4px;
+  font-size: 12px;
+}
+.handoff-tip {
+  color: var(--text-secondary, #6b7280);
+  font-size: 11px;
+  line-height: 1.4;
+}
+.handoff-close {
+  align-self: flex-end;
+  background: none;
+  border: 1px solid var(--border-light, #e5e7eb);
+  border-radius: 4px;
+  padding: 3px 10px;
+  cursor: pointer;
+  font-size: 11px;
+}
 
 .empty {
   flex: 1;

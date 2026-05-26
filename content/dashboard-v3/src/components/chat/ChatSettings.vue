@@ -14,7 +14,7 @@ import { useDiscoveredModels } from '@/composables/useDiscoveredModels';
 
 const emit = defineEmits<{ close: [] }>();
 
-const { settings, update } = useChatSettings();
+const { settings, update, configuredProfiles } = useChatSettings();
 const { data: catalog, isLoading, error } = useLLMProfiles();
 
 const showKey = ref(false);
@@ -144,7 +144,7 @@ function onKeyInput(e: Event) {
           <span class="label">Provider</span>
           <select :value="settings.profile" @change="onProfileChange">
             <option v-for="t in catalog.templates" :key="t.name" :value="t.name">
-              {{ t.label }}
+              {{ configuredProfiles[t.name] ? '🔑 ' : '' }}{{ t.label }}
             </option>
           </select>
         </label>
@@ -215,8 +215,10 @@ function onKeyInput(e: Event) {
           {{ currentProfile.api_key_help }}
         </p>
         <p class="row help muted">
-          Your key is stored in this browser only. The forwarder forwards
-          it on each request and never persists it.
+          Your key is stored in this browser only, separately per
+          provider — switching the dropdown above won't lose the key
+          you've pasted for another provider. The forwarder receives
+          the key on each request and never persists it.
         </p>
       </template>
 
