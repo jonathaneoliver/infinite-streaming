@@ -85,20 +85,50 @@ export function mergeMetricsOnly(
   existing: PlayerRecord,
   incoming: PlayerRecord,
 ): PlayerRecord {
+  // SSE event-type-aware merge of metric BLOBS.
+  //
+  // The proxy always sends a full PlayerRecord on every `player.updated`
+  // SSE frame, but iOS's nested `player_metrics` blob is SPARSE when
+  // the originating iOS event was non-heartbeat (state_change,
+  // buffering_start, etc. only include the fields relevant to that
+  // event). Heartbeats — fired ~1Hz — are the FULL snapshots.
+  //
+  // Detection: look at incoming.player_metrics.last_event. If it's
+  // "heartbeat", treat this as a full snapshot and REPLACE the
+  // metric blobs wholesale (clears stale values that iOS has
+  // stopped sending). Otherwise treat as a delta and DEEP-MERGE
+  // (preserves fields that aren't in this delta).
+  //
+  // Trade-off: stale values can linger for up to ~1s between
+  // heartbeats. The previous bug (fields blanking for 1s on every
+  // state transition) was worse — there a field would go missing
+  // even though the data had it. Heartbeat-driven refresh ensures
+  // any "stale 0 from past iOS measurement" gets cleared on the
+  // next ~1s tick.
+  const lastEvent = (incoming as any).player_metrics?.last_event;
+  const triggerType = (incoming as any).player_metrics?.trigger_type;
+  const isHeartbeat = lastEvent === 'heartbeat' || triggerType === 'heartbeat';
+
   const out: any = { ...existing };
   for (const k of Object.keys(incoming) as (keyof PlayerRecord)[]) {
     if (CONTROL_SET.has(k as string)) continue;          // operator-mutable; preserve existing
     const v = (incoming as any)[k];
     if (v === undefined) continue;                       // missing in tick → keep existing
-    // Metric BLOBS get deep-merged: existing fields are preserved
-    // for any keys the incoming blob doesn't have. Anything else
-    // (scalars, strings) gets the incoming value as-is.
+    // Metric BLOBS get either wholesale-replaced (heartbeat = full
+    // snapshot) or deep-merged (delta event = preserve cached fields).
+    // Anything else (scalars, strings) always gets the incoming value.
     if (METRIC_BLOB_SET.has(k as string) && v !== null && typeof v === 'object') {
-      const prev = (existing as any)[k];
-      if (prev !== null && typeof prev === 'object') {
-        out[k] = mergeShallow(prev, v);
-        continue;
+      if (isHeartbeat) {
+        out[k] = v;                                      // wholesale replace
+      } else {
+        const prev = (existing as any)[k];
+        if (prev !== null && typeof prev === 'object') {
+          out[k] = mergeShallow(prev, v);                // deep merge
+          continue;
+        }
+        out[k] = v;
       }
+      continue;
     }
     out[k] = v;
   }
