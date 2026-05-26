@@ -565,29 +565,22 @@ func applyLabelsPatch(s map[string]any, labels any) {
 	s["_v2_labels"] = current
 }
 
-// effectiveRate resolves a requested rate (Mbps) against the deployment
-// baseline (issue #480). A requested 0 means "no operator override" —
-// on prod (baseline=0) it stays 0 (unlimited); on test-dev (baseline>0)
-// it pins to the baseline so no slider/CLI path can bypass the cap.
-// Positive requests pass through unchanged.
-func effectiveRate(srv *Server, requested float64) float64 {
-	if requested > 0 {
-		return requested
-	}
-	if srv != nil && srv.v1 != nil {
-		if baseline := srv.v1.DefaultRateMbps(); baseline > 0 {
-			return float64(baseline)
-		}
-	}
-	return 0
-}
-
+// applyShapePatch writes the v2 shape patch onto the v1 session map.
+// Storage carries the operator's raw intent (rate_mbps=0 stays 0 — the
+// dashboard slider position). Effective enforcement of the deployment
+// baseline happens at the kernel-apply sites (in package main) via
+// App.effectiveRate. The derived effective_rate_limit_mbps field on
+// every snapshot is what charts read for the throttle line. Issue #480.
+//
+// srv is currently unused here but kept on the signature so future
+// patches that need Server-scoped state (e.g. per-field provenance
+// trackers) can land without re-threading every call site.
 func applyShapePatch(srv *Server, s map[string]any, shape any) {
+	_ = srv
 	if shape == nil {
-		// Wholesale wipe — clear every translated v1 field. Rate
-		// resolves to the baseline so "clear all overrides" returns to
-		// the deployment floor instead of unlimited.
-		s["nftables_bandwidth_mbps"] = effectiveRate(srv, 0)
+		// Wholesale wipe — operator-cleared state. nftables_bandwidth_mbps
+		// goes to 0 ("no override"); kernel still enforces baseline.
+		s["nftables_bandwidth_mbps"] = float64(0)
 		s["nftables_delay_ms"] = 0
 		s["nftables_packet_loss"] = float64(0)
 		s["transport_failure_type"] = "none"
@@ -603,9 +596,9 @@ func applyShapePatch(srv *Server, s map[string]any, shape any) {
 	}
 	if v, present := shapeMap["rate_mbps"]; present {
 		if v == nil {
-			s["nftables_bandwidth_mbps"] = effectiveRate(srv, 0)
+			s["nftables_bandwidth_mbps"] = float64(0)
 		} else if f, ok := numericFloat(v); ok {
-			s["nftables_bandwidth_mbps"] = effectiveRate(srv, f)
+			s["nftables_bandwidth_mbps"] = f
 		}
 	}
 	if v, present := shapeMap["delay_ms"]; present {

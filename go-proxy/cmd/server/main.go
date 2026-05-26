@@ -4206,12 +4206,11 @@ func (a *App) handleNftShape(w http.ResponseWriter, r *http.Request) {
 			rateMbps = parsed
 		}
 	}
-	// "No operator override" (rate_mbps=0) resolves to the deployment
-	// baseline. On prod (defaultRateMbps=0) this is a no-op; on test-dev
-	// it pins the session to the baseline cap. Issue #480.
-	if rateMbps == 0 && a.defaultRateMbps > 0 {
-		rateMbps = float64(a.defaultRateMbps)
-	}
+	// Storage holds the operator's raw intent (rate_mbps=0 stays 0 — the
+	// slider position is "no override"). The kernel sees the deployment
+	// baseline when the operator didn't override; a.effectiveRate does
+	// the translation at the UpdateRateLimit call sites below. Issue
+	// #480.
 	delayMs := 0
 	if val, ok := payload["delay_ms"]; ok {
 		switch v := val.(type) {
@@ -4237,8 +4236,9 @@ func (a *App) handleNftShape(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	a.disablePatternForPort(port)
-	if err := a.traffic.UpdateRateLimit(port, rateMbps); err != nil {
-		log.Printf("NETSHAPE rate limit failed port=%d rate=%g: %v", port, rateMbps, err)
+	effectiveMbps := a.effectiveRate(rateMbps)
+	if err := a.traffic.UpdateRateLimit(port, effectiveMbps); err != nil {
+		log.Printf("NETSHAPE rate limit failed port=%d rate=%g (effective=%g): %v", port, rateMbps, effectiveMbps, err)
 		w.WriteHeader(http.StatusInternalServerError)
 		writeJSON(w, map[string]string{"error": "Failed to update rate limit", "details": err.Error()})
 		return
@@ -4250,7 +4250,7 @@ func (a *App) handleNftShape(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.updateSessionsByPortWithControl(port, map[string]interface{}{
-		"nftables_bandwidth_mbps": rateMbps,
+		"nftables_bandwidth_mbps": rateMbps, // operator intent; 0 = no override
 		"nftables_delay_ms":       delayMs,
 		"nftables_packet_loss":    loss,
 	}, "")
@@ -4265,8 +4265,8 @@ func (a *App) handleNftShape(w http.ResponseWriter, r *http.Request) {
 				continue // Skip the original port
 			}
 			a.disablePatternForPort(groupPort)
-			if err := a.traffic.UpdateRateLimit(groupPort, rateMbps); err != nil {
-				log.Printf("NETSHAPE group propagation rate limit failed port=%d rate=%g: %v", groupPort, rateMbps, err)
+			if err := a.traffic.UpdateRateLimit(groupPort, effectiveMbps); err != nil {
+				log.Printf("NETSHAPE group propagation rate limit failed port=%d rate=%g (effective=%g): %v", groupPort, rateMbps, effectiveMbps, err)
 				continue
 			}
 			if err := a.traffic.UpdateNetem(groupPort, delayMs, loss); err != nil {
@@ -5026,10 +5026,35 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 			"x_forwarded_port":                         assignedInternalPort,
 			"x_forwarded_port_external":                assignedExternalPort,
 			"loop_count_server":                        0,
+			// nftables_bandwidth_mbps starts at 0 — "no operator
+			// override." On a deployment with defaultRateMbps>0 the
+			// kernel still gets capped at the baseline (via
+			// a.effectiveRate at the apply site below) but the slider
+			// in the dashboard stays at 0 so the operator sees "I
+			// haven't touched this." The derived effective_rate_mbps
+			// field surfaces what the kernel is actually enforcing.
+			// Issue #480.
+			"nftables_bandwidth_mbps":                  float64(0),
 		}
 		a.resetServerLoopState(fmt.Sprintf("%d", allocated))
 		sessionList = append(sessionList, sessionData)
 		a.saveSessionList(sessionList)
+		// Apply the deployment baseline to the kernel BEFORE the
+		// redirect fires — the client reconnects on the new port
+		// immediately and the first segment burst would otherwise run
+		// uncapped. effectiveRate(0) returns the baseline (or 0 on
+		// prod-style deployments). No-op when traffic is nil
+		// (non-Linux dev). Issue #480.
+		if a.defaultRateMbps > 0 && a.traffic != nil {
+			if internalPortInt, err := strconv.Atoi(assignedInternalPort); err == nil {
+				effective := a.effectiveRate(0)
+				if err := a.traffic.UpdateRateLimit(internalPortInt, effective); err != nil {
+					log.Printf("baseline rate cap apply failed port=%d rate=%g: %v", internalPortInt, effective, err)
+				} else {
+					log.Printf("baseline rate cap applied port=%d rate=%g Mbps (#480)", internalPortInt, effective)
+				}
+			}
+		}
 		manifestURL := "/" + escapedPath
 		if r.URL.RawQuery != "" {
 			manifestURL = manifestURL + "?" + r.URL.RawQuery
@@ -5938,8 +5963,11 @@ func (a *App) applySessionShaping(session SessionData, port int) {
 	rate := getFloat(session, "nftables_bandwidth_mbps")
 	delay := getInt(session, "nftables_delay_ms")
 	loss := getFloat(session, "nftables_packet_loss")
-	if err := a.applyShapeIfChanged(port, rate, delay, loss); err != nil {
-		log.Printf("NETSHAPE apply failed port=%d rate=%g delay=%d loss=%.2f: %v", port, rate, delay, loss, err)
+	// rate=0 in storage means "operator did not override." Resolve to
+	// the deployment baseline before pushing to the kernel. Issue #480.
+	effective := a.effectiveRate(rate)
+	if err := a.applyShapeIfChanged(port, effective, delay, loss); err != nil {
+		log.Printf("NETSHAPE apply failed port=%d rate=%g (effective=%g) delay=%d loss=%.2f: %v", port, rate, effective, delay, loss, err)
 		return
 	}
 }
@@ -7564,12 +7592,22 @@ func (a *App) normalizeSessionsForResponse(sessions []SessionData) []SessionData
 				session["nftables_pattern_steps"] = []NftShapeStep{}
 			}
 		}
-		// Default the rate cap to the deployment baseline (issue #480).
-		// 0 = "no cap" (production-style); positive = "no operator
-		// override" interpreted as the baseline (test-dev). setDefault
-		// only writes when the session lacks the field, so operator
-		// PATCHes that explicitly set a value are preserved.
-		setDefault("nftables_bandwidth_mbps", float64(a.defaultRateMbps))
+		// nftables_bandwidth_mbps holds the operator's raw intent —
+		// 0 means "no override" (slider at min). Effective enforcement
+		// resolves to the baseline at the kernel-apply call sites via
+		// a.effectiveRate. The derived effective_rate_limit_mbps field
+		// below makes the actual cap visible to charts and the dashboard
+		// throttle line. Issue #480.
+		setDefault("nftables_bandwidth_mbps", float64(0))
+		// effective_rate_limit_mbps — what the kernel is actually
+		// enforcing right now (max of operator override and deployment
+		// baseline). Stamped on every snapshot so dashboards have a
+		// stable, always-present field to draw the throttle line from.
+		// 0 means truly uncapped (prod-style with operator slider at
+		// 0). Positive means a cap is in effect, regardless of origin.
+		// Issue #480.
+		operatorRate := getFloat(session, "nftables_bandwidth_mbps")
+		session["effective_rate_limit_mbps"] = a.effectiveRate(operatorRate)
 		setDefault("nftables_delay_ms", 0)
 		setDefault("nftables_packet_loss", 0)
 		setDefault("nftables_pattern_enabled", false)
@@ -8360,6 +8398,23 @@ func pathParent(path string) string {
 		return ""
 	}
 	return parts[len(parts)-2]
+}
+
+// effectiveRate resolves an operator-requested rate (Mbps) against the
+// deployment baseline. Requested 0 means "no override" — on prod
+// (defaultRateMbps=0) it stays 0 (unlimited); on test-dev
+// (defaultRateMbps>0) it becomes the baseline so the kernel always
+// enforces the floor. Positive requests pass through unchanged. Used
+// at the tc / nftables apply sites only — storage holds the raw
+// operator intent. Issue #480.
+func (a *App) effectiveRate(requested float64) float64 {
+	if requested > 0 {
+		return requested
+	}
+	if a != nil && a.defaultRateMbps > 0 {
+		return float64(a.defaultRateMbps)
+	}
+	return 0
 }
 
 func getenv(key, fallback string) string {
