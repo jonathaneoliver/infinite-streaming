@@ -47,6 +47,21 @@ function fmtDuration(firstIso?: string | null, lastIso?: string | null): string 
   return `${h}h ${m % 60}m`;
 }
 
+/**
+ * effectiveLastSeenAt — server's PlayerRecord.last_seen_at is
+ * legitimately null for live sessions (only set on session-end
+ * lifecycle close on some code paths). Fall back to
+ * server_received_at_ms, which IS updated on every snapshot —
+ * effectively the "most recent server activity" signal.
+ * Returns ISO string or null when neither source has a value.
+ */
+function effectiveLastSeenAt(p: any): string | null {
+  if (typeof p?.last_seen_at === 'string' && p.last_seen_at) return p.last_seen_at;
+  const ms = p?.server_received_at_ms;
+  if (typeof ms === 'number' && ms > 0) return new Date(ms).toISOString();
+  return null;
+}
+
 const fields = computed(() => {
   const p = player.value;
   if (!p) return [] as { label: string; value: string }[];
@@ -83,12 +98,18 @@ const fields = computed(() => {
     { label: 'User Agent', value: p.user_agent ?? '—' },
     { label: 'Master Manifest URL', value: cp?.manifest?.master_url ?? '—' },
     { label: 'First Request', value: fmtDate(p.first_seen_at) },
-    { label: 'Last Request', value: fmtDate(p.last_seen_at) },
-    { label: 'Session Duration', value: fmtDuration(p.first_seen_at, p.last_seen_at) },
-    { label: 'Shaper Avg', value: sm?.mbps_shaper_avg != null ? `${sm.mbps_shaper_avg.toFixed(2)} Mbps` : '—' },
+    // Server's last_seen_at is null on live sessions on some paths;
+    // fall back to server_received_at_ms (the "last snapshot" signal)
+    // so the operator sees actual freshness, not a misleading "—".
+    { label: 'Last Request', value: fmtDate(effectiveLastSeenAt(p)) },
+    { label: 'Session Duration', value: fmtDuration(p.first_seen_at, effectiveLastSeenAt(p)) },
     { label: 'Loops (server)', value: String(p.loop_count_server ?? 0) },
     { label: 'Control Rev', value: p.control_revision ?? '—' },
   ];
+  // Shaper Avg removed from this identity grid — it's a runtime
+  // metric, not identity, so it belongs in developerFields below
+  // alongside Shaper Rate / Transfer Rate / etc.
+  void sm; // sm still used by developerFields; suppress unused-var warning
   // Append test labels at the END so they don't push lifecycle
   // identifiers off-screen on narrow viewports, but still surface
   // when present.
@@ -103,6 +124,11 @@ const developerFields = computed(() => {
   if (!p || !sm) return [] as { label: string; value: string }[];
   return [
     { label: 'Shaper Rate',         value: fmtMbps(sm.mbps_shaper_rate) },
+    // Shaper Avg moved from identity grid into metrics 2026-05-26
+    // (it's runtime telemetry, not session identity). Renders "—"
+    // when no shaping is active — both shaper_rate and shaper_avg
+    // are absent from server_metrics until a shape rule is applied.
+    { label: 'Shaper (avg)',        value: fmtMbps(sm.mbps_shaper_avg) },
     { label: 'Transfer Rate',       value: fmtMbps(sm.mbps_transfer_rate) },
     { label: 'Transfer (avg)',      value: fmtMbps(sm.mbps_transfer_complete) },
     { label: 'Mbps In',             value: fmtMbps(sm.mbps_in) },
