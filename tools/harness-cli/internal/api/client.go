@@ -177,6 +177,38 @@ func asForwarderEditor(e reqEditor) forwarder.RequestEditorFn {
 	return forwarder.RequestEditorFn(e)
 }
 
+// ----- Info ---------------------------------------------------------------
+
+// ProxyInfo is the subset of GET /api/v2/info fields the CLI consumes.
+// The oapigen-typed Info schema doesn't carry default_rate_mbps yet
+// (proxy ships it via an anonymous-embed wrapper — see #480), so we
+// decode the response loosely. Extend this struct as the typed Info
+// gains fields the CLI cares about.
+type ProxyInfo struct {
+	DefaultRateMbps int    `json:"default_rate_mbps"`
+	Version         string `json:"version,omitempty"`
+}
+
+// Info fetches GET /api/v2/info and returns the parsed subset. Errors
+// from the underlying GetApiV2Info call surface unchanged; a 4xx/5xx
+// becomes a checkProxyError. DefaultRateMbps==0 means "deployment is
+// unlimited" (no baseline cap applied to new sessions).
+func (c *Client) Info(ctx context.Context) (ProxyInfo, error) {
+	var out ProxyInfo
+	resp, err := c.proxy.GetApiV2Info(ctx)
+	if err != nil {
+		return out, err
+	}
+	defer resp.Body.Close()
+	if err := checkProxyError(resp, "GET /api/v2/info"); err != nil {
+		return out, err
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return out, fmt.Errorf("decode info: %w", err)
+	}
+	return out, nil
+}
+
 // ----- Players ------------------------------------------------------------
 
 // Players returns the current set of v2 player records. Wraps

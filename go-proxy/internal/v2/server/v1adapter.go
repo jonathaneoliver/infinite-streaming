@@ -128,6 +128,14 @@ type V1Adapter interface {
 	// flag). `delayMs` and `lossPct` carry through to the netem qdisc.
 	// Empty steps disarm the pattern loop and revert to static rate.
 	ApplyPatternToPlayer(playerID string, steps []ShapePatternStep, delayMs int, lossPct float64) error
+
+	// DefaultRateMbps returns the deployment baseline rate cap (Mbps)
+	// read from INFINITE_STREAM_DEFAULT_RATE_MBPS at boot. 0 means no
+	// baseline — sessions are uncapped unless an operator override is
+	// in force (today's prod behaviour). Positive means new sessions
+	// (and any PATCH that requests "no override," i.e. rate_mbps=0 or
+	// null) get this cap. See issue #480.
+	DefaultRateMbps() int
 }
 
 // ShapePatternStep is the v1-shaped step the adapter expects. Mirrors

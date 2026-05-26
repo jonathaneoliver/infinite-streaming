@@ -177,6 +177,13 @@ func (a *v2Adapter) AnalyticsEnabled() bool {
 	return os.Getenv("FORWARDER_URL") != ""
 }
 
+func (a *v2Adapter) DefaultRateMbps() int {
+	if a == nil || a.app == nil {
+		return 0
+	}
+	return a.app.defaultRateMbps
+}
+
 // networkEntryToMap converts a typed v1 ring-buffer entry into the
 // loosely-typed map shape v2's translator consumes. Mirrors the keys
 // in NetworkLogEntry.

@@ -16,6 +16,7 @@ COPY analytics/go-forwarder/ ./analytics/go-forwarder/
 # tools/ tree into the image) keeps the build context tight.
 RUN go work edit -dropuse ./tools/harness-cli || true
 RUN go work edit -dropuse ./tests/characterization || true
+RUN go work edit -dropuse ./tests/server_behavior || true
 WORKDIR /src/analytics/go-forwarder
 RUN CGO_ENABLED=0 GOFLAGS=-trimpath go build -o /out/forwarder .
 

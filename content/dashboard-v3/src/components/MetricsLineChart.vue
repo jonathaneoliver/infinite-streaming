@@ -34,6 +34,11 @@ export interface SeriesSpec {
    *  enables the right axis — pair with `y2Title` on the chart to label
    *  it. */
   axis?: 'y' | 'y2';
+  /** Hide the series by default. Renders in the legend so the operator
+   *  can click to enable it; the dataset is just initially `hidden: true`
+   *  in Chart.js terms. Useful for diagnostic series that would
+   *  otherwise clutter the default view. */
+  hidden?: boolean;
 }
 
 const props = defineProps({
@@ -196,6 +201,7 @@ function createChartInstance(Chart: any): any {
         borderWidth: 2,
         spanGaps: true,
         yAxisID: s.axis === 'y2' ? 'y2' : 'y',
+        hidden: !!s.hidden,
       })),
     },
     /**

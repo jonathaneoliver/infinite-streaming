@@ -14,6 +14,7 @@ import (
 // All methods are concurrent-safe via a single mutex (matches the v1
 // store's sessionsMu single-mutex contract).
 type fakeAdapter struct {
+	defaultRateMbps int
 	mu       sync.Mutex
 	sessions []map[string]any
 
@@ -194,6 +195,13 @@ type fakeTransportFaultCall struct {
 	Consecutive      int
 	ConsecutiveUnits string
 	Frequency        int
+}
+
+// DefaultRateMbps test stub — most tests run with the default 0
+// (production-style "no baseline cap"). Tests that need a positive
+// baseline can set a.defaultRateMbps via a helper.
+func (a *fakeAdapter) DefaultRateMbps() int {
+	return a.defaultRateMbps
 }
 
 // ApplyPatternToPlayer test stub — records the call for assertions.
