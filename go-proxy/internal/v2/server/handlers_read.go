@@ -17,22 +17,38 @@ func (*Server) GetApiV2Healthz(w http.ResponseWriter, r *http.Request) {
 }
 
 // GetApiV2Info returns build / config introspection.
+//
+// The response anonymous-embeds oapigen.Info so the typed v2 fields
+// serialize at the top level, then layers default_rate_mbps as an
+// extra field — pending a schema bump that adds it to the typed Info.
+// Matches the playerRecordWithRaw pattern used below. Issue #480.
 func (s *Server) GetApiV2Info(w http.ResponseWriter, r *http.Request) {
 	versions := []string{"v1", "v2"}
-	resp := oapigen.Info{
+	base := oapigen.Info{
 		ApiVersions: &versions,
 	}
+	defaultRate := 0
 	if s.v1 != nil {
 		v := s.v1.Version()
-		resp.Version = &v
+		base.Version = &v
 		c := s.v1.ContentDir()
-		resp.ContentDir = &c
+		base.ContentDir = &c
 		ae := s.v1.AuthEnabled()
-		resp.AuthEnabled = &ae
+		base.AuthEnabled = &ae
 		an := s.v1.AnalyticsEnabled()
-		resp.AnalyticsEnabled = &an
+		base.AnalyticsEnabled = &an
+		defaultRate = s.v1.DefaultRateMbps()
 	}
-	writeJSON(w, http.StatusOK, resp)
+	type infoWithDefaults struct {
+		oapigen.Info
+		// 0 = unlimited (no deployment baseline); positive = the
+		// kernel-enforced cap applied to every new session and to
+		// every PATCH that requests "no operator override." The
+		// dashboard reads this to render the persistent baseline
+		// chip and to label the slider position at 0.
+		DefaultRateMbps int `json:"default_rate_mbps"`
+	}
+	writeJSON(w, http.StatusOK, infoWithDefaults{Info: base, DefaultRateMbps: defaultRate})
 }
 
 // ----- Players (reads) -----------------------------------------------------
