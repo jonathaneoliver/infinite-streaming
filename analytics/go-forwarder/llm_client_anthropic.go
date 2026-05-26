@@ -190,10 +190,18 @@ func StreamChatAnthropic(ctx context.Context, req LLMRequest) (<-chan LLMEvent, 
 //     cache_control so the whole tools array hashes together.
 func translateToAnthropic(req LLMRequest) (*anthropicRequest, error) {
 	body := &anthropicRequest{
-		Model:       req.Model,
-		MaxTokens:   maxTokensOrDefault(req.MaxTokens),
-		Stream:      true,
-		Temperature: req.Temperature,
+		Model:     req.Model,
+		MaxTokens: maxTokensOrDefault(req.MaxTokens),
+		Stream:    true,
+		// Temperature intentionally omitted. Newer Anthropic models
+		// (Opus 4+) reject `temperature` as deprecated; older ones
+		// accept the server-side default (~1.0) just fine. The chat
+		// handler used to push 0.2 here via orDefault, which broke
+		// the moment the user switched to Opus. If a future caller
+		// needs to tune temperature, add a "set explicitly" guard
+		// (different from Go's zero value) and an allow-list of
+		// model prefixes that still accept the field. Same for
+		// top_p / top_k.
 	}
 
 	// --- System: split + mark cacheable prefix
