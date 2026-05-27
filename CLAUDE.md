@@ -51,22 +51,11 @@ pytest -m smoke
 pytest -m http
 pytest -m "not slow"
 pytest -k test_name
-
-# Run player ABR characterization tests
-pytest test_player_characterization_pytest.py -m abrchar -v \
-  --host $K3S_HOST --scheme http --api-port 40000 --hls-port 40081
-
-# Run against local Docker Compose
-pytest test_player_characterization_pytest.py -m abrchar -v \
-  --host localhost --scheme http --api-port 30000 --hls-port 30081
-
-# Available abrchar test modes: smooth, steps, transient-shock, startup-caps,
-#   downshift-severity, hysteresis-gap, emergency-downshift
-pytest test_player_characterization_pytest.py -m abrchar -v \
-  --abrchar-test-mode steps --abrchar-repeat-count 10
 ```
 
 Default server target for tests is `$K3S_HOST:30000/30081`. Override with `--host`, `--api-port`, `--hls-port`, or `--api-base`.
+
+Player ABR characterization moved to a Go framework under `tests/characterization/` (issue #482). See that directory's README for the mode list (steps / rampup / pyramid / hysteresis_gap / downshift_severity / transient_shock / emergency_downshift / startup / abort) and the launch-mode picker (manual / cli / appium).
 
 ## Code Style
 

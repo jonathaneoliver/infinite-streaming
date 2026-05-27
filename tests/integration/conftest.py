@@ -28,7 +28,6 @@ def pytest_configure(config):
     config.addinivalue_line("markers", "slow: Slow-running tests (>30s)")
     config.addinivalue_line("markers", "smoke: Quick smoke tests")
     config.addinivalue_line("markers", "regression: Regression tests")
-    config.addinivalue_line("markers", "abrchar: Player ABR characterization tests")
 
 
 def pytest_addoption(parser):
@@ -61,133 +60,6 @@ def pytest_addoption(parser):
         default=True,
         help="Follow HTTP redirects during stream/API probing (default: enabled)",
     )
-    parser.addoption("--abrchar-hold-seconds", type=int, default=8, help="Hold seconds per characterization step")
-    parser.addoption(
-        "--abrchar-smooth-step-seconds",
-        type=int,
-        default=None,
-        help="Smooth mode only: seconds each smooth step should last (overrides --abrchar-hold-seconds for smooth mode)",
-    )
-    parser.addoption(
-        "--abrchar-step-gap-seconds",
-        type=float,
-        default=0.0,
-        help="Extra seconds to wait between consecutive limit changes",
-    )
-    parser.addoption("--abrchar-settle-timeout", type=int, default=30, help="Seconds to wait for throughput settle per step")
-    parser.addoption("--abrchar-settle-tolerance", type=float, default=0.25, help="Settle tolerance ratio (e.g. 0.25 = ±25%%)")
-    parser.addoption(
-        "--abrchar-test-mode",
-        default="smooth",
-        choices=[
-            "smooth",
-            "steps",
-            "transient-shock",
-            "startup-caps",
-            "downshift-severity",
-            "hysteresis-gap",
-            "emergency-downshift",
-            "throughput-accuracy",
-            "throughput-calcs",
-        ],
-        help="Characterization schedule mode",
-    )
-    parser.addoption(
-        "--abrchar-accuracy-max-limit-mbps",
-        type=float,
-        default=100.0,
-        help="throughput-accuracy mode: maximum shaping limit to test (Mbps)",
-    )
-    parser.addoption(
-        "--abrchar-accuracy-sparse-variants",
-        type=int,
-        default=2,
-        help="throughput-accuracy mode: emulate sparse ladder using this many representative variants (default: 2)",
-    )
-    parser.addoption(
-        "--abrchar-content-variant-mode",
-        default="off",
-        choices=["off", "all", "sparse"],
-        help="Pre-test content tab variant filtering mode: off (no change), all (clear filter), sparse (select representative subset)",
-    )
-    parser.addoption(
-        "--abrchar-content-sparse-variants",
-        type=int,
-        default=2,
-        help="When --abrchar-content-variant-mode=sparse, how many variants to allow",
-    )
-    parser.addoption(
-        "--abrchar-stream-profile",
-        default="6s",
-        choices=["ll", "2s", "6s"],
-        help="HLS stream profile to use for auto-discovery: ll (master.m3u8), 2s (master_2s.m3u8), or 6s (master_6s.m3u8)",
-    )
-    parser.addoption(
-        "--net-overhead",
-        type=int,
-        choices=[5, 10],
-        help="Network overhead percent used for shaping target conversion (JS parity: 5 or 10)",
-    )
-    parser.addoption("--abrchar-overhead-pct", type=float, default=10.0, help="Network overhead percent used to convert ladder Mbps to wire Mbps")
-    parser.addoption("--abrchar-max-steps", type=int, default=0, help="Maximum number of characterization steps (0 = unlimited)")
-    parser.addoption(
-        "--abrchar-repeat-count",
-        type=int,
-        default=10,
-        help="How many times to repeat the characterization step schedule",
-    )
-    parser.addoption("--abrchar-run-name", default="", help="Optional user-friendly name for this characterization run")
-    parser.addoption(
-        "--abrchar-plot-logs",
-        action="store_true",
-        default=False,
-        help="Emit ABRCHAR_PLOT structured telemetry lines for offline charting (default: disabled)",
-    )
-    parser.addoption(
-        "--abrchar-open-browser",
-        action="store_true",
-        dest="abrchar_open_browser",
-        default=True,
-        help="Open dashboard testing-session page to start browser playback session (default: enabled)",
-    )
-    parser.addoption(
-        "--no-abrchar-open-browser",
-        action="store_false",
-        dest="abrchar_open_browser",
-        help="Disable browser launch and attach to an existing player/session",
-    )
-    parser.addoption(
-        "--abrchar-browser-wait",
-        type=float,
-        default=2.5,
-        help="Seconds to wait after opening browser before polling /api/sessions",
-    )
-    parser.addoption(
-        "--abrchar-live-offset-seconds",
-        type=float,
-        default=0.0,
-        help="When opening testing-session.html, seek this many seconds behind live edge (e.g. 30)",
-    )
-    parser.addoption(
-        "--abrchar-safari-native",
-        action="store_true",
-        default=False,
-        help="Launch testing-session.html in Safari and force player=native",
-    )
-    parser.addoption("--abrchar-session-id", default="", help="Attach ABR characterization to an existing session_id")
-    parser.addoption("--abrchar-player-id", default="", help="Attach ABR characterization to an existing player_id (e.g. iPad simulator app)")
-    parser.addoption(
-        "--abrchar-attach-timeout",
-        type=float,
-        default=60.0,
-        help="Seconds to wait when attaching to an existing player/session",
-    )
-    parser.addoption(
-        "--abrchar-launch-ios-simulator",
-        action="store_true",
-        default=False,
-        help="If attach IDs are not found, try launching InfiniteStreamPlayer in iOS Simulator before browser fallback",
-    )
     # Loop health monitoring
     parser.addoption("--loop-count", type=int, default=3, help="Number of loops to observe before reporting")
     parser.addoption("--loop-timeout", type=int, default=300, help="Max seconds to wait for loops")
@@ -218,31 +90,6 @@ def config(request):
         'url': request.config.getoption("--url"),
         'content_name': request.config.getoption("--content-name"),
         'follow_redirects': request.config.getoption("--follow-redirects"),
-        'abrchar_hold_seconds': request.config.getoption("--abrchar-hold-seconds"),
-        'abrchar_smooth_step_seconds': request.config.getoption("--abrchar-smooth-step-seconds"),
-        'abrchar_step_gap_seconds': request.config.getoption("--abrchar-step-gap-seconds"),
-        'abrchar_settle_timeout': request.config.getoption("--abrchar-settle-timeout"),
-        'abrchar_settle_tolerance': request.config.getoption("--abrchar-settle-tolerance"),
-        'abrchar_test_mode': request.config.getoption("--abrchar-test-mode"),
-        'abrchar_accuracy_max_limit_mbps': request.config.getoption("--abrchar-accuracy-max-limit-mbps"),
-        'abrchar_accuracy_sparse_variants': request.config.getoption("--abrchar-accuracy-sparse-variants"),
-        'abrchar_content_variant_mode': request.config.getoption("--abrchar-content-variant-mode"),
-        'abrchar_content_sparse_variants': request.config.getoption("--abrchar-content-sparse-variants"),
-        'abrchar_stream_profile': request.config.getoption("--abrchar-stream-profile"),
-        'net_overhead_pct': request.config.getoption("--net-overhead"),
-        'abrchar_overhead_pct': request.config.getoption("--abrchar-overhead-pct"),
-        'abrchar_max_steps': request.config.getoption("--abrchar-max-steps"),
-        'abrchar_repeat_count': request.config.getoption("--abrchar-repeat-count"),
-        'abrchar_run_name': request.config.getoption("--abrchar-run-name"),
-        'abrchar_plot_logs': request.config.getoption("--abrchar-plot-logs"),
-        'abrchar_open_browser': request.config.getoption("abrchar_open_browser"),
-        'abrchar_browser_wait': request.config.getoption("--abrchar-browser-wait"),
-        'abrchar_live_offset_seconds': request.config.getoption("--abrchar-live-offset-seconds"),
-        'abrchar_safari_native': request.config.getoption("--abrchar-safari-native"),
-        'abrchar_session_id': request.config.getoption("--abrchar-session-id"),
-        'abrchar_player_id': request.config.getoption("--abrchar-player-id"),
-        'abrchar_attach_timeout': request.config.getoption("--abrchar-attach-timeout"),
-        'abrchar_launch_ios_simulator': request.config.getoption("--abrchar-launch-ios-simulator"),
         'loop_count': request.config.getoption("--loop-count"),
         'loop_timeout': request.config.getoption("--loop-timeout"),
         'loop_player_id': request.config.getoption("--loop-player-id") or None,
@@ -270,9 +117,6 @@ def hls_base(config):
 @pytest.fixture(scope="session")
 def player_id(config):
     """Generate unique player ID for this test session."""
-    override = str(getattr(config, "abrchar_player_id", "") or "").strip()
-    if override:
-        return override
     return str(uuid.uuid4())
 
 

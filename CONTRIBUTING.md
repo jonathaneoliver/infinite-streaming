@@ -84,18 +84,13 @@ pytest -m "not slow"
 pytest -k test_name
 ```
 
-Key markers: `smoke`, `http`, `segment`, `manifest`, `transport`, `abrchar`.
+Key markers: `smoke`, `http`, `segment`, `manifest`, `transport`.
 
 Default target is `$K3S_HOST:30000/30081`. Override with `--host`, `--api-port`, `--hls-port`, or `--api-base`.
 
-Player characterization (ABR ramp sweeps):
+Player ABR characterization moved to the Go framework under [`tests/characterization/`](tests/characterization/) (issue #482) — see that directory's README for the launch-mode picker (manual / cli / appium) and the mode list.
 
-```bash
-pytest test_player_characterization_pytest.py -m abrchar -v \
-  --host localhost --scheme http --api-port 30000 --hls-port 30081
-```
-
-See [`tests/integration/README.md`](tests/integration/README.md) and [`tests/integration/PLAYER_CHARACTERIZATION_PYTEST.md`](tests/integration/PLAYER_CHARACTERIZATION_PYTEST.md) for the full guide.
+See [`tests/integration/README.md`](tests/integration/README.md) for the remaining pytest suite (HLS failure-injection, loop health, iOS simulator smoke).
 
 ## Code style
 
