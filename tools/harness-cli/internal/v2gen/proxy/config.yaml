@@ -1,0 +1,11 @@
+# oapi-codegen config — v2 go-proxy client.
+# Run via `make gen-harness-cli-client` (which cds into this dir).
+# Generated file (proxy.gen.go) IS committed so the CLI builds without
+# contributors needing to run codegen first.
+package: proxy
+output: proxy.gen.go
+generate:
+  models: true
+  client: true
+output-options:
+  skip-prune: true

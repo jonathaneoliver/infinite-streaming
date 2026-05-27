@@ -1,6 +1,20 @@
 services:
   go-server:
     container_name: test-dev-server
+    # Mount mkcert-signed certs over the auto-generated self-signed
+    # pair so Chrome / Safari trust them without per-port click-through.
+    # Drop localhost.pem + localhost-key.pem in ./certs/ on the host
+    # (`scp` from a Mac that ran `mkcert -install` + `mkcert
+    # jonathanoliver-ubuntu.local localhost 127.0.0.1`). launch.sh
+    # skips its self-signed fallback when the files already exist at
+    # /media/certs/, so the mounted cert wins.
+    volumes:
+      - ./certs:/media/certs:ro
+    environment:
+      # nginx's external listen on 30000 is now TLS-only. Internal
+      # in-container calls from go-proxy → nginx use the cleartext
+      # loopback listener on 30005 (see nginx-content.conf.template).
+      - INFINITE_STREAM_UPSTREAM_PORT=30005
     ports:
       !override
       - "21000:30000"
@@ -34,7 +48,7 @@ services:
   forwarder:
     container_name: test-dev-forwarder
     environment:
-      - FORWARDER_SSE_URL=http://go-server:30081/api/sessions/stream
+      - FORWARDER_SSE_URL=https://go-server:30081/api/sessions/stream
       - FORWARDER_CLICKHOUSE_URL=http://clickhouse:8123
       - FORWARDER_CLICKHOUSE_DB=infinite_streaming
       - FORWARDER_CLICKHOUSE_TABLE=session_snapshots

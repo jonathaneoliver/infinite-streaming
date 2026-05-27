@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -22,18 +23,82 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/google/uuid"
+	"github.com/jonathaneoliver/infinite-streaming/go-proxy/pkg/v2translate"
 )
 
+// init: relax TLS verification on every outgoing request. The
+// forwarder only talks to go-server (Docker-internal) and ClickHouse,
+// both reachable on private interfaces with self-signed certs once
+// TS11 flipped go-proxy to TLS. Verification would require shipping
+// the in-container CA into the forwarder image; trusting self-signed
+// for these internal hops is safe and matches `proxy_ssl_verify off`
+// on the nginx side.
+func init() {
+	if transport, ok := http.DefaultTransport.(*http.Transport); ok {
+		if transport.TLSClientConfig == nil {
+			transport.TLSClientConfig = &tls.Config{}
+		}
+		transport.TLSClientConfig.InsecureSkipVerify = true
+	}
+}
+
+// canonicalV2ID normalises a raw v1 identifier (player_id / play_id) to
+// the same canonical v2 form `v2translate` produces on read: parse as
+// UUID when possible, fall back to the stable v5 derivation otherwise.
+// Empty input → empty output (don't synthesise an id for missing data).
+//
+// Without this step the forwarder stored the raw short-form (e.g.
+// "427a6bf3") on ingest but emitted the v5-derived UUID
+// ("7046b635-…") on read; client-side archive queries built from
+// /api/v2/players (the v2 form) then matched no rows, so the
+// Focus Window came up empty for any non-UUID player.
+func canonicalV2ID(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	if u, err := uuid.Parse(raw); err == nil {
+		return u.String()
+	}
+	return v2translate.PlayerUUIDForRawID(raw).String()
+}
+
+// canonicalIDsFor returns the canonical player_id and play_id strings a
+// v3 client will use to look this row up. Routes through
+// v2translate.PlayerFromSession so the forwarder's stored ids stay in
+// lockstep with what `/api/v2/players` emits — including the fallback
+// play_id derivation for sessions whose raw v1 payload doesn't carry
+// `play_id` (web / hls.js / non-Apple devices).
+//
+// Returns empty strings when the session can't be projected (no
+// player_id at all); the caller still inserts the row but the play_id
+// column will be blank and the client won't be able to filter to that
+// row by play_id.
+func canonicalIDsFor(s map[string]interface{}) (string, string) {
+	rec, ok := v2translate.PlayerFromSession(s)
+	if !ok {
+		return canonicalV2ID(getStr(s, "player_id")), canonicalV2ID(getStr(s, "play_id"))
+	}
+	playerID := rec.Id.String()
+	playID := ""
+	if rec.CurrentPlay != nil {
+		playID = rec.CurrentPlay.Id.String()
+	}
+	return playerID, playID
+}
+
 type config struct {
-	sseURL        string
-	clickhouseURL string
-	chDatabase    string
-	chTable       string
-	chUser        string
-	chPassword    string
-	flushEvery    time.Duration
-	flushBatch    int
-	httpListen    string
+	sseURL         string
+	clickhouseURL  string
+	chDatabase     string
+	chTable        string
+	chUser         string
+	chPassword     string
+	flushEvery     time.Duration
+	flushBatch     int
+	httpListen     string
+	ringWindowSecs int // FORWARDER_LIVE_RING_SECONDS; see ring.go
 }
 
 func loadConfig() config {
@@ -51,8 +116,23 @@ func loadConfig() config {
 		flushEvery:    250 * time.Millisecond,
 		flushBatch:    500,
 		httpListen:    getenv("FORWARDER_HTTP_LISTEN", ":8080"),
+		// ring window default 600s (10 min) covers the dashboard's
+		// default focus window so most v3 queries skip ClickHouse
+		// entirely. Tunable down for memory-constrained deployments
+		// or up for "live tail covers more history" use cases.
+		ringWindowSecs: getenvInt("FORWARDER_LIVE_RING_SECONDS", 600),
 	}
 	return c
+}
+
+func getenvInt(key string, def int) int {
+	if v := os.Getenv(key); v != "" {
+		var n int
+		if _, err := fmt.Sscanf(v, "%d", &n); err == nil {
+			return n
+		}
+	}
+	return def
 }
 
 func getenv(key, def string) string {
@@ -69,6 +149,7 @@ type row struct {
 	Revision                 uint64  `json:"revision"`
 	SessionID                string  `json:"session_id"`
 	PlayID                   string  `json:"play_id"`
+	RestartID                string  `json:"restart_id"`
 	PlayerID                 string  `json:"player_id"`
 	GroupID                  string  `json:"group_id"`
 	UserAgent                string  `json:"user_agent"`
@@ -276,16 +357,25 @@ func main() {
 		cancel()
 	}()
 
+	// In-memory ring covering the recently-ingested rows for both
+	// streams. The /api/v2/timeseries handler reads the ring +
+	// CH and dedupes on the boundary so the dashboard sees fresh
+	// data with no NDJSON-vs-pushLive merge race. Eviction runs
+	// once per second; pending/inserting rows are sticky regardless
+	// of age (they exist nowhere else yet).
+	ring := NewRing(int64(cfg.ringWindowSecs)*1000, 0)
+	ring.StartEvictor(ctx.Done(), time.Second)
+
 	rows := make(chan row, 4096)
-	go batchInserter(ctx, cfg, rows)
-	go serveHTTP(ctx, cfg)
+	go batchInserter(ctx, cfg, ring, rows)
+	go serveHTTP(ctx, cfg, ring)
 
 	// Network log archival: subscribe to go-proxy's /api/network/stream
 	// SSE endpoint and forward each per-request event to ClickHouse so
 	// the session-viewer can replay them after the session is gone.
 	netRows := make(chan netRow, 8192)
 	netSeenSet := newNetSeen(50000)
-	go batchInsertNet(ctx, cfg, netRows)
+	go batchInsertNet(ctx, cfg, ring, netRows)
 	go runNetworkStream(ctx, cfg, netSeenSet, netRows)
 
 	// Auto-classifier: when a snapshot carries an interesting signal
@@ -386,12 +476,16 @@ func handlePayload(data []byte, cache *fingerprintCache, netSeen *netSeen, out c
 		// happen now that `saveSessionByID` stamps proxy now() on every
 		// merge (issue #403 follow-up).
 		ts := snapshotEventTimeAsCHTimestamp(s, fallback)
+		// Stamp the sessionID→playerID map so the network row writer
+		// (runNetworkStream → entryToRow) can carry the v2 player_id
+		// onto every HAR row at insert time.
+		sessionToPlayerID.set(sessionID, canonicalV2ID(getStr(s, "player_id")))
 		out <- toRow(ts, payload.Revision, sessionID, s)
 		// Queue auto-classifier if this snapshot carries any of the
 		// "really bad things" signals. Debounced — repeated marks
 		// for the same (session,play) coalesce to one mutation.
 		if classifyQ != nil && hasInterestingSignal(s) {
-			classifyQ.mark(sessionID, getStr(s, "play_id"))
+			classifyQ.mark(sessionID, canonicalV2ID(getStr(s, "play_id")))
 		}
 	}
 	cache.prune(active)
@@ -400,6 +494,7 @@ func handlePayload(data []byte, cache *fingerprintCache, netSeen *netSeen, out c
 	if netSeen != nil {
 		netSeen.prune(active)
 	}
+	sessionToPlayerID.prune(active)
 }
 
 func fingerprint(s map[string]interface{}) string {
@@ -430,12 +525,23 @@ func snapshotEventTimeAsCHTimestamp(s map[string]interface{}, fallback string) s
 
 func toRow(ts string, revision uint64, sessionID string, s map[string]interface{}) row {
 	full, _ := json.Marshal(s)
+	// Store the v2-canonical ids the v3 client will use to look this
+	// row up. canonicalIDsFor routes through v2translate.PlayerFromSession
+	// so the play_id fallback derivation (used when the raw SSE map
+	// doesn't carry `play_id`, which is most non-Apple clients) matches
+	// what `/api/v2/players` emits. Without that fallback the column
+	// stays empty and the v3 client's play_id filter excludes every row.
+	playerCanonical, playCanonical := canonicalIDsFor(s)
 	return row{
 		Ts:                       ts,
 		Revision:                 revision,
 		SessionID:                sessionID,
-		PlayID:                   getStr(s, "play_id"),
-		PlayerID:                 getStr(s, "player_id"),
+		PlayID:                   playCanonical,
+		// restart_id is player-supplied and sticky on the session map
+		// at go-proxy:4517-4519 — pull it straight from the v1 payload
+		// (no canonicalisation; it's already a UUID string).
+		RestartID:                getStr(s, "restart_id"),
+		PlayerID:                 playerCanonical,
 		GroupID:                  getStr(s, "group_id"),
 		UserAgent:                getStr(s, "user_agent"),
 		ManifestURL:              getStr(s, "manifest_url"),
@@ -651,18 +757,30 @@ func getU64(m map[string]interface{}, key string) uint64 {
 	return 0
 }
 
-func batchInserter(ctx context.Context, cfg config, in <-chan row) {
+func batchInserter(ctx context.Context, cfg config, ring *Ring, in <-chan row) {
 	buf := make([]row, 0, cfg.flushBatch)
+	entries := make([]*ringEntry, 0, cfg.flushBatch)
 	tick := time.NewTicker(cfg.flushEvery)
 	defer tick.Stop()
 	flush := func() {
 		if len(buf) == 0 {
 			return
 		}
+		// State transitions: pending → inserting → confirmed.
+		// On INSERT failure we revert inserting → pending so the
+		// ring's read path keeps surfacing the rows (they exist
+		// nowhere else yet). We don't currently retry the failed
+		// batch — the rows go to /dev/null for CH, which matches
+		// today's behaviour. Follow-up: bounded retry queue.
+		ring.MarkInserting(entries)
 		if err := insert(ctx, cfg, buf); err != nil {
 			log.Printf("insert failed (%d rows dropped): %v", len(buf), err)
+			ring.RevertInserting(entries)
+		} else {
+			ring.MarkConfirmed(entries)
 		}
 		buf = buf[:0]
+		entries = entries[:0]
 	}
 	for {
 		select {
@@ -674,7 +792,16 @@ func batchInserter(ctx context.Context, cfg config, in <-chan row) {
 				flush()
 				return
 			}
-			buf = append(buf, r)
+			// Pin the row in the ring as `pending` before queueing
+			// for INSERT. The pointer we get back lets us flip state
+			// in lockstep with the batch's lifecycle.
+			rowCopy := r
+			e := ring.Add(
+				ringKey{PlayerID: rowCopy.PlayerID},
+				kindSample, nowMs(), rowCopy.Ts, rowCopy.PlayID, &rowCopy,
+			)
+			buf = append(buf, rowCopy)
+			entries = append(entries, e)
 			if len(buf) >= cfg.flushBatch {
 				flush()
 			}
@@ -727,11 +854,13 @@ func insert(ctx context.Context, cfg config, rows []row) error {
 //	GET /api/sessions?since=<rfc3339>
 //	GET /api/snapshots?session=<id>&from=<rfc3339>&to=<rfc3339>&limit=<n>
 //	GET /healthz
-func serveHTTP(ctx context.Context, cfg config) {
+func serveHTTP(ctx context.Context, cfg config, ring *Ring) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.Write([]byte("ok"))
 	})
+	mountV2Handlers(mux, cfg)
+	mountTimeseriesHandlers(mux, cfg, ring)
 	mux.HandleFunc("/api/sessions", func(w http.ResponseWriter, r *http.Request) {
 		since := r.URL.Query().Get("since")
 		until := r.URL.Query().Get("until")
@@ -1074,405 +1203,52 @@ func serveHTTP(ctx context.Context, cfg config) {
 	// Notable session events for the jump-list. Returns rows like
 	//   { ts, type: 'stall'|'error'|'fault_on'|'downshift', info }
 	// sorted by ts so the UI can render them as a chronological list.
-	// GET /api/session_events?session=<id>&play_id=<id>&limit=<n>
-	mux.HandleFunc("/api/session_events", func(w http.ResponseWriter, r *http.Request) {
+	//
+	// Accepts both legacy (?session=) and v2 (?session_id=) parameter
+	// names so the same handler serves /api/session_events AND
+	// /api/v2/session_events (registered below as an alias). v2 path
+	// returns NDJSON identically — the events JSON shape is already
+	// the same; only the URL changes for callers that want to use the
+	// v2 endpoint set uniformly.
+	sessionEventsHandler := func(w http.ResponseWriter, r *http.Request) {
 		session := r.URL.Query().Get("session")
 		if session == "" {
-			http.Error(w, "missing session", http.StatusBadRequest)
+			session = r.URL.Query().Get("session_id")
+		}
+		// player_id is an alternative way to identify the rows when the
+		// caller doesn't have (or want to plumb) the session_id — the
+		// live testing-session / testing pages drive this path so they
+		// can stop client-side session-id lookups. session_id wins if
+		// both are supplied so explicit deep links keep working.
+		playerID := r.URL.Query().Get("player_id")
+		if session == "" && playerID == "" {
+			http.Error(w, "missing session_id or player_id", http.StatusBadRequest)
 			return
 		}
-		params := map[string]string{"session": session}
-		clauses := []string{"session_id = {session:String}"}
-		// HAR events come from network_requests, which on iOS often
-		// has play_id='' on variant/segment URLs (the iOS player
-		// strips the query param). Filter HAR by time range derived
-		// from session_snapshots instead of play_id directly.
-		// We qualify ts as `nr.ts` because the inner sub-selects
-		// alias `toString(ts) AS ts` and that String alias would
-		// otherwise shadow the column in the WHERE clause.
-		harClauses := []string{"session_id = {session:String}"}
-		if v := r.URL.Query().Get("play_id"); v != "" {
-			var pidPred string
-			if v == "—" {
-				pidPred = "play_id = ''"
-			} else {
-				pidPred = "play_id = {play:String}"
-				params["play"] = v
-			}
-			clauses = append(clauses, pidPred)
-			harClauses = append(harClauses, fmt.Sprintf(
-				"nr.ts BETWEEN (SELECT min(ts) FROM %s.%s WHERE session_id = {session:String} AND %s) "+
-					"AND (SELECT max(ts) FROM %s.%s WHERE session_id = {session:String} AND %s)",
-				cfg.chDatabase, cfg.chTable, pidPred,
-				cfg.chDatabase, cfg.chTable, pidPred))
-		}
-		limit := 500
+
+		limit := 5000
 		if v := r.URL.Query().Get("limit"); v != "" {
 			var n int
-			if _, err := fmt.Sscanf(v, "%d", &n); err == nil && n > 0 && n <= 5000 {
+			if _, err := fmt.Sscanf(v, "%d", &n); err == nil && n > 0 && n <= 50000 {
 				limit = n
 			}
 		}
-		where := strings.Join(clauses, " AND ")
-		harWhere := strings.Join(harClauses, " AND ")
-		// Event taxonomy:
-		//   - Player-emitted events come from the last_event column directly
-		//     (the player tells us "buffering_start", "rate_shift_down", etc.)
-		//   - Stall vs buffering are kept distinct: AVPlayer (iOS) emits both
-		//     and they mean different things; Chrome/HLS.js only emits stall_*
-		//   - Stall and buffering durations are computed by pairing onsets
-		//     with the next end event in the same family (stall vs buffer)
-		//   - Server-side counters (faults, manifest/segment failures) are
-		//     not surfaced by the player, so we keep lagInFrame for those
-		//
-		// Priority (computed in outer SELECT):
-		//   P1 Critical : error, master/all failure, stall ≥ 3s
-		//   P2 High     : stall < 3s, restart, manifest/segment/transport_failure,
-		//                 transfer_*_timeout
-		//   P3 Medium   : downshift, fault_on, timejump, buffering
-		//   P4 Low      : upshift, fault_off, playback_start
-		query := fmt.Sprintf(`
-			WITH stall_or_buffer_pairs AS (
-			  SELECT start_ts, start_event, duration_s
-			  FROM (
-			    SELECT
-			      ts AS start_ts,
-			      last_event AS start_event,
-			      multiIf(
-			        last_event IN ('stall_start','stall_end'),         'stall',
-			        last_event IN ('buffering_start','buffering_end'), 'buffer',
-			        ''
-			      ) AS family,
-			      leadInFrame(last_event, 1, '') OVER w AS next_event,
-			      dateDiff('millisecond', ts, leadInFrame(ts, 1, ts) OVER w) / 1000.0 AS duration_s
-			    FROM %s.%s
-			    WHERE %s
-			      AND last_event IN ('stall_start','stall_end','buffering_start','buffering_end')
-			    WINDOW w AS (PARTITION BY family ORDER BY ts
-			                 ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)
-			  )
-			  -- Only emit when the lead landed on the matching close event;
-			  -- otherwise we'd surface the gap to the NEXT start (which can
-			  -- be hours away — happens when an _end was never received).
-			  WHERE (start_event = 'stall_start'     AND next_event = 'stall_end')
-			     OR (start_event = 'buffering_start' AND next_event = 'buffering_end')
-			),
-			rate_shifts AS (
-			  SELECT ts, last_event, video_bitrate_mbps,
-			         lagInFrame(video_bitrate_mbps, 1, video_bitrate_mbps) OVER w AS prev_bitrate
-			  FROM %s.%s
-			  WHERE %s
-			  WINDOW w AS (ORDER BY ts)
-			),
-			base AS (
-			  SELECT
-			    ts,
-			    player_error, transport_fault_active,
-			    manifest_consecutive_failures,
-			    segment_consecutive_failures,
-			    master_manifest_consecutive_failures,
-			    all_consecutive_failures,
-			    transport_consecutive_failures,
-			    fault_count_transfer_active_timeout,
-			    fault_count_transfer_idle_timeout,
-			    loop_count_server,
-			    -- row_number used to suppress first-snapshot artifacts: the
-			    -- first row per play has no real prior row, so the lag-default
-			    -- would otherwise spurious-fire if a counter is non-zero on
-			    -- entry (e.g. transport_consecutive_failures = 1 from a prior
-			    -- session leaving state behind).
-			    row_number() OVER w AS rn,
-			    lagInFrame(player_error, 1, '')                       OVER w AS prev_error,
-			    lagInFrame(transport_fault_active, 1, 0)              OVER w AS prev_fault,
-			    lagInFrame(manifest_consecutive_failures, 1, 0)       OVER w AS prev_manifest_fail,
-			    lagInFrame(segment_consecutive_failures, 1, 0)        OVER w AS prev_segment_fail,
-			    lagInFrame(master_manifest_consecutive_failures, 1, 0) OVER w AS prev_master_fail,
-			    lagInFrame(all_consecutive_failures, 1, 0)            OVER w AS prev_all_fail,
-			    lagInFrame(transport_consecutive_failures, 1, 0)      OVER w AS prev_transport_fail,
-			    lagInFrame(fault_count_transfer_active_timeout, 1, 0) OVER w AS prev_active_to,
-			    lagInFrame(fault_count_transfer_idle_timeout, 1, 0)   OVER w AS prev_idle_to,
-			    lagInFrame(loop_count_server, 1, 0)                   OVER w AS prev_loop_server
-			  FROM %s.%s
-			  WHERE %s
-			  WINDOW w AS (PARTITION BY play_id ORDER BY ts)
-			)
-			SELECT
-			  ts, type, info,
-			  -- 'cause' = proxy / system action that *might* produce a user-visible
-			  -- effect (fault injection, server-side failure counters, timeouts).
-			  -- 'effect' = something the player or user actually saw (stall, error,
-			  -- bitrate change, restart). Causes default to P3 (diagnostic context)
-			  -- unless they are the kill-switch types that by design break playback.
-			  multiIf(
-			    -- Inverted classification: explicitly enumerate KNOWN
-			    -- causes (proxy/system actions); everything else —
-			    -- including unrecognised player-emitted events from
-			    -- the catch-all UNION ALL — defaults to 'effect'.
-			    type IN ('master_manifest_failure', 'all_failure',
-			             'manifest_failure', 'segment_failure',
-			             'transport_failure',
-			             'transfer_active_timeout', 'transfer_idle_timeout',
-			             'fault_on', 'fault_off',
-			             'http_5xx', 'http_4xx',
-			             'request_timeout', 'request_incomplete', 'request_faulted',
-			             'slow_request', 'slow_segment', 'request_retry',
-			             'loop_server'), 'cause',
-			    'effect'
-			  ) AS kind,
-			  multiIf(
-			    -- User-marked moments are explicit "this matters" flags
-			    -- from a human watching live — always P1 so they don't
-			    -- get hidden by the default Critical+High+Medium chip
-			    -- selection.
-			    type = 'user_marked', 1,
-			    type = 'error', 1,
-			    -- These two causes break playback by design — stay Critical.
-			    type IN ('master_manifest_failure', 'all_failure'), 1,
-			    type = 'stall' AND duration_s >= 3, 1,
-			    type = 'stall', 2,
-			    type = 'restart', 2,
-			    -- Other causes are diagnostic context, not Critical/High by default.
-			    type IN ('manifest_failure', 'segment_failure',
-			             'transport_failure',
-			             'transfer_active_timeout', 'transfer_idle_timeout',
-			             'fault_on', 'fault_off'), 3,
-			    type IN ('downshift', 'timejump', 'buffering'), 3,
-			    -- HAR-derived events. http_5xx & request_timeout are
-			    -- High because they indicate real failures that often
-			    -- precede a stall. The rest are diagnostic Medium /
-			    -- Low (retries especially are very chatty).
-			    type IN ('http_5xx', 'request_timeout'), 2,
-			    type IN ('http_4xx', 'request_incomplete', 'request_faulted',
-			             'slow_request', 'slow_segment'), 3,
-			    type = 'request_retry', 4,
-			    type IN ('upshift', 'playback_start'), 4,
-			    -- Server loop boundaries are routine in this testing
-			    -- platform (the stream loops the source repeatedly).
-			    -- P4 keeps them available for triage but hidden by
-			    -- default so they don't drown out real signals.
-			    type = 'loop_server', 4,
-			    -- Default for unrecognised types: Medium so they're
-			    -- visible (vs P4 Low which is off by default).
-			    3
-			  ) AS priority
-			FROM (
-			  -- Stalls (paired stall_start → stall_end)
-			  SELECT toString(start_ts) AS ts, 'stall' AS type,
-			         concat(toString(round(duration_s, 2)), 's') AS info,
-			         duration_s
-			  FROM stall_or_buffer_pairs
-			  WHERE start_event = 'stall_start' AND duration_s > 0
-
-			  UNION ALL
-			  -- Buffering (paired buffering_start → buffering_end). Distinct
-			  -- from stall: AVPlayer emits both as separate notifications.
-			  SELECT toString(start_ts) AS ts, 'buffering' AS type,
-			         concat(toString(round(duration_s, 2)), 's') AS info,
-			         duration_s
-			  FROM stall_or_buffer_pairs
-			  WHERE start_event = 'buffering_start' AND duration_s > 0
-
-			  UNION ALL
-			  -- frozen / segment_stall: no explicit *_end emitted, so duration
-			  -- is unknown — emit as zero-duration stall events. frozen is
-			  -- always Critical via a hard-coded subtype hint in info.
-			  SELECT toString(ts) AS ts, 'stall' AS type,
-			         if(last_event = 'frozen', '(frozen)', '(segment)') AS info,
-			         0 AS duration_s
-			  FROM %s.%s WHERE %s AND last_event IN ('frozen', 'segment_stall')
-
-			  UNION ALL
-			  -- Restart, playback_start, downshift, upshift, timejump, error
-			  -- (player-emitted directly via last_event)
-			  SELECT toString(ts) AS ts, 'restart' AS type, '' AS info, 0 AS duration_s
-			  FROM %s.%s WHERE %s AND last_event = 'restart'
-			  UNION ALL
-			  SELECT toString(ts) AS ts, 'playback_start' AS type, '' AS info, 0
-			  FROM %s.%s WHERE %s AND last_event IN ('video_start_time', 'video_first_frame')
-			  UNION ALL
-			  SELECT toString(ts) AS ts, 'downshift' AS type,
-			         concat(toString(round(prev_bitrate, 2)), '→', toString(round(video_bitrate_mbps, 2)), ' Mbps') AS info,
-			         0
-			  FROM rate_shifts WHERE last_event = 'rate_shift_down' AND prev_bitrate > 0 AND video_bitrate_mbps > 0
-			  UNION ALL
-			  SELECT toString(ts) AS ts, 'upshift' AS type,
-			         concat(toString(round(prev_bitrate, 2)), '→', toString(round(video_bitrate_mbps, 2)), ' Mbps') AS info,
-			         0
-			  FROM rate_shifts WHERE last_event = 'rate_shift_up' AND prev_bitrate > 0 AND video_bitrate_mbps > 0
-			  UNION ALL
-			  SELECT toString(ts) AS ts, 'timejump' AS type, '' AS info, 0
-			  FROM %s.%s WHERE %s AND last_event = 'timejump'
-			  UNION ALL
-			  SELECT toString(ts) AS ts, 'error' AS type, player_error AS info, 0
-			  FROM %s.%s WHERE %s AND last_event = 'error'
-			  UNION ALL
-			  -- User-marked moments — the iOS / iPadOS player has a
-			  -- "911" button that fires last_event='user_marked' so an
-			  -- operator viewing live can flag "something interesting
-			  -- just happened" without us having to detect what. Always
-			  -- surface as Critical so it's never hidden by chip filter.
-			  SELECT toString(ts) AS ts, 'user_marked' AS type, '' AS info, 0
-			  FROM %s.%s WHERE %s AND last_event = 'user_marked'
-			  UNION ALL
-			  -- Catch-all: any last_event value we haven't explicitly
-			  -- mapped above shows up here verbatim. Lets new player
-			  -- events appear in the dropdown without a forwarder
-			  -- redeploy. 'heartbeat' / 'state_change' / 'playing' /
-			  -- 'video_bitrate_change' are intentionally excluded as
-			  -- noise. The explicitly-handled types are also excluded
-			  -- so we don't double-emit.
-			  SELECT toString(ts) AS ts, last_event AS type, '' AS info, 0
-			  FROM %s.%s WHERE %s
-			    AND last_event != ''
-			    AND last_event NOT IN (
-			      'heartbeat', 'state_change', 'playing', 'video_bitrate_change',
-			      'stall_start', 'stall_end',
-			      'buffering_start', 'buffering_end',
-			      'frozen', 'segment_stall',
-			      'restart', 'video_first_frame', 'video_start_time',
-			      'rate_shift_down', 'rate_shift_up',
-			      'timejump', 'error', 'user_marked'
-			    )
-
-			  -- Server-side state-change events (lag-based — player can't
-			  -- tell us about these). All filters require rn > 1 so the
-			  -- first snapshot per play (where the lag-default of 0 / ''
-			  -- would falsely trigger if the counter started non-zero) is
-			  -- suppressed.
-			  UNION ALL
-			  SELECT toString(ts) AS ts, 'error' AS type, player_error AS info, 0
-			  FROM base WHERE rn > 1 AND player_error != '' AND prev_error != player_error
-			  UNION ALL
-			  SELECT toString(ts) AS ts, 'master_manifest_failure' AS type, '' AS info, 0
-			  FROM base WHERE rn > 1 AND master_manifest_consecutive_failures > prev_master_fail
-			  UNION ALL
-			  SELECT toString(ts) AS ts, 'all_failure' AS type, '' AS info, 0
-			  FROM base WHERE rn > 1 AND all_consecutive_failures > prev_all_fail
-			  UNION ALL
-			  SELECT toString(ts) AS ts, 'manifest_failure' AS type, '' AS info, 0
-			  FROM base WHERE rn > 1 AND manifest_consecutive_failures > prev_manifest_fail
-			  UNION ALL
-			  SELECT toString(ts) AS ts, 'segment_failure' AS type, '' AS info, 0
-			  FROM base WHERE rn > 1 AND segment_consecutive_failures > prev_segment_fail
-			  UNION ALL
-			  SELECT toString(ts) AS ts, 'transport_failure' AS type, '' AS info, 0
-			  FROM base WHERE rn > 1 AND transport_consecutive_failures > prev_transport_fail
-			  UNION ALL
-			  SELECT toString(ts) AS ts, 'transfer_active_timeout' AS type, '' AS info, 0
-			  FROM base WHERE rn > 1 AND fault_count_transfer_active_timeout > prev_active_to
-			  UNION ALL
-			  SELECT toString(ts) AS ts, 'transfer_idle_timeout' AS type, '' AS info, 0
-			  FROM base WHERE rn > 1 AND fault_count_transfer_idle_timeout > prev_idle_to
-			  UNION ALL
-			  SELECT toString(ts) AS ts, 'fault_on' AS type, '' AS info, 0
-			  FROM base WHERE rn > 1 AND transport_fault_active = 1 AND prev_fault = 0
-			  UNION ALL
-			  SELECT toString(ts) AS ts, 'fault_off' AS type, '' AS info, 0
-			  FROM base WHERE rn > 1 AND transport_fault_active = 0 AND prev_fault = 1
-			  UNION ALL
-			  -- Server-loop boundary: loop_count_server increments each
-			  -- time the live LL-HLS/DASH worker rotates back to loop 0
-			  -- of the source. Useful as a periodic gridline for long
-			  -- testing sessions ("did the stall straddle a loop?").
-			  SELECT toString(ts) AS ts, 'loop_server' AS type,
-			         concat('loop ', toString(loop_count_server)) AS info, 0
-			  FROM base WHERE rn > 1 AND loop_count_server > prev_loop_server
-
-			  -- Network-request-derived events. These come from the
-			  -- network_requests table (HAR archive). Mirrors the
-			  -- waterfall's noteworthy classes: status-4xx/5xx,
-			  -- fault-timeout, fault-incomplete, is-retry, slow-transfer.
-			  -- Each row produces exactly one event via mutually-
-			  -- exclusive WHEREs; nothing double-counts.
-			  -- HAR sub-selects use a table alias 'nr' so the harWhere
-			  -- clause's nr.ts BETWEEN ... resolves to the DateTime64
-			  -- column. Without it, the projection's toString(ts) AS ts
-			  -- would shadow ts as a String and break the comparison.
-			  UNION ALL
-			  SELECT toString(nr.ts) AS ts, 'http_5xx' AS type,
-			         concat(toString(status), ' ', method, ' ', path) AS info, 0 AS duration_s
-			  FROM %s.network_requests AS nr WHERE %s AND status >= 500
-			  UNION ALL
-			  SELECT toString(nr.ts) AS ts, 'http_4xx' AS type,
-			         concat(toString(status), ' ', method, ' ', path) AS info, 0
-			  FROM %s.network_requests AS nr WHERE %s AND status >= 400 AND status < 500
-			  UNION ALL
-			  -- Faulted requests, categorised by fault_type:
-			  --   * 'timeout'  → request_timeout   (P2: picture may stop)
-			  --   * corrupt/partial/abandon, OR faulted 2xx → request_incomplete
-			  --   * everything else faulted → request_faulted
-			  SELECT toString(nr.ts) AS ts,
-			         multiIf(
-			           positionCaseInsensitive(fault_type, 'timeout') > 0, 'request_timeout',
-			           positionCaseInsensitive(fault_type, 'corrupt') > 0
-			             OR positionCaseInsensitive(fault_type, 'partial') > 0
-			             OR positionCaseInsensitive(fault_type, 'abandon') > 0
-			             OR (status >= 200 AND status < 300), 'request_incomplete',
-			           'request_faulted'
-			         ) AS type,
-			         concat(fault_type, ' ', method, ' ', path) AS info, 0
-			  FROM %s.network_requests AS nr WHERE %s AND faulted = 1
-			  UNION ALL
-			  -- Slow non-error requests: client_wait_ms > 2 s.
-			  SELECT toString(nr.ts) AS ts, 'slow_request' AS type,
-			         concat(toString(round(client_wait_ms, 0)), 'ms ', method, ' ', path) AS info, 0
-			  FROM %s.network_requests AS nr
-			  WHERE %s AND client_wait_ms > 2000 AND status < 400 AND faulted = 0
-			  UNION ALL
-			  -- Slow media-segment transfers: distinct from slow_request,
-			  -- this is about long actual transfer time on a segment-
-			  -- shaped URL. Mirrors the waterfall's slow-transfer class.
-			  SELECT toString(nr.ts) AS ts, 'slow_segment' AS type,
-			         concat(toString(round(transfer_ms, 0)), 'ms ', method, ' ', path) AS info, 0
-			  FROM %s.network_requests AS nr
-			  WHERE %s AND transfer_ms > 6000
-			    AND match(path, '\.(m4s|ts|mp4|m4a|m4v|aac|webm|mp3)($|\?)')
-			    AND status < 400 AND faulted = 0
-			  UNION ALL
-			  -- Retries: same URL fetched again within ~4 s. Detected
-			  -- via lagInFrame partitioned by url; the network log uses
-			  -- a per-segment-duration threshold but a fixed 4 s catches
-			  -- almost every real retry case (segments are 2 s/6 s).
-			  SELECT toString(retry_ts) AS ts, 'request_retry' AS type,
-			         concat(method, ' ', path) AS info, 0
-			  FROM (
-			    SELECT nr.ts AS retry_ts, method, url, path,
-			           lagInFrame(nr.ts, 1, nr.ts) OVER (PARTITION BY url ORDER BY nr.ts ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS prev_url_ts
-			    FROM %s.network_requests AS nr
-			    WHERE %s
-			  )
-			  WHERE prev_url_ts != retry_ts
-			    AND dateDiff('millisecond', prev_url_ts, retry_ts) BETWEEN 1 AND 4000
-			)
-			ORDER BY ts ASC
-			LIMIT %d
-			FORMAT JSONEachRow`,
-			// stall_or_buffer_pairs / rate_shifts / base CTEs
-			cfg.chDatabase, cfg.chTable, where,
-			cfg.chDatabase, cfg.chTable, where,
-			cfg.chDatabase, cfg.chTable, where,
-			// frozen/segment_stall, restart, playback_start, timejump, error (5)
-			cfg.chDatabase, cfg.chTable, where,
-			cfg.chDatabase, cfg.chTable, where,
-			cfg.chDatabase, cfg.chTable, where,
-			cfg.chDatabase, cfg.chTable, where,
-			cfg.chDatabase, cfg.chTable, where,
-			// user_marked + catch-all (2)
-			cfg.chDatabase, cfg.chTable, where,
-			cfg.chDatabase, cfg.chTable, where,
-			// HAR events: http_5xx, http_4xx, faulted, slow_request,
-			// slow_segment, request_retry — each filtered by harWhere
-			// (time range, NOT play_id) since iOS strips play_id from
-			// variant/segment URLs.
-			cfg.chDatabase, harWhere,
-			cfg.chDatabase, harWhere,
-			cfg.chDatabase, harWhere,
-			cfg.chDatabase, harWhere,
-			cfg.chDatabase, harWhere,
-			cfg.chDatabase, harWhere,
-			limit)
+		ep := eventsQueryParams{
+			SessionID: session,
+			PlayerID:  playerID,
+			PlayID:    r.URL.Query().Get("play_id"),
+			Limit:     limit,
+		}
+		query, params, err := buildEventsQuery(cfg, ep)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 		proxyClickHouseJSON(w, r, cfg, query, params)
-	})
+	}
+
+	mux.HandleFunc("/api/session_events", sessionEventsHandler)
+	mux.HandleFunc("/api/v2/session_events", sessionEventsHandler)
 
 	// Per-request HAR-style log for the session-viewer's network log
 	// fold. Returns rows in the same shape the live go-proxy endpoint

@@ -3,8 +3,10 @@ module github.com/jonathaneoliver/infinite-streaming/go-proxy
 go 1.25.0
 
 require (
+	github.com/google/uuid v1.6.0
 	github.com/gorilla/mux v1.8.1
 	github.com/grafov/m3u8 v0.12.1
+	github.com/oapi-codegen/runtime v1.4.0
 	github.com/vishvananda/netlink v1.3.1
 	golang.org/x/net v0.53.0
 	golang.org/x/sys v0.43.0
@@ -12,8 +14,8 @@ require (
 )
 
 require (
+	github.com/apapsch/go-jsonmerge/v2 v2.0.0 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
-	github.com/google/uuid v1.6.0 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/ncruces/go-strftime v1.0.0 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect

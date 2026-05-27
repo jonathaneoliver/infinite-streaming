@@ -1,0 +1,18 @@
+# oapi-codegen config — v2 forwarder client.
+# Run via `make gen-harness-cli-client` (which cds into this dir).
+# Generated file (forwarder.gen.go) IS committed so the CLI builds
+# without contributors needing to run codegen first.
+package: forwarder
+output: forwarder.gen.go
+generate:
+  models: true
+  client: true
+output-options:
+  skip-prune: true
+# forwarder.yaml references types defined in proxy.yaml (e.g.
+# ContentManipulation embedded in SnapshotRow). Tell oapi-codegen
+# those refs come from our sibling-generated proxy package so it
+# emits `proxy.ContentManipulation` instead of trying to redefine
+# the type locally.
+import-mapping:
+  proxy.yaml: github.com/jonathaneoliver/infinite-streaming/tools/harness-cli/internal/v2gen/proxy

@@ -51,6 +51,14 @@ thumbnails-test-dev-force:
 build:
 	docker build --no-cache --progress=plain -t infinite-streaming .
 
+# Vue 3 dashboard (Stage 0+ of the v3 migration). Builds to
+# content/dashboard/v3/ which the existing nginx /dashboard/ alias
+# serves automatically. Run manually during dev; the Dockerfile also
+# runs it as part of the image build so deployed containers ship the
+# latest bundle.
+build-dashboard-v3:
+	cd content/dashboard-v3 && npm install && npm run build
+
 buildkit:
 	DOCKER_BUILDKIT=1 docker build -t infinite-streaming .
 
@@ -66,6 +74,103 @@ buildx-arm64:
 
 buildx-push:
 	docker buildx build --platform linux/amd64,linux/arm64 -t infinite-streaming:latest --push .
+
+# OpenAPI / Swagger spec generation. Annotations live in
+# go-proxy/cmd/server/openapi.go and analytics/go-forwarder/openapi.go
+# (separate from the handlers so main.go stays clean). Output drops in
+# api/openapi/{proxy,forwarder}/swagger.{json,yaml}; v2 hand-written
+# specs live in api/openapi/v2/.
+SWAG         := $(or $(SWAG),$(shell go env GOPATH)/bin/swag)
+OAPICODEGEN  := $(or $(OAPICODEGEN),$(shell go env GOPATH)/bin/oapi-codegen)
+
+openapi-tools:
+	go install github.com/swaggo/swag/v2/cmd/swag@v2.0.0
+	go install github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen@v2.7.0
+	@echo "installed: $(SWAG)"
+	@echo "installed: $(OAPICODEGEN)"
+
+# Build + install the harness CLI to ~/.local/bin/harness (or override
+# via HARNESS_CLI_BIN). The CLI is the operator-facing surface for the
+# v2 forwarder + proxy APIs; see tools/harness-cli/ for source.
+# Run `make gen-harness-cli-client` first if you've edited any
+# api/openapi/v2/*.yaml file; otherwise the committed generated
+# clients (tools/harness-cli/internal/v2gen/{proxy,forwarder}.gen.go)
+# are used as-is.
+HARNESS_CLI_BIN ?= $(HOME)/.local/bin/harness
+
+harness-cli:
+	@mkdir -p $(dir $(HARNESS_CLI_BIN))
+	cd tools/harness-cli && go build -o $(HARNESS_CLI_BIN) ./cmd/harness
+	@echo "installed: $(HARNESS_CLI_BIN)"
+	@case ":$$PATH:" in *":$(patsubst %/,%,$(dir $(HARNESS_CLI_BIN))):"*) ;; \
+	  *) echo "warn: $(dir $(HARNESS_CLI_BIN)) is not on \$$PATH — add it or set HARNESS_CLI_BIN" ;; \
+	esac
+
+# Regenerate the typed Go clients under tools/harness-cli/internal/v2gen/
+# from api/openapi/v2/{proxy,forwarder}.yaml. Idempotent; safe to run
+# repeatedly. Requires oapi-codegen on $PATH (install via
+# `make openapi-tools`). The generated *.gen.go files ARE committed
+# so the CLI builds without contributors needing oapi-codegen.
+gen-harness-cli-client:
+	@test -x "$(OAPICODEGEN)" || { echo "oapi-codegen not installed — run 'make openapi-tools'"; exit 1; }
+	@test -f api/openapi/v2/proxy.yaml || { echo "api/openapi/v2/proxy.yaml missing"; exit 1; }
+	@test -f api/openapi/v2/forwarder.yaml || { echo "api/openapi/v2/forwarder.yaml missing"; exit 1; }
+	cd tools/harness-cli/internal/v2gen/proxy && $(OAPICODEGEN) -config config.yaml ../../../../../api/openapi/v2/proxy.yaml
+	cd tools/harness-cli/internal/v2gen/forwarder && $(OAPICODEGEN) -config config.yaml ../../../../../api/openapi/v2/forwarder.yaml
+	@echo "regenerated: tools/harness-cli/internal/v2gen/{proxy,forwarder}/*.gen.go"
+
+# Sync ONLY the hand-written v2 yaml files into the Scalar UI mirror
+# under content/dashboard/api-docs/. Use this after editing
+# api/openapi/v2/{proxy,forwarder}.yaml — it's a strict subset of
+# `make openapi` that skips the swag re-gen (which churns v1 specs from
+# Go source) and skips oapi-codegen (which regenerates server stubs).
+# When you only touched the v2 yaml, this is what you want.
+sync-api-docs:
+	@mkdir -p content/dashboard/api-docs
+	@if [ -f api/openapi/v2/proxy.yaml ]; then \
+	  cp api/openapi/v2/proxy.yaml content/dashboard/api-docs/proxy-v2.yaml; \
+	  echo "synced: content/dashboard/api-docs/proxy-v2.yaml"; \
+	fi
+	@if [ -f api/openapi/v2/forwarder.yaml ]; then \
+	  cp api/openapi/v2/forwarder.yaml content/dashboard/api-docs/forwarder-v2.yaml; \
+	  echo "synced: content/dashboard/api-docs/forwarder-v2.yaml"; \
+	fi
+	@echo "Scalar UI: /dashboard/api-docs/{proxy-v2,forwarder-v2}.html will pick up on next refresh"
+
+openapi:
+	@test -x "$(SWAG)" || { echo "swag not installed — run 'make openapi-tools'"; exit 1; }
+	@mkdir -p api/openapi/proxy api/openapi/forwarder
+	cd go-proxy && $(SWAG) init --v3.1 -g cmd/server/openapi.go --output ../api/openapi/proxy --outputTypes json,yaml --parseInternal
+	@if [ -f analytics/go-forwarder/openapi.go ]; then \
+	  cd analytics/go-forwarder && $(SWAG) init --v3.1 -g openapi.go --output ../../api/openapi/forwarder --outputTypes json,yaml --parseInternal; \
+	else \
+	  echo "skipping forwarder spec — analytics/go-forwarder/openapi.go not present yet"; \
+	fi
+	@mkdir -p content/dashboard/api-docs
+	@cp api/openapi/proxy/swagger.json content/dashboard/api-docs/proxy.json
+	@if [ -f api/openapi/forwarder/swagger.json ]; then \
+	  cp api/openapi/forwarder/swagger.json content/dashboard/api-docs/forwarder.json; \
+	fi
+	@if [ -f api/openapi/v2/proxy.yaml ]; then \
+	  cp api/openapi/v2/proxy.yaml content/dashboard/api-docs/proxy-v2.yaml; \
+	fi
+	@if [ -f api/openapi/v2/forwarder.yaml ]; then \
+	  cp api/openapi/v2/forwarder.yaml content/dashboard/api-docs/forwarder-v2.yaml; \
+	fi
+	@if [ -f api/openapi/v2/proxy.yaml ] && [ -x "$(OAPICODEGEN)" ]; then \
+	  cd go-proxy/pkg/v2oapigen && $(OAPICODEGEN) -config config.yaml ../../../api/openapi/v2/proxy.yaml; \
+	  echo "v2 server interface regenerated: go-proxy/pkg/v2oapigen/oapigen.gen.go"; \
+	else \
+	  echo "skipping v2 codegen — oapi-codegen not installed (run 'make openapi-tools')"; \
+	fi
+	@echo "specs regenerated under api/openapi/"
+	@echo "scalar UI mirror: content/dashboard/api-docs/{proxy,forwarder,proxy-v2,forwarder-v2}.{json,yaml}"
+
+openapi-clean:
+	rm -rf api/openapi/proxy api/openapi/forwarder
+	rm -f content/dashboard/api-docs/proxy.json content/dashboard/api-docs/forwarder.json
+	rm -f content/dashboard/api-docs/proxy-v2.yaml content/dashboard/api-docs/forwarder-v2.yaml
+	rm -f go-proxy/pkg/v2oapigen/oapigen.gen.go
 
 K3S_REGISTRY ?= localhost:5000
 K3S_SERVER_REPO ?= infinite-streaming
@@ -253,9 +358,15 @@ ANALYTICS_SSE_URL ?= http://infinite-streaming:30081/api/sessions/stream
 # Build + push the forwarder image into the cluster's registry. Same
 # image is shared across stacks (cluster-agnostic).
 analytics-build-forwarder-k3s:
+	# Context is the repo root so the Dockerfile can COPY both
+	# go-proxy/ AND analytics/go-forwarder/ — same reason as the
+	# compose `forwarder` service. Without the wider context the
+	# go.mod replace path (../../go-proxy) doesn't resolve inside
+	# the build container.
 	docker buildx build --platform linux/amd64 \
 		-t $(K3S_REGISTRY)/infinite-streaming-forwarder:dev \
-		--push ./analytics/go-forwarder
+		-f analytics/go-forwarder/Dockerfile \
+		--push .
 
 # Apply the analytics manifest into the cluster pointed at by
 # $(KUBECONFIG_FILE). Idempotent.
@@ -303,6 +414,32 @@ test-go:
 
 test-deploy-all: test-deploy-compose test-deploy-ghcr test-deploy-registry
 
+# Frontend-only hot deploy — rebuild the Vue dashboard locally, push
+# just the static bundle into the running test-dev container WITHOUT
+# rebuilding the image or recreating any service. go-proxy / go-live /
+# go-upload / nginx stay running so in-flight sessions (iPad, Apple
+# TV, etc.) keep their playback path. Use this for any change under
+# content/dashboard-v3/. Use `make test-deploy-dev` only when Go
+# services, the Dockerfile, or analytics binaries actually change.
+#
+# The trick: docker-compose.yml mounts `./content` from the host onto
+# `/content` inside the go-server container (bind mount). rsync-ing
+# files to ~/test-dev/content/dashboard/v3/ on the host therefore
+# appears INSTANTLY inside the container — nginx serves the new
+# bundle on the next request, no docker cp / docker exec / reload
+# needed.
+test-deploy-frontend:
+	@echo "=== Frontend-only hot deploy (no container recreate) ==="
+	@if [ ! -f content/dashboard-v3/package.json ]; then \
+		echo "dashboard-v3 not present — nothing to deploy"; exit 1; \
+	fi
+	@echo "Building dashboard-v3 (Vue)..."
+	@cd content/dashboard-v3 && npm run --silent build
+	@echo "rsync → host:~/test-dev/content/dashboard/v3/ (bind-mounted into container)..."
+	ssh -n $(TEST_SSH) 'mkdir -p ~/test-dev/content/dashboard/v3'
+	rsync -az --delete content/dashboard/v3/ $(TEST_SSH):~/test-dev/content/dashboard/v3/
+	@echo "✓ test-dev frontend updated; sessions untouched."
+
 test-deploy-dev:
 	@echo "=== Dev: local working tree (port 21000) ==="
 	ssh -n $(TEST_SSH) 'mkdir -p ~/test-dev'
@@ -311,7 +448,23 @@ test-deploy-dev:
 		--filter=':- .gitignore' \
 		--exclude='.git/' \
 		--exclude='.env' \
+		--exclude='certs/' \
 		./ $(TEST_SSH):~/test-dev/
+	@# The dashboard-v3 Vite build output lives at content/dashboard/v3/
+	@# which is gitignored, so the --filter ':- .gitignore' rule above
+	@# hides it from rsync's source view and --delete then wipes it on
+	@# the remote (this bit you for the testing.html-→-dashboard.html
+	@# redirect on 2026-05-12). Build + push it as an extra rsync
+	@# whose source it can actually see. Skipped silently if
+	@# dashboard-v3 isn't set up yet.
+	@if [ -f content/dashboard-v3/package.json ]; then \
+		echo "Building & pushing dashboard-v3 (Vue)..."; \
+		(cd content/dashboard-v3 && npm run --silent build) && \
+		ssh -n $(TEST_SSH) 'mkdir -p ~/test-dev/content/dashboard/v3' && \
+		rsync -az --delete content/dashboard/v3/ $(TEST_SSH):~/test-dev/content/dashboard/v3/; \
+	else \
+		echo "dashboard-v3 not present, skipping Vue build"; \
+	fi
 	ssh -n $(TEST_SSH) 'printf "CONTENT_DIR=%s\nINFINITE_STREAM_RENDEZVOUS_URL=%s\nINFINITE_STREAM_ANNOUNCE_URL=%s\nINFINITE_STREAM_ANNOUNCE_LABEL=%s\n" "$(TEST_MEDIA_DIR)" "$(INFINITE_STREAM_RENDEZVOUS_URL)" "$(INFINITE_STREAM_ANNOUNCE_URL)" "$(INFINITE_STREAM_ANNOUNCE_LABEL)" > ~/test-dev/.env'
 	scp tests/deploy/override-dev.yml $(TEST_SSH):~/test-dev/docker-compose.override.yml
 	ssh $(TEST_SSH) 'cd ~/test-dev && docker compose build && docker compose up -d'
@@ -333,10 +486,21 @@ analytics-update:
 # pulling go-server into the recreate.
 analytics-rebuild-forwarder:
 	@echo "=== Rebuilding forwarder on test-dev (no go-server restart) ==="
-	ssh $(TEST_SSH) 'mkdir -p ~/test-dev/analytics/go-forwarder'
+	ssh $(TEST_SSH) 'mkdir -p ~/test-dev/analytics/go-forwarder ~/test-dev/go-proxy'
 	rsync -az --delete \
-		/Users/jonathanoliver/Projects/smashing/analytics/go-forwarder/ \
+		/Users/jonathanoliver/Projects/smashing-api-v2-441/analytics/go-forwarder/ \
 		$(TEST_SSH):~/test-dev/analytics/go-forwarder/
+	# go-proxy is referenced via the forwarder's go.mod replace
+	# directive (../../go-proxy). The forwarder's Dockerfile build
+	# context is now the repo root, so we must keep the sibling
+	# go-proxy in sync too — otherwise the build sees stale shared
+	# code and the v2 endpoints diverge from what the proxy emits.
+	rsync -az --delete \
+		/Users/jonathanoliver/Projects/smashing-api-v2-441/go-proxy/ \
+		$(TEST_SSH):~/test-dev/go-proxy/
+	rsync -az \
+		/Users/jonathanoliver/Projects/smashing-api-v2-441/go.work \
+		$(TEST_SSH):~/test-dev/go.work
 	ssh $(TEST_SSH) 'cd ~/test-dev && docker compose build forwarder && docker compose up -d --no-deps forwarder'
 
 # Apply a ClickHouse migration without restarting anything. Pipes the

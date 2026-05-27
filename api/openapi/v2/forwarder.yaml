@@ -1,0 +1,1432 @@
+openapi: 3.0.3
+
+info:
+  title: Analytics forwarder API (v2)
+  version: "2.0"
+  description: |
+    Read-only ClickHouse query layer over archived player + play data.
+    Subscribes to go-proxy's SSE stream, writes typed rows, and serves
+    them back with label-aware filter pushdown.
+
+    v2 introduces:
+    - Plays as the canonical archive entity (replaces v1's "session_id +
+      play_id" tuples).
+    - Labels as first-class query primitives (`?label.<key>=<value>`).
+    - `play_summaries` rollup table for long-retention trend analysis
+      (raw rows still 30-day TTL, summaries 1-year).
+    - Filter pushdown on every list endpoint.
+    - Aggregation endpoint for group-by queries without direct ClickHouse.
+
+    See `api/openapi/v2/DESIGN.md` for principles.
+
+servers:
+  - url: /analytics
+    description: Mounted under /analytics on the same origin as the spec.
+
+security:
+  - {}
+  - basicAuth: []
+
+tags:
+  - name: plays
+    description: |
+      Per-play records and rollups. Source of truth for "what happened in
+      this playback" questions.
+  - name: archive
+    description: Raw row queries — snapshots, network, events.
+  - name: timeseries
+    description: |
+      Unified SSE subscription per (player_id, play_id) that
+      multiplexes samples + network + events with ClickHouse
+      backfill + live-ring overlay. One connection drives every
+      chart + lane + panel in a session card; replaces the older
+      pattern of polling /api/v2/snapshots + /session_events +
+      /network_requests separately.
+  - name: aggregate
+    description: |
+      Group-by + metric aggregation pushdowns. Avoids pulling raw rows
+      to the client just to reduce them.
+  - name: bundle
+    description: Offline ZIP exports.
+  - name: diagnostics
+    description: Health, version.
+
+paths:
+
+  /api/v2/healthz:
+    get:
+      tags: [diagnostics]
+      summary: Liveness probe
+      responses:
+        '200':
+          description: ok
+          content:
+            text/plain:
+              schema: { type: string, example: ok }
+
+  /api/v2/info:
+    get:
+      tags: [diagnostics]
+      summary: Forwarder info — build, ClickHouse target, retention
+      responses:
+        '200':
+          description: Info
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Info' }
+
+  # ---- Plays --------------------------------------------------------------
+
+  /api/v2/plays:
+    get:
+      tags: [plays]
+      summary: List plays — one row per archived playback
+      description: |
+        v2 equivalent of v1's `/api/sessions`. One row per `play_id`,
+        ordered newest-first.
+
+        Today the row is derived live from `session_snapshots` (same
+        aggregation v1 runs). The `play_summaries` rollup table the
+        DESIGN.md describes is not yet materialized — fields tagged
+        "(derived)" in the schema reflect that and may move to the
+        rollup later without changing the wire shape.
+      parameters:
+        - $ref: '#/components/parameters/PlayerIdFilter'
+        - $ref: '#/components/parameters/PlayIdFilter'
+        - $ref: '#/components/parameters/RestartIdFilter'
+        - $ref: '#/components/parameters/From'
+        - $ref: '#/components/parameters/To'
+        - $ref: '#/components/parameters/LabelFilter'
+        - $ref: '#/components/parameters/Classification'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: Page of plays
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PlaySummaryPage' }
+
+  /api/v2/plays/{play_id}:
+    parameters:
+      - $ref: '#/components/parameters/PlayId'
+    get:
+      tags: [plays]
+      summary: Get one archived play (full detail)
+      description: |
+        Returns the play summary plus an embedded `events_summary`
+        (counts per event type) and `network_summary` (counts per
+        status / fault category). For raw rows, follow the
+        `_links` URLs in the response.
+      responses:
+        '200':
+          description: Found
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PlayDetail' }
+        '404': { $ref: '#/components/responses/Problem' }
+
+  /api/v2/plays/aggregate:
+    get:
+      tags: [aggregate]
+      summary: Group-by aggregation over plays
+      description: |
+        Generic pushdown: group by any combination of fields and labels,
+        compute one or more metric expressions over each group. Eliminates
+        the need to pull raw rows for trend / regression queries.
+
+        The query is translated to ClickHouse SQL server-side with
+        parameterized placeholders. Field-level group-by uses native
+        columns; label-level group-by uses `labels[<key>]`.
+      parameters:
+        - $ref: '#/components/parameters/From'
+        - $ref: '#/components/parameters/To'
+        - $ref: '#/components/parameters/LabelFilter'
+        - $ref: '#/components/parameters/Classification'
+        - in: query
+          name: group_by
+          required: true
+          explode: false
+          schema:
+            type: array
+            items: { type: string }
+          description: |
+            Fields to group by. Comma-separated. Native fields (e.g.
+            `player_id`, `classification`) or label keys prefixed with
+            `labels.` (e.g. `labels.test`, `labels.pytest_run`).
+          example: labels.pytest_run,player_id
+        - in: query
+          name: metrics
+          required: true
+          explode: false
+          schema:
+            type: array
+            items: { type: string }
+          description: |
+            Metric expressions, comma-separated. Format: `<agg>.<field>`
+            where `<agg>` ∈ `count|sum|avg|min|max|p50|p95|p99` and
+            `<field>` is one of the numeric columns on `play_summaries`.
+            `count` alone (without `.<field>`) means row count.
+          example: count,avg.rebuffer_ratio,p95.stall_seconds
+        - in: query
+          name: order_by
+          schema: { type: string }
+          description: |
+            Field name (group-by or metric alias) to sort by; prefix `-`
+            for descending. Default: first group_by ascending.
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Aggregated groups
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AggregateResult' }
+
+  # ---- Raw archive rows ---------------------------------------------------
+
+  /api/v2/snapshots:
+    get:
+      tags: [archive]
+      summary: Session snapshots (raw)
+      parameters:
+        - $ref: '#/components/parameters/PlayerIdFilter'
+        - $ref: '#/components/parameters/PlayIdFilter'
+        - $ref: '#/components/parameters/RestartIdFilter'
+        - $ref: '#/components/parameters/From'
+        - $ref: '#/components/parameters/To'
+        - $ref: '#/components/parameters/LabelFilter'
+        - $ref: '#/components/parameters/StrideMs'
+        - $ref: '#/components/parameters/Order'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: Snapshot rows
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SnapshotPage' }
+
+  /api/v2/network_requests:
+    get:
+      tags: [archive]
+      summary: HAR-shaped network rows (raw)
+      parameters:
+        - $ref: '#/components/parameters/PlayerIdFilter'
+        - $ref: '#/components/parameters/PlayIdFilter'
+        - $ref: '#/components/parameters/RestartIdFilter'
+        - $ref: '#/components/parameters/From'
+        - $ref: '#/components/parameters/To'
+        - $ref: '#/components/parameters/LabelFilter'
+        - in: query
+          name: status_min
+          schema: { type: integer }
+        - in: query
+          name: status_max
+          schema: { type: integer }
+        - in: query
+          name: fault_category
+          schema:
+            type: string
+            enum: [http, socket, corruption, transport, transfer_timeout, client_disconnect]
+        - in: query
+          name: fault_action
+          schema: { type: string }
+        - in: query
+          name: faulted_only
+          schema: { type: boolean, default: false }
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: Network rows
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/NetworkRequestsPage' }
+
+  /api/v2/session_events:
+    get:
+      tags: [archive]
+      summary: Chronological events (raw)
+      description: |
+        Player + harness events: ABR shifts, stalls, fault firings, errors.
+        v1's "session_events" name retained for source-table parity even
+        though the user-facing concept is plays.
+      parameters:
+        - $ref: '#/components/parameters/PlayerIdFilter'
+        - $ref: '#/components/parameters/PlayIdFilter'
+        - $ref: '#/components/parameters/RestartIdFilter'
+        - $ref: '#/components/parameters/From'
+        - $ref: '#/components/parameters/To'
+        - $ref: '#/components/parameters/LabelFilter'
+        - in: query
+          name: type
+          explode: true
+          schema:
+            type: array
+            items: { type: string }
+          description: |
+            Filter to specific event types. Multiple values OR'd. Examples:
+            `type=stall&type=downshift`.
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: Event rows
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: { type: object, additionalProperties: true }
+                  next_cursor: { type: string, nullable: true }
+
+  /api/v2/session_heatmap:
+    get:
+      tags: [archive]
+      summary: Per-second buffer + state heatmap
+      description: |
+        Pre-binned grid for visualisation. One row per (play_id, time_bucket).
+      parameters:
+        - $ref: '#/components/parameters/PlayerIdFilter'
+        - $ref: '#/components/parameters/PlayIdFilter'
+        - $ref: '#/components/parameters/RestartIdFilter'
+        - in: query
+          name: buckets
+          schema: { type: integer, minimum: 10, maximum: 1000, default: 240 }
+      responses:
+        '200':
+          description: Heatmap rows
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: { type: object, additionalProperties: true }
+
+  # ---- Bundle -------------------------------------------------------------
+
+  /api/v2/plays/{play_id}/bundle:
+    parameters:
+      - $ref: '#/components/parameters/PlayId'
+    get:
+      tags: [bundle]
+      summary: Download a play bundle (ZIP)
+      description: |
+        Streams a ZIP containing the play summary, snapshots (`.ndjson`),
+        events, and a HAR file. Useful for offline forensics or preserving
+        a play that's about to age out of the 30-day raw TTL.
+      responses:
+        '200':
+          description: ZIP archive
+          content:
+            application/zip:
+              schema: { type: string, format: binary }
+        '404': { $ref: '#/components/responses/Problem' }
+
+  # ---- Timeseries (SSE) --------------------------------------------------
+
+  /api/v2/timeseries:
+    get:
+      tags: [timeseries]
+      summary: Subscribe to a player's samples / network / events stream
+      operationId: getTimeseries
+      description: |
+        Opens a Server-Sent Events stream. The response is a sequence
+        of SSE frames (`text/event-stream`); the OpenAPI response body
+        below documents the SHAPE of each frame's JSON `data` payload
+        keyed by SSE `event:` name.
+
+        ### Event sequence
+
+        Frames arrive in this order on a successful subscription:
+
+        1. `meta` — exactly once, first frame. Names the requested
+           streams + their resolved column projection + the server's
+           liveness verdict.
+        2. `sample` / `network` / `event` — backfill batch. Rows from
+           ClickHouse for the requested `[from, to]` window, plus any
+           uncommitted rows from the live ring overlay (deduped by
+           `ts` for samples, `entry_fingerprint` for network). Rows
+           are emitted in `ts` ASCending order PER STREAM; streams
+           interleave on the wire.
+        3. (live plays) `sample` / `network` / `event` — live deltas
+           as the ring receives new entries. No further `meta`.
+        4. `heartbeat` — every 15 s (configurable server-side).
+           Keeps proxies from idle-closing the connection. Contains
+           only the server `ts`; consumers may use it as a wallclock
+           sync.
+        5. `complete` (archive-only) — emitted when the play has
+           ended and all backfill is flushed. Connection closes.
+        6. `stream_error` (failure-only) — emitted on transport / CH
+           errors AFTER the initial `meta` (a pre-meta error surfaces
+           as an HTTP 4xx/5xx instead).
+
+        ### Identity resolution
+
+        Exactly one of `player_id` or `session_id` is required:
+
+        - `player_id` is the canonical UUID. Preferred for v2 callers.
+        - `session_id` is the legacy v1 numeric session id. Honoured
+          for callers who haven't migrated; falls back to a
+          `lowerUTF8` match in the CH SELECT.
+        - `player_id` may carry an `archive:<session_id>:<play_id>`
+          shorthand prefix — the server parses it and routes to the
+          archive-only path. Used by `session-viewer.html` for an
+          already-completed play without separate session-id /
+          play-id plumbing.
+
+        `play_id` is optional:
+
+        - Omitted → stream rows across EVERY play of the player
+          (useful for "follow this player as plays rotate").
+        - Specific UUID → filter to that one play. Live deltas for
+          OTHER plays of the same player are dropped on send.
+
+        ### Bundles and field selection
+
+        Renderers request bundles by name to avoid enumerating
+        columns. The resolver unions the column sets of all requested
+        bundles plus any explicit `?fields=…`, dedupes, and includes
+        mandatory identity columns even if the caller forgets them
+        (`ts`, `session_id`, `play_id`, `player_id`, plus
+        `entry_fingerprint` for network).
+
+        See the `BundleCatalogue` schema below for the curated bundle
+        list. Unknown bundle names → 400. Unknown field names are
+        passed through to ClickHouse, which rejects with a clean 400.
+
+        ### Live vs archive
+
+        Liveness is decided server-side from the ring's
+        last-activity timestamp for `(player_id, play_id)` (default
+        30 s window). Surfaced in `meta.live`.
+
+        - `live=true` → backfill, then stay open emitting live deltas
+          until the client disconnects or the bucket is evicted.
+        - `live=false` → backfill, emit `complete`, close.
+
+        The client should not poll for liveness — subscribe and trust
+        the server's verdict.
+
+        ### Resumption
+
+        Reserved for a future revision. Today the server ignores the
+        `Last-Event-ID` request header; clients reconnect with a
+        fresh `from=` query param if they need to resume from a
+        specific point.
+
+        ### Stride and decimation
+
+        `stride_ms` (samples stream only) — server-side downsampling
+        for long backfill windows. Returns one row per `stride_ms`
+        bucket aggregated. Defaults to 0 (no decimation).
+
+        `max_hz` — rate-limit live deltas to at most N per second per
+        stream. Defaults to 0 (no rate-limiting).
+
+        See `analytics/go-forwarder/timeseries.go` for the canonical
+        server implementation and `streambundles.go` for the bundle
+        catalogue.
+      parameters:
+        - $ref: '#/components/parameters/TimeseriesPlayerId'
+        - $ref: '#/components/parameters/TimeseriesSessionId'
+        - $ref: '#/components/parameters/TimeseriesPlayId'
+        - $ref: '#/components/parameters/TimeseriesStreams'
+        - $ref: '#/components/parameters/TimeseriesBundles'
+        - $ref: '#/components/parameters/TimeseriesFields'
+        - $ref: '#/components/parameters/TimeseriesFrom'
+        - $ref: '#/components/parameters/TimeseriesTo'
+        - $ref: '#/components/parameters/TimeseriesLimit'
+        - $ref: '#/components/parameters/TimeseriesStrideMs'
+        - $ref: '#/components/parameters/TimeseriesMaxHz'
+        - $ref: '#/components/parameters/TimeseriesLastEventId'
+      responses:
+        '200':
+          description: |
+            SSE stream opens immediately with `meta`. See `description`
+            on the operation for the full event sequence.
+          headers:
+            Content-Type:
+              schema: { type: string, example: text/event-stream }
+            Cache-Control:
+              schema: { type: string, example: no-cache, no-transform }
+            X-Accel-Buffering:
+              description: Always `no` — disables nginx buffering for the SSE response.
+              schema: { type: string, example: no }
+          content:
+            text/event-stream:
+              schema:
+                $ref: '#/components/schemas/SSEFrameUnion'
+              examples:
+                meta-and-backfill:
+                  $ref: '#/components/examples/MetaAndBackfill'
+                live-delta:
+                  $ref: '#/components/examples/LiveDelta'
+                archive-complete:
+                  $ref: '#/components/examples/ArchiveComplete'
+        '400':
+          description: |
+            Malformed query parameters — missing identity, unknown
+            bundle, unknown stream, out-of-range `stride_ms`/`max_hz`.
+            Emitted BEFORE any SSE headers so the client sees a normal
+            HTTP error (not a stream that immediately closes).
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ProblemDetails' }
+        '501':
+          description: |
+            `streams=events` requested but the events taxonomy SQL
+            hasn't been lifted into the timeseries backfill path yet.
+            Use the `/api/v2/session_events` endpoint as a workaround.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ProblemDetails' }
+        '500':
+          description: |
+            Resolver / internal error before the SSE handshake. CH
+            outages encountered AFTER the handshake surface as a
+            `stream_error` event instead.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ProblemDetails' }
+
+  /api/v2/bundles:
+    get:
+      tags: [diagnostics]
+      summary: List available timeseries bundles + their column projections
+      operationId: getBundles
+      description: |
+        Read-only catalogue — returns the same data hard-coded in
+        `streambundles.go` so a client (or doc generator) can discover
+        what `?bundles=…` values are valid without grepping source.
+
+        **Note:** not yet implemented server-side. Spec'd here so the
+        CLI and dashboard can plan against it. Until the handler
+        lands the catalogue lives in code — copy from
+        `analytics/go-forwarder/streambundles.go::bundleRegistry`.
+      responses:
+        '200':
+          description: Catalogue
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BundleCatalogue' }
+
+# ---------------------------------------------------------------------------
+
+components:
+
+  parameters:
+    PlayerIdFilter:
+      in: query
+      name: player_id
+      schema: { type: string, format: uuid }
+    PlayIdFilter:
+      in: query
+      name: play_id
+      schema: { type: string, format: uuid }
+      description: |
+        Filter to one play. Player-supplied UUID; rotates only on
+        content-selection / fresh app or page load. Stable across
+        in-app restart events.
+    PlayId:
+      in: path
+      name: play_id
+      required: true
+      schema: { type: string, format: uuid }
+    RestartIdFilter:
+      in: query
+      name: restart_id
+      schema: { type: string, format: uuid }
+      description: |
+        Filter to one recovery attempt within a play. Player-supplied
+        UUID; rotates on every `restart` event (user-reload or
+        auto-recovery). Stable outside restart boundaries. Use to
+        narrow a query to "what happened in this specific restart"
+        rather than "the whole play".
+    From:
+      in: query
+      name: from
+      schema: { type: string, format: date-time }
+      description: ISO 8601 lower bound on the row timestamp. Inclusive.
+    To:
+      in: query
+      name: to
+      schema: { type: string, format: date-time }
+      description: ISO 8601 upper bound on the row timestamp. Exclusive.
+    LabelFilter:
+      in: query
+      name: label
+      explode: true
+      schema:
+        type: object
+        additionalProperties: { type: string }
+      description: |
+        `label.<key>=<value>` query params. Multiple AND together.
+        Example: `?label.test=foo&label.pytest_run=2026-05-08T05:00:00Z`.
+    Classification:
+      in: query
+      name: classification
+      schema:
+        type: string
+        enum: [interesting, other, favourite]
+      description: |
+        Filter to plays of a specific classification (matches the
+        column on `session_snapshots`). See PlaySummary.classification
+        for the enum semantics and the planned richer enum.
+    StrideMs:
+      in: query
+      name: stride_ms
+      schema: { type: integer, minimum: 100 }
+      description: Downsample to one row per stride.
+    Order:
+      in: query
+      name: order
+      schema: { type: string, enum: [asc, desc], default: asc }
+    Limit:
+      in: query
+      name: limit
+      schema: { type: integer, minimum: 1, maximum: 5000, default: 500 }
+    Cursor:
+      in: query
+      name: cursor
+      schema: { type: string }
+      description: |
+        Opaque keyset-pagination cursor — base64url-encoded
+        `(event_time_micros, last_id)` tuple, server-issued in the
+        previous response's `next_cursor`. Clients **must not** decode
+        or fabricate cursors.
+
+        When `cursor` is set, all filter params (`from`, `to`,
+        `label.*`, etc.) are ignored — the cursor already encodes them.
+        Pass a cursor that fails to decode → `400 Bad Request`.
+
+        End-of-stream is signalled by `next_cursor: null` in the
+        response body; no error / no 404 past the end. See
+        `DESIGN.md § Pagination cursor`.
+
+    # Timeseries-specific parameters (used only by /api/v2/timeseries).
+    # Prefixed `Timeseries*` to avoid colliding with the more general
+    # PlayerIdFilter / PlayIdFilter / From / To params above (those are
+    # `?label.X=Y`-aware list-page filters; these are SSE subscription
+    # primitives with different semantics).
+
+    TimeseriesPlayerId:
+      name: player_id
+      in: query
+      required: false
+      description: |
+        Canonical player UUID. Required unless `session_id` is
+        provided. May carry an `archive:<session_id>:<play_id>`
+        shorthand prefix; the server unpacks it.
+      schema:
+        type: string
+        pattern: '^([A-Za-z0-9._\-]+|archive:[A-Za-z0-9._\-]+:[A-Za-z0-9._\-]+)$'
+        example: 97282446-9a14-4193-9fca-857250bc74ae
+
+    TimeseriesSessionId:
+      name: session_id
+      in: query
+      required: false
+      description: |
+        Legacy v1 numeric session id. Honoured for callers who
+        haven't migrated to player_id. Use `player_id` for new
+        consumers — the dashboard does.
+      schema:
+        type: string
+        example: "1"
+
+    TimeseriesPlayId:
+      name: play_id
+      in: query
+      required: false
+      description: |
+        Filter to a single play. Omit to stream rows across every
+        play of the player (live deltas for any play of this player
+        flow through). Pass the literal `—` (em-dash) to filter for
+        rows with NO play_id assigned (rare; useful for diagnostics).
+      schema:
+        type: string
+        example: 8fa22b46-dcce-4955-9970-4df3cda72d92
+
+    TimeseriesStreams:
+      name: streams
+      in: query
+      required: true
+      description: |
+        Comma-separated list of streams to enable. At least one
+        required. Unknown values → 400.
+
+        - `samples` — `session_snapshots` rows (chart feed).
+        - `network` — `network_requests` rows (HAR waterfall).
+        - `events` — derived taxonomy rows (currently 501; lift in
+          progress).
+      schema:
+        type: string
+        pattern: '^(samples|network|events)(,(samples|network|events))*$'
+        example: samples,network
+
+    TimeseriesBundles:
+      name: bundles
+      in: query
+      required: false
+      description: |
+        Comma-separated list of bundle names. Each bundle expands to
+        a fixed column projection for one stream; the resolver unions
+        all bundles' column sets and adds mandatory identity columns.
+
+        - Bundle whose stream isn't in `streams=` → 400.
+        - Unknown bundle name → 400.
+        - The alias `all` expands to `lanes_v1,network,events`.
+
+        See `GET /api/v2/bundles` (or `BundleCatalogue` schema below)
+        for the current registry.
+      schema:
+        type: string
+        example: charts_minimal,network
+
+    TimeseriesFields:
+      name: fields
+      in: query
+      required: false
+      description: |
+        Comma-separated list of additional column names to include
+        beyond what bundles selected. First-cut applies the flat list
+        to EVERY enabled stream; CH rejects unknown columns
+        per-stream with a clean 4xx, which surfaces as
+        `stream_error`. Per-stream syntax (`samples:col1,col2`) is
+        reserved for a future revision.
+      schema:
+        type: string
+        example: headers,query_string
+
+    TimeseriesFrom:
+      name: from
+      in: query
+      required: false
+      description: |
+        ISO-8601 lower bound for the backfill query (inclusive).
+        Parsed server-side by ClickHouse's `parseDateTime64BestEffort`,
+        so most timezone-bearing forms work. Defaults to "open" —
+        the backfill returns everything CH has up to `to` or `limit`.
+      schema:
+        type: string
+        format: date-time
+        example: "2026-05-17T13:00:00Z"
+
+    TimeseriesTo:
+      name: to
+      in: query
+      required: false
+      description: |
+        ISO-8601 upper bound for the backfill (inclusive). Defaults
+        to "now" — the backfill chases the live edge.
+      schema:
+        type: string
+        format: date-time
+        example: "2026-05-17T14:00:00Z"
+
+    TimeseriesLimit:
+      name: limit
+      in: query
+      required: false
+      description: |
+        Server-side row cap per stream during backfill. Defaults to
+        50000 for samples, 5000 for network; the hard ceiling is
+        the same. Set lower for cheap previews. Live deltas are not
+        affected.
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 200000
+        default: 50000
+
+    TimeseriesStrideMs:
+      name: stride_ms
+      in: query
+      required: false
+      description: |
+        Samples-stream-only. Server-side decimation: returns one row
+        per `stride_ms` bucket aggregated. 0 (default) = no
+        decimation. Use to cap backfill cost on long windows where
+        per-second resolution isn't needed.
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 60000
+
+    TimeseriesMaxHz:
+      name: max_hz
+      in: query
+      required: false
+      description: |
+        Rate-limit live deltas to at most N events per second per
+        stream. 0 (default) = no rate-limiting. Useful for a
+        Mosaic-style multi-session dashboard where the cumulative
+        rate would overwhelm rendering.
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 1000
+
+    TimeseriesLastEventId:
+      name: Last-Event-ID
+      in: header
+      required: false
+      description: |
+        **Reserved for a future revision.** Today the server ignores
+        this header. To resume from a specific point, reconnect with
+        the appropriate `from=` query parameter (the dashboard does
+        this transparently when its cache `version` advances past
+        the last known row).
+      schema:
+        type: string
+
+  responses:
+    Problem:
+      description: Error
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/ProblemDetails' }
+
+  securitySchemes:
+    basicAuth:
+      type: http
+      scheme: basic
+
+  schemas:
+
+    ProblemDetails:
+      description: RFC 7807 problem detail.
+      type: object
+      required: [type, title, status]
+      properties:
+        type:     { type: string, format: uri }
+        title:    { type: string }
+        status:   { type: integer }
+        detail:   { type: string }
+        instance: { type: string, format: uri }
+
+    Info:
+      type: object
+      properties:
+        version:               { type: string }
+        api_versions:          { type: array, items: { type: string } }
+        clickhouse_target:     { type: string }
+        raw_retention_days:    { type: integer, example: 30 }
+        summary_retention_days: { type: integer, example: 365 }
+
+    PlaySummary:
+      description: |
+        One archived play, aggregated. Currently derived live from
+        `session_snapshots`; once the `play_summaries` rollup table
+        exists it'll be served from there instead (same wire shape).
+
+        Field groups:
+        - identifiers (play_id, player_id, session_id, content_id, …)
+        - timing (started_at, last_seen_at)
+        - quality (stalls, downshifts, dropped_frames, avg_quality_pct)
+        - failure counters (master_manifest_failures, …, transport_failures)
+        - signal counters (frozen_count, restart_count, …) used by the
+          dashboard's "interesting" filter
+      type: object
+      required:
+        - play_id
+        - player_id
+        - started_at
+        - last_seen_at
+      properties:
+        # ---- identifiers ----
+        play_id:           { type: string, format: uuid, description: "Player-supplied UUID. Rotates only on content-selection / fresh app or page load. Stable across in-app restart events." }
+        restart_id:        { type: string, format: uuid, nullable: true, description: "Last restart_id observed for this play. Rotates on every restart event. May be null if the play hasn't yet experienced a restart." }
+        restart_episodes:  { type: integer, description: "count(distinct restart_id) for this play. 1 means no restarts beyond the initial; N>1 means N-1 recovery attempts." }
+        player_id:         { type: string, format: uuid }
+        session_id:        { type: string, description: "Per-player numeric session counter ('1', '2', …). Empty when archive predates session_id stamping." }
+        group_id:          { type: string, description: "Optional session-group id from harness label." }
+        content_id:        { type: string }
+        # ---- timing ----
+        started_at:        { type: string, format: date-time }
+        last_seen_at:      { type: string, format: date-time }
+        labels:
+          type: object
+          additionalProperties: { type: string }
+        # ---- terminal state ----
+        last_state:        { type: string, description: "Last observed player_state (playing|paused|stalled|…)." }
+        last_player_error: { type: string }
+        # ---- quality (derived) ----
+        stalls:            { type: integer }
+        dropped_frames:    { type: integer }
+        bitrate_shifts:    { type: integer, description: "Sum of upshifts + downshifts." }
+        upshifts:          { type: integer }
+        downshifts:        { type: integer }
+        resolution_changes: { type: integer }
+        avg_quality_pct:   { type: number, format: float, nullable: true }
+        min_quality_pct:   { type: number, format: float, nullable: true }
+        frames_displayed:  { type: integer }
+        first_frame_s:     { type: number, format: float, description: "Time-to-first-frame, seconds." }
+        # ---- failure counters (max-over-play, derived from per-snapshot consecutive counters) ----
+        master_manifest_failures: { type: integer }
+        manifest_failures:        { type: integer }
+        segment_failures:         { type: integer }
+        all_failures:             { type: integer }
+        transport_failures:       { type: integer }
+        active_timeouts:          { type: integer }
+        idle_timeouts:            { type: integer }
+        # ---- network rollup (joined from network_requests) ----
+        net_events:        { type: integer, description: "Total network rows seen." }
+        net_errors:        { type: integer, description: "Rows with status >= 400." }
+        net_faults:        { type: integer, description: "Rows with faulted = 1." }
+        # ---- per-event signal counts (drive the dashboard's "interesting" badges) ----
+        metric_events:        { type: integer, description: "Total snapshot count for this play." }
+        user_marked_count:    { type: integer, description: "Operator pressed the 911 button N times." }
+        frozen_count:         { type: integer, description: "Renderer-frozen events (≠ buffer stalls)." }
+        segment_stall_count:  { type: integer, description: "Stalls waiting on a segment fetch." }
+        restart_count:        { type: integer, description: "Mid-play player-recovery restarts." }
+        error_event_count:    { type: integer, description: "Explicit player_error events." }
+        # ---- tiered retention class ----
+        classification:
+          type: string
+          enum: ['', 'interesting', 'other', 'favourite']
+          description: |
+            Tiered retention class stored on `session_snapshots`.
+            - `''` (empty) — not yet classified
+            - `interesting` — keep 90 days
+            - `other` — keep 30 days (default)
+            - `favourite` — keep forever (operator-starred)
+
+            **Aspirational** values (`clean | stalled | errored |
+            fault-induced | abandoned`) described in DESIGN.md are
+            blocked on the `play_summaries` rollup table — they'll
+            land here when that lands.
+
+    PlaySummaryPage:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/PlaySummary' }
+        next_cursor:
+          type: string
+          nullable: true
+          description: Pass back as `?cursor=` to fetch the next page.
+
+    PlayDetail:
+      description: Play summary plus embedded counts for at-a-glance.
+      allOf:
+        - $ref: '#/components/schemas/PlaySummary'
+        - type: object
+          properties:
+            events_summary:
+              type: object
+              additionalProperties: { type: integer }
+              description: Count per event type.
+              example:
+                stall: 1
+                downshift: 4
+                upshift: 8
+                slow_segment: 2
+            network_summary:
+              type: object
+              properties:
+                total_requests: { type: integer }
+                by_status:
+                  type: object
+                  additionalProperties: { type: integer }
+                by_fault_category:
+                  type: object
+                  additionalProperties: { type: integer }
+            _links:
+              type: object
+              properties:
+                snapshots:        { type: string, format: uri }
+                events:           { type: string, format: uri }
+                network_requests: { type: string, format: uri }
+                heatmap:          { type: string, format: uri }
+                bundle:           { type: string, format: uri }
+
+    SnapshotRow:
+      description: |
+        One archived player snapshot. The row IS a `proxy.yaml#PlayerRecord`
+        captured at `ts`, plus the row-level metadata (`ts`, `revision`)
+        ClickHouse needs to key/order it. The dashboard's live and replay
+        renderers can therefore consume snapshots through the same model
+        graph (`PlayerRecord` → `Player`); see `content/shared/v2-models.js`
+        and `content/shared/v2-archive-models.js`.
+      allOf:
+        - $ref: 'proxy.yaml#/components/schemas/PlayerRecord'
+        - type: object
+          required: [ts]
+          properties:
+            ts:
+              type: string
+              format: date-time
+              description: Snapshot capture time (ClickHouse `event_time`).
+            revision:
+              type: string
+              description: |
+                `control_revision` at capture time. Already present on
+                `PlayerRecord`; surfaced here so consumers don't need to
+                deep-dive to dedup adjacent snapshots.
+            play_id:
+              type: string
+              description: |
+                Convenience denormalisation of `current_play.id` so query
+                pushdown (`?play_id=`) doesn't need a JSON path
+                expression. Plain string (not UUID) — v1 short-hex
+                play_ids round-trip unchanged for legacy archive rows;
+                v2-minted plays are always UUIDs.
+
+    SnapshotPage:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/SnapshotRow' }
+        next_cursor: { type: string, nullable: true }
+
+    NetworkRequestRow:
+      description: |
+        One archived HAR row. The row IS a
+        `proxy.yaml#NetworkLogEntry`, plus the columnar keys ClickHouse
+        uses to bucket and join it back to its play. Lets dashboard
+        replay reuse the live `NetworkLogEntry` view.
+      allOf:
+        - $ref: 'proxy.yaml#/components/schemas/NetworkLogEntry'
+        - type: object
+          required: [ts, player_id]
+          properties:
+            ts:
+              type: string
+              format: date-time
+              description: Request start time (ClickHouse `event_time`).
+            player_id:
+              type: string
+              format: uuid
+              description: Owning player. Denormalised for filter pushdown.
+
+    NetworkRequestsPage:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/NetworkRequestRow' }
+        next_cursor: { type: string, nullable: true }
+
+    AggregateResult:
+      description: |
+        Group-by output. `groups` is one row per distinct combination of
+        the requested `group_by` keys; each group has the requested metrics
+        plus the group-key values.
+      type: object
+      required: [groups]
+      properties:
+        query:
+          type: object
+          description: Echo of the parsed query, for debugging.
+          properties:
+            group_by: { type: array, items: { type: string } }
+            metrics:  { type: array, items: { type: string } }
+            order_by: { type: string }
+            sql:      { type: string, description: "ClickHouse SQL the server ran (parameterised)." }
+        groups:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+          description: |
+            Each item carries the group-by keys verbatim plus a metric
+            value per requested metric. Example for
+            `group_by=labels.pytest_run&metrics=count,avg.rebuffer_ratio`:
+
+            ```json
+            {
+              "labels.pytest_run": "2026-04-01T03:00:00Z",
+              "count":             12,
+              "avg.rebuffer_ratio": 0.012
+            }
+            ```
+        elapsed_ms:
+          type: number
+          format: float
+          description: ClickHouse query wallclock.
+
+    # ---- Timeseries SSE wire shapes (used only by /api/v2/timeseries) ----
+
+    SSEFrameUnion:
+      description: |
+        The polymorphic union of all `/api/v2/timeseries` SSE frame
+        `data` shapes. The frame's `event:` name (NOT a payload
+        property) discriminates which variant arrives — callers MUST
+        look at the SSE event-name line to know which schema applies.
+
+        OpenAPI's `discriminator` keyword requires a discriminator
+        property IN the payload, which SSE doesn't have, so this
+        union is bare-`oneOf`. Codegen consumers should write a thin
+        wrapper that reads the SSE `event:` line and casts to the
+        matching variant.
+      oneOf:
+        - $ref: '#/components/schemas/MetaEvent'
+        - $ref: '#/components/schemas/SampleRow'
+        - $ref: '#/components/schemas/NetworkRow'
+        - $ref: '#/components/schemas/EventRow'
+        - $ref: '#/components/schemas/HeartbeatEvent'
+        - $ref: '#/components/schemas/CompleteEvent'
+        - $ref: '#/components/schemas/StreamErrorEvent'
+
+    MetaEvent:
+      description: |
+        First frame on every successful subscription. Names the
+        resolved per-stream column projection so the client knows
+        what shape `sample` / `network` / `event` rows will have.
+
+        SSE wire shape: `event: meta\ndata: <this object>\n\n`.
+      type: object
+      required: [streams, columns, live, server_caps, ring]
+      additionalProperties: false
+      properties:
+        streams:
+          type: array
+          description: Resolved stream list (in order — samples, network, events).
+          items: { type: string, enum: [samples, network, events] }
+          example: [samples, network]
+        columns:
+          type: object
+          description: |
+            Per-stream column projection that the backfill + live
+            deltas will use. Keys are stream names; values are the
+            column lists (deduped, sorted, with mandatory identity
+            columns prepended).
+          additionalProperties:
+            type: array
+            items: { type: string }
+          example:
+            samples: [buffer_depth_s, manifest_url, network_bitrate_mbps, play_id, player_id, session_id, ts, video_bitrate_mbps]
+            network: [bytes_in, entry_fingerprint, fault_type, faulted, path, play_id, player_id, request_kind, session_id, status, total_ms, ts, ttfb_ms]
+        live:
+          type: boolean
+          description: |
+            Server's verdict on whether the (player, play) is still
+            producing data. true → backfill, then keep streaming;
+            false → backfill, then `complete` and close.
+        server_caps:
+          type: object
+          description: Server-side ceilings the client should respect.
+          additionalProperties: { type: integer }
+          example: { samples: 50000, network: 5000 }
+        ring:
+          type: object
+          description: Live-ring metadata so the client can size caches.
+          properties:
+            window_seconds:
+              type: integer
+              description: How far back the live ring buffer retains entries.
+              example: 600
+          required: [window_seconds]
+        from:
+          type: string
+          description: Echo of the `from=` request parameter (or empty).
+        to:
+          type: string
+          description: Echo of the `to=` request parameter (or empty).
+
+    SampleRow:
+      description: |
+        One row from `session_snapshots` projected by the requested
+        bundles. Concrete column set is reported by
+        `MetaEvent.columns.samples` and varies by selection — this
+        schema documents the type as an open object so codegen
+        consumers don't have to spec every column.
+
+        Required keys are the mandatory identity columns the resolver
+        always includes; everything else is bundle-dependent.
+
+        SSE wire shape: `event: sample\nid: <ts>\ndata: <this object>\n\n`.
+        The `id:` is the row's stringified `ts`, which the client
+        uses as the dedupe key against the live ring overlay.
+
+        Example below is the `charts_minimal` bundle.
+      type: object
+      additionalProperties: true
+      required: [ts, session_id, play_id, player_id]
+      properties:
+        ts: { type: string, format: date-time, description: ms-precision DateTime64, as a string. }
+        session_id: { type: string }
+        play_id: { type: string }
+        player_id: { type: string }
+      example:
+        ts: "2026-05-17 13:50:11.507"
+        session_id: "1"
+        play_id: 8fa22b46-dcce-4955-9970-4df3cda72d92
+        player_id: 97282446-9a14-4193-9fca-857250bc74ae
+        buffer_depth_s: 6.4
+        network_bitrate_mbps: 4.82
+        video_bitrate_mbps: 4.0
+        video_resolution: "1920x1080"
+        player_state: playing
+        manifest_url: "/go-live/SAMPLE/v2160_h264.m3u8"
+        nftables_bandwidth_mbps: 5
+
+    NetworkRow:
+      description: |
+        One row from `network_requests`. Dedupe key is
+        `entry_fingerprint` (server-stable hash of url+ts+bytes).
+        Bundle-projected columns vary by selection — the `network`
+        bundle's columns are documented as required below.
+
+        SSE wire shape: `event: network\nid: <entry_fingerprint>\ndata: <this object>\n\n`.
+      type: object
+      additionalProperties: true
+      required:
+        - ts
+        - session_id
+        - play_id
+        - player_id
+        - entry_fingerprint
+      properties:
+        ts: { type: string, format: date-time }
+        session_id: { type: string }
+        play_id: { type: string }
+        player_id: { type: string }
+        entry_fingerprint: { type: string }
+        method: { type: string, enum: [GET, HEAD, POST] }
+        url: { type: string }
+        path: { type: string }
+        request_kind:
+          type: string
+          enum: [master, manifest, init, segment, partial, image, other]
+        status: { type: integer }
+        bytes_in: { type: integer }
+        bytes_out: { type: integer }
+        ttfb_ms: { type: number, format: float }
+        transfer_ms: { type: number, format: float }
+        total_ms: { type: number, format: float }
+        client_wait_ms: { type: number, format: float }
+        faulted: { type: integer, enum: [0, 1] }
+        fault_type: { type: string }
+        fault_action: { type: string }
+        fault_category:
+          type: string
+          enum: [http, socket, corruption, transport, transfer_timeout, client_disconnect]
+      example:
+        ts: "2026-05-17 13:51:44.921"
+        session_id: "1"
+        play_id: 8fa22b46-dcce-4955-9970-4df3cda72d92
+        player_id: 97282446-9a14-4193-9fca-857250bc74ae
+        entry_fingerprint: "1234567890123456"
+        method: GET
+        path: /go-live/SAMPLE/2160p/segment_00007.m4s
+        request_kind: segment
+        status: 200
+        bytes_in: 15728640
+        ttfb_ms: 41
+        transfer_ms: 18203
+        total_ms: 18244
+        faulted: 1
+        fault_type: client_disconnect
+        fault_action: transfer_abandoned
+        fault_category: client_disconnect
+
+    EventRow:
+      description: |
+        One row from the derived `events` taxonomy. **Not yet
+        implemented** — requesting `streams=events` returns 501. Spec
+        retained so the wire shape is stable across the lift.
+
+        SSE wire shape: `event: event\nid: <ts>:<type>\ndata: <this object>\n\n`.
+
+        `kind` discriminates cause vs effect; `priority` is 1
+        (critical) through 4 (low) on the dashboard's classification
+        ladder.
+      type: object
+      required: [ts, type, kind, priority, play_id, player_id, session_id]
+      additionalProperties: true
+      properties:
+        ts: { type: string, format: date-time }
+        type:
+          description: Event type name (e.g. stall, downshift, manifest_failure, all_failure, fault_on).
+          type: string
+        info:
+          description: Type-specific JSON payload.
+          type: object
+          additionalProperties: true
+        kind:
+          type: string
+          enum: [cause, effect]
+        priority:
+          type: integer
+          enum: [1, 2, 3, 4]
+        play_id: { type: string }
+        player_id: { type: string }
+        session_id: { type: string }
+
+    HeartbeatEvent:
+      description: |
+        Emitted every 15 s on the open SSE channel so proxies and
+        the client don't idle-close. Carries only the server `ts`
+        (a convenient wall-clock sync if the client wants it).
+
+        SSE wire shape: `event: heartbeat\ndata: <this object>\n\n`.
+      type: object
+      required: [ts]
+      additionalProperties: false
+      properties:
+        ts:
+          type: string
+          format: date-time
+          description: RFC3339Nano UTC server timestamp.
+
+    CompleteEvent:
+      description: |
+        Emitted for archive subscriptions after the backfill is
+        flushed. Indicates the server intentionally closed the
+        stream — the client should NOT auto-reconnect; the play is
+        ended.
+
+        SSE wire shape: `event: complete\ndata: <this object>\n\n`.
+      type: object
+      required: [reason]
+      additionalProperties: false
+      properties:
+        reason:
+          type: string
+          description: Free-text reason; today only `archive_or_play_ended`.
+          example: archive_or_play_ended
+
+    StreamErrorEvent:
+      description: |
+        Emitted on transport / CH failures after the initial `meta`
+        frame. The connection closes shortly after; the client may
+        reconnect with a fresh subscription.
+
+        SSE wire shape: `event: stream_error\ndata: <this object>\n\n`.
+      type: object
+      required: [message]
+      additionalProperties: false
+      properties:
+        message:
+          type: string
+          example: "backfill failed: dial tcp 127.0.0.1:8123: connection refused"
+
+    # ---- Bundle catalogue (returned by GET /api/v2/bundles) -------------
+
+    BundleCatalogue:
+      description: |
+        Static description of the bundle registry as defined by
+        `analytics/go-forwarder/streambundles.go::bundleRegistry`.
+        Returned by `GET /api/v2/bundles` (not yet implemented;
+        catalogue currently lives in source — copy from
+        streambundles.go until the handler lands).
+      type: object
+      required: [bundles, aliases, streams]
+      additionalProperties: false
+      properties:
+        bundles:
+          type: array
+          items: { $ref: '#/components/schemas/BundleDef' }
+        aliases:
+          type: object
+          description: Alias name → expanded bundle list.
+          additionalProperties:
+            type: array
+            items: { type: string }
+          example:
+            all: [lanes_v1, network, events]
+        streams:
+          type: array
+          description: |
+            Mandatory identity columns per stream (always included
+            in the projection, even if the caller doesn't request
+            them).
+          items:
+            type: object
+            required: [stream, mandatory_columns]
+            properties:
+              stream:
+                type: string
+                enum: [samples, network, events]
+              mandatory_columns:
+                type: array
+                items: { type: string }
+          example:
+            - stream: samples
+              mandatory_columns: [ts, session_id, play_id, player_id]
+            - stream: network
+              mandatory_columns: [ts, session_id, play_id, player_id, entry_fingerprint]
+            - stream: events
+              mandatory_columns: [ts, play_id, player_id, session_id]
+
+    BundleDef:
+      description: One named bundle's projection of one stream.
+      type: object
+      required: [name, stream, columns]
+      additionalProperties: false
+      properties:
+        name:
+          type: string
+          example: charts_minimal
+        stream:
+          type: string
+          enum: [samples, network, events]
+        columns:
+          type: array
+          description: Wire-order list of columns the bundle projects.
+          items: { type: string }
+          example: [ts, session_id, play_id, player_id, video_bitrate_mbps, buffer_depth_s]
+        description:
+          type: string
+          description: |
+            Short human-friendly purpose statement. Optional in the
+            registry; the handler fills in defaults derived from the
+            bundle name when missing.
+
+  examples:
+
+    MetaAndBackfill:
+      summary: Initial meta event + a few backfill rows for a live play
+      description: |
+        Raw SSE bytes the client receives on the first second of a
+        live subscription. Frame separators (`\n\n`) shown as blank
+        lines.
+      value: |
+        event: meta
+        data: {"streams":["samples","network"],"columns":{"samples":["buffer_depth_s","play_id","player_id","session_id","ts","video_bitrate_mbps"],"network":["bytes_in","entry_fingerprint","fault_type","faulted","play_id","player_id","session_id","status","ts"]},"live":true,"server_caps":{"samples":50000,"network":5000},"ring":{"window_seconds":600},"from":"","to":""}
+
+        event: sample
+        id: 2026-05-17 13:50:11.507
+        data: {"ts":"2026-05-17 13:50:11.507","session_id":"1","play_id":"8fa22b46-dcce-4955-9970-4df3cda72d92","player_id":"97282446-9a14-4193-9fca-857250bc74ae","buffer_depth_s":6.4,"video_bitrate_mbps":4.0}
+
+        event: network
+        id: "1234567890123456"
+        data: {"ts":"2026-05-17 13:50:11.520","session_id":"1","play_id":"8fa22b46-dcce-4955-9970-4df3cda72d92","player_id":"97282446-9a14-4193-9fca-857250bc74ae","entry_fingerprint":"1234567890123456","status":200,"bytes_in":2654567,"faulted":0}
+
+    LiveDelta:
+      summary: A live sample arriving after backfill is done
+      value: |
+        event: sample
+        id: 2026-05-17 13:50:12.521
+        data: {"ts":"2026-05-17 13:50:12.521","session_id":"1","play_id":"8fa22b46-dcce-4955-9970-4df3cda72d92","player_id":"97282446-9a14-4193-9fca-857250bc74ae","buffer_depth_s":6.1,"video_bitrate_mbps":4.0}
+
+        event: heartbeat
+        data: {"ts":"2026-05-17T13:50:26.521Z"}
+
+    ArchiveComplete:
+      summary: Final frames of an archive-mode subscription
+      description: |
+        After CH backfill is flushed for a play whose `play.ended`
+        row has been seen, the server emits `complete` and closes.
+        The client should NOT reconnect.
+      value: |
+        event: sample
+        id: 2026-05-17 13:53:05.939
+        data: {"ts":"2026-05-17 13:53:05.939","session_id":"1","play_id":"8fa22b46-dcce-4955-9970-4df3cda72d92","player_id":"97282446-9a14-4193-9fca-857250bc74ae","buffer_depth_s":0,"video_bitrate_mbps":0}
+
+        event: complete
+        data: {"reason":"archive_or_play_ended"}

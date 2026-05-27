@@ -1,0 +1,1235 @@
+package server
+
+// End-to-end handler tests. Each test stands up a Server backed by the
+// in-memory fakeAdapter, mounts the v2 router, and drives it with
+// httptest.Server. Covers the happy path + error paths for every
+// real (non-stubbed) endpoint.
+
+import (
+	"context"
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/gorilla/mux"
+)
+
+// newTestServer wires up a fakeAdapter + Server + httptest.Server. The
+// caller is responsible for the returned Close — it stops the test
+// HTTP server AND the v2 EventSource goroutines.
+func newTestServer(t *testing.T) (*fakeAdapter, *Server, *httptest.Server) {
+	t.Helper()
+	adapter := newFakeAdapter()
+	srv := New(adapter)
+	router := mux.NewRouter()
+	Mount(router, srv)
+	httpSrv := httptest.NewServer(router)
+	t.Cleanup(func() {
+		httpSrv.Close()
+		srv.Close()
+	})
+	return adapter, srv, httpSrv
+}
+
+// addPlayer is a test fixture for "the world contains a player with
+// these v2 fields". The session map carries v1-shape keys.
+func (a *fakeAdapter) addPlayer(playerID, controlRev string, extra map[string]any) {
+	s := map[string]any{
+		"player_id":        playerID,
+		"session_id":       "sess-" + playerID[:8],
+		"control_revision": controlRev,
+		"origination_ip":   "10.0.0.1",
+	}
+	for k, v := range extra {
+		s[k] = v
+	}
+	a.addSession(s)
+}
+
+func mustGet(t *testing.T, ts *httptest.Server, path string) (int, []byte, http.Header) {
+	t.Helper()
+	resp, err := http.Get(ts.URL + path)
+	if err != nil {
+		t.Fatalf("GET %s: %v", path, err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	return resp.StatusCode, body, resp.Header
+}
+
+func mustDo(t *testing.T, ts *httptest.Server, method, path, body string, headers map[string]string) (int, []byte, http.Header) {
+	t.Helper()
+	req, err := http.NewRequest(method, ts.URL+path, strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("NewRequest %s %s: %v", method, path, err)
+	}
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+	if body != "" {
+		req.Header.Set("Content-Type", "application/merge-patch+json")
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("Do %s %s: %v", method, path, err)
+	}
+	defer resp.Body.Close()
+	bodyBytes, _ := io.ReadAll(resp.Body)
+	return resp.StatusCode, bodyBytes, resp.Header
+}
+
+// ----- Diagnostics ---------------------------------------------------------
+
+func TestGet_Healthz(t *testing.T) {
+	_, _, ts := newTestServer(t)
+	status, body, _ := mustGet(t, ts, "/api/v2/healthz")
+	if status != http.StatusOK || string(body) != "ok" {
+		t.Errorf("healthz = %d %q, want 200 ok", status, body)
+	}
+}
+
+func TestGet_Info(t *testing.T) {
+	_, _, ts := newTestServer(t)
+	status, body, _ := mustGet(t, ts, "/api/v2/info")
+	if status != http.StatusOK {
+		t.Fatalf("info status %d", status)
+	}
+	var got map[string]any
+	json.Unmarshal(body, &got)
+	if got["version"] != "fake" {
+		t.Errorf("version = %v, want fake", got["version"])
+	}
+	apiVersions, _ := got["api_versions"].([]any)
+	if len(apiVersions) != 2 {
+		t.Errorf("api_versions = %v", apiVersions)
+	}
+}
+
+// ----- Players -------------------------------------------------------------
+
+func TestGet_Players_Empty(t *testing.T) {
+	_, _, ts := newTestServer(t)
+	status, body, _ := mustGet(t, ts, "/api/v2/players")
+	if status != http.StatusOK {
+		t.Fatalf("status %d", status)
+	}
+	var got map[string]any
+	json.Unmarshal(body, &got)
+	items, _ := got["items"].([]any)
+	if len(items) != 0 {
+		t.Errorf("items = %v, want empty", items)
+	}
+}
+
+func TestGet_Players_OneSession(t *testing.T) {
+	a, _, ts := newTestServer(t)
+	pid := uuid.New().String()
+	a.addPlayer(pid, "rev1", nil)
+
+	status, body, _ := mustGet(t, ts, "/api/v2/players")
+	if status != http.StatusOK {
+		t.Fatalf("status %d body=%s", status, body)
+	}
+	var got map[string]any
+	json.Unmarshal(body, &got)
+	items, _ := got["items"].([]any)
+	if len(items) != 1 {
+		t.Fatalf("items = %d, want 1", len(items))
+	}
+	rec, _ := items[0].(map[string]any)
+	if rec["id"] != pid {
+		t.Errorf("id = %v, want %s", rec["id"], pid)
+	}
+}
+
+func TestGet_PlayersByID_404(t *testing.T) {
+	_, _, ts := newTestServer(t)
+	pid := uuid.New().String()
+	status, _, _ := mustGet(t, ts, "/api/v2/players/"+pid)
+	if status != http.StatusNotFound {
+		t.Errorf("status %d, want 404", status)
+	}
+}
+
+func TestGet_PlayersByID_Found_HasETag(t *testing.T) {
+	a, _, ts := newTestServer(t)
+	pid := uuid.New().String()
+	a.addPlayer(pid, "rev1", nil)
+	status, _, headers := mustGet(t, ts, "/api/v2/players/"+pid)
+	if status != http.StatusOK {
+		t.Fatalf("status %d", status)
+	}
+	if got := headers.Get("ETag"); got != `"rev1"` {
+		t.Errorf("ETag = %q, want \"rev1\"", got)
+	}
+}
+
+// TestGet_PlayersByID_Projections_Telemetry asserts that the v1
+// session map's `player_metrics_*`, `client_*` (TCP_INFO + ICMP),
+// `bytes_*`, and `fault_count_*` families round-trip through
+// playerFromSession into the v2 PlayerMetrics / ServerMetrics /
+// FaultCounters projections.
+func TestGet_PlayersByID_Projections_Telemetry(t *testing.T) {
+	a, _, ts := newTestServer(t)
+	pid := uuid.New().String()
+	a.addPlayer(pid, "rev1", map[string]any{
+		// Player metrics
+		"player_metrics_video_resolution":     "1920x1080",
+		"player_metrics_video_bitrate_mbps":   5.5,
+		"player_metrics_video_quality_pct":    72.5,
+		"player_metrics_buffer_depth_s":       12.3,
+		"player_metrics_stalls":               2,
+		"player_metrics_loop_count_player":    7,
+		"player_metrics_loop_count_increment": 1,
+		"player_metrics_profile_shift_count":  4,
+		"player_metrics_last_event":           "playing",
+		"player_metrics_source":               "avplayer-ios",
+		// Server metrics (TCP_INFO + ICMP + bytes)
+		"client_rtt_ms":           42.0,
+		"client_rtt_min_ms":       12.0,
+		"client_path_ping_rtt_ms": 38.5,
+		"client_rtt_stale":        false,
+		"bytes_in_total":          12345,
+		"bytes_out_total":         98765,
+		// Fault counters
+		"fault_count_total":       3,
+		"fault_count_socket_drop": 2,
+	})
+
+	status, body, _ := mustGet(t, ts, "/api/v2/players/"+pid)
+	if status != http.StatusOK {
+		t.Fatalf("status %d body=%s", status, body)
+	}
+	var rec map[string]any
+	if err := json.Unmarshal(body, &rec); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	pm, ok := rec["player_metrics"].(map[string]any)
+	if !ok {
+		t.Fatalf("player_metrics missing or wrong shape: %s", body)
+	}
+	if pm["video_resolution"] != "1920x1080" {
+		t.Errorf("player_metrics.video_resolution = %v", pm["video_resolution"])
+	}
+	if pm["loop_count_player"].(float64) != 7 {
+		t.Errorf("player_metrics.loop_count_player = %v", pm["loop_count_player"])
+	}
+	if pm["last_event"] != "playing" {
+		t.Errorf("player_metrics.last_event = %v", pm["last_event"])
+	}
+
+	sm, ok := rec["server_metrics"].(map[string]any)
+	if !ok {
+		t.Fatalf("server_metrics missing or wrong shape: %s", body)
+	}
+	if sm["rtt_ms"].(float64) != 42.0 {
+		t.Errorf("server_metrics.rtt_ms = %v", sm["rtt_ms"])
+	}
+	if sm["path_ping_rtt_ms"].(float64) != 38.5 {
+		t.Errorf("server_metrics.path_ping_rtt_ms = %v", sm["path_ping_rtt_ms"])
+	}
+	if sm["bytes_in_total"].(float64) != 12345 {
+		t.Errorf("server_metrics.bytes_in_total = %v", sm["bytes_in_total"])
+	}
+
+	fc, ok := rec["fault_counters"].(map[string]any)
+	if !ok {
+		t.Fatalf("fault_counters missing or wrong shape: %s", body)
+	}
+	if fc["total"].(float64) != 3 {
+		t.Errorf("fault_counters.total = %v", fc["total"])
+	}
+	if fc["socket_drop"].(float64) != 2 {
+		t.Errorf("fault_counters.socket_drop = %v", fc["socket_drop"])
+	}
+}
+
+// TestGet_PlayersByID_Projections_AllZeroFaultCounters asserts that an
+// all-zero `fault_count_*` family is suppressed (rendering a sea of
+// zeros on every fresh session is noise — the dashboard should see
+// `fault_counters: undefined` and skip the section entirely).
+func TestGet_PlayersByID_Projections_AllZeroFaultCounters(t *testing.T) {
+	a, _, ts := newTestServer(t)
+	pid := uuid.New().String()
+	a.addPlayer(pid, "rev1", map[string]any{
+		"fault_count_total":       0,
+		"fault_count_socket_drop": 0,
+	})
+
+	_, body, _ := mustGet(t, ts, "/api/v2/players/"+pid)
+	var rec map[string]any
+	json.Unmarshal(body, &rec)
+	if _, ok := rec["fault_counters"]; ok {
+		t.Errorf("fault_counters should be omitted when all zero, got: %v", rec["fault_counters"])
+	}
+}
+
+// TestGet_PlayersByID_Projections_NoTelemetry asserts a session with
+// no metrics fields produces no `player_metrics` / `server_metrics`
+// keys at all (rather than empty objects) — keeps the wire compact.
+func TestGet_PlayersByID_Projections_NoTelemetry(t *testing.T) {
+	a, _, ts := newTestServer(t)
+	pid := uuid.New().String()
+	a.addPlayer(pid, "rev1", nil)
+
+	_, body, _ := mustGet(t, ts, "/api/v2/players/"+pid)
+	var rec map[string]any
+	json.Unmarshal(body, &rec)
+	if _, ok := rec["player_metrics"]; ok {
+		t.Errorf("player_metrics should be omitted when no fields, got: %v", rec["player_metrics"])
+	}
+	if _, ok := rec["server_metrics"]; ok {
+		t.Errorf("server_metrics should be omitted when no fields, got: %v", rec["server_metrics"])
+	}
+}
+
+// TestGet_PlayersByID_Projections_TransferTimeouts asserts the v1
+// transfer_*_timeout fields surface as v2 transfer_timeouts when set.
+func TestGet_PlayersByID_Projections_TransferTimeouts(t *testing.T) {
+	a, _, ts := newTestServer(t)
+	pid := uuid.New().String()
+	a.addPlayer(pid, "rev1", map[string]any{
+		"transfer_active_timeout_seconds":   12,
+		"transfer_idle_timeout_seconds":     5,
+		"transfer_timeout_applies_segments": true,
+		"transfer_timeout_applies_manifests": true,
+	})
+	_, body, _ := mustGet(t, ts, "/api/v2/players/"+pid)
+	var rec map[string]any
+	json.Unmarshal(body, &rec)
+	tt, ok := rec["transfer_timeouts"].(map[string]any)
+	if !ok {
+		t.Fatalf("transfer_timeouts missing: %s", body)
+	}
+	if tt["active_timeout_seconds"].(float64) != 12 {
+		t.Errorf("active_timeout_seconds = %v", tt["active_timeout_seconds"])
+	}
+	if tt["idle_timeout_seconds"].(float64) != 5 {
+		t.Errorf("idle_timeout_seconds = %v", tt["idle_timeout_seconds"])
+	}
+	if tt["applies_manifests"] != true {
+		t.Errorf("applies_manifests = %v", tt["applies_manifests"])
+	}
+}
+
+// TestGet_PlayersByID_Projections_TransferTimeouts_DefaultSuppressed:
+// a session with everything at defaults must omit the transfer_timeouts
+// key entirely (so the dashboard doesn't render the section).
+func TestGet_PlayersByID_Projections_TransferTimeouts_DefaultSuppressed(t *testing.T) {
+	a, _, ts := newTestServer(t)
+	pid := uuid.New().String()
+	a.addPlayer(pid, "rev1", map[string]any{
+		"transfer_active_timeout_seconds":    0,
+		"transfer_idle_timeout_seconds":      0,
+		"transfer_timeout_applies_segments":  true,
+		"transfer_timeout_applies_manifests": false,
+		"transfer_timeout_applies_master":    false,
+	})
+	_, body, _ := mustGet(t, ts, "/api/v2/players/"+pid)
+	var rec map[string]any
+	json.Unmarshal(body, &rec)
+	if _, ok := rec["transfer_timeouts"]; ok {
+		t.Errorf("transfer_timeouts should be suppressed at defaults, got: %v", rec["transfer_timeouts"])
+	}
+}
+
+// TestGet_PlayersByID_Projections_Content asserts content manipulation
+// fields surface when at least one is non-default.
+func TestGet_PlayersByID_Projections_Content(t *testing.T) {
+	a, _, ts := newTestServer(t)
+	pid := uuid.New().String()
+	a.addPlayer(pid, "rev1", map[string]any{
+		"content_strip_codecs":     true,
+		"content_overstate_bandwidth": true,
+		"content_live_offset":      18,
+		"content_allowed_variants": []any{"720p", "1080p"},
+	})
+	_, body, _ := mustGet(t, ts, "/api/v2/players/"+pid)
+	var rec map[string]any
+	json.Unmarshal(body, &rec)
+	c, ok := rec["content"].(map[string]any)
+	if !ok {
+		t.Fatalf("content missing: %s", body)
+	}
+	if c["strip_codecs"] != true {
+		t.Errorf("strip_codecs = %v", c["strip_codecs"])
+	}
+	if c["live_offset"].(float64) != 18 {
+		t.Errorf("live_offset = %v", c["live_offset"])
+	}
+	allowed, ok := c["allowed_variants"].([]any)
+	if !ok || len(allowed) != 2 {
+		t.Errorf("allowed_variants = %v", c["allowed_variants"])
+	}
+}
+
+// TestPatch_Player_TransferTimeouts: PATCH writes flow into the v1
+// session map and the next GET round-trips back as the same shape.
+func TestPatch_Player_TransferTimeouts(t *testing.T) {
+	a, _, ts := newTestServer(t)
+	pid := uuid.New().String()
+	a.addPlayer(pid, "rev1", nil)
+	patch := `{"transfer_timeouts":{"active_timeout_seconds":7,"applies_master":true}}`
+	status, _, _ := mustDo(t, ts, "PATCH", "/api/v2/players/"+pid, patch,
+		map[string]string{"If-Match": `"rev1"`})
+	if status != http.StatusOK && status != http.StatusNoContent {
+		t.Fatalf("PATCH status %d", status)
+	}
+	_, body, _ := mustGet(t, ts, "/api/v2/players/"+pid)
+	var rec map[string]any
+	json.Unmarshal(body, &rec)
+	tt, ok := rec["transfer_timeouts"].(map[string]any)
+	if !ok {
+		t.Fatalf("transfer_timeouts missing after PATCH: %s", body)
+	}
+	if tt["active_timeout_seconds"].(float64) != 7 {
+		t.Errorf("active_timeout_seconds = %v", tt["active_timeout_seconds"])
+	}
+	if tt["applies_master"] != true {
+		t.Errorf("applies_master = %v", tt["applies_master"])
+	}
+}
+
+// TestPatch_Player_Content: PATCH writes content manipulation flags
+// into the v1 session map and round-trips back.
+func TestPatch_Player_Content(t *testing.T) {
+	a, _, ts := newTestServer(t)
+	pid := uuid.New().String()
+	a.addPlayer(pid, "rev1", nil)
+	patch := `{"content":{"strip_codecs":true,"overstate_bandwidth":true,"live_offset":24,"allowed_variants":["v1","v2"]}}`
+	status, _, _ := mustDo(t, ts, "PATCH", "/api/v2/players/"+pid, patch,
+		map[string]string{"If-Match": `"rev1"`})
+	if status != http.StatusOK && status != http.StatusNoContent {
+		t.Fatalf("PATCH status %d", status)
+	}
+	_, body, _ := mustGet(t, ts, "/api/v2/players/"+pid)
+	var rec map[string]any
+	json.Unmarshal(body, &rec)
+	c, ok := rec["content"].(map[string]any)
+	if !ok {
+		t.Fatalf("content missing after PATCH: %s", body)
+	}
+	if c["strip_codecs"] != true || c["overstate_bandwidth"] != true {
+		t.Errorf("flags = %v", c)
+	}
+	if c["live_offset"].(float64) != 24 {
+		t.Errorf("live_offset = %v", c["live_offset"])
+	}
+}
+
+func TestPost_Players_201_ServerGeneratedID(t *testing.T) {
+	_, _, ts := newTestServer(t)
+	status, body, headers := mustDo(t, ts, "POST", "/api/v2/players", "{}", nil)
+	if status != http.StatusCreated {
+		t.Fatalf("status %d body=%s", status, body)
+	}
+	var rec map[string]any
+	if err := json.Unmarshal(body, &rec); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if _, ok := rec["id"]; !ok {
+		t.Errorf("response missing id: %s", body)
+	}
+	if headers.Get("Location") == "" {
+		t.Errorf("Location header missing")
+	}
+	if headers.Get("ETag") == "" {
+		t.Errorf("ETag header missing")
+	}
+}
+
+func TestPost_Players_201_ClientSuppliedID(t *testing.T) {
+	a, _, ts := newTestServer(t)
+	pid := uuid.New().String()
+	body := `{"player_id":"` + pid + `","labels":{"test":"hello"}}`
+	status, _, _ := mustDo(t, ts, "POST", "/api/v2/players", body, nil)
+	if status != http.StatusCreated {
+		t.Fatalf("status %d", status)
+	}
+	stored, ok := a.SessionByPlayerID(pid)
+	if !ok {
+		t.Fatalf("session not stored")
+	}
+	labels, _ := stored["_v2_labels"].(map[string]any)
+	if labels["test"] != "hello" {
+		t.Errorf("labels = %v, want test=hello", labels)
+	}
+}
+
+func TestPost_Players_200_IdempotentRetry(t *testing.T) {
+	_, _, ts := newTestServer(t)
+	pid := uuid.New().String()
+	body := `{"player_id":"` + pid + `","labels":{"k":"v"}}`
+	if s, _, _ := mustDo(t, ts, "POST", "/api/v2/players", body, nil); s != http.StatusCreated {
+		t.Fatalf("first POST %d", s)
+	}
+	// Same body → 200.
+	status, _, _ := mustDo(t, ts, "POST", "/api/v2/players", body, nil)
+	if status != http.StatusOK {
+		t.Errorf("retry status %d, want 200", status)
+	}
+}
+
+func TestPost_Players_409_DifferentBody(t *testing.T) {
+	_, _, ts := newTestServer(t)
+	pid := uuid.New().String()
+	body1 := `{"player_id":"` + pid + `","labels":{"k":"v1"}}`
+	body2 := `{"player_id":"` + pid + `","labels":{"k":"v2"}}`
+	if s, _, _ := mustDo(t, ts, "POST", "/api/v2/players", body1, nil); s != http.StatusCreated {
+		t.Fatalf("first POST %d", s)
+	}
+	status, _, _ := mustDo(t, ts, "POST", "/api/v2/players", body2, nil)
+	if status != http.StatusConflict {
+		t.Errorf("conflicting body status %d, want 409", status)
+	}
+}
+
+func TestDelete_Players_All(t *testing.T) {
+	a, _, ts := newTestServer(t)
+	a.addPlayer(uuid.New().String(), "r", nil)
+	a.addPlayer(uuid.New().String(), "r", nil)
+	status, _, _ := mustDo(t, ts, "DELETE", "/api/v2/players", "", nil)
+	if status != http.StatusNoContent {
+		t.Errorf("status %d, want 204", status)
+	}
+	if got := len(a.snapshot()); got != 0 {
+		t.Errorf("after clear, sessions = %d, want 0", got)
+	}
+}
+
+func TestDelete_PlayerByID(t *testing.T) {
+	a, _, ts := newTestServer(t)
+	pid := uuid.New().String()
+	a.addPlayer(pid, "r", nil)
+
+	status, _, _ := mustDo(t, ts, "DELETE", "/api/v2/players/"+pid, "", nil)
+	if status != http.StatusNoContent {
+		t.Errorf("status %d, want 204", status)
+	}
+	if _, ok := a.SessionByPlayerID(pid); ok {
+		t.Errorf("player still present after delete")
+	}
+}
+
+// ----- PATCH /players/{id} -------------------------------------------------
+
+func TestPatch_NoIfMatch_400(t *testing.T) {
+	_, _, ts := newTestServer(t)
+	pid := uuid.New().String()
+	status, _, _ := mustDo(t, ts, "PATCH", "/api/v2/players/"+pid, `{"labels":{"x":"y"}}`, nil)
+	// The oapigen wrapper rejects missing required If-Match with 400.
+	if status != http.StatusBadRequest {
+		t.Errorf("status %d, want 400", status)
+	}
+}
+
+func TestPatch_UnknownPlayer_404(t *testing.T) {
+	_, _, ts := newTestServer(t)
+	pid := uuid.New().String()
+	status, _, _ := mustDo(t, ts, "PATCH", "/api/v2/players/"+pid, `{"labels":{"x":"y"}}`,
+		map[string]string{"If-Match": `"any"`})
+	if status != http.StatusNotFound {
+		t.Errorf("status %d, want 404", status)
+	}
+}
+
+func TestPatch_UnsupportedField_501(t *testing.T) {
+	a, _, ts := newTestServer(t)
+	pid := uuid.New().String()
+	a.addPlayer(pid, "rev1", nil)
+	// `display_id` is per-device identity, not mutable. Any v2 path
+	// outside the {labels, shape, fault_rules} whitelist returns 501.
+	status, body, _ := mustDo(t, ts, "PATCH", "/api/v2/players/"+pid,
+		`{"display_id":99}`,
+		map[string]string{"If-Match": `"rev1"`})
+	if status != http.StatusNotImplemented {
+		t.Errorf("status %d, want 501; body=%s", status, body)
+	}
+}
+
+func TestPatch_ShapePatternRoundTrip(t *testing.T) {
+	a, _, ts := newTestServer(t)
+	pid := uuid.New().String()
+	initialRev := "2020-01-01T00:00:00.000000000Z"
+	a.addPlayer(pid, initialRev, nil)
+
+	body := `{"shape":{"pattern":{"template":"square_wave","steps":[{"duration_seconds":30,"rate_mbps":5},{"duration_seconds":10,"rate_mbps":1}]}}}`
+	status, respBody, _ := mustDo(t, ts, "PATCH", "/api/v2/players/"+pid, body,
+		map[string]string{"If-Match": `"` + initialRev + `"`})
+	if status != http.StatusOK {
+		t.Fatalf("status %d body=%s", status, respBody)
+	}
+	stored, _ := a.SessionByPlayerID(pid)
+	pat, _ := stored["_v2_shape_pattern"].(map[string]any)
+	if pat == nil {
+		t.Fatalf("_v2_shape_pattern not stashed: %v", stored)
+	}
+	steps, _ := pat["steps"].([]any)
+	if len(steps) != 2 {
+		t.Errorf("steps len = %d, want 2", len(steps))
+	}
+	a.mu.Lock()
+	calls := append([]fakePatternCall{}, a.patternApplyCalls...)
+	a.mu.Unlock()
+	if len(calls) == 0 {
+		t.Fatalf("ApplyPatternToPlayer not called")
+	}
+	last := calls[len(calls)-1]
+	if last.PlayerID != pid || len(last.Steps) != 2 {
+		t.Errorf("pattern call mismatch: %+v", last)
+	}
+	if last.Steps[0].DurationSeconds != 30 || last.Steps[0].RateMbps != 5 {
+		t.Errorf("step[0] = %+v, want duration=30 rate=5", last.Steps[0])
+	}
+}
+
+func TestPatch_ShapePatternDisarm(t *testing.T) {
+	a, _, ts := newTestServer(t)
+	pid := uuid.New().String()
+	initialRev := "2020-01-01T00:00:00.000000000Z"
+	a.addPlayer(pid, initialRev, map[string]any{
+		"_v2_shape_pattern": map[string]any{"steps": []any{
+			map[string]any{"duration_seconds": 5.0, "rate_mbps": 3.0},
+		}},
+	})
+
+	body := `{"shape":{"pattern":null}}`
+	status, _, _ := mustDo(t, ts, "PATCH", "/api/v2/players/"+pid, body,
+		map[string]string{"If-Match": `"` + initialRev + `"`})
+	if status != http.StatusOK {
+		t.Fatalf("status %d", status)
+	}
+	stored, _ := a.SessionByPlayerID(pid)
+	if _, has := stored["_v2_shape_pattern"]; has {
+		t.Errorf("pattern should be cleared, still present: %v", stored["_v2_shape_pattern"])
+	}
+	a.mu.Lock()
+	calls := append([]fakePatternCall{}, a.patternApplyCalls...)
+	a.mu.Unlock()
+	if len(calls) == 0 || len(calls[len(calls)-1].Steps) != 0 {
+		t.Errorf("expected disarm call (empty steps), got %+v", calls)
+	}
+}
+
+func TestPatch_FaultRules_UnsupportedFilter_501(t *testing.T) {
+	a, _, ts := newTestServer(t)
+	pid := uuid.New().String()
+	initialRev := "2020-01-01T00:00:00.000000000Z"
+	a.addPlayer(pid, initialRev, nil)
+	body := `{"fault_rules":[{"id":"r1","type":"500","filter":{"variant":{"rung_positions":["top"]}}}]}`
+	status, respBody, _ := mustDo(t, ts, "PATCH", "/api/v2/players/"+pid, body,
+		map[string]string{"If-Match": `"` + initialRev + `"`})
+	if status != http.StatusNotImplemented {
+		t.Errorf("status %d, want 501; body=%s", status, respBody)
+	}
+}
+
+func TestPatch_FaultRules_RoundTrip(t *testing.T) {
+	a, _, ts := newTestServer(t)
+	pid := uuid.New().String()
+	initialRev := "2020-01-01T00:00:00.000000000Z"
+	a.addPlayer(pid, initialRev, nil)
+
+	body := `{"fault_rules":[{"id":"r-seg","type":"500","frequency":5,"filter":{"request_kind":["segment"]}}]}`
+	status, respBody, _ := mustDo(t, ts, "PATCH", "/api/v2/players/"+pid, body,
+		map[string]string{"If-Match": `"` + initialRev + `"`})
+	if status != http.StatusOK {
+		t.Fatalf("status %d body=%s", status, respBody)
+	}
+	stored, _ := a.SessionByPlayerID(pid)
+	if stored["segment_failure_type"] != "500" {
+		t.Errorf("segment_failure_type = %v, want 500", stored["segment_failure_type"])
+	}
+	if stored["segment_failure_frequency"] != 5 {
+		t.Errorf("segment_failure_frequency = %v, want 5", stored["segment_failure_frequency"])
+	}
+}
+
+func TestPost_FaultRule_AppendOne(t *testing.T) {
+	a, _, ts := newTestServer(t)
+	pid := uuid.New().String()
+	initialRev := "2020-01-01T00:00:00.000000000Z"
+	a.addPlayer(pid, initialRev, nil)
+
+	body := `{"id":"r1","type":"500","frequency":3,"filter":{"request_kind":["segment"]}}`
+	status, respBody, _ := mustDo(t, ts, "POST", "/api/v2/players/"+pid+"/fault_rules", body,
+		map[string]string{"If-Match": `"` + initialRev + `"`})
+	if status != http.StatusCreated {
+		t.Fatalf("status %d body=%s", status, respBody)
+	}
+	stored, _ := a.SessionByPlayerID(pid)
+	if stored["segment_failure_type"] != "500" {
+		t.Errorf("segment_failure_type = %v, want 500", stored["segment_failure_type"])
+	}
+}
+
+func TestDelete_FaultRule(t *testing.T) {
+	a, _, ts := newTestServer(t)
+	pid := uuid.New().String()
+	initialRev := "2020-01-01T00:00:00.000000000Z"
+	a.addPlayer(pid, initialRev, nil)
+
+	// Seed a rule via whole-array PATCH.
+	mustDo(t, ts, "PATCH", "/api/v2/players/"+pid,
+		`{"fault_rules":[{"id":"to-delete","type":"500","filter":{"request_kind":["segment"]}}]}`,
+		map[string]string{"If-Match": `"` + initialRev + `"`})
+
+	// DELETE the rule using its own If-Match.
+	stored, _ := a.SessionByPlayerID(pid)
+	rev := asString(stored["control_revision"])
+	status, _, _ := mustDo(t, ts, "DELETE", "/api/v2/players/"+pid+"/fault_rules/to-delete", "",
+		map[string]string{"If-Match": `"` + rev + `"`})
+	if status != http.StatusNoContent {
+		t.Fatalf("status %d", status)
+	}
+	stored, _ = a.SessionByPlayerID(pid)
+	// segment surface should be cleared after the delete.
+	if stored["segment_failure_type"] != "none" {
+		t.Errorf("segment_failure_type after delete = %v, want none", stored["segment_failure_type"])
+	}
+}
+
+func TestPatch_ShapeRoundTrip(t *testing.T) {
+	a, _, ts := newTestServer(t)
+	pid := uuid.New().String()
+	initialRev := "2020-01-01T00:00:00.000000000Z"
+	a.addPlayer(pid, initialRev, nil)
+
+	body := `{"shape":{"rate_mbps":5,"delay_ms":50,"loss_pct":1.5}}`
+	status, respBody, _ := mustDo(t, ts, "PATCH", "/api/v2/players/"+pid, body,
+		map[string]string{"If-Match": `"` + initialRev + `"`})
+	if status != http.StatusOK {
+		t.Fatalf("status %d body=%s", status, respBody)
+	}
+	stored, _ := a.SessionByPlayerID(pid)
+	if stored["nftables_bandwidth_mbps"] != float64(5) {
+		t.Errorf("nftables_bandwidth_mbps = %v", stored["nftables_bandwidth_mbps"])
+	}
+	if stored["nftables_delay_ms"] != 50 {
+		t.Errorf("nftables_delay_ms = %v", stored["nftables_delay_ms"])
+	}
+	if stored["nftables_packet_loss"] != 1.5 {
+		t.Errorf("nftables_packet_loss = %v", stored["nftables_packet_loss"])
+	}
+	// ApplyShapeToPlayer should have been called.
+	a.mu.Lock()
+	calls := append([]string{}, a.shapeApplyCalls...)
+	a.mu.Unlock()
+	found := false
+	for _, p := range calls {
+		if p == pid {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("ApplyShapeToPlayer not called for %s; calls=%v", pid, calls)
+	}
+}
+
+func TestPatch_TransportFault_ArmsKernel(t *testing.T) {
+	a, _, ts := newTestServer(t)
+	pid := uuid.New().String()
+	initialRev := "2020-01-01T00:00:00.000000000Z"
+	a.addPlayer(pid, initialRev, nil)
+
+	body := `{"shape":{"transport_fault":{"type":"drop","frequency":5,"consecutive":2,"mode":"failures_per_seconds"}}}`
+	status, respBody, _ := mustDo(t, ts, "PATCH", "/api/v2/players/"+pid, body,
+		map[string]string{"If-Match": `"` + initialRev + `"`})
+	if status != http.StatusOK {
+		t.Fatalf("status %d body=%s", status, respBody)
+	}
+	a.mu.Lock()
+	calls := append([]fakeTransportFaultCall{}, a.transportFaultCalls...)
+	a.mu.Unlock()
+	if len(calls) == 0 {
+		t.Fatalf("ApplyTransportFaultToPlayer not called")
+	}
+	last := calls[len(calls)-1]
+	if last.PlayerID != pid || last.FaultType != "drop" || last.Consecutive != 2 || last.Frequency != 5 {
+		t.Errorf("transport-fault call mismatch: %+v", last)
+	}
+}
+
+func TestPatch_LabelsRoundTrip(t *testing.T) {
+	a, _, ts := newTestServer(t)
+	pid := uuid.New().String()
+	a.addPlayer(pid, "rev1", nil)
+
+	status, body, headers := mustDo(t, ts, "PATCH", "/api/v2/players/"+pid,
+		`{"labels":{"test":"abc","run":"42"}}`,
+		map[string]string{"If-Match": `"rev1"`})
+	if status != http.StatusOK {
+		t.Fatalf("status %d body=%s", status, body)
+	}
+	if etag := headers.Get("ETag"); etag == `""` || etag == "" {
+		t.Errorf("ETag missing")
+	}
+	// Confirm the session map carries _v2_labels post-patch.
+	stored, _ := a.SessionByPlayerID(pid)
+	labels, _ := stored["_v2_labels"].(map[string]any)
+	if labels["test"] != "abc" || labels["run"] != "42" {
+		t.Errorf("stored labels = %v, want test=abc run=42", labels)
+	}
+}
+
+func TestPatch_FieldLevelConcurrency_412(t *testing.T) {
+	a, _, ts := newTestServer(t)
+	pid := uuid.New().String()
+	// Use a real timestamp-shaped initial revision so the lex-compare
+	// against post-PATCH revisions (also timestamp-shaped) does the
+	// right thing. A synthetic "rev1" lex-sorts *after* any real
+	// 2026-shaped timestamp, which would mask conflicts.
+	initialRev := "2020-01-01T00:00:00.000000000Z"
+	a.addPlayer(pid, initialRev, nil)
+
+	// First patch succeeds — bumps FieldRevisions for labels.test.
+	s1, _, _ := mustDo(t, ts, "PATCH", "/api/v2/players/"+pid,
+		`{"labels":{"test":"first"}}`,
+		map[string]string{"If-Match": `"` + initialRev + `"`})
+	if s1 != http.StatusOK {
+		t.Fatalf("first patch status %d", s1)
+	}
+
+	// Second patch with the *original* (now stale) If-Match on the
+	// same field → 412.
+	status, body, _ := mustDo(t, ts, "PATCH", "/api/v2/players/"+pid,
+		`{"labels":{"test":"second"}}`,
+		map[string]string{"If-Match": `"` + initialRev + `"`})
+	if status != http.StatusPreconditionFailed {
+		t.Fatalf("status %d, want 412; body=%s", status, body)
+	}
+	var problem map[string]any
+	json.Unmarshal(body, &problem)
+	conflicts, _ := problem["conflicts"].([]any)
+	if len(conflicts) != 1 || conflicts[0] != "labels.test" {
+		t.Errorf("conflicts = %v, want [labels.test]", conflicts)
+	}
+}
+
+func TestPatch_DisjointFields_BothSucceed(t *testing.T) {
+	a, _, ts := newTestServer(t)
+	pid := uuid.New().String()
+	initialRev := "2020-01-01T00:00:00.000000000Z"
+	a.addPlayer(pid, initialRev, nil)
+
+	// First patch: labels.test.
+	s1, _, _ := mustDo(t, ts, "PATCH", "/api/v2/players/"+pid,
+		`{"labels":{"test":"a"}}`,
+		map[string]string{"If-Match": `"` + initialRev + `"`})
+	if s1 != http.StatusOK {
+		t.Fatalf("first patch %d", s1)
+	}
+	// Second patch with the same If-Match but on labels.run (disjoint).
+	// Per field-level concurrency, this should succeed even though
+	// labels.test was bumped.
+	s2, body, _ := mustDo(t, ts, "PATCH", "/api/v2/players/"+pid,
+		`{"labels":{"run":"x"}}`,
+		map[string]string{"If-Match": `"` + initialRev + `"`})
+	if s2 != http.StatusOK {
+		t.Errorf("disjoint patch %d, want 200; body=%s", s2, body)
+	}
+}
+
+// ----- Group lifecycle -----------------------------------------------------
+
+func TestPost_PlayerGroups_Empty_400(t *testing.T) {
+	_, _, ts := newTestServer(t)
+	status, _, _ := mustDo(t, ts, "POST", "/api/v2/player-groups", `{}`, nil)
+	if status != http.StatusBadRequest {
+		t.Errorf("status %d, want 400", status)
+	}
+}
+
+func TestPost_PlayerGroups_NoEligible_409(t *testing.T) {
+	_, _, ts := newTestServer(t)
+	body, _ := json.Marshal(map[string]any{
+		"member_player_ids": []string{uuid.New().String()},
+	})
+	status, _, _ := mustDo(t, ts, "POST", "/api/v2/player-groups", string(body), nil)
+	if status != http.StatusConflict {
+		t.Errorf("status %d, want 409", status)
+	}
+}
+
+func TestPost_PlayerGroups_Success_201(t *testing.T) {
+	a, _, ts := newTestServer(t)
+	pid := uuid.New().String()
+	a.addPlayer(pid, "rev1", nil)
+
+	body, _ := json.Marshal(map[string]any{
+		"member_player_ids": []string{pid},
+		"label":             "blast-test",
+	})
+	status, respBody, headers := mustDo(t, ts, "POST", "/api/v2/player-groups", string(body), nil)
+	if status != http.StatusCreated {
+		t.Fatalf("status %d body=%s", status, respBody)
+	}
+	if headers.Get("Location") == "" {
+		t.Errorf("Location header missing")
+	}
+	var rec map[string]any
+	json.Unmarshal(respBody, &rec)
+	if _, ok := rec["id"]; !ok {
+		t.Errorf("response missing id; body=%s", respBody)
+	}
+	members, _ := rec["member_player_ids"].([]any)
+	if len(members) != 1 {
+		t.Errorf("member_player_ids = %v", members)
+	}
+}
+
+func TestDelete_PlayerGroup_Disband(t *testing.T) {
+	a, _, ts := newTestServer(t)
+	pid := uuid.New().String()
+	a.addPlayer(pid, "rev1", nil)
+
+	body, _ := json.Marshal(map[string]any{"member_player_ids": []string{pid}})
+	_, postBody, _ := mustDo(t, ts, "POST", "/api/v2/player-groups", string(body), nil)
+	var posted map[string]any
+	json.Unmarshal(postBody, &posted)
+	gid := posted["id"].(string)
+
+	status, _, _ := mustDo(t, ts, "DELETE", "/api/v2/player-groups/"+gid, "", nil)
+	if status != http.StatusNoContent {
+		t.Errorf("status %d, want 204", status)
+	}
+	// Player's group_id should now be "".
+	stored, _ := a.SessionByPlayerID(pid)
+	if g := asString(stored["group_id"]); g != "" {
+		t.Errorf("group_id after disband = %q, want empty", g)
+	}
+}
+
+func TestPatch_GroupedMember_Broadcasts(t *testing.T) {
+	a, _, ts := newTestServer(t)
+	p1, p2 := uuid.New().String(), uuid.New().String()
+	a.addPlayer(p1, "rev1", nil)
+	a.addPlayer(p2, "rev2", nil)
+
+	// Group p1 + p2 together.
+	body, _ := json.Marshal(map[string]any{"member_player_ids": []string{p1, p2}})
+	mustDo(t, ts, "POST", "/api/v2/player-groups", string(body), nil)
+
+	// Read the (now-grouped) p1's revision so we PATCH with a fresh
+	// If-Match.
+	stored1, _ := a.SessionByPlayerID(p1)
+	rev1 := asString(stored1["control_revision"])
+
+	// PATCH p1's labels — should fan out to p2.
+	status, respBody, _ := mustDo(t, ts, "PATCH", "/api/v2/players/"+p1,
+		`{"labels":{"broadcast":"1"}}`,
+		map[string]string{"If-Match": `"` + rev1 + `"`})
+	if status != http.StatusOK {
+		t.Fatalf("PATCH p1 %d body=%s", status, respBody)
+	}
+	stored1, _ = a.SessionByPlayerID(p1)
+	stored2, _ := a.SessionByPlayerID(p2)
+	l1, _ := stored1["_v2_labels"].(map[string]any)
+	l2, _ := stored2["_v2_labels"].(map[string]any)
+	if l1["broadcast"] != "1" {
+		t.Errorf("p1 labels = %v, want broadcast=1", l1)
+	}
+	if l2["broadcast"] != "1" {
+		t.Errorf("p2 labels = %v, want broadcast=1 (broadcast failed)", l2)
+	}
+	// Both members should share the same control_revision after the
+	// fan-out.
+	r1 := asString(stored1["control_revision"])
+	r2 := asString(stored2["control_revision"])
+	if r1 != r2 {
+		t.Errorf("control_revision mismatch after broadcast: p1=%q p2=%q", r1, r2)
+	}
+}
+
+// ----- Plays --------------------------------------------------------------
+
+func TestGet_PlaysPlayId_404_Unknown(t *testing.T) {
+	_, _, ts := newTestServer(t)
+	playID := uuid.New().String()
+	status, _, _ := mustGet(t, ts, "/api/v2/plays/"+playID)
+	if status != http.StatusNotFound {
+		t.Errorf("status %d, want 404", status)
+	}
+}
+
+// seedActivePlay registers a player and drives a network row so the
+// EventSource records the player's currentPlay[playID]. Returns the
+// player_id so callers can assert against the session map.
+func seedActivePlay(t *testing.T, a *fakeAdapter, srv *Server, playID string) string {
+	t.Helper()
+	pid := uuid.New().String()
+	initialRev := "2020-01-01T00:00:00.000000000Z"
+	sessID := "sess-" + pid[:8]
+	a.addSession(map[string]any{
+		"player_id":        pid,
+		"session_id":       sessID,
+		"control_revision": initialRev,
+		"x_forwarded_port": "30181",
+	})
+	// Wait for the EventSource to ingest the snapshot so
+	// SubscribeSessions populates sessionToPlayr.
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if got := srv.events.lookupPlayerID(sessID); got == pid {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	a.pushNetworkRow(NetworkLogRow{SessionID: sessID, Entry: map[string]any{"play_id": playID, "url": "/seg1"}})
+	// Wait for currentPlay to populate.
+	deadline = time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if p, ok := srv.events.PlayerForPlay(playID); ok && p == pid {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return pid
+}
+
+func TestPatch_PlayId_LabelsRoundTrip_AndRestoreOnRotate(t *testing.T) {
+	a, srv, ts := newTestServer(t)
+	playID := uuid.New().String()
+	pid := seedActivePlay(t, a, srv, playID)
+	if got, _ := srv.events.PlayerForPlay(playID); got != pid {
+		t.Fatalf("PlayerForPlay %q = %q, want %q", playID, got, pid)
+	}
+	stored, _ := a.SessionByPlayerID(pid)
+	rev := asString(stored["control_revision"])
+
+	// PATCH the play with labels.
+	body := `{"labels":{"per-play":"yes"}}`
+	status, respBody, _ := mustDo(t, ts, "PATCH", "/api/v2/plays/"+playID, body,
+		map[string]string{"If-Match": `"` + rev + `"`})
+	if status != http.StatusOK {
+		t.Fatalf("PATCH status %d body=%s", status, respBody)
+	}
+	stored, _ = a.SessionByPlayerID(pid)
+	labels, _ := stored["_v2_labels"].(map[string]any)
+	if labels["per-play"] != "yes" {
+		t.Errorf("labels = %v, want per-play=yes", labels)
+	}
+	overrides, _ := stored["_v2_play_overrides"].(map[string]any)
+	if overrides == nil || overrides[playID] == nil {
+		t.Fatalf("expected play override snapshot, got %v", stored["_v2_play_overrides"])
+	}
+
+	// Rotate to a new play_id by pushing another network row.
+	sessID := asString(stored["session_id"])
+	newPlayID := uuid.New().String()
+	a.pushNetworkRow(NetworkLogRow{SessionID: sessID, Entry: map[string]any{"play_id": newPlayID, "url": "/seg2"}})
+
+	// Wait for the rotation to land + restore to fire.
+	deadline := time.Now().Add(1 * time.Second)
+	for time.Now().Before(deadline) {
+		stored, _ = a.SessionByPlayerID(pid)
+		if _, hasOverrides := stored["_v2_play_overrides"].(map[string]any); !hasOverrides {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	stored, _ = a.SessionByPlayerID(pid)
+	if _, has := stored["_v2_play_overrides"].(map[string]any); has {
+		t.Errorf("play overrides should be cleared after rotation, still: %v", stored["_v2_play_overrides"])
+	}
+	if labels, _ := stored["_v2_labels"].(map[string]any); labels["per-play"] == "yes" {
+		t.Errorf("play-scope labels should be cleared after rotation, still: %v", labels)
+	}
+}
+
+func TestPatch_PlayId_NoIfMatch_400(t *testing.T) {
+	a, srv, ts := newTestServer(t)
+	playID := uuid.New().String()
+	seedActivePlay(t, a, srv, playID)
+	status, _, _ := mustDo(t, ts, "PATCH", "/api/v2/plays/"+playID, `{"labels":{"x":"y"}}`, nil)
+	if status != http.StatusBadRequest { // oapigen wrapper rejects missing If-Match
+		t.Errorf("status %d, want 400", status)
+	}
+}
+
+func TestPost_PlayFaultRule_Append(t *testing.T) {
+	a, srv, ts := newTestServer(t)
+	playID := uuid.New().String()
+	pid := seedActivePlay(t, a, srv, playID)
+	stored, _ := a.SessionByPlayerID(pid)
+	rev := asString(stored["control_revision"])
+
+	body := `{"id":"r1","type":"500","frequency":3,"filter":{"request_kind":["segment"]}}`
+	status, respBody, _ := mustDo(t, ts, "POST", "/api/v2/plays/"+playID+"/fault_rules", body,
+		map[string]string{"If-Match": `"` + rev + `"`})
+	if status != http.StatusCreated {
+		t.Fatalf("status %d body=%s", status, respBody)
+	}
+	stored, _ = a.SessionByPlayerID(pid)
+	if stored["segment_failure_type"] != "500" {
+		t.Errorf("segment_failure_type = %v, want 500", stored["segment_failure_type"])
+	}
+}
+
+// ----- SSE /events ---------------------------------------------------------
+
+func TestSSE_FirstConnect_GetsHeartbeat(t *testing.T) {
+	t.Skip("heartbeat fires every 15s; too slow for normal CI. Run -short=false to enable.")
+}
+
+// readSSEPrefix opens an SSE GET, reads up to maxBytes from the
+// stream within timeout, and returns whatever arrived. The caller
+// gets the open `*http.Response` back too — close it to release the
+// handler. Uses a context-cancel-on-deadline pattern instead of body
+// SetReadDeadline (the http.Response.Body returned by stdlib doesn't
+// expose SetReadDeadline through its sealed wrapper type).
+func readSSEPrefix(t *testing.T, ts *httptest.Server, lastEventID string, maxBytes int, timeout time.Duration) string {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	req, _ := http.NewRequestWithContext(ctx, "GET", ts.URL+"/api/v2/events", nil)
+	if lastEventID != "" {
+		req.Header.Set("Last-Event-ID", lastEventID)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("SSE GET: %v", err)
+	}
+	defer resp.Body.Close()
+	buf := make([]byte, maxBytes)
+	got := []byte{}
+	for len(got) < maxBytes {
+		n, err := resp.Body.Read(buf)
+		if n > 0 {
+			got = append(got, buf[:n]...)
+		}
+		if err != nil {
+			break
+		}
+		// Stop once we've seen at least one full frame (terminated
+		// by `\n\n`).
+		if strings.Contains(string(got), "\n\n") {
+			break
+		}
+	}
+	return string(got)
+}
+
+func TestSSE_LastEventID_Replays(t *testing.T) {
+	_, srv, ts := newTestServer(t)
+
+	// Inject some frames into the ring directly to avoid waiting for
+	// heartbeats.
+	srv.events.ring.Publish("test.first", []byte(`{"type":"test.first","data":{}}`))
+	srv.events.ring.Publish("test.second", []byte(`{"type":"test.second","data":{}}`))
+
+	got := readSSEPrefix(t, ts, "1", 1024, 2*time.Second)
+	if !strings.Contains(got, "test.second") {
+		t.Errorf("expected 'test.second' in replay, got: %q", got)
+	}
+	if strings.Contains(got, "test.first") {
+		t.Errorf("frame id=1 (test.first) should not be replayed, got: %q", got)
+	}
+}
+
+func TestSSE_PlayStartedAndEnded(t *testing.T) {
+	a, srv, _ := newTestServer(t)
+	pid := uuid.New().String()
+	a.addPlayer(pid, "rev1", map[string]any{"session_id": "sess-A"})
+
+	// Wait briefly for the EventSource to receive the initial session
+	// snapshot from addSession's notifySessions goroutine. Without
+	// this, the subsequent network rows would arrive before the
+	// session_id → player_id map populates and lookupPlayerID
+	// returns "".
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if got := srv.events.lookupPlayerID("sess-A"); got == pid {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// Push two network rows with different play_ids — should yield
+	// play.started(playA), then (on rotation) play.ended(playA) +
+	// play.started(playB).
+	a.pushNetworkRow(NetworkLogRow{SessionID: "sess-A", Entry: map[string]any{"play_id": "playA", "url": "/seg1"}})
+	a.pushNetworkRow(NetworkLogRow{SessionID: "sess-A", Entry: map[string]any{"play_id": "playB", "url": "/seg2"}})
+
+	// Spin briefly until both events land in the ring (best-effort —
+	// the EventSource processes them on its goroutine).
+	deadline = time.Now().Add(1 * time.Second)
+	for time.Now().Before(deadline) {
+		srv.events.ring.mu.RLock()
+		n := len(srv.events.ring.frames)
+		srv.events.ring.mu.RUnlock()
+		if n >= 4 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// Inspect the ring for the expected event types in order.
+	srv.events.ring.mu.RLock()
+	got := make([]string, 0, len(srv.events.ring.frames))
+	for _, f := range srv.events.ring.frames {
+		got = append(got, f.Type)
+	}
+	srv.events.ring.mu.RUnlock()
+
+	// Find the index of the first play.started.
+	startIdx := -1
+	for i, t := range got {
+		if t == "play.started" {
+			startIdx = i
+			break
+		}
+	}
+	if startIdx < 0 {
+		t.Fatalf("play.started missing; ring=%v", got)
+	}
+	// After the first play.started we should see play.ended then
+	// play.started again (potentially interleaved with
+	// play.network.entry frames).
+	rest := got[startIdx+1:]
+	sawEnded := false
+	sawSecondStarted := false
+	for _, t := range rest {
+		if t == "play.ended" {
+			sawEnded = true
+		}
+		if sawEnded && t == "play.started" {
+			sawSecondStarted = true
+			break
+		}
+	}
+	if !sawEnded {
+		t.Errorf("expected play.ended after rotation; ring=%v", got)
+	}
+	if !sawSecondStarted {
+		t.Errorf("expected second play.started after play.ended; ring=%v", got)
+	}
+}
+
+func TestSSE_Gap_Synth(t *testing.T) {
+	_, srv, ts := newTestServer(t)
+
+	// Replace with a tiny ring so we can force a gap. The original
+	// EventRing was already created with default bounds; swapping it
+	// in-place is safe before any client connects.
+	srv.events.ring = NewEventRing(2, time.Hour)
+	srv.events.ring.Publish("a", []byte(`{}`)) // id=1
+	srv.events.ring.Publish("b", []byte(`{}`)) // id=2
+	srv.events.ring.Publish("c", []byte(`{}`)) // id=3 (evicts id=1)
+	srv.events.ring.Publish("d", []byte(`{}`)) // id=4 (evicts id=2)
+
+	got := readSSEPrefix(t, ts, "1", 1024, 2*time.Second)
+	if !strings.Contains(got, "replay.gap") {
+		t.Errorf("expected replay.gap synthetic frame, got: %q", got)
+	}
+	if !strings.Contains(got, "missed_from") {
+		t.Errorf("expected missed_from in gap body, got: %q", got)
+	}
+}

@@ -257,7 +257,9 @@ final class PlaybackDiagnostics: ObservableObject {
         return dBytes * 8.0 / activeTime
     }
 
-    /// Call before replacing the player item to preserve cumulative stats across restarts.
+    /// Call before replacing the player item to preserve cumulative
+    /// stats across restarts. Used by `retry()` and auto-recovery —
+    /// same play, recovery attempt, counters keep climbing.
     func snapshotForRestart() {
         // Accumulate variant dwell times
         for (label, seconds) in variantDwellSeconds {
@@ -266,6 +268,21 @@ final class PlaybackDiagnostics: ObservableObject {
         // Accumulate frame counters
         priorDroppedVideoFrames = droppedVideoFrames ?? 0
         priorEstimatedDisplayedFrames = estimatedDisplayedFrames ?? 0
+    }
+
+    /// Reset EVERYTHING — including the "prior" accumulators that
+    /// `reset()` deliberately preserves. Used by `reload()`: the user
+    /// pressed Reload to start fresh on the current content, so the
+    /// dashboard's per-play counters (dropped frames, displayed
+    /// frames, variant dwell) should restart from zero alongside
+    /// the new play_id.
+    func resetForFreshPlay() {
+        reset()
+        priorDroppedVideoFrames = 0
+        priorEstimatedDisplayedFrames = 0
+        priorVariantDwellSeconds.removeAll()
+        variantDwellSeconds.removeAll()
+        lastVariantDwellTotal = 0
     }
 
     func reset() {

@@ -984,7 +984,7 @@
         function openTestingWindow(url) {
             const playerId = createPlayerId();
             const testingUrl = buildTestingUrl(url, playerId);
-            const pageUrl = `/dashboard/testing-session.html?player_id=${encodeURIComponent(playerId)}&url=${encodeURIComponent(testingUrl)}`;
+            const pageUrl = `/dashboard/v3/testing-session.html?player_id=${encodeURIComponent(playerId)}&url=${encodeURIComponent(testingUrl)}`;
             const popup = window.open(pageUrl, '_blank');
             if (!popup) {
                 alert('Popup blocked. Allow popups for this site.');

@@ -1,4 +1,17 @@
 
+# Vue 3 dashboard build stage. Outputs /out/v3 with the static bundle
+# that gets copied into the final image's /content/dashboard/v3/.
+# Cached by docker if package.json + lock haven't changed.
+FROM node:20-alpine AS dashboard-v3-builder
+WORKDIR /build
+COPY content/dashboard-v3/package.json content/dashboard-v3/package-lock.json* ./
+RUN npm install --no-audit --no-fund
+COPY api/openapi/v2 /build/api/openapi/v2
+COPY content/dashboard-v3 ./
+ENV VITE_BUILD_OUTDIR=/out/v3 \
+    OPENAPI_PATH=/build/api/openapi/v2/proxy.yaml
+RUN npm run gen-types && npm run build
+
 FROM golang:1.26-alpine AS go-builder
 RUN apk add git
 WORKDIR /build
@@ -91,6 +104,9 @@ COPY content/*.css /content/
 COPY content/*.html /content/
 COPY content/shared/ /content/shared/
 COPY content/dashboard/ /content/dashboard/
+# Vue 3 dashboard bundle (Stage 0+). Static files served by nginx via
+# the existing /dashboard/ alias.
+COPY --from=dashboard-v3-builder /out/v3 /content/dashboard/v3
 COPY content/testing/ /content/testing/
 
 ENTRYPOINT ["/sbin/launch.sh"]

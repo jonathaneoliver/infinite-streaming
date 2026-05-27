@@ -27,7 +27,9 @@ import (
 type netRow struct {
 	Ts                   string  `json:"ts"`
 	SessionID            string  `json:"session_id"`
+	PlayerID             string  `json:"player_id"`
 	PlayID               string  `json:"play_id"`
+	RestartID            string  `json:"restart_id"`
 	Method               string  `json:"method"`
 	URL                  string  `json:"url"`
 	UpstreamURL          string  `json:"upstream_url"`
@@ -70,6 +72,7 @@ type netEntry struct {
 	BytesOut             int64         `json:"bytes_out"`
 	ContentType          string        `json:"content_type"`
 	PlayID               string        `json:"play_id"`
+	RestartID            string        `json:"restart_id"`
 	RequestHeaders       []nameValue   `json:"request_headers"`
 	ResponseHeaders      []nameValue   `json:"response_headers"`
 	QueryString          []nameValue   `json:"query_string"`
@@ -91,6 +94,51 @@ type netEntry struct {
 type nameValue struct {
 	Name  string `json:"name"`
 	Value string `json:"value"`
+}
+
+// sessionToPlayerID is the in-memory map populated from each session
+// snapshot the forwarder ingests (handlePayload). The network row
+// writer reads from it at insert time so every HAR row carries the
+// canonical v2 player_id alongside the legacy session_id. Concurrent-
+// safe via RWMutex; the snapshot stream and the network stream run
+// in separate goroutines.
+var sessionToPlayerID = newSessionPlayerMap()
+
+type sessionPlayerMap struct {
+	mu sync.RWMutex
+	m  map[string]string
+}
+
+func newSessionPlayerMap() *sessionPlayerMap {
+	return &sessionPlayerMap{m: make(map[string]string)}
+}
+
+func (s *sessionPlayerMap) set(sessionID, playerID string) {
+	if sessionID == "" || playerID == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.m[sessionID] = playerID
+}
+
+func (s *sessionPlayerMap) lookup(sessionID string) string {
+	if sessionID == "" {
+		return ""
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.m[sessionID]
+}
+
+func (s *sessionPlayerMap) prune(active map[string]struct{}) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for k := range s.m {
+		if _, ok := active[k]; !ok {
+			delete(s.m, k)
+		}
+	}
 }
 
 // netSeen tracks fingerprints already inserted, per session. Bounded
@@ -186,7 +234,7 @@ func jsonOrEmpty(v interface{}) string {
 	return string(b)
 }
 
-func entryToRow(sessionID string, e *netEntry) netRow {
+func entryToRow(sessionID, playerID string, e *netEntry) netRow {
 	faulted := uint8(0)
 	if e.Faulted {
 		faulted = 1
@@ -194,7 +242,9 @@ func entryToRow(sessionID string, e *netEntry) netRow {
 	return netRow{
 		Ts:                   e.Timestamp.UTC().Format("2006-01-02 15:04:05.000"),
 		SessionID:            sessionID,
+		PlayerID:             playerID,
 		PlayID:               e.PlayID,
+		RestartID:            e.RestartID,
 		Method:               e.Method,
 		URL:                  e.URL,
 		UpstreamURL:          e.UpstreamURL,
@@ -289,7 +339,7 @@ func streamNetworkSSE(ctx context.Context, cfg config, seen *netSeen, out chan<-
 			continue
 		}
 		select {
-		case out <- entryToRow(ev.SessionID, &ev.Entry):
+		case out <- entryToRow(ev.SessionID, sessionToPlayerID.lookup(ev.SessionID), &ev.Entry):
 		case <-ctx.Done():
 			return ctx.Err()
 		}
@@ -378,18 +428,24 @@ func parseSSEData(frame []byte) []byte {
 	return nil
 }
 
-func batchInsertNet(ctx context.Context, cfg config, in <-chan netRow) {
+func batchInsertNet(ctx context.Context, cfg config, ring *Ring, in <-chan netRow) {
 	buf := make([]netRow, 0, cfg.flushBatch)
+	entries := make([]*ringEntry, 0, cfg.flushBatch)
 	tick := time.NewTicker(cfg.flushEvery)
 	defer tick.Stop()
 	flush := func() {
 		if len(buf) == 0 {
 			return
 		}
+		ring.MarkInserting(entries)
 		if err := insertNet(ctx, cfg, buf); err != nil {
 			log.Printf("net insert failed (%d rows dropped): %v", len(buf), err)
+			ring.RevertInserting(entries)
+		} else {
+			ring.MarkConfirmed(entries)
 		}
 		buf = buf[:0]
+		entries = entries[:0]
 	}
 	for {
 		select {
@@ -401,7 +457,14 @@ func batchInsertNet(ctx context.Context, cfg config, in <-chan netRow) {
 				flush()
 				return
 			}
-			buf = append(buf, r)
+			rowCopy := r
+			fp := fmt.Sprintf("%d", rowCopy.EntryFingerprint)
+			e := ring.Add(
+				ringKey{PlayerID: rowCopy.PlayerID},
+				kindNetwork, nowMs(), fp, rowCopy.PlayID, &rowCopy,
+			)
+			buf = append(buf, rowCopy)
+			entries = append(entries, e)
 			if len(buf) >= cfg.flushBatch {
 				flush()
 			}

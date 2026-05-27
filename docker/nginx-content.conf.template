@@ -45,8 +45,17 @@ upstream go_proxy {
 # Normal server
 server {
 
-    listen ${INFINITE_STREAM_LISTEN_PORT} default_server;
-    listen [::]:${INFINITE_STREAM_LISTEN_PORT} default_server;
+    # TLS + HTTP/2 for browsers (external traffic). Browsers refuse
+    # cleartext h2 so the port must be HTTPS for multiplexing to
+    # apply — eliminates Chrome's 6-per-origin HTTP/1.1 cap so SSE
+    # streams + REST polls share one TCP connection per tab.
+    listen ${INFINITE_STREAM_LISTEN_PORT} ssl http2 default_server;
+    listen [::]:${INFINITE_STREAM_LISTEN_PORT} ssl http2 default_server;
+    # Cleartext loopback listener for in-container internal calls
+    # (go-proxy → nginx → go-live). go-proxy's UPSTREAM_PORT env
+    # points here so it can speak plain HTTP without negotiating
+    # TLS against the same nginx instance.
+    listen 127.0.0.1:30005;
 
     ssl_certificate /etc/nginx/certs/localhost.pem;
     ssl_certificate_key /etc/nginx/certs/localhost-key.pem;
@@ -138,10 +147,15 @@ server {
         add_header Expires "0" always;
     }
 
+    # Legacy /dashboard/*.html pages (testing, testing-session,
+    # session-viewer, sessions, grid, dashboard) have been removed —
+    # their Vue 3 replacements live under /dashboard/v3/. Unmatched
+    # /dashboard/* requests fall back to the v3 landing.
+
     location /dashboard/ {
         ${INFINITE_STREAM_AUTH_DIRECTIVES}
         alias /content/dashboard/;
-        try_files $uri $uri/ /dashboard/dashboard.html;
+        try_files $uri $uri/ /dashboard/v3/dashboard.html;
     }
 
     location /testing/ {
@@ -150,7 +164,7 @@ server {
     }
 
     location = /dashboard.html {
-        return 302 /dashboard/dashboard.html;
+        return 302 /dashboard/v3/dashboard.html;
     }
 
     location / {
@@ -192,7 +206,8 @@ server {
     include /etc/nginx/snippets/analytics-*.conf;
 
     location = /api/sessions {
-        proxy_pass http://go_proxy;
+        proxy_pass https://go_proxy;
+            proxy_ssl_verify off;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
@@ -204,7 +219,8 @@ server {
     }
 
     location = /api/version {
-        proxy_pass http://go_proxy;
+        proxy_pass https://go_proxy;
+            proxy_ssl_verify off;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
@@ -216,7 +232,8 @@ server {
     }
 
     location = /api/sessions/stream {
-        proxy_pass http://go_proxy;
+        proxy_pass https://go_proxy;
+            proxy_ssl_verify off;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
@@ -232,7 +249,8 @@ server {
     }
 
     location = /api/clear-sessions {
-        proxy_pass http://go_proxy;
+        proxy_pass https://go_proxy;
+            proxy_ssl_verify off;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
@@ -244,7 +262,8 @@ server {
     }
 
     location = /api/external-ips {
-        proxy_pass http://go_proxy;
+        proxy_pass https://go_proxy;
+            proxy_ssl_verify off;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
@@ -256,7 +275,8 @@ server {
     }
 
     location ~ ^/api/session/ {
-        proxy_pass http://go_proxy;
+        proxy_pass https://go_proxy;
+            proxy_ssl_verify off;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
@@ -268,7 +288,8 @@ server {
     }
 
     location ~ ^/api/failure-settings/ {
-        proxy_pass http://go_proxy;
+        proxy_pass https://go_proxy;
+            proxy_ssl_verify off;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
@@ -280,7 +301,8 @@ server {
     }
 
     location ~ ^/api/session-group/ {
-        proxy_pass http://go_proxy;
+        proxy_pass https://go_proxy;
+            proxy_ssl_verify off;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
@@ -292,7 +314,39 @@ server {
     }
 
     location ~ ^/api/nftables/ {
-        proxy_pass http://go_proxy;
+        proxy_pass https://go_proxy;
+            proxy_ssl_verify off;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Port $server_port;
+        add_header Access-Control-Allow-Origin * always;
+        add_header Cache-Control "no-cache, no-store, must-revalidate" always;
+        add_header Pragma "no-cache" always;
+        add_header Expires "0" always;
+    }
+
+    # v2 harness API. Mounts every /api/v2/* path to go-proxy. /api/v2/events
+    # is SSE — needs the same buffering/timeout overrides as /api/sessions/stream
+    # but the location regex below covers the non-stream paths first.
+    location = /api/v2/events {
+        proxy_pass https://go_proxy;
+            proxy_ssl_verify off;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Port $server_port;
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_read_timeout 24h;
+        chunked_transfer_encoding on;
+        add_header Cache-Control "no-cache, no-store, must-revalidate" always;
+        add_header X-Accel-Buffering "no" always;
+    }
+
+    location ~ ^/api/v2/ {
+        proxy_pass https://go_proxy;
+            proxy_ssl_verify off;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;

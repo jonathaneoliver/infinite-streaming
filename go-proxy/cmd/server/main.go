@@ -34,6 +34,7 @@ import (
 	"github.com/vishvananda/netlink"
 	_ "modernc.org/sqlite"
 
+	v2server "github.com/jonathaneoliver/infinite-streaming/go-proxy/internal/v2/server"
 )
 
 //go:embed templates/index.html
@@ -125,12 +126,20 @@ type NetworkLogEntry struct {
 	ContentType string    `json:"content_type"`
 
 	// PlayID identifies the playback episode this request belongs to.
-	// The player generates a fresh UUID at every loadStream / reload
-	// and passes it as `?play_id=...` on every URL. HAR snapshots
-	// filter by the current play_id by default, so a freeze 8 minutes
-	// into a session shows just that play's network log instead of
-	// the whole ring buffer. Issue #280.
+	// The player generates a fresh UUID at every content-selection
+	// boundary (new video / fresh page-load / app launch) and passes
+	// it as `?play_id=...` on every URL. Stable across in-app restart
+	// events (user-reload, auto-recovery). Issue #280.
 	PlayID string `json:"play_id,omitempty"`
+
+	// RestartID identifies the recovery attempt within a playback
+	// episode. The player generates a fresh UUID at every `restart`
+	// event (user-reload OR auto-recovery) and passes it as
+	// `?restart_id=...` on every URL. PlayID stays the same across
+	// such restarts; RestartID rotates. Lets analytics ask both
+	// "how did this play perform" (group by play_id) and "how many
+	// recovery attempts within the play" (count distinct restart_id).
+	RestartID string `json:"restart_id,omitempty"`
 
 	// HTTP-level metadata captured per-request. Sensitive headers
 	// (Cookie / Authorization / Set-Cookie) are filtered before they
@@ -1696,15 +1705,28 @@ func main() {
 	router.HandleFunc("/terminate-worker", app.handleTerminateWorker).Methods(http.MethodGet)
 	router.HandleFunc("/force-close", app.handleForceClose).Methods(http.MethodGet)
 
+	// v2 harness API. Mounts every /api/v2/* route. v1 paths above stay
+	// unchanged. Phase B: read-only handlers backed by the v1 adapter;
+	// mutation/SSE endpoints still 501.
+	v2server.Mount(router, v2server.New(NewV2Adapter(app)))
+
 	router.PathPrefix("/").HandlerFunc(app.handleProxy)
 
 	ports := []int{30081, 30181, 30281, 30381, 30481, 30581, 30681, 30781, 30881}
 
+	// TLS + HTTP/2 on every listener so the dashboard (served HTTPS
+	// by nginx at port 21000/30000) can embed HLS playback URLs
+	// pointing here without browsers blocking mixed content. Cert
+	// is the same self-signed pair launch.sh writes for nginx; we
+	// reuse it so there's exactly one identity to trust per dev
+	// machine. h2 turns on automatically once TLS is in play.
+	const tlsCertFile = "/etc/nginx/certs/localhost.pem"
+	const tlsKeyFile = "/etc/nginx/certs/localhost-key.pem"
 	errorCh := make(chan error, len(ports))
 	for _, port := range ports {
 		addr := fmt.Sprintf(":%d", port)
 		go func(bind string) {
-			log.Printf("go-proxy listening on %s", bind)
+			log.Printf("go-proxy listening on %s (TLS)", bind)
 			srv := &http.Server{
 				Addr:    bind,
 				Handler: router,
@@ -1714,7 +1736,7 @@ func main() {
 				// read. Issue #401.
 				ConnContext: withTCPConnContext,
 			}
-			errorCh <- srv.ListenAndServe()
+			errorCh <- srv.ListenAndServeTLS(tlsCertFile, tlsKeyFile)
 		}(addr)
 	}
 
@@ -1980,6 +2002,17 @@ func (a *App) handlePostSessionMetrics(w http.ResponseWriter, r *http.Request) {
 	// ground-truth live offset that's independent of the client's clock:
 	//   trueOffsetMs = server_received_at_ms - playhead_wallclock_ms
 	metricsOnly["server_received_at_ms"] = time.Now().UnixMilli()
+	// Propagate play_id + restart_id from the URL query (issue #280).
+	// The metrics POST is the only signal we receive between manifest
+	// requests on long-running iOS sessions; without picking up the
+	// player's current ids here, restart_id rotations would lag until
+	// the next manifest fetch.
+	if v := strings.TrimSpace(r.URL.Query().Get("play_id")); v != "" {
+		metricsOnly["play_id"] = v
+	}
+	if v := strings.TrimSpace(r.URL.Query().Get("restart_id")); v != "" {
+		metricsOnly["restart_id"] = v
+	}
 	a.saveSessionByID(id, metricsOnly)
 	lastEvent := strings.ToLower(strings.TrimSpace(getString(metricsOnly, "player_metrics_last_event")))
 	if isSignificantPlayerEvent(lastEvent) {
@@ -2947,6 +2980,24 @@ func (a *App) applyShapePattern(port int, steps []NftShapeStep, delayMs int, los
 			"nftables_pattern_enabled": false,
 			"nftables_pattern_steps":   []NftShapeStep{},
 		}, "")
+		// Disarming the pattern loop leaves the kernel at whatever
+		// rate the last pattern step applied. Reassert the session's
+		// static shape so the user-visible "Limit" matches reality —
+		// without this the proxy reports pattern_enabled=false +
+		// bandwidth=N but the kernel keeps shaping at the old pattern
+		// rate (issue: ramp-pattern → sliders=0 didn't tear down the
+		// shaper). Walks every session bound to this port so a port
+		// hosting a group still drops the rate cleanly. Runs after
+		// the session update above so applySessionShaping sees the
+		// freshly cleared pattern_enabled flag and doesn't no-op via
+		// its "pattern owns the rate" guard.
+		for _, sess := range a.getSessionList() {
+			if portStr := getString(sess, "x_forwarded_port"); portStr != "" {
+				if p, err := strconv.Atoi(portStr); err == nil && p == port {
+					a.applySessionShaping(sess, port)
+				}
+			}
+		}
 		return nil
 	}
 	if err := a.traffic.UpdateNetem(port, delayMs, loss); err != nil {
@@ -4194,14 +4245,19 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 	// order via capturedQueryString.
 	requestHeaders := capturedHeaders(r.Header)
 	queryString := capturedQueryString(r.URL)
-	// Extract the player's `play_id` query param (issue #280). Used to
-	// scope HAR snapshots to a single playback episode. Stamped onto
-	// every NetworkLogEntry created in this handler via the logEntry
-	// closure below.
+	// Extract the player's `play_id` + `restart_id` query params (issue
+	// #280). Used to scope HAR snapshots to a single playback episode
+	// and to track recovery attempts within it. Stamped onto every
+	// NetworkLogEntry created in this handler via the logEntry closure
+	// below.
 	playID := strings.TrimSpace(r.URL.Query().Get("play_id"))
+	restartID := strings.TrimSpace(r.URL.Query().Get("restart_id"))
 	logEntry := func(sessionID string, entry NetworkLogEntry) {
 		if entry.PlayID == "" {
 			entry.PlayID = playID
+		}
+		if entry.RestartID == "" {
+			entry.RestartID = restartID
 		}
 		a.addNetworkLogEntry(sessionID, entry)
 	}
@@ -4248,7 +4304,12 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 				assignedNum, _ := strconv.Atoi(assigned)
 				newPort := replaceThirdFromLastDigit(externalPort, assignedNum)
 				host := hostWithoutPort(r.Host)
-				newURL := fmt.Sprintf("http://%s:%s/%s", host, newPort, escapedPath)
+				// Preserve the request's scheme — go-proxy now serves
+				// TLS on every shaper port (issue TS11), so an HTTPS
+				// dashboard must redirect to https:// to avoid mixed
+				// content. Plain HTTP requests redirect to http://.
+				scheme := requestScheme(r)
+				newURL := fmt.Sprintf("%s://%s:%s/%s", scheme, host, newPort, escapedPath)
 				if r.URL.RawQuery != "" {
 					newURL = newURL + "?" + r.URL.RawQuery
 				}
@@ -4297,11 +4358,18 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 			log.Printf("PORT_MAP_DERIVE external=%s internal=%s allocated=%d", assignedExternalPort, assignedInternalPort, allocated)
 		}
 		groupID := extractGroupId(playerID)
+		// Optional play_id from the client. iOS/tvOS/Roku don't mint one
+		// (the v2 read path derives a stable fallback), but the v3 web
+		// player (VideoPlayerFrame) does — surfacing it here lets the
+		// forwarder archive each web play under its operator-known id
+		// instead of the server-side derivation.
+		playID := r.URL.Query().Get("play_id")
 		sessionData := SessionData{
 			"session_number":                           fmt.Sprintf("%d", allocated),
 			"sid":                                      fmt.Sprintf("%d", allocated),
 			"session_id":                               fmt.Sprintf("%d", allocated),
 			"player_id":                                playerID,
+			"play_id":                                  playID,
 			"group_id":                                 groupID,
 			"control_revision":                         newControlRevision(),
 			"headers_player_id":                        playerHeader,
@@ -4434,7 +4502,8 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 		}
 		a.recordSessionStart(sessionData, manifestURL)
 		host := hostWithoutPort(r.Host)
-		newURL := fmt.Sprintf("http://%s:%s/%s", host, assignedExternalPort, escapedPath)
+		scheme := requestScheme(r)
+		newURL := fmt.Sprintf("%s://%s:%s/%s", scheme, host, assignedExternalPort, escapedPath)
 		if r.URL.RawQuery != "" {
 			newURL = newURL + "?" + r.URL.RawQuery
 		}
@@ -4464,17 +4533,40 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 	sessionData["last_request"] = nowISO()
 	sessionData["last_request_url"] = filename
 	sessionData["user_agent"] = r.UserAgent()
-	// Stamp the player's current play_id on the session so the SSE stream
-	// (and downstream analytics) can partition by playback episode. The
-	// player regenerates play_id at every fresh loadStream boundary
-	// (issue #280); when this value differs from the prior snapshot,
-	// that's a "new playback started" signal in replay views.
+	// Stamp the player's current play_id + restart_id on the session
+	// so the SSE stream (and downstream analytics) can partition by
+	// playback episode (play_id) and recovery attempt (restart_id).
+	// Both are player-supplied; the proxy never synthesises them.
+	// When the player has not yet sent a value, the field stays empty
+	// on the session map — downstream tables get blank rather than
+	// the proxy guessing.
 	if playID != "" {
 		sessionData["play_id"] = playID
+	}
+	if restartID != "" {
+		sessionData["restart_id"] = restartID
 	}
 
 	// Extract client IP considering X-Forwarded-For
 	clientIP := extractClientIP(r.RemoteAddr, r.Header.Get("X-Forwarded-For"))
+	// Diagnostic: surface every overwrite where the new value looks
+	// like a Docker bridge / loopback / private IP that's replacing
+	// a previously-correct external value. The log gives us the URL,
+	// method, and raw headers that triggered the bad overwrite.
+	if prev := getString(sessionData, "player_ip"); prev != "" && prev != clientIP {
+		newIsExternal := isExternalIP(clientIP)
+		prevWasExternal := isExternalIP(prev)
+		if prevWasExternal && !newIsExternal {
+			log.Printf("[GO-PROXY][PLAYER-IP-OVERWRITE] %s %s session_id=%s prev=%s new=%s remote=%s xff=%q ua=%q",
+				r.Method, r.URL.RequestURI(),
+				sessionNumber,
+				prev, clientIP,
+				r.RemoteAddr,
+				r.Header.Get("X-Forwarded-For"),
+				r.Header.Get("User-Agent"),
+			)
+		}
+	}
 	sessionData["player_ip"] = clientIP
 	sessionData["x_forwarded_for"] = r.Header.Get("X-Forwarded-For")
 
@@ -5854,6 +5946,9 @@ func (a *App) addNetworkLogEntry(sessionID string, entry NetworkLogEntry) {
 	if entry.PlayID == "" {
 		entry.PlayID = a.sessionStickyPlayID(sessionID)
 	}
+	if entry.RestartID == "" {
+		entry.RestartID = a.sessionStickyRestartID(sessionID)
+	}
 	rb := a.getOrCreateNetworkLog(sessionID)
 	rb.Add(entry)
 	if a.networkHub != nil {
@@ -5865,6 +5960,18 @@ func (a *App) addNetworkLogEntry(sessionID string, entry NetworkLogEntry) {
 // atomic snapshot without cloning the whole list. Returns "" if the
 // session isn't tracked or has no play_id stamped yet.
 func (a *App) sessionStickyPlayID(sessionID string) string {
+	return a.sessionStickyField(sessionID, "play_id")
+}
+
+// sessionStickyRestartID is the restart_id counterpart of
+// sessionStickyPlayID. The player rotates restart_id on every restart
+// event (user-reload or auto-recovery); the proxy stores the latest
+// value and stamps it onto network log entries that don't carry one.
+func (a *App) sessionStickyRestartID(sessionID string) string {
+	return a.sessionStickyField(sessionID, "restart_id")
+}
+
+func (a *App) sessionStickyField(sessionID, field string) string {
 	snap := a.sessionsSnap.Load()
 	if snap == nil {
 		return ""
@@ -5874,8 +5981,8 @@ func (a *App) sessionStickyPlayID(sessionID string) string {
 		if id != sessionID {
 			continue
 		}
-		pid, _ := s["play_id"].(string)
-		return pid
+		v, _ := s[field].(string)
+		return v
 	}
 	return ""
 }
@@ -7536,6 +7643,23 @@ func countActiveSessionsForIP(sessions []SessionData, requesterIP string) int {
 		}
 	}
 	return count
+}
+
+// requestScheme returns "https" or "http" for the incoming request.
+// Used by redirect handlers so the per-session port URL in the
+// Location header matches the dashboard's origin and the browser
+// doesn't block the hop as mixed content. r.TLS is non-nil when the
+// request arrived over TLS directly; falling back to
+// X-Forwarded-Proto handles a future TLS-terminating reverse proxy
+// upstream of go-proxy.
+func requestScheme(r *http.Request) string {
+	if r.TLS != nil {
+		return "https"
+	}
+	if proto := r.Header.Get("X-Forwarded-Proto"); proto != "" {
+		return proto
+	}
+	return "http"
 }
 
 func hostWithoutPort(hostport string) string {
