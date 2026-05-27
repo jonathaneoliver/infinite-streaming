@@ -15,6 +15,13 @@ services:
       # in-container calls from go-proxy → nginx use the cleartext
       # loopback listener on 30005 (see nginx-content.conf.template).
       - INFINITE_STREAM_UPSTREAM_PORT=30005
+      # Baseline rate cap (#480) — new player sessions, plus any PATCH
+      # that requests rate_mbps=0 / null / cleared, resolve to this rate
+      # instead of unlimited. Models a realistic CDN baseline so the
+      # ABR-fidelity / observability / cross-day-comparability problems
+      # the issue describes don't recur. Prod-style deployments leave
+      # this unset (= 0 = unlimited) to preserve today's behaviour.
+      - INFINITE_STREAM_DEFAULT_RATE_MBPS=100
     ports:
       !override
       - "21000:30000"

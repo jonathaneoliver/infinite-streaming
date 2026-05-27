@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"log"
 	"net"
 	"sync"
@@ -26,10 +27,19 @@ type tcpInfoSnapshot struct {
 type tcpConnCtxKey struct{}
 
 // withTCPConnContext is the http.Server.ConnContext callback. Down-
-// casts c to *net.TCPConn (true for the stdlib HTTP listener) and
-// stamps it on the per-connection context so handleProxy can pull it
-// off later via tcpConnFromContext.
+// casts c to *net.TCPConn and stamps it on the per-connection context
+// so handleProxy can pull it off later via tcpConnFromContext.
+//
+// Listeners run under ListenAndServeTLS (main.go), so the conn handed
+// in here is *tls.Conn — unwrap it via NetConn() first to reach the
+// underlying *net.TCPConn the TCP_INFO sampler needs. Without this
+// unwrap the downcast silently fails and client_rtt_* is never
+// stamped on the session (regression dating to the TLS-on-go-proxy
+// flip in dcb42c1 / #441).
 func withTCPConnContext(ctx context.Context, c net.Conn) context.Context {
+	if tlsConn, ok := c.(*tls.Conn); ok {
+		c = tlsConn.NetConn()
+	}
 	if tc, ok := c.(*net.TCPConn); ok {
 		return context.WithValue(ctx, tcpConnCtxKey{}, tc)
 	}

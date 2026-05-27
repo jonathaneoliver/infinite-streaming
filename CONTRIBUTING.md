@@ -66,36 +66,12 @@ See [`docs/CLOUD_ENCODING.md`](docs/CLOUD_ENCODING.md) for offloading encodes to
 
 ## Testing
 
-Integration tests live in [`tests/integration/`](tests/integration/) and require a running server.
+All tests are Go-based and require a running server.
 
-```bash
-cd tests/integration
-pip install -r requirements.txt
+- **Server-behavior contracts** — [`tests/server_behavior/`](tests/server_behavior/) covers rate / delay / loss / fault / pattern / scope / socket / transport / transfer / content / limit. Run with `go test ./tests/server_behavior -run TestRateSweep -timeout 10m` (or any `TestServer*` / `TestTransportFaults`). Catalogue + calibration baselines in [`.claude/standards/server-behavior.md`](.claude/standards/server-behavior.md).
+- **Player ABR characterization** — [`tests/characterization/`](tests/characterization/) (issue #482) drives 5 platforms (iPhone / iPad / Apple TV / Android TV / Web). See that directory's README for the launch-mode picker (manual / cli / appium) and the full mode list.
 
-# fastest: smoke only
-pytest -m smoke
-
-# all markers
-pytest
-
-# by category
-pytest -m http
-pytest -m "not slow"
-pytest -k test_name
-```
-
-Key markers: `smoke`, `http`, `segment`, `manifest`, `transport`, `abrchar`.
-
-Default target is `$K3S_HOST:30000/30081`. Override with `--host`, `--api-port`, `--hls-port`, or `--api-base`.
-
-Player characterization (ABR ramp sweeps):
-
-```bash
-pytest test_player_characterization_pytest.py -m abrchar -v \
-  --host localhost --scheme http --api-port 30000 --hls-port 30081
-```
-
-See [`tests/integration/README.md`](tests/integration/README.md) and [`tests/integration/PLAYER_CHARACTERIZATION_PYTEST.md`](tests/integration/PLAYER_CHARACTERIZATION_PYTEST.md) for the full guide.
+Default server target is the test-dev deploy at `https://$TEST_HOST:21000`. Override via env vars (`THROUGHPUT_HOST`, `THROUGHPUT_API_PORT`) for server-behavior tests, or harness CLI flags for characterization.
 
 ## Code style
 

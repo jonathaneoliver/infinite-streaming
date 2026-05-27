@@ -78,6 +78,12 @@ const series: SeriesSpec[] = [
     //   4. Otherwise → 0 (no shaping configured; still draw the line
     //      so the operator can see "no ceiling enforced" rather than a
     //      missing series)
+    //
+    // NB: this series reflects OPERATOR OVERRIDE only — when the slider
+    // is at 0 ("no override") the line drops to 0 because there is no
+    // operator-imposed limit. The deployment baseline is plotted by
+    // the separate "Effective Limit" series (hidden by default; toggle
+    // via legend). Issue #480.
     accessor: (p: PlayerRecord) => {
       const sh = p.shape;
       if (!sh) return 0;
@@ -93,6 +99,29 @@ const series: SeriesSpec[] = [
       }
       if (Number.isFinite(sh.rate_mbps as number)) return sh.rate_mbps as number;
       return 0;
+    },
+    stepped: true,
+  },
+  {
+    // Effective Limit — kernel-enforced cap at this instant: max of
+    // operator override and deployment baseline; 0 only when truly
+    // uncapped. Distinct from "Limit (rate_mbps)" above which reflects
+    // operator intent only. Off by default — the operator enables it
+    // when investigating "why is throughput capped at X with no
+    // visible operator limit?"
+    //
+    // First-class CH column (issue #480): proxy stamps
+    // effective_rate_limit_mbps on every normalize, forwarder writes
+    // it to session_events, charts_minimal exposes it, chRowAdapter
+    // projects it onto raw_session. Historically accurate — reflects
+    // the baseline AT THE TIME of the archive sample, not today's.
+    label: 'Effective Limit',
+    color: '#dc2626',
+    hidden: true,
+    accessor: (p: PlayerRecord) => {
+      const eff = (p as any).raw_session?.effective_rate_limit_mbps;
+      if (Number.isFinite(eff) && (eff as number) > 0) return eff as number;
+      return null;
     },
     stepped: true,
   },

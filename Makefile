@@ -765,19 +765,13 @@ test-pattern:
 		"$(TEST_PATTERN_OUTPUT)"
 	@echo "Wrote $(TEST_PATTERN_OUTPUT)"
 
-# ── iOS testing ────────────────────────────────────────────────────────
-
-test-ios-sim-metrics:
-	PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \
-	IOS_SIM_TEST_RUN=1 \
-	IOS_VERBOSE=1 \
-	IOS_SIM_DEVICE="$(IOS_SIM_DEVICE)" \
-	IOS_APP_BUNDLE_ID="$(IOS_APP_BUNDLE_ID)" \
-	IOS_METRICS_DURATION=$(IOS_METRICS_DURATION) \
-	IOS_SCORE_MIN=$(IOS_SCORE_MIN) \
-	pytest tests/integration -k ios_simulator_pyramid_metrics -m integration -vv --api-base $(IOS_API_BASE)
-
 # ── ABR characterization (rampup + rampdown + pyramid, one platform) ──
+#
+# iOS simulator pyramid coverage moved to the Go characterization
+# framework — invoke via `go test ./tests/characterization/modes -run
+# TestPyramid` with the iOS simulator launch mode (see
+# tests/characterization/README.md). The earlier `test-ios-sim-metrics`
+# pytest target was retired alongside tests/integration/.
 # Runs the three vetted characterization tests back-to-back via
 # tests/characterization/overnight.sh. Designed for overnight
 # runs: per-test logs survive a partial failure; JSON/HTML reports
