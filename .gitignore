@@ -88,6 +88,7 @@ content/dashboard-v3/node_modules/
 # everything else under `.claude/` is per-machine / per-session and
 # shouldn't be committed.
 .claude/claude
+.claude/chats/
 .claude/memory/
 .claude/plans/
 .claude/scheduled_tasks.lock

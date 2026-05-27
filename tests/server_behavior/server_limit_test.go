@@ -16,47 +16,47 @@
 //
 // End-to-end flow (mirrors what the web / iOS clients do):
 //
-//   1. Generate a stable player_id (UUID) so every dashboard chart
-//      on the session shows ONE player across the whole sweep.
-//   2. Discover content — env override or first entry from /api/content.
-//   3. Derive the bootstrap shaper port from the UI port using the
-//      same rule the dashboard's normalizeStreamUrl uses:
-//      uiPort[:-3] + "081"  (e.g. 21000 → 21081, 30000 → 30081).
-//   4. GET master_6s.m3u8 on the shaper port with ?player_id=X. The
-//      proxy 302-redirects to the session-bound port the proxy
-//      allocates for that player (e.g. 21181); Go's http.Client
-//      follows the redirect by default. The final response URL tells
-//      us the per-session port for subsequent fetches.
-//   5. Look up the session_id by player_id via /api/sessions (so
-//      later /api/session/{id}/metrics POSTs can target our row).
-//   6. Parse the master playlist → pick the highest-bandwidth variant.
-//   7. For each rate in the sweep:
-//        - PATCH the session's INTERNAL port via
-//          POST /api/nftables/shape/{port} {rate_mbps,delay_ms,loss_pct}.
-//          rate_mbps=0 means "no operator override" — the proxy falls
-//          back to the deployment baseline (INFINITE_STREAM_DEFAULT_RATE_MBPS).
-//        - Wait briefly for the kernel to apply.
-//        - Refetch variant playlist; pull every segment back-to-back
-//          for DURATION_PER_RATE seconds.
-//        - Every ~1s, POST a heartbeat-shaped metrics event with
-//          player_metrics_network_bitrate_mbps (last segment) +
-//          player_metrics_avg_network_bitrate_mbps (EWMA window).
-//          This is what makes the puller visible in the dashboard's
-//          bitrate chart so the operator can watch the sweep live.
-//   8. Print a calibration matrix.
+//  1. Generate a stable player_id (UUID) so every dashboard chart
+//     on the session shows ONE player across the whole sweep.
+//  2. Discover content — env override or first entry from /api/content.
+//  3. Derive the bootstrap shaper port from the UI port using the
+//     same rule the dashboard's normalizeStreamUrl uses:
+//     uiPort[:-3] + "081"  (e.g. 21000 → 21081, 30000 → 30081).
+//  4. GET master_6s.m3u8 on the shaper port with ?player_id=X. The
+//     proxy 302-redirects to the session-bound port the proxy
+//     allocates for that player (e.g. 21181); Go's http.Client
+//     follows the redirect by default. The final response URL tells
+//     us the per-session port for subsequent fetches.
+//  5. Look up the session_id by player_id via /api/sessions (so
+//     later /api/session/{id}/metrics POSTs can target our row).
+//  6. Parse the master playlist → pick the highest-bandwidth variant.
+//  7. For each rate in the sweep:
+//     - PATCH the session's INTERNAL port via
+//     POST /api/nftables/shape/{port} {rate_mbps,delay_ms,loss_pct}.
+//     rate_mbps=0 means "no operator override" — the proxy falls
+//     back to the deployment baseline (INFINITE_STREAM_DEFAULT_RATE_MBPS).
+//     - Wait briefly for the kernel to apply.
+//     - Refetch variant playlist; pull every segment back-to-back
+//     for DURATION_PER_RATE seconds.
+//     - Every ~1s, POST a heartbeat-shaped metrics event with
+//     player_metrics_network_bitrate_mbps (last segment) +
+//     player_metrics_avg_network_bitrate_mbps (EWMA window).
+//     This is what makes the puller visible in the dashboard's
+//     bitrate chart so the operator can watch the sweep live.
+//  8. Print a calibration matrix.
 //
 // Configuration is via env vars only; defaults target test-dev.
 //
-//   THROUGHPUT_HOST=jonathanoliver-ubuntu.local
-//   THROUGHPUT_API_PORT=21000           UI / API port; bootstrap is uiPort[:-3]+"081"
-//   THROUGHPUT_CONTENT=...              omit to auto-pick from /api/content
-//   THROUGHPUT_DURATION_S=15
-//   THROUGHPUT_RATES=1,2,5,10,20,50,100,0   0 = baseline
-//   THROUGHPUT_INSECURE=1               skip TLS verify (default 1 for test-dev)
+//	THROUGHPUT_HOST=jonathanoliver-ubuntu.local
+//	THROUGHPUT_API_PORT=21000           UI / API port; bootstrap is uiPort[:-3]+"081"
+//	THROUGHPUT_CONTENT=...              omit to auto-pick from /api/content
+//	THROUGHPUT_DURATION_S=15
+//	THROUGHPUT_RATES=1,2,5,10,20,50,100,0   0 = baseline
+//	THROUGHPUT_INSECURE=1               skip TLS verify (default 1 for test-dev)
 //
 // Skipped in short mode. Run:
 //
-//   cd tests/throughput && go test -v -run TestRateSweep -timeout 5m
+//	cd tests/throughput && go test -v -run TestServerLimit -timeout 5m
 //
 // Sibling: tests/hls_speed_probe.py is a one-shot Python probe.
 package server_behavior
@@ -83,12 +83,12 @@ import (
 )
 
 const (
-	defaultHost          = "jonathanoliver-ubuntu.local"
-	defaultAPIPort       = "21000"
-	defaultDurationS     = 15
-	defaultRatesString   = "1,2,5,10,20,50,100,0"
-	defaultInsecure      = true
-	heartbeatPeriod      = 1 * time.Second
+	defaultHost        = "jonathanoliver-ubuntu.local"
+	defaultAPIPort     = "21000"
+	defaultDurationS   = 15
+	defaultRatesString = "1,2,5,10,20,50,100,0"
+	defaultInsecure    = true
+	heartbeatPeriod    = 1 * time.Second
 )
 
 // shaperPortFromUI implements the same derivation as the dashboard's
@@ -245,9 +245,9 @@ func discoverContent(c *http.Client, apiBase string) (string, error) {
 
 // sessionInfo holds the fields the probe needs from /api/sessions.
 type sessionInfo struct {
-	SessionID     string
-	InternalPort  int // e.g. 30181 — used for /api/nftables/shape/{port}
-	ExternalPort  int // e.g. 21181 — what we already fetched the redirect to
+	SessionID    string
+	InternalPort int // e.g. 30181 — used for /api/nftables/shape/{port}
+	ExternalPort int // e.g. 21181 — what we already fetched the redirect to
 }
 
 // findSession returns the proxy's session record for `playerID`. Polls
@@ -409,19 +409,19 @@ func postMetrics(
 ) error {
 	now := time.Now().UTC().Format("2006-01-02T15:04:05.000Z")
 	set := map[string]any{
-		"player_id":                                 playerID,
-		"player_metrics_state":                      state,
-		"player_metrics_last_event":                 "heartbeat",
-		"player_metrics_trigger_type":               "heartbeat",
-		"player_metrics_event_time":                 now,
-		"player_metrics_position_s":                 positionS,
-		"player_metrics_playback_rate":              1.0,
-		"player_metrics_source":                     "throughput-probe",
-		"player_metrics_network_bitrate_mbps":       round2(netInstantMbps),
-		"player_metrics_avg_network_bitrate_mbps":   round2(netAvgMbps),
-		"player_metrics_buffer_depth_s":             0,
-		"player_metrics_dropped_frames":             0,
-		"player_metrics_stalls":                     0,
+		"player_id":                               playerID,
+		"player_metrics_state":                    state,
+		"player_metrics_last_event":               "heartbeat",
+		"player_metrics_trigger_type":             "heartbeat",
+		"player_metrics_event_time":               now,
+		"player_metrics_position_s":               positionS,
+		"player_metrics_playback_rate":            1.0,
+		"player_metrics_source":                   "throughput-probe",
+		"player_metrics_network_bitrate_mbps":     round2(netInstantMbps),
+		"player_metrics_avg_network_bitrate_mbps": round2(netAvgMbps),
+		"player_metrics_buffer_depth_s":           0,
+		"player_metrics_dropped_frames":           0,
+		"player_metrics_stalls":                   0,
 	}
 	body, _ := json.Marshal(map[string]any{"set": set})
 	u := fmt.Sprintf(
@@ -461,9 +461,10 @@ type rateResult struct {
 	totalBytes     int64
 	durationS      float64
 	segments       int
+	shaperAvgMbps  float64 // proxy-reported mbps_shaper_avg (server-side view)
 }
 
-func TestRateSweep(t *testing.T) {
+func TestServerLimit(t *testing.T) {
 	if testing.Short() {
 		t.Skip("throughput sweep skipped in short mode")
 	}
@@ -471,17 +472,17 @@ func TestRateSweep(t *testing.T) {
 	apiPort := env("THROUGHPUT_API_PORT", defaultAPIPort)
 	shaperPort := shaperPortFromUI(apiPort)
 	durationS := envInt("THROUGHPUT_DURATION_S", defaultDurationS)
-	ratesCsv := env("THROUGHPUT_RATES", defaultRatesString)
+	ratesOverride := strings.TrimSpace(os.Getenv("THROUGHPUT_RATES"))
 	insecure := envBool("THROUGHPUT_INSECURE", defaultInsecure)
-
-	rates, err := parseRates(ratesCsv)
-	if err != nil {
-		t.Fatalf("parse rates: %v", err)
-	}
 
 	apiBase := host + ":" + apiPort
 	shaperBase := host + ":" + shaperPort
 	c := newClient(insecure)
+	startedAt := time.Now()
+	// The deployment baseline (INFINITE_STREAM_DEFAULT_RATE_MBPS) is the
+	// effective cap when no operator override is set, so rate=0 (baseline)
+	// is really this many Mbps — used to label + score the baseline row.
+	baselineMbps := fetchDefaultRateMbps(c, apiBase)
 
 	content, err := discoverContent(c, apiBase)
 	if err != nil {
@@ -491,8 +492,8 @@ func TestRateSweep(t *testing.T) {
 	playerID := uuid.New().String()
 	playID := uuid.New().String()
 
-	t.Logf("probe player_id=%s api=https://%s shaper=https://%s content=%s rates=%v dur_per_rate=%ds",
-		playerID, apiBase, shaperBase, content, rates, durationS)
+	t.Logf("probe player_id=%s api=https://%s shaper=https://%s content=%s dur_per_rate=%ds",
+		playerID, apiBase, shaperBase, content, durationS)
 
 	// --- 1. Master fetch on the shaper bootstrap port. The proxy
 	// allocates a session and 302-redirects to the per-session port;
@@ -525,33 +526,63 @@ func TestRateSweep(t *testing.T) {
 	t.Logf("top variant: %.2f Mbps at %s",
 		float64(top.BandwidthBps)/1e6, top.URL)
 
-	// --- 4. Sweep rates.
-	// Estimate per-segment size from the top variant's BANDWIDTH * 6s
-	// (assumed segment duration). At lower rates one segment can take
-	// minutes — extend the per-rate window so we always sample at
-	// least one full segment + change. baseDur is the floor.
-	segBytesEst := int64(top.BandwidthBps) * 6 / 8
-	t.Logf("estimated top-variant segment: %.1f MB", float64(segBytesEst)/(1<<20))
+	// Rate sweep: by default derive caps from the content's own variant
+	// average bandwidths (probe the cap right at the ABR switch points),
+	// then continue in steps up to the ceiling (≈ deployment baseline).
+	// THROUGHPUT_RATES overrides with an explicit CSV.
+	var rates []int
+	if ratesOverride != "" {
+		rates, err = parseRates(ratesOverride)
+		if err != nil {
+			t.Fatalf("parse THROUGHPUT_RATES: %v", err)
+		}
+	} else {
+		rates = deriveRatesFromVariants(variants, envInt("LIMIT_CEIL_MBPS", 100), envInt("LIMIT_STEP_MBPS", 25))
+	}
+	t.Logf("rate sweep: %v Mbps (0 = baseline)", rates)
+
+	// --- 4. Sweep rates. For each cap, pull bounded byte-ranges of the
+	// (large) top-variant segment sized to ~2s of data at that cap, for a
+	// fixed window. This saturates the cap at every level without the
+	// minutes-long full-segment pull a low cap would otherwise force — the
+	// top-variant segment is big enough that the requested range is always
+	// available, so high caps stay saturated and low caps pull only a small
+	// prefix.
+	p := &probe{
+		c: c, host: host, apiBase: apiBase, shaperBase: shaperBase,
+		content: content, playerID: playerID, playID: playID,
+		masterURL: finalMasterURL.String(), sess: sess, top: top,
+	}
+	window := time.Duration(durationS) * time.Second
 	results := make([]rateResult, 0, len(rates))
 	for _, rateMbps := range rates {
 		label := fmt.Sprintf("%d Mbps", rateMbps)
 		if rateMbps == 0 {
 			label = "0 (baseline)"
 		}
-		dur := adaptiveDuration(durationS, rateMbps, segBytesEst)
-		t.Logf("\n=== rate cap %s — pulling for %s ===", label, dur)
+		t.Logf("\n=== rate cap %s — pulling for %s ===", label, window)
 		if err := setRateLimit(c, apiBase, sess.InternalPort, rateMbps); err != nil {
 			t.Errorf("set rate %d: %v", rateMbps, err)
 			continue
 		}
 		// Wait for the kernel to apply + tc verifier to settle.
 		time.Sleep(1500 * time.Millisecond)
-		res := runPullWindow(t, c, apiBase, sess.SessionID, playerID, playID,
-			top.URL, dur)
+		segURL := ""
+		if segs := p.pullOnce(t); len(segs) > 0 {
+			segURL = segs[0]
+		}
+		res := runRateWindow(t, p, segURL, rateMbps, window)
 		res.configuredMbps = rateMbps
+		// The proxy's own server-side view of the shaped rate, for contrast
+		// with the probe's client-measured throughput.
+		if m, err := getSessionMap(p.c, p.apiBase, p.playerID); err == nil {
+			if v, ok := mapFloat(m, "mbps_shaper_avg"); ok {
+				res.shaperAvgMbps = v
+			}
+		}
 		results = append(results, res)
-		t.Logf("rate=%-12s avg=%.2f Mbps peak=%.2f Mbps segs=%d total=%dB",
-			label, res.avgMbps, res.peakMbps, res.segments, res.totalBytes)
+		t.Logf("rate=%-12s avg=%.2f Mbps peak=%.2f Mbps shaper_avg=%.2f fetches=%d total=%dB",
+			label, res.avgMbps, res.peakMbps, res.shaperAvgMbps, res.segments, res.totalBytes)
 	}
 
 	// Clear the override at the end so we don't leave the session
@@ -560,6 +591,158 @@ func TestRateSweep(t *testing.T) {
 
 	// --- 5. Summary matrix.
 	printMatrix(t, results)
+
+	// Surface on the Automated Testing page as platform=server / server_limit.
+	sm := serverMatrix{
+		Title:   "Rate-cap accuracy (configured cap vs observed throughput)",
+		Columns: []string{"configured_mbps", "obs_avg_mbps", "avg_diff_pct", "obs_peak_mbps", "peak_diff_pct", "shaper_avg_mbps", "segments"},
+	}
+	for _, r := range results {
+		capStr, avgDiff, peakDiff := "0 (baseline)", "—", "—"
+		// avg_diff_pct: how far the sustained average is from the limit
+		// (expect ~-5% wire overhead; positive = a cap-enforcement problem).
+		// peak_diff_pct: how far the peak burst is above/below the limit.
+		// The baseline row is scored against the deployment default rate
+		// (0 = baseline = that many Mbps).
+		limit := r.configuredMbps
+		if r.configuredMbps == 0 && baselineMbps > 0 {
+			limit = baselineMbps
+			capStr = fmt.Sprintf("0 (baseline=%d)", baselineMbps)
+		}
+		if r.configuredMbps > 0 {
+			capStr = strconv.Itoa(r.configuredMbps)
+		}
+		if limit > 0 {
+			avgDiff = fmt.Sprintf("%+.1f%%", (r.avgMbps-float64(limit))/float64(limit)*100)
+			peakDiff = fmt.Sprintf("%+.1f%%", (r.peakMbps-float64(limit))/float64(limit)*100)
+		}
+		sm.Rows = append(sm.Rows, []string{
+			capStr,
+			fmt.Sprintf("%.2f", r.avgMbps),
+			avgDiff,
+			fmt.Sprintf("%.2f", r.peakMbps),
+			peakDiff,
+			fmt.Sprintf("%.2f", r.shaperAvgMbps),
+			strconv.Itoa(r.segments),
+		})
+	}
+	p.postServerReport(t, "server_limit", fmt.Sprintf("%d rate caps swept", len(results)), startedAt, !t.Failed(), sm)
+}
+
+// runRateWindow pulls bounded byte-ranges of segURL back-to-back for `window`,
+// each range sized to ~2s of data at the configured cap (a small prefix at
+// low caps, a big chunk of the large top-variant segment at high caps), so
+// the cap stays saturated at every level without a minutes-long full-segment
+// pull. Posts heartbeats so the run is visible in the dashboard. Returns
+// aggregate throughput stats.
+func runRateWindow(t *testing.T, p *probe, segURL string, rateMbps int, window time.Duration) rateResult {
+	t.Helper()
+	start := time.Now()
+	deadline := start.Add(window)
+	perFetch := int64(100) * 1_000_000 / 8 * 2 // baseline: assume ~100 Mbps
+	if rateMbps > 0 {
+		perFetch = int64(rateMbps) * 1_000_000 / 8 * 2 // 2s of data at the cap
+	}
+	if perFetch < 64*1024 {
+		perFetch = 64 * 1024
+	}
+	var totalBytes int64
+	var fetches int
+	var peak, ewma float64
+	for time.Now().Before(deadline) || fetches == 0 {
+		if segURL == "" {
+			if segs := p.pullOnce(t); len(segs) > 0 {
+				segURL = segs[0]
+			} else {
+				time.Sleep(150 * time.Millisecond)
+				continue
+			}
+		}
+		t0 := time.Now()
+		n, err := rangeGet(p.c, segURL, perFetch, 30*time.Second)
+		if err != nil {
+			t.Logf("range fetch: %v (refetching segment)", err)
+			segURL = "" // rolled off the live window; pick a fresh one
+			continue
+		}
+		dt := time.Since(t0).Seconds()
+		totalBytes += n
+		fetches++
+		if dt > 0 {
+			inst := float64(n) * 8 / 1e6 / dt
+			if inst > peak {
+				peak = inst
+			}
+			if ewma == 0 {
+				ewma = inst
+			} else {
+				ewma = ewma*0.7 + inst*0.3
+			}
+		}
+		p.heartbeat(round2(ewma), round2(ewma), time.Since(start).Seconds(), "playing")
+	}
+	elapsed := time.Since(start).Seconds()
+	avg := 0.0
+	if elapsed > 0 {
+		avg = float64(totalBytes) * 8 / 1e6 / elapsed
+	}
+	return rateResult{avgMbps: avg, peakMbps: peak, totalBytes: totalBytes, durationS: elapsed, segments: fetches}
+}
+
+// deriveRatesFromVariants builds the rate-cap sweep from the content's own
+// variant average bandwidths (each declared BANDWIDTH, rounded to Mbps) so
+// we probe the cap right at the ABR switch points, then continues in `step`
+// increments above the top variant up to `ceil` (≈ deployment baseline).
+// 0 (baseline) is appended last.
+// fetchDefaultRateMbps reads the deployment baseline rate cap from
+// GET /api/v2/info (`default_rate_mbps`). Returns 0 if unavailable, in
+// which case the baseline row stays labeled "0 (baseline)" with no score.
+func fetchDefaultRateMbps(c *http.Client, apiBase string) int {
+	body, _, err := httpGet(c, fmt.Sprintf("https://%s/api/v2/info", apiBase))
+	if err != nil {
+		return 0
+	}
+	var info struct {
+		DefaultRateMbps int `json:"default_rate_mbps"`
+	}
+	if json.Unmarshal(body, &info) != nil {
+		return 0
+	}
+	return info.DefaultRateMbps
+}
+
+func deriveRatesFromVariants(vs []variant, ceil, step int) []int {
+	if ceil < 1 {
+		ceil = 100
+	}
+	if step < 1 {
+		step = 25
+	}
+	seen := map[int]bool{}
+	var out []int
+	add := func(m int) {
+		if m >= 1 && m <= ceil && !seen[m] {
+			seen[m] = true
+			out = append(out, m)
+		}
+	}
+	top := 0
+	for _, v := range vs {
+		m := int(math.Round(float64(v.BandwidthBps) / 1e6))
+		if m < 1 {
+			m = 1
+		}
+		add(m)
+		if m > top {
+			top = m
+		}
+	}
+	for r := ((top / step) + 1) * step; r <= ceil; r += step {
+		add(r)
+	}
+	add(ceil) // always include the ceiling itself
+	sort.Ints(out)
+	return append(out, 0) // baseline last
 }
 
 func parseRates(csv string) ([]int, error) {
@@ -603,7 +786,7 @@ func runPullWindow(
 	deadline := start.Add(dur)
 	var totalBytes int64
 	var segCount int
-	var ewmaMbps atomic.Uint64    // float64 bits — written via atomic
+	var ewmaMbps atomic.Uint64 // float64 bits — written via atomic
 	var lastInstantMbps atomic.Uint64
 	peak := 0.0
 
