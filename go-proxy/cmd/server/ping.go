@@ -107,8 +107,9 @@ func (a *App) startPathPingSampler(ctx context.Context) {
 					// we tear the filter down so ICMP travels the
 					// unshaped default class.
 					port, _ := strconv.Atoi(strings.TrimSpace(getString(session, "x_forwarded_port")))
+					delayMs := getInt(session, "nftables_delay_ms")
 					shapingActive := getFloat(session, "nftables_bandwidth_mbps") > 0 ||
-						getInt(session, "nftables_delay_ms") > 0 ||
+						delayMs > 0 ||
 						getFloat(session, "nftables_packet_loss") > 0
 					if a.traffic != nil && port > 0 {
 						_ = a.traffic.ApplyPlayerICMPFilter(port, ip, shapingActive && ip != "")
@@ -117,7 +118,26 @@ func (a *App) startPathPingSampler(ctx context.Context) {
 						holder.Store(0)
 						continue
 					}
-					rttUs, perr := sock.ping(ip, 200*time.Millisecond)
+					// Adaptive ping deadline: a configured netem delay
+					// pushes the round trip out to ~delayMs, so a fixed
+					// 200ms timeout silently drops every sample once
+					// delayMs approaches 200 (issue: path-ping went blank
+					// at 250/500ms while TCP RTT kept tracking). Wait 2x
+					// the expected delay, with a 200ms floor (delay=0
+					// keeps the old behaviour) and a 2s cap so a slow /
+					// unreachable client at a high delay can't stall the
+					// 1Hz loop indefinitely.
+					pingTimeout := 200 * time.Millisecond
+					if delayMs > 0 {
+						pingTimeout = time.Duration(delayMs) * 2 * time.Millisecond
+						if pingTimeout < 200*time.Millisecond {
+							pingTimeout = 200 * time.Millisecond
+						}
+						if pingTimeout > 2*time.Second {
+							pingTimeout = 2 * time.Second
+						}
+					}
+					rttUs, perr := sock.ping(ip, pingTimeout)
 					if perr != nil {
 						holder.Store(0)
 						continue
