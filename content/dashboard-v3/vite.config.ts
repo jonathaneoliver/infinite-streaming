@@ -43,7 +43,10 @@ export default defineConfig({
         // Stage 6 (cont.) — archived-sessions picker. The session-viewer
         // entry above expects a deep-link with session_id; this is the
         // browse page that lists every play.
-        sessions: resolve(__dirname, 'sessions.html')
+        sessions: resolve(__dirname, 'sessions.html'),
+        // Stage 7 — characterization-run summary page. Pre-filters
+        // /api/v2/plays on info=test_* labels and groups by run_id.
+        characterization: resolve(__dirname, 'characterization.html')
       }
     }
   },

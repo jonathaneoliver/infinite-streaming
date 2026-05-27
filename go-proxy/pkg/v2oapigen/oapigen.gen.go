@@ -213,6 +213,7 @@ const (
 	N0  PatternMarginPct = 0
 	N10 PatternMarginPct = 10
 	N25 PatternMarginPct = 25
+	N5  PatternMarginPct = 5
 	N50 PatternMarginPct = 50
 )
 
@@ -224,6 +225,8 @@ func (e PatternMarginPct) Valid() bool {
 	case N10:
 		return true
 	case N25:
+		return true
+	case N5:
 		return true
 	case N50:
 		return true
@@ -807,7 +810,10 @@ type Manifest struct {
 
 // ManifestVariant defines model for ManifestVariant.
 type ManifestVariant struct {
-	// Bandwidth bits per second
+	// AverageBandwidth Average bit rate across the variant in bits per second (HLS AVERAGE-BANDWIDTH attribute). Optional — present when the source master playlist includes the attribute. Pattern-step generators should prefer this over BANDWIDTH where available, since it represents the long-term sustainable rate (BANDWIDTH is the peak).
+	AverageBandwidth *int `json:"average_bandwidth,omitempty"`
+
+	// Bandwidth Peak segment bit rate of this variant in bits per second (HLS EXT-X-STREAM-INF BANDWIDTH attribute). Always present.
 	Bandwidth int `json:"bandwidth"`
 
 	// Resolution WIDTHxHEIGHT
@@ -858,7 +864,7 @@ type Pattern struct {
 	// DefaultStepSeconds Default per-step duration the dashboard chose when generating the step list.
 	DefaultStepSeconds *PatternDefaultStepSeconds `json:"default_step_seconds,omitempty"`
 
-	// MarginPct Headroom percent above the top variant used when sizing template steps (0 = exact).
+	// MarginPct Headroom percent above the variant rate used when sizing template steps. 0 = exact (deliberate-stall footgun). 5 = default — covers TCP/IP + TLS 1.3 + HTTP/2 framing overhead on a LAN. 10 = real WiFi with retransmits. 25 / 50 = stress-test over-headroom.
 	MarginPct *PatternMarginPct `json:"margin_pct,omitempty"`
 	Steps     []PatternStep     `json:"steps"`
 
@@ -872,7 +878,7 @@ type Pattern struct {
 // PatternDefaultStepSeconds Default per-step duration the dashboard chose when generating the step list.
 type PatternDefaultStepSeconds int
 
-// PatternMarginPct Headroom percent above the top variant used when sizing template steps (0 = exact).
+// PatternMarginPct Headroom percent above the variant rate used when sizing template steps. 0 = exact (deliberate-stall footgun). 5 = default — covers TCP/IP + TLS 1.3 + HTTP/2 framing overhead on a LAN. 10 = real WiFi with retransmits. 25 / 50 = stress-test over-headroom.
 type PatternMarginPct int
 
 // PatternTemplate Template that drove step-list generation. Stored verbatim

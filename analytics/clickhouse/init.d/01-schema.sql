@@ -492,3 +492,33 @@ ORDER BY (player_id, ts, event_fingerprint)
 TTL toDateTime(ts) + INTERVAL 30 DAY DELETE WHERE classification = 'other',
     toDateTime(ts) + INTERVAL 90 DAY DELETE WHERE classification = 'interesting'
 SETTINGS index_granularity = 8192;
+
+-- ── characterization_runs ─────────────────────────────────────────────────
+-- One row per (run_id, test_name) — the result of one
+-- `tests/characterization/modes/<test>_test.go` invocation. Populated by
+-- the test framework via `harness post characterization` at end-of-sweep.
+-- Carries the report JSON in full so the dashboard can render per-step +
+-- per-variant tables without needing access to the local artifact files.
+-- See plan: ~/.claude/plans/characterization-run-report-server-ingest.md
+CREATE TABLE IF NOT EXISTS infinite_streaming.characterization_runs
+(
+    run_id        String                            CODEC(ZSTD(1)),
+    test_name     LowCardinality(String)            CODEC(ZSTD(1)),
+    platform      LowCardinality(String)            CODEC(ZSTD(1)),
+    started_at    DateTime64(3, 'UTC')              CODEC(Delta, ZSTD(1)),
+    ended_at      DateTime64(3, 'UTC')              CODEC(Delta, ZSTD(1)),
+    player_id     LowCardinality(String)            CODEC(ZSTD(1)),
+    play_ids      Array(String)                     CODEC(ZSTD(1)),
+    passed        UInt8                             DEFAULT 0,
+    summary_json  String                            CODEC(ZSTD(3)),
+    report_json   String                            CODEC(ZSTD(3)),
+    classification LowCardinality(String)           DEFAULT 'other' CODEC(ZSTD(1)),
+    INDEX idx_run_id run_id     TYPE bloom_filter GRANULARITY 4,
+    INDEX idx_player player_id  TYPE bloom_filter GRANULARITY 4
+)
+ENGINE = MergeTree
+PARTITION BY toYYYYMMDD(started_at)
+ORDER BY (started_at, test_name, platform)
+TTL toDateTime(started_at) + INTERVAL 90 DAY DELETE WHERE classification = 'other',
+    toDateTime(started_at) + INTERVAL 180 DAY DELETE WHERE classification = 'interesting'
+SETTINGS index_granularity = 8192;

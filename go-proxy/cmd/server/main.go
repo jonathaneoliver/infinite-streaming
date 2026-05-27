@@ -665,9 +665,10 @@ func (h *SessionEventHub) Broadcast(sessions []SessionData, revision uint64, pre
 }
 
 type PlaylistInfo struct {
-	URL        string `json:"url"`
-	Bandwidth  int    `json:"bandwidth"`
-	Resolution string `json:"resolution"`
+	URL              string `json:"url"`
+	Bandwidth        int    `json:"bandwidth"`
+	AverageBandwidth int    `json:"average_bandwidth,omitempty"`
+	Resolution       string `json:"resolution"`
 }
 
 type TcTrafficManager struct {
@@ -1784,8 +1785,6 @@ func main() {
 	router.HandleFunc("/index.html", app.handleIndex).Methods(http.MethodGet)
 	router.HandleFunc("/api/sessions", app.handleGetSessions).Methods(http.MethodGet)
 	router.HandleFunc("/api/sessions/stream", app.handleSessionStream).Methods(http.MethodGet)
-	router.HandleFunc("/api/failure-settings/{id}", app.handleUpdateFailureSettings).Methods(http.MethodPost)
-	router.HandleFunc("/api/session/{id}/update", app.handleUpdateSessionSettings).Methods(http.MethodPost)
 	router.HandleFunc("/api/session/{id}", app.handleSession).Methods(http.MethodGet, http.MethodDelete)
 	router.HandleFunc("/api/session/{id}", app.handlePatchSession).Methods(http.MethodPatch)
 	router.HandleFunc("/api/session/{id}/metrics", app.handlePostSessionMetrics).Methods(http.MethodPost)
@@ -1797,9 +1796,6 @@ func main() {
 	router.HandleFunc("/api/control/stream", app.handleControlStream).Methods(http.MethodGet)
 	router.HandleFunc("/api/external-ips", app.handleGetExternalIPs).Methods(http.MethodGet)
 	router.HandleFunc("/api/clear-sessions", app.handleClearSessions).Methods(http.MethodPost)
-	router.HandleFunc("/api/session-group/link", app.handleLinkSessions).Methods(http.MethodPost)
-	router.HandleFunc("/api/session-group/unlink", app.handleUnlinkSession).Methods(http.MethodPost)
-	router.HandleFunc("/api/session-group/{groupId}", app.handleGetGroup).Methods(http.MethodGet)
 	router.HandleFunc("/myshows", app.handleMyShows).Methods(http.MethodGet)
 	router.HandleFunc("/debug", app.handleDebug).Methods(http.MethodGet)
 	router.HandleFunc("/api/nftables/status", app.handleNftStatus).Methods(http.MethodGet)
@@ -2231,25 +2227,6 @@ func (a *App) handlePostSessionMetrics(w http.ResponseWriter, r *http.Request) {
 }
 
 
-func (a *App) handleUpdateFailureSettings(w http.ResponseWriter, r *http.Request) {
-	id := mux.Vars(r)["id"]
-	var payload map[string]interface{}
-	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-		writeJSON(w, map[string]string{"error": "invalid json"})
-		return
-	}
-	_, status, errMsg := a.applySessionSettingsUpdate(id, payload, "")
-	if status != http.StatusOK {
-		if errMsg == "" {
-			errMsg = "update failed"
-		}
-		w.WriteHeader(status)
-		writeJSON(w, map[string]string{"error": errMsg})
-		return
-	}
-	writeJSON(w, map[string]string{"message": "Settings updated successfully"})
-}
-
 func (a *App) applySessionSettingsUpdate(id string, payload map[string]interface{}, baseRevision string) (SessionData, int, string) {
 	if payload == nil {
 		payload = map[string]interface{}{}
@@ -2659,9 +2636,12 @@ func (a *App) emitHarnessSettingsChange(sessionID string, payload map[string]int
 		a.emitControlEventForSession(sessionID, "harness", event, info)
 		emitted = true
 	}
-	// Labels first — cheapest test.
-	if _, ok := payload["labels"]; ok {
-		emit("label_changed", "")
+	// Labels first — cheapest test. Carry the new labels payload in
+	// `info` so the forwarder can stamp each KV pair onto the row's
+	// labels[] array, making them queryable via the existing
+	// `--label-has` Sessions filter (issue #482 follow-up).
+	if v, ok := payload["labels"]; ok {
+		emit("label_changed", labelsInfoJSON(v))
 	}
 	if _, ok := payload["content_id"]; ok {
 		emit("content_changed", "")
@@ -2781,10 +2761,6 @@ func parseShapeStepsFromSession(session SessionData) []NftShapeStep {
 		return out
 	}
 	return nil
-}
-
-func (a *App) handleUpdateSessionSettings(w http.ResponseWriter, r *http.Request) {
-	a.handleUpdateFailureSettings(w, r)
 }
 
 func (a *App) handleSession(w http.ResponseWriter, r *http.Request) {
@@ -2964,125 +2940,6 @@ func (a *App) handleClearSessions(w http.ResponseWriter, r *http.Request) {
 	}
 	a.saveSessionList([]SessionData{})
 	writeJSON(w, map[string]string{"message": "All sessions cleared successfully"})
-}
-
-func (a *App) handleLinkSessions(w http.ResponseWriter, r *http.Request) {
-	var payload struct {
-		SessionIds []string `json:"session_ids"`
-		GroupId    string   `json:"group_id"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-		w.WriteHeader(http.StatusBadRequest)
-		writeJSON(w, map[string]string{"error": "invalid json"})
-		return
-	}
-	if len(payload.SessionIds) < 2 {
-		w.WriteHeader(http.StatusBadRequest)
-		writeJSON(w, map[string]string{"error": "at least 2 sessions required"})
-		return
-	}
-	log.Printf("SESSION GROUP LINK request sessions=%v group_id=%s", payload.SessionIds, payload.GroupId)
-	controlRevision := newControlRevision()
-
-	// Generate a group ID if not provided
-	groupID := payload.GroupId
-	if groupID == "" {
-		groupID = fmt.Sprintf("G%d", time.Now().Unix()%10000)
-	}
-
-	linkedCount := 0
-	for _, targetID := range payload.SessionIds {
-		update := SessionData{
-			"session_id":       targetID,
-			"group_id":         groupID,
-			"control_revision": controlRevision,
-		}
-		a.saveSessionByID(targetID, update)
-		linkedCount++
-	}
-	log.Printf("SESSION GROUP LINK result group_id=%s linked=%d", groupID, linkedCount)
-
-	writeJSON(w, map[string]interface{}{
-		"message":      "Sessions linked successfully",
-		"group_id":     groupID,
-		"linked_count": linkedCount,
-	})
-}
-
-func (a *App) handleUnlinkSession(w http.ResponseWriter, r *http.Request) {
-	var payload struct {
-		SessionId   string `json:"session_id"`
-		GroupId     string `json:"group_id"`
-		UnlinkGroup bool   `json:"unlink_group"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-		w.WriteHeader(http.StatusBadRequest)
-		writeJSON(w, map[string]string{"error": "invalid json"})
-		return
-	}
-
-	sessions := a.getSessionList()
-	found := false
-	updated := 0
-	groupID := payload.GroupId
-	if groupID == "" && payload.SessionId != "" {
-		for _, session := range sessions {
-			if getString(session, "session_id") == payload.SessionId {
-				groupID = getString(session, "group_id")
-				break
-			}
-		}
-	}
-	controlRevision := newControlRevision()
-	if payload.UnlinkGroup && groupID != "" {
-		for _, session := range sessions {
-			if getString(session, "group_id") == groupID {
-				sid := getString(session, "session_id")
-				a.saveSessionByID(sid, SessionData{
-					"session_id":       sid,
-					"group_id":         "",
-					"control_revision": controlRevision,
-				})
-				updated++
-				found = true
-			}
-		}
-	} else if payload.SessionId != "" {
-		a.saveSessionByID(payload.SessionId, SessionData{
-			"session_id":       payload.SessionId,
-			"group_id":         "",
-			"control_revision": controlRevision,
-		})
-		updated++
-		found = true
-	}
-
-	if found {
-		writeJSON(w, map[string]interface{}{
-			"message":        "Session group updated successfully",
-			"group_id":       groupID,
-			"unlinked_count": updated,
-		})
-	} else {
-		w.WriteHeader(http.StatusNotFound)
-		writeJSON(w, map[string]string{"error": "Session not found"})
-	}
-}
-
-func (a *App) handleGetGroup(w http.ResponseWriter, r *http.Request) {
-	groupID := mux.Vars(r)["groupId"]
-	if groupID == "" {
-		w.WriteHeader(http.StatusBadRequest)
-		writeJSON(w, map[string]string{"error": "group_id required"})
-		return
-	}
-
-	groupSessions := a.getSessionsByGroupId(groupID)
-	writeJSON(w, map[string]interface{}{
-		"group_id": groupID,
-		"sessions": groupSessions,
-		"count":    len(groupSessions),
-	})
 }
 
 func (a *App) handleMyShows(w http.ResponseWriter, r *http.Request) {
@@ -3494,9 +3351,18 @@ func (a *App) emitControlEventsForDiff(sessionID string, before, after map[strin
 		a.emitControlEventForSession(sessionID, "harness", event, info)
 	}
 
-	// Labels — any change.
-	if changed("labels") {
-		emit("label_changed", "")
+	// Labels — any change to the v1 `labels` slot (legacy direct PATCH)
+	// or the v2 `_v2_labels` slot (PATCH /api/v2/players Merge Patch
+	// writes here, see internal/v2/server/handlers_mutate.go § applyLabelsPatch).
+	// Both surface as `info=<key>_<value>` row labels via the forwarder's
+	// kvLabelsFromInfo helper (issue #487 — fixes the v2 path which was
+	// silently dropping labels because the diff check only looked at v1).
+	if changed("labels") || changed("_v2_labels") {
+		payload := after["_v2_labels"]
+		if payload == nil {
+			payload = after["labels"]
+		}
+		emit("label_changed", labelsInfoJSON(payload))
 	}
 	// Content selection.
 	if changed("content_id") || changed("manifest_url") {
@@ -3580,6 +3446,41 @@ func (a *App) emitControlEventsForDiff(sessionID string, before, after map[strin
 }
 
 // sessionFieldsEqual compares two interface{} values pulled out of a
+// labelsInfoJSON marshals the labels map for embedding in a
+// label_changed control_event's Info string. Accepts the raw
+// session-map value (interface{}) — usually map[string]any or
+// map[string]string — and returns a stable JSON object string the
+// forwarder can parse to extract KV pairs. Empty / nil / wrong-type
+// input renders as "" (the forwarder treats that as "labels cleared").
+func labelsInfoJSON(v interface{}) string {
+	if v == nil {
+		return ""
+	}
+	flat := map[string]string{}
+	switch m := v.(type) {
+	case map[string]string:
+		for k, val := range m {
+			flat[k] = val
+		}
+	case map[string]any:
+		for k, val := range m {
+			if s, ok := val.(string); ok {
+				flat[k] = s
+			}
+		}
+	default:
+		return ""
+	}
+	if len(flat) == 0 {
+		return ""
+	}
+	b, err := json.Marshal(flat)
+	if err != nil {
+		return ""
+	}
+	return string(b)
+}
+
 // session map for the diff-based control_event emitter. Strings,
 // numbers, bools compare by ==; arrays / objects compare by JSON-
 // round-trip. Cheap because session-map values are small.
@@ -4544,7 +4445,30 @@ func isSocketFaultType(faultType string) bool {
 	}
 }
 
-func applySocketFault(w http.ResponseWriter, faultType, contentType string) (string, error) {
+// applySocketFault hijacks the client TCP connection and emits the
+// wire shape for the named fault. Each fault produces a SPECIFIC,
+// CONTRACTUAL on-the-wire pattern that characterization tests (in
+// particular tests/characterization/modes/abort_test.go) interpret
+// against. Subtle behaviour changes silently invalidate that test's
+// results.
+//
+// **DO NOT CHANGE WIRE BEHAVIOURS OF EXISTING FAULT TYPES.**
+// If a different shape is needed, add a new fault-type name; don't
+// repurpose an old one.
+//
+// The canonical reference for every fault type's wire shape AND the
+// real-world failure mode it models is:
+//
+//   .claude/standards/fault-injection-wire-contract.md
+//
+// Read it before editing this function or any of the case branches
+// below. The doc lists: TCP-level shape, what the client OS surfaces,
+// and which real failure scenarios each shape reproduces.
+//
+// Related: isSocketFaultType (keep allowlist in sync), the
+// `corrupted` and `transfer_active_timeout` paths which model
+// different failure surfaces (see the standards doc).
+func applySocketFault(w http.ResponseWriter, faultType, contentType, upstreamURL string) (string, error) {
 	hj, ok := w.(http.Hijacker)
 	if !ok {
 		return "", fmt.Errorf("hijack unsupported")
@@ -4553,7 +4477,26 @@ func applySocketFault(w http.ResponseWriter, faultType, contentType string) (str
 	if err != nil {
 		return "", err
 	}
-	midBody := bytes.Repeat([]byte("X"), socketMidBodyBytes)
+	// For body_* fault types we send a chunk of REAL upstream bytes
+	// (a valid prefix of the segment / playlist response) before the
+	// fault closes the socket. This makes the failure shape match
+	// real-world mid-transfer aborts: the client receives parseable
+	// media data, then a clean close or RST. Fake "X" filler used to
+	// be written here, but that's the `corrupted` failure type's
+	// territory — `request_body_*` is for "the connection died
+	// mid-stream while real data was flowing." See abort
+	// characterization test (modes/abort_test.go).
+	//
+	// On upstream-fetch failure we fall back to "X" filler so the
+	// fault still applies — losing some realism but preserving the
+	// close behaviour the rule promises.
+	var midBody []byte
+	if needsRealBodyBytes(faultType) {
+		midBody = fetchUpstreamBodyPrefix(upstreamURL, socketMidBodyBytes)
+		if len(midBody) == 0 {
+			midBody = bytes.Repeat([]byte("X"), socketMidBodyBytes)
+		}
+	}
 	switch faultType {
 	case "request_connect_reset":
 		closeSocketAsReject(conn)
@@ -4622,6 +4565,46 @@ func applySocketFault(w http.ResponseWriter, faultType, contentType string) (str
 		_ = conn.Close()
 		return "", fmt.Errorf("unsupported socket fault type: %s", faultType)
 	}
+}
+
+// needsRealBodyBytes reports whether the named socket fault writes a
+// prefix of the upstream body to the client before the close behaviour
+// fires. The connect_* and first_byte_* shapes never write any body
+// bytes; only the body_* shapes do.
+func needsRealBodyBytes(faultType string) bool {
+	switch faultType {
+	case "request_body_reset", "request_body_hang", "request_body_delayed":
+		return true
+	}
+	return false
+}
+
+// fetchUpstreamBodyPrefix issues a short-timeout GET to the upstream
+// URL and returns up to `limit` bytes of the response body. Returns
+// nil on any failure (DNS, connect, non-2xx, timeout); caller falls
+// back to synthetic filler when the prefix isn't available.
+//
+// Bounded by a 2s timeout so a stuck upstream doesn't extend the
+// fault application latency past what the operator armed the rule for.
+func fetchUpstreamBodyPrefix(upstreamURL string, limit int) []byte {
+	if upstreamURL == "" || limit <= 0 {
+		return nil
+	}
+	client := &http.Client{Timeout: 2 * time.Second}
+	resp, err := client.Get(upstreamURL)
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		return nil
+	}
+	buf := make([]byte, limit)
+	n, _ := io.ReadFull(resp.Body, buf)
+	if n <= 0 {
+		return nil
+	}
+	return buf[:n]
 }
 
 func normalizeTransportFaultType(raw string) string {
@@ -5322,7 +5305,7 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if isSocketFaultType(failureType) {
-			socketAction, err := applySocketFault(w, failureType, contentType)
+			socketAction, err := applySocketFault(w, failureType, contentType, upstreamURL)
 			if err != nil {
 				actionTaken = "fallback_http_503"
 				w.WriteHeader(http.StatusServiceUnavailable)
@@ -6061,9 +6044,10 @@ func (a *App) getContentType(target string) (string, bool, bool, bool, []Playlis
 							resolution = variant.Resolution
 						}
 						infos = append(infos, PlaylistInfo{
-							URL:        variant.URI,
-							Bandwidth:  int(variant.Bandwidth),
-							Resolution: resolution,
+							URL:              variant.URI,
+							Bandwidth:        int(variant.Bandwidth),
+							AverageBandwidth: int(variant.AverageBandwidth),
+							Resolution:       resolution,
 						})
 					}
 					return contentType, true, false, false, infos
@@ -8704,22 +8688,6 @@ func extractGroupId(playerID string) string {
 		return "G" + matches[1]
 	}
 	return ""
-}
-
-// getSessionsByGroupId returns all sessions that belong to the specified group
-func (a *App) getSessionsByGroupId(groupID string) []SessionData {
-	if groupID == "" {
-		return []SessionData{}
-	}
-	sessions := a.getSessionList()
-	var groupSessions []SessionData
-	for _, session := range sessions {
-		sessionGroupID := getString(session, "group_id")
-		if sessionGroupID == groupID {
-			groupSessions = append(groupSessions, session)
-		}
-	}
-	return groupSessions
 }
 
 // getGroupIdByPort returns the group ID for sessions on the specified port.

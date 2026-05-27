@@ -324,7 +324,11 @@ export function usePlayer(playerId: Ref<string>) {
 
     // Shape (rate / delay / loss / pattern / transport_fault)
     setShape: (partial: Partial<Shape>) => patchShape.mutate(partial),
-    setRate: (rate_mbps: number) => patchShape.mutate({ rate_mbps }),
+    // setRate disarms any active throughput pattern — the rate slider and
+    // the pattern are mutually exclusive sources-of-truth for the kernel
+    // cap. Delay and loss are orthogonal axes that can coexist with a
+    // running pattern, so setDelay / setLoss DON'T touch pattern.
+    setRate: (rate_mbps: number) => patchShape.mutate({ rate_mbps, pattern: null as any }),
     setDelay: (delay_ms: number) => patchShape.mutate({ delay_ms }),
     setLoss: (loss_pct: number) => patchShape.mutate({ loss_pct }),
     setPattern: (pattern: Pattern | null) => patchShape.mutate({ pattern: pattern as any }),

@@ -35,18 +35,6 @@
                 },
                 "type": "object"
             },
-            "main.LinkSessionsRequest": {
-                "properties": {
-                    "session_ids": {
-                        "items": {
-                            "type": "string"
-                        },
-                        "type": "array",
-                        "uniqueItems": false
-                    }
-                },
-                "type": "object"
-            },
             "main.LossRequest": {
                 "properties": {
                     "loss_pct": {
@@ -57,6 +45,10 @@
             },
             "main.NetworkLogEntry": {
                 "properties": {
+                    "attempt_id": {
+                        "description": "AttemptID identifies which playback attempt within a play this\nrequest belongs to. The player initialises it to 1 on every\nnew play and increments by 1 at every `restart` event\n(user-reload OR auto-recovery), passing it as `?attempt_id=N`\non every URL. PlayID stays the same across these attempts;\nAttemptID ticks up. Lets analytics ask both \"how did this play\nperform\" (group by play_id) and \"how many recovery attempts\nwithin the play\" (max attempt_id GROUP BY play_id).",
+                        "type": "integer"
+                    },
                     "bytes_in": {
                         "type": "integer"
                     },
@@ -98,7 +90,7 @@
                         "type": "string"
                     },
                     "play_id": {
-                        "description": "PlayID identifies the playback episode this request belongs to.\nThe player generates a fresh UUID at every loadStream / reload\nand passes it as `?play_id=...` on every URL. HAR snapshots\nfilter by the current play_id by default, so a freeze 8 minutes\ninto a session shows just that play's network log instead of\nthe whole ring buffer. Issue #280.",
+                        "description": "PlayID identifies the playback episode this request belongs to.\nThe player generates a fresh UUID at every content-selection\nboundary (new video / fresh page-load / app launch) and passes\nit as `?play_id=...` on every URL. Stable across in-app restart\nevents (user-reload, auto-recovery). Issue #280.",
                         "type": "string"
                     },
                     "query_string": {
@@ -285,14 +277,6 @@
                     }
                 },
                 "type": "object"
-            },
-            "main.UnlinkSessionRequest": {
-                "properties": {
-                    "session_id": {
-                        "type": "string"
-                    }
-                },
-                "type": "object"
             }
         }
     },
@@ -337,44 +321,6 @@
                 "summary": "External IPs the harness is reachable from",
                 "tags": [
                     "diagnostics"
-                ]
-            }
-        },
-        "/api/failure-settings/{id}": {
-            "post": {
-                "deprecated": true,
-                "description": "Predates the PATCH envelope. Kept for backwards compat with older dashboard code.",
-                "parameters": [
-                    {
-                        "description": "session_id",
-                        "in": "path",
-                        "name": "id",
-                        "required": true,
-                        "schema": {
-                            "type": "string"
-                        }
-                    }
-                ],
-                "requestBody": {
-                    "content": {
-                        "text/plain": {
-                            "schema": {
-                                "title": "body",
-                                "type": "object"
-                            }
-                        }
-                    },
-                    "description": "fault settings",
-                    "required": true
-                },
-                "responses": {
-                    "200": {
-                        "description": "OK"
-                    }
-                },
-                "summary": "Legacy fault-settings POST (use PATCH instead)",
-                "tags": [
-                    "internal"
                 ]
             }
         },
@@ -635,89 +581,6 @@
                 ]
             }
         },
-        "/api/session-group/link": {
-            "post": {
-                "requestBody": {
-                    "content": {
-                        "application/json": {
-                            "schema": {
-                                "$ref": "#/components/schemas/main.LinkSessionsRequest",
-                                "summary": "body",
-                                "description": "{session_ids: [...]}"
-                            }
-                        }
-                    },
-                    "description": "{session_ids: [...]}",
-                    "required": true
-                },
-                "responses": {
-                    "200": {
-                        "description": "OK"
-                    }
-                },
-                "summary": "Link sessions into a fault-propagation group",
-                "tags": [
-                    "groups"
-                ]
-            }
-        },
-        "/api/session-group/unlink": {
-            "post": {
-                "requestBody": {
-                    "content": {
-                        "application/json": {
-                            "schema": {
-                                "$ref": "#/components/schemas/main.UnlinkSessionRequest",
-                                "summary": "body",
-                                "description": "{session_id}"
-                            }
-                        }
-                    },
-                    "description": "{session_id}",
-                    "required": true
-                },
-                "responses": {
-                    "200": {
-                        "description": "OK"
-                    }
-                },
-                "summary": "Unlink a session from its group",
-                "tags": [
-                    "groups"
-                ]
-            }
-        },
-        "/api/session-group/{groupId}": {
-            "get": {
-                "parameters": [
-                    {
-                        "description": "group id",
-                        "in": "path",
-                        "name": "groupId",
-                        "required": true,
-                        "schema": {
-                            "type": "string"
-                        }
-                    }
-                ],
-                "responses": {
-                    "200": {
-                        "content": {
-                            "application/json": {
-                                "schema": {
-                                    "type": "object"
-                                }
-                            }
-                        },
-                        "description": "OK"
-                    }
-                },
-                "summary": "Get a session group",
-                "tags": [
-                    "groups"
-                ]
-            }
-        },
         "/api/session/{id}": {
             "delete": {
                 "description": "Removes the session from the in-memory map and frees its dedicated proxy port.",
@@ -907,43 +770,6 @@
                 "summary": "Get one session's network ring buffer",
                 "tags": [
                     "network"
-                ]
-            }
-        },
-        "/api/session/{id}/update": {
-            "post": {
-                "deprecated": true,
-                "parameters": [
-                    {
-                        "description": "session_id",
-                        "in": "path",
-                        "name": "id",
-                        "required": true,
-                        "schema": {
-                            "type": "string"
-                        }
-                    }
-                ],
-                "requestBody": {
-                    "content": {
-                        "text/plain": {
-                            "schema": {
-                                "title": "body",
-                                "type": "object"
-                            }
-                        }
-                    },
-                    "description": "settings",
-                    "required": true
-                },
-                "responses": {
-                    "200": {
-                        "description": "OK"
-                    }
-                },
-                "summary": "Legacy session-update POST (use PATCH instead)",
-                "tags": [
-                    "internal"
                 ]
             }
         },

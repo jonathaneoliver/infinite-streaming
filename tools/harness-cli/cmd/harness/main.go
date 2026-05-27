@@ -67,6 +67,9 @@ Operator/CLI:
   finding add <target>         capture state+note into .claude/findings/
   procedure soak|abr-sweep|fault-soak <target>
                                multi-step composed test procedures
+  post characterization <file> upload a characterization-test report
+                               JSON to the forwarder (test framework
+                               calls this from WriteReport)
   info [--bundles]             healthz + info across both services
   raw <METHOD> <PATH>          escape hatch (no resolver, no checkpoint)
 
@@ -158,6 +161,8 @@ func main() {
 		exit(cmdFinding(client, args[1:], g.asJSON))
 	case "procedure":
 		exit(cmdProcedure(client, args[1:], g.asJSON))
+	case "post":
+		exit(cmdPost(client, args[1:], g.asJSON))
 	case "help", "--help", "-h":
 		fmt.Fprint(os.Stdout, usage)
 	default:

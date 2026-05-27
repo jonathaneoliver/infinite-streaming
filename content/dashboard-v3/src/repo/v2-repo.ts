@@ -254,6 +254,118 @@ export async function deleteFaultRule(
   );
 }
 
+// ----- Archived plays (forwarder side) -----
+
+/**
+ * Per-play summary row returned by /api/v2/plays. The full schema lives
+ * in api/openapi/v2/forwarder.yaml § PlaySummary; gen-types only pulls
+ * from proxy.yaml today, so the relevant fields are typed here. Extra
+ * server-side fields surface via index access without breaking the
+ * compile.
+ */
+export interface PlaySummary {
+  play_id: string;
+  player_id?: string;
+  session_id?: string;
+  group_id?: string;
+  content_id?: string;
+  attempt_id?: number;
+  attempt_count?: number;
+  started_at?: string;
+  last_seen_at?: string;
+  classification?: string;
+  last_state?: string;
+  last_player_error?: string;
+  metric_events?: number;
+  net_events?: number;
+  net_errors?: number;
+  net_faults?: number;
+  stalls?: number;
+  dropped_frames?: number;
+  master_manifest_failures?: number;
+  manifest_failures?: number;
+  segment_failures?: number;
+  all_failures?: number;
+  transport_failures?: number;
+  active_timeouts?: number;
+  idle_timeouts?: number;
+  bitrate_shifts?: number;
+  downshifts?: number;
+  upshifts?: number;
+  resolution_changes?: number;
+  avg_quality_pct?: number;
+  min_quality_pct?: number;
+  frames_displayed?: number;
+  first_frame_s?: number;
+  user_marked_count?: number;
+  frozen_count?: number;
+  segment_stall_count?: number;
+  restart_count?: number;
+  error_event_count?: number;
+  label_histogram?: [string, number][];
+  labels_total?: number;
+  labels_distinct_count?: number;
+  [k: string]: unknown;
+}
+
+export interface ListPlaysParams {
+  from?: string;
+  to?: string;
+  player_id?: string;
+  play_id?: string;
+  classification?: string;
+  limit?: number;
+}
+
+export async function listPlays(params: ListPlaysParams = {}): Promise<PlaySummary[]> {
+  const qs = new URLSearchParams();
+  for (const [k, v] of Object.entries(params)) {
+    if (v === undefined || v === null || v === '') continue;
+    qs.set(k, String(v));
+  }
+  const url = '/analytics/api/v2/plays' + (qs.toString() ? '?' + qs : '');
+  const { data } = await request<{ items: PlaySummary[]; next_cursor: unknown }>(url);
+  return data.items ?? [];
+}
+
+/**
+ * Fetch one archived play's summary. Returns null on 404 (the play
+ * hasn't archived any rows yet — common right after the live session
+ * ends but before the next forwarder flush). Other HTTP errors throw.
+ */
+export async function getPlay(playId: string): Promise<PlaySummary | null> {
+  try {
+    const { data } = await request<PlaySummary>(
+      `/analytics/api/v2/plays/${encodeURIComponent(playId)}`,
+    );
+    return data;
+  } catch (err) {
+    if (err instanceof RepoError && err.status === 404) return null;
+    throw err;
+  }
+}
+
+/**
+ * Update an archived play's tiered-retention classification (#342).
+ * `value` is one of: 'favourite' | 'interesting' | 'other' | 'auto'.
+ * 'auto' re-runs the auto-classifier server-side; the response body
+ * carries the settled value the caller should write back into cache.
+ */
+export async function patchPlayClassification(
+  playId: string,
+  value: 'favourite' | 'interesting' | 'other' | 'auto',
+): Promise<PlaySummary> {
+  const { data } = await request<PlaySummary>(
+    `/analytics/api/v2/plays/${encodeURIComponent(playId)}`,
+    {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/merge-patch+json' },
+      body: JSON.stringify({ classification: value }),
+    },
+  );
+  return data;
+}
+
 // ----- Network log -----
 
 export async function getPlayerNetworkLog(

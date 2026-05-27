@@ -30,7 +30,8 @@ add flags:
   --kind KINDS     comma-separated request_kind filter
                    (segment, partial, manifest, master_manifest,
                    init, audio_segment, audio_manifest)
-  --url-substr S   match URLs containing S (substring mode)
+  --url-substr S   match URLs containing S; comma-separated for multi-pattern
+                   (e.g. --url-substr 2160p,1440p,1080p)
   --url-regex R    match URLs matching R (regex mode)
   --frequency N    cadence numerator (default 1)
   --mode MODE      requests | seconds | failures_per_seconds
@@ -330,12 +331,31 @@ func buildFilter(kindCSV, urlSubstr, urlRegex string) (*proxy.FaultFilter, error
 		return nil, errors.New("--url-substr and --url-regex are mutually exclusive")
 	}
 	if urlSubstr != "" {
-		f.UrlMatch = &proxy.UrlMatch{Mode: proxy.Substring, Patterns: []string{urlSubstr}}
+		// Comma-separated → multi-pattern. v1's matcher OR's the list,
+		// so a single rule can scope to e.g. "2160p,1440p,1080p" and
+		// fault every video variant without touching audio.
+		patterns := splitTrimNonEmpty(urlSubstr)
+		if len(patterns) > 0 {
+			f.UrlMatch = &proxy.UrlMatch{Mode: proxy.Substring, Patterns: patterns}
+		}
 	}
 	if urlRegex != "" {
 		f.UrlMatch = &proxy.UrlMatch{Mode: proxy.Regex, Patterns: []string{urlRegex}}
 	}
 	return f, nil
+}
+
+// splitTrimNonEmpty parses a comma-separated string into its trimmed
+// non-empty entries. Used by --url-substr to accept multi-pattern
+// scoping in a single rule.
+func splitTrimNonEmpty(s string) []string {
+	out := []string{}
+	for _, p := range strings.Split(s, ",") {
+		if t := strings.TrimSpace(p); t != "" {
+			out = append(out, t)
+		}
+	}
+	return out
 }
 
 func matchRuleID(prefix string, rules *[]proxy.FaultRule) (string, error) {

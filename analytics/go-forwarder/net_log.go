@@ -2,8 +2,8 @@
 // /api/session/<id>/network endpoint for each live session, dedupes
 // against an in-memory fingerprint set, and batch-inserts new rows into
 // the ClickHouse network_requests table. The session-viewer UI reads
-// from /analytics/api/network_requests so the network log fold replays
-// even after the proxy has released the session.
+// from /api/v2/network_requests so the network log fold replays even
+// after the proxy has released the session.
 package main
 
 import (
@@ -527,41 +527,6 @@ func chQueryBytes(ctx context.Context, cfg config, query string, params map[stri
 		return nil, fmt.Errorf("clickhouse %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 	return body, nil
-}
-
-// reinflateNetRowJSON converts the JSONEachRow row from network_requests
-// into the shape the browser network log code expects. The three
-// columns request_headers / response_headers / query_string are stored
-// as JSON-encoded strings (so e.g. "[{\"name\":...}]" arrives as a
-// String), but the consumer wants actual arrays. We re-parse those
-// columns and splice them back in.
-func reinflateNetRowJSON(line []byte) []byte {
-	var raw map[string]json.RawMessage
-	if err := json.Unmarshal(line, &raw); err != nil {
-		return line
-	}
-	for _, key := range [...]string{"request_headers", "response_headers", "query_string"} {
-		val, ok := raw[key]
-		if !ok {
-			continue
-		}
-		// val is a JSON String containing JSON. Decode the outer string
-		// then re-emit the inner JSON as raw.
-		var inner string
-		if err := json.Unmarshal(val, &inner); err != nil {
-			continue
-		}
-		if inner == "" {
-			raw[key] = json.RawMessage("[]")
-			continue
-		}
-		raw[key] = json.RawMessage(inner)
-	}
-	out, err := json.Marshal(raw)
-	if err != nil {
-		return line
-	}
-	return out
 }
 
 func insertNet(ctx context.Context, cfg config, rows []netRow) error {

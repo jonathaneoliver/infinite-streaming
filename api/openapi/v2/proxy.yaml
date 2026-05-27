@@ -1470,8 +1470,8 @@ components:
           description: 'Default per-step duration the dashboard chose when generating the step list.'
         margin_pct:
           type: integer
-          enum: [0, 10, 25, 50]
-          description: 'Headroom percent above the top variant used when sizing template steps (0 = exact).'
+          enum: [0, 5, 10, 25, 50]
+          description: 'Headroom percent above the variant rate used when sizing template steps. 0 = exact (deliberate-stall footgun). 5 = default — covers TCP/IP + TLS 1.3 + HTTP/2 framing overhead on a LAN. 10 = real WiFi with retransmits. 25 / 50 = stress-test over-headroom.'
 
     PatternStep:
       type: object
@@ -1540,7 +1540,8 @@ components:
       required: [url, bandwidth, resolution]
       properties:
         url:        { type: string }
-        bandwidth:  { type: integer, description: bits per second }
+        bandwidth:  { type: integer, description: 'Peak segment bit rate of this variant in bits per second (HLS EXT-X-STREAM-INF BANDWIDTH attribute). Always present.' }
+        average_bandwidth: { type: integer, description: 'Average bit rate across the variant in bits per second (HLS AVERAGE-BANDWIDTH attribute). Optional — present when the source master playlist includes the attribute. Pattern-step generators should prefer this over BANDWIDTH where available, since it represents the long-term sustainable rate (BANDWIDTH is the peak).' }
         resolution: { type: string, description: 'WIDTHxHEIGHT' }
 
     PlayerMetrics:

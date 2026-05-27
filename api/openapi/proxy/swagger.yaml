@@ -22,14 +22,6 @@ components:
         value:
           type: string
       type: object
-    main.LinkSessionsRequest:
-      properties:
-        session_ids:
-          items:
-            type: string
-          type: array
-          uniqueItems: false
-      type: object
     main.LossRequest:
       properties:
         loss_pct:
@@ -37,6 +29,17 @@ components:
       type: object
     main.NetworkLogEntry:
       properties:
+        attempt_id:
+          description: |-
+            AttemptID identifies which playback attempt within a play this
+            request belongs to. The player initialises it to 1 on every
+            new play and increments by 1 at every `restart` event
+            (user-reload OR auto-recovery), passing it as `?attempt_id=N`
+            on every URL. PlayID stays the same across these attempts;
+            AttemptID ticks up. Lets analytics ask both "how did this play
+            perform" (group by play_id) and "how many recovery attempts
+            within the play" (max attempt_id GROUP BY play_id).
+          type: integer
         bytes_in:
           type: integer
         bytes_out:
@@ -81,11 +84,10 @@ components:
         play_id:
           description: |-
             PlayID identifies the playback episode this request belongs to.
-            The player generates a fresh UUID at every loadStream / reload
-            and passes it as `?play_id=...` on every URL. HAR snapshots
-            filter by the current play_id by default, so a freeze 8 minutes
-            into a session shows just that play's network log instead of
-            the whole ring buffer. Issue #280.
+            The player generates a fresh UUID at every content-selection
+            boundary (new video / fresh page-load / app launch) and passes
+            it as `?play_id=...` on every URL. Stable across in-app restart
+            events (user-reload, auto-recovery). Issue #280.
           type: string
         query_string:
           items:
@@ -226,11 +228,6 @@ components:
         rate_mbps:
           type: number
       type: object
-    main.UnlinkSessionRequest:
-      properties:
-        session_id:
-          type: string
-      type: object
 externalDocs:
   description: ""
   url: ""
@@ -265,32 +262,6 @@ paths:
       summary: External IPs the harness is reachable from
       tags:
       - diagnostics
-  /api/failure-settings/{id}:
-    post:
-      deprecated: true
-      description: Predates the PATCH envelope. Kept for backwards compat with older
-        dashboard code.
-      parameters:
-      - description: session_id
-        in: path
-        name: id
-        required: true
-        schema:
-          type: string
-      requestBody:
-        content:
-          text/plain:
-            schema:
-              title: body
-              type: object
-        description: fault settings
-        required: true
-      responses:
-        "200":
-          description: OK
-      summary: Legacy fault-settings POST (use PATCH instead)
-      tags:
-      - internal
   /api/network/stream:
     get:
       description: |-
@@ -460,59 +431,6 @@ paths:
       summary: Global nftables status
       tags:
       - shaping
-  /api/session-group/{groupId}:
-    get:
-      parameters:
-      - description: group id
-        in: path
-        name: groupId
-        required: true
-        schema:
-          type: string
-      responses:
-        "200":
-          content:
-            application/json:
-              schema:
-                type: object
-          description: OK
-      summary: Get a session group
-      tags:
-      - groups
-  /api/session-group/link:
-    post:
-      requestBody:
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/main.LinkSessionsRequest'
-              description: '{session_ids: [...]}'
-              summary: body
-        description: '{session_ids: [...]}'
-        required: true
-      responses:
-        "200":
-          description: OK
-      summary: Link sessions into a fault-propagation group
-      tags:
-      - groups
-  /api/session-group/unlink:
-    post:
-      requestBody:
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/main.UnlinkSessionRequest'
-              description: '{session_id}'
-              summary: body
-        description: '{session_id}'
-        required: true
-      responses:
-        "200":
-          description: OK
-      summary: Unlink a session from its group
-      tags:
-      - groups
   /api/session/{id}:
     delete:
       description: Removes the session from the in-memory map and frees its dedicated
@@ -641,30 +559,6 @@ paths:
       summary: Get one session's network ring buffer
       tags:
       - network
-  /api/session/{id}/update:
-    post:
-      deprecated: true
-      parameters:
-      - description: session_id
-        in: path
-        name: id
-        required: true
-        schema:
-          type: string
-      requestBody:
-        content:
-          text/plain:
-            schema:
-              title: body
-              type: object
-        description: settings
-        required: true
-      responses:
-        "200":
-          description: OK
-      summary: Legacy session-update POST (use PATCH instead)
-      tags:
-      - internal
   /api/sessions:
     get:
       responses:
