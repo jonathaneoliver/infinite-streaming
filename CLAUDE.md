@@ -74,6 +74,10 @@ Default server target for tests is `$K3S_HOST:30000/30081`. Override with `--hos
 - **Shell**: POSIX-friendly where possible
 - **JS/CSS/HTML**: keep changes explicit and readable
 
+## Timestamps in conversation
+
+Every conversational timestamp must show **both local AND UTC**: `HH:MM:SS LOCAL (HH:MM:SS UTC)`. Wire / storage / URLs stay UTC-only. Full rule + edge cases + macOS conversion command in [`.claude/standards/timestamp-display.md`](.claude/standards/timestamp-display.md) — the dashboard chat bot reads from the same file via `read_standard("timestamp-display")`, so update there to change both consumers in one place.
+
 ## Architecture
 
 ### Services (all run inside a single Docker container)

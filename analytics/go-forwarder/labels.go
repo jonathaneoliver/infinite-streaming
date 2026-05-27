@@ -166,7 +166,11 @@ func computeEventLabelsWithState(s *labelState, r *row) []string {
 	case "rate_shift_down":
 		return []string{SevInfo + "=shift_down"}
 	case "video_first_frame":
-		return []string{SevInfo + "=first_frame"}
+		labels := []string{SevInfo + "=first_frame"}
+		if l := videoStartupLabel(r.VideoFirstFrameTimeS); l != "" {
+			labels = append(labels, l)
+		}
+		return labels
 	case "video_start_time":
 		return []string{SevInfo + "=playback_start"}
 
@@ -273,6 +277,23 @@ func bufferingContext(ps *playLabelState, now time.Time) string {
 		return "scrub"
 	}
 	return "midplay"
+}
+
+// videoStartupLabel classifies player-reported time-to-first-frame.
+// Sits alongside the existing `info=first_frame` direct emission so a
+// slow cold-start surfaces both signals on the same row.
+//
+//   ttff > 4s  → error=*video_startup_severe
+//   ttff > 2s  → warning=*video_startup_long
+//   else       → "" (fast startup; only the info=first_frame chip lands)
+func videoStartupLabel(ttffS float32) string {
+	switch {
+	case ttffS > 4.0:
+		return SevError + "=" + synthMark + "video_startup_severe"
+	case ttffS > 2.0:
+		return SevWarning + "=" + synthMark + "video_startup_long"
+	}
+	return ""
 }
 
 func stallLabel(durS float64, ctx string) string {
