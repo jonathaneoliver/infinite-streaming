@@ -4,7 +4,8 @@ What the Apple HLS stack does differently from the spec — facts we've actually
 
 ## Reporting gaps
 
-- **`buffer_depth_s` is often 0 even during normal playback.** AVPlayer doesn't reliably expose a "seconds of buffer ahead of playhead" metric. Use `buffer_end_s` (most-distant loaded segment position) as the truer signal: if it doesn't advance, the player isn't ingesting new data, regardless of what `buffer_depth_s` says.
+- **`buffer_depth_s` is often 0 even during normal playback.** AVPlayer doesn't reliably expose a "seconds of buffer ahead of playhead" metric. Use `buffer_end_s` for liveness: if it doesn't advance, the player isn't ingesting new data, regardless of what `buffer_depth_s` says.
+- **`buffer_end_s` is ABSOLUTE playhead-time, NOT buffer depth.** It's the timeline position (in seconds from stream start) of the most-distant loaded segment — e.g. `972.4` means "we have segments loaded up to 972.4 s into the stream." It is NOT "we have 972.4 s of headroom." **Never compare `buffer_end_s` directly to a buffer-depth threshold like `>= 5.0`.** Either use `buffer_depth_s` for the threshold check, or compute depth yourself as `buffer_end_s - position_s`. Misusing this caused the startup characterization to log `reach5sbuf=0.4s` (a meaningless trivially-passing check) before the 2026-05-22 fix.
 - **`frames_displayed` is always 0 for HLS.** `AVAssetTrack.nominalFrameRate` returns 0 for HLS variants — there's no frame-count surface to report. Tracked in #147 (we read FRAME-RATE from the master playlist to fill this in). Don't use frames_displayed as a liveness signal on iOS.
 - **`stall_count` only counts `stall_start` events the player emitted explicitly.** It does NOT include the implicit stalls from `(frozen)` or `(segment)` taxonomy events — those come from server-side inference, not player notifications.
 

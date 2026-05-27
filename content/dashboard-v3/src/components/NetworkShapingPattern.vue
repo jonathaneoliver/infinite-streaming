@@ -19,7 +19,7 @@
  * via the same optimistic + revision-cursor pipeline. Slider drags
  * on individual step rates are debounced.
  */
-import { computed, ref, toRef } from 'vue';
+import { computed, ref, toRef, watch } from 'vue';
 import { usePlayer } from '@/composables/usePlayer';
 import { useManifestVariants } from '@/composables/useManifestVariants';
 import type { Pattern } from '@/repo/v2-repo';
@@ -39,8 +39,15 @@ function marginLabel(m: number): string {
   return m === 0 ? 'Exact' : `+${m}%`;
 }
 
-const MARGIN_CHOICES = [0, 10, 25, 50] as const;
+// 5% is the default: covers TCP/IP + TLS 1.3 + HTTP/2 framing overhead on a
+// LAN with no losses (~5% measured), so pattern step rates set at variant
+// AVERAGE-BANDWIDTH × 1.05 should keep the player playing without artificial
+// stalls. Bigger margins exist for real-WiFi (7-8%), bursty-loss (10%), or
+// "way over headroom" stress / pre-buffer tests (25-50%). "Exact" (0%) is
+// the deliberate-stall footgun.
+const MARGIN_CHOICES = [0, 5, 10, 25, 50] as const;
 type Margin = (typeof MARGIN_CHOICES)[number];
+const DEFAULT_MARGIN_PCT: Margin = 5;
 
 const STEP_SECONDS_CHOICES = [6, 12, 18, 24] as const;
 type StepSeconds = (typeof STEP_SECONDS_CHOICES)[number];
@@ -63,7 +70,7 @@ const activeTemplate = computed<Template>(() => {
 const margin = computed<Margin>(() => {
   const src = editMode.value ? draftPattern.value : pattern.value;
   const m = src?.margin_pct;
-  return (MARGIN_CHOICES as readonly number[]).includes(m as number) ? (m as Margin) : 0;
+  return (MARGIN_CHOICES as readonly number[]).includes(m as number) ? (m as Margin) : DEFAULT_MARGIN_PCT;
 });
 
 const defaultStepSeconds = computed<StepSeconds>(() => {
@@ -81,7 +88,8 @@ const sortedVariants = computed(() => {
 /** Preset choices for a single step row, including a synthetic "Custom"
  *  for any rate that doesn't match a variant rung exactly. Sources:
  *    - 0 Mbps (stall test)
- *    - each manifest variant @ current margin
+ *    - each manifest variant @ current margin (using AVERAGE-BANDWIDTH
+ *      when the playlist provided it, else falling back to BANDWIDTH)
  *    - +10% over top variant (deliberate over-headroom)
  */
 const stepPresets = computed<{ value: number; label: string }[]>(() => {
@@ -89,9 +97,15 @@ const stepPresets = computed<{ value: number; label: string }[]>(() => {
   items.push({ value: 0, label: '0 Mbps (stall)' });
   const m = margin.value;
   for (const v of sortedVariants.value) {
-    const mbps = Math.round(((v.bandwidth ?? 0) * (1 + m / 100)) / 1000) / 1000;
+    // Prefer AVERAGE-BANDWIDTH when present — the variant's long-term
+    // sustainable rate. BANDWIDTH (the HLS spec attribute) is the peak
+    // segment rate, typically 30-40% above AVERAGE for CBR encoders;
+    // using the peak gives every step ~35% of unwarranted headroom.
+    const baseBps = (v as any).average_bandwidth || v.bandwidth || 0;
+    const mbps = Math.round((baseBps * (1 + m / 100)) / 1000) / 1000;
     if (!Number.isFinite(mbps) || mbps <= 0) continue;
-    items.push({ value: mbps, label: `${v.resolution} · ${mbps.toFixed(2)} Mbps` });
+    const tag = (v as any).average_bandwidth ? '' : ' (peak)';
+    items.push({ value: mbps, label: `${v.resolution} · ${mbps.toFixed(2)} Mbps${tag}` });
   }
   const top = items[items.length - 1];
   if (top && top.value > 0) {
@@ -115,7 +129,11 @@ function onPresetChange(idx: number, e: Event) {
 /** Generate step rates from template + margin + variants. */
 function buildSteps(t: Template, marginPct: number, stepSecs: number): Pattern['steps'] {
   const rates = sortedVariants.value
-    .map((v) => Math.round(((v.bandwidth ?? 0) * (1 + marginPct / 100)) / 1000) / 1000) // bps → Mbps
+    .map((v) => {
+      // See stepPresets: prefer AVERAGE-BANDWIDTH, fall back to BANDWIDTH.
+      const baseBps = (v as any).average_bandwidth || v.bandwidth || 0;
+      return Math.round((baseBps * (1 + marginPct / 100)) / 1000) / 1000; // bps → Mbps
+    })
     .filter((r) => Number.isFinite(r) && r > 0);
   if (!rates.length) return [];
 
@@ -157,6 +175,23 @@ function buildSteps(t: Template, marginPct: number, stepSecs: number): Pattern['
 const draftPattern = ref<Pattern | null>(null);
 const editMode = ref(false);
 
+// Bail out of edit mode when the server-side pattern disappears beneath
+// us. Happens when the operator drives the rate / delay / loss sliders
+// (ShapeSliders.vue → setRate), runs `harness shape --rate N` from a
+// terminal, or hits "Clear shape" from a different surface. In all of
+// those flows the server clears `shape.pattern` to null; without this
+// watcher the pattern editor sticks open showing the stale draft and
+// the template selector stays on the disarmed template instead of
+// snapping back to "Sliders." Triggers only on the transition from
+// non-null → null so re-arming a pattern from elsewhere doesn't kick
+// the operator out of an active edit.
+watch(pattern, (now, prev) => {
+  if (prev != null && now == null && editMode.value) {
+    editMode.value = false;
+    draftPattern.value = null;
+  }
+});
+
 // What the UI binds to — draft when in edit mode, server otherwise.
 const editing = computed<Pattern | null>(() => editMode.value ? draftPattern.value : pattern.value);
 
@@ -187,9 +222,11 @@ function applyDraft() {
 function ensureDraft(): Pattern {
   if (!draftPattern.value) {
     // Seed an empty pattern using current margin / step seconds defaults.
+    // 5% margin is the default — covers protocol framing overhead so the
+    // bottom rung doesn't artificially stall the player.
     draftPattern.value = {
       template: 'ramp_up' as any,
-      margin_pct: 0,
+      margin_pct: DEFAULT_MARGIN_PCT as any,
       default_step_seconds: 6,
       steps: [],
     } as Pattern;

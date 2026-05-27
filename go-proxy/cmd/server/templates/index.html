@@ -335,7 +335,7 @@
 
                             // Fetch failure types from the server
                             $.ajax({
-                                url: `/api/failure-settings/${sessionId}`,
+                                url: `/api/session/${sessionId}`,
                                 method: 'GET',
                                 success: function(failureTypes) {
                                     $(`input[name="segment_failure_type_${sessionId}"][value="${failureTypes.segment_failure_type}"]`).prop('checked', true);
@@ -401,24 +401,25 @@
                 localStorage.setItem(`consecutive_failures_${sessionId}`, consecutiveFailures);
                 localStorage.setItem(`segment_failure_mode_${sessionId}`, segmentFailureMode);
 
+                const settings = {
+                    session_id: sessionId,
+                    segment_failure_type: segmentFailureType,
+                    manifest_failure_type: manifestFailureType,
+                    master_manifest_failure_type: masterManifestFailureType,
+                    segment_failure_frequency: segmentFailureFrequency,
+                    segment_consecutive_units: segmentConsecutiveUnits,
+                    segment_frequency_units: segmentFrequencyUnits,
+                    segment_failure_mode: segmentFailureMode,
+                    manifest_failure_frequency: manifestFailureFrequency,
+                    master_manifest_failure_frequency: masterManifestFailureFrequency,
+                    consecutive_failures: consecutiveFailures
+                };
                 $.ajax({
-                    // URL for the management interface
-                    url: `/api/failure-settings/${sessionId}`,
-                    method: 'POST',
+                    // PATCH /api/session/{id} consolidated v1 surface.
+                    url: `/api/session/${sessionId}`,
+                    method: 'PATCH',
                     contentType: 'application/json',
-                    data: JSON.stringify({
-                        session_id: sessionId,
-                        segment_failure_type: segmentFailureType,
-                            manifest_failure_type: manifestFailureType,
-                            master_manifest_failure_type: masterManifestFailureType,
-                        segment_failure_frequency: segmentFailureFrequency,
-                        segment_consecutive_units: segmentConsecutiveUnits,
-                        segment_frequency_units: segmentFrequencyUnits,
-                        segment_failure_mode: segmentFailureMode,
-                            manifest_failure_frequency: manifestFailureFrequency,
-                            master_manifest_failure_frequency: masterManifestFailureFrequency,
-                        consecutive_failures: consecutiveFailures
-                    }),
+                    data: JSON.stringify({ set: settings, fields: Object.keys(settings) }),
                     success: function(response) {
                         $('#message').text('');
                     },

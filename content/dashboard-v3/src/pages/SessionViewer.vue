@@ -13,35 +13,32 @@
  * routes display panels to the side-channel store in v2-repo instead
  * of the live `/api/v2/players` fetch.
  */
-import { ref, computed, onMounted } from 'vue';
+import { ref, computed } from 'vue';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/vue-query';
 import ShellLayout from '@/components/ShellLayout.vue';
 import SessionDisplay from '@/components/SessionDisplay.vue';
+import { parseTimeAny, canonicalUUID } from '@/composables/urlTimeFormat';
+import { getPlay, patchPlayClassification, type PlaySummary } from '@/repo/v2-repo';
 
 const qs = new URLSearchParams(window.location.search);
 // v3 canonical: identify an archived play by (player_id, play_id).
 // session_id was the legacy proxy-port handle — not needed here since
 // the v3 timeseries endpoint and the SSE pool both key by player_id.
-const playerId = ref<string>(qs.get('player_id') ?? '');
-const playId = ref<string | null>(qs.get('play_id'));
+// UUIDs are lowercased — CH stores them lowercase and iOS sometimes
+// emits uppercase (case_sensitivity_ids memory).
+const playerId = ref<string>(canonicalUUID(qs.get('player_id') ?? ''));
+const playId = ref<string | null>(qs.get('play_id') ? canonicalUUID(qs.get('play_id')!) : null);
 
-/** Initial time window. sessions.html passes start_time + end_time
- *  on the link so the viewer can scope its initial brush + SSE
- *  backfill without waiting for samples to land. end_time = "live"
- *  means "this play is still active — follow the live edge". */
-function parseIsoMs(v: string | null): number | null {
-  if (!v) return null;
-  const ms = Date.parse(v);
-  return Number.isFinite(ms) ? ms : null;
-}
-const startMs = ref<number | null>(parseIsoMs(qs.get('start_time')));
-const endTimeRaw = qs.get('end_time');
-// endMs = null sentinel means "follow live" — either an explicit
-// `live`/`now` value or simply absent.
-const endMs = ref<number | null>(
-  (endTimeRaw === 'live' || endTimeRaw === 'now')
-    ? null
-    : parseIsoMs(endTimeRaw),
-);
+/** Initial time window. New canonical param names are `from` / `to`
+ *  (shorter, no `:` in compact ISO → no `%3A` clutter). Legacy
+ *  `start_time` / `end_time` still accepted so already-copied links
+ *  keep working. parseTimeAny handles BOTH compact ISO basic
+ *  (`20260522T170417Z`) and traditional ISO (`2026-05-22T17:04:17Z`).
+ *
+ *  `to` absent OR `to=live`/`to=now` ⇒ follow live edge.
+ */
+const startMs = ref<number | null>(parseTimeAny(qs.get('from') ?? qs.get('start_time')));
+const endMs = ref<number | null>(parseTimeAny(qs.get('to') ?? qs.get('end_time')));
 
 /** "Show before/after" toggle. When ON, SessionDisplay drops the
  *  play_id filter on its SSE subscription and widens the time
@@ -53,20 +50,52 @@ const endMs = ref<number | null>(
 const showContext = ref<boolean>(false);
 function toggleShowContext() { showContext.value = !showContext.value; }
 
-// Starred state. Optimistically toggled on click, then synced from
-// the server response. Initial fetch in onMounted below.
-const starred = ref<boolean>(false);
-async function toggleStarred() {
+// Starred state — backed by TanStack so the optimistic flip, the
+// mutation rollback, and any future cache invalidations follow the
+// same contract as Sessions.vue / usePlayer.ts § makeGroupMutation.
+// No auto-refresh on this page, so cancelQueries is mostly defensive.
+const qc = useQueryClient();
+const playQueryKey = computed(() => ['play', playId.value] as const);
+const playQuery = useQuery<PlaySummary | null>({
+  queryKey: playQueryKey,
+  queryFn: () => getPlay(playId.value as string),
+  enabled: computed(() => !!playId.value),
+  // One-shot for the initial starred state; refetch on focus is
+  // enough — no point polling, this is a finished play.
+  refetchInterval: false,
+});
+const starred = computed<boolean>(
+  () => String(playQuery.data.value?.classification ?? '') === 'favourite',
+);
+
+const starMutation = useMutation({
+  mutationFn: (next: boolean) =>
+    patchPlayClassification(playId.value as string, next ? 'favourite' : 'auto'),
+  onMutate: async (next) => {
+    if (!playId.value) return { prev: undefined };
+    await qc.cancelQueries({ queryKey: playQueryKey.value });
+    const prev = qc.getQueryData<PlaySummary | null>(playQueryKey.value);
+    if (prev) {
+      qc.setQueryData<PlaySummary | null>(playQueryKey.value, {
+        ...prev,
+        classification: next ? 'favourite' : '',
+      });
+    }
+    return { prev };
+  },
+  onError: (_err, _vars, ctx) => {
+    if (ctx && 'prev' in ctx) {
+      qc.setQueryData(playQueryKey.value, ctx.prev);
+    }
+  },
+  onSuccess: (settled) => {
+    if (settled) qc.setQueryData(playQueryKey.value, settled);
+  },
+});
+
+function toggleStarred() {
   if (!playerId.value || !playId.value) return;
-  const next = !starred.value;
-  starred.value = next; // optimistic
-  try {
-    const url = `/analytics/api/sessions/${encodeURIComponent(playerId.value)}/${encodeURIComponent(playId.value)}/star`;
-    const resp = await fetch(url, { method: next ? 'POST' : 'DELETE' });
-    if (!resp.ok) throw new Error(`star ${resp.status}`);
-  } catch {
-    starred.value = !next; // rollback on failure
-  }
+  starMutation.mutate(!starred.value);
 }
 
 const bundleHref = computed(() => {
@@ -78,22 +107,9 @@ const bundleHref = computed(() => {
 });
 const backHref = '/dashboard/v3/sessions.html';
 
-onMounted(async () => {
-  // Look up the current starred state. The endpoint returns
-  // {"starred": true|false} (or 404 if the play hasn't been touched).
-  if (playerId.value && playId.value) {
-    try {
-      const url = `/analytics/api/sessions/${encodeURIComponent(playerId.value)}/${encodeURIComponent(playId.value)}/star`;
-      const resp = await fetch(url);
-      if (resp.ok) {
-        const j = await resp.json();
-        starred.value = !!j.starred;
-      }
-    } catch {
-      // Star lookup is non-essential; the toggle still works.
-    }
-  }
-});
+// (Initial starred-state lookup now lives in the playQuery above —
+// useQuery fires automatically when playId is set; the onMounted
+// fetch + try/catch is gone.)
 
 </script>
 

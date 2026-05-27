@@ -10,6 +10,8 @@ Default target: `https://dev.jeoliver.com:21000` (test-dev, public Let's Encrypt
 
 **Conventions:** this skill follows `.claude/skills/CONVENTIONS.md`. Most load-bearing for fault: every mutation is checkpoint-protected (`harness undo` rolls back); ALWAYS show current state (`harness fault list <t>`) before adding, removing, or clearing; lead every shell command with `harness`.
 
+**Wire-shape contract:** every fault type produces a SPECIFIC on-the-wire pattern that characterization tests interpret against. Before reasoning about what a fault DOES, read [`.claude/standards/fault-injection-wire-contract.md`](../../standards/fault-injection-wire-contract.md) — it documents the exact wire shape per fault AND the real-world failure mode each one models. Don't propose changes to `applySocketFault` or any fault-type case branch without reading that doc first.
+
 ## Always do this first
 
 Before any `fault add`, show the user what's already there:

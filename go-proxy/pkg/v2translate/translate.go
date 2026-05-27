@@ -567,6 +567,10 @@ func manifestVariantFromMap(m map[string]any) oapigen.ManifestVariant {
 	if v, ok := numericFloatTranslate(m["bandwidth"]); ok {
 		mv.Bandwidth = int(v)
 	}
+	if v, ok := numericFloatTranslate(m["average_bandwidth"]); ok && v > 0 {
+		ab := int(v)
+		mv.AverageBandwidth = &ab
+	}
 	if r, ok := m["resolution"].(string); ok {
 		mv.Resolution = r
 	}

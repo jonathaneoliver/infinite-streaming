@@ -22,7 +22,9 @@ Slider mode (any subset; omitted fields are not modified):
 Pattern mode (generates a step list from the player's current variants):
   --pattern NAME     pyramid | ramp_up | ramp_down | square_wave | sliders
   --step-seconds N   per-step duration: 6 | 12 | 18 | 24 (default 12)
-  --margin PCT       headroom above top variant: 0 | 10 | 25 | 50 (default 0)
+  --margin PCT       headroom above variant rate: 0 | 5 | 10 | 25 | 50 (default 5)
+                     5% covers TCP/IP+TLS+HTTP framing; 0% is a
+                     deliberate-stall footgun
   --clear-pattern    stop any running pattern (back to slider rate)
   --show-pattern     print current pattern + active step
 
@@ -58,7 +60,7 @@ func cmdShape(client *api.Client, args []string, asJSON bool) error {
 	loss := fs.Float64("loss", -1, "loss %")
 	pattern := fs.String("pattern", "", "pattern template (pyramid|ramp_up|ramp_down|square_wave|sliders)")
 	stepSeconds := fs.Int("step-seconds", 12, "per-step duration: 6|12|18|24")
-	margin := fs.Int("margin", 0, "headroom %% above top variant: 0|10|25|50")
+	margin := fs.Int("margin", 5, "headroom %% above variant rate: 0|5|10|25|50 (5 covers protocol overhead)")
 	clearPattern := fs.Bool("clear-pattern", false, "stop any running pattern")
 	showPattern := fs.Bool("show-pattern", false, "print current pattern, don't modify")
 	clear := fs.Bool("clear", false, "send {shape:null}")
@@ -168,11 +170,46 @@ func doClear(client *api.Client, ctx context.Context, pid string, asJSON bool,
 }
 
 func doSliderShape(client *api.Client, ctx context.Context, pid string, asJSON bool, rate, delay, loss float64) error {
-	shape := proxy.Shape{}
+	action := fmt.Sprintf("shape rate=%v delay=%v loss=%v", rate, delay, loss)
+
+	// Setting a static rate disarms any active throughput pattern —
+	// they're mutually exclusive sources-of-truth for the kernel cap.
+	// Delay and loss are orthogonal axes that can coexist with a
+	// running pattern, so they don't need explicit pattern-null.
+	//
+	// We can't express the rate-clears-pattern semantic through the
+	// typed proxy.Shape struct because Pattern has `omitempty` and a
+	// nil pointer would just be dropped from the JSON, leaving the
+	// pattern running. So when --rate is set we build the body as a
+	// map and use PatchShapeMap (same trick ClearShape uses for the
+	// {"shape": null} merge-patch sentinel).
 	if rate >= 0 {
-		v := float32(rate)
-		shape.RateMbps = &v
+		shape := map[string]any{
+			"rate_mbps": rate,
+			"pattern":   nil,
+		}
+		if delay >= 0 {
+			shape["delay_ms"] = delay
+		}
+		if loss >= 0 {
+			shape["loss_pct"] = loss
+		}
+		newETag, err := client.PatchShapeMap(ctx, pid, action, shape)
+		if err != nil {
+			return err
+		}
+		if asJSON {
+			return format.JSON(os.Stdout, map[string]any{
+				"player_id": pid, "shape": shape, "etag": newETag,
+			})
+		}
+		fmt.Printf("patched shape on %s (etag %s)\n", pid, shortRev(newETag))
+		return nil
 	}
+
+	// Rate not set — only delay / loss being adjusted. Pattern (if any)
+	// stays armed. Use the typed PatchShape path.
+	shape := proxy.Shape{}
 	if delay >= 0 {
 		v := float32(delay)
 		shape.DelayMs = &v
@@ -181,7 +218,6 @@ func doSliderShape(client *api.Client, ctx context.Context, pid string, asJSON b
 		v := float32(loss)
 		shape.LossPct = &v
 	}
-	action := fmt.Sprintf("shape rate=%v delay=%v loss=%v", rate, delay, loss)
 	newETag, err := client.PatchShape(ctx, pid, action, &shape)
 	if err != nil {
 		return err
@@ -251,12 +287,7 @@ func doPattern(client *api.Client, ctx context.Context, pid string, asJSON bool,
 	}
 	rates, err := variantRatesMbps(rec, marginPct)
 	if err != nil {
-		// Typed v2 path empty — fall back to legacy /api/sessions.
-		fallback, ferr := variantRatesFromLegacySessions(client, ctx, pid, marginPct)
-		if ferr != nil {
-			return fmt.Errorf("%v; legacy fallback also failed: %v", err, ferr)
-		}
-		rates = fallback
+		return err
 	}
 
 	steps := buildPatternSteps(tpl, rates, stepSecs)
@@ -314,10 +345,10 @@ func parseStepSeconds(n int) (proxy.PatternDefaultStepSeconds, error) {
 
 func parseMarginPct(n int) (proxy.PatternMarginPct, error) {
 	switch n {
-	case 0, 10, 25, 50:
+	case 0, 5, 10, 25, 50:
 		return proxy.PatternMarginPct(n), nil
 	}
-	return 0, fmt.Errorf("invalid --margin %d: must be 0|10|25|50", n)
+	return 0, fmt.Errorf("invalid --margin %d: must be 0|5|10|25|50", n)
 }
 
 // variantRatesMbps pulls the player's manifest variants, applies the
@@ -334,9 +365,19 @@ func variantRatesMbps(rec *proxy.PlayerRecord, marginPct int) ([]float32, error)
 	}
 	rates := make([]float32, 0, len(variants))
 	for _, v := range variants {
+		// Prefer AVERAGE-BANDWIDTH when the source playlist provided
+		// it — the variant's long-term sustainable rate, which is the
+		// honest minimum for "this variant should play smoothly."
+		// BANDWIDTH (per HLS spec) is the peak segment rate, which is
+		// 30–40% higher than AVERAGE for typical CBR encoders. Using
+		// the peak gives every step ~35% of unwarranted headroom.
+		bps := float32(v.Bandwidth)
+		if v.AverageBandwidth != nil && *v.AverageBandwidth > 0 {
+			bps = float32(*v.AverageBandwidth)
+		}
 		// Same shape as dashboard's buildSteps: bps × (1 + margin) / 1000
 		// rounded to 3 dp.
-		mbps := float32(v.Bandwidth) * (1 + float32(marginPct)/100) / 1_000_000
+		mbps := bps * (1 + float32(marginPct)/100) / 1_000_000
 		if mbps > 0 {
 			rates = append(rates, roundFloat32(mbps, 3))
 		}
@@ -345,71 +386,6 @@ func variantRatesMbps(rec *proxy.PlayerRecord, marginPct int) ([]float32, error)
 		return nil, errors.New("manifest_variants present but all bandwidths zero")
 	}
 	// Sort ascending for the build algorithm.
-	for i := 1; i < len(rates); i++ {
-		for j := i; j > 0 && rates[j-1] > rates[j]; j-- {
-			rates[j-1], rates[j] = rates[j], rates[j-1]
-		}
-	}
-	return rates, nil
-}
-
-// variantRatesFromLegacySessions queries the v1 `/api/sessions` array
-// directly and pulls `manifest_variants` for the matching player.
-// Bypasses the v2 projection's gap — the legacy endpoint always
-// carries the raw session map, which has `manifest_variants` whenever
-// the master playlist has been fetched.
-func variantRatesFromLegacySessions(client *api.Client, ctx context.Context, pid string, marginPct int) ([]float32, error) {
-	body, err := client.Raw(ctx, "GET", "/api/sessions", nil)
-	if err != nil {
-		return nil, fmt.Errorf("legacy /api/sessions fetch failed: %w", err)
-	}
-	// /api/sessions returns a JSON array of session maps. Find the
-	// entry whose `headers_player-ID` (case-sensitive, iOS-uppercase)
-	// or `player_id` matches our canonical lowercase pid.
-	var sessions []map[string]any
-	if err := jsonDecodeSlice(body, &sessions); err != nil {
-		return nil, fmt.Errorf("parse /api/sessions: %w", err)
-	}
-	want := strings.ToLower(pid)
-	for _, s := range sessions {
-		for _, key := range []string{"player_id", "headers_player-ID", "headers_player_id", "headers_x_playback_session_id"} {
-			v, _ := s[key].(string)
-			if v != "" && strings.ToLower(v) == want {
-				return manifestVariantsFromMap(s, marginPct)
-			}
-		}
-	}
-	return nil, fmt.Errorf("no /api/sessions entry matches player %s", pid)
-}
-
-// manifestVariantsFromMap pulls `manifest_variants` out of a session
-// map and applies the margin %, returning the sorted rate list. Same
-// shape as variantRatesMbps but operating on a v1-style raw map.
-func manifestVariantsFromMap(s map[string]any, marginPct int) ([]float32, error) {
-	raw, ok := s["manifest_variants"]
-	if !ok || raw == nil {
-		return nil, errors.New("manifest_variants missing on session")
-	}
-	arr, ok := raw.([]any)
-	if !ok {
-		return nil, fmt.Errorf("manifest_variants is %T, want []any", raw)
-	}
-	rates := make([]float32, 0, len(arr))
-	for _, e := range arr {
-		obj, ok := e.(map[string]any)
-		if !ok {
-			continue
-		}
-		bw, _ := obj["bandwidth"].(float64)
-		if bw <= 0 {
-			continue
-		}
-		mbps := float32(bw) * (1 + float32(marginPct)/100) / 1_000_000
-		rates = append(rates, roundFloat32(mbps, 3))
-	}
-	if len(rates) == 0 {
-		return nil, errors.New("manifest_variants present but all bandwidths zero or non-numeric")
-	}
 	for i := 1; i < len(rates); i++ {
 		for j := i; j > 0 && rates[j-1] > rates[j]; j-- {
 			rates[j-1], rates[j] = rates[j], rates[j-1]

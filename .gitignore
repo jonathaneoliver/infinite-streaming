@@ -66,6 +66,10 @@ analytics/go-forwarder/go-forwarder
 tests/.hls_failure_probe_last_failed
 tests/integration/test_run.log
 
+# Characterization framework artifacts (per-run JSON/MD/HTML reports)
+tests/characterization/artifacts/
+tests/characterization/modes/artifacts/
+
 # Xcode user state
 apple/InfiniteStreamPlayer/InfiniteStreamPlayer.xcodeproj/project.xcworkspace/xcuserdata/
 
@@ -78,3 +82,15 @@ apple/InfiniteStreamPlayer/InfiniteStreamPlayer.xcodeproj/project.xcworkspace/xc
 # content/dashboard/v3/ during make build).
 content/dashboard/v3/
 content/dashboard-v3/node_modules/
+
+# Per-user Claude Code local state. `.claude/agents/`, `.claude/findings/`,
+# `.claude/skills/`, `.claude/standards/` are tracked (shared knowledge);
+# everything else under `.claude/` is per-machine / per-session and
+# shouldn't be committed.
+.claude/claude
+.claude/memory/
+.claude/plans/
+.claude/scheduled_tasks.lock
+.claude/screenshots/
+.claude/settings.json
+.claude/worktrees/

@@ -41,11 +41,16 @@ struct PlaybackScreen: View {
             VStack {
                 HStack(spacing: Space.s3) {
                     BackChevronButton { onBack() }
+                        .accessibilityIdentifier("playback-back-button")
                     Spacer()
                     iconButton(systemName: "arrow.clockwise") { vm.retry() }
+                        .accessibilityIdentifier("playback-retry-button")
                     iconButton(systemName: "arrow.triangle.2.circlepath") { vm.reload() }
+                        .accessibilityIdentifier("playback-reload-button")
                     iconButton(systemName: "exclamationmark.triangle.fill") { vm.mark911() }
+                        .accessibilityIdentifier("playback-911-button")
                     iconButton(systemName: "gearshape") { vm.setSettingsOpen(true) }
+                        .accessibilityIdentifier("playback-settings-button")
                 }
                 .padding(Space.s4)
                 Spacer()

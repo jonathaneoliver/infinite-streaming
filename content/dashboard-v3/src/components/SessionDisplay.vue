@@ -39,6 +39,7 @@ import FPSChart from '@/components/FPSChart.vue';
 import NetworkLog from '@/components/NetworkLog.vue';
 import PlayLog from '@/components/PlayLog.vue';
 import BitrateChartPanelToolbar from '@/components/BitrateChartPanelToolbar.vue';
+import CycleBandsRail from '@/components/CycleBandsRail.vue';
 import { useChartCoordination } from '@/composables/useChartCoordination';
 // Issue #474 Milestone C: session_markers retired. The severity filter
 // derives its event list from `labels[]` on rows across all three
@@ -253,6 +254,18 @@ const toMsRef = computed<number | null>(() => {
   // bound on the SSE backfill, regardless of showContext.
   if (props.endMs == null) return null;
   return props.showContext ? props.endMs + CONTEXT_PAD_MS : props.endMs;
+});
+
+/** Resolved [fromMs, toMs] for the CycleBandsRail. When toMsRef is
+ *  null (follow-live), use Date.now() as the upper bound so bands
+ *  still render. Rail renders nothing when either bound is missing
+ *  (covers the initial-load case before bounds settle). */
+const cycleBandsDomain = computed<{ fromMs: number; toMs: number } | null>(() => {
+  const from = fromMsRef.value;
+  if (from == null) return null;
+  const to = toMsRef.value ?? Date.now();
+  if (to <= from) return null;
+  return { fromMs: from, toMs: to };
 });
 
 const timeseries = useSessionTimeSeries(
@@ -1230,6 +1243,16 @@ function skipToEnd() {
     </CollapsibleSection>
 
     <CollapsibleSection title="Player State" :open="true" eager persist-key="player-state">
+      <!-- Cycle-band overlay — visible only when control_events for
+           this play include at least one label_changed row carrying
+           a cycle_id (characterization runs only). Aligned with the
+           SSE backfill window. -->
+      <CycleBandsRail
+        v-if="cycleBandsDomain"
+        :control-stream="timeseries.control"
+        :from-ms="cycleBandsDomain.fromMs"
+        :to-ms="cycleBandsDomain.toMs"
+      />
       <EventsTimeline :player-id="archivePlayerId" :events-stream="timeseries.events" />
     </CollapsibleSection>
 

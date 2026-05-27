@@ -460,9 +460,10 @@ def wait_for_transport_active(api_base, session_id, timeout=6, verbose=False):
 
 
 def apply_failure_settings(api_base, session_id, payload, verbose=False):
-    """Apply failure settings to session."""
-    url = f"{api_base}/api/failure-settings/{session_id}"
-    return api_request_json(url, method="POST", payload=payload, timeout=10, verbose=verbose)
+    """Apply failure settings to session via PATCH /api/session/{id}."""
+    url = f"{api_base}/api/session/{session_id}"
+    envelope = {"set": payload, "fields": list(payload.keys())}
+    return api_request_json(url, method="PATCH", payload=envelope, timeout=10, verbose=verbose)
 
 
 def apply_shaping(api_base, port, rate_mbps, delay_ms=0, loss_pct=0.0, verbose=False):

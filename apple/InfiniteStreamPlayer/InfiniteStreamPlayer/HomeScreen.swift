@@ -39,6 +39,20 @@ struct HomeScreen: View {
         }
         .background(Tokens.bg.ignoresSafeArea())
         .onAppear { vm.fetchContentList() }
+        // Hidden accessibility node carrying the persistent player_id
+        // so the characterization test framework can read it via
+        // Appium BEFORE tapping Continue Watching. With the id in hand,
+        // the test applies the shape cap to the right player_id pre-
+        // playback, eliminating the cold-start variant-pick race that
+        // wedged rampup step 1 on first-launch devices. See plan:
+        // ~/.claude/plans/cold-start-shape-cap-race-fix.md.
+        .overlay(alignment: .topLeading) {
+            Text(vm.playerId)
+                .frame(width: 0, height: 0)
+                .opacity(0)
+                .accessibilityIdentifier("home-player-id")
+                .accessibilityValue(vm.playerId)
+        }
     }
 
     /// Top-of-screen header: brand label + serif title on the left,
@@ -170,6 +184,13 @@ private struct ContinueWatchingHero: View {
                     vm.setSelectedContent(item.name)
                     onPlay()
                 }
+                // Stable handle for UI automation (Appium / XCUITest).
+                // The id is the same across the Continue Watching and the
+                // Now Playing rendering — the tile is always "what would
+                // resume if you tap me." Combined with isButton trait so
+                // XCUITest treats it as a tap target, not a generic view.
+                .accessibilityIdentifier("home-continue-watching")
+                .accessibilityAddTraits(.isButton)
             }
         }
     }
@@ -310,6 +331,13 @@ private struct LiveRow: View {
                                         }
                                     }
                                     .id(item.id)
+                                    // Accessibility identifier per tile so the
+                                    // characterization framework can tap a
+                                    // specific content tile by clip_id (used
+                                    // by the startup test's channel_change
+                                    // mode — see
+                                    // .claude/standards/startup-characterization-test.md).
+                                    .accessibilityIdentifier("home-tile-\(item.clipId)")
                                 }
                             }
                         }
