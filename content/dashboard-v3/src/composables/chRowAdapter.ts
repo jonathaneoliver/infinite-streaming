@@ -56,6 +56,24 @@ export function chRowToPlayerRecord(row: Record<string, unknown>): PlayerRecord 
     stall_time_s: num(row.stall_time_s),
     first_frame_time_s: num(row.video_first_frame_time_s),
     video_start_time_s: num(row.video_start_time_s),
+    // panel_v1 bundle additions — populated only when the request
+    // included the panel_v1 bundle (testing.html + session-viewer).
+    // Without this bundle these columns aren't projected and the
+    // PlayerMetrics panel shows "—" for fields the data actually has.
+    // `source` is the dashboard label for CH's `metrics_source`.
+    last_event: typeof row.last_event === 'string' ? row.last_event : null,
+    trigger_type: typeof row.trigger_type === 'string' ? row.trigger_type : null,
+    position_s: num(row.position_s),
+    playback_rate: num(row.playback_rate),
+    seekable_end_s: num(row.seekable_end_s),
+    live_edge_s: num(row.live_edge_s),
+    source: typeof row.metrics_source === 'string' ? row.metrics_source : null,
+    loop_count_player: num(row.loop_count_player),
+    last_stall_time_s: num(row.last_stall_time_s),
+    video_quality_pct: num(row.video_quality_pct),
+    playhead_wallclock_ms: num(row.playhead_wallclock_ms),
+    player_restarts: num(row.player_restarts),
+    profile_shift_count: num(row.profile_shift_count),
   } as PlayerRecord['player_metrics'];
 
   const serverMetrics = {

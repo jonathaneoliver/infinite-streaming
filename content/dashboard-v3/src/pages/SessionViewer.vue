@@ -17,8 +17,11 @@ import { ref, computed } from 'vue';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/vue-query';
 import ShellLayout from '@/components/ShellLayout.vue';
 import SessionDisplay from '@/components/SessionDisplay.vue';
+import ChatPanel from '@/components/chat/ChatPanel.vue';
 import { parseTimeAny, canonicalUUID } from '@/composables/urlTimeFormat';
 import { getPlay, patchPlayClassification, type PlaySummary } from '@/repo/v2-repo';
+import { useChartCoordination } from '@/composables/useChartCoordination';
+import type { ChatScope } from '@/types/chat';
 
 const qs = new URLSearchParams(window.location.search);
 // v3 canonical: identify an archived play by (player_id, play_id).
@@ -39,6 +42,39 @@ const playId = ref<string | null>(qs.get('play_id') ? canonicalUUID(qs.get('play
  */
 const startMs = ref<number | null>(parseTimeAny(qs.get('from') ?? qs.get('start_time')));
 const endMs = ref<number | null>(parseTimeAny(qs.get('to') ?? qs.get('end_time')));
+
+/** Same per-player coord instance SessionDisplay uses. Reading
+ *  effectiveRange here gives us the live brush window for the AI
+ *  chat scope — no event plumbing, both components read the same
+ *  module-level reactive state by playerId. */
+const coord = useChartCoordination(playerId);
+
+/** Brush-vs-full-play detection. If the brush covers the whole
+ *  play (or play bounds aren't known yet), treat as scope='play';
+ *  if it's a strict subset, scope='range' with from/to so the
+ *  bot's system-prompt preamble flips to "focus on this window".
+ *  Tolerance handles tiny rounding gaps between the brush extent
+ *  and the play's started_at / last_seen_at. */
+const BRUSH_FULL_TOLERANCE_MS = 1500;
+const chatScope = computed<ChatScope>(() => {
+  if (!playId.value || !playerId.value) return { kind: 'fleet' };
+  const brush = coord.effectiveRange.value;
+  const summary = playQuery.data.value;
+  const playStart = summary?.started_at ? Date.parse(summary.started_at) : NaN;
+  const playEnd = summary?.last_seen_at ? Date.parse(summary.last_seen_at) : NaN;
+  const isFullPlay = !Number.isFinite(playStart) || !Number.isFinite(playEnd)
+    || (brush.min <= playStart + BRUSH_FULL_TOLERANCE_MS && brush.max >= playEnd - BRUSH_FULL_TOLERANCE_MS);
+  if (isFullPlay) {
+    return { kind: 'play', play_id: playId.value, player_id: playerId.value };
+  }
+  return {
+    kind: 'range',
+    play_id: playId.value,
+    player_id: playerId.value,
+    from: new Date(brush.min).toISOString(),
+    to: new Date(brush.max).toISOString(),
+  };
+});
 
 /** "Show before/after" toggle. When ON, SessionDisplay drops the
  *  play_id filter on its SSE subscription and widens the time
@@ -186,15 +222,62 @@ const backHref = '/dashboard/v3/sessions.html';
         </template>
       </main>
     </div>
+
+    <!-- AI chat side panel — scope reflects the chart's brush.
+         When the brush covers the full play, scope is
+         {kind: 'play'}; when the brush is a strict subset,
+         scope is {kind: 'range', from, to} so the bot focuses
+         on events inside that window. SessionViewer and
+         SessionDisplay share the same useChartCoordination
+         instance (keyed by player_id), so brushRange is
+         reactive without any event plumbing. -->
+    <Teleport to="body">
+      <div class="chat-dock" v-if="playId && playerId">
+        <ChatPanel
+          :scope="chatScope"
+          :scope-key="`viewer:${playId}`"
+          variant="panel"
+          :start-collapsed="true"
+        />
+      </div>
+    </Teleport>
   </ShellLayout>
 </template>
 
+<style>
+/* Unscoped — Teleport-to-body element needs the parent style applied
+   directly. Pinned to the right edge, full viewport height below the
+   header. Same pattern as Sessions.vue. */
+.chat-dock {
+  position: fixed;
+  top: var(--header-height, 64px);
+  right: 0;
+  bottom: 0;
+  z-index: 50;
+  box-shadow: var(--shadow-md);
+  background: #fff;
+}
+</style>
+
 <style scoped>
-.page { display: flex; }
+.page { display: flex; min-width: 0; }
 .content {
   padding: 14px 20px;
   margin: 0 auto;
   flex: 1;
+  /* min-width: 0 — flex items default to min-width: auto, which
+     lets intrinsic child widths (timeline/chart canvases sized to
+     their original viewport) push the item past its flex parent.
+     Setting min-width: 0 lets flex shrink .content to its parent's
+     bounds when the AI panel reduces available space. */
+  min-width: 0;
+  /* overflow-x: hidden — safety net for any grand-child (a Chart.js
+     canvas, vis-timeline) that still renders at an explicit pixel
+     width bigger than .content. Without this they'd bleed past
+     .content's right edge into the AI dock area. Charts that need
+     to be readable at narrow widths should observe their container
+     and call .resize() — this is a clip, not a layout fix for them. */
+  overflow-x: hidden;
 }
 .header-title { font-size: 16px; font-weight: 600; }
 

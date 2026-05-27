@@ -16,6 +16,8 @@
 import { computed, ref, onMounted } from 'vue';
 import ShellLayout from '@/components/ShellLayout.vue';
 import SessionViewerLink from '@/components/SessionViewerLink.vue';
+import ChatPanel from '@/components/chat/ChatPanel.vue';
+import type { ChatScope } from '@/types/chat';
 
 type TestName = 'rampup' | 'rampdown' | 'pyramid' | 'abort' | 'startup';
 const TEST_NAMES: TestName[] = ['rampup', 'rampdown', 'pyramid', 'abort', 'startup'];
@@ -193,10 +195,25 @@ interface StepRow {
   hold_actual_s?: number;
   min_buffer_s?: number;
   max_buffer_s?: number;
+  // Buffer envelope endpoints — first / last sample's buffer in the
+  // step's [started_at, ended_at] window. With min/max above, the
+  // four-tuple paints the full per-step buffer story without
+  // opening the session viewer.
+  buffer_at_start_s?: number;
+  buffer_at_end_s?: number;
   stalls_delta?: number;
   shifts_delta?: number;
-  bitrate_min_mbps?: number;
-  bitrate_max_mbps?: number;
+  // Per-step bandwidth aggregates. Mean is the average across samples;
+  // max is the peak. Both video (what the player picked) and network
+  // (what the proxy delivered) are reported separately.
+  mean_bitrate_mbps?: number;
+  max_bitrate_mbps?: number;
+  mean_network_bitrate_mbps?: number;
+  max_network_bitrate_mbps?: number;
+  // Optional explicit window — populated by the Go runner; stepWindow
+  // derives cumulatively from report.started_at + prior steps' hold
+  // when absent.
+  started_at?: string;
 }
 
 interface AbortCycleRow {
@@ -267,6 +284,24 @@ interface ReportBlob {
 
 // Per-card expand state + cache. Map key = (run_id, test_name).
 const expandedSteps = ref<Map<string, { open: boolean; report?: ReportBlob; loading?: boolean; error?: string }>>(new Map());
+
+// Chat scope: narrows to a single (run_id, test_name) when exactly
+// one Details card is expanded. If zero or 2+ cards are open the
+// chat falls back to characterization-fleet scope so the bot reasons
+// about the whole page.
+const chatScope = computed<ChatScope>(() => {
+  const open: { run_id: string; test_name: string }[] = [];
+  for (const [key, entry] of expandedSteps.value.entries()) {
+    if (entry.open) {
+      const [run_id, test_name] = key.split('|');
+      open.push({ run_id, test_name });
+    }
+  }
+  if (open.length === 1) {
+    return { kind: 'characterization', run_id: open[0].run_id, test_name: open[0].test_name };
+  }
+  return { kind: 'characterization' };
+});
 
 async function toggleSteps(runID: string, testName: TestName) {
   const key = charRunKey(runID, testName);
@@ -423,6 +458,38 @@ function startupCycleWindow(c: StartupCycleRow): { startMs: number; endMs: numbe
 function abortCycleWindow(c: AbortCycleRow): { startMs: number; endMs: number } {
   const startMs = c.armed_at ? Date.parse(c.armed_at) : NaN;
   return { startMs, endMs: startMs + ABORT_OBSERVE_WINDOW_MS };
+}
+
+// stepWindow derives the [startMs, endMs] for a single step in a
+// non-cycle-style test (rampup / rampdown / pyramid). Steps don't
+// carry explicit timestamps in older runner output, so fall back to
+// cumulative hold-time from report.started_at:
+//   step[0].start  = report.started_at
+//   step[i].start  = report.started_at + sum(steps[0..i-1].hold_actual_s)
+//   step[i].end    = step[i].start + step[i].hold_actual_s
+// Inaccurate by whatever overhead the runner has between steps
+// (variant probe, settle wait, etc.) — close enough for a viewer
+// pre-roll. The runner can ship a per-step started_at later and
+// this helper transparently prefers it.
+function stepWindow(report: ReportBlob, stepIdx: number): { startMs: number; endMs: number } {
+  const steps = report.steps ?? [];
+  const s = steps[stepIdx];
+  if (!s) return { startMs: NaN, endMs: NaN };
+  let startMs: number;
+  if (s.started_at) {
+    startMs = Date.parse(s.started_at);
+  } else {
+    const reportStart = report.started_at ? Date.parse(report.started_at) : NaN;
+    if (!Number.isFinite(reportStart)) return { startMs: NaN, endMs: NaN };
+    let offsetMs = 0;
+    for (let i = 0; i < stepIdx; i++) {
+      const prev = steps[i];
+      offsetMs += ((prev?.hold_actual_s ?? prev?.hold_s ?? 0)) * 1000;
+    }
+    startMs = reportStart + offsetMs;
+  }
+  const holdMs = ((s.hold_actual_s ?? s.hold_s ?? 0)) * 1000;
+  return { startMs, endMs: startMs + holdMs };
 }
 </script>
 
@@ -857,7 +924,17 @@ function abortCycleWindow(c: AbortCycleRow): { startMs: number; endMs: number } 
                     <table class="steps-table">
                       <thead>
                         <tr>
-                          <th>#</th><th>cap</th><th>variant</th><th>exit</th><th>held</th><th>min/max buf</th><th>stalls</th><th>shifts</th>
+                          <th>#</th>
+                          <th>cap</th>
+                          <th>variant</th>
+                          <th>exit</th>
+                          <th>held</th>
+                          <th title="start / min / max / end buffer (s)">buffer s/m/M/e</th>
+                          <th title="video bitrate: avg / peak (Mbps)">video bw</th>
+                          <th title="network throughput: avg / peak (Mbps)">net bw</th>
+                          <th>stalls</th>
+                          <th>shifts</th>
+                          <th>view</th>
                         </tr>
                       </thead>
                       <tbody>
@@ -867,9 +944,28 @@ function abortCycleWindow(c: AbortCycleRow): { startMs: number; endMs: number } 
                           <td class="mono">{{ s.variant?.resolution ?? '—' }} <span v-if="s.variant?.margin_pct != null" class="muted">{{ fmtPct(s.variant!.margin_pct) }}</span></td>
                           <td>{{ s.exit_reason ?? '—' }}</td>
                           <td>{{ fmtSeconds(s.hold_actual_s ?? s.hold_s) }}</td>
-                          <td>{{ s.min_buffer_s?.toFixed(1) ?? '—' }} / {{ s.max_buffer_s?.toFixed(1) ?? '—' }}</td>
+                          <td class="mono">
+                            {{ s.buffer_at_start_s != null ? s.buffer_at_start_s!.toFixed(1) : '—' }} /
+                            {{ s.min_buffer_s != null ? s.min_buffer_s!.toFixed(1) : '—' }} /
+                            {{ s.max_buffer_s != null ? s.max_buffer_s!.toFixed(1) : '—' }} /
+                            {{ s.buffer_at_end_s != null ? s.buffer_at_end_s!.toFixed(1) : '—' }}
+                          </td>
+                          <td class="mono">
+                            {{ s.mean_bitrate_mbps != null ? s.mean_bitrate_mbps!.toFixed(2) : '—' }}<span class="muted"> / </span>{{ s.max_bitrate_mbps != null ? s.max_bitrate_mbps!.toFixed(2) : '—' }}
+                          </td>
+                          <td class="mono">
+                            {{ s.mean_network_bitrate_mbps != null ? s.mean_network_bitrate_mbps!.toFixed(2) : '—' }}<span class="muted"> / </span>{{ s.max_network_bitrate_mbps != null ? s.max_network_bitrate_mbps!.toFixed(2) : '—' }}
+                          </td>
                           <td>{{ s.stalls_delta ?? 0 }}</td>
                           <td>{{ s.shifts_delta ?? 0 }}</td>
+                          <td>
+                            <SessionViewerLink
+                              :player-id="expandedSteps.get(charRunKey(g.run_id, t))!.report!.player_id ?? ''"
+                              :play-id="expandedSteps.get(charRunKey(g.run_id, t))!.report!.play_ids?.[0]"
+                              :start-ms="stepWindow(expandedSteps.get(charRunKey(g.run_id, t))!.report!, i).startMs"
+                              :end-ms="stepWindow(expandedSteps.get(charRunKey(g.run_id, t))!.report!, i).endMs"
+                            />
+                          </td>
                         </tr>
                       </tbody>
                     </table>
@@ -882,8 +978,32 @@ function abortCycleWindow(c: AbortCycleRow): { startMs: number; endMs: number } 
         </div>
       </div>
     </main>
+    <Teleport to="body">
+      <div class="chat-dock">
+        <ChatPanel
+          :scope="chatScope"
+          scope-key="characterization:fleet"
+          variant="panel"
+          :start-collapsed="true"
+        />
+      </div>
+    </Teleport>
   </ShellLayout>
 </template>
+
+<style>
+/* Unscoped — Teleport-to-body element needs the parent style applied
+   directly. Same pattern as Sessions.vue / SessionViewer.vue. */
+.chat-dock {
+  position: fixed;
+  top: var(--header-height, 64px);
+  right: 0;
+  bottom: 0;
+  z-index: 50;
+  box-shadow: var(--shadow-md);
+  background: #fff;
+}
+</style>
 
 <style scoped>
 /* Light-theme palette to match Sessions.vue. Reads var(--bg-*, …)

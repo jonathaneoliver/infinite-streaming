@@ -14,9 +14,14 @@ services:
     user: "0:0"
     volumes:
       - ${CONTENT_DIR:-./sample-content}:/media
+      # Mounted to match the forwarder's /claude mount so this init
+      # can pre-create + chmod the subdirs the forwarder (distroless
+      # nonroot UID 65532) needs to write into. Host source comes
+      # from FORWARDER_CLAUDE_DIR_HOST; defaults match the forwarder.
+      - ${FORWARDER_CLAUDE_DIR_HOST:-./.claude}:/claude
     command: >-
-      sh -c "mkdir -p /media/logs /media/grafana &&
-             chmod 0777 /media/logs /media/grafana"
+      sh -c "mkdir -p /media/logs /media/grafana /claude/chats &&
+             chmod 0777 /media/logs /media/grafana /claude/chats"
     restart: "no"
     networks:
       - app_network
@@ -132,12 +137,30 @@ services:
       # chmods /media/logs to 0777 so the forwarder's distroless nonroot
       # user (UID 65532) can write.
       - ${CONTENT_DIR:-./sample-content}:/media
+      # Project knowledge layer for the AI chat backend's Tier 2
+      # tools (read_finding / read_standard / read_skill /
+      # read_conventions) and propose_finding write target. Override
+      # the host path with FORWARDER_CLAUDE_DIR_HOST; defaults to
+      # the test-dev convention `./` + .claude. The container always
+      # sees it at /claude so FORWARDER_CLAUDE_DIR env var (below)
+      # can be a fixed value regardless of host layout.
+      - ${FORWARDER_CLAUDE_DIR_HOST:-./.claude}:/claude
     environment:
       - FORWARDER_SSE_URL=http://go-server:30081/api/sessions/stream
       - FORWARDER_CLICKHOUSE_URL=http://clickhouse:8123
       - FORWARDER_CLICKHOUSE_DB=infinite_streaming
       - FORWARDER_CLICKHOUSE_TABLE=session_events
       - FORWARDER_LOG_FILE=/media/logs/forwarder.log
+      - FORWARDER_CLAUDE_DIR=/claude
+      # Per-template base_url overrides for the AI chat catalog
+      # (#497). Lets a deploy point local-server templates (Ollama,
+      # LiteLLM, MLX, …) at a real LAN address instead of the
+      # container's localhost. Pattern:
+      # FORWARDER_LLM_BASE_URL_<TEMPLATE_NAME_UPPERCASED>. See
+      # llm_profiles.go applyEnvBaseURLOverrides.
+      - FORWARDER_LLM_BASE_URL_OLLAMA=${FORWARDER_LLM_BASE_URL_OLLAMA:-}
+      - FORWARDER_LLM_BASE_URL_MLX_LOCAL=${FORWARDER_LLM_BASE_URL_MLX_LOCAL:-}
+      - FORWARDER_LLM_BASE_URL_CHATGPT_VIA_LITELLM=${FORWARDER_LLM_BASE_URL_CHATGPT_VIA_LITELLM:-}
     depends_on:
       clickhouse:
         condition: service_started

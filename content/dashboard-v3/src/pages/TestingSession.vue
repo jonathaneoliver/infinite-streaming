@@ -27,6 +27,8 @@ import StatusBanners from '@/components/StatusBanners.vue';
 // historical via player_id directly against the forwarder — no
 // client-side session lookup needed.
 import SessionDisplay from '@/components/SessionDisplay.vue';
+import ChatPanel from '@/components/chat/ChatPanel.vue';
+import type { ChatScope } from '@/types/chat';
 
 const params = useUrlSearchParams<{ player_id?: string; url?: string }>('history');
 const playerId = computed(() => params.player_id ?? '');
@@ -89,6 +91,20 @@ const displayId = computed<string>(() => {
   const n = player.value?.display_id;
   return typeof n === 'number' ? `#${n}` : '';
 });
+
+// AI chat scope — testing-session kind so the bot reads the
+// harness-cli + fault-injection-wire-contract standards before
+// recommending faults/shaping. session_id is the proxy port handle
+// the operator is mutating; PlayerRecord on the v2 wire doesn't
+// expose it (server-side only), so we pass display_id as a proxy
+// stringified — the bot mostly uses it as a tag for the system
+// prompt's "this session" framing rather than for tool calls.
+const chatScope = computed<ChatScope>(() => ({
+  kind: 'testing-session',
+  player_id: playerId.value || undefined,
+  session_id: typeof player.value?.display_id === 'number'
+    ? String(player.value.display_id) : undefined,
+}));
 
 </script>
 
@@ -197,8 +213,33 @@ const displayId = computed<string>(() => {
       </template>
       </main>
     </div>
+    <Teleport to="body">
+      <div class="chat-dock" v-if="playerId">
+        <ChatPanel
+          :scope="chatScope"
+          :scope-key="`testing-session:${playerId}`"
+          variant="panel"
+          :start-collapsed="true"
+        />
+      </div>
+    </Teleport>
   </ShellLayout>
 </template>
+
+<style>
+/* Unscoped — Teleport-to-body element needs the parent style applied
+   directly. Same pattern as SessionViewer.vue / Sessions.vue /
+   Characterization.vue. */
+.chat-dock {
+  position: fixed;
+  top: var(--header-height, 64px);
+  right: 0;
+  bottom: 0;
+  z-index: 50;
+  box-shadow: var(--shadow-md);
+  background: #fff;
+}
+</style>
 
 <style scoped>
 .page {

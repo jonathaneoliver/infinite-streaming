@@ -1,0 +1,201 @@
+# Profile catalog for the AI chat backend (#497).
+#
+# Each template declares a base_url + a list of supported models with
+# pricing. The forwarder ships this file as read-only catalog data;
+# users pick a template + model in the dashboard's chat settings and
+# supply their own api_key (browser localStorage). The forwarder never
+# stores keys — it's a stateless proxy that passes the user's key on
+# each upstream call.
+#
+# Adding a new template here is a YAML edit + forwarder reload — no
+# code change required.
+#
+# Pricing fields are USD-per-1M-tokens. When a user picks a model
+# whose pricing isn't listed (e.g. they typed a custom Ollama model
+# name not in the catalog), the ledger records cost_usd = -1
+# ("unknown") and the global budget guard treats it as free. Set
+# FORWARDER_LLM_BUDGET_USD = 0 to refuse all calls including
+# unknown-pricing ones.
+
+templates:
+  - name: anthropic-claude
+    label: "Anthropic Claude (API)"
+    # Anthropic's OAI-compat endpoint is /v1/ — the OpenAI SDK
+    # appends /chat/completions giving /v1/chat/completions.
+    # (Not /v1/openai/ — that returns 404.)
+    # https://platform.claude.com/docs/en/api/openai-sdk
+    base_url: "https://api.anthropic.com/v1/"
+    requires_api_key: true
+    api_key_help: "Get an API key from console.anthropic.com → API Keys"
+    supports_tools: true
+    models:
+      - id: "claude-opus-4-7"
+        label: "Claude Opus 4.7 (most capable)"
+        pricing:
+          input_per_mtok: 15.00
+          output_per_mtok: 75.00
+        context_window: 200000
+      - id: "claude-sonnet-4-6"
+        label: "Claude Sonnet 4.6 (fast, balanced)"
+        pricing:
+          input_per_mtok: 3.00
+          output_per_mtok: 15.00
+        context_window: 200000
+      - id: "claude-haiku-4-5"
+        label: "Claude Haiku 4.5 (cheapest)"
+        pricing:
+          input_per_mtok: 1.00
+          output_per_mtok: 5.00
+        context_window: 200000
+
+  - name: huggingface
+    label: "HuggingFace Inference Providers"
+    base_url: "https://router.huggingface.co/v1"
+    requires_api_key: true
+    api_key_help: "Get a token from huggingface.co/settings/tokens (read access). Prices vary by which backend HF routes to (Together / Fireworks / Novita); listed values are typical defaults — check actual cost in the ledger after the first run."
+    supports_tools: true
+    models:
+      # Qwen3-Coder-Next — best tool-use behaviour at the cheapest
+      # hosted rate. Recommended default for our chat backend.
+      - id: "Qwen/Qwen3-Coder-Next"
+        label: "Qwen3 Coder Next — best tool use, cheapest"
+        pricing:
+          input_per_mtok: 0.11
+          output_per_mtok: 0.80
+        context_window: 1000000
+      # Qwen3-Coder 480B MoE — flagship. Slightly more expensive than
+      # Next but stronger on long-horizon reasoning.
+      - id: "Qwen/Qwen3-Coder-480B-A35B-Instruct"
+        label: "Qwen3 Coder 480B MoE — flagship agentic"
+        pricing:
+          input_per_mtok: 0.22
+          output_per_mtok: 0.90
+        context_window: 256000
+      # Qwen3-Coder 30B MoE — same architecture as the 480B flagship
+      # but trained smaller; tighter context cost vs Next.
+      - id: "Qwen/Qwen3-Coder-30B-A3B-Instruct"
+        label: "Qwen3 Coder 30B-A3B MoE"
+        pricing:
+          input_per_mtok: 0.15
+          output_per_mtok: 0.60
+        context_window: 256000
+      # Qwen2.5-Coder 32B — older generation; useful comparison
+      # baseline for the 3-series.
+      - id: "Qwen/Qwen2.5-Coder-32B-Instruct"
+        label: "Qwen2.5 Coder 32B Instruct"
+        pricing:
+          input_per_mtok: 0.66
+          output_per_mtok: 0.80
+        context_window: 131072
+      - id: "meta-llama/Llama-3.3-70B-Instruct"
+        label: "Llama 3.3 70B Instruct"
+        pricing:
+          input_per_mtok: 0.88
+          output_per_mtok: 0.88
+        context_window: 131072
+      - id: "Qwen/Qwen2.5-72B-Instruct"
+        label: "Qwen 2.5 72B Instruct"
+        pricing:
+          input_per_mtok: 0.90
+          output_per_mtok: 0.90
+        context_window: 131072
+
+  - name: ollama
+    label: "Local Ollama"
+    base_url: "http://localhost:11434/v1"
+    requires_api_key: false
+    api_key_help: "No API key needed; ensure Ollama is running locally. The dashboard discovers installed models via /v1/models — if discovery fails with CORS, set OLLAMA_ORIGINS to the dashboard's origin and restart Ollama."
+    supports_tools: true
+    models:
+      - id: "llama3.1:70b"
+        label: "Llama 3.1 70B"
+        pricing:
+          input_per_mtok: 0
+          output_per_mtok: 0
+        context_window: 131072
+      - id: "qwen2.5:72b"
+        label: "Qwen 2.5 72B"
+        pricing:
+          input_per_mtok: 0
+          output_per_mtok: 0
+        context_window: 131072
+
+  # Local MLX server (`mlx_lm.server`). Faster than Ollama on Apple
+  # Silicon — bypasses llama.cpp/GGUF and uses Metal directly.
+  # Launch on the operator's Mac:
+  #   mlx_lm.server --model mlx-community/Qwen3-Coder-8B-Instruct-4bit \
+  #                 --host 0.0.0.0 --port 8080
+  # Then set FORWARDER_LLM_BASE_URL_MLX_LOCAL=http://<mac-lan-ip>:8080/v1
+  # in the test-dev .env (mDNS doesn't resolve inside Docker, so
+  # use the LAN IP not <hostname>.local).
+  - name: mlx-local
+    label: "Local MLX (mlx_lm.server)"
+    base_url: "http://localhost:8080/v1"
+    requires_api_key: false
+    api_key_help: "No API key needed; ensure mlx_lm.server is running locally with --host 0.0.0.0. Override the base URL via FORWARDER_LLM_BASE_URL_MLX_LOCAL or per-browser in chat settings if MLX is on a remote Mac."
+    supports_tools: true
+    models:
+      # Qwen2.5 Coder 7B — dense, ~4 GB on disk, ~5 min download.
+      # Best starter model for verifying the MLX wiring; Qwen 3
+      # Coder series doesn't have an 8B-class variant on mlx-community.
+      - id: "mlx-community/Qwen2.5-Coder-7B-Instruct-4bit"
+        label: "Qwen2.5 Coder 7B (4bit, MLX) — fast"
+        pricing:
+          input_per_mtok: 0
+          output_per_mtok: 0
+        context_window: 131072
+      # Qwen3 Coder 30B MoE — 3B active per token, ~17 GB on disk.
+      # Best tool-use behaviour at near-3B-dense speed. Requires
+      # ≥24 GB unified memory.
+      - id: "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit"
+        label: "Qwen3 Coder 30B-A3B MoE (4bit, MLX) — best tool use"
+        pricing:
+          input_per_mtok: 0
+          output_per_mtok: 0
+        context_window: 256000
+      - id: "mlx-community/Qwen3-Coder-Next-4bit"
+        label: "Qwen3 Coder Next (4bit, MLX) — latest agentic"
+        pricing:
+          input_per_mtok: 0
+          output_per_mtok: 0
+        context_window: 1000000
+
+  # ChatGPT subscription via LiteLLM's OAuth device flow. LiteLLM
+  # holds the OAuth token and exposes the subscription-accessible
+  # models (gpt-5.4, gpt-5.4-pro, gpt-5.3-codex, …) as OAI-compat.
+  # Run LiteLLM locally (`litellm --chatgpt-login`, then
+  # `litellm --port 4000`) and the dashboard's /v1/models discovery
+  # will populate the dropdown with whatever models the subscription
+  # tier exposes.
+  #
+  # Pricing is zero from the forwarder's perspective — the calls
+  # bill against the ChatGPT subscription's flat-rate quota, not
+  # per-token. The cost ledger records 0 USD for these calls; the
+  # global budget cap is still enforced as a safety rail.
+  - name: chatgpt-via-litellm
+    label: "ChatGPT subscription (via LiteLLM)"
+    base_url: "http://localhost:4000/v1"
+    requires_api_key: false
+    api_key_help: "Run `litellm --chatgpt-login` on the box that runs the browser to authenticate via OAuth; then `litellm --port 4000`. LiteLLM caches the token and exposes the subscription-bound models as OAI-compat. Tool-use across LiteLLM's Responses-API bridge is not yet verified; pick a non-Codex model if you see tool_call regressions."
+    supports_tools: true
+    models:
+      - id: "chatgpt/gpt-5.4"
+        label: "GPT-5.4 (flagship, subscription)"
+        pricing:
+          input_per_mtok: 0
+          output_per_mtok: 0
+      - id: "chatgpt/gpt-5.4-pro"
+        label: "GPT-5.4 Pro (Pro subscription only)"
+        pricing:
+          input_per_mtok: 0
+          output_per_mtok: 0
+      - id: "chatgpt/gpt-5.3-codex"
+        label: "GPT-5.3 Codex"
+        pricing:
+          input_per_mtok: 0
+          output_per_mtok: 0
+      - id: "chatgpt/gpt-5.3-instant"
+        label: "GPT-5.3 Instant"
+        pricing:
+          input_per_mtok: 0
+          output_per_mtok: 0
