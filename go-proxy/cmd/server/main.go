@@ -5442,53 +5442,48 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 		updateSessionTraffic(sessionData, requestBytes, 0)
 		sessionList[index] = sessionData
 		a.saveSessionList(sessionList)
+		status := http.StatusInternalServerError
 		switch failureType {
 		case "404":
 			actionTaken = "http_404"
-			w.WriteHeader(http.StatusNotFound)
+			status = http.StatusNotFound
 		case "403":
 			actionTaken = "http_403"
-			w.WriteHeader(http.StatusForbidden)
+			status = http.StatusForbidden
 		case "500":
 			actionTaken = "http_500"
-			w.WriteHeader(http.StatusInternalServerError)
+			status = http.StatusInternalServerError
 		case "timeout":
 			actionTaken = "http_504_timeout"
-			w.WriteHeader(http.StatusGatewayTimeout)
+			status = http.StatusGatewayTimeout
 		case "connection_refused":
 			actionTaken = "http_503_connection_refused"
-			w.WriteHeader(http.StatusServiceUnavailable)
+			status = http.StatusServiceUnavailable
 		case "dns_failure":
 			actionTaken = "http_502_dns_failure"
-			w.WriteHeader(http.StatusBadGateway)
+			status = http.StatusBadGateway
 		case "rate_limiting":
 			actionTaken = "http_429_rate_limited"
-			w.WriteHeader(http.StatusTooManyRequests)
+			status = http.StatusTooManyRequests
 		default:
-			actionTaken = "http_500_unknown_failure"
-			w.WriteHeader(http.StatusInternalServerError)
+			// Generic numeric status: any 4xx/5xx code passed as the
+			// failure type (e.g. "503", "429") is honored directly, with
+			// its standard reason phrase. This removes the silent-500
+			// footgun where an unlisted numeric type fell through to 500.
+			// Non-numeric / out-of-range types still fall back to 500.
+			if code, err := strconv.Atoi(failureType); err == nil && code >= 400 && code <= 599 {
+				actionTaken = "http_" + failureType
+				status = code
+			} else {
+				actionTaken = "http_500_unknown_failure"
+				status = http.StatusInternalServerError
+			}
 		}
+		w.WriteHeader(status)
 		bumpFaultCounter(sessionData, failureType)
 		logFaultEvent(sessionData, externalPort, failureType, requestKind, actionTaken)
 		// Log network entry for HTTP faults
 		sessionID := getString(sessionData, "session_id")
-		status := http.StatusInternalServerError
-		switch actionTaken {
-		case "http_404":
-			status = http.StatusNotFound
-		case "http_403":
-			status = http.StatusForbidden
-		case "http_500":
-			status = http.StatusInternalServerError
-		case "http_504_timeout":
-			status = http.StatusGatewayTimeout
-		case "http_503_connection_refused":
-			status = http.StatusServiceUnavailable
-		case "http_502_dns_failure":
-			status = http.StatusBadGateway
-		case "http_429_rate_limited":
-			status = http.StatusTooManyRequests
-		}
 		netEntry := createFaultLogEntry(playerURL, upstreamURL, requestKind, failureType, actionTaken, status, requestBytes, requestReceivedAt)
 		stampNetMeta(&netEntry, requestHeaders, queryString, nil)
 		logEntry(sessionID,netEntry)
