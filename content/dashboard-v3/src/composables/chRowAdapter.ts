@@ -120,6 +120,16 @@ export function chRowToPlayerRecord(row: Record<string, unknown>): PlayerRecord 
     pattern_step_runtime: num(row.nftables_pattern_step),
   };
 
+  // Synthesise a minimal raw_session so accessors that read v1-shape
+  // fields (e.g. BandwidthChart's "Effective Limit" reading
+  // `raw_session.effective_rate_limit_mbps`) work uniformly across
+  // the live and archive code paths. Add only the fields actually
+  // consumed — full passthrough would inflate every CH row's footprint
+  // in the chart memory.
+  const rawSession = {
+    effective_rate_limit_mbps: num(row.effective_rate_limit_mbps),
+  };
+
   return {
     id: typeof row.player_id === 'string' ? row.player_id : '',
     last_seen_at: typeof row.event_time === 'string' ? row.event_time
@@ -130,6 +140,7 @@ export function chRowToPlayerRecord(row: Record<string, unknown>): PlayerRecord 
     loop_count_server: num(row.loop_count_server),
     control_revision: row.control_revision == null ? undefined : String(row.control_revision),
     shape,
+    raw_session: rawSession,
     // current_play.manifest.* isn't persisted per-snapshot; EventsTimeline
     // reads manifest_variants directly out of the raw CH row.
   } as unknown as PlayerRecord;

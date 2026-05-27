@@ -799,7 +799,8 @@ Captured from the live dashboard; files live in [`docs/screenshots/`](docs/scree
 **Subsystems:**
 - [`go-live/IMPLEMENTATION_SUMMARY.md`](go-live/IMPLEMENTATION_SUMMARY.md), [`go-live/PLAN.md`](go-live/PLAN.md)
 - [`analytics/README.md`](analytics/README.md) — analytics sidecar (ClickHouse + Grafana + replay mode)
-- [`tests/integration/README.md`](tests/integration/README.md), [`tests/integration/PLAYER_CHARACTERIZATION_PYTEST.md`](tests/integration/PLAYER_CHARACTERIZATION_PYTEST.md)
+- [`tests/server_behavior/`](tests/server_behavior/) + [`.claude/standards/server-behavior.md`](.claude/standards/server-behavior.md) — Go server-behavior tests + calibration baselines
+- [`tests/characterization/README.md`](tests/characterization/README.md) — Go player ABR characterization framework
 
 ---
 

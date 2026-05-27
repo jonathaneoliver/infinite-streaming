@@ -335,8 +335,8 @@ client-set, mutable via PATCH (Merge Patch semantics — present key upserts,
 
 ```yaml
 labels:
-  test:        tests/integration/test_abr.py::test_downshift_under_loss
-  pytest_run:  2026-05-08T05:00:00Z
+  test:        tests/characterization/modes/downshift_severity_test.go::TestDownshiftSeverity
+  run_at:      2026-05-08T05:00:00Z
   branch:      feat/claude-skills-437
   fixture:     insane-fpv-shots
 ```

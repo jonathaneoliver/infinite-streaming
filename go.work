@@ -13,5 +13,6 @@ use (
 	./analytics/go-forwarder
 	./go-proxy
 	./tests/characterization
+	./tests/server_behavior
 	./tools/harness-cli
 )

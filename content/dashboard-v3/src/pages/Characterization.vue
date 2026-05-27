@@ -84,6 +84,7 @@ interface CharRunSummary {
   highest_stalling_cap_mbps?: number;
   bottom_variant_floor_mbps?: number;
   variant_sample_counts?: number[];
+  headline?: string; // server_* runs: one-line summary
 }
 const charRuns = ref<Map<string, CharRunRow & { summary?: CharRunSummary }>>(new Map());
 
@@ -405,6 +406,75 @@ const grouped = computed<RunGroup[]>(() => {
     .sort((a, b) => (a.earliest < b.earliest ? 1 : -1)); // newest first
 });
 
+// --- Server checks (platform=server) ---------------------------------------
+// Server-behavior tests (tests/server_behavior) post characterization_runs
+// rows with platform="server" and a generic `server_matrix` in the report
+// (they have no ABR ramp steps). They're surfaced here as their own section,
+// driven straight from charRuns rather than labeled plays.
+interface ServerMatrix {
+  title?: string;
+  columns?: string[];
+  rows?: string[][];
+}
+interface ServerRunCard {
+  test_name: string;
+  passed: boolean;
+  headline: string;
+}
+interface ServerRunGroup {
+  run_id: string;
+  earliest: string;
+  latest: string;
+  cards: ServerRunCard[];
+}
+
+const serverRuns = computed<ServerRunGroup[]>(() => {
+  const byRun = new Map<string, ServerRunGroup>();
+  for (const row of charRuns.value.values()) {
+    if (row.platform !== 'server') continue;
+    const started = row.started_at_str ?? '';
+    let g = byRun.get(row.run_id);
+    if (!g) {
+      g = { run_id: row.run_id, earliest: started, latest: row.ended_at_str ?? started, cards: [] };
+      byRun.set(row.run_id, g);
+    }
+    if (started && started < g.earliest) g.earliest = started;
+    const end = row.ended_at_str ?? started;
+    if (end > g.latest) g.latest = end;
+    g.cards.push({ test_name: row.test_name, passed: row.passed === 1, headline: row.summary?.headline ?? '' });
+  }
+  for (const g of byRun.values()) g.cards.sort((a, b) => (a.test_name < b.test_name ? -1 : 1));
+  return Array.from(byRun.values()).sort((a, b) => (a.earliest < b.earliest ? 1 : -1));
+});
+
+const serverExpanded = ref<Map<string, { open: boolean; loading?: boolean; matrix?: ServerMatrix; error?: string }>>(new Map());
+function serverDetail(runID: string, testName: string) {
+  return serverExpanded.value.get(charRunKey(runID, testName));
+}
+async function toggleServerDetail(runID: string, testName: string) {
+  const key = charRunKey(runID, testName);
+  const m = new Map(serverExpanded.value);
+  const cur = m.get(key);
+  if (cur?.open) { m.set(key, { ...cur, open: false }); serverExpanded.value = m; return; }
+  if (cur?.matrix) { m.set(key, { ...cur, open: true }); serverExpanded.value = m; return; }
+  m.set(key, { open: true, loading: true });
+  serverExpanded.value = m;
+  try {
+    const resp = await fetch(`/analytics/api/v2/characterization-runs/${encodeURIComponent(runID)}/${encodeURIComponent(testName)}`);
+    if (!resp.ok) throw new Error(`detail fetch ${resp.status}`);
+    const row = await resp.json();
+    let matrix: ServerMatrix | undefined;
+    if (row?.report_json) { try { matrix = JSON.parse(row.report_json).server_matrix; } catch { matrix = undefined; } }
+    const m2 = new Map(serverExpanded.value);
+    m2.set(key, { open: true, matrix, loading: false });
+    serverExpanded.value = m2;
+  } catch (e: any) {
+    const m2 = new Map(serverExpanded.value);
+    m2.set(key, { open: true, loading: false, error: String(e?.message ?? e) });
+    serverExpanded.value = m2;
+  }
+}
+
 function shortRunID(runID: string): string {
   // run_id is a UTC timestamp the test framework stamps at start, e.g.
   // "20260521T155558Z". Convert to the browser's local timezone for
@@ -512,6 +582,73 @@ function stepWindow(report: ReportBlob, stepIdx: number): { startMs: number; end
   -run <span class="muted">TestStartupIPadSim</span> \
   -timeout 30m -count=1 -launch-mode=appium</pre>
           Available <code>-run</code> values: <code>TestStartupIPadSim</code>, <code>TestAbortIPadSim</code>, <code>TestRampupIPadSim</code> (and <code>IPhone</code>, <code>AppleTV</code>, <code>AndroidTV</code>, <code>Web</code> variants per test). The run uploads its report via <code>harness post characterization</code> and lands here within a few seconds.
+        </div>
+      </div>
+
+      <div class="panel" v-if="serverRuns.length > 0">
+        <div class="panel-header">
+          <div class="panel-title">
+            Server checks
+            <span class="status-message">{{ serverRuns.length }} run<span v-if="serverRuns.length !== 1">s</span></span>
+          </div>
+        </div>
+        <div v-for="g in serverRuns" :key="'srv-' + g.run_id" class="run-row">
+          <div class="run-row-header">
+            <span class="run-id">{{ shortRunID(g.run_id) }}</span>
+            <span class="run-platform">server</span>
+            <span class="run-duration">⏳ {{ isoDurationShort(g.earliest, g.latest) }}</span>
+          </div>
+          <div class="run-cards">
+            <div v-for="c in g.cards" :key="c.test_name" class="run-card" :class="c.passed ? 'pass' : 'fail'">
+              <div class="run-card-title">
+                <span class="test-name">{{ c.test_name }}</span>
+                <span class="status-chip" :class="c.passed ? 'chip-pass' : 'chip-fail'">{{ c.passed ? 'PASS' : 'FAIL' }}</span>
+              </div>
+              <div class="run-card-body">
+                <div v-if="c.headline" class="metric"><span class="label">summary</span> <span class="value">{{ c.headline }}</span></div>
+                <div class="card-actions">
+                  <button
+                    type="button"
+                    class="btn btn-secondary btn-sm"
+                    :class="{ 'btn-active': serverDetail(g.run_id, c.test_name)?.open }"
+                    @click="toggleServerDetail(g.run_id, c.test_name)"
+                  >
+                    {{ serverDetail(g.run_id, c.test_name)?.open ? 'Details ▲' : 'Details ▼' }}
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Same full-width detail chrome as the ABR runs (.run-row-details);
+               only the body differs (a generic matrix table vs ABR steps). -->
+          <template v-for="c in g.cards" :key="'det-' + c.test_name">
+            <div v-if="serverDetail(g.run_id, c.test_name)?.open" class="run-row-details">
+              <div class="run-row-details-header">
+                <span class="details-test-label">Details — {{ c.test_name }}</span>
+                <span class="details-test-status" :class="c.passed ? 'chip-pass' : 'chip-fail'">{{ c.passed ? 'PASS' : 'FAIL' }}</span>
+                <button type="button" class="btn btn-secondary btn-sm" @click="toggleServerDetail(g.run_id, c.test_name)">Close ▲</button>
+              </div>
+              <div v-if="serverDetail(g.run_id, c.test_name)?.loading" class="steps-loading">loading…</div>
+              <div v-else-if="serverDetail(g.run_id, c.test_name)?.error" class="steps-error">error: {{ serverDetail(g.run_id, c.test_name)?.error }}</div>
+              <template v-else-if="serverDetail(g.run_id, c.test_name)?.matrix">
+                <div class="details-section">
+                  <div class="details-section-title">{{ serverDetail(g.run_id, c.test_name)?.matrix?.title }}</div>
+                  <table class="server-matrix">
+                    <thead>
+                      <tr><th v-for="col in serverDetail(g.run_id, c.test_name)?.matrix?.columns || []" :key="col">{{ col }}</th></tr>
+                    </thead>
+                    <tbody>
+                      <tr v-for="(r, ri) in serverDetail(g.run_id, c.test_name)?.matrix?.rows || []" :key="ri">
+                        <td v-for="(cell, ci) in r" :key="ci">{{ cell }}</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+              </template>
+              <div v-else class="steps-loading">no matrix in report</div>
+            </div>
+          </template>
         </div>
       </div>
 
@@ -1155,4 +1292,10 @@ function stepWindow(report: ReportBlob, stepIdx: number): { startMs: number; end
 .summary-table td.label { color: #6b7280; }
 .summary-table td.value { color: #111827; text-align: right; }
 .summary-table td.value.mono { font-family: ui-monospace, SFMono-Regular, monospace; }
+
+/* Server-checks detail: generic results matrix, rendered inside the shared
+   .run-row-details chrome (same as the ABR runs). */
+.server-matrix { width: 100%; border-collapse: collapse; font-size: 12px; background: #ffffff; border: 1px solid #e5e7eb; border-radius: 4px; font-family: ui-monospace, SFMono-Regular, monospace; }
+.server-matrix th { text-align: left; padding: 4px 8px; color: #6b7280; border-bottom: 1px solid #e5e7eb; background: #f9fafb; white-space: nowrap; }
+.server-matrix td { padding: 4px 8px; border-bottom: 1px solid #f3f4f6; color: #111827; white-space: normal; word-break: break-word; vertical-align: top; }
 </style>

@@ -81,6 +81,12 @@ CREATE TABLE IF NOT EXISTS infinite_streaming.session_events
     loop_count_server     UInt32                      DEFAULT 0,
     player_restarts       UInt32                      DEFAULT 0,
     profile_shift_count   UInt32                      DEFAULT 0,
+    -- Effective rate cap the kernel is enforcing right now:
+    -- max(operator override, deployment baseline). 0 means truly
+    -- uncapped (prod-style with operator slider at 0). Distinct from
+    -- nftables_bandwidth_mbps which stores operator intent only.
+    -- Stamped by the proxy on every snapshot. Issue #480.
+    effective_rate_limit_mbps Float32                 CODEC(ZSTD(1)),
 
     -- Player events (discrete signals embedded in the heartbeat snapshot;
     -- testing.html derives event-lane points from transitions in these).
@@ -269,6 +275,7 @@ ALTER TABLE infinite_streaming.session_events
     ADD COLUMN IF NOT EXISTS playhead_wallclock_ms Int64 CODEC(ZSTD(1)),
     ADD COLUMN IF NOT EXISTS player_restarts UInt32 DEFAULT 0,
     ADD COLUMN IF NOT EXISTS profile_shift_count UInt32 DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS effective_rate_limit_mbps Float32 CODEC(ZSTD(1)),
     ADD COLUMN IF NOT EXISTS seekable_end_s Float32 CODEC(ZSTD(1)),
     ADD COLUMN IF NOT EXISTS metrics_source LowCardinality(String) CODEC(ZSTD(1)),
     ADD COLUMN IF NOT EXISTS video_first_frame_time_s Float32 CODEC(ZSTD(1)),

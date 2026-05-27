@@ -333,6 +333,13 @@ type App struct {
 	upstreamHost             string
 	upstreamPort             string
 	maxSessions              int
+	// defaultRateMbps is the baseline rate cap (Mbps) applied to every
+	// new player session via setDefault on `nftables_bandwidth_mbps` in
+	// normalizeSessionsForResponse. Read once at boot from
+	// INFINITE_STREAM_DEFAULT_RATE_MBPS. 0 = no cap (today's behaviour);
+	// non-zero = the deployment's interpretation of "no operator
+	// override." See issue #480.
+	defaultRateMbps          int
 	client                   *http.Client
 	portMap                  PortMapping
 	shapeMu                  sync.Mutex
@@ -1723,6 +1730,16 @@ func main() {
 	upstreamHost := getenvAny([]string{"INFINITE_STREAM_UPSTREAM_HOST", "INFINITE_UPSTREAM_HOST", "ISM_UPSTREAM_HOST"}, "127.0.0.1")
 	upstreamPort := getenvAny([]string{"INFINITE_STREAM_UPSTREAM_PORT", "INFINITE_UPSTREAM_PORT", "ISM_UPSTREAM_PORT"}, "30000")
 	maxSessions := getenvIntAny([]string{"INFINITE_STREAM_MAX_SESSIONS", "INFINITE_MAX_SESSIONS", "ISM_MAX_SESSIONS"}, 8)
+	defaultRateMbps := getenvInt("INFINITE_STREAM_DEFAULT_RATE_MBPS", 0)
+	if defaultRateMbps < 0 {
+		log.Printf("INFINITE_STREAM_DEFAULT_RATE_MBPS=%d invalid (negative); using 0", defaultRateMbps)
+		defaultRateMbps = 0
+	}
+	if defaultRateMbps > 0 {
+		log.Printf("baseline rate cap: %d Mbps (issue #480; new sessions default to this rate)", defaultRateMbps)
+	} else {
+		log.Printf("baseline rate cap: unlimited (INFINITE_STREAM_DEFAULT_RATE_MBPS=0 or unset)")
+	}
 	interfaceName := getenvAny([]string{"INFINITE_STREAM_TC_INTERFACE", "INFINITE_TC_INTERFACE", "TC_INTERFACE"}, "eth0")
 	tcDebug := getenvBoolAny([]string{"INFINITE_STREAM_TC_DEBUG", "INFINITE_TC_DEBUG", "TC_DEBUG"}, false)
 	eventStore, eventStoreErr := newSessionEventStore(getenv("GO_PROXY_SESSION_EVENTS_DB", defaultSessionEventsDB))
@@ -1737,7 +1754,8 @@ func main() {
 		traffic:       NewTcTrafficManager(interfaceName, tcDebug),
 		upstreamHost:  upstreamHost,
 		upstreamPort:  upstreamPort,
-		maxSessions:   maxSessions,
+		maxSessions:      maxSessions,
+		defaultRateMbps:  defaultRateMbps,
 		portMap:       loadPortMapping(),
 		client: &http.Client{
 			Transport: &http.Transport{
@@ -1768,6 +1786,11 @@ func main() {
 
 	go app.trackPortThroughput()
 	app.restoreTransportFaultSchedules()
+	// Re-install tc rate/delay/loss state for every session that
+	// survived the proxy restart. Without this, pre-existing sessions
+	// keep their session-map values but the kernel forgot — they end
+	// up uncapped. Issue #480.
+	app.restoreShapeApplication()
 	// 100 ms TCP_INFO sampler — folds smoothed RTT / jitter / lifetime
 	// min / RTO into per-session windows that get drained on each
 	// snapshot broadcast (issue #401). Linux-only kernel read; the
@@ -3947,6 +3970,47 @@ func (a *App) restoreTransportFaultSchedules() {
 	}
 }
 
+// restoreShapeApplication re-applies the tc rate/delay/loss state for
+// every session in the loaded session map. Required on boot because
+// the container's network namespace is recreated on restart — tc
+// classes/filters don't survive, but the session map (persisted on
+// disk via saveSessionList) does. Without this, sessions that
+// pre-existed the restart end up running uncapped, which silently
+// breaks both operator-set rate overrides and the deployment baseline
+// cap (issue #480). Matches restoreTransportFaultSchedules' pattern.
+func (a *App) restoreShapeApplication() {
+	if a.traffic == nil {
+		return
+	}
+	seenPorts := map[int]struct{}{}
+	restored, skipped := 0, 0
+	for _, session := range a.getSessionList() {
+		portStr := getString(session, "x_forwarded_port")
+		if portStr == "" {
+			skipped++
+			continue
+		}
+		port, err := strconv.Atoi(portStr)
+		if err != nil {
+			skipped++
+			continue
+		}
+		if _, ok := seenPorts[port]; ok {
+			continue
+		}
+		seenPorts[port] = struct{}{}
+		// applySessionShaping reads nftables_bandwidth_mbps + delay + loss
+		// from the session map, runs them through a.effectiveRate (so
+		// rate=0 resolves to the deployment baseline), and installs the
+		// kernel state. Pattern is owned by applySessionShaping's early
+		// return when pattern_enabled is set; we don't need to special-
+		// case it here.
+		a.applySessionShaping(session, port)
+		restored++
+	}
+	log.Printf("shape restoration on boot: restored=%d skipped=%d baseline_mbps=%d", restored, skipped, a.defaultRateMbps)
+}
+
 func (a *App) handleNftPattern(w http.ResponseWriter, r *http.Request) {
 	if a.traffic == nil {
 		w.WriteHeader(http.StatusServiceUnavailable)
@@ -4188,6 +4252,11 @@ func (a *App) handleNftShape(w http.ResponseWriter, r *http.Request) {
 			rateMbps = parsed
 		}
 	}
+	// Storage holds the operator's raw intent (rate_mbps=0 stays 0 — the
+	// slider position is "no override"). The kernel sees the deployment
+	// baseline when the operator didn't override; a.effectiveRate does
+	// the translation at the UpdateRateLimit call sites below. Issue
+	// #480.
 	delayMs := 0
 	if val, ok := payload["delay_ms"]; ok {
 		switch v := val.(type) {
@@ -4213,8 +4282,9 @@ func (a *App) handleNftShape(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	a.disablePatternForPort(port)
-	if err := a.traffic.UpdateRateLimit(port, rateMbps); err != nil {
-		log.Printf("NETSHAPE rate limit failed port=%d rate=%g: %v", port, rateMbps, err)
+	effectiveMbps := a.effectiveRate(rateMbps)
+	if err := a.traffic.UpdateRateLimit(port, effectiveMbps); err != nil {
+		log.Printf("NETSHAPE rate limit failed port=%d rate=%g (effective=%g): %v", port, rateMbps, effectiveMbps, err)
 		w.WriteHeader(http.StatusInternalServerError)
 		writeJSON(w, map[string]string{"error": "Failed to update rate limit", "details": err.Error()})
 		return
@@ -4226,7 +4296,7 @@ func (a *App) handleNftShape(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.updateSessionsByPortWithControl(port, map[string]interface{}{
-		"nftables_bandwidth_mbps": rateMbps,
+		"nftables_bandwidth_mbps": rateMbps, // operator intent; 0 = no override
 		"nftables_delay_ms":       delayMs,
 		"nftables_packet_loss":    loss,
 	}, "")
@@ -4241,8 +4311,8 @@ func (a *App) handleNftShape(w http.ResponseWriter, r *http.Request) {
 				continue // Skip the original port
 			}
 			a.disablePatternForPort(groupPort)
-			if err := a.traffic.UpdateRateLimit(groupPort, rateMbps); err != nil {
-				log.Printf("NETSHAPE group propagation rate limit failed port=%d rate=%g: %v", groupPort, rateMbps, err)
+			if err := a.traffic.UpdateRateLimit(groupPort, effectiveMbps); err != nil {
+				log.Printf("NETSHAPE group propagation rate limit failed port=%d rate=%g (effective=%g): %v", groupPort, rateMbps, effectiveMbps, err)
 				continue
 			}
 			if err := a.traffic.UpdateNetem(groupPort, delayMs, loss); err != nil {
@@ -5002,10 +5072,35 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 			"x_forwarded_port":                         assignedInternalPort,
 			"x_forwarded_port_external":                assignedExternalPort,
 			"loop_count_server":                        0,
+			// nftables_bandwidth_mbps starts at 0 — "no operator
+			// override." On a deployment with defaultRateMbps>0 the
+			// kernel still gets capped at the baseline (via
+			// a.effectiveRate at the apply site below) but the slider
+			// in the dashboard stays at 0 so the operator sees "I
+			// haven't touched this." The derived effective_rate_mbps
+			// field surfaces what the kernel is actually enforcing.
+			// Issue #480.
+			"nftables_bandwidth_mbps":                  float64(0),
 		}
 		a.resetServerLoopState(fmt.Sprintf("%d", allocated))
 		sessionList = append(sessionList, sessionData)
 		a.saveSessionList(sessionList)
+		// Apply the deployment baseline to the kernel BEFORE the
+		// redirect fires — the client reconnects on the new port
+		// immediately and the first segment burst would otherwise run
+		// uncapped. effectiveRate(0) returns the baseline (or 0 on
+		// prod-style deployments). No-op when traffic is nil
+		// (non-Linux dev). Issue #480.
+		if a.defaultRateMbps > 0 && a.traffic != nil {
+			if internalPortInt, err := strconv.Atoi(assignedInternalPort); err == nil {
+				effective := a.effectiveRate(0)
+				if err := a.traffic.UpdateRateLimit(internalPortInt, effective); err != nil {
+					log.Printf("baseline rate cap apply failed port=%d rate=%g: %v", internalPortInt, effective, err)
+				} else {
+					log.Printf("baseline rate cap applied port=%d rate=%g Mbps (#480)", internalPortInt, effective)
+				}
+			}
+		}
 		manifestURL := "/" + escapedPath
 		if r.URL.RawQuery != "" {
 			manifestURL = manifestURL + "?" + r.URL.RawQuery
@@ -5347,53 +5442,48 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 		updateSessionTraffic(sessionData, requestBytes, 0)
 		sessionList[index] = sessionData
 		a.saveSessionList(sessionList)
+		status := http.StatusInternalServerError
 		switch failureType {
 		case "404":
 			actionTaken = "http_404"
-			w.WriteHeader(http.StatusNotFound)
+			status = http.StatusNotFound
 		case "403":
 			actionTaken = "http_403"
-			w.WriteHeader(http.StatusForbidden)
+			status = http.StatusForbidden
 		case "500":
 			actionTaken = "http_500"
-			w.WriteHeader(http.StatusInternalServerError)
+			status = http.StatusInternalServerError
 		case "timeout":
 			actionTaken = "http_504_timeout"
-			w.WriteHeader(http.StatusGatewayTimeout)
+			status = http.StatusGatewayTimeout
 		case "connection_refused":
 			actionTaken = "http_503_connection_refused"
-			w.WriteHeader(http.StatusServiceUnavailable)
+			status = http.StatusServiceUnavailable
 		case "dns_failure":
 			actionTaken = "http_502_dns_failure"
-			w.WriteHeader(http.StatusBadGateway)
+			status = http.StatusBadGateway
 		case "rate_limiting":
 			actionTaken = "http_429_rate_limited"
-			w.WriteHeader(http.StatusTooManyRequests)
+			status = http.StatusTooManyRequests
 		default:
-			actionTaken = "http_500_unknown_failure"
-			w.WriteHeader(http.StatusInternalServerError)
+			// Generic numeric status: any 4xx/5xx code passed as the
+			// failure type (e.g. "503", "429") is honored directly, with
+			// its standard reason phrase. This removes the silent-500
+			// footgun where an unlisted numeric type fell through to 500.
+			// Non-numeric / out-of-range types still fall back to 500.
+			if code, err := strconv.Atoi(failureType); err == nil && code >= 400 && code <= 599 {
+				actionTaken = "http_" + failureType
+				status = code
+			} else {
+				actionTaken = "http_500_unknown_failure"
+				status = http.StatusInternalServerError
+			}
 		}
+		w.WriteHeader(status)
 		bumpFaultCounter(sessionData, failureType)
 		logFaultEvent(sessionData, externalPort, failureType, requestKind, actionTaken)
 		// Log network entry for HTTP faults
 		sessionID := getString(sessionData, "session_id")
-		status := http.StatusInternalServerError
-		switch actionTaken {
-		case "http_404":
-			status = http.StatusNotFound
-		case "http_403":
-			status = http.StatusForbidden
-		case "http_500":
-			status = http.StatusInternalServerError
-		case "http_504_timeout":
-			status = http.StatusGatewayTimeout
-		case "http_503_connection_refused":
-			status = http.StatusServiceUnavailable
-		case "http_502_dns_failure":
-			status = http.StatusBadGateway
-		case "http_429_rate_limited":
-			status = http.StatusTooManyRequests
-		}
 		netEntry := createFaultLogEntry(playerURL, upstreamURL, requestKind, failureType, actionTaken, status, requestBytes, requestReceivedAt)
 		stampNetMeta(&netEntry, requestHeaders, queryString, nil)
 		logEntry(sessionID,netEntry)
@@ -5914,8 +6004,11 @@ func (a *App) applySessionShaping(session SessionData, port int) {
 	rate := getFloat(session, "nftables_bandwidth_mbps")
 	delay := getInt(session, "nftables_delay_ms")
 	loss := getFloat(session, "nftables_packet_loss")
-	if err := a.applyShapeIfChanged(port, rate, delay, loss); err != nil {
-		log.Printf("NETSHAPE apply failed port=%d rate=%g delay=%d loss=%.2f: %v", port, rate, delay, loss, err)
+	// rate=0 in storage means "operator did not override." Resolve to
+	// the deployment baseline before pushing to the kernel. Issue #480.
+	effective := a.effectiveRate(rate)
+	if err := a.applyShapeIfChanged(port, effective, delay, loss); err != nil {
+		log.Printf("NETSHAPE apply failed port=%d rate=%g (effective=%g) delay=%d loss=%.2f: %v", port, rate, effective, delay, loss, err)
 		return
 	}
 }
@@ -7540,7 +7633,22 @@ func (a *App) normalizeSessionsForResponse(sessions []SessionData) []SessionData
 				session["nftables_pattern_steps"] = []NftShapeStep{}
 			}
 		}
-		setDefault("nftables_bandwidth_mbps", 0)
+		// nftables_bandwidth_mbps holds the operator's raw intent —
+		// 0 means "no override" (slider at min). Effective enforcement
+		// resolves to the baseline at the kernel-apply call sites via
+		// a.effectiveRate. The derived effective_rate_limit_mbps field
+		// below makes the actual cap visible to charts and the dashboard
+		// throttle line. Issue #480.
+		setDefault("nftables_bandwidth_mbps", float64(0))
+		// effective_rate_limit_mbps — what the kernel is actually
+		// enforcing right now (max of operator override and deployment
+		// baseline). Stamped on every snapshot so dashboards have a
+		// stable, always-present field to draw the throttle line from.
+		// 0 means truly uncapped (prod-style with operator slider at
+		// 0). Positive means a cap is in effect, regardless of origin.
+		// Issue #480.
+		operatorRate := getFloat(session, "nftables_bandwidth_mbps")
+		session["effective_rate_limit_mbps"] = a.effectiveRate(operatorRate)
 		setDefault("nftables_delay_ms", 0)
 		setDefault("nftables_packet_loss", 0)
 		setDefault("nftables_pattern_enabled", false)
@@ -8331,6 +8439,23 @@ func pathParent(path string) string {
 		return ""
 	}
 	return parts[len(parts)-2]
+}
+
+// effectiveRate resolves an operator-requested rate (Mbps) against the
+// deployment baseline. Requested 0 means "no override" — on prod
+// (defaultRateMbps=0) it stays 0 (unlimited); on test-dev
+// (defaultRateMbps>0) it becomes the baseline so the kernel always
+// enforces the floor. Positive requests pass through unchanged. Used
+// at the tc / nftables apply sites only — storage holds the raw
+// operator intent. Issue #480.
+func (a *App) effectiveRate(requested float64) float64 {
+	if requested > 0 {
+		return requested
+	}
+	if a != nil && a.defaultRateMbps > 0 {
+		return float64(a.defaultRateMbps)
+	}
+	return 0
 }
 
 func getenv(key, fallback string) string {

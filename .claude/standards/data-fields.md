@@ -535,7 +535,24 @@ These are populated by the harness via `harness fault add` / `harness shape` / `
 ```
 nftables_bandwidth_mbps
   units:       Mbps
-  meaning:     plain-rate shaper cap when no pattern is active.
+  meaning:     OPERATOR INTENT — the rate the slider / harness set. 0
+               means "no operator override." For the rate the KERNEL
+               is actually enforcing, read effective_rate_limit_mbps
+               below.
+
+effective_rate_limit_mbps
+  units:       Mbps
+  meaning:     KERNEL-ENFORCED cap at this instant: max of the operator
+               override (nftables_bandwidth_mbps) and the deployment
+               baseline (INFINITE_STREAM_DEFAULT_RATE_MBPS env, see
+               GET /api/v2/info → default_rate_mbps). 0 means truly
+               uncapped (prod-style deployments with operator slider
+               at 0). Distinct from nftables_bandwidth_mbps because
+               on test-dev (baseline=100) the kernel caps at 100
+               even when the operator hasn't set anything — the
+               difference between intent and enforcement explains
+               "why is throughput capped at X with no visible
+               operator limit?" Issue #480.
 
 nftables_delay_ms / nftables_packet_loss
   units:       ms / ratio 0-1

@@ -26,6 +26,17 @@ the **Breaking changes** section before upgrading.
   (`triage`, `investigate`, `forensics`, `fault`, `shape`, `finding`)
   let operators drive the rig — and run forensic analyses — through
   natural-language prompts.
+- **An in-dashboard AI chat panel** (`#497`, `#511`–`#515`) — ask the
+  rig questions in prose, scoped to the session/play you're viewing,
+  backed by a provider-agnostic forwarder chat backend.
+- **A player ABR characterization framework** (`#482`, `#483`, `#493`)
+  plus an **Automated Testing** dashboard page that groups runs and
+  drills into per-step detail.
+- **A server-behavior control-surface test suite** (`#518`–`#524`)
+  that calibrates rate caps, delay, loss, patterns, fault injection,
+  transport faults, and transfer timeouts against a live deployment.
+- **A baseline rate cap** (`#480`) every new session inherits, with
+  the kernel-truth `effective_rate_limit_mbps` surfaced in the UI.
 
 ---
 
@@ -51,12 +62,13 @@ the **Breaking changes** section before upgrading.
 | `GET /api/control/stream` (SSE, new) | Live proxy-side action stream | Additive. The forwarder subscribes to it for ingest; clients can subscribe directly too. |
 | `play_id` synthesis by proxy | Player-driven only | Pre-bug-#4 clients that relied on the proxy minting a `play_id` from `control_revision` now see an empty `play_id` column. iOS 1.x+ already mints client-side. Other clients should mint UUID per play boundary and pass on every request URL + metrics POST. |
 | Legacy v1/v2 dashboard pages (non-v3) | **Removed** in #459 | Replace bookmarks with `/dashboard/v3/...` equivalents (testing, testing-session, session-viewer, sessions, dashboard, grid). |
+| v1 archive read API (the pre-v2 forwarder archive endpoints) | **Removed** (#478 / #496) | The dashboard's plays surface now reads exclusively from the v2 archive (`/api/v2/...`) via TanStack Query. Any external consumer of the old v1 archive endpoints must move to the v2 equivalents listed above. |
 
 ### Tooling
 
 | Was | Now | Migration |
 |---|---|---|
-| `harness archive markers` subcommand | **Removed** → `harness archive control` | The control_events table is the closest analog (proxy/operator actions). Player-emitted signals now live as `labels[]` on session_events. |
+| `harness archive markers` subcommand (the `archive` family is renamed `query` in v2.0.0) | **Removed** → `harness query control` | The control_events table is the closest analog (proxy/operator actions). Player-emitted signals now live as `labels[]` on session_events. |
 | Forwarder Go package `analytics/go-forwarder/eventclass/` | **Removed** | Internal to the forwarder; only matters if you forked. Classification logic moved into `labels.go` as ingest-time label computation. |
 | `priority` numeric field on the retired `session_markers` table | Gone with the table | Use the severity prefix on the row's `labels[]` instead (`error` / `critical` / `warning` / `info`). |
 | `restart_id` (UUID, pre-cutover) on session_events | Renamed to `attempt_id` (UInt32 counter) | Player-driven sticky counter, +1 per restart event. Reset to 1 at each play boundary. |
@@ -71,8 +83,10 @@ make analytics-migrate SQL='ALTER TABLE infinite_streaming.session_events ADD CO
 make analytics-migrate SQL='ALTER TABLE infinite_streaming.network_requests ADD COLUMN labels Array(LowCardinality(String)) DEFAULT [] CODEC(ZSTD(1))'
 make analytics-migrate SQL='ALTER TABLE infinite_streaming.session_events ADD COLUMN attempt_id UInt32 DEFAULT 0 CODEC(ZSTD(1))'
 make analytics-migrate SQL='ALTER TABLE infinite_streaming.session_events ADD COLUMN last_buffering_time_s Float32 CODEC(ZSTD(1))'
-# (control_events CREATE TABLE — paste the full DDL from
-#  analytics/clickhouse/init.d/01-schema.sql)
+# New tables — paste each CREATE TABLE IF NOT EXISTS block from the
+# init.d schema files (re-running one that already exists is a no-op):
+#   - control_events, characterization_runs → analytics/clickhouse/init.d/01-schema.sql
+#   - llm_calls (AI chat panel)             → analytics/clickhouse/init.d/03-llm-calls.sql
 make analytics-migrate SQL='DROP TABLE IF EXISTS infinite_streaming.session_markers'
 
 # 2. Rebuild the forwarder + proxy.
@@ -199,8 +213,8 @@ full v2 surface (24 endpoints). Subcommand families:
 - **`harness fault`** / **`harness shape`** / **`harness label`** —
   mutation. Every command snapshots state before applying and
   supports `harness <verb> undo` for replay-to-prior-state.
-- **`harness archive`** — `plays`, `play`, `events`, `network`,
-  `control`, `snapshots`, `heatmap`, `bundle` for archive reads.
+- **`harness query`** (alias `q`) — `plays`, `play`, `aggregate`,
+  `events`, `network`, `control`, `heatmap`, `bundle` for archive reads.
 
 Build with `make harness-cli`. Client stubs are checked in.
 
@@ -236,6 +250,76 @@ Supporting docs:
 - User-Agent preservation across metrics POSTs so the proxy's
   `iPad/iPhone/AppleTV` family label survives.
 
+### 9. In-dashboard AI chat panel (#497, #511–#515)
+
+Ask the rig questions in prose, without leaving the dashboard.
+
+- **Forwarder chat backend** — Anthropic-native client with prompt
+  caching, plus an OpenAI-compatible path so hosted (OpenAI / litellm /
+  HF) and local (mlx) providers all work. Live model discovery from
+  `{base_url}/v1/models`; per-user base-url + per-profile API-key
+  overrides in the UI.
+- **`ChatPanel`** mounts on Testing, TestingSession, and SessionViewer
+  with **harness-aware scope** — the bot knows which `player_id` / play
+  / brush window you're looking at, and citations carry the `player_id`.
+- **Tooling discipline** — context-window + token meter, bytes-budget
+  guard with summary mode + history trimming, an `investigate` subagent,
+  `propose_finding`, and label-vocabulary discovery (`list_labels`,
+  wildcard match) so the bot queries the real `labels[]` vocab.
+- A standalone **`/ask` fleet page** for fleet-wide questions.
+
+### 10. Player ABR characterization framework (#482, #483, #493)
+
+A Go-driven framework that puts a real device through scripted ABR
+scenarios and archives the result.
+
+- **Go test framework** under `tests/characterization/` with an Appium
+  launcher, symmetric margin sweeps, and a cold-start-under-throttle
+  wrapper. Test modes include a **startup test** (app-cold + channel-
+  change) and a **client-fetch-abort test** (5-shape fault matrix).
+- **OTel spans + standard cycle-label schema** per cycle, carrying
+  `player_id` / `play_id` and failure status, ingested into ClickHouse.
+- **Automated Testing dashboard page** groups characterization runs,
+  with per-cycle session-viewer links, a cycle-band overlay, and an
+  expandable per-run **Details** panel (summary + variants).
+- `AVERAGE-BANDWIDTH` end-to-end with a 5% margin default (#483).
+
+### 11. Server-behavior control-surface test suite (#518–#524)
+
+An integration suite under `tests/server_behavior/` that calibrates
+every go-proxy control surface against a live deployment and records the
+baselines in `.claude/standards/server-behavior.md`:
+
+- Rate-cap accuracy, `nftables` delay / loss / pattern fidelity,
+  per-kind HTTP fault frequency + failure-type coverage, transfer
+  timeouts, **socket-phase faults** (connect/first_byte/body ×
+  reset/hang/delayed), fault **variant-scope** isolation, and content
+  manipulation (+ m3u8 parseability).
+- **Transport faults** (`drop`/`reject`) are characterized via the
+  kernel `nftables` packet counters — the un-maskable ground truth,
+  since a fresh connect is masked by Docker's userland proxy.
+- Supporting proxy changes: generic numeric-status HTTP fault injection
+  (any 4xx/5xx honored directly) and an adaptive ICMP path-ping timeout.
+
+### 12. Baseline rate cap (#480)
+
+Every new player session inherits a configurable baseline rate cap.
+
+- `INFINITE_STREAM_DEFAULT_RATE_MBPS` sets it; `GET /api/v2/info`
+  exposes `default_rate_mbps`; new sessions are capped at creation.
+- `effective_rate_limit_mbps` is surfaced as a first-class field (kernel
+  truth, distinct from operator intent), with a persistent baseline chip
+  + slider label in the UI and a `harness shape --show` baseline view.
+- `restoreShapeApplication()` re-installs tc state for sessions that
+  survive a proxy restart, closing a silent-uncap regression.
+
+### 13. Test consolidation: pytest retired (#529)
+
+All Python/pytest integration tests are removed — the Go
+characterization (#482) and server-behavior (#518) suites now cover that
+surface. Contributors run the Go suites; there's no Python test
+dependency left.
+
 ---
 
 ## Known gaps
@@ -258,6 +342,10 @@ These are carried into the next release:
 #467 #468 #469 #470 #471 #472 #473 #474, plus the `#444` follow-up
 that was completed by the labels-on-source-rows architecture.
 
+Landed since the initial v2.0.0 draft and folded into this release:
+#478 #480 #482 #483 #493 #496 #497 #498 #511 #512 #514 #515 #518 #519
+#520 #521 #522 #523 #524 #525 #526 #527 #529.
+
 ---
 
 ## Compatibility matrix
@@ -269,3 +357,4 @@ that was completed by the labels-on-source-rows architecture.
 | `harness` CLI (pre-v2) | ✗ | The legacy CLI is gone. Rebuild from `tools/harness-cli/` via `make harness-cli`. |
 | Custom Grafana dashboards on v1 schema | ✗ | Update to reference `session_events` / `labels[]`. |
 | Saved Scalar UI tabs | ✓ | Endpoints regenerated from the v2 yaml; the Scalar UI auto-reflects. |
+| AI chat panel (`#497`) | ✓ opt-in | Inert until an LLM provider is configured (Anthropic-native or any OpenAI-compatible / local endpoint). No provider → the panel just doesn't answer; nothing else is affected. |

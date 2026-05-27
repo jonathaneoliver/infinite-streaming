@@ -19,7 +19,7 @@ Thanks for the PR. A couple of conventions for this repo:
 <!-- How you (or a reviewer) can verify the change works. -->
 
 - [ ] Tested locally via `make run` / `make test-deploy-dev` / etc.
-- [ ] Added or updated tests where appropriate (`tests/integration/`).
+- [ ] Added or updated tests where appropriate (`tests/server_behavior/` for proxy contracts, `tests/characterization/` for player behaviour).
 - [ ] Updated docs (README / docs/ARCHITECTURE.md / docs/API.md) if behaviour or env changed.
 - [ ] No personal info, secrets, or per-user URLs in the diff.
 
