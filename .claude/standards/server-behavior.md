@@ -21,7 +21,7 @@ is set to Z?" — the calibration data here is the ground truth.
 
 ## 1. Rate cap calibration
 
-**Test:** `tests/server_behavior/throughput_calibration_test.go::TestRateSweep`
+**Test:** `tests/server_behavior/throughput_calibration_test.go::TestServerLimit`
 
 **Methodology:** HLS-aware probe pulls the top variant of a real
 content item as fast as the server allows, across a sweep of rate
@@ -70,6 +70,172 @@ cap accuracy" from "iOS HLS player measurement quirk").
 
 ---
 
+## 1.2 Delay accuracy (#519)
+
+**Test:** `tests/server_behavior/delay_accuracy_test.go::TestServerDelay`
+
+**Methodology:** Sweep configured `nftables_delay_ms`; at each step keep
+the connection warm with one segment pull per second and average the two
+RTT signals the proxy already publishes per session — `client_path_ping_rtt_ms`
+(ICMP path-ping, the clean signal) and `client_rtt_ms` (TCP_INFO smoothed
+RTT). Baseline measured at delay=0; each higher delay reported as its
+increase over baseline.
+
+**Contract:** path-ping RTT ≈ baseline + configured delay (within a few
+ms of noise). TCP RTT may inflate further under load (bufferbloat).
+
+**Calibration data:** _TBD — populate from first run on test-dev._
+
+| Configured | path-ping obs | tcp obs | delta vs base | accuracy |
+|---|---|---|---|---|
+| 0 ms   | — | — | — | — |
+| 50 ms  | — | — | — | — |
+| 100 ms | — | — | — | — |
+| 250 ms | — | — | — | — |
+| 500 ms | — | — | — | — |
+
+---
+
+## 1.3 Loss accuracy (#520)
+
+**Test:** `tests/server_behavior/loss_accuracy_test.go::TestServerLoss`
+
+**Methodology:** Pin a fixed rate cap so the ceiling is constant, sweep
+`nftables_packet_loss`, pull segments for a window at each step. Packet
+loss isn't directly observable from HTTP; its effect (retransmits +
+congestion-window collapse → lower goodput) is. Report observed avg
+throughput vs the 0%-loss baseline.
+
+**Contract:** 0% → ~95% of cap (matches §1); throughput degrades
+non-linearly as loss climbs; ~10% loss → severe degradation (TCP
+slow-start dominates).
+
+**Calibration data:** _TBD — populate from first run on test-dev._
+
+| Configured loss | obs avg Mbps | % of 0%-loss baseline |
+|---|---|---|
+| 0%  | — | 100% |
+| 1%  | — | — |
+| 5%  | — | — |
+| 10% | — | — |
+
+---
+
+## 1.4 Pattern fidelity (#521)
+
+**Test:** `tests/server_behavior/pattern_fidelity_test.go::TestServerPattern`
+
+**Methodology:** Install a deterministic multi-step pattern (default
+`30,5,30` Mbps, 8s/step) via `POST /api/nftables/pattern/{port}`, pull
+segments continuously, bucket each segment's throughput by the step
+window its fetch started in. Cross-check the engine's runtime fields
+(`nftables_pattern_step`, `nftables_pattern_rate_runtime_mbps`) advance.
+
+**Contract:** each step's observed avg tracks its nominal rate within the
+~95% band from §1; runtime step index advances monotonically.
+
+**Calibration data:** _TBD — populate from first run on test-dev._
+
+| Step | nominal Mbps | obs avg Mbps | accuracy |
+|---|---|---|---|
+| 1 | — | — | — |
+| 2 | — | — | — |
+| 3 | — | — | — |
+
+---
+
+## 1.5 Fault injection (#522)
+
+**Test:** `tests/server_behavior/fault_injection_test.go::TestServerFault`
+
+**Methodology:** Arm the count-based fault engine (consecutive=1,
+frequency=N, units=requests) per kind via `PATCH /api/session/{id}`, pull
+`>>N` requests of that kind, count failures by status. The engine is
+deterministic — 1 fail per N requests of that kind — so observed ≈ K/N.
+A second (un-faulted) kind is sampled to prove cross-kind isolation; the
+`all` rule is verified to fault every kind at once.
+
+**Contract:** frequency=N → ~1-in-N failures with the configured status;
+no cross-kind leak; `all_failure_*` overrides per-kind rules.
+
+**Calibration data:** _TBD — populate from first run on test-dev._
+
+| Kind | status | freq | samples | failures | ~1/N | cross-kind leak |
+|---|---|---|---|---|---|---|
+| segment         | 503 | 10 | — | — | — | 0 |
+| manifest        | 503 | 10 | — | — | — | 0 |
+| master_manifest | 503 | 10 | — | — | — | 0 |
+| all             | 503 | 10 | — | — | — | n/a |
+
+---
+
+## 1.6 Transport faults (#523)
+
+**Test:** `tests/server_behavior/transport_fault_test.go::TestTransportFaults`
+
+**Methodology:** Arm each fault, then a raw `net.DialTimeout` probe (not
+http.Client) classifies the TCP-layer outcome. Baseline connect must
+succeed first or the result is meaningless. Always-on is expressed as
+`transport_consecutive_failures`=3600 (on-seconds) / `transport_failure_frequency`=0
+(off-seconds).
+
+**Contract + cadence notes:**
+- `drop` and `reject` are **kernel** nftables faults and are mutually
+  exclusive (proxy stores one `transport_fault_type` per session).
+  - **drop:** SYN silently dropped → TCP connect **times out**.
+  - **reject:** SYN gets an RST → connect fails fast with **connection
+    refused**.
+- `hang` is **not** a transport fault — it's the HTTP-layer
+  `request_connect_hang` rule (armed via the `all` failure type). TCP
+  connect still **succeeds**; the HTTP request stalls with no response.
+  The test asserts that split (TCP connected / HTTP stalled).
+- Cadence: on-seconds (`transport_consecutive_failures`) / off-seconds
+  (`transport_failure_frequency`) gate when the kernel rule is live;
+  on=3600/off=0 keeps it always-on for a test window.
+
+**Calibration data:** _TBD — confirm each classification on first run._
+
+| Fault | layer | expected probe outcome |
+|---|---|---|
+| drop   | kernel | connect timeout |
+| reject | kernel | connection refused / reset |
+| hang   | http   | TCP connect OK, HTTP stalls |
+
+---
+
+## 1.7 Transfer timeouts (#524)
+
+**Test:** `tests/server_behavior/transfer_timeout_test.go::TestServerTransfer`
+
+**Methodology:** Rate cap is derived from the discovered segment size so a
+full segment pull takes ~5× the active timeout (otherwise the segment
+finishes before the guard fires and the test is vacuous). Active timeout:
+read a slow segment to completion-or-cut. Idle timeout: read one chunk,
+stop reading so TCP backpressure stalls the proxy's writes, then resume.
+Counters read off the session record before/after.
+
+**Contract + per-path scoping notes:**
+- Active timeout bounds total response duration; fires within a few
+  seconds of the deadline, leaving a partial body.
+- Idle timeout bounds time since the server's last write; fires ~idle
+  seconds after the client goes quiet.
+- `transfer_timeout_applies_segments` / `_manifests` / `_master` gate
+  which request kinds are subject. Verified directly: with
+  `applies_segments=false` the same slow segment runs to **completion**
+  (guard gated off).
+- Counters `fault_count_transfer_active_timeout` /
+  `fault_count_transfer_idle_timeout` increment on each fire.
+
+**Calibration data:** _TBD — confirm cut timing + counter ticks on first run._
+
+| Guard | configured | observed cut | partial body | counter ticked |
+|---|---|---|---|---|
+| active           | 3s | — | — | — |
+| idle             | 2s | — | — | — |
+| active (scoped off) | 3s | completes (not cut) | n/a | n/a |
+
+---
+
 ## 2. Future server-behavior tests (proposed)
 
 Each row below is an as-yet-unwritten test in `tests/server_behavior/`.
@@ -78,14 +244,18 @@ this kind of calibration coverage.
 
 ### P0 — controls that DEFINE the server's value proposition
 
-| Test file (proposed) | Control surface | Contract being verified |
+**Status: all six P0 tests are implemented (#519–#524).** Calibration
+tables in §1.2–1.7 above are placeholders pending the first run against a
+live deployment.
+
+| Test file | Control surface | Contract being verified |
 |---|---|---|
-| `delay_accuracy_test.go` | `nftables_delay_ms` (set via `harness shape --delay N`) | Configured delay matches path-ping RTT (within ~5ms noise). Sweep 0/50/100/250/500ms. |
-| `loss_accuracy_test.go` | `nftables_packet_loss` (set via `harness shape --loss N`) | Configured loss % matches observed segment retransmits + throughput drop. Sweep 0/1/5/10%. |
-| `pattern_fidelity_test.go` | `nftables_pattern_*` (set via `harness pattern apply`) | Each step's nominal rate is enforced at the correct time + duration. Sweep against pyramid + step + ramp patterns. |
-| `fault_injection_test.go` | per-kind HTTP fault rules (`segment_failure_*`, `manifest_failure_*`, `master_manifest_failure_*`, `all_failure_*`) | Statistical: at frequency=N requests, ~1/N return the configured status. Verify status code, error path. |
-| `transport_fault_test.go` | `transport_fault_type` ∈ {drop, reject, hang} | Configured fault is actually applied at the TCP layer (SYN drop / RST / accept-no-respond). |
-| `transfer_timeout_test.go` | `transfer_active_timeout_seconds`, `transfer_idle_timeout_seconds` | In-flight request killed at configured wall-clock deadline. |
+| `delay_accuracy_test.go` ✅ | `nftables_delay_ms` | Configured delay matches path-ping RTT (within ~5ms noise). Sweep 0/50/100/250/500ms. |
+| `loss_accuracy_test.go` ✅ | `nftables_packet_loss` | Configured loss % matches observed throughput drop. Sweep 0/1/5/10%. |
+| `pattern_fidelity_test.go` ✅ | `nftables_pattern_*` | Each step's nominal rate is enforced at the correct time + duration. |
+| `fault_injection_test.go` ✅ | per-kind HTTP fault rules (`segment_failure_*`, `manifest_failure_*`, `master_manifest_failure_*`, `all_failure_*`) | At frequency=N requests, ~1/N return the configured status; cross-kind isolation; `all` override. |
+| `transport_fault_test.go` ✅ | `transport_fault_type` ∈ {drop, reject} (kernel) + `hang` (HTTP-layer) | drop=SYN timeout, reject=RST, hang=TCP-connects/HTTP-stalls. |
+| `transfer_timeout_test.go` ✅ | `transfer_active_timeout_seconds`, `transfer_idle_timeout_seconds`, `transfer_timeout_applies_*` | In-flight request killed at the configured wall-clock deadline; `applies_*` flags scope which kinds. |
 
 ### P1 — composition + lifecycle
 
@@ -113,17 +283,33 @@ this kind of calibration coverage.
 cd tests/server_behavior
 
 # Full calibration sweep (default rates against test-dev):
-go test -v -run TestRateSweep -timeout 10m
+go test -v -run TestServerLimit -timeout 10m
 
 # Single rate, short:
-THROUGHPUT_RATES=50 THROUGHPUT_DURATION_S=10 go test -v -run TestRateSweep -timeout 60s
+THROUGHPUT_RATES=50 THROUGHPUT_DURATION_S=10 go test -v -run TestServerLimit -timeout 60s
 
 # Target a different deployment:
 THROUGHPUT_HOST=other-host.local THROUGHPUT_API_PORT=31000 \
-  go test -v -run TestRateSweep -timeout 10m
+  go test -v -run TestServerLimit -timeout 10m
 
 # Skip in CI (short mode auto-skips):
 go test -short ./...
+```
+
+### Sibling P0 tests (#519–#524)
+
+All share the `THROUGHPUT_*` connection env vars (host / api-port /
+insecure / content) and skip under `-short`. Each prints a matrix.
+
+```bash
+cd tests/server_behavior
+
+go test -v -run TestServerDelay       -timeout 5m   # DELAY_SWEEP_MS, DELAY_SETTLE_S
+go test -v -run TestServerLoss        -timeout 5m   # LOSS_SWEEP_PCT, LOSS_RATE_CAP, LOSS_DURATION_S
+go test -v -run TestServerPattern  -timeout 10m  # PATTERN_RATES, PATTERN_STEP_S
+go test -v -run TestServerFault   -timeout 10m  # FAULT_FREQUENCY, FAULT_SAMPLES, FAULT_STATUS
+go test -v -run TestTransportFaults  -timeout 5m   # TRANSPORT_PROBE_TIMEOUT_S, TRANSPORT_ARM_WINDOW_S
+go test -v -run TestServerTransfer -timeout 5m   # TIMEOUT_ACTIVE_S, TIMEOUT_IDLE_S
 ```
 
 Tests post heartbeat metrics to the proxy so they're **visible in
