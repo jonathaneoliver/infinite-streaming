@@ -120,7 +120,11 @@ jobs:
       - name: Build and push forwarder
         uses: docker/build-push-action@v7
         with:
-          context: ./analytics/go-forwarder
+          # Repo root context (mirrors docker-compose.yml): the forwarder
+          # Dockerfile COPYs go.work + go-proxy/ so its `replace => ../../go-proxy`
+          # resolves. A narrower context breaks with "/analytics/go-forwarder: not found".
+          context: .
+          file: analytics/go-forwarder/Dockerfile
           push: true
           tags: |
             ${{ steps.meta-forwarder-ghcr.outputs.tags }}
