@@ -237,10 +237,45 @@ func TestServerFault(t *testing.T) {
 		})
 	})
 
+	// Failure-type selection: every supported HTTP fault type must produce
+	// its mapped status at least once. This is independent of the frequency
+	// math above — it catches a broken type→status switch (e.g. a renamed
+	// case silently falling through to 500). corrupted/socket types live in
+	// server_content / server_socket; here we cover the status-returning set:
+	// the named types plus the generic numeric path.
+	t.Run("type_coverage", func(t *testing.T) {
+		coverTypes := []string{
+			"timeout", "connection_refused", "dns_failure", "rate_limiting", // named
+			"404", "403", "500", "502", "503", "429", // generic numeric
+		}
+		coverSamples := envInt("FAULT_TYPE_SAMPLES", 8)
+		for _, ft := range coverTypes {
+			want := faultStatusForType(ft)
+			// consec=5/freq=1 → bursts of faults, so the type fires within a
+			// few samples regardless of where the engine's cycle sits.
+			if err := patchSession(p.c, p.apiBase, p.sess.SessionID, faultSet("segment", ft, 1, 5)); err != nil {
+				t.Fatalf("arm type %s: %v", ft, err)
+			}
+			hist := p.pullStatuses(t, func() []string { return p.pullOnce(t) }, coverSamples)
+			patchSession(p.c, p.apiBase, p.sess.SessionID, faultClear("segment"))
+			got := hist[want]
+			t.Logf("type %-20s want_status=%d hist=%v hits=%d", ft, want, hist, got)
+			if got < 1 {
+				t.Errorf("failure type %q produced zero %d-responses over %d samples — type selection broken (hist=%v)",
+					ft, want, coverSamples, hist)
+			}
+			rows = append(rows, faultRow{
+				kind: "type:" + ft, configured: ft, freq: 1, consec: 1,
+				samples: coverSamples, failures: got, expected: 1,
+				crossKind: fmt.Sprintf("status=%d", want),
+			})
+		}
+	})
+
 	printFaultMatrix(t, rows)
 
 	sm := serverMatrix{
-		Title:   "Fault injection (per-kind C-in-N HTTP fault frequency + full cross-kind isolation)",
+		Title:   "Fault injection (per-kind C-in-N frequency + cross-kind isolation + failure-type coverage)",
 		Columns: []string{"kind", "type", "rate", "samples", "failures", "expected", "other_kinds"},
 	}
 	for _, r := range rows {
@@ -258,7 +293,7 @@ func TestServerFault(t *testing.T) {
 			r.crossKind,
 		})
 	}
-	p.postServerReport(t, "server_fault", fmt.Sprintf("%s, 1-in-%d & 2-in-%d", status, freq, freq), startedAt, !t.Failed(), sm)
+	p.postServerReport(t, "server_fault", fmt.Sprintf("%s, 1-in-%d & 2-in-%d, +type coverage", status, freq, freq), startedAt, !t.Failed(), sm)
 }
 
 // withinFaultBand accepts the count-based engine's drift: the deterministic
