@@ -1,6 +1,6 @@
 /**
  * urlTimeFormat — shared helpers for the human-visible URL params
- * that link to /dashboard/v3/session-viewer.html (and any other page
+ * that link to /dashboard/session-viewer.html (and any other page
  * that scopes by player_id + play_id + time window).
  *
  * The compact format keeps URLs short and free of percent-encoding:
@@ -76,7 +76,7 @@ export function canonicalUUID(s: string | null | undefined): string {
 
 /**
  * sessionViewerURL — single place to build the canonical link.
- * Returns a complete `/dashboard/v3/session-viewer.html?…` string.
+ * Returns a complete `/dashboard/session-viewer.html?…` string.
  *
  * Inputs: ms-epoch numbers for the window; nulls/NaNs are dropped
  * silently (the viewer falls back to its own bounds detection when
@@ -105,5 +105,5 @@ export function sessionViewerURL(opts: {
   // URLSearchParams encodes the `:` we'd otherwise smuggle through;
   // because the compact form has no `:` at all, the resulting URL is
   // free of `%3A` clutter.
-  return `/dashboard/v3/session-viewer.html?${p.toString()}`;
+  return `/dashboard/session-viewer.html?${p.toString()}`;
 }

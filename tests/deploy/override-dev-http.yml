@@ -1,0 +1,58 @@
+services:
+  go-server:
+    container_name: test-dev-http-server
+    # HTTP-only mirror of test-dev (no TLS — INFINITE_STREAM_TLS=off in .env),
+    # on the 27xxx port range (21-26 are taken on the box by the other test
+    # stacks and an ad-hoc test-docker-run). Shares the encoded content +
+    # sources from the primary test-dev media library so it plays the same
+    # catalogue without a re-upload/re-encode, while keeping its OWN state
+    # (data / logs / clickhouse / grafana) under this stack's CONTENT_DIR.
+    # Content discovery is filesystem-based (go-upload scans
+    # /media/dynamic_content), so overlaying just these dirs is enough for the
+    # catalogue to appear.
+    #
+    # No certs mount and no INFINITE_STREAM_UPSTREAM_PORT override: with TLS off,
+    # nginx's external listener on 30000 is already cleartext, so in-container
+    # go-proxy → nginx calls use it directly (the 30005 loopback split is a
+    # TLS-only concern).
+    volumes:
+      - ${SHARED_CONTENT_DIR}/dynamic_content:/media/dynamic_content
+      - ${SHARED_CONTENT_DIR}/originals:/media/originals
+      - ${SHARED_CONTENT_DIR}/uploads:/media/uploads
+    environment:
+      # Match test-dev's baseline rate cap (#480) for parity.
+      - INFINITE_STREAM_DEFAULT_RATE_MBPS=100
+    ports:
+      !override
+      - "27000:30000"
+      - "27081:30081"
+      - "27181:30181"
+      - "27281:30281"
+      - "27381:30381"
+      - "27481:30481"
+      - "27581:30581"
+      - "27681:30681"
+      - "27781:30781"
+      - "27881:30881"
+  clickhouse:
+    container_name: test-dev-http-clickhouse
+    # Loopback-only, distinct host port from the other stacks.
+    ports:
+      !override
+      - "127.0.0.1:27123:8123"
+  grafana:
+    container_name: test-dev-http-grafana
+    # Reached via the nginx /grafana/ prefix on this stack's port. The root URL
+    # is left to docker-compose.yml's default, which reads INFINITE_STREAM_BASE_URL
+    # — written into the generated .env from $(TEST_HOST) by the make target — so
+    # no hostname is hardcoded here.
+    ports: !override []
+  forwarder:
+    container_name: test-dev-http-forwarder
+    environment:
+      # Plain HTTP to the proxy SSE — with TLS off the shaper/SSE ports are
+      # cleartext (https here would fail the handshake).
+      - FORWARDER_SSE_URL=http://go-server:30081/api/sessions/stream
+      - FORWARDER_CLICKHOUSE_URL=http://clickhouse:8123
+      - FORWARDER_CLICKHOUSE_DB=infinite_streaming
+      - FORWARDER_CLICKHOUSE_TABLE=session_events

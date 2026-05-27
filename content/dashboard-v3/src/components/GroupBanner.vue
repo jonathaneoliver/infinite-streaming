@@ -101,7 +101,7 @@ async function deleteSession() {
   if (!confirm(`Release session ${props.playerId}?`)) return;
   try {
     await repo.deletePlayer(props.playerId);
-    window.location.href = '/dashboard/v3/testing.html';
+    window.location.href = '/dashboard/testing.html';
   } catch (err: any) {
     console.error('release failed', err);
     alert(`Release failed: ${err?.message ?? err}`);

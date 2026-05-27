@@ -45,22 +45,22 @@ upstream go_proxy {
 # Normal server
 server {
 
-    # TLS + HTTP/2 for browsers (external traffic). Browsers refuse
-    # cleartext h2 so the port must be HTTPS for multiplexing to
-    # apply — eliminates Chrome's 6-per-origin HTTP/1.1 cap so SSE
-    # streams + REST polls share one TCP connection per tab.
-    listen ${INFINITE_STREAM_LISTEN_PORT} ssl http2 default_server;
-    listen [::]:${INFINITE_STREAM_LISTEN_PORT} ssl http2 default_server;
+    # External listener. INFINITE_STREAM_TLS (in launch.sh) decides the
+    # scheme: when on, the listen opts become "ssl http2" (browsers refuse
+    # cleartext h2, so the port must be HTTPS for the multiplexing that
+    # dodges Chrome's 6-per-origin HTTP/1.1 cap on SSE streams); when off
+    # they're empty and the cert block below is blank → plain HTTP/1.1.
+    listen ${INFINITE_STREAM_LISTEN_PORT}${INFINITE_STREAM_TLS_LISTEN_OPTS} default_server;
+    listen [::]:${INFINITE_STREAM_LISTEN_PORT}${INFINITE_STREAM_TLS_LISTEN_OPTS} default_server;
     # Cleartext loopback listener for in-container internal calls
     # (go-proxy → nginx → go-live). go-proxy's UPSTREAM_PORT env
     # points here so it can speak plain HTTP without negotiating
     # TLS against the same nginx instance.
     listen 127.0.0.1:30005;
 
-    ssl_certificate /etc/nginx/certs/localhost.pem;
-    ssl_certificate_key /etc/nginx/certs/localhost-key.pem;
-    ssl_session_timeout 10m;
-    ssl_protocols TLSv1.2 TLSv1.3;
+    # ssl_certificate / ssl_protocols etc. — rendered by launch.sh only
+    # when INFINITE_STREAM_TLS is on; empty in plain-HTTP mode.
+    ${INFINITE_STREAM_TLS_DIRECTIVES}
 
     add_header Access-Control-Allow-Origin *;
     # Log to stderr for proper time-interleaving in Docker logs, AND to
@@ -147,10 +147,19 @@ server {
         add_header Expires "0" always;
     }
 
-    # Legacy /dashboard/*.html pages (testing, testing-session,
-    # session-viewer, sessions, grid, dashboard) have been removed —
-    # their Vue 3 replacements live under /dashboard/v3/. Unmatched
-    # /dashboard/* requests fall back to the v3 landing.
+    # The Vue 3 dashboard pages are served at clean /dashboard/<page>.html
+    # URLs (no /v3/ in the address bar). Their built files physically live
+    # in /content/dashboard/v3/; this regex location aliases the page set
+    # into that dir. A matching regex location takes precedence over the
+    # /dashboard/ prefix location below. Page assets are still referenced
+    # under /dashboard/v3/assets/ and served by the prefix location, and
+    # /dashboard/v3/<page>.html keeps working for old bookmarks. Surviving
+    # legacy static pages (upload, jobs, sources, playback, …) also serve
+    # from the prefix location.
+    location ~ ^/dashboard/(dashboard|testing|testing-session|sessions|session-viewer|grid|characterization|ask|hello)\.html$ {
+        ${INFINITE_STREAM_AUTH_DIRECTIVES}
+        alias /content/dashboard/v3/$1.html;
+    }
 
     location /dashboard/ {
         ${INFINITE_STREAM_AUTH_DIRECTIVES}
@@ -164,7 +173,7 @@ server {
     }
 
     location = /dashboard.html {
-        return 302 /dashboard/v3/dashboard.html;
+        return 302 /dashboard/dashboard.html;
     }
 
     location / {
@@ -206,7 +215,7 @@ server {
     include /etc/nginx/snippets/analytics-*.conf;
 
     location = /api/sessions {
-        proxy_pass https://go_proxy;
+        proxy_pass ${INFINITE_STREAM_PROXY_SCHEME}://go_proxy;
             proxy_ssl_verify off;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
@@ -219,7 +228,7 @@ server {
     }
 
     location = /api/version {
-        proxy_pass https://go_proxy;
+        proxy_pass ${INFINITE_STREAM_PROXY_SCHEME}://go_proxy;
             proxy_ssl_verify off;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
@@ -232,7 +241,7 @@ server {
     }
 
     location = /api/sessions/stream {
-        proxy_pass https://go_proxy;
+        proxy_pass ${INFINITE_STREAM_PROXY_SCHEME}://go_proxy;
             proxy_ssl_verify off;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
@@ -249,7 +258,7 @@ server {
     }
 
     location = /api/clear-sessions {
-        proxy_pass https://go_proxy;
+        proxy_pass ${INFINITE_STREAM_PROXY_SCHEME}://go_proxy;
             proxy_ssl_verify off;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
@@ -262,7 +271,7 @@ server {
     }
 
     location = /api/external-ips {
-        proxy_pass https://go_proxy;
+        proxy_pass ${INFINITE_STREAM_PROXY_SCHEME}://go_proxy;
             proxy_ssl_verify off;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
@@ -275,7 +284,7 @@ server {
     }
 
     location ~ ^/api/session/ {
-        proxy_pass https://go_proxy;
+        proxy_pass ${INFINITE_STREAM_PROXY_SCHEME}://go_proxy;
             proxy_ssl_verify off;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
@@ -288,7 +297,7 @@ server {
     }
 
     location ~ ^/api/nftables/ {
-        proxy_pass https://go_proxy;
+        proxy_pass ${INFINITE_STREAM_PROXY_SCHEME}://go_proxy;
             proxy_ssl_verify off;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
@@ -304,7 +313,7 @@ server {
     # is SSE — needs the same buffering/timeout overrides as /api/sessions/stream
     # but the location regex below covers the non-stream paths first.
     location = /api/v2/events {
-        proxy_pass https://go_proxy;
+        proxy_pass ${INFINITE_STREAM_PROXY_SCHEME}://go_proxy;
             proxy_ssl_verify off;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
@@ -319,7 +328,7 @@ server {
     }
 
     location ~ ^/api/v2/ {
-        proxy_pass https://go_proxy;
+        proxy_pass ${INFINITE_STREAM_PROXY_SCHEME}://go_proxy;
             proxy_ssl_verify off;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;

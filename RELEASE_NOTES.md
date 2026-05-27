@@ -322,6 +322,23 @@ dependency left.
 
 ---
 
+### 14. HTTP / HTTPS toggle + cert options
+
+The dashboard, API, and shaper ports now default to **HTTPS + HTTP/2**,
+gated by `INFINITE_STREAM_TLS` (`on` by default; `off`/`0`/`false`/`no` for
+plain HTTP). HTTP/2 is what keeps the dashboard's many SSE streams under
+Chrome's 6-per-origin cap. The toggle flips both the nginx listener **and**
+the nginx→go-proxy `proxy_pass` scheme + go-proxy's own listener, so an
+HTTP-only deploy no longer 502s on `/api/v2/*`. The auto-generated
+self-signed cert takes its SAN list from `INFINITE_STREAM_TLS_SAN` (so it
+can match `.local` / LAN-IP names), and a supplied mkcert / Let's Encrypt
+cert in the certs dir is used untouched. New `make test-deploy-dev-http`
+stands up a plain-HTTP mirror that shares the content library but keeps its
+own state. Full reference — cert modes, the Cloudflare/LE DNS-01 runbook,
+mkcert, and installing a CA on Apple clients — in `docs/TLS.md`.
+
+---
+
 ## Known gaps
 
 These are carried into the next release:

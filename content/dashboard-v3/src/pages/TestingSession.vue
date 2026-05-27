@@ -5,7 +5,7 @@
  * the page scaffold + the ShapeSliders proving-ground component.
  *
  * URL contract (matches the legacy v2 page so existing bookmarks work):
- *   /dashboard/v3/testing-session.html?player_id=<uuid>
+ *   /dashboard/testing-session.html?player_id=<uuid>
  */
 import { computed } from 'vue';
 import { useUrlSearchParams } from '@vueuse/core';
@@ -35,33 +35,34 @@ const params = useUrlSearchParams<{ player_id?: string; url?: string }>('history
 const playerId = computed(() => params.player_id ?? '');
 
 /**
- * Defensive rescue for stale grid bundles. Pre-fix grid builds appended
- * the page's fresh player_id to a tile URL that ALREADY carried its own
- * `player_id=<tileId>`, producing `…?player_id=A&player_id=B`. The
- * shaper then registers under the first (`A`) and the page (which
- * queries `B`) 404s forever. If we see duplicates in `url=`, rewrite
- * down to a single `player_id` matching the page's id so the shaper
- * registers under what we'll actually look up.
- *
- * Once every browser is on the post-fix grid bundle this is a no-op,
- * but it costs ~nothing and shields users with cached old code.
+ * Force the stream URL (`url=`) to carry exactly the page's `player_id`.
+ * The shaper registers the per-session redirect (302 :2X081 → :2X181) BY
+ * `player_id`, so a stream URL missing it 404s on the shaper port. Two
+ * sources get this wrong:
+ *   - legacy `shared-nav.js` builds `url=<stream>` WITHOUT an embedded
+ *     player_id (it only sets it as a top-level page param), so we must
+ *     INJECT it here;
+ *   - stale grid bundles appended the page id to a tile URL that already
+ *     carried its own, producing `…?player_id=A&player_id=B`; we collapse
+ *     to a single one matching the page id.
+ * When the page has no player_id there's nothing to enforce → pass through.
  */
 function sanitizeUrlOverride(raw: string, pid: string): string {
   if (!raw) return raw;
+  if (!pid) return raw; // nothing to enforce
   try {
     const u = new URL(raw, window.location.href);
     const all = u.searchParams.getAll('player_id');
-    // No player_id, or already a single matching one → nothing to do.
-    if (all.length === 0) return raw;
+    // Already exactly the page's id → nothing to do.
     if (all.length === 1 && all[0] === pid) return raw;
     u.searchParams.delete('player_id');
-    if (pid) u.searchParams.set('player_id', pid);
+    u.searchParams.set('player_id', pid);
     const fixed = u.toString();
     if (fixed !== raw) {
-      console.warn('[TS] sanitised urlOverride to dedupe player_id', {
+      console.warn('[TS] ensured stream-URL player_id matches the page', {
         before: raw,
         after: fixed,
-        duplicates: all,
+        had: all,
       });
     }
     return fixed;
@@ -132,7 +133,7 @@ const chatScope = computed<ChatScope>(() => ({
       <main class="content">
       <div v-if="!playerId" class="empty">
         <p>No <code>player_id</code> in the URL.</p>
-        <p>Open <code>/dashboard/v3/testing-session.html?player_id=&lt;uuid&gt;</code></p>
+        <p>Open <code>/dashboard/testing-session.html?player_id=&lt;uuid&gt;</code></p>
       </div>
 
       <!-- Loading + error states only kick in when there's NO urlOverride.

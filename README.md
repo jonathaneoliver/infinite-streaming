@@ -93,7 +93,7 @@ Use live-feed testing to answer "does it work in the wild." Use this to answer "
 
 - **Docker** (and Docker Compose).
 - A **media directory** on the host (`CONTENT_DIR`) for source files and encoded output. It will be mounted into the container as `/media`.
-- **TLS certificates** in `$CONTENT_DIR/certs/`. Self-signed certs are auto-generated on first startup if none exist. To provide your own, drop `localhost.pem` and `localhost-key.pem` into `$CONTENT_DIR/certs/` before starting.
+- **TLS** is on by default (HTTPS + HTTP/2); set `INFINITE_STREAM_TLS=off` for plain HTTP. Certs live in `$CONTENT_DIR/certs/` — a self-signed pair is auto-generated on first start if none exist (its SAN comes from `INFINITE_STREAM_TLS_SAN`). To provide your own, drop `localhost.pem` and `localhost-key.pem` there before starting. See [`docs/TLS.md`](docs/TLS.md) for the HTTP-vs-HTTPS choice and cert options.
 
 ### Start it
 
@@ -105,7 +105,7 @@ cp .env.example .env       # edit CONTENT_DIR
 docker compose up -d       # first run builds the image
 ```
 
-Open **http://localhost:30000/** in a browser. That's the dashboard — everything else happens there.
+Open **https://localhost:30000/** in a browser. That's the dashboard — everything else happens there.
 
 ### First-run setup (out-of-box experience)
 
@@ -173,6 +173,8 @@ That walkthrough exercises the majority of the system. The sections below descri
 - **Go-Monitor** — active workers, request counts, last-request time, idle timeout, tick timings.
 - **Upload Content** — web upload + encoding job tracking.
 - **Source Library** — list of `$CONTENT_DIR/originals/`. Click to kick re-encodes.
+- **Automated Testing** — a read-only viewer over **archived** automated-test runs: server control-surface checks (the `server_*` calibration suite) and player ABR characterization sweeps, grouped by run with per-step drill-down detail. It doesn't run anything itself — the runs execute on the dev host (`make automated-testing` → server checks then iPad-sim players; run commands and per-test detail in [`tests/characterization/README.md`](tests/characterization/README.md) and [`.claude/standards/server-behavior.md`](.claude/standards/server-behavior.md)) and post their results here.
+- **Ask (AI chat)** — a `/ask` fleet page plus an in-page chat panel (Testing / Session Viewer) that answers questions about the rig in prose, scoped to the `player_id` / play you're viewing. See [AI chat and Claude Code skills](#ai-chat-and-claude-code-skills).
 
 Selected content and URL persist across pages in `localStorage` (`ismSelected*`).
 
@@ -185,7 +187,7 @@ Selected content and URL persist across pages in `localStorage` (`ismSelected*`)
 Open directly if you don't want to come from Mosaic:
 
 ```
-http://localhost:30000/dashboard/testing-session.html?player_id=<uuid>&url=<encoded-stream-url>
+https://localhost:30000/dashboard/testing-session.html?player_id=<uuid>&url=<encoded-stream-url>
 ```
 
 The `player_id` is required. go-proxy uses it to allocate a session-specific port (`30181..30881`) so that failure injection and shaping stay scoped to *your* session.
@@ -352,6 +354,15 @@ The two pages downstream of this stack — **Sessions view** (the picker) and **
 
 ---
 
+## AI chat and Claude Code skills
+
+Two ways to drive and interrogate the rig in natural language, both new in v2:
+
+- **In-dashboard AI chat** (#497) — a chat panel mounts on the Testing and Session-Viewer pages (plus a standalone `/ask` fleet page), scoped to the `player_id` / play / brush window you're viewing, so you can ask "why did this session stall at 0:42?" instead of hand-writing ClickHouse queries. The forwarder backend is provider-agnostic: Anthropic-native (with prompt caching) or any OpenAI-compatible endpoint — hosted (OpenAI / litellm / HF) or local (mlx) — with live model discovery and per-user base-URL / per-profile API-key overrides. It's opt-in: with no provider configured the panel is simply inert.
+- **Claude Code skills** under [`.claude/skills/`](.claude/skills/) — `triage`, `investigate`, `forensics`, `fault`, `shape`, and `finding` let an operator drive the rig and run forensic analyses through prose prompts. They're built **on top of the [`harness` CLI](tools/harness-cli/README.md)**: each skill translates the prompt into `harness` commands (`harness fault add`, `harness shape …`, `harness query …`), so the snapshot-before-mutate and `harness undo` discipline comes from the CLI itself rather than the prompt. Backed by the playback-knowledge references in [`.claude/standards/`](.claude/standards/) and a capture-finding library in [`.claude/findings/`](.claude/findings/). Walkthrough: [`.claude/skills/USAGE_WALKTHROUGH.md`](.claude/skills/USAGE_WALKTHROUGH.md).
+
+---
+
 ## Sessions view (the picker)
 
 ![Sessions view](docs/screenshots/sessions.png)
@@ -379,7 +390,7 @@ When something stands out — a row with a 🚨 chip, a stack of ⛔ errors, a s
 
 ![Session Viewer](docs/screenshots/session-viewer.png)
 
-The Session Viewer (`dashboard/session-viewer.html?session=<sid>&play_id=<pid>`) replays one archived play through the same chart stack the live Testing Session page uses. Same widgets, frozen data, with two viewer-only additions across the top.
+The Session Viewer (`dashboard/session-viewer.html?session=<sid>&play_id=<pid>`) replays one archived play through the same chart stack the live Testing Session page uses. Same widgets, frozen data, with viewer-only additions: a scrub bar and event filters across the top, plus **Focus Window** and **Play Log** folds (below).
 
 ### Scrub bar (top)
 
@@ -404,6 +415,13 @@ Below the brush + filters: bandwidth chart (with buffer depth and FPS overlays),
 - **⭐ star and 📥 bundle download** in the banner — same controls as the picker row, applied to the play in view.
 - **🚨 last-event marker** if the play included a `user_marked` event — vertical line on every chart at the exact moment of the 911 press.
 
+### Focus Window and Play Log folds
+
+Two folds backed by the unified events / network / control streams (shared with the live Testing Session via the same display component):
+
+- **Focus Window** (open by default) — a synchronised brush over the play with a severity-filter accordion derived from the `labels[]` across all three streams, so you can narrow to "just the critical window" and have every chart follow. The `start_time` / `end_time` URL params scope it before any SSE backfill lands; a **Show context** toggle widens the window by ±5 min to show what surrounded the incident.
+- **Play Log** — a time-multiplexed scroll interleaving all three sources (event / network / control) in one chronological list, with source-toggle checkboxes, severity tint, label chips, and a Flags column mirroring the Network Log's glyphs for network rows. Uniform columns: time / source / player_id / play_id / attempt_id / name / info.
+
 ---
 
 ## Third-party players
@@ -415,7 +433,7 @@ The Testing Session flow isn't limited to the built-in browser players. Any HTTP
 Inside the dashboard, right-click any tile in **Mosaic (Grid)** → **Open in Testing Window**. That builds the session URL:
 
 ```
-http://<host>:30000/dashboard/testing-session.html?url=<stream-url>&player_id=<uuid>&nav=1
+https://<host>:30000/dashboard/testing-session.html?url=<stream-url>&player_id=<uuid>&nav=1
 ```
 
 For 3rd-party integrations you want the `player_id` and `url` values — those are the only two pieces of state a session needs. Paste the stream URL into your player and use the `player_id` on everything described below.
@@ -431,10 +449,10 @@ A native app integrates in four steps, all plain HTTP:
 3. **Build the stream URL and play it.** Append `?player_id=<id>` to the manifest path:
 
    ```
-   http://<host>:30081/go-live/<content>/master.m3u8?player_id=<id>       # HLS LL
-   http://<host>:30081/go-live/<content>/master_2s.m3u8?player_id=<id>    # HLS 2s
-   http://<host>:30081/go-live/<content>/master_6s.m3u8?player_id=<id>    # HLS 6s
-   http://<host>:30081/go-live/<content>/manifest.mpd?player_id=<id>      # LL-DASH
+   https://<host>:30081/go-live/<content>/master.m3u8?player_id=<id>       # HLS LL
+   https://<host>:30081/go-live/<content>/master_2s.m3u8?player_id=<id>    # HLS 2s
+   https://<host>:30081/go-live/<content>/master_6s.m3u8?player_id=<id>    # HLS 6s
+   https://<host>:30081/go-live/<content>/manifest.mpd?player_id=<id>      # LL-DASH
    ```
 
    The proxy allocates a dedicated session port on first request and responds with `302` to the allocated port (e.g. `30081` → `30281`). **Follow the redirect** — all subsequent segment and playlist requests must stay on that port so faults and shaping apply. Every HLS.js/Shaka/AVPlayer/ExoPlayer/Roku player handles 302 redirects natively; this is zero work for the client.
@@ -525,14 +543,14 @@ To encode outside the dashboard (offline, in CI, or on a build box):
 ### Primary endpoints
 
 **HLS:**
-- `http://localhost:30000/go-live/{content}/master.m3u8` (LL)
-- `http://localhost:30000/go-live/{content}/master_2s.m3u8`
-- `http://localhost:30000/go-live/{content}/master_6s.m3u8`
+- `https://localhost:30000/go-live/{content}/master.m3u8` (LL)
+- `https://localhost:30000/go-live/{content}/master_2s.m3u8`
+- `https://localhost:30000/go-live/{content}/master_6s.m3u8`
 
 **DASH:**
-- `http://localhost:30000/go-live/{content}/manifest.mpd` (LL)
-- `http://localhost:30000/go-live/{content}/manifest_2s.mpd`
-- `http://localhost:30000/go-live/{content}/manifest_6s.mpd`
+- `https://localhost:30000/go-live/{content}/manifest.mpd` (LL)
+- `https://localhost:30000/go-live/{content}/manifest_2s.mpd`
+- `https://localhost:30000/go-live/{content}/manifest_6s.mpd`
 
 Full API (`/api/content`, `/api/jobs`, `/api/sessions/*`, `/api/nftables/*`, etc.) is in [`docs/API.md`](docs/API.md).
 
@@ -715,7 +733,15 @@ That's it — no third-party services beyond a Cloudflare account.
 
 ### HTTP, HTTPS, and iOS App Transport Security
 
-The server defaults to plain HTTP on its dashboard / API / playback ports. That's fine for **LAN use** and **HTTPS-fronted public deployments**, but **plain HTTP to a public hostname** trips the platform-specific cleartext-traffic rules baked into modern OSes:
+The dashboard, API, and per-session shaper ports default to **HTTPS + HTTP/2**, controlled by `INFINITE_STREAM_TLS` (`on` by default; set `off` / `0` / `false` / `no` for plain HTTP). HTTPS is the default because HTTP/2 multiplexes the dashboard's many SSE streams over one connection, dodging Chrome's 6-connections-per-origin cap. Three modes, picked by how clients reach the box:
+
+- **HTTPS with a publicly-trusted cert** (Let's Encrypt for a domain you own) — green padlock, nothing to install on clients; the announced URL must match the cert's hostname.
+- **HTTPS with a self-signed / mkcert cert** — covers any name you put in the SAN (including `.local`), but the cert (self-signed) or CA (mkcert) must be trusted on each client.
+- **Plain HTTP** (`INFINITE_STREAM_TLS=off`) — no cert, but loses HTTP/2 (heavy dashboards hit the SSE cap), and **plain HTTP to a public hostname** trips the platform cleartext-traffic rules below.
+
+Full reference — cert modes, the Cloudflare/Let's-Encrypt DNS-01 runbook, mkcert, the self-signed SAN var (`INFINITE_STREAM_TLS_SAN`), and installing a CA on Apple clients — is in [`docs/TLS.md`](docs/TLS.md).
+
+When run as plain HTTP, the cleartext-traffic rules baked into modern OSes apply:
 
 | Client | Cleartext to LAN (`localhost`, `*.local`, RFC1918) | Cleartext to public hostname |
 |---|---|---|
@@ -726,7 +752,7 @@ The server defaults to plain HTTP on its dashboard / API / playback ports. That'
 
 The iOS/tvOS Info.plist files in this repo include an explicit `NSExceptionDomains` entry for `infinitestreaming.jeoliver.com` (the upstream maintainer's public domain). **If you fork and ship apps that talk to a different public-HTTP hostname** (your own server, a Tailscale MagicDNS name like `*.ts.net`, a Tailscale CGNAT IP in `100.64.0.0/10`, etc.) you must add it to both Info.plists or those clients will silently fail to load anything.
 
-The cleaner long-term answer is to terminate TLS at the server so all clients use HTTPS and no per-domain ATS / cleartext exceptions are needed. The k3d manifests already mount a `certs-vol` for this; flipping the nginx template to `listen … ssl` and pointing it at a Let's Encrypt cert (or whichever cert lives in `K3S_CERTS_DIR`) gets you there.
+The cleaner answer is to keep TLS on (the default) so all clients use HTTPS and no per-domain ATS / cleartext exceptions are needed — terminate at the server with a cert whose hostname matches what clients use (see [`docs/TLS.md`](docs/TLS.md)). For Docker Compose, drop your cert in `$CONTENT_DIR/certs/`; for k3d, the manifests mount a `certs-vol` from `K3S_CERTS_DIR`.
 
 ---
 
@@ -757,7 +783,7 @@ echo "CONTENT_DIR=/path/to/your/media" > .env
 docker compose up -d
 ```
 
-Open `http://localhost:30000/`. The dashboard's Sessions / Session Viewer / Grafana features all work in this mode (analytics tier comes up alongside the main image — see [Analytics tier](#analytics-tier)).
+Open `https://localhost:30000/`. The dashboard's Sessions / Session Viewer / Grafana features all work in this mode (analytics tier comes up alongside the main image — see [Analytics tier](#analytics-tier)).
 
 ### k3d, release tagging, GHCR publishing
 
@@ -801,6 +827,8 @@ Captured from the live dashboard; files live in [`docs/screenshots/`](docs/scree
 - [`analytics/README.md`](analytics/README.md) — analytics sidecar (ClickHouse + Grafana + replay mode)
 - [`tests/server_behavior/`](tests/server_behavior/) + [`.claude/standards/server-behavior.md`](.claude/standards/server-behavior.md) — Go server-behavior tests + calibration baselines
 - [`tests/characterization/README.md`](tests/characterization/README.md) — Go player ABR characterization framework
+- [`tools/harness-cli/README.md`](tools/harness-cli/README.md) — the `harness` CLI (full v2 API surface, snapshot/undo discipline)
+- [`.claude/skills/USAGE_WALKTHROUGH.md`](.claude/skills/USAGE_WALKTHROUGH.md) — prose-driven operation via Claude Code skills
 
 ---
 

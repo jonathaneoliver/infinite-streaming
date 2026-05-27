@@ -687,8 +687,23 @@
             return encodeURIComponent(name).replace(/%2F/g, '/');
         }
 
+        // Resolve the real content directory name. Legacy content is named
+        // '<base>_<codec>' (e.g. 'fashion' + '_h264' = 'fashion_h264'), but
+        // newer content already carries the codec + timestamp in its name
+        // (e.g. 'INSANE_..._p200_h264_20260423_212139'), so blindly appending
+        // the codec suffix 404s. Prefer the catalogue (QUARTET_CONTENT_META);
+        // fall back to a codec-token check when it isn't loaded yet.
+        function resolveStreamName(content, suffix) {
+            if (!suffix) return content;
+            const withSuffix = `${content}${suffix}`;
+            if (QUARTET_CONTENT_META?.[withSuffix]) return withSuffix;
+            if (QUARTET_CONTENT_META?.[content]) return content;
+            const codec = suffix.replace(/^_/, '');
+            return new RegExp(`(^|_)${codec}(_|$)`, 'i').test(content) ? content : withSuffix;
+        }
+
         function buildMasterUrl(content, encodingConfig, segment = 'll') {
-            const streamName = `${content}${encodingConfig.suffix}`;
+            const streamName = resolveStreamName(content, encodingConfig.suffix);
             const base = window.location.origin;
             let filename;
             if (encodingConfig.protocol === 'dash') {
@@ -1098,7 +1113,7 @@
         function openTestingWindow(url) {
             const playerId = createPlayerId();
             const testingUrl = buildTestingUrl(url, playerId);
-            const pageUrl = `/dashboard/v3/testing-session.html?player_id=${encodeURIComponent(playerId)}&url=${encodeURIComponent(testingUrl)}`;
+            const pageUrl = `/dashboard/testing-session.html?player_id=${encodeURIComponent(playerId)}&url=${encodeURIComponent(testingUrl)}`;
             const popup = window.open(pageUrl, '_blank');
             if (!popup) {
                 alert('Popup blocked. Allow popups for this site.');

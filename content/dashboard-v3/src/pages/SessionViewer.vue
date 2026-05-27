@@ -141,7 +141,7 @@ const bundleHref = computed(() => {
   if (playId.value) p.set('play_id', playId.value);
   return '/analytics/api/session_bundle?' + p.toString();
 });
-const backHref = '/dashboard/v3/sessions.html';
+const backHref = '/dashboard/sessions.html';
 
 // (Initial starred-state lookup now lives in the playQuery above —
 // useQuery fires automatically when playId is set; the onMounted
@@ -159,7 +159,7 @@ const backHref = '/dashboard/v3/sessions.html';
       <main class="content">
         <div v-if="!playerId" class="empty">
           <p>No <code>player_id</code> in the URL.</p>
-          <p>Open <code>/dashboard/v3/session-viewer.html?player_id=&lt;uuid&gt;&amp;play_id=&lt;uuid&gt;</code></p>
+          <p>Open <code>/dashboard/session-viewer.html?player_id=&lt;uuid&gt;&amp;play_id=&lt;uuid&gt;</code></p>
         </div>
 
         <template v-else>
