@@ -38,24 +38,12 @@ UI is available at `http://localhost:30000/` (Docker Compose) or `http://$K3S_HO
 
 ## Testing
 
-Tests are integration tests that require a running server. Navigate to the test directory first:
+All tests are now Go-based and require a running server.
 
-```bash
-cd tests/integration
-pip install -r requirements.txt
+- **Server-behavior tests** under `tests/server_behavior/` cover control-surface contracts: rate (throughput_calibration) + delay + loss + fault + pattern + scope + socket + transport + transfer + content + limit. Run via `go test ./tests/server_behavior -run TestRateSweep -timeout 10m` (or any other `TestServer*` / `TestTransportFaults`). See [`.claude/standards/server-behavior.md`](.claude/standards/server-behavior.md) for the catalogue and calibration baselines.
+- **Player ABR characterization** lives under `tests/characterization/` (issue #482) — modes: steps / rampup / rampdown / pyramid / hysteresis_gap / downshift_severity / transient_shock / emergency_downshift / startup / startup_caps / abort. Multi-platform via the launch-mode picker (manual / cli / appium). See `tests/characterization/README.md`.
 
-# Run smoke tests (fastest)
-pytest -m smoke
-
-# Run specific categories
-pytest -m http
-pytest -m "not slow"
-pytest -k test_name
-```
-
-Default server target for tests is `$K3S_HOST:30000/30081`. Override with `--host`, `--api-port`, `--hls-port`, or `--api-base`.
-
-Player ABR characterization moved to a Go framework under `tests/characterization/` (issue #482). See that directory's README for the mode list (steps / rampup / pyramid / hysteresis_gap / downshift_severity / transient_shock / emergency_downshift / startup / abort) and the launch-mode picker (manual / cli / appium).
+Default server target is the test-dev deploy at `https://$TEST_HOST:21000`; override via `THROUGHPUT_HOST` / `THROUGHPUT_API_PORT` env vars in `tests/server_behavior/`, or harness flags in `tests/characterization/`. The legacy `tests/integration/` pytest suite was retired in favour of the Go coverage above.
 
 ## Code Style
 
