@@ -1,11 +1,14 @@
 ---
 name: fault
 description: Inject HTTP errors, socket faults, or transport-layer drops on a player session via the harness CLI. Invoke when the user says "inject", "drop a 404", "fault on segments", "every N seconds", "kill the connection mid-body", "throttle", "reset faults", or otherwise wants to mutate the proxy's behaviour for one player. This skill owns the English-to-CLI-flag translation including the ambiguous-phrase tables; resolve disambiguation BEFORE running any harness command.
+last_reviewed: 2026-05-19
 ---
 
 # Inject faults via `harness fault`
 
-Default target: `https://jonathanoliver-ubuntu.local:21000` (test-dev). Every mutation is snapshot-protected by the CLI — `harness undo <target>` rolls back. You never have to manage state.
+Default target: `https://dev.jeoliver.com:21000` (test-dev, public Let's Encrypt cert). Every mutation is checkpoint-protected by the CLI — `harness undo <target>` rolls back the most-recent change. You never have to manage state.
+
+**Conventions:** this skill follows `.claude/skills/CONVENTIONS.md`. Most load-bearing for fault: every mutation is checkpoint-protected (`harness undo` rolls back); ALWAYS show current state (`harness fault list <t>`) before adding, removing, or clearing; lead every shell command with `harness`.
 
 ## Always do this first
 
@@ -68,7 +71,7 @@ Don't guess. Offer a menu:
 
 | Verb | Command | Behaviour |
 |---|---|---|
-| **Undo** ("undo that") | `harness undo <t>` | Replays the most-recent snapshot. Restores exactly what was there. |
+| **Undo** ("undo that") | `harness undo <t>` | Replays the most-recent checkpoint. Restores exactly what was there. |
 | **Clear faults** | `harness fault clear <t>` | Removes all fault rules. Doesn't restore prior state — wipes. |
 | **Wipe everything** | `harness players prune --yes` | Destroys ALL players + state. **Confirm before running.** |
 
@@ -144,7 +147,7 @@ The short rule_id from `fault list` is enough — the CLI expands prefixes.
 
 ## What NOT to do here
 
-- **Don't snapshot first.** The CLI does it automatically on every mutation. Skipping the `harness snapshot` call isn't an oversight — it's redundant.
+- **Don't checkpoint first.** The CLI does it automatically on every mutation. Skipping the `harness checkpoint` call isn't an oversight — it's redundant.
 - **Don't add a rule without showing the existing list first.** Stale top-of-list rules silently consume requests that the operator thought their new rule would catch.
 - **Don't run `players prune` or `players rm` without explicit user confirmation.** Even with `--yes` the CLI proceeds without asking; require the operator to say yes in the chat first.
 - **Don't echo "rule added" without the undo command.** Every mutation reply ends with the inverse.

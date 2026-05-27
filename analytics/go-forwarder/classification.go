@@ -182,8 +182,11 @@ func setClassification(ctx context.Context, cfg config, sessionID, playID, value
 		label string
 		query string
 	}{
-		{"session_snapshots", fmt.Sprintf("ALTER TABLE %s.%s UPDATE classification = {cls:String} %s", cfg.chDatabase, cfg.chTable, whereSafe)},
+		{"session_events", fmt.Sprintf("ALTER TABLE %s.%s UPDATE classification = {cls:String} %s", cfg.chDatabase, cfg.chTable, whereSafe)},
 		{"network_requests", fmt.Sprintf("ALTER TABLE %s.network_requests UPDATE classification = {cls:String} %s", cfg.chDatabase, whereSafe)},
+		// Mirror onto control_events so the proxy/harness action log
+		// ages out on the same TTL tier as the parent session.
+		{"control_events", fmt.Sprintf("ALTER TABLE %s.control_events UPDATE classification = {cls:String} %s", cfg.chDatabase, whereSafe)},
 	}
 	for _, u := range updates {
 		if _, err := chQueryBytes(ctx, cfg, u.query, params); err != nil {
@@ -227,6 +230,10 @@ func registerClassificationHandlers(mux *http.ServeMux, cfg config) {
 		if playID == "—" {
 			playID = ""
 		}
+		// Canonicalise — ClickHouse stores lowercase UUIDs; an
+		// uppercase URL segment would silently match no rows.
+		// See canonicalV2ID() doc.
+		playID = canonicalV2ID(playID)
 		if sessionID == "" {
 			http.Error(w, "session id required", http.StatusBadRequest)
 			return

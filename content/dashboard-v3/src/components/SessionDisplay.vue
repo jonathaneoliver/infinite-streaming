@@ -37,9 +37,23 @@ import RTTChart from '@/components/RTTChart.vue';
 import BufferChart from '@/components/BufferChart.vue';
 import FPSChart from '@/components/FPSChart.vue';
 import NetworkLog from '@/components/NetworkLog.vue';
+import PlayLog from '@/components/PlayLog.vue';
 import BitrateChartPanelToolbar from '@/components/BitrateChartPanelToolbar.vue';
 import { useChartCoordination } from '@/composables/useChartCoordination';
-import { useArchivedSessionEvents, type SessionEvent } from '@/composables/useArchivedSessionEvents';
+// Issue #474 Milestone C: session_markers retired. The severity filter
+// derives its event list from `labels[]` on rows across all three
+// streams (events / network / control_events) instead of a dedicated
+// markers table. See `sessionEvents` computed below.
+interface SessionEvent {
+  ts?: string;
+  event_time?: string;
+  type?: string;
+  info?: string;
+  kind?: 'effect' | 'cause';
+  priority?: 1 | 2 | 3 | 4;
+  severity?: string;
+  [k: string]: unknown;
+}
 import { usePlayer } from '@/composables/usePlayer';
 import { useSessionTimeSeries } from '@/composables/useSessionTimeSeries';
 import { chRowToPlayerRecord, tsOfRow } from '@/composables/chRowAdapter';
@@ -60,6 +74,20 @@ const props = defineProps<{
    *  (above the control panels), so they pass this flag and SessionDisplay
    *  omits the duplicate panel from its stack. */
   hideSessionDetails?: boolean;
+  /** SessionViewer "show before/after" toggle. When true the SSE
+   *  drops the play_id filter and widens fromMs/toMs to the cached
+   *  play bounds ± 5 minutes so the operator can scroll through the
+   *  surrounding context for the same player. Default: false — the
+   *  view is locked to this play. */
+  showContext?: boolean;
+  /** Initial time window. Caller (SessionViewer reading the URL)
+   *  passes startMs (ms-since-epoch) and endMs. endMs = null means
+   *  "follow live edge" — the SSE backfills from startMs but doesn't
+   *  set a `to` bound, and the brush stays unpinned so it tracks
+   *  live samples as they arrive. Both null = legacy behaviour
+   *  (auto-pin brush to samples.rangeBounds when they land). */
+  startMs?: number | null;
+  endMs?: number | null;
 }>();
 
 const playIdRef = computed(() => props.playId);
@@ -105,7 +133,57 @@ const archivePlayerId = computed(() =>
 // tick markers, the priority/tier filter UI, and the prev/next nav
 // keep functioning unchanged. Filters by player_id + play_id only —
 // session_id retired.
-const { events: sessionEvents } = useArchivedSessionEvents(apiPlayerIdRef, playIdRef);
+// Derived event list for the severity filter — projects every
+// labelled row across session_events / network_requests / control_events
+// into a SessionEvent. After issue #474 Milestone C this replaces the
+// useArchivedSessionMarkers fetch against the retired session_markers
+// table. One synthetic event per label; ts/severity/type come straight
+// from the row + label string.
+const sessionEvents = computed<SessionEvent[]>(() => {
+  // Trigger reactivity on each stream's version ref.
+  void timeseries.events.version.value;
+  void timeseries.network.version.value;
+  void timeseries.control.version.value;
+  const out: SessionEvent[] = [];
+  function emit(row: Record<string, unknown>, kind: 'effect' | 'cause') {
+    const labels = Array.isArray((row as { labels?: unknown }).labels)
+      ? ((row as { labels: unknown[] }).labels as string[])
+      : null;
+    if (!labels || labels.length === 0) return;
+    const ts = (row.ts as string | undefined) ?? '';
+    for (const l of labels) {
+      const eq = l.indexOf('=');
+      if (eq <= 0) continue;
+      const sev = l.slice(0, eq);
+      let type = l.slice(eq + 1);
+      // Strip the `*` synthesized-marker prefix for display — the
+      // filter UI treats `*manifest_failure` and `manifest_failure`
+      // as the same bucket type.
+      if (type.startsWith('*')) type = type.slice(1);
+      if (sev !== 'error' && sev !== 'critical' && sev !== 'warning' && sev !== 'info') continue;
+      out.push({ ts, type, severity: sev, kind });
+    }
+  }
+  // Cause / effect axis (post-#474 redefinition):
+  //   - cause  = something the operator / proxy deliberately introduced
+  //              to provoke a reaction. Every control_events row counts
+  //              (fault enables, pattern toggles, shaper edits, the
+  //              pattern_step ticks themselves). On network rows, only
+  //              the proxy-flagged `faulted=1` responses count — those
+  //              are the 1-in-10 HTTP 4xx/5xx returned by the fault
+  //              rules. An organic upstream 5xx the proxy didn't fault
+  //              stays an effect.
+  //   - effect = the player's / network's reaction. All session_events
+  //              rows (stalls, restarts, ABR shifts, errors) and the
+  //              clean network rows.
+  for (const r of timeseries.events.inRange(0, Number.MAX_SAFE_INTEGER)) emit(r, 'effect');
+  for (const r of timeseries.network.inRange(0, Number.MAX_SAFE_INTEGER)) {
+    const faulted = Number((r as { faulted?: unknown }).faulted) || 0;
+    emit(r, faulted ? 'cause' : 'effect');
+  }
+  for (const r of timeseries.control.inRange(0, Number.MAX_SAFE_INTEGER)) emit(r, 'cause');
+  return out;
+});
 
 // v3 unified time-series model. Single subscription per
 // SessionDisplay drives:
@@ -132,14 +210,81 @@ const { events: sessionEvents } = useArchivedSessionEvents(apiPlayerIdRef, playI
 // way the v3 timeseries SSE handles backfill + live deltas in the
 // same stream, so an in-progress play visited from session-viewer
 // will still receive live updates via the ring overlay.
-const timeseriesPlayId = playIdRef;
+/** Initial time-window source of truth, in order of preference:
+ *    1. props.startMs / props.endMs   ← URL-driven (sessions.html)
+ *    2. samples.rangeBounds            ← legacy auto-pin once data lands
+ *
+ *  windowBoundsRef holds whichever is currently the truth. URL props
+ *  take precedence — when present, the brush pins to them immediately
+ *  on mount (no waiting for samples). When absent, falls back to the
+ *  rangeBounds watcher below. */
+const windowBoundsRef = ref<{ min: number; max: number } | null>(null);
+if (props.startMs != null && props.endMs != null) {
+  windowBoundsRef.value = { min: props.startMs, max: props.endMs };
+} else if (props.startMs != null && props.endMs == null) {
+  // end_time=live: start is anchored, end follows live edge. The
+  // window's "max" doesn't matter for the SSE (we leave toMs null
+  // below); set it to startMs for now and let lastSampleMs extend it.
+  windowBoundsRef.value = { min: props.startMs, max: props.startMs };
+}
+
+/** Effective play_id for the SSE subscription. `showContext = true`
+ *  drops the play_id filter so rows from neighbouring plays of the
+ *  same player land in the caches. */
+const effectivePlayIdRef = computed<string | null>(() =>
+  props.showContext ? null : playIdRef.value,
+);
+
+/** Reactive fromMs / toMs for the SSE.
+ *  - Base case (showContext off): use the URL's startMs/endMs as-is.
+ *    endMs=null means "follow live" — pass through as null so SSE
+ *    tails the live edge.
+ *  - showContext on: widen by CONTEXT_PAD_MS on each side so the
+ *    operator can scroll through before/after; toMs stays null when
+ *    end_time was "live". */
+const CONTEXT_PAD_MS = 5 * 60 * 1000;
+const fromMsRef = computed<number | null>(() => {
+  const startMs = props.startMs ?? windowBoundsRef.value?.min ?? null;
+  if (startMs == null) return null;
+  return props.showContext ? startMs - CONTEXT_PAD_MS : startMs;
+});
+const toMsRef = computed<number | null>(() => {
+  // end_time=live (props.endMs == null but startMs set) → no upper
+  // bound on the SSE backfill, regardless of showContext.
+  if (props.endMs == null) return null;
+  return props.showContext ? props.endMs + CONTEXT_PAD_MS : props.endMs;
+});
+
 const timeseries = useSessionTimeSeries(
   apiPlayerIdRef,
-  timeseriesPlayId,
+  effectivePlayIdRef,
   {
-    streams: ['samples', 'network'],
+    // 'control' added so the PlayLog and severity filter can see
+    // proxy/harness action rows alongside player events + network
+    // rows. The control bundle is auto-added when 'control' is in
+    // streams (useSessionTimeSeries). Issue #474 Milestone C.
+    streams: ['events', 'network', 'control'],
     bundles: ['charts_minimal', 'lanes_v1', 'session_details', 'network'],
+    fromMs: fromMsRef,
+    toMs: toMsRef,
   },
+);
+
+// Fallback: when the URL didn't carry start_time/end_time, capture
+// the play's bounds the first time samples arrive in archive mode
+// so windowBoundsRef can drive the SSE re-subscribe on showContext
+// toggles. Skipped when URL props are present — those take precedence.
+watch(
+  () => timeseries.events.rangeBounds.value,
+  (b) => {
+    if (!b) return;
+    if (props.startMs != null) return;   // URL gave us the truth
+    if (props.showContext) return;        // wider window, don't anchor on it
+    if (!playIdRef.value) return;         // live mode
+    if (windowBoundsRef.value !== null) return;
+    windowBoundsRef.value = b;
+  },
+  { immediate: true },
 );
 
 // coord declared up-front so the `timeRange` computed below can read
@@ -147,6 +292,44 @@ const timeseries = useSessionTimeSeries(
 // — and so any earlier reactive code (window watcher, brush clamps)
 // sees a coord instance even though it gets consumed mostly later.
 const coord = useChartCoordination(archivePlayerId);
+
+// Pin the focus-window brush as soon as we know the time bounds.
+//   - URL gave us startMs + endMs (sessions.html click): pin
+//     immediately on mount, no waiting for samples.
+//   - URL gave us startMs + endMs=null ("live"): leave coord.range
+//     null so the brush follows the live edge.
+//   - URL gave us nothing (legacy / direct URL): wait for samples
+//     and pin to bounds.min - 5s when they land.
+// One-shot: don't fight subsequent operator drags or the
+// "show context" toggle widening.
+let hasPinnedBrush = false;
+function tryPinBrush(min: number | null, max: number | null) {
+  if (hasPinnedBrush) return;
+  if (min == null || max == null) return;
+  if (props.showContext) return;
+  if (coord.state.range !== null) return;
+  coord.setRange({ min, max });
+  hasPinnedBrush = true;
+}
+if (props.startMs != null && props.endMs != null) {
+  // URL-driven archive range: pin immediately.
+  tryPinBrush(props.startMs, props.endMs);
+} else if (props.startMs != null && props.endMs == null) {
+  // end_time=live: leave coord.range null so brush follows live
+  // edge. Treat as "pinned" for the fallback watcher's purposes.
+  hasPinnedBrush = true;
+}
+watch(
+  () => timeseries.events.rangeBounds.value,
+  (b) => {
+    if (hasPinnedBrush) return;
+    if (!b) return;
+    if (props.showContext) return;
+    if (!playIdRef.value) return;
+    tryPinBrush(b.min - 5000, b.max);
+  },
+  { immediate: true },
+);
 
 /** Effective time range for the brush rail. Reads the cached
  *  rangeBounds of the samples stream as the historical span; always
@@ -156,7 +339,7 @@ const coord = useChartCoordination(archivePlayerId);
  *  (or the last archived sample's ts) and the rail bounds come
  *  entirely from `rangeBounds`. */
 const timeRange = computed<{ min: number; max: number } | null>(() => {
-  const ar = timeseries.samples.rangeBounds.value;
+  const ar = timeseries.events.rangeBounds.value;
   const live = coord.state.lastSampleMs || 0;
   if (!ar && !live) return null;
   if (!ar) return { min: live, max: live };
@@ -164,15 +347,15 @@ const timeRange = computed<{ min: number; max: number } | null>(() => {
   return { min: ar.min, max: Math.max(ar.max, live) };
 });
 
-const loading = computed(() => timeseries.samples.loading.value);
-const error = computed(() => timeseries.samples.error.value);
+const loading = computed(() => timeseries.events.loading.value);
+const error = computed(() => timeseries.events.error.value);
 const progressLabel = computed(() => loading.value ? 'Streaming snapshots…' : '');
 // Approximate count of rendered samples — used in the brush-rail
 // status line. The cache only grows; reading via inRange touches
 // `version` so this stays reactive on every flush.
 const samplesCount = computed(() => {
-  void timeseries.samples.version.value;
-  return timeseries.samples.inRange(0, Number.MAX_SAFE_INTEGER).length;
+  void timeseries.events.version.value;
+  return timeseries.events.inRange(0, Number.MAX_SAFE_INTEGER).length;
 });
 
 /* ─── Event filter ──────────────────────────────────────────────── */
@@ -193,27 +376,37 @@ const enabledKind = ref<Record<'effect' | 'cause', boolean>>({
   cause: false,
 });
 
-// L1 — Priority tier
-type Priority = 1 | 2 | 3 | 4;
-const PRIORITY_ORDER: Priority[] = [1, 2, 3, 4];
-const PRIORITY_META: Record<Priority, { label: string; color: string; bg: string; border: string }> = {
-  1: { label: 'Critical', color: '#dc2626', bg: '#fee2e2', border: '#fca5a5' },
-  2: { label: 'High',     color: '#b45309', bg: '#fef3c7', border: '#fcd34d' },
-  3: { label: 'Medium',   color: '#1d4ed8', bg: '#dbeafe', border: '#93c5fd' },
-  4: { label: 'Low',      color: '#4b5563', bg: '#e5e7eb', border: '#9ca3af' },
+// L1 — Severity tier (issue #473, replaces numeric Priority 1..4).
+// String tiers, worst-first. Same vocabulary the forwarder writes to
+// session_events.labels[] and network_requests.labels[] so a single
+// filter UI sweeps both. Critical leads (user-visible playback
+// breakage like stall_severe / frozen / restart_auto_recovery); Error
+// sits next for system-detected error states (player_error).
+type Severity = 'error' | 'critical' | 'warning' | 'info';
+const SEVERITY_ORDER: Severity[] = ['critical', 'error', 'warning', 'info'];
+const SEVERITY_META: Record<Severity, { label: string; color: string; bg: string; border: string }> = {
+  // Critical wears the red palette (worst-looking — user-visible
+  // playback breakage); Error wears the orange palette. Swapped
+  // from the original assignment so the two tiers' visuals match
+  // operator intuition. The whole palette pair moves together so
+  // each tier keeps internal bg/border/text harmony.
+  error:    { label: 'Error',    color: '#7c2d12', bg: '#ffedd5', border: '#fdba74' },
+  critical: { label: 'Critical', color: '#7f1d1d', bg: '#fee2e2', border: '#fca5a5' },
+  warning:  { label: 'Warning',  color: '#854d0e', bg: '#fef3c7', border: '#fcd34d' },
+  info:     { label: 'Info',     color: '#1f2937', bg: '#f0fdf4', border: '#a7f3d0' },
 };
 
-const expandedTiers = ref<Record<Priority, boolean>>({
-  1: true, 2: true, 3: false, 4: false,
+const expandedTiers = ref<Record<Severity, boolean>>({
+  error: true, critical: true, warning: false, info: false,
 });
-function toggleTier(p: Priority) {
+function toggleTier(p: Severity) {
   expandedTiers.value[p] = !expandedTiers.value[p];
 }
 
-const visiblePriority = ref<Record<Priority, boolean>>({
-  1: true, 2: true, 3: true, 4: false,
+const visiblePriority = ref<Record<Severity, boolean>>({
+  error: true, critical: true, warning: true, info: false,
 });
-function togglePriorityVisibility(p: Priority, e: MouseEvent) {
+function togglePriorityVisibility(p: Severity, e: MouseEvent) {
   e.stopPropagation();
   const willBeVisible = !visiblePriority.value[p];
   visiblePriority.value[p] = willBeVisible;
@@ -228,10 +421,10 @@ function togglePriorityVisibility(p: Priority, e: MouseEvent) {
 }
 
 const hiddenTypeKeys = ref<Set<string>>(new Set());
-function isTypeVisible(t: string, p: Priority): boolean {
+function isTypeVisible(t: string, p: Severity): boolean {
   return !hiddenTypeKeys.value.has(typeKey(t, p));
 }
-function toggleTypeVisibility(t: string, p: Priority, e: MouseEvent) {
+function toggleTypeVisibility(t: string, p: Severity, e: MouseEvent) {
   e.stopPropagation();
   const k = typeKey(t, p);
   const next = new Set(hiddenTypeKeys.value);
@@ -239,9 +432,9 @@ function toggleTypeVisibility(t: string, p: Priority, e: MouseEvent) {
   hiddenTypeKeys.value = next;
 }
 
-const lockedPriority = ref<Priority | null>(null);
+const lockedPriority = ref<Severity | null>(null);
 const lockedType = ref<string | null>(null);
-function selectTier(p: Priority) {
+function selectTier(p: Severity) {
   if (lockedPriority.value === p && !lockedType.value) {
     lockedPriority.value = null;
   } else {
@@ -251,7 +444,7 @@ function selectTier(p: Priority) {
     expandedTiers.value[p] = true;
   }
 }
-function selectType(t: string, p: Priority) {
+function selectType(t: string, p: Severity) {
   if (lockedType.value === t && lockedPriority.value === p) {
     lockedType.value = null;
   } else {
@@ -267,15 +460,25 @@ function clearScope() {
 }
 
 const expandedTypeKey = ref<string | null>(null);
-function typeKey(t: string, p: Priority): string { return `${p}|${t}`; }
-function toggleTypeExpand(t: string, p: Priority) {
+function typeKey(t: string, p: Severity): string { return `${p}|${t}`; }
+function toggleTypeExpand(t: string, p: Severity) {
   const k = typeKey(t, p);
   expandedTypeKey.value = expandedTypeKey.value === k ? null : k;
 }
 
-function eventPriority(ev: SessionEvent): Priority {
-  const p = ev.priority;
-  return (p === 1 || p === 2 || p === 3 || p === 4) ? p : 3;
+function eventSeverity(ev: SessionEvent): Severity {
+  // Prefer the string `severity` field (post-#473 markers carry it).
+  // Fall back to the legacy numeric `priority` for one release while
+  // older forwarder builds + historical rows roll out.
+  const sev = (ev as { severity?: string }).severity;
+  if (sev === 'error' || sev === 'critical' || sev === 'warning' || sev === 'info') return sev;
+  switch (ev.priority) {
+    case 1: return 'error';
+    case 2: return 'critical';
+    case 3: return 'warning';
+    case 4: return 'info';
+  }
+  return 'warning';
 }
 function eventKindCE(ev: SessionEvent): 'effect' | 'cause' {
   return ev.kind === 'cause' ? 'cause' : 'effect';
@@ -283,13 +486,13 @@ function eventKindCE(ev: SessionEvent): 'effect' | 'cause' {
 
 interface AnnotatedEvent extends SessionEvent {
   _ts: number;
-  _p: Priority;
+  _p: Severity;
 }
 
 const kindFilteredEvents = computed<AnnotatedEvent[]>(() =>
   sessionEvents.value
     .filter((ev) => enabledKind.value[eventKindCE(ev)])
-    .map((ev) => ({ ...ev, _ts: eventMs(ev), _p: eventPriority(ev) }))
+    .map((ev) => ({ ...ev, _ts: eventMs(ev), _p: eventSeverity(ev) }))
     .filter((ev) => Number.isFinite(ev._ts))
     .sort((a, b) => a._ts - b._ts),
 );
@@ -303,8 +506,8 @@ const filteredEvents = computed<AnnotatedEvent[]>(
   }),
 );
 
-const tierCounts = computed<Record<Priority, number>>(() => {
-  const c: Record<Priority, number> = { 1: 0, 2: 0, 3: 0, 4: 0 };
+const tierCounts = computed<Record<Severity, number>>(() => {
+  const c: Record<Severity, number> = { error: 0, critical: 0, warning: 0, info: 0 };
   for (const ev of kindFilteredEvents.value) c[ev._p]++;
   return c;
 });
@@ -315,16 +518,16 @@ function kindCount(k: 'effect' | 'cause'): number {
   return n;
 }
 
-const tierTypes = computed<Record<Priority, Array<{ type: string; count: number }>>>(() => {
-  const buckets: Record<Priority, Map<string, number>> = {
-    1: new Map(), 2: new Map(), 3: new Map(), 4: new Map(),
+const tierTypes = computed<Record<Severity, Array<{ type: string; count: number }>>>(() => {
+  const buckets: Record<Severity, Map<string, number>> = {
+    error: new Map(), critical: new Map(), warning: new Map(), info: new Map(),
   };
   for (const ev of kindFilteredEvents.value) {
     const t = String(ev.type ?? 'event');
     buckets[ev._p].set(t, (buckets[ev._p].get(t) ?? 0) + 1);
   }
-  const out = {} as Record<Priority, Array<{ type: string; count: number }>>;
-  for (const p of PRIORITY_ORDER) {
+  const out = {} as Record<Severity, Array<{ type: string; count: number }>>;
+  for (const p of SEVERITY_ORDER) {
     out[p] = [...buckets[p].entries()]
       .map(([type, count]) => ({ type, count }))
       .sort((a, b) => a.count - b.count);
@@ -341,7 +544,7 @@ const tierTypeInstances = computed<Record<string, AnnotatedEvent[]>>(() => {
   return out;
 });
 
-function selectInstance(ev: AnnotatedEvent, t: string, p: Priority) {
+function selectInstance(ev: AnnotatedEvent, t: string, p: Severity) {
   if (lockedType.value !== t || lockedPriority.value !== p) {
     lockedPriority.value = p;
     lockedType.value = t;
@@ -357,23 +560,23 @@ function selectInstance(ev: AnnotatedEvent, t: string, p: Priority) {
   }
 }
 
-function tierPreview(p: Priority): Array<{ type: string; count: number }> {
+function tierPreview(p: Severity): Array<{ type: string; count: number }> {
   return tierTypes.value[p].slice(0, 5);
 }
-function tierPreviewMore(p: Priority): number {
+function tierPreviewMore(p: Severity): number {
   return Math.max(0, tierTypes.value[p].length - 5);
 }
-function pickPreviewType(t: string, p: Priority) {
+function pickPreviewType(t: string, p: Severity) {
   expandedTiers.value[p] = true;
   selectType(t, p);
 }
 
 const scopeLabel = computed<string>(() => {
   if (lockedType.value && lockedPriority.value) {
-    return `${lockedType.value} (in ${PRIORITY_META[lockedPriority.value].label})`;
+    return `${lockedType.value} (in ${SEVERITY_META[lockedPriority.value].label})`;
   }
   if (lockedPriority.value) {
-    return `All ${PRIORITY_META[lockedPriority.value].label} events`;
+    return `All ${SEVERITY_META[lockedPriority.value].label} events`;
   }
   return `All events (${filteredEvents.value.length})`;
 });
@@ -437,7 +640,7 @@ const railMarkers = computed(() => {
     const isCurrent = !!cur && cur._ts === ev._ts && cur.type === ev.type;
     return {
       leftPct: pct,
-      color: PRIORITY_META[ev._p].color,
+      color: SEVERITY_META[ev._p].color,
       opacity: eventKindCE(ev) === 'effect' ? 1 : 0.4,
       isCurrent,
       ts: ev._ts,
@@ -652,9 +855,9 @@ function playerKey(id: string) {
 // this never collides with the live cache that outside mutation
 // panels (FaultRules etc.) read.
 watch(
-  [() => brushRange.value.max, () => timeseries.samples.version.value],
+  [() => brushRange.value.max, () => timeseries.events.version.value],
   ([endMs]) => {
-    const row = timeseries.samples.lastAt(endMs);
+    const row = timeseries.events.lastAt(endMs);
     if (!row) return;
     const adapted = chRowToPlayerRecord(row);
     setArchivePlayer(archivePlayerId.value, adapted);
@@ -842,7 +1045,7 @@ function skipToEnd() {
         </div>
 
         <div
-          v-for="p in PRIORITY_ORDER"
+          v-for="p in SEVERITY_ORDER"
           :key="p"
           class="tier-group"
           :class="{
@@ -851,9 +1054,9 @@ function skipToEnd() {
             'tier-active': lockedPriority === p && !lockedType,
           }"
           :style="{
-            '--tier-bg': PRIORITY_META[p].bg,
-            '--tier-border': PRIORITY_META[p].border,
-            '--tier-color': PRIORITY_META[p].color,
+            '--tier-bg': SEVERITY_META[p].bg,
+            '--tier-border': SEVERITY_META[p].border,
+            '--tier-color': SEVERITY_META[p].color,
           }"
         >
           <div class="tier-header">
@@ -869,11 +1072,11 @@ function skipToEnd() {
               type="button"
               class="tier-name-btn"
               @click="selectTier(p); expandedTiers[p] = true"
-              :title="`Walk all ${tierCounts[p]} ${PRIORITY_META[p].label} event(s) with prev/next`"
+              :title="`Walk all ${tierCounts[p]} ${SEVERITY_META[p].label} event(s) with prev/next`"
               :disabled="!tierCounts[p]"
             >
               <span class="tier-dot" />
-              <span class="tier-name">{{ PRIORITY_META[p].label }}</span>
+              <span class="tier-name">{{ SEVERITY_META[p].label }}</span>
               <span class="tier-count-pill">{{ tierCounts[p] }}</span>
             </button>
             <button
@@ -881,7 +1084,7 @@ function skipToEnd() {
               class="tier-eye-btn"
               :class="{ off: !visiblePriority[p] }"
               @click="togglePriorityVisibility(p, $event)"
-              :title="visiblePriority[p] ? `Hide ${PRIORITY_META[p].label} events from the rail` : `Show ${PRIORITY_META[p].label} events on the rail`"
+              :title="visiblePriority[p] ? `Hide ${SEVERITY_META[p].label} events from the rail` : `Show ${SEVERITY_META[p].label} events on the rail`"
               :disabled="!tierCounts[p]"
             >
               <svg v-if="visiblePriority[p]" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
@@ -1027,16 +1230,16 @@ function skipToEnd() {
     </CollapsibleSection>
 
     <CollapsibleSection title="Player State" :open="true" eager persist-key="player-state">
-      <EventsTimeline :player-id="archivePlayerId" :samples-stream="timeseries.samples" />
+      <EventsTimeline :player-id="archivePlayerId" :events-stream="timeseries.events" />
     </CollapsibleSection>
 
     <CollapsibleSection title="Bitrate Chart etc" :open="true" eager persist-key="bitrate-chart">
       <BitrateChartPanelToolbar :player-id="archivePlayerId" />
       <div class="chart-stack">
-        <BandwidthChart :player-id="archivePlayerId" :samples-stream="timeseries.samples" />
-        <RTTChart :player-id="archivePlayerId" :samples-stream="timeseries.samples" />
-        <BufferChart :player-id="archivePlayerId" :samples-stream="timeseries.samples" />
-        <FPSChart :player-id="archivePlayerId" :samples-stream="timeseries.samples" />
+        <BandwidthChart :player-id="archivePlayerId" :events-stream="timeseries.events" />
+        <RTTChart :player-id="archivePlayerId" :events-stream="timeseries.events" />
+        <BufferChart :player-id="archivePlayerId" :events-stream="timeseries.events" />
+        <FPSChart :player-id="archivePlayerId" :events-stream="timeseries.events" />
       </div>
     </CollapsibleSection>
 
@@ -1047,6 +1250,22 @@ function skipToEnd() {
            (or worse, show a brush in live-not-paused when nothing
            else does), so always opt out of it here. -->
       <NetworkLog :player-id="archivePlayerId" :network-stream="timeseries.network" />
+    </CollapsibleSection>
+
+    <CollapsibleSection title="Play Log" persist-key="play-log">
+      <!-- Time-multiplexed view of snapshots + network rows + events
+           interleaved on one chronological scroll, with checkbox
+           filters per source. The three streams come from the same
+           timeseries SSE pool the other panels use; PlayLog merges
+           them on the dashboard side rather than asking the
+           forwarder for a pre-joined view. -->
+      <PlayLog
+        :player-id="archivePlayerId"
+        :play-id="playIdRef"
+        :events-stream="timeseries.events"
+        :network-stream="timeseries.network"
+        :control-stream="timeseries.control"
+      />
     </CollapsibleSection>
   </div>
 </template>

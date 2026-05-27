@@ -37,18 +37,18 @@ func TestCloneSessionListIsolation(t *testing.T) {
 }
 
 // TestCloneSessionListIsolatesBroadcast mirrors the production race that
-// caused issue #81. In production:
+// caused issue #81 and is still relevant on the per-event emit path
+// (issue #470 replaced the debounced broadcast but the cloning
+// invariant remained). In production:
 //   - The "handler" goroutine owns sessionList and mutates session fields
 //     between successive saveSessionList calls.
-//   - On each saveSessionList → queueSessionsBroadcast call, the handler
-//     publishes a snapshot to a shared "broadcast" slot.
-//   - A "broadcast" goroutine (the AfterFunc timer in production) reads
-//     the latest snapshot and mutates it (normalizeSessionsForResponse)
-//     and marshals it.
+//   - saveSessionByIDReturning clones the merged session before handing
+//     it to emitSessionEvent, so the SSE write goroutine works on its
+//     own copy and never races with the handler's continued mutations.
 //
-// With the snapshot in queueSessionsBroadcast, the broadcast goroutine
-// works on its own copy and must never race with the handler's continued
-// mutations. Run with `go test -race`.
+// The test exercises cloneSessionList directly — the same primitive
+// emitSessionEvent's normalizeSessionsForResponse path leans on. Run
+// with `go test -race`.
 func TestCloneSessionListIsolatesBroadcast(t *testing.T) {
 	live := []SessionData{
 		{

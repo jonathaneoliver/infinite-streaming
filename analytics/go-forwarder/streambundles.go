@@ -22,25 +22,28 @@ import (
 )
 
 // streamKind names the three top-level data streams the v2
-// timeseries endpoint can emit. Mirrors ringKind for samples/network
-// (events are derived at query time so they don't pass through the
-// ring).
+// timeseries endpoint can emit. Mirrors ringKind for events/network;
+// control_events is read at query time and doesn't pass through the
+// ring (very low volume).
+//
+// Issue #474 Milestone C dropped streamMarkers (the derived
+// session_markers table retired) and added streamControl.
 type streamKind string
 
 const (
-	streamSamples streamKind = "samples"
-	streamNetwork streamKind = "network"
 	streamEvents  streamKind = "events"
+	streamNetwork streamKind = "network"
+	streamControl streamKind = "control"
 )
 
 func parseStreamKind(s string) (streamKind, bool) {
 	switch s {
-	case "samples":
-		return streamSamples, true
-	case "network":
-		return streamNetwork, true
 	case "events":
 		return streamEvents, true
+	case "network":
+		return streamNetwork, true
+	case "control":
+		return streamControl, true
 	}
 	return "", false
 }
@@ -69,7 +72,7 @@ var bundleRegistry = map[string]bundleDef{
 	// window stays cheap.
 	"charts_minimal": {
 		Name:   "charts_minimal",
-		Stream: streamSamples,
+		Stream: streamEvents,
 		Columns: []string{
 			"ts",
 			"session_id", "play_id", "player_id",
@@ -135,7 +138,7 @@ var bundleRegistry = map[string]bundleDef{
 	// pre-segmented MV without breaking lanes_v1 consumers.
 	"lanes_v1": {
 		Name:   "lanes_v1",
-		Stream: streamSamples,
+		Stream: streamEvents,
 		Columns: []string{
 			"ts",
 			"session_id", "play_id", "player_id",
@@ -167,7 +170,7 @@ var bundleRegistry = map[string]bundleDef{
 	// session". Static-ish fields the user reads, not chart-fed.
 	"session_details": {
 		Name:   "session_details",
-		Stream: streamSamples,
+		Stream: streamEvents,
 		Columns: []string{
 			"ts",
 			"session_id", "play_id", "player_id", "group_id",
@@ -203,16 +206,17 @@ var bundleRegistry = map[string]bundleDef{
 		},
 	},
 
-	// events — the kind/priority-classified rows from the derived SQL
-	// in main.go (`/api/session_events` taxonomy). Columns here are
-	// the post-projection wire shape, not the raw `session_snapshots`
-	// columns. The timeseries handler delegates to the same SQL.
-	"events": {
-		Name:   "events",
-		Stream: streamEvents,
+	// control — the proxy/harness action log (control_events). After
+	// issue #474 Milestone C this replaces the old `events` (markers)
+	// bundle. Lets the dashboard render fault_on/off, pattern_step,
+	// session lifecycle, etc. on the same brush rail as other streams.
+	"control": {
+		Name:   "control",
+		Stream: streamControl,
 		Columns: []string{
-			"ts", "type", "info", "kind", "priority",
-			"play_id", "player_id", "session_id",
+			"ts", "play_id", "player_id", "session_id",
+			"attempt_id", "source", "event", "info", "labels",
+			"event_fingerprint",
 		},
 	},
 }
@@ -221,7 +225,7 @@ var bundleRegistry = map[string]bundleDef{
 // names. Keeps the wire ergonomic without compounding the resolver.
 var bundleAliases = map[string][]string{
 	// `all` covers the three streams with their primary bundles.
-	"all": {"lanes_v1", "network", "events"},
+	"all": {"lanes_v1", "network", "control"},
 }
 
 // streamSelection is the resolved projection for one stream — the
@@ -354,12 +358,15 @@ func resolveSelection(
 //     ring/CH boundary.
 func mandatoryColumns(stream streamKind) []string {
 	switch stream {
-	case streamSamples:
-		return []string{"ts", "session_id", "play_id", "player_id"}
-	case streamNetwork:
-		return []string{"ts", "session_id", "play_id", "player_id", "entry_fingerprint"}
 	case streamEvents:
-		return []string{"ts", "play_id", "player_id", "session_id"}
+		// attempt_id is the dashboard ATTEMPT_ID column; if the
+		// active bundle didn't already pull it the column rendered
+		// as "—" for every event row even though CH had the value.
+		return []string{"ts", "session_id", "play_id", "player_id", "attempt_id", "labels"}
+	case streamNetwork:
+		return []string{"ts", "session_id", "play_id", "player_id", "attempt_id", "labels", "entry_fingerprint"}
+	case streamControl:
+		return []string{"ts", "play_id", "player_id", "session_id", "attempt_id", "labels", "event_fingerprint"}
 	}
 	return nil
 }

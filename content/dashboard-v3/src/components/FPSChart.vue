@@ -21,7 +21,7 @@ import type { PlayerRecord } from '@/repo/v2-repo';
 
 const props = defineProps<{
   playerId: string;
-  samplesStream: Stream<Record<string, unknown>>;
+  eventsStream: Stream<Record<string, unknown>>;
 }>();
 
 // per-instance state: previous frame counters + the derived rate to
@@ -43,9 +43,9 @@ function num(v: unknown): number | null {
 }
 
 watch(
-  () => props.samplesStream.version.value,
+  () => props.eventsStream.version.value,
   () => {
-    const raw = props.samplesStream.inRange(
+    const raw = props.eventsStream.inRange(
       lastSeenMs === -Infinity ? 0 : lastSeenMs + 1,
       Number.MAX_SAFE_INTEGER,
     );
@@ -123,7 +123,7 @@ const series = computed<SeriesSpec[]>(() => [
     title="Frame rate (derived)"
     unit="fps"
     :series="series"
-    :samples-stream="samplesStream"
+    :events-stream="eventsStream"
     :y-min="0"
     y2-title="dropped (count)"
     :y2-min="0"

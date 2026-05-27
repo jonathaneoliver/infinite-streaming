@@ -1,9 +1,35 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+  Network trust policy for the ExoPlayer test harness.
+
+  - Production (release builds): system CA trust only.
+  - Debug builds: additionally trust the bundled mkcert dev CA so HTTPS
+    against a developer's local test-dev server (mkcert-signed cert)
+    validates without manual CA install on the device. <debug-overrides>
+    only applies when android:debuggable=true.
+
+  Cleartext is permitted to localhost and 10.0.2.2 (Android emulator host
+  loopback) so the demo "out of the box" works against a Docker Compose /
+  k3s release on the same machine without TLS setup.
+
+  NOTE FOR FORKS: res/raw/mkcert_ca.pem is the upstream maintainer's
+  personal mkcert CA. Replace it with your own (or remove it from the
+  raw bundle + this config) if you're hosting your own dev server.
+-->
 <network-security-config>
-    <!-- Cleartext (http) is permitted to localhost (10.0.2.2 = host loopback   -->
-    <!-- from the Android emulator) so the demo "out of the box" works against -->
-    <!-- a Docker Compose / k3s release on the same machine.                  -->
-    <!-- Add your own LAN/Tailscale/public hosts here for real device testing. -->
+    <base-config cleartextTrafficPermitted="false">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+
+    <debug-overrides>
+        <trust-anchors>
+            <certificates src="system" />
+            <certificates src="@raw/mkcert_ca" />
+        </trust-anchors>
+    </debug-overrides>
+
     <domain-config cleartextTrafficPermitted="true">
         <domain includeSubdomains="true">localhost</domain>
         <domain includeSubdomains="true">10.0.2.2</domain>

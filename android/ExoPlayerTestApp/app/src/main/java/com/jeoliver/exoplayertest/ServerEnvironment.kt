@@ -4,12 +4,16 @@ enum class ServerEnvironment(
     val label: String,
     val host: String,
     val contentPort: Int,
-    val playbackPort: Int
+    val playbackPort: Int,
+    val scheme: String,
 ) {
-    LOCAL("Local (30000)", "localhost", 30000, 30081),
-    LOCAL_DEV("Dev (40000)", "localhost", 40000, 40081),
-    LOCAL_TEST("Test (21000)", "localhost", 21000, 21081);
+    // Docker Compose / k3s default — plain HTTP.
+    LOCAL("Local (30000)", "localhost", 30000, 30081, "http"),
+    // k3d dev cluster — plain HTTP.
+    LOCAL_DEV("Dev (40000)", "localhost", 40000, 40081, "http"),
+    // test-dev deploy — TLS (mkcert) since tests/deploy/override-dev.yml.
+    LOCAL_TEST("Test (21000)", "localhost", 21000, 21081, "https");
 
-    val contentBaseUrl get() = "http://$host:$contentPort"
-    val playbackBaseUrl get() = "http://$host:$playbackPort"
+    val contentBaseUrl get() = "$scheme://$host:$contentPort"
+    val playbackBaseUrl get() = "$scheme://$host:$playbackPort"
 }

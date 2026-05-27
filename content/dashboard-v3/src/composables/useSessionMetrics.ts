@@ -344,9 +344,16 @@ export function useSessionMetrics(opts: UseSessionMetricsOptions) {
           const numeric = lvl.bitrate / 1_000_000;
           if (lastRenditionMbps != null && Math.abs(numeric - lastRenditionMbps) > 0.01) {
             profileShiftCount += 1;
-            send('video_bitrate_change', {
-              player_metrics_video_bitrate_from_mbps: n2(lastRenditionMbps),
-              player_metrics_video_bitrate_to_mbps: n2(numeric),
+            // Issue #470: emit a directional event per bitrate
+            // transition. Was video_bitrate_change; aligned to the
+            // iOS player's rate_shift_up / rate_shift_down naming so
+            // both clients produce the same event taxonomy and the
+            // forwarder's snapshot_rate classifier sees one event
+            // shape from anywhere.
+            const dir = numeric > lastRenditionMbps ? 'up' : 'down';
+            send(`rate_shift_${dir}`, {
+              player_metrics_rate_from_mbps: n2(lastRenditionMbps),
+              player_metrics_rate_to_mbps: n2(numeric),
               player_metrics_profile_shift_count: profileShiftCount,
             });
           }

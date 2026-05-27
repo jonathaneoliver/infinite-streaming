@@ -53,18 +53,84 @@ func mountV2Handlers(mux *http.ServeMux, cfg config) {
 		})
 	})
 
-	mux.HandleFunc("/api/v2/snapshots", func(w http.ResponseWriter, r *http.Request) {
-		v2SnapshotsHandler(w, r, cfg)
+	// /api/v2/events is the canonical name as of #472 / v2.0.0. The
+	// underlying CH table session_snapshots was renamed to
+	// session_events; the route name follows. The old /api/v2/snapshots
+	// alias retired with v2.0.0.
+	mux.HandleFunc("/api/v2/events", func(w http.ResponseWriter, r *http.Request) {
+		v2EventsHandler(w, r, cfg)
 	})
 
 	mux.HandleFunc("/api/v2/network_requests", func(w http.ResponseWriter, r *http.Request) {
 		v2NetworkRequestsHandler(w, r, cfg)
 	})
 
+	// /api/v2/control_events — issue #474 Milestone B. Read-only
+	// proxy/harness action log keyed by player_id / play_id, with
+	// from/to time filtering. Mirrors network_requests' shape so the
+	// dashboard's PlayLog can render all three tables uniformly.
+	mux.HandleFunc("/api/v2/control_events", func(w http.ResponseWriter, r *http.Request) {
+		v2ControlEventsHandler(w, r, cfg)
+	})
+
 	mountV2PlaysHandlers(mux, cfg)
 }
 
-// v2SnapshotsHandler queries session_snapshots, parses session_json
+// v2ControlEventsHandler returns control_events rows as NDJSON keyed
+// by ?player_id=, ?play_id=, ?from=, ?to=, ?limit=. Issue #474.
+func v2ControlEventsHandler(w http.ResponseWriter, r *http.Request, cfg config) {
+	q := r.URL.Query()
+	// Canonicalise to lowercase — see canonicalV2ID()'s doc on
+	// why this matters. An operator who curls the endpoint with
+	// an uppercase UUID would otherwise get an empty page.
+	playerID := canonicalV2ID(q.Get("player_id"))
+	if playerID == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":"player_id required"}`))
+		return
+	}
+	playID := canonicalV2ID(q.Get("play_id"))
+	from := q.Get("from")
+	to := q.Get("to")
+	limit := q.Get("limit")
+	if limit == "" {
+		limit = "1000"
+	}
+	params := map[string]string{
+		"player_id": playerID,
+		"limit":     limit,
+	}
+	where := []string{"player_id = {player_id:String}"}
+	if playID != "" {
+		params["play_id"] = playID
+		where = append(where, "play_id = {play_id:String}")
+	}
+	if from != "" {
+		params["from"] = from
+		where = append(where, "ts >= parseDateTime64BestEffortOrNull({from:String}, 3)")
+	}
+	if to != "" {
+		params["to"] = to
+		where = append(where, "ts <= parseDateTime64BestEffortOrNull({to:String}, 3)")
+	}
+	// Tristate label filter — see label_filter.go.
+	labelHas, labelNot := readLabelFilters(q)
+	where, params = applyLabelFilters(where, params, "labels", labelHas, labelNot)
+	query := "SELECT ts, player_id, play_id, attempt_id, session_id, source, event, info, labels, event_fingerprint, classification " +
+		"FROM " + cfg.chDatabase + ".control_events WHERE " +
+		strings.Join(where, " AND ") +
+		" ORDER BY ts ASC LIMIT {limit:UInt32} FORMAT JSONEachRow"
+	body, err := chQueryBytes(r.Context(), cfg, query, params)
+	if err != nil {
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = w.Write([]byte(`{"error":"upstream query failed"}`))
+		return
+	}
+	w.Header().Set("Content-Type", "application/x-ndjson")
+	_, _ = w.Write(body)
+}
+
+// v2EventsHandler queries session_events, parses session_json
 // back into the v1 map[string]any shape the proxy emitted, and runs it
 // through v2translate.PlayerFromSession to land on the same
 // PlayerRecord shape live SSE delivers. The row's ts/revision/play_id
@@ -84,11 +150,11 @@ func mountV2Handlers(mux *http.ServeMux, cfg config) {
 //   - `Accept: application/x-ndjson` — streams JSONEachRow lines
 //     directly so a 200K-snapshot window doesn't buffer in the
 //     forwarder before painting starts.
-func v2SnapshotsHandler(w http.ResponseWriter, r *http.Request, cfg config) {
+func v2EventsHandler(w http.ResponseWriter, r *http.Request, cfg config) {
 	playerID := r.URL.Query().Get("player_id")
 	sessionID := r.URL.Query().Get("session_id")
 	playID := r.URL.Query().Get("play_id")
-	restartID := r.URL.Query().Get("restart_id")
+	attemptID := r.URL.Query().Get("attempt_id")
 	from := r.URL.Query().Get("from")
 	to := r.URL.Query().Get("to")
 	limit := parseLimit(r.URL.Query().Get("limit"), 500, 200000)
@@ -130,9 +196,9 @@ func v2SnapshotsHandler(w http.ResponseWriter, r *http.Request, cfg config) {
 			params["play"] = playID
 		}
 	}
-	if restartID != "" {
-		clauses = append(clauses, "lowerUTF8(restart_id) = lowerUTF8({restart:String})")
-		params["restart"] = restartID
+	if attemptID != "" {
+		clauses = append(clauses, "attempt_id = {attempt:UInt32}")
+		params["attempt"] = attemptID
 	}
 	if from != "" {
 		clauses = append(clauses, "ts >= parseDateTime64BestEffort({from:String})")
@@ -142,6 +208,9 @@ func v2SnapshotsHandler(w http.ResponseWriter, r *http.Request, cfg config) {
 		clauses = append(clauses, "ts < parseDateTime64BestEffort({to:String})")
 		params["to"] = to
 	}
+	// Tristate label filter — see label_filter.go.
+	labelHas, labelNot := readLabelFilters(r.URL.Query())
+	clauses, params = applyLabelFilters(clauses, params, "labels", labelHas, labelNot)
 	if len(clauses) == 0 {
 		clauses = append(clauses, "ts >= now() - INTERVAL 1 HOUR")
 	}
@@ -161,18 +230,18 @@ func v2SnapshotsHandler(w http.ResponseWriter, r *http.Request, cfg config) {
 	if strideMs > 0 {
 		query = fmt.Sprintf(`
 			SELECT toString(ts_max) AS ts, toString(rev_max) AS revision,
-			       any(play_id) AS play_id, any(restart_id) AS restart_id,
+			       any(play_id) AS play_id, any(attempt_id) AS attempt_id,
 			       session_json_max AS session_json
 			FROM (
 			  SELECT
 			    argMax(ts, ts) AS ts_max,
 			    argMax(revision, ts) AS rev_max,
 			    play_id,
-			    restart_id,
+			    attempt_id,
 			    argMax(session_json, ts) AS session_json_max
 			  FROM %s.%s
 			  WHERE %s
-			  GROUP BY intDiv(toUnixTimestamp64Milli(ts), %d), play_id, restart_id
+			  GROUP BY intDiv(toUnixTimestamp64Milli(ts), %d), play_id, attempt_id
 			)
 			GROUP BY ts_max, rev_max, session_json_max
 			ORDER BY ts_max %s
@@ -183,13 +252,13 @@ func v2SnapshotsHandler(w http.ResponseWriter, r *http.Request, cfg config) {
 	} else {
 		query = fmt.Sprintf(`
 			SELECT toString(ts_raw) AS ts, toString(rev_raw) AS revision,
-			       play_id, restart_id, session_json
+			       play_id, attempt_id, session_json
 			FROM (
 			  SELECT
 			    ts AS ts_raw,
 			    revision AS rev_raw,
 			    play_id,
-			    restart_id,
+			    attempt_id,
 			    session_json
 			  FROM %s.%s
 			  WHERE %s
@@ -245,7 +314,7 @@ func v2NetworkRequestsHandler(w http.ResponseWriter, r *http.Request, cfg config
 		sessionID = r.URL.Query().Get("session")
 	}
 	playID := r.URL.Query().Get("play_id")
-	restartID := r.URL.Query().Get("restart_id")
+	attemptID := r.URL.Query().Get("attempt_id")
 	from := r.URL.Query().Get("from")
 	to := r.URL.Query().Get("to")
 	limit := parseLimit(r.URL.Query().Get("limit"), 500, 5000)
@@ -275,9 +344,9 @@ func v2NetworkRequestsHandler(w http.ResponseWriter, r *http.Request, cfg config
 			params["play"] = playID
 		}
 	}
-	if restartID != "" {
-		clauses = append(clauses, "lowerUTF8(restart_id) = lowerUTF8({restart:String})")
-		params["restart"] = restartID
+	if attemptID != "" {
+		clauses = append(clauses, "attempt_id = {attempt:UInt32}")
+		params["attempt"] = attemptID
 	}
 	if from != "" {
 		clauses = append(clauses, "ts >= parseDateTime64BestEffort({from:String})")
@@ -290,6 +359,9 @@ func v2NetworkRequestsHandler(w http.ResponseWriter, r *http.Request, cfg config
 	if faultedOnly {
 		clauses = append(clauses, "faulted = 1")
 	}
+	// Tristate label filter — see label_filter.go.
+	labelHas, labelNot := readLabelFilters(r.URL.Query())
+	clauses, params = applyLabelFilters(clauses, params, "labels", labelHas, labelNot)
 	if len(clauses) == 0 {
 		clauses = append(clauses, "ts >= now() - INTERVAL 1 HOUR")
 	}
@@ -300,7 +372,7 @@ func v2NetworkRequestsHandler(w http.ResponseWriter, r *http.Request, cfg config
 	query := fmt.Sprintf(`
 		SELECT
 		  toString(ts_raw) AS timestamp,
-		  session_id, player_id, play_id, restart_id,
+		  session_id, player_id, play_id, attempt_id,
 		  method, url, upstream_url, request_kind, content_type,
 		  status, bytes_in, bytes_out,
 		  ttfb_ms, total_ms, dns_ms, connect_ms, tls_ms, transfer_ms, client_wait_ms,
@@ -308,7 +380,7 @@ func v2NetworkRequestsHandler(w http.ResponseWriter, r *http.Request, cfg config
 		FROM (
 		  SELECT
 		    ts AS ts_raw,
-		    session_id, player_id, play_id, restart_id,
+		    session_id, player_id, play_id, attempt_id,
 		    method, url, upstream_url, request_kind, content_type,
 		    status, bytes_in, bytes_out,
 		    ttfb_ms, total_ms, dns_ms, connect_ms, tls_ms, transfer_ms, client_wait_ms,

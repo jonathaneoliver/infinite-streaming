@@ -20,6 +20,8 @@ import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -44,12 +46,15 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
+import androidx.tv.material3.Icon
 import androidx.tv.material3.Text
 import com.infinitestream.player.state.ContentItem
 import com.infinitestream.player.state.DecodeBudget
 import com.infinitestream.player.state.PlayerViewModel
 import com.infinitestream.player.state.UiState
+import coil.compose.AsyncImage
 import com.infinitestream.player.ui.component.LivePreviewTile
+import com.infinitestream.player.ui.component.LiveVideoSurface
 import com.infinitestream.player.ui.component.StatusDot
 import com.infinitestream.player.ui.theme.AppType
 import com.infinitestream.player.ui.theme.Radius
@@ -109,7 +114,15 @@ fun HomeScreen(
     // Dedupe by `clip_id` (server-computed), preferring the H.264 entry
     // since that's universally hardware-decodable on every TV chip.
     val hardwareCap = remember { DecodeBudget.maxConcurrent }
-    val visibleSlots = state.previewVideoSlots.coerceIn(0, hardwareCap)
+    val totalVideoSlots = state.previewVideoSlots.coerceIn(0, hardwareCap)
+    // Hero claims 1 of the decoder slots when the user has at least one
+    // preview slot enabled — mirrors iOS where the Continue Watching
+    // hero is the visual focal point and gets first priority. Tiles get
+    // whatever's left over; everything past that renders its thumbnail
+    // (the LivePreviewTile already handles `active=false` via the
+    // poster underneath).
+    val heroVideoActive = state.activeServer != null && totalVideoSlots > 0
+    val visibleSlots = (totalVideoSlots - (if (heroVideoActive) 1 else 0)).coerceAtLeast(0)
     // Pool of unique H.264 clips for the carousel.
     //
     // Ordering policy (most-prominent first):
@@ -140,91 +153,80 @@ fun HomeScreen(
             .background(Tokens.bg)
     ) {
         Column(modifier = Modifier.fillMaxSize().padding(Space.s7)) {
-            // Top nav (Home/Streams/Library/Search/server-pill/Settings) was
-            // removed — settings is reachable via Playback HUD → gear and
-            // the server picker via Settings → Server. Brand mark stays as
-            // a quiet anchor.
-            Text("InfiniteStream", style = AppType.bodySm.copy(color = Tokens.fgDim))
-            Spacer(Modifier.height(Space.s4))
+            // Header — big serif brand + monospace active-server label
+            // on the left, a focusable gear on the right that opens
+            // SettingsOverlay (mirrors the iOS/tvOS HomeScreen header).
+            // Typography matches iOS: displayLg (Fraunces 44sp) for the
+            // title, monoSm for the server label, so the two platforms
+            // read as siblings.
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        "InfiniteStream",
+                        style = AppType.displayLg.copy(color = Tokens.fg),
+                    )
+                    val activeServerLabel = state.activeServer?.name
+                    if (!activeServerLabel.isNullOrBlank()) {
+                        Text(
+                            activeServerLabel,
+                            style = AppType.monoSm.copy(color = Tokens.fgFaint),
+                        )
+                    }
+                }
+                HomeSettingsButton(onClick = onOpenSettings)
+            }
+            Spacer(Modifier.height(Space.s5))
 
-            Hero(featured, state, onResume = {
-                if (featured != null) playPicked(featured.name)
-            })
+            // "NOW PLAYING" pulled OUTSIDE the Hero so the hero band
+            // reads as a clean video poster, matching the iPad layout.
+            Text("NOW PLAYING", style = AppType.label.copy(color = Tokens.fgDim))
+            Spacer(Modifier.height(Space.s2))
+            val heroAppStopped by vm.appStopped.collectAsStateWithLifecycle()
+            Hero(
+                featured = featured,
+                state = state,
+                videoActive = heroVideoActive && !heroAppStopped,
+                onAcquireDecoderLease = vm::acquireDecoderLease,
+                onReleaseDecoderLease = vm::releaseDecoderLease,
+                onResume = { if (featured != null) playPicked(featured.name) },
+            )
 
             Spacer(Modifier.height(Space.s7))
 
             val activeServer = state.activeServer
-            if (previewPool.isNotEmpty() && activeServer != null && visibleSlots > 0) {
+            // LIVE row — flat thumbnail row over the whole pool (minus
+            // the featured clip, which is already showing as the hero
+            // band above). Tiles render with `active=false` so they
+            // skip the ExoPlayer build entirely and stay as static
+            // posters. The hero is the only video decoder in use on
+            // Home; the MTK shared-decoder flicker we saw with two
+            // concurrent decoders on the same URL goes away.
+            val tilePool = if (heroVideoActive) {
+                previewPool.filter { it.clipId != featured?.clipId }
+            } else previewPool
+            if (tilePool.isNotEmpty() && activeServer != null) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     StatusDot(color = Tokens.live)
                     Spacer(Modifier.width(Space.s1))
-                    Text("LIVE STREAMS", style = AppType.label.copy(color = Tokens.fg))
+                    Text("LIVE", style = AppType.label.copy(color = Tokens.fgDim))
                 }
                 Spacer(Modifier.height(Space.s3))
-                val appStopped by vm.appStopped.collectAsStateWithLifecycle()
-                // Carousel offset: the visible window starts here in the
-                // pool. Increment on D-pad-Right past the rightmost slot,
-                // decrement on D-pad-Left past the leftmost. Modulo wraps
-                // at the pool ends so the row keeps cycling.
-                var offset by remember { mutableStateOf(0) }
-                val poolSize = previewPool.size
-                val visible = remember(offset, poolSize) {
-                    if (poolSize <= visibleSlots) previewPool
-                    else (0 until visibleSlots).map { i ->
-                        previewPool[((offset + i) % poolSize + poolSize) % poolSize]
-                    }
-                }
-                // FocusRequester per pool item — used to pin focus to the
-                // item that just slid in after a rotation.
-                val focusReqs = remember(poolSize) {
-                    previewPool.associateWith { FocusRequester() }
-                }
                 LazyRow(horizontalArrangement = Arrangement.spacedBy(Space.s3)) {
-                    itemsIndexed(visible, key = { _, c -> c.name }) { i, c ->
-                        val isFirst = i == 0
-                        val isLast = i == visible.lastIndex
-                        val canRotate = poolSize > visibleSlots
+                    items(tilePool, key = { c -> c.name }) { c ->
                         LivePreviewTile(
                             content = c,
                             server = activeServer,
-                            // Settings → Advanced → Preview video slots = 0
-                            // collapses every tile to its static thumbnail
-                            // and skips the per-tile ExoPlayer build.
-                            active = state.previewVideoSlots > 0,
-                            appStopped = appStopped,
+                            // Always inactive — thumbnail-only. The
+                            // hardware decoder budget belongs to the
+                            // hero band on this screen.
+                            active = false,
+                            appStopped = false,
                             onClick = { picked -> playPicked(picked.name) },
                             onAcquireDecoderLease = vm::acquireDecoderLease,
                             onReleaseDecoderLease = vm::releaseDecoderLease,
-                            modifier = Modifier
-                                .focusRequester(focusReqs[c] ?: FocusRequester())
-                                .onPreviewKeyEvent { ev ->
-                                    if (ev.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
-                                    when {
-                                        canRotate && ev.key == Key.DirectionRight && isLast -> {
-                                            offset = (offset + 1) % poolSize
-                                            scope.launch {
-                                                delay(60)
-                                                val newLast = previewPool[
-                                                    ((offset + visibleSlots - 1) % poolSize + poolSize) % poolSize
-                                                ]
-                                                runCatching { focusReqs[newLast]?.requestFocus() }
-                                            }
-                                            true
-                                        }
-                                        canRotate && ev.key == Key.DirectionLeft && isFirst -> {
-                                            offset = ((offset - 1) % poolSize + poolSize) % poolSize
-                                            scope.launch {
-                                                delay(60)
-                                                val newFirst = previewPool[
-                                                    ((offset) % poolSize + poolSize) % poolSize
-                                                ]
-                                                runCatching { focusReqs[newFirst]?.requestFocus() }
-                                            }
-                                            true
-                                        }
-                                        else -> false
-                                    }
-                                },
                         )
                     }
                 }
@@ -260,12 +262,23 @@ fun HomeScreen(
 
 
 @Composable
-private fun Hero(featured: ContentItem?, state: UiState, onResume: () -> Unit) {
+private fun Hero(
+    featured: ContentItem?,
+    state: UiState,
+    videoActive: Boolean,
+    onAcquireDecoderLease: () -> Unit,
+    onReleaseDecoderLease: () -> Unit,
+    onResume: () -> Unit,
+) {
     val activeServer = state.activeServer
-    // Hero used to autoplay the featured clip as a 360p video background.
-    // Removed because the combination of (hero + 6 preview tiles + main
-    // playback) blew past the chip's hardware-decode budget on the home →
-    // playback transition. Static gradient + text only now.
+    // Hero now plays the featured clip as a silent 360p background when
+    // (a) the user has at least one preview slot enabled, (b) the app
+    // is in foreground, and (c) the catalogue has a featured clip. The
+    // hero takes one DecodeBudget slot — HomeScreen reserves it ahead
+    // of the preview tile carousel so total in-flight decoders stays
+    // within `DecodeBudget.maxConcurrent` (the chip's hard cap, e.g. 3
+    // on the Google TV Streamer MTK chip). Past three, tiles render
+    // their static thumbnail poster instead of building an ExoPlayer.
     Box(
         modifier = Modifier
             .fillMaxWidth()
@@ -275,16 +288,52 @@ private fun Hero(featured: ContentItem?, state: UiState, onResume: () -> Unit) {
                 Brush.horizontalGradient(
                     listOf(Tokens.bgCard, Tokens.bgSoft)
                 )
-            )
-            .padding(Space.s7),
+            ),
     ) {
+        // Thumbnail poster underneath — same boot-frame trick the LIVE
+        // preview tiles use so the hero doesn't flash black while the
+        // first segment buffers. Falls through to the gradient when no
+        // thumbnail has been generated yet.
+        if (featured != null && activeServer != null && featured.thumbnailPathLarge != null) {
+            AsyncImage(
+                model = "${activeServer.apiUrl}${featured.thumbnailPathLarge}",
+                contentDescription = null,
+                contentScale = androidx.compose.ui.layout.ContentScale.Crop,
+                modifier = Modifier.fillMaxSize(),
+            )
+        }
+        if (videoActive && featured != null && activeServer != null) {
+            LiveVideoSurface(
+                content = featured,
+                server = activeServer,
+                onAcquireDecoderLease = onAcquireDecoderLease,
+                onReleaseDecoderLease = onReleaseDecoderLease,
+                // Hero is the visual focal point on a TV. Crank it to
+                // 720p (matches iOS HeroLiveVideo). Tiles stay at 360p
+                // since they're tiny.
+                resolutionLabel = "720p",
+                maxVideoWidth = 1280,
+                maxVideoHeight = 720,
+            )
+        }
+        // Bottom gradient + copy stay legible against any frame the
+        // video might render. Resume button anchors the bottom-right.
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(
+                    Brush.verticalGradient(
+                        0f to Color.Transparent,
+                        0.55f to Color.Transparent,
+                        1f to Color.Black.copy(alpha = 0.75f),
+                    )
+                )
+        )
         Column(
-            modifier = Modifier.fillMaxSize(),
+            modifier = Modifier.fillMaxSize().padding(Space.s7),
             verticalArrangement = Arrangement.SpaceBetween,
         ) {
             Column {
-                Text("CONTINUE WATCHING", style = AppType.label.copy(color = Tokens.accent))
-                Spacer(Modifier.height(Space.s1))
                 Text(
                     featured?.name ?: "—",
                     style = AppType.display.copy(color = Tokens.fg),
@@ -369,6 +418,26 @@ private fun ContentCard(
                 maxLines = 2,
             )
         }
+    }
+}
+
+/** Circular gear icon in the HomeScreen header. D-pad up from the
+ *  content tiles reaches it; Enter opens [SettingsOverlay] (the existing
+ *  drawer that PlaybackScreen's transport gear also opens). Same shape
+ *  language as [TransportButton] in PlaybackScreen so the two surfaces
+ *  read as siblings. */
+@Composable
+private fun HomeSettingsButton(onClick: () -> Unit) {
+    Box(
+        modifier = Modifier
+            .size(44.dp)
+            .tvFocus(cornerRadius = Radius.pill)
+            .clip(RoundedCornerShape(Radius.pill))
+            .background(Tokens.bgCard.copy(alpha = 0.6f))
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        Icon(Icons.Default.Settings, contentDescription = "Settings", tint = Tokens.fg)
     }
 }
 

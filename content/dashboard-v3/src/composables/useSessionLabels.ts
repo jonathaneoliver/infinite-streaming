@@ -16,10 +16,15 @@ interface DeviceRule {
 }
 
 // Match order matters — first hit wins. Apple TV must come before
-// generic iOS/Mac patterns because tvOS reports `AppleTV` in the UA
-// but its underlying engine string also matches Mac patterns.
+// generic iOS/Mac patterns because tvOS reports its identifier in the
+// UA but the underlying engine string also matches Mac patterns
+// ("CPU OS … like Mac OS X"). tvOS 26 (Apple TV 4K Streamer, 2026)
+// switched the token from `AppleTV` to `Apple TV` with a space, so
+// the pattern accepts both spellings — without `\s?` the new UA falls
+// through to the Mac rule and the dashboard mislabels Apple TVs as
+// Macs. Same for tvOS literal in case Apple ever splits it.
 const DEVICE_RULES: DeviceRule[] = [
-  { re: /AppleTV|tvOS/i,            label: 'Apple TV' },
+  { re: /Apple\s?TV|tvOS/i,         label: 'Apple TV' },
   { re: /iPad/i,                    label: 'iPad' },
   { re: /iPhone/i,                  label: 'iPhone' },
   { re: /iPod/i,                    label: 'iPod' },

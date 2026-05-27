@@ -20,6 +20,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+
 )
 
 // netRow is the JSONEachRow shape for network_requests. Tags match the
@@ -29,7 +30,7 @@ type netRow struct {
 	SessionID            string  `json:"session_id"`
 	PlayerID             string  `json:"player_id"`
 	PlayID               string  `json:"play_id"`
-	RestartID            string  `json:"restart_id"`
+	AttemptID            uint32  `json:"attempt_id"`
 	Method               string  `json:"method"`
 	URL                  string  `json:"url"`
 	UpstreamURL          string  `json:"upstream_url"`
@@ -55,7 +56,18 @@ type netRow struct {
 	RequestHeaders       string  `json:"request_headers"`
 	ResponseHeaders      string  `json:"response_headers"`
 	QueryString          string  `json:"query_string"`
-	EntryFingerprint     uint64  `json:"entry_fingerprint"`
+	// `,string` tag forces JSON serialization as a string. UInt64 values
+	// exceed JS's 2^53 safe-integer range, and the dashboard's per-row
+	// fpOf() compares fingerprints as strings — without `,string` the
+	// SSE-live overlay JSON would arrive as a precision-lossy JS Number
+	// and never match the same row's CH-backfill string, so the same
+	// network row got rendered twice in PlayLog.
+	EntryFingerprint     uint64  `json:"entry_fingerprint,string"`
+	// Labels — see the corresponding field on `row` in main.go.
+	// Same vocabulary; <severity>=<event> strings stamped at ingest
+	// from computeNetworkLabels(). Drives the dashboard's row tint
+	// and chip rendering. Issue #473.
+	Labels               []string `json:"labels,omitempty"`
 }
 
 // netEntry mirrors go-proxy's NetworkLogEntry. Only the fields we keep
@@ -72,7 +84,7 @@ type netEntry struct {
 	BytesOut             int64         `json:"bytes_out"`
 	ContentType          string        `json:"content_type"`
 	PlayID               string        `json:"play_id"`
-	RestartID            string        `json:"restart_id"`
+	AttemptID            uint32        `json:"attempt_id"`
 	RequestHeaders       []nameValue   `json:"request_headers"`
 	ResponseHeaders      []nameValue   `json:"response_headers"`
 	QueryString          []nameValue   `json:"query_string"`
@@ -239,12 +251,18 @@ func entryToRow(sessionID, playerID string, e *netEntry) netRow {
 	if e.Faulted {
 		faulted = 1
 	}
+	// Canonicalise — see canonicalV2ID()'s doc on case-sensitivity.
+	// `playerID` already came in canonicalised via sessionToPlayerID,
+	// but `e.PlayID` lands raw off the proxy SSE entry — historically
+	// uppercase from iOS clients. Without this, network_requests rows
+	// landed with mixed case and the dashboard / archive plays
+	// histogram missed them on lowercase JOINs.
 	return netRow{
 		Ts:                   e.Timestamp.UTC().Format("2006-01-02 15:04:05.000"),
 		SessionID:            sessionID,
-		PlayerID:             playerID,
-		PlayID:               e.PlayID,
-		RestartID:            e.RestartID,
+		PlayerID:             canonicalV2ID(playerID),
+		PlayID:               canonicalV2ID(e.PlayID),
+		AttemptID:            e.AttemptID,
 		Method:               e.Method,
 		URL:                  e.URL,
 		UpstreamURL:          e.UpstreamURL,
@@ -457,6 +475,8 @@ func batchInsertNet(ctx context.Context, cfg config, ring *Ring, in <-chan netRo
 				flush()
 				return
 			}
+			// Stamp severity-tagged labels at write time (issue #473).
+			r.Labels = computeNetworkLabels(&r)
 			rowCopy := r
 			fp := fmt.Sprintf("%d", rowCopy.EntryFingerprint)
 			e := ring.Add(

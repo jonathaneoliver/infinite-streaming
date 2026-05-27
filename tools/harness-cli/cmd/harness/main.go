@@ -10,7 +10,7 @@
 //	harness [global flags] <command> [args]
 //
 // Phase 1 commands (greenfield scaffold): players list / players show.
-// Subsequent phases add: fault, shape, tail, ts, archive, groups,
+// Subsequent phases add: fault, shape, tail, ts, query, groups,
 // snapshot/undo, findings, procedure. Each command commits separately
 // so the scaffold stays reviewable.
 package main
@@ -37,7 +37,7 @@ Global flags:
   --basic USER:PW  HTTP Basic auth (default $HARNESS_BASIC_AUTH)
   --json           emit JSON instead of human-readable output
 
-Commands (live mutations are snapshot-protected; see 'undo'):
+Commands (live mutations are checkpoint-protected; see 'undo'):
   players list|show|create|rm|prune
   fault   list|add|edit|rm|clear
   shape   <target> --rate --delay --loss [--clear|--show]
@@ -48,28 +48,33 @@ Commands (live mutations are snapshot-protected; see 'undo'):
   network <target>            live HAR from /players/{id}/network
   groups  list|show|create|patch|add|remove|rm
 
-Streaming:
-  tail    <target|all>         network rows (/api/v2/timeseries)
-  ts      <target|all>         combined samples+network rows
+Streaming (live SSE):
+  tail    <target|all>         network rows over /api/v2/timeseries
+  ts      <target|all>         combined events+network+control rows
+                               (--streams events,network,control)
   events  <target|all>         lifecycle SSE (/api/v2/events)
 
-Archive (read-only forwarder /analytics/api/v2/*):
-  archive plays|play|aggregate|snapshots|network|events|heatmap|bundle
+Query  (read-only forwarder /analytics/api/v2/*):  alias 'q'
+  query   plays|play|aggregate|events|network|control|heatmap|bundle
+                               server-side label filters via
+                               --label-has X --label-not Y
+                               'query plays' carries label_histogram
 
 Operator/CLI:
-  snapshot list|show           mutation snapshots in ~/.claude/state/...
-  undo [<target>|<id>]         replay the most recent snapshot
+  checkpoint list|show         pre-mutation checkpoints in ~/.claude/state/...
+                               (alias: 'ck'; legacy: 'snapshot' / 'snap')
+  undo [<target>|<id>]         replay the most recent checkpoint
   finding add <target>         capture state+note into .claude/findings/
   procedure soak|abr-sweep|fault-soak <target>
                                multi-step composed test procedures
   info [--bundles]             healthz + info across both services
-  raw <METHOD> <PATH>          escape hatch (no resolver, no snapshot)
+  raw <METHOD> <PATH>          escape hatch (no resolver, no checkpoint)
 
 Targets are resolved against the live player list. A target may be a
 full UUID, a >=6-char hex prefix, a label value (device/name), a
 player IP, or a substring of the User-Agent.
 
-Mutations are snapshotted to ~/.claude/state/harness/<repo>/ so
+Mutations are checkpointed to ~/.claude/state/harness/<repo>/ so
 'harness undo' can replay them.
 `
 
@@ -118,8 +123,13 @@ func main() {
 		exit(cmdTs(client, args[1:], g.asJSON))
 	case "events":
 		exit(cmdEvents(client, args[1:], g.asJSON))
-	case "snapshot", "snap":
-		exit(cmdSnapshot(client, args[1:], g.asJSON))
+	case "checkpoint", "ck", "snapshot", "snap":
+		// `checkpoint` is the canonical name as of v2.0.0 — the
+		// pre-mutation state-save pattern overlapped naming-wise
+		// with the player-events table that retired in #474. `ck`
+		// is the short alias; `snapshot` / `snap` stay as legacy
+		// aliases for scripts that haven't migrated yet.
+		exit(cmdCheckpoint(client, args[1:], g.asJSON))
 	case "undo":
 		exit(cmdUndo(client, args[1:], g.asJSON))
 	case "labels":
@@ -132,8 +142,12 @@ func main() {
 		exit(cmdPlay(client, args[1:], g.asJSON))
 	case "network":
 		exit(cmdNetwork(client, args[1:], g.asJSON))
-	case "archive":
-		exit(cmdArchive(client, args[1:], g.asJSON))
+	case "query", "q":
+		// `query` is the canonical name as of v2.0.0 — the
+		// underlying CH tables hold both live and historical rows,
+		// so "archive" was misleading. `q` is a short alias for
+		// repeat use at the prompt.
+		exit(cmdQuery(client, args[1:], g.asJSON))
 	case "groups":
 		exit(cmdGroups(client, args[1:], g.asJSON))
 	case "info":

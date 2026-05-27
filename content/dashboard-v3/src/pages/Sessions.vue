@@ -42,6 +42,14 @@ interface SessionRow {
   error_event_count?: number;
   avg_quality_pct?: number;
   bitrate_shifts?: number;
+  // Issue #474: per-play label histogram from session_events +
+  // network_requests + control_events. `labels_total` is the count of
+  // labelled rows; `labels_distinct_count` is how many distinct label
+  // strings appeared; `labels` is the [label, count] tuples for the
+  // hover tooltip.
+  labels_total?: number;
+  labels_distinct_count?: number;
+  labels?: [string, number][];
   // derived in deriveHealth
   duration_ms?: number;
   errors_count?: number;
@@ -98,9 +106,17 @@ const filters = ref<{
   content_id: string;
   play_id: string;
   classification: 'all' | 'starred' | 'interesting' | 'other';
+  // Tristate label filter:
+  //   - labels:        AND-required INCLUDES (row.labels must contain every entry)
+  //   - labelsExclude: AND-required EXCLUDES (row.labels must contain NONE of these)
+  // Empty arrays = no constraint on that side. Combine for queries
+  // like "has http_404 AND has-not fault_rule_enabled".
+  labels: string[];
+  labelsExclude: string[];
 }>({
   player_id: '', group_id: '', content_id: '', play_id: '',
   classification: 'all',
+  labels: [], labelsExclude: [],
 });
 
 const rows = ref<SessionRow[]>([]);
@@ -223,14 +239,193 @@ function matchesClassification(r: SessionRow): boolean {
   }
 }
 
+function matchesLabels(r: SessionRow): boolean {
+  const inc = filters.value.labels;
+  const exc = filters.value.labelsExclude;
+  if (!inc.length && !exc.length) return true;
+  const have = Array.isArray(r.labels) ? r.labels : [];
+  const haveSet = new Set<string>();
+  for (const [label] of have) haveSet.add(String(label));
+  // INCLUDE = AND: every requested label must be present.
+  for (const want of inc) {
+    if (!haveSet.has(want)) return false;
+  }
+  // EXCLUDE = AND: none of the excluded labels may be present.
+  for (const ban of exc) {
+    if (haveSet.has(ban)) return false;
+  }
+  return true;
+}
+
 function matches(r: SessionRow): boolean {
   const f = filters.value;
   return (!f.player_id || r.player_id === f.player_id)
     && (!f.group_id || r.group_id === f.group_id)
     && (!f.content_id || r.content_id === f.content_id)
     && (!f.play_id || r.play_id === f.play_id)
-    && matchesClassification(r);
+    && matchesClassification(r)
+    && matchesLabels(r);
 }
+
+// Hierarchical label filter — mirrors the SessionDisplay event-filter
+// accordion. One tier per severity (error → critical → warning →
+// info), each containing the distinct labels seen at that tier with
+// occurrence counts. Click a label chip to toggle inclusion;
+// click the tier header to toggle ALL labels in that tier. Issue
+// #474 follow-up.
+type Severity = 'error' | 'critical' | 'warning' | 'info';
+// User-facing ordering: Critical leads (the "🚨 something's actually
+// wrong" tier), then Error (player-error transitions), Warning, Info.
+const SEVERITY_ORDER: Severity[] = ['critical', 'error', 'warning', 'info'];
+const SEVERITY_META: Record<Severity, { label: string; bg: string; border: string; color: string }> = {
+  // Critical wears red (worst-looking — user-visible playback
+  // breakage); Error wears orange. Whole palette pair moves
+  // together so each tier stays internally consistent. Mirrors
+  // SessionDisplay.vue.
+  error:    { label: 'Error',    bg: '#ffedd5', border: '#fdba74', color: '#7c2d12' },
+  critical: { label: 'Critical', bg: '#fee2e2', border: '#fca5a5', color: '#7f1d1d' },
+  warning:  { label: 'Warning',  bg: '#fef3c7', border: '#fcd34d', color: '#854d0e' },
+  info:     { label: 'Info',     bg: '#f0fdf4', border: '#a7f3d0', color: '#1f2937' },
+};
+
+interface LabelEntry {
+  value: string;     // raw `<severity>=<event>` string
+  name: string;      // event portion (with `*` synthMark preserved)
+  count: number;     // total occurrences across all loaded rows
+}
+interface LabelTier {
+  sev: Severity;
+  entries: LabelEntry[];
+  total: number;     // sum of entry.count
+}
+
+const labelTiers = computed<LabelTier[]>(() => {
+  const acc: Record<Severity, Map<string, number>> = {
+    error: new Map(), critical: new Map(), warning: new Map(), info: new Map(),
+  };
+  for (const r of rows.value) {
+    const pairs = Array.isArray(r.labels) ? r.labels : [];
+    for (const p of pairs) {
+      const label = String(p[0] ?? '');
+      const n = Number(p[1]) || 0;
+      if (!label || n <= 0) continue;
+      const eq = label.indexOf('=');
+      if (eq <= 0) continue;
+      const sev = label.slice(0, eq) as Severity;
+      if (!(sev in acc)) continue;
+      acc[sev].set(label, (acc[sev].get(label) ?? 0) + n);
+    }
+  }
+  const out: LabelTier[] = [];
+  for (const sev of SEVERITY_ORDER) {
+    const entries: LabelEntry[] = [];
+    let total = 0;
+    for (const [value, count] of acc[sev]) {
+      const eq = value.indexOf('=');
+      const name = eq > 0 ? value.slice(eq + 1) : value;
+      entries.push({ value, name, count });
+      total += count;
+    }
+    entries.sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
+    out.push({ sev, entries, total });
+  }
+  return out;
+});
+
+// Expand state per tier. Defaults: error + critical open; warning +
+// info collapsed (matches SessionDisplay's expandedTiers initial
+// state — the user usually wants to scan the worst tiers first).
+const expandedLabelTiers = ref<Record<Severity, boolean>>({
+  error: true, critical: true, warning: false, info: false,
+});
+function toggleLabelTier(sev: Severity) {
+  expandedLabelTiers.value[sev] = !expandedLabelTiers.value[sev];
+}
+
+// Per-label tristate. Click cycles:
+//   none  →  include  →  exclude  →  none
+// `include` requires the row to have this label; `exclude` requires
+// the row to NOT have it. Both are AND'd within their respective sets
+// and combine to support queries like "has http_404 AND has-not
+// fault_rule_enabled".
+type LabelState = 'none' | 'include' | 'exclude';
+function labelState(value: string): LabelState {
+  if (filters.value.labels.includes(value)) return 'include';
+  if (filters.value.labelsExclude.includes(value)) return 'exclude';
+  return 'none';
+}
+function cycleLabelFilter(value: string) {
+  const inc = filters.value.labels;
+  const exc = filters.value.labelsExclude;
+  const cur = labelState(value);
+  // Strip existing entries first so we always end up in a clean state.
+  filters.value.labels = inc.filter((v) => v !== value);
+  filters.value.labelsExclude = exc.filter((v) => v !== value);
+  if (cur === 'none')        filters.value.labels = [...filters.value.labels, value];
+  else if (cur === 'include') filters.value.labelsExclude = [...filters.value.labelsExclude, value];
+  // cur === 'exclude' falls through to clean state (= 'none').
+}
+function isLabelSelected(value: string): boolean {
+  return labelState(value) !== 'none';
+}
+// Tier-level cycle — same none → include → exclude → none as per-label
+// but applied across every label currently visible in the tier. Click
+// computes the consensus state (everything-included, everything-
+// excluded, or mixed/none) and advances the whole group.
+function toggleTierAll(sev: Severity, e: MouseEvent) {
+  e.stopPropagation();
+  const tier = labelTiers.value.find((t) => t.sev === sev);
+  if (!tier || !tier.entries.length) return;
+  const tierValues = tier.entries.map((x) => x.value);
+  const state = tierSelectionState(sev);
+  // Always strip everything in this tier from both sets first; then
+  // re-add to the target based on the next state.
+  const incOther = filters.value.labels.filter((v) => !tierValues.includes(v));
+  const excOther = filters.value.labelsExclude.filter((v) => !tierValues.includes(v));
+  switch (state) {
+    case 'none':
+    case 'partial':
+      filters.value.labels = [...incOther, ...tierValues];
+      filters.value.labelsExclude = excOther;
+      break;
+    case 'all-include':
+      filters.value.labels = incOther;
+      filters.value.labelsExclude = [...excOther, ...tierValues];
+      break;
+    case 'all-exclude':
+    default:
+      filters.value.labels = incOther;
+      filters.value.labelsExclude = excOther;
+      break;
+  }
+}
+// Per-tier consensus state. Lets the tier dot show the same
+// has/has-not affordance as per-label rows.
+type TierState = 'none' | 'partial' | 'all-include' | 'all-exclude';
+function tierSelectionState(sev: Severity): TierState {
+  const tier = labelTiers.value.find((t) => t.sev === sev);
+  if (!tier || !tier.entries.length) return 'none';
+  let inc = 0, exc = 0;
+  for (const e of tier.entries) {
+    const s = labelState(e.value);
+    if (s === 'include') inc++;
+    else if (s === 'exclude') exc++;
+  }
+  const total = tier.entries.length;
+  if (inc === total) return 'all-include';
+  if (exc === total) return 'all-exclude';
+  if (inc === 0 && exc === 0) return 'none';
+  return 'partial';
+}
+function clearLabelFilter() {
+  filters.value.labels = [];
+  filters.value.labelsExclude = [];
+}
+// Total selected (include + exclude) — drives the Clear button count.
+const labelFilterCount = computed(() =>
+  filters.value.labels.length + filters.value.labelsExclude.length);
+// True iff any label is currently displayed (even an empty tier).
+const hasAnyLabels = computed(() => labelTiers.value.some((t) => t.total > 0));
 
 const filtered = computed(() => rows.value.filter(matches));
 
@@ -290,6 +485,8 @@ function clearFilters() {
   filters.value.content_id = '';
   filters.value.play_id = '';
   filters.value.classification = 'all';
+  filters.value.labels = [];
+  filters.value.labelsExclude = [];
 }
 
 function onRangeChange() {
@@ -321,10 +518,48 @@ function isoToLocal(iso: string): string {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
+/** ClickHouse-aware ISO parser. ClickHouse emits timestamps as
+ *  "YYYY-MM-DD HH:MM:SS.fff" (space separator, no zone). `Date.parse`
+ *  of that form is implementation-defined and returns NaN on Safari /
+ *  older WebKit, which previously caused `endTimeFor` to fall through
+ *  to `'live'` for every row regardless of how old the session was.
+ *  Already-RFC3339 strings (with `T`) pass through unchanged. */
+function parseChIsoMs(v: string | null | undefined): number {
+  if (!v) return NaN;
+  const normalised = v.length > 10 && v.charAt(10) === ' '
+    ? v.replace(' ', 'T') + 'Z'
+    : v;
+  return Date.parse(normalised);
+}
+
+/** A play is "still live" — i.e. the viewer should follow the live
+ *  edge rather than pin to a fixed end_time — if its last_seen is
+ *  within LIVE_TAIL_MS of now AND no terminal-state marker is set.
+ *  Threshold is generous (60 s) so a heartbeat that's a few seconds
+ *  late doesn't kick us into archive mode. */
+const LIVE_TAIL_MS = 60_000;
+function endTimeFor(r: SessionRow): string {
+  const lastSeen = parseChIsoMs(r.last_seen);
+  if (!Number.isFinite(lastSeen)) return 'live';
+  if (Date.now() - lastSeen < LIVE_TAIL_MS) return 'live';
+  return new Date(lastSeen).toISOString();
+}
+
 function viewerHref(r: SessionRow): string {
   if (!r.player_id) return '#';
   const qs = new URLSearchParams({ player_id: r.player_id });
   if (r.play_id && r.play_id !== '—') qs.set('play_id', r.play_id);
+  // Pass the play's time bounds so the viewer can scope its initial
+  // brush + SSE backfill to this play's range instead of inferring
+  // it from samples landing. end_time=live means "follow live edge"
+  // and is set when the play looks still-active.
+  if (r.started) {
+    const startMs = parseChIsoMs(r.started);
+    if (Number.isFinite(startMs)) {
+      qs.set('start_time', new Date(startMs).toISOString());
+    }
+  }
+  qs.set('end_time', endTimeFor(r));
   return '/dashboard/v3/session-viewer.html?' + qs.toString();
 }
 function bundleHref(r: SessionRow): string {
@@ -416,6 +651,39 @@ const FLAG_DEFS = [
   { key: 'segment_stall_count' as const, icon: '⏸',         label: 'segment stall',    color: '#c2410c' },
   { key: 'restart_count' as const,       icon: '🔄', label: 'restart',          color: '#b45309' },
 ];
+// Per-label chip data for the Labels column. One chip per distinct
+// label, count baked in. Sorted by count desc (most-frequent first)
+// so the row reads "what happened most" left-to-right. Issue #474.
+interface LabelChip {
+  label: string;     // raw `<severity>=<event>` string
+  name: string;      // event portion (with the `*` synthMark intact)
+  count: number;
+  cls: 'info' | 'warning' | 'critical' | 'error';
+}
+function labelChips(r: SessionRow): LabelChip[] {
+  const pairs = Array.isArray(r.labels) ? r.labels : [];
+  const out: LabelChip[] = [];
+  for (const p of pairs) {
+    const label = String(p[0] ?? '');
+    const count = Number(p[1]) || 0;
+    if (!label || count <= 0) continue;
+    const eq = label.indexOf('=');
+    const sev = eq > 0 ? label.slice(0, eq) : '';
+    const name = eq > 0 ? label.slice(eq + 1) : label;
+    const cls: LabelChip['cls'] =
+      sev === 'error' ? 'error'
+      : sev === 'critical' ? 'critical'
+      : sev === 'warning' ? 'warning'
+      : 'info';
+    out.push({ label, name, count, cls });
+  }
+  out.sort((a, b) =>
+    b.count - a.count
+    || a.label.localeCompare(b.label),
+  );
+  return out;
+}
+
 function flagChips(r: SessionRow): { icon: string; label: string; tip: string; color: string; count: number }[] {
   const out: { icon: string; label: string; tip: string; color: string; count: number }[] = [];
   for (const f of FLAG_DEFS) {
@@ -438,6 +706,7 @@ const COLUMNS = [
   { key: 'last_state',       label: 'State',      type: 'string' as const,  sortable: true },
   { key: 'issues_count',     label: 'Issues',     type: 'number' as const,  sortable: true },
   { key: '__flags',          label: 'Flags',      type: 'string' as const,  sortable: false },
+  { key: 'labels_total',     label: 'Labels',     type: 'number' as const,  sortable: true },
   { key: 'health_score',     label: 'Health',     type: 'number' as const,  sortable: true },
   { key: 'stalls',           label: 'Stalls',     type: 'number' as const,  sortable: true },
   { key: 'errors_count',     label: 'Errors',     type: 'number' as const,  sortable: true },
@@ -598,6 +867,109 @@ const showCustomInputs = computed(() => activeRangeId.value === 'custom');
             <span class="match-count">{{ matchCount }}</span>
           </div>
 
+          <!-- Hierarchical labels filter (issue #474 follow-up).
+               Mirrors SessionDisplay's Focus Window event-filter
+               accordion: severity tier headers → expand → distinct
+               labels at that tier with click-to-toggle inclusion.
+               Multi-select OR semantics. -->
+          <div class="label-filter-accordion" v-if="hasAnyLabels">
+            <div class="label-filter-head">
+              <span class="ctrl-label-text">Filter by label:</span>
+              <button
+                v-if="labelFilterCount"
+                type="button"
+                class="btn btn-secondary label-clear"
+                @click="clearLabelFilter"
+              >Clear ({{ labelFilterCount }})</button>
+            </div>
+            <div
+              v-for="tier in labelTiers"
+              :key="tier.sev"
+              class="lf-tier"
+              :class="{
+                expanded: expandedLabelTiers[tier.sev],
+                dim: !tier.total,
+                'tier-active': tierSelectionState(tier.sev) !== 'none',
+              }"
+              :style="{
+                '--tier-bg': SEVERITY_META[tier.sev].bg,
+                '--tier-border': SEVERITY_META[tier.sev].border,
+                '--tier-color': SEVERITY_META[tier.sev].color,
+              }"
+            >
+              <div class="lf-tier-head">
+                <button
+                  type="button"
+                  class="lf-chevron"
+                  @click="toggleLabelTier(tier.sev)"
+                  :title="expandedLabelTiers[tier.sev] ? 'Collapse' : 'Expand'"
+                  :disabled="!tier.total"
+                >{{ expandedLabelTiers[tier.sev] ? '▾' : '▸' }}</button>
+                <button
+                  type="button"
+                  class="lf-tier-name"
+                  @click="toggleTierAll(tier.sev, $event)"
+                  :disabled="!tier.total"
+                  :title="tier.total
+                    ? `Cycle ALL ${tier.entries.length} ${SEVERITY_META[tier.sev].label} labels:  none → include → exclude → none`
+                    : ''"
+                >
+                  <!-- Four-state dot:
+                         none         hollow ring
+                         all-include  solid fill
+                         all-exclude  solid fill + ⊘ overlay
+                         partial      half-fill -->
+                  <span
+                    class="lf-tier-dot"
+                    :class="'sel-' + tierSelectionState(tier.sev)"
+                    aria-hidden="true"
+                  />
+                  <span class="lf-tier-text">{{ SEVERITY_META[tier.sev].label }}</span>
+                  <span class="lf-tier-pill">{{ tier.total }}</span>
+                </button>
+                <!-- Collapsed preview: first 5 labels as compact chips.
+                     Mirrors SessionDisplay's tierPreview. -->
+                <div class="lf-preview" v-if="!expandedLabelTiers[tier.sev] && tier.total">
+                  <button
+                    v-for="e in tier.entries.slice(0, 5)"
+                    :key="e.value"
+                    type="button"
+                    class="lf-preview-chip"
+                    :class="'state-' + labelState(e.value)"
+                    @click.stop="cycleLabelFilter(e.value)"
+                    :title="`${e.value}\nclick: none → include → exclude → none`"
+                  >{{ e.name }} · {{ e.count }}</button>
+                  <span v-if="tier.entries.length > 5" class="lf-preview-more">
+                    +{{ tier.entries.length - 5 }} more
+                  </span>
+                </div>
+              </div>
+              <div class="lf-tier-body" v-if="expandedLabelTiers[tier.sev] && tier.total">
+                <button
+                  v-for="e in tier.entries"
+                  :key="e.value"
+                  type="button"
+                  class="lf-label-row"
+                  :class="'state-' + labelState(e.value)"
+                  @click="cycleLabelFilter(e.value)"
+                  :title="`${e.value}\nclick: none → include → exclude → none`"
+                >
+                  <!-- Tristate glyph:
+                         none     hollow ring     ○
+                         include  filled check    ✓
+                         exclude  circled slash   ⊘ -->
+                  <span class="lf-label-check">{{
+                    labelState(e.value) === 'include' ? '✓'
+                    : labelState(e.value) === 'exclude' ? '⊘'
+                    : '○'
+                  }}</span>
+                  <span class="lf-label-name">{{ e.name }}</span>
+                  <span class="lf-label-count">{{ e.count }}</span>
+                </button>
+              </div>
+            </div>
+          </div>
+
           <div class="table-wrap">
             <table class="picker-table">
               <thead>
@@ -661,6 +1033,16 @@ const showCustomInputs = computed(() => activeRangeId.value === 'custom');
                   <td>
                     <span v-for="(f, i) in flagChips(r)" :key="i" class="flag-chip" :style="{ background: f.color }" :title="f.tip">{{ f.icon }} {{ f.count }}</span>
                     <span v-if="flagChips(r).length === 0" class="dash">—</span>
+                  </td>
+                  <td class="cell-labels">
+                    <span
+                      v-for="chip in labelChips(r)"
+                      :key="chip.label"
+                      class="label-chip"
+                      :class="'label-' + chip.cls"
+                      :title="chip.label"
+                    >{{ chip.count }}× {{ chip.name }}</span>
+                    <span v-if="labelChips(r).length === 0" class="dash">—</span>
                   </td>
                   <td>
                     <span class="health-badge" :class="'issue-' + fmtHealthBadge(r).cls" :title="fmtHealthBadge(r).tip">{{ fmtHealthBadge(r).score }}</span>
@@ -861,6 +1243,206 @@ const showCustomInputs = computed(() => activeRangeId.value === 'custom');
   line-height: 1.4;
 }
 .dash { color: #9ca3af; }
+
+/* Per-label chips (issue #474). One chip per distinct label,
+ * count baked in. Severity-tinted, mirroring SessionDisplay's
+ * SEVERITY_META palette. */
+.cell-labels { min-width: 220px; max-width: 360px; }
+.label-chip {
+  display: inline-block;
+  padding: 1px 6px;
+  margin: 0 3px 2px 0;
+  border-radius: 10px;
+  font: 600 11px system-ui;
+  line-height: 1.4;
+  white-space: nowrap;
+  border: 1px solid transparent;
+}
+.label-info     { background: #f0fdf4; color: #1f2937; border-color: #a7f3d0; }
+.label-warning  { background: #fef3c7; color: #854d0e; border-color: #fcd34d; }
+.label-critical { background: #fee2e2; color: #7f1d1d; border-color: #fca5a5; }
+.label-error    { background: #ffedd5; color: #7c2d12; border-color: #fdba74; }
+
+/* Hierarchical labels filter — mirrors SessionDisplay's Focus Window
+ * event-filter accordion. One row per severity tier with a clickable
+ * header (toggle ALL labels in that tier), a chevron (collapse), and
+ * an expanded body listing individual label rows with check toggles. */
+.label-filter-accordion {
+  display: flex; flex-direction: column; gap: 4px;
+  padding: 4px 0;
+}
+.label-filter-head {
+  display: flex; align-items: center; gap: 8px; padding-bottom: 2px;
+}
+.label-clear { margin-left: auto; }
+
+.lf-tier {
+  border: 1px solid var(--tier-border);
+  border-radius: 8px;
+  background: var(--tier-bg);
+  padding: 4px 6px;
+}
+.lf-tier.dim { opacity: 0.45; }
+.lf-tier.tier-active { box-shadow: 0 0 0 1.5px var(--tier-color) inset; }
+
+.lf-tier-head {
+  display: flex; align-items: center; gap: 6px; min-height: 26px;
+}
+.lf-chevron {
+  background: transparent; border: 0;
+  width: 18px; height: 18px;
+  cursor: pointer;
+  color: var(--tier-color);
+  font-size: 13px;
+  line-height: 1;
+}
+.lf-chevron:disabled { cursor: default; opacity: 0.4; }
+.lf-tier-name {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 2px 8px;
+  border-radius: 12px;
+  border: 0;
+  background: transparent;
+  color: var(--tier-color);
+  font: 600 12px system-ui;
+  cursor: pointer;
+}
+.lf-tier-name:hover:not(:disabled) { background: rgba(0,0,0,0.05); }
+.lf-tier-name:disabled { cursor: default; }
+/* Tristate (+ partial) selection dot for tier headers. Visual states:
+ *   .sel-none        — hollow ring
+ *   .sel-partial     — half-fill (mixed include/exclude/none)
+ *   .sel-all-include — solid fill
+ *   .sel-all-exclude — solid fill + ⊘ slash overlay */
+.lf-tier-dot {
+  position: relative;
+  display: inline-block;
+  width: 12px; height: 12px;
+  border-radius: 50%;
+  box-sizing: border-box;
+  border: 1.5px solid var(--tier-color);
+  background: transparent;
+}
+.lf-tier-dot.sel-all-include {
+  background: var(--tier-color);
+}
+/* Exclude: leave the dot hollow (matches sel-none ring) but draw a
+ * diagonal slash across it. Reads as "not this" — same affordance as
+ * a "no entry" sign. */
+.lf-tier-dot.sel-all-exclude {
+  background: transparent;
+}
+.lf-tier-dot.sel-all-exclude::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: -3px;
+  bottom: -3px;
+  width: 1.5px;
+  background: var(--tier-color);
+  transform: translateX(-50%) rotate(45deg);
+}
+.lf-tier-dot.sel-partial {
+  background: conic-gradient(var(--tier-color) 0 50%, transparent 50% 100%);
+}
+.lf-tier-pill {
+  background: rgba(0,0,0,0.08);
+  color: var(--tier-color);
+  border-radius: 8px;
+  padding: 0 6px;
+  font: 700 10px ui-monospace, Menlo, monospace;
+  min-width: 18px;
+  text-align: center;
+}
+
+.lf-preview {
+  display: flex; flex-wrap: wrap; gap: 4px; margin-left: 8px; flex: 1;
+}
+.lf-preview-chip {
+  padding: 1px 7px;
+  border-radius: 10px;
+  font: 500 11px system-ui;
+  border: 1px solid var(--tier-border);
+  background: rgba(255,255,255,0.55);
+  color: var(--tier-color);
+  cursor: pointer;
+  line-height: 1.4;
+}
+.lf-preview-chip.state-include {
+  background: var(--tier-color);
+  color: #fff;
+  border-color: var(--tier-color);
+}
+/* Exclude: keep the chip hollow (same baseline as 'none') and draw a
+ * diagonal slash across it so the chip reads as "not this". Reuses
+ * the same "no entry" semantic as the tier dot's exclude state.
+ * Border stays the tier color and slightly heavier so the chip still
+ * registers as a filter target. */
+.lf-preview-chip.state-exclude {
+  background: rgba(255,255,255,0.55);
+  color: var(--tier-color);
+  border-color: var(--tier-color);
+  border-width: 1.5px;
+  position: relative;
+  text-decoration: line-through;
+  text-decoration-thickness: 1.5px;
+  text-decoration-color: var(--tier-color);
+}
+.lf-preview-more {
+  font: 500 11px system-ui;
+  color: var(--tier-color);
+  opacity: 0.7;
+  align-self: center;
+}
+
+.lf-tier-body {
+  display: flex; flex-direction: column; gap: 2px;
+  padding: 4px 4px 2px 26px;     /* indent under the chevron */
+}
+.lf-label-row {
+  display: grid;
+  grid-template-columns: 18px 1fr auto;
+  gap: 6px;
+  align-items: center;
+  padding: 2px 8px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: rgba(255,255,255,0.55);
+  color: var(--tier-color);
+  font: 500 12px system-ui;
+  text-align: left;
+  cursor: pointer;
+}
+.lf-label-row:hover { background: rgba(255,255,255,0.85); }
+.lf-label-row.state-include {
+  background: var(--tier-color);
+  color: #fff;
+  border-color: var(--tier-color);
+}
+/* Exclude: hollow background like the 'none' baseline, just a slash
+ * across the row plus a heavier border so the inverted state reads
+ * at a glance. The lf-label-check glyph (⊘) reinforces the same
+ * "not this" affordance. */
+.lf-label-row.state-exclude {
+  background: rgba(255,255,255,0.55);
+  color: var(--tier-color);
+  border-color: var(--tier-color);
+  border-width: 1.5px;
+  text-decoration: line-through;
+  text-decoration-thickness: 1.5px;
+  text-decoration-color: var(--tier-color);
+}
+.lf-label-check { font-weight: 700; }
+/* Tighten the ⊘ glyph — many fonts render it overly wide. */
+.lf-label-row.state-exclude .lf-label-check { letter-spacing: -1px; }
+.lf-label-name {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font: 500 12px ui-monospace, Menlo, monospace;
+}
+.lf-label-count {
+  font: 600 11px ui-monospace, Menlo, monospace;
+  opacity: 0.85;
+}
 
 .rel-recent { color: #16a34a; font-weight: 600; display: inline-flex; align-items: center; gap: 6px; }
 .rel-medium { color: var(--text-primary); }

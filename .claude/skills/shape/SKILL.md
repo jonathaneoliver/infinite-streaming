@@ -1,11 +1,31 @@
 ---
 name: shape
 description: Set bandwidth cap, delay, packet loss, or pattern-based ramp on a player session via the harness CLI. Invoke when the user says "throttle to X Mbps", "add N ms delay", "X percent loss", "ramp up over 30s", "drop-and-recover pattern", "shape the network", or otherwise wants kernel-level traffic shaping. This skill handles unit normalisation and routes ramp-style asks to the `abr-sweep` procedure.
+last_reviewed: 2026-05-19
 ---
 
 # Network shaping via `harness shape` + `harness procedure abr-sweep`
 
 Defaults: target test-dev; snapshot-protected; `harness undo <target>` rolls back any shape change.
+
+**Conventions:** this skill follows `.claude/skills/CONVENTIONS.md`. Most load-bearing for shape: every mutation is checkpoint-protected (`harness undo` rolls back); ALWAYS show current state (`harness shape <t> --show` and `harness players show <t>` for baseline metrics) before applying any change; lead every shell command with `harness`.
+
+## Always do this first
+
+Before any `shape …` that changes the cap, delay, loss, or pattern, show the operator both:
+
+1. The current shape/pattern state:
+   ```sh
+   harness --insecure shape <target> --show
+   ```
+2. The baseline playback metrics (so they see what they're about to perturb):
+   ```sh
+   harness --insecure players show <target>
+   ```
+
+The operator needs to see "you're starting from 4K @ 29.86 Mbps, 18s buffer, 0 stalls" before agreeing to "apply pyramid 12s steps." Skipping this is the most common cause of "wait, that wasn't where I started from" surprise after a mutation.
+
+Mirrors the equivalent discipline in `fault` — both mutation skills follow the same "show, then mutate" pattern.
 
 ## Single static shape
 

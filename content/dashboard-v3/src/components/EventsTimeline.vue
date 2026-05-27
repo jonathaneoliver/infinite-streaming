@@ -82,7 +82,7 @@ const props = defineProps<{
   /** Samples stream from SessionDisplay's useSessionTimeSeries model.
    *  Each row is a CH session_snapshots projection (lanes_v1 bundle).
    *  EventsTimeline derives swim-lane segments from successive rows. */
-  samplesStream: Stream<Record<string, unknown>>;
+  eventsStream: Stream<Record<string, unknown>>;
 }>();
 const coord = useChartCoordination(toRef(props, 'playerId'));
 
@@ -251,7 +251,7 @@ let prevFirstFrame: number | null = null;
 let prevVideoStart: number | null = null;
 let prevVariantMbps: number | null = null;
 // Watermark of the latest CH row already fed through `ingest()`. The
-// samples-stream watcher uses this to consume only NEW rows on each
+// markers-stream watcher uses this to consume only NEW rows on each
 // version bump (the stream cache holds the full backfill + live tail).
 let lastIngestedMs = -Infinity;
 
@@ -710,7 +710,7 @@ const pendingLive: IngestRow[] = [];
 let drainToken = 0;
 async function drainNewRows() {
   if (lastIngestedMs === Infinity) return; // never happens, defensive
-  const raw = props.samplesStream.inRange(
+  const raw = props.eventsStream.inRange(
     lastIngestedMs === -Infinity ? 0 : lastIngestedMs + 1,
     Number.MAX_SAFE_INTEGER,
   );
@@ -726,7 +726,12 @@ async function drainNewRows() {
       const row = chRowToIngest(raw[i]);
       if (!row) continue;
       if (row.ts <= lastIngestedMs) continue; // belt-and-suspenders
-      if (coord.state.range !== null) {
+      // Pause buffer is only for rows arriving PAST the pinned
+      // window — see MetricsLineChart.vue:679 for the reasoning.
+      // Archive replay pins the brush before backfill starts; those
+      // rows belong inside the range and must reach the timeline.
+      const range = coord.state.range;
+      if (range !== null && row.ts > range.max) {
         pendingLive.push(row);
       } else {
         ingest(row);
@@ -743,7 +748,7 @@ async function drainNewRows() {
 }
 
 watch(
-  () => props.samplesStream.version.value,
+  () => props.eventsStream.version.value,
   () => { void drainNewRows(); },
   { immediate: true },
 );

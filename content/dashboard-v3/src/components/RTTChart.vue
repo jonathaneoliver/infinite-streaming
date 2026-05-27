@@ -12,7 +12,7 @@ import type { PlayerRecord } from '@/repo/v2-repo';
 
 defineProps<{
   playerId: string;
-  samplesStream: Stream<Record<string, unknown>>;
+  eventsStream: Stream<Record<string, unknown>>;
 }>();
 
 const series: SeriesSpec[] = [
@@ -51,7 +51,7 @@ const series: SeriesSpec[] = [
     title="Round-trip time"
     unit="ms"
     :series="series"
-    :samples-stream="samplesStream"
+    :events-stream="eventsStream"
     :y-min="0"
     y2-title="RTO (ms)"
     :y2-min="0"

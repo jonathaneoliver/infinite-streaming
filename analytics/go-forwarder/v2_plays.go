@@ -53,10 +53,13 @@ func playsDispatcher(cfg config) http.HandlerFunc {
 // v2PlaysListHandler answers GET /api/v2/plays.
 func v2PlaysListHandler(w http.ResponseWriter, r *http.Request, cfg config) {
 	q := r.URL.Query()
+	// Canonicalise — see canonicalV2ID()'s doc. Operators who curl
+	// the endpoint with an uppercase UUID would otherwise see an
+	// empty page silently.
 	clauses, params, err := buildPlaysFilter(
-		q.Get("player_id"),
-		q.Get("play_id"),
-		q.Get("restart_id"),
+		canonicalV2ID(q.Get("player_id")),
+		canonicalV2ID(q.Get("play_id")),
+		q.Get("attempt_id"),
 		q.Get("from"),
 		q.Get("to"),
 		q.Get("classification"),
@@ -65,9 +68,13 @@ func v2PlaysListHandler(w http.ResponseWriter, r *http.Request, cfg config) {
 		writeProblemv2(w, http.StatusBadRequest, "bad request", err.Error())
 		return
 	}
+	// Tristate label filter at the play level — see label_filter.go.
+	// Applied as a post-join predicate against the labels_agg CTE
+	// inside queryPlaySummaries.
+	labelHas, labelNot := readLabelFilters(q)
 	limit := parseLimit(q.Get("limit"), 500, 5000)
 
-	rows, err := queryPlaySummaries(r.Context(), cfg, clauses, params, limit)
+	rows, err := queryPlaySummariesFiltered(r.Context(), cfg, clauses, params, labelHas, labelNot, limit)
 	if err != nil {
 		writeProblemv2(w, http.StatusBadGateway, "clickhouse query failed", err.Error())
 		return
@@ -94,7 +101,7 @@ func v2PlayDetailHandler(w http.ResponseWriter, r *http.Request, cfg config, pla
 		writeProblemv2(w, http.StatusBadRequest, "bad request", err.Error())
 		return
 	}
-	rows, err := queryPlaySummaries(r.Context(), cfg, clauses, params, 1)
+	rows, err := queryPlaySummariesFiltered(r.Context(), cfg, clauses, params, nil, nil, 1)
 	if err != nil {
 		writeProblemv2(w, http.StatusBadGateway, "clickhouse query failed", err.Error())
 		return
@@ -110,7 +117,7 @@ func v2PlayDetailHandler(w http.ResponseWriter, r *http.Request, cfg config, pla
 // the plays aggregation. Empty inputs are skipped. Returns an error only
 // when a value is malformed in a way ClickHouse can't recover from
 // (today: nothing — all values are passed through as parameters).
-func buildPlaysFilter(playerID, playID, restartID, from, to, classification string) ([]string, map[string]string, error) {
+func buildPlaysFilter(playerID, playID, attemptID, from, to, classification string) ([]string, map[string]string, error) {
 	params := map[string]string{}
 	// play_id != '' filters out pre-stamp legacy rows; the v1 endpoint
 	// surfaces them as the literal "—" but v2 plays are defined to be
@@ -124,12 +131,11 @@ func buildPlaysFilter(playerID, playID, restartID, from, to, classification stri
 		clauses = append(clauses, "lowerUTF8(play_id) = lowerUTF8({play:String})")
 		params["play"] = playID
 	}
-	if restartID != "" {
-		// Plays don't usually have a single restart_id, but filtering by
-		// it narrows a list response to plays that contain this specific
-		// recovery attempt — useful when piecing a multi-play debug.
-		clauses = append(clauses, "lowerUTF8(restart_id) = lowerUTF8({restart:String})")
-		params["restart"] = restartID
+	if attemptID != "" {
+		// Narrow to plays that contain this specific recovery attempt
+		// — useful when piecing together a multi-attempt debug.
+		clauses = append(clauses, "attempt_id = {attempt:UInt32}")
+		params["attempt"] = attemptID
 	}
 	if from != "" {
 		clauses = append(clauses, "ts >= parseDateTime64BestEffort({from:String})")
@@ -148,7 +154,7 @@ func buildPlaysFilter(playerID, playID, restartID, from, to, classification stri
 			return nil, nil, errors.New("classification must be one of: interesting, other, favourite")
 		}
 	}
-	if playerID == "" && playID == "" && restartID == "" && from == "" && to == "" {
+	if playerID == "" && playID == "" && attemptID == "" && from == "" && to == "" {
 		// Bound the scan when the caller didn't — the snapshots table
 		// is partitioned by toYYYYMMDD(ts), so without a time bound
 		// ClickHouse would read every partition.
@@ -157,12 +163,40 @@ func buildPlaysFilter(playerID, playID, restartID, from, to, classification stri
 	return clauses, params, nil
 }
 
+// queryPlaySummariesFiltered is the entry point with the post-join
+// label-presence filter (issue #474 follow-up). labelHas / labelNot
+// are AND-required against the per-play labels_distinct array; pass
+// nil/empty for the no-filter case. Delegates to queryPlaySummaries
+// after appending the appropriate post-join clauses.
+func queryPlaySummariesFiltered(
+	ctx context.Context, cfg config,
+	clauses []string, params map[string]string,
+	labelHas, labelNot []string,
+	limit int,
+) ([]map[string]any, error) {
+	// The base clauses filter the snapshot/network rows. Label
+	// filters are applied AFTER labels_agg builds the per-play
+	// histogram — see the final WHERE in queryPlaySummaries. We
+	// pass them through the params map keyed by `label_has_N` /
+	// `label_not_N` and emit a `postClauses` placeholder the SQL
+	// template substitutes.
+	var post []string
+	post, params = applyLabelFilters(post, params, "labels_agg.labels_distinct", labelHas, labelNot)
+	return queryPlaySummaries(ctx, cfg, clauses, params, post, limit)
+}
+
 // queryPlaySummaries runs the per-play aggregation. Reuses v1's SQL
 // shape (lagInFrame window for ABR-shift counting, left-join against
 // network_requests for the net_* counters) but groups by play_id only —
 // session_id rides along as `any(session_id)` for the dashboard's
 // stable row key.
-func queryPlaySummaries(ctx context.Context, cfg config, clauses []string, params map[string]string, limit int) ([]map[string]any, error) {
+//
+// `postClauses` (issue #474 follow-up) are AND'd into the final
+// SELECT's WHERE — they run AFTER the labels_agg JOIN so callers can
+// filter by label presence/absence (e.g. plays that have
+// `warning=http_4xx` but NOT `info=*fault_rule_enabled`). Pass nil
+// when no label filter is in play.
+func queryPlaySummaries(ctx context.Context, cfg config, clauses []string, params map[string]string, postClauses []string, limit int) ([]map[string]any, error) {
 	where := "WHERE " + strings.Join(clauses, " AND ")
 	// network_requests doesn't carry a classification column, so the
 	// net_counts CTE skips the classification clause if present. The
@@ -183,7 +217,7 @@ func queryPlaySummaries(ctx context.Context, cfg config, clauses []string, param
 	query := fmt.Sprintf(`
 		WITH base AS (
 		  SELECT
-		    session_id, play_id, restart_id, ts,
+		    session_id, play_id, attempt_id, ts,
 		    player_id, group_id, content_id,
 		    player_state, player_error, last_event,
 		    stall_count, dropped_frames, frames_displayed,
@@ -210,6 +244,39 @@ func queryPlaySummaries(ctx context.Context, cfg config, clauses []string, param
 		         countIf(faulted = 1)  AS net_faults
 		  FROM %s.network_requests
 		  %s
+		  GROUP BY play_id
+		),
+		-- Per-play label histogram across all three source tables
+		-- (issue #474 follow-up so harness CLI's archive plays
+		-- carries the same per-row labels surface the dashboard's
+		-- Sessions page shows via /analytics/api/sessions).
+		-- lowerUTF8 on play_id makes the JOIN survive the case-
+		-- sensitivity gap where some legacy rows landed with
+		-- uppercase play_ids.
+		labels_unioned AS (
+		  SELECT lowerUTF8(play_id) AS play_id, arrayJoin(labels) AS label
+		  FROM %s.%s
+		  %s
+		  UNION ALL
+		  SELECT lowerUTF8(play_id) AS play_id, arrayJoin(labels) AS label
+		  FROM %s.network_requests
+		  %s
+		  UNION ALL
+		  SELECT lowerUTF8(play_id) AS play_id, arrayJoin(labels) AS label
+		  FROM %s.control_events
+		  %s
+		),
+		labels_per_play AS (
+		  SELECT play_id, label, count() AS n
+		  FROM labels_unioned
+		  GROUP BY play_id, label
+		),
+		labels_agg AS (
+		  SELECT play_id,
+		         sum(n) AS labels_total,
+		         arrayDistinct(groupArray(label)) AS labels_distinct,
+		         groupArray((label, n)) AS label_pairs
+		  FROM labels_per_play
 		  GROUP BY play_id
 		),
 		agg AS (
@@ -247,21 +314,21 @@ func queryPlaySummaries(ctx context.Context, cfg config, clauses []string, param
 		    countIf(last_event = 'restart')       AS restart_count,
 		    countIf(last_event = 'error')         AS error_event_count,
 		    any(classification) AS classification,
-		    -- restart_id projection: last non-empty value observed in
-		    -- the play, plus the count of distinct non-empty ids so
-		    -- callers can quickly see "how many recovery attempts in
-		    -- this play". Aliased to *_last to avoid ClickHouse's
-		    -- ILLEGAL_AGGREGATION error when an aggregate alias
-		    -- shadows the underlying column referenced by another
-		    -- aggregate (uniqExactIf reads the underlying column).
-		    argMaxIf(restart_id, ts, restart_id != '')    AS restart_id_last,
-		    uniqExactIf(restart_id, restart_id != '')     AS restart_episodes
+		    -- attempt_id projection: highest attempt observed in this
+		    -- play. Since the player increments attempt_id from 1 by
+		    -- 1, max() doubles as "total attempts": 1 = clean play,
+		    -- N = N-1 recovery attempts after the initial. Aliased to
+		    -- *_max so the alias doesn't shadow the column referenced
+		    -- by another aggregate in the same SELECT.
+		    maxIf(attempt_id, attempt_id > 0)       AS attempt_id_max
 		  FROM base
 		  GROUP BY play_id
 		)
 		SELECT
-		  agg.play_id, agg.player_id,
-		  agg.restart_id_last AS restart_id, agg.restart_episodes,
+		  agg.play_id   AS play_id,
+		  agg.player_id AS player_id,
+		  agg.attempt_id_max AS attempt_id,
+		  agg.attempt_id_max AS attempt_count,
 		  agg.session_id, agg.group_id, agg.content_id,
 		  toString(agg.started_at)   AS started_at,
 		  toString(agg.last_seen_at) AS last_seen_at,
@@ -277,15 +344,34 @@ func queryPlaySummaries(ctx context.Context, cfg config, clauses []string, param
 		  agg.classification,
 		  ifNull(net_counts.net_rows,   0) AS net_events,
 		  ifNull(net_counts.net_errors, 0) AS net_errors,
-		  ifNull(net_counts.net_faults, 0) AS net_faults
+		  ifNull(net_counts.net_faults, 0) AS net_faults,
+		  ifNull(labels_agg.labels_total,           0)  AS labels_total,
+		  ifNull(length(labels_agg.labels_distinct), 0) AS labels_distinct_count,
+		  ifNull(labels_agg.label_pairs,           []) AS label_histogram
 		FROM agg
 		LEFT JOIN net_counts ON agg.play_id = net_counts.play_id
+		LEFT JOIN labels_agg ON lowerUTF8(agg.play_id) = labels_agg.play_id
+		%s
 		ORDER BY agg.started_at DESC
 		LIMIT %d
 		FORMAT JSONEachRow`,
 		cfg.chDatabase, cfg.chTable, where,
 		cfg.chDatabase, netWhere,
+		cfg.chDatabase, cfg.chTable, where,
+		cfg.chDatabase, netWhere,
+		cfg.chDatabase, netWhere,
+		postWhere(postClauses),
 		limit,
 	)
 	return queryClickHouseRows(ctx, cfg, query, params)
+}
+
+// postWhere emits a `WHERE …` fragment (or empty string when no
+// post-join filters were requested) so the outer SELECT's
+// label-filter pushdown only renders when needed.
+func postWhere(post []string) string {
+	if len(post) == 0 {
+		return ""
+	}
+	return "WHERE " + strings.Join(post, " AND ")
 }

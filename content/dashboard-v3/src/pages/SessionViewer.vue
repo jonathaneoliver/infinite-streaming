@@ -24,6 +24,35 @@ const qs = new URLSearchParams(window.location.search);
 const playerId = ref<string>(qs.get('player_id') ?? '');
 const playId = ref<string | null>(qs.get('play_id'));
 
+/** Initial time window. sessions.html passes start_time + end_time
+ *  on the link so the viewer can scope its initial brush + SSE
+ *  backfill without waiting for samples to land. end_time = "live"
+ *  means "this play is still active — follow the live edge". */
+function parseIsoMs(v: string | null): number | null {
+  if (!v) return null;
+  const ms = Date.parse(v);
+  return Number.isFinite(ms) ? ms : null;
+}
+const startMs = ref<number | null>(parseIsoMs(qs.get('start_time')));
+const endTimeRaw = qs.get('end_time');
+// endMs = null sentinel means "follow live" — either an explicit
+// `live`/`now` value or simply absent.
+const endMs = ref<number | null>(
+  (endTimeRaw === 'live' || endTimeRaw === 'now')
+    ? null
+    : parseIsoMs(endTimeRaw),
+);
+
+/** "Show before/after" toggle. When ON, SessionDisplay drops the
+ *  play_id filter on its SSE subscription and widens the time
+ *  window to play_bounds ± 5 min, so rows from neighbouring plays
+ *  for the same player become visible in the same panel layout.
+ *  Default OFF — the page is locked to this play, matching the
+ *  "click a session row, see that session" mental model from
+ *  sessions.html. */
+const showContext = ref<boolean>(false);
+function toggleShowContext() { showContext.value = !showContext.value; }
+
 // Starred state. Optimistically toggled on click, then synced from
 // the server response. Initial fetch in onMounted below.
 const starred = ref<boolean>(false);
@@ -87,10 +116,35 @@ onMounted(async () => {
           <header class="meta-banner">
             <div class="meta-line">
               <span class="replay-badge">REPLAY</span>
+              <span class="meta-label">player</span>
+              <code class="id-pill" :title="playerId">{{ playerId || '(no player)' }}</code>
               <span class="meta-label">play</span>
-              <code class="id-pill" :title="playId ?? '(all plays)'">{{ playId ?? '(all plays)' }}</code>
+              <!-- play_id gets a "disabled" style when showContext is on:
+                   the SSE has dropped the play_id filter so the id shown
+                   here is no longer what's actually being filtered. The
+                   strike + muted colour signals "this label doesn't
+                   reflect what you're currently looking at". -->
+              <code
+                class="id-pill"
+                :class="{ 'id-pill-disabled': showContext }"
+                :title="showContext
+                  ? `${playId ?? '(all plays)'} — filter disabled while showing context`
+                  : (playId ?? '(all plays)')"
+              >{{ playId ?? '(all plays)' }}</code>
             </div>
             <div class="banner-actions">
+              <button
+                type="button"
+                class="banner-btn"
+                :class="{ active: showContext }"
+                @click="toggleShowContext"
+                :disabled="!playId"
+                :title="showContext
+                  ? 'Snap back to this play only'
+                  : 'Show rows from before and after this play (same player, ±5 min)'"
+              >
+                {{ showContext ? '🔓 Showing context' : '🔒 This play only' }}
+              </button>
               <button
                 type="button"
                 class="banner-btn"
@@ -109,6 +163,9 @@ onMounted(async () => {
           <SessionDisplay
             :player-id="playerId"
             :play-id="playId"
+            :show-context="showContext"
+            :start-ms="startMs"
+            :end-ms="endMs"
           />
         </template>
       </main>
@@ -168,6 +225,16 @@ onMounted(async () => {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+/* When "Showing context" is on, the play_id pill no longer reflects
+ * what the SSE is filtering by. Strike + mute so the operator can
+ * see at a glance "this label doesn't match the data flowing". */
+.id-pill-disabled {
+  background: #f3f4f6;
+  color: #9ca3af;
+  text-decoration: line-through;
+  text-decoration-color: #9ca3af;
+  text-decoration-thickness: 1px;
 }
 
 .banner-actions { display: flex; gap: 6px; flex-wrap: wrap; }

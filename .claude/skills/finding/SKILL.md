@@ -1,11 +1,14 @@
 ---
 name: finding
 description: Capture a discovery into the .claude/findings/ library, or recall existing findings related to the current investigation. Invoke when the user says "save that", "record this finding", "this is worth remembering", "what do we know about X", "have we seen this before", or after a successful `investigate` / `forensics` run that reached a tagged hypothesis. The library is the project's memory across sessions — write to it when a non-obvious cause has been confirmed or strongly suspected.
+last_reviewed: 2026-05-19
 ---
 
 # Findings library — capture + recall
 
 The library lives at `.claude/findings/` (per-repo, committed). Each finding is a markdown narrative + (usually) a JSON sidecar with the raw player state at the moment of capture. See `.claude/findings/README.md` for the file format and the bar for adding a finding.
+
+**Conventions:** this skill follows `.claude/skills/CONVENTIONS.md`. Most load-bearing for finding: durable storage stays UTC (the sidecar JSON, file names, and the narrative's timestamps); only the rendered display lines you show the operator get converted to local time.
 
 ## When to invoke
 

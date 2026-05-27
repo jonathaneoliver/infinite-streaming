@@ -85,7 +85,7 @@ services:
       - FORWARDER_SSE_URL=http://go-server:30081/api/sessions/stream
       - FORWARDER_CLICKHOUSE_URL=http://clickhouse:8123
       - FORWARDER_CLICKHOUSE_DB=infinite_streaming
-      - FORWARDER_CLICKHOUSE_TABLE=session_snapshots
+      - FORWARDER_CLICKHOUSE_TABLE=session_events
     volumes:
       - ${CONTENT_DIR:-./sample-content}/logs:/media/logs
     networks:

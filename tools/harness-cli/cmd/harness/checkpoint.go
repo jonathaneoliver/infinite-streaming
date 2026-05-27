@@ -13,35 +13,39 @@ import (
 	"github.com/jonathaneoliver/infinite-streaming/tools/harness-cli/internal/snapshot"
 )
 
-const snapshotUsage = `harness snapshot <subcommand>
+const checkpointUsage = `harness checkpoint <subcommand>     (alias: harness ck)
+
+Pre-mutation state captures so 'harness undo' can roll back.
 
 Subcommands:
-  list [<target>]               show recent snapshots (newest first)
-  show <snapshot_id>            print one snapshot in full (id prefix ok)
+  list [<target>]               show recent checkpoints (newest first)
+  show <checkpoint_id>          print one checkpoint in full (id prefix ok)
 
-Snapshots live under ~/.claude/state/harness/<repo>/ and are written
+Checkpoints live under ~/.claude/state/harness/<repo>/ and are written
 by every mutation command (fault, shape, etc.). 'harness undo'
-consumes them.
+consumes them. Legacy aliases 'snapshot' / 'snap' remain accepted on
+the CLI but the user-visible name moved to 'checkpoint' in v2.0.0 so
+"snapshot" doesn't overlap with the retired session_snapshots table.
 `
 
-func cmdSnapshot(client *api.Client, args []string, asJSON bool) error {
+func cmdCheckpoint(client *api.Client, args []string, asJSON bool) error {
 	if len(args) == 0 {
-		return errors.New(snapshotUsage)
+		return errors.New(checkpointUsage)
 	}
 	if client.Snap == nil {
-		return errors.New("snapshot store unavailable (see startup warning)")
+		return errors.New("checkpoint store unavailable (see startup warning)")
 	}
 	switch args[0] {
 	case "list", "ls":
-		return cmdSnapshotList(client, args[1:], asJSON)
+		return cmdCheckpointList(client, args[1:], asJSON)
 	case "show", "cat":
-		return cmdSnapshotShow(client, args[1:], asJSON)
+		return cmdCheckpointShow(client, args[1:], asJSON)
 	default:
-		return fmt.Errorf("unknown snapshot subcommand: %s\n\n%s", args[0], snapshotUsage)
+		return fmt.Errorf("unknown checkpoint subcommand: %s\n\n%s", args[0], checkpointUsage)
 	}
 }
 
-func cmdSnapshotList(client *api.Client, args []string, asJSON bool) error {
+func cmdCheckpointList(client *api.Client, args []string, asJSON bool) error {
 	var playerID string
 	if len(args) == 1 {
 		pid, err := client.Resolve(context.Background(), args[0])
@@ -53,7 +57,7 @@ func cmdSnapshotList(client *api.Client, args []string, asJSON bool) error {
 			playerID = pid
 		}
 	} else if len(args) > 1 {
-		return errors.New("usage: harness snapshot list [<target>]")
+		return errors.New("usage: harness checkpoint list [<target>]")
 	}
 	snaps, err := client.Snap.List(playerID, 50)
 	if err != nil {
@@ -63,7 +67,7 @@ func cmdSnapshotList(client *api.Client, args []string, asJSON bool) error {
 		return format.JSON(os.Stdout, snaps)
 	}
 	if len(snaps) == 0 {
-		fmt.Println("no snapshots")
+		fmt.Println("no checkpoints")
 		return nil
 	}
 	for _, s := range snaps {
@@ -78,9 +82,9 @@ func cmdSnapshotList(client *api.Client, args []string, asJSON bool) error {
 	return nil
 }
 
-func cmdSnapshotShow(client *api.Client, args []string, asJSON bool) error {
+func cmdCheckpointShow(client *api.Client, args []string, asJSON bool) error {
 	if len(args) != 1 {
-		return errors.New("usage: harness snapshot show <id-prefix>")
+		return errors.New("usage: harness checkpoint show <id-prefix>")
 	}
 	snap, path, err := resolveSnapshot(client, args[0])
 	if err != nil {
@@ -128,7 +132,7 @@ func resolveSnapshot(client *api.Client, idArg string) (snapshot.Snapshot, strin
 			return s, p, nil
 		}
 	}
-	return snapshot.Snapshot{}, "", fmt.Errorf("no snapshot matches %q", idArg)
+	return snapshot.Snapshot{}, "", fmt.Errorf("no checkpoint matches %q", idArg)
 }
 
 func indent(s, prefix string) string {

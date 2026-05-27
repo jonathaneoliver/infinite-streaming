@@ -692,11 +692,13 @@ func (c *Client) ArchivePlaysAggregate(ctx context.Context, params *forwarder.Ge
 	}, "GET /analytics/api/v2/plays/aggregate")
 }
 
-// ArchiveSnapshots returns the session_snapshots rows for one play.
-func (c *Client) ArchiveSnapshots(ctx context.Context, params *forwarder.GetApiV2SnapshotsParams) ([]byte, error) {
+// ArchiveEvents returns the session_events rows for one play.
+// (Renamed from ArchiveSnapshots in v2.0.0 — the pre-#472 alias
+// /api/v2/snapshots was retired.)
+func (c *Client) ArchiveEvents(ctx context.Context, params *forwarder.GetApiV2EventsParams) ([]byte, error) {
 	return c.archiveGET(func() (*http.Response, error) {
-		return c.forwarder.GetApiV2Snapshots(ctx, params)
-	}, "GET /analytics/api/v2/snapshots")
+		return c.forwarder.GetApiV2Events(ctx, params)
+	}, "GET /analytics/api/v2/events")
 }
 
 // ArchiveNetworkRequests returns the network_requests rows.
@@ -706,11 +708,13 @@ func (c *Client) ArchiveNetworkRequests(ctx context.Context, params *forwarder.G
 	}, "GET /analytics/api/v2/network_requests")
 }
 
-// ArchiveSessionEvents returns the derived session_events taxonomy.
-func (c *Client) ArchiveSessionEvents(ctx context.Context, params *forwarder.GetApiV2SessionEventsParams) ([]byte, error) {
+// ArchiveControlEvents returns the proxy/harness action log
+// (control_events). Issue #474 Milestone B replacement for the retired
+// ArchiveSessionEvents (session_markers).
+func (c *Client) ArchiveControlEvents(ctx context.Context, params *forwarder.GetApiV2ControlEventsParams) ([]byte, error) {
 	return c.archiveGET(func() (*http.Response, error) {
-		return c.forwarder.GetApiV2SessionEvents(ctx, params)
-	}, "GET /analytics/api/v2/session_events")
+		return c.forwarder.GetApiV2ControlEvents(ctx, params)
+	}, "GET /analytics/api/v2/control_events")
 }
 
 // ArchiveSessionHeatmap returns the bucketed heatmap.
