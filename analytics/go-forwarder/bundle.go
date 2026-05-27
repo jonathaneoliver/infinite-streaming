@@ -69,6 +69,10 @@ func registerBundleHandler(mux *http.ServeMux, cfg config) {
 		if playID == "—" {
 			playID = ""
 		}
+		// Canonicalise — ClickHouse stores lowercase UUIDs (see
+		// canonicalV2ID() doc). Without this the bundle for an
+		// uppercase URL silently comes back empty.
+		playID = canonicalV2ID(playID)
 
 		// Build a useful filename — small enough to fit in a Slack
 		// upload column without needing a tooltip, but with enough

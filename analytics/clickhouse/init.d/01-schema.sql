@@ -1,25 +1,33 @@
--- Analytics schema for InfiniteStream session snapshots.
+-- Analytics schema for InfiniteStream session events + classifier markers.
 --
--- One row per session per SSE broadcast tick. The forwarder dedupes by
--- payload fingerprint, so an unchanging session does not generate rows.
--- Grafana, ad-hoc SQL, and testing.html replay mode all read from here.
+-- Two coupled tables:
+--   - session_events:   one row per player metrics POST (was: session_snapshots).
+--   - session_markers:  one row per classifier-derived event (was: session_events).
+-- The forwarder dedupes events by payload fingerprint; markers by event_fingerprint.
+-- Grafana, ad-hoc SQL, the harness CLI, and the session viewer all read from here.
+--
+-- The rename (issue #472) was a vocabulary cleanup, not a data migration —
+-- existing data was preserved via RENAME TABLE. On fresh hosts these CREATEs
+-- use the new names from the start.
 
 CREATE DATABASE IF NOT EXISTS infinite_streaming;
 
-CREATE TABLE IF NOT EXISTS infinite_streaming.session_snapshots
+CREATE TABLE IF NOT EXISTS infinite_streaming.session_events
 (
     ts                    DateTime64(3, 'UTC')        CODEC(DoubleDelta, ZSTD(1)),
     revision              UInt64                      CODEC(DoubleDelta, ZSTD(1)),
     session_id            String                      CODEC(ZSTD(1)),
     play_id               LowCardinality(String)      CODEC(ZSTD(1)),
-    -- restart_id: player-supplied UUID per recovery attempt within a
-    -- play. Rotates on every `restart` event (user-reload OR
-    -- auto-recovery); stable outside restart boundaries. Empty when
-    -- the player hasn't yet supplied one. Use with play_id to count
-    -- recovery attempts per play: count(distinct restart_id) GROUP
-    -- BY play_id. See bug #4 fix that removed the proxy synthesis
-    -- which previously made play_id rotate on every control mutation.
-    restart_id            LowCardinality(String)      CODEC(ZSTD(1)),
+    -- attempt_id: player-supplied monotonically-incrementing counter
+    -- per playback attempt within a play. 1 on the initial play of
+    -- any content, +1 on every `restart` event (user-restart OR
+    -- auto-recovery). Resets to 1 at each new play boundary. 0 means
+    -- "unknown" — pre-rename rows or non-iOS clients. Use with
+    -- play_id to count recovery attempts per play: max(attempt_id)
+    -- GROUP BY play_id. See bug #4 fix that removed the proxy
+    -- synthesis which previously made play_id rotate on every
+    -- control mutation.
+    attempt_id            UInt32                      DEFAULT 0 CODEC(ZSTD(1)),
     player_id             LowCardinality(String)      CODEC(ZSTD(1)),
     group_id              LowCardinality(String)      CODEC(ZSTD(1)),
     user_agent            String                      CODEC(ZSTD(1)),
@@ -83,6 +91,12 @@ CREATE TABLE IF NOT EXISTS infinite_streaming.session_snapshots
     avg_network_bitrate_mbps     Float32 CODEC(ZSTD(1)),
     buffer_end_s                 Float32 CODEC(ZSTD(1)),
     last_stall_time_s            Float32 CODEC(ZSTD(1)),
+    -- Authoritative buffering pair duration from the iOS player on
+    -- buffering_end POSTs (issue #474 Milestone A). Lets the forwarder
+    -- read duration off the row instead of computing from a write-time
+    -- cache. Older clients leave this at 0 — labels.go's cache then
+    -- fills in via end_ts - start_ts.
+    last_buffering_time_s        Float32 CODEC(ZSTD(1)),
     live_offset_s                Float32 CODEC(ZSTD(1)),
     playhead_wallclock_ms        Int64   CODEC(ZSTD(1)),
     seekable_end_s               Float32 CODEC(ZSTD(1)),
@@ -227,19 +241,19 @@ TTL toDateTime(ts) + INTERVAL 30 DAY DELETE WHERE classification = 'other',
 SETTINGS index_granularity = 8192;
 
 -- Bloom filter on session_id for fast point lookups in replay mode.
-ALTER TABLE infinite_streaming.session_snapshots
+ALTER TABLE infinite_streaming.session_events
     ADD INDEX IF NOT EXISTS idx_session_id session_id TYPE bloom_filter(0.01) GRANULARITY 4;
 
-ALTER TABLE infinite_streaming.session_snapshots
+ALTER TABLE infinite_streaming.session_events
     ADD INDEX IF NOT EXISTS idx_player_id player_id TYPE bloom_filter(0.01) GRANULARITY 4;
 
-ALTER TABLE infinite_streaming.session_snapshots
+ALTER TABLE infinite_streaming.session_events
     ADD INDEX IF NOT EXISTS idx_play_id play_id TYPE bloom_filter(0.01) GRANULARITY 4;
 
 -- Bring older deployments up to date if the column predates this column.
-ALTER TABLE infinite_streaming.session_snapshots
+ALTER TABLE infinite_streaming.session_events
     ADD COLUMN IF NOT EXISTS play_id LowCardinality(String) CODEC(ZSTD(1)),
-    ADD COLUMN IF NOT EXISTS restart_id LowCardinality(String) CODEC(ZSTD(1)),
+    ADD COLUMN IF NOT EXISTS attempt_id UInt32 DEFAULT 0 CODEC(ZSTD(1)),
     ADD COLUMN IF NOT EXISTS content_id LowCardinality(String) CODEC(ZSTD(1)),
     ADD COLUMN IF NOT EXISTS last_event LowCardinality(String) CODEC(ZSTD(1)),
     ADD COLUMN IF NOT EXISTS trigger_type LowCardinality(String) CODEC(ZSTD(1)),
@@ -248,6 +262,7 @@ ALTER TABLE infinite_streaming.session_snapshots
     ADD COLUMN IF NOT EXISTS avg_network_bitrate_mbps Float32 CODEC(ZSTD(1)),
     ADD COLUMN IF NOT EXISTS buffer_end_s Float32 CODEC(ZSTD(1)),
     ADD COLUMN IF NOT EXISTS last_stall_time_s Float32 CODEC(ZSTD(1)),
+    ADD COLUMN IF NOT EXISTS last_buffering_time_s Float32 CODEC(ZSTD(1)),
     ADD COLUMN IF NOT EXISTS live_offset_s Float32 CODEC(ZSTD(1)),
     ADD COLUMN IF NOT EXISTS playhead_wallclock_ms Int64 CODEC(ZSTD(1)),
     ADD COLUMN IF NOT EXISTS seekable_end_s Float32 CODEC(ZSTD(1)),
@@ -336,7 +351,7 @@ ALTER TABLE infinite_streaming.session_snapshots
 -- Convert legacy manifest_variants UInt16 (broken: always stored 0 because
 -- the SSE field is an array, not a number) to String (JSON of the variant
 -- ladder). Safe MODIFY since the only existing values are zero.
-ALTER TABLE infinite_streaming.session_snapshots
+ALTER TABLE infinite_streaming.session_events
     MODIFY COLUMN IF EXISTS manifest_variants String CODEC(ZSTD(3));
 
 -- Per-request HAR-style log so the session-viewer's network log fold
@@ -355,9 +370,9 @@ CREATE TABLE IF NOT EXISTS infinite_streaming.network_requests
     -- columns can't be in the sort key on first init.
     player_id                LowCardinality(String) CODEC(ZSTD(1)),
     play_id                  LowCardinality(String) CODEC(ZSTD(1)),
-    -- restart_id mirrors session_snapshots — see comment there.
-    -- Stamped onto every HAR row from the session's sticky restart_id.
-    restart_id               LowCardinality(String) CODEC(ZSTD(1)),
+    -- attempt_id mirrors session_events — see comment there.
+    -- Stamped onto every HAR row from the session's sticky attempt_id.
+    attempt_id               UInt32                 DEFAULT 0 CODEC(ZSTD(1)),
     method                   LowCardinality(String) CODEC(ZSTD(1)),
     url                      String                 CODEC(ZSTD(3)),
     upstream_url             String                 CODEC(ZSTD(3)),
@@ -388,7 +403,7 @@ CREATE TABLE IF NOT EXISTS infinite_streaming.network_requests
     entry_fingerprint        UInt64                 CODEC(ZSTD(1)),
     -- Tiered retention classification (issue #342) — must be inline
     -- because the TTL clause below references it. See full comment on
-    -- session_snapshots. The post-create ALTER ADD COLUMN IF NOT EXISTS
+    -- session_events. The post-create ALTER ADD COLUMN IF NOT EXISTS
     -- below is a no-op on fresh hosts but covers the upgrade path.
     classification           LowCardinality(String) DEFAULT 'other' CODEC(ZSTD(1)),
     INDEX idx_play_id play_id TYPE bloom_filter GRANULARITY 4,
@@ -396,13 +411,13 @@ CREATE TABLE IF NOT EXISTS infinite_streaming.network_requests
 )
 ENGINE = MergeTree
 PARTITION BY toYYYYMMDD(ts)
--- ORDER BY player_id first for the same reason as session_snapshots:
+-- ORDER BY player_id first for the same reason as session_events:
 -- the dashboard's network log filter is always WHERE player_id = X
 -- AND ts BETWEEN ?. entry_fingerprint stays as the dedupe component
 -- of the sort tuple so per-request UPSERT semantics still work.
 ORDER BY (player_id, ts, entry_fingerprint)
 -- Tiered retention by classification column — see comment on
--- session_snapshots above. Both tables share the same retention
+-- session_events above. Both tables share the same retention
 -- policy so paired (snapshots, network) data ages out together.
 TTL toDateTime(ts) + INTERVAL 30 DAY DELETE WHERE classification = 'other',
     toDateTime(ts) + INTERVAL 90 DAY DELETE WHERE classification = 'interesting'
@@ -423,7 +438,57 @@ ALTER TABLE infinite_streaming.network_requests
 ALTER TABLE infinite_streaming.network_requests
     ADD COLUMN IF NOT EXISTS player_id LowCardinality(String) CODEC(ZSTD(1));
 
--- restart_id on HAR rows mirrors session_snapshots — stamped from the
--- session's sticky restart_id at insert. Old rows keep the empty default.
+-- attempt_id on HAR rows mirrors session_events — stamped from the
+-- session's sticky attempt_id at insert. Old rows keep the 0 default.
 ALTER TABLE infinite_streaming.network_requests
-    ADD COLUMN IF NOT EXISTS restart_id LowCardinality(String) CODEC(ZSTD(1));
+    ADD COLUMN IF NOT EXISTS attempt_id UInt32 DEFAULT 0 CODEC(ZSTD(1));
+
+-- session_markers retired in issue #474 Milestone C — replaced by
+-- per-row `labels[]` on session_events / network_requests and by
+-- discrete rows on control_events. The CREATE TABLE block previously
+-- here was removed; existing rows on running clusters age out via TTL
+-- once forwarder writes stop. New deployments never create the table.
+
+-- Issue #474 Milestone B — control_events.
+--
+-- Sibling of session_events / network_requests for server-side and
+-- operator-driven actions: fault toggles, pattern step advances,
+-- shaper changes, harness mutations (fault rule edits, label edits,
+-- session lifecycle, content swap). One row per discrete action.
+--
+-- `source` distinguishes who caused it:
+--   'harness' — operator-initiated via dashboard / harness CLI
+--   'proxy'   — runtime auto-transition (fault loop, pattern step,
+--               loop_server detection, proxy-detected session_end)
+--   'auto'    — automated test runner (placeholder; no emit path yet)
+--
+-- `event` is the closed-set action vocabulary — see Milestone B body
+-- in issue #474. `info` is an optional JSON blob with extras (the
+-- changed field for control_change, step/rate/duration for
+-- pattern_step, etc.).
+--
+-- `labels[]` follows the same `<severity>=<event>` / `<severity>=*<event>`
+-- convention as the other two tables so the dashboard's severity
+-- filter sweeps all three uniformly.
+CREATE TABLE IF NOT EXISTS infinite_streaming.control_events
+(
+    ts                       DateTime64(3, 'UTC')   CODEC(Delta, ZSTD(1)),
+    player_id                LowCardinality(String) CODEC(ZSTD(1)),
+    play_id                  LowCardinality(String) CODEC(ZSTD(1)),
+    attempt_id               UInt32                 DEFAULT 0 CODEC(ZSTD(1)),
+    session_id               String                 CODEC(ZSTD(1)),
+    source                   LowCardinality(String) CODEC(ZSTD(1)),
+    event                    LowCardinality(String) CODEC(ZSTD(1)),
+    info                     String                 CODEC(ZSTD(3)),
+    labels                   Array(LowCardinality(String)) DEFAULT [] CODEC(ZSTD(1)),
+    event_fingerprint        UInt64                 CODEC(ZSTD(1)),
+    classification           LowCardinality(String) DEFAULT 'other' CODEC(ZSTD(1)),
+    INDEX idx_play_id play_id TYPE bloom_filter GRANULARITY 4,
+    INDEX idx_event   event   TYPE bloom_filter GRANULARITY 4
+)
+ENGINE = MergeTree
+PARTITION BY toYYYYMMDD(ts)
+ORDER BY (player_id, ts, event_fingerprint)
+TTL toDateTime(ts) + INTERVAL 30 DAY DELETE WHERE classification = 'other',
+    toDateTime(ts) + INTERVAL 90 DAY DELETE WHERE classification = 'interesting'
+SETTINGS index_granularity = 8192;

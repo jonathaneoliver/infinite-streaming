@@ -226,37 +226,45 @@ private struct ServerCard: View {
     let onForget: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: Space.s2) {
-            HStack {
-                if active {
-                    Circle().fill(Tokens.accent).frame(width: 8, height: 8)
+        // The whole card is one Button driving onSelect — that way the
+        // tvOS focus engine treats it as a single press target and the
+        // Play/Select remote button fires onSelect cleanly. Forget is
+        // surfaced via the long-press context menu (tvOS: hold Select;
+        // iOS: long-press) so it doesn't compete with the primary tap.
+        Button(action: onSelect) {
+            VStack(alignment: .leading, spacing: Space.s2) {
+                HStack {
+                    if active {
+                        Circle().fill(Tokens.accent).frame(width: 8, height: 8)
+                    }
+                    Text(server.label)
+                        .font(AppType.bodyEm())
+                        .foregroundColor(Tokens.fg)
+                        .lineLimit(1)
+                    Spacer()
                 }
-                Text(server.label)
-                    .font(AppType.bodyEm())
-                    .foregroundColor(Tokens.fg)
-                    .lineLimit(1)
-                Spacer()
-            }
-            Text(server.contentURL)
-                .font(AppType.mono(size: 12))
-                .foregroundColor(Tokens.fgDim)
-                .lineLimit(1)
-            Spacer().frame(height: Space.s3)
-            HStack {
-                Spacer()
-                Button("Forget", action: onForget)
-                    .font(AppType.monoSm())
+                Text(server.contentURL)
+                    .font(AppType.mono(size: 12))
                     .foregroundColor(Tokens.fgDim)
-                    .buttonStyle(.plain)
+                    .lineLimit(1)
+                Spacer().frame(height: Space.s3)
+                Text("hold to forget")
+                    .font(AppType.monoSm())
+                    .foregroundColor(Tokens.fgFaint)
+                    .frame(maxWidth: .infinity, alignment: .trailing)
+            }
+            .padding(Space.s4)
+            .frame(maxWidth: .infinity, minHeight: 120, alignment: .topLeading)
+            .background(active ? Tokens.bgCard : Tokens.bgSoft)
+            .clipShape(RoundedRectangle(cornerRadius: Radius.card, style: .continuous))
+            .cinematicFocusFollower(cornerRadius: Radius.card)
+        }
+        .buttonStyle(.plain)
+        .contextMenu {
+            Button(role: .destructive, action: onForget) {
+                Label("Forget Server", systemImage: "trash")
             }
         }
-        .padding(Space.s4)
-        .frame(maxWidth: .infinity, minHeight: 120, alignment: .topLeading)
-        .background(active ? Tokens.bgCard : Tokens.bgSoft)
-        .clipShape(RoundedRectangle(cornerRadius: Radius.card, style: .continuous))
-        .cinematicFocus(cornerRadius: Radius.card)
-        .contentShape(Rectangle())
-        .onTapGesture(perform: onSelect)
     }
 }
 
@@ -420,7 +428,7 @@ private struct ManualAddSheet: View {
             Form {
                 Section("Server") {
                     TextField("Label (optional)", text: $label)
-                    TextField("URL (e.g. http://192.168.1.10:30000)", text: $urlText)
+                    TextField("URL (e.g. https://192.168.1.10:30000)", text: $urlText)
                         #if os(iOS)
                         .textInputAutocapitalization(.never)
                         .keyboardType(.URL)

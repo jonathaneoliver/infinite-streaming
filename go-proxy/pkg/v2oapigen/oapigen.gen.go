@@ -980,6 +980,22 @@ type PlayPatch struct {
 // analytics archive (`/analytics/api/v2/plays/{id}`) for ended plays;
 // the only difference is `ended_at` is non-null in the archive.
 type PlayRecord struct {
+	// AttemptId Player-supplied **monotonically-incrementing counter**, 1
+	// on the initial play of any content, +1 on every `restart`
+	// event (user-restart OR auto-recovery). Resets to 1 at
+	// every new play boundary (new content, reload, content-
+	// filter swap). Stable outside restart boundaries.
+	//
+	// Use to count or order recovery attempts within a single
+	// play: `max(attempt_id) GROUP BY play_id` gives the total
+	// attempt count; filter by `attempt_id = N` to isolate the
+	// Nth attempt's activity. Null when the player has not yet
+	// supplied one.
+	//
+	// Integer rather than UUID because the operator-facing
+	// question is "which try is this" — 1, 2, 3 answers that
+	// directly.
+	AttemptId       *int       `json:"attempt_id,omitempty"`
 	ControlRevision string     `json:"control_revision"`
 	EndedAt         *time.Time `json:"ended_at,omitempty"`
 
@@ -1012,14 +1028,6 @@ type PlayRecord struct {
 	// a typed projection). All fields nullable — the player may not
 	// report every field on every tick.
 	PlayerMetrics *PlayerMetrics `json:"player_metrics,omitempty"`
-
-	// RestartId Player-supplied UUID identifying one recovery attempt
-	// within this play. The player rotates it on every `restart`
-	// event (user-reload OR auto-recovery), but keeps it stable
-	// outside restart boundaries. Null when the player has not
-	// yet supplied one. Use to count or filter recovery attempts
-	// within a single play (`count(distinct restart_id)`).
-	RestartId *openapi_types.UUID `json:"restart_id,omitempty"`
 
 	// ServerMetrics Read-only server-observed transport telemetry. Sourced from
 	// v1's TCP_INFO poll (RTT family) + ICMP path ping + per-session

@@ -132,14 +132,15 @@ type NetworkLogEntry struct {
 	// events (user-reload, auto-recovery). Issue #280.
 	PlayID string `json:"play_id,omitempty"`
 
-	// RestartID identifies the recovery attempt within a playback
-	// episode. The player generates a fresh UUID at every `restart`
-	// event (user-reload OR auto-recovery) and passes it as
-	// `?restart_id=...` on every URL. PlayID stays the same across
-	// such restarts; RestartID rotates. Lets analytics ask both
-	// "how did this play perform" (group by play_id) and "how many
-	// recovery attempts within the play" (count distinct restart_id).
-	RestartID string `json:"restart_id,omitempty"`
+	// AttemptID identifies which playback attempt within a play this
+	// request belongs to. The player initialises it to 1 on every
+	// new play and increments by 1 at every `restart` event
+	// (user-reload OR auto-recovery), passing it as `?attempt_id=N`
+	// on every URL. PlayID stays the same across these attempts;
+	// AttemptID ticks up. Lets analytics ask both "how did this play
+	// perform" (group by play_id) and "how many recovery attempts
+	// within the play" (max attempt_id GROUP BY play_id).
+	AttemptID uint32 `json:"attempt_id,omitempty"`
 
 	// HTTP-level metadata captured per-request. Sensitive headers
 	// (Cookie / Authorization / Set-Cookie) are filtered before they
@@ -346,11 +347,16 @@ type App struct {
 	loopStateMu              sync.Mutex
 	loopStateBySession       map[string]ServerLoopState
 	sessionsHub              *SessionEventHub
-	sessionsBroadcastMu      sync.Mutex
-	sessionsBroadcastPending bool
-	sessionsBroadcastLatest  []SessionData
+	// Monotonic revision stamped on each /api/sessions/stream frame
+	// (handleSessionStream initial frame + emitSessionEvent per-event
+	// frames). Was named sessionsBroadcastSeq when the debounced
+	// full-state broadcast lived here; kept stable as the wire
+	// revision is consumer-visible.
 	sessionsBroadcastSeq     uint64
 	networkHub               *NetworkEventHub
+	// controlHub broadcasts proxy/harness control events to subscribers
+	// (forwarder + any dashboard SSE client). Issue #474 Milestone B.
+	controlHub               *ControlEventHub
 	uiStateVersionSeq        uint64
 	segmentFlightMu          sync.Mutex
 	segmentFlight            map[int]segmentFlightInfo // internal port -> segment transfer info
@@ -514,6 +520,87 @@ func (h *NetworkEventHub) Broadcast(sessionID string, entry NetworkLogEntry) {
 		case c.ch <- ev:
 		default:
 			// Buffer full — drop oldest, log occasionally.
+			select {
+			case <-c.ch:
+				c.dropped++
+			default:
+			}
+			select {
+			case c.ch <- ev:
+			default:
+				c.dropped++
+			}
+		}
+	}
+}
+
+// ControlEventHub fans out control_events to dashboard + forwarder
+// subscribers. Same drop-oldest policy as NetworkEventHub (slow
+// clients lose old events rather than blocking the proxy hot path).
+// Issue #474 Milestone B.
+type ControlEventHub struct {
+	mu      sync.Mutex
+	nextID  int
+	clients map[int]*ControlClient
+}
+
+type ControlClient struct {
+	ch      chan ControlEvent
+	dropped uint64
+}
+
+// ControlEvent is one emitted action. JSON-tagged for the SSE body —
+// the forwarder's ctrlEnt mirrors this shape.
+type ControlEvent struct {
+	Ts        time.Time `json:"ts"`
+	SessionID string    `json:"session_id"`
+	PlayerID  string    `json:"player_id"`
+	PlayID    string    `json:"play_id"`
+	AttemptID uint32    `json:"attempt_id"`
+	Source    string    `json:"source"`
+	Event     string    `json:"event"`
+	Info      string    `json:"info"`
+}
+
+func NewControlEventHub() *ControlEventHub {
+	return &ControlEventHub{clients: map[int]*ControlClient{}}
+}
+
+func (h *ControlEventHub) AddClient(buffer int) (int, <-chan ControlEvent) {
+	if buffer <= 0 {
+		buffer = 256
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.nextID++
+	id := h.nextID
+	c := &ControlClient{ch: make(chan ControlEvent, buffer)}
+	h.clients[id] = c
+	return id, c.ch
+}
+
+func (h *ControlEventHub) RemoveClient(id int) {
+	h.mu.Lock()
+	c, ok := h.clients[id]
+	if ok {
+		delete(h.clients, id)
+	}
+	h.mu.Unlock()
+	if ok {
+		close(c.ch)
+	}
+}
+
+func (h *ControlEventHub) Broadcast(ev ControlEvent) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if len(h.clients) == 0 {
+		return
+	}
+	for _, c := range h.clients {
+		select {
+		case c.ch <- ev:
+		default:
 			select {
 			case <-c.ch:
 				c.dropped++
@@ -754,25 +841,42 @@ func (s *SessionEventStore) RecordEnd(session SessionData, endedAt time.Time, re
 }
 
 func (a *App) recordSessionStart(session SessionData, manifestURL string) {
-	if a == nil || a.sessionEvents == nil {
+	if a == nil {
 		return
 	}
-	startAt := timeFromInterface(session["session_start_time"])
-	if startAt.IsZero() {
-		startAt = timeFromInterface(session["first_request_time"])
+	sessionID := getString(session, "session_id")
+	if a.sessionEvents != nil {
+		startAt := timeFromInterface(session["session_start_time"])
+		if startAt.IsZero() {
+			startAt = timeFromInterface(session["first_request_time"])
+		}
+		if err := a.sessionEvents.RecordStart(session, manifestURL, startAt); err != nil {
+			log.Printf("session event start failed session_id=%s err=%v", sessionID, err)
+		}
 	}
-	if err := a.sessionEvents.RecordStart(session, manifestURL, startAt); err != nil {
-		log.Printf("session event start failed session_id=%s err=%v", getString(session, "session_id"), err)
-	}
+	a.emitControlEventForSession(sessionID, "proxy", "session_start", manifestURL)
 }
 
 func (a *App) recordSessionEnd(session SessionData, reason string) {
-	if a == nil || a.sessionEvents == nil {
+	if a == nil {
 		return
 	}
-	if err := a.sessionEvents.RecordEnd(session, time.Now().UTC(), reason); err != nil {
-		log.Printf("session event end failed session_id=%s reason=%s err=%v", getString(session, "session_id"), reason, err)
+	sessionID := getString(session, "session_id")
+	if a.sessionEvents != nil {
+		if err := a.sessionEvents.RecordEnd(session, time.Now().UTC(), reason); err != nil {
+			log.Printf("session event end failed session_id=%s reason=%s err=%v", sessionID, reason, err)
+		}
 	}
+	// Mirror the lifecycle into control_events. `proxy` is the source
+	// for inactive_timeout/cleared; explicit operator deletes still
+	// flow through here too, so we tag the reason in `info` and let
+	// downstream filter by it. Issue #474 Milestone B.
+	source := "proxy"
+	switch reason {
+	case "deleted", "cleared":
+		source = "harness"
+	}
+	a.emitControlEventForSession(sessionID, source, "session_end", reason)
 }
 
 func (s *NftShapeStep) UnmarshalJSON(data []byte) error {
@@ -1646,6 +1750,7 @@ func main() {
 		faultLoops:         map[int]context.CancelFunc{},
 		sessionsHub:        NewSessionEventHub(),
 		networkHub:         NewNetworkEventHub(),
+		controlHub:         NewControlEventHub(),
 		networkLogs:        map[string]*NetworkLogRingBuffer{},
 		loopStateBySession: map[string]ServerLoopState{},
 		segmentFlight:      map[int]segmentFlightInfo{},
@@ -1686,6 +1791,10 @@ func main() {
 	router.HandleFunc("/api/session/{id}/metrics", app.handlePostSessionMetrics).Methods(http.MethodPost)
 	router.HandleFunc("/api/session/{id}/network", app.handleGetNetworkLog).Methods(http.MethodGet)
 	router.HandleFunc("/api/network/stream", app.handleNetworkStream).Methods(http.MethodGet)
+	// Control events SSE — issue #474 Milestone B. Mirrors
+	// /api/network/stream's shape; one JSON envelope per emitted
+	// action.
+	router.HandleFunc("/api/control/stream", app.handleControlStream).Methods(http.MethodGet)
 	router.HandleFunc("/api/external-ips", app.handleGetExternalIPs).Methods(http.MethodGet)
 	router.HandleFunc("/api/clear-sessions", app.handleClearSessions).Methods(http.MethodPost)
 	router.HandleFunc("/api/session-group/link", app.handleLinkSessions).Methods(http.MethodPost)
@@ -1841,6 +1950,93 @@ func (a *App) handleNetworkStream(w http.ResponseWriter, r *http.Request) {
 			flusher.Flush()
 		}
 	}
+}
+
+// handleControlStream emits each control_events row as it lands.
+// Body shape mirrors /api/network/stream: one SSE `data:` line per
+// action, `{"session_id":"...","entry":{...}}`. Forwarder subscribes
+// to this and writes to ClickHouse. Issue #474 Milestone B.
+func (a *App) handleControlStream(w http.ResponseWriter, r *http.Request) {
+	if a.controlHub == nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		writeJSON(w, map[string]string{"error": "stream unavailable"})
+		return
+	}
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		w.WriteHeader(http.StatusInternalServerError)
+		writeJSON(w, map[string]string{"error": "stream unsupported"})
+		return
+	}
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+
+	clientID, ch := a.controlHub.AddClient(1024)
+	defer a.controlHub.RemoveClient(clientID)
+
+	heartbeat := time.NewTicker(15 * time.Second)
+	defer heartbeat.Stop()
+
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case <-heartbeat.C:
+			if _, err := w.Write([]byte(": ping\n\n")); err != nil {
+				return
+			}
+			flusher.Flush()
+		case ev, ok := <-ch:
+			if !ok {
+				return
+			}
+			payload := struct {
+				SessionID string       `json:"session_id"`
+				Entry     ControlEvent `json:"entry"`
+			}{ev.SessionID, ev}
+			b, err := json.Marshal(payload)
+			if err != nil {
+				continue
+			}
+			if _, err := w.Write([]byte("data: " + string(b) + "\n\n")); err != nil {
+				return
+			}
+			flusher.Flush()
+		}
+	}
+}
+
+// emitControlEventForSession is the single entry point proxy code calls
+// to record a control_events action. Looks up sticky identity
+// (player_id, play_id, attempt_id) from the session map so the row
+// joins to session_events / network_requests on the same fields. Issue
+// #474 Milestone B.
+func (a *App) emitControlEventForSession(sessionID, source, event, info string) {
+	if a == nil || a.controlHub == nil || event == "" {
+		return
+	}
+	var (
+		playerID  string
+		playID    string
+		attemptID uint32
+	)
+	if sessionID != "" {
+		playerID = a.sessionStickyPlayerID(sessionID)
+		playID = a.sessionStickyPlayID(sessionID)
+		attemptID = a.sessionStickyAttemptID(sessionID)
+	}
+	a.controlHub.Broadcast(ControlEvent{
+		Ts:        time.Now().UTC(),
+		SessionID: sessionID,
+		PlayerID:  playerID,
+		PlayID:    playID,
+		AttemptID: attemptID,
+		Source:    source,
+		Event:     event,
+		Info:      info,
+	})
 }
 
 func (a *App) handleSessionStream(w http.ResponseWriter, r *http.Request) {
@@ -2002,21 +2198,27 @@ func (a *App) handlePostSessionMetrics(w http.ResponseWriter, r *http.Request) {
 	// ground-truth live offset that's independent of the client's clock:
 	//   trueOffsetMs = server_received_at_ms - playhead_wallclock_ms
 	metricsOnly["server_received_at_ms"] = time.Now().UnixMilli()
-	// Propagate play_id + restart_id from the URL query (issue #280).
+	// Propagate play_id + attempt_id from the URL query (issue #280).
 	// The metrics POST is the only signal we receive between manifest
 	// requests on long-running iOS sessions; without picking up the
-	// player's current ids here, restart_id rotations would lag until
-	// the next manifest fetch.
+	// player's current ids here, attempt_id increments would lag
+	// until the next manifest fetch.
 	if v := strings.TrimSpace(r.URL.Query().Get("play_id")); v != "" {
 		metricsOnly["play_id"] = v
 	}
-	if v := strings.TrimSpace(r.URL.Query().Get("restart_id")); v != "" {
-		metricsOnly["restart_id"] = v
+	if v := strings.TrimSpace(r.URL.Query().Get("attempt_id")); v != "" {
+		metricsOnly["attempt_id"] = v
 	}
-	a.saveSessionByID(id, metricsOnly)
-	lastEvent := strings.ToLower(strings.TrimSpace(getString(metricsOnly, "player_metrics_last_event")))
-	if isSignificantPlayerEvent(lastEvent) {
-		a.flushSessionsBroadcast()
+	merged, ok := a.saveSessionByIDReturning(id, metricsOnly)
+	// Issue #470: emit one SSE frame per metrics POST. Every POST —
+	// heartbeat or otherwise — flows through so the forwarder writes
+	// exactly one snapshot row per event the player produced. The
+	// significance gate (`isSignificantPlayerEvent`) is gone because
+	// the previous "debounce + significance" pair was the source of
+	// the cadence aliasing and the stale-marker leak that produced
+	// duplicate session_events rows. Each frame stands on its own.
+	if ok {
+		a.emitSessionEvent(merged)
 	}
 	// "user_marked" (the 911 button) flows into the analytics tier
 	// via session_snapshots.last_event = 'user_marked'; the operator
@@ -2026,14 +2228,6 @@ func (a *App) handlePostSessionMetrics(w http.ResponseWriter, r *http.Request) {
 	// 30-day TTL is needed.
 	w.WriteHeader(http.StatusOK)
 	writeJSON(w, map[string]string{"status": "ok"})
-}
-
-func isSignificantPlayerEvent(event string) bool {
-	switch strings.ToLower(strings.TrimSpace(event)) {
-	case "stall_start", "stall_end", "segment_stall", "restart", "frozen", "error", "loop_marker", "playing", "buffering_start", "buffering_end", "rate_shift_up", "rate_shift_down", "video_first_frame", "video_start_time", "timejump", "user_marked":
-		return true
-	}
-	return false
 }
 
 
@@ -2441,7 +2635,116 @@ func (a *App) applySessionSettingsUpdate(id string, payload map[string]interface
 		}
 	}
 
+	// Emit a control_event summarising the operator's mutation (issue
+	// #474 Milestone B). Classify the change by the field touched and
+	// fall back to `control_change` when nothing more specific maps.
+	// Source is always `harness` here — every caller of
+	// applySessionSettingsUpdate is the dashboard / harness PATCH path.
+	a.emitHarnessSettingsChange(id, payload)
+
 	return target, http.StatusOK, ""
+}
+
+// emitHarnessSettingsChange classifies a settings PATCH into one of
+// the control_events vocab entries and broadcasts it. Multiple field
+// touches in one payload emit multiple events — that matches operator
+// intent (one PATCH can change rate + pattern + labels, all three are
+// distinct surfaces).
+func (a *App) emitHarnessSettingsChange(sessionID string, payload map[string]interface{}) {
+	if a == nil || a.controlHub == nil || len(payload) == 0 {
+		return
+	}
+	emitted := false
+	emit := func(event, info string) {
+		a.emitControlEventForSession(sessionID, "harness", event, info)
+		emitted = true
+	}
+	// Labels first — cheapest test.
+	if _, ok := payload["labels"]; ok {
+		emit("label_changed", "")
+	}
+	if _, ok := payload["content_id"]; ok {
+		emit("content_changed", "")
+	}
+	if _, ok := payload["manifest_url"]; ok {
+		emit("content_changed", "")
+	}
+	// Transport fault rule.
+	transportTouched := false
+	for _, k := range []string{
+		"transport_failure_type", "transport_fault_type",
+		"transport_failure_frequency", "transport_failure_units",
+		"transport_consecutive_failures", "transport_consecutive_seconds",
+		"transport_consecutive_units", "transport_frequency_seconds",
+		"transport_fault_on_seconds", "transport_fault_off_seconds",
+	} {
+		if _, ok := payload[k]; ok {
+			transportTouched = true
+			break
+		}
+	}
+	if transportTouched {
+		// Distinguish enable vs disable from the type field if present.
+		ft := normalizeTransportFaultType(getString(payload, "transport_fault_type"))
+		if ft == "none" {
+			ft = normalizeTransportFaultType(getString(payload, "transport_failure_type"))
+		}
+		switch ft {
+		case "none":
+			emit("fault_rule_disabled", "")
+		case "":
+			emit("fault_rule_config_change", "")
+		default:
+			emit("fault_rule_enabled", ft)
+		}
+	}
+	// Pattern enable / disable is emitted by applyShapePattern /
+	// disablePatternForPort directly so EVERY toggle path is
+	// covered (PATCH, switch-to-sliders, session release, group
+	// reset, …). Skip the redundant hook here to avoid double-emit.
+	// Pure config edits (steps array, template mode, margin) that
+	// stay within an already-enabled pattern still surface via
+	// pattern_config_change.
+	patternTouched := false
+	for _, k := range []string{"nftables_pattern_steps", "nftables_pattern_template_mode", "nftables_pattern_margin_pct"} {
+		if _, ok := payload[k]; ok {
+			patternTouched = true
+			break
+		}
+	}
+	if patternTouched {
+		emit("pattern_config_change", "")
+	}
+	// Shaper rate / delay / loss.
+	shaperTouched := false
+	for _, k := range []string{"nftables_bandwidth_mbps", "nftables_delay_ms", "nftables_packet_loss"} {
+		if _, ok := payload[k]; ok {
+			shaperTouched = true
+			break
+		}
+	}
+	if shaperTouched {
+		emit("shaper_config_change", "")
+	}
+	// Timeouts.
+	timeoutsTouched := false
+	for _, k := range []string{
+		"transfer_active_timeout_seconds", "transfer_idle_timeout_seconds",
+		"transfer_timeout_applies_manifests", "transfer_timeout_applies_master",
+		"transfer_timeout_applies_segments",
+	} {
+		if _, ok := payload[k]; ok {
+			timeoutsTouched = true
+			break
+		}
+	}
+	if timeoutsTouched {
+		emit("timeouts_changed", "")
+	}
+	if !emitted {
+		// Generic fallback so analytics never miss a mutation.
+		emit("control_change", "")
+	}
 }
 
 // parseShapeStepsFromSession extracts []NftShapeStep from the session's
@@ -2980,6 +3283,10 @@ func (a *App) applyShapePattern(port int, steps []NftShapeStep, delayMs int, los
 			"nftables_pattern_enabled": false,
 			"nftables_pattern_steps":   []NftShapeStep{},
 		}, "")
+		// Empty-steps branch counts as a pattern_disabled — the
+		// caller asked for "no pattern". Without this, an operator
+		// who cleared the steps table would see no Control row.
+		a.emitControlEventForPort(port, "proxy", "pattern_disabled", "")
 		// Disarming the pattern loop leaves the kernel at whatever
 		// rate the last pattern step applied. Reassert the session's
 		// static shape so the user-visible "Limit" matches reality —
@@ -3024,6 +3331,32 @@ func (a *App) applyShapePattern(port int, steps []NftShapeStep, delayMs int, los
 		"nftables_delay_ms":        delayMs,
 		"nftables_packet_loss":     loss,
 	}, "")
+	// Emit pattern_enabled (per session on this port) so the
+	// dashboard's PlayLog Control bucket surfaces operator toggles
+	// regardless of which endpoint triggered them. Info carries the
+	// step count + first rate + template mode (rampUp / stairs /
+	// custom …); the mode flows through to a per-pattern label so
+	// the Sessions filter can distinguish them.
+	stepCount := len(cleanSteps)
+	firstRate := 0.0
+	if stepCount > 0 {
+		firstRate = cleanSteps[0].RateMbps
+	}
+	// template_mode was just stamped by updateSessionsByPortWithControl
+	// above when the caller included it in the payload, so any session
+	// on this port has the freshest value.
+	mode := ""
+	for _, sess := range a.getSessionList() {
+		if portStr := getString(sess, "x_forwarded_port"); portStr != "" {
+			if pn, err := strconv.Atoi(portStr); err == nil && pn == port {
+				mode = getString(sess, "nftables_pattern_template_mode")
+				break
+			}
+		}
+	}
+	info := fmt.Sprintf(`{"mode":%q,"steps":%d,"rate_mbps_first":%.3f,"delay_ms":%d,"packet_loss":%.3f}`,
+		mode, stepCount, firstRate, delayMs, loss)
+	a.emitControlEventForPort(port, "proxy", "pattern_enabled", info)
 	go a.runShapePatternLoop(ctx, port, cleanSteps, delayMs, loss)
 	return nil
 }
@@ -3104,6 +3437,19 @@ func (a *App) runShapePatternLoop(ctx context.Context, port int, steps []NftShap
 			"nftables_pattern_step_runtime":      stepIndex + 1,
 			"nftables_pattern_rate_runtime_mbps": step.RateMbps,
 		})
+		// Emit pattern_step as a control_event for every session on
+		// this port (issue #474 Milestone B). Info is a tiny JSON
+		// blob so downstream (graphs, harness archive) can read
+		// step / rate / duration without re-fetching pattern config.
+		for _, sess := range a.getSessionList() {
+			if portStr := getString(sess, "x_forwarded_port"); portStr != "" {
+				if pn, err := strconv.Atoi(portStr); err == nil && pn == port {
+					info := fmt.Sprintf(`{"step":%d,"rate_mbps":%.3f,"duration_s":%.1f}`,
+						stepIndex+1, step.RateMbps, step.DurationSeconds)
+					a.emitControlEventForSession(getString(sess, "session_id"), "proxy", "pattern_step", info)
+				}
+			}
+		}
 		wait := time.Duration(step.DurationSeconds * float64(time.Second))
 		timer := time.NewTimer(wait)
 		select {
@@ -3123,6 +3469,170 @@ func (a *App) disablePatternForPort(port int) {
 		"nftables_pattern_steps":   []NftShapeStep{},
 		"nftables_pattern_step":    nil,
 	}, "")
+	// Emit pattern_disabled to control_events for every session on
+	// this port. Without this hook the dashboard's PlayLog "Control"
+	// bucket stayed silent on toggle paths that bypass
+	// applySessionSettingsUpdate (e.g. switching to sliders mode,
+	// session release, group reset). Issue #474 follow-up.
+	a.emitControlEventForPort(port, "proxy", "pattern_disabled", "")
+}
+
+// emitControlEventsForDiff inspects a (before, after) session-state
+// pair and emits one control_event per detected operator-driven
+// change. Used by paths that mutate the session map directly (v2
+// PATCH via MutatePlayer) and so bypass applySessionSettingsUpdate's
+// PATCH-payload hook. source is always `harness` here because every
+// caller is a dashboard / harness PATCH. Issue #474 follow-up.
+func (a *App) emitControlEventsForDiff(sessionID string, before, after map[string]interface{}) {
+	if a == nil || a.controlHub == nil || sessionID == "" {
+		return
+	}
+	changed := func(k string) bool {
+		return !sessionFieldsEqual(before[k], after[k])
+	}
+	emit := func(event, info string) {
+		a.emitControlEventForSession(sessionID, "harness", event, info)
+	}
+
+	// Labels — any change.
+	if changed("labels") {
+		emit("label_changed", "")
+	}
+	// Content selection.
+	if changed("content_id") || changed("manifest_url") {
+		emit("content_changed", "")
+	}
+	// Transport fault rule.
+	transportKeys := []string{
+		"transport_failure_type", "transport_fault_type",
+		"transport_failure_frequency", "transport_failure_units",
+		"transport_consecutive_failures", "transport_consecutive_seconds",
+		"transport_consecutive_units", "transport_frequency_seconds",
+		"transport_fault_on_seconds", "transport_fault_off_seconds",
+	}
+	transportTouched := false
+	for _, k := range transportKeys {
+		if changed(k) {
+			transportTouched = true
+			break
+		}
+	}
+	if transportTouched {
+		ft := normalizeTransportFaultType(getString(after, "transport_fault_type"))
+		if ft == "none" {
+			ft = normalizeTransportFaultType(getString(after, "transport_failure_type"))
+		}
+		prev := normalizeTransportFaultType(getString(before, "transport_fault_type"))
+		if prev == "none" {
+			prev = normalizeTransportFaultType(getString(before, "transport_failure_type"))
+		}
+		switch {
+		case prev == "none" && ft != "none":
+			emit("fault_rule_enabled", ft)
+		case prev != "none" && ft == "none":
+			emit("fault_rule_disabled", prev)
+		default:
+			emit("fault_rule_config_change", ft)
+		}
+	}
+	// Per-surface failure rules (master, manifest, segment, all).
+	for _, surface := range []string{"master_manifest", "manifest", "segment", "all"} {
+		typeKey := surface + "_failure_type"
+		freqKey := surface + "_failure_frequency"
+		modeKey := surface + "_failure_mode"
+		if !(changed(typeKey) || changed(freqKey) || changed(modeKey)) {
+			continue
+		}
+		prev := getString(before, typeKey)
+		cur := getString(after, typeKey)
+		switch {
+		case (prev == "" || prev == "none") && cur != "" && cur != "none":
+			emit("fault_rule_enabled", surface+":"+cur)
+		case prev != "" && prev != "none" && (cur == "" || cur == "none"):
+			emit("fault_rule_disabled", surface+":"+prev)
+		default:
+			emit("fault_rule_config_change", surface+":"+cur)
+		}
+	}
+	// Shaper (rate / delay / loss) — sliders.
+	if changed("nftables_bandwidth_mbps") || changed("nftables_delay_ms") || changed("nftables_packet_loss") {
+		emit("shaper_config_change",
+			fmt.Sprintf(`{"rate_mbps":%v,"delay_ms":%v,"packet_loss":%v}`,
+				after["nftables_bandwidth_mbps"], after["nftables_delay_ms"], after["nftables_packet_loss"]))
+	}
+	// Pattern enable/disable is emitted by applyShapePattern /
+	// disablePatternForPort directly — skip here. Config-only edits
+	// to steps still need surfacing.
+	if changed("nftables_pattern_steps") || changed("nftables_pattern_template_mode") || changed("nftables_pattern_margin_pct") {
+		emit("pattern_config_change", "")
+	}
+	// Transfer timeouts.
+	for _, k := range []string{
+		"transfer_active_timeout_seconds", "transfer_idle_timeout_seconds",
+		"transfer_timeout_applies_manifests", "transfer_timeout_applies_master",
+		"transfer_timeout_applies_segments",
+	} {
+		if changed(k) {
+			emit("timeouts_changed", "")
+			break
+		}
+	}
+}
+
+// sessionFieldsEqual compares two interface{} values pulled out of a
+// session map for the diff-based control_event emitter. Strings,
+// numbers, bools compare by ==; arrays / objects compare by JSON-
+// round-trip. Cheap because session-map values are small.
+func sessionFieldsEqual(a, b interface{}) bool {
+	if a == nil && b == nil {
+		return true
+	}
+	// Same-type primitive shortcut.
+	switch va := a.(type) {
+	case string:
+		if vb, ok := b.(string); ok {
+			return va == vb
+		}
+	case bool:
+		if vb, ok := b.(bool); ok {
+			return va == vb
+		}
+	case float64:
+		if vb, ok := b.(float64); ok {
+			return va == vb
+		}
+	case int:
+		if vb, ok := b.(int); ok {
+			return va == vb
+		}
+	}
+	// Fall through to JSON for arrays / nested maps / mixed
+	// number types.
+	ja, ea := json.Marshal(a)
+	jb, eb := json.Marshal(b)
+	if ea != nil || eb != nil {
+		return false
+	}
+	return string(ja) == string(jb)
+}
+
+// emitControlEventForPort emits one control_event per session bound to
+// the given proxy port. Used by pattern enable/disable + shaper paths
+// that act on a port (not a single session). Empty info when the
+// event has no extras worth surfacing.
+func (a *App) emitControlEventForPort(port int, source, event, info string) {
+	if a == nil || a.controlHub == nil || event == "" {
+		return
+	}
+	for _, sess := range a.getSessionList() {
+		portStr := getString(sess, "x_forwarded_port")
+		if portStr == "" {
+			continue
+		}
+		if pn, err := strconv.Atoi(portStr); err == nil && pn == port {
+			a.emitControlEventForSession(getString(sess, "session_id"), source, event, info)
+		}
+	}
 }
 
 func transportRuleComment(port int) string {
@@ -3345,6 +3855,17 @@ func (a *App) setTransportFaultSessionState(port int, faultType string, active b
 					controlRevision = newControlRevision()
 				}
 				applyControlRevision(session, controlRevision)
+			}
+			// Emit control_event on the fault active edge — fault_on /
+			// fault_off (issue #474 Milestone B). Replaces the
+			// snapshot_failures classifier's transport_fault edge.
+			if prevActive != active {
+				sessionID := getString(session, "session_id")
+				ev := "fault_off"
+				if active {
+					ev = "fault_on"
+				}
+				a.emitControlEventForSession(sessionID, "proxy", ev, faultType)
 			}
 			changed = true
 		}
@@ -4245,19 +4766,25 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 	// order via capturedQueryString.
 	requestHeaders := capturedHeaders(r.Header)
 	queryString := capturedQueryString(r.URL)
-	// Extract the player's `play_id` + `restart_id` query params (issue
+	// Extract the player's `play_id` + `attempt_id` query params (issue
 	// #280). Used to scope HAR snapshots to a single playback episode
 	// and to track recovery attempts within it. Stamped onto every
 	// NetworkLogEntry created in this handler via the logEntry closure
 	// below.
 	playID := strings.TrimSpace(r.URL.Query().Get("play_id"))
-	restartID := strings.TrimSpace(r.URL.Query().Get("restart_id"))
+	attemptIDStr := strings.TrimSpace(r.URL.Query().Get("attempt_id"))
+	var attemptID uint32
+	if attemptIDStr != "" {
+		if n, err := strconv.ParseUint(attemptIDStr, 10, 32); err == nil {
+			attemptID = uint32(n)
+		}
+	}
 	logEntry := func(sessionID string, entry NetworkLogEntry) {
 		if entry.PlayID == "" {
 			entry.PlayID = playID
 		}
-		if entry.RestartID == "" {
-			entry.RestartID = restartID
+		if entry.AttemptID == 0 {
+			entry.AttemptID = attemptID
 		}
 		a.addNetworkLogEntry(sessionID, entry)
 	}
@@ -4533,9 +5060,9 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 	sessionData["last_request"] = nowISO()
 	sessionData["last_request_url"] = filename
 	sessionData["user_agent"] = r.UserAgent()
-	// Stamp the player's current play_id + restart_id on the session
+	// Stamp the player's current play_id + attempt_id on the session
 	// so the SSE stream (and downstream analytics) can partition by
-	// playback episode (play_id) and recovery attempt (restart_id).
+	// playback episode (play_id) and recovery attempt (attempt_id).
 	// Both are player-supplied; the proxy never synthesises them.
 	// When the player has not yet sent a value, the field stays empty
 	// on the session map — downstream tables get blank rather than
@@ -4543,8 +5070,11 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 	if playID != "" {
 		sessionData["play_id"] = playID
 	}
-	if restartID != "" {
-		sessionData["restart_id"] = restartID
+	// Store the raw string so sessionStickyField (a generic
+	// type-asserts-as-string helper) can read it back uniformly
+	// across the metrics POST + manifest GET paths.
+	if attemptIDStr != "" {
+		sessionData["attempt_id"] = attemptIDStr
 	}
 
 	// Extract client IP considering X-Forwarded-For
@@ -5946,8 +6476,8 @@ func (a *App) addNetworkLogEntry(sessionID string, entry NetworkLogEntry) {
 	if entry.PlayID == "" {
 		entry.PlayID = a.sessionStickyPlayID(sessionID)
 	}
-	if entry.RestartID == "" {
-		entry.RestartID = a.sessionStickyRestartID(sessionID)
+	if entry.AttemptID == 0 {
+		entry.AttemptID = a.sessionStickyAttemptID(sessionID)
 	}
 	rb := a.getOrCreateNetworkLog(sessionID)
 	rb.Add(entry)
@@ -5963,12 +6493,30 @@ func (a *App) sessionStickyPlayID(sessionID string) string {
 	return a.sessionStickyField(sessionID, "play_id")
 }
 
-// sessionStickyRestartID is the restart_id counterpart of
-// sessionStickyPlayID. The player rotates restart_id on every restart
-// event (user-reload or auto-recovery); the proxy stores the latest
-// value and stamps it onto network log entries that don't carry one.
-func (a *App) sessionStickyRestartID(sessionID string) string {
-	return a.sessionStickyField(sessionID, "restart_id")
+// sessionStickyPlayerID is the player_id counterpart — sourced from
+// the same session snapshot so control_events and other server-side
+// emissions can stamp the canonical UUID without a parallel cache.
+// Issue #474 Milestone B.
+func (a *App) sessionStickyPlayerID(sessionID string) string {
+	return a.sessionStickyField(sessionID, "player_id")
+}
+
+// sessionStickyAttemptID is the attempt_id counterpart of
+// sessionStickyPlayID. The player increments attempt_id on every
+// restart event (user-restart or auto-recovery); the proxy stores
+// the latest value and stamps it onto network log entries that
+// don't carry one. Returns 0 when nothing is stamped yet — the
+// uint32 zero-value harmlessly leaves the entry unstamped on the
+// CH side.
+func (a *App) sessionStickyAttemptID(sessionID string) uint32 {
+	v := a.sessionStickyField(sessionID, "attempt_id")
+	if v == "" {
+		return 0
+	}
+	if n, err := strconv.ParseUint(v, 10, 32); err == nil {
+		return uint32(n)
+	}
+	return 0
 }
 
 func (a *App) sessionStickyField(sessionID, field string) string {
@@ -6315,7 +6863,13 @@ func (a *App) publishSnapshot(sessions []SessionData) {
 		session["ui_state_revision"] = uiRevision
 	}
 	a.sessionsSnap.Store(&sessions)
-	a.queueSessionsBroadcast(sessions)
+	// Issue #470: stopped broadcasting the full session list on every
+	// snapshot publish. /api/sessions/stream is now a per-event channel
+	// driven by emitSessionEvent; the debounced full-state path served
+	// only the forwarder and produced duplicates in session_events as
+	// stale `player_metrics_last_event` markers leaked across emissions.
+	// The in-memory snapshot (sessionsSnap) is still maintained because
+	// GET /api/sessions reads from it.
 }
 
 func (a *App) saveSessionList(sessions []SessionData) {
@@ -6325,11 +6879,29 @@ func (a *App) saveSessionList(sessions []SessionData) {
 }
 
 func (a *App) saveSessionByID(sessionID string, session SessionData) {
+	a.saveSessionByIDReturning(sessionID, session)
+}
+
+// saveSessionByIDReturning is saveSessionByID's worker; returns the
+// merged session post-merge so callers (the metrics POST handler) can
+// emit a per-event SSE frame containing exactly the row that was
+// just written. Returns nil + false when the merge was dropped as
+// stale (see isStalePlayerMetricsUpdate) so the caller knows not to
+// emit.
+//
+// Issue #470: the per-event emission path consumes this; the
+// pre-existing debounced full-state broadcast path is no longer used
+// for /api/sessions/stream — publishSnapshot still maintains the
+// in-memory snapshot for GET /api/sessions, but no longer queues a
+// hub broadcast.
+func (a *App) saveSessionByIDReturning(sessionID string, session SessionData) (SessionData, bool) {
 	a.sessionsMu.Lock()
 	defer a.sessionsMu.Unlock()
 	snap := a.getSessionList()
 	updated := make([]SessionData, len(snap))
 	copy(updated, snap)
+	var merged SessionData
+	var found bool
 	for i, s := range updated {
 		if getString(s, "session_id") == sessionID {
 			// Drop the merge if it's a player_metrics POST whose
@@ -6341,11 +6913,28 @@ func (a *App) saveSessionByID(sessionID string, session SessionData) {
 			// event_time jumps in session_snapshots and zigzag charts
 			// at step boundaries (issue #403 follow-up).
 			if isStalePlayerMetricsUpdate(s, session) {
-				return
+				return nil, false
 			}
-			merged := cloneSession(s)
+			merged = cloneSession(s)
 			for k, v := range session {
 				merged[k] = v
+			}
+			// Don't let a thinner user_agent overwrite a richer one
+			// already on the session (issue #471). AVPlayer's
+			// segment/manifest fetches arrive with a device-family
+			// token ("AppleCoreMedia/… (iPad; …)"); the app's
+			// URLSession metrics POSTs and HAR snapshot requests used
+			// to land with a thinner "CFNetwork/… Darwin/…" string
+			// that erased the iPad/iPhone/AppleTV label. iOS now
+			// stamps its own User-Agent on every request, but keep
+			// this guard for clients (web, Roku, future) that may
+			// not.
+			if existingUA := getString(s, "user_agent"); existingUA != "" {
+				if incomingUA, ok := session["user_agent"].(string); ok {
+					if hasDeviceFamilyToken(existingUA) && !hasDeviceFamilyToken(incomingUA) {
+						merged["user_agent"] = existingUA
+					}
+				}
 			}
 			existingRevision := getString(s, "control_revision")
 			incomingRevision := getString(session, "control_revision")
@@ -6369,10 +6958,36 @@ func (a *App) saveSessionByID(sessionID string, session SessionData) {
 				}
 			}
 			updated[i] = merged
+			found = true
 			break
 		}
 	}
 	a.publishSnapshot(updated)
+	if !found {
+		return nil, false
+	}
+	return cloneSession(merged), true
+}
+
+// hasDeviceFamilyToken reports whether the given User-Agent string
+// carries a token the harness device resolver and the dashboard's
+// device chips can identify. Used by saveSessionByID's user_agent
+// merge guard so a thinner per-request UA can't overwrite a richer
+// one already stored on the session. Issue #471.
+//
+// Match is case-insensitive on a small closed set. New device
+// families (Android, Tizen, etc.) get added here when they ship.
+func hasDeviceFamilyToken(ua string) bool {
+	if ua == "" {
+		return false
+	}
+	lower := strings.ToLower(ua)
+	for _, tok := range []string{"ipad", "iphone", "appletv", "apple tv", "roku", "android"} {
+		if strings.Contains(lower, tok) {
+			return true
+		}
+	}
+	return false
 }
 
 // isStalePlayerMetricsUpdate returns true when `incoming` carries a
@@ -7041,30 +7656,6 @@ func (a *App) buildSessionsEvent(normalized []SessionData, revision uint64, drop
 	return fmt.Sprintf("event: sessions\nid: %d\ndata: %s\n\n", revision, data)
 }
 
-func (a *App) queueSessionsBroadcast(sessions []SessionData) {
-	if a.sessionsHub == nil {
-		return
-	}
-	// Snapshot before stashing. The broadcast pipeline runs asynchronously
-	// (250ms timer → normalizeSessionsForResponse mutates the maps → SSE
-	// clients marshal them). Without this snapshot the pipeline shares maps
-	// with the calling handler, which continues to mutate sessionData
-	// between successive saveSessionList calls — that's the race that
-	// triggers `concurrent map iteration and map write` in json.Marshal.
-	snapshot := cloneSessionList(sessions)
-	a.sessionsBroadcastMu.Lock()
-	a.sessionsBroadcastLatest = snapshot
-	if a.sessionsBroadcastPending {
-		a.sessionsBroadcastMu.Unlock()
-		return
-	}
-	a.sessionsBroadcastPending = true
-	a.sessionsBroadcastMu.Unlock()
-	time.AfterFunc(250*time.Millisecond, func() {
-		a.flushSessionsBroadcast()
-	})
-}
-
 // cloneSessionList deep-copies the maps inside the slice so the result can
 // be iterated/mutated independently of the input. Primitives are shared by
 // value; nested map[string]interface{} and []interface{} are recursively
@@ -7106,16 +7697,28 @@ func cloneInterface(v interface{}) interface{} {
 	}
 }
 
-func (a *App) flushSessionsBroadcast() {
-	a.sessionsBroadcastMu.Lock()
-	sessions := a.sessionsBroadcastLatest
-	a.sessionsBroadcastLatest = nil
-	a.sessionsBroadcastPending = false
-	a.sessionsBroadcastMu.Unlock()
-	if sessions == nil {
+// emitSessionEvent broadcasts ONE session frame to /api/sessions/stream
+// clients immediately, no debounce. Issue #470: replaces the
+// debounced full-state broadcast as the way the forwarder learns
+// about playback events. One iOS metrics POST → one emit → one
+// session_snapshots row → N classified rows in session_events (one
+// per eventclass rule that matched).
+//
+// The session payload is the post-merge view of the row that was
+// just written (saveSessionByIDReturning's return value). It carries
+// the player's just-received `player_metrics_last_event` exactly
+// once: subsequent broadcasts (other than another metrics POST)
+// don't read this stream anymore, so the leak that drove the
+// duplicate-event bug in #469 is structurally impossible.
+//
+// Wire shape stays the existing `event: sessions\ndata: {...}` with
+// a single-element Sessions array so the forwarder consumes it with
+// no schema change.
+func (a *App) emitSessionEvent(session SessionData) {
+	if a.sessionsHub == nil || session == nil {
 		return
 	}
-	normalized := a.normalizeSessionsForResponse(sessions)
+	normalized := a.normalizeSessionsForResponse([]SessionData{session})
 	rev := atomic.AddUint64(&a.sessionsBroadcastSeq, 1)
 	preMarshaled := a.buildSessionsEvent(normalized, rev, 0, nil)
 	a.sessionsHub.Broadcast(normalized, rev, preMarshaled)
@@ -7541,6 +8144,12 @@ func (a *App) observeServerSegmentLoop(session SessionData, requestPath string) 
 		session["loop_count_server"] = count
 		session["loop_count_server_last_at"] = nowISO()
 		log.Printf("LOOP_SERVER session_id=%s loop_count_server=%d segment_seq=%d", sessionID, count, seq)
+		// Emit a control_event so the dashboard's per-play history
+		// surfaces server-side loops alongside fault toggles + pattern
+		// steps. Replaces the snapshot_failures TypeLoopServer marker.
+		// Issue #474 Milestone B.
+		info := fmt.Sprintf(`{"loop":%d,"segment_seq":%d}`, count, seq)
+		a.emitControlEventForSession(sessionID, "proxy", "loop_server", info)
 	}
 }
 

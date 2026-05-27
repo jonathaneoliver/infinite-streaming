@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Network trust policy for the InfiniteStream player.
+
+  - Production (release builds): system CA trust only. Cleartext blocked
+    except for the localhost / Android-emulator-host-loopback exceptions
+    below, which are needed so a fresh dev box running Docker Compose
+    against the emulator "just works".
+  - Debug builds: additionally trust the bundled mkcert dev CA so HTTPS
+    against a developer's local test-dev server (mkcert-signed cert)
+    validates without manual CA install on the device. <debug-overrides>
+    only takes effect when android:debuggable=true, i.e. debug-variant
+    builds — release APKs do NOT include this trust.
+
+  NOTE FOR FORKS: res/raw/mkcert_ca.pem is the upstream maintainer's
+  personal mkcert CA (see ~/Library/Application Support/mkcert/rootCA.pem
+  on macOS). Replace it with your own mkcert CA if you're hosting your
+  own dev server; otherwise debug builds will only validate certs signed
+  by the upstream maintainer's CA.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+
+    <debug-overrides>
+        <trust-anchors>
+            <certificates src="system" />
+            <certificates src="@raw/mkcert_ca" />
+        </trust-anchors>
+    </debug-overrides>
+
+    <!-- Cleartext to localhost / 10.0.2.2 (Android emulator host loopback) — -->
+    <!-- needed so the demo "out of the box" works against a Docker Compose / -->
+    <!-- k3s release on the same machine without TLS setup.                  -->
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="true">localhost</domain>
+        <domain includeSubdomains="true">10.0.2.2</domain>
+    </domain-config>
+</network-security-config>

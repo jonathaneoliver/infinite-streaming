@@ -340,8 +340,8 @@ A sidecar stack (ClickHouse + Grafana + a small Go forwarder) auto-archives sess
 
 | Component | Role |
 |---|---|
-| `clickhouse` | Two wide tables (`session_snapshots`, `network_requests`) with 30-day TTL. Hot fields are typed columns; everything else lands in a `session_json` blob. |
-| `go-forwarder` | Subscribes to go-proxy's `/api/sessions/stream` SSE, dedupes by snapshot fingerprint, batches inserts into ClickHouse. Also serves `/api/sessions`, `/api/snapshots`, `/api/session_events`, `/api/network_requests`, `/api/session_heatmap`, `/api/session_bundle` — read-only, parameterized SQL, behind `nginx /analytics/api/`. |
+| `clickhouse` | Three sibling tables — `session_events` (one row per player metrics POST), `network_requests` (one row per HTTP request), and `control_events` (one row per server-side or operator action) — all with 30-day TTL on `classification='other'`, 90 days on `'interesting'`, forever on starred plays. Each table carries a `labels Array(LowCardinality(String))` column with severity-tagged tags (`<severity>=<event>`) used as the single classification vocabulary across the picker UI, Focus Window filters, and forwarder/dashboard chips. Hot fields are typed columns; the long tail of player snapshot metadata lands in a `session_json` blob. |
+| `go-forwarder` | Subscribes to go-proxy's `/api/sessions/stream`, `/api/network/stream`, and `/api/control/stream` SSE endpoints, dedupes per-table by fingerprint, batches inserts into ClickHouse. Also serves `/api/sessions`, `/api/v2/snapshots`, `/api/v2/network_requests`, `/api/v2/control_events`, `/api/session_heatmap`, `/api/session_bundle` plus the unified `/api/v2/timeseries` SSE (multiplexes `streams=events,network,control` over one connection) — read-only, parameterized SQL, behind `nginx /analytics/api/`. |
 | `grafana` | Provisioned-as-code dashboards under [`analytics/grafana/provisioning/`](analytics/grafana/provisioning/). Reachable via `nginx /grafana/`. |
 
 **Operating it**: `make analytics-rebuild-forwarder` recreates the forwarder container in-place (live UI untouched); `make analytics-update` reloads Grafana provisioning; `make analytics-migrate SQL='ALTER TABLE …'` runs a schema change. The data is exposed read-only to the dashboard via parameterized ClickHouse queries — no string interpolation, no auth-token leakage.
@@ -360,7 +360,7 @@ The Sessions page (`dashboard/sessions.html`) is the **triage entry point** for 
 
 **Capture & triage hooks** — two cross-platform mechanisms drop "look-at-me" markers on the picker:
 
-- **911 button** — every player (iOS / iPadOS / tvOS / Android TV) has a "911" button right of Reload. One tap fires a `user_marked` event that lands as a row in `session_snapshots.last_event` and as a 🚨 chip on the picker row. Cross-layer "911" log lines on Apple device console, `adb logcat`, and docker logs make it grep-friendly across all three layers.
+- **911 button** — every player (iOS / iPadOS / tvOS / Android TV) has a "911" button right of Reload. One tap fires a `user_marked` event that lands as a row in `session_events.last_event` with a `critical=user_marked_911` label and surfaces as a 🚨 chip on the picker row. Cross-layer "911" log lines on Apple device console, `adb logcat`, and docker logs make it grep-friendly across all three layers.
 - **📥 bundle download** — each picker row and the Session Viewer banner both have a download button that streams the session as a portable `.zip` (`snapshots.ndjson` + `network.har` + `session.json` + `README.md`). Sensitive headers and credential-shaped query params are redacted server-side. See [`analytics/README.md`](analytics/README.md) for the bundle format.
 
 **Picker UI**:

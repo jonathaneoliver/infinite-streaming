@@ -19,6 +19,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -49,11 +50,26 @@ func init() {
 // UUID when possible, fall back to the stable v5 derivation otherwise.
 // Empty input → empty output (don't synthesise an id for missing data).
 //
-// Without this step the forwarder stored the raw short-form (e.g.
-// "427a6bf3") on ingest but emitted the v5-derived UUID
-// ("7046b635-…") on read; client-side archive queries built from
-// /api/v2/players (the v2 form) then matched no rows, so the
-// Focus Window came up empty for any non-UUID player.
+// CRITICAL — every forwarder ingest path that writes a row keyed by
+// player_id / play_id MUST run those ids through THIS function before
+// the INSERT. ClickHouse string comparisons are case-sensitive; iOS
+// emits uppercase UUIDs ("DC08D893-…"); the v3 dashboard canonicalises
+// to lowercase for every WHERE clause. Skipping this step lands rows in
+// CH that look fine in a `SELECT *`, but the dashboard filter silently
+// matches zero — there's no error surface, just empty panels.
+//
+// Issue history:
+//   - First seen pre-#474: snapshots stored as raw short-form
+//     "427a6bf3" while reads produced the v5-derived UUID — Focus
+//     Window came up empty for any non-UUID player.
+//   - Issue #474 control_events repeat: the new ingest path skipped
+//     this step, control_events.player_id was uppercase, PlayLog's
+//     Control bucket stayed empty until canonicalV2ID was wired into
+//     entryToCtrlRow.
+//
+// Future ingest paths: a quick sanity check is `SELECT DISTINCT
+// player_id FROM your_new_table` next to the same query against
+// session_events — they should agree on case.
 func canonicalV2ID(raw string) string {
 	if raw == "" {
 		return ""
@@ -106,7 +122,7 @@ func loadConfig() config {
 		sseURL:        getenv("FORWARDER_SSE_URL", "http://go-server:30081/api/sessions/stream"),
 		clickhouseURL: getenv("FORWARDER_CLICKHOUSE_URL", "http://clickhouse:8123"),
 		chDatabase:    getenv("FORWARDER_CLICKHOUSE_DB", "infinite_streaming"),
-		chTable:       getenv("FORWARDER_CLICKHOUSE_TABLE", "session_snapshots"),
+		chTable:       getenv("FORWARDER_CLICKHOUSE_TABLE", "session_events"),
 		chUser:        getenv("FORWARDER_CLICKHOUSE_USER", "default"),
 		chPassword:    getenv("FORWARDER_CLICKHOUSE_PASSWORD", ""),
 		// flushEvery is the upper bound on per-row visibility lag — the
@@ -149,7 +165,7 @@ type row struct {
 	Revision                 uint64  `json:"revision"`
 	SessionID                string  `json:"session_id"`
 	PlayID                   string  `json:"play_id"`
-	RestartID                string  `json:"restart_id"`
+	AttemptID                uint32  `json:"attempt_id"`
 	PlayerID                 string  `json:"player_id"`
 	GroupID                  string  `json:"group_id"`
 	UserAgent                string  `json:"user_agent"`
@@ -162,6 +178,17 @@ type row struct {
 	BufferDepthS             float32 `json:"buffer_depth_s"`
 	NetworkBitrateMbps       float32 `json:"network_bitrate_mbps"`
 	VideoBitrateMbps         float32 `json:"video_bitrate_mbps"`
+	// Player-supplied from/to bitrate on rate_shift_down /
+	// rate_shift_up POSTs (issue #470). Authoritative transition
+	// values — eventclass.snapshotRateClassifier prefers these to
+	// the (prev.VideoBitrate, cur.VideoBitrate) inference because
+	// iOS emits a parallel `video_bitrate_change` POST in the same
+	// handler with the same new bitrate, briefly aliasing the
+	// inferred prev. `json:"-"` keeps these out of the CH insert
+	// body (no column in session_snapshots) — they're transient,
+	// read only at classify time.
+	RateFromMbps             float32 `json:"-"`
+	RateToMbps               float32 `json:"-"`
 	MeasuredMbps             float32 `json:"measured_mbps"`
 	MbpsShaperRate           float32 `json:"mbps_shaper_rate"`
 	MbpsShaperAvg            float32 `json:"mbps_shaper_avg"`
@@ -194,6 +221,11 @@ type row struct {
 	AvgNetworkBitrateMbps    float32 `json:"avg_network_bitrate_mbps"`
 	BufferEndS               float32 `json:"buffer_end_s"`
 	LastStallTimeS           float32 `json:"last_stall_time_s"`
+	// LastBufferingTimeS is the iOS player's authoritative duration
+	// for the most-recent buffering pair, populated on buffering_end.
+	// Forwarder reads from here when present; the labels.go pair
+	// cache is the fallback for clients that don't send the field.
+	LastBufferingTimeS       float32 `json:"last_buffering_time_s"`
 	LiveOffsetS              float32 `json:"live_offset_s"`
 	PlayheadWallclockMs      int64   `json:"playhead_wallclock_ms"`
 	SeekableEndS             float32 `json:"seekable_end_s"`
@@ -282,6 +314,13 @@ type row struct {
 	LastRequest              string  `json:"last_request"`
 	SessionDuration          float32 `json:"session_duration"`
 	SessionJSON              string  `json:"session_json"`
+	// Labels are the row's <severity>=<event> tags computed at ingest
+	// time (issue #473). Source for the dashboard's severity-based
+	// row tint + chips and the auto-classification tier bump in
+	// classification.go's runClassifyLoop. Bucket-A markers (the ones
+	// that were pure re-labels of one source row) were retired in
+	// favor of these labels. CH type is Array(LowCardinality(String)).
+	Labels                   []string `json:"labels,omitempty"`
 }
 
 type ssePayload struct {
@@ -366,6 +405,8 @@ func main() {
 	ring := NewRing(int64(cfg.ringWindowSecs)*1000, 0)
 	ring.StartEvictor(ctx.Done(), time.Second)
 
+	// Snapshot ingest. Labels at write time replace the eventclass
+	// classifier registry retired in issue #474 Milestone C.
 	rows := make(chan row, 4096)
 	go batchInserter(ctx, cfg, ring, rows)
 	go serveHTTP(ctx, cfg, ring)
@@ -377,6 +418,15 @@ func main() {
 	netSeenSet := newNetSeen(50000)
 	go batchInsertNet(ctx, cfg, ring, netRows)
 	go runNetworkStream(ctx, cfg, netSeenSet, netRows)
+
+	// Control events (issue #474 Milestone B): subscribe to go-proxy's
+	// /api/control/stream and write into control_events. Mirrors the
+	// network log path exactly. Dedupe by event_fingerprint so SSE
+	// reconnects don't double-insert.
+	ctrlRows := make(chan ctrlRow, 4096)
+	ctrlSeenSet := newCtrlSeen(20000)
+	go batchInsertControl(ctx, cfg, ctrlRows)
+	go runControlStream(ctx, cfg, ctrlSeenSet, ctrlRows)
 
 	// Auto-classifier: when a snapshot carries an interesting signal
 	// (911 / frozen / hard error / fault counters), queue the
@@ -537,10 +587,11 @@ func toRow(ts string, revision uint64, sessionID string, s map[string]interface{
 		Revision:                 revision,
 		SessionID:                sessionID,
 		PlayID:                   playCanonical,
-		// restart_id is player-supplied and sticky on the session map
-		// at go-proxy:4517-4519 — pull it straight from the v1 payload
-		// (no canonicalisation; it's already a UUID string).
-		RestartID:                getStr(s, "restart_id"),
+		// attempt_id is player-supplied and sticky on the session map
+		// at go-proxy:4517-4519 — pull it from the v1 payload (string
+		// form) and parse to uint32 here. 0 (the uint32 zero value)
+		// means "unknown" — pre-rename rows or non-iOS clients.
+		AttemptID:                parseAttemptID(s),
 		PlayerID:                 playerCanonical,
 		GroupID:                  getStr(s, "group_id"),
 		UserAgent:                getStr(s, "user_agent"),
@@ -553,6 +604,8 @@ func toRow(ts string, revision uint64, sessionID string, s map[string]interface{
 		BufferDepthS:             getF32(s, "player_metrics_buffer_depth_s"),
 		NetworkBitrateMbps:       getF32(s, "player_metrics_network_bitrate_mbps"),
 		VideoBitrateMbps:         getF32(s, "player_metrics_video_bitrate_mbps"),
+		RateFromMbps:             getF32(s, "player_metrics_rate_from_mbps"),
+		RateToMbps:               getF32(s, "player_metrics_rate_to_mbps"),
 		MeasuredMbps:             getF32(s, "measured_mbps"),
 		MbpsShaperRate:           getF32(s, "mbps_shaper_rate"),
 		MbpsShaperAvg:            getF32(s, "mbps_shaper_avg"),
@@ -583,6 +636,7 @@ func toRow(ts string, revision uint64, sessionID string, s map[string]interface{
 		AvgNetworkBitrateMbps: getF32(s, "player_metrics_avg_network_bitrate_mbps"),
 		BufferEndS:            getF32(s, "player_metrics_buffer_end_s"),
 		LastStallTimeS:        getF32(s, "player_metrics_last_stall_time_s"),
+		LastBufferingTimeS:    getF32(s, "player_metrics_last_buffering_time_s"),
 		LiveOffsetS:           getF32(s, "player_metrics_live_offset_s"),
 		PlayheadWallclockMs:   int64(getU64(s, "player_metrics_playhead_wallclock_ms")),
 		SeekableEndS:          getF32(s, "player_metrics_seekable_end_s"),
@@ -702,6 +756,28 @@ func getStr(m map[string]interface{}, key string) string {
 	return ""
 }
 
+// parseAttemptID reads the player's attempt_id off the session map.
+// Stored as either a string (URL-query path in go-proxy) or directly
+// as a number when iOS sends it in the body. 0 means "unknown" —
+// covers pre-rename rows and non-iOS clients.
+func parseAttemptID(m map[string]interface{}) uint32 {
+	switch v := m["attempt_id"].(type) {
+	case string:
+		if n, err := strconv.ParseUint(v, 10, 32); err == nil {
+			return uint32(n)
+		}
+	case float64: // JSON numbers decode to float64
+		if v >= 0 && v <= float64(^uint32(0)) {
+			return uint32(v)
+		}
+	case int:
+		if v >= 0 {
+			return uint32(v)
+		}
+	}
+	return 0
+}
+
 // getJSON returns m[key] re-encoded as a JSON string. Use for fields
 // whose SSE shape is an array or object — we keep them queryable via
 // JSONExtract*() on the ClickHouse side without committing to a fixed
@@ -792,6 +868,11 @@ func batchInserter(ctx context.Context, cfg config, ring *Ring, in <-chan row) {
 				flush()
 				return
 			}
+			// Stamp severity-tagged labels at write time (issue #473)
+			// — replaces bucket-A markers. The dashboard and the
+			// auto-classifier both read this column instead of the
+			// scattered per-event-type rules we used to maintain.
+			r.Labels = computeEventLabels(&r)
 			// Pin the row in the ring as `pending` before queueing
 			// for INSERT. The pointer we get back lets us flip state
 			// in lockstep with the batch's lifecycle.
@@ -919,6 +1000,37 @@ func serveHTTP(ctx context.Context, cfg config, ring *Ring) {
 			  %s
 			  GROUP BY session_id, play_id
 			),
+			-- Per-(session,play) label histogram across all three source
+			-- tables. Issue #474: every interesting signal is now a label
+			-- on session_events / network_requests / control_events; this
+			-- CTE lets the sessions picker render "N labels" with a
+			-- per-label breakdown without three roundtrips.
+			labels_unioned AS (
+			  SELECT session_id, play_id, arrayJoin(labels) AS label
+			  FROM %s.%s
+			  %s
+			  UNION ALL
+			  SELECT session_id, play_id, arrayJoin(labels) AS label
+			  FROM %s.network_requests
+			  %s
+			  UNION ALL
+			  SELECT session_id, play_id, arrayJoin(labels) AS label
+			  FROM %s.control_events
+			  %s
+			),
+			labels_per_pair AS (
+			  SELECT session_id, play_id, label, count() AS n
+			  FROM labels_unioned
+			  GROUP BY session_id, play_id, label
+			),
+			labels_agg AS (
+			  SELECT session_id, play_id,
+			         sum(n) AS labels_total,
+			         arrayDistinct(groupArray(label)) AS labels_distinct,
+			         groupArray((label, n)) AS label_pairs
+			  FROM labels_per_pair
+			  GROUP BY session_id, play_id
+			),
 			agg AS (
 			  SELECT
 			    session_id,
@@ -990,14 +1102,25 @@ func serveHTTP(ctx context.Context, cfg config, ring *Ring) {
 			  agg.frames_displayed, agg.first_frame_s,
 			  agg.user_marked_count, agg.frozen_count, agg.segment_stall_count,
 			  agg.restart_count, agg.error_event_count,
-			  agg.classification
+			  agg.classification,
+			  ifNull(labels_agg.labels_total, 0) AS labels_total,
+			  ifNull(length(labels_agg.labels_distinct), 0) AS labels_distinct_count,
+			  ifNull(labels_agg.label_pairs, []) AS labels
 			FROM agg
 			LEFT JOIN net_counts
 			  ON agg.session_id = net_counts.session_id
 			 AND agg.raw_play_id = net_counts.play_id
+			LEFT JOIN labels_agg
+			  ON agg.session_id = labels_agg.session_id
+			 AND agg.raw_play_id = labels_agg.play_id
 			ORDER BY agg.started DESC
 			LIMIT 1000
-			FORMAT JSONEachRow`, cfg.chDatabase, cfg.chTable, where, cfg.chDatabase, where)
+			FORMAT JSONEachRow`,
+				cfg.chDatabase, cfg.chTable, where,
+				cfg.chDatabase, where,
+				cfg.chDatabase, cfg.chTable, where,
+				cfg.chDatabase, where,
+				cfg.chDatabase, where)
 		proxyClickHouseJSON(w, r, cfg, query, params)
 	})
 	mux.HandleFunc("/api/snapshot_count", func(w http.ResponseWriter, r *http.Request) {
@@ -1013,7 +1136,7 @@ func serveHTTP(ctx context.Context, cfg config, ring *Ring) {
 				clauses = append(clauses, "play_id = ''")
 			} else {
 				clauses = append(clauses, "play_id = {play:String}")
-				params["play"] = v
+				params["play"] = canonicalV2ID(v)
 			}
 		}
 		if v := r.URL.Query().Get("from"); v != "" {
@@ -1050,7 +1173,7 @@ func serveHTTP(ctx context.Context, cfg config, ring *Ring) {
 				clauses = append(clauses, "play_id = ''")
 			} else {
 				clauses = append(clauses, "play_id = {play:String}")
-				params["play"] = v
+				params["play"] = canonicalV2ID(v)
 			}
 		}
 		if v := r.URL.Query().Get("from"); v != "" {
@@ -1142,7 +1265,7 @@ func serveHTTP(ctx context.Context, cfg config, ring *Ring) {
 				clauses = append(clauses, "play_id = ''")
 			} else {
 				clauses = append(clauses, "play_id = {play:String}")
-				params["play"] = v
+				params["play"] = canonicalV2ID(v)
 			}
 		}
 		buckets := 120
@@ -1200,55 +1323,10 @@ func serveHTTP(ctx context.Context, cfg config, ring *Ring) {
 		proxyClickHouseJSON(w, r, cfg, query, params)
 	})
 
-	// Notable session events for the jump-list. Returns rows like
-	//   { ts, type: 'stall'|'error'|'fault_on'|'downshift', info }
-	// sorted by ts so the UI can render them as a chronological list.
-	//
-	// Accepts both legacy (?session=) and v2 (?session_id=) parameter
-	// names so the same handler serves /api/session_events AND
-	// /api/v2/session_events (registered below as an alias). v2 path
-	// returns NDJSON identically — the events JSON shape is already
-	// the same; only the URL changes for callers that want to use the
-	// v2 endpoint set uniformly.
-	sessionEventsHandler := func(w http.ResponseWriter, r *http.Request) {
-		session := r.URL.Query().Get("session")
-		if session == "" {
-			session = r.URL.Query().Get("session_id")
-		}
-		// player_id is an alternative way to identify the rows when the
-		// caller doesn't have (or want to plumb) the session_id — the
-		// live testing-session / testing pages drive this path so they
-		// can stop client-side session-id lookups. session_id wins if
-		// both are supplied so explicit deep links keep working.
-		playerID := r.URL.Query().Get("player_id")
-		if session == "" && playerID == "" {
-			http.Error(w, "missing session_id or player_id", http.StatusBadRequest)
-			return
-		}
-
-		limit := 5000
-		if v := r.URL.Query().Get("limit"); v != "" {
-			var n int
-			if _, err := fmt.Sscanf(v, "%d", &n); err == nil && n > 0 && n <= 50000 {
-				limit = n
-			}
-		}
-		ep := eventsQueryParams{
-			SessionID: session,
-			PlayerID:  playerID,
-			PlayID:    r.URL.Query().Get("play_id"),
-			Limit:     limit,
-		}
-		query, params, err := buildEventsQuery(cfg, ep)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		proxyClickHouseJSON(w, r, cfg, query, params)
-	}
-
-	mux.HandleFunc("/api/session_events", sessionEventsHandler)
-	mux.HandleFunc("/api/v2/session_events", sessionEventsHandler)
+	// session_markers retired in issue #474 Milestone C. Notable
+	// events now live as `labels[]` on session_events / network_requests
+	// rows and as discrete rows on control_events; consumers iterate
+	// those three tables instead of the derived markers table.
 
 	// Per-request HAR-style log for the session-viewer's network log
 	// fold. Returns rows in the same shape the live go-proxy endpoint
@@ -1267,7 +1345,7 @@ func serveHTTP(ctx context.Context, cfg config, ring *Ring) {
 				clauses = append(clauses, "play_id = ''")
 			} else {
 				clauses = append(clauses, "play_id = {play:String}")
-				params["play"] = v
+				params["play"] = canonicalV2ID(v)
 			}
 		}
 		if v := r.URL.Query().Get("from"); v != "" {

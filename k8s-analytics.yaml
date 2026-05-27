@@ -469,7 +469,7 @@ spec:
         - name: FORWARDER_CLICKHOUSE_DB
           value: infinite_streaming
         - name: FORWARDER_CLICKHOUSE_TABLE
-          value: session_snapshots
+          value: session_events
 ---
 apiVersion: v1
 kind: Service

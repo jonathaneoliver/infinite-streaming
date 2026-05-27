@@ -30,7 +30,7 @@ import type { PlayerRecord } from '@/repo/v2-repo';
 
 const props = defineProps<{
   playerId: string;
-  samplesStream: Stream<Record<string, unknown>>;
+  eventsStream: Stream<Record<string, unknown>>;
 }>();
 const coord = useChartCoordination(toRef(props, 'playerId'));
 const yMax = computed(() => coord.state.bandwidthYMax);
@@ -127,7 +127,7 @@ const series: SeriesSpec[] = [
     title="Bandwidth"
     unit="Mbps"
     :series="series"
-    :samples-stream="samplesStream"
+    :events-stream="eventsStream"
     :y-min="0"
     :y-max="yMax"
   />

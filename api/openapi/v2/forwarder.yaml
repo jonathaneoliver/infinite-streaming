@@ -40,8 +40,8 @@ tags:
       multiplexes samples + network + events with ClickHouse
       backfill + live-ring overlay. One connection drives every
       chart + lane + panel in a session card; replaces the older
-      pattern of polling /api/v2/snapshots + /session_events +
-      /network_requests separately.
+      pattern of polling /api/v2/snapshots + /network_requests +
+      /control_events separately.
   - name: aggregate
     description: |
       Group-by + metric aggregation pushdowns. Avoids pulling raw rows
@@ -93,10 +93,12 @@ paths:
       parameters:
         - $ref: '#/components/parameters/PlayerIdFilter'
         - $ref: '#/components/parameters/PlayIdFilter'
-        - $ref: '#/components/parameters/RestartIdFilter'
+        - $ref: '#/components/parameters/AttemptIdFilter'
         - $ref: '#/components/parameters/From'
         - $ref: '#/components/parameters/To'
         - $ref: '#/components/parameters/LabelFilter'
+        - $ref: '#/components/parameters/LabelHasFilter'
+        - $ref: '#/components/parameters/LabelNotFilter'
         - $ref: '#/components/parameters/Classification'
         - $ref: '#/components/parameters/Limit'
         - $ref: '#/components/parameters/Cursor'
@@ -142,6 +144,8 @@ paths:
         - $ref: '#/components/parameters/From'
         - $ref: '#/components/parameters/To'
         - $ref: '#/components/parameters/LabelFilter'
+        - $ref: '#/components/parameters/LabelHasFilter'
+        - $ref: '#/components/parameters/LabelNotFilter'
         - $ref: '#/components/parameters/Classification'
         - in: query
           name: group_by
@@ -184,17 +188,23 @@ paths:
 
   # ---- Raw archive rows ---------------------------------------------------
 
-  /api/v2/snapshots:
+  /api/v2/events:
     get:
       tags: [archive]
-      summary: Session snapshots (raw)
+      summary: Player events (raw rows from session_events)
+      description: |
+        One row per player metrics POST (the source-of-truth player
+        event stream). Replaces the pre-#472 `/api/v2/snapshots`
+        name — that path is no longer served as of v2.0.0.
       parameters:
         - $ref: '#/components/parameters/PlayerIdFilter'
         - $ref: '#/components/parameters/PlayIdFilter'
-        - $ref: '#/components/parameters/RestartIdFilter'
+        - $ref: '#/components/parameters/AttemptIdFilter'
         - $ref: '#/components/parameters/From'
         - $ref: '#/components/parameters/To'
         - $ref: '#/components/parameters/LabelFilter'
+        - $ref: '#/components/parameters/LabelHasFilter'
+        - $ref: '#/components/parameters/LabelNotFilter'
         - $ref: '#/components/parameters/StrideMs'
         - $ref: '#/components/parameters/Order'
         - $ref: '#/components/parameters/Limit'
@@ -204,7 +214,7 @@ paths:
           description: Snapshot rows
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/SnapshotPage' }
+              schema: { $ref: '#/components/schemas/EventPage' }
 
   /api/v2/network_requests:
     get:
@@ -213,10 +223,12 @@ paths:
       parameters:
         - $ref: '#/components/parameters/PlayerIdFilter'
         - $ref: '#/components/parameters/PlayIdFilter'
-        - $ref: '#/components/parameters/RestartIdFilter'
+        - $ref: '#/components/parameters/AttemptIdFilter'
         - $ref: '#/components/parameters/From'
         - $ref: '#/components/parameters/To'
         - $ref: '#/components/parameters/LabelFilter'
+        - $ref: '#/components/parameters/LabelHasFilter'
+        - $ref: '#/components/parameters/LabelNotFilter'
         - in: query
           name: status_min
           schema: { type: integer }
@@ -243,45 +255,49 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/NetworkRequestsPage' }
 
-  /api/v2/session_events:
+  /api/v2/control_events:
     get:
       tags: [archive]
-      summary: Chronological events (raw)
+      summary: Proxy / harness action log
       description: |
-        Player + harness events: ABR shifts, stalls, fault firings, errors.
-        v1's "session_events" name retained for source-table parity even
-        though the user-facing concept is plays.
+        One row per server-side or operator-driven action — fault toggles,
+        pattern step advances, shaper edits, session lifecycle, etc. Issue
+        #474 Milestone B replacement for the retired `session_events`
+        (markers) endpoint; severity-tagged labels now ride on
+        `session_events` / `network_requests` rows directly, and discrete
+        actions live here.
       parameters:
         - $ref: '#/components/parameters/PlayerIdFilter'
         - $ref: '#/components/parameters/PlayIdFilter'
-        - $ref: '#/components/parameters/RestartIdFilter'
         - $ref: '#/components/parameters/From'
         - $ref: '#/components/parameters/To'
-        - $ref: '#/components/parameters/LabelFilter'
         - in: query
-          name: type
+          name: source
+          schema:
+            type: string
+            enum: [harness, proxy, auto]
+          description: |
+            Filter to one source. `harness` = operator-initiated;
+            `proxy` = runtime auto-transition; `auto` = automated runner
+            (placeholder).
+        - in: query
+          name: event
           explode: true
           schema:
             type: array
             items: { type: string }
           description: |
-            Filter to specific event types. Multiple values OR'd. Examples:
-            `type=stall&type=downshift`.
+            Filter to specific event names. Multiple values OR'd. Examples:
+            `event=fault_on&event=pattern_step`.
+        - $ref: '#/components/parameters/LabelHasFilter'
+        - $ref: '#/components/parameters/LabelNotFilter'
         - $ref: '#/components/parameters/Limit'
-        - $ref: '#/components/parameters/Cursor'
       responses:
         '200':
-          description: Event rows
+          description: Control event rows (NDJSON)
           content:
-            application/json:
-              schema:
-                type: object
-                required: [items]
-                properties:
-                  items:
-                    type: array
-                    items: { type: object, additionalProperties: true }
-                  next_cursor: { type: string, nullable: true }
+            application/x-ndjson:
+              schema: { $ref: '#/components/schemas/ControlEventRow' }
 
   /api/v2/session_heatmap:
     get:
@@ -292,7 +308,7 @@ paths:
       parameters:
         - $ref: '#/components/parameters/PlayerIdFilter'
         - $ref: '#/components/parameters/PlayIdFilter'
-        - $ref: '#/components/parameters/RestartIdFilter'
+        - $ref: '#/components/parameters/AttemptIdFilter'
         - in: query
           name: buckets
           schema: { type: integer, minimum: 10, maximum: 1000, default: 240 }
@@ -334,7 +350,7 @@ paths:
   /api/v2/timeseries:
     get:
       tags: [timeseries]
-      summary: Subscribe to a player's samples / network / events stream
+      summary: Subscribe to a player's events / network / control stream
       operationId: getTimeseries
       description: |
         Opens a Server-Sent Events stream. The response is a sequence
@@ -479,14 +495,6 @@ paths:
           content:
             application/problem+json:
               schema: { $ref: '#/components/schemas/ProblemDetails' }
-        '501':
-          description: |
-            `streams=events` requested but the events taxonomy SQL
-            hasn't been lifted into the timeseries backfill path yet.
-            Use the `/api/v2/session_events` endpoint as a workaround.
-          content:
-            application/problem+json:
-              schema: { $ref: '#/components/schemas/ProblemDetails' }
         '500':
           description: |
             Resolver / internal error before the SSE handshake. CH
@@ -539,16 +547,17 @@ components:
       name: play_id
       required: true
       schema: { type: string, format: uuid }
-    RestartIdFilter:
+    AttemptIdFilter:
       in: query
-      name: restart_id
-      schema: { type: string, format: uuid }
+      name: attempt_id
+      schema: { type: integer, minimum: 1 }
       description: |
         Filter to one recovery attempt within a play. Player-supplied
-        UUID; rotates on every `restart` event (user-reload or
-        auto-recovery). Stable outside restart boundaries. Use to
-        narrow a query to "what happened in this specific restart"
-        rather than "the whole play".
+        monotonically-incrementing counter; 1 on initial play, +1 per
+        `restart` event (user-restart OR auto-recovery). Stable
+        outside restart boundaries. Use to narrow a query to "what
+        happened in this specific attempt" rather than "the whole
+        play".
     From:
       in: query
       name: from
@@ -569,6 +578,38 @@ components:
       description: |
         `label.<key>=<value>` query params. Multiple AND together.
         Example: `?label.test=foo&label.pytest_run=2026-05-08T05:00:00Z`.
+
+        Note — distinct from `label_has` / `label_not` (below). This
+        is the operator-defined `Map(String, String)` set via the
+        harness label PATCH; `label_has` / `label_not` filter against
+        the row-level `Array(String)` severity-tagged labels added in
+        #473 / #474.
+    LabelHasFilter:
+      in: query
+      name: label_has
+      explode: true
+      schema:
+        type: array
+        items: { type: string }
+      description: |
+        Row-level label inclusion filter. Repeatable; every value
+        must be present in the row's `labels[]` (AND-within-includes).
+        Format `<severity>=<event>` (with `*` prefix for synthesized
+        labels). Example:
+        `?label_has=warning%3Dhttp_4xx&label_has=info%3D%2Apattern_step`.
+    LabelNotFilter:
+      in: query
+      name: label_not
+      explode: true
+      schema:
+        type: array
+        items: { type: string }
+      description: |
+        Row-level label exclusion filter. Repeatable; none of the
+        values may be present in the row's `labels[]`
+        (AND-within-excludes). Combine with `label_has` for queries
+        like *"has http_4xx AND has-not fault_rule_enabled"*. Same
+        format as `label_has`.
     Classification:
       in: query
       name: classification
@@ -668,7 +709,7 @@ components:
           progress).
       schema:
         type: string
-        pattern: '^(samples|network|events)(,(samples|network|events))*$'
+        pattern: '^(events|network|control)(,(events|network|control))*$'
         example: samples,network
 
     TimeseriesBundles:
@@ -843,8 +884,8 @@ components:
       properties:
         # ---- identifiers ----
         play_id:           { type: string, format: uuid, description: "Player-supplied UUID. Rotates only on content-selection / fresh app or page load. Stable across in-app restart events." }
-        restart_id:        { type: string, format: uuid, nullable: true, description: "Last restart_id observed for this play. Rotates on every restart event. May be null if the play hasn't yet experienced a restart." }
-        restart_episodes:  { type: integer, description: "count(distinct restart_id) for this play. 1 means no restarts beyond the initial; N>1 means N-1 recovery attempts." }
+        attempt_id:        { type: integer, minimum: 1, nullable: true, description: "Highest attempt_id observed for this play (== total attempts). 1 means initial play with no restarts; N means N-1 recovery attempts after the initial." }
+        attempt_count:     { type: integer, description: "Alias for max(attempt_id) — kept as a stable name for callers that want the count semantic over the id semantic." }
         player_id:         { type: string, format: uuid }
         session_id:        { type: string, description: "Per-player numeric session counter ('1', '2', …). Empty when archive predates session_id stamping." }
         group_id:          { type: string, description: "Optional session-group id from harness label." }
@@ -888,6 +929,42 @@ components:
         segment_stall_count:  { type: integer, description: "Stalls waiting on a segment fetch." }
         restart_count:        { type: integer, description: "Mid-play player-recovery restarts." }
         error_event_count:    { type: integer, description: "Explicit player_error events." }
+        # ---- row-level label histogram (issue #474 follow-up) ----
+        labels_total:
+          type: integer
+          description: |
+            Total labelled-row occurrences across session_events +
+            network_requests + control_events for this play_id. Same
+            number that drives the dashboard Sessions page's Labels
+            column count.
+        labels_distinct_count:
+          type: integer
+          description: |
+            Distinct `<severity>=<event>` label strings seen for this
+            play. `labels_total / labels_distinct_count` is the avg
+            occurrences per label kind.
+        label_histogram:
+          type: array
+          description: |
+            Per-label `(label, count)` pairs for this play_id,
+            unioned across all three source tables. Sorted by
+            occurrence descending. Use to render chip clouds on the
+            picker UI or to compose filters like "has http_4xx AND
+            has-not fault_rule_enabled" against batch reports.
+
+            Note: distinct from the operator-defined Map(String,String)
+            `labels` field above — those are harness-set name=value
+            tags; `label_histogram` is the ingest-time severity-tagged
+            classification labels.
+          items:
+            type: array
+            description: "[label_string, count] tuple."
+            minItems: 2
+            maxItems: 2
+            items:
+              oneOf:
+                - { type: string,  description: "label, e.g. 'warning=*manifest_failure'" }
+                - { type: integer, description: "occurrence count for this play" }
         # ---- tiered retention class ----
         classification:
           type: string
@@ -944,13 +1021,13 @@ components:
             _links:
               type: object
               properties:
-                snapshots:        { type: string, format: uri }
                 events:           { type: string, format: uri }
                 network_requests: { type: string, format: uri }
+                control_events:   { type: string, format: uri }
                 heatmap:          { type: string, format: uri }
                 bundle:           { type: string, format: uri }
 
-    SnapshotRow:
+    EventRow:
       description: |
         One archived player snapshot. The row IS a `proxy.yaml#PlayerRecord`
         captured at `ts`, plus the row-level metadata (`ts`, `revision`)
@@ -982,13 +1059,13 @@ components:
                 play_ids round-trip unchanged for legacy archive rows;
                 v2-minted plays are always UUIDs.
 
-    SnapshotPage:
+    EventPage:
       type: object
       required: [items]
       properties:
         items:
           type: array
-          items: { $ref: '#/components/schemas/SnapshotRow' }
+          items: { $ref: '#/components/schemas/EventRow' }
         next_cursor: { type: string, nullable: true }
 
     NetworkRequestRow:
@@ -1019,6 +1096,69 @@ components:
           type: array
           items: { $ref: '#/components/schemas/NetworkRequestRow' }
         next_cursor: { type: string, nullable: true }
+
+    ControlEventRow:
+      description: |
+        One archived `control_events` row. Server-side or operator-driven
+        action — fault toggles, pattern step advances, harness edits,
+        session lifecycle, etc. Issue #474 Milestone B.
+      type: object
+      required: [ts, player_id, source, event]
+      properties:
+        ts:
+          type: string
+          format: date-time
+          description: When the action occurred.
+        player_id:
+          type: string
+          format: uuid
+          description: Owning player.
+        play_id:
+          type: string
+          description: Owning play (empty when not yet stamped).
+        attempt_id:
+          type: integer
+          format: int64
+          description: |
+            Sticky per-attempt counter from the proxy session map. 0 when
+            unknown.
+        session_id:
+          type: string
+          description: Owning proxy session.
+        source:
+          type: string
+          enum: [harness, proxy, auto]
+          description: |
+            Who caused it — `harness` (operator), `proxy` (runtime
+            auto-transition), `auto` (test runner placeholder).
+        event:
+          type: string
+          description: |
+            Closed-set action name. See issue #474 for the full vocab —
+            e.g. `fault_on`, `pattern_step`, `loop_server`,
+            `fault_rule_enabled`, `session_start`, `session_end`.
+        info:
+          type: string
+          description: |
+            Optional JSON object as a string with extras
+            (step / rate / duration for pattern_step, fault type for
+            fault_on, etc.). Empty when the event needs no detail.
+        labels:
+          type: array
+          items: { type: string }
+          description: |
+            Severity-tagged `<severity>=<event>` strings (synthesized
+            entries carry a `*` prefix on the event portion). Same vocab
+            as session_events / network_requests.labels.
+        event_fingerprint:
+          type: string
+          description: |
+            FNV-64a hash over (player, play, ts_ms, source, event, info).
+            Stable dedupe key for SSE reconnects.
+        classification:
+          type: string
+          enum: [other, interesting, favourite]
+          description: Retention tier — same lifecycle as the parent session.
 
     AggregateResult:
       description: |
@@ -1076,7 +1216,7 @@ components:
         - $ref: '#/components/schemas/MetaEvent'
         - $ref: '#/components/schemas/SampleRow'
         - $ref: '#/components/schemas/NetworkRow'
-        - $ref: '#/components/schemas/EventRow'
+        - $ref: '#/components/schemas/ControlEventRow'
         - $ref: '#/components/schemas/HeartbeatEvent'
         - $ref: '#/components/schemas/CompleteEvent'
         - $ref: '#/components/schemas/StreamErrorEvent'
@@ -1094,9 +1234,9 @@ components:
       properties:
         streams:
           type: array
-          description: Resolved stream list (in order — samples, network, events).
-          items: { type: string, enum: [samples, network, events] }
-          example: [samples, network]
+          description: Resolved stream list (in order — events, network, control).
+          items: { type: string, enum: [events, network, control] }
+          example: [events, network]
         columns:
           type: object
           description: |
@@ -1234,35 +1374,20 @@ components:
         fault_action: transfer_abandoned
         fault_category: client_disconnect
 
-    EventRow:
+    # (Pre-#474 the events SSE stream had its own derived row shape
+    # with kind/priority/info fields. After #474 the unified
+    # /api/v2/timeseries stream sends EventRow / NetworkRow /
+    # ControlEventRow directly off the three live tables; no
+    # separate "events taxonomy" schema remains.)
+    LegacyEventRow:
       description: |
-        One row from the derived `events` taxonomy. **Not yet
-        implemented** — requesting `streams=events` returns 501. Spec
-        retained so the wire shape is stable across the lift.
-
-        SSE wire shape: `event: event\nid: <ts>:<type>\ndata: <this object>\n\n`.
-
-        `kind` discriminates cause vs effect; `priority` is 1
-        (critical) through 4 (low) on the dashboard's classification
-        ladder.
+        Reserved name — the pre-#474 derived-events row used to live
+        here; retained as a placeholder so wire-shape diffs against
+        archived specs don't surprise anyone.
       type: object
-      required: [ts, type, kind, priority, play_id, player_id, session_id]
       additionalProperties: true
       properties:
         ts: { type: string, format: date-time }
-        type:
-          description: Event type name (e.g. stall, downshift, manifest_failure, all_failure, fault_on).
-          type: string
-        info:
-          description: Type-specific JSON payload.
-          type: object
-          additionalProperties: true
-        kind:
-          type: string
-          enum: [cause, effect]
-        priority:
-          type: integer
-          enum: [1, 2, 3, 4]
         play_id: { type: string }
         player_id: { type: string }
         session_id: { type: string }
@@ -1351,7 +1476,7 @@ components:
             properties:
               stream:
                 type: string
-                enum: [samples, network, events]
+                enum: [events, network, control]
               mandatory_columns:
                 type: array
                 items: { type: string }
@@ -1374,7 +1499,7 @@ components:
           example: charts_minimal
         stream:
           type: string
-          enum: [samples, network, events]
+          enum: [events, network, control]
         columns:
           type: array
           description: Wire-order list of columns the bundle projects.

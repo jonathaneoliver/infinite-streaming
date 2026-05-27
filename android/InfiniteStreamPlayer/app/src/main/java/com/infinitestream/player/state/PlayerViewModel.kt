@@ -209,6 +209,7 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
                         host = o.optString("host", ""),
                         port = o.optString("port", ""),
                         apiPort = o.optString("apiPort", ""),
+                        scheme = o.optString("scheme", "https"),
                     )
                 }
             } catch (_: Exception) { /* corrupt prefs — start fresh */ }
@@ -223,6 +224,7 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
             arr.put(JSONObject().apply {
                 put("name", s.name); put("host", s.host)
                 put("port", s.port); put("apiPort", s.apiPort)
+                put("scheme", s.scheme)
             })
         }
         prefs().edit().putString(SERVERS_KEY, arr.toString()).apply()
@@ -286,7 +288,8 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
     fun addServerFromUrl(url: String): Int {
         val u = android.net.Uri.parse(url)
         val host = u.host ?: return -1
-        val port = if (u.port >= 0) u.port else if (u.scheme.equals("https", true)) 443 else 80
+        val scheme = u.scheme?.lowercase() ?: "https"
+        val port = if (u.port >= 0) u.port else if (scheme == "https") 443 else 80
         val apiPort = port.toString()
         // Convention: playback port = api port + 81 (matches iOS ServerProfile.fromDashboardURL).
         val playPort = (port + 81).toString()
@@ -297,7 +300,7 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
                 selectServer(i); return i
             }
         }
-        val updated = list + ServerEnvironment(name, host, playPort, apiPort)
+        val updated = list + ServerEnvironment(name, host, playPort, apiPort, scheme)
         _state.update { it.copy(servers = updated, activeServerIndex = updated.size - 1) }
         persistServers()
         prefs().edit().putInt(SERVERS_ACTIVE_KEY, updated.size - 1).apply()
@@ -658,7 +661,7 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         // below once the player has been handed off.
         playIdMintedAt = System.currentTimeMillis()
         playIdLastActivityAt = 0L
-        val url = "http://${server.host}:$port/go-live/${s.selectedContent}/$manifest?player_id=$playerId&play_id=$currentPlayId"
+        val url = "${server.scheme}://${server.host}:$port/go-live/${s.selectedContent}/$manifest?player_id=$playerId&play_id=$currentPlayId"
         _state.update { it.copy(currentUrl = url, statusText = url) }
         loadStream(url)
         schedulePlayIdRotation()

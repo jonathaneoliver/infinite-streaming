@@ -1,11 +1,14 @@
 ---
 name: forensics
 description: Multi-event causal analysis — "why does X keep happening", "compare A vs B", "find the pattern across these failures", "is this related to a change". Gathers events/network/samples + relevant past findings + applicable standards, then dispatches to the `playback-forensics-expert` subagent for hypothesis generation. Invoke when one event isn't enough (use `investigate` for single events) and the question is "why" not "what". Returns a tagged hypothesis plus a suggested test to confirm or refute.
+last_reviewed: 2026-05-19
 ---
 
 # Forensics — dispatch a "why" question to the playback expert
 
 `investigate` answers "what happened at time T". Forensics answers "why does this pattern keep recurring" or "why is A different from B". Different question, different cost: forensics calls out to a Sonnet subagent (`playback-forensics-expert`) primed with HLS/AVPlayer/ABR knowledge. The main session stays cheap; the subagent does the reasoning.
+
+**Conventions:** this skill follows `.claude/skills/CONVENTIONS.md`. Most load-bearing for forensics: pre-fetch all evidence before dispatching (the subagent can't run shell); tag the returned hypothesis verbatim with `confirmed` / `refuted` / `needs-test`; grep `.claude/memory/` and `.claude/findings/` *before* dispatching so we don't burn subagent tokens on already-answered questions.
 
 ## When to use this over `investigate`
 
@@ -30,7 +33,7 @@ Rule of thumb: if the answer requires comparing two or more event clusters, or c
 If the user named a player but not specific plays, **enumerate candidate plays first** using the v2 plays endpoint — it makes the comparison set concrete and surfaces which plays carry which trouble signals before you decide what to gather:
 
 ```sh
-harness --insecure --json archive plays \
+harness --insecure --json query plays \
   --player-id "$PID" \
   --from "$FROM" --to "$TO" --limit 50 2>/dev/null \
   | jq '.items[] | {play_id, started_at, classification, last_player_error,

@@ -25,7 +25,7 @@
  * stream regardless of arrival rate. Keeps the JS thread responsive
  * even when the forwarder bursts a backfill of thousands of rows.
  */
-import { ref, shallowRef, triggerRef, watch, onScopeDispose, type Ref } from 'vue';
+import { ref, shallowRef, triggerRef, watch, onScopeDispose, isRef, type Ref } from 'vue';
 import {
   tsOf,
   binarySearchLE,
@@ -33,7 +33,10 @@ import {
   inRangeAsc,
   evictOutsideViewport,
 } from './sessionTimeSeriesUtils';
-const V3_EVENT_TYPES = ['meta', 'sample', 'network', 'event', 'heartbeat', 'complete', 'stream_error'];
+// SSE event names this stream produces. Issue #474 Milestone C
+// dropped 'marker' (the session_markers stream retired) and added
+// 'control' (control_events — proxy/harness action log).
+const V3_EVENT_TYPES = ['meta', 'event', 'network', 'control', 'heartbeat', 'complete', 'stream_error'];
 
 /**
  * Stream<T> — the per-stream surface every renderer consumes. Read
@@ -56,7 +59,7 @@ export interface Stream<T> {
 
 export interface UseSessionTimeSeriesOpts {
   /** Comma list of streams to subscribe to. Default: all three. */
-  streams?: ('samples' | 'network' | 'events')[];
+  streams?: ('events' | 'network' | 'control')[];
   /** Bundle names. Default: charts_minimal,lanes_v1,network for samples+network. */
   bundles?: string[];
   /** Ad-hoc field list — applied to every enabled stream as a
@@ -65,9 +68,15 @@ export interface UseSessionTimeSeriesOpts {
   fields?: string[];
   /** Initial backfill window. Defaults to last 10 minutes when
    *  unset; the brush rail will then drive subsequent fetches via
-   *  range queries. */
-  fromMs?: number;
-  toMs?: number;
+   *  range queries.
+   *
+   *  Accepts either a plain number (set-once at subscription time)
+   *  or a Ref — when a Ref, changes trigger an SSE re-subscribe with
+   *  the new window. SessionViewer uses the Ref form so its
+   *  "show context" toggle can widen the time range live without
+   *  rebuilding the composable. */
+  fromMs?: number | Ref<number | null | undefined>;
+  toMs?: number | Ref<number | null | undefined>;
   /** Per-(samples) downsample bucket. Live deltas always full-res. */
   strideMs?: number;
   /** Per-stream max delta rate hint. Server coalesces above this. */
@@ -75,9 +84,9 @@ export interface UseSessionTimeSeriesOpts {
 }
 
 export interface UseSessionTimeSeriesReturn {
-  samples: Stream<Record<string, unknown>>;
-  network: Stream<Record<string, unknown>>;
   events: Stream<Record<string, unknown>>;
+  network: Stream<Record<string, unknown>>;
+  control: Stream<Record<string, unknown>>;
   /** True if the server is actively tailing this stream. False once
    *  it sends `event:complete` (archive replay or play ended). */
   live: Ref<boolean>;
@@ -124,25 +133,36 @@ export function useSessionTimeSeries(
   opts: UseSessionTimeSeriesOpts = {},
 ): UseSessionTimeSeriesReturn {
 
-  const samplesArr = shallowRef<Record<string, unknown>[]>([]);
-  const networkArr = shallowRef<Record<string, unknown>[]>([]);
+  // Normalise fromMs / toMs to refs so the watcher below picks up
+  // changes uniformly whether the caller passed a plain number or
+  // a Ref. Plain numbers become non-reactive refs that just sit at
+  // their initial value.
+  const fromMsRef: Ref<number | null | undefined> = isRef(opts.fromMs)
+    ? (opts.fromMs as Ref<number | null | undefined>)
+    : ref(opts.fromMs);
+  const toMsRef: Ref<number | null | undefined> = isRef(opts.toMs)
+    ? (opts.toMs as Ref<number | null | undefined>)
+    : ref(opts.toMs);
+
   const eventsArr = shallowRef<Record<string, unknown>[]>([]);
+  const networkArr = shallowRef<Record<string, unknown>[]>([]);
+  const controlArr = shallowRef<Record<string, unknown>[]>([]);
 
-  const samplesVersion = ref(0);
-  const networkVersion = ref(0);
   const eventsVersion = ref(0);
+  const networkVersion = ref(0);
+  const controlVersion = ref(0);
 
-  const samplesBounds = ref<{ min: number; max: number } | null>(null);
-  const networkBounds = ref<{ min: number; max: number } | null>(null);
   const eventsBounds = ref<{ min: number; max: number } | null>(null);
+  const networkBounds = ref<{ min: number; max: number } | null>(null);
+  const controlBounds = ref<{ min: number; max: number } | null>(null);
 
-  const samplesLoading = ref(false);
-  const networkLoading = ref(false);
   const eventsLoading = ref(false);
+  const networkLoading = ref(false);
+  const controlLoading = ref(false);
 
-  const samplesError = ref<string | null>(null);
-  const networkError = ref<string | null>(null);
   const eventsError = ref<string | null>(null);
+  const networkError = ref<string | null>(null);
+  const controlError = ref<string | null>(null);
 
   const live = ref(true);
   const connectionState = ref<'connecting' | 'open' | 'closed'>('closed');
@@ -157,9 +177,9 @@ export function useSessionTimeSeries(
   // bumps version + triggerRef once per stream that received rows.
   // This caps re-render cost at one pass per stream per second
   // regardless of upstream burst rate.
-  const samplesPending: Record<string, unknown>[] = [];
-  const networkPending: Record<string, unknown>[] = [];
   const eventsPending: Record<string, unknown>[] = [];
+  const networkPending: Record<string, unknown>[] = [];
+  const controlPending: Record<string, unknown>[] = [];
   let flushTimer: ReturnType<typeof setInterval> | null = null;
 
   function teardown() {
@@ -175,24 +195,24 @@ export function useSessionTimeSeries(
   }
 
   function resetCaches() {
-    samplesArr.value = [];
-    networkArr.value = [];
     eventsArr.value = [];
-    samplesPending.length = 0;
-    networkPending.length = 0;
+    networkArr.value = [];
+    controlArr.value = [];
     eventsPending.length = 0;
-    samplesVersion.value++;
-    networkVersion.value++;
+    networkPending.length = 0;
+    controlPending.length = 0;
     eventsVersion.value++;
-    samplesBounds.value = null;
-    networkBounds.value = null;
+    networkVersion.value++;
+    controlVersion.value++;
     eventsBounds.value = null;
-    samplesLoading.value = false;
-    networkLoading.value = false;
+    networkBounds.value = null;
+    controlBounds.value = null;
     eventsLoading.value = false;
-    samplesError.value = null;
-    networkError.value = null;
+    networkLoading.value = false;
+    controlLoading.value = false;
     eventsError.value = null;
+    networkError.value = null;
+    controlError.value = null;
     lastEventId = '';
   }
 
@@ -203,34 +223,39 @@ export function useSessionTimeSeries(
     const params = new URLSearchParams();
     params.set('player_id', pid);
     if (playId.value) params.set('play_id', playId.value);
-    const streams = opts.streams ?? ['samples', 'network'];
+    const streams = opts.streams ?? ['events', 'network'];
     params.set('streams', streams.join(','));
     if (opts.bundles && opts.bundles.length) {
       params.set('bundles', opts.bundles.join(','));
     } else {
       // Default bundle picks per stream; keeps the wire ergonomic.
       const defaults: string[] = [];
-      if (streams.includes('samples')) defaults.push('charts_minimal', 'lanes_v1');
+      if (streams.includes('events')) defaults.push('charts_minimal', 'lanes_v1');
       if (streams.includes('network')) defaults.push('network');
-      if (streams.includes('events')) defaults.push('events');
+      if (streams.includes('control')) defaults.push('control');
       if (defaults.length) params.set('bundles', defaults.join(','));
     }
     if (opts.fields && opts.fields.length) {
       params.set('fields', opts.fields.join(','));
     }
-    if (opts.fromMs && opts.fromMs > 0) {
-      params.set('from', new Date(opts.fromMs).toISOString());
+    const fromMs = fromMsRef.value;
+    const toMs = toMsRef.value;
+    if (fromMs && fromMs > 0) {
+      params.set('from', new Date(fromMs).toISOString());
     } else if (!playId.value) {
-      // Live mode (no specific play_id): default backfill is the last
-      // 10 minutes so a fresh page load doesn't drag down a 24h
-      // history. Archive replay (playId set) gets no default `from`
-      // so the server returns ALL rows for that play (the play's
-      // bounded range naturally caps the row count below the
-      // server's per-stream limit).
+      // Live mode (no specific play_id) and no explicit from: default
+      // backfill is the last 10 minutes so a fresh page load doesn't
+      // drag down a 24h history. Archive replay (playId set) gets no
+      // default `from` so the server returns ALL rows for that play
+      // (the play's bounded range naturally caps the row count below
+      // the server's per-stream limit). When playId is null AND an
+      // explicit fromMs is set (SessionViewer's "show context" toggle),
+      // we fall through the first branch above with the operator-
+      // supplied window.
       params.set('from', new Date(Date.now() - DEFAULT_BACKFILL_MS).toISOString());
     }
-    if (opts.toMs && opts.toMs > 0) {
-      params.set('to', new Date(opts.toMs).toISOString());
+    if (toMs && toMs > 0) {
+      params.set('to', new Date(toMs).toISOString());
     }
     if (opts.strideMs && opts.strideMs > 0) params.set('stride_ms', String(opts.strideMs));
     if (opts.maxHz && opts.maxHz > 0) params.set('max_hz', String(opts.maxHz));
@@ -243,7 +268,7 @@ export function useSessionTimeSeries(
     const url = buildUrl();
     if (!url) return;
     connectionState.value = 'connecting';
-    samplesLoading.value = true;
+    eventsLoading.value = true;
     networkLoading.value = true;
 
     es = new EventSource(url);
@@ -276,14 +301,14 @@ export function useSessionTimeSeries(
           if (typeof m?.live === 'boolean') live.value = m.live;
         } catch { /* ignore malformed meta */ }
         return;
-      case 'sample':
-        enqueueRow(data, samplesPending);
+      case 'event':
+        enqueueRow(data, eventsPending);
         return;
       case 'network':
         enqueueRow(data, networkPending);
         return;
-      case 'event':
-        enqueueRow(data, eventsPending);
+      case 'control':
+        enqueueRow(data, controlPending);
         return;
       case 'heartbeat':
         return;
@@ -292,20 +317,20 @@ export function useSessionTimeSeries(
         // archive rows make it into the cache.
         flushAll();
         live.value = false;
-        samplesLoading.value = false;
-        networkLoading.value = false;
         eventsLoading.value = false;
+        networkLoading.value = false;
+        controlLoading.value = false;
         teardown();
         return;
       case 'stream_error':
         try {
           const m = JSON.parse(data);
           const msg = String(m?.message ?? 'stream error');
-          samplesError.value = msg;
-          networkError.value = msg;
           eventsError.value = msg;
+          networkError.value = msg;
+          controlError.value = msg;
         } catch {
-          samplesError.value = 'stream error';
+          eventsError.value = 'stream error';
         }
         return;
     }
@@ -323,9 +348,9 @@ export function useSessionTimeSeries(
    *  pass per stream. Bumps version + triggerRef once per stream
    *  that actually received rows. */
   function flushAll() {
-    drainQueue(samplesPending, samplesArr, samplesVersion, samplesBounds, samplesLoading);
-    drainQueue(networkPending, networkArr, networkVersion, networkBounds, networkLoading);
     drainQueue(eventsPending, eventsArr, eventsVersion, eventsBounds, eventsLoading);
+    drainQueue(networkPending, networkArr, networkVersion, networkBounds, networkLoading);
+    drainQueue(controlPending, controlArr, controlVersion, controlBounds, controlLoading);
   }
 
   function drainQueue(
@@ -379,15 +404,27 @@ export function useSessionTimeSeries(
   const RECONNECT_DEBOUNCE_MS = 500;
   let lastPid = '';
   let lastPlayid: string | null = null;
+  let lastFrom: number | null = null;
+  let lastTo: number | null = null;
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   watch(
-    [playerId, playId],
-    ([pid, plyid]) => {
+    // fromMsRef / toMsRef join playerId + playId in the watch list so
+    // the SSE re-subscribes when SessionViewer's "show context" toggle
+    // widens the time window. Re-subscribe debounce + cache-reset
+    // semantics apply uniformly — caches are cleared on every change
+    // so a wider window doesn't leak rows from the prior subscription.
+    [playerId, playId, fromMsRef, toMsRef],
+    ([pid, plyid, fromMs, toMs]) => {
       const newPid = pid ?? '';
       const newPlayid = plyid ?? null;
-      if (newPid === lastPid && newPlayid === lastPlayid) return;
+      const newFrom = fromMs ?? null;
+      const newTo = toMs ?? null;
+      if (newPid === lastPid && newPlayid === lastPlayid
+          && newFrom === lastFrom && newTo === lastTo) return;
       lastPid = newPid;
       lastPlayid = newPlayid;
+      lastFrom = newFrom;
+      lastTo = newTo;
       if (reconnectTimer) clearTimeout(reconnectTimer);
       // Immediate teardown + resetCaches so the OLD player's EventSource
       // stops streaming and the cache doesn't leak stale samples into
@@ -404,9 +441,14 @@ export function useSessionTimeSeries(
         reconnectTimer = null;
         const finalPid = playerId.value ?? '';
         const finalPlayid = playId.value ?? null;
-        if (finalPid !== lastPid || finalPlayid !== lastPlayid) {
+        const finalFrom = fromMsRef.value ?? null;
+        const finalTo = toMsRef.value ?? null;
+        if (finalPid !== lastPid || finalPlayid !== lastPlayid
+            || finalFrom !== lastFrom || finalTo !== lastTo) {
           lastPid = finalPid;
           lastPlayid = finalPlayid;
+          lastFrom = finalFrom;
+          lastTo = finalTo;
         }
         connect();
       }, RECONNECT_DEBOUNCE_MS);
@@ -453,29 +495,29 @@ export function useSessionTimeSeries(
   const SOFT_CAP_NETWORK = 5000;
   const SOFT_CAP_EVENTS = 50000;
   watch(
-    [samplesVersion, networkVersion, eventsVersion],
+    [eventsVersion, networkVersion, controlVersion],
     () => {
-      const bounds = mergedBounds(samplesBounds.value, networkBounds.value, eventsBounds.value);
+      const bounds = mergedBounds(eventsBounds.value, networkBounds.value, controlBounds.value);
       if (!bounds) return;
-      if (samplesArr.value.length > SOFT_CAP_SAMPLES) {
-        evictOutsideViewport(samplesArr.value, bounds.min, bounds.max, tsOf);
-        triggerRef(samplesArr);
+      if (eventsArr.value.length > SOFT_CAP_SAMPLES) {
+        evictOutsideViewport(eventsArr.value, bounds.min, bounds.max, tsOf);
+        triggerRef(eventsArr);
       }
       if (networkArr.value.length > SOFT_CAP_NETWORK) {
         evictOutsideViewport(networkArr.value, bounds.min, bounds.max, tsOf);
         triggerRef(networkArr);
       }
-      if (eventsArr.value.length > SOFT_CAP_EVENTS) {
-        evictOutsideViewport(eventsArr.value, bounds.min, bounds.max, tsOf);
-        triggerRef(eventsArr);
+      if (controlArr.value.length > SOFT_CAP_EVENTS) {
+        evictOutsideViewport(controlArr.value, bounds.min, bounds.max, tsOf);
+        triggerRef(controlArr);
       }
     },
   );
 
   return {
-    samples: makeStream(samplesArr, samplesVersion, samplesBounds, samplesLoading, samplesError),
-    network: makeStream(networkArr, networkVersion, networkBounds, networkLoading, networkError),
     events: makeStream(eventsArr, eventsVersion, eventsBounds, eventsLoading, eventsError),
+    network: makeStream(networkArr, networkVersion, networkBounds, networkLoading, networkError),
+    control: makeStream(controlArr, controlVersion, controlBounds, controlLoading, controlError),
     live,
     connectionState,
     reconnect: connect,

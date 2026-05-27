@@ -67,7 +67,7 @@ const keepaliveInterval = 15 * time.Second
 // stream during the backfill burst. Surfaced in `meta.server_caps`
 // so the client can adjust its memory budget honestly.
 const (
-	backfillCapSamples = 50000
+	backfillCapEvents = 50000
 	backfillCapNetwork = 5000
 )
 
@@ -130,6 +130,22 @@ func makeTimeseriesHandler(cfg config, ring *Ring) http.HandlerFunc {
 
 		live := isStreamLive(ring, key, params.playerID, params.playID)
 
+		// `to` was supplied AND is in the past → this is an archive
+		// read of a closed window. Even if the player happens to
+		// still be active, the caller has asked for a bounded view,
+		// so the live tail (ring deltas + events poller) would push
+		// rows past `to` into the client's cache and the UI's brush
+		// rail / NetworkLog / PlayLog would then show rows outside
+		// the focus window. Treat as !live so we complete after
+		// backfill.
+		if params.to != "" {
+			if t, err := time.Parse(time.RFC3339Nano, params.to); err == nil {
+				if time.Since(t) > 5*time.Second {
+					live = false
+				}
+			}
+		}
+
 		emitMeta(w, flusher, selections, live, ring, params)
 
 		// Track the high-water timestamp emitted during backfill so
@@ -156,17 +172,14 @@ func makeTimeseriesHandler(cfg config, ring *Ring) http.HandlerFunc {
 			return
 		}
 
-		// Events are derived from samples + network rows so there's no
-		// ring channel for them. If the caller asked for events, run
-		// a poller alongside the ring-driven live loop. The poller
-		// tracks the highest emitted ts and uses it as `from=` on each
-		// poll so subsequent runs only return new rows.
-		// SSE writes from the live ring loop and the events poll
-		// goroutine could otherwise interleave bytes mid-frame; share
-		// a mutex when both paths are active.
+		// control_events flow into CH via the proxy SSE bridge rather
+		// than the in-memory ring, so live deltas are picked up by a
+		// background poller alongside the ring-driven sample/network
+		// path. SSE writes from both paths share a mutex to keep
+		// frames intact. Issue #474 Milestone C.
 		writeMu := &sync.Mutex{}
-		if selectionsHasEvents(selections) {
-			cancel := startEventsPoller(ctx, w, flusher, writeMu, cfg, params, emittedIDs)
+		if selectionsHasControl(selections) {
+			cancel := startControlPoller(ctx, w, flusher, writeMu, cfg, params, emittedIDs)
 			defer cancel()
 		}
 
@@ -179,9 +192,12 @@ func makeTimeseriesHandler(cfg config, ring *Ring) http.HandlerFunc {
 func parseTimeseriesParams(r *http.Request) (timeseriesParams, error) {
 	q := r.URL.Query()
 	p := timeseriesParams{
-		playerID:       strings.TrimSpace(q.Get("player_id")),
+		// canonicalV2ID lowercases UUIDs — see its doc. ClickHouse
+		// stores the canonical form; an operator who hits this with an
+		// uppercase UUID would otherwise get an empty stream silently.
+		playerID:       canonicalV2ID(strings.TrimSpace(q.Get("player_id"))),
 		sessionID:      strings.TrimSpace(q.Get("session_id")),
-		playID:         strings.TrimSpace(q.Get("play_id")),
+		playID:         canonicalV2ID(strings.TrimSpace(q.Get("play_id"))),
 		from:           strings.TrimSpace(q.Get("from")),
 		to:             strings.TrimSpace(q.Get("to")),
 		streams:        strings.TrimSpace(q.Get("streams")),
@@ -210,7 +226,7 @@ func parseTimeseriesParams(r *http.Request) (timeseriesParams, error) {
 		return p, errBadParam("one of player_id or session_id is required")
 	}
 	if p.streams == "" {
-		return p, errBadParam("streams=samples,network,... is required")
+		return p, errBadParam("streams=events,network,markers is required")
 	}
 
 	p.limit = parseLimit(q.Get("limit"), 50000, 200000)
@@ -232,7 +248,7 @@ func parseTimeseriesParams(r *http.Request) (timeseriesParams, error) {
 	// (CH will reject unknown columns per-stream — clean 4xx surface).
 	if f := strings.TrimSpace(q.Get("fields")); f != "" {
 		list := splitCSV(f)
-		for _, sk := range []streamKind{streamSamples, streamNetwork, streamEvents} {
+		for _, sk := range []streamKind{streamEvents, streamNetwork, streamControl} {
 			p.fieldsByStream[sk] = list
 		}
 	}
@@ -337,7 +353,7 @@ func emitBackfill(
 	ringWindowMs int64,
 ) error {
 	switch sel.Stream {
-	case streamSamples:
+	case streamEvents:
 		if err := emitBackfillSamples(ctx, w, flusher, cfg, sel, params, seen); err != nil {
 			return err
 		}
@@ -347,11 +363,11 @@ func emitBackfill(
 			return err
 		}
 		return emitBackfillFromRing(w, flusher, ring, key, sel.Stream, kindNetwork, params, seen, ringWindowMs)
-	case streamEvents:
-		// Events are derived at query time — no ring; backfill is the
-		// taxonomy SQL over [from, to]. Live continuation is handled
-		// by startEventsPoller after backfill returns.
-		return emitBackfillEvents(ctx, w, flusher, cfg, params, seen)
+	case streamControl:
+		// control_events doesn't pass through the ring. Backfill is a
+		// CH query; live continuation is handled by startControlPoller
+		// after backfill returns.
+		return emitBackfillControl(ctx, w, flusher, cfg, params, seen)
 	}
 	return nil
 }
@@ -368,10 +384,10 @@ func emitBackfillSamples(ctx context.Context, w http.ResponseWriter, flusher htt
 	}
 	for _, row := range rows {
 		ts := stringField(row, "ts")
-		if !seen.Add(streamSamples, ts) {
+		if !seen.Add(streamEvents, ts) {
 			continue
 		}
-		writeSSEEvent(w, "sample", ts, row)
+		writeSSEEvent(w, "event", ts, row)
 	}
 	flusher.Flush()
 	return nil
@@ -414,7 +430,7 @@ func emitBackfillFromRing(w http.ResponseWriter, flusher http.Flusher,
 		var payload any
 		var fp string
 		switch stream {
-		case streamSamples:
+		case streamEvents:
 			r, ok := e.Payload.(*row)
 			if !ok {
 				continue
@@ -523,12 +539,12 @@ func lockedWrite(mu *sync.Mutex, fn func()) {
 	fn()
 }
 
-// selectionsHasEvents reports whether the resolved selections include
-// the events stream. The events stream is special because it doesn't
-// come off the ring — see startEventsPoller.
-func selectionsHasEvents(selections []streamSelection) bool {
+// selectionsHasControl reports whether the resolved selections include
+// the control_events stream. control_events doesn't come off the ring
+// — see startControlPoller.
+func selectionsHasControl(selections []streamSelection) bool {
 	for _, s := range selections {
-		if s.Stream == streamEvents {
+		if s.Stream == streamControl {
 			return true
 		}
 	}
@@ -539,17 +555,22 @@ func ringKindToStream(k ringKind) streamKind {
 	if k == kindNetwork {
 		return streamNetwork
 	}
-	return streamSamples
+	return streamEvents
 }
 
+// streamToEventName maps a streamKind to the SSE `event:` name the
+// frame is written under.
+//   streamEvents  → "event"   (player event POST)
+//   streamNetwork → "network"
+//   streamControl → "control" (proxy / harness action)
 func streamToEventName(s streamKind) string {
 	switch s {
-	case streamSamples:
-		return "sample"
-	case streamNetwork:
-		return "network"
 	case streamEvents:
 		return "event"
+	case streamNetwork:
+		return "network"
+	case streamControl:
+		return "control"
 	}
 	return "data"
 }
@@ -587,8 +608,8 @@ func buildSamplesQuery(cfg config, sel streamSelection, params timeseriesParams)
 		return "", nil, errBadParam("at least one identity clause required")
 	}
 	limit := params.limit
-	if limit <= 0 || limit > backfillCapSamples {
-		limit = backfillCapSamples
+	if limit <= 0 || limit > backfillCapEvents {
+		limit = backfillCapEvents
 	}
 	// Subquery wrap so WHERE/ORDER BY operate on the native DateTime64
 	// `ts` column. Without the wrap, the outer SELECT's
@@ -721,7 +742,7 @@ func emitMeta(w http.ResponseWriter, flusher http.Flusher, selections []streamSe
 		"streams":     streams,
 		"columns":     cols,
 		"live":        live,
-		"server_caps": map[string]int{"samples": backfillCapSamples, "network": backfillCapNetwork},
+		"server_caps": map[string]int{"events": backfillCapEvents, "network": backfillCapNetwork},
 		"ring":        map[string]any{"window_seconds": ring.windowMs / 1000},
 		"from":        params.from,
 		"to":          params.to,
