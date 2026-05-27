@@ -49,7 +49,7 @@ const developerMode = computed(() => params.developer === '1');
 
 /* ─── Context menu (legacy /dashboard/grid.html parity) ──────────────
  * Right-clicking a tile shows the same 3-option menu as legacy:
- *   - Open in Testing Window  →  /dashboard/v3/testing-session.html
+ *   - Open in Testing Window  →  /dashboard/testing-session.html
  *   - Copy Testing URL        →  clipboard
  *   - Open in HLS.js Demo     →  hlsjs.video-dev.org (developer mode + HLS only)
  *
@@ -128,7 +128,7 @@ function closeMenu() { menu.value.open = false; }
 function menuOpenTesting() {
   const playerId = mintPlayerId();
   const testingUrl = buildTestingUrl(menu.value.url, playerId);
-  const pageUrl = `/dashboard/v3/testing-session.html?player_id=${encodeURIComponent(playerId)}&url=${encodeURIComponent(testingUrl)}`;
+  const pageUrl = `/dashboard/testing-session.html?player_id=${encodeURIComponent(playerId)}&url=${encodeURIComponent(testingUrl)}`;
   window.open(pageUrl, '_blank', 'noopener');
   closeMenu();
 }

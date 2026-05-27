@@ -34,8 +34,8 @@ PREFLIGHT — what your environment supports
   ✗ Appium server        not reachable              (fix: only needed for Apple TV automation)
 
 DEVICES (currently discoverable)
-  iphone     Jonathans iPhone        EBB41BDC-...
-  appletv    appletv                 7312834B-...
+  iphone     My iPhone               <udid>
+  appletv    Apple TV                <udid>
 
 RECOMMENDED LAUNCH_MODE=cli
   why: Xcode and/or adb available; CLI handles sim + real iOS + Android TV
@@ -79,6 +79,12 @@ tests/characterization/
 # From the repo root:
 make harness-cli                                                # installs `harness` to ~/.local/bin
 
+# Convenience make targets (wrap overnight.sh per platform; results post to
+# the dashboard's Automated Testing page):
+make characterize-ipad-sim      # or -iphone / -appletv / -androidtv / -web
+make characterize-server        # server_* control-surface checks (tests/server_behavior) vs test-dev
+make automated-testing          # one-shot: server checks, then iPad-sim players
+
 # Smooth sweep on first iPad sim found — no env vars needed.
 # Artifacts land in tests/characterization/artifacts/.
 go test -C tests/characterization ./modes/... \
@@ -88,7 +94,7 @@ go test -C tests/characterization ./modes/... \
 go test -C tests/characterization ./runner/... -v
 
 # Target a specific device (e.g. for parallel runs across two sims)
-CHARACTERIZATION_DEVICE_UDID=8C792303-...                       \
+CHARACTERIZATION_DEVICE_UDID=<device-udid>                      \
   go test -C tests/characterization ./modes/... \
       -v -run TestSmoothIPadSim -timeout 90m -count=1
 

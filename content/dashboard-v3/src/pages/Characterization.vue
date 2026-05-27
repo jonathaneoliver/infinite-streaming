@@ -501,7 +501,7 @@ function playerShort(p: string): string {
 
 function playViewerHref(playID: string, playerID: string): string {
   const qs = new URLSearchParams({ play_id: playID, player_id: playerID });
-  return `/dashboard/v3/session-viewer.html?${qs}`;
+  return `/dashboard/session-viewer.html?${qs}`;
 }
 
 function startedAtLocal(iso: string): string {
@@ -577,11 +577,14 @@ function stepWindow(report: ReportBlob, stepIdx: number): { startMs: number; end
           Click a card to open the play in the Session Viewer.
         </div>
         <div class="page-callout">
-          <strong>How to run:</strong> Characterization tests run from the developer host, not this UI — this page only displays results that have already been archived. Trigger a run with <code>go test</code> on the host:
+          <strong>How to run:</strong> Tests run from the developer host, not this UI — this page only displays results that have already been archived. A single command does the server checks then the iPad-sim players:
+          <pre class="page-callout-code">make automated-testing   <span class="muted"># characterize-server, then characterize-ipad-sim</span></pre>
+          <strong>Server checks</strong> (the <code>server_*</code> tiles) on their own: <code>make characterize-server</code> — runs <code>go test -run TestServer</code> in <code>tests/server_behavior/</code> against test-dev (rate / delay / loss / pattern / fault / transfer / socket / scope / content).
+          <strong>Player characterization</strong> on its own, per platform: <code>make characterize-{ipad-sim,iphone,appletv,androidtv,web}</code>, or directly:
           <pre class="page-callout-code">go test -C tests/characterization ./modes/... -v \
   -run <span class="muted">TestStartupIPadSim</span> \
   -timeout 30m -count=1 -launch-mode=appium</pre>
-          Available <code>-run</code> values: <code>TestStartupIPadSim</code>, <code>TestAbortIPadSim</code>, <code>TestRampupIPadSim</code> (and <code>IPhone</code>, <code>AppleTV</code>, <code>AndroidTV</code>, <code>Web</code> variants per test). The run uploads its report via <code>harness post characterization</code> and lands here within a few seconds.
+          Available <code>-run</code> values: <code>TestStartupIPadSim</code>, <code>TestAbortIPadSim</code>, <code>TestRampupIPadSim</code> (and <code>IPhone</code>, <code>AppleTV</code>, <code>AndroidTV</code>, <code>Web</code> variants per test). Reports upload via <code>harness post characterization</code> and land here within a few seconds.
         </div>
       </div>
 

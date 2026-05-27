@@ -9,7 +9,7 @@
     // Configuration
     const NAVIGATION = {
         main: [
-            { id: 'dashboard', icon: '📊', text: 'Dashboard', href: '/dashboard/v3/dashboard.html' }
+            { id: 'dashboard', icon: '📊', text: 'Dashboard', href: '/dashboard/dashboard.html' }
         ],
         content: [
             { id: 'upload', icon: '📤', text: 'Upload Content', href: '/dashboard/upload.html' },
@@ -17,12 +17,12 @@
             { id: 'jobs', icon: '💼', text: 'Encoding Jobs', href: '/dashboard/jobs.html' }
         ],
         testing: [
-            { id: 'grid', icon: '🎮', text: 'Mosaic', href: '/dashboard/v3/grid.html', warning: true },
+            { id: 'grid', icon: '🎮', text: 'Mosaic', href: '/dashboard/grid.html', warning: true },
             { id: 'mosaic-10ft', icon: '📺', text: '10ft UI', href: '/dashboard/mosaic-10ft.html', alpha: true },
             { id: 'playback', icon: '▶️', text: 'Playback', href: '/dashboard/playback.html' },
-            { id: 'test-playback', icon: '🧭', text: 'Testing Playback', href: '/dashboard/v3/testing-session.html?nav=1' },
-            { id: 'testing', icon: '🧪', text: 'Testing Monitor', href: '/dashboard/v3/testing.html' },
-            { id: 'sessions', icon: '⏪', text: 'Sessions', href: '/dashboard/v3/sessions.html' },
+            { id: 'test-playback', icon: '🧭', text: 'Testing Playback', href: '/dashboard/testing-session.html?nav=1' },
+            { id: 'testing', icon: '🧪', text: 'Testing Monitor', href: '/dashboard/testing.html' },
+            { id: 'sessions', icon: '⏪', text: 'Sessions', href: '/dashboard/sessions.html' },
             { id: 'quartet', icon: '🎬', text: 'Quartet', href: '/dashboard/quartet.html', alpha: true },
             { id: 'segment-duration', icon: '⏱️', text: 'Live Offset', href: '/dashboard/segment-duration-comparison.html', alpha: true }
         ],
@@ -489,7 +489,7 @@
                 demoLink.removeAttribute('aria-disabled');
             }
             if (testPlaybackLink) {
-                testPlaybackLink.href = '/dashboard/v3/testing-session.html?nav=1';
+                testPlaybackLink.href = '/dashboard/testing-session.html?nav=1';
                 testPlaybackLink.removeAttribute('aria-disabled');
             }
             return;
@@ -521,7 +521,13 @@
                 }
                 if (testPlaybackLink) {
                     const playerId = getOrCreateTestPlaybackPlayerId();
-                    testPlaybackLink.href = `/dashboard/v3/testing-session.html?url=${encodeURIComponent(absoluteUrl)}&player_id=${encodeURIComponent(playerId)}&nav=1`;
+                    // Embed player_id INSIDE the stream URL too: the shaper
+                    // registers the per-session redirect (:2X081 → :2X181) BY
+                    // player_id, so a stream URL without it 404s. (The v3 nav
+                    // builder embeds it; keep parity so both paths play.)
+                    const sep = absoluteUrl.includes('?') ? '&' : '?';
+                    const streamUrl = `${absoluteUrl}${sep}player_id=${encodeURIComponent(playerId)}`;
+                    testPlaybackLink.href = `/dashboard/testing-session.html?url=${encodeURIComponent(streamUrl)}&player_id=${encodeURIComponent(playerId)}&nav=1`;
                     testPlaybackLink.removeAttribute('aria-disabled');
                     testPlaybackLink.title = 'Open selected stream in Testing Playback';
                 }
@@ -547,7 +553,7 @@
                 shakaLink.removeAttribute('aria-disabled');
             }
             if (testPlaybackLink) {
-                testPlaybackLink.href = '/dashboard/v3/testing-session.html?nav=1';
+                testPlaybackLink.href = '/dashboard/testing-session.html?nav=1';
                 testPlaybackLink.removeAttribute('aria-disabled');
             }
         }

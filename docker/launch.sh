@@ -18,22 +18,70 @@ export INFINITE_STREAM_OUTPUT_DIR="${INFINITE_STREAM_OUTPUT_DIR:-${INFINITE_OUTP
 # no-op when the directory already exists.
 mkdir -p /media/logs /media/data "$INFINITE_STREAM_OUTPUT_DIR"
 
-# Auto-generate self-signed TLS certs if missing
-certdir="/media/certs"
-if [ -f "$certdir/localhost.pem" ] && [ -f "$certdir/localhost-key.pem" ]; then
-  echo "Using existing TLS certificates from $certdir"
+# TLS toggle. INFINITE_STREAM_TLS=off (or 0/false/no) serves plain HTTP on
+# the public nginx listener AND go-proxy's shaper ports; default on (HTTPS).
+# Plain HTTP loses HTTP/2, so the dashboard's SSE streams fall back under
+# Chrome's per-origin connection cap — fine for quick / cert-free use.
+case "$(printf '%s' "${INFINITE_STREAM_TLS:-on}" | tr 'A-Z' 'a-z')" in
+  off|0|false|no) INFINITE_STREAM_TLS=off ;;
+  *)              INFINITE_STREAM_TLS=on ;;
+esac
+export INFINITE_STREAM_TLS
+
+if [ "$INFINITE_STREAM_TLS" = on ]; then
+  # Substituted into the nginx template's listen lines + cert block.
+  export INFINITE_STREAM_TLS_LISTEN_OPTS=" ssl http2"
+  # nginx → go-proxy upstream scheme. go-proxy serves TLS on 30081 when
+  # TLS is on, plain HTTP when off, so nginx's proxy_pass scheme must
+  # track it or the handshake fails with 502 (see nginx template).
+  export INFINITE_STREAM_PROXY_SCHEME="https"
+  export INFINITE_STREAM_TLS_DIRECTIVES="ssl_certificate /etc/nginx/certs/localhost.pem;
+    ssl_certificate_key /etc/nginx/certs/localhost-key.pem;
+    ssl_session_timeout 10m;
+    ssl_protocols TLSv1.2 TLSv1.3;"
+
+  # Auto-generate a self-signed cert when none is supplied. The SAN list comes
+  # from INFINITE_STREAM_TLS_SAN so each deployment can cover its own hostnames
+  # — browsers match on SAN, not CN, so every name/IP clients reach this box by
+  # must be listed. A manually-supplied cert (mkcert / Let's Encrypt) carries no
+  # .self-signed-san marker and is left untouched. A self-signed cert is
+  # regenerated when the requested SAN changes, so editing the var in .env takes
+  # effect on the next start. See docs/TLS.md.
+  certdir="/media/certs"
+  san_marker="$certdir/.self-signed-san"
+  want_san="${INFINITE_STREAM_TLS_SAN:-DNS:localhost,IP:127.0.0.1}"
+  have_cert=false
+  [ -f "$certdir/localhost.pem" ] && [ -f "$certdir/localhost-key.pem" ] && have_cert=true
+
+  if [ "$have_cert" = true ] && [ ! -f "$san_marker" ]; then
+    echo "Using supplied TLS certificate in $certdir (not self-signed; left untouched)."
+  elif [ "$have_cert" = true ] && [ "$(cat "$san_marker" 2>/dev/null)" = "$want_san" ]; then
+    echo "Using existing self-signed TLS certificate in $certdir (SAN=$want_san)."
+  else
+    mkdir -p "$certdir"
+    # CN is legacy and ignored by modern browsers, but keep it readable: the
+    # first DNS: entry in the SAN, falling back to localhost.
+    cn="$(printf '%s' "$want_san" | tr ',' '\n' | sed -n 's/^DNS://p' | head -n1)"
+    cn="${cn:-localhost}"
+    openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+      -keyout "$certdir/localhost-key.pem" \
+      -out "$certdir/localhost.pem" \
+      -subj "/CN=$cn" \
+      -addext "subjectAltName=$want_san" 2>/dev/null
+    printf '%s' "$want_san" > "$san_marker"
+    echo "Auto-generated self-signed TLS certificate in $certdir (CN=$cn SAN=$want_san)."
+  fi
+  # Ensure nginx can find the certs
+  mkdir -p /etc/nginx/certs
+  ln -sf "$certdir/localhost.pem" /etc/nginx/certs/localhost.pem
+  ln -sf "$certdir/localhost-key.pem" /etc/nginx/certs/localhost-key.pem
+  echo "TLS ENABLED — HTTPS + HTTP/2 on :$INFINITE_STREAM_LISTEN_PORT and the shaper ports."
 else
-  mkdir -p "$certdir"
-  openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
-    -keyout "$certdir/localhost-key.pem" \
-    -out "$certdir/localhost.pem" \
-    -subj "/CN=localhost" 2>/dev/null
-  echo "Auto-generated self-signed TLS certificates in $certdir"
+  export INFINITE_STREAM_TLS_LISTEN_OPTS=""
+  export INFINITE_STREAM_TLS_DIRECTIVES=""
+  export INFINITE_STREAM_PROXY_SCHEME="http"
+  echo "TLS DISABLED — plain HTTP (HTTP/2 off; dashboard SSE limited by Chrome's per-origin cap)."
 fi
-# Ensure nginx can find the certs
-mkdir -p /etc/nginx/certs
-ln -sf "$certdir/localhost.pem" /etc/nginx/certs/localhost.pem
-ln -sf "$certdir/localhost-key.pem" /etc/nginx/certs/localhost-key.pem
 export INFINITE_STREAM_PROXY_HOST="${INFINITE_STREAM_PROXY_HOST:-127.0.0.1}"
 
 # Analytics sidecar (forwarder + Grafana) is OPT-IN. Compose sets
@@ -73,7 +121,7 @@ else
   export INFINITE_STREAM_AUTH_DIRECTIVES="auth_basic off;"
   echo "Basic auth disabled (set INFINITE_STREAM_AUTH_HTPASSWD to a htpasswd file path to enable)."
 fi
-envsubst '${INFINITE_STREAM_OUTPUT_DIR} ${INFINITE_STREAM_PROXY_HOST} ${INFINITE_STREAM_LISTEN_PORT} ${INFINITE_STREAM_AUTH_DIRECTIVES}' < /etc/nginx/http.d/nginx-content.conf.template > /etc/nginx/http.d/nginx-content.conf
+envsubst '${INFINITE_STREAM_OUTPUT_DIR} ${INFINITE_STREAM_PROXY_HOST} ${INFINITE_STREAM_LISTEN_PORT} ${INFINITE_STREAM_AUTH_DIRECTIVES} ${INFINITE_STREAM_TLS_LISTEN_OPTS} ${INFINITE_STREAM_TLS_DIRECTIVES} ${INFINITE_STREAM_PROXY_SCHEME}' < /etc/nginx/http.d/nginx-content.conf.template > /etc/nginx/http.d/nginx-content.conf
 
 # Analytics fragment: emitted only when the sidecar is enabled.
 # /etc/nginx/snippets/ is glob-included from inside the main config's

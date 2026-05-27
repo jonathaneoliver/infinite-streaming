@@ -52,7 +52,7 @@ const href = computed(() => {
       p.set('player_id', c.player_id);
       p.set('play_id', c.play_id);
       if (c.at) p.set('at', c.at);
-      return `/dashboard/v3/session-viewer.html?${p.toString()}`;
+      return `/dashboard/session-viewer.html?${p.toString()}`;
     }
     case 'range': {
       if (!c.player_id || !c.play_id) return null;
@@ -61,11 +61,11 @@ const href = computed(() => {
       p.set('play_id', c.play_id);
       if (c.from) p.set('from', c.from);
       if (c.to) p.set('to', c.to);
-      return `/dashboard/v3/session-viewer.html?${p.toString()}`;
+      return `/dashboard/session-viewer.html?${p.toString()}`;
     }
     case 'run':
       return c.run_id
-        ? `/dashboard/v3/characterization.html?run_id=${encodeURIComponent(c.run_id)}${c.cycle ? `&cycle=${c.cycle}` : ''}`
+        ? `/dashboard/characterization.html?run_id=${encodeURIComponent(c.run_id)}${c.cycle ? `&cycle=${c.cycle}` : ''}`
         : null;
     case 'finding':
     case 'standard':

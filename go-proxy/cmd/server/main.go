@@ -1850,11 +1850,18 @@ func main() {
 	// machine. h2 turns on automatically once TLS is in play.
 	const tlsCertFile = "/etc/nginx/certs/localhost.pem"
 	const tlsKeyFile = "/etc/nginx/certs/localhost-key.pem"
+	// INFINITE_STREAM_TLS=off (or 0/false/no) serves plain HTTP on the
+	// shaper ports instead of TLS, matching nginx's listener so an HTTP
+	// dashboard embeds HTTP playback (no mixed content). Default: on.
+	tlsEnabled := true
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("INFINITE_STREAM_TLS"))) {
+	case "off", "0", "false", "no":
+		tlsEnabled = false
+	}
 	errorCh := make(chan error, len(ports))
 	for _, port := range ports {
 		addr := fmt.Sprintf(":%d", port)
 		go func(bind string) {
-			log.Printf("go-proxy listening on %s (TLS)", bind)
 			srv := &http.Server{
 				Addr:    bind,
 				Handler: router,
@@ -1864,7 +1871,13 @@ func main() {
 				// read. Issue #401.
 				ConnContext: withTCPConnContext,
 			}
-			errorCh <- srv.ListenAndServeTLS(tlsCertFile, tlsKeyFile)
+			if tlsEnabled {
+				log.Printf("go-proxy listening on %s (TLS)", bind)
+				errorCh <- srv.ListenAndServeTLS(tlsCertFile, tlsKeyFile)
+			} else {
+				log.Printf("go-proxy listening on %s (plain HTTP)", bind)
+				errorCh <- srv.ListenAndServe()
+			}
 		}(addr)
 	}
 

@@ -27,7 +27,10 @@ services:
       - app_network
 
   go-server:
-    build: .
+    build:
+      context: .
+      args:
+        VERSION: ${VERSION:-unknown}
     image: infinite-streaming
     container_name: infinite-streaming
     cap_add:
@@ -62,6 +65,14 @@ services:
       - GO_LIVE_OUTPUT_DIR=/go-live
       - GO_UPLOAD_ADDR=:8003
       - INFINITE_STREAM_LISTEN_PORT=30000
+      # TLS toggle (default on = HTTPS+HTTP/2). Set INFINITE_STREAM_TLS=off
+      # in .env to serve plain HTTP on the dashboard + shaper ports.
+      - INFINITE_STREAM_TLS=${INFINITE_STREAM_TLS:-on}
+      # SAN list for the auto-generated self-signed cert (used only when no
+      # mkcert / Let's Encrypt cert is mounted into the certs dir). Comma-
+      # separated openssl SAN entries — list every hostname/IP clients reach
+      # this box by, since browsers match on SAN not CN. See docs/TLS.md.
+      - INFINITE_STREAM_TLS_SAN=${INFINITE_STREAM_TLS_SAN:-DNS:localhost,IP:127.0.0.1}
       - INFINITE_STREAM_UPSTREAM_HOST=127.0.0.1
       - INFINITE_STREAM_UPSTREAM_PORT=30000
       - INFINITE_STREAM_MAX_SESSIONS=8

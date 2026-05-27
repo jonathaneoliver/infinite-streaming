@@ -1,6 +1,6 @@
 <script setup lang="ts">
 /**
- * SessionViewerLink — single-source link to /dashboard/v3/session-viewer.html
+ * SessionViewerLink — single-source link to /dashboard/session-viewer.html
  * for one time-bounded window. Used by every characterization cycle/step
  * row on the Characterization page so the operator can jump from a
  * per-cycle result straight to the replay scoped to that cycle's window.

@@ -465,9 +465,41 @@ test-deploy-dev:
 	else \
 		echo "dashboard-v3 not present, skipping Vue build"; \
 	fi
-	ssh -n $(TEST_SSH) 'printf "CONTENT_DIR=%s\nINFINITE_STREAM_RENDEZVOUS_URL=%s\nINFINITE_STREAM_ANNOUNCE_URL=%s\nINFINITE_STREAM_ANNOUNCE_LABEL=%s\n" "$(TEST_MEDIA_DIR)" "$(INFINITE_STREAM_RENDEZVOUS_URL)" "$(INFINITE_STREAM_ANNOUNCE_URL)" "$(INFINITE_STREAM_ANNOUNCE_LABEL)" > ~/test-dev/.env'
+	ssh -n $(TEST_SSH) 'printf "CONTENT_DIR=%s\nINFINITE_STREAM_RENDEZVOUS_URL=%s\nINFINITE_STREAM_ANNOUNCE_URL=%s\nINFINITE_STREAM_ANNOUNCE_LABEL=%s\nINFINITE_STREAM_TLS=%s\nINFINITE_STREAM_TLS_SAN=%s\n" "$(TEST_MEDIA_DIR)" "$(INFINITE_STREAM_RENDEZVOUS_URL)" "$(INFINITE_STREAM_ANNOUNCE_URL)" "$(INFINITE_STREAM_ANNOUNCE_LABEL)" "$(INFINITE_STREAM_TLS)" "$(INFINITE_STREAM_TLS_SAN)" > ~/test-dev/.env'
 	scp tests/deploy/override-dev.yml $(TEST_SSH):~/test-dev/docker-compose.override.yml
-	ssh $(TEST_SSH) 'cd ~/test-dev && docker compose build && docker compose up -d'
+	ssh $(TEST_SSH) 'cd ~/test-dev && VERSION=$$(cat VERSION) docker compose build && docker compose up -d'
+
+# HTTP-only mirror of test-dev on the 27xxx port range. Same code/working tree,
+# but INFINITE_STREAM_TLS=off (plain HTTP, no cert — handy for the iOS/tvOS
+# LocalHTTPProxy path and any client that can't trust a dev cert). Shares the
+# encoded content library from $(TEST_MEDIA_DIR) via SHARED_CONTENT_DIR (see
+# override-dev-http.yml) while keeping its own state under TEST_HTTP_MEDIA_DIR.
+# Publishes an explicit "http-only" label so it's unmistakable in discovery.
+TEST_HTTP_MEDIA_DIR ?= /home/$(shell echo $(TEST_SSH) | cut -d@ -f1)/test-dev-http-media
+# Announce/base URL for the HTTP mirror. Set INFINITE_STREAM_ANNOUNCE_URL_HTTP in
+# .env to control it explicitly; otherwise derive it from the SSH host.
+INFINITE_STREAM_ANNOUNCE_URL_HTTP ?= http://$(TEST_HOST):27000
+test-deploy-dev-http:
+	@echo "=== Dev (HTTP-only): local working tree (port 27000) ==="
+	ssh -n $(TEST_SSH) 'mkdir -p ~/test-dev-http'
+	@echo "Syncing local working tree (excluding .git and .gitignore matches)..."
+	rsync -az --delete \
+		--filter=':- .gitignore' \
+		--exclude='.git/' \
+		--exclude='.env' \
+		--exclude='certs/' \
+		./ $(TEST_SSH):~/test-dev-http/
+	@if [ -f content/dashboard-v3/package.json ]; then \
+		echo "Building & pushing dashboard-v3 (Vue)..."; \
+		(cd content/dashboard-v3 && npm run --silent build) && \
+		ssh -n $(TEST_SSH) 'mkdir -p ~/test-dev-http/content/dashboard/v3' && \
+		rsync -az --delete content/dashboard/v3/ $(TEST_SSH):~/test-dev-http/content/dashboard/v3/; \
+	else \
+		echo "dashboard-v3 not present, skipping Vue build"; \
+	fi
+	ssh -n $(TEST_SSH) 'printf "COMPOSE_PROJECT_NAME=test-dev-http\nCONTENT_DIR=%s\nSHARED_CONTENT_DIR=%s\nINFINITE_STREAM_RENDEZVOUS_URL=%s\nINFINITE_STREAM_ANNOUNCE_URL=%s\nINFINITE_STREAM_ANNOUNCE_LABEL=test-dev-http-only\nINFINITE_STREAM_BASE_URL=%s\nINFINITE_STREAM_TLS=off\n" "$(TEST_HTTP_MEDIA_DIR)" "$(TEST_MEDIA_DIR)" "$(INFINITE_STREAM_RENDEZVOUS_URL)" "$(INFINITE_STREAM_ANNOUNCE_URL_HTTP)" "$(INFINITE_STREAM_ANNOUNCE_URL_HTTP)" > ~/test-dev-http/.env'
+	scp tests/deploy/override-dev-http.yml $(TEST_SSH):~/test-dev-http/docker-compose.override.yml
+	ssh $(TEST_SSH) 'cd ~/test-dev-http && VERSION=$$(cat VERSION) docker compose build && docker compose up -d'
 
 # Iterate on Grafana provisioning (dashboards / datasources) without
 # touching go-server. Sessions keep flowing live; Grafana auto-reloads
@@ -600,10 +632,23 @@ test-deploy-oobe:
 		--exclude='.git/' \
 		--exclude='.env' \
 		./ $(TEST_SSH):~/test-oobe/
-	ssh -n $(TEST_SSH) 'printf "COMPOSE_PROJECT_NAME=test-oobe\nCONTENT_DIR=%s\nINFINITE_STREAM_RENDEZVOUS_URL=%s\nINFINITE_STREAM_ANNOUNCE_URL=http://%s:26000\nINFINITE_STREAM_BASE_URL=http://%s:26000\n" \
+	@# The dashboard-v3 Vite build output (content/dashboard/v3/) is gitignored,
+	@# so the --filter ':- .gitignore' rule above hides it from rsync and the
+	@# volume mount would then shadow the image's baked copy with an empty dir
+	@# (dashboard 404). Build + push it as a separate rsync, same as
+	@# test-deploy-dev.
+	@if [ -f content/dashboard-v3/package.json ]; then \
+		echo "Building & pushing dashboard-v3 (Vue)..."; \
+		(cd content/dashboard-v3 && npm run --silent build) && \
+		ssh -n $(TEST_SSH) 'mkdir -p ~/test-oobe/content/dashboard/v3' && \
+		rsync -az --delete content/dashboard/v3/ $(TEST_SSH):~/test-oobe/content/dashboard/v3/; \
+	else \
+		echo "dashboard-v3 not present, skipping Vue build"; \
+	fi
+	ssh -n $(TEST_SSH) 'printf "COMPOSE_PROJECT_NAME=test-oobe\nCONTENT_DIR=%s\nINFINITE_STREAM_RENDEZVOUS_URL=%s\nINFINITE_STREAM_ANNOUNCE_URL=https://%s:26000\nINFINITE_STREAM_BASE_URL=https://%s:26000\n" \
 		"$(TEST_OOBE_MEDIA_DIR)" "$(INFINITE_STREAM_RENDEZVOUS_URL)" "$(TEST_HOST)" "$(TEST_HOST)" > ~/test-oobe/.env'
 	scp tests/deploy/override-oobe.yml $(TEST_SSH):~/test-oobe/docker-compose.override.yml
-	ssh $(TEST_SSH) 'cd ~/test-oobe && docker compose -p test-oobe build && docker compose -p test-oobe up -d'
+	ssh $(TEST_SSH) 'cd ~/test-oobe && VERSION=$$(cat VERSION) docker compose -p test-oobe build && docker compose -p test-oobe up -d'
 
 test-clean-oobe:
 	@case "$(TEST_OOBE_MEDIA_DIR)" in \
@@ -621,9 +666,9 @@ test-clean-oobe:
 test-deploy-compose:
 	@echo "=== Option 1: Docker Compose from source (port 22000) ==="
 	ssh $(TEST_SSH) 'if [ -d ~/test-compose/.git ]; then cd ~/test-compose && git checkout -- . && git pull; else git clone $(REPO_URL) ~/test-compose; fi'
-	ssh -n $(TEST_SSH) 'printf "CONTENT_DIR=%s\nINFINITE_STREAM_RENDEZVOUS_URL=%s\nINFINITE_STREAM_ANNOUNCE_URL=http://%s:22000\n" "$(TEST_MEDIA_DIR)" "$(INFINITE_STREAM_RENDEZVOUS_URL)" "$(TEST_HOST)" > ~/test-compose/.env'
+	ssh -n $(TEST_SSH) 'printf "CONTENT_DIR=%s\nINFINITE_STREAM_RENDEZVOUS_URL=%s\nINFINITE_STREAM_ANNOUNCE_URL=https://%s:22000\n" "$(TEST_MEDIA_DIR)" "$(INFINITE_STREAM_RENDEZVOUS_URL)" "$(TEST_HOST)" > ~/test-compose/.env'
 	scp tests/deploy/override-compose.yml $(TEST_SSH):~/test-compose/docker-compose.override.yml
-	ssh $(TEST_SSH) 'cd ~/test-compose && docker compose build && docker compose up -d'
+	ssh $(TEST_SSH) 'cd ~/test-compose && VERSION=$$(cat VERSION) docker compose build && docker compose up -d'
 
 # `test-deploy-run` (the bare `docker run` of a single container)
 # was removed in #394 — the install method it tested can't support
@@ -794,3 +839,17 @@ characterize-androidtv:
 
 characterize-web:
 	./tests/characterization/overnight.sh web
+
+# Server control-surface checks (rate/delay/loss/pattern/fault/transfer/
+# socket/scope/content). Runs against test-dev and posts results to the
+# Automated Testing page as platform=server (the server_* tiles).
+# Override the target with THROUGHPUT_HOST / THROUGHPUT_API_PORT.
+characterize-server:
+	cd tests/server_behavior && THROUGHPUT_HOST=$(TEST_HOST) THROUGHPUT_API_PORT=21000 \
+		go test -run 'TestServer' -timeout 40m -v ./...
+
+# One-shot Automated Testing run: server checks first, then the iPad
+# simulator player characterization — populates the whole Automated Testing
+# page in one command. (Other platforms remain available individually via
+# characterize-{iphone,appletv,androidtv,web}.)
+automated-testing: characterize-server characterize-ipad-sim
