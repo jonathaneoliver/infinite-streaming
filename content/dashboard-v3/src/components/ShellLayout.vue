@@ -615,10 +615,97 @@ function viewActiveJob() {
   }
 }
 
+// --- Version notice: "what's new in this build" + "newer release available" ---
+// Two jobs: surface what shipped in the running build (once per upgrade, no
+// network), and nudge when a newer release exists (best-effort GitHub check).
+const REPO_SLUG = 'jonathaneoliver/infinite-streaming';
+const runningVersion = ref('');
+const latestVersion = ref('');
+const whatsNewDismissed = ref(false);
+const upgradeDismissed = ref(false);
+
+function normVer(v: string): string {
+  return (v || '').trim().replace(/^v/i, '');
+}
+// -1 if a<b, 1 if a>b, 0 if equal OR unparseable (unparseable → no upgrade nudge).
+function cmpSemver(a: string, b: string): number {
+  const pa = normVer(a).split('.').map((n) => parseInt(n, 10));
+  const pb = normVer(b).split('.').map((n) => parseInt(n, 10));
+  if (pa.some(Number.isNaN) || pb.some(Number.isNaN)) return 0;
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const x = pa[i] || 0;
+    const y = pb[i] || 0;
+    if (x !== y) return x < y ? -1 : 1;
+  }
+  return 0;
+}
+
+async function loadVersionInfo() {
+  try {
+    const r = await fetch('/api/version');
+    if (r.ok) runningVersion.value = String((await r.json()).version || '').trim();
+  } catch {
+    /* best-effort */
+  }
+  if (!runningVersion.value) return;
+  // Latest release tag, cached ~6h. GitHub's API is CORS-enabled for public
+  // repos; any failure (offline / rate-limited / air-gapped) is silent so the
+  // upgrade nudge simply never shows.
+  const TTL = 6 * 60 * 60 * 1000;
+  try {
+    const cached = JSON.parse(localStorage.getItem('ismLatestRelease') || 'null') as {
+      tag: string;
+      ts: number;
+    } | null;
+    if (cached?.tag && Date.now() - cached.ts < TTL) {
+      latestVersion.value = cached.tag;
+      return;
+    }
+    const r = await fetch(`https://api.github.com/repos/${REPO_SLUG}/releases/latest`);
+    if (r.ok) {
+      const tag = String((await r.json()).tag_name || '').trim();
+      if (tag) {
+        latestVersion.value = tag;
+        localStorage.setItem('ismLatestRelease', JSON.stringify({ tag, ts: Date.now() }));
+      }
+    }
+  } catch {
+    /* upgrade check is best-effort */
+  }
+}
+
+const runningTag = computed(() => `v${normVer(runningVersion.value)}`);
+const whatsNewVisible = computed(
+  () =>
+    !!runningVersion.value &&
+    !whatsNewDismissed.value &&
+    localStorage.getItem('ismWhatsNewSeen') !== runningVersion.value,
+);
+const upgradeVisible = computed(
+  () =>
+    !!runningVersion.value &&
+    !!latestVersion.value &&
+    !upgradeDismissed.value &&
+    cmpSemver(runningVersion.value, latestVersion.value) < 0 &&
+    localStorage.getItem('ismUpgradeDismissed') !== latestVersion.value,
+);
+const whatsNewUrl = computed(() => `https://github.com/${REPO_SLUG}/releases/tag/${runningTag.value}`);
+const latestUrl = computed(() => `https://github.com/${REPO_SLUG}/releases/latest`);
+
+function dismissWhatsNew() {
+  localStorage.setItem('ismWhatsNewSeen', runningVersion.value);
+  whatsNewDismissed.value = true;
+}
+function dismissUpgrade() {
+  localStorage.setItem('ismUpgradeDismissed', latestVersion.value);
+  upgradeDismissed.value = true;
+}
+
 onMounted(() => {
   loadSetup();
   checkActiveJobs();
   jobsTimer = setInterval(checkActiveJobs, 2000);
+  loadVersionInfo();
 });
 onBeforeUnmount(() => {
   if (jobsTimer) clearInterval(jobsTimer);
@@ -693,6 +780,24 @@ onBeforeUnmount(() => {
       </header>
 
       <main class="ism-content">
+        <div v-if="whatsNewVisible" class="ism-version-banner whatsnew">
+          <div class="ism-version-icon">🎉</div>
+          <div class="ism-version-body">
+            <strong>You're now running {{ runningTag }}.</strong>
+            New in this release: an in-dashboard AI chat bot for your sessions and Claude Code CLI
+            session querying.
+            <a :href="whatsNewUrl" target="_blank" rel="noopener" class="ism-version-link">What's new →</a>
+          </div>
+          <button class="ism-version-dismiss" type="button" aria-label="Dismiss" @click="dismissWhatsNew">&times;</button>
+        </div>
+        <div v-if="upgradeVisible" class="ism-version-banner upgrade">
+          <div class="ism-version-icon">⬆️</div>
+          <div class="ism-version-body">
+            <strong>{{ latestVersion }} is available</strong> — you're on {{ runningTag }}.
+            <a :href="latestUrl" target="_blank" rel="noopener" class="ism-version-link">View release →</a>
+          </div>
+          <button class="ism-version-dismiss" type="button" aria-label="Dismiss" @click="dismissUpgrade">&times;</button>
+        </div>
         <div v-if="setupHasIssues" class="ism-setup-banner">
           <div class="ism-setup-icon">⚠️</div>
           <div class="ism-setup-body">
@@ -1087,6 +1192,44 @@ onBeforeUnmount(() => {
 .ism-pair-btn:disabled { opacity: 0.6; cursor: default; }
 .ism-pair-msg { margin-top: 10px; font-size: 0.85em; }
 .ism-pair-unconfigured { font-size: 0.85em; color: #888; font-style: italic; }
+
+/* Version notice banners (what's-new + upgrade) */
+.ism-version-banner {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  margin: 0 0 16px 0;
+  padding: 12px 16px;
+  border-radius: 8px;
+  font-size: 13px;
+}
+.ism-version-banner.whatsnew {
+  background: #ecfdf5;
+  border: 1px solid #a7f3d0;
+  border-left: 3px solid #10b981;
+  color: #065f46;
+}
+.ism-version-banner.upgrade {
+  background: #eff6ff;
+  border: 1px solid #bfdbfe;
+  border-left: 3px solid #3b82f6;
+  color: #1e3a8a;
+}
+.ism-version-icon { font-size: 18px; line-height: 1.2; }
+.ism-version-body { flex: 1; min-width: 0; }
+.ism-version-link { font-weight: 600; white-space: nowrap; margin-left: 6px; }
+.ism-version-banner.whatsnew .ism-version-link { color: #047857; }
+.ism-version-banner.upgrade .ism-version-link { color: #1d4ed8; }
+.ism-version-dismiss {
+  background: none;
+  border: none;
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  color: inherit;
+  opacity: 0.6;
+}
+.ism-version-dismiss:hover { opacity: 1; }
 
 /* First-run setup banner */
 .ism-setup-banner {
