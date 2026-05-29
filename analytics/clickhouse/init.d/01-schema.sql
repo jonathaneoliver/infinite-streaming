@@ -81,11 +81,16 @@ CREATE TABLE IF NOT EXISTS infinite_streaming.session_events
     loop_count_server     UInt32                      DEFAULT 0,
     player_restarts       UInt32                      DEFAULT 0,
     profile_shift_count   UInt32                      DEFAULT 0,
-    -- Effective rate cap the kernel is enforcing right now:
-    -- max(operator override, deployment baseline). 0 means truly
-    -- uncapped (prod-style with operator slider at 0). Distinct from
-    -- nftables_bandwidth_mbps which stores operator intent only.
-    -- Stamped by the proxy on every snapshot. Issue #480.
+    -- Effective rate cap the kernel is enforcing right now. Resolves
+    -- in priority order:
+    --   1. Pattern step runtime (nftables_pattern_rate_runtime_mbps)
+    --      when a pattern is enabled and running.
+    --   2. Operator slider (nftables_bandwidth_mbps) when set (>0).
+    --   3. Deployment baseline (INFINITE_STREAM_DEFAULT_RATE_MBPS).
+    -- 0 means truly uncapped (all three sources at 0). Distinct from
+    -- nftables_bandwidth_mbps which stores operator slider intent only.
+    -- Stamped by the proxy on every snapshot. Issue #480, pattern
+    -- fold-in added in follow-up.
     effective_rate_limit_mbps Float32                 CODEC(ZSTD(1)),
 
     -- Player events (discrete signals embedded in the heartbeat snapshot;
@@ -281,6 +286,32 @@ ALTER TABLE infinite_streaming.session_events
     ADD COLUMN IF NOT EXISTS video_first_frame_time_s Float32 CODEC(ZSTD(1)),
     ADD COLUMN IF NOT EXISTS video_quality_pct Float32 CODEC(ZSTD(1)),
     ADD COLUMN IF NOT EXISTS video_start_time_s Float32 CODEC(ZSTD(1)),
+    -- iOS per-variant watch time (issue #486). JSON-string keyed by
+    -- `<resolution>@<kbps>kbps` with seconds-watched values. Stored
+    -- verbatim; PlayLog expands it into one chip per variant via its
+    -- generic JSON-field expander.
+    ADD COLUMN IF NOT EXISTS time_per_variant_s String CODEC(ZSTD(3)),
+    -- Manifest HOLD-BACK / PART-HOLD-BACK (issue #486 follow-up).
+    -- recommended_offset_s = AVFoundation's parse of
+    -- EXT-X-SERVER-CONTROL — what Apple says the player should sit
+    -- back from the live edge. configured_offset_s = what the app
+    -- currently has set. live_offset_s + recommended_offset_s gives
+    -- the "true offset to end of playlist" stable across stalls.
+    ADD COLUMN IF NOT EXISTS recommended_offset_s Float32 CODEC(ZSTD(1)),
+    ADD COLUMN IF NOT EXISTS configured_offset_s Float32 CODEC(ZSTD(1)),
+    -- Active variant's nominal frame rate (issue #486 follow-up).
+    -- Used by the dashboard to display the effective vs nominal FPS
+    -- ratio. Sourced from AVAssetVariant.videoAttributes.
+    ADD COLUMN IF NOT EXISTS nominal_fps_current Float32 CODEC(ZSTD(1)),
+    -- Median TTFB (responseStart - requestEnd) over the most recent
+    -- AVMetricMediaResourceRequestEvent.networkTransactionMetrics
+    -- samples. Rendered as "TTFB (client, ms)" on the RTT chart.
+    -- NOT a wire-time RTT — on HTTP/2 keep-alive this is stream-
+    -- level latency from URLSession's pipeline view, typically far
+    -- below the server-side TCP_INFO `client_rtt_ms`. The gap
+    -- between this and `client_rtt_ms` is itself a diagnostic
+    -- signal (proxy buffering / stream queueing). Issue #486.
+    ADD COLUMN IF NOT EXISTS client_rtt_avmetrics_ms Float32 CODEC(ZSTD(1)),
     ADD COLUMN IF NOT EXISTS mbps_transfer_complete Float32 CODEC(ZSTD(1)),
     ADD COLUMN IF NOT EXISTS mbps_transfer_rate Float32 CODEC(ZSTD(1)),
     ADD COLUMN IF NOT EXISTS player_ip LowCardinality(String) CODEC(ZSTD(1)),
@@ -496,6 +527,51 @@ CREATE TABLE IF NOT EXISTS infinite_streaming.control_events
     classification           LowCardinality(String) DEFAULT 'other' CODEC(ZSTD(1)),
     INDEX idx_play_id play_id TYPE bloom_filter GRANULARITY 4,
     INDEX idx_event   event   TYPE bloom_filter GRANULARITY 4
+)
+ENGINE = MergeTree
+PARTITION BY toYYYYMMDD(ts)
+ORDER BY (player_id, ts, event_fingerprint)
+TTL toDateTime(ts) + INTERVAL 30 DAY DELETE WHERE classification = 'other',
+    toDateTime(ts) + INTERVAL 90 DAY DELETE WHERE classification = 'interesting'
+SETTINGS index_granularity = 8192;
+
+-- ── ios_avmetric_events ───────────────────────────────────────────────────
+-- iOS 18 AVMetrics raw event stream (issue #486 spike).
+--
+-- One row per AVMetric event the iOS player publishes via
+-- POST /api/session/{id}/avmetrics. Parallel to session_events; the spike
+-- intentionally keeps this stream separate so we can compare AVMetrics vs
+-- our heartbeat-derived metrics side-by-side without polluting either schema.
+--
+-- `event_type` is the AVMetric subclass name as published by AVFoundation —
+-- e.g. AVMetricPlayerItemLikelyToKeepUpEvent, AVMetricPlayerItemStallEvent,
+-- AVMetricPlayerItemVariantSwitchEvent, AVMetricPlayerItemPlaybackSummaryEvent.
+-- `raw_json` is the unmodified event payload from the SDK so we can iterate
+-- the projection without iOS code changes.
+--
+-- Same TTL policy as session_events / control_events: 30 d / 90 d / forever
+-- by classification. classification is bumped by the forwarder on
+-- session-end (interesting) and on user star (favourite).
+CREATE TABLE IF NOT EXISTS infinite_streaming.ios_avmetric_events
+(
+    ts                DateTime64(3, 'UTC')          CODEC(Delta, ZSTD(1)),
+    player_id         LowCardinality(String)        CODEC(ZSTD(1)),
+    play_id           LowCardinality(String)        CODEC(ZSTD(1)),
+    attempt_id        UInt32                        DEFAULT 0 CODEC(ZSTD(1)),
+    session_id        String                        CODEC(ZSTD(1)),
+    event_type        LowCardinality(String)        CODEC(ZSTD(1)),
+    -- The AVMetric event's own timeline timestamp (CMTime → ms),
+    -- preserved separately from `ts` (our wall-clock receive time) so
+    -- the dashboard can plot causality without mixing clocks.
+    event_ts_ms       Int64                         DEFAULT 0 CODEC(ZSTD(1)),
+    raw_json          String                        CODEC(ZSTD(3)),
+    labels            Array(LowCardinality(String)) DEFAULT [] CODEC(ZSTD(1)),
+    -- Fingerprint over (session_id, event_ts_ms, event_type) so a retry
+    -- POST of the same batch does not double-insert.
+    event_fingerprint UInt64                        CODEC(ZSTD(1)),
+    classification    LowCardinality(String)        DEFAULT 'other' CODEC(ZSTD(1)),
+    INDEX idx_play_id    play_id    TYPE bloom_filter GRANULARITY 4,
+    INDEX idx_event_type event_type TYPE bloom_filter GRANULARITY 4
 )
 ENGINE = MergeTree
 PARTITION BY toYYYYMMDD(ts)
