@@ -1511,6 +1511,7 @@ components:
       properties:
         strip_codecs:             { type: boolean, default: false, description: 'Remove CODECS attribute from EXT-X-STREAM-INF lines.' }
         strip_average_bandwidth:  { type: boolean, default: false, description: 'Remove AVERAGE-BANDWIDTH attribute.' }
+        strip_resolution:         { type: boolean, default: false, description: 'Remove RESOLUTION attribute from EXT-X-STREAM-INF lines. Apple HLS validator rejects this; AVPlayer plays but variant.video.size becomes empty (issue #486).' }
         overstate_bandwidth:      { type: boolean, default: false, description: 'Inflate BANDWIDTH attribute by 10%.' }
         allowed_variants:
           type: array
@@ -1608,6 +1609,7 @@ components:
         rtt_var_ms:           { type: number, format: float, nullable: true, description: 'RTT variance.' }
         rto_ms:               { type: number, format: float, nullable: true, description: 'Current TCP retransmit timeout.' }
         path_ping_rtt_ms:     { type: number, format: float, nullable: true, description: 'ICMP path ping RTT measured server-side.' }
+        rtt_avmetrics_ms:     { type: number, format: float, nullable: true, description: 'Median TTFB (responseStart - requestEnd) from iOS 18 AVMetrics MediaResourceRequest events. Stream-level latency from URLSession pipeline; not a wire RTT on HTTP/2 keep-alive. Issue #486.' }
         rtt_stale:            { type: boolean, nullable: true, description: 'true when no fresh TCP_INFO sample is available (e.g. session idle).' }
         bytes_in_total:       { type: integer, nullable: true, description: 'Lifetime ingress bytes from the player to the proxy.' }
         bytes_out_total:      { type: integer, nullable: true, description: 'Lifetime egress bytes from the proxy to the player.' }

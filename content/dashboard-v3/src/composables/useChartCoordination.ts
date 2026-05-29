@@ -52,6 +52,11 @@ export interface ChartCoordinationState {
    *  position so the operator can see exactly where the prev/next
    *  selected event sits across all panels. null = no cursor. */
   cursorMs: number | null;
+  /** Operator-facing label for the cursor — set alongside `cursorMs`
+   *  by `setCursor`. Surfaces in the hover tooltip on every chart's
+   *  vertical marker so the operator never has to guess what the
+   *  pinned event was. Issue #486. */
+  cursorLabel: string | null;
 
   /** The single source of truth for "what range is currently
    *  displayed". null → operator is following live (chart x-axis is
@@ -83,6 +88,7 @@ function freshState(): ChartCoordinationState {
     lastSampleMs: 0,
     bandwidthYMax: undefined,
     cursorMs: null,
+    cursorLabel: null,
     range: null,
     liveSpan: DEFAULT_FOCUS_MS,
   });
@@ -202,6 +208,16 @@ export function useChartCoordination(playerIdInput: string | Ref<string>) {
    *  hide it. */
   function setCursorMs(ms: number | null) {
     cur().cursorMs = ms;
+    if (ms == null) cur().cursorLabel = null;
+  }
+  /** Set position AND label in one call. Use this from callers that
+   *  know which event the cursor represents (SessionDisplay's
+   *  prev/next navigator); use `setCursorMs` from callers that only
+   *  know the timestamp. Issue #486. */
+  function setCursor(ms: number | null, label: string | null) {
+    const s = cur();
+    s.cursorMs = ms;
+    s.cursorLabel = ms == null ? null : label;
   }
 
   return {
@@ -220,6 +236,7 @@ export function useChartCoordination(playerIdInput: string | Ref<string>) {
     toggleExpanded,
     setBandwidthYMax,
     setCursorMs,
+    setCursor,
   };
 }
 

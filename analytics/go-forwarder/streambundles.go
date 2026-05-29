@@ -31,9 +31,13 @@ import (
 type streamKind string
 
 const (
-	streamEvents  streamKind = "events"
-	streamNetwork streamKind = "network"
-	streamControl streamKind = "control"
+	streamEvents    streamKind = "events"
+	streamNetwork   streamKind = "network"
+	streamControl   streamKind = "control"
+	// streamAVMetrics — iOS 18 AVMetrics raw events (issue #486 spike).
+	// Sibling of streamControl: low-volume CH-only stream (no ring),
+	// backfill via SQL + live continuation via a poller.
+	streamAVMetrics streamKind = "avmetrics"
 )
 
 func parseStreamKind(s string) (streamKind, bool) {
@@ -44,6 +48,8 @@ func parseStreamKind(s string) (streamKind, bool) {
 		return streamNetwork, true
 	case "control":
 		return streamControl, true
+	case "avmetrics":
+		return streamAVMetrics, true
 	}
 	return "", false
 }
@@ -93,6 +99,10 @@ var bundleRegistry = map[string]bundleDef{
 			"client_rtt_max_ms",
 			"client_path_ping_rtt_ms",
 			"client_rto_ms",
+			// Client-side RTT proxy from AVMetrics TTFB (issue #486).
+			// Sits alongside the server-side TCP_INFO RTT on the
+			// chart so gaps between the two views are visible.
+			"client_rtt_avmetrics_ms",
 			// Buffer & offsets
 			"buffer_depth_s",
 			"buffer_end_s",
@@ -145,6 +155,11 @@ var bundleRegistry = map[string]bundleDef{
 	// projection (SessionDisplay → chRowToPlayerRecord → archive cache)
 	// can only fill ~19 of the 28 PlayerMetrics labels, and the panel
 	// shows "—" for fields the data actually has.
+	// panel_v1 — fills the PlayerMetrics grid + PlayLog chip rows
+	// with extended player_metrics fields. Issue #486 added
+	// `time_per_variant_s` (iOS per-variant watch-time breakdown,
+	// a JSON-string keyed by `<res>@<kbps>kbps` → seconds) so
+	// PlayLog's JSON-field expansion can render one chip per variant.
 	"panel_v1": {
 		Name:   "panel_v1",
 		Stream: streamEvents,
@@ -163,6 +178,14 @@ var bundleRegistry = map[string]bundleDef{
 			"trigger_type",
 			"player_restarts",
 			"profile_shift_count",
+			"time_per_variant_s",
+			// Issue #486 follow-up: manifest HOLD-BACK + active
+			// variant nominal fps. PlayLog renders them as chips;
+			// future "true offset" chart can derive
+			// live_offset_s + recommended_offset_s.
+			"recommended_offset_s",
+			"configured_offset_s",
+			"nominal_fps_current",
 		},
 	},
 
@@ -251,6 +274,20 @@ var bundleRegistry = map[string]bundleDef{
 			"ts", "play_id", "player_id", "session_id",
 			"attempt_id", "source", "event", "info", "labels",
 			"event_fingerprint",
+		},
+	},
+
+	// avmetrics — iOS 18 AVMetrics raw event stream (issue #486 spike).
+	// Sibling of `control` — low-volume CH-only stream, surfaced on
+	// the same brush rail so the comparison "what AVMetrics says vs
+	// what the heartbeat says" reads at a glance.
+	"avmetrics": {
+		Name:   "avmetrics",
+		Stream: streamAVMetrics,
+		Columns: []string{
+			"ts", "play_id", "player_id", "session_id",
+			"attempt_id", "event_type", "event_ts_ms", "raw_json",
+			"labels", "event_fingerprint",
 		},
 	},
 }
@@ -401,6 +438,8 @@ func mandatoryColumns(stream streamKind) []string {
 		return []string{"ts", "session_id", "play_id", "player_id", "attempt_id", "labels", "entry_fingerprint"}
 	case streamControl:
 		return []string{"ts", "play_id", "player_id", "session_id", "attempt_id", "labels", "event_fingerprint"}
+	case streamAVMetrics:
+		return []string{"ts", "play_id", "player_id", "session_id", "attempt_id", "labels", "event_fingerprint", "event_type"}
 	}
 	return nil
 }

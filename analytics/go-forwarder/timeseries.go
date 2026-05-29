@@ -182,6 +182,10 @@ func makeTimeseriesHandler(cfg config, ring *Ring) http.HandlerFunc {
 			cancel := startControlPoller(ctx, w, flusher, writeMu, cfg, params, emittedIDs)
 			defer cancel()
 		}
+		if selectionsHasAVMetrics(selections) {
+			cancel := startAVMPoller(ctx, w, flusher, writeMu, cfg, params, emittedIDs)
+			defer cancel()
+		}
 
 		streamLiveDeltas(ctx, w, flusher, writeMu, subCh, selections, emittedIDs, params.playID)
 	}
@@ -248,7 +252,7 @@ func parseTimeseriesParams(r *http.Request) (timeseriesParams, error) {
 	// (CH will reject unknown columns per-stream — clean 4xx surface).
 	if f := strings.TrimSpace(q.Get("fields")); f != "" {
 		list := splitCSV(f)
-		for _, sk := range []streamKind{streamEvents, streamNetwork, streamControl} {
+		for _, sk := range []streamKind{streamEvents, streamNetwork, streamControl, streamAVMetrics} {
 			p.fieldsByStream[sk] = list
 		}
 	}
@@ -368,6 +372,11 @@ func emitBackfill(
 		// CH query; live continuation is handled by startControlPoller
 		// after backfill returns.
 		return emitBackfillControl(ctx, w, flusher, cfg, params, seen)
+	case streamAVMetrics:
+		// ios_avmetric_events doesn't pass through the ring either —
+		// same shape as control_events. Live continuation handled by
+		// startAVMPoller after backfill returns.
+		return emitBackfillAVM(ctx, w, flusher, cfg, params, seen)
 	}
 	return nil
 }
@@ -539,6 +548,18 @@ func lockedWrite(mu *sync.Mutex, fn func()) {
 	fn()
 }
 
+// selectionsHasAVMetrics reports whether the resolved selections
+// include the ios_avmetric_events stream. Mirrors selectionsHasControl
+// — both streams are CH-only, polled rather than ring-driven.
+func selectionsHasAVMetrics(selections []streamSelection) bool {
+	for _, s := range selections {
+		if s.Stream == streamAVMetrics {
+			return true
+		}
+	}
+	return false
+}
+
 // selectionsHasControl reports whether the resolved selections include
 // the control_events stream. control_events doesn't come off the ring
 // — see startControlPoller.
@@ -571,6 +592,8 @@ func streamToEventName(s streamKind) string {
 		return "network"
 	case streamControl:
 		return "control"
+	case streamAVMetrics:
+		return "avmetrics"
 	}
 	return "data"
 }

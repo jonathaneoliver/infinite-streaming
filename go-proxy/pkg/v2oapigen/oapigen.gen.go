@@ -643,6 +643,9 @@ type ContentManipulation struct {
 
 	// StripCodecs Remove CODECS attribute from EXT-X-STREAM-INF lines.
 	StripCodecs *bool `json:"strip_codecs,omitempty"`
+
+	// StripResolution Remove RESOLUTION attribute from EXT-X-STREAM-INF lines (issue #486).
+	StripResolution *bool `json:"strip_resolution,omitempty"`
 }
 
 // ContentManipulationLiveOffset Live edge offset window in seconds. 0 = no offset.

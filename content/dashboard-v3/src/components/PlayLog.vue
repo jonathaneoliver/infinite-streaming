@@ -38,6 +38,10 @@ const props = defineProps<{
   eventsStream: Stream<Record<string, unknown>>;
   networkStream: Stream<Record<string, unknown>>;
   controlStream: Stream<Record<string, unknown>>;
+  /** iOS 18 AVMetrics raw event stream (issue #486 spike). Renders as
+   *  a fourth source on the timeline so the operator can read the
+   *  AVFoundation-side signal next to today's heartbeat-derived one. */
+  avmetricsStream: Stream<Record<string, unknown>>;
 }>();
 
 const playerIdRef = toRef(props, 'playerId');
@@ -70,6 +74,7 @@ function realPlayerId(): string {
 const showEvents = ref(true);
 const showNetwork = ref(true);
 const showControl = ref(true);
+const showAVMetrics = ref(true);
 
 /** Follow-latest mirrors the page-level focus bar's "Live" state.
  *  When the operator drags the brush back to a historical window,
@@ -131,7 +136,7 @@ const sortDir = ref<SortDir>('asc');
 
 const rowsScrollRef = ref<HTMLDivElement | null>(null);
 
-type Source = 'event' | 'network' | 'control';
+type Source = 'event' | 'network' | 'control' | 'avmetrics';
 interface Row {
   ts: number;          // epoch ms
   source: Source;
@@ -298,6 +303,25 @@ function buildEventRow(raw: Record<string, unknown>): Row | null {
   };
 }
 
+/** ios_avmetric_events row (issue #486 spike). `event_type` is the
+ *  AVFoundation subclass name (e.g. AVMetricPlayerItemLikelyToKeepUpEvent).
+ *  The unmodified SDK payload is in `raw_json`; default field display
+ *  surfaces it as a string chip — CSS truncates long values, hover
+ *  shows the full content. */
+function buildAVMetricsRow(raw: Record<string, unknown>): Row | null {
+  const ts = tsOf(raw);
+  if (!Number.isFinite(ts)) return null;
+  return {
+    ts,
+    source: 'avmetrics',
+    playerId: asLowerId(raw.player_id ?? realPlayerId()),
+    playId: asLowerId(raw.play_id ?? props.playId ?? ''),
+    attemptId: asStr(raw.attempt_id),
+    raw,
+    eventName: pickEventName(raw, ['event_type', 'type', 'event']),
+  };
+}
+
 /** Look up the first non-empty string field from a fallback chain.
  *  Lets the event_name column survive future renames — when the
  *  storage column is renamed to `event_name`, that key wins; until
@@ -313,6 +337,77 @@ function pickEventName(raw: Record<string, unknown>, keys: string[]): string {
 
 /** Render a single field value to a short display string. JSON-stringify
  *  nested values; trim floats; tolerate everything else. */
+/** Extract the integer kbps part from a variant key. Handles both
+ *  `<resolution>@<N>kbps` (e.g. `1080p@7060kbps`) and the
+ *  bitrate-only fallback `<N>kbps` (issue #486 — emitted when no
+ *  variant resolution matched). Returns 0 if the key doesn't match
+ *  so unmatched keys fall to the bottom of the sort. */
+function kbpsFromVariantKey(key: string): number {
+  const m = key.match(/(\d+)kbps/);
+  return m ? Number(m[1]) : 0;
+}
+
+/** Parse the `manifest_variants` raw field (JSON-string or array) into
+ *  a clean list of `{kbps, height}` for the ladder. Heights aren't
+ *  used today but kept for the resolution-weighted alternative when
+ *  we want it. Returns [] when the row hasn't seen the manifest yet. */
+function parseManifestLadder(rawMV: unknown): { kbps: number; height: number }[] {
+  let arr: unknown = rawMV;
+  if (typeof rawMV === 'string' && rawMV.length > 0 && rawMV !== 'null') {
+    try { arr = JSON.parse(rawMV); } catch { return []; }
+  }
+  if (!Array.isArray(arr)) return [];
+  const out: { kbps: number; height: number }[] = [];
+  for (const v of arr) {
+    const bw = Number((v as Record<string, unknown>)?.bandwidth ?? 0);
+    if (!Number.isFinite(bw) || bw <= 0) continue;
+    const resStr = String((v as Record<string, unknown>)?.resolution ?? '');
+    const h = Number(resStr.match(/x(\d+)/i)?.[1] ?? 0);
+    out.push({ kbps: Math.round(bw / 1000), height: Number.isFinite(h) ? h : 0 });
+  }
+  return out;
+}
+
+/** Log-bitrate-weighted quality % with a baseline floor (issue #486).
+ *
+ * Perceived video quality is roughly logarithmic in bitrate (the
+ * Weber-Fechner curve that also governs perceived loudness): doubling
+ * the bitrate barely registers near the top of the ladder. Linear
+ * bitrate weighting penalises 1080p too harshly when the ceiling is
+ * 4K. This computes `quality = log(kbps/min) / log(max/min)` per
+ * variant, clamps to `BASELINE_FLOOR` so the bottom variant isn't
+ * scored zero, and time-weights across the variants the player has
+ * actually watched. Returns null when inputs are insufficient (no
+ * ladder, no per-variant time, single-variant ladder where the log
+ * ratio is undefined). */
+const QUALITY_BASELINE_FLOOR = 0.20;
+function computeQualityPct(
+  perVariant: Record<string, number>,
+  ladder: { kbps: number; height: number }[],
+): number | null {
+  if (!ladder.length) return null;
+  const kbpsList = ladder.map((v) => v.kbps).filter((k) => k > 0);
+  if (kbpsList.length < 2) return null;
+  const minKbps = Math.min(...kbpsList);
+  const maxKbps = Math.max(...kbpsList);
+  if (maxKbps <= minKbps) return null;
+  const denom = Math.log(maxKbps / minKbps);
+  let weightedSum = 0;
+  let totalSec = 0;
+  for (const [key, seconds] of Object.entries(perVariant)) {
+    if (!Number.isFinite(seconds) || seconds <= 0) continue;
+    const kbps = kbpsFromVariantKey(key);
+    if (kbps <= 0) continue;
+    const ratio = kbps / minKbps;
+    const raw = ratio > 0 ? Math.log(ratio) / denom : 0;
+    const q = Math.max(QUALITY_BASELINE_FLOOR, raw);
+    weightedSum += q * seconds;
+    totalSec += seconds;
+  }
+  if (totalSec <= 0) return null;
+  return (weightedSum / totalSec) * 100;
+}
+
 function formatValue(v: unknown): string {
   if (v == null) return '';
   if (typeof v === 'string') return v;
@@ -342,6 +437,83 @@ function fieldsFromRaw(raw: Record<string, unknown>, extraSkip?: Set<string>): D
     if (extraSkip && extraSkip.has(k)) continue;
     const v = raw[k];
     if (v == null) continue;
+    // player_metrics_time_per_variant_s (issue #486 per-variant watch
+    // time): each inner key is a `<resolution>@<kbps>kbps` label, the
+    // value is seconds. Render as one chip per variant, value
+    // formatted as `<seconds>s (<pct>%)` so the operator sees both
+    // absolute time and share of the play at a glance. Sorted by
+    // time descending so dominant variants lead.
+    // CH projection drops the `player_metrics_` prefix; check both
+    // the raw heartbeat field name and the CH column name so this
+    // expansion works whether the row came straight off the SSE
+    // session map or through the timeseries bundle projection.
+    if ((k === 'time_per_variant_s' || k === 'player_metrics_time_per_variant_s')
+        && typeof v === 'string' && v.length > 2 && v.charAt(0) === '{') {
+      try {
+        const parsed = JSON.parse(v);
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+          const entries: [string, number][] = [];
+          let total = 0;
+          for (const ik of Object.keys(parsed as Record<string, unknown>)) {
+            const iv = Number((parsed as Record<string, unknown>)[ik]);
+            if (!Number.isFinite(iv) || iv <= 0) continue;
+            entries.push([ik, iv]);
+            total += iv;
+          }
+          // Emit a SINGLE chip carrying every variant's seconds + %.
+          // Issue #486 follow-up: when each variant was its own chip
+          // the "by-change-rate" field ordering re-sorted them by how
+          // often the seconds value moved, which scrambled the
+          // ladder. Joining them into one value freezes the
+          // bitrate-descending order regardless of the field-order
+          // mode. Bitrate descending so the ladder reads top→bottom
+          // of the manifest regardless of which variant dominates.
+          entries.sort((a, b) => kbpsFromVariantKey(b[0]) - kbpsFromVariantKey(a[0]));
+          const parts = entries.map(([ik, seconds]) => {
+            const pct = total > 0 ? Math.round((seconds / total) * 100) : 0;
+            return `${ik}=${seconds.toFixed(1)}s(${pct}%)`;
+          });
+          if (parts.length) {
+            out.push({ name: 'time_per_variant', value: parts.join(' · ') });
+          }
+          // Cumulative-since-start quality chip. The 60-second
+          // sliding-window companion is appended later in
+          // rowsWithFields (which has access to the prior row
+          // needed for the diff). Issue #486.
+          const perVariantMap: Record<string, number> = {};
+          for (const [ik, seconds] of entries) perVariantMap[ik] = seconds;
+          const ladder = parseManifestLadder(raw.manifest_variants);
+          const quality = computeQualityPct(perVariantMap, ladder);
+          if (quality != null) {
+            out.push({
+              name: 'quality_pct',
+              value: `${quality.toFixed(1)}% (log-bitrate, cumulative)`,
+            });
+          }
+          continue;
+        }
+      } catch { /* fall through */ }
+    }
+    // raw_json (issue #486 AVMetrics rows): the value is a JSON-object
+    // string holding the AVMetric event's full Obj-C property dump. A
+    // single chip with 2000 chars overflows the column. Parse it and
+    // emit one chip per inner key — matches the visual density of
+    // every other row source.
+    if (k === 'raw_json' && typeof v === 'string' && v.length > 2 && v.charAt(0) === '{') {
+      try {
+        const parsed = JSON.parse(v);
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+          for (const ik of Object.keys(parsed as Record<string, unknown>).sort()) {
+            const iv = (parsed as Record<string, unknown>)[ik];
+            if (iv == null) continue;
+            const formatted = formatValue(iv);
+            if (formatted === '') continue;
+            out.push({ name: ik, value: formatted });
+          }
+          continue;
+        }
+      } catch { /* fall through to single-chip rendering */ }
+    }
     const formatted = formatValue(v);
     if (formatted === '') continue;
     out.push({ name: k, value: formatted });
@@ -505,6 +677,7 @@ const allRows = computed<Row[]>(() => {
   void props.eventsStream.version.value;
   void props.networkStream.version.value;
   void props.controlStream.version.value;
+  void props.avmetricsStream.version.value;
   const built: Row[] = [];
   if (showEvents.value) {
     for (const raw of props.eventsStream.inRange(0, Number.MAX_SAFE_INTEGER)) {
@@ -521,6 +694,12 @@ const allRows = computed<Row[]>(() => {
   if (showControl.value) {
     for (const raw of props.controlStream.inRange(0, Number.MAX_SAFE_INTEGER)) {
       const r = buildEventRow(raw);
+      if (r) built.push(r);
+    }
+  }
+  if (showAVMetrics.value) {
+    for (const raw of props.avmetricsStream.inRange(0, Number.MAX_SAFE_INTEGER)) {
+      const r = buildAVMetricsRow(raw);
       if (r) built.push(r);
     }
   }
@@ -675,11 +854,81 @@ const rowsWithFields = computed<RowWithFields[]>(() => {
       fields = fieldsFromRaw(r.raw, EVENT_SKIP);
     }
     fields = sortFields(fields, r.source);
+    // Sliding-window quality (issue #486). For every heartbeat row,
+    // walk back through the chronological event rows to find one
+    // that's at least `QUALITY_WINDOW_MS` older and also carries
+    // `time_per_variant_s`. Diff the two cumulative dicts to get the
+    // per-variant *seconds inside the window*, then run the
+    // log-bitrate quality formula on that delta. The chip reads as
+    // "how good did the last N seconds look" instead of "how good
+    // has the whole play been so far".
+    if (r.source === 'event') {
+      const tpvNowRaw = (r.raw.time_per_variant_s ?? r.raw.player_metrics_time_per_variant_s);
+      if (typeof tpvNowRaw === 'string' && tpvNowRaw.charAt(0) === '{') {
+        const cutoff = r.ts - QUALITY_WINDOW_MS;
+        let priorRaw: Record<string, unknown> | null = null;
+        for (let j = i - 1; j >= 0; j--) {
+          const pr = chrono[j];
+          if (pr.source !== 'event') continue;
+          if (pr.ts > cutoff) continue;
+          const pTpv = pr.raw.time_per_variant_s ?? pr.raw.player_metrics_time_per_variant_s;
+          if (typeof pTpv === 'string' && pTpv.charAt(0) === '{') {
+            priorRaw = pr.raw;
+            break;
+          }
+        }
+        const windowField = computeWindowQualityField(r.raw, priorRaw);
+        if (windowField) fields = [...fields, windowField];
+      }
+    }
     out[i] = { ...r, fields };
     if (r.source === 'event') prevSnapshot = r.raw;
   }
   return out;
 });
+
+/** Window size for the sliding-quality chip. 60 seconds is the
+ *  standard analytics-dashboard window — long enough to be stable
+ *  across a couple of segment fetches, short enough that a real
+ *  ABR shift shows up within ~1 chip cycle. */
+const QUALITY_WINDOW_MS = 60_000;
+
+/** Build the sliding-window quality chip for one heartbeat row.
+ *  Returns null when we can't compute (no prior row in window, no
+ *  ladder yet, or the diff produced no positive deltas). Issue #486. */
+function computeWindowQualityField(
+  currentRaw: Record<string, unknown>,
+  priorRaw: Record<string, unknown> | null,
+): DisplayedField | null {
+  if (!priorRaw) return null;
+  let cur: Record<string, unknown>;
+  let prv: Record<string, unknown>;
+  try {
+    cur = JSON.parse(String(
+      currentRaw.time_per_variant_s ?? currentRaw.player_metrics_time_per_variant_s ?? '{}',
+    ));
+    prv = JSON.parse(String(
+      priorRaw.time_per_variant_s ?? priorRaw.player_metrics_time_per_variant_s ?? '{}',
+    ));
+  } catch { return null; }
+  if (!cur || typeof cur !== 'object' || Array.isArray(cur)) return null;
+  if (!prv || typeof prv !== 'object' || Array.isArray(prv)) return null;
+  const delta: Record<string, number> = {};
+  for (const k of Object.keys(cur)) {
+    const c = Number((cur as Record<string, unknown>)[k] ?? 0);
+    const p = Number((prv as Record<string, unknown>)[k] ?? 0);
+    const d = c - p;
+    if (Number.isFinite(d) && d > 0) delta[k] = d;
+  }
+  if (Object.keys(delta).length === 0) return null;
+  const ladder = parseManifestLadder(currentRaw.manifest_variants);
+  const q = computeQualityPct(delta, ladder);
+  if (q == null) return null;
+  return {
+    name: 'quality_pct_60s',
+    value: `${q.toFixed(1)}% (log-bitrate, 60s window)`,
+  };
+}
 
 const sortedRows = computed<RowWithFields[]>(() => {
   const list = rowsWithFields.value.slice();
@@ -698,13 +947,27 @@ const sortedRows = computed<RowWithFields[]>(() => {
 });
 
 const counts = computed(() => {
-  let evt = 0, net = 0, ctl = 0;
+  let evt = 0, net = 0, ctl = 0, avm = 0;
   for (const r of allRows.value) {
     if (r.source === 'event') evt++;
     else if (r.source === 'network') net++;
+    else if (r.source === 'avmetrics') avm++;
     else ctl++;
   }
-  return { evt, net, ctl, total: allRows.value.length };
+  return { evt, net, ctl, avm, total: allRows.value.length };
+});
+
+/** True when the active player has any AVMetrics rows in the cached
+ *  window. Hides the AVMetrics filter checkbox on non-iOS devices
+ *  (Android, Roku, Web) so the toolbar doesn't carry a permanently-
+ *  empty row count. Independent of `showAVMetrics` — checks the
+ *  underlying stream directly so the toggle being off doesn't fool
+ *  the test. Issue #486. */
+const hasAVMetrics = computed(() => {
+  void props.avmetricsStream.version.value;
+  const bounds = props.avmetricsStream.rangeBounds.value;
+  if (bounds && (bounds.max ?? 0) > 0) return true;
+  return props.avmetricsStream.inRange(0, Number.MAX_SAFE_INTEGER).length > 0;
 });
 
 function clickSort(col: SortCol) {
@@ -807,6 +1070,7 @@ function onRowsWheel(e: WheelEvent) {
       <label class="opt"><input type="checkbox" v-model="showEvents" /> Events ({{ counts.evt }})</label>
       <label class="opt"><input type="checkbox" v-model="showNetwork" /> Network ({{ counts.net }})</label>
       <label class="opt"><input type="checkbox" v-model="showControl" /> Control ({{ counts.ctl }})</label>
+      <label v-if="hasAVMetrics" class="opt" title="iOS 18 AVMetrics raw events (issue #486 spike). Parallel observation stream from AVFoundation — compare side-by-side against today's heartbeat-derived Events."><input type="checkbox" v-model="showAVMetrics" /> AVMetrics ({{ counts.avm }})</label>
       <label class="opt"><input type="checkbox" v-model="showRaw" /> Raw</label>
       <span class="count">{{ counts.total }} row{{ counts.total === 1 ? '' : 's' }}</span>
       <button
@@ -1062,6 +1326,11 @@ function onRowsWheel(e: WheelEvent) {
 .row.src-network  { background: #ffffff; }
 .row.src-control    { background: #fef9c3; }
 .row.src-control:hover { background: #fef08a; }
+/* AVMetrics: cool indigo so it reads as "parallel observation stream"
+ * — distinct from the warm yellow Control rail without competing with
+ * the severity tints. Issue #486 spike. */
+.row.src-avmetrics    { background: #ede9fe; }
+.row.src-avmetrics:hover { background: #ddd6fe; }
 
 /* Row tints by severity (issue #473). Driven by the worst label on
  * the row; placed AFTER the .row.src-* rules so source order breaks
@@ -1132,9 +1401,11 @@ function onRowsWheel(e: WheelEvent) {
   letter-spacing: 0.4px;
   border: 1px solid transparent;
 }
-.tag-event   { background: #e5e7eb; color: #374151; border-color: #d1d5db; }
-.tag-network { background: #dbeafe; color: #1e3a8a; border-color: #bfdbfe; }
-.tag-marker  { background: #fde68a; color: #92400e; border-color: #fcd34d; }
+.tag-event    { background: #e5e7eb; color: #374151; border-color: #d1d5db; }
+.tag-network  { background: #dbeafe; color: #1e3a8a; border-color: #bfdbfe; }
+.tag-marker   { background: #fde68a; color: #92400e; border-color: #fcd34d; }
+.tag-control  { background: #fde68a; color: #92400e; border-color: #fcd34d; }
+.tag-avmetrics { background: #c4b5fd; color: #4c1d95; border-color: #a78bfa; }
 
 .sortable { cursor: pointer; user-select: none; }
 .sortable:hover { color: #1f2937; }

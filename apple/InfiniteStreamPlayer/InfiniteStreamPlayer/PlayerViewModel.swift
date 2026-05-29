@@ -247,6 +247,13 @@ final class PlayerViewModel: ObservableObject {
     // heartbeat (bps=1.84) that arrived later. See plan
     // humming-sleeping-squid.md.
     private var metricsTaskTail: Task<Void, Never>?
+    // iOS 18 AVMetrics raw-event subscriber for the current AVPlayerItem
+    // (issue #486 spike). Replaced on every new item; nil when no item
+    // is bound or when running on a pre-iOS-18 build. Property type is
+    // `Any?` so the declaration doesn't need an `@available` mark on
+    // PlayerViewModel itself — the concrete cast lives inside
+    // attachAVMetrics / detachAVMetrics, which are guarded.
+    private var avMetricsSubscriber: Any?
     private let metricsSessionLookupSeconds: TimeInterval = 30
     private let autoRecoveryThresholdSeconds: TimeInterval = 60
     private let autoRecoveryBaseDelaySeconds: TimeInterval = 2
@@ -828,6 +835,10 @@ final class PlayerViewModel: ObservableObject {
         item.automaticallyPreservesTimeOffsetFromLive = true
         apply4kPreference(to: item)
         player.replaceCurrentItem(with: item)
+        // iOS 18 AVMetrics raw-event subscriber for the comparison spike
+        // (issue #486). Rebuilt per-item so the streams stay bound to the
+        // playerItem that AVFoundation is actually observing.
+        attachAVMetrics(to: item)
         player.isMuted = isMuted
         player.automaticallyWaitsToMinimizeStalling = true
         player.play()
@@ -1836,12 +1847,20 @@ extension PlayerViewModel {
            now.timeIntervalSince(lastLookup) < metricsSessionLookupSeconds {
             return existing
         }
-        var request = URLRequest(url: baseURL.appendingPathComponent("api/sessions"))
+        let lookupURL = baseURL.appendingPathComponent("api/sessions")
+        var request = URLRequest(url: lookupURL)
         applyPlayerHeaders(to: &request)
         do {
             let (data, response) = try await URLSession.shared.data(for: request)
-            if let http = response as? HTTPURLResponse, http.statusCode >= 400 { return nil }
-            guard let json = try JSONSerialization.jsonObject(with: data) as? [[String: Any]] else { return nil }
+            let status = (response as? HTTPURLResponse)?.statusCode ?? -1
+            if status >= 400 {
+                NSLog("[SESSION-RESOLVE] HTTP \(status) — abort")
+                return nil
+            }
+            guard let json = try JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
+                NSLog("[SESSION-RESOLVE] response not [[String: Any]] — abort")
+                return nil
+            }
             let match = json.first { entry in
                 (entry["player_id"] as? String) == playerId
             }
@@ -1850,10 +1869,165 @@ extension PlayerViewModel {
                 metricsLastSessionLookup = now
                 return sessionId
             }
+            // Bust the stale cache (issue #486 follow-up) — if /api/sessions
+            // succeeded but our player_id isn't there, the cached sessionId
+            // is dead. Without this we'd keep POSTing to a ghost session
+            // forever after the proxy is restarted.
+            if metricsSessionId != nil {
+                NSLog("[SESSION-RESOLVE] no match for player_id=\(playerId) — busting stale cache")
+                metricsSessionId = nil
+                metricsLastSessionLookup = nil
+            }
         } catch {
+            NSLog("[SESSION-RESOLVE] EXCEPTION: \(error.localizedDescription)")
             return nil
         }
         return nil
+    }
+
+    /// Time-watched per variant, in seconds, keyed by a compact
+    /// `<resolution>@<kbps>kbps` label (e.g. `"360p@725kbps"`).
+    /// Sourced from `AVPlayerItemAccessLog.events` — Apple's
+    /// canonical record of per-segment playback, where each event
+    /// carries `durationWatched` for a contiguous run at a given
+    /// indicated bitrate. The resolution half comes from a tolerant
+    /// match of the access-log bitrate against the asset's variant
+    /// ladder (`AVURLAsset.variants`). When no variant matches
+    /// within ±10%, falls back to a bitrate-only label so the row
+    /// still shows.
+    ///
+    /// Per issue #486: AVMetricPlayerItemPlaybackSummaryEvent does NOT
+    /// expose this breakdown (the only time field there is
+    /// `timeWeightedAverageBitrate`, a session-wide weighted average).
+    /// The access log fills that gap — and stays valid throughout the
+    /// play, so we publish on every heartbeat AND it's naturally
+    /// captured by the last heartbeat before tear-down.
+    /// Frames-displayed estimate from playing-time × active variant
+    /// nominal fps − dropped frames. Returns nil when the variant's
+    /// nominal FPS isn't available yet (caller falls back to the
+    /// legacy `estimatedDisplayedFrames`). Issue #486 follow-up.
+    ///
+    /// `diagnostics.currentTime` is the playhead position which only
+    /// advances while the player is actually playing — it freezes
+    /// during stalls / pauses, which is exactly what we want as the
+    /// denominator. Multiplying by nominalFrameRate gives the count
+    /// of frames the player *should* have displayed; subtracting
+    /// dropped frames yields the actual displayed count.
+    fileprivate func framesDisplayedFromNominalFps() -> Double? {
+        guard let fps = diagnostics.nominalFrameRate, fps > 0 else { return nil }
+        let playing = diagnostics.currentTime
+        guard playing > 0 else { return 0 }
+        let dropped = Double(diagnostics.droppedVideoFrames ?? 0)
+        return max(0, playing * fps - dropped)
+    }
+
+    /// More accurate frames-displayed when the player has crossed
+    /// variants of differing FPS — walks the access log and weights
+    /// each segment's `durationWatched` by the matching variant's
+    /// `nominalFrameRate`. Returns nil when the asset doesn't expose
+    /// per-variant FPS metadata (caller falls back to the
+    /// single-variant nominal-fps formula). Issue #486 follow-up.
+    ///
+    /// All variants in our content are 25 fps today, so this exactly
+    /// matches `framesDisplayedFromNominalFps()` in practice; the
+    /// generalisation is here for future content with mixed-FPS
+    /// ladders (e.g. 30/60 fps for sports streams).
+    fileprivate func framesDisplayedFromAccessLog() -> Double? {
+        guard let item = player.currentItem,
+              let log = item.accessLog() else { return nil }
+
+        // bitrate → nominalFrameRate from the asset's variants. Same
+        // tolerant matching as perVariantTimeSeconds() so an EWMA-
+        // jittered indicatedBitrate still matches its rung.
+        var ladder: [(peak: Double, fps: Double)] = []
+        if let asset = item.asset as? AVURLAsset {
+            for variant in asset.variants {
+                guard let peak = variant.peakBitRate, peak > 0 else { continue }
+                guard let nfrVal = variant.videoAttributes?.nominalFrameRate else { continue }
+                let nfr = Double(nfrVal)
+                guard nfr > 0 else { continue }
+                ladder.append((peak: peak, fps: nfr))
+            }
+        }
+        if ladder.isEmpty { return nil }
+
+        func fpsFor(bitrate: Double) -> Double {
+            var best: (delta: Double, fps: Double)? = nil
+            for entry in ladder {
+                let delta = abs(entry.peak - bitrate)
+                let tol = max(entry.peak * 0.10, 50_000)
+                if delta <= tol, (best == nil || delta < best!.delta) {
+                    best = (delta, entry.fps)
+                }
+            }
+            return best?.fps ?? 0
+        }
+
+        var expected: Double = 0
+        for event in log.events {
+            let bitrate = event.indicatedBitrate
+            let duration = event.durationWatched
+            guard bitrate > 0, duration > 0 else { continue }
+            let fps = fpsFor(bitrate: bitrate)
+            if fps > 0 { expected += duration * fps }
+        }
+        if expected <= 0 { return nil }
+        let dropped = Double(diagnostics.droppedVideoFrames ?? 0)
+        return max(0, expected - dropped)
+    }
+
+    fileprivate func perVariantTimeSeconds() -> [String: Double] {
+        guard let item = player.currentItem,
+              let log = item.accessLog() else { return [:] }
+
+        // Build a bitrate → resolution lookup from the asset's
+        // variant ladder. Each AVAssetVariant carries peakBitRate
+        // (the EXT-X-STREAM-INF BANDWIDTH attribute) and an optional
+        // videoAttributes.presentationSize. Tolerant match below
+        // since the access log's `indicatedBitrate` is an EWMA
+        // estimate, not an exact reproduction of the manifest's
+        // BANDWIDTH value.
+        var ladder: [(peak: Double, label: String)] = []
+        if let asset = item.asset as? AVURLAsset {
+            for variant in asset.variants {
+                guard let peak = variant.peakBitRate, peak > 0 else { continue }
+                if let size = variant.videoAttributes?.presentationSize, size.height > 0 {
+                    ladder.append((peak: peak, label: "\(Int(size.height))p"))
+                } else {
+                    ladder.append((peak: peak, label: ""))
+                }
+            }
+        }
+
+        func labelFor(bitrate: Double) -> String {
+            var best: (delta: Double, label: String)? = nil
+            for entry in ladder {
+                let delta = abs(entry.peak - bitrate)
+                let tol = max(entry.peak * 0.10, 50_000) // ±10% or 50 kbps, whichever wider
+                if delta <= tol, (best == nil || delta < best!.delta) {
+                    best = (delta, entry.label)
+                }
+            }
+            let kbps = Int((bitrate / 1000).rounded())
+            if let b = best, !b.label.isEmpty {
+                return "\(b.label)@\(kbps)kbps"
+            }
+            return "\(kbps)kbps"
+        }
+
+        var out: [String: Double] = [:]
+        for event in log.events {
+            let bitrate = event.indicatedBitrate
+            let duration = event.durationWatched
+            guard bitrate > 0, duration > 0 else { continue }
+            let key = labelFor(bitrate: bitrate)
+            // Round to 2 decimal places so the JSON stays compact and
+            // the dashboard's chip rendering shows e.g. "12.34" not
+            // "12.339999999". Sum first, round on read.
+            out[key, default: 0] += duration
+        }
+        // Round at the end so the running sum stays full precision.
+        return out.mapValues { (round($0 * 100) / 100) }
     }
 
     fileprivate func buildMetricsPayload(event: String, at eventAt: Date = Date(), extra: [String: Any] = [:]) -> [String: Any] {
@@ -1906,8 +2080,25 @@ extension PlayerViewModel {
             "player_metrics_stall_count": diagnostics.stallCount,
             "player_metrics_stall_time_s": roundSeconds(diagnostics.stallTimeSeconds),
             "player_metrics_last_stall_time_s": roundSeconds(diagnostics.lastStallDurationSeconds),
-            "player_metrics_frames_displayed": diagnostics.estimatedDisplayedFrames.map { roundMetric($0) },
+            // Displayed frame count (issue #486 follow-up). Recomputed
+            // from playing-time × active variant's nominal frame rate
+            // minus dropped frames, instead of the legacy
+            // `estimatedDisplayedFrames` that drifted because it
+            // assumed a constant fps regardless of variant. The
+            // dashboard's FPS chart reads delta(frames)/delta(time)
+            // off this column — with the corrected formula a stall
+            // shows as a 0 fps dip and a drop burst shows as a notch
+            // proportional to the drop rate. Falls back to the legacy
+            // estimate when nominalFrameRate hasn't loaded yet (early
+            // in a play, before the first AVAssetTrack metadata
+            // resolves).
+            "player_metrics_frames_displayed": framesDisplayedFromAccessLog()
+                ?? framesDisplayedFromNominalFps()
+                ?? diagnostics.estimatedDisplayedFrames.map { roundMetric($0) },
             "player_metrics_dropped_frames": diagnostics.droppedVideoFrames.map { roundMetric($0) },
+            // Publish the variant's nominal FPS alongside so the
+            // dashboard can show effective vs nominal at a glance.
+            "player_metrics_nominal_fps_current": diagnostics.nominalFrameRate,
             "player_metrics_loop_count_player": loopCount,
             "player_metrics_loop_count_increment": loopIncrement,
             "player_metrics_profile_shift_count": profileShiftCount,
@@ -1929,6 +2120,71 @@ extension PlayerViewModel {
             compact["player_metrics_network_bitrate_mbps"] = mbpsValue
         } else {
             compact["player_metrics_network_bitrate_mbps"] = NSNull()
+        }
+        // HOLD-BACK / PART-HOLD-BACK from the manifest (issue #486
+        // follow-up). AVFoundation parses EXT-X-SERVER-CONTROL for us
+        // and exposes the result via `recommendedTimeOffsetFromLive`
+        // (iOS 13+). `configured` is what the app currently has set;
+        // when both are present the gap is the app's deviation from
+        // Apple's manifest-derived recommendation.
+        //
+        // Pre-computed live_offset_true_s = live_offset_s +
+        // recommended_offset_s is published here too so the dashboard
+        // doesn't have to derive — all the math lives in the client.
+        if let item = player.currentItem {
+            var recommendedSec: Double? = nil
+            let rec = item.recommendedTimeOffsetFromLive
+            if rec.isValid, rec.isNumeric {
+                let s = rec.seconds
+                if s.isFinite, s >= 0 {
+                    recommendedSec = s
+                    compact["player_metrics_recommended_offset_s"] = roundSeconds(s)
+                }
+            }
+            let cfg = item.configuredTimeOffsetFromLive
+            if cfg.isValid, cfg.isNumeric {
+                let s = cfg.seconds
+                if s.isFinite, s >= 0 {
+                    compact["player_metrics_configured_offset_s"] = roundSeconds(s)
+                }
+            }
+            // Replace `live_offset_s` with the true offset to the end
+            // of the playlist = the seekable-edge offset plus the
+            // manifest's HOLD-BACK / PART-HOLD-BACK. The raw
+            // seekable-edge distance alone is misleading (it sits
+            // HOLD-BACK seconds short of the true live edge), so the
+            // dashboard never sees that value — the field now means
+            // "offset to true playlist end" for every iOS heartbeat.
+            // No parallel `_true_s` field is published.
+            if let liveOff = diagnostics.liveOffset, let rec = recommendedSec {
+                compact["player_metrics_live_offset_s"] = roundSeconds(liveOff + rec)
+            }
+        }
+        // Per-variant watch time (issue #486). One JSON-object string
+        // mapping indicatedBitrate (bps) → seconds watched at that
+        // bitrate. Encoded as a string so the existing CH long-tail
+        // column (`session_json`) and the dashboard chip renderer
+        // pick it up without schema changes. Empty payloads are
+        // omitted entirely so heartbeats early in a play don't ship
+        // `{}`. The last heartbeat before tear-down carries the
+        // final accumulated values — no separate end-of-session POST
+        // needed.
+        let perVariant = perVariantTimeSeconds()
+        if !perVariant.isEmpty,
+           let data = try? JSONSerialization.data(withJSONObject: perVariant, options: [.sortedKeys]),
+           let json = String(data: data, encoding: .utf8) {
+            compact["player_metrics_time_per_variant_s"] = json
+        }
+        // Client-side RTT proxy from AVMetrics TTFB (issue #486).
+        // Median of the recent MediaResourceRequest TTFBs — only
+        // populated on iOS 18+ with the AVMetrics subscriber attached.
+        // Pairs with the server-side `client_rtt_ms` on the RTT chart
+        // so we can see when the two views diverge.
+        if #available(iOS 18.0, *), let sub = avMetricsSubscriber as? AVMetricsSubscriber {
+            let medianMs = sub.medianTTFB()
+            if medianMs > 0 {
+                compact["player_metrics_client_rtt_avmetrics_ms"] = roundMetric(medianMs)
+            }
         }
         return compact
     }
@@ -1990,9 +2246,105 @@ extension PlayerViewModel {
         ]
         do {
             request.httpBody = try JSONSerialization.data(withJSONObject: body, options: [])
-            _ = try await URLSession.shared.data(for: request)
+            let (respData, response) = try await URLSession.shared.data(for: request)
+            let status = (response as? HTTPURLResponse)?.statusCode ?? -1
+            if status != 200 {
+                let bodyStr = String(data: respData.prefix(200), encoding: .utf8) ?? "<binary>"
+                NSLog("[METRICS-POST] ← HTTP \(status) body=\(bodyStr)")
+            }
         } catch {
+            NSLog("[METRICS-POST] EXCEPTION: \(error.localizedDescription)")
             log("Metrics patch failed: \(error.localizedDescription)")
+        }
+    }
+
+    // MARK: - iOS 18 AVMetrics spike (issue #486)
+
+    /// Replace the AVMetrics subscriber bound to `item`. Cancels the
+    /// previous one (if any) so a content swap or recovery-driven
+    /// `replaceCurrentItem` doesn't leak two subscribers fighting over
+    /// the buffer. No-op on pre-iOS-18 — the project min target is iOS
+    /// 26 so the guard is belt-and-suspenders.
+    /// Grace period between dropping our reference to a subscriber
+    /// and cancelling its async loops. AVFoundation emits the
+    /// `AVMetricPlayerItemPlaybackSummaryEvent` on the *old* item
+    /// shortly after `replaceCurrentItem`; if we cancel synchronously
+    /// the summary lands on a torn-down loop and is dropped. 1.5s is
+    /// well over the observed emission window for both replace-and-
+    /// swap and replace-with-nil. Issue #486 spike.
+    private static let avMetricsDetachGraceNs: UInt64 = 1_500_000_000
+
+    fileprivate func attachAVMetrics(to item: AVPlayerItem) {
+        if #available(iOS 18.0, *) {
+            NSLog("[AVMetrics] attachAVMetrics — replacing subscriber for new AVPlayerItem")
+            scheduleAVMetricsDrain(avMetricsSubscriber as? AVMetricsSubscriber)
+            avMetricsSubscriber = AVMetricsSubscriber(item: item) { [weak self] events in
+                await self?.sendAVMetricsBatch(events)
+            }
+        } else {
+            NSLog("[AVMetrics] attachAVMetrics skipped — OS pre-iOS-18 (subscriber gated)")
+        }
+    }
+
+    fileprivate func detachAVMetrics() {
+        if #available(iOS 18.0, *) {
+            NSLog("[AVMetrics] detachAVMetrics — draining old subscriber for PlaybackSummary")
+            scheduleAVMetricsDrain(avMetricsSubscriber as? AVMetricsSubscriber)
+            avMetricsSubscriber = nil
+        }
+    }
+
+    /// Schedule a delayed cancel on `old` so trailing AVMetric events
+    /// — chiefly `PlaybackSummaryEvent`, emitted on item termination
+    /// — have time to be recorded before the async loops shut down.
+    @available(iOS 18.0, *)
+    private func scheduleAVMetricsDrain(_ old: AVMetricsSubscriber?) {
+        guard let old else { return }
+        Task {
+            try? await Task.sleep(nanoseconds: Self.avMetricsDetachGraceNs)
+            NSLog("[AVMetrics] drain grace elapsed — cancelling prior subscriber")
+            old.cancel()
+        }
+    }
+
+    /// POST a batch of AVMetric events to the proxy's
+    /// `/api/session/{id}/avmetrics` endpoint. Mirrors patchSessionMetrics
+    /// for the URL-construction + headers + play_id/attempt_id stamping;
+    /// the body is `{events: [...]}` instead of the heartbeat's
+    /// `{set, fields}` envelope so the two streams stay independently
+    /// projectable on the server.
+    fileprivate func sendAVMetricsBatch(_ events: [[String: Any]]) async {
+        guard !events.isEmpty else { return }
+        guard let baseURL = metricsBaseURL() else {
+            NSLog("[AVMetrics] sendBatch skipped — no metricsBaseURL (no active server)")
+            return
+        }
+        guard let sessionId = await resolveMetricsSessionId(baseURL: baseURL) else {
+            NSLog("[AVMetrics] sendBatch skipped — no session_id resolved yet (try again on next batch)")
+            return
+        }
+        let pathURL = baseURL
+            .appendingPathComponent("api/session")
+            .appendingPathComponent(sessionId)
+            .appendingPathComponent("avmetrics")
+        var url = appendPlayID(to: pathURL)
+        url = appendAttemptID(to: url)
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        applyPlayerHeaders(to: &request)
+        let body: [String: Any] = ["events": events]
+        do {
+            request.httpBody = try JSONSerialization.data(withJSONObject: body, options: [])
+            let (data, response) = try await URLSession.shared.data(for: request)
+            let status = (response as? HTTPURLResponse)?.statusCode ?? -1
+            if status != 200 {
+                let bodyStr = String(data: data.prefix(200), encoding: .utf8) ?? "<binary>"
+                NSLog("[AVMetrics] POST ← HTTP \(status) body=\(bodyStr)")
+            }
+        } catch {
+            NSLog("[AVMetrics] POST failed: \(error.localizedDescription)")
+            log("AVMetrics batch POST failed: \(error.localizedDescription)")
         }
     }
 

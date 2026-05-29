@@ -23,7 +23,7 @@ const variants = computed(() => {
 const LIVE_OFFSET_CHOICES = [0, 6, 18, 24] as const;
 type LiveOffset = (typeof LIVE_OFFSET_CHOICES)[number];
 
-function onBoolChange(field: 'strip_codecs' | 'strip_average_bandwidth' | 'overstate_bandwidth', e: Event) {
+function onBoolChange(field: 'strip_codecs' | 'strip_average_bandwidth' | 'strip_resolution' | 'overstate_bandwidth', e: Event) {
   const v = (e.target as HTMLInputElement).checked;
   setContent({ [field]: v } as Partial<Content>);
 }
@@ -110,6 +110,17 @@ function variantLabel(v: { url: string; resolution?: string; bandwidth?: number 
         <div class="bool-text">
           <div class="bool-title">Strip AVERAGE-BANDWIDTH</div>
           <div class="bool-desc">Remove AVERAGE-BANDWIDTH attribute from master playlist</div>
+        </div>
+      </label>
+      <label class="bool-item">
+        <input
+          type="checkbox"
+          :checked="content?.strip_resolution ?? false"
+          @change="onBoolChange('strip_resolution', $event)"
+        />
+        <div class="bool-text">
+          <div class="bool-title">Strip RESOLUTION</div>
+          <div class="bool-desc">Remove RESOLUTION attribute from EXT-X-STREAM-INF. AVPlayer keeps playing but variant.video.size becomes empty (issue #486).</div>
         </div>
       </label>
       <label class="bool-item">

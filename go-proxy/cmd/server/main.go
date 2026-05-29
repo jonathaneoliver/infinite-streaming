@@ -364,6 +364,9 @@ type App struct {
 	// controlHub broadcasts proxy/harness control events to subscribers
 	// (forwarder + any dashboard SSE client). Issue #474 Milestone B.
 	controlHub               *ControlEventHub
+	// avmetricsHub broadcasts iOS 18 AVMetrics raw events posted by the
+	// player to dashboard + forwarder subscribers. Issue #486 spike.
+	avmetricsHub             *AVMetricEventHub
 	uiStateVersionSeq        uint64
 	segmentFlightMu          sync.Mutex
 	segmentFlight            map[int]segmentFlightInfo // internal port -> segment transfer info
@@ -599,6 +602,92 @@ func (h *ControlEventHub) RemoveClient(id int) {
 }
 
 func (h *ControlEventHub) Broadcast(ev ControlEvent) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if len(h.clients) == 0 {
+		return
+	}
+	for _, c := range h.clients {
+		select {
+		case c.ch <- ev:
+		default:
+			select {
+			case <-c.ch:
+				c.dropped++
+			default:
+			}
+			select {
+			case c.ch <- ev:
+			default:
+				c.dropped++
+			}
+		}
+	}
+}
+
+// AVMetricEventHub fans out iOS 18 AVMetrics raw events (issue #486) to
+// dashboard + forwarder subscribers. Parallel to ControlEventHub so the
+// spike's comparison stream stays separable from existing channels. Same
+// drop-oldest fanout policy: slow clients lose old events rather than
+// blocking the proxy hot path.
+type AVMetricEventHub struct {
+	mu      sync.Mutex
+	nextID  int
+	clients map[int]*AVMetricClient
+}
+
+type AVMetricClient struct {
+	ch      chan AVMetricEvent
+	dropped uint64
+}
+
+// AVMetricEvent is one row's worth of an AVMetrics-emitted event. The
+// raw subclass name (e.g. AVMetricPlayerItemLikelyToKeepUpEvent) is in
+// `EventType`; the unmodified SDK payload is in `Raw` so the forwarder
+// can persist it verbatim and the dashboard can project new fields
+// without an iOS rebuild. `EventTsMs` is the AVMetrics-side timeline
+// stamp (separate from `Ts` so causality plots don't mix clocks).
+type AVMetricEvent struct {
+	Ts        time.Time       `json:"ts"`
+	SessionID string          `json:"session_id"`
+	PlayerID  string          `json:"player_id"`
+	PlayID    string          `json:"play_id"`
+	AttemptID uint32          `json:"attempt_id"`
+	EventType string          `json:"event_type"`
+	EventTsMs int64           `json:"event_ts_ms"`
+	Raw       json.RawMessage `json:"raw"`
+}
+
+func NewAVMetricEventHub() *AVMetricEventHub {
+	return &AVMetricEventHub{clients: map[int]*AVMetricClient{}}
+}
+
+func (h *AVMetricEventHub) AddClient(buffer int) (int, <-chan AVMetricEvent) {
+	if buffer <= 0 {
+		buffer = 256
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.nextID++
+	id := h.nextID
+	c := &AVMetricClient{ch: make(chan AVMetricEvent, buffer)}
+	h.clients[id] = c
+	return id, c.ch
+}
+
+func (h *AVMetricEventHub) RemoveClient(id int) {
+	h.mu.Lock()
+	c, ok := h.clients[id]
+	if ok {
+		delete(h.clients, id)
+	}
+	h.mu.Unlock()
+	if ok {
+		close(c.ch)
+	}
+}
+
+func (h *AVMetricEventHub) Broadcast(ev AVMetricEvent) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if len(h.clients) == 0 {
@@ -1770,6 +1859,7 @@ func main() {
 		sessionsHub:        NewSessionEventHub(),
 		networkHub:         NewNetworkEventHub(),
 		controlHub:         NewControlEventHub(),
+		avmetricsHub:       NewAVMetricEventHub(),
 		networkLogs:        map[string]*NetworkLogRingBuffer{},
 		loopStateBySession: map[string]ServerLoopState{},
 		segmentFlight:      map[int]segmentFlightInfo{},
@@ -1811,6 +1901,10 @@ func main() {
 	router.HandleFunc("/api/session/{id}", app.handleSession).Methods(http.MethodGet, http.MethodDelete)
 	router.HandleFunc("/api/session/{id}", app.handlePatchSession).Methods(http.MethodPatch)
 	router.HandleFunc("/api/session/{id}/metrics", app.handlePostSessionMetrics).Methods(http.MethodPost)
+	// iOS 18 AVMetrics raw event stream (issue #486 spike). Kept on its
+	// own POST + SSE pair so the comparison against /metrics stays clean.
+	router.HandleFunc("/api/session/{id}/avmetrics", app.handlePostSessionAVMetrics).Methods(http.MethodPost)
+	router.HandleFunc("/api/avmetrics/stream", app.handleAVMetricsStream).Methods(http.MethodGet)
 	router.HandleFunc("/api/session/{id}/network", app.handleGetNetworkLog).Methods(http.MethodGet)
 	router.HandleFunc("/api/network/stream", app.handleNetworkStream).Methods(http.MethodGet)
 	// Control events SSE — issue #474 Milestone B. Mirrors
@@ -2262,6 +2356,144 @@ func (a *App) handlePostSessionMetrics(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]string{"status": "ok"})
 }
 
+// avmetricsBatchPayload is the wire shape iOS posts to
+// /api/session/{id}/avmetrics. The player batches AVMetrics events
+// (~50 per POST or every ~500 ms, whichever fires first) so we don't
+// fan a separate request out per LikelyToKeepUp / Stall / Variant
+// switch frame. `Raw` is a passthrough of the SDK event payload so
+// the projection can evolve server-side without an iOS rebuild.
+type avmetricsBatchPayload struct {
+	Events []struct {
+		EventType string          `json:"event_type"`
+		EventTsMs int64           `json:"event_ts_ms"`
+		Raw       json.RawMessage `json:"raw"`
+	} `json:"events"`
+}
+
+// handlePostSessionAVMetrics receives a batch of iOS 18 AVMetrics events
+// for one session and broadcasts each as an SSE frame to
+// /api/avmetrics/stream. Issue #486 spike.
+//
+// Stays out of the SessionData map / control_revision flow on purpose:
+// AVMetrics is a parallel observation stream for comparison against the
+// existing /metrics heartbeat, not a replacement, and we want both
+// streams independently subscribable + independently disablable.
+func (a *App) handlePostSessionAVMetrics(w http.ResponseWriter, r *http.Request) {
+	id := mux.Vars(r)["id"]
+	if a.avmetricsHub == nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		writeJSON(w, map[string]string{"error": "avmetrics hub unavailable"})
+		return
+	}
+	var payload avmetricsBatchPayload
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		writeJSON(w, map[string]string{"error": "invalid json"})
+		return
+	}
+	if len(payload.Events) == 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		writeJSON(w, map[string]string{"error": "no events"})
+		return
+	}
+	// Resolve sticky identity once per batch — same lookup the
+	// control_events emitter uses so AVMetric rows join to
+	// session_events / network_requests on the same fields.
+	var (
+		playerID  string
+		playID    string
+		attemptID uint32
+	)
+	if id != "" {
+		playerID = a.sessionStickyPlayerID(id)
+		playID = a.sessionStickyPlayID(id)
+		attemptID = a.sessionStickyAttemptID(id)
+	}
+	// Per-request play_id / attempt_id overrides via query string, mirroring
+	// handlePostSessionMetrics (#280) — keeps the row's identity in sync
+	// with the player's current attempt even between manifest fetches.
+	if v := strings.TrimSpace(r.URL.Query().Get("play_id")); v != "" {
+		playID = v
+	}
+	if v := strings.TrimSpace(r.URL.Query().Get("attempt_id")); v != "" {
+		if parsed, err := strconv.ParseUint(v, 10, 32); err == nil {
+			attemptID = uint32(parsed)
+		}
+	}
+	now := time.Now().UTC()
+	for _, ev := range payload.Events {
+		if ev.EventType == "" {
+			continue
+		}
+		a.avmetricsHub.Broadcast(AVMetricEvent{
+			Ts:        now,
+			SessionID: id,
+			PlayerID:  playerID,
+			PlayID:    playID,
+			AttemptID: attemptID,
+			EventType: ev.EventType,
+			EventTsMs: ev.EventTsMs,
+			Raw:       ev.Raw,
+		})
+	}
+	w.WriteHeader(http.StatusOK)
+	writeJSON(w, map[string]int{"accepted": len(payload.Events)})
+}
+
+// handleAVMetricsStream emits each AVMetrics event as it lands. Body
+// shape mirrors /api/control/stream: one SSE `data:` line per event,
+// `{"session_id":"...","entry":{...}}`. Issue #486 spike.
+func (a *App) handleAVMetricsStream(w http.ResponseWriter, r *http.Request) {
+	if a.avmetricsHub == nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		writeJSON(w, map[string]string{"error": "stream unavailable"})
+		return
+	}
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		w.WriteHeader(http.StatusInternalServerError)
+		writeJSON(w, map[string]string{"error": "stream unsupported"})
+		return
+	}
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+
+	clientID, ch := a.avmetricsHub.AddClient(1024)
+	defer a.avmetricsHub.RemoveClient(clientID)
+
+	heartbeat := time.NewTicker(15 * time.Second)
+	defer heartbeat.Stop()
+
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case <-heartbeat.C:
+			if _, err := w.Write([]byte(": ping\n\n")); err != nil {
+				return
+			}
+			flusher.Flush()
+		case ev, ok := <-ch:
+			if !ok {
+				return
+			}
+			payload := struct {
+				SessionID string        `json:"session_id"`
+				Entry     AVMetricEvent `json:"entry"`
+			}{ev.SessionID, ev}
+			b, err := json.Marshal(payload)
+			if err != nil {
+				continue
+			}
+			if _, err := w.Write([]byte("data: " + string(b) + "\n\n")); err != nil {
+				return
+			}
+			flusher.Flush()
+		}
+	}
+}
 
 func (a *App) applySessionSettingsUpdate(id string, payload map[string]interface{}, baseRevision string) (SessionData, int, string) {
 	if payload == nil {
@@ -5767,6 +5999,9 @@ func shouldApplyContentManipulation(session SessionData) bool {
 	if getBool(session, "content_strip_average_bandwidth") {
 		return true
 	}
+	if getBool(session, "content_strip_resolution") {
+		return true
+	}
 	if getBool(session, "content_overstate_bandwidth") {
 		return true
 	}
@@ -5784,13 +6019,14 @@ func shouldApplyContentManipulation(session SessionData) bool {
 func (a *App) applyContentManipulation(body []byte, session SessionData, contentType string) ([]byte, error) {
 	stripCodecs := getBool(session, "content_strip_codecs")
 	stripAvgBandwidth := getBool(session, "content_strip_average_bandwidth")
+	stripResolution := getBool(session, "content_strip_resolution")
 	overstateBandwidth := getBool(session, "content_overstate_bandwidth")
 	liveOffset := getInt(session, "content_live_offset")
 	allowedVariants := getStringSlice(session, "content_allowed_variants")
 
 	// Handle HLS master playlists
 	if strings.Contains(strings.ToLower(contentType), "mpegurl") || strings.Contains(strings.ToLower(contentType), "m3u8") {
-		result, err := manipulateHLSMaster(body, stripCodecs, stripAvgBandwidth, overstateBandwidth, liveOffset, allowedVariants)
+		result, err := manipulateHLSMaster(body, stripCodecs, stripAvgBandwidth, stripResolution, overstateBandwidth, liveOffset, allowedVariants)
 		if err != nil {
 			return nil, err
 		}
@@ -5807,14 +6043,14 @@ func (a *App) applyContentManipulation(body []byte, session SessionData, content
 
 	// Handle DASH manifests
 	if strings.Contains(strings.ToLower(contentType), "dash") || strings.Contains(strings.ToLower(contentType), "mpd") {
-		return manipulateDASHManifest(body, stripCodecs, stripAvgBandwidth, overstateBandwidth, liveOffset, allowedVariants)
+		return manipulateDASHManifest(body, stripCodecs, stripAvgBandwidth, stripResolution, overstateBandwidth, liveOffset, allowedVariants)
 	}
 
 	return body, nil
 }
 
 // manipulateHLSMaster modifies an HLS master playlist
-func manipulateHLSMaster(body []byte, stripCodecs bool, stripAvgBandwidth bool, overstateBandwidth bool, liveOffset int, allowedVariants []string) ([]byte, error) {
+func manipulateHLSMaster(body []byte, stripCodecs bool, stripAvgBandwidth bool, stripResolution bool, overstateBandwidth bool, liveOffset int, allowedVariants []string) ([]byte, error) {
 	playlist, listType, err := m3u8.DecodeFrom(bufio.NewReader(bytes.NewReader(body)), true)
 	if err != nil {
 		return nil, fmt.Errorf("failed to decode HLS playlist: %w", err)
@@ -5867,6 +6103,22 @@ func manipulateHLSMaster(body []byte, stripCodecs bool, stripAvgBandwidth bool, 
 		for _, variant := range master.Variants {
 			if variant != nil && variant.AverageBandwidth > 0 {
 				variant.AverageBandwidth = 0
+				modified = true
+			}
+		}
+	}
+
+	// Strip RESOLUTION if requested (issue #486). Drops the
+	// EXT-X-STREAM-INF RESOLUTION=WxH attribute, leaving the variant
+	// playable but with empty `AVAssetVariant.video.size`. Useful for
+	// testing how players (and the AVMetrics VariantSwitchEvent
+	// payload) handle missing resolution metadata. Apple's HLS
+	// validator (mediastreamvalidator) rejects this; AVPlayer
+	// continues but loses resolution-aware ABR and UI badges.
+	if stripResolution {
+		for _, variant := range master.Variants {
+			if variant != nil && variant.Resolution != "" {
+				variant.Resolution = ""
 				modified = true
 			}
 		}
@@ -5991,12 +6243,13 @@ func rewriteVariantLiveOffsetTags(body []byte, liveOffsetSecs int) []byte {
 
 // manipulateDASHManifest modifies a DASH manifest
 // Note: stripCodecs and allowedVariants parameters are reserved for future DASH implementation
-func manipulateDASHManifest(body []byte, stripCodecs bool, stripAvgBandwidth bool, overstateBandwidth bool, liveOffset int, allowedVariants []string) ([]byte, error) {
+func manipulateDASHManifest(body []byte, stripCodecs bool, stripAvgBandwidth bool, stripResolution bool, overstateBandwidth bool, liveOffset int, allowedVariants []string) ([]byte, error) {
 	// DASH manifest manipulation would require XML parsing and manipulation
 	// using libraries like encoding/xml or third-party XML processors.
 	// This is deferred to keep the initial implementation focused on HLS.
 	_ = stripCodecs        // Silence unused parameter warning
 	_ = stripAvgBandwidth  // Silence unused parameter warning
+	_ = stripResolution    // Silence unused parameter warning
 	_ = overstateBandwidth // Silence unused parameter warning
 	_ = liveOffset         // Silence unused parameter warning
 	_ = allowedVariants    // Silence unused parameter warning
@@ -7653,15 +7906,16 @@ func (a *App) normalizeSessionsForResponse(sessions []SessionData) []SessionData
 		// below makes the actual cap visible to charts and the dashboard
 		// throttle line. Issue #480.
 		setDefault("nftables_bandwidth_mbps", float64(0))
-		// effective_rate_limit_mbps — what the kernel is actually
-		// enforcing right now (max of operator override and deployment
-		// baseline). Stamped on every snapshot so dashboards have a
-		// stable, always-present field to draw the throttle line from.
-		// 0 means truly uncapped (prod-style with operator slider at
-		// 0). Positive means a cap is in effect, regardless of origin.
-		// Issue #480.
-		operatorRate := getFloat(session, "nftables_bandwidth_mbps")
-		session["effective_rate_limit_mbps"] = a.effectiveRate(operatorRate)
+		// effective_rate_limit_mbps — kernel-enforced cap at this
+		// instant. Resolves in priority order:
+		//   1. Pattern step runtime (nftables_pattern_rate_runtime_mbps)
+		//      when a pattern is enabled and running.
+		//   2. Operator slider (nftables_bandwidth_mbps) when set (>0).
+		//   3. Deployment baseline (INFINITE_STREAM_DEFAULT_RATE_MBPS).
+		// 0 means truly uncapped (all three sources at 0). Stamped on
+		// every snapshot so dashboards have a stable, always-present
+		// field to draw the throttle line from. Issue #480.
+		session["effective_rate_limit_mbps"] = a.effectiveRateForSession(session)
 		setDefault("nftables_delay_ms", 0)
 		setDefault("nftables_packet_loss", 0)
 		setDefault("nftables_pattern_enabled", false)
@@ -8469,6 +8723,25 @@ func (a *App) effectiveRate(requested float64) float64 {
 		return float64(a.defaultRateMbps)
 	}
 	return 0
+}
+
+// effectiveRateForSession reports the cap the kernel is actually
+// enforcing at this instant — pattern step rate first, then the
+// operator slider, then the deployment baseline. Used for the
+// snapshot-stamped `effective_rate_limit_mbps` so the dashboard's
+// "Effective Limit" line tracks both slider AND pattern overrides
+// without ambiguity. Issue #480 follow-up.
+//
+// Kernel-apply call sites do NOT use this — they already skip the
+// pattern branch via the `nftables_pattern_enabled` guard upstream
+// and call `effectiveRate(operatorRate)` directly.
+func (a *App) effectiveRateForSession(session SessionData) float64 {
+	if getBool(session, "nftables_pattern_enabled") {
+		if pr := getFloat(session, "nftables_pattern_rate_runtime_mbps"); pr > 0 {
+			return pr
+		}
+	}
+	return a.effectiveRate(getFloat(session, "nftables_bandwidth_mbps"))
 }
 
 func getenv(key, fallback string) string {
