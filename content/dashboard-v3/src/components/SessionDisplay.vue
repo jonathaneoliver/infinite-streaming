@@ -276,7 +276,7 @@ const timeseries = useSessionTimeSeries(
     // proxy/harness action rows alongside player events + network
     // rows. The control bundle is auto-added when 'control' is in
     // streams (useSessionTimeSeries). Issue #474 Milestone C.
-    streams: ['events', 'network', 'control'],
+    streams: ['events', 'network', 'control', 'avmetrics'],
     bundles: ['charts_minimal', 'lanes_v1', 'panel_v1', 'session_details', 'network'],
     fromMs: fromMsRef,
     toMs: toMsRef,
@@ -629,7 +629,18 @@ function recenterOnNav() {
 }
 
 watch(navCurrent, (ev) => {
-  coord.setCursorMs(ev ? ev._ts : null);
+  if (!ev) { coord.setCursor(null, null); return; }
+  // Compose a short label for the cursor hover tooltip. `type` is the
+  // event class (e.g. `restart`, `stall_start`, `fault_on`); `info`
+  // is the per-event detail string when available. Severity is
+  // appended in parens so the hover surface tells the operator
+  // everything they need without reopening the navigator. Issue #486.
+  const parts: string[] = [];
+  if (ev.type) parts.push(String(ev.type));
+  if (ev.info) parts.push(String(ev.info));
+  const sev = (ev.severity ?? '').toString();
+  const label = parts.join(' · ') + (sev ? ` (${sev})` : '');
+  coord.setCursor(ev._ts, label || 'event');
 });
 
 function onKey(e: KeyboardEvent) {
@@ -1253,13 +1264,13 @@ function skipToEnd() {
         :from-ms="cycleBandsDomain.fromMs"
         :to-ms="cycleBandsDomain.toMs"
       />
-      <EventsTimeline :player-id="archivePlayerId" :events-stream="timeseries.events" />
+      <EventsTimeline :player-id="archivePlayerId" :events-stream="timeseries.events" :avmetrics-stream="timeseries.avmetrics" />
     </CollapsibleSection>
 
     <CollapsibleSection title="Bitrate Chart etc" :open="true" eager persist-key="bitrate-chart">
       <BitrateChartPanelToolbar :player-id="archivePlayerId" />
       <div class="chart-stack">
-        <BandwidthChart :player-id="archivePlayerId" :events-stream="timeseries.events" />
+        <BandwidthChart :player-id="archivePlayerId" :events-stream="timeseries.events" :avmetrics-stream="timeseries.avmetrics" />
         <RTTChart :player-id="archivePlayerId" :events-stream="timeseries.events" />
         <BufferChart :player-id="archivePlayerId" :events-stream="timeseries.events" />
         <FPSChart :player-id="archivePlayerId" :events-stream="timeseries.events" />
@@ -1288,6 +1299,7 @@ function skipToEnd() {
         :events-stream="timeseries.events"
         :network-stream="timeseries.network"
         :control-stream="timeseries.control"
+        :avmetrics-stream="timeseries.avmetrics"
       />
     </CollapsibleSection>
   </div>

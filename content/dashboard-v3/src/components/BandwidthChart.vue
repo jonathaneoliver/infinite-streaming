@@ -22,20 +22,145 @@
  * Y-max is controlled by the panel-level BitrateChartPanelToolbar via
  * the shared chart-coordination state.
  */
-import { computed, toRef } from 'vue';
+import { computed, ref, toRef } from 'vue';
 import MetricsLineChart, { type SeriesSpec } from './MetricsLineChart.vue';
 import { useChartCoordination } from '@/composables/useChartCoordination';
+import { useManifestVariants } from '@/composables/useManifestVariants';
 import type { Stream } from '@/composables/useSessionTimeSeries';
 import type { PlayerRecord } from '@/repo/v2-repo';
 
 const props = defineProps<{
   playerId: string;
   eventsStream: Stream<Record<string, unknown>>;
+  /** AVMetrics stream — used to overlay per-segment throughput dots
+   *  on the bandwidth chart (issue #486). Optional so existing
+   *  callers without the avmetrics scope (live testing.html
+   *  pre-spike) can still mount the chart. */
+  avmetricsStream?: Stream<Record<string, unknown>>;
 }>();
 const coord = useChartCoordination(toRef(props, 'playerId'));
 const yMax = computed(() => coord.state.bandwidthYMax);
+const { variants: usePlayerVariants } = useManifestVariants(toRef(props, 'playerId'));
 
-const series: SeriesSpec[] = [
+/** Per-segment markers — OFF by default. Operator opts in via the
+ *  synthetic legend chip in MetricsLineChart (issue #486). The chip
+ *  always shows when avmetrics data is present so it's discoverable. */
+const segmentMarkersVisible = ref(false);
+
+interface ManifestVariantLite {
+  url?: string;
+  bandwidth?: number;
+  average_bandwidth?: number;
+  resolution?: string;
+}
+
+/** Most-recent non-empty `manifest_variants` value from the events
+ *  stream. SessionDisplay passes `archivePlayerId` to BandwidthChart;
+ *  for live testing.html that synthesises a separate scope from the
+ *  raw `player_id`, and `usePlayer(archivePlayerId)` doesn't surface
+ *  the manifest because the archive record is built without it. The
+ *  events stream rows DO carry `manifest_variants` (it's part of the
+ *  charts_minimal projection), so read from there. Issue #486. */
+const eventsStreamVariants = computed<ManifestVariantLite[]>(() => {
+  void props.eventsStream.version.value;
+  const rows = props.eventsStream.inRange(0, Number.MAX_SAFE_INTEGER);
+  for (let i = rows.length - 1; i >= 0; i--) {
+    const mv = (rows[i] as Record<string, unknown>).manifest_variants;
+    if (Array.isArray(mv) && mv.length) return mv as ManifestVariantLite[];
+    if (typeof mv === 'string' && mv.length > 0 && mv !== 'null') {
+      try {
+        const parsed = JSON.parse(mv);
+        if (Array.isArray(parsed) && parsed.length) return parsed as ManifestVariantLite[];
+      } catch { /* ignore */ }
+    }
+  }
+  return [];
+});
+
+const variants = computed<ManifestVariantLite[]>(() => {
+  const fromPlayer = usePlayerVariants.value;
+  if (Array.isArray(fromPlayer) && fromPlayer.length) return fromPlayer as ManifestVariantLite[];
+  return eventsStreamVariants.value;
+});
+
+/** Per-segment throughput overlay (issue #486). For every completed
+ *  HLS media-segment fetch the iOS player publishes via AVMetrics, we
+ *  computed `derived_mbps` on the client side. Drop a dot at
+ *  (event_ts_ms, derived_mbps) so the operator can see real per-
+ *  request throughput overlaid on the heartbeat-averaged line. Colors
+ *  by event type — segment dots are slate, playlist dots blue, key
+ *  fetches orange — so the role of each request is visible at a glance. */
+const segmentMarkers = computed(() => {
+  const stream = props.avmetricsStream;
+  if (!stream) return [];
+  void stream.version.value;
+  const rows = stream.inRange(0, Number.MAX_SAFE_INTEGER);
+  const out: Array<{ x: number; y: number; color?: string; label?: string }> = [];
+  for (const row of rows) {
+    const type = String(row.event_type ?? '');
+    // Video segments only (issue #486). Skip playlists, DRM keys,
+    // and audio/subtitle segments so the operator sees per-video-
+    // segment throughput without mixing in playlist refreshes (1-2 ms
+    // each) or audio fetches that aren't bandwidth-relevant.
+    if (!type.includes('HLSMediaSegment')) continue;
+    const ts = Number(row.event_ts_ms ?? 0);
+    if (!Number.isFinite(ts) || ts <= 0) continue;
+    let mbps: number | null = null;
+    let label = '';
+    const rawJson = row.raw_json;
+    if (typeof rawJson === 'string' && rawJson.length > 2) {
+      try {
+        const parsed = JSON.parse(rawJson) as Record<string, unknown>;
+        // AVMediaType is an NSString-typed const; Apple's `vide`
+        // 4cc is what backs `AVMediaTypeVideo`. Reflective dump
+        // returns the underlying string. Match defensively against
+        // the 4cc and the descriptive name in case Apple ever
+        // changes the surface.
+        const mediaType = String(parsed.mediaType ?? '');
+        if (!/vide|video/i.test(mediaType)) continue;
+        const v = Number(parsed.derived_mbps);
+        if (Number.isFinite(v)) mbps = v;
+        const cached = String(parsed.derived_from_cache ?? '0');
+        if (cached === '1') continue; // skip cache-served requests
+        // Tooltip body — short event-type label, the path
+        // (filename only — full URL is too long for the floating
+        // tooltip), and the derived bandwidth / transfer details.
+        const shortType = type
+          .replace(/^AVMetricHLS/, '')
+          .replace(/^AVMetric/, '')
+          .replace(/RequestEvent$/, '');
+        const url = String(parsed.url ?? '');
+        const filename = url ? (url.split('?')[0].split('/').pop() ?? '') : '';
+        const bytes = Number(parsed.derived_bytes);
+        const transferMs = Number(parsed.derived_transfer_ms);
+        const ttfbMs = Number(parsed.derived_ttfb_ms);
+        const d = new Date(ts);
+        const hms = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}:${String(d.getSeconds()).padStart(2, '0')}.${String(d.getMilliseconds()).padStart(3, '0')}`;
+        const lines = [
+          `${shortType} · ${hms}`,
+          filename ? filename : '',
+          mbps != null ? `${mbps.toFixed(2)} Mbps` : '',
+          Number.isFinite(bytes) && bytes > 0 ? `${bytes.toLocaleString()} bytes` : '',
+          Number.isFinite(transferMs) && transferMs > 0 ? `${transferMs.toFixed(0)} ms body transfer` : '',
+          Number.isFinite(ttfbMs) && ttfbMs > 0 ? `${ttfbMs.toFixed(1)} ms TTFB` : '',
+        ].filter(Boolean);
+        label = lines.join('\n');
+      } catch { /* fall through */ }
+    }
+    if (mbps == null) continue;
+    out.push({ x: ts, y: mbps, color: colorForRequestType(type), label });
+  }
+  return out;
+});
+
+function colorForRequestType(type: string): string {
+  if (type.includes('HLSMediaSegment')) return '#475569'; // slate — bulk segments
+  if (type.includes('HLSPlaylist'))     return '#0ea5e9'; // sky   — playlists
+  if (type.includes('ContentKey'))      return '#ea580c'; // orange — DRM keys
+  return '#94a3b8';                                       // mute fallback
+}
+
+const baseSeries: SeriesSpec[] = [
   {
     label: 'mbps_shaper_rate',
     color: '#0f766e',
@@ -103,18 +228,24 @@ const series: SeriesSpec[] = [
     stepped: true,
   },
   {
-    // Effective Limit — kernel-enforced cap at this instant: max of
-    // operator override and deployment baseline; 0 only when truly
-    // uncapped. Distinct from "Limit (rate_mbps)" above which reflects
-    // operator intent only. Off by default — the operator enables it
-    // when investigating "why is throughput capped at X with no
-    // visible operator limit?"
+    // Effective Limit — kernel-enforced cap at this instant. Resolves
+    // in priority order:
+    //   1. Pattern step runtime (when a pattern is enabled and running).
+    //   2. Operator slider (when set >0).
+    //   3. Deployment baseline.
+    // 0 only when truly uncapped (all three sources at 0). Tracks both
+    // slider AND active pattern step — distinct from "Limit (rate_mbps)"
+    // above which reflects operator INTENT only (slider when set, else
+    // the pattern's runtime, else static). Off by default — the operator
+    // enables it when investigating "what is the kernel actually
+    // enforcing right now?"
     //
-    // First-class CH column (issue #480): proxy stamps
-    // effective_rate_limit_mbps on every normalize, forwarder writes
-    // it to session_events, charts_minimal exposes it, chRowAdapter
-    // projects it onto raw_session. Historically accurate — reflects
-    // the baseline AT THE TIME of the archive sample, not today's.
+    // First-class CH column (issue #480; pattern fold-in added in
+    // follow-up): proxy stamps effective_rate_limit_mbps on every
+    // normalize, forwarder writes it to session_events, charts_minimal
+    // exposes it, chRowAdapter projects it onto raw_session.
+    // Historically accurate — reflects the cap AT THE TIME of the
+    // archive sample, not today's.
     label: 'Effective Limit',
     color: '#dc2626',
     hidden: true,
@@ -148,6 +279,57 @@ const series: SeriesSpec[] = [
     stepped: true,
   },
 ];
+
+/** Restored from the legacy chart (issue #486): one dashed horizontal
+ *  line per variant in the manifest's ladder. AVG group uses
+ *  `average_bandwidth` (the EXT-X-STREAM-INF AVERAGE-BANDWIDTH attr,
+ *  representing typical body bitrate); PEAK group uses `bandwidth`
+ *  (the EXT-X-STREAM-INF BANDWIDTH attr, the encoder's worst-case
+ *  peak). Each variant becomes its own series so the line spans the
+ *  whole X range; sharing a `groupLegend` collapses them all to a
+ *  single legend chip that toggles every line at once.
+ *
+ *  Defaults: avg ON (the operator's natural mental ABR reference),
+ *  peak OFF (clutters the chart for advanced inspection only). */
+const series = computed<SeriesSpec[]>(() => {
+  const out = [...baseSeries];
+  const ladder = variants.value;
+  if (!ladder.length) return out;
+  // Mute the variant-line color so it doesn't out-shout the live
+  // traces. Slate-400 reads at a glance but stays in the background.
+  const AVG_COLOR = '#94a3b8';
+  const PEAK_COLOR = '#cbd5e1';
+  for (const v of ladder) {
+    const avgBw = Number((v as any).average_bandwidth ?? v.bandwidth);
+    if (Number.isFinite(avgBw) && avgBw > 0) {
+      const mbps = avgBw / 1_000_000;
+      const resLabel = v.resolution ?? '?';
+      out.push({
+        label: `Variant avg ${resLabel} (${mbps.toFixed(2)} Mbps)`,
+        color: AVG_COLOR,
+        accessor: () => mbps,
+        stepped: false,
+        borderDash: [6, 4],
+        groupLegend: 'Variant avg bandwidth',
+      });
+    }
+    const peakBw = Number(v.bandwidth);
+    if (Number.isFinite(peakBw) && peakBw > 0) {
+      const mbps = peakBw / 1_000_000;
+      const resLabel = v.resolution ?? '?';
+      out.push({
+        label: `Variant peak ${resLabel} (${mbps.toFixed(2)} Mbps)`,
+        color: PEAK_COLOR,
+        accessor: () => mbps,
+        stepped: false,
+        borderDash: [2, 4],
+        groupLegend: 'Variant peak bandwidth',
+        hidden: true,
+      });
+    }
+  }
+  return out;
+});
 </script>
 
 <template>
@@ -157,6 +339,9 @@ const series: SeriesSpec[] = [
     unit="Mbps"
     :series="series"
     :events-stream="eventsStream"
+    :markers="segmentMarkers"
+    markers-label="Per-segment throughput (AVMetrics)"
+    v-model:markers-visible="segmentMarkersVisible"
     :y-min="0"
     :y-max="yMax"
   />

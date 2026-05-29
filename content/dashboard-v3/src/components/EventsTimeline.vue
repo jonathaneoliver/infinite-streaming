@@ -43,7 +43,129 @@ const EVENT_LANES: Record<string, LaneCfg> = {
   PLAYBACK:    { label: 'PLAYBACK',    color: '#16a34a' },
   IMPAIRMENT:  { label: 'IMPAIRMENT',  color: '#000000' },
   LOOP_SERVER: { label: 'LOOP SERVER', color: '#84cc16' },
+  // play_id lifecycle (issue #486) — one range per distinct play_id
+  // so the operator can see when a play starts / stops. Colored by a
+  // stable hash of the id so consecutive plays alternate visibly.
+  PLAY_ID:     { label: 'PLAY ID',     color: '#0891b2' },
+  // iOS 18 AVMetrics raw event stream (issue #486 spike) — one point
+  // per emitted AVMetric event. Hover tooltip shows the full payload.
+  AVMETRICS:   { label: 'AVMETRICS',   color: '#a78bfa' },
 };
+
+/** Stable, deterministic color for a given play_id so swapping plays
+ *  shows obvious contrast on the swim lane. FNV-1a → indexed palette. */
+function playIdColor(id: string): string {
+  const palette = ['#0891b2', '#0ea5e9', '#6366f1', '#a855f7', '#ec4899', '#f43f5e', '#f97316', '#eab308', '#84cc16', '#10b981'];
+  let h = 0x811c9dc5;
+  for (let i = 0; i < id.length; i++) {
+    h ^= id.charCodeAt(i);
+    h = (h + ((h << 1) + (h << 4) + (h << 7) + (h << 8) + (h << 24))) >>> 0;
+  }
+  return palette[h % palette.length];
+}
+
+/** Compact AVMetric event-type label — strip the framework prefix so
+ *  the swim-lane point's tooltip header is readable at a glance. */
+function shortAVMetricType(t: string): string {
+  return t.replace(/^AVMetricPlayerItem/, '').replace(/^AVMetric/, '');
+}
+
+/** True when the active player has published any AVMetric events in
+ *  the cached window. Used to gate the AVMETRICS lane + legend so
+ *  non-iOS devices (Android, Roku, Web) don't get a permanently-
+ *  empty section on screen. Issue #486. */
+function hasAVMetricsActivity(): boolean {
+  const stream = props.avmetricsStream;
+  if (!stream) return false;
+  if ((stream.rangeBounds.value?.max ?? 0) > 0) return true;
+  // rangeBounds is null on a fresh stream; fall back to a cheap
+  // inRange probe so we re-check even before the first delta lands.
+  return stream.inRange(0, Number.MAX_SAFE_INTEGER).length > 0;
+}
+
+/** Color per AVMetric event type. Scoped to the AVMETRICS lane only —
+ *  no other lane reads this. Maps from the *short* form (post-prefix-
+ *  strip) so the table stays readable. Unknown types fall back to the
+ *  lane's default indigo so we never render a transparent bar. */
+const AVMETRICS_COLOR_BY_TYPE: Record<string, string> = {
+  // ABR / variant
+  VariantSwitchEvent:           '#2563eb', // blue   — completed switch
+  VariantSwitchStartEvent:      '#60a5fa', // sky-blue — switch START (iOS 26)
+  // Buffer readiness
+  LikelyToKeepUpEvent:          '#f59e0b', // amber
+  InitialLikelyToKeepUpEvent:   '#d97706', // dark amber — first-frame readiness (iOS 26)
+  // Stalls (subclass of RateChange — iOS 26)
+  StallEvent:                   '#dc2626', // red
+  PlaybackStalledEvent:         '#dc2626', // red (legacy / variant name)
+  // Playback control
+  RateChangeEvent:              '#16a34a', // green
+  SeekEvent:                    '#a855f7', // purple — seek START (iOS 26)
+  SeekDidCompleteEvent:         '#9333ea', // purple-dark — seek COMPLETE
+  // Summary / end-of-session
+  PlaybackSummaryEvent:         '#6366f1', // indigo
+  // Errors
+  ErrorEvent:                   '#dc2626', // red
+  // Network / resource fetches
+  MediaResourceRequestEvent:    '#0891b2', // cyan
+  HLSMediaSegmentRequestEvent:  '#0891b2', // cyan
+  HLSPlaylistRequestEvent:      '#0ea5e9', // sky
+  // DRM
+  ContentKeyRequestEvent:       '#ea580c', // orange
+};
+
+function avMetricsColor(eventType: string): string {
+  const short = shortAVMetricType(eventType);
+  return AVMETRICS_COLOR_BY_TYPE[short] ?? EVENT_LANES.AVMETRICS.color;
+}
+
+function escapeHTML(s: string): string {
+  return s
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+/** Format the AVMetric event's Obj-C property dump as HTML for the
+ *  vis-timeline tooltip overlay. One field per `<div>`, sorted
+ *  alphabetically, with values HTML-escaped so AVAssetVariant
+ *  `<...>` notation renders as text. Length-bounded so a pathological
+ *  payload doesn't make the tooltip unscrollable. Issue #486. */
+function formatAVMetricRawHTML(raw: unknown): string {
+  if (typeof raw !== 'string' || raw.length === 0) return '';
+  let parsed: unknown;
+  try { parsed = JSON.parse(raw); }
+  catch {
+    const trunc = raw.length > 4000 ? raw.slice(0, 4000) + '…' : raw;
+    return `<div>${escapeHTML(trunc)}</div>`;
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return `<div>${escapeHTML(raw)}</div>`;
+  }
+  const obj = parsed as Record<string, unknown>;
+  const lines: string[] = [];
+  let total = 0;
+  const LIMIT = 6000;
+  for (const k of Object.keys(obj).sort()) {
+    const v = obj[k];
+    if (v == null) continue;
+    const valueStr = typeof v === 'string' ? v : JSON.stringify(v);
+    if (valueStr === '' || valueStr === '""') continue;
+    if (total + valueStr.length + k.length > LIMIT) {
+      lines.push('<div style="color:#9ca3af;margin-top:6px;">…(truncated)</div>');
+      break;
+    }
+    lines.push(
+      `<div style="margin-bottom:4px;line-height:1.4;">` +
+      `<b style="color:#4338ca;">${escapeHTML(k)}</b>: ` +
+      `<span style="color:#1f2937;">${escapeHTML(valueStr)}</span>` +
+      `</div>`,
+    );
+    total += valueStr.length + k.length;
+  }
+  return lines.join('');
+}
 
 const PLAYER_STATE_COLOR: Record<string, string> = {
   playing:   '#16a34a',
@@ -83,6 +205,11 @@ const props = defineProps<{
    *  Each row is a CH session_snapshots projection (lanes_v1 bundle).
    *  EventsTimeline derives swim-lane segments from successive rows. */
   eventsStream: Stream<Record<string, unknown>>;
+  /** iOS 18 AVMetrics raw event stream (issue #486). One point per
+   *  emitted AVMetric event on the AVMETRICS lane. Optional so other
+   *  consumers (live testing.html) can skip wiring it without
+   *  breaking the component. */
+  avmetricsStream?: Stream<Record<string, unknown>>;
 }>();
 const coord = useChartCoordination(toRef(props, 'playerId'));
 
@@ -220,7 +347,7 @@ const items: TimelineItem[] = [];
 
 interface StatefulEvent {
   ts: number;
-  type: 'PLAYERSTATE' | 'DISPLAY_RES' | 'VARIANT';
+  type: 'PLAYERSTATE' | 'DISPLAY_RES' | 'VARIANT' | 'PLAY_ID';
   // PLAYERSTATE
   state?: string;
   reason?: string;
@@ -230,6 +357,9 @@ interface StatefulEvent {
   mbps?: number;
   variantRes?: string;
   variantKey?: string;
+  // PLAY_ID — the play_id active on the heartbeat that produced
+  // this event. Coalesce into a range; new id starts a new range.
+  playId?: string;
 }
 
 const statefulEvents: StatefulEvent[] = [];
@@ -263,6 +393,26 @@ function fmtTime(ms: number): string {
 function variantLabel(mbps: number, resolution: string): string {
   const m = mbps.toFixed(2);
   return `${resolution} · ${m} Mbps`;
+}
+
+/** Reverse of `manifestResolutionForBitrate` — find the variant's
+ *  peak bandwidth (Mbps) given its resolution. Used to colour the
+ *  DISPLAY_RES lane in lock-step with the VARIANT lane so the same
+ *  resolution always reads with the same swatch. Issue #486. */
+function bandwidthMbpsForResolution(
+  variants: IngestRow['manifestVariants'],
+  resolution: string,
+): number | undefined {
+  if (!resolution || !variants || variants.length === 0) return undefined;
+  const target = resolution.trim().toLowerCase();
+  for (const v of variants) {
+    const r = String(v?.resolution ?? '').trim().toLowerCase();
+    if (r && r === target) {
+      const bw = Number(v?.bandwidth ?? 0);
+      if (Number.isFinite(bw) && bw > 0) return bw / 1_000_000;
+    }
+  }
+  return undefined;
 }
 
 /** Find the canonical resolution for a given bitrate by consulting the
@@ -361,11 +511,13 @@ function rebuildGroups() {
     id: v.key,
     content: variantLabel(v.mbps, v.resolution),
   }));
-  const groups = [
+  const groups: any[] = [
     { id: 'PLAYER_SECTION', content: 'PLAYER', nestedGroups: [
+      'PLAY_ID',
       ...variantGroups.map((g) => g.id),
       'DISPLAY_RES', 'PLAYERSTATE', 'PLAYBACK', 'IMPAIRMENT',
     ] },
+    { id: 'PLAY_ID', content: EVENT_LANES.PLAY_ID.label },
     ...variantGroups,
     { id: 'DISPLAY_RES', content: EVENT_LANES.DISPLAY_RES.label },
     { id: 'PLAYERSTATE', content: EVENT_LANES.PLAYERSTATE.label },
@@ -376,6 +528,18 @@ function rebuildGroups() {
     { id: 'SERVER_SECTION',  content: 'SERVER',  nestedGroups: ['LOOP_SERVER'] },
     { id: 'LOOP_SERVER', content: EVENT_LANES.LOOP_SERVER.label },
   ];
+  // AVMetrics section only when the active player has actually
+  // published AVMetric events (issue #486). Heuristic: any rows on
+  // the avmetrics stream within the cached window. Hides the lane
+  // entirely for Android/Roku/Web players that don't have the
+  // framework. Re-evaluated on every rebuildGroups call so an iOS
+  // player joining later wakes the lane up automatically.
+  if (hasAVMetricsActivity()) {
+    groups.push(
+      { id: 'AVMETRICS_SECTION', content: 'AVMETRICS', nestedGroups: ['AVMETRICS'] },
+      { id: 'AVMETRICS', content: EVENT_LANES.AVMETRICS.label },
+    );
+  }
   groupsDS.clear();
   groupsDS.add(groups);
 }
@@ -412,6 +576,14 @@ async function ensureTimeline(): Promise<void> {
         orientation: { axis: 'top' },
         start: new Date(vp.min),
         end: new Date(vp.max),
+        // HTML tooltips (issue #486): the native browser `title` attr
+        // is plain-text only and the OS clips long content. vis-timeline's
+        // own tooltip overlay respects HTML in item.title when XSS
+        // protection is disabled — needed so AVMetric event payloads
+        // render as multi-line, vertically-spread fields. `overflowMethod`
+        // flips the tooltip when it would clip the timeline edge.
+        tooltip: { followMouse: true, overflowMethod: 'flip' },
+        xss: { disabled: true },
       });
       // Pause/live transitions come from the Live toggle button, the
       // brush rail, and the rangechanged handler below (pan / zoom
@@ -425,8 +597,22 @@ async function ensureTimeline(): Promise<void> {
       timeline.on('rangechange', (rc: any) => {
         if (rc?.byUser) userInteracting = true;
       });
+      // Left-click on a blank part of the timeline = toggle live
+      // (issue #486). Mirrors the canvas-click behaviour on the line
+      // charts. `what === 'background'` skips item clicks, lane-
+      // header clicks, axis clicks — only the empty strip counts.
+      timeline.on('click', (ev: any) => {
+        if (ev?.what === 'background') {
+          coord.toggleLive();
+        }
+      });
       timeline.on('rangechanged', (rc: any) => {
         userInteracting = false;
+        // Re-flow AVMetric bar widths to the new viewport regardless
+        // of who triggered the change — zoom in, zoom out, pan, or a
+        // programmatic setWindow all change ms-per-pixel. Cheap diff
+        // update; safe on every fire. Issue #486.
+        reflowAVMetricsDurations();
         // The suppress flag is only for our own programmatic setWindow
         // calls (which fire rangechanged with byUser=false). NEVER let
         // it consume a real user pan — earlier versions did, and when
@@ -454,6 +640,7 @@ async function ensureTimeline(): Promise<void> {
         coord.setRange({ min: a, max: b });
       });
       installLiveWheelAnchor();
+      installCursorHoverTooltip();
     } finally {
       // Hold the resolved promise around so subsequent calls short-circuit
       // via the `if (timeline) return` check at the top.
@@ -490,9 +677,28 @@ function ingest(r: IngestRow) {
     statefulEvents.push({ ts: t, type: 'PLAYERSTATE', state: r.state, reason: r.waitingReason });
   }
 
+  // PLAY_ID lane — one stateful tick per heartbeat with the active
+  // play_id. The renderer coalesces consecutive runs of the same id
+  // into a range, so each play shows up as one bar with a colour
+  // derived from the id. New play_id (rotation / reload) starts a
+  // new range automatically. Issue #486.
+  if (r.playId) {
+    statefulEvents.push({ ts: t, type: 'PLAY_ID', playId: r.playId });
+  }
+
   // DISPLAY_RES — the decoded video resolution being displayed.
+  // Stamp the matching variant's Mbps onto the event so the lane can
+  // colour-match the VARIANT row (which is keyed by bitrate bucket).
+  // Operator preference: a single resolution should read with the
+  // same colour everywhere on the chart. Issue #486.
   if (r.videoResolution) {
-    statefulEvents.push({ ts: t, type: 'DISPLAY_RES', resolution: r.videoResolution });
+    const matchMbps = bandwidthMbpsForResolution(r.manifestVariants, r.videoResolution);
+    statefulEvents.push({
+      ts: t,
+      type: 'DISPLAY_RES',
+      resolution: r.videoResolution,
+      mbps: matchMbps,
+    });
   }
 
   // VARIANT — keyed on the MANIFEST's canonical resolution for the
@@ -666,13 +872,30 @@ function renderStatefulLanes(nowMs: number) {
     'DISPLAY_RES',
     () => 'DISPLAY_RES',
     (e) => e.resolution ?? '?',
-    (e) => displayResColor(e.resolution ?? null),
+    // Colour by the matching variant's Mbps when available so
+    // 1920x1080 here reads with the same swatch as 1920x1080 on
+    // the VARIANT lane. Pre-manifest heartbeats (no match) fall
+    // back to the legacy resolution-bucket palette. Issue #486.
+    (e) => (e.mbps && e.mbps > 0
+      ? variantColor(e.mbps)
+      : displayResColor(e.resolution ?? null)),
   );
   coalesce(
     'VARIANT',
     (e) => e.variantKey ?? 'VARIANT',
     () => '', // ranges are blank bars; label sits on the group header
     (e) => variantColor(e.mbps ?? 0),
+  );
+
+  // PLAY_ID — one range per contiguous run of the same play_id.
+  // Issue #486. Tooltip shows the full id; the bar shows a short
+  // 8-char prefix so the lane stays readable even with stacked
+  // narrow ranges.
+  coalesce(
+    'PLAY_ID',
+    () => 'PLAY_ID',
+    (e) => (e.playId ? e.playId.slice(0, 8) : '—'),
+    (e) => (e.playId ? playIdColor(e.playId) : '#9ca3af'),
   );
 
   // Atomic apply: update writes-or-adds (vis DataSet.update upserts
@@ -753,15 +976,219 @@ watch(
   { immediate: true },
 );
 
+/* ─── AVMetrics drain (issue #486) ─────────────────────────────────
+ * Parallel to drainNewRows but consumes the avmetricsStream and emits
+ * one POINT item per event on the AVMETRICS lane. No coalescing — each
+ * event is its own marker. Hover tooltip carries the full payload.
+ */
+const pendingLiveAV: Record<string, unknown>[] = [];
+let lastAVIngestedMs = -Infinity;
+let avDrainToken = 0;
+
+/** Synthetic duration for AVMetric items — viewport-aware (issue #486).
+ *
+ * AVMetric events are instantaneous in the SDK, but a single tick of
+ * width is unclickable on any zoom level. We want a constant on-screen
+ * footprint (~AVMETRICS_TARGET_PIXELS px wide) regardless of whether
+ * the operator is looking at a 10-min window or a 10-hour archive
+ * replay. Duration is computed from the current vis-timeline window
+ * and container width, clamped to a sane minimum/maximum so a deeply-
+ * zoomed-in view doesn't shrink to sub-millisecond and a 10-hr replay
+ * doesn't push individual events past the next one.
+ *
+ * Bars are sized at ingest time AND re-flowed on every `rangechanged`
+ * (pan/zoom) — see `reflowAVMetricsDurations`. */
+const AVMETRICS_TARGET_PIXELS = 8;       // clickable minimum on screen
+const AVMETRICS_MIN_DURATION_MS = 250;   // floor at deep zoom-in
+const AVMETRICS_MAX_DURATION_MS = 60_000; // ceiling at deep zoom-out
+
+function computeAVMetricsDurationMs(): number {
+  if (!timeline || !container.value) return 1000;
+  const win = timeline.getWindow();
+  const startMs = (win.start instanceof Date) ? win.start.getTime() : Number(win.start);
+  const endMs   = (win.end   instanceof Date) ? win.end.getTime()   : Number(win.end);
+  const winMs = endMs - startMs;
+  if (!Number.isFinite(winMs) || winMs <= 0) return 1000;
+  // Reserve space for the group-header column; the actual content
+  // area is narrower than the full container. The exact value isn't
+  // critical — being off by ±50 px just shifts the clickable footprint
+  // by a fraction of a pixel.
+  const containerWidth = container.value.clientWidth || 1000;
+  const contentWidth = Math.max(400, containerWidth - 220);
+  const msPerPixel = winMs / contentWidth;
+  const target = AVMETRICS_TARGET_PIXELS * msPerPixel;
+  return Math.min(AVMETRICS_MAX_DURATION_MS, Math.max(AVMETRICS_MIN_DURATION_MS, target));
+}
+
+/** Time-cost of one screen pixel under the current viewport. Used
+ *  both as the visual gap between adjacent events and as the absolute
+ *  floor for an event's width (so even tightly-clustered events keep
+ *  a 1px-visible mark). */
+function msPerPixel(): number {
+  if (!timeline || !container.value) return 1;
+  const win = timeline.getWindow();
+  const startMs = (win.start instanceof Date) ? win.start.getTime() : Number(win.start);
+  const endMs   = (win.end   instanceof Date) ? win.end.getTime()   : Number(win.end);
+  const winMs = endMs - startMs;
+  if (!Number.isFinite(winMs) || winMs <= 0) return 1;
+  const containerWidth = container.value.clientWidth || 1000;
+  const contentWidth = Math.max(400, containerWidth - 220);
+  return winMs / contentWidth;
+}
+
+/** Walk every AVMetric range in the DataSet (in chronological order)
+ *  and update its end to give each bar the target pixel width — but
+ *  never overlapping into the next event's start. Result: each event
+ *  is as wide as the target *or* as wide as the gap to its neighbor,
+ *  whichever is smaller, minus a 2-px visual gap. Called from the
+ *  rangechanged handler so widths track pan / zoom, and at the end of
+ *  every AVMetrics drain so newly-arrived events get sized correctly
+ *  (and the neighbor they pulled in next to gets re-clamped). */
+function reflowAVMetricsDurations() {
+  if (!itemsDS) return;
+  const target = computeAVMetricsDurationMs();
+  const mpp = msPerPixel();
+  const gapMs = Math.max(20, 2 * mpp);   // 2 px visual gap between neighbours
+  const floorMs = Math.max(1, mpp);      // never less than 1 px wide
+
+  const ranges: { id: any; ts0: number; end: number }[] = [];
+  itemsDS.forEach((it: any) => {
+    if (it.group !== 'AVMETRICS') return;
+    if (typeof it.ts0 !== 'number') return;
+    ranges.push({ id: it.id, ts0: it.ts0, end: it.end });
+  });
+  ranges.sort((a, b) => a.ts0 - b.ts0);
+
+  const updates: any[] = [];
+  for (let i = 0; i < ranges.length; i++) {
+    const cur = ranges[i];
+    const next = ranges[i + 1];
+    let dur = target;
+    if (next) {
+      const room = next.ts0 - cur.ts0 - gapMs;
+      if (room < dur) dur = room;
+    }
+    if (dur < floorMs) dur = floorMs;
+    const newEnd = cur.ts0 + dur;
+    if (cur.end !== newEnd) updates.push({ id: cur.id, end: newEnd });
+  }
+  if (updates.length) itemsDS.update(updates);
+}
+
+function ingestAVMetric(row: Record<string, unknown>) {
+  const t = tsOfRow(row);
+  if (!Number.isFinite(t)) return;
+  const eventType = String(row.event_type ?? '').trim() || 'AVMetric';
+  const short = shortAVMetricType(eventType);
+  const formatted = formatAVMetricRawHTML(row.raw_json);
+  const id = nextId++;
+  // HTML tooltip (issue #486). Constrained max-width so very long
+  // unbroken value strings (e.g. fromVariant's full AVAssetVariant
+  // dump) wrap rather than push the tooltip off-screen.
+  const header =
+    `<div style="font-weight:600;margin-bottom:2px;color:#1e1b4b;">${escapeHTML(eventType)}</div>` +
+    `<div style="color:#6b7280;font-size:11px;margin-bottom:8px;">${fmtTime(t)}</div>`;
+  const title = `<div class="avmetrics-tooltip" style="max-width:720px;font-family:ui-monospace,'SF Mono',Menlo,monospace;font-size:11px;white-space:normal;word-break:break-all;">${header}${formatted}</div>`;
+  const color = avMetricsColor(eventType);
+  const item: TimelineRangeItem = {
+    id,
+    group: 'AVMETRICS',
+    content: short,
+    start: t,
+    end: t + computeAVMetricsDurationMs(),
+    ts0: t,
+    type: 'range',
+    title,
+    style: `background-color: ${color}; border-color: ${color}; color: #1e1b4b;`,
+  };
+  items.push(item);
+  itemsDS?.add(item);
+}
+
+async function drainNewAVMetricsRows() {
+  const stream = props.avmetricsStream;
+  if (!stream) return;
+  const raw = stream.inRange(
+    lastAVIngestedMs === -Infinity ? 0 : lastAVIngestedMs + 1,
+    Number.MAX_SAFE_INTEGER,
+  );
+  if (!raw.length) return;
+  await ensureTimeline();
+  const myToken = ++avDrainToken;
+  const CHUNK = 500;
+  let highWater = lastAVIngestedMs;
+  for (let start = 0; start < raw.length; start += CHUNK) {
+    if (myToken !== avDrainToken) return;
+    const end = Math.min(start + CHUNK, raw.length);
+    for (let i = start; i < end; i++) {
+      const row = raw[i];
+      const t = tsOfRow(row);
+      if (!Number.isFinite(t) || t <= lastAVIngestedMs) continue;
+      const range = coord.state.range;
+      if (range !== null && t > range.max) {
+        pendingLiveAV.push(row);
+      } else {
+        ingestAVMetric(row);
+      }
+      if (t > highWater) highWater = t;
+    }
+    if (end < raw.length) {
+      await new Promise<void>((r) => setTimeout(r, 0));
+    }
+  }
+  lastAVIngestedMs = highWater;
+  // After the batch lands, re-flow widths so the just-arrived events
+  // get sized to the current viewport AND their neighbours get
+  // re-clamped to not overlap. Cheap — itemsDS.update() with the
+  // diff path is sub-ms for the volumes we deal with.
+  reflowAVMetricsDurations();
+}
+
+watch(
+  () => props.avmetricsStream?.version.value ?? 0,
+  () => { void drainNewAVMetricsRows(); },
+  { immediate: true },
+);
+
+// Toggle the AVMETRICS lane's visibility when activity appears or
+// disappears (issue #486). Single boolean memo so we only call
+// rebuildGroups on the actual transition — every other version
+// tick is a no-op.
+let avMetricsLaneVisible = false;
+watch(
+  () => props.avmetricsStream?.version.value ?? 0,
+  () => {
+    const nowHas = hasAVMetricsActivity();
+    if (nowHas !== avMetricsLaneVisible) {
+      avMetricsLaneVisible = nowHas;
+      rebuildGroups();
+    }
+  },
+  { immediate: true },
+);
+
+/** Reactive equivalent of hasAVMetricsActivity() for the template —
+ *  the AVMETRICS legend strip uses this to hide on non-iOS devices. */
+const hasAVMetricsForLegend = computed(() => {
+  void props.avmetricsStream?.version.value;
+  return hasAVMetricsActivity();
+});
+
 // Resume drain — feed any buffered rows through `ingest()` in arrival
 // order so the coalescing logic produces the same lane segments it
 // would have produced live.
 watch(
   () => coord.state.range,
   (range) => {
-    if (range !== null || !pendingLive.length) return;
-    const drained = pendingLive.splice(0, pendingLive.length);
-    for (const r of drained) ingest(r);
+    if (range !== null) return;
+    if (pendingLive.length) {
+      const drained = pendingLive.splice(0, pendingLive.length);
+      for (const r of drained) ingest(r);
+    }
+    if (pendingLiveAV.length) {
+      const drained = pendingLiveAV.splice(0, pendingLiveAV.length);
+      for (const r of drained) ingestAVMetric(r);
+    }
   },
 );
 
@@ -774,7 +1201,9 @@ watch(
   () => {
     statefulEvents.length = 0;
     pendingLive.length = 0;
+    pendingLiveAV.length = 0;
     lastIngestedMs = -Infinity;
+    lastAVIngestedMs = -Infinity;
     prevStalls = prevDropped = null;
     prevLoopServer = null;
     prevControlRev = null;
@@ -896,9 +1325,55 @@ function onLiveToggleClick() {
  */
 const NAV_CURSOR_ID = 'nav-cursor';
 let navCursorAdded = false;
+
+/** Custom-DOM cursor tooltip state for the EventsTimeline strip
+ *  (issue #486). Driven by a mousemove handler on the strip: when
+ *  the mouse is within ~6 px of the rendered `.vis-custom-time`
+ *  line, show the tooltip near the cursor with cursorLabel text. */
+const cursorTooltipVisible = ref(false);
+const cursorTooltipX = ref(0);
+const cursorTooltipY = ref(0);
+
+/** Install the strip-level mousemove + mouseleave handlers. Called
+ *  once after the timeline is created. The vis-timeline custom-time
+ *  DOM element is the source of truth for the line's screen X; we
+ *  read its bounding rect each move so pan/zoom is handled
+ *  automatically. */
+function installCursorHoverTooltip() {
+  const c = container.value;
+  if (!c) return;
+  c.addEventListener('mousemove', (e) => {
+    const label = coord.state.cursorLabel;
+    if (!label || coord.state.cursorMs == null) {
+      if (cursorTooltipVisible.value) cursorTooltipVisible.value = false;
+      return;
+    }
+    const lineEl = c.querySelector('.vis-custom-time') as HTMLElement | null;
+    if (!lineEl) {
+      if (cursorTooltipVisible.value) cursorTooltipVisible.value = false;
+      return;
+    }
+    const cRect = c.getBoundingClientRect();
+    const lRect = lineEl.getBoundingClientRect();
+    const lineX = lRect.left + lRect.width / 2 - cRect.left;
+    const mx = e.clientX - cRect.left;
+    const my = e.clientY - cRect.top;
+    if (Math.abs(mx - lineX) > 6) {
+      if (cursorTooltipVisible.value) cursorTooltipVisible.value = false;
+      return;
+    }
+    cursorTooltipX.value = Math.min(lineX + 6, c.clientWidth - 240);
+    cursorTooltipY.value = Math.max(4, my - 28);
+    cursorTooltipVisible.value = true;
+  });
+  c.addEventListener('mouseleave', () => {
+    cursorTooltipVisible.value = false;
+  });
+}
+
 watch(
-  () => coord.state.cursorMs,
-  async (ms) => {
+  [() => coord.state.cursorMs, () => coord.state.cursorLabel],
+  async ([ms]) => {
     await ensureTimeline();
     if (!timeline) return;
     if (ms == null || !Number.isFinite(ms)) {
@@ -953,6 +1428,16 @@ onBeforeUnmount(() => {
 
     <div class="strip-wrap" :class="expandedClass">
       <div ref="container" class="strip" />
+      <!-- Cursor hover tooltip (issue #486). The vis-timeline
+           `.vis-custom-time` line is too thin to reliably hit with
+           native browser tooltips, AND vis sets pointer-events:none
+           on it. Drive a custom-DOM tooltip from a mousemove handler
+           on the strip instead — same UX as the line charts. -->
+      <div
+        v-if="cursorTooltipVisible"
+        class="cursor-tooltip"
+        :style="{ left: cursorTooltipX + 'px', top: cursorTooltipY + 'px' }"
+      >{{ coord.state.cursorLabel }}</div>
     </div>
 
     <!-- Colour key — placed BELOW the chart so the eye reads the
@@ -968,6 +1453,27 @@ onBeforeUnmount(() => {
       <span class="key"><span class="sw" style="background:#e11d48"/>Error</span>
       <span class="key"><span class="sw" style="background:#7c3aed"/>Control</span>
       <span class="key"><span class="sw" style="background:#84cc16"/>Loop</span>
+    </div>
+
+    <!-- AVMetrics colour key (issue #486) — its own strip with a
+         section header so it reads as the parallel observation stream
+         it is, not as a continuation of the heartbeat-derived colours
+         above. Entries mirror AVMETRICS_COLOR_BY_TYPE in the script. -->
+    <div v-if="hasAVMetricsForLegend" class="legend legend-avmetrics">
+      <span class="legend-label">AVMETRICS:</span>
+      <span class="key"><span class="sw" style="background:#2563eb"/>VariantSwitch</span>
+      <span class="key"><span class="sw" style="background:#60a5fa"/>VariantSwitchStart</span>
+      <span class="key"><span class="sw" style="background:#f59e0b"/>LikelyToKeepUp</span>
+      <span class="key"><span class="sw" style="background:#d97706"/>InitialLikelyToKeepUp</span>
+      <span class="key"><span class="sw" style="background:#dc2626"/>Stall / Error</span>
+      <span class="key"><span class="sw" style="background:#16a34a"/>RateChange</span>
+      <span class="key"><span class="sw" style="background:#a855f7"/>Seek</span>
+      <span class="key"><span class="sw" style="background:#9333ea"/>SeekDidComplete</span>
+      <span class="key"><span class="sw" style="background:#6366f1"/>PlaybackSummary</span>
+      <span class="key"><span class="sw" style="background:#0891b2"/>MediaResource / HLS Segment</span>
+      <span class="key"><span class="sw" style="background:#0ea5e9"/>HLS Playlist</span>
+      <span class="key"><span class="sw" style="background:#ea580c"/>ContentKey (DRM)</span>
+      <span class="key"><span class="sw" style="background:#a78bfa"/>other</span>
     </div>
   </div>
 </template>
@@ -1023,6 +1529,18 @@ onBeforeUnmount(() => {
   font-size: 10px;
   color: #5f6368;
 }
+/* AVMetrics row sits below the heartbeat legend with a hairline rule
+ * + a leading section label so the two palettes don't read as one. */
+.legend-avmetrics {
+  border-top: 1px solid #e5e7eb;
+  padding-top: 4px;
+}
+.legend-label {
+  font-weight: 600;
+  color: #4338ca;
+  letter-spacing: 0.4px;
+  text-transform: uppercase;
+}
 .key { display: inline-flex; align-items: center; gap: 4px; }
 .sw {
   display: inline-block;
@@ -1056,6 +1574,26 @@ onBeforeUnmount(() => {
   border: 1px solid #e5e7eb;
   border-radius: 4px;
   min-height: inherit;
+}
+
+/* Cursor hover tooltip (issue #486) — mirrors MetricsLineChart's
+ * tooltip styling so the surface reads identically across all
+ * synchronized charts. */
+.cursor-tooltip {
+  position: absolute;
+  z-index: 4;
+  background: #1e3a8a;
+  color: #fff;
+  font-size: 11px;
+  font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+  padding: 4px 8px;
+  border-radius: 4px;
+  pointer-events: none;
+  white-space: nowrap;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.18);
+  max-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 /* "Selected event" custom-time line — full visual parity with the
  * line-chart cursor: 1.5 px dashed blue line + a small filled

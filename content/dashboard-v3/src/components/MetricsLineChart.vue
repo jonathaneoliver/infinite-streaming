@@ -39,6 +39,15 @@ export interface SeriesSpec {
    *  in Chart.js terms. Useful for diagnostic series that would
    *  otherwise clutter the default view. */
   hidden?: boolean;
+  /** Chart.js `borderDash` — e.g. `[4, 4]` for a dashed line. */
+  borderDash?: number[];
+  /** Collapse this series into a group-shared legend entry. All series
+   *  sharing the same `groupLegend` string appear under a single
+   *  legend item whose label is the group name; clicking it toggles
+   *  visibility on every member. Useful for "the variant ladder" or
+   *  any other set of N lines the operator thinks of as one
+   *  conceptual overlay. Issue #486. */
+  groupLegend?: string;
 }
 
 const props = defineProps({
@@ -58,7 +67,24 @@ const props = defineProps({
    *  bundle); the chart adapts it to the synthetic PlayerRecord shape
    *  the per-series accessors expect. */
   eventsStream: { type: Object as PropType<Stream<Record<string, unknown>>>, required: true },
+  /** Optional overlay markers (issue #486). One dot per entry; rendered
+   *  after datasets are drawn so they sit above the line series. Used by
+   *  BandwidthChart for per-AVMetric-segment throughput points; any
+   *  chart can pass any stream of {x, y, color, label} the same way. */
+  markers: {
+    type: Array as PropType<Array<{ x: number; y: number; color?: string; label?: string }>>,
+    default: () => [],
+  },
+  /** Synthetic legend entry text. When set, a clickable chip appears at
+   *  the end of the legend that toggles all markers on/off. */
+  markersLabel: { type: String, default: '' },
+  /** Marker visibility (v-model). Default true. */
+  markersVisible: { type: Boolean, default: true },
 });
+
+const emit = defineEmits<{
+  (e: 'update:markersVisible', value: boolean): void;
+}>();
 
 const canvas = ref<HTMLCanvasElement | null>(null);
 const wrap = ref<HTMLDivElement | null>(null);
@@ -168,6 +194,66 @@ async function ensure(): Promise<any> {
   return ensurePromise;
 }
 
+/** Reconcile the live chart's dataset list against props.series
+ *  (issue #486). The chart is built once at mount with whatever
+ *  series existed then; series that come from a computed (e.g. the
+ *  manifest variant overlay on BandwidthChart) may arrive late. This
+ *  syncs the chart's `data.datasets` array + the backing `dataset`
+ *  cache in place — no destroy/recreate, so accumulated history on
+ *  the static series isn't lost. */
+function syncDatasetsFromSeriesProp() {
+  if (!chart || !chart.data?.datasets) return;
+  const target = props.series;
+  // Adjust backing `dataset` length first so pushSample's loop and
+  // chart.data.datasets stay 1:1.
+  while (dataset.length < target.length) dataset.push([]);
+  while (dataset.length > target.length) dataset.pop();
+  // Reconcile chart datasets in place. Match by label so a stable
+  // series keeps its in-memory data even if a new series is inserted
+  // before it.
+  const existing = chart.data.datasets;
+  const byLabel = new Map<string, any>();
+  for (const d of existing) if (d.label) byLabel.set(d.label, d);
+  const next: any[] = [];
+  for (let i = 0; i < target.length; i++) {
+    const s = target[i];
+    const prev = byLabel.get(s.label);
+    if (prev) {
+      // Update mutable bits and reuse the data array (preserves history).
+      prev.borderColor = s.color;
+      prev.backgroundColor = s.color + '22';
+      prev.stepped = !!s.stepped;
+      prev.borderDash = s.borderDash ?? [];
+      prev.yAxisID = s.axis === 'y2' ? 'y2' : 'y';
+      (prev as any)._groupLegend = s.groupLegend ?? null;
+      // Backing `dataset[i]` must point at the same array Chart.js
+      // is reading from. Reuse prev.data and reseat the cache slot.
+      dataset[i] = prev.data;
+      next.push(prev);
+    } else {
+      const data: Array<{ x: number; y: number }> = [];
+      dataset[i] = data;
+      next.push({
+        label: s.label,
+        borderColor: s.color,
+        backgroundColor: s.color + '22',
+        data,
+        tension: 0,
+        stepped: !!s.stepped,
+        pointRadius: 0,
+        borderWidth: 2,
+        borderDash: s.borderDash ?? [],
+        spanGaps: true,
+        yAxisID: s.axis === 'y2' ? 'y2' : 'y',
+        hidden: !!s.hidden,
+        _groupLegend: s.groupLegend ?? null,
+      });
+    }
+  }
+  chart.data.datasets = next;
+  safeChartUpdate();
+}
+
 function createChartInstance(Chart: any): any {
   dataset = props.series.map(() => []);
   const initialViewport = coord.effectiveRange.value;
@@ -199,9 +285,14 @@ function createChartInstance(Chart: any): any {
         stepped: !!s.stepped,
         pointRadius: 0,
         borderWidth: 2,
+        borderDash: s.borderDash ?? [],
         spanGaps: true,
         yAxisID: s.axis === 'y2' ? 'y2' : 'y',
         hidden: !!s.hidden,
+        // Marker for the legend group-collapse logic (issue #486).
+        // Datasets that share a `_groupLegend` value collapse to a
+        // single legend entry; clicking it toggles all members.
+        _groupLegend: s.groupLegend ?? null,
       })),
     },
     /**
@@ -213,6 +304,35 @@ function createChartInstance(Chart: any): any {
      * sits on top of the lines, but below the tooltip/legend.
      */
     plugins: [{
+      id: 'overlayMarkers',
+      afterDatasetsDraw(c: any) {
+        if (!props.markersVisible) return;
+        const list = props.markers;
+        if (!Array.isArray(list) || list.length === 0) return;
+        const sx = c.scales?.x;
+        const sy = c.scales?.y;
+        const area = c.chartArea;
+        if (!sx || !sy || !area) return;
+        const ctx = c.ctx;
+        ctx.save();
+        for (const m of list) {
+          if (!Number.isFinite(m.x) || !Number.isFinite(m.y)) continue;
+          if (m.x < sx.min || m.x > sx.max) continue;
+          if (m.y < sy.min || m.y > sy.max) continue;
+          const px = sx.getPixelForValue(m.x);
+          const py = sy.getPixelForValue(m.y);
+          ctx.beginPath();
+          ctx.arc(px, py, 3, 0, Math.PI * 2);
+          ctx.fillStyle = m.color ?? '#1f2937';
+          ctx.fill();
+          // Hairline border so the dot stands out on a same-colored line.
+          ctx.strokeStyle = 'rgba(255,255,255,0.85)';
+          ctx.lineWidth = 1;
+          ctx.stroke();
+        }
+        ctx.restore();
+      },
+    }, {
       id: 'navCursorLine',
       afterDatasetsDraw(c: any) {
         const ms = coord.state.cursorMs;
@@ -260,7 +380,87 @@ function createChartInstance(Chart: any): any {
       plugins: {
         legend: {
           position: 'bottom',
-          labels: { boxWidth: 10, font: { size: 11 }, padding: 6 },
+          labels: {
+            boxWidth: 10,
+            font: { size: 11 },
+            padding: 6,
+            // Group-collapse (issue #486): datasets sharing a
+            // `_groupLegend` value appear as ONE legend entry whose
+            // text is the group name and whose `hidden` reflects "is
+            // every member hidden?". The default generator emits one
+            // entry per dataset; we walk those, rename the first per
+            // group, and drop the rest.
+            generateLabels(chart: any) {
+              const defaults = (window as any).Chart?.defaults?.plugins?.legend?.labels?.generateLabels;
+              const items = defaults ? defaults(chart) : [];
+              const seen = new Set<string>();
+              const out: any[] = [];
+              for (const item of items) {
+                const ds = chart.data.datasets[item.datasetIndex];
+                const grp = ds?._groupLegend;
+                if (!grp) { out.push(item); continue; }
+                if (seen.has(grp)) continue;
+                seen.add(grp);
+                // "hidden" for the group entry: only true when EVERY
+                // member is hidden. Any one visible → group reads
+                // visible (not strike-through).
+                const anyVisible = chart.data.datasets.some(
+                  (d: any, idx: number) =>
+                    d._groupLegend === grp && chart.isDatasetVisible(idx),
+                );
+                item.text = grp;
+                item.hidden = !anyVisible;
+                item.lineDash = ds.borderDash ?? [];
+                out.push(item);
+              }
+              // Synthetic legend chip for the markers overlay (issue
+              // #486). Rendered as a filled circle (no line) so it
+              // reads as "dot overlay" not "line series". onClick
+              // below toggles `props.markersVisible` via emit.
+              if (props.markersLabel) {
+                out.push({
+                  text: props.markersLabel,
+                  fillStyle: '#475569',
+                  strokeStyle: '#475569',
+                  lineWidth: 0,
+                  pointStyle: 'circle',
+                  hidden: !props.markersVisible,
+                  datasetIndex: -1,
+                  _isMarkerToggle: true,
+                });
+              }
+              return out;
+            },
+          },
+          // Group-aware onClick. For ungrouped datasets, use the
+          // stock toggle. For grouped datasets, flip visibility on
+          // every member so one click controls the whole overlay.
+          onClick(_e: any, item: any, legend: any) {
+            const ci = legend.chart;
+            // Marker overlay toggle — synthetic legend entry; flip
+            // visibility on the parent's v-model state and force a
+            // repaint. Issue #486.
+            if (item?._isMarkerToggle) {
+              emit('update:markersVisible', !props.markersVisible);
+              ci.update();
+              return;
+            }
+            const ds = ci.data.datasets[item.datasetIndex];
+            const grp = ds?._groupLegend;
+            if (!grp) {
+              ci.setDatasetVisibility(item.datasetIndex, !ci.isDatasetVisible(item.datasetIndex));
+              ci.update();
+              return;
+            }
+            const anyVisible = ci.data.datasets.some(
+              (d: any, idx: number) =>
+                d._groupLegend === grp && ci.isDatasetVisible(idx),
+            );
+            ci.data.datasets.forEach((d: any, idx: number) => {
+              if (d._groupLegend === grp) ci.setDatasetVisibility(idx, !anyVisible);
+            });
+            ci.update();
+          },
           // Hover-highlight: when the cursor is over a legend label,
           // make that dataset's line POP and dim every other line so the
           // user can isolate it without clicking through visibility
@@ -272,10 +472,25 @@ function createChartInstance(Chart: any): any {
             const c = leg?.chart;
             if (!c || typeof item?.datasetIndex !== 'number') return;
             const hovered = item.datasetIndex;
+            // If the hovered legend entry represents a group (issue
+            // #486 — `Variant avg bandwidth` / `Variant peak bandwidth`
+            // each stand in for N member series), build a Set of every
+            // dataset index in that group so all members read as
+            // "highlighted" together. For an ungrouped entry the set
+            // is just the one dataset.
+            const hoveredGroup = c.data.datasets[hovered]?._groupLegend;
+            const highlighted = new Set<number>();
+            if (hoveredGroup) {
+              c.data.datasets.forEach((ds: any, i: number) => {
+                if (ds._groupLegend === hoveredGroup) highlighted.add(i);
+              });
+            } else {
+              highlighted.add(hovered);
+            }
             c.data.datasets.forEach((ds: any, i: number) => {
               if (ds._origBorderWidth == null) ds._origBorderWidth = ds.borderWidth ?? 2;
               if (ds._origBorderColor == null) ds._origBorderColor = ds.borderColor;
-              if (i === hovered) {
+              if (highlighted.has(i)) {
                 ds.borderWidth = (ds._origBorderWidth ?? 2) + 2;
                 ds.borderColor = ds._origBorderColor;
               } else {
@@ -415,7 +630,170 @@ function createChartInstance(Chart: any): any {
   installRightDragPan();
   installLiveWheelAnchor();
   installContextMenuSuppress();
+  installLeftClickLiveToggle();
+  installCursorHoverTooltip();
+  installMarkerHoverTooltip();
   return chart;
+}
+
+/* Cursor hover tooltip (issue #486).
+ *
+ * When the selected-event cursor is pinned, hovering the mouse within
+ * a few pixels of the vertical line reveals a small tooltip showing
+ * the cursor's label (`coord.state.cursorLabel`). Drives three refs
+ * the template binds: `cursorTooltipVisible`, `cursorTooltipX/Y`.
+ *
+ * Hit-test is canvas-pixel-space so the tooltip activates wherever the
+ * line is actually drawn, regardless of zoom or pan. 6 px tolerance
+ * matches the tap-target rule of thumb on macOS / desktop browsers.
+ */
+const cursorTooltipVisible = ref(false);
+const cursorTooltipX = ref(0);
+const cursorTooltipY = ref(0);
+
+/* Per-marker hover tooltip (issue #486).
+ *
+ * Mousemove handler hit-tests against every marker's chart-pixel
+ * position. When the mouse comes within ~6 px of a dot, pop a
+ * multi-line tooltip with that marker's pre-built `label` (set by
+ * BandwidthChart with event type / filename / mbps / bytes / etc.).
+ * Hidden when markers themselves are hidden. */
+const markerTooltipVisible = ref(false);
+const markerTooltipX = ref(0);
+const markerTooltipY = ref(0);
+const markerTooltipText = ref('');
+
+function installMarkerHoverTooltip() {
+  const c = canvas.value;
+  if (!c) return;
+  c.addEventListener('mousemove', (e) => {
+    if (!props.markersVisible) {
+      if (markerTooltipVisible.value) markerTooltipVisible.value = false;
+      return;
+    }
+    const list = props.markers;
+    if (!Array.isArray(list) || list.length === 0 || !chart) return;
+    const sx = chart.scales?.x;
+    const sy = chart.scales?.y;
+    const area = chart.chartArea;
+    if (!sx || !sy || !area) return;
+    const rect = c.getBoundingClientRect();
+    const mx = e.clientX - rect.left;
+    const my = e.clientY - rect.top;
+    if (mx < area.left || mx > area.right || my < area.top || my > area.bottom) {
+      if (markerTooltipVisible.value) markerTooltipVisible.value = false;
+      return;
+    }
+    // Find the closest marker within tolerance. Use squared
+    // distance to avoid the sqrt in the hot path.
+    const tol = 7; // pixels
+    let bestDist = tol * tol;
+    let bestLabel = '';
+    for (const m of list) {
+      if (!Number.isFinite(m.x) || !Number.isFinite(m.y)) continue;
+      if (m.x < sx.min || m.x > sx.max) continue;
+      if (m.y < sy.min || m.y > sy.max) continue;
+      const px = sx.getPixelForValue(m.x);
+      const py = sy.getPixelForValue(m.y);
+      const dx = mx - px;
+      const dy = my - py;
+      const d2 = dx * dx + dy * dy;
+      if (d2 < bestDist) {
+        bestDist = d2;
+        bestLabel = m.label ?? '';
+      }
+    }
+    if (!bestLabel) {
+      if (markerTooltipVisible.value) markerTooltipVisible.value = false;
+      return;
+    }
+    markerTooltipText.value = bestLabel;
+    markerTooltipX.value = Math.min(mx + 10, c.clientWidth - 280);
+    markerTooltipY.value = Math.max(4, my - 56);
+    markerTooltipVisible.value = true;
+  });
+  c.addEventListener('mouseleave', () => {
+    markerTooltipVisible.value = false;
+  });
+}
+
+function installCursorHoverTooltip() {
+  const c = canvas.value;
+  if (!c) return;
+  c.addEventListener('mousemove', (e) => {
+    const ms = coord.state.cursorMs;
+    const label = coord.state.cursorLabel;
+    if (ms == null || !label || !chart) {
+      if (cursorTooltipVisible.value) cursorTooltipVisible.value = false;
+      return;
+    }
+    const sx = chart.scales?.x;
+    const area = chart.chartArea;
+    if (!sx || !area) return;
+    const cursorPx = sx.getPixelForValue(ms);
+    if (!Number.isFinite(cursorPx)) return;
+    const rect = c.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+    if (y < area.top || y > area.bottom) {
+      if (cursorTooltipVisible.value) cursorTooltipVisible.value = false;
+      return;
+    }
+    if (Math.abs(x - cursorPx) > 6) {
+      if (cursorTooltipVisible.value) cursorTooltipVisible.value = false;
+      return;
+    }
+    // Position: just above and slightly right of the cursor, clamped
+    // to the visible area so a cursor near the right edge doesn't
+    // push the tooltip off-screen.
+    cursorTooltipX.value = Math.min(cursorPx + 6, c.clientWidth - 220);
+    cursorTooltipY.value = Math.max(4, y - 28);
+    cursorTooltipVisible.value = true;
+  });
+  c.addEventListener('mouseleave', () => {
+    cursorTooltipVisible.value = false;
+  });
+}
+
+/**
+ * Left-click-on-plot-area = toggle live (issue #486).
+ *
+ * The header comment promised this behavior since day one ("Left click
+ * (no drag) = toggle pause") but it was never wired. Adds a click-vs-
+ * drag detector: a left mouseup within 3 px and 300 ms of mousedown
+ * is a click; anything more is a drag (which is already handled by
+ * other paths). Click is constrained to the chart's plot area so
+ * legend toggles, axis-label clicks, and title clicks fall through
+ * to Chart.js's own handlers without also toggling live state.
+ *
+ * Alt+click is reserved for the live-edge wheel anchor and isn't
+ * treated as a toggle.
+ */
+function installLeftClickLiveToggle() {
+  const c = canvas.value;
+  if (!c) return;
+  let downAt: { x: number; y: number; t: number } | null = null;
+  c.addEventListener('mousedown', (e) => {
+    if (e.button !== 0 || e.altKey) return;
+    downAt = { x: e.clientX, y: e.clientY, t: performance.now() };
+  });
+  c.addEventListener('mouseup', (e) => {
+    if (e.button !== 0) return;
+    const start = downAt;
+    downAt = null;
+    if (!start) return;
+    const dist = Math.hypot(e.clientX - start.x, e.clientY - start.y);
+    const dur = performance.now() - start.t;
+    if (dist > 3 || dur > 300) return;            // it was a drag
+    const rect = c.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+    const area = chart?.chartArea;
+    if (!area) return;
+    if (x < area.left || x > area.right || y < area.top || y > area.bottom) return;
+    coord.toggleLive();
+  });
+  window.addEventListener('blur', () => { downAt = null; });
 }
 
 function installContextMenuSuppress() {
@@ -770,12 +1148,43 @@ watch(
   },
 );
 
+// When markers change, repaint so the dots track the latest stream
+// state. Cheap: chart.update('none') skips animations.
+watch(
+  () => props.markers,
+  () => { try { chart?.update('none'); } catch { /* ignore */ } },
+  { deep: false },
+);
+
 // When yMax changes from outside (Y-axis selector), reapply.
 watch(
   () => props.yMax,
   (v) => {
     try { applyYMax(v); } catch (err) { console.warn('chart yMax apply skipped:', err); }
     safeChartUpdate();
+  },
+);
+
+// When the series list changes (e.g. manifest variants populate after
+// the chart is up), reconcile the chart's datasets and replay the
+// cached events stream so new series fill in with whatever history
+// the rest of the chart has already absorbed. Issue #486.
+watch(
+  () => props.series.map((s) => s.label).join('|'),
+  () => {
+    try {
+      syncDatasetsFromSeriesProp();
+    } catch (err) {
+      console.warn('series sync skipped:', err);
+    }
+    // Replay history into the (possibly new) datasets. Reset the
+    // watermark so pushSample picks every cached row up again — it
+    // dedupes by exact x value in insertByX so the existing series
+    // don't accumulate duplicates.
+    try {
+      lastIngestedMs = -Infinity;
+      drainNewRows();
+    } catch { /* ignore */ }
   },
 );
 
@@ -858,6 +1267,23 @@ onBeforeUnmount(() => {
     </div>
     <div ref="canvasWrap" class="canvas-wrap" :class="expandedClass">
       <canvas ref="canvas" />
+      <!-- Cursor hover tooltip (issue #486). Positioned absolutely
+           over the canvas; visibility and position driven by the
+           installCursorHoverTooltip handler. Empty by default; only
+           rendered when the user hovers within a few pixels of the
+           pinned cursor line. -->
+      <div
+        v-if="cursorTooltipVisible"
+        class="cursor-tooltip"
+        :style="{ left: cursorTooltipX + 'px', top: cursorTooltipY + 'px' }"
+      >{{ coord.state.cursorLabel }}</div>
+      <!-- Per-marker hover tooltip (issue #486) — appears when the
+           mouse is within ~7 px of any overlay marker. Multi-line. -->
+      <div
+        v-if="markerTooltipVisible"
+        class="marker-tooltip"
+        :style="{ left: markerTooltipX + 'px', top: markerTooltipY + 'px' }"
+      >{{ markerTooltipText }}</div>
     </div>
   </div>
 </template>
@@ -932,6 +1358,45 @@ onBeforeUnmount(() => {
 }
 .canvas-wrap.expanded {
   height: 540px;
+}
+
+/* Cursor hover tooltip (issue #486). Position is set via inline
+ * style — only the appearance lives here. Above the canvas, below
+ * any modal so it's never lost behind a Chart.js native tooltip. */
+.cursor-tooltip {
+  position: absolute;
+  z-index: 4;
+  background: #1e3a8a;
+  color: #fff;
+  font-size: 11px;
+  font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+  padding: 4px 8px;
+  border-radius: 4px;
+  pointer-events: none;
+  white-space: nowrap;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.18);
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Per-marker hover tooltip (issue #486). Different colour from the
+ * cursor tooltip so the two read distinctly when both could plausibly
+ * be visible. Pre-line for embedded \n in the marker label. */
+.marker-tooltip {
+  position: absolute;
+  z-index: 4;
+  background: rgba(15, 23, 42, 0.94); /* slate-900-ish, slight transparency */
+  color: #fff;
+  font-size: 11px;
+  font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+  padding: 6px 8px;
+  border-radius: 4px;
+  pointer-events: none;
+  white-space: pre-line;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.18);
+  max-width: 280px;
+  line-height: 1.4;
 }
 
 .btn-expand { display: inline-flex; align-items: center; gap: 4px; }
