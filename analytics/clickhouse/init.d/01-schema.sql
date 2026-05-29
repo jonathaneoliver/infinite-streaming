@@ -71,8 +71,112 @@ CREATE TABLE IF NOT EXISTS infinite_streaming.session_events
     video_resolution      LowCardinality(String)      CODEC(ZSTD(1)),
     frames_displayed      UInt64                      DEFAULT 0,
     dropped_frames        UInt32                      DEFAULT 0,
+    -- DEPRECATED (#550 soft cutover). Forwarder mirror-writes from
+    -- stalling_count / stalling_time_ms below for the deprecation
+    -- window. Consumers (Vue3 dashboard, harness, Grafana) migrate to
+    -- stalling_* over time; a follow-up PR drops these two columns.
     stall_count           UInt32                      DEFAULT 0,
     stall_time_s          Float32                     CODEC(ZSTD(1)),
+
+    -- ── State residency accumulators (#550 Phase 1) ────────────────────
+    -- Cumulative-on-the-wire since play start; reset at every play
+    -- boundary by the iOS client. Server derives per-snapshot deltas
+    -- via lag() — and ALSO stores them as paired _delta columns below
+    -- (forwarder-computed at insert time from per-play state cache).
+    --
+    -- Use _delta for "did this snapshot witness X" / "live tile";
+    -- _time_ms for "total since play start"; _count for "entries";
+    -- *_duration_ms (further down) for "most-recent event duration".
+    --
+    -- stalling_* replaces both the old AVPlayerItemPlaybackStalled-
+    -- driven stall_count/stall_time_s AND the briefly-shipped
+    -- stalled_state_* mirror — single canonical pair, driven by
+    -- state transitions in PlaybackDiagnostics.
+    --
+    -- Trickplay = playback rate ∉ {~0, ~1}. Seeking = time between
+    -- AVPlayerItemTimeJumped and next .playing transition; Conviva
+    -- CIRR/CIRT pattern lets dashboard derive connection-induced
+    -- buffer via `buffering_time_ms - seeking_time_ms`.
+    playing_time_ms             UInt32 DEFAULT 0          CODEC(DoubleDelta, ZSTD(1)),
+    playing_time_ms_delta       UInt32 DEFAULT 0          CODEC(DoubleDelta, ZSTD(1)),
+    playing_count               UInt32 DEFAULT 0          CODEC(DoubleDelta, ZSTD(1)),
+    playing_count_delta         UInt32 DEFAULT 0          CODEC(DoubleDelta, ZSTD(1)),
+    pausing_time_ms             UInt32 DEFAULT 0          CODEC(DoubleDelta, ZSTD(1)),
+    pausing_time_ms_delta       UInt32 DEFAULT 0          CODEC(DoubleDelta, ZSTD(1)),
+    pausing_count               UInt32 DEFAULT 0          CODEC(DoubleDelta, ZSTD(1)),
+    pausing_count_delta         UInt32 DEFAULT 0          CODEC(DoubleDelta, ZSTD(1)),
+    buffering_time_ms           UInt32 DEFAULT 0          CODEC(DoubleDelta, ZSTD(1)),
+    buffering_time_ms_delta     UInt32 DEFAULT 0          CODEC(DoubleDelta, ZSTD(1)),
+    buffering_count             UInt32 DEFAULT 0          CODEC(DoubleDelta, ZSTD(1)),
+    buffering_count_delta       UInt32 DEFAULT 0          CODEC(DoubleDelta, ZSTD(1)),
+    stalling_time_ms            UInt32 DEFAULT 0          CODEC(DoubleDelta, ZSTD(1)),
+    stalling_time_ms_delta      UInt32 DEFAULT 0          CODEC(DoubleDelta, ZSTD(1)),
+    stalling_count              UInt32 DEFAULT 0          CODEC(DoubleDelta, ZSTD(1)),
+    stalling_count_delta        UInt32 DEFAULT 0          CODEC(DoubleDelta, ZSTD(1)),
+    idling_time_ms              UInt32 DEFAULT 0          CODEC(DoubleDelta, ZSTD(1)),
+    idling_time_ms_delta        UInt32 DEFAULT 0          CODEC(DoubleDelta, ZSTD(1)),
+    idling_count                UInt32 DEFAULT 0          CODEC(DoubleDelta, ZSTD(1)),
+    idling_count_delta          UInt32 DEFAULT 0          CODEC(DoubleDelta, ZSTD(1)),
+    seeking_time_ms             UInt32 DEFAULT 0          CODEC(DoubleDelta, ZSTD(1)),
+    seeking_time_ms_delta       UInt32 DEFAULT 0          CODEC(DoubleDelta, ZSTD(1)),
+    seeking_count               UInt32 DEFAULT 0          CODEC(DoubleDelta, ZSTD(1)),
+    seeking_count_delta         UInt32 DEFAULT 0          CODEC(DoubleDelta, ZSTD(1)),
+    trickplaying_time_ms        UInt32 DEFAULT 0          CODEC(DoubleDelta, ZSTD(1)),
+    trickplaying_time_ms_delta  UInt32 DEFAULT 0          CODEC(DoubleDelta, ZSTD(1)),
+    trickplaying_count          UInt32 DEFAULT 0          CODEC(DoubleDelta, ZSTD(1)),
+    trickplaying_count_delta    UInt32 DEFAULT 0          CODEC(DoubleDelta, ZSTD(1)),
+
+    -- ── Phase 1 per-event sticky durations (#550) ──────────────────
+    -- Duration of the most-recent stall / buffer event. Set by iOS
+    -- when the event completes (last_event='stall_end' /
+    -- 'buffering_end'), sticky on subsequent heartbeats until next
+    -- event. Use these for "longest single event in play" queries;
+    -- the _delta columns above answer "this heartbeat saw X".
+    stall_duration_ms           UInt32 DEFAULT 0          CODEC(DoubleDelta, ZSTD(1)),
+    buffering_duration_ms       UInt32 DEFAULT 0          CODEC(DoubleDelta, ZSTD(1)),
+
+    -- ── Phase 2 outcome status + error fields (#550) ───────────────
+    -- playback_status: terminal outcome (completed / user_stopped /
+    --   start_failure (VSF) / abandoned_start (EBVS) /
+    --   mid_stream_failure (MSF) / in_progress).
+    -- playback_reason: controlled vocab per status. During
+    --   in_progress, mirrors player_state for free; on terminal rows,
+    --   classifier-derived from iOS raw signals + qoe_thresholds.json.
+    -- error_code/_domain/_details: per-snapshot error context;
+    --   populated on `last_event='error'` rows AND on terminal failure
+    --   session_end rows (same value as terminal_error_* on those).
+    -- terminal_error_*: populated ONLY on terminal failure rows.
+    --   Querying terminal_error_code != 0 never returns transient codes.
+    -- error_count / _delta: cumulative observation counter + per-row
+    --   delta. Match the Phase 1 _delta pattern.
+    playback_status         LowCardinality(String) DEFAULT 'in_progress' CODEC(ZSTD(1)),
+    playback_reason         LowCardinality(String) DEFAULT ''            CODEC(ZSTD(1)),
+    error_code              Int32                  DEFAULT 0             CODEC(DoubleDelta, ZSTD(1)),
+    error_domain            LowCardinality(String) DEFAULT ''            CODEC(ZSTD(1)),
+    error_details           String                                       CODEC(ZSTD(3)),
+    terminal_error_code     Int32                  DEFAULT 0             CODEC(DoubleDelta, ZSTD(1)),
+    terminal_error_domain   LowCardinality(String) DEFAULT ''            CODEC(ZSTD(1)),
+    terminal_error_details  String                                       CODEC(ZSTD(3)),
+    error_count             UInt32                 DEFAULT 0             CODEC(DoubleDelta, ZSTD(1)),
+    error_count_delta       UInt32                 DEFAULT 0             CODEC(DoubleDelta, ZSTD(1)),
+
+    -- ── Phase 4 device / platform / version taxonomy (#550) ────────
+    -- Split the conflated `platform` field into the canonical Conviva
+    -- / Bitmovin taxonomy. Stamped on every row (Mux/Conviva pattern);
+    -- LowCardinality compresses the repeats. iOS app emits via
+    -- DeviceInfo.swift; external HLS players (no metrics protocol)
+    -- get device fields parsed best-effort from User-Agent by
+    -- go-proxy.
+    os_version_major        UInt16                 DEFAULT 0             CODEC(ZSTD(1)),
+    os_version_minor        UInt16                 DEFAULT 0             CODEC(ZSTD(1)),
+    app_version             LowCardinality(String) DEFAULT ''            CODEC(ZSTD(1)),
+    device_class            LowCardinality(String) DEFAULT ''            CODEC(ZSTD(1)),
+    device_model            String                 DEFAULT ''            CODEC(ZSTD(1)),
+    player_tech             LowCardinality(String) DEFAULT ''            CODEC(ZSTD(1)),
+    screen_width_px         UInt16                 DEFAULT 0             CODEC(ZSTD(1)),
+    screen_height_px        UInt16                 DEFAULT 0             CODEC(ZSTD(1)),
+    screen_density          Float32                DEFAULT 0             CODEC(ZSTD(1)),
+
     position_s            Float32                     CODEC(ZSTD(1)),
     live_edge_s           Float32                     CODEC(ZSTD(1)),
     true_offset_s         Float32                     CODEC(ZSTD(1)),
@@ -191,7 +295,14 @@ CREATE TABLE IF NOT EXISTS infinite_streaming.session_events
 
     -- Misc
     abrchar_run_lock            UInt8                  DEFAULT 0,
-    control_revision            UInt64                 DEFAULT 0,
+    -- control_revision is go-proxy's RFC3339Nano "ETag" for
+    -- optimistic concurrency on session mutations. Originally stored
+    -- as UInt64 — silently truncated by getU64(s, "control_revision")
+    -- via fmt.Sscanf("%d", ...) to just the leading year (e.g. "2026"
+    -- from "2026-05-29T17:06:29Z"). Type-changed-in-place: dropped
+    -- the broken UInt64 + renamed the working String column back to
+    -- the canonical name. See migration in the same PR.
+    control_revision            String                 DEFAULT ''            CODEC(ZSTD(1)),
 
     -- Server-side variant
     server_video_rendition       LowCardinality(String) CODEC(ZSTD(1)),
@@ -291,6 +402,88 @@ ALTER TABLE infinite_streaming.session_events
     -- verbatim; PlayLog expands it into one chip per variant via its
     -- generic JSON-field expander.
     ADD COLUMN IF NOT EXISTS time_per_variant_s String CODEC(ZSTD(3)),
+
+    -- ── #550 Phase 1: residency accumulators + paired deltas ───────
+    -- New canonical names (gerund, UInt32 ms, DoubleDelta+ZSTD).
+    -- Supersedes the first-cut Float32 _s variants from the prior
+    -- residency commit on this branch (those ALTERs are removed
+    -- because no production deploy ever consumed them).
+    ADD COLUMN IF NOT EXISTS playing_time_ms             UInt32 DEFAULT 0 CODEC(DoubleDelta, ZSTD(1)),
+    ADD COLUMN IF NOT EXISTS playing_time_ms_delta       UInt32 DEFAULT 0 CODEC(DoubleDelta, ZSTD(1)),
+    ADD COLUMN IF NOT EXISTS playing_count               UInt32 DEFAULT 0 CODEC(DoubleDelta, ZSTD(1)),
+    ADD COLUMN IF NOT EXISTS playing_count_delta         UInt32 DEFAULT 0 CODEC(DoubleDelta, ZSTD(1)),
+    ADD COLUMN IF NOT EXISTS pausing_time_ms             UInt32 DEFAULT 0 CODEC(DoubleDelta, ZSTD(1)),
+    ADD COLUMN IF NOT EXISTS pausing_time_ms_delta       UInt32 DEFAULT 0 CODEC(DoubleDelta, ZSTD(1)),
+    ADD COLUMN IF NOT EXISTS pausing_count               UInt32 DEFAULT 0 CODEC(DoubleDelta, ZSTD(1)),
+    ADD COLUMN IF NOT EXISTS pausing_count_delta         UInt32 DEFAULT 0 CODEC(DoubleDelta, ZSTD(1)),
+    ADD COLUMN IF NOT EXISTS buffering_time_ms           UInt32 DEFAULT 0 CODEC(DoubleDelta, ZSTD(1)),
+    ADD COLUMN IF NOT EXISTS buffering_time_ms_delta     UInt32 DEFAULT 0 CODEC(DoubleDelta, ZSTD(1)),
+    ADD COLUMN IF NOT EXISTS buffering_count             UInt32 DEFAULT 0 CODEC(DoubleDelta, ZSTD(1)),
+    ADD COLUMN IF NOT EXISTS buffering_count_delta       UInt32 DEFAULT 0 CODEC(DoubleDelta, ZSTD(1)),
+    ADD COLUMN IF NOT EXISTS stalling_time_ms            UInt32 DEFAULT 0 CODEC(DoubleDelta, ZSTD(1)),
+    ADD COLUMN IF NOT EXISTS stalling_time_ms_delta      UInt32 DEFAULT 0 CODEC(DoubleDelta, ZSTD(1)),
+    ADD COLUMN IF NOT EXISTS stalling_count              UInt32 DEFAULT 0 CODEC(DoubleDelta, ZSTD(1)),
+    ADD COLUMN IF NOT EXISTS stalling_count_delta        UInt32 DEFAULT 0 CODEC(DoubleDelta, ZSTD(1)),
+    ADD COLUMN IF NOT EXISTS idling_time_ms              UInt32 DEFAULT 0 CODEC(DoubleDelta, ZSTD(1)),
+    ADD COLUMN IF NOT EXISTS idling_time_ms_delta        UInt32 DEFAULT 0 CODEC(DoubleDelta, ZSTD(1)),
+    ADD COLUMN IF NOT EXISTS idling_count                UInt32 DEFAULT 0 CODEC(DoubleDelta, ZSTD(1)),
+    ADD COLUMN IF NOT EXISTS idling_count_delta          UInt32 DEFAULT 0 CODEC(DoubleDelta, ZSTD(1)),
+    ADD COLUMN IF NOT EXISTS seeking_time_ms             UInt32 DEFAULT 0 CODEC(DoubleDelta, ZSTD(1)),
+    ADD COLUMN IF NOT EXISTS seeking_time_ms_delta       UInt32 DEFAULT 0 CODEC(DoubleDelta, ZSTD(1)),
+    ADD COLUMN IF NOT EXISTS seeking_count               UInt32 DEFAULT 0 CODEC(DoubleDelta, ZSTD(1)),
+    ADD COLUMN IF NOT EXISTS seeking_count_delta         UInt32 DEFAULT 0 CODEC(DoubleDelta, ZSTD(1)),
+    ADD COLUMN IF NOT EXISTS trickplaying_time_ms        UInt32 DEFAULT 0 CODEC(DoubleDelta, ZSTD(1)),
+    ADD COLUMN IF NOT EXISTS trickplaying_time_ms_delta  UInt32 DEFAULT 0 CODEC(DoubleDelta, ZSTD(1)),
+    ADD COLUMN IF NOT EXISTS trickplaying_count          UInt32 DEFAULT 0 CODEC(DoubleDelta, ZSTD(1)),
+    ADD COLUMN IF NOT EXISTS trickplaying_count_delta    UInt32 DEFAULT 0 CODEC(DoubleDelta, ZSTD(1)),
+    -- Per-event sticky durations (Phase 1 ancillary).
+    ADD COLUMN IF NOT EXISTS stall_duration_ms           UInt32 DEFAULT 0 CODEC(DoubleDelta, ZSTD(1)),
+    ADD COLUMN IF NOT EXISTS buffering_duration_ms       UInt32 DEFAULT 0 CODEC(DoubleDelta, ZSTD(1)),
+    -- video_first_frame_time_ms / video_start_time_ms (Phase 1 ms migrations).
+    -- Keep the legacy _s variants above as deprecated; forwarder
+    -- mirror-writes both for the deprecation window.
+    ADD COLUMN IF NOT EXISTS video_first_frame_time_ms   UInt32 DEFAULT 0 CODEC(DoubleDelta, ZSTD(1)),
+    ADD COLUMN IF NOT EXISTS video_start_time_ms         UInt32 DEFAULT 0 CODEC(DoubleDelta, ZSTD(1)),
+
+    -- ── #550 Phase 2: outcome status + structured error fields ─────
+    ADD COLUMN IF NOT EXISTS playback_status         LowCardinality(String) DEFAULT 'in_progress' CODEC(ZSTD(1)),
+    ADD COLUMN IF NOT EXISTS playback_reason         LowCardinality(String) DEFAULT ''            CODEC(ZSTD(1)),
+    ADD COLUMN IF NOT EXISTS error_code              Int32                  DEFAULT 0             CODEC(DoubleDelta, ZSTD(1)),
+    ADD COLUMN IF NOT EXISTS error_domain            LowCardinality(String) DEFAULT ''            CODEC(ZSTD(1)),
+    ADD COLUMN IF NOT EXISTS error_details           String                                       CODEC(ZSTD(3)),
+    ADD COLUMN IF NOT EXISTS terminal_error_code     Int32                  DEFAULT 0             CODEC(DoubleDelta, ZSTD(1)),
+    ADD COLUMN IF NOT EXISTS terminal_error_domain   LowCardinality(String) DEFAULT ''            CODEC(ZSTD(1)),
+    ADD COLUMN IF NOT EXISTS terminal_error_details  String                                       CODEC(ZSTD(3)),
+    ADD COLUMN IF NOT EXISTS error_count             UInt32                 DEFAULT 0             CODEC(DoubleDelta, ZSTD(1)),
+    ADD COLUMN IF NOT EXISTS error_count_delta       UInt32                 DEFAULT 0             CODEC(DoubleDelta, ZSTD(1)),
+
+    -- ── #550 Phase 4: device / platform / version taxonomy ─────────
+    ADD COLUMN IF NOT EXISTS os_version_major        UInt16                 DEFAULT 0             CODEC(ZSTD(1)),
+    ADD COLUMN IF NOT EXISTS os_version_minor        UInt16                 DEFAULT 0             CODEC(ZSTD(1)),
+    ADD COLUMN IF NOT EXISTS app_version             LowCardinality(String) DEFAULT ''            CODEC(ZSTD(1)),
+    ADD COLUMN IF NOT EXISTS device_class            LowCardinality(String) DEFAULT ''            CODEC(ZSTD(1)),
+    ADD COLUMN IF NOT EXISTS device_model            String                 DEFAULT ''            CODEC(ZSTD(1)),
+    ADD COLUMN IF NOT EXISTS player_tech             LowCardinality(String) DEFAULT ''            CODEC(ZSTD(1)),
+    ADD COLUMN IF NOT EXISTS screen_width_px         UInt16                 DEFAULT 0             CODEC(ZSTD(1)),
+    ADD COLUMN IF NOT EXISTS screen_height_px        UInt16                 DEFAULT 0             CODEC(ZSTD(1)),
+    ADD COLUMN IF NOT EXISTS screen_density          Float32                DEFAULT 0             CODEC(ZSTD(1)),
+
+    -- #550 dashboard-parity restoration: origination_ip was on the
+    -- live PlayerRecord but never made it into CH (no schema column,
+    -- no forwarder ingest, no bundle). Restored here so archived
+    -- session viewer's "Origination IP" tile populates the same way
+    -- the live Testing dashboard's does.
+    ADD COLUMN IF NOT EXISTS origination_ip          LowCardinality(String) DEFAULT ''            CODEC(ZSTD(1)),
+    -- session_number is the proxy's short numeric session id
+    -- (port-derived). Surfaced as display_id in v2 + the dashboard's
+    -- "Display ID" tile. Was missing from CH so archived rows showed
+    -- "—". Same parity-restoration pattern as origination_ip above.
+    ADD COLUMN IF NOT EXISTS session_number          UInt32                 DEFAULT 0             CODEC(ZSTD(1)),
+    -- control_revision: the working String column. Type-changed in-
+    -- place from UInt64 (truncated by Sscanf) via DROP + RENAME in
+    -- the same migration block. See top-of-table CREATE definition
+    -- for the canonical type. ALTER on existing deploys is the
+    -- two-statement sequence at the bottom of this file.
     -- Manifest HOLD-BACK / PART-HOLD-BACK (issue #486 follow-up).
     -- recommended_offset_s = AVFoundation's parse of
     -- EXT-X-SERVER-CONTROL — what Apple says the player should sit
@@ -366,7 +559,12 @@ ALTER TABLE infinite_streaming.session_events
     ADD COLUMN IF NOT EXISTS content_live_offset Float32 CODEC(ZSTD(1)),
     ADD COLUMN IF NOT EXISTS content_strip_codecs String CODEC(ZSTD(1)),
     ADD COLUMN IF NOT EXISTS abrchar_run_lock UInt8 DEFAULT 0,
-    ADD COLUMN IF NOT EXISTS control_revision UInt64 DEFAULT 0,
+    -- control_revision was originally added here as UInt64 — wrong
+    -- type (see CREATE TABLE comment). Type-fix migration below at
+    -- the end of this file: DROP UInt64 + RENAME _str → canonical
+    -- name. Line kept as a comment so legacy clusters with the
+    -- UInt64 column still parse this file cleanly during init.d
+    -- replay (ADD COLUMN IF NOT EXISTS is a no-op when present).
     -- Server-side TCP_INFO RTT (issue #401). See inline comment on
     -- the CREATE TABLE columns above.
     ADD COLUMN IF NOT EXISTS client_rtt_ms Float32 CODEC(ZSTD(1)),
@@ -395,6 +593,30 @@ ALTER TABLE infinite_streaming.session_events
 -- ladder). Safe MODIFY since the only existing values are zero.
 ALTER TABLE infinite_streaming.session_events
     MODIFY COLUMN IF EXISTS manifest_variants String CODEC(ZSTD(3));
+
+-- control_revision: type-change-in-place from UInt64 → String.
+-- The UInt64 was filled by getU64(s, "control_revision") which calls
+-- fmt.Sscanf("%d", ...) — that reads leading digits and stops at the
+-- first non-digit, truncating go-proxy's RFC3339Nano timestamps to
+-- just the year (e.g. "2026" from "2026-05-29T17:06:29.776714594Z").
+--
+-- Migration sequence (atomic via two ALTERs run in immediate
+-- succession; CH supports multi-action ALTER but the soft-cutover
+-- column control_revision_str must exist before the DROP):
+--   1. ADD COLUMN control_revision_str String   (already done above
+--      in the additive ALTER block as a soft cutover)
+--   2. DROP COLUMN control_revision (the broken UInt64)
+--   3. RENAME COLUMN control_revision_str → control_revision
+--
+-- On fresh deploys the CREATE TABLE has the canonical String column,
+-- so step 2's IF EXISTS is a no-op (nothing to drop) and step 3 is
+-- a no-op (nothing to rename — control_revision_str was never added
+-- because step 1 above is IF NOT EXISTS).
+ALTER TABLE infinite_streaming.session_events
+    DROP COLUMN IF EXISTS control_revision;
+
+ALTER TABLE infinite_streaming.session_events
+    RENAME COLUMN IF EXISTS control_revision_str TO control_revision;
 
 -- Per-request HAR-style log so the session-viewer's network log fold
 -- can replay archived sessions whose go-proxy buffer is gone. Forwarder

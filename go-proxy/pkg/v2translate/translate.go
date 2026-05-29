@@ -232,6 +232,18 @@ func playerMetricsFromSession(s map[string]any) *oapigen.PlayerMetrics {
 		{"player_metrics_playback_engine", &pm.PlaybackEngine},
 		{"player_metrics_error", &pm.Error},
 		{"player_metrics_source", &pm.Source},
+		// #550 Phase 2: outcome + error string fields.
+		{"player_metrics_playback_status", &pm.PlaybackStatus},
+		{"player_metrics_playback_reason", &pm.PlaybackReason},
+		{"player_metrics_error_domain", &pm.ErrorDomain},
+		{"player_metrics_error_details", &pm.ErrorDetails},
+		{"player_metrics_terminal_error_domain", &pm.TerminalErrorDomain},
+		{"player_metrics_terminal_error_details", &pm.TerminalErrorDetails},
+		// #550 Phase 4: device taxonomy string fields.
+		{"player_metrics_app_version", &pm.AppVersion},
+		{"player_metrics_device_class", &pm.DeviceClass},
+		{"player_metrics_device_model", &pm.DeviceModel},
+		{"player_metrics_player_tech", &pm.PlayerTech},
 	} {
 		if v, ok := s[m.key].(string); ok && v != "" {
 			vv := v
@@ -261,6 +273,8 @@ func playerMetricsFromSession(s map[string]any) *oapigen.PlayerMetrics {
 		{"player_metrics_video_start_time_s", &pm.VideoStartTimeS},
 		{"player_metrics_stall_time_s", &pm.StallTimeS},
 		{"player_metrics_last_stall_time_s", &pm.LastStallTimeS},
+		// #550 Phase 4: only float field in device taxonomy.
+		{"player_metrics_screen_density", &pm.ScreenDensity},
 	} {
 		if v, ok := numericFloatTranslate(s[m.key]); ok {
 			f := float32(v)
@@ -283,6 +297,34 @@ func playerMetricsFromSession(s map[string]any) *oapigen.PlayerMetrics {
 		{"player_metrics_loop_count_increment", &pm.LoopCountIncrement},
 		{"player_metrics_profile_shift_count", &pm.ProfileShiftCount},
 		{"player_metrics_playhead_wallclock_ms", &pm.PlayheadWallclockMs},
+		// #550 Phase 1: residency accumulators + per-event durations.
+		{"player_metrics_playing_time_ms", &pm.PlayingTimeMs},
+		{"player_metrics_playing_count", &pm.PlayingCount},
+		{"player_metrics_pausing_time_ms", &pm.PausingTimeMs},
+		{"player_metrics_pausing_count", &pm.PausingCount},
+		{"player_metrics_buffering_time_ms", &pm.BufferingTimeMs},
+		{"player_metrics_buffering_count", &pm.BufferingCount},
+		{"player_metrics_stalling_time_ms", &pm.StallingTimeMs},
+		{"player_metrics_stalling_count", &pm.StallingCount},
+		{"player_metrics_idling_time_ms", &pm.IdlingTimeMs},
+		{"player_metrics_idling_count", &pm.IdlingCount},
+		{"player_metrics_seeking_time_ms", &pm.SeekingTimeMs},
+		{"player_metrics_seeking_count", &pm.SeekingCount},
+		{"player_metrics_trickplaying_time_ms", &pm.TrickplayingTimeMs},
+		{"player_metrics_trickplaying_count", &pm.TrickplayingCount},
+		{"player_metrics_stall_duration_ms", &pm.StallDurationMs},
+		{"player_metrics_buffering_duration_ms", &pm.BufferingDurationMs},
+		{"player_metrics_video_first_frame_time_ms", &pm.VideoFirstFrameTimeMs},
+		{"player_metrics_video_start_time_ms", &pm.VideoStartTimeMs},
+		// #550 Phase 2: error code + counter (signed code via int; NSError codes are negative).
+		{"player_metrics_error_code", &pm.ErrorCode},
+		{"player_metrics_terminal_error_code", &pm.TerminalErrorCode},
+		{"player_metrics_error_count", &pm.ErrorCount},
+		// #550 Phase 4: integer device taxonomy fields.
+		{"player_metrics_os_version_major", &pm.OsVersionMajor},
+		{"player_metrics_os_version_minor", &pm.OsVersionMinor},
+		{"player_metrics_screen_width_px", &pm.ScreenWidthPx},
+		{"player_metrics_screen_height_px", &pm.ScreenHeightPx},
 	} {
 		if v, ok := numericFloatTranslate(s[m.key]); ok {
 			i := int(v)

@@ -644,7 +644,7 @@ type ContentManipulation struct {
 	// StripCodecs Remove CODECS attribute from EXT-X-STREAM-INF lines.
 	StripCodecs *bool `json:"strip_codecs,omitempty"`
 
-	// StripResolution Remove RESOLUTION attribute from EXT-X-STREAM-INF lines (issue #486).
+	// StripResolution Remove RESOLUTION attribute from EXT-X-STREAM-INF lines. Apple HLS validator rejects this; AVPlayer plays but variant.video.size becomes empty (issue #486).
 	StripResolution *bool `json:"strip_resolution,omitempty"`
 }
 
@@ -1198,6 +1198,9 @@ type PlayerGroupPatch struct {
 // a typed projection). All fields nullable — the player may not
 // report every field on every tick.
 type PlayerMetrics struct {
+	// AppVersion #550 Phase 4: app marketing version from Bundle CFBundleShortVersionString.
+	AppVersion *string `json:"app_version,omitempty"`
+
 	// AvgNetworkBitrateMbps Player-computed avgNetworkBitrate.
 	AvgNetworkBitrateMbps *float32 `json:"avg_network_bitrate_mbps,omitempty"`
 
@@ -1208,6 +1211,21 @@ type PlayerMetrics struct {
 	// BufferEndS Player-reported end of buffered range (seconds).
 	BufferEndS *float32 `json:"buffer_end_s,omitempty"`
 
+	// BufferingCount #550 Phase 1: entries into `buffering` state.
+	BufferingCount *int `json:"buffering_count,omitempty"`
+
+	// BufferingDurationMs #550 Phase 1: duration of the MOST RECENT buffer event (sticky). Replaces legacy last_buffering_time_s.
+	BufferingDurationMs *int `json:"buffering_duration_ms,omitempty"`
+
+	// BufferingTimeMs #550 Phase 1: cumulative buffering time (ms).
+	BufferingTimeMs *int `json:"buffering_time_ms,omitempty"`
+
+	// DeviceClass #550 Phase 4: form-factor enum: `phone` / `tablet` / `tv` / `desktop` / `unknown`.
+	DeviceClass *string `json:"device_class,omitempty"`
+
+	// DeviceModel #550 Phase 4: hardware model identifier (e.g. iPhone15,3) via sysctl hw.machine.
+	DeviceModel *string `json:"device_model,omitempty"`
+
 	// DisplayResolution Player-reported window/display resolution (separate from the active video resolution).
 	DisplayResolution *string `json:"display_resolution,omitempty"`
 
@@ -1217,6 +1235,18 @@ type PlayerMetrics struct {
 	// Error Most recent player-reported error string.
 	Error *string `json:"error,omitempty"`
 
+	// ErrorCode #550 Phase 2: NSError.code / HTTP status / system errno. Populated on `error` events AND terminal failure rows. 0 = no error.
+	ErrorCode *int `json:"error_code,omitempty"`
+
+	// ErrorCount #550 Phase 2: cumulative observation counter. Ticks on every `error` event (transient or terminal). Forwarder computes per-row delta server-side.
+	ErrorCount *int `json:"error_count,omitempty"`
+
+	// ErrorDetails #550 Phase 2: JSON blob with URL, underlying error chain, native message.
+	ErrorDetails *string `json:"error_details,omitempty"`
+
+	// ErrorDomain #550 Phase 2: NSError.domain — `CoreMediaErrorDomain` / `NSURLErrorDomain` / `AVFoundationErrorDomain` / `http` etc.
+	ErrorDomain *string `json:"error_domain,omitempty"`
+
 	// EventTime Player-supplied wallclock for the most recent metrics tick.
 	EventTime *time.Time `json:"event_time,omitempty"`
 
@@ -1225,6 +1255,12 @@ type PlayerMetrics struct {
 
 	// FramesDisplayed Player-reported displayed frames count.
 	FramesDisplayed *int `json:"frames_displayed,omitempty"`
+
+	// IdlingCount #550 Phase 1: entries into `idle` state.
+	IdlingCount *int `json:"idling_count,omitempty"`
+
+	// IdlingTimeMs #550 Phase 1: cumulative idle time (ms).
+	IdlingTimeMs *int `json:"idling_time_ms,omitempty"`
 
 	// LastEvent Most recent player-reported lifecycle event (playing, buffering_start, stall_start, etc.).
 	LastEvent *string `json:"last_event,omitempty"`
@@ -1247,17 +1283,44 @@ type PlayerMetrics struct {
 	// NetworkBitrateMbps Player-computed instantaneous networkBitrate.
 	NetworkBitrateMbps *float32 `json:"network_bitrate_mbps,omitempty"`
 
+	// OsVersionMajor #550 Phase 4: OS major version (e.g. 26 for iOS 26.0.1).
+	OsVersionMajor *int `json:"os_version_major,omitempty"`
+
+	// OsVersionMinor #550 Phase 4: OS minor version.
+	OsVersionMinor *int `json:"os_version_minor,omitempty"`
+
+	// PausingCount #550 Phase 1: entries into `paused` state.
+	PausingCount *int `json:"pausing_count,omitempty"`
+
+	// PausingTimeMs #550 Phase 1: cumulative time in `paused` state (ms).
+	PausingTimeMs *int `json:"pausing_time_ms,omitempty"`
+
 	// PlaybackEngine Web-player engine (`native` for AVPlayer, `mse` for Media Source Extensions). Pairs with `browser_family` for the rendition inference.
 	PlaybackEngine *string `json:"playback_engine,omitempty"`
 
 	// PlaybackRate Player playback rate (1.0 = normal).
 	PlaybackRate *float32 `json:"playback_rate,omitempty"`
 
+	// PlaybackReason #550 Phase 2: controlled vocab per status. During in_progress, mirrors `player_state`; on terminal rows, forwarder classifier derives from error_code+domain+kind.
+	PlaybackReason *string `json:"playback_reason,omitempty"`
+
+	// PlaybackStatus #550 Phase 2: terminal outcome enum: `in_progress` / `completed` / `user_stopped` / `start_failure` (VSF) / `abandoned_start` (EBVS) / `mid_stream_failure` (MSF). Mid-session rows = `in_progress`.
+	PlaybackStatus *string `json:"playback_status,omitempty"`
+
 	// PlayerRestarts Number of player restarts (auto-recovery + manual).
 	PlayerRestarts *int `json:"player_restarts,omitempty"`
 
+	// PlayerTech #550 Phase 4: playback engine: `AVPlayer` / `hls.js` / `shaka` / `native-roku` / `vlc` / `ffmpeg`.
+	PlayerTech *string `json:"player_tech,omitempty"`
+
 	// PlayheadWallclockMs Player-encoded PDT (milliseconds since Unix epoch) for the current playhead. Used by the chart engine to compute live offset against the server clock.
 	PlayheadWallclockMs *int `json:"playhead_wallclock_ms,omitempty"`
+
+	// PlayingCount #550 Phase 1: entries into `playing` state since play start.
+	PlayingCount *int `json:"playing_count,omitempty"`
+
+	// PlayingTimeMs #550 Phase 1: cumulative time in `playing` state (ms), since play start.
+	PlayingTimeMs *int `json:"playing_time_ms,omitempty"`
 
 	// PositionS Player current position (seconds).
 	PositionS *float32 `json:"position_s,omitempty"`
@@ -1265,18 +1328,57 @@ type PlayerMetrics struct {
 	// ProfileShiftCount Number of ABR rendition shifts the player has reported.
 	ProfileShiftCount *int `json:"profile_shift_count,omitempty"`
 
+	// ScreenDensity #550 Phase 4: native scale (points-to-pixels density).
+	ScreenDensity *float32 `json:"screen_density,omitempty"`
+
+	// ScreenHeightPx #550 Phase 4: native screen height.
+	ScreenHeightPx *int `json:"screen_height_px,omitempty"`
+
+	// ScreenWidthPx #550 Phase 4: native (physical-pixel) screen width.
+	ScreenWidthPx *int `json:"screen_width_px,omitempty"`
+
 	// SeekableEndS Player-reported end of seekable range (seconds).
 	SeekableEndS *float32 `json:"seekable_end_s,omitempty"`
+
+	// SeekingCount #550 Phase 1: AVPlayerItemTimeJumped events since play start.
+	SeekingCount *int `json:"seeking_count,omitempty"`
+
+	// SeekingTimeMs #550 Phase 1: cumulative time spent in seek-induced refill (TimeJumped → next .playing). Conviva CIRR/CIRT pattern: `connection_buffering = buffering_time_ms - seeking_time_ms`.
+	SeekingTimeMs *int `json:"seeking_time_ms,omitempty"`
 
 	// Source Identifier for the metrics source (e.g. avplayer-ios, exoplayer-android).
 	Source *string `json:"source,omitempty"`
 
+	// StallDurationMs #550 Phase 1: duration of the MOST RECENT stall event (sticky on subsequent heartbeats). Replaces legacy last_stall_time_s.
+	StallDurationMs *int `json:"stall_duration_ms,omitempty"`
+
 	// StallTimeS Cumulative stall time (seconds).
 	StallTimeS *float32 `json:"stall_time_s,omitempty"`
-	Stalls     *int     `json:"stalls,omitempty"`
+
+	// StallingCount #550 Phase 1: entries into `stalled` state.
+	StallingCount *int `json:"stalling_count,omitempty"`
+
+	// StallingTimeMs #550 Phase 1: cumulative stalling time (ms). Single canonical pair replacing legacy stall_count/stall_time_s during soft cutover.
+	StallingTimeMs *int `json:"stalling_time_ms,omitempty"`
+	Stalls         *int `json:"stalls,omitempty"`
 
 	// State Player state machine label (idle, playing, paused, buffering, ended, error).
 	State *string `json:"state,omitempty"`
+
+	// TerminalErrorCode #550 Phase 2: error code populated ONLY on terminal failure rows. Querying `WHERE terminal_error_code != 0` is SQL-safe — never returns transient codes.
+	TerminalErrorCode *int `json:"terminal_error_code,omitempty"`
+
+	// TerminalErrorDetails #550 Phase 2: error details JSON on terminal failure rows.
+	TerminalErrorDetails *string `json:"terminal_error_details,omitempty"`
+
+	// TerminalErrorDomain #550 Phase 2: error domain on terminal failure rows.
+	TerminalErrorDomain *string `json:"terminal_error_domain,omitempty"`
+
+	// TrickplayingCount #550 Phase 1: entries into trickplay (rate ∉ {0, ~1}).
+	TrickplayingCount *int `json:"trickplaying_count,omitempty"`
+
+	// TrickplayingTimeMs #550 Phase 1: cumulative time at non-1× playback rate (FF / RW).
+	TrickplayingTimeMs *int `json:"trickplaying_time_ms,omitempty"`
 
 	// TriggerType What triggered the most recent metrics tick (timer, event, etc.).
 	TriggerType *string `json:"trigger_type,omitempty"`
@@ -1285,9 +1387,15 @@ type PlayerMetrics struct {
 	TrueOffsetS      *float32 `json:"true_offset_s,omitempty"`
 	VideoBitrateMbps *float32 `json:"video_bitrate_mbps,omitempty"`
 
+	// VideoFirstFrameTimeMs #550 Phase 1: TTFF in ms. Conviva/Mux/Bitmovin canonical units. Replaces legacy video_first_frame_time_s.
+	VideoFirstFrameTimeMs *int `json:"video_first_frame_time_ms,omitempty"`
+
 	// VideoQualityPct video_bitrate_mbps as a percentage of the top variant in the active manifest
 	VideoQualityPct *float32 `json:"video_quality_pct,omitempty"`
 	VideoResolution *string  `json:"video_resolution,omitempty"`
+
+	// VideoStartTimeMs #550 Phase 1: alternate startup-time measurement in ms.
+	VideoStartTimeMs *int `json:"video_start_time_ms,omitempty"`
 
 	// VideoStartTimeS Time-to-playing (seconds since play started).
 	VideoStartTimeS *float32 `json:"video_start_time_s,omitempty"`
@@ -1576,6 +1684,9 @@ type ServerMetrics struct {
 
 	// RtoMs Current TCP retransmit timeout.
 	RtoMs *float32 `json:"rto_ms,omitempty"`
+
+	// RttAvmetricsMs Median TTFB (responseStart - requestEnd) from iOS 18 AVMetrics MediaResourceRequest events. Stream-level latency from URLSession pipeline; not a wire RTT on HTTP/2 keep-alive. Issue #486.
+	RttAvmetricsMs *float32 `json:"rtt_avmetrics_ms,omitempty"`
 
 	// RttMaxMs Maximum RTT in the last sample window.
 	RttMaxMs *float32 `json:"rtt_max_ms,omitempty"`

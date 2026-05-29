@@ -40,7 +40,75 @@ final class PlaybackDiagnostics: ObservableObject {
     /// give us if two jumps happen to land at the same `to`.
     let timeJumpSubject = PassthroughSubject<TimeJumpEvent, Never>()
 
-    @Published var state: String = "Idle"
+    /// Player state — one of "idle" / "playing" / "paused" /
+    /// "buffering" / "stalled" / "unknown". Mutating this property
+    /// ticks the residency accumulators below: elapsed since the
+    /// previous transition is added to the *old* state's bucket and
+    /// the new state's count is incremented. Cumulative-on-the-wire
+    /// (server derives per-snapshot delta via lag() over play_id).
+    @Published var state: String = "idle" {
+        didSet {
+            guard state != oldValue else { return }
+            tickStateResidency(from: oldValue, to: state)
+        }
+    }
+
+    // ── #550 Phase 1: state residency accumulators ─────────────────
+    // Cumulative time/count per player_state since the play started.
+    // Reset at each new play boundary via reset(). Server (forwarder)
+    // computes per-snapshot deltas from these accumulated values + a
+    // per-play state cache, and stores BOTH the accumulated value and
+    // the delta in ClickHouse (`*_time_ms` + `*_time_ms_delta`).
+    //
+    // Gerund naming throughout — `pausing` / `stalling` / `idling` /
+    // `trickplaying` — for consistency. `stalling*` consolidates the
+    // formerly-separate AVPlayerItemPlaybackStalled-driven counters
+    // and state-machine mirror into a single state-driven pair.
+    //
+    // Internal storage stays in seconds (Swift Date.timeIntervalSince
+    // is naturally seconds); conversion to ms happens at the
+    // metrics-payload boundary in PlayerViewModel.
+    //
+    // Seeking semantics: seekingStartAt is recorded on
+    // AVPlayerItemTimeJumped; seekingTimeS accumulates from there
+    // until the next state transition to .playing. This catches the
+    // post-seek refill cost as both buffering AND seeking time
+    // (intentional Conviva CIRR/CIRT-style categorisation overlap so
+    // queries can derive connection-induced buffer as
+    // `buffering_time_ms - seeking_time_ms`).
+    @Published var playingTimeS: Double = 0
+    @Published var playingCount: Int = 0
+    @Published var pausingTimeS: Double = 0
+    @Published var pausingCount: Int = 0
+    @Published var bufferingTimeS: Double = 0
+    @Published var bufferingCount: Int = 0
+    @Published var stallingTimeS: Double = 0
+    @Published var stallingCount: Int = 0
+    @Published var idlingTimeS: Double = 0
+    @Published var idlingCount: Int = 0
+    @Published var seekingTimeS: Double = 0
+    @Published var seekingCount: Int = 0
+    @Published var trickplayingTimeS: Double = 0
+    @Published var trickplayingCount: Int = 0
+    private var stateResidencyLastAt: Date?
+    private var trickplayingStartAt: Date?
+    private var seekingStartAt: Date?
+
+    // ── #550 Phase 1 per-event sticky durations ────────────────────
+    // Duration of the most-recent stall / buffer event. Set when the
+    // event completes; sticky on subsequent heartbeats until next
+    // event. Complementary to *_delta (per-heartbeat interval) and
+    // *_time_ms (cumulative since play start). Use for "longest
+    // single event" forensic queries and threshold labels.
+    @Published var stallDurationS: Double = 0
+    @Published var bufferingDurationS: Double = 0
+
+    // ── #550 Phase 2: error observation counter ────────────────────
+    // Ticks on every error event the player observes (transient or
+    // terminal). Stamped on every payload; forwarder computes the
+    // _delta column from the per-play state cache. Distinct from
+    // restart/recovery — those are tracked via attempt_id advances.
+    @Published var errorCount: Int = 0
     @Published var currentTime: Double = 0
     @Published var bufferedEnd: Double?
     @Published var bufferDepth: Double?
@@ -60,9 +128,14 @@ final class PlaybackDiagnostics: ObservableObject {
     @Published var playbackRate: Float = 0
     @Published var likelyToKeepUp: Bool = false
     @Published var bufferEmpty: Bool = false
-    @Published var stallCount: Int = 0
-    @Published var stallTimeSeconds: Double = 0
-    @Published var lastStallDurationSeconds: Double = 0
+    // stallCount / stallTimeSeconds / lastStallDurationSeconds
+    // consolidated into `stallingCount` / `stallingTimeS` /
+    // `stallDurationS` above (Phase 1 rename). The
+    // AVPlayerItemPlaybackStalled notification still flips the
+    // `isStalled` flag (used by the state machine to disambiguate
+    // .waitingToPlayAtSpecifiedRate) but no longer increments its own
+    // counter — the state.didSet residency tick is the single source
+    // of truth.
     @Published var observedBitrate: Double?
     @Published var indicatedBitrate: Double?
     @Published var avgNetworkBitrate: Double?
@@ -285,6 +358,102 @@ final class PlaybackDiagnostics: ObservableObject {
         lastVariantDwellTotal = 0
     }
 
+    /// Add elapsed-since-last-transition to the *prior* state's
+    /// residency bucket, then increment the new state's entry count.
+    /// Called from `state.didSet`; safe to call with unknown states
+    /// (they just don't contribute to any bucket).
+    private func tickStateResidency(from oldState: String, to newState: String) {
+        let now = Date()
+        if let last = stateResidencyLastAt {
+            let elapsed = now.timeIntervalSince(last)
+            switch oldState {
+            case "playing":   playingTimeS   += elapsed
+            case "paused":    pausingTimeS   += elapsed
+            case "buffering": bufferingTimeS += elapsed
+            case "stalled":   stallingTimeS  += elapsed
+            case "idle":      idlingTimeS    += elapsed
+            default: break
+            }
+        }
+        switch newState {
+        case "playing":   playingCount   += 1
+        case "paused":    pausingCount   += 1
+        case "buffering": bufferingCount += 1
+        case "stalled":   stallingCount  += 1
+        case "idle":      idlingCount    += 1
+        default: break
+        }
+        // Seeking time accumulates from TimeJumped until the next
+        // transition to .playing. Mirrors Conviva CIRR/CIRT semantics
+        // where the post-seek buffer-refill is categorised as
+        // seek-induced rather than connection-induced.
+        if newState == "playing", let start = seekingStartAt {
+            seekingTimeS += now.timeIntervalSince(start)
+            seekingStartAt = nil
+        }
+        stateResidencyLastAt = now
+    }
+
+    /// Flush time still accruing in the current state into its bucket
+    /// without changing state. Called from the metrics-payload builder
+    /// so an accumulator read mid-state reflects all elapsed time, not
+    /// just the time at the last transition.
+    func flushStateResidencyForRead() {
+        guard let last = stateResidencyLastAt else { return }
+        let now = Date()
+        let elapsed = now.timeIntervalSince(last)
+        guard elapsed > 0 else { return }
+        switch state {
+        case "playing":   playingTimeS   += elapsed
+        case "paused":    pausingTimeS   += elapsed
+        case "buffering": bufferingTimeS += elapsed
+        case "stalled":   stallingTimeS  += elapsed
+        case "idle":      idlingTimeS    += elapsed
+        default: break
+        }
+        if let start = trickplayingStartAt {
+            trickplayingTimeS += now.timeIntervalSince(start)
+            trickplayingStartAt = now
+        }
+        if let start = seekingStartAt {
+            seekingTimeS += now.timeIntervalSince(start)
+            seekingStartAt = now
+        }
+        stateResidencyLastAt = now
+    }
+
+    /// Trickplay = AVPlayer.rate at a magnitude outside [~0, ~1]. Driven
+    /// from the rate publisher. Idempotent — calling with the same
+    /// "isTrick" value twice doesn't double-tick.
+    func updateTrickplay(rate: Float) {
+        let mag = abs(rate)
+        let isTrick = mag > 1.05 || (mag > 0.05 && mag < 0.95)
+        if isTrick && trickplayingStartAt == nil {
+            trickplayingStartAt = Date()
+            trickplayingCount += 1
+        } else if !isTrick, let start = trickplayingStartAt {
+            trickplayingTimeS += Date().timeIntervalSince(start)
+            trickplayingStartAt = nil
+        }
+    }
+
+    /// Tick on each TimeJumpSubject event. Seeks are instantaneous from
+    /// AVPlayer's POV — `seekingCount` reflects how many user/program
+    /// seeks happened; seek-induced rebuffer time lands in
+    /// `bufferingTimeS` (separable post-hoc by joining to TimeJump
+    /// events within ~250ms).
+    func tickSeek() {
+        seekingCount += 1
+        // Record the seek start so tickStateResidency can attribute
+        // the post-seek time (buffering + refill) to seeking_time_ms
+        // until the player resumes .playing. Mirrors Conviva CIRR/CIRT
+        // semantics where seek-induced buffer is distinguished from
+        // connection-induced buffer.
+        if seekingStartAt == nil {
+            seekingStartAt = Date()
+        }
+    }
+
     func reset() {
         state = "idle"
         currentTime = 0
@@ -300,9 +469,9 @@ final class PlaybackDiagnostics: ObservableObject {
         playbackRate = 0
         likelyToKeepUp = false
         bufferEmpty = false
-        stallCount = 0
-        stallTimeSeconds = 0
-        lastStallDurationSeconds = 0
+        // stallCount / stallTimeSeconds / lastStallDurationSeconds
+        // consolidated into stallingCount / stallingTimeS / stallDurationS
+        // — reset further down with the other residency counters.
         observedBitrate = nil
         indicatedBitrate = nil
         avgNetworkBitrate = nil
@@ -351,6 +520,31 @@ final class PlaybackDiagnostics: ObservableObject {
         lastVariantDwellChangeAt = nil
         // Don't clear: priorVariantDwellSeconds, priorDroppedVideoFrames,
         // priorEstimatedDisplayedFrames, knownVariants
+        // State-residency accumulators reset at every play boundary —
+        // the forwarder's per-play state cache evicts the prior play
+        // when its play_id falls out of the active set, so the next
+        // snapshot under a new play_id computes delta = current - 0.
+        playingTimeS = 0
+        playingCount = 0
+        pausingTimeS = 0
+        pausingCount = 0
+        bufferingTimeS = 0
+        bufferingCount = 0
+        stallingTimeS = 0
+        stallingCount = 0
+        idlingTimeS = 0
+        idlingCount = 0
+        seekingTimeS = 0
+        seekingCount = 0
+        trickplayingTimeS = 0
+        trickplayingCount = 0
+        stateResidencyLastAt = Date()
+        trickplayingStartAt = nil
+        seekingStartAt = nil
+        // Per-event sticky durations + error counter.
+        stallDurationS = 0
+        bufferingDurationS = 0
+        errorCount = 0
     }
 
     func markFirstFrameRendered() {
@@ -412,6 +606,10 @@ final class PlaybackDiagnostics: ObservableObject {
                 guard let self else { return }
                 let prev = self.playbackRate
                 self.playbackRate = rate
+                // Tick the trickplay residency bucket on every rate
+                // change. Idempotent — only flips when crossing the
+                // [~0, ~1] boundary.
+                self.updateTrickplay(rate: rate)
                 if abs(rate - prev) > 0.001 {
                     print("[RATE] \(prev) -> \(rate) state=\(self.state) time=\(String(format: "%.2f", self.currentTime)) \(self.playbackSnapshot())")
                 }
@@ -449,6 +647,7 @@ final class PlaybackDiagnostics: ObservableObject {
                     origin: original,
                     at: Date()
                 ))
+                self.tickSeek()
             }
             .store(in: &cancellables)
 
@@ -643,7 +842,9 @@ final class PlaybackDiagnostics: ObservableObject {
             return
         }
         stallStartAt = Date()
-        stallCount += 1
+        // stallingCount is incremented by tickStateResidency() when
+        // the state machine transitions to "stalled" — single source
+        // of truth, no double-count.
     }
 
     private func checkFrozenState() {
@@ -690,8 +891,11 @@ final class PlaybackDiagnostics: ObservableObject {
     private func endStallIfNeeded() {
         guard let start = stallStartAt else { return }
         let duration = max(0, Date().timeIntervalSince(start))
-        lastStallDurationSeconds = duration
-        stallTimeSeconds += duration
+        // stallDurationS is the sticky "most-recent stall event
+        // duration" — set here at event end; cumulative stallingTimeS
+        // is accumulated by tickStateResidency() / flushStateResidencyForRead()
+        // as state-residency time, not on this notification path.
+        stallDurationS = duration
         stallStartAt = nil
     }
 

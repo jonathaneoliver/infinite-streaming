@@ -206,7 +206,13 @@ func computeEventLabelsWithState(s *labelState, r *row) []string {
 		ps.stallStartTime = now
 		return nil
 	case "stall_end":
-		dur := float64(r.LastStallTimeS)
+		// #550 Phase 1: prefer the new stall_duration_ms; fall back to
+		// the deprecated last_stall_time_s during the cutover window
+		// for clients still on the older payload contract.
+		dur := float64(r.StallDurationMs) / 1000.0
+		if dur <= 0 {
+			dur = float64(r.LastStallTimeS)
+		}
 		if dur <= 0 && !ps.stallStartTime.IsZero() {
 			dur = now.Sub(ps.stallStartTime).Seconds()
 		}
@@ -222,7 +228,11 @@ func computeEventLabelsWithState(s *labelState, r *row) []string {
 		ps.bufferingStartTime = now
 		return nil
 	case "buffering_end":
-		dur := float64(r.LastBufferingTimeS)
+		// #550 Phase 1: same precedence ladder as stall_end.
+		dur := float64(r.BufferingDurationMs) / 1000.0
+		if dur <= 0 {
+			dur = float64(r.LastBufferingTimeS)
+		}
 		if dur <= 0 && !ps.bufferingStartTime.IsZero() {
 			dur = now.Sub(ps.bufferingStartTime).Seconds()
 		}

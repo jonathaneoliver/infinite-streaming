@@ -17,7 +17,7 @@
  * the legacy used (`ismSidebarCollapsed`) so the user's collapsed/
  * expanded preference survives the legacy/v3 transition.
  */
-import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue';
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 
 const props = defineProps<{ activePage: string }>();
 
@@ -693,9 +693,28 @@ const whatsNewUrl = computed(() => `https://github.com/${REPO_SLUG}/releases/tag
 const latestUrl = computed(() => `https://github.com/${REPO_SLUG}/releases/latest`);
 
 function dismissWhatsNew() {
+  // localStorage is already marked on first impression (watcher
+  // below); the × button only needs to hide the banner in this
+  // window. Set is harmless / idempotent so we keep it.
   localStorage.setItem('ismWhatsNewSeen', runningVersion.value);
   whatsNewDismissed.value = true;
 }
+
+// Auto-mark the "what's new" banner as seen on first display so it
+// doesn't reappear in every new tab/window until manually dismissed.
+// User can still click × in the current window to hide it; but
+// localStorage is set the moment the banner becomes visible, which
+// means the very next tab/window check passes and the banner stays
+// hidden until the next deploy bumps `runningVersion`. The computed
+// `whatsNewVisible` doesn't re-evaluate on localStorage writes (it
+// reads localStorage non-reactively), so the banner remains visible
+// in THIS window until the user explicitly dismisses or navigates
+// away.
+watch(whatsNewVisible, (visible) => {
+  if (visible && runningVersion.value) {
+    localStorage.setItem('ismWhatsNewSeen', runningVersion.value);
+  }
+});
 function dismissUpgrade() {
   localStorage.setItem('ismUpgradeDismissed', latestVersion.value);
   upgradeDismissed.value = true;

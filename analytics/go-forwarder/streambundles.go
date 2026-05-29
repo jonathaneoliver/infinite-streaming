@@ -186,6 +186,27 @@ var bundleRegistry = map[string]bundleDef{
 			"recommended_offset_s",
 			"configured_offset_s",
 			"nominal_fps_current",
+			// #550 Phase 1: residency accumulators + sticky durations
+			// + ms-renamed video startup. PlayerMetrics panel reads
+			// these via chRowAdapter; without them the per-state
+			// tiles render as "—" in the session viewer.
+			"playing_time_ms", "playing_count",
+			"pausing_time_ms", "pausing_count",
+			"buffering_time_ms", "buffering_count",
+			"stalling_time_ms", "stalling_count",
+			"idling_time_ms", "idling_count",
+			"seeking_time_ms", "seeking_count",
+			"trickplaying_time_ms", "trickplaying_count",
+			"stall_duration_ms",
+			"buffering_duration_ms",
+			"video_first_frame_time_ms",
+			"video_start_time_ms",
+			// #550 Phase 2: outcome + error fields (per-snapshot;
+			// SessionDetails + PlayerMetrics both consume).
+			"playback_status", "playback_reason",
+			"error_code", "error_domain",
+			"terminal_error_code", "terminal_error_domain",
+			"error_count",
 		},
 	},
 
@@ -234,12 +255,33 @@ var bundleRegistry = map[string]bundleDef{
 			"content_id",
 			"user_agent",
 			"manifest_url",
+			// master_manifest_url is the player-loaded MASTER playlist;
+			// manifest_url above is the most-recently-fetched VARIANT.
+			// SessionDetails' "Master Manifest URL" tile reads the
+			// master — was missing here so it showed a variant URL.
+			"master_manifest_url",
 			"last_request_url",
 			"player_state",
 			"player_error",
 			"last_event",
 			"classification",
 			"control_revision",
+			// Identity fields SessionDetails reads at top level —
+			// were missing from the projection so the panel showed
+			// "—" for User Agent / Player IP / Port even though the
+			// CH row had them. (Fix: projection-gap parity with the
+			// Testing dashboard's PlayerRecord shape.)
+			"player_ip", "origination_ip",
+			"session_number",
+			"attempt_id",
+			"x_forwarded_port", "x_forwarded_port_external",
+			"server_received_at_ms",
+			// #550 Phase 4: device taxonomy — per-session stable
+			// fields. SessionDetails.vue renders them alongside
+			// identity tiles. Costs are minimal: LowCardinality
+			// columns compress repeats to near-nothing.
+			"device_class", "device_model", "player_tech",
+			"app_version", "os_version_major", "os_version_minor",
 		},
 	},
 

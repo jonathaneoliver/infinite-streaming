@@ -3,6 +3,19 @@ plugins {
     id 'org.jetbrains.kotlin.android'
 }
 
+// Read the canonical version from the repo's top-level VERSION file
+// so this Android TV app advertises the same version as the rest of
+// the stack (iOS app via DeviceInfo.swift, server image tag, dashboard
+// "What's New" banner). Strip the leading `v` (e.g. `v2.0.0` →
+// `2.0.0`) to match Android versionName conventions. Falls back to
+// "0.0.0" if the VERSION file is missing so builds don't hard-fail
+// in a partial checkout.
+def repoVersionName = {
+    def f = file("$rootDir/../../VERSION")
+    if (!f.exists()) return "0.0.0"
+    return f.text.trim().replaceFirst(/^v/, '')
+}.call()
+
 android {
     namespace 'com.infinitestream.player'
     compileSdk 34
@@ -12,7 +25,7 @@ android {
         minSdk 24
         targetSdk 34
         versionCode 2
-        versionName "2.0"
+        versionName repoVersionName
     }
 
     buildTypes {

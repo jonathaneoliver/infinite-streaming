@@ -5383,6 +5383,12 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 	sessionData["last_request"] = nowISO()
 	sessionData["last_request_url"] = filename
 	sessionData["user_agent"] = r.UserAgent()
+	// #550 Phase 4: best-effort device taxonomy from UA for
+	// non-instrumented clients (VLC, ffplay, hls.js, Roku channels,
+	// etc.). Idempotent + non-overwriting — iOS-emitted DeviceInfo
+	// values from the metrics POST channel take precedence by virtue
+	// of stampDeviceFromUserAgent's setIfEmpty check.
+	stampDeviceFromUserAgent(sessionData)
 	// Stamp the player's current play_id + attempt_id on the session
 	// so the SSE stream (and downstream analytics) can partition by
 	// playback episode (play_id) and recovery attempt (attempt_id).

@@ -1542,15 +1542,23 @@ export interface components {
              */
             id: string;
             /**
-             * Format: uuid
-             * @description Player-supplied UUID identifying one recovery attempt
-             *     within this play. The player rotates it on every `restart`
-             *     event (user-reload OR auto-recovery), but keeps it stable
-             *     outside restart boundaries. Null when the player has not
-             *     yet supplied one. Use to count or filter recovery attempts
-             *     within a single play (`count(distinct restart_id)`).
+             * @description Player-supplied **monotonically-incrementing counter**, 1
+             *     on the initial play of any content, +1 on every `restart`
+             *     event (user-restart OR auto-recovery). Resets to 1 at
+             *     every new play boundary (new content, reload, content-
+             *     filter swap). Stable outside restart boundaries.
+             *
+             *     Use to count or order recovery attempts within a single
+             *     play: `max(attempt_id) GROUP BY play_id` gives the total
+             *     attempt count; filter by `attempt_id = N` to isolate the
+             *     Nth attempt's activity. Null when the player has not yet
+             *     supplied one.
+             *
+             *     Integer rather than UUID because the operator-facing
+             *     question is "which try is this" — 1, 2, 3 answers that
+             *     directly.
              */
-            restart_id?: string | null;
+            attempt_id?: number | null;
             /** Format: uuid */
             player_id: string;
             control_revision: string;
@@ -1814,10 +1822,10 @@ export interface components {
              */
             default_step_seconds?: 6 | 12 | 18 | 24;
             /**
-             * @description Headroom percent above the top variant used when sizing template steps (0 = exact).
+             * @description Headroom percent above the variant rate used when sizing template steps. 0 = exact (deliberate-stall footgun). 5 = default — covers TCP/IP + TLS 1.3 + HTTP/2 framing overhead on a LAN. 10 = real WiFi with retransmits. 25 / 50 = stress-test over-headroom.
              * @enum {integer}
              */
-            margin_pct?: 0 | 10 | 25 | 50;
+            margin_pct?: 0 | 5 | 10 | 25 | 50;
         };
         PatternStep: {
             /** Format: float */
@@ -1867,7 +1875,7 @@ export interface components {
              */
             strip_average_bandwidth: boolean;
             /**
-             * @description Remove RESOLUTION attribute from EXT-X-STREAM-INF lines (issue #486).
+             * @description Remove RESOLUTION attribute from EXT-X-STREAM-INF lines. Apple HLS validator rejects this; AVPlayer plays but variant.video.size becomes empty (issue #486).
              * @default false
              */
             strip_resolution: boolean;
@@ -1892,8 +1900,10 @@ export interface components {
         };
         ManifestVariant: {
             url: string;
-            /** @description bits per second */
+            /** @description Peak segment bit rate of this variant in bits per second (HLS EXT-X-STREAM-INF BANDWIDTH attribute). Always present. */
             bandwidth: number;
+            /** @description Average bit rate across the variant in bits per second (HLS AVERAGE-BANDWIDTH attribute). Optional — present when the source master playlist includes the attribute. Pattern-step generators should prefer this over BANDWIDTH where available, since it represents the long-term sustainable rate (BANDWIDTH is the peak). */
+            average_bandwidth?: number;
             /** @description WIDTHxHEIGHT */
             resolution: string;
         };
@@ -2018,6 +2028,81 @@ export interface components {
              * @description Player-supplied wallclock for the most recent metrics tick.
              */
             event_time?: string | null;
+            /** @description #550 Phase 1: cumulative time in `playing` state (ms), since play start. */
+            playing_time_ms?: number | null;
+            /** @description #550 Phase 1: entries into `playing` state since play start. */
+            playing_count?: number | null;
+            /** @description #550 Phase 1: cumulative time in `paused` state (ms). */
+            pausing_time_ms?: number | null;
+            /** @description #550 Phase 1: entries into `paused` state. */
+            pausing_count?: number | null;
+            /** @description #550 Phase 1: cumulative buffering time (ms). */
+            buffering_time_ms?: number | null;
+            /** @description #550 Phase 1: entries into `buffering` state. */
+            buffering_count?: number | null;
+            /** @description #550 Phase 1: cumulative stalling time (ms). Single canonical pair replacing legacy stall_count/stall_time_s during soft cutover. */
+            stalling_time_ms?: number | null;
+            /** @description #550 Phase 1: entries into `stalled` state. */
+            stalling_count?: number | null;
+            /** @description #550 Phase 1: cumulative idle time (ms). */
+            idling_time_ms?: number | null;
+            /** @description #550 Phase 1: entries into `idle` state. */
+            idling_count?: number | null;
+            /** @description #550 Phase 1: cumulative time spent in seek-induced refill (TimeJumped → next .playing). Conviva CIRR/CIRT pattern: `connection_buffering = buffering_time_ms - seeking_time_ms`. */
+            seeking_time_ms?: number | null;
+            /** @description #550 Phase 1: AVPlayerItemTimeJumped events since play start. */
+            seeking_count?: number | null;
+            /** @description #550 Phase 1: cumulative time at non-1× playback rate (FF / RW). */
+            trickplaying_time_ms?: number | null;
+            /** @description #550 Phase 1: entries into trickplay (rate ∉ {0, ~1}). */
+            trickplaying_count?: number | null;
+            /** @description #550 Phase 1: duration of the MOST RECENT stall event (sticky on subsequent heartbeats). Replaces legacy last_stall_time_s. */
+            stall_duration_ms?: number | null;
+            /** @description #550 Phase 1: duration of the MOST RECENT buffer event (sticky). Replaces legacy last_buffering_time_s. */
+            buffering_duration_ms?: number | null;
+            /** @description #550 Phase 1: TTFF in ms. Conviva/Mux/Bitmovin canonical units. Replaces legacy video_first_frame_time_s. */
+            video_first_frame_time_ms?: number | null;
+            /** @description #550 Phase 1: alternate startup-time measurement in ms. */
+            video_start_time_ms?: number | null;
+            /** @description #550 Phase 2: terminal outcome enum: `in_progress` / `completed` / `user_stopped` / `start_failure` (VSF) / `abandoned_start` (EBVS) / `mid_stream_failure` (MSF). Mid-session rows = `in_progress`. */
+            playback_status?: string | null;
+            /** @description #550 Phase 2: controlled vocab per status. During in_progress, mirrors `player_state`; on terminal rows, forwarder classifier derives from error_code+domain+kind. */
+            playback_reason?: string | null;
+            /** @description #550 Phase 2: NSError.code / HTTP status / system errno. Populated on `error` events AND terminal failure rows. 0 = no error. */
+            error_code?: number | null;
+            /** @description #550 Phase 2: NSError.domain — `CoreMediaErrorDomain` / `NSURLErrorDomain` / `AVFoundationErrorDomain` / `http` etc. */
+            error_domain?: string | null;
+            /** @description #550 Phase 2: JSON blob with URL, underlying error chain, native message. */
+            error_details?: string | null;
+            /** @description #550 Phase 2: error code populated ONLY on terminal failure rows. Querying `WHERE terminal_error_code != 0` is SQL-safe — never returns transient codes. */
+            terminal_error_code?: number | null;
+            /** @description #550 Phase 2: error domain on terminal failure rows. */
+            terminal_error_domain?: string | null;
+            /** @description #550 Phase 2: error details JSON on terminal failure rows. */
+            terminal_error_details?: string | null;
+            /** @description #550 Phase 2: cumulative observation counter. Ticks on every `error` event (transient or terminal). Forwarder computes per-row delta server-side. */
+            error_count?: number | null;
+            /** @description #550 Phase 4: OS major version (e.g. 26 for iOS 26.0.1). */
+            os_version_major?: number | null;
+            /** @description #550 Phase 4: OS minor version. */
+            os_version_minor?: number | null;
+            /** @description #550 Phase 4: app marketing version from Bundle CFBundleShortVersionString. */
+            app_version?: string | null;
+            /** @description #550 Phase 4: form-factor enum: `phone` / `tablet` / `tv` / `desktop` / `unknown`. */
+            device_class?: string | null;
+            /** @description #550 Phase 4: hardware model identifier (e.g. iPhone15,3) via sysctl hw.machine. */
+            device_model?: string | null;
+            /** @description #550 Phase 4: playback engine: `AVPlayer` / `hls.js` / `shaka` / `native-roku` / `vlc` / `ffmpeg`. */
+            player_tech?: string | null;
+            /** @description #550 Phase 4: native (physical-pixel) screen width. */
+            screen_width_px?: number | null;
+            /** @description #550 Phase 4: native screen height. */
+            screen_height_px?: number | null;
+            /**
+             * Format: float
+             * @description #550 Phase 4: native scale (points-to-pixels density).
+             */
+            screen_density?: number | null;
         };
         /**
          * @description Read-only server-observed transport telemetry. Sourced from
@@ -2069,7 +2154,7 @@ export interface components {
             path_ping_rtt_ms?: number | null;
             /**
              * Format: float
-             * @description Client-side RTT proxy from iOS 18 AVMetrics TTFB (issue #486).
+             * @description Median TTFB (responseStart - requestEnd) from iOS 18 AVMetrics MediaResourceRequest events. Stream-level latency from URLSession pipeline; not a wire RTT on HTTP/2 keep-alive. Issue #486.
              */
             rtt_avmetrics_ms?: number | null;
             /** @description true when no fresh TCP_INFO sample is available (e.g. session idle). */

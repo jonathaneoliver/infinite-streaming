@@ -47,8 +47,73 @@ function fmtTime(iso?: string | null): string {
 const pm = computed(() => player.value?.player_metrics ?? null);
 const sm = computed(() => player.value?.server_metrics ?? null);
 
+// #550 helpers — the new residency + delta columns arrive in ms;
+// chRowAdapter converts to seconds for tile parity with legacy fields.
+// Treat them through fmtS / fmtNum / fmtPct accordingly.
+type PMExt = NonNullable<typeof pm.value> & {
+  // Phase 1 residency (seconds — chRowAdapter divides ms by 1000)
+  playing_time_s?: number | null;
+  pausing_time_s?: number | null;
+  buffering_time_s?: number | null;
+  stalling_time_s?: number | null;
+  idling_time_s?: number | null;
+  seeking_time_s?: number | null;
+  trickplaying_time_s?: number | null;
+  playing_count?: number | null;
+  pausing_count?: number | null;
+  buffering_count?: number | null;
+  stalling_count?: number | null;
+  idling_count?: number | null;
+  seeking_count?: number | null;
+  trickplaying_count?: number | null;
+  stall_duration_s?: number | null;
+  buffering_duration_s?: number | null;
+  // Phase 2 status + error
+  playback_status?: string | null;
+  playback_reason?: string | null;
+  error_code?: number | null;
+  error_domain?: string | null;
+  terminal_error_code?: number | null;
+  terminal_error_domain?: string | null;
+  error_count?: number | null;
+  // Phase 4 device taxonomy
+  os_version_major?: number | null;
+  os_version_minor?: number | null;
+  app_version?: string | null;
+  device_class?: string | null;
+  device_model?: string | null;
+  player_tech?: string | null;
+  screen_width_px?: number | null;
+  screen_height_px?: number | null;
+  screen_density?: number | null;
+};
+
+function fmtOsVersion(major?: number | null, minor?: number | null): string {
+  if (major == null && minor == null) return '—';
+  return `${major ?? 0}.${minor ?? 0}`;
+}
+
+function fmtScreen(w?: number | null, h?: number | null, d?: number | null): string {
+  if (!w && !h) return '—';
+  if (d && d > 0) return `${w ?? 0}×${h ?? 0} @${d.toFixed(1)}x`;
+  return `${w ?? 0}×${h ?? 0}`;
+}
+
+// Display residency time as a human-readable mix (h/m/s) for big
+// values, falling back to fmtS for short ones.
+function fmtDur(v: number | null | undefined): string {
+  if (v == null || !Number.isFinite(v)) return '—';
+  if (v < 60) return fmtS(v, 2);
+  const m = Math.floor(v / 60);
+  const s = v - m * 60;
+  if (v < 3600) return `${m}m ${s.toFixed(1)}s`;
+  const h = Math.floor(v / 3600);
+  const rm = m - h * 60;
+  return `${h}h ${rm}m ${s.toFixed(0)}s`;
+}
+
 const playerFields = computed(() => {
-  const m = pm.value;
+  const m = pm.value as PMExt | null;
   if (!m) return [] as { label: string; value: string }[];
   return [
     { label: 'Last Event', value: fmtStr(m.last_event) },
@@ -73,18 +138,62 @@ const playerFields = computed(() => {
     { label: 'Video Quality', value: fmtPct(m.video_quality_pct) },
     { label: 'Frames Shown', value: fmtNum(m.frames_displayed) },
     { label: 'Dropped Frames', value: fmtNum(m.dropped_frames) },
-    { label: 'Stalls', value: fmtNum(m.stalls) },
-    { label: 'Stall Time', value: fmtS(m.stall_time_s) },
-    { label: 'Last Stall', value: fmtS(m.last_stall_time_s) },
-    { label: 'Browser', value: fmtStr(m.browser_family) },
-    { label: 'Playback Engine', value: fmtStr(m.playback_engine) },
-    { label: 'Error', value: fmtStr(m.error) },
-    { label: 'Restarts', value: fmtNum(m.player_restarts) },
+    // Browser / Playback Engine / Error (legacy player_error string)
+    // superseded by Phase 4 player_tech (Session Details) and the
+    // structured Error Code / Domain / Details / Terminal Error tiles
+    // in the Outcome section below.
+    // "Restarts" moved to SessionDetails as "Attempt" (attempt_id is
+    // the canonical schema field; max(attempt_id) per play = total
+    // attempts including recoveries).
     { label: 'Loops (player)', value: fmtNum(m.loop_count_player) },
     { label: 'Profile Shifts', value: fmtNum(m.profile_shift_count) },
-    { label: 'Source', value: fmtStr(m.source) },
+    // `source` removed — superseded by Phase 4 `player_tech` in
+    // Session Details.
   ];
 });
+
+// #550 Phase 1: state residency — one tile per state pair (time + count).
+const residencyFields = computed(() => {
+  const m = pm.value as PMExt | null;
+  if (!m) return [] as { label: string; value: string }[];
+  return [
+    { label: 'Playing Time', value: fmtDur(m.playing_time_s) },
+    { label: 'Playing Count', value: fmtNum(m.playing_count) },
+    { label: 'Pausing Time', value: fmtDur(m.pausing_time_s) },
+    { label: 'Pausing Count', value: fmtNum(m.pausing_count) },
+    { label: 'Buffering Time', value: fmtDur(m.buffering_time_s) },
+    { label: 'Buffering Count', value: fmtNum(m.buffering_count) },
+    { label: 'Stalling Time', value: fmtDur(m.stalling_time_s) },
+    { label: 'Stalling Count', value: fmtNum(m.stalling_count) },
+    { label: 'Idling Time', value: fmtDur(m.idling_time_s) },
+    { label: 'Idling Count', value: fmtNum(m.idling_count) },
+    { label: 'Seeking Time', value: fmtDur(m.seeking_time_s) },
+    { label: 'Seeking Count', value: fmtNum(m.seeking_count) },
+    { label: 'Trickplaying Time', value: fmtDur(m.trickplaying_time_s) },
+    { label: 'Trickplaying Count', value: fmtNum(m.trickplaying_count) },
+    { label: 'Last Stall Duration', value: fmtS(m.stall_duration_s) },
+    { label: 'Last Buffer Duration', value: fmtS(m.buffering_duration_s) },
+  ];
+});
+
+// #550 Phase 2: outcome + structured error fields.
+const outcomeFields = computed(() => {
+  const m = pm.value as PMExt | null;
+  if (!m) return [] as { label: string; value: string }[];
+  return [
+    { label: 'Status', value: fmtStr(m.playback_status) },
+    { label: 'Reason', value: fmtStr(m.playback_reason) },
+    { label: 'Error Code', value: m.error_code ? fmtNum(m.error_code) : '—' },
+    { label: 'Error Domain', value: fmtStr(m.error_domain) },
+    { label: 'Terminal Error Code', value: m.terminal_error_code ? fmtNum(m.terminal_error_code) : '—' },
+    { label: 'Terminal Error Domain', value: fmtStr(m.terminal_error_domain) },
+    { label: 'Error Count', value: fmtNum(m.error_count) },
+  ];
+});
+
+// Device taxonomy lives in SessionDetails (one stamp per session
+// vs per-snapshot residency/outcome), so PlayerMetrics doesn't
+// duplicate the tiles here.
 
 const serverFields = computed(() => {
   const s = sm.value;
@@ -112,6 +221,18 @@ const serverFields = computed(() => {
   <div v-if="player">
     <div class="grid">
       <div v-for="f in playerFields" :key="f.label" class="cell">
+        <div class="lbl">{{ f.label }}</div>
+        <div class="val">{{ f.value }}</div>
+      </div>
+    </div>
+    <div class="grid">
+      <div v-for="f in residencyFields" :key="f.label" class="cell">
+        <div class="lbl">{{ f.label }}</div>
+        <div class="val">{{ f.value }}</div>
+      </div>
+    </div>
+    <div class="grid">
+      <div v-for="f in outcomeFields" :key="f.label" class="cell">
         <div class="lbl">{{ f.label }}</div>
         <div class="val">{{ f.value }}</div>
       </div>

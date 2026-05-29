@@ -321,37 +321,127 @@ video_start_time_s
 
 ### 1.c Stalls, errors, lifecycle counters
 
+#### Legacy stall fields (DEPRECATED — replaced in #550)
+
+`stall_count` / `stall_time_s` / `last_stall_time_s` / `last_buffering_time_s`
+are kept as deprecated mirrors during the soft-cutover window. The
+forwarder mirror-writes from the new canonical Phase 1 fields
+(`stalling_count` / `stalling_time_ms` / `stall_duration_ms` /
+`buffering_duration_ms`) so legacy consumers still get fresh data.
+Prefer the new names in any new query. Old fields will be dropped in
+a follow-up PR once consumers migrate.
+
+#### #550 Phase 1 — state residency (per-state cumulative ms)
+
 ```
-stall_count
+playing_time_ms / pausing_time_ms / buffering_time_ms /
+stalling_time_ms / idling_time_ms / seeking_time_ms /
+trickplaying_time_ms
+  type:        UInt32 (DoubleDelta + ZSTD)
+  units:       milliseconds (cumulative since play start)
+  populated:   player-SDK (iOS state-machine residency tick)
+  meaning:     total time the player has spent in each player_state.
+               Sum across all states ≈ wall-clock since play started.
+  gotchas:     resets to 0 at every play_id boundary. For per-snapshot
+               deltas the forwarder also writes paired *_delta columns
+               (already-computed, no lag() needed).
+
+playing_count / pausing_count / buffering_count / stalling_count /
+idling_count / seeking_count / trickplaying_count
   type:        UInt32
-  populated:   player-SDK (monotonic)
-  meaning:     cumulative count of distinct stall events on this play
-               so far. Goes up on every new stall; never resets within
-               a play.
-  gotchas:     to find stalls in a time window, take delta:
-               max(stall_count) - min(stall_count) over the window.
+  populated:   player-SDK (state-machine entry counter)
+  meaning:     count of distinct entries into each state. Goes up
+               every time player_state transitions INTO the named state.
 
-stall_time_s
-  type:        Float32
-  units:       seconds (cumulative)
-  populated:   player-SDK
-  meaning:     total time spent in stall states this play. Cumulative.
+playing_time_ms_delta / *_delta
+  type:        UInt32 (DoubleDelta)
+  populated:   forwarder (computed from per-play state cache)
+  meaning:     per-row delta of the paired cumulative *_time_ms.
+               Use this instead of `x - lag(x) OVER (...)` — it's
+               populated server-side already, bloom-filter-indexable,
+               and the "who's buffering RIGHT NOW" tile is a one-liner:
+               `WHERE buffering_time_ms_delta > 0 AND ts > now() - 5s`.
 
-last_stall_time_s
-  type:        Float32
-  units:       seconds (duration of last stall only)
-  populated:   player-SDK
-  meaning:     duration of the most recent stall event.
+stall_duration_ms / buffering_duration_ms
+  type:        UInt32
+  populated:   player-SDK (set on the last_event='stall_end' /
+               'buffering_end' row; sticky on subsequent heartbeats)
+  meaning:     duration of the MOST RECENT stall / buffer event.
+               Use for "longest single event in play" queries:
+               `WHERE buffering_duration_ms > 5000 AND last_event =
+               'buffering_end'`.
+```
 
-last_buffering_time_s
-  type:        Float32
-  units:       seconds
-  populated:   player-SDK (iOS only, on buffering_end POSTs)
-  meaning:     authoritative duration of the most recent buffering pair.
-               When non-zero, prefer this over forwarder-side derivations.
-  gotchas:     0 for older clients (pre-#474 milestone A) — the
-               forwarder's labels.go cache fills in the gap via
-               end_ts - start_ts derivation when this is 0.
+#### #550 Phase 2 — outcome status + structured errors
+
+```
+playback_status
+  type:        LowCardinality(String)
+  populated:   player-SDK (iOS) or forwarder default
+  meaning:     terminal outcome enum. One of:
+               - 'in_progress' (default, mid-session)
+               - 'completed'   (natural EOF / clean exit)
+               - 'user_stopped'
+               - 'start_failure'      (VSF — fatal before first frame)
+               - 'abandoned_start'    (EBVS — > threshold without start)
+               - 'mid_stream_failure' (MSF — fatal after first frame)
+  gotchas:     Sessions that never get a session_end POST stay
+               'in_progress' until TTL ageout. Triage queries should
+               filter `WHERE playback_status != 'in_progress'` for
+               clean success-rate metrics.
+
+playback_reason
+  type:        LowCardinality(String)
+  populated:   mirrors player_state during in_progress; classifier-
+               derived on terminal rows
+  meaning:     controlled-vocab reason per status. Examples per status:
+               completed → natural_eof / loop_complete
+               user_stopped → user_quit / app_backgrounded
+               *_failure → drm_license_failed / segment_404 /
+                           manifest_5xx / network_timeout / unknown / ...
+
+error_code, error_domain, error_details
+  type:        Int32 / LowCardinality(String) / String (JSON)
+  populated:   player-SDK on every error-bearing row
+  meaning:     per-row error context. Populated on `last_event='error'`
+               events AND on terminal-failure session_end rows.
+
+terminal_error_code, terminal_error_domain, terminal_error_details
+  type:        Int32 / LowCardinality(String) / String (JSON)
+  populated:   ONLY on terminal failure rows
+  meaning:     SQL-safe terminal cause. Querying
+               `WHERE terminal_error_code != 0` returns only plays that
+               actually failed — never transient codes from recovered
+               errors. Use this for failure-rate dashboards.
+
+error_count, error_count_delta
+  type:        UInt32 / UInt32 (DoubleDelta)
+  populated:   player-SDK / forwarder (delta)
+  meaning:     cumulative error observations across the play + per-row
+               delta. High error_count even with playback_status =
+               'completed' = the play recovered through hiccups.
+```
+
+#### #550 Phase 4 — device / platform / version taxonomy
+
+```
+device_class, device_model, player_tech, app_version,
+os_version_major, os_version_minor, screen_width_px,
+screen_height_px, screen_density
+  type:        LowCardinality(String) / String / LowCardinality(String)
+               / UInt16 / UInt16 / UInt16 / UInt16 / Float32
+  populated:   player-SDK (DeviceInfo.swift on iOS) or go-proxy UA
+               parser for external HLS players (VLC / ffplay / hls.js)
+  meaning:     splits the conflated v1 `platform` field into the
+               Conviva / Bitmovin canonical taxonomy. Stamped on every
+               row (LowCardinality compresses the repeats); session-
+               stable in practice, so `argMax(field, ts)` in plays-
+               aggregation queries gives a clean per-play value.
+  gotchas:     external HLS players get partial coverage from
+               User-Agent parsing; fields default to empty when the
+               UA doesn't match a known pattern. iOS app is the
+               canonical source — when present, its values override
+               go-proxy's UA-parsed defaults via setIfEmpty merge.
 
 frames_displayed
   type:        UInt64

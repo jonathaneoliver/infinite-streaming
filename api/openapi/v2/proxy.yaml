@@ -1590,6 +1590,54 @@ components:
         source:              { type: string,  nullable: true, description: 'Identifier for the metrics source (e.g. avplayer-ios, exoplayer-android).' }
         event_time:          { type: string,  format: date-time, nullable: true, description: 'Player-supplied wallclock for the most recent metrics tick.' }
 
+        # ── #550 Phase 1: state-residency accumulators + per-row deltas ──
+        # Cumulative-on-the-wire UInt32 milliseconds since play start.
+        # Forwarder computes the paired _delta fields server-side from
+        # a per-play state cache; the _delta fields are NOT sent by the
+        # client over the wire — they're populated only on the
+        # ClickHouse row. See #550 epic and `analytics/go-forwarder/
+        # residency_cache.go`.
+        playing_time_ms:        { type: integer, nullable: true, description: '#550 Phase 1: cumulative time in `playing` state (ms), since play start.' }
+        playing_count:          { type: integer, nullable: true, description: '#550 Phase 1: entries into `playing` state since play start.' }
+        pausing_time_ms:        { type: integer, nullable: true, description: '#550 Phase 1: cumulative time in `paused` state (ms).' }
+        pausing_count:          { type: integer, nullable: true, description: '#550 Phase 1: entries into `paused` state.' }
+        buffering_time_ms:      { type: integer, nullable: true, description: '#550 Phase 1: cumulative buffering time (ms).' }
+        buffering_count:        { type: integer, nullable: true, description: '#550 Phase 1: entries into `buffering` state.' }
+        stalling_time_ms:       { type: integer, nullable: true, description: '#550 Phase 1: cumulative stalling time (ms). Single canonical pair replacing legacy stall_count/stall_time_s during soft cutover.' }
+        stalling_count:         { type: integer, nullable: true, description: '#550 Phase 1: entries into `stalled` state.' }
+        idling_time_ms:         { type: integer, nullable: true, description: '#550 Phase 1: cumulative idle time (ms).' }
+        idling_count:           { type: integer, nullable: true, description: '#550 Phase 1: entries into `idle` state.' }
+        seeking_time_ms:        { type: integer, nullable: true, description: '#550 Phase 1: cumulative time spent in seek-induced refill (TimeJumped → next .playing). Conviva CIRR/CIRT pattern: `connection_buffering = buffering_time_ms - seeking_time_ms`.' }
+        seeking_count:          { type: integer, nullable: true, description: '#550 Phase 1: AVPlayerItemTimeJumped events since play start.' }
+        trickplaying_time_ms:   { type: integer, nullable: true, description: '#550 Phase 1: cumulative time at non-1× playback rate (FF / RW).' }
+        trickplaying_count:     { type: integer, nullable: true, description: '#550 Phase 1: entries into trickplay (rate ∉ {0, ~1}).' }
+        stall_duration_ms:      { type: integer, nullable: true, description: '#550 Phase 1: duration of the MOST RECENT stall event (sticky on subsequent heartbeats). Replaces legacy last_stall_time_s.' }
+        buffering_duration_ms:  { type: integer, nullable: true, description: '#550 Phase 1: duration of the MOST RECENT buffer event (sticky). Replaces legacy last_buffering_time_s.' }
+        video_first_frame_time_ms: { type: integer, nullable: true, description: '#550 Phase 1: TTFF in ms. Conviva/Mux/Bitmovin canonical units. Replaces legacy video_first_frame_time_s.' }
+        video_start_time_ms:    { type: integer, nullable: true, description: '#550 Phase 1: alternate startup-time measurement in ms.' }
+
+        # ── #550 Phase 2: outcome status + structured error fields ──
+        playback_status:        { type: string,  nullable: true, description: '#550 Phase 2: terminal outcome enum: `in_progress` / `completed` / `user_stopped` / `start_failure` (VSF) / `abandoned_start` (EBVS) / `mid_stream_failure` (MSF). Mid-session rows = `in_progress`.' }
+        playback_reason:        { type: string,  nullable: true, description: '#550 Phase 2: controlled vocab per status. During in_progress, mirrors `player_state`; on terminal rows, forwarder classifier derives from error_code+domain+kind.' }
+        error_code:             { type: integer, nullable: true, description: '#550 Phase 2: NSError.code / HTTP status / system errno. Populated on `error` events AND terminal failure rows. 0 = no error.' }
+        error_domain:           { type: string,  nullable: true, description: '#550 Phase 2: NSError.domain — `CoreMediaErrorDomain` / `NSURLErrorDomain` / `AVFoundationErrorDomain` / `http` etc.' }
+        error_details:          { type: string,  nullable: true, description: '#550 Phase 2: JSON blob with URL, underlying error chain, native message.' }
+        terminal_error_code:    { type: integer, nullable: true, description: '#550 Phase 2: error code populated ONLY on terminal failure rows. Querying `WHERE terminal_error_code != 0` is SQL-safe — never returns transient codes.' }
+        terminal_error_domain:  { type: string,  nullable: true, description: '#550 Phase 2: error domain on terminal failure rows.' }
+        terminal_error_details: { type: string,  nullable: true, description: '#550 Phase 2: error details JSON on terminal failure rows.' }
+        error_count:            { type: integer, nullable: true, description: '#550 Phase 2: cumulative observation counter. Ticks on every `error` event (transient or terminal). Forwarder computes per-row delta server-side.' }
+
+        # ── #550 Phase 4: device / platform / version taxonomy ──
+        os_version_major:       { type: integer, nullable: true, description: '#550 Phase 4: OS major version (e.g. 26 for iOS 26.0.1).' }
+        os_version_minor:       { type: integer, nullable: true, description: '#550 Phase 4: OS minor version.' }
+        app_version:            { type: string,  nullable: true, description: '#550 Phase 4: app marketing version from Bundle CFBundleShortVersionString.' }
+        device_class:           { type: string,  nullable: true, description: '#550 Phase 4: form-factor enum: `phone` / `tablet` / `tv` / `desktop` / `unknown`.' }
+        device_model:           { type: string,  nullable: true, description: '#550 Phase 4: hardware model identifier (e.g. iPhone15,3) via sysctl hw.machine.' }
+        player_tech:            { type: string,  nullable: true, description: '#550 Phase 4: playback engine: `AVPlayer` / `hls.js` / `shaka` / `native-roku` / `vlc` / `ffmpeg`.' }
+        screen_width_px:        { type: integer, nullable: true, description: '#550 Phase 4: native (physical-pixel) screen width.' }
+        screen_height_px:       { type: integer, nullable: true, description: '#550 Phase 4: native screen height.' }
+        screen_density:         { type: number,  format: float, nullable: true, description: '#550 Phase 4: native scale (points-to-pixels density).' }
+
     ServerMetrics:
       description: |
         Read-only server-observed transport telemetry. Sourced from

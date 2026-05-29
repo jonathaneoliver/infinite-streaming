@@ -883,7 +883,41 @@ watch(
   ([endMs]) => {
     const row = timeseries.events.lastAt(endMs);
     if (!row) return;
-    const adapted = chRowToPlayerRecord(row);
+    // Pass the events stream's min-bound as the play's first_seen_at
+    // so SessionDetails' "First Request" + "Session Duration" tiles
+    // render the play's true start, not the brush-cursor row's ts.
+    const bounds = timeseries.events.rangeBounds.value;
+    const minMs = bounds?.min;
+    // ISO-with-Z so SessionDetails' fmtDate parses it as UTC across
+    // all browsers (matches chRowAdapter.toISOWithZ normalisation
+    // applied to last_seen_at; same format on both ends keeps
+    // fmtDuration honest).
+    const firstSeenAt = (minMs != null && Number.isFinite(minMs))
+      ? new Date(minMs).toISOString()
+      : undefined;
+    // Max control_revision + max attempt_id across the whole play.
+    // attempt_id is the recovery counter (1 = no recovery, 2 = one
+    // restart, etc.); SessionDetails shows it as the "Attempt" tile.
+    // Both pulled from the same single inRange() walk.
+    let maxControlRevision: string | undefined;
+    let maxAttemptId: number | undefined;
+    if (bounds && Number.isFinite(bounds.min) && Number.isFinite(bounds.max)) {
+      const rows = timeseries.events.inRange(bounds.min, bounds.max);
+      // control_revision is RFC3339Nano post type-change-in-place;
+      // string-compare gives chronological order for ISO timestamps.
+      let crStr: string | undefined;
+      let att = 0;
+      for (const r of rows) {
+        const rec = r as Record<string, unknown>;
+        const candidate = typeof rec.control_revision === 'string' ? rec.control_revision : '';
+        if (candidate && (!crStr || candidate > crStr)) crStr = candidate;
+        const a = Number(rec.attempt_id ?? 0);
+        if (Number.isFinite(a) && a > att) att = a;
+      }
+      maxControlRevision = crStr;
+      if (att > 0) maxAttemptId = att;
+    }
+    const adapted = chRowToPlayerRecord(row, { firstSeenAt, maxControlRevision, maxAttemptId });
     setArchivePlayer(archivePlayerId.value, adapted);
     qc.setQueryData(playerKey(archivePlayerId.value), { player: adapted, etag: undefined });
   },

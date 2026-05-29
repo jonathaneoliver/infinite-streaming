@@ -1525,7 +1525,7 @@ extension PlayerViewModel {
         // playhead_wallclock, etc. all anchored to the moment the
         // underlying event fired — not to whenever the Task body
         // happens to run after chaining through `metricsTaskTail`.
-        diagnostics.$stallCount
+        diagnostics.$stallingCount
             .removeDuplicates()
             .receive(on: DispatchQueue.main)
             .sink { [weak self] count in
@@ -1537,14 +1537,14 @@ extension PlayerViewModel {
             }
             .store(in: &cancellables)
 
-        diagnostics.$lastStallDurationSeconds
+        diagnostics.$stallDurationS
             .removeDuplicates()
             .receive(on: DispatchQueue.main)
             .sink { [weak self] duration in
                 guard let self, duration > 0, duration != self.lastReportedStallDuration else { return }
                 self.lastReportedStallDuration = duration
                 let payload = self.buildMetricsPayload(event: "stall_end", at: Date(), extra: [
-                    "player_metrics_last_stall_time_s": self.roundSeconds(duration)
+                    "player_metrics_stall_duration_ms": self.secondsToMs(duration)
                 ])
                 Task { await self.sendPlayerMetrics(payload: payload) }
             }
@@ -2032,6 +2032,10 @@ extension PlayerViewModel {
 
     fileprivate func buildMetricsPayload(event: String, at eventAt: Date = Date(), extra: [String: Any] = [:]) -> [String: Any] {
         let timestamp = Self.metricsTimestampFormatter.string(from: eventAt)
+        // Flush accruing residency into the current bucket so the
+        // payload reflects time-up-to-now, not time-up-to-last-state-
+        // change. Cheap; idempotent.
+        diagnostics.flushStateResidencyForRead()
         let loopCount = max(0, diagnostics.loopCountPlayer)
         let loopIncrement = max(0, loopCount - lastReportedLoopCount)
         lastReportedLoopCount = loopCount
@@ -2075,11 +2079,48 @@ extension PlayerViewModel {
             },
             "player_metrics_display_resolution": formatResolution(width: diagnostics.displayWidth, height: diagnostics.displayHeight),
             "player_metrics_video_resolution": formatResolution(width: diagnostics.videoWidth, height: diagnostics.videoHeight),
-            "player_metrics_video_first_frame_time_s": videoFirstFrameSeconds,
-            "player_metrics_video_start_time_s": videoPlayingTimeSeconds,
-            "player_metrics_stall_count": diagnostics.stallCount,
-            "player_metrics_stall_time_s": roundSeconds(diagnostics.stallTimeSeconds),
-            "player_metrics_last_stall_time_s": roundSeconds(diagnostics.lastStallDurationSeconds),
+            // ── #550 Phase 1: ms time fields (gerund-named) ────────
+            "player_metrics_video_first_frame_time_ms": secondsToMs(videoFirstFrameSeconds),
+            "player_metrics_video_start_time_ms": secondsToMs(videoPlayingTimeSeconds),
+            "player_metrics_stalling_count": diagnostics.stallingCount,
+            "player_metrics_stalling_time_ms": secondsToMs(diagnostics.stallingTimeS),
+            "player_metrics_stall_duration_ms": secondsToMs(diagnostics.stallDurationS),
+            "player_metrics_buffering_duration_ms": secondsToMs(diagnostics.bufferingDurationS),
+            // State residency accumulators — cumulative-on-the-wire
+            // since play start. Forwarder computes per-row deltas from
+            // a per-play state cache and stores both as paired
+            // *_time_ms + *_time_ms_delta columns in ClickHouse.
+            "player_metrics_playing_time_ms": secondsToMs(diagnostics.playingTimeS),
+            "player_metrics_playing_count": diagnostics.playingCount,
+            "player_metrics_pausing_time_ms": secondsToMs(diagnostics.pausingTimeS),
+            "player_metrics_pausing_count": diagnostics.pausingCount,
+            "player_metrics_buffering_time_ms": secondsToMs(diagnostics.bufferingTimeS),
+            "player_metrics_buffering_count": diagnostics.bufferingCount,
+            "player_metrics_idling_time_ms": secondsToMs(diagnostics.idlingTimeS),
+            "player_metrics_idling_count": diagnostics.idlingCount,
+            "player_metrics_seeking_time_ms": secondsToMs(diagnostics.seekingTimeS),
+            "player_metrics_seeking_count": diagnostics.seekingCount,
+            "player_metrics_trickplaying_time_ms": secondsToMs(diagnostics.trickplayingTimeS),
+            "player_metrics_trickplaying_count": diagnostics.trickplayingCount,
+            // ── #550 Phase 2: outcome + error ──────────────────────
+            // playback_status defaults to 'in_progress' for any
+            // non-terminal payload; iOS sets explicit values for
+            // session_end events (completed / user_stopped / failed_*).
+            // playback_reason mirrors player_state during in_progress;
+            // classifier-derived on terminal rows.
+            "player_metrics_playback_status": "in_progress",
+            "player_metrics_playback_reason": diagnostics.state,
+            "player_metrics_error_count": diagnostics.errorCount,
+            // ── #550 Phase 4: device / platform taxonomy ───────────
+            "player_metrics_os_version_major": DeviceInfo.osVersionMajor,
+            "player_metrics_os_version_minor": DeviceInfo.osVersionMinor,
+            "player_metrics_app_version": DeviceInfo.appVersion,
+            "player_metrics_device_class": DeviceInfo.deviceClass,
+            "player_metrics_device_model": DeviceInfo.deviceModel,
+            "player_metrics_player_tech": DeviceInfo.playerTech,
+            "player_metrics_screen_width_px": DeviceInfo.screenWidthPx,
+            "player_metrics_screen_height_px": DeviceInfo.screenHeightPx,
+            "player_metrics_screen_density": DeviceInfo.screenDensity,
             // Displayed frame count (issue #486 follow-up). Recomputed
             // from playing-time × active variant's nominal frame rate
             // minus dropped frames, instead of the legacy
@@ -2206,7 +2247,7 @@ extension PlayerViewModel {
         var metadata: [String: Any] = [
             "player_state": diagnostics.state,
             "buffer_depth_s": diagnostics.bufferDepth as Any,
-            "stall_count": diagnostics.stallCount,
+            "stalling_count": diagnostics.stallingCount,
             "auto_recovery_attempt": attempt,
             "player_restarts": playerRestarts
         ]
@@ -2468,6 +2509,22 @@ extension PlayerViewModel {
 
     fileprivate func roundSeconds(_ value: Double) -> Double {
         (value * 1000).rounded() / 1000
+    }
+
+    /// Convert a Double-seconds residency accumulator to UInt32-ms
+    /// for the #550 Phase 1 wire contract. Clamped at 0; values
+    /// beyond UInt32 max (~49 days) saturate. Round-half-to-even for
+    /// stable values across snapshots that read mid-state.
+    fileprivate func secondsToMs(_ value: Double) -> UInt32 {
+        let scaled = (value * 1000).rounded()
+        if scaled <= 0 { return 0 }
+        if scaled >= Double(UInt32.max) { return UInt32.max }
+        return UInt32(scaled)
+    }
+
+    fileprivate func secondsToMs(_ value: Double?) -> UInt32 {
+        guard let v = value else { return 0 }
+        return secondsToMs(v)
     }
 
     fileprivate func roundMetric(_ value: Double) -> Double {

@@ -141,6 +141,13 @@ func runPlaysQuery(ctx context.Context, b Backend, clauses []string, params map[
 		    fault_count_transfer_active_timeout,
 		    fault_count_transfer_idle_timeout,
 		    classification,
+		    -- #550 Phase 1+2+4 fields for the aggregation below.
+		    playing_time_ms, buffering_time_ms, stalling_time_ms,
+		    error_count, error_code, error_domain,
+		    terminal_error_code, terminal_error_domain,
+		    playback_status, playback_reason,
+		    device_class, device_model, player_tech,
+		    app_version, os_version_major, os_version_minor,
 		    lagInFrame(video_bitrate_mbps, 1, video_bitrate_mbps) OVER w AS prev_bitrate,
 		    lagInFrame(video_resolution,   1, video_resolution)   OVER w AS prev_resolution
 		  FROM %s.%s
@@ -220,7 +227,30 @@ func runPlaysQuery(ctx context.Context, b Backend, clauses []string, params map[
 		    countIf(last_event = 'restart')       AS restart_count,
 		    countIf(last_event = 'error')         AS error_event_count,
 		    any(classification) AS classification,
-		    maxIf(attempt_id, attempt_id > 0)       AS attempt_id_max
+		    maxIf(attempt_id, attempt_id > 0)       AS attempt_id_max,
+		    -- #550 Phase 1: residency totals (max because cumulative)
+		    max(playing_time_ms) AS playing_time_ms,
+		    max(buffering_time_ms) AS buffering_time_ms,
+		    max(stalling_time_ms) AS stalling_time_ms,
+		    -- #550 Phase 2: outcome (argMax on terminal row; in_progress
+		    -- mid-play rows return last value seen, which is what we
+		    -- want for live sessions).
+		    argMax(playback_status, ts) AS playback_status,
+		    argMax(playback_reason, ts) AS playback_reason,
+		    argMax(terminal_error_code, ts)   AS terminal_error_code,
+		    argMax(terminal_error_domain, ts) AS terminal_error_domain,
+		    argMax(error_code, ts)   AS last_error_code,
+		    argMax(error_domain, ts) AS last_error_domain,
+		    max(error_count) AS error_count,
+		    -- #550 Phase 4: device taxonomy — stable per session;
+		    -- argMax picks the most recent stamp (which equals every
+		    -- stamp in practice).
+		    argMax(device_class, ts) AS device_class,
+		    argMax(device_model, ts) AS device_model,
+		    argMax(player_tech, ts)  AS player_tech,
+		    argMax(app_version, ts)  AS app_version,
+		    argMax(os_version_major, ts) AS os_version_major,
+		    argMax(os_version_minor, ts) AS os_version_minor
 		  FROM base
 		  GROUP BY play_id
 		)
@@ -241,6 +271,13 @@ func runPlaysQuery(ctx context.Context, b Backend, clauses []string, params map[
 		  agg.frames_displayed, agg.first_frame_s,
 		  agg.user_marked_count, agg.frozen_count, agg.segment_stall_count,
 		  agg.restart_count, agg.error_event_count,
+		  -- #550 Phase 1+2+4 fields propagated to PlaySummary.
+		  agg.playing_time_ms, agg.buffering_time_ms, agg.stalling_time_ms,
+		  agg.playback_status, agg.playback_reason,
+		  agg.terminal_error_code, agg.terminal_error_domain,
+		  agg.last_error_code, agg.last_error_domain, agg.error_count,
+		  agg.device_class, agg.device_model, agg.player_tech,
+		  agg.app_version, agg.os_version_major, agg.os_version_minor,
 		  agg.classification,
 		  ifNull(net_counts.net_rows,   0) AS net_events,
 		  ifNull(net_counts.net_errors, 0) AS net_errors,
