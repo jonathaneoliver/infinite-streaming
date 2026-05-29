@@ -273,6 +273,22 @@ type row struct {
 	VideoFirstFrameTimeS     float32 `json:"video_first_frame_time_s"`
 	VideoQualityPct          float32 `json:"video_quality_pct"`
 	VideoStartTimeS          float32 `json:"video_start_time_s"`
+	// iOS-published per-variant watch time (issue #486). JSON-object
+	// string keyed by `<resolution>@<kbps>kbps` with seconds-watched
+	// values. Stored verbatim so the dashboard can parse + expand it
+	// into one chip per variant without per-variant column proliferation.
+	TimePerVariantS          string  `json:"time_per_variant_s"`
+	// Client-side RTT proxy from AVMetrics (issue #486). Median TTFB
+	// over the most recent MediaResourceRequest events. Read by the
+	// RTT chart in lockstep with the server-side `client_rtt_ms`.
+	ClientRttAvmetricsMs     float32 `json:"client_rtt_avmetrics_ms"`
+	// HOLD-BACK / PART-HOLD-BACK from the manifest (issue #486
+	// follow-up). AVFoundation parses EXT-X-SERVER-CONTROL and
+	// surfaces the result via AVPlayerItem.recommendedTimeOffsetFromLive.
+	RecommendedOffsetS       float32 `json:"recommended_offset_s"`
+	ConfiguredOffsetS        float32 `json:"configured_offset_s"`
+	// Active variant's nominal frame rate (issue #486 follow-up).
+	NominalFpsCurrent        float32 `json:"nominal_fps_current"`
 
 	MbpsTransferComplete     float32 `json:"mbps_transfer_complete"`
 	MbpsTransferRate         float32 `json:"mbps_transfer_rate"`
@@ -467,6 +483,14 @@ func main() {
 	ctrlSeenSet := newCtrlSeen(20000)
 	go batchInsertControl(ctx, cfg, ctrlRows)
 	go runControlStream(ctx, cfg, ctrlSeenSet, ctrlRows)
+
+	// iOS 18 AVMetrics raw event stream (issue #486 spike): subscribe to
+	// go-proxy's /api/avmetrics/stream and write into ios_avmetric_events.
+	// Same shape as control_events ingest.
+	avmRows := make(chan avmRow, 4096)
+	avmSeenSet := newAVMSeen(20000)
+	go batchInsertAVM(ctx, cfg, avmRows)
+	go runAVMStream(ctx, cfg, avmSeenSet, avmRows)
 
 	// Auto-classifier: when a snapshot carries an interesting signal
 	// (911 / frozen / hard error / fault counters), queue the
@@ -691,6 +715,11 @@ func toRow(ts string, revision uint64, sessionID string, s map[string]interface{
 		VideoFirstFrameTimeS:  getF32(s, "player_metrics_video_first_frame_time_s"),
 		VideoQualityPct:       getF32(s, "player_metrics_video_quality_pct"),
 		VideoStartTimeS:       getF32(s, "player_metrics_video_start_time_s"),
+		TimePerVariantS:       stringField(s, "player_metrics_time_per_variant_s"),
+		ClientRttAvmetricsMs:  getF32(s, "player_metrics_client_rtt_avmetrics_ms"),
+		RecommendedOffsetS:    getF32(s, "player_metrics_recommended_offset_s"),
+		ConfiguredOffsetS:     getF32(s, "player_metrics_configured_offset_s"),
+		NominalFpsCurrent:     getF32(s, "player_metrics_nominal_fps_current"),
 
 		MbpsTransferComplete:   getF32(s, "mbps_transfer_complete"),
 		MbpsTransferRate:       getF32(s, "mbps_transfer_rate"),
