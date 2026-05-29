@@ -68,6 +68,28 @@ type netRow struct {
 	// from computeNetworkLabels(). Drives the dashboard's row tint
 	// and chip rendering. Issue #473.
 	Labels               []string `json:"labels,omitempty"`
+
+	// CMCD (CTA-5004) capture — see CMCDData in go-proxy/cmd/server/cmcd.go.
+	// cmcd_raw is the JSON of the parsed key→value map (preserved
+	// verbatim for ground-truth discovery); typed columns mirror the
+	// well-known short-name keys for cheap SQL.
+	CMCDRaw string `json:"cmcd_raw,omitempty"`
+	CMCDBR  uint32 `json:"cmcd_br,omitempty"`
+	CMCDBL  uint32 `json:"cmcd_bl,omitempty"`
+	CMCDBS  uint8  `json:"cmcd_bs,omitempty"`
+	CMCDDL  uint32 `json:"cmcd_dl,omitempty"`
+	CMCDMTP uint32 `json:"cmcd_mtp,omitempty"`
+	CMCDRTP uint32 `json:"cmcd_rtp,omitempty"`
+	CMCDTB  uint32 `json:"cmcd_tb,omitempty"`
+	CMCDD   uint32 `json:"cmcd_d,omitempty"`
+	CMCDSU  uint8  `json:"cmcd_su,omitempty"`
+	CMCDOT  string `json:"cmcd_ot,omitempty"`
+	CMCDSF  string `json:"cmcd_sf,omitempty"`
+	CMCDST  string `json:"cmcd_st,omitempty"`
+	CMCDCID string `json:"cmcd_cid,omitempty"`
+	CMCDSID string `json:"cmcd_sid,omitempty"`
+	CMCDPR  string `json:"cmcd_pr,omitempty"`
+	CMCDV   uint32 `json:"cmcd_v,omitempty"`
 }
 
 // netEntry mirrors go-proxy's NetworkLogEntry. Only the fields we keep
@@ -101,6 +123,37 @@ type netEntry struct {
 	FaultCategory        string        `json:"fault_category"`
 	RequestRange         string        `json:"request_range"`
 	ResponseContentRange string        `json:"response_content_range"`
+
+	// CMCD payload as emitted by go-proxy's parseCMCD; nil when the
+	// player did not send CMCD on this request.
+	CMCD *cmcdData `json:"cmcd,omitempty"`
+}
+
+// cmcdData mirrors go-proxy's CMCDData. Tags match exactly so the
+// SSE envelope round-trips with no field-name divergence.
+type cmcdData struct {
+	HeaderRequest string            `json:"header_request,omitempty"`
+	HeaderObject  string            `json:"header_object,omitempty"`
+	HeaderStatus  string            `json:"header_status,omitempty"`
+	HeaderSession string            `json:"header_session,omitempty"`
+	HeaderQuery   string            `json:"header_query,omitempty"`
+	Raw           map[string]string `json:"raw,omitempty"`
+	BR            uint32            `json:"br,omitempty"`
+	BL            uint32            `json:"bl,omitempty"`
+	BS            bool              `json:"bs,omitempty"`
+	DL            uint32            `json:"dl,omitempty"`
+	MTP           uint32            `json:"mtp,omitempty"`
+	RTP           uint32            `json:"rtp,omitempty"`
+	TB            uint32            `json:"tb,omitempty"`
+	D             uint32            `json:"d,omitempty"`
+	SU            bool              `json:"su,omitempty"`
+	OT            string            `json:"ot,omitempty"`
+	SF            string            `json:"sf,omitempty"`
+	ST            string            `json:"st,omitempty"`
+	CID           string            `json:"cid,omitempty"`
+	SID           string            `json:"sid,omitempty"`
+	PR            string            `json:"pr,omitempty"`
+	V             uint32            `json:"v,omitempty"`
 }
 
 type nameValue struct {
@@ -251,6 +304,44 @@ func entryToRow(sessionID, playerID string, e *netEntry) netRow {
 	if e.Faulted {
 		faulted = 1
 	}
+	// CMCD pass-through. The Raw map is serialised as a JSON object so a
+	// single column carries the ground-truth set of keys the player
+	// actually emitted — useful for discovering unknown keys (e.g. what
+	// iOS 18 AVPlayer ships out-of-the-box) without changing schema.
+	var (
+		cmcdRaw                                          string
+		cmcdBR, cmcdBL, cmcdDL, cmcdMTP                  uint32
+		cmcdRTP, cmcdTB, cmcdD, cmcdV                    uint32
+		cmcdBS, cmcdSU                                   uint8
+		cmcdOT, cmcdSF, cmcdST, cmcdCID, cmcdSID, cmcdPR string
+	)
+	if e.CMCD != nil {
+		if len(e.CMCD.Raw) > 0 {
+			if b, err := json.Marshal(e.CMCD.Raw); err == nil {
+				cmcdRaw = string(b)
+			}
+		}
+		cmcdBR = e.CMCD.BR
+		cmcdBL = e.CMCD.BL
+		cmcdDL = e.CMCD.DL
+		cmcdMTP = e.CMCD.MTP
+		cmcdRTP = e.CMCD.RTP
+		cmcdTB = e.CMCD.TB
+		cmcdD = e.CMCD.D
+		cmcdV = e.CMCD.V
+		if e.CMCD.BS {
+			cmcdBS = 1
+		}
+		if e.CMCD.SU {
+			cmcdSU = 1
+		}
+		cmcdOT = e.CMCD.OT
+		cmcdSF = e.CMCD.SF
+		cmcdST = e.CMCD.ST
+		cmcdCID = e.CMCD.CID
+		cmcdSID = e.CMCD.SID
+		cmcdPR = e.CMCD.PR
+	}
 	// Canonicalise — see canonicalV2ID()'s doc on case-sensitivity.
 	// `playerID` already came in canonicalised via sessionToPlayerID,
 	// but `e.PlayID` lands raw off the proxy SSE entry — historically
@@ -289,6 +380,23 @@ func entryToRow(sessionID, playerID string, e *netEntry) netRow {
 		ResponseHeaders:      jsonOrEmpty(e.ResponseHeaders),
 		QueryString:          jsonOrEmpty(e.QueryString),
 		EntryFingerprint:     netFingerprint(e),
+		CMCDRaw:              cmcdRaw,
+		CMCDBR:               cmcdBR,
+		CMCDBL:               cmcdBL,
+		CMCDBS:               cmcdBS,
+		CMCDDL:               cmcdDL,
+		CMCDMTP:              cmcdMTP,
+		CMCDRTP:              cmcdRTP,
+		CMCDTB:               cmcdTB,
+		CMCDD:                cmcdD,
+		CMCDSU:               cmcdSU,
+		CMCDOT:               cmcdOT,
+		CMCDSF:               cmcdSF,
+		CMCDST:               cmcdST,
+		CMCDCID:              cmcdCID,
+		CMCDSID:              cmcdSID,
+		CMCDPR:               cmcdPR,
+		CMCDV:                cmcdV,
 	}
 }
 

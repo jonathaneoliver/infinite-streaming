@@ -184,6 +184,13 @@ type NetworkLogEntry struct {
 	// requests in the dashboard.
 	RequestRange         string `json:"request_range,omitempty"`
 	ResponseContentRange string `json:"response_content_range,omitempty"`
+
+	// CMCD (CTA-5004) payload extracted from the player's request —
+	// CMCD-Request / CMCD-Object / CMCD-Status / CMCD-Session headers
+	// and the ?CMCD= query parameter. Nil for non-CMCD clients. iOS 18+
+	// AVPlayer emits these when the app sets
+	// resourceLoader.sendsCommonMediaClientDataAsHTTPHeaders = true.
+	CMCD *CMCDData `json:"cmcd,omitempty"`
 }
 
 // sensitiveHeaderNames are excluded from HAR captures regardless of source.
@@ -237,6 +244,15 @@ func stampNetMeta(entry *NetworkLogEntry, requestHeaders, queryString []HeaderPa
 	if entry.ResponseHeaders == nil && resp != nil {
 		entry.ResponseHeaders = capturedHeaders(resp.Header)
 	}
+}
+
+// stampCMCD attaches a parsed CMCD payload to a NetworkLogEntry.
+// Idempotent — won't overwrite an already-set CMCD field.
+func stampCMCD(entry *NetworkLogEntry, cmcd *CMCDData) {
+	if entry == nil || cmcd == nil || entry.CMCD != nil {
+		return
+	}
+	entry.CMCD = cmcd
 }
 
 // capturedQueryString converts the URL's query into []HeaderPair preserving
@@ -5064,6 +5080,10 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 	// order via capturedQueryString.
 	requestHeaders := capturedHeaders(r.Header)
 	queryString := capturedQueryString(r.URL)
+	// Parse CMCD (CTA-5004) carried as CMCD-* headers and/or ?CMCD= query
+	// param. Nil for non-CMCD clients. iOS 18+ AVPlayer emits the headers
+	// when the app sets resourceLoader.sendsCommonMediaClientDataAsHTTPHeaders.
+	cmcd := parseCMCD(r.Header, r.URL.Query())
 	// Extract the player's `play_id` + `attempt_id` query params (issue
 	// #280). Used to scope HAR snapshots to a single playback episode
 	// and to track recovery attempts within it. Stamped onto every
@@ -5083,6 +5103,9 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 		}
 		if entry.AttemptID == 0 {
 			entry.AttemptID = attemptID
+		}
+		if entry.CMCD == nil {
+			entry.CMCD = cmcd
 		}
 		a.addNetworkLogEntry(sessionID, entry)
 	}

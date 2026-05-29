@@ -827,6 +827,15 @@ final class PlayerViewModel: ObservableObject {
         RequestTracker.shared.reset()
 
         let asset = AVURLAsset(url: assetURL, options: nil)
+        // CMCD (CTA-5004) emission as HTTP request headers. iOS 18+.
+        // Must be set BEFORE the asset is handed to AVPlayerItem.
+        // go-proxy parses the CMCD-* headers and stamps them onto
+        // network_requests so the test framework can correlate
+        // client-side ABR decisions with proxy-side traffic shaping.
+        // Per Apple FB17086130, leave disabled on FairPlay-protected
+        // streams — this app does not use FairPlay so the flag is safe
+        // to enable unconditionally here.
+        asset.resourceLoader.sendsCommonMediaClientDataAsHTTPHeaders = true
         let item = AVPlayerItem(asset: asset)
         // Preserve the server-advertised live offset across stall
         // recoveries — without this, AVPlayer snaps back to the live

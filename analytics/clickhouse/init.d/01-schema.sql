@@ -485,6 +485,33 @@ ALTER TABLE infinite_streaming.network_requests
 ALTER TABLE infinite_streaming.network_requests
     ADD COLUMN IF NOT EXISTS attempt_id UInt32 DEFAULT 0 CODEC(ZSTD(1));
 
+-- CMCD (Common Media Client Data, CTA-5004) capture. iOS 18+ AVPlayer
+-- emits CMCD-Request / CMCD-Object / CMCD-Status / CMCD-Session headers
+-- when the app sets resourceLoader.sendsCommonMediaClientDataAsHTTPHeaders.
+-- `cmcd_raw` is the JSON-encoded full key→value map preserved verbatim
+-- from the wire so the test framework can discover the ground-truth set
+-- of keys a given player emits (no per-vendor schema assumed). The typed
+-- columns below mirror the well-known CTA-5004 keys for cheap SQL
+-- queries; null/0 means the player did not send that key on that request.
+ALTER TABLE infinite_streaming.network_requests
+    ADD COLUMN IF NOT EXISTS cmcd_raw    String                 CODEC(ZSTD(3)),
+    ADD COLUMN IF NOT EXISTS cmcd_br     UInt32                 DEFAULT 0 CODEC(ZSTD(1)),
+    ADD COLUMN IF NOT EXISTS cmcd_bl     UInt32                 DEFAULT 0 CODEC(ZSTD(1)),
+    ADD COLUMN IF NOT EXISTS cmcd_bs     UInt8                  DEFAULT 0 CODEC(ZSTD(1)),
+    ADD COLUMN IF NOT EXISTS cmcd_dl     UInt32                 DEFAULT 0 CODEC(ZSTD(1)),
+    ADD COLUMN IF NOT EXISTS cmcd_mtp    UInt32                 DEFAULT 0 CODEC(ZSTD(1)),
+    ADD COLUMN IF NOT EXISTS cmcd_rtp    UInt32                 DEFAULT 0 CODEC(ZSTD(1)),
+    ADD COLUMN IF NOT EXISTS cmcd_tb     UInt32                 DEFAULT 0 CODEC(ZSTD(1)),
+    ADD COLUMN IF NOT EXISTS cmcd_d      UInt32                 DEFAULT 0 CODEC(ZSTD(1)),
+    ADD COLUMN IF NOT EXISTS cmcd_su     UInt8                  DEFAULT 0 CODEC(ZSTD(1)),
+    ADD COLUMN IF NOT EXISTS cmcd_ot     LowCardinality(String) DEFAULT '' CODEC(ZSTD(1)),
+    ADD COLUMN IF NOT EXISTS cmcd_sf     LowCardinality(String) DEFAULT '' CODEC(ZSTD(1)),
+    ADD COLUMN IF NOT EXISTS cmcd_st     LowCardinality(String) DEFAULT '' CODEC(ZSTD(1)),
+    ADD COLUMN IF NOT EXISTS cmcd_cid    String                 DEFAULT '' CODEC(ZSTD(1)),
+    ADD COLUMN IF NOT EXISTS cmcd_sid    String                 DEFAULT '' CODEC(ZSTD(1)),
+    ADD COLUMN IF NOT EXISTS cmcd_pr     String                 DEFAULT '' CODEC(ZSTD(1)),
+    ADD COLUMN IF NOT EXISTS cmcd_v      UInt32                 DEFAULT 0 CODEC(ZSTD(1));
+
 -- session_markers retired in issue #474 Milestone C — replaced by
 -- per-row `labels[]` on session_events / network_requests and by
 -- discrete rows on control_events. The CREATE TABLE block previously
