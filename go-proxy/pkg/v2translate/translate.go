@@ -175,6 +175,7 @@ func transferTimeoutsFromSession(s map[string]any) *oapigen.TransferTimeouts {
 func contentManipulationFromSession(s map[string]any) *oapigen.ContentManipulation {
 	stripCodecs, _ := s["content_strip_codecs"].(bool)
 	stripAvgBw, _ := s["content_strip_average_bandwidth"].(bool)
+	stripResolution, _ := s["content_strip_resolution"].(bool)
 	overstate, _ := s["content_overstate_bandwidth"].(bool)
 	offset := 0
 	if v, ok := numericFloatTranslate(s["content_live_offset"]); ok {
@@ -190,13 +191,14 @@ func contentManipulationFromSession(s map[string]any) *oapigen.ContentManipulati
 	} else if raw, ok := s["content_allowed_variants"].([]string); ok {
 		allowed = append([]string{}, raw...)
 	}
-	if !stripCodecs && !stripAvgBw && !overstate && offset == 0 && len(allowed) == 0 {
+	if !stripCodecs && !stripAvgBw && !stripResolution && !overstate && offset == 0 && len(allowed) == 0 {
 		return nil
 	}
 	off := oapigen.ContentManipulationLiveOffset(offset)
 	out := oapigen.ContentManipulation{
 		StripCodecs:           &stripCodecs,
 		StripAverageBandwidth: &stripAvgBw,
+		StripResolution:       &stripResolution,
 		OverstateBandwidth:    &overstate,
 		LiveOffset:            &off,
 	}

@@ -489,6 +489,7 @@ func applyContentPatch(s map[string]any, c any) {
 	if c == nil {
 		s["content_strip_codecs"] = false
 		s["content_strip_average_bandwidth"] = false
+		s["content_strip_resolution"] = false
 		s["content_overstate_bandwidth"] = false
 		s["content_live_offset"] = 0
 		s["content_allowed_variants"] = []any{}
@@ -503,6 +504,9 @@ func applyContentPatch(s map[string]any, c any) {
 	}
 	if v, present := m["strip_average_bandwidth"]; present {
 		s["content_strip_average_bandwidth"] = toBool(v)
+	}
+	if v, present := m["strip_resolution"]; present {
+		s["content_strip_resolution"] = toBool(v)
 	}
 	if v, present := m["overstate_bandwidth"]; present {
 		s["content_overstate_bandwidth"] = toBool(v)

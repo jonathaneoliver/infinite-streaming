@@ -1867,6 +1867,11 @@ export interface components {
              */
             strip_average_bandwidth: boolean;
             /**
+             * @description Remove RESOLUTION attribute from EXT-X-STREAM-INF lines (issue #486).
+             * @default false
+             */
+            strip_resolution: boolean;
+            /**
              * @description Inflate BANDWIDTH attribute by 10%.
              * @default false
              */
@@ -2062,6 +2067,11 @@ export interface components {
              * @description ICMP path ping RTT measured server-side.
              */
             path_ping_rtt_ms?: number | null;
+            /**
+             * Format: float
+             * @description Client-side RTT proxy from iOS 18 AVMetrics TTFB (issue #486).
+             */
+            rtt_avmetrics_ms?: number | null;
             /** @description true when no fresh TCP_INFO sample is available (e.g. session idle). */
             rtt_stale?: boolean | null;
             /** @description Lifetime ingress bytes from the player to the proxy. */
