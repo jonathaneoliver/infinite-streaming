@@ -35,8 +35,10 @@ import {
 } from './sessionTimeSeriesUtils';
 // SSE event names this stream produces. Issue #474 Milestone C
 // dropped 'marker' (the session_markers stream retired) and added
-// 'control' (control_events — proxy/harness action log).
-const V3_EVENT_TYPES = ['meta', 'event', 'network', 'control', 'heartbeat', 'complete', 'stream_error'];
+// 'control' (control_events — proxy/harness action log). Issue #486
+// added 'avmetrics' for the iOS 18 AVMetrics raw-event comparison
+// stream.
+const V3_EVENT_TYPES = ['meta', 'event', 'network', 'control', 'avmetrics', 'heartbeat', 'complete', 'stream_error'];
 
 /**
  * Stream<T> — the per-stream surface every renderer consumes. Read
@@ -59,7 +61,7 @@ export interface Stream<T> {
 
 export interface UseSessionTimeSeriesOpts {
   /** Comma list of streams to subscribe to. Default: all three. */
-  streams?: ('events' | 'network' | 'control')[];
+  streams?: ('events' | 'network' | 'control' | 'avmetrics')[];
   /** Bundle names. Default: charts_minimal,lanes_v1,network for samples+network. */
   bundles?: string[];
   /** Ad-hoc field list — applied to every enabled stream as a
@@ -87,6 +89,9 @@ export interface UseSessionTimeSeriesReturn {
   events: Stream<Record<string, unknown>>;
   network: Stream<Record<string, unknown>>;
   control: Stream<Record<string, unknown>>;
+  /** iOS 18 AVMetrics raw event stream (issue #486 spike). Empty
+   *  unless the caller opted in via `streams: [..., 'avmetrics']`. */
+  avmetrics: Stream<Record<string, unknown>>;
   /** True if the server is actively tailing this stream. False once
    *  it sends `event:complete` (archive replay or play ended). */
   live: Ref<boolean>;
@@ -147,22 +152,27 @@ export function useSessionTimeSeries(
   const eventsArr = shallowRef<Record<string, unknown>[]>([]);
   const networkArr = shallowRef<Record<string, unknown>[]>([]);
   const controlArr = shallowRef<Record<string, unknown>[]>([]);
+  const avmetricsArr = shallowRef<Record<string, unknown>[]>([]);
 
   const eventsVersion = ref(0);
   const networkVersion = ref(0);
   const controlVersion = ref(0);
+  const avmetricsVersion = ref(0);
 
   const eventsBounds = ref<{ min: number; max: number } | null>(null);
   const networkBounds = ref<{ min: number; max: number } | null>(null);
   const controlBounds = ref<{ min: number; max: number } | null>(null);
+  const avmetricsBounds = ref<{ min: number; max: number } | null>(null);
 
   const eventsLoading = ref(false);
   const networkLoading = ref(false);
   const controlLoading = ref(false);
+  const avmetricsLoading = ref(false);
 
   const eventsError = ref<string | null>(null);
   const networkError = ref<string | null>(null);
   const controlError = ref<string | null>(null);
+  const avmetricsError = ref<string | null>(null);
 
   const live = ref(true);
   const connectionState = ref<'connecting' | 'open' | 'closed'>('closed');
@@ -180,6 +190,7 @@ export function useSessionTimeSeries(
   const eventsPending: Record<string, unknown>[] = [];
   const networkPending: Record<string, unknown>[] = [];
   const controlPending: Record<string, unknown>[] = [];
+  const avmetricsPending: Record<string, unknown>[] = [];
   let flushTimer: ReturnType<typeof setInterval> | null = null;
 
   function teardown() {
@@ -198,21 +209,27 @@ export function useSessionTimeSeries(
     eventsArr.value = [];
     networkArr.value = [];
     controlArr.value = [];
+    avmetricsArr.value = [];
     eventsPending.length = 0;
     networkPending.length = 0;
     controlPending.length = 0;
+    avmetricsPending.length = 0;
     eventsVersion.value++;
     networkVersion.value++;
     controlVersion.value++;
+    avmetricsVersion.value++;
     eventsBounds.value = null;
     networkBounds.value = null;
     controlBounds.value = null;
+    avmetricsBounds.value = null;
     eventsLoading.value = false;
     networkLoading.value = false;
     controlLoading.value = false;
+    avmetricsLoading.value = false;
     eventsError.value = null;
     networkError.value = null;
     controlError.value = null;
+    avmetricsError.value = null;
     lastEventId = '';
   }
 
@@ -233,6 +250,7 @@ export function useSessionTimeSeries(
       if (streams.includes('events')) defaults.push('charts_minimal', 'lanes_v1');
       if (streams.includes('network')) defaults.push('network');
       if (streams.includes('control')) defaults.push('control');
+      if (streams.includes('avmetrics')) defaults.push('avmetrics');
       if (defaults.length) params.set('bundles', defaults.join(','));
     }
     if (opts.fields && opts.fields.length) {
@@ -310,6 +328,9 @@ export function useSessionTimeSeries(
       case 'control':
         enqueueRow(data, controlPending);
         return;
+      case 'avmetrics':
+        enqueueRow(data, avmetricsPending);
+        return;
       case 'heartbeat':
         return;
       case 'complete':
@@ -320,6 +341,7 @@ export function useSessionTimeSeries(
         eventsLoading.value = false;
         networkLoading.value = false;
         controlLoading.value = false;
+        avmetricsLoading.value = false;
         teardown();
         return;
       case 'stream_error':
@@ -329,6 +351,7 @@ export function useSessionTimeSeries(
           eventsError.value = msg;
           networkError.value = msg;
           controlError.value = msg;
+          avmetricsError.value = msg;
         } catch {
           eventsError.value = 'stream error';
         }
@@ -351,6 +374,7 @@ export function useSessionTimeSeries(
     drainQueue(eventsPending, eventsArr, eventsVersion, eventsBounds, eventsLoading);
     drainQueue(networkPending, networkArr, networkVersion, networkBounds, networkLoading);
     drainQueue(controlPending, controlArr, controlVersion, controlBounds, controlLoading);
+    drainQueue(avmetricsPending, avmetricsArr, avmetricsVersion, avmetricsBounds, avmetricsLoading);
   }
 
   function drainQueue(
@@ -495,9 +519,14 @@ export function useSessionTimeSeries(
   const SOFT_CAP_NETWORK = 5000;
   const SOFT_CAP_EVENTS = 50000;
   watch(
-    [eventsVersion, networkVersion, controlVersion],
+    [eventsVersion, networkVersion, controlVersion, avmetricsVersion],
     () => {
-      const bounds = mergedBounds(eventsBounds.value, networkBounds.value, controlBounds.value);
+      const bounds = mergedBounds(
+        eventsBounds.value,
+        networkBounds.value,
+        controlBounds.value,
+        avmetricsBounds.value,
+      );
       if (!bounds) return;
       if (eventsArr.value.length > SOFT_CAP_SAMPLES) {
         evictOutsideViewport(eventsArr.value, bounds.min, bounds.max, tsOf);
@@ -511,6 +540,10 @@ export function useSessionTimeSeries(
         evictOutsideViewport(controlArr.value, bounds.min, bounds.max, tsOf);
         triggerRef(controlArr);
       }
+      if (avmetricsArr.value.length > SOFT_CAP_EVENTS) {
+        evictOutsideViewport(avmetricsArr.value, bounds.min, bounds.max, tsOf);
+        triggerRef(avmetricsArr);
+      }
     },
   );
 
@@ -518,6 +551,7 @@ export function useSessionTimeSeries(
     events: makeStream(eventsArr, eventsVersion, eventsBounds, eventsLoading, eventsError),
     network: makeStream(networkArr, networkVersion, networkBounds, networkLoading, networkError),
     control: makeStream(controlArr, controlVersion, controlBounds, controlLoading, controlError),
+    avmetrics: makeStream(avmetricsArr, avmetricsVersion, avmetricsBounds, avmetricsLoading, avmetricsError),
     live,
     connectionState,
     reconnect: connect,
@@ -526,14 +560,12 @@ export function useSessionTimeSeries(
 }
 
 function mergedBounds(
-  a: { min: number; max: number } | null,
-  b: { min: number; max: number } | null,
-  c: { min: number; max: number } | null,
+  ...sources: ({ min: number; max: number } | null)[]
 ): { min: number; max: number } | null {
   let min = Infinity;
   let max = -Infinity;
   let any = false;
-  for (const x of [a, b, c]) {
+  for (const x of sources) {
     if (!x) continue;
     if (x.min < min) min = x.min;
     if (x.max > max) max = x.max;

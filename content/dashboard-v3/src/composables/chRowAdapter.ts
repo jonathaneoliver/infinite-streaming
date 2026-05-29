@@ -89,6 +89,12 @@ export function chRowToPlayerRecord(row: Record<string, unknown>): PlayerRecord 
     rtt_max_ms: num(row.client_rtt_max_ms),
     rto_ms: num(row.client_rto_ms),
     path_ping_rtt_ms: num(row.client_path_ping_rtt_ms),
+    // Issue #486: client-side TTFB-derived RTT from iOS AVMetrics.
+    // Surfaced on server_metrics for chart parity with the rest of
+    // the RTT family even though it originates client-side; the
+    // PlayerRecord shape doesn't distinguish strictly enough to
+    // warrant a third bucket.
+    rtt_avmetrics_ms: num(row.client_rtt_avmetrics_ms),
     // Server's view of the player's active variant — pairs with
     // player_metrics.video_bitrate_mbps so BandwidthChart can draw
     // both "Player Variant" and "Server Variant" for archived plays.

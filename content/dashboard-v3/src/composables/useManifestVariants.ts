@@ -24,12 +24,16 @@ export function useManifestVariants(playerId: Ref<string> | string) {
   const { player } = usePlayer(idRef);
 
   const variants = computed<ManifestVariant[]>(() => {
-    const typed = player.value?.current_play?.manifest?.variants;
+    const p = player.value;
+    const typed = p?.current_play?.manifest?.variants;
     if (Array.isArray(typed) && typed.length) return typed;
-    const flat = ((player.value as any)?.raw_session?.manifest_variants) as
-      | { url: string; bandwidth: number; average_bandwidth?: number; resolution: string }[]
-      | undefined;
-    if (Array.isArray(flat)) return flat as ManifestVariant[];
+    let flat = (p as any)?.raw_session?.manifest_variants;
+    if (typeof flat === 'string') {
+      // raw_session may serialize the variant list as a JSON string
+      // when coming through the CH long-tail column. Parse if so.
+      try { flat = JSON.parse(flat); } catch { flat = undefined; }
+    }
+    if (Array.isArray(flat) && flat.length) return flat as ManifestVariant[];
     return [];
   });
 
