@@ -145,6 +145,22 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
     }
     fun onActivityStarted() { _appStopped.value = false }
 
+    /** Wired from MainActivity's BackHandler when leaving the Playback
+     *  route. Picks user_stopped vs abandoned_start based on first-frame
+     *  + elapsed-since-play-start (EBVS). Forwards to PlaybackMetrics
+     *  which classifies ended_buffering / ended_stalling refinement
+     *  client-side before emitting session_end. */
+    fun endSessionForUserBack() {
+        metrics?.endSessionForUserBack()
+    }
+
+    /** App-terminated path — fired from MainActivity's onDestroy /
+     *  the process-lifecycle owner. Best-effort: if the OS reaps us
+     *  before the POST completes, the row stays in_progress. */
+    fun endSessionAsAppTerminated() {
+        metrics?.endSession("user_stopped", "app_terminated")
+    }
+
     fun acquireDecoderLease() { _decoderLeases.update { it + 1 } }
     fun releaseDecoderLease() {
         _decoderLeases.update { (it - 1).coerceAtLeast(0) }
@@ -794,6 +810,13 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
 
     fun reload() {
         metrics?.onRestart("reload")
+        // Fresh play boundary: zero the prior accumulators (variant
+        // dwell etc.) BEFORE releasing the old metrics instance, so
+        // a subsequent retry-flow won't inadvertently inherit values
+        // from before the reload. The new PlaybackMetrics built in
+        // bindMetrics() starts with empty priors anyway, but this
+        // guards against a leak if anyone caches a reference.
+        metrics?.resetForFreshPlay()
         metrics?.release()
         metrics = null
         player.release()
@@ -831,7 +854,7 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
     private fun attachPlayerListeners() {
         player.addListener(object : Player.Listener {
             override fun onPlayerError(error: PlaybackException) {
-                metrics?.onPlayerError(error.message)
+                metrics?.onPlayerError(error)
                 markPlayIdActivity()
                 // Retry on any MediaCodec decoder failure — covers both
                 // NO_MEMORY init failures (lease-counting in
@@ -865,7 +888,13 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
                         kotlinx.coroutines.delay(500)
                         retry()
                     }
+                    return
                 }
+                // No auto-recovery → this error is terminal. Phase 2:
+                // metrics emits a session_end with start_failure (no
+                // first frame yet) or mid_stream_failure (post-first-
+                // frame), stamping playback_status into CH.
+                metrics?.markFatalTerminal(error.message ?: "")
             }
             override fun onRenderedFirstFrame() {
                 tag("main player: first frame for '${_state.value.selectedContent}'")

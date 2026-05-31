@@ -46,6 +46,9 @@ android {
 
     buildFeatures {
         compose true
+        // Needed so DeviceInfo can read BuildConfig.VERSION_NAME for the
+        // #550 Phase 4 app_version field on every metrics payload.
+        buildConfig true
     }
 
     composeOptions {
