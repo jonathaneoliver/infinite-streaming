@@ -859,7 +859,10 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
             player, view, bandwidthMeter, playerId,
             { _state.value.activeServer?.apiUrl ?: "" },
             { _state.value.currentUrl },
-        ).also { it.start() }
+        ).also {
+            it.setContentName(_state.value.selectedContent)
+            it.start()
+        }
     }
 
     /** Cached PlayerView reference used by bindMetrics() to short-circuit
@@ -968,6 +971,14 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
                     else -> "unknown"
                 }
                 metrics?.onTimeJump(old.positionMs, new.positionMs, name)
+            }
+            override fun onMediaItemTransition(item: MediaItem?, reason: Int) {
+                // Source looped — fire loop counter increment for the
+                // player_metrics_loop_count_player payload field.
+                if (reason == Player.MEDIA_ITEM_TRANSITION_REASON_REPEAT
+                    || reason == Player.MEDIA_ITEM_TRANSITION_REASON_AUTO) {
+                    metrics?.onLoop()
+                }
             }
         })
         player.addAnalyticsListener(object : AnalyticsListener {

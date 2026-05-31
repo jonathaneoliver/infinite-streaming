@@ -161,6 +161,35 @@ public final class PlaybackMetrics {
     // Cleared the moment ExoPlayer reaches STATE_READY again.
     private boolean stallStuck;
 
+    // Per-event sticky duration of the MOST RECENT buffering event.
+    // Mirrors iOS PlaybackDiagnostics.bufferingDurationS; differs from
+    // bufferingTimeMs which is cumulative-across-play. Updated on every
+    // buffering_end transition; survives subsequent heartbeats so the
+    // dashboard's "Last Buffer Duration" tile reflects the most recent
+    // pain point.
+    private long lastBufferingDurationMs;
+    private long bufferingStartAtMsForDuration = -1;
+
+    // Loop counter — number of times the player has wrapped past the
+    // end of a finite source (or the equivalent live signal).
+    // ExoPlayer fires onMediaItemTransition with reason==REPEAT or
+    // REASON_AUTO when looping; we count it here. iOS-side property
+    // shipping for parity even though Android typically streams live.
+    private int loopCountPlayer;
+    private int lastReportedLoopCount;
+
+    // Content title surfaced on the play_started / first_frame events.
+    // Set by PlayerViewModel via setContentName() once content is bound.
+    private String contentName = "";
+
+    // Per-event sticky frame rate of the active variant. Read from
+    // Format.frameRate on onVideoFormatChanged.
+    private float nominalFpsCurrent = 0f;
+
+    // Last residency state we emitted in a state_change event — used
+    // to set player_metrics_state_from on the next transition.
+    private String lastEmittedStateForChange;
+
     // Per-variant cumulative dwell. Key = "{height}p@{kbps}kbps" to
     // match the iOS payload key format. variantDwellMs is the LIVE
     // total; priorVariantDwellMs is the snapshot from the previous
@@ -442,6 +471,7 @@ public final class PlaybackMetrics {
         recomputeResidencyState();
         if (buffering) return;
         buffering = true;
+        bufferingStartAtMsForDuration = System.currentTimeMillis();
         sendEvent("buffering_start", Collections.<String, Object>emptyMap());
     }
 
@@ -450,7 +480,27 @@ public final class PlaybackMetrics {
         recomputeResidencyState();
         if (!buffering) return;
         buffering = false;
+        // Per-event sticky duration of the buffering event that just
+        // ended. Pairs with cumulative buffering_time_ms — dashboard
+        // tile "Last Buffer Duration" reads this; classifier reads it
+        // for the ended_buffering_long threshold check.
+        if (bufferingStartAtMsForDuration > 0) {
+            lastBufferingDurationMs = Math.max(0, System.currentTimeMillis() - bufferingStartAtMsForDuration);
+            bufferingStartAtMsForDuration = -1;
+        }
         sendEvent("buffering_end", Collections.<String, Object>emptyMap());
+    }
+
+    /** Called from PlayerViewModel when content metadata is bound so the
+     *  metrics emitter can stamp it on subsequent payloads. */
+    public void setContentName(String name) {
+        this.contentName = name == null ? "" : name;
+    }
+
+    /** Called on ExoPlayer's onMediaItemTransition when REASON_REPEAT or
+     *  REASON_AUTO fires — the source looped. */
+    public void onLoop() {
+        loopCountPlayer++;
     }
 
     /**
@@ -507,6 +557,10 @@ public final class PlaybackMetrics {
         // Per-variant dwell tracking — flush previous bucket, start new.
         int kbps = (int) Math.round(format.bitrate / 1000.0);
         onVariantSelected(kbps, format.width, format.height);
+        // Active variant's nominal frame rate — emitted as a sticky
+        // field; pairs with profile_shift_count for "did the ABR
+        // pick a higher-FPS rendition" analysis.
+        if (format.frameRate > 0) nominalFpsCurrent = format.frameRate;
         if (lastReportedBitrateMbps != null) {
             double previous = lastReportedBitrateMbps;
             if (mbps != previous) {
@@ -597,8 +651,11 @@ public final class PlaybackMetrics {
     public void onUserMarked() {
         // Console marker — easy to grep adb logcat / OS logs for "911"
         // alongside the network log entry the server writes.
-        Log.i("InfiniteStream", "911 user-marked at " + iso8601.format(new Date()));
-        sendEvent("user_marked", Collections.<String, Object>emptyMap());
+        String stamp = iso8601.format(new Date());
+        Log.i("InfiniteStream", "911 user-marked at " + stamp);
+        Map<String, Object> extra = new HashMap<>();
+        extra.put("player_metrics_user_marked_at", stamp);
+        sendEvent("user_marked", extra);
     }
 
     /** Called when user triggers a restart (Restart Playback button, etc). */
@@ -764,6 +821,16 @@ public final class PlaybackMetrics {
             if (liveOffsetMs != C.TIME_UNSET) {
                 p.put("player_metrics_live_offset_s", roundSeconds(liveOffsetMs / 1000.0));
             }
+            // Seekable end + live edge — iOS PlaybackDiagnostics surfaces
+            // these via seekableTimeRanges; ExoPlayer's analogue is the
+            // current window's duration. For live HLS the two coincide
+            // at the freshest sample the player could seek to.
+            long durationMs = player.getDuration();
+            if (durationMs != C.TIME_UNSET && durationMs > 0) {
+                double endS = roundSeconds(durationMs / 1000.0);
+                p.put("player_metrics_seekable_end_s", endS);
+                p.put("player_metrics_live_edge_s", endS);
+            }
 
             // Encoded wall-clock at the playhead (epoch ms) — derived from the
             // HLS timeline window's PROGRAM-DATE-TIME (windowStartTimeMs)
@@ -895,6 +962,31 @@ public final class PlaybackMetrics {
             // aware. Mirrors iOS DeviceInfo.deviceResolution() — same
             // schema column across platforms.
             p.put("player_metrics_device_resolution", DeviceInfo.deviceResolution(ctx));
+
+            // Content name — surfaced by the operator-facing dashboard
+            // ("which content was playing") and useful in forensics
+            // bundles. Set by PlayerViewModel.bindMetrics via setContentName.
+            if (!contentName.isEmpty()) {
+                p.put("player_metrics_content_name", contentName);
+            }
+            // Per-event sticky buffering duration. Distinct from
+            // buffering_time_ms (cumulative-across-play); this is the
+            // duration of the MOST RECENT buffering event so the
+            // dashboard surfaces "the last pain point" alongside the
+            // long-term total. Mirrors iOS bufferingDurationS.
+            p.put("player_metrics_buffering_duration_ms", lastBufferingDurationMs);
+            // Active variant's nominal frame rate — sticky after first
+            // observation in onVideoFormatChanged.
+            if (nominalFpsCurrent > 0f) {
+                p.put("player_metrics_nominal_fps_current", round2(nominalFpsCurrent));
+            }
+            // Loop counter + per-heartbeat increment. iOS reports both
+            // so the dashboard's "loops since last heartbeat" pulse
+            // can fire on the same field name.
+            int loopIncrement = Math.max(0, loopCountPlayer - lastReportedLoopCount);
+            lastReportedLoopCount = loopCountPlayer;
+            p.put("player_metrics_loop_count_player", loopCountPlayer);
+            p.put("player_metrics_loop_count_increment", loopIncrement);
 
             // Per-variant cumulative dwell — preserved across retry() via
             // priors so the dashboard Time-per-Variant tile doesn't reset
@@ -1220,7 +1312,12 @@ public final class PlaybackMetrics {
         int minK = selectableMinKbps();
         int maxK = selectableTopKbps();
         if (currentVariantKbps <= 0 || minK <= 0 || maxK <= minK) return null;
-        return qualityWeight(currentVariantKbps, minK, maxK) * 100.0;
+        // Belt-and-braces clamp at 100. qualityWeight already caps the
+        // log-ratio at 1.0, but float multiply + downstream round2 can
+        // surface 100.01 due to FP rounding when the player is at the
+        // top variant. Always cap at exactly 100 so the dashboard tile
+        // never reads > 100%.
+        return Math.min(100.0, qualityWeight(currentVariantKbps, minK, maxK) * 100.0);
     }
 
     private Double videoQualityAvgPct() {
@@ -1244,7 +1341,7 @@ public final class PlaybackMetrics {
             total += ms;
         }
         if (total <= 0) return null;
-        return (weighted / total) * 100.0;
+        return Math.min(100.0, (weighted / total) * 100.0);
     }
 
     /** Last 60s of watched time only. Without per-event timestamps we
@@ -1256,7 +1353,7 @@ public final class PlaybackMetrics {
         int minK = selectableMinKbps();
         int maxK = selectableTopKbps();
         if (minK <= 0 || maxK <= minK || currentVariantKbps <= 0) return null;
-        return qualityWeight(currentVariantKbps, minK, maxK) * 100.0;
+        return Math.min(100.0, qualityWeight(currentVariantKbps, minK, maxK) * 100.0);
     }
 
     /** Resolution AVPlayer-equivalent (ExoPlayer) is about to fetch.
@@ -1349,6 +1446,7 @@ public final class PlaybackMetrics {
             return;
         }
         if (newState.equals(currentResidencyState)) return;
+        String previous = currentResidencyState;
         flushResidency();
         currentResidencyState = newState;
         bumpResidencyCount(newState);
@@ -1363,6 +1461,15 @@ public final class PlaybackMetrics {
             seekingTimeMs += delta;
             seekingStartAtMs = -1;
         }
+        // state_change event carries the from/to vocab for dashboard
+        // timeline rendering — matches iOS PlaybackDiagnostics's
+        // state-change publisher. Heartbeats stamp the post-transition
+        // state on `player_state`; this event stamps the transition.
+        Map<String, Object> stateExtra = new HashMap<>();
+        stateExtra.put("player_metrics_state_from", previous);
+        stateExtra.put("player_metrics_state_to", newState);
+        sendEvent("state_change", stateExtra);
+        lastEmittedStateForChange = newState;
     }
 
     private void bumpResidencyCount(String state) {
