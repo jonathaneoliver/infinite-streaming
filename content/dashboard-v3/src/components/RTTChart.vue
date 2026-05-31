@@ -6,16 +6,28 @@
  * so it gets its own right-hand y-axis to keep the RTT detail
  * readable. Matches the legacy chart layout.
  */
+import { computed, toRef } from 'vue';
 import MetricsLineChart, { type SeriesSpec } from './MetricsLineChart.vue';
 import type { Stream } from '@/composables/useSessionTimeSeries';
 import type { PlayerRecord } from '@/repo/v2-repo';
+import { usePlayer } from '@/composables/usePlayer';
 
-defineProps<{
+const props = defineProps<{
   playerId: string;
   eventsStream: Stream<Record<string, unknown>>;
 }>();
 
-const series: SeriesSpec[] = [
+// AVMetrics is iOS-only (AVPlayer ≥ iOS 18); other players will never
+// populate client_rtt_avmetrics_ms, so we hide the TTFB (client) line
+// entirely on those platforms rather than rendering an empty series
+// in the legend.
+const { player } = usePlayer(toRef(props, 'playerId'));
+const isAVPlayer = computed(() => {
+  const tech = player.value?.player_metrics?.player_tech;
+  return tech === 'AVPlayer';
+});
+
+const series = computed<SeriesSpec[]>(() => [
   {
     label: 'RTT (ms)',
     color: '#4f46e5',
@@ -36,32 +48,27 @@ const series: SeriesSpec[] = [
     color: '#f59e0b',
     accessor: (p: PlayerRecord) => p.server_metrics?.path_ping_rtt_ms ?? null,
   },
-  {
-    // TTFB (client) — median `responseStart − requestEnd` over the
-    // recent AVMetric MediaResourceRequest events on the iOS player
-    // (issue #486). Honest naming: on HTTP/2 keep-alive this is
-    // *stream-level* latency from URLSession's pipeline view — not
-    // a wire-time RTT. Frame coalescing and multiplexing mean it
-    // typically reads far below the server-side TCP_INFO RTT.
-    //
-    // The gap between this and `client_rtt_ms` is the diagnostic:
-    // closer together means the path is healthy, divergence means
-    // something between the player's URLSession and the proxy's
-    // socket (proxy buffering, HTTP/2 stream queueing, etc.) is
-    // adding latency. Dashed so it reads as "derived / per-request"
-    // versus the smoothed server-side traces.
-    label: 'TTFB (client, ms)',
-    color: '#0ea5e9',
-    accessor: (p: PlayerRecord) => p.server_metrics?.rtt_avmetrics_ms ?? null,
-    borderDash: [4, 3],
-  },
+  // TTFB (client) — iOS-AVPlayer-only (AVMetrics, issue #486). Median
+  // `responseStart − requestEnd` over the recent MediaResourceRequest
+  // events; stream-level latency from URLSession's pipeline view, not
+  // a wire-time RTT. Hidden entirely for non-iOS platforms because the
+  // field is always null on Roku / ExoPlayer / external HLS players,
+  // so the legend would mislead.
+  ...(isAVPlayer.value
+    ? [{
+        label: 'TTFB (client, ms)',
+        color: '#0ea5e9',
+        accessor: (p: PlayerRecord) => p.server_metrics?.rtt_avmetrics_ms ?? null,
+        borderDash: [4, 3],
+      } satisfies SeriesSpec]
+    : []),
   {
     label: 'RTO (ms)',
     color: '#a855f7',
     accessor: (p: PlayerRecord) => p.server_metrics?.rto_ms ?? null,
     axis: 'y2',
   },
-];
+]);
 </script>
 
 <template>

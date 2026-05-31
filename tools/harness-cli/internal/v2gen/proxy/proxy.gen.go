@@ -1414,6 +1414,12 @@ type PlayerMetrics struct {
 
 	// WaitingReason AVFoundation reasonForWaitingToPlay (or platform equivalent) — split labels within `state` like `toMinimizeStalls` vs `evaluatingBufferingRate`.
 	WaitingReason *string `json:"waiting_reason,omitempty"`
+
+	StateFrom         *string  `json:"state_from,omitempty"`
+	StateTo           *string  `json:"state_to,omitempty"`
+	ContentName       *string  `json:"content_name,omitempty"`
+	UserMarkedAt      *string  `json:"user_marked_at,omitempty"`
+	NominalFpsCurrent *float32 `json:"nominal_fps_current,omitempty"`
 }
 
 // PlayerPatch Mutable subset of `PlayerRecord`. JSON Merge Patch semantics.

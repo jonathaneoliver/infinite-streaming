@@ -208,6 +208,10 @@ type row struct {
 	ContentID                string  `json:"content_id"`
 	PlayerState              string  `json:"player_state"`
 	WaitingReason            string  `json:"waiting_reason"`
+	StateFrom                string  `json:"state_from"`
+	StateTo                  string  `json:"state_to"`
+	ContentName              string  `json:"content_name"`
+	UserMarkedAt             string  `json:"user_marked_at"`
 	BufferDepthS             float32 `json:"buffer_depth_s"`
 	NetworkBitrateMbps       float32 `json:"network_bitrate_mbps"`
 	VideoBitrateMbps         float32 `json:"video_bitrate_mbps"`
@@ -313,6 +317,7 @@ type row struct {
 	TrueOffsetS              float32 `json:"true_offset_s"`
 	PlaybackRate             float32 `json:"playback_rate"`
 	LoopCountPlayer          uint32  `json:"loop_count_player"`
+	LoopCountIncrement       uint32  `json:"loop_count_increment"`
 	LoopCountServer          uint32  `json:"loop_count_server"`
 	PlayerRestarts           uint32  `json:"player_restarts"`
 	ProfileShiftCount        uint32  `json:"profile_shift_count"`
@@ -762,6 +767,10 @@ func toRow(ts string, revision uint64, sessionID string, s map[string]interface{
 		ContentID:                contentIDFromURL(getStr(s, "manifest_url"), getStr(s, "last_request_url")),
 		PlayerState:              getStr(s, "player_metrics_state"),
 		WaitingReason:            getStr(s, "player_metrics_waiting_reason"),
+		StateFrom:                getStr(s, "player_metrics_state_from"),
+		StateTo:                  getStr(s, "player_metrics_state_to"),
+		ContentName:              getStr(s, "player_metrics_content_name"),
+		UserMarkedAt:             getStr(s, "player_metrics_user_marked_at"),
 		BufferDepthS:             getF32(s, "player_metrics_buffer_depth_s"),
 		NetworkBitrateMbps:       getF32(s, "player_metrics_network_bitrate_mbps"),
 		VideoBitrateMbps:         getF32(s, "player_metrics_video_bitrate_mbps"),
@@ -835,6 +844,7 @@ func toRow(ts string, revision uint64, sessionID string, s map[string]interface{
 		TrueOffsetS:              getF32(s, "player_metrics_true_offset_s"),
 		PlaybackRate:             getF32(s, "player_metrics_playback_rate"),
 		LoopCountPlayer:          uint32(getU64(s, "loop_count_player")),
+		LoopCountIncrement:       uint32(getU64(s, "player_metrics_loop_count_increment")),
 		LoopCountServer:          uint32(getU64(s, "loop_count_server")),
 		// player_restarts is sent at the top level of iOS POST (not
 		// nested under player_metrics_*) — matches the v2translate

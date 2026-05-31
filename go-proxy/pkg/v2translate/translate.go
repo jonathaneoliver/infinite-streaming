@@ -228,6 +228,10 @@ func playerMetricsFromSession(s map[string]any) *oapigen.PlayerMetrics {
 		{"player_metrics_last_event", &pm.LastEvent},
 		{"player_metrics_trigger_type", &pm.TriggerType},
 		{"player_metrics_state", &pm.State},
+		{"player_metrics_state_from", &pm.StateFrom},
+		{"player_metrics_state_to", &pm.StateTo},
+		{"player_metrics_content_name", &pm.ContentName},
+		{"player_metrics_user_marked_at", &pm.UserMarkedAt},
 		{"player_metrics_waiting_reason", &pm.WaitingReason},
 		{"player_metrics_browser_family", &pm.BrowserFamily},
 		{"player_metrics_playback_engine", &pm.PlaybackEngine},
@@ -266,6 +270,7 @@ func playerMetricsFromSession(s map[string]any) *oapigen.PlayerMetrics {
 		dst **float32
 	}{
 		{"player_metrics_video_bitrate_mbps", &pm.VideoBitrateMbps},
+		{"player_metrics_nominal_fps_current", &pm.NominalFpsCurrent},
 		{"player_metrics_video_quality_pct", &pm.VideoQualityPct},
 		{"player_metrics_video_quality_60s_pct", &pm.VideoQuality60sPct},
 		{"player_metrics_video_quality_avg_pct", &pm.VideoQualityAvgPct},

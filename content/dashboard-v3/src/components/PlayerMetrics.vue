@@ -119,17 +119,20 @@ function fmtScreen(w?: number | null, h?: number | null, d?: number | null): str
   return `${w ?? 0}×${h ?? 0}`;
 }
 
-// Display residency time as a human-readable mix (h/m/s) for big
-// values, falling back to fmtS for short ones.
+// Display residency time as a human-readable mix (h/m/s). All tiers
+// keep 3-decimal-place precision (millisecond resolution) so the
+// operator can correlate against per-event timestamps — the
+// underlying counters are stored ms-precise upstream, dropping
+// resolution at the tile level was hiding real granularity.
 function fmtDur(v: number | null | undefined): string {
   if (v == null || !Number.isFinite(v)) return '—';
-  if (v < 60) return fmtS(v, 2);
+  if (v < 60) return fmtS(v, 3);
   const m = Math.floor(v / 60);
   const s = v - m * 60;
-  if (v < 3600) return `${m}m ${s.toFixed(1)}s`;
+  if (v < 3600) return `${m}m ${s.toFixed(3)}s`;
   const h = Math.floor(v / 3600);
   const rm = m - h * 60;
-  return `${h}h ${rm}m ${s.toFixed(0)}s`;
+  return `${h}h ${rm}m ${s.toFixed(3)}s`;
 }
 
 const playerFields = computed(() => {

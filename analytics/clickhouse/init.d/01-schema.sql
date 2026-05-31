@@ -200,6 +200,11 @@ CREATE TABLE IF NOT EXISTS infinite_streaming.session_events
     true_offset_s         Float32                     CODEC(ZSTD(1)),
     playback_rate         Float32                     CODEC(ZSTD(1)),
     loop_count_player     UInt32                      DEFAULT 0,
+    loop_count_increment  UInt32                      DEFAULT 0,
+    state_from            LowCardinality(String) DEFAULT '' CODEC(ZSTD(1)),
+    state_to              LowCardinality(String) DEFAULT '' CODEC(ZSTD(1)),
+    content_name          LowCardinality(String) DEFAULT '' CODEC(ZSTD(1)),
+    user_marked_at        String                 DEFAULT '' CODEC(ZSTD(1)),
     loop_count_server     UInt32                      DEFAULT 0,
     player_restarts       UInt32                      DEFAULT 0,
     profile_shift_count   UInt32                      DEFAULT 0,
@@ -493,6 +498,11 @@ ALTER TABLE infinite_streaming.session_events
     -- device_resolution supersedes screen_width_px / screen_height_px /
     -- screen_density (2026-05-30 cleanup).
     ADD COLUMN IF NOT EXISTS device_resolution       LowCardinality(String) DEFAULT ''            CODEC(ZSTD(1)),
+    ADD COLUMN IF NOT EXISTS loop_count_increment    UInt32                 DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS state_from              LowCardinality(String) DEFAULT ''            CODEC(ZSTD(1)),
+    ADD COLUMN IF NOT EXISTS state_to                LowCardinality(String) DEFAULT ''            CODEC(ZSTD(1)),
+    ADD COLUMN IF NOT EXISTS content_name            LowCardinality(String) DEFAULT ''            CODEC(ZSTD(1)),
+    ADD COLUMN IF NOT EXISTS user_marked_at          String                 DEFAULT ''            CODEC(ZSTD(1)),
     DROP COLUMN IF EXISTS screen_width_px,
     DROP COLUMN IF EXISTS screen_height_px,
     DROP COLUMN IF EXISTS screen_density,

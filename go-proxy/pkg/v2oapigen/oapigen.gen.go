@@ -1420,6 +1420,21 @@ type PlayerMetrics struct {
 
 	// WaitingReason AVFoundation reasonForWaitingToPlay (or platform equivalent) — split labels within `state` like `toMinimizeStalls` vs `evaluatingBufferingRate`.
 	WaitingReason *string `json:"waiting_reason,omitempty"`
+
+	// StateFrom On state_change events: the player_state before the transition.
+	StateFrom *string `json:"state_from,omitempty"`
+
+	// StateTo On state_change events: the player_state after the transition.
+	StateTo *string `json:"state_to,omitempty"`
+
+	// ContentName Content title bound at metrics-start. Stamped on every payload.
+	ContentName *string `json:"content_name,omitempty"`
+
+	// UserMarkedAt On user_marked (911) events: wall-clock ISO-8601 instant the operator pressed the button.
+	UserMarkedAt *string `json:"user_marked_at,omitempty"`
+
+	// NominalFpsCurrent Active variant's nominal frame rate (Hz). Sticky after first observation.
+	NominalFpsCurrent *float32 `json:"nominal_fps_current,omitempty"`
 }
 
 // PlayerPatch Mutable subset of `PlayerRecord`. JSON Merge Patch semantics.

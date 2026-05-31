@@ -26,6 +26,7 @@ import { computed, ref, toRef } from 'vue';
 import MetricsLineChart, { type SeriesSpec } from './MetricsLineChart.vue';
 import { useChartCoordination } from '@/composables/useChartCoordination';
 import { useManifestVariants } from '@/composables/useManifestVariants';
+import { usePlayer } from '@/composables/usePlayer';
 import type { Stream } from '@/composables/useSessionTimeSeries';
 import type { PlayerRecord } from '@/repo/v2-repo';
 
@@ -41,6 +42,7 @@ const props = defineProps<{
 const coord = useChartCoordination(toRef(props, 'playerId'));
 const yMax = computed(() => coord.state.bandwidthYMax);
 const { variants: usePlayerVariants } = useManifestVariants(toRef(props, 'playerId'));
+const { player } = usePlayer(toRef(props, 'playerId'));
 
 /** Per-segment markers — OFF by default. Operator opts in via the
  *  synthetic legend chip in MetricsLineChart (issue #486). The chip
@@ -91,6 +93,10 @@ const variants = computed<ManifestVariantLite[]>(() => {
  *  by event type — segment dots are slate, playlist dots blue, key
  *  fetches orange — so the role of each request is visible at a glance. */
 const segmentMarkers = computed(() => {
+  // AVMetrics is iOS-only — gate the per-segment overlay on player_tech
+  // so non-iOS players don't show an empty "Per-segment throughput
+  // (AVMetrics)" tile.
+  if (player.value?.player_metrics?.player_tech !== 'AVPlayer') return [];
   const stream = props.avmetricsStream;
   if (!stream) return [];
   void stream.version.value;
