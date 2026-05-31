@@ -93,6 +93,26 @@ final class PlaybackDiagnostics: ObservableObject {
     private var stateResidencyLastAt: Date?
     private var trickplayingStartAt: Date?
     private var seekingStartAt: Date?
+    // Minimum playhead jump (seconds) for an AVPlayerItemTimeJumped
+    // notification to count as a distinct user/program seek. AVPlayer
+    // fires a follow-up alignment notification with a sub-100ms delta
+    // right after every seek; HLS discontinuity handling and live-edge
+    // nudges land in roughly the same range. 0.5s sits comfortably
+    // above both and below any plausible user skip-back distance.
+    private static let realSeekMinJumpSeconds: Double = 0.5
+    /// Set to true once `onAVMetricSeek()` has fired at least once
+    /// during this play. From then on, the legacy
+    /// `AVPlayerItemTimeJumped` path is suppressed because Apple's
+    /// authoritative `AVMetricPlayerItemSeekEvent` is the single
+    /// source of truth on this device. Reset on every play boundary.
+    private var avMetricSeekActive: Bool = false
+    /// Coalesce window for the legacy `AVPlayerItemTimeJumped` path:
+    /// many TimeJumped notifications can fire for a single user-
+    /// initiated seek as AVPlayer executes intermediate steps. We
+    /// debounce so each user gesture ticks `seekingCount` exactly
+    /// once. iOS 26+ uses the AVMetric path instead and skips this.
+    private var lastTickSeekAt: Date?
+    private static let timeJumpedCoalesceSeconds: Double = 0.25
 
     // ── #550 Phase 1 per-event sticky durations ────────────────────
     // Duration of the most-recent stall / buffer event. Set when the
@@ -187,6 +207,17 @@ final class PlaybackDiagnostics: ObservableObject {
     /// PLAYERSTATE lane — the latter being any other waiting state
     /// (initial pre-roll, post-seek refill, etc.).
     private var isStalled: Bool = false
+    /// Set when AVPlayer transitions from `.waitingToPlayAtSpecifiedRate`
+    /// (mid-play stall) to `.paused` without our app calling pause().
+    /// This is AVPlayer giving up — it WILL NOT auto-recover; the app
+    /// must call play() to resume. The dashboard surfaces this as a
+    /// sticky `stall_stuck: true` field in metrics so a downstream
+    /// alert or operator action can drive recovery. The PLAYERSTATE
+    /// lane keeps showing "stalled" (residency bucket continuity);
+    /// `stall_stuck` is the orthogonal "needs intervention" signal.
+    /// Reset on play boundary + on next .playing transition (the
+    /// latter covers the happy case where retry() succeeded).
+    @Published var stallStuck: Bool = false
     private var hasRenderedFirstFrame: Bool = false
     private var lastAdvancingTime: Double = 0
     private var lastAdvancingAt: Date?
@@ -198,6 +229,25 @@ final class PlaybackDiagnostics: ObservableObject {
     private var priorVariantDwellSeconds: [String: Double] = [:]  // accumulated across restarts
     private var priorDroppedVideoFrames: Double = 0
     private var priorEstimatedDisplayedFrames: Double = 0
+    // #550 Phase 1: residency accumulator snapshots preserved across
+    // retry()-style AVPlayerItem replacement so the dashboard sees
+    // continuous totals through automatic recovery. Cleared by
+    // resetForFreshPlay() (Reload button) so a user-driven fresh play
+    // starts at zero.
+    private var priorPlayingTimeS: Double = 0
+    private var priorPausingTimeS: Double = 0
+    private var priorBufferingTimeS: Double = 0
+    private var priorStallingTimeS: Double = 0
+    private var priorIdlingTimeS: Double = 0
+    private var priorSeekingTimeS: Double = 0
+    private var priorTrickplayingTimeS: Double = 0
+    private var priorPlayingCount: Int = 0
+    private var priorPausingCount: Int = 0
+    private var priorBufferingCount: Int = 0
+    private var priorStallingCount: Int = 0
+    private var priorIdlingCount: Int = 0
+    private var priorSeekingCount: Int = 0
+    private var priorTrickplayingCount: Int = 0
     private var knownVariants: Set<String> = []
     private var lastVariantSummaryAt: Date?
     private var lastAccessLogEventCount: Int = 0
@@ -341,6 +391,24 @@ final class PlaybackDiagnostics: ObservableObject {
         // Accumulate frame counters
         priorDroppedVideoFrames = droppedVideoFrames ?? 0
         priorEstimatedDisplayedFrames = estimatedDisplayedFrames ?? 0
+        // #550 Phase 1: residency accumulators. flush still-accruing
+        // time into the current bucket FIRST so a retry mid-state
+        // doesn't lose the in-flight interval to nothing.
+        flushStateResidencyForRead()
+        priorPlayingTimeS      = playingTimeS
+        priorPausingTimeS      = pausingTimeS
+        priorBufferingTimeS    = bufferingTimeS
+        priorStallingTimeS     = stallingTimeS
+        priorIdlingTimeS       = idlingTimeS
+        priorSeekingTimeS      = seekingTimeS
+        priorTrickplayingTimeS = trickplayingTimeS
+        priorPlayingCount      = playingCount
+        priorPausingCount      = pausingCount
+        priorBufferingCount    = bufferingCount
+        priorStallingCount     = stallingCount
+        priorIdlingCount       = idlingCount
+        priorSeekingCount      = seekingCount
+        priorTrickplayingCount = trickplayingCount
     }
 
     /// Reset EVERYTHING — including the "prior" accumulators that
@@ -350,6 +418,23 @@ final class PlaybackDiagnostics: ObservableObject {
     /// frames, variant dwell) should restart from zero alongside
     /// the new play_id.
     func resetForFreshPlay() {
+        // Zero the prior* residency snapshots BEFORE reset() runs,
+        // because reset() restores from priors. resetForFreshPlay()
+        // is the Reload-button path → user wants a clean slate.
+        priorPlayingTimeS      = 0
+        priorPausingTimeS      = 0
+        priorBufferingTimeS    = 0
+        priorStallingTimeS     = 0
+        priorIdlingTimeS       = 0
+        priorSeekingTimeS      = 0
+        priorTrickplayingTimeS = 0
+        priorPlayingCount      = 0
+        priorPausingCount      = 0
+        priorBufferingCount    = 0
+        priorStallingCount     = 0
+        priorIdlingCount       = 0
+        priorSeekingCount      = 0
+        priorTrickplayingCount = 0
         reset()
         priorDroppedVideoFrames = 0
         priorEstimatedDisplayedFrames = 0
@@ -417,7 +502,18 @@ final class PlaybackDiagnostics: ObservableObject {
         }
         if let start = seekingStartAt {
             seekingTimeS += now.timeIntervalSince(start)
-            seekingStartAt = now
+            // The seek window ends when the player is back in steady
+            // playback. tickStateResidency catches the explicit
+            // .buffering/.stalled → .playing transition, but an
+            // in-buffer seek can land without state ever leaving
+            // "playing" — in that case no transition fires and the
+            // accumulator would run forever. Clear here so the next
+            // heartbeat's flush sees seekingStartAt == nil.
+            if state == "playing" {
+                seekingStartAt = nil
+            } else {
+                seekingStartAt = now
+            }
         }
         stateResidencyLastAt = now
     }
@@ -444,6 +540,7 @@ final class PlaybackDiagnostics: ObservableObject {
     /// events within ~250ms).
     func tickSeek() {
         seekingCount += 1
+        lastTickSeekAt = Date()
         // Record the seek start so tickStateResidency can attribute
         // the post-seek time (buffering + refill) to seeking_time_ms
         // until the player resumes .playing. Mirrors Conviva CIRR/CIRT
@@ -452,6 +549,18 @@ final class PlaybackDiagnostics: ObservableObject {
         if seekingStartAt == nil {
             seekingStartAt = Date()
         }
+    }
+
+    /// Apple-vended single-event-per-user-seek signal (iOS 26+).
+    /// Wired from `AVMetricsSubscriber.onSeek`. Each call represents
+    /// one user gesture (skip-button tap, scrubber drag, programmatic
+    /// seek) regardless of how many internal TimeJumped notifications
+    /// AVPlayer fires to execute it. Once this fires for the current
+    /// play, the legacy TimeJumped magnitude-filter path goes silent
+    /// — Apple's signal is authoritative on this device.
+    func onAVMetricSeek() {
+        avMetricSeekActive = true
+        tickSeek()
     }
 
     func reset() {
@@ -519,28 +628,39 @@ final class PlaybackDiagnostics: ObservableObject {
         lastVariantDwellTotal = priorVariantDwellSeconds.values.reduce(0, +)
         lastVariantDwellChangeAt = nil
         // Don't clear: priorVariantDwellSeconds, priorDroppedVideoFrames,
-        // priorEstimatedDisplayedFrames, knownVariants
-        // State-residency accumulators reset at every play boundary —
-        // the forwarder's per-play state cache evicts the prior play
-        // when its play_id falls out of the active set, so the next
-        // snapshot under a new play_id computes delta = current - 0.
-        playingTimeS = 0
-        playingCount = 0
-        pausingTimeS = 0
-        pausingCount = 0
-        bufferingTimeS = 0
-        bufferingCount = 0
-        stallingTimeS = 0
-        stallingCount = 0
-        idlingTimeS = 0
-        idlingCount = 0
-        seekingTimeS = 0
-        seekingCount = 0
-        trickplayingTimeS = 0
-        trickplayingCount = 0
+        // priorEstimatedDisplayedFrames, knownVariants, and the
+        // prior* residency snapshots — they're preserved by design
+        // so reset() restores continuity across retry(). Fresh-play
+        // (Reload button) zeroes them explicitly via
+        // resetForFreshPlay().
+        //
+        // State-residency accumulators: take the value snapshotted by
+        // snapshotForRestart() (zero on first play, last play's
+        // accumulated value on retry) so the new play picks up where
+        // the previous one left off. The forwarder's per-play state
+        // cache still keys by play_id so its delta math stays right
+        // — retry() does NOT rotate play_id, so the cache carries
+        // forward; reload() DOES rotate, the cache evicts, and the
+        // next snapshot computes delta against zero.
+        playingTimeS      = priorPlayingTimeS
+        playingCount      = priorPlayingCount
+        pausingTimeS      = priorPausingTimeS
+        pausingCount      = priorPausingCount
+        bufferingTimeS    = priorBufferingTimeS
+        bufferingCount    = priorBufferingCount
+        stallingTimeS     = priorStallingTimeS
+        stallingCount     = priorStallingCount
+        idlingTimeS       = priorIdlingTimeS
+        idlingCount       = priorIdlingCount
+        seekingTimeS      = priorSeekingTimeS
+        seekingCount      = priorSeekingCount
+        trickplayingTimeS = priorTrickplayingTimeS
+        trickplayingCount = priorTrickplayingCount
         stateResidencyLastAt = Date()
         trickplayingStartAt = nil
         seekingStartAt = nil
+        avMetricSeekActive = false
+        lastTickSeekAt = nil
         // Per-event sticky durations + error counter.
         stallDurationS = 0
         bufferingDurationS = 0
@@ -562,6 +682,41 @@ final class PlaybackDiagnostics: ObservableObject {
                 let rate = self.player?.rate ?? 0
                 switch status {
                 case .paused:
+                    // AVPlayer's .paused covers THREE semantically
+                    // distinct cases the residency state machine
+                    // needs to handle:
+                    //
+                    //  (a) USER paused (button tap) — real "paused"
+                    //      transition. State → "paused", pausing_count
+                    //      ticks.
+                    //  (b) AVPLAYER AUTO-PAUSED after a long
+                    //      .waitingToPlay sit-out — buffer drained,
+                    //      player gave up. iOS does NOT auto-recover;
+                    //      the app must call play() to resume. State
+                    //      STAYS "stalled" because "player wants to
+                    //      play but can't" is still true; the
+                    //      `stall_stuck` flag below signals
+                    //      that the dashboard / operator must
+                    //      intervene to recover.
+                    //  (c) PRE-FIRST-FRAME initial state before our
+                    //      play() call takes effect — AVPlayer's
+                    //      default rate=0 produces a transient
+                    //      .paused that should NOT tick any counter.
+                    //      The next .waitingToPlay or .playing will
+                    //      set the right state shortly.
+                    if !self.hasRenderedFirstFrame {
+                        break
+                    }
+                    if self.state == "stalled" {
+                        // Case (b). Don't mutate state — it remains
+                        // "stalled" so the residency bucket is right
+                        // and the lane stays consistent. The
+                        // stallStuck flag (consumed at metrics
+                        // POST time) is the channel that tells the
+                        // dashboard recovery requires intervention.
+                        self.stallStuck = true
+                        break
+                    }
                     self.state = "paused"
                 case .waitingToPlayAtSpecifiedRate:
                     // Distinguish user-induced refill (initial pre-roll,
@@ -577,6 +732,10 @@ final class PlaybackDiagnostics: ObservableObject {
                 case .playing:
                     self.state = "playing"
                     self.isStalled = false
+                    // Once we're back to playing, whatever caused the
+                    // abandonment is resolved — clear the sticky flag
+                    // so the next stall starts fresh.
+                    self.stallStuck = false
                     self.endStallIfNeeded()
                 @unknown default: self.state = "unknown"
                 }
@@ -637,16 +796,45 @@ final class PlaybackDiagnostics: ObservableObject {
                       item === current
                 else { return }
                 let original = (notification.userInfo?[AVPlayerItem.timeJumpedOriginatingParticipantKey] as? String) ?? "unknown"
-                let fromTime = self.currentTime
+                // fromTime: the playhead position BEFORE this jump.
+                // We can't read it from `self.currentTime` here — by
+                // the time the notification handler runs the player
+                // has already moved, so currentTime returns the new
+                // position. Use the periodic time observer's most
+                // recent snapshot (`lastAdvancingTime`, updated ~10×
+                // per second elsewhere in this file) as the
+                // "previous" reference instead.
                 let newTime = item?.currentTime().seconds ?? self.currentTime
-                print("[TIMEJUMP] origin=\(original) time=\(String(format: "%.2f", newTime)) state=\(self.state) \(self.playbackSnapshot())")
-                // Publish for ViewModel to forward as a metrics event.
+                let fromTime = self.lastAdvancingTime > 0 ? self.lastAdvancingTime : newTime
+                print("[TIMEJUMP] origin=\(original) time=\(String(format: "%.2f", newTime)) delta=\(String(format: "%.2f", newTime - fromTime)) state=\(self.state) \(self.playbackSnapshot())")
+                // Publish for ViewModel to forward as a metrics event
+                // (other consumers depend on this; don't gate it).
                 self.timeJumpSubject.send(TimeJumpEvent(
                     from: fromTime,
                     to: newTime,
                     origin: original,
                     at: Date()
                 ))
+                // Seek-count attribution: skip if Apple-vended
+                // AVMetricPlayerItemSeekEvent is the live source of
+                // truth — it tells us user intent more reliably than
+                // any TimeJumped heuristic.
+                if self.avMetricSeekActive { return }
+                // Debounce: a single user gesture can fire many
+                // TimeJumped notifications as AVPlayer executes the
+                // seek in steps. Coalesce anything within the window
+                // into one tick — the count reflects USER ACTION,
+                // not AVPlayer's internal implementation.
+                if let last = self.lastTickSeekAt,
+                   Date().timeIntervalSince(last) < Self.timeJumpedCoalesceSeconds {
+                    return
+                }
+                // No magnitude filter here — small jumps that survive
+                // the debounce window are real user actions
+                // (chapter-marker tap, end-of-content snap-back, etc.)
+                // and should count. HLS discontinuity / live-edge
+                // catch-up still leaks through, but those are rare
+                // compared to the legacy false-positive rate.
                 self.tickSeek()
             }
             .store(in: &cancellables)

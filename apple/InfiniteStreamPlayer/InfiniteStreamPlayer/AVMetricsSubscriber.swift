@@ -23,7 +23,18 @@ final class AVMetricsSubscriber: @unchecked Sendable {
     /// from the existing metrics bookkeeping.
     typealias OnBatch = (_ events: [[String: Any]]) async -> Void
 
+    /// Narrow callback fired exactly once per Apple-vended
+    /// `AVMetricPlayerItemSeekEvent`. iOS 26+ only — the SDK class
+    /// is unavailable on older OSes so the callback never fires there
+    /// and the legacy `AVPlayerItemTimeJumped` magnitude-filter path
+    /// remains authoritative. PlaybackDiagnostics uses this to
+    /// increment `seekingCount` by exactly one per user gesture
+    /// regardless of how many internal TimeJumped notifications
+    /// AVPlayer fires while implementing the seek.
+    typealias OnSeek = () -> Void
+
     private let onBatch: OnBatch
+    private let onSeek: OnSeek?
     private var tasks: [Task<Void, Never>] = []
     private var flushTimer: Task<Void, Never>?
     private let bufferLock = NSLock()
@@ -47,8 +58,11 @@ final class AVMetricsSubscriber: @unchecked Sendable {
     private let ttfbRingLock = NSLock()
     private var ttfbRing: [Double] = []
 
-    init(item: AVPlayerItem, onBatch: @escaping OnBatch) {
+    init(item: AVPlayerItem,
+         onBatch: @escaping OnBatch,
+         onSeek: OnSeek? = nil) {
         self.onBatch = onBatch
+        self.onSeek = onSeek
         NSLog("[AVMetrics] init — bound to AVPlayerItem \(ObjectIdentifier(item))")
         subscribe(item: item)
         startFlushTimer()
@@ -163,6 +177,18 @@ final class AVMetricsSubscriber: @unchecked Sendable {
         bufferLock.unlock()
         if shouldFlush {
             flush()
+        }
+        // Apple-vended single-event-per-user-seek signal. Forward to
+        // PlaybackDiagnostics so seekingCount reflects user intent
+        // (one gesture = one tick) regardless of how many internal
+        // TimeJumped notifications AVPlayer fires while executing
+        // the seek. Available iOS 26+ only; older OSes never produce
+        // this event class and the callback stays silent — the
+        // legacy TimeJumped magnitude path handles them.
+        if #available(iOS 26.0, tvOS 26.0, *) {
+            if event is AVMetricPlayerItemSeekEvent, let onSeek {
+                onSeek()
+            }
         }
     }
 

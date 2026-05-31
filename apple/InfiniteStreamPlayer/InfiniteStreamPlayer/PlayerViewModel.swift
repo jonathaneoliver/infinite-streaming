@@ -2319,9 +2319,23 @@ extension PlayerViewModel {
         if #available(iOS 18.0, *) {
             NSLog("[AVMetrics] attachAVMetrics — replacing subscriber for new AVPlayerItem")
             scheduleAVMetricsDrain(avMetricsSubscriber as? AVMetricsSubscriber)
-            avMetricsSubscriber = AVMetricsSubscriber(item: item) { [weak self] events in
-                await self?.sendAVMetricsBatch(events)
-            }
+            // Bridge Apple's authoritative single-event-per-user-seek
+            // signal (AVMetricPlayerItemSeekEvent, iOS 26+) into
+            // PlaybackDiagnostics so seekingCount reflects user intent
+            // rather than counting AVPlayer's internal TimeJumped
+            // notifications. The bridge fires nothing on pre-iOS-26
+            // OSes (subclass unavailable) and the legacy debounced
+            // TimeJumped path remains authoritative there.
+            let diag = diagnostics
+            avMetricsSubscriber = AVMetricsSubscriber(
+                item: item,
+                onBatch: { [weak self] events in
+                    await self?.sendAVMetricsBatch(events)
+                },
+                onSeek: { [weak diag] in
+                    Task { @MainActor in diag?.onAVMetricSeek() }
+                }
+            )
         } else {
             NSLog("[AVMetrics] attachAVMetrics skipped — OS pre-iOS-18 (subscriber gated)")
         }
