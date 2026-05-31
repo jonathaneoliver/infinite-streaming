@@ -859,10 +859,12 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
             player, view, bandwidthMeter, playerId,
             { _state.value.activeServer?.apiUrl ?: "" },
             { _state.value.currentUrl },
-        ).also {
-            it.setContentName(_state.value.selectedContent)
-            it.start()
-        }
+            // Read selectedContent LIVE per emit (urlProvider pattern)
+            // so a late-arriving content pick lands on the next heartbeat
+            // instead of staying empty if bindMetrics fired before
+            // selectedContent was set.
+            { _state.value.selectedContent },
+        ).also { it.start() }
     }
 
     /** Cached PlayerView reference used by bindMetrics() to short-circuit

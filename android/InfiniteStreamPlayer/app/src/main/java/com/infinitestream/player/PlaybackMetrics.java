@@ -55,6 +55,10 @@ public final class PlaybackMetrics {
         String get();
     }
 
+    public interface ContentNameProvider {
+        String currentContentName();
+    }
+
     public interface UrlProvider {
         String currentStreamUrl();
     }
@@ -74,6 +78,7 @@ public final class PlaybackMetrics {
     private final String playerId;
     private final BaseUrlProvider baseUrlProvider;
     private final UrlProvider urlProvider;
+    private final ContentNameProvider contentNameProvider;
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private final ExecutorService networkExecutor = Executors.newSingleThreadExecutor();
     private final SimpleDateFormat iso8601;
@@ -178,9 +183,10 @@ public final class PlaybackMetrics {
     private int loopCountPlayer;
     private int lastReportedLoopCount;
 
-    // Content title surfaced on the play_started / first_frame events.
-    // Set by PlayerViewModel via setContentName() once content is bound.
-    private String contentName = "";
+    // Content name is read live via contentNameProvider on every emit
+    // (urlProvider pattern) so a late selectedContent update lands on
+    // the next heartbeat — caching it at construction would lose every
+    // first play where bindMetrics fired before selectedContent was set.
 
     // Per-event sticky frame rate of the active variant. Read from
     // Format.frameRate on onVideoFormatChanged.
@@ -366,13 +372,15 @@ public final class PlaybackMetrics {
                     BandwidthMeter bandwidthMeter,
                     String playerId,
                     BaseUrlProvider baseUrlProvider,
-                    UrlProvider urlProvider) {
+                    UrlProvider urlProvider,
+                    ContentNameProvider contentNameProvider) {
         this.player = player;
         this.playerView = playerView;
         this.bandwidthMeter = bandwidthMeter;
         this.playerId = playerId;
         this.baseUrlProvider = baseUrlProvider;
         this.urlProvider = urlProvider;
+        this.contentNameProvider = contentNameProvider;
         this.iso8601 = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.US);
         this.iso8601.setTimeZone(TimeZone.getTimeZone("UTC"));
         // Initialise the start clock at construction so first-frame elapsed
@@ -489,12 +497,6 @@ public final class PlaybackMetrics {
             bufferingStartAtMsForDuration = -1;
         }
         sendEvent("buffering_end", Collections.<String, Object>emptyMap());
-    }
-
-    /** Called from PlayerViewModel when content metadata is bound so the
-     *  metrics emitter can stamp it on subsequent payloads. */
-    public void setContentName(String name) {
-        this.contentName = name == null ? "" : name;
     }
 
     /** Called on ExoPlayer's onMediaItemTransition when REASON_REPEAT or
@@ -963,11 +965,14 @@ public final class PlaybackMetrics {
             // schema column across platforms.
             p.put("player_metrics_device_resolution", DeviceInfo.deviceResolution(ctx));
 
-            // Content name — surfaced by the operator-facing dashboard
-            // ("which content was playing") and useful in forensics
-            // bundles. Set by PlayerViewModel.bindMetrics via setContentName.
-            if (!contentName.isEmpty()) {
-                p.put("player_metrics_content_name", contentName);
+            // Content name — read LIVE via contentNameProvider so a
+            // late selectedContent update (user picks content after
+            // PlayerView composes) shows up on the next heartbeat
+            // instead of staying empty for the rest of the play.
+            String currentContentName = contentNameProvider != null
+                ? contentNameProvider.currentContentName() : "";
+            if (currentContentName != null && !currentContentName.isEmpty()) {
+                p.put("player_metrics_content_name", currentContentName);
             }
             // Per-event sticky buffering duration. Distinct from
             // buffering_time_ms (cumulative-across-play); this is the
