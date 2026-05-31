@@ -333,12 +333,6 @@ type row struct {
 
 	AvgNetworkBitrateMbps    float32 `json:"avg_network_bitrate_mbps"`
 	BufferEndS               float32 `json:"buffer_end_s"`
-	LastStallTimeS           float32 `json:"last_stall_time_s"`
-	// LastBufferingTimeS is the iOS player's authoritative duration
-	// for the most-recent buffering pair, populated on buffering_end.
-	// Forwarder reads from here when present; the labels.go pair
-	// cache is the fallback for clients that don't send the field.
-	LastBufferingTimeS       float32 `json:"last_buffering_time_s"`
 	LiveOffsetS              float32 `json:"live_offset_s"`
 	PlayheadWallclockMs      int64   `json:"playhead_wallclock_ms"`
 	SeekableEndS             float32 `json:"seekable_end_s"`
@@ -860,8 +854,6 @@ func toRow(ts string, revision uint64, sessionID string, s map[string]interface{
 
 		AvgNetworkBitrateMbps: getF32(s, "player_metrics_avg_network_bitrate_mbps"),
 		BufferEndS:            getF32(s, "player_metrics_buffer_end_s"),
-		LastStallTimeS:        getF32(s, "player_metrics_last_stall_time_s"),
-		LastBufferingTimeS:    getF32(s, "player_metrics_last_buffering_time_s"),
 		LiveOffsetS:           getF32(s, "player_metrics_live_offset_s"),
 		PlayheadWallclockMs:   int64(getU64(s, "player_metrics_playhead_wallclock_ms")),
 		SeekableEndS:          getF32(s, "player_metrics_seekable_end_s"),

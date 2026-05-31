@@ -1988,11 +1988,6 @@ export interface components {
              * @description Cumulative stall time (seconds).
              */
             stall_time_s?: number | null;
-            /**
-             * Format: float
-             * @description Duration of the most recent stall (seconds).
-             */
-            last_stall_time_s?: number | null;
             /** @description Player-reported displayed frames count. */
             frames_displayed?: number | null;
             /** @description Player-reported dropped frames count. */

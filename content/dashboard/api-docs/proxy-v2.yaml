@@ -1571,7 +1571,6 @@ components:
         video_start_time_s:  { type: number, format: float, nullable: true, description: 'Time-to-playing (seconds since play started).' }
         stalls:              { type: integer, nullable: true }
         stall_time_s:        { type: number, format: float, nullable: true, description: 'Cumulative stall time (seconds).' }
-        last_stall_time_s:   { type: number, format: float, nullable: true, description: 'Duration of the most recent stall (seconds).' }
         frames_displayed:    { type: integer, nullable: true, description: 'Player-reported displayed frames count.' }
         frames_dropped:      { type: integer, nullable: true, description: 'Player-reported dropped frames count.' }
         player_restarts:     { type: integer, nullable: true, description: 'Number of player restarts (auto-recovery + manual).' }

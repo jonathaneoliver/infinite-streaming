@@ -230,13 +230,6 @@ CREATE TABLE IF NOT EXISTS infinite_streaming.session_events
     -- Player metrics (extended)
     avg_network_bitrate_mbps     Float32 CODEC(ZSTD(1)),
     buffer_end_s                 Float32 CODEC(ZSTD(1)),
-    last_stall_time_s            Float32 CODEC(ZSTD(1)),
-    -- Authoritative buffering pair duration from the iOS player on
-    -- buffering_end POSTs (issue #474 Milestone A). Lets the forwarder
-    -- read duration off the row instead of computing from a write-time
-    -- cache. Older clients leave this at 0 — labels.go's cache then
-    -- fills in via end_ts - start_ts.
-    last_buffering_time_s        Float32 CODEC(ZSTD(1)),
     live_offset_s                Float32 CODEC(ZSTD(1)),
     playhead_wallclock_ms        Int64   CODEC(ZSTD(1)),
     seekable_end_s               Float32 CODEC(ZSTD(1)),
@@ -410,8 +403,6 @@ ALTER TABLE infinite_streaming.session_events
     ADD COLUMN IF NOT EXISTS player_error String CODEC(ZSTD(1)),
     ADD COLUMN IF NOT EXISTS avg_network_bitrate_mbps Float32 CODEC(ZSTD(1)),
     ADD COLUMN IF NOT EXISTS buffer_end_s Float32 CODEC(ZSTD(1)),
-    ADD COLUMN IF NOT EXISTS last_stall_time_s Float32 CODEC(ZSTD(1)),
-    ADD COLUMN IF NOT EXISTS last_buffering_time_s Float32 CODEC(ZSTD(1)),
     ADD COLUMN IF NOT EXISTS live_offset_s Float32 CODEC(ZSTD(1)),
     ADD COLUMN IF NOT EXISTS playhead_wallclock_ms Int64 CODEC(ZSTD(1)),
     ADD COLUMN IF NOT EXISTS player_restarts UInt32 DEFAULT 0,

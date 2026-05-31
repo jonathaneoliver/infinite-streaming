@@ -1702,13 +1702,11 @@ extension PlayerViewModel {
                         let payload = self.buildMetricsPayload(event: "buffering_start", at: eventAt)
                         Task { await self.sendPlayerMetrics(payload: payload) }
                     } else if previous == "buffering" {
-                        var extra: [String: Any] = [:]
-                        if let started = self.bufferingStartedAt {
-                            extra["player_metrics_last_buffering_time_s"] =
-                                self.roundSeconds(eventAt.timeIntervalSince(started))
-                        }
+                        // Phase 1 cutover dropped player_metrics_last_buffering_time_s
+                        // — buffering_duration_ms (sticky per-event) replaces it
+                        // and is stamped via diagnostics on every heartbeat.
                         self.bufferingStartedAt = nil
-                        let payload = self.buildMetricsPayload(event: "buffering_end", at: eventAt, extra: extra)
+                        let payload = self.buildMetricsPayload(event: "buffering_end", at: eventAt)
                         Task { await self.sendPlayerMetrics(payload: payload) }
                     }
                 } else if previous == nil {

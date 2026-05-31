@@ -1268,9 +1268,6 @@ type PlayerMetrics struct {
 	// LastEvent Most recent player-reported lifecycle event (playing, buffering_start, stall_start, etc.).
 	LastEvent *string `json:"last_event,omitempty"`
 
-	// LastStallTimeS Duration of the most recent stall (seconds).
-	LastStallTimeS *float32 `json:"last_stall_time_s,omitempty"`
-
 	// LiveEdgeS Player-reported live edge timestamp (seconds).
 	LiveEdgeS *float32 `json:"live_edge_s,omitempty"`
 

@@ -287,7 +287,6 @@ func playerMetricsFromSession(s map[string]any) *oapigen.PlayerMetrics {
 		{"player_metrics_video_first_frame_time_s", &pm.FirstFrameTimeS},
 		{"player_metrics_video_start_time_s", &pm.VideoStartTimeS},
 		{"player_metrics_stall_time_s", &pm.StallTimeS},
-		{"player_metrics_last_stall_time_s", &pm.LastStallTimeS},
 	} {
 		if v, ok := numericFloatTranslate(s[m.key]); ok {
 			f := float32(v)

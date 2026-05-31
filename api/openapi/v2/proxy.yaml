@@ -1575,7 +1575,6 @@ components:
         video_start_time_s:  { type: number, format: float, nullable: true, description: 'Time-to-playing (seconds since play started).' }
         stalls:              { type: integer, nullable: true }
         stall_time_s:        { type: number, format: float, nullable: true, description: 'Cumulative stall time (seconds).' }
-        last_stall_time_s:   { type: number, format: float, nullable: true, description: 'Duration of the most recent stall (seconds).' }
         frames_displayed:    { type: integer, nullable: true, description: 'Player-reported displayed frames count.' }
         frames_dropped:      { type: integer, nullable: true, description: 'Player-reported dropped frames count.' }
         player_restarts:     { type: integer, nullable: true, description: 'Number of player restarts (auto-recovery + manual).' }
@@ -1620,8 +1619,8 @@ components:
         trickplaying_time_ms:   { type: integer, nullable: true, description: '#550 Phase 1: cumulative time at non-1× playback rate (FF / RW).' }
         time_per_variant_s:     { type: string,  nullable: true, description: 'JSON-string-encoded map of variant-label → cumulative seconds spent at that variant (e.g. `{"2160p@29857kbps":65.28}`). Preserved across retry()-style restarts.' }
         trickplaying_count:     { type: integer, nullable: true, description: '#550 Phase 1: entries into trickplay (rate ∉ {0, ~1}).' }
-        stall_duration_ms:      { type: integer, nullable: true, description: '#550 Phase 1: duration of the MOST RECENT stall event (sticky on subsequent heartbeats). Replaces legacy last_stall_time_s.' }
-        buffering_duration_ms:  { type: integer, nullable: true, description: '#550 Phase 1: duration of the MOST RECENT buffer event (sticky). Replaces legacy last_buffering_time_s.' }
+        stall_duration_ms:      { type: integer, nullable: true, description: '#550 Phase 1: duration of the MOST RECENT stall event (sticky on subsequent heartbeats).' }
+        buffering_duration_ms:  { type: integer, nullable: true, description: '#550 Phase 1: duration of the MOST RECENT buffer event (sticky).' }
         stall_stuck:            { type: boolean, nullable: true, description: '#550 Phase 1 ext: orthogonal "this stall won''t auto-recover" flag. True from the moment AVPlayer transitions stalled → .paused (give-up) until next .playing transition. State stays "stalled" for residency continuity; dashboards key on this flag to surface operator-actionable stalls.' }
         video_first_frame_time_ms: { type: integer, nullable: true, description: '#550 Phase 1: TTFF in ms. Conviva/Mux/Bitmovin canonical units. Replaces legacy video_first_frame_time_s.' }
         video_start_time_ms:    { type: integer, nullable: true, description: '#550 Phase 1: alternate startup-time measurement in ms.' }

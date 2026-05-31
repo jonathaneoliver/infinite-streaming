@@ -57,7 +57,6 @@ type PlayerRecord struct {
 		BufferEndS             float64 `json:"buffer_end_s"`
 		Stalls                 int     `json:"stalls"`
 		StallTimeS             float64 `json:"stall_time_s"`
-		LastStallTimeS         float64 `json:"last_stall_time_s"`
 		ProfileShiftCount      int     `json:"profile_shift_count"`
 		PlayerRestarts         int     `json:"player_restarts"`
 		VideoBitrateMbps       float64 `json:"video_bitrate_mbps"`

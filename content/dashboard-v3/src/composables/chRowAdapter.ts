@@ -179,8 +179,10 @@ export function chRowToPlayerRecord(
     source: typeof row.metrics_source === 'string' ? row.metrics_source : null,
     loop_count_player: num(row.loop_count_player),
     loop_count_delta: num(row.loop_count_delta),
-    // #550 Phase 1: stall_duration_ms supersedes last_stall_time_s.
-    last_stall_time_s: msOrSeconds(row.stall_duration_ms, row.last_stall_time_s),
+    // #550 Phase 1: stall_duration_ms is the sticky per-event duration.
+    // Legacy last_stall_time_s column dropped from schema; the dashboard
+    // property name stays the same for PlayerMetrics back-compat.
+    last_stall_time_s: msToSeconds(row.stall_duration_ms),
     video_quality_pct: num(row.video_quality_pct),
     video_quality_60s_pct: num(row.video_quality_60s_pct),
     video_quality_avg_pct: num(row.video_quality_avg_pct),

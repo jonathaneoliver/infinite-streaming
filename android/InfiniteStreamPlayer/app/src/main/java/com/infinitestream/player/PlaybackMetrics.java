@@ -462,10 +462,8 @@ public final class PlaybackMetrics {
         totalStallTimeS += duration;
         lastStallDurationS = roundSeconds(duration);
         Map<String, Object> extra = new HashMap<>();
-        extra.put("player_metrics_last_stall_time_s", lastStallDurationS);
-        // #550 Phase 1: canonical *_ms emission alongside the legacy
-        // *_s mirror so the forwarder picks up either form during the
-        // soft-cutover window.
+        // Phase 1 cutover dropped player_metrics_last_stall_time_s —
+        // stall_duration_ms (sticky per-event) is the canonical form.
         extra.put("player_metrics_stall_duration_ms", (long) Math.round(duration * 1000.0));
         sendEvent("stall_end", extra);
     }
@@ -892,7 +890,6 @@ public final class PlaybackMetrics {
             p.put("player_metrics_profile_shift_count", profileShiftCount);
             p.put("player_metrics_stall_count", stallCount);
             p.put("player_metrics_stall_time_s", roundSeconds(totalStallTimeS));
-            p.put("player_metrics_last_stall_time_s", lastStallDurationS);
             p.put("player_restarts", playerRestarts);
 
             if (videoFirstFrameSeconds != null) {

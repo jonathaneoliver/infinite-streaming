@@ -178,7 +178,6 @@ var bundleRegistry = map[string]bundleDef{
 			"content_name",
 			"user_marked_at",
 			"frames_rate",
-			"last_stall_time_s",
 			"video_quality_pct",
 			"video_quality_60s_pct",
 			"video_quality_avg_pct",
