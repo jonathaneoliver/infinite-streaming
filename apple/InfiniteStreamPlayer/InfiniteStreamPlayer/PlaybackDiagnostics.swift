@@ -167,6 +167,18 @@ final class PlaybackDiagnostics: ObservableObject {
     @Published var loopCountPlayer: Int = 0
     @Published var lastSegmentURI: String = ""
     @Published var lastError: String = ""
+
+    // #550 Phase 2 — structured error fields. Captured alongside the
+    // human-readable `lastError` / `itemError` strings whenever
+    // describeError() runs. Forwarder error_classifier.go maps the
+    // (domain, code) tuple to a controlled playback_reason vocab on
+    // session_end rows; the dashboard surfaces them as Error Code /
+    // Error Domain tiles. Sticky after first observation so a
+    // heartbeat after a transient error still carries the most recent
+    // error context — cleared on reset() (play boundary).
+    @Published var lastErrorCode: Int = 0
+    @Published var lastErrorDomain: String = ""
+    @Published var lastErrorDetails: String = ""
     @Published var itemStatus: String = "Unknown"
     @Published var itemError: String = ""
     @Published var lastFailure: String = ""
@@ -664,6 +676,9 @@ final class PlaybackDiagnostics: ObservableObject {
         loopCountPlayer = 0
         lastSegmentURI = ""
         lastError = ""
+        lastErrorCode = 0
+        lastErrorDomain = ""
+        lastErrorDetails = ""
         itemStatus = "Unknown"
         itemError = ""
         lastFailure = ""
@@ -1623,9 +1638,14 @@ final class PlaybackDiagnostics: ObservableObject {
 
     private func describeError(_ error: Error) -> String {
         let ns = error as NSError
+        // Capture the structured Phase 2 fields alongside the human-
+        // readable string. Forwarder's error_classifier needs
+        // (domain, code) tuples to map to a playback_reason vocab.
+        self.lastErrorCode = ns.code
+        self.lastErrorDomain = ns.domain
         var parts: [String] = [ns.localizedDescription]
         if !ns.domain.isEmpty { parts.append("domain=\(ns.domain)") }
-        if ns.code != 0 { 
+        if ns.code != 0 {
             parts.append("code=\(ns.code)")
             // Add human-readable interpretation of common error codes
             if ns.domain == AVFoundationErrorDomain {
@@ -1643,7 +1663,9 @@ final class PlaybackDiagnostics: ObservableObject {
         if let underlyingError = ns.userInfo[NSUnderlyingErrorKey] as? NSError {
             parts.append("underlying=[\(underlyingError.domain) \(underlyingError.code)]")
         }
-        return parts.joined(separator: " ")
+        let joined = parts.joined(separator: " ")
+        self.lastErrorDetails = joined
+        return joined
     }
     
     private func interpretAVErrorCode(_ code: Int) -> String {

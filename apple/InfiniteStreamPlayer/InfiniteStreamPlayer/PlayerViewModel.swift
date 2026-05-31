@@ -1559,7 +1559,12 @@ extension PlayerViewModel {
             .sink { [weak self] value in
                 guard let self else { return }
                 self.log("Item error: \(value)")
-                let payload = self.buildMetricsPayload(event: "error", at: Date(), extra: ["player_metrics_error": value])
+                let payload = self.buildMetricsPayload(event: "error", at: Date(), extra: [
+                    "player_metrics_error": value,
+                    "player_metrics_error_code": self.diagnostics.lastErrorCode,
+                    "player_metrics_error_domain": self.diagnostics.lastErrorDomain,
+                    "player_metrics_error_details": self.diagnostics.lastErrorDetails,
+                ])
                 Task { await self.sendPlayerMetrics(payload: payload) }
                 self.markPlayIdActivity()
             }
@@ -1572,7 +1577,12 @@ extension PlayerViewModel {
             .sink { [weak self] value in
                 guard let self else { return }
                 self.log("Playback failure: \(value)")
-                let payload = self.buildMetricsPayload(event: "error", at: Date(), extra: ["player_metrics_error": value])
+                let payload = self.buildMetricsPayload(event: "error", at: Date(), extra: [
+                    "player_metrics_error": value,
+                    "player_metrics_error_code": self.diagnostics.lastErrorCode,
+                    "player_metrics_error_domain": self.diagnostics.lastErrorDomain,
+                    "player_metrics_error_details": self.diagnostics.lastErrorDetails,
+                ])
                 Task { await self.sendPlayerMetrics(payload: payload) }
                 if self.autoRecovery {
                     // Per-attempt HAR is captured by scheduleAutoRecoveryRestart
@@ -1592,7 +1602,12 @@ extension PlayerViewModel {
             .sink { [weak self] value in
                 guard let self else { return }
                 self.log("Player error: \(value)")
-                let payload = self.buildMetricsPayload(event: "error", at: Date(), extra: ["player_metrics_error": value])
+                let payload = self.buildMetricsPayload(event: "error", at: Date(), extra: [
+                    "player_metrics_error": value,
+                    "player_metrics_error_code": self.diagnostics.lastErrorCode,
+                    "player_metrics_error_domain": self.diagnostics.lastErrorDomain,
+                    "player_metrics_error_details": self.diagnostics.lastErrorDetails,
+                ])
                 Task { await self.sendPlayerMetrics(payload: payload) }
                 self.markPlayIdActivity()
             }
