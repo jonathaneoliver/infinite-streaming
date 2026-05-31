@@ -1125,8 +1125,30 @@ public final class PlaybackMetrics {
      *  Includes priors so retry() preserves continuity. */
     private JSONObject buildTimePerVariantJson() {
         flushVariantDwell();
-        if (variantDwellMs.isEmpty() && priorVariantDwellMs.isEmpty()) return null;
-        Map<String, Long> merged = new HashMap<>(priorVariantDwellMs);
+        if (variantDwellMs.isEmpty()
+                && priorVariantDwellMs.isEmpty()
+                && variantLadder.isEmpty()) {
+            return null;
+        }
+        // Seed the merged map with EVERY known variant at 0 so the
+        // dashboard's Time-per-Variant tile shows the full menu the
+        // player can choose from, not just the ones it's tried.
+        // Mirrors iOS perVariantTimeSeconds. variantLadder is populated
+        // by refreshVariantLadder() on every heartbeat from the asset's
+        // selectable tracks.
+        Map<String, Long> merged = new HashMap<>();
+        for (Map.Entry<Integer, String> e : variantLadder.entrySet()) {
+            int kbps = e.getKey();
+            String resLabel = e.getValue();
+            String key = (resLabel != null && !resLabel.isEmpty())
+                ? heightFromResolution(resLabel) + "p@" + kbps + "kbps"
+                : kbps + "kbps";
+            merged.put(key, 0L);
+        }
+        for (Map.Entry<String, Long> e : priorVariantDwellMs.entrySet()) {
+            Long prev = merged.get(e.getKey());
+            merged.put(e.getKey(), (prev == null ? 0L : prev) + e.getValue());
+        }
         for (Map.Entry<String, Long> e : variantDwellMs.entrySet()) {
             Long prev = merged.get(e.getKey());
             merged.put(e.getKey(), (prev == null ? 0L : prev) + e.getValue());
@@ -1141,6 +1163,19 @@ public final class PlaybackMetrics {
             return null;
         }
         return out;
+    }
+
+    /** Pull the height (Y dimension) out of a "WxH" resolution string.
+     *  Returns 0 on malformed input. */
+    private static int heightFromResolution(String wxh) {
+        if (wxh == null) return 0;
+        int x = wxh.indexOf('x');
+        if (x < 0 || x + 1 >= wxh.length()) return 0;
+        try {
+            return Integer.parseInt(wxh.substring(x + 1));
+        } catch (NumberFormatException e) {
+            return 0;
+        }
     }
 
     // ──────────────────────────────────────────────────────────────
