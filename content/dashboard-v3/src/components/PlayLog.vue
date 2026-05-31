@@ -347,67 +347,6 @@ function kbpsFromVariantKey(key: string): number {
   return m ? Number(m[1]) : 0;
 }
 
-/** Parse the `manifest_variants` raw field (JSON-string or array) into
- *  a clean list of `{kbps, height}` for the ladder. Heights aren't
- *  used today but kept for the resolution-weighted alternative when
- *  we want it. Returns [] when the row hasn't seen the manifest yet. */
-function parseManifestLadder(rawMV: unknown): { kbps: number; height: number }[] {
-  let arr: unknown = rawMV;
-  if (typeof rawMV === 'string' && rawMV.length > 0 && rawMV !== 'null') {
-    try { arr = JSON.parse(rawMV); } catch { return []; }
-  }
-  if (!Array.isArray(arr)) return [];
-  const out: { kbps: number; height: number }[] = [];
-  for (const v of arr) {
-    const bw = Number((v as Record<string, unknown>)?.bandwidth ?? 0);
-    if (!Number.isFinite(bw) || bw <= 0) continue;
-    const resStr = String((v as Record<string, unknown>)?.resolution ?? '');
-    const h = Number(resStr.match(/x(\d+)/i)?.[1] ?? 0);
-    out.push({ kbps: Math.round(bw / 1000), height: Number.isFinite(h) ? h : 0 });
-  }
-  return out;
-}
-
-/** Log-bitrate-weighted quality % with a baseline floor (issue #486).
- *
- * Perceived video quality is roughly logarithmic in bitrate (the
- * Weber-Fechner curve that also governs perceived loudness): doubling
- * the bitrate barely registers near the top of the ladder. Linear
- * bitrate weighting penalises 1080p too harshly when the ceiling is
- * 4K. This computes `quality = log(kbps/min) / log(max/min)` per
- * variant, clamps to `BASELINE_FLOOR` so the bottom variant isn't
- * scored zero, and time-weights across the variants the player has
- * actually watched. Returns null when inputs are insufficient (no
- * ladder, no per-variant time, single-variant ladder where the log
- * ratio is undefined). */
-const QUALITY_BASELINE_FLOOR = 0.20;
-function computeQualityPct(
-  perVariant: Record<string, number>,
-  ladder: { kbps: number; height: number }[],
-): number | null {
-  if (!ladder.length) return null;
-  const kbpsList = ladder.map((v) => v.kbps).filter((k) => k > 0);
-  if (kbpsList.length < 2) return null;
-  const minKbps = Math.min(...kbpsList);
-  const maxKbps = Math.max(...kbpsList);
-  if (maxKbps <= minKbps) return null;
-  const denom = Math.log(maxKbps / minKbps);
-  let weightedSum = 0;
-  let totalSec = 0;
-  for (const [key, seconds] of Object.entries(perVariant)) {
-    if (!Number.isFinite(seconds) || seconds <= 0) continue;
-    const kbps = kbpsFromVariantKey(key);
-    if (kbps <= 0) continue;
-    const ratio = kbps / minKbps;
-    const raw = ratio > 0 ? Math.log(ratio) / denom : 0;
-    const q = Math.max(QUALITY_BASELINE_FLOOR, raw);
-    weightedSum += q * seconds;
-    totalSec += seconds;
-  }
-  if (totalSec <= 0) return null;
-  return (weightedSum / totalSec) * 100;
-}
-
 function formatValue(v: unknown): string {
   if (v == null) return '';
   if (typeof v === 'string') return v;
@@ -476,18 +415,24 @@ function fieldsFromRaw(raw: Record<string, unknown>, extraSkip?: Set<string>): D
           if (parts.length) {
             out.push({ name: 'time_per_variant', value: parts.join(' · ') });
           }
-          // Cumulative-since-start quality chip. The 60-second
-          // sliding-window companion is appended later in
-          // rowsWithFields (which has access to the prior row
-          // needed for the diff). Issue #486.
-          const perVariantMap: Record<string, number> = {};
-          for (const [ik, seconds] of entries) perVariantMap[ik] = seconds;
-          const ladder = parseManifestLadder(raw.manifest_variants);
-          const quality = computeQualityPct(perVariantMap, ladder);
-          if (quality != null) {
+          // Cumulative + 60s quality chips — read straight off the row.
+          // iOS computes both (log-bitrate, 0.20 floor) and the
+          // forwarder persists them as `video_quality_avg_pct` /
+          // `video_quality_60s_pct`. Single source of truth: same
+          // numbers in PlayerMetrics tile, PlayLog chips, and CH
+          // forever. 0 means "no iOS payload yet" (Float32 default).
+          const avgQ = Number(raw.video_quality_avg_pct);
+          if (Number.isFinite(avgQ) && avgQ > 0) {
             out.push({
               name: 'quality_pct',
-              value: `${quality.toFixed(1)}% (log-bitrate, cumulative)`,
+              value: `${avgQ.toFixed(1)}% (log-bitrate, cumulative)`,
+            });
+          }
+          const q60 = Number(raw.video_quality_60s_pct);
+          if (Number.isFinite(q60) && q60 > 0) {
+            out.push({
+              name: 'quality_pct_60s',
+              value: `${q60.toFixed(1)}% (log-bitrate, 60s window)`,
             });
           }
           continue;
@@ -854,81 +799,14 @@ const rowsWithFields = computed<RowWithFields[]>(() => {
       fields = fieldsFromRaw(r.raw, EVENT_SKIP);
     }
     fields = sortFields(fields, r.source);
-    // Sliding-window quality (issue #486). For every heartbeat row,
-    // walk back through the chronological event rows to find one
-    // that's at least `QUALITY_WINDOW_MS` older and also carries
-    // `time_per_variant_s`. Diff the two cumulative dicts to get the
-    // per-variant *seconds inside the window*, then run the
-    // log-bitrate quality formula on that delta. The chip reads as
-    // "how good did the last N seconds look" instead of "how good
-    // has the whole play been so far".
-    if (r.source === 'event') {
-      const tpvNowRaw = (r.raw.time_per_variant_s ?? r.raw.player_metrics_time_per_variant_s);
-      if (typeof tpvNowRaw === 'string' && tpvNowRaw.charAt(0) === '{') {
-        const cutoff = r.ts - QUALITY_WINDOW_MS;
-        let priorRaw: Record<string, unknown> | null = null;
-        for (let j = i - 1; j >= 0; j--) {
-          const pr = chrono[j];
-          if (pr.source !== 'event') continue;
-          if (pr.ts > cutoff) continue;
-          const pTpv = pr.raw.time_per_variant_s ?? pr.raw.player_metrics_time_per_variant_s;
-          if (typeof pTpv === 'string' && pTpv.charAt(0) === '{') {
-            priorRaw = pr.raw;
-            break;
-          }
-        }
-        const windowField = computeWindowQualityField(r.raw, priorRaw);
-        if (windowField) fields = [...fields, windowField];
-      }
-    }
+    // 60s window quality chip is now appended inline above from
+    // `raw.video_quality_60s_pct` (iOS-canonical). No client-side
+    // walk-back / diff needed.
     out[i] = { ...r, fields };
     if (r.source === 'event') prevSnapshot = r.raw;
   }
   return out;
 });
-
-/** Window size for the sliding-quality chip. 60 seconds is the
- *  standard analytics-dashboard window — long enough to be stable
- *  across a couple of segment fetches, short enough that a real
- *  ABR shift shows up within ~1 chip cycle. */
-const QUALITY_WINDOW_MS = 60_000;
-
-/** Build the sliding-window quality chip for one heartbeat row.
- *  Returns null when we can't compute (no prior row in window, no
- *  ladder yet, or the diff produced no positive deltas). Issue #486. */
-function computeWindowQualityField(
-  currentRaw: Record<string, unknown>,
-  priorRaw: Record<string, unknown> | null,
-): DisplayedField | null {
-  if (!priorRaw) return null;
-  let cur: Record<string, unknown>;
-  let prv: Record<string, unknown>;
-  try {
-    cur = JSON.parse(String(
-      currentRaw.time_per_variant_s ?? currentRaw.player_metrics_time_per_variant_s ?? '{}',
-    ));
-    prv = JSON.parse(String(
-      priorRaw.time_per_variant_s ?? priorRaw.player_metrics_time_per_variant_s ?? '{}',
-    ));
-  } catch { return null; }
-  if (!cur || typeof cur !== 'object' || Array.isArray(cur)) return null;
-  if (!prv || typeof prv !== 'object' || Array.isArray(prv)) return null;
-  const delta: Record<string, number> = {};
-  for (const k of Object.keys(cur)) {
-    const c = Number((cur as Record<string, unknown>)[k] ?? 0);
-    const p = Number((prv as Record<string, unknown>)[k] ?? 0);
-    const d = c - p;
-    if (Number.isFinite(d) && d > 0) delta[k] = d;
-  }
-  if (Object.keys(delta).length === 0) return null;
-  const ladder = parseManifestLadder(currentRaw.manifest_variants);
-  const q = computeQualityPct(delta, ladder);
-  if (q == null) return null;
-  return {
-    name: 'quality_pct_60s',
-    value: `${q.toFixed(1)}% (log-bitrate, 60s window)`,
-  };
-}
 
 const sortedRows = computed<RowWithFields[]>(() => {
   const list = rowsWithFields.value.slice();

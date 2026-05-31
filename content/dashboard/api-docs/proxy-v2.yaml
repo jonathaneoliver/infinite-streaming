@@ -1571,12 +1571,11 @@ components:
         video_start_time_s:  { type: number, format: float, nullable: true, description: 'Time-to-playing (seconds since play started).' }
         stalls:              { type: integer, nullable: true }
         stall_time_s:        { type: number, format: float, nullable: true, description: 'Cumulative stall time (seconds).' }
-        last_stall_time_s:   { type: number, format: float, nullable: true, description: 'Duration of the most recent stall (seconds).' }
         frames_displayed:    { type: integer, nullable: true, description: 'Player-reported displayed frames count.' }
-        dropped_frames:      { type: integer, nullable: true, description: 'Player-reported dropped frames count.' }
+        frames_dropped:      { type: integer, nullable: true, description: 'Player-reported dropped frames count.' }
         player_restarts:     { type: integer, nullable: true, description: 'Number of player restarts (auto-recovery + manual).' }
         loop_count_player:   { type: integer, nullable: true, description: 'How many times the player has reported looping the content. Player-reported, may be 0 on platforms that do not count.' }
-        loop_count_increment: { type: integer, nullable: true, description: 'Server-derived increment from the previous report.' }
+        loop_count_delta: { type: integer, nullable: true, description: 'Server-derived increment from the previous report.' }
         profile_shift_count: { type: integer, nullable: true, description: 'Number of ABR rendition shifts the player has reported.' }
         last_event:          { type: string,  nullable: true, description: 'Most recent player-reported lifecycle event (playing, buffering_start, stall_start, etc.).' }
         trigger_type:        { type: string,  nullable: true, description: 'What triggered the most recent metrics tick (timer, event, etc.).' }

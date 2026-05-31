@@ -281,7 +281,7 @@ export interface PlaySummary {
   net_errors?: number;
   net_faults?: number;
   stalls?: number;
-  dropped_frames?: number;
+  frames_dropped?: number;
   master_manifest_failures?: number;
   manifest_failures?: number;
   segment_failures?: number;

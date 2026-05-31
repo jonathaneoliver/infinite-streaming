@@ -18,9 +18,9 @@ func TestReportFinalizeAndWrite(t *testing.T) {
 		PlayerID:  "00000000-0000-0000-0000-000000000001",
 		StartedAt: start,
 		Samples: []Sample{
-			{Ts: start, AppliedRateMbps: 5.0, BufferDepthS: 8.5, Stalls: 0, StallTimeS: 0, VideoBitrateMbps: 4.9, ProfileShiftCount: 0, DroppedFrames: 0},
-			{Ts: start.Add(10 * time.Second), AppliedRateMbps: 3.0, BufferDepthS: 6.0, Stalls: 0, StallTimeS: 0, VideoBitrateMbps: 2.4, ProfileShiftCount: 1, DroppedFrames: 0},
-			{Ts: start.Add(20 * time.Second), AppliedRateMbps: 1.5, BufferDepthS: 4.0, Stalls: 1, StallTimeS: 2.3, VideoBitrateMbps: 1.1, ProfileShiftCount: 2, DroppedFrames: 5},
+			{Ts: start, AppliedRateMbps: 5.0, BufferDepthS: 8.5, Stalls: 0, StallTimeS: 0, VideoBitrateMbps: 4.9, ProfileShiftCount: 0, FramesDropped: 0},
+			{Ts: start.Add(10 * time.Second), AppliedRateMbps: 3.0, BufferDepthS: 6.0, Stalls: 0, StallTimeS: 0, VideoBitrateMbps: 2.4, ProfileShiftCount: 1, FramesDropped: 0},
+			{Ts: start.Add(20 * time.Second), AppliedRateMbps: 1.5, BufferDepthS: 4.0, Stalls: 1, StallTimeS: 2.3, VideoBitrateMbps: 1.1, ProfileShiftCount: 2, FramesDropped: 5},
 		},
 		Steps: []Step{
 			{StartedAt: start, RateMbps: 5.0, Hold: 10 * time.Second},

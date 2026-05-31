@@ -232,6 +232,16 @@ final class PlayerViewModel: ObservableObject {
     private var lastReportedStallCount: Int = 0
     private var lastReportedStallDuration: Double = 0
     private var lastReportedLoopCount: Int = 0
+
+    /// Variant-dwell totals snapshotted at the moment of `retry()` so
+    /// the new AVPlayerItem's access-log walk in `perVariantTimeSeconds()`
+    /// continues from the prior play's accumulation rather than
+    /// restarting at zero. AVPlayer's access log is per-item, so without
+    /// this every retry would zero the dashboard's Time-per-Variant
+    /// tile mid-play. Mirrors the PlaybackDiagnostics prior* pattern
+    /// but lives here because the payload key format ("1080p@7060kbps")
+    /// is computed in this layer.
+    private var priorPerVariantTimeSeconds: [String: Double] = [:]
     // Captured when the player enters the buffering state so the
     // matching buffering_end POST can carry an authoritative duration
     // in `player_metrics_last_buffering_time_s`. Mirrors the stall
@@ -270,6 +280,7 @@ final class PlayerViewModel: ObservableObject {
     private var firstFrameObserver: AVPlayerItemMetadataOutput?
     private var hasReportedFirstFrame = false
     private var willEnterForegroundObserver: NSObjectProtocol?
+    private var willTerminateObserver: NSObjectProtocol?
     private var didEnterBackgroundObserver: NSObjectProtocol?
 
     // MARK: - Init
@@ -324,6 +335,7 @@ final class PlayerViewModel: ObservableObject {
         if let o = didPlayToEndObserver { NotificationCenter.default.removeObserver(o) }
         if let o = failedToPlayObserver { NotificationCenter.default.removeObserver(o) }
         if let o = willEnterForegroundObserver { NotificationCenter.default.removeObserver(o) }
+        if let o = willTerminateObserver { NotificationCenter.default.removeObserver(o) }
         if let o = didEnterBackgroundObserver { NotificationCenter.default.removeObserver(o) }
         playIdRotationTask?.cancel()
     }
@@ -1068,6 +1080,7 @@ final class PlayerViewModel: ObservableObject {
         // rather than restart from zero. Tick playerRestarts so each
         // recovery attempt registers in the per-play restart count.
         diagnostics.snapshotForRestart()
+        snapshotPerVariantForRestart()
         playerRestarts += 1
         // Tick `attempt_id` (per bug #4 contract) so analytics can
         // count recovery attempts. Keep `play_id` stable — this is
@@ -1106,6 +1119,62 @@ final class PlayerViewModel: ObservableObject {
         Task { [weak self] in await self?.sendPlayerMetrics(payload: payload) }
     }
 
+    /// Mark the play as terminated with the given Phase 2 status +
+    /// reason and emit a single session_end event so the dashboard /
+    /// CH see the terminal row. Idempotent — only the FIRST call
+    /// stamps the terminal state (a user_quit followed by a fatal
+    /// error a moment later still reads as user_stopped, which matches
+    /// reality from the operator's perspective).
+    ///
+    /// Detection-point inputs:
+    ///   - User back tap → status="user_stopped"  reason="user_quit"
+    ///   - App background → status="user_stopped" reason="app_backgrounded"
+    ///   - App terminate → status="user_stopped"  reason="app_terminated"
+    ///   - AVPlayer fatal pre-first-frame → status="start_failure"
+    ///   - AVPlayer fatal post-first-frame → status="mid_stream_failure"
+    ///
+    /// Reason is passed through diagnostics.refineTerminalReason so a
+    /// user_quit while buffering becomes ended_buffering[_long] etc.
+    /// before the payload goes out.
+    /// EBVS threshold (seconds). Above this, a user back-tap before
+    /// first frame becomes abandoned_start / slow_startup. Below, it
+    /// stays user_stopped / user_quit (user changed their mind quickly).
+    /// Mirrors the forwarder's default qoe_thresholds.outcomes.ebvs_threshold_ms
+    /// (10s); kept as a Swift constant so the client decision happens
+    /// in one place and the row is stamped right at session_end.
+    private static let ebvsThresholdSeconds: TimeInterval = 10
+
+    /// Convenience for the playback-back-button tap (and tvOS exit
+    /// command). Decides between user_stopped / abandoned_start based
+    /// on whether the player ever crossed first frame and how long
+    /// the play had been running. The classifier in PlaybackDiagnostics
+    /// then upgrades user_quit → ended_buffering[_long] etc. if the
+    /// player was stuck in those states.
+    func endSessionForUserBack() {
+        if !diagnostics.hasRenderedFirstFrame,
+           let startedAt = diagnostics.playStartAt,
+           Date().timeIntervalSince(startedAt) >= Self.ebvsThresholdSeconds {
+            endSession(status: "abandoned_start", reason: "slow_startup")
+        } else {
+            endSession(status: "user_stopped", reason: "user_quit")
+        }
+    }
+
+    func endSession(status: String, reason: String) {
+        // No-op on subsequent calls — diagnostics.markTerminal enforces
+        // first-call-wins. Even when terminal is already set we still
+        // emit a session_end (the prior emit may have been swallowed
+        // by background suspension), but the values stay stable.
+        let alreadyTerminal = diagnostics.terminalStatus != nil
+        diagnostics.markTerminal(status: status, reason: reason)
+        if alreadyTerminal {
+            NSLog("[endSession] terminal already=\(diagnostics.terminalStatus ?? "?") — re-emitting session_end for delivery")
+        }
+        Task { [weak self] in
+            await self?.sendPlayerMetrics(event: "session_end")
+        }
+    }
+
     func reload() {
         Task { [weak self] in
             await self?.requestHARSnapshot(reason: "user_reload", force: true)
@@ -1127,6 +1196,7 @@ final class PlayerViewModel: ObservableObject {
         // snapshotForRestart() populates. retry() does the opposite —
         // it snapshots so counters carry across recovery attempts.
         diagnostics.resetForFreshPlay()
+        resetPerVariantForFreshPlay()
         playerRestarts = 0
         profileShiftCount = 0
         // Rotate play_id (new play boundary) AND reset attempt_id
@@ -1157,6 +1227,15 @@ final class PlayerViewModel: ObservableObject {
                 // Android's onActivityStopped behaviour. AVPlayer doesn't
                 // hold a hardware decoder when nil item is set, and pause
                 // alone wouldn't free anything.
+                //
+                // We intentionally do NOT mark terminal here. Background
+                // is ambiguous: a 1-second app-switch and an end-of-
+                // session both look identical at this notification.
+                // willTerminate handles the unambiguous end-of-app case;
+                // quick app-switches resume cleanly via willEnterForeground
+                // without false-positive user_stopped rows. Future
+                // refinement: a timer that marks terminal after N
+                // seconds backgrounded.
                 self?.player.pause()
                 self?.player.replaceCurrentItem(with: nil)
             }
@@ -1169,6 +1248,20 @@ final class PlayerViewModel: ObservableObject {
                 // Re-prepare from the URL we had loaded before backgrounding.
                 guard let url = self?.currentURL else { return }
                 self?.loadStream(url: url)
+            }
+        }
+        // willTerminate fires on hard-quit (swipe-up from app switcher).
+        // Synchronous notification — we get a few hundred ms before iOS
+        // reaps us. Mark terminal + fire-and-forget the session_end.
+        // Best-effort: if iOS reaps us mid-flight the row stays
+        // in_progress and the forwarder treats absent session_end as
+        // "user closed without notifying."
+        willTerminateObserver = nc.addObserver(
+            forName: UIApplication.willTerminateNotification,
+            object: nil, queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.endSession(status: "user_stopped", reason: "app_terminated")
             }
         }
     }
@@ -1283,11 +1376,20 @@ final class PlayerViewModel: ObservableObject {
                 try? await Task.sleep(nanoseconds: 500_000_000)
                 self?.loadStream(url: url)
             }
+            return
         }
+        // No auto-recovery → this error is terminal. start_failure if
+        // we never reached first frame, otherwise mid_stream_failure.
+        markFatalTerminal(message: message)
     }
 
     private func handleErrorRetry(reason: String) {
-        guard codecRetries < maxCodecRetries, let url = currentURL else { return }
+        guard codecRetries < maxCodecRetries, let url = currentURL else {
+            // Retry budget exhausted → the play is dead. Distinguish
+            // pre-vs-post-first-frame for the right Phase 2 status.
+            markFatalTerminal(message: reason)
+            return
+        }
         codecRetries += 1
         let retries = codecRetries
         statusText = "\(reason) — retry \(retries)/\(maxCodecRetries)"
@@ -1295,6 +1397,19 @@ final class PlayerViewModel: ObservableObject {
             try? await Task.sleep(nanoseconds: UInt64(150_000_000 * retries))
             self?.loadStream(url: url)
         }
+    }
+
+    /// Stamp the play as fatally terminated and emit session_end. The
+    /// status is `start_failure` when the player never crossed first
+    /// frame, `mid_stream_failure` after. iOS doesn't yet inspect the
+    /// underlying NSError domain/code to populate a specific
+    /// playback_reason — the forwarder error_classifier (4d8265f) will
+    /// pick that up from terminal_error_* in a follow-up; for now we
+    /// stamp the generic "unknown" so dashboards bucket correctly.
+    private func markFatalTerminal(message: String) {
+        let status = diagnostics.hasRenderedFirstFrame ? "mid_stream_failure" : "start_failure"
+        endSession(status: status, reason: "unknown")
+        NSLog("[endSession] fatal status=\(status) message=\(message)")
     }
 
     // MARK: - Persistence (UserDefaults)
@@ -1444,7 +1559,12 @@ extension PlayerViewModel {
             .sink { [weak self] value in
                 guard let self else { return }
                 self.log("Item error: \(value)")
-                let payload = self.buildMetricsPayload(event: "error", at: Date(), extra: ["player_metrics_error": value])
+                let payload = self.buildMetricsPayload(event: "error", at: Date(), extra: [
+                    "player_metrics_error": value,
+                    "player_metrics_error_code": self.diagnostics.lastErrorCode,
+                    "player_metrics_error_domain": self.diagnostics.lastErrorDomain,
+                    "player_metrics_error_details": self.diagnostics.lastErrorDetails,
+                ])
                 Task { await self.sendPlayerMetrics(payload: payload) }
                 self.markPlayIdActivity()
             }
@@ -1457,7 +1577,12 @@ extension PlayerViewModel {
             .sink { [weak self] value in
                 guard let self else { return }
                 self.log("Playback failure: \(value)")
-                let payload = self.buildMetricsPayload(event: "error", at: Date(), extra: ["player_metrics_error": value])
+                let payload = self.buildMetricsPayload(event: "error", at: Date(), extra: [
+                    "player_metrics_error": value,
+                    "player_metrics_error_code": self.diagnostics.lastErrorCode,
+                    "player_metrics_error_domain": self.diagnostics.lastErrorDomain,
+                    "player_metrics_error_details": self.diagnostics.lastErrorDetails,
+                ])
                 Task { await self.sendPlayerMetrics(payload: payload) }
                 if self.autoRecovery {
                     // Per-attempt HAR is captured by scheduleAutoRecoveryRestart
@@ -1477,7 +1602,12 @@ extension PlayerViewModel {
             .sink { [weak self] value in
                 guard let self else { return }
                 self.log("Player error: \(value)")
-                let payload = self.buildMetricsPayload(event: "error", at: Date(), extra: ["player_metrics_error": value])
+                let payload = self.buildMetricsPayload(event: "error", at: Date(), extra: [
+                    "player_metrics_error": value,
+                    "player_metrics_error_code": self.diagnostics.lastErrorCode,
+                    "player_metrics_error_domain": self.diagnostics.lastErrorDomain,
+                    "player_metrics_error_details": self.diagnostics.lastErrorDetails,
+                ])
                 Task { await self.sendPlayerMetrics(payload: payload) }
                 self.markPlayIdActivity()
             }
@@ -1525,7 +1655,7 @@ extension PlayerViewModel {
         // playhead_wallclock, etc. all anchored to the moment the
         // underlying event fired — not to whenever the Task body
         // happens to run after chaining through `metricsTaskTail`.
-        diagnostics.$stallCount
+        diagnostics.$stallingCount
             .removeDuplicates()
             .receive(on: DispatchQueue.main)
             .sink { [weak self] count in
@@ -1537,14 +1667,14 @@ extension PlayerViewModel {
             }
             .store(in: &cancellables)
 
-        diagnostics.$lastStallDurationSeconds
+        diagnostics.$stallDurationS
             .removeDuplicates()
             .receive(on: DispatchQueue.main)
             .sink { [weak self] duration in
                 guard let self, duration > 0, duration != self.lastReportedStallDuration else { return }
                 self.lastReportedStallDuration = duration
                 let payload = self.buildMetricsPayload(event: "stall_end", at: Date(), extra: [
-                    "player_metrics_last_stall_time_s": self.roundSeconds(duration)
+                    "player_metrics_stall_duration_ms": self.secondsToMs(duration)
                 ])
                 Task { await self.sendPlayerMetrics(payload: payload) }
             }
@@ -1572,13 +1702,11 @@ extension PlayerViewModel {
                         let payload = self.buildMetricsPayload(event: "buffering_start", at: eventAt)
                         Task { await self.sendPlayerMetrics(payload: payload) }
                     } else if previous == "buffering" {
-                        var extra: [String: Any] = [:]
-                        if let started = self.bufferingStartedAt {
-                            extra["player_metrics_last_buffering_time_s"] =
-                                self.roundSeconds(eventAt.timeIntervalSince(started))
-                        }
+                        // Phase 1 cutover dropped player_metrics_last_buffering_time_s
+                        // — buffering_duration_ms (sticky per-event) replaces it
+                        // and is stamped via diagnostics on every heartbeat.
                         self.bufferingStartedAt = nil
-                        let payload = self.buildMetricsPayload(event: "buffering_end", at: eventAt, extra: extra)
+                        let payload = self.buildMetricsPayload(event: "buffering_end", at: eventAt)
                         Task { await self.sendPlayerMetrics(payload: payload) }
                     }
                 } else if previous == nil {
@@ -1976,28 +2104,76 @@ extension PlayerViewModel {
         return max(0, expected - dropped)
     }
 
+    /// Self-healing ladder: start with variants ≤ `preferredMaximumResolution`,
+    /// then if AVPlayer was ever observed playing a higher bitrate than
+    /// our filtered max, expand the ladder to include every variant in
+    /// the asset whose peak is between the filter ceiling and the
+    /// observed max (inclusive at the top with 10% tolerance for EWMA
+    /// jitter). The `preferredMaximumResolution` hint is documented as
+    /// non-binding, so this absorbs the rare break-through without
+    /// silently misreporting quality% as 100% of a too-low denominator.
+    ///
+    /// Returns the full eligible set every call — pure-function, no
+    /// stateful ratchet. Items deduplicated by peakBitRate.
+    fileprivate func selectableLadderPeaks() -> [(peak: Double, label: String)] {
+        guard let item = player.currentItem,
+              let asset = item.asset as? AVURLAsset else { return [] }
+        let cap = item.preferredMaximumResolution
+        let hasCap = cap.width > 0 && cap.height > 0
+
+        func makeLabel(_ variant: AVAssetVariant) -> String {
+            if let size = variant.videoAttributes?.presentationSize, size.height > 0 {
+                return "\(Int(size.height))p"
+            }
+            return ""
+        }
+
+        // Cap-filtered set first.
+        var filtered: [(peak: Double, label: String)] = []
+        for variant in asset.variants {
+            guard let peak = variant.peakBitRate, peak > 0 else { continue }
+            if hasCap, let size = variant.videoAttributes?.presentationSize, size.height > 0 {
+                if size.height > cap.height || size.width > cap.width { continue }
+            }
+            filtered.append((peak: peak, label: makeLabel(variant)))
+        }
+
+        // Find max observed indicatedBitrate from the access log.
+        var observedMax: Double = 0
+        if let logRef = item.accessLog() {
+            for event in logRef.events {
+                if event.indicatedBitrate > observedMax { observedMax = event.indicatedBitrate }
+            }
+        }
+
+        // If the player has been observed above the filter ceiling,
+        // pull in every variant from the asset whose peak fits between
+        // the old ceiling and the observed max + 10% tolerance.
+        let filteredMax = filtered.map(\.peak).max() ?? 0
+        if observedMax > 0 && observedMax > filteredMax {
+            let tolerated = observedMax * 1.10
+            var seenPeaks = Set(filtered.map(\.peak))
+            for variant in asset.variants {
+                guard let peak = variant.peakBitRate, peak > 0 else { continue }
+                if peak <= filteredMax { continue }
+                if peak > tolerated { continue }
+                if seenPeaks.contains(peak) { continue }
+                seenPeaks.insert(peak)
+                filtered.append((peak: peak, label: makeLabel(variant)))
+            }
+        }
+        return filtered
+    }
+
     fileprivate func perVariantTimeSeconds() -> [String: Double] {
         guard let item = player.currentItem,
               let log = item.accessLog() else { return [:] }
 
-        // Build a bitrate → resolution lookup from the asset's
-        // variant ladder. Each AVAssetVariant carries peakBitRate
-        // (the EXT-X-STREAM-INF BANDWIDTH attribute) and an optional
-        // videoAttributes.presentationSize. Tolerant match below
-        // since the access log's `indicatedBitrate` is an EWMA
-        // estimate, not an exact reproduction of the manifest's
-        // BANDWIDTH value.
-        var ladder: [(peak: Double, label: String)] = []
-        if let asset = item.asset as? AVURLAsset {
-            for variant in asset.variants {
-                guard let peak = variant.peakBitRate, peak > 0 else { continue }
-                if let size = variant.videoAttributes?.presentationSize, size.height > 0 {
-                    ladder.append((peak: peak, label: "\(Int(size.height))p"))
-                } else {
-                    ladder.append((peak: peak, label: ""))
-                }
-            }
-        }
+        // Build a bitrate → resolution lookup from the self-healing
+        // selectable ladder. Tolerant match below since the access log's
+        // `indicatedBitrate` is an EWMA estimate, not an exact
+        // reproduction of the manifest's BANDWIDTH value.
+        let ladder = selectableLadderPeaks()
 
         func labelFor(bitrate: Double) -> String {
             var best: (delta: Double, label: String)? = nil
@@ -2015,7 +2191,23 @@ extension PlayerViewModel {
             return "\(kbps)kbps"
         }
 
+        // Seed the map with every allowed variant at 0s so the
+        // dashboard renders the FULL menu the player can choose from,
+        // not just the ones it's picked. Variants excluded by the
+        // resolution cap above never appear in `ladder`, so the menu
+        // accurately reflects the platform's actual selectable set.
+        // Seed with prior-play accumulations so retry() preserves
+        // continuity — the new AVPlayerItem's access log starts at
+        // zero so without this every retry would zero the tile.
         var out: [String: Double] = [:]
+        for entry in ladder {
+            let kbps = Int((entry.peak / 1000).rounded())
+            let key = entry.label.isEmpty ? "\(kbps)kbps" : "\(entry.label)@\(kbps)kbps"
+            out[key] = 0
+        }
+        for (key, seconds) in priorPerVariantTimeSeconds {
+            out[key, default: 0] += seconds
+        }
         for event in log.events {
             let bitrate = event.indicatedBitrate
             let duration = event.durationWatched
@@ -2030,8 +2222,138 @@ extension PlayerViewModel {
         return out.mapValues { (round($0 * 100) / 100) }
     }
 
+    /// Snapshot current per-variant totals so the next access-log walk
+    /// after AVPlayerItem replacement continues from here. Called from
+    /// retry(). Captures the FULL merged result (priors + current
+    /// access log) so subsequent retries also stack correctly.
+    fileprivate func snapshotPerVariantForRestart() {
+        priorPerVariantTimeSeconds = perVariantTimeSeconds()
+    }
+
+    /// Zero the priors so a fresh play (reload) starts from zero.
+    /// Called from reload() before regeneratePlayID/loadStream.
+    fileprivate func resetPerVariantForFreshPlay() {
+        priorPerVariantTimeSeconds.removeAll()
+    }
+
+    /// Log-bitrate quality weighting with a baseline floor. Mirrors
+    /// the dashboard's PlayLog `computeQualityPct` formula
+    /// (Weber-Fechner perceptual model — doubling bitrate near the top
+    /// barely registers, so linear `bitrate/maxPeak` over-penalises the
+    /// mid-tier). Output is `log(kbps/minKbps) / log(maxKbps/minKbps)`
+    /// clamped to the floor. Single-variant ladders return nil because
+    /// the log ratio is undefined.
+    private static let qualityBaselineFloor: Double = 0.20
+
+    /// Quality% denominator. Shares `selectableLadderPeaks()` with the
+    /// per-variant dwell map so the displayed menu and the quality
+    /// math always use the same ladder — including when the
+    /// self-healing path expands it after an observed cap break.
+    private func variantLadderKbps() -> (minKbps: Double, maxKbps: Double, denom: Double)? {
+        let entries = selectableLadderPeaks()
+        let bitrates = entries.map { $0.peak / 1000.0 }
+        guard bitrates.count >= 2 else { return nil }
+        let minKbps = bitrates.min()!
+        let maxKbps = bitrates.max()!
+        guard maxKbps > minKbps else { return nil }
+        return (minKbps, maxKbps, Foundation.log(maxKbps / minKbps))
+    }
+
+    private func qualityWeightForBitrate(_ bitrateBps: Double, ladder: (minKbps: Double, maxKbps: Double, denom: Double)) -> Double {
+        let kbps = bitrateBps / 1000.0
+        let ratio = kbps / ladder.minKbps
+        let raw = ratio > 0 ? Foundation.log(ratio) / ladder.denom : 0
+        // Cap at 1.0 — defensive against a race during cap change or
+        // a manifest variant outside the filtered set still appearing
+        // in the access log briefly. Playing the top selectable
+        // variant is always 100%, never more.
+        return max(Self.qualityBaselineFloor, min(1.0, raw))
+    }
+
+    /// Lifetime time-weighted log-bitrate quality across all
+    /// access-log events. Returns nil when there's no ladder or no
+    /// playback time.
+    fileprivate func videoQualityAvgPct() -> Double? {
+        guard let item = player.currentItem,
+              let logRef = item.accessLog(),
+              let ladder = variantLadderKbps() else { return nil }
+        var weighted: Double = 0
+        var total: Double = 0
+        for event in logRef.events {
+            let bitrate = event.indicatedBitrate
+            let duration = event.durationWatched
+            guard bitrate > 0, duration > 0 else { continue }
+            weighted += qualityWeightForBitrate(bitrate, ladder: ladder) * duration
+            total += duration
+        }
+        guard total > 0 else { return nil }
+        return (weighted / total) * 100
+    }
+
+    /// Same log-bitrate formula but restricted to the last 60s of
+    /// *watched* time. Walks events newest-first, accumulating
+    /// `durationWatched` until 60s is reached. Stalls / pauses contribute
+    /// zero naturally. Returns nil when there isn't enough data yet.
+    fileprivate func videoQuality60sPct() -> Double? {
+        guard let item = player.currentItem,
+              let logRef = item.accessLog(),
+              let ladder = variantLadderKbps() else { return nil }
+        let windowSec: Double = 60
+        var weighted: Double = 0
+        var total: Double = 0
+        for event in logRef.events.reversed() {
+            let bitrate = event.indicatedBitrate
+            let duration = event.durationWatched
+            guard bitrate > 0, duration > 0 else { continue }
+            let remaining = windowSec - total
+            if remaining <= 0 { break }
+            let take = min(duration, remaining)
+            weighted += qualityWeightForBitrate(bitrate, ladder: ladder) * take
+            total += take
+        }
+        guard total > 0 else { return nil }
+        return (weighted / total) * 100
+    }
+
+    /// Resolution AVPlayer is about to fetch. Matches the most recent
+    /// access-log event's `indicatedBitrate` (the ABR pick for the next
+    /// download) against the asset's variant ladder by peakBitRate
+    /// with ±10% tolerance. Returns nil before the first access-log
+    /// event lands or when the indicated bitrate doesn't match any
+    /// ladder entry within tolerance.
+    fileprivate func fetchingResolution() -> String? {
+        guard let item = player.currentItem,
+              let logRef = item.accessLog(),
+              let asset = item.asset as? AVURLAsset else { return nil }
+        var indicated: Double = 0
+        for event in logRef.events.reversed() {
+            if event.indicatedBitrate > 0 {
+                indicated = event.indicatedBitrate
+                break
+            }
+        }
+        guard indicated > 0 else { return nil }
+        var best: (delta: Double, label: String)? = nil
+        for variant in asset.variants {
+            guard let peak = variant.peakBitRate, peak > 0 else { continue }
+            guard let size = variant.videoAttributes?.presentationSize,
+                  size.width > 0, size.height > 0 else { continue }
+            let delta = abs(peak - indicated)
+            let tol = max(peak * 0.10, 50_000)
+            if delta > tol { continue }
+            if best == nil || delta < best!.delta {
+                best = (delta, "\(Int(size.width))x\(Int(size.height))")
+            }
+        }
+        return best?.label
+    }
+
     fileprivate func buildMetricsPayload(event: String, at eventAt: Date = Date(), extra: [String: Any] = [:]) -> [String: Any] {
         let timestamp = Self.metricsTimestampFormatter.string(from: eventAt)
+        // Flush accruing residency into the current bucket so the
+        // payload reflects time-up-to-now, not time-up-to-last-state-
+        // change. Cheap; idempotent.
+        diagnostics.flushStateResidencyForRead()
         let loopCount = max(0, diagnostics.loopCountPlayer)
         let loopIncrement = max(0, loopCount - lastReportedLoopCount)
         lastReportedLoopCount = loopCount
@@ -2075,11 +2397,64 @@ extension PlayerViewModel {
             },
             "player_metrics_display_resolution": formatResolution(width: diagnostics.displayWidth, height: diagnostics.displayHeight),
             "player_metrics_video_resolution": formatResolution(width: diagnostics.videoWidth, height: diagnostics.videoHeight),
-            "player_metrics_video_first_frame_time_s": videoFirstFrameSeconds,
-            "player_metrics_video_start_time_s": videoPlayingTimeSeconds,
-            "player_metrics_stall_count": diagnostics.stallCount,
-            "player_metrics_stall_time_s": roundSeconds(diagnostics.stallTimeSeconds),
-            "player_metrics_last_stall_time_s": roundSeconds(diagnostics.lastStallDurationSeconds),
+            // ── #550 Phase 1: ms time fields (gerund-named) ────────
+            "player_metrics_video_first_frame_time_ms": secondsToMs(videoFirstFrameSeconds),
+            "player_metrics_video_start_time_ms": secondsToMs(videoPlayingTimeSeconds),
+            "player_metrics_stalling_count": diagnostics.stallingCount,
+            "player_metrics_stalling_time_ms": secondsToMs(diagnostics.stallingTimeS),
+            "player_metrics_stall_duration_ms": secondsToMs(diagnostics.stallDurationS),
+            "player_metrics_buffering_duration_ms": secondsToMs(diagnostics.bufferingDurationS),
+            // State residency accumulators — cumulative-on-the-wire
+            // since play start. Forwarder computes per-row deltas from
+            // a per-play state cache and stores both as paired
+            // *_time_ms + *_time_ms_delta columns in ClickHouse.
+            "player_metrics_playing_time_ms": secondsToMs(diagnostics.playingTimeS),
+            "player_metrics_playing_count": diagnostics.playingCount,
+            "player_metrics_pausing_time_ms": secondsToMs(diagnostics.pausingTimeS),
+            "player_metrics_pausing_count": diagnostics.pausingCount,
+            "player_metrics_buffering_time_ms": secondsToMs(diagnostics.bufferingTimeS),
+            "player_metrics_buffering_count": diagnostics.bufferingCount,
+            "player_metrics_idling_time_ms": secondsToMs(diagnostics.idlingTimeS),
+            "player_metrics_idling_count": diagnostics.idlingCount,
+            "player_metrics_seeking_time_ms": secondsToMs(diagnostics.seekingTimeS),
+            "player_metrics_seeking_count": diagnostics.seekingCount,
+            "player_metrics_trickplaying_time_ms": secondsToMs(diagnostics.trickplayingTimeS),
+            "player_metrics_trickplaying_count": diagnostics.trickplayingCount,
+            // ── #550 Phase 2: outcome + error ──────────────────────
+            // playback_status defaults to 'in_progress' for any
+            // non-terminal payload; iOS sets explicit values for
+            // session_end events (completed / user_stopped / failed_*).
+            // playback_reason mirrors player_state during in_progress;
+            // classifier-derived on terminal rows.
+            // playback_status / _reason — heartbeats default to
+            // in_progress + the current state. session_end events
+            // (and any heartbeat after markTerminal fires) pick up
+            // the terminal values diagnostics stamped. Once markTerminal
+            // has run, EVERY subsequent payload carries the terminal
+            // status so a late-arriving heartbeat after teardown still
+            // reads correctly.
+            "player_metrics_playback_status": diagnostics.terminalStatus ?? "in_progress",
+            "player_metrics_playback_reason": diagnostics.terminalReason ?? diagnostics.state,
+            "player_metrics_error_count": diagnostics.errorCount,
+            // stall_stuck: sticky true when AVPlayer transitioned
+            // from .waitingToPlay to .paused mid-stall. The player
+            // WILL NOT auto-recover; the dashboard / operator needs
+            // to drive a play() retry. Cleared on the next .playing
+            // transition or play boundary. The state lane stays on
+            // "stalled" for residency continuity — this flag is the
+            // orthogonal "needs intervention" signal.
+            "player_metrics_stall_stuck": diagnostics.stallStuck,
+            // ── #550 Phase 4: device / platform taxonomy ───────────
+            "player_metrics_os_version_major": DeviceInfo.osVersionMajor,
+            "player_metrics_os_version_minor": DeviceInfo.osVersionMinor,
+            "player_metrics_app_version": DeviceInfo.appVersion,
+            "player_metrics_device_class": DeviceInfo.deviceClass,
+            "player_metrics_device_model": DeviceInfo.deviceModel,
+            "player_metrics_player_tech": DeviceInfo.playerTech,
+            // Orientation-aware physical pixels — replaces the prior
+            // screen_width_px / screen_height_px / screen_density
+            // taxonomy fields (which were static portrait-only).
+            "player_metrics_device_resolution": DeviceInfo.deviceResolution(),
             // Displayed frame count (issue #486 follow-up). Recomputed
             // from playing-time × active variant's nominal frame rate
             // minus dropped frames, instead of the legacy
@@ -2095,12 +2470,12 @@ extension PlayerViewModel {
             "player_metrics_frames_displayed": framesDisplayedFromAccessLog()
                 ?? framesDisplayedFromNominalFps()
                 ?? diagnostics.estimatedDisplayedFrames.map { roundMetric($0) },
-            "player_metrics_dropped_frames": diagnostics.droppedVideoFrames.map { roundMetric($0) },
+            "player_metrics_frames_dropped": diagnostics.droppedVideoFrames.map { roundMetric($0) },
             // Publish the variant's nominal FPS alongside so the
             // dashboard can show effective vs nominal at a glance.
-            "player_metrics_nominal_fps_current": diagnostics.nominalFrameRate,
+            "player_metrics_frames_rate": diagnostics.nominalFrameRate,
             "player_metrics_loop_count_player": loopCount,
-            "player_metrics_loop_count_increment": loopIncrement,
+            "player_metrics_loop_count_delta": loopIncrement,
             "player_metrics_profile_shift_count": profileShiftCount,
             "player_restarts": playerRestarts,
             "player_auto_recovery_enabled": autoRecovery,
@@ -2175,6 +2550,23 @@ extension PlayerViewModel {
            let json = String(data: data, encoding: .utf8) {
             compact["player_metrics_time_per_variant_s"] = json
         }
+        // Lifetime + 60s rolling quality. Both computed from the same
+        // access-log + variant ladder as perVariantTimeSeconds() so the
+        // dashboard never has to re-derive — single source of truth,
+        // stored in CH forever. nil values omit the key (so a fresh
+        // play before any access-log events doesn't ship 0%).
+        if let avg = videoQualityAvgPct() {
+            compact["player_metrics_video_quality_avg_pct"] = round(avg * 100) / 100
+        }
+        if let q60 = videoQuality60sPct() {
+            compact["player_metrics_video_quality_60s_pct"] = round(q60 * 100) / 100
+        }
+        // Resolution AVPlayer is about to fetch — matches indicatedBitrate
+        // against the asset's variant ladder. Persisted in CH so historical
+        // replays show the same value. Nil → key omitted.
+        if let fetching = fetchingResolution() {
+            compact["player_metrics_fetching_resolution"] = fetching
+        }
         // Client-side RTT proxy from AVMetrics TTFB (issue #486).
         // Median of the recent MediaResourceRequest TTFBs — only
         // populated on iOS 18+ with the AVMetrics subscriber attached.
@@ -2206,7 +2598,7 @@ extension PlayerViewModel {
         var metadata: [String: Any] = [
             "player_state": diagnostics.state,
             "buffer_depth_s": diagnostics.bufferDepth as Any,
-            "stall_count": diagnostics.stallCount,
+            "stalling_count": diagnostics.stallingCount,
             "auto_recovery_attempt": attempt,
             "player_restarts": playerRestarts
         ]
@@ -2278,9 +2670,23 @@ extension PlayerViewModel {
         if #available(iOS 18.0, *) {
             NSLog("[AVMetrics] attachAVMetrics — replacing subscriber for new AVPlayerItem")
             scheduleAVMetricsDrain(avMetricsSubscriber as? AVMetricsSubscriber)
-            avMetricsSubscriber = AVMetricsSubscriber(item: item) { [weak self] events in
-                await self?.sendAVMetricsBatch(events)
-            }
+            // Bridge Apple's authoritative single-event-per-user-seek
+            // signal (AVMetricPlayerItemSeekEvent, iOS 26+) into
+            // PlaybackDiagnostics so seekingCount reflects user intent
+            // rather than counting AVPlayer's internal TimeJumped
+            // notifications. The bridge fires nothing on pre-iOS-26
+            // OSes (subclass unavailable) and the legacy debounced
+            // TimeJumped path remains authoritative there.
+            let diag = diagnostics
+            avMetricsSubscriber = AVMetricsSubscriber(
+                item: item,
+                onBatch: { [weak self] events in
+                    await self?.sendAVMetricsBatch(events)
+                },
+                onSeek: { [weak diag] in
+                    Task { @MainActor in diag?.onAVMetricSeek() }
+                }
+            )
         } else {
             NSLog("[AVMetrics] attachAVMetrics skipped — OS pre-iOS-18 (subscriber gated)")
         }
@@ -2468,6 +2874,22 @@ extension PlayerViewModel {
 
     fileprivate func roundSeconds(_ value: Double) -> Double {
         (value * 1000).rounded() / 1000
+    }
+
+    /// Convert a Double-seconds residency accumulator to UInt32-ms
+    /// for the #550 Phase 1 wire contract. Clamped at 0; values
+    /// beyond UInt32 max (~49 days) saturate. Round-half-to-even for
+    /// stable values across snapshots that read mid-state.
+    fileprivate func secondsToMs(_ value: Double) -> UInt32 {
+        let scaled = (value * 1000).rounded()
+        if scaled <= 0 { return 0 }
+        if scaled >= Double(UInt32.max) { return UInt32.max }
+        return UInt32(scaled)
+    }
+
+    fileprivate func secondsToMs(_ value: Double?) -> UInt32 {
+        guard let v = value else { return 0 }
+        return secondsToMs(v)
     }
 
     fileprivate func roundMetric(_ value: Double) -> Double {

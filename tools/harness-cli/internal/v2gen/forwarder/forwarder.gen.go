@@ -4,6 +4,7 @@
 package forwarder
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -408,19 +409,43 @@ func (e GetApiV2PlaysParamsClassification) Valid() bool {
 
 // Defines values for GetApiV2PlaysAggregateParamsClassification.
 const (
-	Favourite   GetApiV2PlaysAggregateParamsClassification = "favourite"
-	Interesting GetApiV2PlaysAggregateParamsClassification = "interesting"
-	Other       GetApiV2PlaysAggregateParamsClassification = "other"
+	GetApiV2PlaysAggregateParamsClassificationFavourite   GetApiV2PlaysAggregateParamsClassification = "favourite"
+	GetApiV2PlaysAggregateParamsClassificationInteresting GetApiV2PlaysAggregateParamsClassification = "interesting"
+	GetApiV2PlaysAggregateParamsClassificationOther       GetApiV2PlaysAggregateParamsClassification = "other"
 )
 
 // Valid indicates whether the value is a known member of the GetApiV2PlaysAggregateParamsClassification enum.
 func (e GetApiV2PlaysAggregateParamsClassification) Valid() bool {
 	switch e {
-	case Favourite:
+	case GetApiV2PlaysAggregateParamsClassificationFavourite:
 		return true
-	case Interesting:
+	case GetApiV2PlaysAggregateParamsClassificationInteresting:
 		return true
-	case Other:
+	case GetApiV2PlaysAggregateParamsClassificationOther:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for PatchApiV2PlaysPlayIdApplicationMergePatchPlusJSONBodyClassification.
+const (
+	PatchApiV2PlaysPlayIdApplicationMergePatchPlusJSONBodyClassificationAuto        PatchApiV2PlaysPlayIdApplicationMergePatchPlusJSONBodyClassification = "auto"
+	PatchApiV2PlaysPlayIdApplicationMergePatchPlusJSONBodyClassificationFavourite   PatchApiV2PlaysPlayIdApplicationMergePatchPlusJSONBodyClassification = "favourite"
+	PatchApiV2PlaysPlayIdApplicationMergePatchPlusJSONBodyClassificationInteresting PatchApiV2PlaysPlayIdApplicationMergePatchPlusJSONBodyClassification = "interesting"
+	PatchApiV2PlaysPlayIdApplicationMergePatchPlusJSONBodyClassificationOther       PatchApiV2PlaysPlayIdApplicationMergePatchPlusJSONBodyClassification = "other"
+)
+
+// Valid indicates whether the value is a known member of the PatchApiV2PlaysPlayIdApplicationMergePatchPlusJSONBodyClassification enum.
+func (e PatchApiV2PlaysPlayIdApplicationMergePatchPlusJSONBodyClassification) Valid() bool {
+	switch e {
+	case PatchApiV2PlaysPlayIdApplicationMergePatchPlusJSONBodyClassificationAuto:
+		return true
+	case PatchApiV2PlaysPlayIdApplicationMergePatchPlusJSONBodyClassificationFavourite:
+		return true
+	case PatchApiV2PlaysPlayIdApplicationMergePatchPlusJSONBodyClassificationInteresting:
+		return true
+	case PatchApiV2PlaysPlayIdApplicationMergePatchPlusJSONBodyClassificationOther:
 		return true
 	default:
 		return false
@@ -868,7 +893,7 @@ type PlayDetail struct {
 	Classification *PlayDetailClassification `json:"classification,omitempty"`
 	ContentId      *string                   `json:"content_id,omitempty"`
 	Downshifts     *int                      `json:"downshifts,omitempty"`
-	DroppedFrames  *int                      `json:"dropped_frames,omitempty"`
+	FramesDropped  *int                      `json:"frames_dropped,omitempty"`
 
 	// ErrorEventCount Explicit player_error events.
 	ErrorEventCount *int `json:"error_event_count,omitempty"`
@@ -989,7 +1014,7 @@ type PlayDetail_LabelHistogram_Item struct {
 // Field groups:
 //   - identifiers (play_id, player_id, session_id, content_id, …)
 //   - timing (started_at, last_seen_at)
-//   - quality (stalls, downshifts, dropped_frames, avg_quality_pct)
+//   - quality (stalls, downshifts, frames_dropped, avg_quality_pct)
 //   - failure counters (master_manifest_failures, …, transport_failures)
 //   - signal counters (frozen_count, restart_count, …) used by the
 //     dashboard's "interesting" filter
@@ -1020,7 +1045,7 @@ type PlaySummary struct {
 	Classification *PlaySummaryClassification `json:"classification,omitempty"`
 	ContentId      *string                    `json:"content_id,omitempty"`
 	Downshifts     *int                       `json:"downshifts,omitempty"`
-	DroppedFrames  *int                       `json:"dropped_frames,omitempty"`
+	FramesDropped  *int                       `json:"frames_dropped,omitempty"`
 
 	// ErrorEventCount Explicit player_error events.
 	ErrorEventCount *int `json:"error_event_count,omitempty"`
@@ -1586,6 +1611,14 @@ type GetApiV2PlaysAggregateParams struct {
 // GetApiV2PlaysAggregateParamsClassification defines parameters for GetApiV2PlaysAggregate.
 type GetApiV2PlaysAggregateParamsClassification string
 
+// PatchApiV2PlaysPlayIdApplicationMergePatchPlusJSONBody defines parameters for PatchApiV2PlaysPlayId.
+type PatchApiV2PlaysPlayIdApplicationMergePatchPlusJSONBody struct {
+	Classification *PatchApiV2PlaysPlayIdApplicationMergePatchPlusJSONBodyClassification `json:"classification,omitempty"`
+}
+
+// PatchApiV2PlaysPlayIdApplicationMergePatchPlusJSONBodyClassification defines parameters for PatchApiV2PlaysPlayId.
+type PatchApiV2PlaysPlayIdApplicationMergePatchPlusJSONBodyClassification string
+
 // GetApiV2SessionHeatmapParams defines parameters for GetApiV2SessionHeatmap.
 type GetApiV2SessionHeatmapParams struct {
 	PlayerId *PlayerIdFilter `form:"player_id,omitempty" json:"player_id,omitempty"`
@@ -1687,6 +1720,9 @@ type GetTimeseriesParams struct {
 	// the last known row).
 	LastEventID *TimeseriesLastEventId `json:"Last-Event-ID,omitempty"`
 }
+
+// PatchApiV2PlaysPlayIdApplicationMergePatchPlusJSONRequestBody defines body for PatchApiV2PlaysPlayId for application/merge-patch+json ContentType.
+type PatchApiV2PlaysPlayIdApplicationMergePatchPlusJSONRequestBody PatchApiV2PlaysPlayIdApplicationMergePatchPlusJSONBody
 
 // Getter for additional properties for LegacyEventRow. Returns the specified
 // element and whether it was found
@@ -2665,6 +2701,11 @@ type ClientInterface interface {
 	// GetApiV2PlaysPlayId request
 	GetApiV2PlaysPlayId(ctx context.Context, playId PlayId, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// PatchApiV2PlaysPlayIdWithBody request with any body
+	PatchApiV2PlaysPlayIdWithBody(ctx context.Context, playId PlayId, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	PatchApiV2PlaysPlayIdWithApplicationMergePatchPlusJSONBody(ctx context.Context, playId PlayId, body PatchApiV2PlaysPlayIdApplicationMergePatchPlusJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// GetApiV2PlaysPlayIdBundle request
 	GetApiV2PlaysPlayIdBundle(ctx context.Context, playId PlayId, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -2773,6 +2814,30 @@ func (c *Client) GetApiV2PlaysAggregate(ctx context.Context, params *GetApiV2Pla
 
 func (c *Client) GetApiV2PlaysPlayId(ctx context.Context, playId PlayId, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewGetApiV2PlaysPlayIdRequest(c.Server, playId)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) PatchApiV2PlaysPlayIdWithBody(ctx context.Context, playId PlayId, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPatchApiV2PlaysPlayIdRequestWithBody(c.Server, playId, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) PatchApiV2PlaysPlayIdWithApplicationMergePatchPlusJSONBody(ctx context.Context, playId PlayId, body PatchApiV2PlaysPlayIdApplicationMergePatchPlusJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPatchApiV2PlaysPlayIdRequestWithApplicationMergePatchPlusJSONBody(c.Server, playId, body)
 	if err != nil {
 		return nil, err
 	}
@@ -3828,6 +3893,53 @@ func NewGetApiV2PlaysPlayIdRequest(server string, playId PlayId) (*http.Request,
 	return req, nil
 }
 
+// NewPatchApiV2PlaysPlayIdRequestWithApplicationMergePatchPlusJSONBody calls the generic PatchApiV2PlaysPlayId builder with application/merge-patch+json body
+func NewPatchApiV2PlaysPlayIdRequestWithApplicationMergePatchPlusJSONBody(server string, playId PlayId, body PatchApiV2PlaysPlayIdApplicationMergePatchPlusJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewPatchApiV2PlaysPlayIdRequestWithBody(server, playId, "application/merge-patch+json", bodyReader)
+}
+
+// NewPatchApiV2PlaysPlayIdRequestWithBody generates requests for PatchApiV2PlaysPlayId with any type of body
+func NewPatchApiV2PlaysPlayIdRequestWithBody(server string, playId PlayId, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "play_id", playId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: "uuid"})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v2/plays/%s", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodPatch, queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
 // NewGetApiV2PlaysPlayIdBundleRequest generates requests for GetApiV2PlaysPlayIdBundle
 func NewGetApiV2PlaysPlayIdBundleRequest(server string, playId PlayId) (*http.Request, error) {
 	var err error
@@ -4207,6 +4319,11 @@ type ClientWithResponsesInterface interface {
 	// GetApiV2PlaysPlayIdWithResponse request
 	GetApiV2PlaysPlayIdWithResponse(ctx context.Context, playId PlayId, reqEditors ...RequestEditorFn) (*GetApiV2PlaysPlayIdResponse, error)
 
+	// PatchApiV2PlaysPlayIdWithBodyWithResponse request with any body
+	PatchApiV2PlaysPlayIdWithBodyWithResponse(ctx context.Context, playId PlayId, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PatchApiV2PlaysPlayIdResponse, error)
+
+	PatchApiV2PlaysPlayIdWithApplicationMergePatchPlusJSONBodyWithResponse(ctx context.Context, playId PlayId, body PatchApiV2PlaysPlayIdApplicationMergePatchPlusJSONRequestBody, reqEditors ...RequestEditorFn) (*PatchApiV2PlaysPlayIdResponse, error)
+
 	// GetApiV2PlaysPlayIdBundleWithResponse request
 	GetApiV2PlaysPlayIdBundleWithResponse(ctx context.Context, playId PlayId, reqEditors ...RequestEditorFn) (*GetApiV2PlaysPlayIdBundleResponse, error)
 
@@ -4486,6 +4603,38 @@ func (r GetApiV2PlaysPlayIdResponse) ContentType() string {
 	return ""
 }
 
+type PatchApiV2PlaysPlayIdResponse struct {
+	Body                      []byte
+	HTTPResponse              *http.Response
+	JSON200                   *PlaySummary
+	ApplicationproblemJSON400 *Problem
+	ApplicationproblemJSON501 *Problem
+}
+
+// Status returns HTTPResponse.Status
+func (r PatchApiV2PlaysPlayIdResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r PatchApiV2PlaysPlayIdResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r PatchApiV2PlaysPlayIdResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
 type GetApiV2PlaysPlayIdBundleResponse struct {
 	Body                      []byte
 	HTTPResponse              *http.Response
@@ -4658,6 +4807,23 @@ func (c *ClientWithResponses) GetApiV2PlaysPlayIdWithResponse(ctx context.Contex
 		return nil, err
 	}
 	return ParseGetApiV2PlaysPlayIdResponse(rsp)
+}
+
+// PatchApiV2PlaysPlayIdWithBodyWithResponse request with arbitrary body returning *PatchApiV2PlaysPlayIdResponse
+func (c *ClientWithResponses) PatchApiV2PlaysPlayIdWithBodyWithResponse(ctx context.Context, playId PlayId, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PatchApiV2PlaysPlayIdResponse, error) {
+	rsp, err := c.PatchApiV2PlaysPlayIdWithBody(ctx, playId, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParsePatchApiV2PlaysPlayIdResponse(rsp)
+}
+
+func (c *ClientWithResponses) PatchApiV2PlaysPlayIdWithApplicationMergePatchPlusJSONBodyWithResponse(ctx context.Context, playId PlayId, body PatchApiV2PlaysPlayIdApplicationMergePatchPlusJSONRequestBody, reqEditors ...RequestEditorFn) (*PatchApiV2PlaysPlayIdResponse, error) {
+	rsp, err := c.PatchApiV2PlaysPlayIdWithApplicationMergePatchPlusJSONBody(ctx, playId, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParsePatchApiV2PlaysPlayIdResponse(rsp)
 }
 
 // GetApiV2PlaysPlayIdBundleWithResponse request returning *GetApiV2PlaysPlayIdBundleResponse
@@ -4902,6 +5068,46 @@ func ParseGetApiV2PlaysPlayIdResponse(rsp *http.Response) (*GetApiV2PlaysPlayIdR
 			return nil, err
 		}
 		response.ApplicationproblemJSON404 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParsePatchApiV2PlaysPlayIdResponse parses an HTTP response from a PatchApiV2PlaysPlayIdWithResponse call
+func ParsePatchApiV2PlaysPlayIdResponse(rsp *http.Response) (*PatchApiV2PlaysPlayIdResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &PatchApiV2PlaysPlayIdResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest PlaySummary
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 400:
+		var dest Problem
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON400 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 501:
+		var dest Problem
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON501 = &dest
 
 	}
 

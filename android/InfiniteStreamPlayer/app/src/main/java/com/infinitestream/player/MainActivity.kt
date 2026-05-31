@@ -62,7 +62,27 @@ class MainActivity : ComponentActivity() {
         // foreground. The VM stops + clearMediaItems on the main player
         // and broadcasts appStopped=true so every LivePreviewTile on
         // Home releases its decoder too. Re-prepares on onStart.
+        //
+        // We do NOT mark terminal here — onStop fires for a 1-second
+        // app-switch as well as for a real session end, and the
+        // false-positive rate of user_stopped/app_backgrounded rows
+        // would be too high. onDestroy (real-quit) handles the
+        // unambiguous case via vm.endSessionAsAppTerminated below.
         vm.onActivityStopped()
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        // #550 Phase 2 — best-effort terminal stamp on real activity
+        // teardown. isFinishing rules out config-change destruction
+        // (rotation, theme switch); only fires on the operator-driven
+        // back-to-quit / OS-reaped finish. The metrics POST is
+        // fire-and-forget; if the OS reaps us mid-flight the row
+        // stays in_progress (treated as "user closed without notifying"
+        // by downstream).
+        if (isFinishing) {
+            vm.endSessionAsAppTerminated()
+        }
     }
 }
 
@@ -106,6 +126,13 @@ private fun AppRoot() {
         vm.setHudVisible(false)
     }
     BackHandler(enabled = !state.settingsOpen && !state.hudVisible && route == Route.Playback) {
+        // #550 Phase 2 — emit session_end with user_stopped (or
+        // abandoned_start if EBVS conditions met) before navigating
+        // away. Stamping happens here at the back-press because the
+        // route flip + downstream LaunchedEffect tear down the
+        // player + metrics; we'd lose the chance to mark terminal
+        // after that.
+        vm.endSessionForUserBack()
         route = Route.Home
     }
     BackHandler(enabled = !state.settingsOpen && route == Route.Home) {

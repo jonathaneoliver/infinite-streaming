@@ -2575,17 +2575,17 @@ func (a *App) applySessionSettingsUpdate(id string, payload map[string]interface
 			getString(target, "player_metrics_source"),
 			getString(target, "player_metrics_last_event"),
 			getInt(target, "player_metrics_loop_count_player"),
-			getInt(target, "player_metrics_loop_count_increment"),
+			getInt(target, "player_metrics_loop_count_delta"),
 			getInt(target, "loop_count_server"),
 		)
-	} else if _, ok := payload["player_metrics_loop_count_increment"]; ok {
+	} else if _, ok := payload["player_metrics_loop_count_delta"]; ok {
 		log.Printf(
 			"LOOP_COUNTER_PATCH session_id=%s source=%s event=%s player_loop_count=%d loop_increment=%d server_loop_count=%d",
 			id,
 			getString(target, "player_metrics_source"),
 			getString(target, "player_metrics_last_event"),
 			getInt(target, "player_metrics_loop_count_player"),
-			getInt(target, "player_metrics_loop_count_increment"),
+			getInt(target, "player_metrics_loop_count_delta"),
 			getInt(target, "loop_count_server"),
 		)
 	}
@@ -5383,6 +5383,12 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 	sessionData["last_request"] = nowISO()
 	sessionData["last_request_url"] = filename
 	sessionData["user_agent"] = r.UserAgent()
+	// #550 Phase 4: best-effort device taxonomy from UA for
+	// non-instrumented clients (VLC, ffplay, hls.js, Roku channels,
+	// etc.). Idempotent + non-overwriting — iOS-emitted DeviceInfo
+	// values from the metrics POST channel take precedence by virtue
+	// of stampDeviceFromUserAgent's setIfEmpty check.
+	stampDeviceFromUserAgent(sessionData)
 	// Stamp the player's current play_id + attempt_id on the session
 	// so the SSE stream (and downstream analytics) can partition by
 	// playback episode (play_id) and recovery attempt (attempt_id).
@@ -7931,7 +7937,7 @@ func (a *App) normalizeSessionsForResponse(sessions []SessionData) []SessionData
 		setDefault("player_metrics_profile_shift_count", 0)
 		setDefault("loop_count_server", 0)
 		setDefault("player_metrics_loop_count_player", 0)
-		setDefault("player_metrics_loop_count_increment", 0)
+		setDefault("player_metrics_loop_count_delta", 0)
 		bestMbps := bestVariantMbps(session)
 		videoMbps := getFloat(session, "player_metrics_video_bitrate_mbps")
 		if bestMbps > 0 && videoMbps > 0 {

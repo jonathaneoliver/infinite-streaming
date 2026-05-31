@@ -26,6 +26,7 @@ import { computed, ref, toRef } from 'vue';
 import MetricsLineChart, { type SeriesSpec } from './MetricsLineChart.vue';
 import { useChartCoordination } from '@/composables/useChartCoordination';
 import { useManifestVariants } from '@/composables/useManifestVariants';
+import { usePlayer } from '@/composables/usePlayer';
 import type { Stream } from '@/composables/useSessionTimeSeries';
 import type { PlayerRecord } from '@/repo/v2-repo';
 
@@ -41,6 +42,7 @@ const props = defineProps<{
 const coord = useChartCoordination(toRef(props, 'playerId'));
 const yMax = computed(() => coord.state.bandwidthYMax);
 const { variants: usePlayerVariants } = useManifestVariants(toRef(props, 'playerId'));
+const { player } = usePlayer(toRef(props, 'playerId'));
 
 /** Per-segment markers — OFF by default. Operator opts in via the
  *  synthetic legend chip in MetricsLineChart (issue #486). The chip
@@ -90,7 +92,15 @@ const variants = computed<ManifestVariantLite[]>(() => {
  *  request throughput overlaid on the heartbeat-averaged line. Colors
  *  by event type — segment dots are slate, playlist dots blue, key
  *  fetches orange — so the role of each request is visible at a glance. */
+// AVMetrics is iOS-AVPlayer-only. Gate both the data AND the legend
+// label so non-iOS players don't see "Per-segment throughput (AVMetrics)"
+// at all — MetricsLineChart renders the legend entry whenever the label
+// prop is non-empty, regardless of whether there's data.
+const isAVPlayerForMarkers = computed(() => player.value?.player_metrics?.player_tech === 'AVPlayer');
+const segmentMarkersLabel = computed(() => isAVPlayerForMarkers.value ? 'Per-segment throughput (AVMetrics)' : '');
+
 const segmentMarkers = computed(() => {
+  if (!isAVPlayerForMarkers.value) return [];
   const stream = props.avmetricsStream;
   if (!stream) return [];
   void stream.version.value;
@@ -340,7 +350,7 @@ const series = computed<SeriesSpec[]>(() => {
     :series="series"
     :events-stream="eventsStream"
     :markers="segmentMarkers"
-    markers-label="Per-segment throughput (AVMetrics)"
+    :markers-label="segmentMarkersLabel"
     v-model:markers-visible="segmentMarkersVisible"
     :y-min="0"
     :y-max="yMax"

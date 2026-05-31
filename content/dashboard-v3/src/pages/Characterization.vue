@@ -31,7 +31,7 @@ interface PlayRow {
   stalls: number | string;
   bitrate_shifts: number | string;
   resolution_changes: number | string;
-  dropped_frames: number;
+  frames_dropped: number;
   error_event_count: number | string;
   first_frame_s: number | null;
   last_player_error: string | null;
@@ -75,7 +75,7 @@ interface CharRunSummary {
   total_stalls?: number;
   total_stall_seconds?: number;
   profile_shifts?: number;
-  dropped_frames?: number;
+  frames_dropped?: number;
   sample_count?: number;
   mean_bitrate_mbps?: number;
   min_bitrate_mbps?: number;
@@ -262,7 +262,7 @@ interface StartupCycleRow {
   upshifts_in_30s?: number;
   downshifts_in_30s?: number;
   stalls_in_30s?: number;
-  dropped_frames_in_30s?: number;
+  frames_dropped_in_30s?: number;
   settled_variant?: string;
   network_bitrate_at_start_mbps?: number;
   network_bitrate_at_30s_mbps?: number;
@@ -759,7 +759,7 @@ function stepWindow(report: ReportBlob, stepIdx: number): { startMs: number; end
                           <tr v-if="expandedSteps.get(charRunKey(g.run_id, t))!.report!.summary?.highest_stalling_cap_mbps"><td class="label">highest stalling cap</td><td class="value mono">{{ fmtMbps(expandedSteps.get(charRunKey(g.run_id, t))!.report!.summary!.highest_stalling_cap_mbps) }}</td></tr>
                           <tr><td class="label">stalls</td><td class="value mono">{{ expandedSteps.get(charRunKey(g.run_id, t))!.report!.summary?.total_stalls ?? 0 }} ({{ (expandedSteps.get(charRunKey(g.run_id, t))!.report!.summary?.total_stall_seconds ?? 0).toFixed(1) }}s)</td></tr>
                           <tr><td class="label">profile shifts</td><td class="value mono">{{ expandedSteps.get(charRunKey(g.run_id, t))!.report!.summary?.profile_shifts ?? 0 }}</td></tr>
-                          <tr><td class="label">dropped frames</td><td class="value mono">{{ expandedSteps.get(charRunKey(g.run_id, t))!.report!.summary?.dropped_frames ?? 0 }}</td></tr>
+                          <tr><td class="label">dropped frames</td><td class="value mono">{{ expandedSteps.get(charRunKey(g.run_id, t))!.report!.summary?.frames_dropped ?? 0 }}</td></tr>
                           <tr><td class="label">samples</td><td class="value mono">{{ expandedSteps.get(charRunKey(g.run_id, t))!.report!.summary?.sample_count ?? 0 }}</td></tr>
                           <tr v-if="expandedSteps.get(charRunKey(g.run_id, t))!.report!.summary?.min_bitrate_mbps != null">
                             <td class="label">bitrate min / mean / max</td>
@@ -945,7 +945,7 @@ function stepWindow(report: ReportBlob, stepIdx: number): { startMs: number; end
                         <tr v-if="expandedSteps.get(charRunKey(g.run_id, t))!.report!.summary?.highest_stalling_cap_mbps"><td class="label">highest stalling cap</td><td class="value mono">{{ fmtMbps(expandedSteps.get(charRunKey(g.run_id, t))!.report!.summary!.highest_stalling_cap_mbps) }}</td></tr>
                         <tr><td class="label">stalls</td><td class="value mono">{{ expandedSteps.get(charRunKey(g.run_id, t))!.report!.summary?.total_stalls ?? 0 }} ({{ (expandedSteps.get(charRunKey(g.run_id, t))!.report!.summary?.total_stall_seconds ?? 0).toFixed(1) }}s)</td></tr>
                         <tr><td class="label">profile shifts</td><td class="value mono">{{ expandedSteps.get(charRunKey(g.run_id, t))!.report!.summary?.profile_shifts ?? 0 }}</td></tr>
-                        <tr><td class="label">dropped frames</td><td class="value mono">{{ expandedSteps.get(charRunKey(g.run_id, t))!.report!.summary?.dropped_frames ?? 0 }}</td></tr>
+                        <tr><td class="label">dropped frames</td><td class="value mono">{{ expandedSteps.get(charRunKey(g.run_id, t))!.report!.summary?.frames_dropped ?? 0 }}</td></tr>
                         <tr><td class="label">samples</td><td class="value mono">{{ expandedSteps.get(charRunKey(g.run_id, t))!.report!.summary?.sample_count ?? 0 }}</td></tr>
                         <tr v-if="expandedSteps.get(charRunKey(g.run_id, t))!.report!.summary?.min_bitrate_mbps != null">
                           <td class="label">bitrate min / mean / max</td>

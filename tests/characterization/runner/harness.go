@@ -33,8 +33,9 @@ type PlayerRecord struct {
 	UserAgent  string     `json:"user_agent"`
 	Labels     map[string]string `json:"labels"`
 	CurrentPlay *struct {
-		ID       string `json:"id"`
-		Manifest struct {
+		ID        string `json:"id"`
+		AttemptID int    `json:"attempt_id"`
+		Manifest  struct {
 			MasterURL string `json:"master_url"`
 			Variants  []struct {
 				Bandwidth        int    `json:"bandwidth"`
@@ -56,7 +57,6 @@ type PlayerRecord struct {
 		BufferEndS             float64 `json:"buffer_end_s"`
 		Stalls                 int     `json:"stalls"`
 		StallTimeS             float64 `json:"stall_time_s"`
-		LastStallTimeS         float64 `json:"last_stall_time_s"`
 		ProfileShiftCount      int     `json:"profile_shift_count"`
 		PlayerRestarts         int     `json:"player_restarts"`
 		VideoBitrateMbps       float64 `json:"video_bitrate_mbps"`
@@ -70,10 +70,52 @@ type PlayerRecord struct {
 		VideoFirstFrameTimeS   float64 `json:"first_frame_time_s"`
 		NetworkBitrateMbps     float64 `json:"network_bitrate_mbps"`
 		AvgNetworkBitrateMbps  float64 `json:"avg_network_bitrate_mbps"`
-		DroppedFrames          int     `json:"dropped_frames"`
+		FramesDropped          int     `json:"frames_dropped"`
 		PositionS              float64 `json:"position_s"`
 		LiveEdgeS              float64 `json:"live_edge_s"`
 		LiveOffsetS            float64 `json:"live_offset_s"`
+
+		// #550 Phase 1 residency accumulators — cumulative ms in each
+		// player state since the current play started. Phase 1
+		// columns in CH (see analytics/clickhouse/init.d/01-schema.sql).
+		// The state_residency characterization test asserts these
+		// after driving the iPad sim through targeted scenarios.
+		PlayingTimeMs       uint32 `json:"playing_time_ms"`
+		PausingTimeMs       uint32 `json:"pausing_time_ms"`
+		BufferingTimeMs     uint32 `json:"buffering_time_ms"`
+		StallingTimeMs      uint32 `json:"stalling_time_ms"`
+		IdlingTimeMs        uint32 `json:"idling_time_ms"`
+		SeekingTimeMs       uint32 `json:"seeking_time_ms"`
+		TrickplayingTimeMs  uint32 `json:"trickplaying_time_ms"`
+		PlayingCount        uint32 `json:"playing_count"`
+		PausingCount        uint32 `json:"pausing_count"`
+		BufferingCount      uint32 `json:"buffering_count"`
+		StallingCount       uint32 `json:"stalling_count"`
+		IdlingCount         uint32 `json:"idling_count"`
+		SeekingCount        uint32 `json:"seeking_count"`
+		TrickplayingCount   uint32 `json:"trickplaying_count"`
+
+		// #550 Phase 2 outcome — final classification (in_progress,
+		// completed, user_stopped, start_failure, mid_stream_failure,
+		// abandoned_start). PlaybackReason carries the *cause* on
+		// terminal rows (e.g. "natural_eof", "decoder_runtime") and
+		// mirrors player_state on in_progress rows.
+		PlaybackStatus      string `json:"playback_status"`
+		PlaybackReason      string `json:"playback_reason"`
+		ErrorCount          uint32 `json:"error_count"`
+		ErrorCode           int32  `json:"error_code"`
+		ErrorDomain         string `json:"error_domain"`
+		TerminalErrorCode   int32  `json:"terminal_error_code"`
+		TerminalErrorDomain string `json:"terminal_error_domain"`
+
+		// JSON-string-encoded map of variant-label → cumulative
+		// seconds spent at that variant. iOS emits as
+		// `{"2160p@29857kbps":65.28,"1080p@…":12.4}` so test code
+		// must json.Unmarshal into map[string]float64. Preserved
+		// across retry()-style restarts by
+		// PlaybackDiagnostics.snapshotForRestart() — the
+		// RestartPreservesMetrics characterization asserts this.
+		TimePerVariantS string `json:"time_per_variant_s"`
 	} `json:"player_metrics"`
 }
 
@@ -117,6 +159,14 @@ func runHarness(ctx context.Context, args ...string) ([]byte, error) {
 		return out, fmt.Errorf("harness %s: %w", strings.Join(args, " "), err)
 	}
 	return out, nil
+}
+
+// RunHarnessCLI is the exported counterpart to runHarness — lets test
+// packages outside `runner` (e.g. modes/) drive arbitrary harness CLI
+// commands without re-implementing the exec wiring. Inherits the
+// same insecure / json / base-URL flags via harnessArgs.
+func RunHarnessCLI(ctx context.Context, args ...string) ([]byte, error) {
+	return runHarness(ctx, args...)
 }
 
 // ListPlayers returns every player the proxy currently knows about, including

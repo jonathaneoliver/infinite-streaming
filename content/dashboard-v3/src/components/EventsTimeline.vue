@@ -276,11 +276,19 @@ function chRowToIngest(row: Record<string, unknown>): IngestRow | null {
     waitingReason: String(row.waiting_reason ?? '').trim(),
     videoResolution: String(row.video_resolution ?? '').trim(),
     videoBitrateMbps: num(row.video_bitrate_mbps),
-    stalls: num(row.stall_count),
-    droppedFrames: num(row.dropped_frames),
+    // #550 Phase 1 soft cutover: prefer the new canonical column
+    // names; fall back to legacy ones during the deprecation window
+    // so the timeline still renders for historical rows that pre-date
+    // the rename.
+    stalls: num(row.stalling_count) ?? num(row.stall_count),
+    droppedFrames: num(row.frames_dropped),
     error: String(row.player_error ?? ''),
-    firstFrameTimeS: num(row.video_first_frame_time_s),
-    videoStartTimeS: num(row.video_start_time_s),
+    firstFrameTimeS: num(row.video_first_frame_time_ms) != null
+      ? (num(row.video_first_frame_time_ms) as number) / 1000
+      : num(row.video_first_frame_time_s),
+    videoStartTimeS: num(row.video_start_time_ms) != null
+      ? (num(row.video_start_time_ms) as number) / 1000
+      : num(row.video_start_time_s),
     loopCountServer: num(row.loop_count_server),
     controlRevision,
     playId: typeof row.play_id === 'string' ? row.play_id : null,

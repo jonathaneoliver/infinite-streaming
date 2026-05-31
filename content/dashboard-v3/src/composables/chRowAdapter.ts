@@ -28,20 +28,82 @@ function num(v: unknown): number | null {
   return null;
 }
 
+// Normalise a CH JSONEachRow timestamp ("YYYY-MM-DD HH:MM:SS.SSS",
+// no T, no Z) to ISO-with-Z so `new Date(...)` reads it as UTC across
+// all browsers — matching the live PlayerRecord shape from go-proxy
+// (Go RFC3339 always has Z). Empty / already-ISO inputs pass through.
+function toISOWithZ(s: string): string {
+  if (!s) return s;
+  if (s.endsWith('Z') || /[+-]\d{2}:?\d{2}$/.test(s)) return s;
+  const isoBody = s.includes('T') ? s : s.replace(' ', 'T');
+  return isoBody + 'Z';
+}
+
+// #550 Phase 1: convert UInt32-ms to Float seconds for the existing
+// dashboard adapters (panel + charts expect seconds). 0 ms → null so
+// "no data" rows render as "—" instead of "0.000s".
+function msToSeconds(v: unknown): number | null {
+  const n = num(v);
+  if (n == null) return null;
+  // Keep 0 as 0 (not null) — residency counters are valid at 0 when
+  // a state hasn't fired yet. Dashboard tiles should read "0s", not
+  // blank, so the operator can see the counter exists.
+  return n / 1000;
+}
+
+// #550 Phase 1 soft cutover: prefer the new _ms column; fall back to
+// the deprecated _s column on rows that pre-date the migration.
+function msOrSeconds(msV: unknown, sV: unknown): number | null {
+  const fromMs = msToSeconds(msV);
+  if (fromMs != null) return fromMs;
+  return num(sV);
+}
+
 /** Adapter — synthesize a PlayerRecord-shaped object from one CH row.
  *  CH stores flat columns; the v2 wire shape nests them under
  *  player_metrics.* and server_metrics.*. Map here so per-series
  *  accessors and panel templates don't need to know the storage
  *  shape. */
-export function chRowToPlayerRecord(row: Record<string, unknown>): PlayerRecord {
+export interface ChRowContext {
+  /** ISO/CH timestamp of the play's first session_events row. The
+   * brush-end row alone gives us "last seen" but not "first seen";
+   * callers with access to the stream range bounds should pass this
+   * so SessionDetails' "First Request" + "Session Duration" tiles
+   * render the play's real start, not the current cursor's row. */
+  firstSeenAt?: string;
+  /** Maximum control_revision observed across the play. Without this,
+   * SessionDetails' "Control Rev" tile shows the brush-cursor row's
+   * value (mid-play, may be older than the play's final mutation
+   * count) — confusing when comparing to the live Testing dashboard
+   * which always reports the latest. SessionDisplay walks the stream
+   * once via inRange() and passes the max. */
+  maxControlRevision?: string;
+  /** Maximum attempt_id observed across the play. attempt_id =
+   * recovery-attempt counter (1 on initial play, +1 on every
+   * restart/auto-recovery). The play's max is "how many tries did
+   * this play take" — meaningful at the play level even though
+   * attempt_id is per-snapshot in the schema. */
+  maxAttemptId?: number;
+}
+
+export function chRowToPlayerRecord(
+  row: Record<string, unknown>,
+  ctx?: ChRowContext,
+): PlayerRecord {
   const playerMetrics = {
     event_time: typeof row.event_time === 'string' ? row.event_time
       : (typeof row.ts === 'string' ? row.ts : ''),
     state: typeof row.player_state === 'string' ? row.player_state : '',
     waiting_reason: typeof row.waiting_reason === 'string' ? row.waiting_reason : '',
+    state_from: typeof row.state_from === 'string' ? row.state_from : '',
+    state_to: typeof row.state_to === 'string' ? row.state_to : '',
+    content_name: typeof row.content_name === 'string' ? row.content_name : '',
+    user_marked_at: typeof row.user_marked_at === 'string' ? row.user_marked_at : '',
+    frames_rate: num(row.frames_rate),
     error: typeof row.player_error === 'string' ? row.player_error : '',
     video_resolution: typeof row.video_resolution === 'string' ? row.video_resolution : '',
     display_resolution: typeof row.display_resolution === 'string' ? row.display_resolution : '',
+    fetching_resolution: typeof row.fetching_resolution === 'string' ? row.fetching_resolution : '',
     video_bitrate_mbps: num(row.video_bitrate_mbps),
     network_bitrate_mbps: num(row.network_bitrate_mbps),
     avg_network_bitrate_mbps: num(row.avg_network_bitrate_mbps),
@@ -50,12 +112,59 @@ export function chRowToPlayerRecord(row: Record<string, unknown>): PlayerRecord 
     live_offset_s: num(row.live_offset_s),
     true_offset_s: num(row.true_offset_s),
     frames_displayed: num(row.frames_displayed),
-    dropped_frames: num(row.dropped_frames),
-    // CH stores `stall_count`; v2 wire uses `stalls`.
-    stalls: num(row.stall_count),
-    stall_time_s: num(row.stall_time_s),
-    first_frame_time_s: num(row.video_first_frame_time_s),
-    video_start_time_s: num(row.video_start_time_s),
+    frames_dropped: num(row.frames_dropped),
+    // #550 Phase 1: prefer the new gerund-named ms columns; fall
+    // back to the deprecated _s variants during the soft cutover so
+    // pre-migration historical rows still render. The forwarder
+    // mirror-writes both during the deprecation window.
+    stalls: num(row.stalling_count) || num(row.stall_count),
+    stall_time_s: msOrSeconds(row.stalling_time_ms, row.stall_time_s),
+    first_frame_time_s: msOrSeconds(row.video_first_frame_time_ms, row.video_first_frame_time_s),
+    video_start_time_s: msOrSeconds(row.video_start_time_ms, row.video_start_time_s),
+    // #550 Phase 1: new residency + delta columns + sticky durations.
+    playing_time_s: msToSeconds(row.playing_time_ms),
+    pausing_time_s: msToSeconds(row.pausing_time_ms),
+    buffering_time_s: msToSeconds(row.buffering_time_ms),
+    stalling_time_s: msToSeconds(row.stalling_time_ms),
+    idling_time_s: msToSeconds(row.idling_time_ms),
+    seeking_time_s: msToSeconds(row.seeking_time_ms),
+    trickplaying_time_s: msToSeconds(row.trickplaying_time_ms),
+    playing_count: num(row.playing_count),
+    pausing_count: num(row.pausing_count),
+    buffering_count: num(row.buffering_count),
+    stalling_count: num(row.stalling_count),
+    idling_count: num(row.idling_count),
+    seeking_count: num(row.seeking_count),
+    trickplaying_count: num(row.trickplaying_count),
+    stall_duration_s: msToSeconds(row.stall_duration_ms),
+    buffering_duration_s: msToSeconds(row.buffering_duration_ms),
+    // Orthogonal "this stall won't auto-recover" discriminator. True
+    // when AVPlayer transitioned stalled → .paused (give-up) and the
+    // app must call play() to resume. PLAYERSTATE lane stays on
+    // "stalled"; this flag drives the chip the operator sees.
+    stall_stuck: row.stall_stuck === true || row.stall_stuck === 'true' || row.stall_stuck === 1,
+    // Per-variant dwell map. CH stores as JSON string; pass through
+    // as-is and let PlayerMetrics.vue's parser handle decode. Empty
+    // string ⇒ "no variant data" path in the consumer.
+    time_per_variant_s: typeof row.time_per_variant_s === 'string' ? row.time_per_variant_s : '',
+    // #550 Phase 2: outcome + structured error fields.
+    playback_status: typeof row.playback_status === 'string' ? row.playback_status : '',
+    playback_reason: typeof row.playback_reason === 'string' ? row.playback_reason : '',
+    error_code: num(row.error_code),
+    error_domain: typeof row.error_domain === 'string' ? row.error_domain : '',
+    error_details: typeof row.error_details === 'string' ? row.error_details : '',
+    terminal_error_code: num(row.terminal_error_code),
+    terminal_error_domain: typeof row.terminal_error_domain === 'string' ? row.terminal_error_domain : '',
+    error_count: num(row.error_count),
+    // #550 Phase 4: device / platform taxonomy.
+    os_version_major: num(row.os_version_major),
+    os_version_minor: num(row.os_version_minor),
+    app_version: typeof row.app_version === 'string' ? row.app_version : '',
+    device_class: typeof row.device_class === 'string' ? row.device_class : '',
+    device_model: typeof row.device_model === 'string' ? row.device_model : '',
+    player_tech: typeof row.player_tech === 'string' ? row.player_tech : '',
+    // Orientation-aware "WxH"; supersedes screen_width_px / _height_px / _density.
+    device_resolution: typeof row.device_resolution === 'string' ? row.device_resolution : '',
     // panel_v1 bundle additions — populated only when the request
     // included the panel_v1 bundle (testing.html + session-viewer).
     // Without this bundle these columns aren't projected and the
@@ -69,8 +178,14 @@ export function chRowToPlayerRecord(row: Record<string, unknown>): PlayerRecord 
     live_edge_s: num(row.live_edge_s),
     source: typeof row.metrics_source === 'string' ? row.metrics_source : null,
     loop_count_player: num(row.loop_count_player),
-    last_stall_time_s: num(row.last_stall_time_s),
+    loop_count_delta: num(row.loop_count_delta),
+    // #550 Phase 1: stall_duration_ms is the sticky per-event duration.
+    // Legacy last_stall_time_s column dropped from schema; the dashboard
+    // property name stays the same for PlayerMetrics back-compat.
+    last_stall_time_s: msToSeconds(row.stall_duration_ms),
     video_quality_pct: num(row.video_quality_pct),
+    video_quality_60s_pct: num(row.video_quality_60s_pct),
+    video_quality_avg_pct: num(row.video_quality_avg_pct),
     playhead_wallclock_ms: num(row.playhead_wallclock_ms),
     player_restarts: num(row.player_restarts),
     profile_shift_count: num(row.profile_shift_count),
@@ -134,17 +249,66 @@ export function chRowToPlayerRecord(row: Record<string, unknown>): PlayerRecord 
   // in the chart memory.
   const rawSession = {
     effective_rate_limit_mbps: num(row.effective_rate_limit_mbps),
+    // Identity fields SessionDetails.vue reads from raw_session (port)
+    // and group_id (top-level). Mirror the keys the live PlayerRecord
+    // shape uses so the same component renders both paths.
+    group_id: typeof row.group_id === 'string' ? row.group_id : undefined,
+    x_forwarded_port: row.x_forwarded_port != null ? Number(row.x_forwarded_port) : undefined,
+    x_forwarded_port_external: row.x_forwarded_port_external != null
+      ? Number(row.x_forwarded_port_external)
+      : undefined,
   };
+
+  // Identity / lifecycle fields SessionDetails.vue reads at the top
+  // level (matching the live PlayerRecord shape from /api/v2/players).
+  //
+  // Timestamp normalisation: ClickHouse JSONEachRow emits DateTime64
+  // as "YYYY-MM-DD HH:MM:SS.SSS" — no T separator, no Z suffix. Some
+  // browsers interpret that as LOCAL time when fed to `new Date(...)`,
+  // while the live PlayerRecord (Go RFC3339) always has the Z, parsed
+  // as UTC. The mismatch made archive timestamps render hours off in
+  // SessionDetails' fmtDate. Normalise CH-format → ISO-with-Z so both
+  // paths display identical wall-clock times.
+  const lastSeenAt = toISOWithZ(typeof row.event_time === 'string' ? row.event_time
+    : (typeof row.ts === 'string' ? row.ts : ''));
+  const userAgent = typeof row.user_agent === 'string' ? row.user_agent : undefined;
+  const playerIp = typeof row.player_ip === 'string' ? row.player_ip : undefined;
+  const originationIp = typeof row.origination_ip === 'string' ? row.origination_ip : undefined;
+  // master_manifest_url is the master playlist the player loaded
+  // (rendered as "Master Manifest URL" in SessionDetails). Fall back
+  // to manifest_url (the variant playlist) only if the master column
+  // wasn't projected.
+  const masterUrl = typeof row.master_manifest_url === 'string' && row.master_manifest_url
+    ? row.master_manifest_url
+    : (typeof row.manifest_url === 'string' ? row.manifest_url : undefined);
 
   return {
     id: typeof row.player_id === 'string' ? row.player_id : '',
-    last_seen_at: typeof row.event_time === 'string' ? row.event_time
-      : (typeof row.ts === 'string' ? row.ts : ''),
+    // SessionDetails reads p.display_id; matches the live PlayerRecord
+    // shape from v2translate which projects session_number → DisplayId.
+    display_id: num(row.session_number) ?? undefined,
+    last_seen_at: lastSeenAt,
+    first_seen_at: ctx?.firstSeenAt ?? lastSeenAt,
+    user_agent: userAgent,
+    player_ip: playerIp,
+    origination_ip: originationIp,
+    server_received_at_ms: num(row.server_received_at_ms) ?? undefined,
     player_metrics: playerMetrics,
     server_metrics: serverMetrics,
-    current_play: typeof row.play_id === 'string' ? { id: row.play_id } : null,
+    current_play: typeof row.play_id === 'string'
+      ? {
+          id: row.play_id,
+          attempt_id: ctx?.maxAttemptId ?? (num(row.attempt_id) ?? undefined),
+          manifest: masterUrl ? { master_url: masterUrl } : undefined,
+        }
+      : null,
     loop_count_server: num(row.loop_count_server),
-    control_revision: row.control_revision == null ? undefined : String(row.control_revision),
+    // control_revision is now String — go-proxy's RFC3339Nano "ETag".
+    // Type-changed-in-place via DROP UInt64 + RENAME control_revision_str
+    // → control_revision. maxControlRevision from ctx wins when present
+    // (final value across the play).
+    control_revision: ctx?.maxControlRevision
+      ?? (typeof row.control_revision === 'string' ? row.control_revision : undefined),
     shape,
     raw_session: rawSession,
     // current_play.manifest.* isn't persisted per-snapshot; EventsTimeline

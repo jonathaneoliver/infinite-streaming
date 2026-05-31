@@ -222,6 +222,7 @@ const chatScope = computed<ChatScope>(() => ({
           :player-id="playerId"
           :play-id="playIdRef"
           hide-session-details
+          follow-live
         />
 
       </template>

@@ -46,7 +46,7 @@ type tailSampleRow struct {
 	RenditionMbps       any    `json:"rendition_mbps,omitempty"`
 	ShaperLimitMbps     any    `json:"shaper_limit_mbps,omitempty"`
 	FpsRunning          any    `json:"fps_running,omitempty"`
-	DroppedFramesDelta  any    `json:"dropped_frames_delta,omitempty"`
+	FramesDroppedDelta  any    `json:"frames_dropped_delta,omitempty"`
 	Downshifts          any    `json:"downshifts,omitempty"`
 }
 
@@ -157,7 +157,7 @@ func formatSampleRow(r tailSampleRow) string {
 		fps = fmt.Sprintf("%4.1f", f)
 	}
 	drops := "—"
-	if n, ok := anyInt(r.DroppedFramesDelta); ok && n > 0 {
+	if n, ok := anyInt(r.FramesDroppedDelta); ok && n > 0 {
 		drops = fmt.Sprintf("Δdrop=%d", n)
 	}
 	return fmt.Sprintf("%s  %-10s buf=%-6s rtt=%-7s bw=%-11s rend=%-11s fps=%-4s %s",

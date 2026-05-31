@@ -768,6 +768,11 @@ deploy-androidtv:
 uninstall-androidtv:
 	$(ANDROID_SDK_HOME)/platform-tools/adb uninstall com.infinitestream.player 2>/dev/null || true
 
+# Google TV runs Android TV OS — same APK, same gradle install path.
+# Alias so muscle memory works either way.
+deploy-googletv: deploy-androidtv
+uninstall-googletv: uninstall-androidtv
+
 # ── Synthetic test pattern ─────────────────────────────────────────────
 # Generate a 4K mezzanine file from FFmpeg's `testsrc` source (colour
 # chart + scrolling gradient + built-in timestamp) with a solid-colour

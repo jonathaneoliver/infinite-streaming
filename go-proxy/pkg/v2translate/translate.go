@@ -224,14 +224,38 @@ func playerMetricsFromSession(s map[string]any) *oapigen.PlayerMetrics {
 	}{
 		{"player_metrics_video_resolution", &pm.VideoResolution},
 		{"player_metrics_display_resolution", &pm.DisplayResolution},
+		{"player_metrics_fetching_resolution", &pm.FetchingResolution},
 		{"player_metrics_last_event", &pm.LastEvent},
 		{"player_metrics_trigger_type", &pm.TriggerType},
 		{"player_metrics_state", &pm.State},
+		{"player_metrics_state_from", &pm.StateFrom},
+		{"player_metrics_state_to", &pm.StateTo},
+		{"player_metrics_content_name", &pm.ContentName},
+		{"player_metrics_user_marked_at", &pm.UserMarkedAt},
 		{"player_metrics_waiting_reason", &pm.WaitingReason},
 		{"player_metrics_browser_family", &pm.BrowserFamily},
 		{"player_metrics_playback_engine", &pm.PlaybackEngine},
 		{"player_metrics_error", &pm.Error},
 		{"player_metrics_source", &pm.Source},
+		// #550 Phase 2: outcome + error string fields.
+		{"player_metrics_playback_status", &pm.PlaybackStatus},
+		{"player_metrics_playback_reason", &pm.PlaybackReason},
+		{"player_metrics_error_domain", &pm.ErrorDomain},
+		{"player_metrics_error_details", &pm.ErrorDetails},
+		{"player_metrics_terminal_error_domain", &pm.TerminalErrorDomain},
+		{"player_metrics_terminal_error_details", &pm.TerminalErrorDetails},
+		// #550 Phase 4: device taxonomy string fields.
+		{"player_metrics_app_version", &pm.AppVersion},
+		{"player_metrics_device_class", &pm.DeviceClass},
+		{"player_metrics_device_model", &pm.DeviceModel},
+		{"player_metrics_player_tech", &pm.PlayerTech},
+		// Per-variant dwell map — iOS emits as JSON-string for compactness.
+		// Dashboard parses on the client side via JSON.parse.
+		{"player_metrics_time_per_variant_s", &pm.TimePerVariantS},
+		// Orientation-aware physical-pixel screen resolution. Same
+		// "WxH" format as video_resolution / display_resolution for
+		// side-by-side comparison.
+		{"player_metrics_device_resolution", &pm.DeviceResolution},
 	} {
 		if v, ok := s[m.key].(string); ok && v != "" {
 			vv := v
@@ -246,7 +270,10 @@ func playerMetricsFromSession(s map[string]any) *oapigen.PlayerMetrics {
 		dst **float32
 	}{
 		{"player_metrics_video_bitrate_mbps", &pm.VideoBitrateMbps},
+		{"player_metrics_frames_rate", &pm.FramesRate},
 		{"player_metrics_video_quality_pct", &pm.VideoQualityPct},
+		{"player_metrics_video_quality_60s_pct", &pm.VideoQuality60sPct},
+		{"player_metrics_video_quality_avg_pct", &pm.VideoQualityAvgPct},
 		{"player_metrics_avg_network_bitrate_mbps", &pm.AvgNetworkBitrateMbps},
 		{"player_metrics_network_bitrate_mbps", &pm.NetworkBitrateMbps},
 		{"player_metrics_buffer_depth_s", &pm.BufferDepthS},
@@ -260,7 +287,6 @@ func playerMetricsFromSession(s map[string]any) *oapigen.PlayerMetrics {
 		{"player_metrics_video_first_frame_time_s", &pm.FirstFrameTimeS},
 		{"player_metrics_video_start_time_s", &pm.VideoStartTimeS},
 		{"player_metrics_stall_time_s", &pm.StallTimeS},
-		{"player_metrics_last_stall_time_s", &pm.LastStallTimeS},
 	} {
 		if v, ok := numericFloatTranslate(s[m.key]); ok {
 			f := float32(v)
@@ -277,12 +303,41 @@ func playerMetricsFromSession(s map[string]any) *oapigen.PlayerMetrics {
 		{"player_metrics_stalls", &pm.Stalls},
 		{"player_metrics_stall_count", &pm.Stalls}, // v1 alias
 		{"player_metrics_frames_displayed", &pm.FramesDisplayed},
-		{"player_metrics_dropped_frames", &pm.DroppedFrames},
+		{"player_metrics_frames_dropped", &pm.FramesDropped},
 		{"player_restarts", &pm.PlayerRestarts},
 		{"player_metrics_loop_count_player", &pm.LoopCountPlayer},
-		{"player_metrics_loop_count_increment", &pm.LoopCountIncrement},
+		{"player_metrics_loop_count_delta", &pm.LoopCountDelta},
 		{"player_metrics_profile_shift_count", &pm.ProfileShiftCount},
 		{"player_metrics_playhead_wallclock_ms", &pm.PlayheadWallclockMs},
+		// #550 Phase 1: residency accumulators + per-event durations.
+		{"player_metrics_playing_time_ms", &pm.PlayingTimeMs},
+		{"player_metrics_playing_count", &pm.PlayingCount},
+		{"player_metrics_pausing_time_ms", &pm.PausingTimeMs},
+		{"player_metrics_pausing_count", &pm.PausingCount},
+		{"player_metrics_buffering_time_ms", &pm.BufferingTimeMs},
+		{"player_metrics_buffering_count", &pm.BufferingCount},
+		{"player_metrics_stalling_time_ms", &pm.StallingTimeMs},
+		{"player_metrics_stalling_count", &pm.StallingCount},
+		{"player_metrics_idling_time_ms", &pm.IdlingTimeMs},
+		{"player_metrics_idling_count", &pm.IdlingCount},
+		{"player_metrics_seeking_time_ms", &pm.SeekingTimeMs},
+		{"player_metrics_seeking_count", &pm.SeekingCount},
+		{"player_metrics_trickplaying_time_ms", &pm.TrickplayingTimeMs},
+		{"player_metrics_trickplaying_count", &pm.TrickplayingCount},
+		{"player_metrics_stall_duration_ms", &pm.StallDurationMs},
+		{"player_metrics_buffering_duration_ms", &pm.BufferingDurationMs},
+		// stall_stuck is bool-shaped but the session map can carry it
+		// as bool, "true"/"false" string, or 0/1. boolTranslate below
+		// handles all three; this loop just covers the int fields.
+		{"player_metrics_video_first_frame_time_ms", &pm.VideoFirstFrameTimeMs},
+		{"player_metrics_video_start_time_ms", &pm.VideoStartTimeMs},
+		// #550 Phase 2: error code + counter (signed code via int; NSError codes are negative).
+		{"player_metrics_error_code", &pm.ErrorCode},
+		{"player_metrics_terminal_error_code", &pm.TerminalErrorCode},
+		{"player_metrics_error_count", &pm.ErrorCount},
+		// #550 Phase 4: integer device taxonomy fields.
+		{"player_metrics_os_version_major", &pm.OsVersionMajor},
+		{"player_metrics_os_version_minor", &pm.OsVersionMinor},
 	} {
 		if v, ok := numericFloatTranslate(s[m.key]); ok {
 			i := int(v)
@@ -295,10 +350,49 @@ func playerMetricsFromSession(s map[string]any) *oapigen.PlayerMetrics {
 		pm.EventTime = &t
 		any = true
 	}
+
+	// Bool fields — tolerant of native bool, "true"/"false" strings,
+	// and numeric 0/1 from older clients.
+	for _, m := range []struct {
+		key string
+		dst **bool
+	}{
+		{"player_metrics_stall_stuck", &pm.StallStuck},
+	} {
+		if b, ok := boolTranslate(s[m.key]); ok {
+			*m.dst = &b
+			any = true
+		}
+	}
+
 	if !any {
 		return nil
 	}
 	return &pm
+}
+
+// boolTranslate parses raw session-map values into a bool the same way
+// the forwarder's getBool does. Native bool wins; "true"/"false"
+// strings (case-insensitive) translate; numeric non-zero is true.
+// Returns (_, false) when the key is missing or unparseable so the
+// caller can leave the pointer nil and the field stays omitted in JSON.
+func boolTranslate(v any) (bool, bool) {
+	switch x := v.(type) {
+	case bool:
+		return x, true
+	case string:
+		switch strings.ToLower(x) {
+		case "true", "1", "t", "yes":
+			return true, true
+		case "false", "0", "f", "no":
+			return false, true
+		}
+	case float64:
+		return x != 0, true
+	case float32:
+		return x != 0, true
+	}
+	return false, false
 }
 
 // serverMetricsFromSession projects v1's TCP_INFO / ICMP / byte-counter

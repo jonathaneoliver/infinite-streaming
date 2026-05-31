@@ -1629,9 +1629,17 @@
             player_metrics_frames_displayed: displayedFrames,
             player_metrics_total_video_frames: totalFrames,
             player_metrics_dropped_frames: droppedFrames,
-            player_metrics_stall_count: stallCount,
-            player_metrics_stall_time_s: round2(stallTotalMs / 1000),
-            player_metrics_last_stall_time_s: round2(lastStallDurationMs / 1000),
+            // #550 Phase 1: emit canonical *_ms keys. Forwarder
+            // mirror-writes the legacy _s columns from these so
+            // backward consumers still get values.
+            player_metrics_stalling_count: stallCount,
+            player_metrics_stalling_time_ms: Math.max(0, Math.round(stallTotalMs)),
+            player_metrics_stall_duration_ms: Math.max(0, Math.round(lastStallDurationMs)),
+            // Phase 2 minimal: emit playback_status so the forwarder
+            // can default-stamp `in_progress` correctly even from this
+            // legacy emitter. No structured error fields — that's
+            // iOS-only for now.
+            player_metrics_playback_status: 'in_progress',
             play_id: currentPlayId || null,
         };
         const merged = { ...base, ...extra };

@@ -22,6 +22,15 @@ struct PlayerView: UIViewControllerRepresentable {
     /// instant the flip was observed; the consumer (PlayerViewModel)
     /// is responsible for idempotency (resetting on item replace).
     var onFirstFrame: ((Date) -> Void)? = nil
+    /// Fired with the AVPlayerLayer's bounds in PHYSICAL PIXELS
+    /// (points × UIScreen.nativeScale) whenever the layer is resized:
+    /// initial layout, fullscreen toggle, device rotation, window
+    /// resize. The consumer (PlayerViewModel) forwards into
+    /// PlaybackDiagnostics.updateDisplaySize so the heartbeat
+    /// `display_resolution` field tracks the actual render surface
+    /// (vs. `video_resolution` = decoded stream, `device_resolution`
+    /// = full physical screen).
+    var onDisplaySize: ((CGSize) -> Void)? = nil
 
     func makeCoordinator() -> Coordinator {
         Coordinator()
@@ -31,12 +40,9 @@ struct PlayerView: UIViewControllerRepresentable {
         let controller = AVPlayerViewController()
         controller.player = player
         controller.videoGravity = .resizeAspect
-        #if os(tvOS)
         controller.showsPlaybackControls = true
-        #else
-        controller.showsPlaybackControls = false
-        #endif
         context.coordinator.onFirstFrame = onFirstFrame
+        context.coordinator.onDisplaySize = onDisplaySize
         context.coordinator.attach(to: controller, player: player)
         return controller
     }
@@ -50,6 +56,7 @@ struct PlayerView: UIViewControllerRepresentable {
             uiViewController.player = player
         }
         context.coordinator.onFirstFrame = onFirstFrame
+        context.coordinator.onDisplaySize = onDisplaySize
         context.coordinator.attach(to: uiViewController, player: player)
         #if os(tvOS)
         // Rebuild every update so each UIAction closure captures the
@@ -94,11 +101,13 @@ struct PlayerView: UIViewControllerRepresentable {
     /// item replace, so the observer always tracks the live layer.
     final class Coordinator: NSObject {
         var onFirstFrame: ((Date) -> Void)?
+        var onDisplaySize: ((CGSize) -> Void)?
 
         private weak var observedPlayer: AVPlayer?
         private weak var observedLayer: AVPlayerLayer?
         private var readyObservation: NSKeyValueObservation?
         private var sublayerObservation: NSKeyValueObservation?
+        private var boundsObservation: NSKeyValueObservation?
         private var didReportForCurrentLayer: Bool = false
 
         func attach(to controller: AVPlayerViewController, player: AVPlayer) {
@@ -159,6 +168,8 @@ struct PlayerView: UIViewControllerRepresentable {
             readyObservation = nil
             sublayerObservation?.invalidate()
             sublayerObservation = nil
+            boundsObservation?.invalidate()
+            boundsObservation = nil
             observedLayer = nil
             didReportForCurrentLayer = false
         }
@@ -166,8 +177,30 @@ struct PlayerView: UIViewControllerRepresentable {
         private func installReadyObserver(on layer: AVPlayerLayer) {
             if observedLayer === layer { return }
             readyObservation?.invalidate()
+            boundsObservation?.invalidate()
             observedLayer = layer
             didReportForCurrentLayer = false
+            // Track the render surface's pixel size so
+            // PlaybackDiagnostics can publish display_resolution
+            // alongside video_resolution + device_resolution.
+            // .initial fires on attach; subsequent changes cover
+            // rotation, fullscreen toggle, window resize, PIP.
+            #if canImport(UIKit)
+            let scale = UIScreen.main.nativeScale
+            #else
+            let scale: CGFloat = 1.0
+            #endif
+            boundsObservation = layer.observe(\.bounds, options: [.initial, .new]) { [weak self] observed, _ in
+                guard let self else { return }
+                let b = observed.bounds
+                guard b.width > 0 && b.height > 0 else { return }
+                let pixels = CGSize(width: b.width * scale, height: b.height * scale)
+                if Thread.isMainThread {
+                    self.onDisplaySize?(pixels)
+                } else {
+                    DispatchQueue.main.async { [weak self] in self?.onDisplaySize?(pixels) }
+                }
+            }
             // `.initial` lets us fire immediately if the layer is
             // already ready (e.g. SwiftUI re-rendered after first frame
             // already landed).

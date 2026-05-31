@@ -322,6 +322,29 @@ func (a *AppiumLauncher) readAccessibilityValue(ctx context.Context, sessID, id 
 // Requires the iOS app to surface `home-tile-<clip_id>` accessibility
 // identifiers on each LivePreviewTile (see
 // .claude/standards/startup-characterization-test.md).
+// TapByAccessibilityID is the public wrapper around tapByAccessibilityID
+// for tests that need to drive arbitrary AX-tagged UI (Retry / Reload /
+// 911 / settings buttons) outside the home-tile flow.
+//
+// Returns an error if no element with the given identifier is visible
+// — useful for tests that conditionally tap (e.g. "tap retry only when
+// state went to paused").
+func (a *AppiumLauncher) TapByAccessibilityID(ctx context.Context, sess *Session, id string) error {
+	if sess == nil {
+		return errors.New("TapByAccessibilityID: nil session")
+	}
+	if id == "" {
+		return errors.New("TapByAccessibilityID: empty id")
+	}
+	a.mu.Lock()
+	sessID := a.sessions[sess.Device.UDID]
+	a.mu.Unlock()
+	if sessID == "" {
+		return errors.New("TapByAccessibilityID: no active appium session for device")
+	}
+	return a.tapByAccessibilityID(ctx, sessID, id)
+}
+
 func (a *AppiumLauncher) TapTileByClipID(ctx context.Context, sess *Session, clipID string) error {
 	if sess == nil {
 		return errors.New("TapTileByClipID: nil session")

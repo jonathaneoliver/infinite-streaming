@@ -145,6 +145,22 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
     }
     fun onActivityStarted() { _appStopped.value = false }
 
+    /** Wired from MainActivity's BackHandler when leaving the Playback
+     *  route. Picks user_stopped vs abandoned_start based on first-frame
+     *  + elapsed-since-play-start (EBVS). Forwards to PlaybackMetrics
+     *  which classifies ended_buffering / ended_stalling refinement
+     *  client-side before emitting session_end. */
+    fun endSessionForUserBack() {
+        metrics?.endSessionForUserBack()
+    }
+
+    /** App-terminated path — fired from MainActivity's onDestroy /
+     *  the process-lifecycle owner. Best-effort: if the OS reaps us
+     *  before the POST completes, the row stays in_progress. */
+    fun endSessionAsAppTerminated() {
+        metrics?.endSession("user_stopped", "app_terminated")
+    }
+
     fun acquireDecoderLease() { _decoderLeases.update { it + 1 } }
     fun releaseDecoderLease() {
         _decoderLeases.update { (it - 1).coerceAtLeast(0) }
@@ -753,17 +769,23 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
     fun retry() {
         val url = _state.value.currentUrl
         if (url.isEmpty()) return
-        // A retry is a new playback episode — fresh play_id so the
-        // proxy's network log scopes the next round of requests
-        // separately from the one that just failed. Issue #280.
-        regeneratePlayId()
-        val refreshed = withPlayId(url)
-        _state.update { it.copy(currentUrl = refreshed, statusText = refreshed) }
+        // #550 retry contract — recovery attempt WITHIN the same play.
+        // Mirrors iOS PlayerViewModel.retry():
+        //   - play_id stays stable (do NOT rotate)
+        //   - residency + variant-dwell counters preserved across the
+        //     player_item replacement via metrics.snapshotForRestart()
+        //   - the next resetResidency() (inside loadStream's
+        //     onPlaybackStarted) restores from those priors rather
+        //     than zeroing
+        // Reload (separate UI action) rotates play_id + clears priors;
+        // the proxy's network log scopes the new round of requests
+        // accordingly.
+        metrics?.snapshotForRestart()
         // User-driven Retry deserves its own HAR — bypass per-player debounce.
         metrics?.requestHarSnapshot("user_retry", 0, /* force= */ true)
         player.stop()
         player.clearMediaItems()
-        loadStream(refreshed)
+        loadStream(url)
     }
 
     /**
@@ -794,8 +816,16 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
 
     fun reload() {
         metrics?.onRestart("reload")
+        // Fresh play boundary: zero the prior accumulators (variant
+        // dwell etc.) BEFORE releasing the old metrics instance, so
+        // a subsequent retry-flow won't inadvertently inherit values
+        // from before the reload. The new PlaybackMetrics built in
+        // bindMetrics() starts with empty priors anyway, but this
+        // guards against a leak if anyone caches a reference.
+        metrics?.resetForFreshPlay()
         metrics?.release()
         metrics = null
+        boundPlayerView = null
         player.release()
         bandwidthMeter = DefaultBandwidthMeter.Builder(getApplication()).build()
         player = ExoPlayer.Builder(getApplication<Application>())
@@ -810,28 +840,48 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
     // -- Metrics binding -----------------------------------------------------
 
     /**
-     * Bound from the playback screen once the [PlayerView] is composed. We
-     * re-create [PlaybackMetrics] each time because it captures the PlayerView
-     * for display-resolution reads.
+     * Bound from the playback screen once the [PlayerView] is composed.
+     *
+     * IMPORTANT: AndroidView.update fires on every Compose recomposition,
+     * so this gets called many times per second during normal interaction.
+     * It MUST be idempotent — recreating PlaybackMetrics on every call
+     * zeroes the residency / variant-dwell / counters mid-play, which the
+     * dashboard sees as Playing Time / Pausing Time inexplicably resetting.
+     *
+     * We compare PlayerView identity to detect a genuinely-new view (e.g.
+     * after vm.reload() rebuilds the player) and only recreate then.
      */
     fun bindMetrics(view: PlayerView) {
+        if (metrics != null && boundPlayerView === view) return
         metrics?.release()
+        boundPlayerView = view
         metrics = PlaybackMetrics(
             player, view, bandwidthMeter, playerId,
             { _state.value.activeServer?.apiUrl ?: "" },
             { _state.value.currentUrl },
+            // Read selectedContent LIVE per emit (urlProvider pattern)
+            // so a late-arriving content pick lands on the next heartbeat
+            // instead of staying empty if bindMetrics fired before
+            // selectedContent was set.
+            { _state.value.selectedContent },
         ).also { it.start() }
     }
+
+    /** Cached PlayerView reference used by bindMetrics() to short-circuit
+     *  no-op rebinds during Compose recompositions. Reset to null on
+     *  unbindMetrics + reload so the next bind genuinely creates fresh. */
+    private var boundPlayerView: PlayerView? = null
 
     fun unbindMetrics() {
         metrics?.release()
         metrics = null
+        boundPlayerView = null
     }
 
     private fun attachPlayerListeners() {
         player.addListener(object : Player.Listener {
             override fun onPlayerError(error: PlaybackException) {
-                metrics?.onPlayerError(error.message)
+                metrics?.onPlayerError(error)
                 markPlayIdActivity()
                 // Retry on any MediaCodec decoder failure — covers both
                 // NO_MEMORY init failures (lease-counting in
@@ -865,7 +915,13 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
                         kotlinx.coroutines.delay(500)
                         retry()
                     }
+                    return
                 }
+                // No auto-recovery → this error is terminal. Phase 2:
+                // metrics emits a session_end with start_failure (no
+                // first frame yet) or mid_stream_failure (post-first-
+                // frame), stamping playback_status into CH.
+                metrics?.markFatalTerminal(error.message ?: "")
             }
             override fun onRenderedFirstFrame() {
                 tag("main player: first frame for '${_state.value.selectedContent}'")
@@ -918,11 +974,19 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
                 }
                 metrics?.onTimeJump(old.positionMs, new.positionMs, name)
             }
+            override fun onMediaItemTransition(item: MediaItem?, reason: Int) {
+                // Source looped — fire loop counter increment for the
+                // player_metrics_loop_count_player payload field.
+                if (reason == Player.MEDIA_ITEM_TRANSITION_REASON_REPEAT
+                    || reason == Player.MEDIA_ITEM_TRANSITION_REASON_AUTO) {
+                    metrics?.onLoop()
+                }
+            }
         })
         player.addAnalyticsListener(object : AnalyticsListener {
             override fun onDroppedVideoFrames(
                 eventTime: AnalyticsListener.EventTime, droppedFrames: Int, elapsedMs: Long
-            ) { metrics?.onDroppedFrames(droppedFrames) }
+            ) { metrics?.onFramesDropped(droppedFrames) }
 
             override fun onVideoInputFormatChanged(
                 eventTime: AnalyticsListener.EventTime, format: Format,

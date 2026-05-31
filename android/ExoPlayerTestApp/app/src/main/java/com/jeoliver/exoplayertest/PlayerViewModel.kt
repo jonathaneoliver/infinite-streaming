@@ -196,7 +196,7 @@ class PlayerViewModel : ViewModel() {
             // (the instantaneous field) stays unreported.
             "player_metrics_avg_network_bitrate_mbps" to if (bandwidthEstimate > 0) round3(bandwidthEstimate / 1_000_000.0) else null,
             "player_metrics_frames_displayed" to (counters?.renderedOutputBufferCount ?: 0),
-            "player_metrics_dropped_frames" to (counters?.droppedBufferCount ?: 0),
+            "player_metrics_frames_dropped" to (counters?.droppedBufferCount ?: 0),
             "player_metrics_total_video_frames" to ((counters?.renderedOutputBufferCount ?: 0) + (counters?.droppedBufferCount ?: 0)),
             "player_metrics_stall_count" to stallCount,
             "player_metrics_stall_time_s" to round3(totalStallMs / 1000.0),

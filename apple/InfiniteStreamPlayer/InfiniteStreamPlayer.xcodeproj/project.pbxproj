@@ -23,6 +23,7 @@
 		A1A1A1A1A1A1A1A1A1A10056 /* SettingsOverlay.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A11056 /* SettingsOverlay.swift */; };
 		A1A1A1A1A1A1A1A1A1A10057 /* LivePreviewTile.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A11057 /* LivePreviewTile.swift */; };
 		A1A1A1A1A1A1A1A1A1A10058 /* PlaybackDiagnostics.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A11058 /* PlaybackDiagnostics.swift */; };
+		B1B1B1B1B1B1B1B1B1B10001 /* DeviceInfo.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1B1B1B1B1B1B1B1B1B11001 /* DeviceInfo.swift */; };
 		A1A1A1A1A1A1A1A1A1A10059 /* DecodeBudget.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A11059 /* DecodeBudget.swift */; };
 		A1A1A1A1A1A1A1A1A1A10060 /* DiagnosticHUD.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A11060 /* DiagnosticHUD.swift */; };
 		A1A1A1A1A1A1A1A1A1A10061 /* AVMetricsSubscriber.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A11061 /* AVMetricsSubscriber.swift */; };
@@ -46,6 +47,7 @@
 		A2A2A2A2A2A2A2A2A2A20056 /* SettingsOverlay.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A11056 /* SettingsOverlay.swift */; };
 		A2A2A2A2A2A2A2A2A2A20057 /* LivePreviewTile.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A11057 /* LivePreviewTile.swift */; };
 		A2A2A2A2A2A2A2A2A2A20058 /* PlaybackDiagnostics.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A11058 /* PlaybackDiagnostics.swift */; };
+		B2B2B2B2B2B2B2B2B2B20001 /* DeviceInfo.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1B1B1B1B1B1B1B1B1B11001 /* DeviceInfo.swift */; };
 		A2A2A2A2A2A2A2A2A2A20059 /* DecodeBudget.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A11059 /* DecodeBudget.swift */; };
 		A2A2A2A2A2A2A2A2A2A20060 /* DiagnosticHUD.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A11060 /* DiagnosticHUD.swift */; };
 		A2A2A2A2A2A2A2A2A2A20061 /* AVMetricsSubscriber.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A11061 /* AVMetricsSubscriber.swift */; };
@@ -74,6 +76,7 @@
 		A1A1A1A1A1A1A1A1A1A11056 /* SettingsOverlay.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsOverlay.swift; sourceTree = "<group>"; };
 		A1A1A1A1A1A1A1A1A1A11057 /* LivePreviewTile.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LivePreviewTile.swift; sourceTree = "<group>"; };
 		A1A1A1A1A1A1A1A1A1A11058 /* PlaybackDiagnostics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaybackDiagnostics.swift; sourceTree = "<group>"; };
+		B1B1B1B1B1B1B1B1B1B11001 /* DeviceInfo.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceInfo.swift; sourceTree = "<group>"; };
 		A1A1A1A1A1A1A1A1A1A11059 /* DecodeBudget.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DecodeBudget.swift; sourceTree = "<group>"; };
 		A1A1A1A1A1A1A1A1A1A11060 /* DiagnosticHUD.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiagnosticHUD.swift; sourceTree = "<group>"; };
 		A1A1A1A1A1A1A1A1A1A11061 /* AVMetricsSubscriber.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AVMetricsSubscriber.swift; sourceTree = "<group>"; };
@@ -138,6 +141,7 @@
 				A1A1A1A1A1A1A1A1A1A11056 /* SettingsOverlay.swift */,
 				A1A1A1A1A1A1A1A1A1A11057 /* LivePreviewTile.swift */,
 				A1A1A1A1A1A1A1A1A1A11058 /* PlaybackDiagnostics.swift */,
+				B1B1B1B1B1B1B1B1B1B11001 /* DeviceInfo.swift */,
 				A1A1A1A1A1A1A1A1A1A11059 /* DecodeBudget.swift */,
 				A1A1A1A1A1A1A1A1A1A11060 /* DiagnosticHUD.swift */,
 				A1A1A1A1A1A1A1A1A1A11061 /* AVMetricsSubscriber.swift */,
@@ -187,6 +191,7 @@
 			isa = PBXNativeTarget;
 			buildConfigurationList = A1A1A1A1A1A1A1A1A1A17001 /* Build configuration list for PBXNativeTarget "InfiniteStreamPlayer (iOS)" */;
 			buildPhases = (
+				C1C1C1C1C1C1C1C1C1C10001 /* Sync version from repo VERSION */,
 				A1A1A1A1A1A1A1A1A1A18001 /* Sources */,
 				A1A1A1A1A1A1A1A1A1A14001 /* Frameworks */,
 				A1A1A1A1A1A1A1A1A1A19001 /* Resources */,
@@ -204,6 +209,7 @@
 			isa = PBXNativeTarget;
 			buildConfigurationList = A2A2A2A2A2A2A2A2A2A27001 /* Build configuration list for PBXNativeTarget "InfiniteStreamPlayer (tvOS)" */;
 			buildPhases = (
+				C2C2C2C2C2C2C2C2C2C20001 /* Sync version from repo VERSION */,
 				A2A2A2A2A2A2A2A2A2A28001 /* Sources */,
 				A2A2A2A2A2A2A2A2A2A24001 /* Frameworks */,
 				A2A2A2A2A2A2A2A2A2A29001 /* Resources */,
@@ -272,6 +278,49 @@
 		};
 /* End PBXResourcesBuildPhase section */
 
+/* Begin PBXShellScriptBuildPhase section */
+		C1C1C1C1C1C1C1C1C1C10001 /* Sync version from repo VERSION */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+			);
+			name = "Sync version from repo VERSION";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+				"$(SRCROOT)/InfiniteStreamPlayer-iOS/Info.plist",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "# Generate AppVersionGenerated.swift with the canonical version\n# from the repo-root VERSION file. Keeps the iOS / tvOS app in\n# lockstep with the rest of the stack (Android build.gradle reads\n# the same file; server image tag uses VERSION; dashboard \"What's\n# New\" banner reads /api/version which is fed from VERSION at\n# server build time). Strips the leading `v` so `v2.0.0` -> `2.0.0`.\n#\n# Writes to a Swift source file rather than the Info.plist. The\n# Info.plist approach failed silently — Xcode locks the source\n# plist during build and reverts post-codesign edits to the built\n# plist. A Swift constant compiled into the binary works the\n# first time and is what DeviceInfo.swift's appVersion reads.\n#\n# The file is committed under source control with a placeholder so\n# SwiftUI previews work without the script running. The diff is\n# no-op when VERSION matches the placeholder.\nVERSION_FILE=\"${SRCROOT}/../../VERSION\"\nif [ ! -f \"$VERSION_FILE\" ]; then\n  echo \"warning: VERSION file not found at $VERSION_FILE; leaving AppVersionGenerated.swift unchanged\"\n  exit 0\nfi\nVERSION=$(cat \"$VERSION_FILE\" | tr -d '\\n' | sed 's/^v//')\nif [ -z \"$VERSION\" ]; then\n  echo \"warning: VERSION file empty; leaving AppVersionGenerated.swift unchanged\"\n  exit 0\nfi\n# Update the source Info.plist's CFBundleShortVersionString so both\n# Apple's binary metadata (App Store, TestFlight, About panes) AND\n# the iOS app's runtime telemetry (DeviceInfo.swift reads it via\n# Bundle.main.infoDictionary) match the canonical VERSION. The\n# sandbox grants write permission because the plist is declared\n# in this phase's outputPaths. INFOPLIST_FILE is set per-target\n# by Xcode so each phase touches only its own plist.\nPLIST=\"${SRCROOT}/${INFOPLIST_FILE}\"\nif [ -f \"$PLIST\" ]; then\n  CURRENT=$(/usr/libexec/PlistBuddy -c \"Print :CFBundleShortVersionString\" \"$PLIST\" 2>/dev/null || true)\n  if [ \"$CURRENT\" != \"$VERSION\" ]; then\n    /usr/libexec/PlistBuddy -c \"Set :CFBundleShortVersionString $VERSION\" \"$PLIST\" 2>/dev/null \\\n      || /usr/libexec/PlistBuddy -c \"Add :CFBundleShortVersionString string $VERSION\" \"$PLIST\" \\\n      || echo \"warning: failed to update $PLIST\"\n    echo \"CFBundleShortVersionString set to $VERSION in $PLIST\"\n  fi\nfi\n";
+		};
+		C2C2C2C2C2C2C2C2C2C20001 /* Sync version from repo VERSION */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+			);
+			name = "Sync version from repo VERSION";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+				"$(SRCROOT)/InfiniteStreamPlayer-tvOS/Info.plist",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "# tvOS counterpart of the iOS Swift-generation script. Both\n# targets compile the shared AppVersionGenerated.swift file, so\n# this phase writes the same content the iOS phase does. Either\n# target's build will produce the same file — last writer wins\n# (idempotent since both reads the same VERSION).\nVERSION_FILE=\"${SRCROOT}/../../VERSION\"\nif [ ! -f \"$VERSION_FILE\" ]; then\n  echo \"warning: VERSION file not found at $VERSION_FILE; leaving AppVersionGenerated.swift unchanged\"\n  exit 0\nfi\nVERSION=$(cat \"$VERSION_FILE\" | tr -d '\\n' | sed 's/^v//')\nif [ -z \"$VERSION\" ]; then\n  echo \"warning: VERSION file empty; leaving AppVersionGenerated.swift unchanged\"\n  exit 0\nfi\n# Update the source Info.plist's CFBundleShortVersionString so both\n# Apple's binary metadata (App Store, TestFlight, About panes) AND\n# the iOS app's runtime telemetry (DeviceInfo.swift reads it via\n# Bundle.main.infoDictionary) match the canonical VERSION. The\n# sandbox grants write permission because the plist is declared\n# in this phase's outputPaths. INFOPLIST_FILE is set per-target\n# by Xcode so each phase touches only its own plist.\nPLIST=\"${SRCROOT}/${INFOPLIST_FILE}\"\nif [ -f \"$PLIST\" ]; then\n  CURRENT=$(/usr/libexec/PlistBuddy -c \"Print :CFBundleShortVersionString\" \"$PLIST\" 2>/dev/null || true)\n  if [ \"$CURRENT\" != \"$VERSION\" ]; then\n    /usr/libexec/PlistBuddy -c \"Set :CFBundleShortVersionString $VERSION\" \"$PLIST\" 2>/dev/null \\\n      || /usr/libexec/PlistBuddy -c \"Add :CFBundleShortVersionString string $VERSION\" \"$PLIST\" \\\n      || echo \"warning: failed to update $PLIST\"\n    echo \"CFBundleShortVersionString set to $VERSION in $PLIST\"\n  fi\nfi\n";
+		};
+/* End PBXShellScriptBuildPhase section */
+
 /* Begin PBXSourcesBuildPhase section */
 		A1A1A1A1A1A1A1A1A1A18001 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
@@ -289,6 +338,7 @@
 				A1A1A1A1A1A1A1A1A1A10056 /* SettingsOverlay.swift in Sources */,
 				A1A1A1A1A1A1A1A1A1A10057 /* LivePreviewTile.swift in Sources */,
 				A1A1A1A1A1A1A1A1A1A10058 /* PlaybackDiagnostics.swift in Sources */,
+				B1B1B1B1B1B1B1B1B1B10001 /* DeviceInfo.swift in Sources */,
 				A1A1A1A1A1A1A1A1A1A10059 /* DecodeBudget.swift in Sources */,
 				A1A1A1A1A1A1A1A1A1A10060 /* DiagnosticHUD.swift in Sources */,
 				A1A1A1A1A1A1A1A1A1A10061 /* AVMetricsSubscriber.swift in Sources */,
@@ -318,6 +368,7 @@
 				A2A2A2A2A2A2A2A2A2A20056 /* SettingsOverlay.swift in Sources */,
 				A2A2A2A2A2A2A2A2A2A20057 /* LivePreviewTile.swift in Sources */,
 				A2A2A2A2A2A2A2A2A2A20058 /* PlaybackDiagnostics.swift in Sources */,
+				B2B2B2B2B2B2B2B2B2B20001 /* DeviceInfo.swift in Sources */,
 				A2A2A2A2A2A2A2A2A2A20059 /* DecodeBudget.swift in Sources */,
 				A2A2A2A2A2A2A2A2A2A20060 /* DiagnosticHUD.swift in Sources */,
 				A2A2A2A2A2A2A2A2A2A20061 /* AVMetricsSubscriber.swift in Sources */,

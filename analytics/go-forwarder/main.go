@@ -208,6 +208,10 @@ type row struct {
 	ContentID                string  `json:"content_id"`
 	PlayerState              string  `json:"player_state"`
 	WaitingReason            string  `json:"waiting_reason"`
+	StateFrom                string  `json:"state_from"`
+	StateTo                  string  `json:"state_to"`
+	ContentName              string  `json:"content_name"`
+	UserMarkedAt             string  `json:"user_marked_at"`
 	BufferDepthS             float32 `json:"buffer_depth_s"`
 	NetworkBitrateMbps       float32 `json:"network_bitrate_mbps"`
 	VideoBitrateMbps         float32 `json:"video_bitrate_mbps"`
@@ -235,16 +239,85 @@ type row struct {
 	// Out-of-band ICMP path-ping (issue #404).
 	ClientPathPingRTTMs     float32 `json:"client_path_ping_rtt_ms"`
 	DisplayResolution        string  `json:"display_resolution"`
+	FetchingResolution       string  `json:"fetching_resolution"`
 	VideoResolution          string  `json:"video_resolution"`
 	FramesDisplayed          uint64  `json:"frames_displayed"`
-	DroppedFrames            uint32  `json:"dropped_frames"`
+	FramesDropped            uint32  `json:"frames_dropped"`
 	StallCount               uint32  `json:"stall_count"`
 	StallTimeS               float32 `json:"stall_time_s"`
+	// ── #550 Phase 1: residency accumulators (UInt32 ms) + deltas ──
+	// Cumulative-on-the-wire since play start; forwarder fills the
+	// paired *Delta fields from a per-play state cache in toRow().
+	// Gerund-named to match the schema column names.
+	PlayingTimeMs            uint32 `json:"playing_time_ms"`
+	PlayingTimeMsDelta       uint32 `json:"playing_time_ms_delta"`
+	PlayingCount             uint32 `json:"playing_count"`
+	PlayingCountDelta        uint32 `json:"playing_count_delta"`
+	PausingTimeMs            uint32 `json:"pausing_time_ms"`
+	PausingTimeMsDelta       uint32 `json:"pausing_time_ms_delta"`
+	PausingCount             uint32 `json:"pausing_count"`
+	PausingCountDelta        uint32 `json:"pausing_count_delta"`
+	BufferingTimeMs          uint32 `json:"buffering_time_ms"`
+	BufferingTimeMsDelta     uint32 `json:"buffering_time_ms_delta"`
+	BufferingCount           uint32 `json:"buffering_count"`
+	BufferingCountDelta      uint32 `json:"buffering_count_delta"`
+	StallingTimeMs           uint32 `json:"stalling_time_ms"`
+	StallingTimeMsDelta      uint32 `json:"stalling_time_ms_delta"`
+	StallingCount            uint32 `json:"stalling_count"`
+	StallingCountDelta       uint32 `json:"stalling_count_delta"`
+	IdlingTimeMs             uint32 `json:"idling_time_ms"`
+	IdlingTimeMsDelta        uint32 `json:"idling_time_ms_delta"`
+	IdlingCount              uint32 `json:"idling_count"`
+	IdlingCountDelta         uint32 `json:"idling_count_delta"`
+	SeekingTimeMs            uint32 `json:"seeking_time_ms"`
+	SeekingTimeMsDelta       uint32 `json:"seeking_time_ms_delta"`
+	SeekingCount             uint32 `json:"seeking_count"`
+	SeekingCountDelta        uint32 `json:"seeking_count_delta"`
+	TrickplayingTimeMs       uint32 `json:"trickplaying_time_ms"`
+	TrickplayingTimeMsDelta  uint32 `json:"trickplaying_time_ms_delta"`
+	TrickplayingCount        uint32 `json:"trickplaying_count"`
+	TrickplayingCountDelta   uint32 `json:"trickplaying_count_delta"`
+	// Per-event sticky durations (Phase 1 ancillary).
+	StallDurationMs          uint32 `json:"stall_duration_ms"`
+	BufferingDurationMs      uint32 `json:"buffering_duration_ms"`
+	// Orthogonal "this stall won't auto-recover" discriminator.
+	// True from the moment AVPlayer transitions stalled → .paused
+	// (give-up) until next .playing transition. State stays "stalled"
+	// for residency continuity; dashboards key on this flag to surface
+	// operator-actionable stalls.
+	StallStuck               bool   `json:"stall_stuck"`
+	// ── #550 Phase 2: outcome status + structured error fields ─────
+	PlaybackStatus           string `json:"playback_status"`
+	PlaybackReason           string `json:"playback_reason"`
+	ErrorCode                int32  `json:"error_code"`
+	ErrorDomain              string `json:"error_domain"`
+	ErrorDetails             string `json:"error_details"`
+	TerminalErrorCode        int32  `json:"terminal_error_code"`
+	TerminalErrorDomain      string `json:"terminal_error_domain"`
+	TerminalErrorDetails     string `json:"terminal_error_details"`
+	ErrorCount               uint32 `json:"error_count"`
+	ErrorCountDelta          uint32 `json:"error_count_delta"`
+	// ── #550 Phase 4: device / platform / version taxonomy ─────────
+	OsVersionMajor           uint16  `json:"os_version_major"`
+	OsVersionMinor           uint16  `json:"os_version_minor"`
+	AppVersion               string  `json:"app_version"`
+	DeviceClass              string  `json:"device_class"`
+	DeviceModel              string  `json:"device_model"`
+	PlayerTech               string  `json:"player_tech"`
+	// Orientation-aware "WxH" — supersedes the three screen_* fields
+	// dropped on 2026-05-30.
+	DeviceResolution         string  `json:"device_resolution"`
+	// ── #550 Phase 1 video-startup ms migrations ───────────────────
+	// New canonical names alongside deprecated _s variants below
+	// (mirror-written by toRow during deprecation window).
+	VideoFirstFrameTimeMs    uint32 `json:"video_first_frame_time_ms"`
+	VideoStartTimeMs         uint32 `json:"video_start_time_ms"`
 	PositionS                float32 `json:"position_s"`
 	LiveEdgeS                float32 `json:"live_edge_s"`
 	TrueOffsetS              float32 `json:"true_offset_s"`
 	PlaybackRate             float32 `json:"playback_rate"`
 	LoopCountPlayer          uint32  `json:"loop_count_player"`
+	LoopCountDelta       uint32  `json:"loop_count_delta"`
 	LoopCountServer          uint32  `json:"loop_count_server"`
 	PlayerRestarts           uint32  `json:"player_restarts"`
 	ProfileShiftCount        uint32  `json:"profile_shift_count"`
@@ -260,18 +333,14 @@ type row struct {
 
 	AvgNetworkBitrateMbps    float32 `json:"avg_network_bitrate_mbps"`
 	BufferEndS               float32 `json:"buffer_end_s"`
-	LastStallTimeS           float32 `json:"last_stall_time_s"`
-	// LastBufferingTimeS is the iOS player's authoritative duration
-	// for the most-recent buffering pair, populated on buffering_end.
-	// Forwarder reads from here when present; the labels.go pair
-	// cache is the fallback for clients that don't send the field.
-	LastBufferingTimeS       float32 `json:"last_buffering_time_s"`
 	LiveOffsetS              float32 `json:"live_offset_s"`
 	PlayheadWallclockMs      int64   `json:"playhead_wallclock_ms"`
 	SeekableEndS             float32 `json:"seekable_end_s"`
 	MetricsSource            string  `json:"metrics_source"`
 	VideoFirstFrameTimeS     float32 `json:"video_first_frame_time_s"`
 	VideoQualityPct          float32 `json:"video_quality_pct"`
+	VideoQuality60sPct       float32 `json:"video_quality_60s_pct"`
+	VideoQualityAvgPct       float32 `json:"video_quality_avg_pct"`
 	VideoStartTimeS          float32 `json:"video_start_time_s"`
 	// iOS-published per-variant watch time (issue #486). JSON-object
 	// string keyed by `<resolution>@<kbps>kbps` with seconds-watched
@@ -288,11 +357,24 @@ type row struct {
 	RecommendedOffsetS       float32 `json:"recommended_offset_s"`
 	ConfiguredOffsetS        float32 `json:"configured_offset_s"`
 	// Active variant's nominal frame rate (issue #486 follow-up).
-	NominalFpsCurrent        float32 `json:"nominal_fps_current"`
+	FramesRate        float32 `json:"frames_rate"`
 
 	MbpsTransferComplete     float32 `json:"mbps_transfer_complete"`
 	MbpsTransferRate         float32 `json:"mbps_transfer_rate"`
 	PlayerIP                 string  `json:"player_ip"`
+	// OriginationIP is the proxy-observed client IP from before the
+	// load-balancer chain (X-Forwarded-For first hop). Surfaced
+	// separately from PlayerIP so the dashboard can show both the
+	// edge-observed IP and the next-hop after any LB rewrites.
+	// Lost in the v1→CH pipeline pre-#550; restored here so the
+	// session viewer's "Origination IP" tile populates from archived
+	// rows the same way the live Testing dashboard does.
+	OriginationIP            string  `json:"origination_ip"`
+	// SessionNumber is the proxy's short numeric ID per session (port-
+	// derived; surfaced as `display_id` in v2 + dashboard tiles).
+	// Restored via #550 dashboard-parity fix — was missing from CH so
+	// archived sessions showed "—" for Display ID.
+	SessionNumber            uint32  `json:"session_number"`
 	ServerReceivedAtMs       int64   `json:"server_received_at_ms"`
 	XForwardedPort           uint16  `json:"x_forwarded_port"`
 	XForwardedPortExternal   uint16  `json:"x_forwarded_port_external"`
@@ -353,7 +435,12 @@ type row struct {
 	ContentStripCodecs     string  `json:"content_strip_codecs"`
 
 	AbrcharRunLock   uint8  `json:"abrchar_run_lock"`
-	ControlRevision  uint64 `json:"control_revision"`
+	// ControlRevision is go-proxy's RFC3339Nano "ETag" for optimistic
+	// concurrency on session mutations. Originally stored as UInt64
+	// in CH (truncated by Sscanf("%d") to just the leading year);
+	// type fixed in-place via DROP UInt64 + RENAME control_revision_str
+	// → control_revision in a follow-up PR.
+	ControlRevision  string `json:"control_revision"`
 	ServerVideoRendition     string  `json:"server_video_rendition"`
 	ServerVideoRenditionMbps float32 `json:"server_video_rendition_mbps"`
 	ManifestFailureType      string  `json:"manifest_failure_type"`
@@ -571,12 +658,20 @@ func handlePayload(data []byte, cache *fingerprintCache, netSeen *netSeen, out c
 	}
 	fallback := time.Now().UTC().Format("2006-01-02 15:04:05.000")
 	active := make(map[string]struct{}, len(payload.Sessions))
+	// #550 Phase 1: collect the play_ids we observe this tick so we
+	// can prune playResidency at the end. Mirrors the sessionToPlayerID
+	// active-set pattern but keyed by play_id (since residency resets
+	// at play boundaries, not session boundaries).
+	activePlays := make(map[string]struct{}, len(payload.Sessions))
 	for _, s := range payload.Sessions {
 		sessionID, _ := s["session_id"].(string)
 		if sessionID == "" {
 			continue
 		}
 		active[sessionID] = struct{}{}
+		if pid := canonicalV2ID(getStr(s, "play_id")); pid != "" {
+			activePlays[pid] = struct{}{}
+		}
 		fp := fingerprint(s)
 		if !cache.changed(sessionID, fp) {
 			continue
@@ -609,6 +704,7 @@ func handlePayload(data []byte, cache *fingerprintCache, netSeen *netSeen, out c
 		netSeen.prune(active)
 	}
 	sessionToPlayerID.prune(active)
+	playResidency.prune(activePlays)
 }
 
 func fingerprint(s map[string]interface{}) string {
@@ -646,7 +742,7 @@ func toRow(ts string, revision uint64, sessionID string, s map[string]interface{
 	// what `/api/v2/players` emits. Without that fallback the column
 	// stays empty and the v3 client's play_id filter excludes every row.
 	playerCanonical, playCanonical := canonicalIDsFor(s)
-	return row{
+	r := row{
 		Ts:                       ts,
 		Revision:                 revision,
 		SessionID:                sessionID,
@@ -665,6 +761,10 @@ func toRow(ts string, revision uint64, sessionID string, s map[string]interface{
 		ContentID:                contentIDFromURL(getStr(s, "manifest_url"), getStr(s, "last_request_url")),
 		PlayerState:              getStr(s, "player_metrics_state"),
 		WaitingReason:            getStr(s, "player_metrics_waiting_reason"),
+		StateFrom:                getStr(s, "player_metrics_state_from"),
+		StateTo:                  getStr(s, "player_metrics_state_to"),
+		ContentName:              getStr(s, "player_metrics_content_name"),
+		UserMarkedAt:             getStr(s, "player_metrics_user_marked_at"),
 		BufferDepthS:             getF32(s, "player_metrics_buffer_depth_s"),
 		NetworkBitrateMbps:       getF32(s, "player_metrics_network_bitrate_mbps"),
 		VideoBitrateMbps:         getF32(s, "player_metrics_video_bitrate_mbps"),
@@ -681,16 +781,64 @@ func toRow(ts string, revision uint64, sessionID string, s map[string]interface{
 		ClientRTOMs:              getF32(s, "client_rto_ms"),
 		ClientPathPingRTTMs:      getF32(s, "client_path_ping_rtt_ms"),
 		DisplayResolution:        getStr(s, "player_metrics_display_resolution"),
+		FetchingResolution:       getStr(s, "player_metrics_fetching_resolution"),
 		VideoResolution:          getStr(s, "player_metrics_video_resolution"),
 		FramesDisplayed:          getU64(s, "player_metrics_frames_displayed"),
-		DroppedFrames:            uint32(getU64(s, "player_metrics_dropped_frames")),
-		StallCount:               uint32(getU64(s, "player_metrics_stall_count")),
-		StallTimeS:               getF32(s, "player_metrics_stall_time_s"),
+		FramesDropped:            uint32(getU64(s, "player_metrics_frames_dropped")),
+		// Phase 1 residency accumulators — iOS emits ms; forwarder
+		// passes through into both the new *_time_ms column AND the
+		// deprecated stall_time_s column (mirror-write at the
+		// canonical pair below). Deltas are not parsed from payload —
+		// they're forwarder-computed in computeResidencyDeltas() after
+		// row construction.
+		PlayingTimeMs:            uint32(getU64(s, "player_metrics_playing_time_ms")),
+		PlayingCount:             uint32(getU64(s, "player_metrics_playing_count")),
+		PausingTimeMs:            uint32(getU64(s, "player_metrics_pausing_time_ms")),
+		PausingCount:             uint32(getU64(s, "player_metrics_pausing_count")),
+		BufferingTimeMs:          uint32(getU64(s, "player_metrics_buffering_time_ms")),
+		BufferingCount:           uint32(getU64(s, "player_metrics_buffering_count")),
+		StallingTimeMs:           uint32(getU64(s, "player_metrics_stalling_time_ms")),
+		StallingCount:            uint32(getU64(s, "player_metrics_stalling_count")),
+		IdlingTimeMs:             uint32(getU64(s, "player_metrics_idling_time_ms")),
+		IdlingCount:              uint32(getU64(s, "player_metrics_idling_count")),
+		SeekingTimeMs:            uint32(getU64(s, "player_metrics_seeking_time_ms")),
+		SeekingCount:             uint32(getU64(s, "player_metrics_seeking_count")),
+		TrickplayingTimeMs:       uint32(getU64(s, "player_metrics_trickplaying_time_ms")),
+		TrickplayingCount:        uint32(getU64(s, "player_metrics_trickplaying_count")),
+		StallDurationMs:          uint32(getU64(s, "player_metrics_stall_duration_ms")),
+		BufferingDurationMs:      uint32(getU64(s, "player_metrics_buffering_duration_ms")),
+		StallStuck:               getBool(s, "player_metrics_stall_stuck"),
+		VideoFirstFrameTimeMs:    uint32(getU64(s, "player_metrics_video_first_frame_time_ms")),
+		VideoStartTimeMs:         uint32(getU64(s, "player_metrics_video_start_time_ms")),
+		// Phase 1 soft cutover: mirror-write the deprecated stall_*
+		// columns from stalling_*. Dashboards reading stall_count /
+		// stall_time_s keep working until they migrate.
+		StallCount:               uint32(getU64(s, "player_metrics_stalling_count")),
+		StallTimeS:               float32(getU64(s, "player_metrics_stalling_time_ms")) / 1000.0,
+		// Phase 2 outcome + error fields.
+		PlaybackStatus:           getStr(s, "player_metrics_playback_status"),
+		PlaybackReason:           getStr(s, "player_metrics_playback_reason"),
+		ErrorCode:                int32(getI64(s, "player_metrics_error_code")),
+		ErrorDomain:              getStr(s, "player_metrics_error_domain"),
+		ErrorDetails:             getStr(s, "player_metrics_error_details"),
+		TerminalErrorCode:        int32(getI64(s, "player_metrics_terminal_error_code")),
+		TerminalErrorDomain:      getStr(s, "player_metrics_terminal_error_domain"),
+		TerminalErrorDetails:     getStr(s, "player_metrics_terminal_error_details"),
+		ErrorCount:               uint32(getU64(s, "player_metrics_error_count")),
+		// Phase 4 device taxonomy.
+		OsVersionMajor:           uint16(getU64(s, "player_metrics_os_version_major")),
+		OsVersionMinor:           uint16(getU64(s, "player_metrics_os_version_minor")),
+		AppVersion:               getStr(s, "player_metrics_app_version"),
+		DeviceClass:              getStr(s, "player_metrics_device_class"),
+		DeviceModel:              getStr(s, "player_metrics_device_model"),
+		PlayerTech:                getStr(s, "player_metrics_player_tech"),
+		DeviceResolution:          getStr(s, "player_metrics_device_resolution"),
 		PositionS:                getF32(s, "player_metrics_position_s"),
 		LiveEdgeS:                getF32(s, "player_metrics_live_edge_s"),
 		TrueOffsetS:              getF32(s, "player_metrics_true_offset_s"),
 		PlaybackRate:             getF32(s, "player_metrics_playback_rate"),
 		LoopCountPlayer:          uint32(getU64(s, "loop_count_player")),
+		LoopCountDelta:       uint32(getU64(s, "player_metrics_loop_count_delta")),
 		LoopCountServer:          uint32(getU64(s, "loop_count_server")),
 		// player_restarts is sent at the top level of iOS POST (not
 		// nested under player_metrics_*) — matches the v2translate
@@ -706,24 +854,26 @@ func toRow(ts string, revision uint64, sessionID string, s map[string]interface{
 
 		AvgNetworkBitrateMbps: getF32(s, "player_metrics_avg_network_bitrate_mbps"),
 		BufferEndS:            getF32(s, "player_metrics_buffer_end_s"),
-		LastStallTimeS:        getF32(s, "player_metrics_last_stall_time_s"),
-		LastBufferingTimeS:    getF32(s, "player_metrics_last_buffering_time_s"),
 		LiveOffsetS:           getF32(s, "player_metrics_live_offset_s"),
 		PlayheadWallclockMs:   int64(getU64(s, "player_metrics_playhead_wallclock_ms")),
 		SeekableEndS:          getF32(s, "player_metrics_seekable_end_s"),
 		MetricsSource:         getStr(s, "player_metrics_source"),
 		VideoFirstFrameTimeS:  getF32(s, "player_metrics_video_first_frame_time_s"),
 		VideoQualityPct:       getF32(s, "player_metrics_video_quality_pct"),
+		VideoQuality60sPct:    getF32(s, "player_metrics_video_quality_60s_pct"),
+		VideoQualityAvgPct:    getF32(s, "player_metrics_video_quality_avg_pct"),
 		VideoStartTimeS:       getF32(s, "player_metrics_video_start_time_s"),
 		TimePerVariantS:       stringField(s, "player_metrics_time_per_variant_s"),
 		ClientRttAvmetricsMs:  getF32(s, "player_metrics_client_rtt_avmetrics_ms"),
 		RecommendedOffsetS:    getF32(s, "player_metrics_recommended_offset_s"),
 		ConfiguredOffsetS:     getF32(s, "player_metrics_configured_offset_s"),
-		NominalFpsCurrent:     getF32(s, "player_metrics_nominal_fps_current"),
+		FramesRate:     getF32(s, "player_metrics_frames_rate"),
 
 		MbpsTransferComplete:   getF32(s, "mbps_transfer_complete"),
 		MbpsTransferRate:       getF32(s, "mbps_transfer_rate"),
 		PlayerIP:               getStr(s, "player_ip"),
+		OriginationIP:          getStr(s, "origination_ip"),
+		SessionNumber:          uint32(getU64(s, "session_number")),
 		ServerReceivedAtMs:     int64(getU64(s, "server_received_at_ms")),
 		XForwardedPort:         uint16(getU64(s, "x_forwarded_port")),
 		XForwardedPortExternal: uint16(getU64(s, "x_forwarded_port_external")),
@@ -784,7 +934,7 @@ func toRow(ts string, revision uint64, sessionID string, s map[string]interface{
 		ContentStripCodecs:     getStr(s, "content_strip_codecs"),
 
 		AbrcharRunLock:  uint8(getU64(s, "abrchar_run_lock")),
-		ControlRevision: getU64(s, "control_revision"),
+		ControlRevision: getStr(s, "control_revision"),
 		ServerVideoRendition:     getStr(s, "server_video_rendition"),
 		ServerVideoRenditionMbps: getF32(s, "server_video_rendition_mbps"),
 		ManifestFailureType:      getStr(s, "manifest_failure_type"),
@@ -802,6 +952,23 @@ func toRow(ts string, revision uint64, sessionID string, s map[string]interface{
 		SessionDuration:          getF32(s, "session_duration"),
 		SessionJSON:              string(full),
 	}
+	_ = playerCanonical // reserved for future cross-cache wiring
+	// #550 Phase 1: compute paired _delta columns from the per-play
+	// state cache. Empty playCanonical → no caching (returns zero
+	// state, deltas equal accumulated). Called after the row struct
+	// is populated so all accumulated counters are visible.
+	applyResidencyDeltas(&r, playCanonical)
+	// Default to in_progress on rows where iOS didn't stamp a status
+	// (older clients, non-iOS payloads). Terminal status comes from
+	// iOS — including the ended_buffering / ended_stalling refinement
+	// of playback_reason on user_stopped rows. We don't reclassify
+	// server-side because historical rows should carry the value the
+	// client stamped at session_end forever, not the value a later
+	// threshold tweak would produce.
+	if r.PlaybackStatus == "" {
+		r.PlaybackStatus = "in_progress"
+	}
+	return r
 }
 
 // contentIDFromURL pulls the {content} path segment out of a go-live URL.
@@ -873,6 +1040,26 @@ func getJSON(m map[string]interface{}, key string) string {
 	return string(b)
 }
 
+// getBool reads a boolean field tolerantly. Native bool, "true"/"false"
+// strings, and numeric 0/1 all parse. Missing or unparseable keys
+// return false.
+func getBool(m map[string]interface{}, key string) bool {
+	switch v := m[key].(type) {
+	case bool:
+		return v
+	case string:
+		switch strings.ToLower(v) {
+		case "true", "1", "t", "yes":
+			return true
+		}
+	case float64:
+		return v != 0
+	case float32:
+		return v != 0
+	}
+	return false
+}
+
 func getF32(m map[string]interface{}, key string) float32 {
 	switch v := m[key].(type) {
 	case float64:
@@ -904,6 +1091,28 @@ func getU64(m map[string]interface{}, key string) uint64 {
 		var u uint64
 		if _, err := fmt.Sscanf(v, "%d", &u); err == nil {
 			return u
+		}
+	}
+	return 0
+}
+
+// getI64 mirrors getU64 but preserves sign — required for Apple
+// NSError codes (negative, e.g. CoreMediaErrorDomain -12318) that
+// land on the #550 Phase 2 `error_code` / `terminal_error_code`
+// columns.
+func getI64(m map[string]interface{}, key string) int64 {
+	switch v := m[key].(type) {
+	case float64:
+		return int64(v)
+	case bool:
+		if v {
+			return 1
+		}
+		return 0
+	case string:
+		var i int64
+		if _, err := fmt.Sscanf(v, "%d", &i); err == nil {
+			return i
 		}
 	}
 	return 0
@@ -1182,11 +1391,11 @@ func serveHTTP(ctx context.Context, cfg config, ring *Ring) {
 			    toUnixTimestamp64Milli(ts) AS ts_ms,
 			    intDiv(toUnixTimestamp64Milli(ts) - (SELECT start_ms FROM sized),
 			           (SELECT bucket_ms FROM sized)) AS bucket,
-			    stall_count, dropped_frames, player_error, transport_fault_active,
+			    stall_count, frames_dropped, player_error, transport_fault_active,
 			    manifest_failure_type, segment_failure_type, all_failure_type,
 			    video_bitrate_mbps,
 			    lagInFrame(stall_count, 1, stall_count)             OVER w AS prev_stall,
-			    lagInFrame(dropped_frames, 1, dropped_frames)       OVER w AS prev_drops,
+			    lagInFrame(frames_dropped, 1, frames_dropped)       OVER w AS prev_drops,
 			    lagInFrame(video_bitrate_mbps, 1, video_bitrate_mbps) OVER w AS prev_bitrate
 			  FROM %s.%s
 			  WHERE %s
@@ -1202,7 +1411,7 @@ func serveHTTP(ctx context.Context, cfg config, ring *Ring) {
 			          OR (segment_failure_type  != '' AND segment_failure_type  != 'none')
 			          OR (all_failure_type      != '' AND all_failure_type      != 'none'))     AS fault_rows,
 			  countIf(video_bitrate_mbps < prev_bitrate AND prev_bitrate > 0 AND video_bitrate_mbps > 0) AS downshifts,
-			  max(dropped_frames) - min(dropped_frames)                                          AS drops
+			  max(frames_dropped) - min(frames_dropped)                                          AS drops
 			FROM base
 			GROUP BY bucket
 			ORDER BY bucket
