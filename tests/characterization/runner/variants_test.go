@@ -172,8 +172,9 @@ func mkPlayerWithVariants(t *testing.T, seeds []variantSeed) *PlayerRecord {
 		ID: "00000000-0000-0000-0000-000000000001",
 	}
 	rec.CurrentPlay = &struct {
-		ID       string `json:"id"`
-		Manifest struct {
+		ID        string `json:"id"`
+		AttemptID int    `json:"attempt_id"`
+		Manifest  struct {
 			MasterURL string `json:"master_url"`
 			Variants  []struct {
 				Bandwidth        int    `json:"bandwidth"`
