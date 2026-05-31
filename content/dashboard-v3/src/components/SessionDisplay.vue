@@ -89,6 +89,13 @@ const props = defineProps<{
    *  (auto-pin brush to samples.rangeBounds when they land). */
   startMs?: number | null;
   endMs?: number | null;
+  /** Live-page hint: caller is mounting on a perpetually-live page
+   *  (TestingSession) with no URL time bounds. Skip the
+   *  pin-to-sample-bounds fallback so the brush leaves coord.range
+   *  null and panels follow the live edge on every refresh. Treat
+   *  identically to startMs!=null && endMs==null but without forcing
+   *  a startMs anchor. Default: false (legacy archive behaviour). */
+  followLive?: boolean;
 }>();
 
 const playIdRef = computed(() => props.playId);
@@ -327,9 +334,10 @@ function tryPinBrush(min: number | null, max: number | null) {
 if (props.startMs != null && props.endMs != null) {
   // URL-driven archive range: pin immediately.
   tryPinBrush(props.startMs, props.endMs);
-} else if (props.startMs != null && props.endMs == null) {
-  // end_time=live: leave coord.range null so brush follows live
-  // edge. Treat as "pinned" for the fallback watcher's purposes.
+} else if ((props.startMs != null && props.endMs == null) || props.followLive) {
+  // end_time=live OR explicit live-page hint: leave coord.range null
+  // so brush follows live edge. Treat as "pinned" for the fallback
+  // watcher's purposes so it doesn't auto-pin on first samples.
   hasPinnedBrush = true;
 }
 watch(
