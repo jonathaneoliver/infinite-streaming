@@ -769,17 +769,23 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
     fun retry() {
         val url = _state.value.currentUrl
         if (url.isEmpty()) return
-        // A retry is a new playback episode — fresh play_id so the
-        // proxy's network log scopes the next round of requests
-        // separately from the one that just failed. Issue #280.
-        regeneratePlayId()
-        val refreshed = withPlayId(url)
-        _state.update { it.copy(currentUrl = refreshed, statusText = refreshed) }
+        // #550 retry contract — recovery attempt WITHIN the same play.
+        // Mirrors iOS PlayerViewModel.retry():
+        //   - play_id stays stable (do NOT rotate)
+        //   - residency + variant-dwell counters preserved across the
+        //     player_item replacement via metrics.snapshotForRestart()
+        //   - the next resetResidency() (inside loadStream's
+        //     onPlaybackStarted) restores from those priors rather
+        //     than zeroing
+        // Reload (separate UI action) rotates play_id + clears priors;
+        // the proxy's network log scopes the new round of requests
+        // accordingly.
+        metrics?.snapshotForRestart()
         // User-driven Retry deserves its own HAR — bypass per-player debounce.
         metrics?.requestHarSnapshot("user_retry", 0, /* force= */ true)
         player.stop()
         player.clearMediaItems()
-        loadStream(refreshed)
+        loadStream(url)
     }
 
     /**
@@ -819,6 +825,7 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         metrics?.resetForFreshPlay()
         metrics?.release()
         metrics = null
+        boundPlayerView = null
         player.release()
         bandwidthMeter = DefaultBandwidthMeter.Builder(getApplication()).build()
         player = ExoPlayer.Builder(getApplication<Application>())
@@ -833,12 +840,21 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
     // -- Metrics binding -----------------------------------------------------
 
     /**
-     * Bound from the playback screen once the [PlayerView] is composed. We
-     * re-create [PlaybackMetrics] each time because it captures the PlayerView
-     * for display-resolution reads.
+     * Bound from the playback screen once the [PlayerView] is composed.
+     *
+     * IMPORTANT: AndroidView.update fires on every Compose recomposition,
+     * so this gets called many times per second during normal interaction.
+     * It MUST be idempotent — recreating PlaybackMetrics on every call
+     * zeroes the residency / variant-dwell / counters mid-play, which the
+     * dashboard sees as Playing Time / Pausing Time inexplicably resetting.
+     *
+     * We compare PlayerView identity to detect a genuinely-new view (e.g.
+     * after vm.reload() rebuilds the player) and only recreate then.
      */
     fun bindMetrics(view: PlayerView) {
+        if (metrics != null && boundPlayerView === view) return
         metrics?.release()
+        boundPlayerView = view
         metrics = PlaybackMetrics(
             player, view, bandwidthMeter, playerId,
             { _state.value.activeServer?.apiUrl ?: "" },
@@ -846,9 +862,15 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         ).also { it.start() }
     }
 
+    /** Cached PlayerView reference used by bindMetrics() to short-circuit
+     *  no-op rebinds during Compose recompositions. Reset to null on
+     *  unbindMetrics + reload so the next bind genuinely creates fresh. */
+    private var boundPlayerView: PlayerView? = null
+
     fun unbindMetrics() {
         metrics?.release()
         metrics = null
+        boundPlayerView = null
     }
 
     private fun attachPlayerListeners() {

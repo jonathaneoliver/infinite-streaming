@@ -44,7 +44,10 @@ function toISOWithZ(s: string): string {
 // "no data" rows render as "—" instead of "0.000s".
 function msToSeconds(v: unknown): number | null {
   const n = num(v);
-  if (n == null || n === 0) return null;
+  if (n == null) return null;
+  // Keep 0 as 0 (not null) — residency counters are valid at 0 when
+  // a state hasn't fired yet. Dashboard tiles should read "0s", not
+  // blank, so the operator can see the counter exists.
   return n / 1000;
 }
 

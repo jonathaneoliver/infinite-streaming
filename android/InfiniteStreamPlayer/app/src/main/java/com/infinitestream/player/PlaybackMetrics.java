@@ -168,6 +168,26 @@ public final class PlaybackMetrics {
     // Variant tile across recovery.
     private final Map<String, Long> variantDwellMs = new HashMap<>();
     private final Map<String, Long> priorVariantDwellMs = new HashMap<>();
+
+    // Residency snapshots preserved across retry() — same pattern as
+    // iOS PlaybackDiagnostics' prior* fields. snapshotForRestart()
+    // captures current values into these; resetResidency() restores
+    // FROM these so the new attempt continues accumulating rather
+    // than zeroing. resetForFreshPlay() (Reload button) zeroes them
+    // explicitly before calling reset() — user-driven fresh play
+    // starts from scratch.
+    private long priorPlayingTimeMs;
+    private long priorPausingTimeMs;
+    private long priorBufferingTimeMs;
+    private long priorStallingTimeMs;
+    private long priorIdlingTimeMs;
+    private long priorSeekingTimeMs;
+    private int priorPlayingCount;
+    private int priorPausingCount;
+    private int priorBufferingCount;
+    private int priorStallingCount;
+    private int priorIdlingCount;
+    private int priorSeekingCount;
     private String currentVariantKey;
     private long currentVariantAnchorMs;
     private int currentVariantKbps;
@@ -917,18 +937,22 @@ public final class PlaybackMetrics {
     private void resetResidency() {
         currentResidencyState = null;
         residencyAnchorMs = System.currentTimeMillis();
-        playingTimeMs = 0;
-        pausingTimeMs = 0;
-        bufferingTimeMs = 0;
-        stallingTimeMs = 0;
-        idlingTimeMs = 0;
-        seekingTimeMs = 0;
-        playingCount = 0;
-        pausingCount = 0;
-        bufferingCount = 0;
-        stallingCount = 0;
-        idlingCount = 0;
-        seekingCount = 0;
+        // Restore from priors — same pattern as iOS PlaybackDiagnostics.
+        // resetForFreshPlay() zeroes priors first so a Reload starts at
+        // zero; retry() preserves them so the new attempt continues
+        // accumulating from the prior attempt's totals.
+        playingTimeMs   = priorPlayingTimeMs;
+        pausingTimeMs   = priorPausingTimeMs;
+        bufferingTimeMs = priorBufferingTimeMs;
+        stallingTimeMs  = priorStallingTimeMs;
+        idlingTimeMs    = priorIdlingTimeMs;
+        seekingTimeMs   = priorSeekingTimeMs;
+        playingCount    = priorPlayingCount;
+        pausingCount    = priorPausingCount;
+        bufferingCount  = priorBufferingCount;
+        stallingCount   = priorStallingCount;
+        idlingCount     = priorIdlingCount;
+        seekingCount    = priorSeekingCount;
         seekingStartAtMs = -1;
         // Snapshot variant dwell into priors so retry() preserves the
         // dashboard Time-per-Variant tile across the AVPlayerItem
@@ -953,9 +977,42 @@ public final class PlaybackMetrics {
         observedMaxVariantKbps = 0;
     }
 
+    /** Called from PlayerViewModel.retry() — capture current residency
+     *  + variant-dwell into priors so the subsequent resetResidency()
+     *  (via loadStream → onPlaybackStarted) restores rather than
+     *  zeroes. Mirrors iOS PlaybackDiagnostics.snapshotForRestart(). */
+    public void snapshotForRestart() {
+        flushResidency();  // close the open bucket first
+        priorPlayingTimeMs   = playingTimeMs;
+        priorPausingTimeMs   = pausingTimeMs;
+        priorBufferingTimeMs = bufferingTimeMs;
+        priorStallingTimeMs  = stallingTimeMs;
+        priorIdlingTimeMs    = idlingTimeMs;
+        priorSeekingTimeMs   = seekingTimeMs;
+        priorPlayingCount    = playingCount;
+        priorPausingCount    = pausingCount;
+        priorBufferingCount  = bufferingCount;
+        priorStallingCount   = stallingCount;
+        priorIdlingCount     = idlingCount;
+        priorSeekingCount    = seekingCount;
+        // variant dwell snapshot happens inside resetResidency()
+    }
+
     /** Called from PlayerViewModel.reload() — fresh play boundary,
      *  zero priors so the new play_id starts from scratch. */
     public void resetForFreshPlay() {
+        priorPlayingTimeMs = 0;
+        priorPausingTimeMs = 0;
+        priorBufferingTimeMs = 0;
+        priorStallingTimeMs = 0;
+        priorIdlingTimeMs = 0;
+        priorSeekingTimeMs = 0;
+        priorPlayingCount = 0;
+        priorPausingCount = 0;
+        priorBufferingCount = 0;
+        priorStallingCount = 0;
+        priorIdlingCount = 0;
+        priorSeekingCount = 0;
         priorVariantDwellMs.clear();
         terminalStatus = null;
         terminalReason = null;
