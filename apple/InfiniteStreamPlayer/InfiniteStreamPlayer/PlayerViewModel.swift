@@ -232,6 +232,16 @@ final class PlayerViewModel: ObservableObject {
     private var lastReportedStallCount: Int = 0
     private var lastReportedStallDuration: Double = 0
     private var lastReportedLoopCount: Int = 0
+
+    /// Variant-dwell totals snapshotted at the moment of `retry()` so
+    /// the new AVPlayerItem's access-log walk in `perVariantTimeSeconds()`
+    /// continues from the prior play's accumulation rather than
+    /// restarting at zero. AVPlayer's access log is per-item, so without
+    /// this every retry would zero the dashboard's Time-per-Variant
+    /// tile mid-play. Mirrors the PlaybackDiagnostics prior* pattern
+    /// but lives here because the payload key format ("1080p@7060kbps")
+    /// is computed in this layer.
+    private var priorPerVariantTimeSeconds: [String: Double] = [:]
     // Captured when the player enters the buffering state so the
     // matching buffering_end POST can carry an authoritative duration
     // in `player_metrics_last_buffering_time_s`. Mirrors the stall
@@ -1068,6 +1078,7 @@ final class PlayerViewModel: ObservableObject {
         // rather than restart from zero. Tick playerRestarts so each
         // recovery attempt registers in the per-play restart count.
         diagnostics.snapshotForRestart()
+        snapshotPerVariantForRestart()
         playerRestarts += 1
         // Tick `attempt_id` (per bug #4 contract) so analytics can
         // count recovery attempts. Keep `play_id` stable — this is
@@ -1127,6 +1138,7 @@ final class PlayerViewModel: ObservableObject {
         // snapshotForRestart() populates. retry() does the opposite —
         // it snapshots so counters carry across recovery attempts.
         diagnostics.resetForFreshPlay()
+        resetPerVariantForFreshPlay()
         playerRestarts = 0
         profileShiftCount = 0
         // Rotate play_id (new play boundary) AND reset attempt_id
@@ -2068,11 +2080,17 @@ extension PlayerViewModel {
         // not just the ones it's picked. Variants excluded by the
         // resolution cap above never appear in `ladder`, so the menu
         // accurately reflects the platform's actual selectable set.
+        // Seed with prior-play accumulations so retry() preserves
+        // continuity — the new AVPlayerItem's access log starts at
+        // zero so without this every retry would zero the tile.
         var out: [String: Double] = [:]
         for entry in ladder {
             let kbps = Int((entry.peak / 1000).rounded())
             let key = entry.label.isEmpty ? "\(kbps)kbps" : "\(entry.label)@\(kbps)kbps"
             out[key] = 0
+        }
+        for (key, seconds) in priorPerVariantTimeSeconds {
+            out[key, default: 0] += seconds
         }
         for event in log.events {
             let bitrate = event.indicatedBitrate
@@ -2086,6 +2104,20 @@ extension PlayerViewModel {
         }
         // Round at the end so the running sum stays full precision.
         return out.mapValues { (round($0 * 100) / 100) }
+    }
+
+    /// Snapshot current per-variant totals so the next access-log walk
+    /// after AVPlayerItem replacement continues from here. Called from
+    /// retry(). Captures the FULL merged result (priors + current
+    /// access log) so subsequent retries also stack correctly.
+    fileprivate func snapshotPerVariantForRestart() {
+        priorPerVariantTimeSeconds = perVariantTimeSeconds()
+    }
+
+    /// Zero the priors so a fresh play (reload) starts from zero.
+    /// Called from reload() before regeneratePlayID/loadStream.
+    fileprivate func resetPerVariantForFreshPlay() {
+        priorPerVariantTimeSeconds.removeAll()
     }
 
     /// Log-bitrate quality weighting with a baseline floor. Mirrors
