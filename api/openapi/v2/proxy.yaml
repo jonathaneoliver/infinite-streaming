@@ -1577,10 +1577,10 @@ components:
         stall_time_s:        { type: number, format: float, nullable: true, description: 'Cumulative stall time (seconds).' }
         last_stall_time_s:   { type: number, format: float, nullable: true, description: 'Duration of the most recent stall (seconds).' }
         frames_displayed:    { type: integer, nullable: true, description: 'Player-reported displayed frames count.' }
-        dropped_frames:      { type: integer, nullable: true, description: 'Player-reported dropped frames count.' }
+        frames_dropped:      { type: integer, nullable: true, description: 'Player-reported dropped frames count.' }
         player_restarts:     { type: integer, nullable: true, description: 'Number of player restarts (auto-recovery + manual).' }
         loop_count_player:   { type: integer, nullable: true, description: 'How many times the player has reported looping the content. Player-reported, may be 0 on platforms that do not count.' }
-        loop_count_increment: { type: integer, nullable: true, description: 'Server-derived increment from the previous report.' }
+        loop_count_delta: { type: integer, nullable: true, description: 'Server-derived increment from the previous report.' }
         profile_shift_count: { type: integer, nullable: true, description: 'Number of ABR rendition shifts the player has reported.' }
         last_event:          { type: string,  nullable: true, description: 'Most recent player-reported lifecycle event (playing, buffering_start, stall_start, etc.).' }
         trigger_type:        { type: string,  nullable: true, description: 'What triggered the most recent metrics tick (timer, event, etc.).' }
@@ -1590,7 +1590,7 @@ components:
         waiting_reason:      { type: string,  nullable: true, description: 'AVFoundation reasonForWaitingToPlay (or platform equivalent) — split labels within `state` like `toMinimizeStalls` vs `evaluatingBufferingRate`.' }
         content_name:        { type: string,  nullable: true, description: 'Content title bound at metrics-start. Stamped on every payload so dashboards see "which content was playing" without joining against the upload catalogue.' }
         user_marked_at:      { type: string,  nullable: true, description: 'On user_marked (911) events: wall-clock ISO-8601 instant the operator pressed the button. Empty on other rows.' }
-        nominal_fps_current: { type: number, format: float, nullable: true, description: 'Active variant''s nominal frame rate (Hz). Sticky after first observation in the format-change event.' }
+        frames_rate: { type: number, format: float, nullable: true, description: 'Active variant''s nominal frame rate (Hz). Sticky after first observation in the format-change event.' }
         playhead_wallclock_ms: { type: integer, nullable: true, description: 'Player-encoded PDT (milliseconds since Unix epoch) for the current playhead. Used by the chart engine to compute live offset against the server clock.' }
         browser_family:      { type: string,  nullable: true, description: 'Web-player browser family (e.g. `safari`, `chrome`). Drives native-rendition inference for HLS-on-Safari where bitrate is not directly reported.' }
         playback_engine:     { type: string,  nullable: true, description: 'Web-player engine (`native` for AVPlayer, `mse` for Media Source Extensions). Pairs with `browser_family` for the rendition inference.' }

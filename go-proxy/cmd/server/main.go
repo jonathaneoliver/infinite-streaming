@@ -2575,17 +2575,17 @@ func (a *App) applySessionSettingsUpdate(id string, payload map[string]interface
 			getString(target, "player_metrics_source"),
 			getString(target, "player_metrics_last_event"),
 			getInt(target, "player_metrics_loop_count_player"),
-			getInt(target, "player_metrics_loop_count_increment"),
+			getInt(target, "player_metrics_loop_count_delta"),
 			getInt(target, "loop_count_server"),
 		)
-	} else if _, ok := payload["player_metrics_loop_count_increment"]; ok {
+	} else if _, ok := payload["player_metrics_loop_count_delta"]; ok {
 		log.Printf(
 			"LOOP_COUNTER_PATCH session_id=%s source=%s event=%s player_loop_count=%d loop_increment=%d server_loop_count=%d",
 			id,
 			getString(target, "player_metrics_source"),
 			getString(target, "player_metrics_last_event"),
 			getInt(target, "player_metrics_loop_count_player"),
-			getInt(target, "player_metrics_loop_count_increment"),
+			getInt(target, "player_metrics_loop_count_delta"),
 			getInt(target, "loop_count_server"),
 		)
 	}
@@ -7937,7 +7937,7 @@ func (a *App) normalizeSessionsForResponse(sessions []SessionData) []SessionData
 		setDefault("player_metrics_profile_shift_count", 0)
 		setDefault("loop_count_server", 0)
 		setDefault("player_metrics_loop_count_player", 0)
-		setDefault("player_metrics_loop_count_increment", 0)
+		setDefault("player_metrics_loop_count_delta", 0)
 		bestMbps := bestVariantMbps(session)
 		videoMbps := getFloat(session, "player_metrics_video_bitrate_mbps")
 		if bestMbps > 0 && videoMbps > 0 {

@@ -242,7 +242,7 @@ type row struct {
 	FetchingResolution       string  `json:"fetching_resolution"`
 	VideoResolution          string  `json:"video_resolution"`
 	FramesDisplayed          uint64  `json:"frames_displayed"`
-	DroppedFrames            uint32  `json:"dropped_frames"`
+	FramesDropped            uint32  `json:"frames_dropped"`
 	StallCount               uint32  `json:"stall_count"`
 	StallTimeS               float32 `json:"stall_time_s"`
 	// ── #550 Phase 1: residency accumulators (UInt32 ms) + deltas ──
@@ -317,7 +317,7 @@ type row struct {
 	TrueOffsetS              float32 `json:"true_offset_s"`
 	PlaybackRate             float32 `json:"playback_rate"`
 	LoopCountPlayer          uint32  `json:"loop_count_player"`
-	LoopCountIncrement       uint32  `json:"loop_count_increment"`
+	LoopCountDelta       uint32  `json:"loop_count_delta"`
 	LoopCountServer          uint32  `json:"loop_count_server"`
 	PlayerRestarts           uint32  `json:"player_restarts"`
 	ProfileShiftCount        uint32  `json:"profile_shift_count"`
@@ -363,7 +363,7 @@ type row struct {
 	RecommendedOffsetS       float32 `json:"recommended_offset_s"`
 	ConfiguredOffsetS        float32 `json:"configured_offset_s"`
 	// Active variant's nominal frame rate (issue #486 follow-up).
-	NominalFpsCurrent        float32 `json:"nominal_fps_current"`
+	FramesRate        float32 `json:"frames_rate"`
 
 	MbpsTransferComplete     float32 `json:"mbps_transfer_complete"`
 	MbpsTransferRate         float32 `json:"mbps_transfer_rate"`
@@ -790,7 +790,7 @@ func toRow(ts string, revision uint64, sessionID string, s map[string]interface{
 		FetchingResolution:       getStr(s, "player_metrics_fetching_resolution"),
 		VideoResolution:          getStr(s, "player_metrics_video_resolution"),
 		FramesDisplayed:          getU64(s, "player_metrics_frames_displayed"),
-		DroppedFrames:            uint32(getU64(s, "player_metrics_dropped_frames")),
+		FramesDropped:            uint32(getU64(s, "player_metrics_frames_dropped")),
 		// Phase 1 residency accumulators — iOS emits ms; forwarder
 		// passes through into both the new *_time_ms column AND the
 		// deprecated stall_time_s column (mirror-write at the
@@ -844,7 +844,7 @@ func toRow(ts string, revision uint64, sessionID string, s map[string]interface{
 		TrueOffsetS:              getF32(s, "player_metrics_true_offset_s"),
 		PlaybackRate:             getF32(s, "player_metrics_playback_rate"),
 		LoopCountPlayer:          uint32(getU64(s, "loop_count_player")),
-		LoopCountIncrement:       uint32(getU64(s, "player_metrics_loop_count_increment")),
+		LoopCountDelta:       uint32(getU64(s, "player_metrics_loop_count_delta")),
 		LoopCountServer:          uint32(getU64(s, "loop_count_server")),
 		// player_restarts is sent at the top level of iOS POST (not
 		// nested under player_metrics_*) — matches the v2translate
@@ -875,7 +875,7 @@ func toRow(ts string, revision uint64, sessionID string, s map[string]interface{
 		ClientRttAvmetricsMs:  getF32(s, "player_metrics_client_rtt_avmetrics_ms"),
 		RecommendedOffsetS:    getF32(s, "player_metrics_recommended_offset_s"),
 		ConfiguredOffsetS:     getF32(s, "player_metrics_configured_offset_s"),
-		NominalFpsCurrent:     getF32(s, "player_metrics_nominal_fps_current"),
+		FramesRate:     getF32(s, "player_metrics_frames_rate"),
 
 		MbpsTransferComplete:   getF32(s, "mbps_transfer_complete"),
 		MbpsTransferRate:       getF32(s, "mbps_transfer_rate"),
@@ -1399,11 +1399,11 @@ func serveHTTP(ctx context.Context, cfg config, ring *Ring) {
 			    toUnixTimestamp64Milli(ts) AS ts_ms,
 			    intDiv(toUnixTimestamp64Milli(ts) - (SELECT start_ms FROM sized),
 			           (SELECT bucket_ms FROM sized)) AS bucket,
-			    stall_count, dropped_frames, player_error, transport_fault_active,
+			    stall_count, frames_dropped, player_error, transport_fault_active,
 			    manifest_failure_type, segment_failure_type, all_failure_type,
 			    video_bitrate_mbps,
 			    lagInFrame(stall_count, 1, stall_count)             OVER w AS prev_stall,
-			    lagInFrame(dropped_frames, 1, dropped_frames)       OVER w AS prev_drops,
+			    lagInFrame(frames_dropped, 1, frames_dropped)       OVER w AS prev_drops,
 			    lagInFrame(video_bitrate_mbps, 1, video_bitrate_mbps) OVER w AS prev_bitrate
 			  FROM %s.%s
 			  WHERE %s
@@ -1419,7 +1419,7 @@ func serveHTTP(ctx context.Context, cfg config, ring *Ring) {
 			          OR (segment_failure_type  != '' AND segment_failure_type  != 'none')
 			          OR (all_failure_type      != '' AND all_failure_type      != 'none'))     AS fault_rows,
 			  countIf(video_bitrate_mbps < prev_bitrate AND prev_bitrate > 0 AND video_bitrate_mbps > 0) AS downshifts,
-			  max(dropped_frames) - min(dropped_frames)                                          AS drops
+			  max(frames_dropped) - min(frames_dropped)                                          AS drops
 			FROM base
 			GROUP BY bucket
 			ORDER BY bucket

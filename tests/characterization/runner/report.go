@@ -195,7 +195,7 @@ type StartupCycleResult struct {
 	UpshiftsIn30S      int `json:"upshifts_in_30s"`
 	DownshiftsIn30S    int `json:"downshifts_in_30s"`
 	StallsIn30S        int `json:"stalls_in_30s"`
-	DroppedFramesIn30S int `json:"dropped_frames_in_30s"`
+	FramesDroppedIn30S int `json:"frames_dropped_in_30s"`
 	// SettledVariant is the resolution with the majority of samples
 	// in the last 10 s of the 30 s window. Empty if the player never
 	// stabilised.
@@ -365,7 +365,7 @@ type Summary struct {
 	MinBitrateMbps      float64 `json:"min_bitrate_mbps"`
 	MaxBitrateMbps      float64 `json:"max_bitrate_mbps"`
 	ProfileShifts       int     `json:"profile_shifts"`
-	DroppedFrames       int     `json:"dropped_frames"`
+	FramesDropped       int     `json:"frames_dropped"`
 	SampleCount         int     `json:"sample_count"`
 	VariantSampleCounts []int   `json:"variant_sample_counts,omitempty"`
 
@@ -477,9 +477,9 @@ func (r *Report) Finalize(endedAt time.Time) {
 	if r.Summary.ProfileShifts < 0 {
 		r.Summary.ProfileShifts = last.ProfileShiftCount
 	}
-	r.Summary.DroppedFrames = last.DroppedFrames - first.DroppedFrames
-	if r.Summary.DroppedFrames < 0 {
-		r.Summary.DroppedFrames = last.DroppedFrames
+	r.Summary.FramesDropped = last.FramesDropped - first.FramesDropped
+	if r.Summary.FramesDropped < 0 {
+		r.Summary.FramesDropped = last.FramesDropped
 	}
 	r.Summary.SampleCount = len(r.Samples)
 
@@ -723,7 +723,7 @@ func renderMarkdown(r *Report) string {
 	fmt.Fprintf(&b, "| stalls               | %d |\n", r.Summary.TotalStalls)
 	fmt.Fprintf(&b, "| stall seconds        | %.1f |\n", r.Summary.TotalStallSeconds)
 	fmt.Fprintf(&b, "| profile shifts       | %d |\n", r.Summary.ProfileShifts)
-	fmt.Fprintf(&b, "| dropped frames       | %d |\n", r.Summary.DroppedFrames)
+	fmt.Fprintf(&b, "| dropped frames       | %d |\n", r.Summary.FramesDropped)
 	fmt.Fprintf(&b, "| buffer min / max (s) | %.1f / %.1f |\n", r.Summary.MinBufferDepthS, r.Summary.MaxBufferDepthS)
 	fmt.Fprintf(&b, "| bitrate min / mean / max (Mbps) | %.2f / %.2f / %.2f |\n",
 		r.Summary.MinBitrateMbps, r.Summary.MeanBitrateMbps, r.Summary.MaxBitrateMbps)

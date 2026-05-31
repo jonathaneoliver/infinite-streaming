@@ -99,7 +99,7 @@ export function chRowToPlayerRecord(
     state_to: typeof row.state_to === 'string' ? row.state_to : '',
     content_name: typeof row.content_name === 'string' ? row.content_name : '',
     user_marked_at: typeof row.user_marked_at === 'string' ? row.user_marked_at : '',
-    nominal_fps_current: num(row.nominal_fps_current),
+    frames_rate: num(row.frames_rate),
     error: typeof row.player_error === 'string' ? row.player_error : '',
     video_resolution: typeof row.video_resolution === 'string' ? row.video_resolution : '',
     display_resolution: typeof row.display_resolution === 'string' ? row.display_resolution : '',
@@ -112,7 +112,7 @@ export function chRowToPlayerRecord(
     live_offset_s: num(row.live_offset_s),
     true_offset_s: num(row.true_offset_s),
     frames_displayed: num(row.frames_displayed),
-    dropped_frames: num(row.dropped_frames),
+    frames_dropped: num(row.frames_dropped),
     // #550 Phase 1: prefer the new gerund-named ms columns; fall
     // back to the deprecated _s variants during the soft cutover so
     // pre-migration historical rows still render. The forwarder
@@ -178,7 +178,7 @@ export function chRowToPlayerRecord(
     live_edge_s: num(row.live_edge_s),
     source: typeof row.metrics_source === 'string' ? row.metrics_source : null,
     loop_count_player: num(row.loop_count_player),
-    loop_count_increment: num(row.loop_count_increment),
+    loop_count_delta: num(row.loop_count_delta),
     // #550 Phase 1: stall_duration_ms supersedes last_stall_time_s.
     last_stall_time_s: msOrSeconds(row.stall_duration_ms, row.last_stall_time_s),
     video_quality_pct: num(row.video_quality_pct),

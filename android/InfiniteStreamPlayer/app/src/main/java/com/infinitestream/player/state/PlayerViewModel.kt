@@ -986,7 +986,7 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         player.addAnalyticsListener(object : AnalyticsListener {
             override fun onDroppedVideoFrames(
                 eventTime: AnalyticsListener.EventTime, droppedFrames: Int, elapsedMs: Long
-            ) { metrics?.onDroppedFrames(droppedFrames) }
+            ) { metrics?.onFramesDropped(droppedFrames) }
 
             override fun onVideoInputFormatChanged(
                 eventTime: AnalyticsListener.EventTime, format: Format,

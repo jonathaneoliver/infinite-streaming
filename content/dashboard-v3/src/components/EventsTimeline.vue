@@ -281,7 +281,7 @@ function chRowToIngest(row: Record<string, unknown>): IngestRow | null {
     // so the timeline still renders for historical rows that pre-date
     // the rename.
     stalls: num(row.stalling_count) ?? num(row.stall_count),
-    droppedFrames: num(row.dropped_frames),
+    droppedFrames: num(row.frames_dropped),
     error: String(row.player_error ?? ''),
     firstFrameTimeS: num(row.video_first_frame_time_ms) != null
       ? (num(row.video_first_frame_time_ms) as number) / 1000

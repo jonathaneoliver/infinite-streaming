@@ -71,7 +71,7 @@ type PlayerRecord struct {
 		VideoFirstFrameTimeS   float64 `json:"first_frame_time_s"`
 		NetworkBitrateMbps     float64 `json:"network_bitrate_mbps"`
 		AvgNetworkBitrateMbps  float64 `json:"avg_network_bitrate_mbps"`
-		DroppedFrames          int     `json:"dropped_frames"`
+		FramesDropped          int     `json:"frames_dropped"`
 		PositionS              float64 `json:"position_s"`
 		LiveEdgeS              float64 `json:"live_edge_s"`
 		LiveOffsetS            float64 `json:"live_offset_s"`

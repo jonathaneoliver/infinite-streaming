@@ -893,7 +893,7 @@ type PlayDetail struct {
 	Classification *PlayDetailClassification `json:"classification,omitempty"`
 	ContentId      *string                   `json:"content_id,omitempty"`
 	Downshifts     *int                      `json:"downshifts,omitempty"`
-	DroppedFrames  *int                      `json:"dropped_frames,omitempty"`
+	FramesDropped  *int                      `json:"frames_dropped,omitempty"`
 
 	// ErrorEventCount Explicit player_error events.
 	ErrorEventCount *int `json:"error_event_count,omitempty"`
@@ -1014,7 +1014,7 @@ type PlayDetail_LabelHistogram_Item struct {
 // Field groups:
 //   - identifiers (play_id, player_id, session_id, content_id, …)
 //   - timing (started_at, last_seen_at)
-//   - quality (stalls, downshifts, dropped_frames, avg_quality_pct)
+//   - quality (stalls, downshifts, frames_dropped, avg_quality_pct)
 //   - failure counters (master_manifest_failures, …, transport_failures)
 //   - signal counters (frozen_count, restart_count, …) used by the
 //     dashboard's "interesting" filter
@@ -1045,7 +1045,7 @@ type PlaySummary struct {
 	Classification *PlaySummaryClassification `json:"classification,omitempty"`
 	ContentId      *string                    `json:"content_id,omitempty"`
 	Downshifts     *int                       `json:"downshifts,omitempty"`
-	DroppedFrames  *int                       `json:"dropped_frames,omitempty"`
+	FramesDropped  *int                       `json:"frames_dropped,omitempty"`
 
 	// ErrorEventCount Explicit player_error events.
 	ErrorEventCount *int `json:"error_event_count,omitempty"`

@@ -59,7 +59,7 @@ data:
         display_resolution    LowCardinality(String)      CODEC(ZSTD(1)),
         video_resolution      LowCardinality(String)      CODEC(ZSTD(1)),
         frames_displayed      UInt64                      DEFAULT 0,
-        dropped_frames        UInt32                      DEFAULT 0,
+        frames_dropped        UInt32                      DEFAULT 0,
         stall_count           UInt32                      DEFAULT 0,
         stall_time_s          Float32                     CODEC(ZSTD(1)),
         position_s            Float32                     CODEC(ZSTD(1)),

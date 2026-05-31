@@ -1996,13 +1996,13 @@ export interface components {
             /** @description Player-reported displayed frames count. */
             frames_displayed?: number | null;
             /** @description Player-reported dropped frames count. */
-            dropped_frames?: number | null;
+            frames_dropped?: number | null;
             /** @description Number of player restarts (auto-recovery + manual). */
             player_restarts?: number | null;
             /** @description How many times the player has reported looping the content. Player-reported, may be 0 on platforms that do not count. */
             loop_count_player?: number | null;
             /** @description Server-derived increment from the previous report. */
-            loop_count_increment?: number | null;
+            loop_count_delta?: number | null;
             /** @description Number of ABR rendition shifts the player has reported. */
             profile_shift_count?: number | null;
             /** @description Most recent player-reported lifecycle event (playing, buffering_start, stall_start, etc.). */

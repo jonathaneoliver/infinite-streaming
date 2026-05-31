@@ -110,7 +110,7 @@ var bundleRegistry = map[string]bundleDef{
 			"true_offset_s",
 			// FPS-derived counters
 			"frames_displayed",
-			"dropped_frames",
+			"frames_dropped",
 			"stall_count",
 			"stall_time_s",
 			// Player + manifest identity (used by hover tooltips +
@@ -172,12 +172,12 @@ var bundleRegistry = map[string]bundleDef{
 			"live_edge_s",
 			"metrics_source",
 			"loop_count_player",
-			"loop_count_increment",
+			"loop_count_delta",
 			"state_from",
 			"state_to",
 			"content_name",
 			"user_marked_at",
-			"nominal_fps_current",
+			"frames_rate",
 			"last_stall_time_s",
 			"video_quality_pct",
 			"video_quality_60s_pct",
@@ -193,7 +193,7 @@ var bundleRegistry = map[string]bundleDef{
 			// live_offset_s + recommended_offset_s.
 			"recommended_offset_s",
 			"configured_offset_s",
-			"nominal_fps_current",
+			"frames_rate",
 			// #550 Phase 1: residency accumulators + sticky durations
 			// + ms-renamed video startup. PlayerMetrics panel reads
 			// these via chRowAdapter; without them the per-state
@@ -235,7 +235,7 @@ var bundleRegistry = map[string]bundleDef{
 			"display_resolution",
 			"fetching_resolution",
 			"stall_count",
-			"dropped_frames",
+			"frames_dropped",
 			"player_error",
 			"last_event",
 			"manifest_variants",

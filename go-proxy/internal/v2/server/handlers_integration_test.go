@@ -185,7 +185,7 @@ func TestGet_PlayersByID_Projections_Telemetry(t *testing.T) {
 		"player_metrics_buffer_depth_s":       12.3,
 		"player_metrics_stalls":               2,
 		"player_metrics_loop_count_player":    7,
-		"player_metrics_loop_count_increment": 1,
+		"player_metrics_loop_count_delta": 1,
 		"player_metrics_profile_shift_count":  4,
 		"player_metrics_last_event":           "playing",
 		"player_metrics_source":               "avplayer-ios",

@@ -525,7 +525,7 @@ private fun DiagnosticHud(vm: PlayerViewModel) {
             val stalls = metrics?.stallCount ?: 0
             stallsText = if (stalls == 0) "0"
                 else String.format("%d (last %.1fs)", stalls, metrics?.lastStallSeconds ?: 0.0)
-            droppedText = metrics?.droppedFrames?.toString() ?: "—"
+            droppedText = metrics?.framesDropped?.toString() ?: "—"
 
             delay(1000)
         }

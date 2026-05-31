@@ -2472,12 +2472,12 @@ extension PlayerViewModel {
             "player_metrics_frames_displayed": framesDisplayedFromAccessLog()
                 ?? framesDisplayedFromNominalFps()
                 ?? diagnostics.estimatedDisplayedFrames.map { roundMetric($0) },
-            "player_metrics_dropped_frames": diagnostics.droppedVideoFrames.map { roundMetric($0) },
+            "player_metrics_frames_dropped": diagnostics.droppedVideoFrames.map { roundMetric($0) },
             // Publish the variant's nominal FPS alongside so the
             // dashboard can show effective vs nominal at a glance.
-            "player_metrics_nominal_fps_current": diagnostics.nominalFrameRate,
+            "player_metrics_frames_rate": diagnostics.nominalFrameRate,
             "player_metrics_loop_count_player": loopCount,
-            "player_metrics_loop_count_increment": loopIncrement,
+            "player_metrics_loop_count_delta": loopIncrement,
             "player_metrics_profile_shift_count": profileShiftCount,
             "player_restarts": playerRestarts,
             "player_auto_recovery_enabled": autoRecovery,

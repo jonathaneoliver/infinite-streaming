@@ -270,7 +270,7 @@ func playerMetricsFromSession(s map[string]any) *oapigen.PlayerMetrics {
 		dst **float32
 	}{
 		{"player_metrics_video_bitrate_mbps", &pm.VideoBitrateMbps},
-		{"player_metrics_nominal_fps_current", &pm.NominalFpsCurrent},
+		{"player_metrics_frames_rate", &pm.FramesRate},
 		{"player_metrics_video_quality_pct", &pm.VideoQualityPct},
 		{"player_metrics_video_quality_60s_pct", &pm.VideoQuality60sPct},
 		{"player_metrics_video_quality_avg_pct", &pm.VideoQualityAvgPct},
@@ -304,10 +304,10 @@ func playerMetricsFromSession(s map[string]any) *oapigen.PlayerMetrics {
 		{"player_metrics_stalls", &pm.Stalls},
 		{"player_metrics_stall_count", &pm.Stalls}, // v1 alias
 		{"player_metrics_frames_displayed", &pm.FramesDisplayed},
-		{"player_metrics_dropped_frames", &pm.DroppedFrames},
+		{"player_metrics_frames_dropped", &pm.FramesDropped},
 		{"player_restarts", &pm.PlayerRestarts},
 		{"player_metrics_loop_count_player", &pm.LoopCountPlayer},
-		{"player_metrics_loop_count_increment", &pm.LoopCountIncrement},
+		{"player_metrics_loop_count_delta", &pm.LoopCountDelta},
 		{"player_metrics_profile_shift_count", &pm.ProfileShiftCount},
 		{"player_metrics_playhead_wallclock_ms", &pm.PlayheadWallclockMs},
 		// #550 Phase 1: residency accumulators + per-event durations.

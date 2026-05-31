@@ -586,7 +586,7 @@ public final class PlaybackMetrics {
     }
 
     /** Called from AnalyticsListener.onDroppedVideoFrames. */
-    public void onDroppedFrames(int count) {
+    public void onFramesDropped(int count) {
         if (count <= 0) return;
         droppedFramesTotal += count;
     }
@@ -888,7 +888,7 @@ public final class PlaybackMetrics {
             p.put("player_metrics_network_bitrate_mbps", JSONObject.NULL);
 
             p.put("player_metrics_frames_displayed", framesRenderedTotal.get());
-            p.put("player_metrics_dropped_frames", droppedFramesTotal);
+            p.put("player_metrics_frames_dropped", droppedFramesTotal);
             p.put("player_metrics_profile_shift_count", profileShiftCount);
             p.put("player_metrics_stall_count", stallCount);
             p.put("player_metrics_stall_time_s", roundSeconds(totalStallTimeS));
@@ -983,7 +983,7 @@ public final class PlaybackMetrics {
             // Active variant's nominal frame rate — sticky after first
             // observation in onVideoFormatChanged.
             if (nominalFpsCurrent > 0f) {
-                p.put("player_metrics_nominal_fps_current", round2(nominalFpsCurrent));
+                p.put("player_metrics_frames_rate", round2(nominalFpsCurrent));
             }
             // Loop counter + per-heartbeat increment. iOS reports both
             // so the dashboard's "loops since last heartbeat" pulse
@@ -991,7 +991,7 @@ public final class PlaybackMetrics {
             int loopIncrement = Math.max(0, loopCountPlayer - lastReportedLoopCount);
             lastReportedLoopCount = loopCountPlayer;
             p.put("player_metrics_loop_count_player", loopCountPlayer);
-            p.put("player_metrics_loop_count_increment", loopIncrement);
+            p.put("player_metrics_loop_count_delta", loopIncrement);
 
             // Per-variant cumulative dwell — preserved across retry() via
             // priors so the dashboard Time-per-Variant tile doesn't reset
@@ -1491,7 +1491,7 @@ public final class PlaybackMetrics {
     /** Read-only counters surfaced for the on-device DiagnosticHud. */
     public int getStallCount() { return stallCount; }
     public double getLastStallSeconds() { return lastStallDurationS; }
-    public long getDroppedFrames() { return droppedFramesTotal; }
+    public long getFramesDropped() { return droppedFramesTotal; }
     public int getProfileShiftCount() { return profileShiftCount; }
     public String currentMappedState() { return mapState(); }
     public String currentMappedWaitingReason() { return mapWaitingReason(); }

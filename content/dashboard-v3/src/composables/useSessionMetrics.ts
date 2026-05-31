@@ -204,7 +204,7 @@ export function useSessionMetrics(opts: UseSessionMetricsOptions) {
       player_metrics_profile_shift_count: profileShiftCount,
       player_metrics_frames_displayed: displayedFrames,
       player_metrics_total_video_frames: totalFrames,
-      player_metrics_dropped_frames: droppedFrames,
+      player_metrics_frames_dropped: droppedFrames,
       // #550 Phase 1: emit canonical *_ms keys (forwarder mirror-
       // writes the legacy _s columns so dashboards reading either
       // shape see fresh data during the deprecation window).

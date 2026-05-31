@@ -169,7 +169,7 @@ const playerFields = computed(() => {
     // both describe variant-selection behavior so they read better
     // together than mixed in with bitrate / resolution tiles.
     { label: 'Frames Shown', value: fmtNum(m.frames_displayed) },
-    { label: 'Dropped Frames', value: fmtNum(m.dropped_frames) },
+    { label: 'Dropped Frames', value: fmtNum(m.frames_dropped) },
     // Browser / Playback Engine / Error (legacy player_error string)
     // superseded by Phase 4 player_tech (Session Details) and the
     // structured Error Code / Domain / Details / Terminal Error tiles

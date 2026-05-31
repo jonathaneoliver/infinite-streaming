@@ -1232,8 +1232,8 @@ type PlayerMetrics struct {
 	// FetchingResolution WxH of the variant the player is about to fetch — derived iOS-side from indicatedBitrate vs the variant ladder.
 	FetchingResolution *string `json:"fetching_resolution,omitempty"`
 
-	// DroppedFrames Player-reported dropped frames count.
-	DroppedFrames *int `json:"dropped_frames,omitempty"`
+	// FramesDropped Player-reported dropped frames count.
+	FramesDropped *int `json:"frames_dropped,omitempty"`
 
 	// Error Most recent player-reported error string.
 	Error *string `json:"error,omitempty"`
@@ -1277,8 +1277,8 @@ type PlayerMetrics struct {
 	// LiveOffsetS Player-reported offset behind live edge (seconds).
 	LiveOffsetS *float32 `json:"live_offset_s,omitempty"`
 
-	// LoopCountIncrement Server-derived increment from the previous report.
-	LoopCountIncrement *int `json:"loop_count_increment,omitempty"`
+	// LoopCountDelta Server-derived increment from the previous report.
+	LoopCountDelta *int `json:"loop_count_delta,omitempty"`
 
 	// LoopCountPlayer How many times the player has reported looping the content. Player-reported, may be 0 on platforms that do not count.
 	LoopCountPlayer *int `json:"loop_count_player,omitempty"`
@@ -1433,8 +1433,8 @@ type PlayerMetrics struct {
 	// UserMarkedAt On user_marked (911) events: wall-clock ISO-8601 instant the operator pressed the button.
 	UserMarkedAt *string `json:"user_marked_at,omitempty"`
 
-	// NominalFpsCurrent Active variant's nominal frame rate (Hz). Sticky after first observation.
-	NominalFpsCurrent *float32 `json:"nominal_fps_current,omitempty"`
+	// FramesRate Active variant's nominal frame rate (Hz). Sticky after first observation.
+	FramesRate *float32 `json:"frames_rate,omitempty"`
 }
 
 // PlayerPatch Mutable subset of `PlayerRecord`. JSON Merge Patch semantics.

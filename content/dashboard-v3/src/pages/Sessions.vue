@@ -28,7 +28,7 @@ interface SessionRow {
   metric_events?: number | string;
   net_events?: number | string;
   stalls?: number;
-  dropped_frames?: number;
+  frames_dropped?: number;
   downshifts?: number;
   upshifts?: number;
   resolution_changes?: number;
@@ -207,7 +207,7 @@ function computeRange(): { since: string; until: string } {
 function deriveHealth(r: SessionRow): void {
   const n = (k: keyof SessionRow) => Number((r as any)[k]) || 0;
   const stalls = n('stalls');
-  const drops = n('dropped_frames');
+  const drops = n('frames_dropped');
   const downshifts = n('downshifts');
   const upshifts = n('upshifts');
   const resChanges = n('resolution_changes');
@@ -813,7 +813,7 @@ const COLUMNS = [
   { key: 'errors_count',     label: 'Errors',     type: 'number' as const,  sortable: true },
   { key: 'faults_count',     label: 'Faults',     type: 'number' as const,  sortable: true },
   { key: 'downshifts_count', label: 'Downshifts', type: 'number' as const,  sortable: true },
-  { key: 'dropped_frames',   label: 'Drops',      type: 'number' as const,  sortable: true },
+  { key: 'frames_dropped',   label: 'Drops',      type: 'number' as const,  sortable: true },
   { key: 'avg_quality_pct',  label: 'Avg Q%',     type: 'number' as const,  sortable: true },
   { key: 'metric_events',    label: 'Metrics',    type: 'number' as const,  sortable: true },
   { key: 'net_events',       label: 'HAR',        type: 'number' as const,  sortable: true },
@@ -1223,7 +1223,7 @@ const showCustomInputs = computed(() => activeRangeId.value === 'custom');
                   <td><span :style="{ color: fmtCount(r.errors_count, 1, 1).color, fontWeight: fmtCount(r.errors_count, 1, 1).bold ? 600 : 400 }">{{ fmtCount(r.errors_count, 1, 1).n }}</span></td>
                   <td><span :style="{ color: fmtCount(r.faults_count, 1, 10).color, fontWeight: fmtCount(r.faults_count, 1, 10).bold ? 600 : 400 }">{{ fmtCount(r.faults_count, 1, 10).n }}</span></td>
                   <td><span :style="{ color: fmtCount(r.downshifts_count, 1, 5).color, fontWeight: fmtCount(r.downshifts_count, 1, 5).bold ? 600 : 400 }">{{ fmtCount(r.downshifts_count, 1, 5).n }}</span></td>
-                  <td><span :style="{ color: fmtCount(r.dropped_frames, 100, 1000).color, fontWeight: fmtCount(r.dropped_frames, 100, 1000).bold ? 600 : 400 }">{{ fmtCount(r.dropped_frames, 100, 1000).n }}</span></td>
+                  <td><span :style="{ color: fmtCount(r.frames_dropped, 100, 1000).color, fontWeight: fmtCount(r.frames_dropped, 100, 1000).bold ? 600 : 400 }">{{ fmtCount(r.frames_dropped, 100, 1000).n }}</span></td>
                   <td><span :style="{ color: fmtPct(r.avg_quality_pct).color }">{{ fmtPct(r.avg_quality_pct).label }}</span></td>
                   <td>{{ r.metric_events || 0 }}</td>
                   <td>{{ r.net_events || 0 }}</td>

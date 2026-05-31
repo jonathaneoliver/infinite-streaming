@@ -55,7 +55,7 @@ watch(
       if (!Number.isFinite(t) || t <= lastSeenMs) continue;
       lastSeenMs = t;
       const fr = num(row.frames_displayed);
-      const dr = num(row.dropped_frames);
+      const dr = num(row.frames_dropped);
       const playId = typeof row.play_id === 'string' ? row.play_id : null;
       if (playId !== prevPlayId) {
         prevPlayId = playId;
@@ -109,7 +109,7 @@ const series = computed<SeriesSpec[]>(() => [
   {
     label: 'Dropped frames (total)',
     color: '#7c2d12',
-    accessor: (p: PlayerRecord) => p.player_metrics?.dropped_frames ?? null,
+    accessor: (p: PlayerRecord) => p.player_metrics?.frames_dropped ?? null,
     stepped: true,
     axis: 'y2',
   },

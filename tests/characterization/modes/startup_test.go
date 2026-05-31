@@ -695,13 +695,13 @@ func populateStartupCycleResult(r runner.StartupCycleResult, samples []runner.Sa
 		last := samples[len(samples)-1]
 		shiftDelta := max0(last.ProfileShiftCount - baselineSample.ProfileShiftCount)
 		stallDelta := max0(last.Stalls - baselineSample.Stalls)
-		droppedDelta := max0(last.DroppedFrames - baselineSample.DroppedFrames)
+		droppedDelta := max0(last.FramesDropped - baselineSample.FramesDropped)
 		// ProfileShiftCount is a combined counter (up + down). We don't
 		// have per-direction info; lump into UpshiftsIn30S and leave
 		// DownshiftsIn30S=0. Standards doc notes this.
 		r.UpshiftsIn30S = shiftDelta
 		r.StallsIn30S = stallDelta
-		r.DroppedFramesIn30S = droppedDelta
+		r.FramesDroppedIn30S = droppedDelta
 	}
 
 	r.NetworkBitrateAtStartMbps = firstNB

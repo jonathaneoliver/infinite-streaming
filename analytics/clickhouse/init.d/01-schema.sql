@@ -71,7 +71,7 @@ CREATE TABLE IF NOT EXISTS infinite_streaming.session_events
     fetching_resolution   LowCardinality(String) DEFAULT '' CODEC(ZSTD(1)),
     video_resolution      LowCardinality(String)      CODEC(ZSTD(1)),
     frames_displayed      UInt64                      DEFAULT 0,
-    dropped_frames        UInt32                      DEFAULT 0,
+    frames_dropped        UInt32                      DEFAULT 0,
     -- DEPRECATED (#550 soft cutover). Forwarder mirror-writes from
     -- stalling_count / stalling_time_ms below for the deprecation
     -- window. Consumers (Vue3 dashboard, harness, Grafana) migrate to
@@ -200,7 +200,7 @@ CREATE TABLE IF NOT EXISTS infinite_streaming.session_events
     true_offset_s         Float32                     CODEC(ZSTD(1)),
     playback_rate         Float32                     CODEC(ZSTD(1)),
     loop_count_player     UInt32                      DEFAULT 0,
-    loop_count_increment  UInt32                      DEFAULT 0,
+    loop_count_delta  UInt32                      DEFAULT 0,
     state_from            LowCardinality(String) DEFAULT '' CODEC(ZSTD(1)),
     state_to              LowCardinality(String) DEFAULT '' CODEC(ZSTD(1)),
     content_name          LowCardinality(String) DEFAULT '' CODEC(ZSTD(1)),
@@ -498,7 +498,7 @@ ALTER TABLE infinite_streaming.session_events
     -- device_resolution supersedes screen_width_px / screen_height_px /
     -- screen_density (2026-05-30 cleanup).
     ADD COLUMN IF NOT EXISTS device_resolution       LowCardinality(String) DEFAULT ''            CODEC(ZSTD(1)),
-    ADD COLUMN IF NOT EXISTS loop_count_increment    UInt32                 DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS loop_count_delta    UInt32                 DEFAULT 0,
     ADD COLUMN IF NOT EXISTS state_from              LowCardinality(String) DEFAULT ''            CODEC(ZSTD(1)),
     ADD COLUMN IF NOT EXISTS state_to                LowCardinality(String) DEFAULT ''            CODEC(ZSTD(1)),
     ADD COLUMN IF NOT EXISTS content_name            LowCardinality(String) DEFAULT ''            CODEC(ZSTD(1)),
@@ -534,7 +534,7 @@ ALTER TABLE infinite_streaming.session_events
     -- Active variant's nominal frame rate (issue #486 follow-up).
     -- Used by the dashboard to display the effective vs nominal FPS
     -- ratio. Sourced from AVAssetVariant.videoAttributes.
-    ADD COLUMN IF NOT EXISTS nominal_fps_current Float32 CODEC(ZSTD(1)),
+    ADD COLUMN IF NOT EXISTS frames_rate Float32 CODEC(ZSTD(1)),
     -- Median TTFB (responseStart - requestEnd) over the most recent
     -- AVMetricMediaResourceRequestEvent.networkTransactionMetrics
     -- samples. Rendered as "TTFB (client, ms)" on the RTT chart.
