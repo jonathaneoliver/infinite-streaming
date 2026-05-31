@@ -218,7 +218,68 @@ final class PlaybackDiagnostics: ObservableObject {
     /// Reset on play boundary + on next .playing transition (the
     /// latter covers the happy case where retry() succeeded).
     @Published var stallStuck: Bool = false
-    private var hasRenderedFirstFrame: Bool = false
+
+    /// Terminal status / reason for the play. Nil while in_progress;
+    /// set exactly once at session_end via markTerminal(). Read by
+    /// PlayerViewModel.buildMetricsPayload to stamp the session_end
+    /// row's `player_metrics_playback_status` / `_playback_reason`.
+    /// Cleared by resetForFreshPlay (Reload button); PRESERVED across
+    /// retry() because if the play already hit a terminal state it
+    /// stays terminal.
+    @Published var terminalStatus: String? = nil
+    @Published var terminalReason: String? = nil
+
+    /// Threshold (seconds) above which a user_stopped row whose state
+    /// was buffering / stalled is marked `_long`. Same value across
+    /// every client platform — the vocabulary is contract-shaped, not
+    /// operator-tunable. If retuning becomes a real need, lift this
+    /// into a config-fetched value and propagate; until then a Swift
+    /// constant keeps the classification on the device and the row's
+    /// stamped value true forever.
+    static let endedStateLongThresholdSeconds: Double = 10.0
+
+    /// Set the terminal status/reason for this play. First call wins —
+    /// later attempts no-op so the first detected terminal condition
+    /// is the one that lands in CH. Refines the reason via
+    /// refineTerminalReason (so a user_quit while buffering becomes
+    /// ended_buffering[_long] etc.). Idempotent + thread-safe via
+    /// @Published main-actor isolation when called from MainActor
+    /// contexts (PlayerViewModel callbacks).
+    func markTerminal(status: String, reason: String) {
+        guard terminalStatus == nil else { return }
+        terminalStatus = status
+        terminalReason = refineTerminalReason(baseReason: reason, status: status)
+    }
+
+    /// Returns the playback_reason to stamp on a session_end row,
+    /// given a base reason and the current state + sticky durations.
+    /// Refines the generic `"user_quit"` into ended_buffering /
+    /// ended_stalling (or their `_long` variants) when the player was
+    /// buffering / stalled at the moment iOS emits session_end.
+    /// Operator-explicit reasons (`app_backgrounded`, `app_terminated`,
+    /// `next_content_selected`) pass through untouched. Lives on
+    /// PlaybackDiagnostics because every input is already here.
+    func refineTerminalReason(baseReason: String, status: String) -> String {
+        guard status == "user_stopped" else { return baseReason }
+        guard baseReason.isEmpty || baseReason == "user_quit" else { return baseReason }
+        let thresholdMs = UInt32(Self.endedStateLongThresholdSeconds * 1000)
+        let stallMs = UInt32(stallDurationS * 1000)
+        let bufMs = UInt32(bufferingDurationS * 1000)
+        switch state {
+        case "stalled":   return stallMs >= thresholdMs ? "ended_stalling_long"  : "ended_stalling"
+        case "buffering": return bufMs   >= thresholdMs ? "ended_buffering_long" : "ended_buffering"
+        default:          return baseReason
+        }
+    }
+    private(set) var hasRenderedFirstFrame: Bool = false
+
+    /// Wall-clock instant at the start of the current play. Used to
+    /// detect EBVS (Exit-Before-Video-Start) on user-back: when the
+    /// user taps back BEFORE first frame AND elapsed > threshold,
+    /// the play is classified as abandoned_start / slow_startup
+    /// instead of generic user_stopped. Set by reset() at every play
+    /// boundary; preserved across retry() via the prior pattern.
+    private(set) var playStartAt: Date?
     private var lastAdvancingTime: Double = 0
     private var lastAdvancingAt: Date?
     private var frozenLoggedAt: Date?
@@ -441,6 +502,15 @@ final class PlaybackDiagnostics: ObservableObject {
         priorVariantDwellSeconds.removeAll()
         variantDwellSeconds.removeAll()
         lastVariantDwellTotal = 0
+        // Fresh play → clear terminal so the new play starts in_progress.
+        // retry() does NOT call resetForFreshPlay; retry preserves the
+        // terminal state of a play if it already crossed terminal.
+        terminalStatus = nil
+        terminalReason = nil
+        // Fresh play → restart the EBVS clock. Nil now so reset()'s
+        // nil-coalesce sets it to the new Date() at this fresh play
+        // boundary, not the prior play's start.
+        playStartAt = nil
     }
 
     /// Add elapsed-since-last-transition to the *prior* state's
@@ -613,6 +683,11 @@ final class PlaybackDiagnostics: ObservableObject {
         lastPlayerSampleAt = nil
         stallStartAt = nil
         isStalled = false
+        // playStartAt persists across retry() — the "play" is the same,
+        // attempts are retries within it. resetForFreshPlay() explicitly
+        // nils it BEFORE calling reset() so a Reload starts the clock
+        // over. EBVS classification reads this elapsed.
+        playStartAt = playStartAt ?? Date()
         hasRenderedFirstFrame = false
         lastObservedSegmentSequence = nil
         maxObservedSegmentSequence = nil

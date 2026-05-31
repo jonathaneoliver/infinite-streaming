@@ -43,6 +43,7 @@ type QoEThresholds struct {
 		// watch) vs `user_stopped` (before-substantial-watch, i.e.
 		// bounce).
 		UserStoppedAfterThresholdMs uint32 `json:"user_stopped_after_threshold_ms"`
+
 	} `json:"outcomes"`
 
 	// Phase 3 — auto-labels. Parsed but consumed by a follow-up

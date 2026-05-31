@@ -958,7 +958,11 @@ func toRow(ts string, revision uint64, sessionID string, s map[string]interface{
 	applyResidencyDeltas(&r, playCanonical)
 	// Default to in_progress on rows where iOS didn't stamp a status
 	// (older clients, non-iOS payloads). Terminal status comes from
-	// iOS or the future forwarder classifier.
+	// iOS — including the ended_buffering / ended_stalling refinement
+	// of playback_reason on user_stopped rows. We don't reclassify
+	// server-side because historical rows should carry the value the
+	// client stamped at session_end forever, not the value a later
+	// threshold tweak would produce.
 	if r.PlaybackStatus == "" {
 		r.PlaybackStatus = "in_progress"
 	}

@@ -280,6 +280,7 @@ final class PlayerViewModel: ObservableObject {
     private var firstFrameObserver: AVPlayerItemMetadataOutput?
     private var hasReportedFirstFrame = false
     private var willEnterForegroundObserver: NSObjectProtocol?
+    private var willTerminateObserver: NSObjectProtocol?
     private var didEnterBackgroundObserver: NSObjectProtocol?
 
     // MARK: - Init
@@ -334,6 +335,7 @@ final class PlayerViewModel: ObservableObject {
         if let o = didPlayToEndObserver { NotificationCenter.default.removeObserver(o) }
         if let o = failedToPlayObserver { NotificationCenter.default.removeObserver(o) }
         if let o = willEnterForegroundObserver { NotificationCenter.default.removeObserver(o) }
+        if let o = willTerminateObserver { NotificationCenter.default.removeObserver(o) }
         if let o = didEnterBackgroundObserver { NotificationCenter.default.removeObserver(o) }
         playIdRotationTask?.cancel()
     }
@@ -1117,6 +1119,62 @@ final class PlayerViewModel: ObservableObject {
         Task { [weak self] in await self?.sendPlayerMetrics(payload: payload) }
     }
 
+    /// Mark the play as terminated with the given Phase 2 status +
+    /// reason and emit a single session_end event so the dashboard /
+    /// CH see the terminal row. Idempotent — only the FIRST call
+    /// stamps the terminal state (a user_quit followed by a fatal
+    /// error a moment later still reads as user_stopped, which matches
+    /// reality from the operator's perspective).
+    ///
+    /// Detection-point inputs:
+    ///   - User back tap → status="user_stopped"  reason="user_quit"
+    ///   - App background → status="user_stopped" reason="app_backgrounded"
+    ///   - App terminate → status="user_stopped"  reason="app_terminated"
+    ///   - AVPlayer fatal pre-first-frame → status="start_failure"
+    ///   - AVPlayer fatal post-first-frame → status="mid_stream_failure"
+    ///
+    /// Reason is passed through diagnostics.refineTerminalReason so a
+    /// user_quit while buffering becomes ended_buffering[_long] etc.
+    /// before the payload goes out.
+    /// EBVS threshold (seconds). Above this, a user back-tap before
+    /// first frame becomes abandoned_start / slow_startup. Below, it
+    /// stays user_stopped / user_quit (user changed their mind quickly).
+    /// Mirrors the forwarder's default qoe_thresholds.outcomes.ebvs_threshold_ms
+    /// (10s); kept as a Swift constant so the client decision happens
+    /// in one place and the row is stamped right at session_end.
+    private static let ebvsThresholdSeconds: TimeInterval = 10
+
+    /// Convenience for the playback-back-button tap (and tvOS exit
+    /// command). Decides between user_stopped / abandoned_start based
+    /// on whether the player ever crossed first frame and how long
+    /// the play had been running. The classifier in PlaybackDiagnostics
+    /// then upgrades user_quit → ended_buffering[_long] etc. if the
+    /// player was stuck in those states.
+    func endSessionForUserBack() {
+        if !diagnostics.hasRenderedFirstFrame,
+           let startedAt = diagnostics.playStartAt,
+           Date().timeIntervalSince(startedAt) >= Self.ebvsThresholdSeconds {
+            endSession(status: "abandoned_start", reason: "slow_startup")
+        } else {
+            endSession(status: "user_stopped", reason: "user_quit")
+        }
+    }
+
+    func endSession(status: String, reason: String) {
+        // No-op on subsequent calls — diagnostics.markTerminal enforces
+        // first-call-wins. Even when terminal is already set we still
+        // emit a session_end (the prior emit may have been swallowed
+        // by background suspension), but the values stay stable.
+        let alreadyTerminal = diagnostics.terminalStatus != nil
+        diagnostics.markTerminal(status: status, reason: reason)
+        if alreadyTerminal {
+            NSLog("[endSession] terminal already=\(diagnostics.terminalStatus ?? "?") — re-emitting session_end for delivery")
+        }
+        Task { [weak self] in
+            await self?.sendPlayerMetrics(event: "session_end")
+        }
+    }
+
     func reload() {
         Task { [weak self] in
             await self?.requestHARSnapshot(reason: "user_reload", force: true)
@@ -1169,6 +1227,15 @@ final class PlayerViewModel: ObservableObject {
                 // Android's onActivityStopped behaviour. AVPlayer doesn't
                 // hold a hardware decoder when nil item is set, and pause
                 // alone wouldn't free anything.
+                //
+                // We intentionally do NOT mark terminal here. Background
+                // is ambiguous: a 1-second app-switch and an end-of-
+                // session both look identical at this notification.
+                // willTerminate handles the unambiguous end-of-app case;
+                // quick app-switches resume cleanly via willEnterForeground
+                // without false-positive user_stopped rows. Future
+                // refinement: a timer that marks terminal after N
+                // seconds backgrounded.
                 self?.player.pause()
                 self?.player.replaceCurrentItem(with: nil)
             }
@@ -1181,6 +1248,20 @@ final class PlayerViewModel: ObservableObject {
                 // Re-prepare from the URL we had loaded before backgrounding.
                 guard let url = self?.currentURL else { return }
                 self?.loadStream(url: url)
+            }
+        }
+        // willTerminate fires on hard-quit (swipe-up from app switcher).
+        // Synchronous notification — we get a few hundred ms before iOS
+        // reaps us. Mark terminal + fire-and-forget the session_end.
+        // Best-effort: if iOS reaps us mid-flight the row stays
+        // in_progress and the forwarder treats absent session_end as
+        // "user closed without notifying."
+        willTerminateObserver = nc.addObserver(
+            forName: UIApplication.willTerminateNotification,
+            object: nil, queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.endSession(status: "user_stopped", reason: "app_terminated")
             }
         }
     }
@@ -1295,11 +1376,20 @@ final class PlayerViewModel: ObservableObject {
                 try? await Task.sleep(nanoseconds: 500_000_000)
                 self?.loadStream(url: url)
             }
+            return
         }
+        // No auto-recovery → this error is terminal. start_failure if
+        // we never reached first frame, otherwise mid_stream_failure.
+        markFatalTerminal(message: message)
     }
 
     private func handleErrorRetry(reason: String) {
-        guard codecRetries < maxCodecRetries, let url = currentURL else { return }
+        guard codecRetries < maxCodecRetries, let url = currentURL else {
+            // Retry budget exhausted → the play is dead. Distinguish
+            // pre-vs-post-first-frame for the right Phase 2 status.
+            markFatalTerminal(message: reason)
+            return
+        }
         codecRetries += 1
         let retries = codecRetries
         statusText = "\(reason) — retry \(retries)/\(maxCodecRetries)"
@@ -1307,6 +1397,19 @@ final class PlayerViewModel: ObservableObject {
             try? await Task.sleep(nanoseconds: UInt64(150_000_000 * retries))
             self?.loadStream(url: url)
         }
+    }
+
+    /// Stamp the play as fatally terminated and emit session_end. The
+    /// status is `start_failure` when the player never crossed first
+    /// frame, `mid_stream_failure` after. iOS doesn't yet inspect the
+    /// underlying NSError domain/code to populate a specific
+    /// playback_reason — the forwarder error_classifier (4d8265f) will
+    /// pick that up from terminal_error_* in a follow-up; for now we
+    /// stamp the generic "unknown" so dashboards bucket correctly.
+    private func markFatalTerminal(message: String) {
+        let status = diagnostics.hasRenderedFirstFrame ? "mid_stream_failure" : "start_failure"
+        endSession(status: status, reason: "unknown")
+        NSLog("[endSession] fatal status=\(status) message=\(message)")
     }
 
     // MARK: - Persistence (UserDefaults)
@@ -2310,8 +2413,15 @@ extension PlayerViewModel {
             // session_end events (completed / user_stopped / failed_*).
             // playback_reason mirrors player_state during in_progress;
             // classifier-derived on terminal rows.
-            "player_metrics_playback_status": "in_progress",
-            "player_metrics_playback_reason": diagnostics.state,
+            // playback_status / _reason — heartbeats default to
+            // in_progress + the current state. session_end events
+            // (and any heartbeat after markTerminal fires) pick up
+            // the terminal values diagnostics stamped. Once markTerminal
+            // has run, EVERY subsequent payload carries the terminal
+            // status so a late-arriving heartbeat after teardown still
+            // reads correctly.
+            "player_metrics_playback_status": diagnostics.terminalStatus ?? "in_progress",
+            "player_metrics_playback_reason": diagnostics.terminalReason ?? diagnostics.state,
             "player_metrics_error_count": diagnostics.errorCount,
             // stall_stuck: sticky true when AVPlayer transitioned
             // from .waitingToPlay to .paused mid-stall. The player

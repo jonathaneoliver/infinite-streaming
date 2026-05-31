@@ -162,6 +162,14 @@ func runHarness(ctx context.Context, args ...string) ([]byte, error) {
 	return out, nil
 }
 
+// RunHarnessCLI is the exported counterpart to runHarness — lets test
+// packages outside `runner` (e.g. modes/) drive arbitrary harness CLI
+// commands without re-implementing the exec wiring. Inherits the
+// same insecure / json / base-URL flags via harnessArgs.
+func RunHarnessCLI(ctx context.Context, args ...string) ([]byte, error) {
+	return runHarness(ctx, args...)
+}
+
 // ListPlayers returns every player the proxy currently knows about, including
 // stale ones with last_seen_at=null. Filter to heartbeating via IsHeartbeating.
 func ListPlayers(ctx context.Context) ([]PlayerRecord, error) {

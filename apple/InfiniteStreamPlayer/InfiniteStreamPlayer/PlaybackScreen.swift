@@ -41,7 +41,10 @@ struct PlaybackScreen: View {
             #if !os(tvOS)
             VStack {
                 HStack(spacing: Space.s3) {
-                    BackChevronButton { onBack() }
+                    BackChevronButton {
+                        vm.endSessionForUserBack()
+                        onBack()
+                    }
                         .accessibilityIdentifier("playback-back-button")
                         .help("Back to content list")
                     Spacer()
@@ -62,7 +65,10 @@ struct PlaybackScreen: View {
         .background(Color.black.ignoresSafeArea())
         #if os(tvOS)
         .onExitCommand {
-            if !vm.settingsOpen { onBack() }
+            if !vm.settingsOpen {
+                vm.endSessionForUserBack()
+                onBack()
+            }
         }
         #endif
     }
