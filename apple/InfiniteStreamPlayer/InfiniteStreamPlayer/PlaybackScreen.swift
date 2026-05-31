@@ -23,7 +23,8 @@ struct PlaybackScreen: View {
                 onReload: { vm.reload() },
                 onMark911: { vm.mark911() },
                 onOpenSettings: { vm.setSettingsOpen(true) },
-                onFirstFrame: { at in vm.markFirstFrameRendered(at: at) }
+                onFirstFrame: { at in vm.markFirstFrameRendered(at: at) },
+                onDisplaySize: { size in vm.diagnostics.updateDisplaySize(size) }
             )
             .id(vm.playerEpoch)
             .ignoresSafeArea()

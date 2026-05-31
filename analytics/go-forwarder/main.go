@@ -275,6 +275,12 @@ type row struct {
 	// Per-event sticky durations (Phase 1 ancillary).
 	StallDurationMs          uint32 `json:"stall_duration_ms"`
 	BufferingDurationMs      uint32 `json:"buffering_duration_ms"`
+	// Orthogonal "this stall won't auto-recover" discriminator.
+	// True from the moment AVPlayer transitions stalled → .paused
+	// (give-up) until next .playing transition. State stays "stalled"
+	// for residency continuity; dashboards key on this flag to surface
+	// operator-actionable stalls.
+	StallStuck               bool   `json:"stall_stuck"`
 	// ── #550 Phase 2: outcome status + structured error fields ─────
 	PlaybackStatus           string `json:"playback_status"`
 	PlaybackReason           string `json:"playback_reason"`
@@ -293,9 +299,9 @@ type row struct {
 	DeviceClass              string  `json:"device_class"`
 	DeviceModel              string  `json:"device_model"`
 	PlayerTech               string  `json:"player_tech"`
-	ScreenWidthPx            uint16  `json:"screen_width_px"`
-	ScreenHeightPx           uint16  `json:"screen_height_px"`
-	ScreenDensity            float32 `json:"screen_density"`
+	// Orientation-aware "WxH" — supersedes the three screen_* fields
+	// dropped on 2026-05-30.
+	DeviceResolution         string  `json:"device_resolution"`
 	// ── #550 Phase 1 video-startup ms migrations ───────────────────
 	// New canonical names alongside deprecated _s variants below
 	// (mirror-written by toRow during deprecation window).
@@ -333,6 +339,8 @@ type row struct {
 	MetricsSource            string  `json:"metrics_source"`
 	VideoFirstFrameTimeS     float32 `json:"video_first_frame_time_s"`
 	VideoQualityPct          float32 `json:"video_quality_pct"`
+	VideoQuality60sPct       float32 `json:"video_quality_60s_pct"`
+	VideoQualityAvgPct       float32 `json:"video_quality_avg_pct"`
 	VideoStartTimeS          float32 `json:"video_start_time_s"`
 	// iOS-published per-variant watch time (issue #486). JSON-object
 	// string keyed by `<resolution>@<kbps>kbps` with seconds-watched
@@ -794,6 +802,7 @@ func toRow(ts string, revision uint64, sessionID string, s map[string]interface{
 		TrickplayingCount:        uint32(getU64(s, "player_metrics_trickplaying_count")),
 		StallDurationMs:          uint32(getU64(s, "player_metrics_stall_duration_ms")),
 		BufferingDurationMs:      uint32(getU64(s, "player_metrics_buffering_duration_ms")),
+		StallStuck:               getBool(s, "player_metrics_stall_stuck"),
 		VideoFirstFrameTimeMs:    uint32(getU64(s, "player_metrics_video_first_frame_time_ms")),
 		VideoStartTimeMs:         uint32(getU64(s, "player_metrics_video_start_time_ms")),
 		// Phase 1 soft cutover: mirror-write the deprecated stall_*
@@ -818,9 +827,7 @@ func toRow(ts string, revision uint64, sessionID string, s map[string]interface{
 		DeviceClass:              getStr(s, "player_metrics_device_class"),
 		DeviceModel:              getStr(s, "player_metrics_device_model"),
 		PlayerTech:                getStr(s, "player_metrics_player_tech"),
-		ScreenWidthPx:             uint16(getU64(s, "player_metrics_screen_width_px")),
-		ScreenHeightPx:            uint16(getU64(s, "player_metrics_screen_height_px")),
-		ScreenDensity:             getF32(s, "player_metrics_screen_density"),
+		DeviceResolution:          getStr(s, "player_metrics_device_resolution"),
 		PositionS:                getF32(s, "player_metrics_position_s"),
 		LiveEdgeS:                getF32(s, "player_metrics_live_edge_s"),
 		TrueOffsetS:              getF32(s, "player_metrics_true_offset_s"),
@@ -849,6 +856,8 @@ func toRow(ts string, revision uint64, sessionID string, s map[string]interface{
 		MetricsSource:         getStr(s, "player_metrics_source"),
 		VideoFirstFrameTimeS:  getF32(s, "player_metrics_video_first_frame_time_s"),
 		VideoQualityPct:       getF32(s, "player_metrics_video_quality_pct"),
+		VideoQuality60sPct:    getF32(s, "player_metrics_video_quality_60s_pct"),
+		VideoQualityAvgPct:    getF32(s, "player_metrics_video_quality_avg_pct"),
 		VideoStartTimeS:       getF32(s, "player_metrics_video_start_time_s"),
 		TimePerVariantS:       stringField(s, "player_metrics_time_per_variant_s"),
 		ClientRttAvmetricsMs:  getF32(s, "player_metrics_client_rtt_avmetrics_ms"),
@@ -1021,6 +1030,26 @@ func getJSON(m map[string]interface{}, key string) string {
 		return ""
 	}
 	return string(b)
+}
+
+// getBool reads a boolean field tolerantly. Native bool, "true"/"false"
+// strings, and numeric 0/1 all parse. Missing or unparseable keys
+// return false.
+func getBool(m map[string]interface{}, key string) bool {
+	switch v := m[key].(type) {
+	case bool:
+		return v
+	case string:
+		switch strings.ToLower(v) {
+		case "true", "1", "t", "yes":
+			return true
+		}
+	case float64:
+		return v != 0
+	case float32:
+		return v != 0
+	}
+	return false
 }
 
 func getF32(m map[string]interface{}, key string) float32 {

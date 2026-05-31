@@ -1557,7 +1557,9 @@ components:
         video_resolution:    { type: string,  nullable: true }
         display_resolution:  { type: string,  nullable: true, description: 'Player-reported window/display resolution (separate from the active video resolution).' }
         video_bitrate_mbps:  { type: number, format: float, nullable: true }
-        video_quality_pct:   { type: number, format: float, nullable: true, description: 'video_bitrate_mbps as a percentage of the top variant in the active manifest' }
+        video_quality_pct:   { type: number, format: float, nullable: true, description: 'video_bitrate_mbps as a percentage of the top variant in the active manifest (snapshot)' }
+        video_quality_60s_pct: { type: number, format: float, nullable: true, description: 'Log-bitrate (Weber-Fechner) quality over the last 60s of watched playback. Formula: log(kbps/min) / log(max/min) per event, clamped to a 0.20 floor, time-weighted by durationWatched. Matches dashboard PlayLog computeQualityPct.' }
+        video_quality_avg_pct: { type: number, format: float, nullable: true, description: 'Same log-bitrate formula as video_quality_60s_pct but over the lifetime of the play. Computed by iOS from AVPlayerItem.accessLog().' }
         avg_network_bitrate_mbps: { type: number, format: float, nullable: true, description: 'Player-computed avgNetworkBitrate.' }
         network_bitrate_mbps:     { type: number, format: float, nullable: true, description: 'Player-computed instantaneous networkBitrate.' }
         buffer_depth_s:      { type: number, format: float, nullable: true }
@@ -1610,9 +1612,11 @@ components:
         seeking_time_ms:        { type: integer, nullable: true, description: '#550 Phase 1: cumulative time spent in seek-induced refill (TimeJumped → next .playing). Conviva CIRR/CIRT pattern: `connection_buffering = buffering_time_ms - seeking_time_ms`.' }
         seeking_count:          { type: integer, nullable: true, description: '#550 Phase 1: AVPlayerItemTimeJumped events since play start.' }
         trickplaying_time_ms:   { type: integer, nullable: true, description: '#550 Phase 1: cumulative time at non-1× playback rate (FF / RW).' }
+        time_per_variant_s:     { type: string,  nullable: true, description: 'JSON-string-encoded map of variant-label → cumulative seconds spent at that variant (e.g. `{"2160p@29857kbps":65.28}`). Preserved across retry()-style restarts.' }
         trickplaying_count:     { type: integer, nullable: true, description: '#550 Phase 1: entries into trickplay (rate ∉ {0, ~1}).' }
         stall_duration_ms:      { type: integer, nullable: true, description: '#550 Phase 1: duration of the MOST RECENT stall event (sticky on subsequent heartbeats). Replaces legacy last_stall_time_s.' }
         buffering_duration_ms:  { type: integer, nullable: true, description: '#550 Phase 1: duration of the MOST RECENT buffer event (sticky). Replaces legacy last_buffering_time_s.' }
+        stall_stuck:            { type: boolean, nullable: true, description: '#550 Phase 1 ext: orthogonal "this stall won''t auto-recover" flag. True from the moment AVPlayer transitions stalled → .paused (give-up) until next .playing transition. State stays "stalled" for residency continuity; dashboards key on this flag to surface operator-actionable stalls.' }
         video_first_frame_time_ms: { type: integer, nullable: true, description: '#550 Phase 1: TTFF in ms. Conviva/Mux/Bitmovin canonical units. Replaces legacy video_first_frame_time_s.' }
         video_start_time_ms:    { type: integer, nullable: true, description: '#550 Phase 1: alternate startup-time measurement in ms.' }
 
@@ -1634,9 +1638,7 @@ components:
         device_class:           { type: string,  nullable: true, description: '#550 Phase 4: form-factor enum: `phone` / `tablet` / `tv` / `desktop` / `unknown`.' }
         device_model:           { type: string,  nullable: true, description: '#550 Phase 4: hardware model identifier (e.g. iPhone15,3) via sysctl hw.machine.' }
         player_tech:            { type: string,  nullable: true, description: '#550 Phase 4: playback engine: `AVPlayer` / `hls.js` / `shaka` / `native-roku` / `vlc` / `ffmpeg`.' }
-        screen_width_px:        { type: integer, nullable: true, description: '#550 Phase 4: native (physical-pixel) screen width.' }
-        screen_height_px:       { type: integer, nullable: true, description: '#550 Phase 4: native screen height.' }
-        screen_density:         { type: number,  format: float, nullable: true, description: '#550 Phase 4: native scale (points-to-pixels density).' }
+        device_resolution:      { type: string,  nullable: true, description: 'Physical-pixel resolution of the device''s current orientation, formatted `"WxH"` to match video_resolution / display_resolution. Swaps integers on iPad rotation; static on Apple TV / orientation-locked clients. Supersedes screen_width_px / screen_height_px / screen_density (dropped 2026-05-30).' }
 
     ServerMetrics:
       description: |

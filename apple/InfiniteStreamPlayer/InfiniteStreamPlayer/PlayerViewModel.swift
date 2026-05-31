@@ -1976,28 +1976,76 @@ extension PlayerViewModel {
         return max(0, expected - dropped)
     }
 
+    /// Self-healing ladder: start with variants ≤ `preferredMaximumResolution`,
+    /// then if AVPlayer was ever observed playing a higher bitrate than
+    /// our filtered max, expand the ladder to include every variant in
+    /// the asset whose peak is between the filter ceiling and the
+    /// observed max (inclusive at the top with 10% tolerance for EWMA
+    /// jitter). The `preferredMaximumResolution` hint is documented as
+    /// non-binding, so this absorbs the rare break-through without
+    /// silently misreporting quality% as 100% of a too-low denominator.
+    ///
+    /// Returns the full eligible set every call — pure-function, no
+    /// stateful ratchet. Items deduplicated by peakBitRate.
+    fileprivate func selectableLadderPeaks() -> [(peak: Double, label: String)] {
+        guard let item = player.currentItem,
+              let asset = item.asset as? AVURLAsset else { return [] }
+        let cap = item.preferredMaximumResolution
+        let hasCap = cap.width > 0 && cap.height > 0
+
+        func makeLabel(_ variant: AVAssetVariant) -> String {
+            if let size = variant.videoAttributes?.presentationSize, size.height > 0 {
+                return "\(Int(size.height))p"
+            }
+            return ""
+        }
+
+        // Cap-filtered set first.
+        var filtered: [(peak: Double, label: String)] = []
+        for variant in asset.variants {
+            guard let peak = variant.peakBitRate, peak > 0 else { continue }
+            if hasCap, let size = variant.videoAttributes?.presentationSize, size.height > 0 {
+                if size.height > cap.height || size.width > cap.width { continue }
+            }
+            filtered.append((peak: peak, label: makeLabel(variant)))
+        }
+
+        // Find max observed indicatedBitrate from the access log.
+        var observedMax: Double = 0
+        if let logRef = item.accessLog() {
+            for event in logRef.events {
+                if event.indicatedBitrate > observedMax { observedMax = event.indicatedBitrate }
+            }
+        }
+
+        // If the player has been observed above the filter ceiling,
+        // pull in every variant from the asset whose peak fits between
+        // the old ceiling and the observed max + 10% tolerance.
+        let filteredMax = filtered.map(\.peak).max() ?? 0
+        if observedMax > 0 && observedMax > filteredMax {
+            let tolerated = observedMax * 1.10
+            var seenPeaks = Set(filtered.map(\.peak))
+            for variant in asset.variants {
+                guard let peak = variant.peakBitRate, peak > 0 else { continue }
+                if peak <= filteredMax { continue }
+                if peak > tolerated { continue }
+                if seenPeaks.contains(peak) { continue }
+                seenPeaks.insert(peak)
+                filtered.append((peak: peak, label: makeLabel(variant)))
+            }
+        }
+        return filtered
+    }
+
     fileprivate func perVariantTimeSeconds() -> [String: Double] {
         guard let item = player.currentItem,
               let log = item.accessLog() else { return [:] }
 
-        // Build a bitrate → resolution lookup from the asset's
-        // variant ladder. Each AVAssetVariant carries peakBitRate
-        // (the EXT-X-STREAM-INF BANDWIDTH attribute) and an optional
-        // videoAttributes.presentationSize. Tolerant match below
-        // since the access log's `indicatedBitrate` is an EWMA
-        // estimate, not an exact reproduction of the manifest's
-        // BANDWIDTH value.
-        var ladder: [(peak: Double, label: String)] = []
-        if let asset = item.asset as? AVURLAsset {
-            for variant in asset.variants {
-                guard let peak = variant.peakBitRate, peak > 0 else { continue }
-                if let size = variant.videoAttributes?.presentationSize, size.height > 0 {
-                    ladder.append((peak: peak, label: "\(Int(size.height))p"))
-                } else {
-                    ladder.append((peak: peak, label: ""))
-                }
-            }
-        }
+        // Build a bitrate → resolution lookup from the self-healing
+        // selectable ladder. Tolerant match below since the access log's
+        // `indicatedBitrate` is an EWMA estimate, not an exact
+        // reproduction of the manifest's BANDWIDTH value.
+        let ladder = selectableLadderPeaks()
 
         func labelFor(bitrate: Double) -> String {
             var best: (delta: Double, label: String)? = nil
@@ -2015,7 +2063,17 @@ extension PlayerViewModel {
             return "\(kbps)kbps"
         }
 
+        // Seed the map with every allowed variant at 0s so the
+        // dashboard renders the FULL menu the player can choose from,
+        // not just the ones it's picked. Variants excluded by the
+        // resolution cap above never appear in `ladder`, so the menu
+        // accurately reflects the platform's actual selectable set.
         var out: [String: Double] = [:]
+        for entry in ladder {
+            let kbps = Int((entry.peak / 1000).rounded())
+            let key = entry.label.isEmpty ? "\(kbps)kbps" : "\(entry.label)@\(kbps)kbps"
+            out[key] = 0
+        }
         for event in log.events {
             let bitrate = event.indicatedBitrate
             let duration = event.durationWatched
@@ -2028,6 +2086,85 @@ extension PlayerViewModel {
         }
         // Round at the end so the running sum stays full precision.
         return out.mapValues { (round($0 * 100) / 100) }
+    }
+
+    /// Log-bitrate quality weighting with a baseline floor. Mirrors
+    /// the dashboard's PlayLog `computeQualityPct` formula
+    /// (Weber-Fechner perceptual model — doubling bitrate near the top
+    /// barely registers, so linear `bitrate/maxPeak` over-penalises the
+    /// mid-tier). Output is `log(kbps/minKbps) / log(maxKbps/minKbps)`
+    /// clamped to the floor. Single-variant ladders return nil because
+    /// the log ratio is undefined.
+    private static let qualityBaselineFloor: Double = 0.20
+
+    /// Quality% denominator. Shares `selectableLadderPeaks()` with the
+    /// per-variant dwell map so the displayed menu and the quality
+    /// math always use the same ladder — including when the
+    /// self-healing path expands it after an observed cap break.
+    private func variantLadderKbps() -> (minKbps: Double, maxKbps: Double, denom: Double)? {
+        let entries = selectableLadderPeaks()
+        let bitrates = entries.map { $0.peak / 1000.0 }
+        guard bitrates.count >= 2 else { return nil }
+        let minKbps = bitrates.min()!
+        let maxKbps = bitrates.max()!
+        guard maxKbps > minKbps else { return nil }
+        return (minKbps, maxKbps, Foundation.log(maxKbps / minKbps))
+    }
+
+    private func qualityWeightForBitrate(_ bitrateBps: Double, ladder: (minKbps: Double, maxKbps: Double, denom: Double)) -> Double {
+        let kbps = bitrateBps / 1000.0
+        let ratio = kbps / ladder.minKbps
+        let raw = ratio > 0 ? Foundation.log(ratio) / ladder.denom : 0
+        // Cap at 1.0 — defensive against a race during cap change or
+        // a manifest variant outside the filtered set still appearing
+        // in the access log briefly. Playing the top selectable
+        // variant is always 100%, never more.
+        return max(Self.qualityBaselineFloor, min(1.0, raw))
+    }
+
+    /// Lifetime time-weighted log-bitrate quality across all
+    /// access-log events. Returns nil when there's no ladder or no
+    /// playback time.
+    fileprivate func videoQualityAvgPct() -> Double? {
+        guard let item = player.currentItem,
+              let logRef = item.accessLog(),
+              let ladder = variantLadderKbps() else { return nil }
+        var weighted: Double = 0
+        var total: Double = 0
+        for event in logRef.events {
+            let bitrate = event.indicatedBitrate
+            let duration = event.durationWatched
+            guard bitrate > 0, duration > 0 else { continue }
+            weighted += qualityWeightForBitrate(bitrate, ladder: ladder) * duration
+            total += duration
+        }
+        guard total > 0 else { return nil }
+        return (weighted / total) * 100
+    }
+
+    /// Same log-bitrate formula but restricted to the last 60s of
+    /// *watched* time. Walks events newest-first, accumulating
+    /// `durationWatched` until 60s is reached. Stalls / pauses contribute
+    /// zero naturally. Returns nil when there isn't enough data yet.
+    fileprivate func videoQuality60sPct() -> Double? {
+        guard let item = player.currentItem,
+              let logRef = item.accessLog(),
+              let ladder = variantLadderKbps() else { return nil }
+        let windowSec: Double = 60
+        var weighted: Double = 0
+        var total: Double = 0
+        for event in logRef.events.reversed() {
+            let bitrate = event.indicatedBitrate
+            let duration = event.durationWatched
+            guard bitrate > 0, duration > 0 else { continue }
+            let remaining = windowSec - total
+            if remaining <= 0 { break }
+            let take = min(duration, remaining)
+            weighted += qualityWeightForBitrate(bitrate, ladder: ladder) * take
+            total += take
+        }
+        guard total > 0 else { return nil }
+        return (weighted / total) * 100
     }
 
     fileprivate func buildMetricsPayload(event: String, at eventAt: Date = Date(), extra: [String: Any] = [:]) -> [String: Any] {
@@ -2111,6 +2248,14 @@ extension PlayerViewModel {
             "player_metrics_playback_status": "in_progress",
             "player_metrics_playback_reason": diagnostics.state,
             "player_metrics_error_count": diagnostics.errorCount,
+            // stall_stuck: sticky true when AVPlayer transitioned
+            // from .waitingToPlay to .paused mid-stall. The player
+            // WILL NOT auto-recover; the dashboard / operator needs
+            // to drive a play() retry. Cleared on the next .playing
+            // transition or play boundary. The state lane stays on
+            // "stalled" for residency continuity — this flag is the
+            // orthogonal "needs intervention" signal.
+            "player_metrics_stall_stuck": diagnostics.stallStuck,
             // ── #550 Phase 4: device / platform taxonomy ───────────
             "player_metrics_os_version_major": DeviceInfo.osVersionMajor,
             "player_metrics_os_version_minor": DeviceInfo.osVersionMinor,
@@ -2118,9 +2263,10 @@ extension PlayerViewModel {
             "player_metrics_device_class": DeviceInfo.deviceClass,
             "player_metrics_device_model": DeviceInfo.deviceModel,
             "player_metrics_player_tech": DeviceInfo.playerTech,
-            "player_metrics_screen_width_px": DeviceInfo.screenWidthPx,
-            "player_metrics_screen_height_px": DeviceInfo.screenHeightPx,
-            "player_metrics_screen_density": DeviceInfo.screenDensity,
+            // Orientation-aware physical pixels — replaces the prior
+            // screen_width_px / screen_height_px / screen_density
+            // taxonomy fields (which were static portrait-only).
+            "player_metrics_device_resolution": DeviceInfo.deviceResolution(),
             // Displayed frame count (issue #486 follow-up). Recomputed
             // from playing-time × active variant's nominal frame rate
             // minus dropped frames, instead of the legacy
@@ -2215,6 +2361,17 @@ extension PlayerViewModel {
            let data = try? JSONSerialization.data(withJSONObject: perVariant, options: [.sortedKeys]),
            let json = String(data: data, encoding: .utf8) {
             compact["player_metrics_time_per_variant_s"] = json
+        }
+        // Lifetime + 60s rolling quality. Both computed from the same
+        // access-log + variant ladder as perVariantTimeSeconds() so the
+        // dashboard never has to re-derive — single source of truth,
+        // stored in CH forever. nil values omit the key (so a fresh
+        // play before any access-log events doesn't ship 0%).
+        if let avg = videoQualityAvgPct() {
+            compact["player_metrics_video_quality_avg_pct"] = round(avg * 100) / 100
+        }
+        if let q60 = videoQuality60sPct() {
+            compact["player_metrics_video_quality_60s_pct"] = round(q60 * 100) / 100
         }
         // Client-side RTT proxy from AVMetrics TTFB (issue #486).
         // Median of the recent MediaResourceRequest TTFBs — only

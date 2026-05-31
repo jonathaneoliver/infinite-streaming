@@ -24,17 +24,14 @@ enum DeviceInfo {
     /// at the schema level (LowCardinality-friendly cardinality).
     static let osVersionMinor: UInt16 = parsedOSVersion.minor
 
-    /// App marketing version. Sourced from the repo-root VERSION file
-    /// via an Xcode build phase that regenerates AppVersionGenerated.swift
-    /// before every compile — single source of truth shared with the
-    /// Android app's build.gradle, the server image tag, and the
-    /// dashboard's "What's New" banner. Falls back to the Info.plist's
-    /// CFBundleShortVersionString and finally an empty string when
-    /// neither path has a value (e.g. SwiftUI previews before the
-    /// generated file lands).
+    /// App marketing version from Bundle (CFBundleShortVersionString).
+    /// Synced to the repo-root VERSION file by the "Sync version from
+    /// repo VERSION" Xcode build phase before every compile — single
+    /// source of truth shared with the Android build.gradle, the
+    /// server image tag, and the dashboard "What's New" banner. To
+    /// bump, edit /VERSION at the repo root; the next build picks
+    /// it up automatically and writes both Info.plist files.
     static let appVersion: String = {
-        let generated = AppVersionGenerated.value
-        if !generated.isEmpty { return generated }
         let dict = Bundle.main.infoDictionary
         return (dict?["CFBundleShortVersionString"] as? String) ?? ""
     }()
@@ -77,36 +74,29 @@ enum DeviceInfo {
     /// it to "hls.js" / "shaka" / "native-roku" etc.
     static let playerTech: String = "AVPlayer"
 
-    /// Native (physical-pixel) screen width. Falls back to 0 when
-    /// UIKit is unavailable or the screen can't be queried.
-    static let screenWidthPx: UInt16 = {
+    /// Physical-pixel resolution of the device's current orientation,
+    /// formatted as `"WxH"` to match `video_resolution` /
+    /// `display_resolution` for side-by-side comparison. On iPad this
+    /// swaps when the device rotates; on Apple TV / iPhone-locked
+    /// orientations it stays constant. Computed each call so the
+    /// caller gets the current orientation rather than the value at
+    /// app launch.
+    ///
+    /// Replaces the prior `screen_width_px` / `screen_height_px` /
+    /// `screen_density` taxonomy fields, which were static
+    /// portrait-only readings and never reflected rotation.
+    static func deviceResolution() -> String {
         #if canImport(UIKit)
-        let w = UIScreen.main.nativeBounds.width
-        if w <= 0 || w > Double(UInt16.max) { return 0 }
-        return UInt16(w)
+        let b = UIScreen.main.bounds
+        let s = UIScreen.main.nativeScale
+        let w = Int((b.width  * s).rounded())
+        let h = Int((b.height * s).rounded())
+        guard w > 0 && h > 0 else { return "" }
+        return "\(w)x\(h)"
         #else
-        return 0
+        return ""
         #endif
-    }()
-
-    static let screenHeightPx: UInt16 = {
-        #if canImport(UIKit)
-        let h = UIScreen.main.nativeBounds.height
-        if h <= 0 || h > Double(UInt16.max) { return 0 }
-        return UInt16(h)
-        #else
-        return 0
-        #endif
-    }()
-
-    /// Native scale (points-to-pixels density), e.g. 3.0 for @3x.
-    static let screenDensity: Float = {
-        #if canImport(UIKit)
-        return Float(UIScreen.main.nativeScale)
-        #else
-        return 0
-        #endif
-    }()
+    }
 
     // ── Helpers ────────────────────────────────────────────────────
 

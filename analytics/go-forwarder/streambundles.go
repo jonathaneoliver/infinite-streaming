@@ -174,6 +174,8 @@ var bundleRegistry = map[string]bundleDef{
 			"loop_count_player",
 			"last_stall_time_s",
 			"video_quality_pct",
+			"video_quality_60s_pct",
+			"video_quality_avg_pct",
 			"playhead_wallclock_ms",
 			"trigger_type",
 			"player_restarts",

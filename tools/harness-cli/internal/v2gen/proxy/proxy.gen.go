@@ -1329,14 +1329,8 @@ type PlayerMetrics struct {
 	// ProfileShiftCount Number of ABR rendition shifts the player has reported.
 	ProfileShiftCount *int `json:"profile_shift_count,omitempty"`
 
-	// ScreenDensity #550 Phase 4: native scale (points-to-pixels density).
-	ScreenDensity *float32 `json:"screen_density,omitempty"`
-
-	// ScreenHeightPx #550 Phase 4: native screen height.
-	ScreenHeightPx *int `json:"screen_height_px,omitempty"`
-
-	// ScreenWidthPx #550 Phase 4: native (physical-pixel) screen width.
-	ScreenWidthPx *int `json:"screen_width_px,omitempty"`
+	// DeviceResolution Physical-pixel resolution in current orientation, "WxH".
+	DeviceResolution *string `json:"device_resolution,omitempty"`
 
 	// SeekableEndS Player-reported end of seekable range (seconds).
 	SeekableEndS *float32 `json:"seekable_end_s,omitempty"`
@@ -1361,7 +1355,11 @@ type PlayerMetrics struct {
 
 	// StallingTimeMs #550 Phase 1: cumulative stalling time (ms). Single canonical pair replacing legacy stall_count/stall_time_s during soft cutover.
 	StallingTimeMs *int `json:"stalling_time_ms,omitempty"`
-	Stalls         *int `json:"stalls,omitempty"`
+
+	// StallStuck #550 Phase 1 ext: orthogonal "this stall won't auto-recover" flag.
+	StallStuck *bool `json:"stall_stuck,omitempty"`
+
+	Stalls *int `json:"stalls,omitempty"`
 
 	// State Player state machine label (idle, playing, paused, buffering, ended, error).
 	State *string `json:"state,omitempty"`
@@ -1381,6 +1379,9 @@ type PlayerMetrics struct {
 	// TrickplayingTimeMs #550 Phase 1: cumulative time at non-1× playback rate (FF / RW).
 	TrickplayingTimeMs *int `json:"trickplaying_time_ms,omitempty"`
 
+	// TimePerVariantS JSON-string-encoded variant → cumulative seconds map.
+	TimePerVariantS *string `json:"time_per_variant_s,omitempty"`
+
 	// TriggerType What triggered the most recent metrics tick (timer, event, etc.).
 	TriggerType *string `json:"trigger_type,omitempty"`
 
@@ -1391,8 +1392,15 @@ type PlayerMetrics struct {
 	// VideoFirstFrameTimeMs #550 Phase 1: TTFF in ms. Conviva/Mux/Bitmovin canonical units. Replaces legacy video_first_frame_time_s.
 	VideoFirstFrameTimeMs *int `json:"video_first_frame_time_ms,omitempty"`
 
-	// VideoQualityPct video_bitrate_mbps as a percentage of the top variant in the active manifest
+	// VideoQualityPct video_bitrate_mbps as a percentage of the top variant in the active manifest (snapshot)
 	VideoQualityPct *float32 `json:"video_quality_pct,omitempty"`
+
+	// VideoQuality60sPct Time-weighted (bitrate/maxPeak)×100 over the last 60s of watched playback.
+	VideoQuality60sPct *float32 `json:"video_quality_60s_pct,omitempty"`
+
+	// VideoQualityAvgPct Time-weighted (bitrate/maxPeak)×100 over the lifetime of the play.
+	VideoQualityAvgPct *float32 `json:"video_quality_avg_pct,omitempty"`
+
 	VideoResolution *string  `json:"video_resolution,omitempty"`
 
 	// VideoStartTimeMs #550 Phase 1: alternate startup-time measurement in ms.

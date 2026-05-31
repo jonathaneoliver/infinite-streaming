@@ -135,6 +135,21 @@ CREATE TABLE IF NOT EXISTS infinite_streaming.session_events
     stall_duration_ms           UInt32 DEFAULT 0          CODEC(DoubleDelta, ZSTD(1)),
     buffering_duration_ms       UInt32 DEFAULT 0          CODEC(DoubleDelta, ZSTD(1)),
 
+    -- JSON-string-encoded variant-label → cumulative seconds map.
+    -- iOS emits as `{"2160p@29857kbps":65.28,"1080p@7060kbps":12.4}`.
+    -- Preserved across retry()-style restarts so dwell totals remain
+    -- continuous through auto-recovery. ZSTD compresses the
+    -- repeating-shape strings to near-nothing in the column store.
+    time_per_variant_s          String DEFAULT ''         CODEC(ZSTD(3)),
+
+    -- Orthogonal "this stall won't auto-recover" flag. Set by iOS
+    -- when AVPlayer transitions from .waitingToPlayAtSpecifiedRate
+    -- to .paused mid-stall (give-up). The state lane stays "stalled"
+    -- for residency continuity; this flag is the discriminator the
+    -- dashboard renders for operator-actionable stalls. Cleared on
+    -- next .playing transition.
+    stall_stuck                 Bool   DEFAULT false      CODEC(ZSTD(1)),
+
     -- ── Phase 2 outcome status + error fields (#550) ───────────────
     -- playback_status: terminal outcome (completed / user_stopped /
     --   start_failure (VSF) / abandoned_start (EBVS) /
@@ -173,9 +188,11 @@ CREATE TABLE IF NOT EXISTS infinite_streaming.session_events
     device_class            LowCardinality(String) DEFAULT ''            CODEC(ZSTD(1)),
     device_model            String                 DEFAULT ''            CODEC(ZSTD(1)),
     player_tech             LowCardinality(String) DEFAULT ''            CODEC(ZSTD(1)),
-    screen_width_px         UInt16                 DEFAULT 0             CODEC(ZSTD(1)),
-    screen_height_px        UInt16                 DEFAULT 0             CODEC(ZSTD(1)),
-    screen_density          Float32                DEFAULT 0             CODEC(ZSTD(1)),
+    -- Orientation-aware physical-pixel resolution, formatted "WxH" to
+    -- match video_resolution / display_resolution. Supersedes
+    -- screen_width_px / screen_height_px / screen_density (dropped
+    -- 2026-05-30 — see ALTER block at end of file).
+    device_resolution       LowCardinality(String) DEFAULT ''            CODEC(ZSTD(1)),
 
     position_s            Float32                     CODEC(ZSTD(1)),
     live_edge_s           Float32                     CODEC(ZSTD(1)),
@@ -220,6 +237,8 @@ CREATE TABLE IF NOT EXISTS infinite_streaming.session_events
     metrics_source               LowCardinality(String) CODEC(ZSTD(1)),
     video_first_frame_time_s     Float32 CODEC(ZSTD(1)),
     video_quality_pct            Float32 CODEC(ZSTD(1)),
+    video_quality_60s_pct        Float32 CODEC(ZSTD(1)),
+    video_quality_avg_pct        Float32 CODEC(ZSTD(1)),
     video_start_time_s           Float32 CODEC(ZSTD(1)),
 
     -- Network / transfer
@@ -396,6 +415,8 @@ ALTER TABLE infinite_streaming.session_events
     ADD COLUMN IF NOT EXISTS metrics_source LowCardinality(String) CODEC(ZSTD(1)),
     ADD COLUMN IF NOT EXISTS video_first_frame_time_s Float32 CODEC(ZSTD(1)),
     ADD COLUMN IF NOT EXISTS video_quality_pct Float32 CODEC(ZSTD(1)),
+    ADD COLUMN IF NOT EXISTS video_quality_60s_pct Float32 CODEC(ZSTD(1)),
+    ADD COLUMN IF NOT EXISTS video_quality_avg_pct Float32 CODEC(ZSTD(1)),
     ADD COLUMN IF NOT EXISTS video_start_time_s Float32 CODEC(ZSTD(1)),
     -- iOS per-variant watch time (issue #486). JSON-string keyed by
     -- `<resolution>@<kbps>kbps` with seconds-watched values. Stored
@@ -439,6 +460,10 @@ ALTER TABLE infinite_streaming.session_events
     -- Per-event sticky durations (Phase 1 ancillary).
     ADD COLUMN IF NOT EXISTS stall_duration_ms           UInt32 DEFAULT 0 CODEC(DoubleDelta, ZSTD(1)),
     ADD COLUMN IF NOT EXISTS buffering_duration_ms       UInt32 DEFAULT 0 CODEC(DoubleDelta, ZSTD(1)),
+    -- "this stall won't auto-recover" discriminator (#550 Phase 1 ext.)
+    ADD COLUMN IF NOT EXISTS stall_stuck                 Bool   DEFAULT false CODEC(ZSTD(1)),
+    -- Per-variant dwell map (JSON string).
+    ADD COLUMN IF NOT EXISTS time_per_variant_s          String DEFAULT ''    CODEC(ZSTD(3)),
     -- video_first_frame_time_ms / video_start_time_ms (Phase 1 ms migrations).
     -- Keep the legacy _s variants above as deprecated; forwarder
     -- mirror-writes both for the deprecation window.
@@ -464,9 +489,12 @@ ALTER TABLE infinite_streaming.session_events
     ADD COLUMN IF NOT EXISTS device_class            LowCardinality(String) DEFAULT ''            CODEC(ZSTD(1)),
     ADD COLUMN IF NOT EXISTS device_model            String                 DEFAULT ''            CODEC(ZSTD(1)),
     ADD COLUMN IF NOT EXISTS player_tech             LowCardinality(String) DEFAULT ''            CODEC(ZSTD(1)),
-    ADD COLUMN IF NOT EXISTS screen_width_px         UInt16                 DEFAULT 0             CODEC(ZSTD(1)),
-    ADD COLUMN IF NOT EXISTS screen_height_px        UInt16                 DEFAULT 0             CODEC(ZSTD(1)),
-    ADD COLUMN IF NOT EXISTS screen_density          Float32                DEFAULT 0             CODEC(ZSTD(1)),
+    -- device_resolution supersedes screen_width_px / screen_height_px /
+    -- screen_density (2026-05-30 cleanup).
+    ADD COLUMN IF NOT EXISTS device_resolution       LowCardinality(String) DEFAULT ''            CODEC(ZSTD(1)),
+    DROP COLUMN IF EXISTS screen_width_px,
+    DROP COLUMN IF EXISTS screen_height_px,
+    DROP COLUMN IF EXISTS screen_density,
 
     -- #550 dashboard-parity restoration: origination_ip was on the
     -- live PlayerRecord but never made it into CH (no schema column,

@@ -129,6 +129,15 @@ export function chRowToPlayerRecord(
     trickplaying_count: num(row.trickplaying_count),
     stall_duration_s: msToSeconds(row.stall_duration_ms),
     buffering_duration_s: msToSeconds(row.buffering_duration_ms),
+    // Orthogonal "this stall won't auto-recover" discriminator. True
+    // when AVPlayer transitioned stalled → .paused (give-up) and the
+    // app must call play() to resume. PLAYERSTATE lane stays on
+    // "stalled"; this flag drives the chip the operator sees.
+    stall_stuck: row.stall_stuck === true || row.stall_stuck === 'true' || row.stall_stuck === 1,
+    // Per-variant dwell map. CH stores as JSON string; pass through
+    // as-is and let PlayerMetrics.vue's parser handle decode. Empty
+    // string ⇒ "no variant data" path in the consumer.
+    time_per_variant_s: typeof row.time_per_variant_s === 'string' ? row.time_per_variant_s : '',
     // #550 Phase 2: outcome + structured error fields.
     playback_status: typeof row.playback_status === 'string' ? row.playback_status : '',
     playback_reason: typeof row.playback_reason === 'string' ? row.playback_reason : '',
@@ -144,9 +153,8 @@ export function chRowToPlayerRecord(
     device_class: typeof row.device_class === 'string' ? row.device_class : '',
     device_model: typeof row.device_model === 'string' ? row.device_model : '',
     player_tech: typeof row.player_tech === 'string' ? row.player_tech : '',
-    screen_width_px: num(row.screen_width_px),
-    screen_height_px: num(row.screen_height_px),
-    screen_density: num(row.screen_density),
+    // Orientation-aware "WxH"; supersedes screen_width_px / _height_px / _density.
+    device_resolution: typeof row.device_resolution === 'string' ? row.device_resolution : '',
     // panel_v1 bundle additions — populated only when the request
     // included the panel_v1 bundle (testing.html + session-viewer).
     // Without this bundle these columns aren't projected and the
@@ -163,6 +171,8 @@ export function chRowToPlayerRecord(
     // #550 Phase 1: stall_duration_ms supersedes last_stall_time_s.
     last_stall_time_s: msOrSeconds(row.stall_duration_ms, row.last_stall_time_s),
     video_quality_pct: num(row.video_quality_pct),
+    video_quality_60s_pct: num(row.video_quality_60s_pct),
+    video_quality_avg_pct: num(row.video_quality_avg_pct),
     playhead_wallclock_ms: num(row.playhead_wallclock_ms),
     player_restarts: num(row.player_restarts),
     profile_shift_count: num(row.profile_shift_count),
