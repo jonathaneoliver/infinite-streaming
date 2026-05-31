@@ -227,6 +227,7 @@ var bundleRegistry = map[string]bundleDef{
 			"video_resolution",
 			"video_bitrate_mbps",
 			"display_resolution",
+			"fetching_resolution",
 			"stall_count",
 			"dropped_frames",
 			"player_error",

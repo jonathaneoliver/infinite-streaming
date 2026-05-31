@@ -89,6 +89,11 @@ type PMExt = NonNullable<typeof pm.value> & {
   // Orientation-aware physical-pixel resolution (e.g. "2752x2064").
   // Replaces the prior screen_width_px / _height_px / _density tile.
   device_resolution?: string | null;
+  // Resolution of the variant AVPlayer is about to fetch — derived
+  // iOS-side from indicatedBitrate vs the variant ladder. Lives next
+  // to video_resolution semantically (both are "what's the player
+  // playing/preparing").
+  fetching_resolution?: string | null;
   // Per-variant dwell time map. iOS emits the raw field
   // `player_metrics_time_per_variant_s` as a JSON-encoded string
   // ({"2160p@29857kbps":65.28, …}); the chRowAdapter / SSE pipeline
@@ -143,6 +148,12 @@ const playerFields = computed(() => {
     { label: 'Live Edge', value: fmtS(m.live_edge_s) },
     { label: 'Live Offset', value: fmtS(m.live_offset_s) },
     { label: 'True Offset', value: fmtS(m.true_offset_s) },
+    // Fetching Res — iOS-computed resolution of the variant AVPlayer
+    // is about to fetch (indicatedBitrate matched against the asset's
+    // variant ladder). Persisted in CH as `fetching_resolution` so
+    // historical replays show the same value. Empty until iOS picks
+    // its first variant.
+    { label: 'Fetching Res', value: fmtStr((m as PMExt).fetching_resolution) },
     { label: 'Video Res', value: fmtStr(m.video_resolution) },
     { label: 'Display Res', value: fmtStr(m.display_resolution) },
     { label: 'Device Res', value: fmtStr(m.device_resolution) },
@@ -247,7 +258,7 @@ const variantDwellRows = computed(() => {
         display: `${fmtDur(seconds)} (${pct.toFixed(1)}%)`,
       };
     })
-    .sort((a, b) => (b.seconds - a.seconds) || (b.kbps - a.kbps));
+    .sort((a, b) => (b.kbps - a.kbps) || (b.seconds - a.seconds));
 });
 
 // Lifetime + 60s rolling quality averages — both computed iOS-side

@@ -1230,6 +1230,9 @@ type PlayerMetrics struct {
 	// DisplayResolution Player-reported window/display resolution (separate from the active video resolution).
 	DisplayResolution *string `json:"display_resolution,omitempty"`
 
+	// FetchingResolution WxH of the variant the player is about to fetch — derived iOS-side from indicatedBitrate vs the variant ladder.
+	FetchingResolution *string `json:"fetching_resolution,omitempty"`
+
 	// DroppedFrames Player-reported dropped frames count.
 	DroppedFrames *int `json:"dropped_frames,omitempty"`
 

@@ -224,6 +224,7 @@ func playerMetricsFromSession(s map[string]any) *oapigen.PlayerMetrics {
 	}{
 		{"player_metrics_video_resolution", &pm.VideoResolution},
 		{"player_metrics_display_resolution", &pm.DisplayResolution},
+		{"player_metrics_fetching_resolution", &pm.FetchingResolution},
 		{"player_metrics_last_event", &pm.LastEvent},
 		{"player_metrics_trigger_type", &pm.TriggerType},
 		{"player_metrics_state", &pm.State},

@@ -95,6 +95,7 @@ export function chRowToPlayerRecord(
     error: typeof row.player_error === 'string' ? row.player_error : '',
     video_resolution: typeof row.video_resolution === 'string' ? row.video_resolution : '',
     display_resolution: typeof row.display_resolution === 'string' ? row.display_resolution : '',
+    fetching_resolution: typeof row.fetching_resolution === 'string' ? row.fetching_resolution : '',
     video_bitrate_mbps: num(row.video_bitrate_mbps),
     network_bitrate_mbps: num(row.network_bitrate_mbps),
     avg_network_bitrate_mbps: num(row.avg_network_bitrate_mbps),

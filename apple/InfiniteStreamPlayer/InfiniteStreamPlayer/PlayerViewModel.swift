@@ -2167,6 +2167,39 @@ extension PlayerViewModel {
         return (weighted / total) * 100
     }
 
+    /// Resolution AVPlayer is about to fetch. Matches the most recent
+    /// access-log event's `indicatedBitrate` (the ABR pick for the next
+    /// download) against the asset's variant ladder by peakBitRate
+    /// with ±10% tolerance. Returns nil before the first access-log
+    /// event lands or when the indicated bitrate doesn't match any
+    /// ladder entry within tolerance.
+    fileprivate func fetchingResolution() -> String? {
+        guard let item = player.currentItem,
+              let logRef = item.accessLog(),
+              let asset = item.asset as? AVURLAsset else { return nil }
+        var indicated: Double = 0
+        for event in logRef.events.reversed() {
+            if event.indicatedBitrate > 0 {
+                indicated = event.indicatedBitrate
+                break
+            }
+        }
+        guard indicated > 0 else { return nil }
+        var best: (delta: Double, label: String)? = nil
+        for variant in asset.variants {
+            guard let peak = variant.peakBitRate, peak > 0 else { continue }
+            guard let size = variant.videoAttributes?.presentationSize,
+                  size.width > 0, size.height > 0 else { continue }
+            let delta = abs(peak - indicated)
+            let tol = max(peak * 0.10, 50_000)
+            if delta > tol { continue }
+            if best == nil || delta < best!.delta {
+                best = (delta, "\(Int(size.width))x\(Int(size.height))")
+            }
+        }
+        return best?.label
+    }
+
     fileprivate func buildMetricsPayload(event: String, at eventAt: Date = Date(), extra: [String: Any] = [:]) -> [String: Any] {
         let timestamp = Self.metricsTimestampFormatter.string(from: eventAt)
         // Flush accruing residency into the current bucket so the
@@ -2372,6 +2405,12 @@ extension PlayerViewModel {
         }
         if let q60 = videoQuality60sPct() {
             compact["player_metrics_video_quality_60s_pct"] = round(q60 * 100) / 100
+        }
+        // Resolution AVPlayer is about to fetch — matches indicatedBitrate
+        // against the asset's variant ladder. Persisted in CH so historical
+        // replays show the same value. Nil → key omitted.
+        if let fetching = fetchingResolution() {
+            compact["player_metrics_fetching_resolution"] = fetching
         }
         // Client-side RTT proxy from AVMetrics TTFB (issue #486).
         // Median of the recent MediaResourceRequest TTFBs — only

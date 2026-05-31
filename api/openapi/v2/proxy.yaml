@@ -1556,6 +1556,7 @@ components:
       properties:
         video_resolution:    { type: string,  nullable: true }
         display_resolution:  { type: string,  nullable: true, description: 'Player-reported window/display resolution (separate from the active video resolution).' }
+        fetching_resolution: { type: string,  nullable: true, description: 'WxH of the variant the player is about to fetch — derived iOS-side from indicatedBitrate vs the variant ladder. Empty before the first access-log event.' }
         video_bitrate_mbps:  { type: number, format: float, nullable: true }
         video_quality_pct:   { type: number, format: float, nullable: true, description: 'video_bitrate_mbps as a percentage of the top variant in the active manifest (snapshot)' }
         video_quality_60s_pct: { type: number, format: float, nullable: true, description: 'Log-bitrate (Weber-Fechner) quality over the last 60s of watched playback. Formula: log(kbps/min) / log(max/min) per event, clamped to a 0.20 floor, time-weighted by durationWatched. Matches dashboard PlayLog computeQualityPct.' }

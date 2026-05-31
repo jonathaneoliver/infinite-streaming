@@ -68,6 +68,7 @@ CREATE TABLE IF NOT EXISTS infinite_streaming.session_events
     -- climbs from queueing.
     client_path_ping_rtt_ms    Float32                CODEC(ZSTD(1)),
     display_resolution    LowCardinality(String)      CODEC(ZSTD(1)),
+    fetching_resolution   LowCardinality(String) DEFAULT '' CODEC(ZSTD(1)),
     video_resolution      LowCardinality(String)      CODEC(ZSTD(1)),
     frames_displayed      UInt64                      DEFAULT 0,
     dropped_frames        UInt32                      DEFAULT 0,
