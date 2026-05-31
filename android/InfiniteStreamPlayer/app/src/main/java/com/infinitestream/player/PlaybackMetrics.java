@@ -326,6 +326,13 @@ public final class PlaybackMetrics {
         this.urlProvider = urlProvider;
         this.iso8601 = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.US);
         this.iso8601.setTimeZone(TimeZone.getTimeZone("UTC"));
+        // Initialise the start clock at construction so first-frame elapsed
+        // math is sane even when bindMetrics happens AFTER loadStream's
+        // onPlaybackStarted() (e.g. the PlayerView composes asynchronously).
+        // Without this, elapsedMs = currentTimeMillis() - 0 ≈ a Unix epoch
+        // ms value, which UInt32-wraps in CH (the ~24-day garbage we saw).
+        // onPlaybackStarted resets to its own value when it does fire.
+        this.playbackStartAtMs = System.currentTimeMillis();
     }
 
     public void start() {
