@@ -42,18 +42,20 @@ Examples:
 // string because CH emits naive `2026-05-17 13:33:56.050` (no T,
 // no zone).
 type tailNetworkRow struct {
-	Ts          string `json:"ts"`
-	PlayerID    string `json:"player_id"`
-	PlayID      string `json:"play_id"`
-	Method      any    `json:"method,omitempty"`
-	Status      any    `json:"status,omitempty"`
-	RequestKind any    `json:"request_kind,omitempty"`
-	TotalMs     any    `json:"total_ms,omitempty"`
-	BytesIn     any    `json:"bytes_in,omitempty"`
-	Path        any    `json:"path,omitempty"`
-	URL         any    `json:"url,omitempty"`
-	Faulted     any    `json:"faulted,omitempty"`
-	FaultType   any    `json:"fault_type,omitempty"`
+	Ts            string `json:"ts"`
+	PlayerID      string `json:"player_id"`
+	PlayID        string `json:"play_id"`
+	Method        any    `json:"method,omitempty"`
+	Status        any    `json:"status,omitempty"`
+	RequestKind   any    `json:"request_kind,omitempty"`
+	TotalMs       any    `json:"total_ms,omitempty"`
+	BytesIn       any    `json:"bytes_in,omitempty"`
+	Path          any    `json:"path,omitempty"`
+	URL           any    `json:"url,omitempty"`
+	Faulted       any    `json:"faulted,omitempty"`
+	FaultType     any    `json:"fault_type,omitempty"`
+	FaultCategory any    `json:"fault_category,omitempty"`
+	FaultAction   any    `json:"fault_action,omitempty"`
 }
 
 func cmdTail(client *api.Client, args []string, asJSON bool) error {
@@ -174,9 +176,21 @@ func formatNetworkRow(r tailNetworkRow) string {
 	if len(path) > 70 {
 		path = "…" + path[len(path)-69:]
 	}
+	// The forwarder read API returns fault_type/fault_category/fault_action
+	// but NOT a separate `faulted` flag, so key the display on fault_type
+	// presence rather than the (usually-absent) faulted column. Fall back to
+	// the faulted flag for any path that does emit it (e.g. live proxy ring).
 	fault := ""
-	if n, ok := anyInt(r.Faulted); ok && n == 1 {
-		fault = "  ⚠ " + anyStr(r.FaultType, "?")
+	if ft := anyStr(r.FaultType, ""); ft != "" {
+		fault = "  ⚠ " + ft
+		if fc := anyStr(r.FaultCategory, ""); fc != "" && fc != ft {
+			fault += "/" + fc
+		}
+		if fa := anyStr(r.FaultAction, ""); fa != "" && fa != ft {
+			fault += " (" + fa + ")"
+		}
+	} else if n, ok := anyInt(r.Faulted); ok && n == 1 {
+		fault = "  ⚠ faulted"
 	}
 	return fmt.Sprintf("%s  %-7s %-3s %-15s %9s %8s  %s%s",
 		formatTs(r.Ts),

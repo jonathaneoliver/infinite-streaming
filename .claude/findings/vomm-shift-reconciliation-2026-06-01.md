@@ -59,8 +59,11 @@ sees.
 Reproduce: `harness --insecure --json query plays --from 2026-01-01T00:00:00Z --to
 2026-06-02T00:00:00Z --limit 5000`, then per-play `harness --insecure --json query
 network <uuid> --limit 3000` and parse the rendition dir + segment number in `ts` order.
-Completion check: inspect `status` + `bytes_out` (note `query network` does NOT expose
-`faulted`/`fault_type`/`response_content_range`).
+Completion check: inspect `status` + `bytes_out`. Fault classification is available via
+`query network --json` — faulted rows carry `fault_type`/`fault_category`/`fault_action`
+(`omitempty`-dropped on clean rows); the live human view (`tail`/`network`) now renders
+them too. `response_content_range` and the raw `faulted` flag are still not projected by
+the read API (a small forwarder add if PARTIAL-delivery detection needs them).
 
 ## Hypothesis
 The request-ordering premise for #508 is sound (**confirmed** on n=65 substantial plays,
@@ -91,8 +94,9 @@ window, so the reinterpretation is **needs-test**.
 - [ ] needs-test: classify backward-jump re-fetch benign (user scrub) vs pathological —
       requires playhead/seek-control/buffer state (#445 HMM or enriched alphabet).
 - [ ] #507: map `fault_type`/`fault_category` → `ABORT/PARTIAL(surface)` token (capture
-      exists; token does not). Note `query network` does not surface the fault columns —
-      either fix the projection or query ClickHouse directly.
+      exists; token does not). Fault columns ARE accessible via `query network --json`
+      (faulted rows) and `raw GET /api/v2/network_requests?faulted_only=true`; the CLI
+      human view now renders them. No CH-direct access or schema change needed.
 - [ ] needs-test: re-pull `0a9c4308` if it can be located and confirm the re-fetch
       reinterpretation.
 
