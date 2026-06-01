@@ -38,7 +38,13 @@ Token vocab (subset of the #442 alphabet, enough for the baseline):
   LOOP_BOUNDARY                 segnum reset / large backward jump
   V_PL(profile) / A_PL          playlist refresh
   M_PL                          master/multivariant playlist
-  FAULT(surface)                4xx/5xx (kept for parity; abort token is #507)
+  FAULT(surface, class)         a faulted/aborted request. class ∈ {4xx, 404, auth,
+                                5xx, client_abandon, server_partial, injected_reset,
+                                corruption, other}, mapped from fault_category/fault_type
+                                (or HTTP status). client_abandon is player-initiated
+                                (behaviour grammar, not a reaction antecedent — agency
+                                caveat); the rest are server/transport-imposed. See
+                                CORPUS_PLAN.md "Fault-class taxonomy".
 
 Usage:
   tokenize.py --play <uuid>                 # pulls via harness CLI
@@ -115,7 +121,9 @@ def tokenize(rows):
     vseg_idx = []  # (row_index, rendition, segnum)
     for i, r in enumerate(rows):
         kind, rend, seg = classify_row(r["url"])
-        if kind == "V_SEG" and rend in RENDITION_ORDINAL:
+        # Faulted/abandoned segment fetches did not deliver a rendition, so they
+        # must not advance the rendition baseline (they emit a FAULT token instead).
+        if kind == "V_SEG" and rend in RENDITION_ORDINAL and not _is_faulted(r):
             vseg_idx.append((i, rend, seg))
 
     # Mark the startup ramp: leading run before the first sustained rendition settles.
@@ -149,9 +157,8 @@ def tokenize(rows):
 
     for i, r in enumerate(rows):
         kind, rend, seg = classify_row(r["url"])
-        status = _int(r.get("status"))
-        if status and status >= 400:
-            tokens.append(f"FAULT({_surface(kind)})")
+        if _is_faulted(r):
+            tokens.append(f"FAULT({_surface(kind)},{_fault_class(r)})")
             continue
 
         if kind == "V_SEG" and rend in RENDITION_ORDINAL:
@@ -201,6 +208,47 @@ def _first_sustained(vseg_idx):
 def _surface(kind):
     return {"V_SEG": "video_seg", "A_SEG": "audio_seg", "V_PL": "playlist",
             "A_PL": "playlist", "M_PL": "master"}.get(kind, "other")
+
+
+def _is_faulted(r):
+    """A row is faulted if the proxy stamped a fault, or the HTTP status is >=400.
+
+    The read API stamps fault_type/fault_category on the body-copy path; transport
+    aborts / client disconnects can carry status 200 (or 0), so status alone misses them.
+    """
+    if str(r.get("fault_type") or "").strip() or str(r.get("fault_category") or "").strip():
+        return True
+    return _int(r.get("status")) >= 400
+
+
+def _fault_class(r):
+    """Map fault_category/fault_type (or HTTP status) to a taxonomy class.
+
+    Mirrors CORPUS_PLAN.md's FAULT(surface,class) taxonomy. Keep coarse; hierarchical
+    back-off (FAULT(surface,5xx) -> FAULT(surface,*) -> FAULT(*,*)) handles sparsity, and
+    a divergence test promotes/merges classes later.
+    """
+    cat = str(r.get("fault_category") or "").strip()
+    ftype = str(r.get("fault_type") or "").strip()
+    if cat == "client_disconnect":
+        return "client_abandon"   # player-initiated; behaviour grammar, not a reaction
+    if cat == "transfer_timeout":
+        return "server_partial"
+    if cat in ("socket", "transport"):
+        return "injected_reset"
+    if cat == "corruption":
+        return "corruption"
+    # http / status-derived. fault_type for http rows is the numeric code as a string.
+    code = _int(r.get("status")) or _int(ftype)
+    if code >= 500:
+        return "5xx"
+    if code in (401, 403):
+        return "auth"
+    if code == 404:
+        return "404"
+    if code >= 400:
+        return "4xx"
+    return "other"
 
 
 def _int(v):

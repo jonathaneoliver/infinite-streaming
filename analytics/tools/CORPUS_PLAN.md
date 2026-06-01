@@ -165,6 +165,40 @@ VOMM is therefore **never worse, but only meaningfully better where the corpus s
 depth** — which our fault/shift corpus mostly does not yet. Hence: ship Layer 1 first
 (cheap, interpretable, what VOMM reduces to here); add Layer 2 as the corpus grows.
 
+### Fault-taxonomy census — what's actually in the archive (2026-06-01)
+
+Sampled the top-30 fault plays by `net_faults` (all engines) via the read API
+(`faulted_only=true`). The `FAULT(surface,class)` taxonomy maps onto **real** data — we
+do NOT have to wait for #507 to generate it:
+
+| `fault_category` | rows (sample) | taxonomy class | engines seen | example `fault_type` / `fault_action` |
+|---|---|---|---|---|
+| `client_disconnect` | **2242** | `client_abandon` | AVPlayer, blank | `client_disconnect` / `transfer_abandoned` |
+| `http` | 1520 | `4xx` / `5xx` | AVPlayer, blank | 404, 503, 502, 500, 429, 403, `connection_refused`, `dns_failure`, `timeout` |
+| `transfer_timeout` | 23 | `server_partial` | **blank only** | `transfer_active_timeout_mid_body`, `transfer_idle_timeout_mid_body` |
+| `socket` | 4 | `injected_reset` | **blank only** | `request_body_reset`, `request_first_byte_hang`, `request_body_hang` |
+
+(Sample, not exhaustive. The spec's `NetworkRowFaultCategory` enum also defines
+`corruption` and `transport`, not seen in this sample.)
+
+**The critical nuance — abundant ≠ useful for the reaction question.** The 2242
+`client_disconnect/transfer_abandoned` rows are **client-initiated** (the player
+abandoning in-flight, usually to switch rendition) → behaviour grammar, **not** a fault
+the player *reacts* to (the agency caveat above). The **server-imposed** aborts where
+"how does the player react?" applies (`transfer_timeout`) are **rare (23) and `blank`-engine
+only — none on AVPlayer**; same for injected `socket` resets.
+
+**Consequence for iOS-first:**
+- Client-abandon behaviour + HTTP-fault reaction: **rich AVPlayer data, Layer 1 runnable now.**
+- Server-imposed abort/partial *reaction* on iOS: **essentially absent** → this is the
+  exact slice #507's harness sweep (inject mid-body aborts per engine) must generate.
+
+**Access (no schema change):**
+- `harness query network <play> --json` carries `fault_type`/`fault_category`/`fault_action`
+  on faulted rows; `harness query network <play> --faulted-only` / `--fault-category <cat>`
+  filter to them; `harness raw GET "/analytics/api/v2/network_requests?...&faulted_only=true"`
+  for the server-side filter. CLI live `tail`/`network` now render the fault inline.
+
 ## Acceptance for "adequate corpus" (unblocks model R&D)
 
 Scoped iOS-first (Roku/hls.js deferred):
