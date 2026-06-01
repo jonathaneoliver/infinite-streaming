@@ -376,7 +376,7 @@ func v2NetworkRequestsHandler(w http.ResponseWriter, r *http.Request, cfg config
 		  method, url, upstream_url, request_kind, content_type,
 		  status, bytes_in, bytes_out,
 		  ttfb_ms, total_ms, dns_ms, connect_ms, tls_ms, transfer_ms, client_wait_ms,
-		  faulted, fault_type, fault_action, fault_category
+		  faulted, fault_type, fault_action, fault_category, labels
 		FROM (
 		  SELECT
 		    ts AS ts_raw,
@@ -384,7 +384,7 @@ func v2NetworkRequestsHandler(w http.ResponseWriter, r *http.Request, cfg config
 		    method, url, upstream_url, request_kind, content_type,
 		    status, bytes_in, bytes_out,
 		    ttfb_ms, total_ms, dns_ms, connect_ms, tls_ms, transfer_ms, client_wait_ms,
-		    faulted, fault_type, fault_action, fault_category
+		    faulted, fault_type, fault_action, fault_category, labels
 		  FROM %s.network_requests
 		  WHERE %s
 		  -- DESC so the LIMIT keeps the most recent N rows. ASC
@@ -436,6 +436,14 @@ func v2NetworkRequestsHandler(w http.ResponseWriter, r *http.Request, cfg config
 		}
 		if pid, _ := row["play_id"].(string); pid != "" {
 			item["play_id"] = pid
+		}
+		// #558 — surface the ingest-time labels[] so the dashboard can
+		// render network-row chips (http_5xx / slow_segment / fault_* and
+		// the #553 qoe_ttfb_breach / qoe_transfer_stall). NetworkLogEntry
+		// has no labels field, so patch it onto the row map directly,
+		// mirroring how ts/session_id/player_id are added above.
+		if labels, ok := row["labels"]; ok && labels != nil {
+			item["labels"] = labels
 		}
 		out = append(out, item)
 	}
