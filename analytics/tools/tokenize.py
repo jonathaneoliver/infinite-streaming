@@ -5,6 +5,12 @@ Turns a play's `network_requests` stream into the delta-encoded token sequence t
 variable-order back-off model (and the 1st-order baseline) will consume. This is the
 shared substrate, not the model itself.
 
+SCOPE (#508): READ-ONLY. This tool only reads the archive (`harness query`) and emits
+tokens/scores locally. It must NOT write labels[], derived_labels, classification, or
+anything the dashboard renders — surfacing interesting sessions in sessions.html is
+#506's job, deliberately decoupled from the model so model logic never touches ingest.
+Do not add a write path here.
+
 It bakes in the Phase-0 reconciliation findings (GitHub #508, 2026-06-01):
 
   * STARTUP_RAMP   — opening low-rendition segment(s) before the sustained rendition.

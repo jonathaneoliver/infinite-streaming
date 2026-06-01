@@ -5,7 +5,23 @@ gate but identified the **binding constraint**: the substantial-play corpus is o
 engines (AVPlayer 58, ExoPlayer 7) with **no Roku and no hls.js**. Variable-order
 per-engine modelling needs a deliberately generated corpus before any model spend.
 
-## Target corpus (minimum to start model R&D)
+## Scope: iOS/AVPlayer first
+
+Current decision (2026-06-01): **focus on iOS/AVPlayer**; Roku + hls.js are a deferred
+follow-up, not part of the first model. A single-engine model also avoids the
+cross-engine segmentation/back-off complexity.
+
+Measured iOS reality (58 substantial AVPlayer plays):
+- **~11 clean** (3 reached `<E>`, 8 got first-frame but no explicit session-end), and
+  one of those is a 19-h loop session — so **~10 distinct clean sessions**.
+- **44 fault/error** — the validation positives + #507 abort/recovery dataset.
+- **2 shaped**, 1 other.
+- The clean set is **nearly all steady-2160p** (~all `V_SEG(+0,+1)`, almost no ΔP≠0):
+  enough for the 1st-order baseline, **thin for VOMM shift-ordering** until we add
+  shaped + episode-harvested shift sequences. (Shaped-inclusion vs exclusion is an open
+  holdout-validated knob — see "How to generate".)
+
+## Target corpus (eventual, all engines — deferred behind iOS)
 
 | engine | organic-steady | gentle-shaped (smooth/steps) | fault/abort | notes |
 |---|---|---|---|---|
@@ -27,9 +43,20 @@ Use the existing characterization + fault harness (`tests/characterization/`, th
 - **Gentle-shaped (INCLUDE in training, down-weighted):** `smooth` / `steps` abrchar
   modes — gives coverage of *normal* downshift transitions so real customer shifts
   don't score as novel. Tag `info=corpus_shaped`.
-- **EXCLUDE from clean training, KEEP for validation positives + #507 study:**
-  `transient-shock`, `emergency-downshift`, `downshift-severity` sweeps, and all
-  FAULT/ABORT-bearing sessions. Tag `info=corpus_adversarial` / `info=corpus_abort`.
+- **Test / harness sessions are a FIRST-CLASS corpus, not just "excluded."** Adversarial
+  sweeps (`transient-shock`, `emergency-downshift`, `downshift-severity`) and all
+  FAULT/ABORT-bearing sessions are kept out of the *clean-baseline* model, but they are
+  the **primary** training data for the conditional-recovery model (the "is the reaction
+  typical?" question — see the fault-class section) and the validation positives. Tag
+  `info=corpus_adversarial` / `info=corpus_abort`. Treat the rig's fault sessions as
+  signal to model, not noise to discard.
+
+Two corpora, two models (both valid, different jobs):
+- **(A) clean-baseline detector** — trains on clean + gentle-shaped; catches *unknown*
+  structural anomalies. Test/fault sessions are its validation positives.
+- **(B) conditional-recovery model** — trains **on** the test/fault sessions; answers
+  "given a `FAULT(surface,class)`, is the recovery ordering typical?" per engine. This is
+  the #507 corpus flip: the sessions (A) excludes are exactly (B)'s training set.
 
 Label every run with engine + mode so the per-engine split is queryable:
 
@@ -52,11 +79,68 @@ wolf:
 3. **Loop boundary** — segment number resets to a low number (harness loops content).
    Emit `LOOP_BOUNDARY`, suppress the false rewind.
 
+## Fault-class taxonomy + hierarchical back-off (conditional recovery scoring)
+
+This is for the **conditional** question — "is the player's *reaction* to a failure
+typical?" — not the marginal "are failures typical?". The model conditions on a fault
+antecedent and scores the *continuation*; it excludes the antecedent's own probability
+(otherwise the rare `FAULT` token dominates and you just re-measure "failures are
+rare"). "Atypical reaction" = a low-probability recovery sequence even though the fault
+itself was expected. **Ordering only** — recovery latency / buffer cost is timing (→ #445).
+
+**Governing principle:** split an antecedent into its own token *iff the reaction
+grammar diverges* (same rule #442 uses for segmentation). Don't pre-split per HTTP code;
+let a divergence test promote/merge.
+
+**Antecedent token:** `FAULT(surface, class)`
+
+- `surface ∈ {video_seg, audio_seg, playlist, master, key, other}` — already in the #442
+  alphabet; drives different recoveries (segment→retry/skip, playlist→refetch,
+  key→re-acquire).
+- `class` — mapped directly from the proxy's existing `fault_type` / `fault_category`
+  (this mapping IS #507's deliverable; capture already exists, no schema work):
+
+  | class | derived from | agency | role |
+  |---|---|---|---|
+  | `4xx` | HTTP 4xx (carve out `404`=stale-playlist, `401/403`=auth as candidates) | server-imposed | reaction antecedent |
+  | `5xx` | HTTP 5xx (500/502/503 merged unless divergence test splits) | server-imposed | reaction antecedent |
+  | `server_partial` | `transfer_idle_timeout` / `transfer_active_timeout` (partial body) | server-imposed | reaction antecedent |
+  | `client_abandon` | `client_disconnect` / `transfer_abandoned` | **player-initiated** | behaviour grammar, NOT a reaction antecedent |
+  | `injected_reset` | `request_connect_reset` / `_first_byte_reset` / `_body_reset` | test-rig | #507 study stimulus; keep separable, exclude from the organic model |
+
+**Agency caveat:** `client_abandon` is the player's *own* action (it cancelled
+in-flight, usually to switch rendition), so the "is the reaction typical?" question
+targets the **server-imposed** classes (`4xx`/`5xx`/`server_partial`). The abandon token
+tells you what the player switched *to* — it belongs in the behaviour grammar.
+
+**Hierarchical back-off across the `(surface × class)` tree** — resolves the
+granularity-vs-sparsity bind. Score under the most specific antecedent with support,
+fall back to coarser:
+
+```
+FAULT(video_seg, 5xx)  →  FAULT(video_seg, *)  →  FAULT(*, *)
+```
+
+This mirrors the segmentation back-off in #442 (`hlsjs-LL → all-hlsjs → all-LL →
+global`). So **define antecedents finely and don't fix the granularity upfront** — the
+back-off uses the fine distinction where the corpus supports it and a coarse,
+well-estimated one where it doesn't. A divergence test then **merges** classes whose
+`P(next | class)` distributions are statistically indistinguishable. Err fine, merge
+down: splitting is cheap to undo, over-merging is lossy.
+
+**Why back-off is not optional here:** with only ~44 iOS fault sessions, `surface × class`
+(~5 × 5) fans out far faster than the corpus supports — most cells would starve.
+Back-off is what makes a fine taxonomy viable on the corpus we have.
+
 ## Acceptance for "adequate corpus" (unblocks model R&D)
 
-- ≥30 substantial clean sessions per engine for all four engines, OR an explicit
-  decision to scope the first model to the engines we have (AVPlayer + ExoPlayer) with
-  the rest as a follow-up.
-- A held-out clean split per engine for the novelty-based validation regime.
-- Fault/abort sessions tagged and excluded from clean training (they are #507's primary
-  dataset).
+Scoped iOS-first (Roku/hls.js deferred):
+- **(A) clean-baseline detector:** ≥~30 substantial clean AVPlayer sessions (have ~10 —
+  generate more, optionally + gentle-shaped), with a held-out clean split for the
+  novelty-based validation regime.
+- **(B) conditional-recovery model:** enough `FAULT(surface,class)` antecedents with
+  recovery continuations that the back-off tree has support at useful depth (have ~44
+  iOS fault sessions — likely need more per class). Test/fault sessions are the training
+  set here, not excluded.
+- All sessions tagged by engine + corpus role so clean / shaped / fault / abort are
+  queryable and the two models draw from the right slices.
