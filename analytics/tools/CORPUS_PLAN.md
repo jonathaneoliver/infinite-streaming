@@ -132,6 +132,39 @@ down: splitting is cheap to undo, over-merging is lossy.
 (~5 × 5) fans out far faster than the corpus supports — most cells would starve.
 Back-off is what makes a fine taxonomy viable on the corpus we have.
 
+### Two modelling layers on the same antecedent (build depth-1 first)
+
+The conditional-recovery model is built in two layers on the same `FAULT(surface,class)`
+antecedent. They are NOT rivals — the first is a strict subset of the second.
+
+**Layer 1 — fault-conditional 1st-order = the immediate-reaction distribution.**
+`P(next_token | FAULT(surface,class))` — the player's *first* move after the fault:
+retry-same / refetch-playlist-first / downshift / skip / stall. Build this first.
+- The "1st-order is weak" verdict was about **whole-session average NLL** (averaging over
+  all transitions re-derives frequency, loses ordering). It does **not** apply here: this
+  is a *targeted conditional on a rare, meaningful antecedent* that we inspect/compare,
+  not average into a session score. The immediate reaction genuinely *is* a one-step
+  phenomenon, so order-1 captures it fully.
+- It is exactly the **depth-1 leaf of the back-off tree** above, and it's what a
+  correctly-built VOMM falls back to in our thin-data regime anyway — plus it's directly
+  *readable* (one distribution, not a blend across orders). Matches #507's "descriptive
+  slice = direct aggregation is more interpretable than the model".
+
+**Layer 2 — VOMM = the multi-step recovery *trajectory*.**
+"Over the next k tokens, did the player recover or spiral?" This is where longer context
+earns its keep — and only where the data supports depth.
+
+**On "isn't VOMM always better (it's a superset)?"** — superset in *capacity* (set
+max-order=1 and VOMM ≡ 1st-order), so asymptotically VOMM ≥ 1st-order. But on *finite*
+data it is not strictly better: deeper contexts add variance/overfitting (→ false
+positives for anomaly detection), and the back-off/smoothing scheme has to be good for
+the advantage to materialise. VOMM exists *because* more-order-isn't-always-better — it
+is the mechanism to use depth only where supported and degrade to ~1st-order elsewhere
+(contrast fixed-high-order, which #442 rejects for sparsity collapse). A correctly-built
+VOMM is therefore **never worse, but only meaningfully better where the corpus supports
+depth** — which our fault/shift corpus mostly does not yet. Hence: ship Layer 1 first
+(cheap, interpretable, what VOMM reduces to here); add Layer 2 as the corpus grows.
+
 ## Acceptance for "adequate corpus" (unblocks model R&D)
 
 Scoped iOS-first (Roku/hls.js deferred):
