@@ -528,6 +528,12 @@ func main() {
 	cfg := loadConfig()
 	log.Printf("forwarder starting: sse=%s ch=%s/%s.%s", cfg.sseURL, cfg.clickhouseURL, cfg.chDatabase, cfg.chTable)
 
+	// #553 — load QoE label thresholds (compiled-in defaults, optionally
+	// overlaid from FORWARDER_QOE_THRESHOLDS_PATH) and install them into
+	// the write-time labeler. loadQoEThresholds logs the resolved tier so
+	// operators can audit which thresholds this deployment is running at.
+	defaultLabelState.SetThresholds(loadQoEThresholds(os.Getenv("FORWARDER_QOE_THRESHOLDS_PATH")))
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
