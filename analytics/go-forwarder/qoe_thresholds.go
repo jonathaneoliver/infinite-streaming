@@ -43,7 +43,6 @@ type QoEThresholds struct {
 		// watch) vs `user_stopped` (before-substantial-watch, i.e.
 		// bounce).
 		UserStoppedAfterThresholdMs uint32 `json:"user_stopped_after_threshold_ms"`
-
 	} `json:"outcomes"`
 
 	// Phase 3 — auto-labels. Parsed but consumed by a follow-up
@@ -71,19 +70,52 @@ type QoEThresholds struct {
 		RateCapBreachFactor float64 `json:"rate_cap_breach_factor"`
 		CMCDMTPDriftRatio   float64 `json:"cmcd_mtp_drift_ratio"`
 	} `json:"network"`
+
+	// ABR / quality label thresholds (#553). The two bitrate cause
+	// labels (qoe_abr_conservative / qoe_ladder_gap) share the
+	// underutilization ratio + headroom margin; the storm/dwell labels
+	// pair a count/duration with a window.
+	ABR struct {
+		// cur/throughput below this ⇒ underutilized (gate for the two
+		// ladder-aware cause labels).
+		BitrateUnderutilizedRatio float64 `json:"bitrate_underutilized_ratio"`
+		// Next rung "fits" if next_rung_mbps ≤ throughput × this.
+		AbrHeadroomMargin float64 `json:"abr_headroom_margin"`
+		// network_bitrate diverging > this fraction from recent-peak
+		// server throughput OR the cap trips qoe_throughput_divergence.
+		ThroughputDivergenceFactor float64 `json:"throughput_divergence_factor"`
+		// Window (s) over which the recent server-throughput peak is
+		// taken for the divergence comparison.
+		ThroughputPeakWindowS uint32 `json:"throughput_peak_window_s"`
+		// > N rate_shift_down within window ⇒ qoe_downshift_storm.
+		DownshiftStormThreshold uint32 `json:"downshift_storm_threshold"`
+		DownshiftStormWindowS   uint32 `json:"downshift_storm_window_s"`
+		// Dwell (s) pinned at the lowest rung ⇒ qoe_min_variant_stuck.
+		MinVariantStuckS uint32 `json:"min_variant_stuck_s"`
+		// Displayed fps below this fraction of nominal ⇒ qoe_fps_dip.
+		FPSDipRatio float64 `json:"fps_dip_ratio"`
+	} `json:"abr"`
+
+	// Live-edge label thresholds (#553). Margins are seconds BEYOND the
+	// manifest-recommended offset.
+	Live struct {
+		OffsetConcerningMarginS float64 `json:"offset_concerning_margin_s"`
+		OffsetBreachMarginS     float64 `json:"offset_breach_margin_s"`
+		HoldbackDeviationS      float64 `json:"holdback_deviation_s"`
+	} `json:"live"`
 }
 
 // qoeDefaults returns the Conviva "good" tier baked-in defaults.
 // Override values in qoe_thresholds.json or via env var.
 func qoeDefaults() *QoEThresholds {
 	t := &QoEThresholds{Version: "1.0"}
-	t.Outcomes.EBVSThresholdMs = 10000              // Conviva "good"
-	t.Outcomes.UserStoppedAfterThresholdMs = 5000   // 5s = substantial-watch threshold
-	t.Startup.VSTConcerningMs = 5000                // Conviva "best"
-	t.Startup.VSTBreachMs = 10000                   // Conviva "good"
+	t.Outcomes.EBVSThresholdMs = 10000            // Conviva "good"
+	t.Outcomes.UserStoppedAfterThresholdMs = 5000 // 5s = substantial-watch threshold
+	t.Startup.VSTConcerningMs = 5000              // Conviva "best"
+	t.Startup.VSTBreachMs = 10000                 // Conviva "good"
 	t.Startup.DRMDominantRatio = 0.5
-	t.Continuity.CIRRConcerning = 0.002             // Conviva "best"
-	t.Continuity.CIRRBreach = 0.004                 // Conviva "good"
+	t.Continuity.CIRRConcerning = 0.002 // Conviva "best"
+	t.Continuity.CIRRBreach = 0.004     // Conviva "good"
 	t.Continuity.CIRTConcerningMs = 1000
 	t.Continuity.CIRTBreachMs = 2000
 	t.Continuity.StallBurstThreshold = 3
@@ -92,6 +124,17 @@ func qoeDefaults() *QoEThresholds {
 	t.Network.TransferStallMs = 5000
 	t.Network.RateCapBreachFactor = 1.10
 	t.Network.CMCDMTPDriftRatio = 0.5
+	t.ABR.BitrateUnderutilizedRatio = 0.5   // variant using < half the link
+	t.ABR.AbrHeadroomMargin = 0.85          // need ~15% headroom to sustain a rung
+	t.ABR.ThroughputDivergenceFactor = 0.15 // >15% client/server disagreement
+	t.ABR.ThroughputPeakWindowS = 30
+	t.ABR.DownshiftStormThreshold = 3
+	t.ABR.DownshiftStormWindowS = 30
+	t.ABR.MinVariantStuckS = 30
+	t.ABR.FPSDipRatio = 0.2 // displayed fps < 80% of nominal
+	t.Live.OffsetConcerningMarginS = 3
+	t.Live.OffsetBreachMarginS = 10
+	t.Live.HoldbackDeviationS = 2
 	return t
 }
 
@@ -171,6 +214,39 @@ func loadQoEThresholds(path string) *QoEThresholds {
 	if override.Network.CMCDMTPDriftRatio != 0 {
 		cfg.Network.CMCDMTPDriftRatio = override.Network.CMCDMTPDriftRatio
 	}
+	if override.ABR.BitrateUnderutilizedRatio != 0 {
+		cfg.ABR.BitrateUnderutilizedRatio = override.ABR.BitrateUnderutilizedRatio
+	}
+	if override.ABR.AbrHeadroomMargin != 0 {
+		cfg.ABR.AbrHeadroomMargin = override.ABR.AbrHeadroomMargin
+	}
+	if override.ABR.ThroughputDivergenceFactor != 0 {
+		cfg.ABR.ThroughputDivergenceFactor = override.ABR.ThroughputDivergenceFactor
+	}
+	if override.ABR.ThroughputPeakWindowS != 0 {
+		cfg.ABR.ThroughputPeakWindowS = override.ABR.ThroughputPeakWindowS
+	}
+	if override.ABR.DownshiftStormThreshold != 0 {
+		cfg.ABR.DownshiftStormThreshold = override.ABR.DownshiftStormThreshold
+	}
+	if override.ABR.DownshiftStormWindowS != 0 {
+		cfg.ABR.DownshiftStormWindowS = override.ABR.DownshiftStormWindowS
+	}
+	if override.ABR.MinVariantStuckS != 0 {
+		cfg.ABR.MinVariantStuckS = override.ABR.MinVariantStuckS
+	}
+	if override.ABR.FPSDipRatio != 0 {
+		cfg.ABR.FPSDipRatio = override.ABR.FPSDipRatio
+	}
+	if override.Live.OffsetConcerningMarginS != 0 {
+		cfg.Live.OffsetConcerningMarginS = override.Live.OffsetConcerningMarginS
+	}
+	if override.Live.OffsetBreachMarginS != 0 {
+		cfg.Live.OffsetBreachMarginS = override.Live.OffsetBreachMarginS
+	}
+	if override.Live.HoldbackDeviationS != 0 {
+		cfg.Live.HoldbackDeviationS = override.Live.HoldbackDeviationS
+	}
 	log.Printf("[QoE] loaded overrides from %s", path)
 	logQoEResolved(cfg)
 	return cfg
@@ -183,8 +259,14 @@ func logQoEResolved(cfg *QoEThresholds) {
 	log.Printf("[QoE]   continuity.cirr_breach=%.4f cirt_breach_ms=%d stall_burst=%d/%ds",
 		cfg.Continuity.CIRRBreach, cfg.Continuity.CIRTBreachMs,
 		cfg.Continuity.StallBurstThreshold, cfg.Continuity.StallBurstWindowS)
-	log.Printf("[QoE]   network.ttfb_breach_ms=%d transfer_stall_ms=%d",
-		cfg.Network.TTFBBreachMs, cfg.Network.TransferStallMs)
+	log.Printf("[QoE]   network.ttfb_breach_ms=%d transfer_stall_ms=%d rate_cap_breach_factor=%.2f cmcd_mtp_drift_ratio=%.2f",
+		cfg.Network.TTFBBreachMs, cfg.Network.TransferStallMs,
+		cfg.Network.RateCapBreachFactor, cfg.Network.CMCDMTPDriftRatio)
+	log.Printf("[QoE]   abr.bitrate_underutilized_ratio=%.2f abr_headroom_margin=%.2f throughput_divergence_factor=%.2f downshift_storm=%d/%ds min_variant_stuck_s=%d fps_dip_ratio=%.2f",
+		cfg.ABR.BitrateUnderutilizedRatio, cfg.ABR.AbrHeadroomMargin, cfg.ABR.ThroughputDivergenceFactor,
+		cfg.ABR.DownshiftStormThreshold, cfg.ABR.DownshiftStormWindowS, cfg.ABR.MinVariantStuckS, cfg.ABR.FPSDipRatio)
+	log.Printf("[QoE]   live.offset_concerning_margin_s=%.1f offset_breach_margin_s=%.1f holdback_deviation_s=%.1f",
+		cfg.Live.OffsetConcerningMarginS, cfg.Live.OffsetBreachMarginS, cfg.Live.HoldbackDeviationS)
 }
 
 // Suppress the unused-import error in case fmt isn't otherwise
