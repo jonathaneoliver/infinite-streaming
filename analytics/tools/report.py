@@ -165,9 +165,12 @@ def analyze_stalls(play_ids, window=8.0, lookback=4.0):
 
 
 # ---------- condition: PLAY-END lead-up ----------
-def analyze_ends(plays, lead=20, gap=300):
+def analyze_ends(plays, lead=20, gap=300, per_bucket=80):
     now = datetime.now(timezone.utc).replace(tzinfo=None)
-    buckets = collections.defaultdict(list)
+    # Bucket ALL plays from their records first (free, exact counts); then pull network
+    # for a per-bucket sample for the lead-up grammar. Avoids the earlier bug where a
+    # global cap on first-N plays undersampled the `silent` bucket.
+    by_bucket = collections.defaultdict(list)
     censored = 0
     for p in plays:
         status = (p.get("playback_status") or "").strip()
@@ -181,16 +184,19 @@ def analyze_ends(plays, lead=20, gap=300):
         else:
             reason = (p.get("playback_reason") or "").strip()
             b = status if reason in ("", "unknown") else f"{status}/{reason}"
-        net = pull("network", p["play_id"])
-        if not net:
-            continue
-        body = [t for t in tk.tokenize(net) if t not in ("<S>", "<E>")]
-        buckets[b].append(body[-lead:])
+        by_bucket[b].append(p)
     out = {}
-    for b, tails in buckets.items():
-        nb = len(tails)
-        has = lambda pred: sum(1 for t in tails if any(pred(x) for x in t)) / (nb or 1)
-        out[b] = {"n": nb,
+    for b, ps in by_bucket.items():
+        tails = []
+        for p in ps[:per_bucket]:
+            net = pull("network", p["play_id"])
+            if not net:
+                continue
+            body = [t for t in tk.tokenize(net) if t not in ("<S>", "<E>")]
+            tails.append(body[-lead:])
+        ns = len(tails) or 1
+        has = lambda pred: sum(1 for t in tails if any(pred(x) for x in t)) / ns
+        out[b] = {"n": len(ps), "sampled": len(tails),
                   "fault": has(lambda x: x.startswith("FAULT(")),
                   "downshift": has(lambda x: x.startswith("V_SEG(-")),
                   "stall": has(lambda x: x.startswith("STALL"))}
@@ -223,7 +229,7 @@ def build_report(days=7, engine="AVPlayer", max_plays=200, out="/tmp/vomm_report
 
     fr = analyze_faults([p["play_id"] for p in fault[:max_plays]])
     st = analyze_stalls([p["play_id"] for p in stall[:max_plays]])
-    en = analyze_ends(eng[:max_plays])
+    en = analyze_ends(eng)  # buckets all plays (exact counts); samples network per bucket
 
     L = []
     L.append(f"# #508 condition report — {engine}, last {days}d")
@@ -248,11 +254,11 @@ def build_report(days=7, engine="AVPlayer", max_plays=200, out="/tmp/vomm_report
     L += bars(st["seg_delta"])[0]
 
     L.append(f"\n## Play-end lead-up  (live/censored excluded: {en['censored']})")
-    L.append("| end-type | n | FAULT in lead-up | downshift | STALL |")
-    L.append("|---|---|---|---|---|")
+    L.append("| end-type | n | lead-up sampled | FAULT | downshift | STALL |")
+    L.append("|---|---|---|---|---|---|")
     for b, d in sorted(en["buckets"].items(), key=lambda kv: -kv[1]["n"]):
         if d["n"] >= 5:
-            L.append(f"| {b} | {d['n']} | {d['fault']:.0%} | {d['downshift']:.0%} | {d['stall']:.0%} |")
+            L.append(f"| {b} | {d['n']} | {d['sampled']} | {d['fault']:.0%} | {d['downshift']:.0%} | {d['stall']:.0%} |")
 
     L.append("\n_Caveats: single engine, test-rig-heavy corpus; descriptive (no trained surprise model yet); "
              "`STALL` in play-end lead-up is 0 until end-analysis pulls events; end-type labels contaminated (see #565)._")

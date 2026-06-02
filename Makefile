@@ -13,6 +13,8 @@ IOS_APP_BUNDLE_ID ?= com.jeoliver.InfiniteStreamPlayer
 IOS_API_BASE ?= http://$(K3S_HOST):40000
 IOS_METRICS_DURATION ?= 900
 IOS_SCORE_MIN ?= 60
+REPORT_DAYS ?= 7
+REPORT_OUT ?= /tmp/report-conditions.md
 
 run:
 	docker compose up -d
@@ -105,6 +107,12 @@ harness-cli:
 	@case ":$$PATH:" in *":$(patsubst %/,%,$(dir $(HARNESS_CLI_BIN))):"*) ;; \
 	  *) echo "warn: $(dir $(HARNESS_CLI_BIN)) is not on \$$PATH — add it or set HARNESS_CLI_BIN" ;; \
 	esac
+
+# #508 streaming report — what the player does around faults / stalls / play-ends.
+# Read-only; needs the harness CLI on $PATH (make harness-cli), pointed at test-dev.
+# Override: make report REPORT_DAYS=14 REPORT_OUT=/tmp/r.md
+report:
+	python3 analytics/tools/report.py --kind conditions --days $(REPORT_DAYS) --out $(REPORT_OUT)
 
 # Regenerate the typed Go clients under tools/harness-cli/internal/v2gen/
 # from api/openapi/v2/{proxy,forwarder}.yaml. Idempotent; safe to run
