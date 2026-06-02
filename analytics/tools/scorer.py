@@ -1,21 +1,21 @@
 #!/usr/bin/env python3
-"""1st-order baseline scorer for #508 — the order-1 floor under tail/peak surprise.
+"""VOMM scorer for #508 — variable-order back-off, tail/peak + count-above surprise.
 
-Trains a smoothed 1st-order Markov P(next | prev) over the token alphabet on a CLEAN
-reference corpus, then scores token sequences by SURPRISE:
-  * peak surprise — the single most-improbable transition, max(−log P(next|prev));
-  * count above threshold — # transitions whose surprise exceeds a clean-calibrated bar.
-NOT whole-session avg-NLL (rejected — re-derives frequency, length-confounded; see
-CORPUS_PLAN.md "Scoring statistic"). This is the back-off LEAF the VOMM extends, and the
-clean order-1 ablation baseline.
+Trains a variable-order back-off model (PPM-C escape) P(next | longest-supported context)
+over the token alphabet on a CLEAN reference corpus, then scores sequences by SURPRISE.
 
-READ-ONLY (#508): reads the archive via the harness CLI (reuses report.pull /
-query_plays); writes nothing.
+Scoring statistic (NOT whole-session avg-NLL — rejected; see CORPUS_PLAN):
+  * surprise rate — fraction of transitions whose −log P exceeds a clean-calibrated (p99)
+    threshold. Length-normalised and graded (doesn't saturate like raw peak). PRIMARY.
+  * peak — the single most-improbable transition (secondary; saturates on novel tokens).
 
-  python3 analytics/tools/scorer.py [--days 7] [--engine AVPlayer] [--alpha 0.5]
+`max_order` is the only model knob: max_order=1 IS the 1st-order Markov (the ablation
+floor); max_order=K is the VOMM. Same code, one parameter — the order-1 case is just the
+back-off leaf. The run compares the two to answer "does variable-order beat order-1?".
 
-This is a baseline/floor — see the honest caveats it prints. The real test (does ordering
-separate good vs bad beyond mere fault-token novelty?) needs more corpus / the VOMM.
+READ-ONLY (#508): reads via the harness CLI (reuses report.pull / query_plays); writes nothing.
+
+  python3 analytics/tools/scorer.py [--days 7] [--engine AVPlayer] [--max-order 4] [--alpha 0.5]
 """
 import argparse
 import collections
@@ -26,56 +26,66 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import tokenize as tk   # noqa: E402
-import report as rep    # noqa: E402  (reuse pull / query_plays / gi / play_labels)
+import report as rep    # noqa: E402
 
 
-# ---------- model ----------
-def train(sequences, alpha=0.5):
-    """1st-order transition model with add-alpha (Laplace) smoothing. #442 uses alpha=0.5."""
-    trans = collections.defaultdict(collections.Counter)  # prev -> Counter(next)
+# ---------- VOMM model (PPM-C back-off) ----------
+def train(sequences, max_order=4, alpha=0.5):
+    """counts[m][ctx_tuple] = Counter(next) for context length m in 0..max_order."""
+    counts = [collections.defaultdict(collections.Counter) for _ in range(max_order + 1)]
     vocab = set()
     for seq in sequences:
         vocab.update(seq)
-        for a, b in zip(seq, seq[1:]):
-            trans[a][b] += 1
-    return {"trans": trans, "V": max(len(vocab), 1), "alpha": alpha}
+        for i in range(1, len(seq)):
+            nxt = seq[i]
+            for m in range(0, min(max_order, i) + 1):
+                ctx = tuple(seq[i - m:i])      # m tokens before i (m=0 → () = unigram)
+                counts[m][ctx][nxt] += 1
+    return {"counts": counts, "max_order": max_order, "V": max(len(vocab), 1)}
 
 
-def _logp(model, prev, nxt):
-    a, V = model["alpha"], model["V"]
-    ctr = model["trans"].get(prev)
-    if ctr is None:                       # unseen context → ~uniform over vocab
-        return math.log(1.0 / V)
-    return math.log((ctr.get(nxt, 0) + a) / (sum(ctr.values()) + a * V))
+def _ppm_prob(model, history, nxt, m):
+    """PPM-C: P(nxt | last m tokens), backing off to shorter context, base = uniform 1/V."""
+    if m < 0:
+        return 1.0 / model["V"]
+    ctx = tuple(history[len(history) - m:]) if m > 0 else ()
+    ctr = model["counts"][m].get(ctx)
+    if not ctr:                                # unseen context → drop a level
+        return _ppm_prob(model, history, nxt, m - 1)
+    T = sum(ctr.values())
+    D = len(ctr)                               # PPM-C escape mass = distinct types
+    if nxt in ctr:
+        return ctr[nxt] / (T + D)
+    return (D / (T + D)) * _ppm_prob(model, history, nxt, m - 1)
 
 
 def transition_surprises(model, seq):
-    return [(-_logp(model, a, b), a, b) for a, b in zip(seq, seq[1:])]
+    K = model["max_order"]
+    out = []
+    for i in range(1, len(seq)):
+        p = _ppm_prob(model, seq[:i], seq[i], min(K, i))
+        out.append((-math.log(p), seq[i - 1], seq[i]))
+    return out
 
 
 def score(model, seq, threshold):
     s = transition_surprises(model, seq)
     if not s:
-        return {"peak": 0.0, "argmax": None, "n_above": 0, "n_trans": 0}
+        return {"rate": 0.0, "n_above": 0, "n_trans": 0, "peak": 0.0, "argmax": None}
     pk = max(s, key=lambda x: x[0])
-    return {"peak": pk[0], "argmax": f"{pk[1]} → {pk[2]}",
-            "n_above": sum(1 for x in s if x[0] >= threshold), "n_trans": len(s)}
+    n_above = sum(1 for x in s if x[0] >= threshold)
+    return {"rate": n_above / len(s), "n_above": n_above, "n_trans": len(s),
+            "peak": pk[0], "argmax": f"{pk[1]} → {pk[2]}"}
 
 
-# ---------- corpus ----------
+# ---------- corpus (reused harness) ----------
 def seqs_for(play_ids, limit=5000):
-    out = []
-    for pid in play_ids:
-        net = rep.pull("network", pid, limit)
-        if net:
-            out.append(tk.tokenize(net))
-    return out
+    return [tk.tokenize(net) for pid in play_ids if (net := rep.pull("network", pid, limit))]
 
 
 def select(plays, engine):
-    """(clean, fault) iOS play-id lists. Clean = substantial, no faults/errors/shaping."""
     eng = [p for p in plays if p.get("player_tech") == engine]
-    fault, clean = [], []
+    clean, fault = [], []
     for p in eng:
         if rep.gi(p, "playing_time_ms") < 30000:
             continue
@@ -90,66 +100,71 @@ def select(plays, engine):
     return clean, fault
 
 
-def pctiles(vals):
-    if not vals:
-        return (0.0, 0.0, 0.0)
-    v = sorted(vals)
-    q = lambda f: v[min(len(v) - 1, int(f * len(v)))]
-    return (q(0.5), q(0.9), q(0.99))
+def median(v):
+    return sorted(v)[len(v) // 2] if v else 0.0
+
+
+def p99(v):
+    return sorted(v)[min(len(v) - 1, int(0.99 * len(v)))] if v else 0.0
+
+
+def run_order(order, train_seqs, holdout_seqs, fault_seqs, alpha):
+    """Train at this max_order on train_seqs; return clean-holdout vs fault surprise rates."""
+    model = train(train_seqs, max_order=order, alpha=alpha)
+    thr = p99([s for seq in train_seqs for s, _, _ in transition_surprises(model, seq)])
+    clean_rate = median([score(model, s, thr)["rate"] for s in holdout_seqs])
+    fr = [score(model, s, thr) for s in fault_seqs]
+    fault_rate = median([r["rate"] for r in fr])
+    argmaxes = collections.Counter(r["argmax"] for r in fr if r["argmax"])
+    return {"order": order, "thr": thr, "clean_rate": clean_rate,
+            "fault_rate": fault_rate, "sep": fault_rate - clean_rate, "argmaxes": argmaxes}
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--days", type=int, default=7)
     ap.add_argument("--engine", default="AVPlayer")
+    ap.add_argument("--max-order", type=int, default=4)
     ap.add_argument("--alpha", type=float, default=0.5)
-    ap.add_argument("--max-fault", type=int, default=60, help="cap fault test sequences")
+    ap.add_argument("--max-fault", type=int, default=60)
     args = ap.parse_args()
 
     plays, frm = rep.query_plays(args.days)
     clean_ids, fault_ids = select(plays, args.engine)
     clean_seqs = seqs_for(clean_ids)
     fault_seqs = seqs_for(fault_ids[:args.max_fault])
-    print(f"#508 baseline scorer (1st-order, α={args.alpha}) — {args.engine}, {args.days}d since {frm}")
-    print(f"clean training corpus: {len(clean_seqs)} sessions ; fault test: {len(fault_seqs)} sessions\n")
-    if len(clean_seqs) < 3:
-        print("too few clean sessions to train — need more clean corpus (a known #508 gap).")
+    # deterministic 80/20 clean split: every 5th session is the held-out baseline.
+    holdout = [s for i, s in enumerate(clean_seqs) if i % 5 == 0]
+    train_seqs = [s for i, s in enumerate(clean_seqs) if i % 5 != 0]
+    print(f"#508 VOMM scorer — {args.engine}, {args.days}d since {frm}")
+    print(f"clean: train {len(train_seqs)} / holdout {len(holdout)} ; fault test {len(fault_seqs)}\n")
+    if len(train_seqs) < 5 or not holdout or not fault_seqs:
+        print("corpus too thin to run the ablation (known #508 gap).")
         return
 
-    # Calibrate the count-above threshold from in-sample clean transition surprises (p99).
-    full = train(clean_seqs, args.alpha)
-    clean_surpr = [s for seq in clean_seqs for s, _, _ in transition_surprises(full, seq)]
-    _, _, thr = pctiles(clean_surpr)
-    print(f"clean transition-surprise p50/p90/p99 = {'/'.join(f'{x:.1f}' for x in pctiles(clean_surpr))} nats"
-          f"  → count-above threshold = {thr:.1f}")
+    print("surprise RATE (frac of transitions above clean-p99 bar) — median over sessions:")
+    print(f"  {'model':12} {'thr(nats)':>9} {'clean':>8} {'fault':>8} {'separation':>11}")
+    results = {}
+    for order in sorted({1, args.max_order}):
+        r = run_order(order, train_seqs, holdout, fault_seqs, args.alpha)
+        results[order] = r
+        name = "order-1" if order == 1 else f"VOMM(K={order})"
+        print(f"  {name:12} {r['thr']:9.1f} {r['clean_rate']:8.1%} {r['fault_rate']:8.1%} {r['sep']:+11.1%}")
 
-    # Clean baseline: leave-one-out (score each clean session under a model trained on the rest).
-    clean_peaks = []
-    for i, seq in enumerate(clean_seqs):
-        m = train(clean_seqs[:i] + clean_seqs[i + 1:], args.alpha)
-        clean_peaks.append(score(m, seq, thr)["peak"])
-    # Fault sessions scored under the full clean model.
-    fault_peaks, argmaxes = [], collections.Counter()
-    for seq in fault_seqs:
-        r = score(full, seq, thr)
-        fault_peaks.append(r["peak"])
-        if r["argmax"]:
-            argmaxes[r["argmax"]] += 1
+    if args.max_order != 1 and 1 in results:
+        d = results[args.max_order]["sep"] - results[1]["sep"]
+        verdict = "VOMM improves separation" if d > 0.005 else ("≈ no gain over order-1" if abs(d) <= 0.005 else "VOMM WORSE")
+        print(f"\n  → does depth help? Δseparation (VOMM − order-1) = {d:+.1%}  [{verdict}]")
 
-    print(f"\npeak-surprise (nats)  median / p90 / max")
-    print(f"  clean (leave-one-out): {'/'.join(f'{x:.1f}' for x in (pctiles(clean_peaks)[0], pctiles(clean_peaks)[1], max(clean_peaks) if clean_peaks else 0))}")
-    print(f"  fault sessions:        {'/'.join(f'{x:.1f}' for x in (pctiles(fault_peaks)[0], pctiles(fault_peaks)[1], max(fault_peaks) if fault_peaks else 0))}")
-    sep = (pctiles(fault_peaks)[0] - pctiles(clean_peaks)[0]) if clean_peaks and fault_peaks else 0
-    print(f"  → median peak-surprise separation (fault − clean): {sep:+.1f} nats")
-    print("\nmost-surprising transition driving each fault session's peak (top 8):")
-    for k, c in argmaxes.most_common(8):
+    print(f"\ntop most-surprising transitions in fault sessions (VOMM K={args.max_order}):")
+    for k, c in results[args.max_order]["argmaxes"].most_common(8):
         print(f"  {c:3}  {k}")
 
-    print("\nCAVEAT: this baseline mostly fires on FAULT tokens being novel to a clean-trained\n"
-          "model — i.e. it largely re-detects 'a fault happened', ≈ the trivial fault counter.\n"
-          "The real question (does ORDERING separate good vs bad beyond fault-presence?) needs\n"
-          "more clean corpus + the VOMM + a contrastive setup. This establishes the machinery\n"
-          "and the order-1 floor, nothing more.")
+    print("\nNote: clean corpus is steady-2160p-heavy, so much of the fault separation is\n"
+          "fault/rendition-switch NOVELTY against a low-diversity clean model (≈ the trivial\n"
+          "fault counter). The honest model win is the Δseparation line: does variable-order\n"
+          "buy anything over order-1 here? Episode-anchored scoring + more diverse clean\n"
+          "corpus are the next levers.")
 
 
 if __name__ == "__main__":
