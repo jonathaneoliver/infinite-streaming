@@ -9,10 +9,15 @@ conditional on a rare, meaningful antecedent.
 
 READ-ONLY (#508): reads the archive via `harness query network --json`, writes nothing.
 
-Two views per antecedent:
-  * raw next token (immediate successor in the interleaved request stream), and
-  * next VIDEO-surface token (skips audio interleaving) — more interpretable for the
-    video recovery grammar: retry / downshift / playlist-refetch / resume / give-up.
+Views:
+  * raw next token (immediate successor in the interleaved request stream);
+  * next committed video SEGMENT (V_SEG/V_PROBE) — follows THROUGH the playlist refetch
+    to the rendition the player actually commits to. NOTE: the immediate next token after
+    a video 404 is usually V_PL (the player re-resolves via the playlist), so stopping at
+    the first "video token" hides the real reaction — you must walk to the next segment.
+    (This was a real depth-1 trap: it inverted "downshift every time" into "no downshift".)
+  * rendition staircase — TRUE rendition delta (from URLs, not the clamped token ΔP, so
+    it distinguishes −1 from −5) between a 404'd video segment and the next committed one.
 
 The agency caveat (CORPUS_PLAN.md): client_abandon is player-INITIATED, so its
 "reaction" is really the player's own switch behaviour, not a recovery from an imposed
@@ -32,8 +37,15 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import tokenize as tk  # noqa: E402
 
-VIDEO_KINDS = ("V_SEG", "V_PROBE", "V_PL")
+SEGMENT_KINDS = ("V_SEG", "V_PROBE")  # committed video renditions (NOT V_PL — that's the
+#                                      intermediate playlist refetch, not a commit).
 CACHE_DIR = "/tmp"
+
+
+def seg_rendition(url):
+    """Rendition string of a video segment URL (e.g. '2160p'), or None."""
+    m = tk.SEG_RE.search(url or "")
+    return m.group(1) if (m and m.group(1) in tk.RENDITION_ORDINAL) else None
 
 
 def pull_network(uuid, limit):
@@ -85,7 +97,8 @@ def main():
     uuids = [args.play] if args.play else [l.strip() for l in open(args.plays_file) if l.strip()]
 
     raw_next = collections.defaultdict(collections.Counter)    # antecedent -> Counter(next_label)
-    vid_next = collections.defaultdict(collections.Counter)    # video-fault antecedent -> Counter(next video label)
+    seg_next = collections.defaultdict(collections.Counter)    # video-fault -> Counter(next COMMITTED-segment label)
+    stair = collections.Counter()                              # true rendition delta after a video 404
     n_plays = 0
     for uuid in uuids:
         rows = pull_network(uuid, args.limit)
@@ -99,12 +112,25 @@ def main():
                 continue
             nxt = toks[i + 1] if i + 1 < len(toks) else "<E>"
             raw_next[ant][next_label(nxt)] += 1
-            # next-video view (skip audio/other interleaving) for video-surface faults
+            # committed-segment view: walk THROUGH V_PL/audio to the next V_SEG/V_PROBE.
             if ant.startswith("video_seg"):
                 for j in range(i + 1, len(toks)):
-                    if toks[j].split("(")[0] in VIDEO_KINDS or toks[j] == "<E>":
-                        vid_next[ant][next_label(toks[j])] += 1
+                    if toks[j].split("(")[0] in SEGMENT_KINDS or toks[j] == "<E>":
+                        seg_next[ant][next_label(toks[j])] += 1
                         break
+
+        # rendition staircase (row-based — true renditions, unclamped). For each 404'd
+        # video segment, the ordinal delta to the next committed (non-404) video segment.
+        vrows = [(r.get("ts") or r.get("timestamp") or "", r) for r in rows if seg_rendition(r.get("url"))]
+        vrows.sort(key=lambda x: x[0])
+        for k, (_, r) in enumerate(vrows):
+            if str(r.get("status")) != "404":
+                continue
+            faulted = tk.RENDITION_ORDINAL[seg_rendition(r["url"])]
+            for _, r2 in vrows[k + 1:]:
+                if str(r2.get("status")) != "404":
+                    stair[tk.RENDITION_ORDINAL[seg_rendition(r2["url"])] - faulted] += 1
+                    break
 
     print(f"plays tokenized: {n_plays}/{len(uuids)}\n")
 
@@ -121,7 +147,23 @@ def main():
                 print(f"    {lbl:18} {c/total:5.1%} {bar} ({c})")
 
     render("P(next token | FAULT) — raw immediate successor", raw_next)
-    render("P(next VIDEO token | FAULT(video_seg,*)) — recovery grammar", vid_next)
+    render("P(next committed video SEGMENT | FAULT(video_seg,*)) — recovery grammar "
+           "(through the playlist refetch)", seg_next)
+
+    # Rendition staircase — true unclamped deltas.
+    total = sum(stair.values())
+    if total:
+        print(f"\n================ rendition staircase after a video 404 "
+              f"(true Δrungs, n={total}) ================")
+        labels = {0: "same rung", -1: "down 1 rung"}
+        for d in sorted(stair, key=lambda d: (d != -1, d != 0, d)):
+            c = stair[d]
+            name = labels.get(d, f"{'down' if d < 0 else 'up'} {abs(d)} rungs")
+            bar = "█" * int(round(30 * c / total))
+            print(f"    Δ{d:+d}  {name:13} {c/total:5.1%} {bar} ({c})")
+        down1 = stair.get(-1, 0)
+        print(f"\n    → one-rung downshift dominates: {down1}/{total} ({down1/total:.0%}); "
+              f"big drops (≤−4) = probe-to-top-then-crash; +Δ = optimistic re-probe from floor.")
 
 
 if __name__ == "__main__":
