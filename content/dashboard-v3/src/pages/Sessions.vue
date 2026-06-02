@@ -25,6 +25,10 @@ interface SessionRow {
   classification?: string;
   last_state?: string;
   last_player_error?: string;
+  // #550 Phase 2 outcome (argMax'd onto the play summary) — how the play
+  // ended. Rendered as the "Outcome" column via endOutcome().
+  playback_status?: string;
+  playback_reason?: string;
   metric_events?: number | string;
   net_events?: number | string;
   stalls?: number;
@@ -858,6 +862,34 @@ function labelChips(r: SessionRow): LabelChip[] {
   return out;
 }
 
+// #563 — human-readable "how did this play end?" from the Phase 2
+// outcome fields. playback_status is the verb; playback_reason refines
+// a user_stopped into the state it was in at exit (the iOS client's
+// refineTerminalReason + the #556 proxy inactive_timeout). Returns a
+// short label, a colour, and a tooltip carrying the raw status·reason.
+function endOutcome(r: SessionRow): { label: string; color: string; tip: string } {
+  const status = String(r.playback_status ?? '').trim();
+  const reason = String(r.playback_reason ?? '').trim();
+  const grey = '#9ca3af', green = '#065f46', amber = '#92400e', red = '#991b1b', neutral = '#374151';
+  const tip = status ? `${status}${reason ? ' · ' + reason : ''}` : 'in progress';
+  if (!status || status === 'in_progress') return { label: 'Playing', color: grey, tip };
+  if (status === 'completed') return { label: 'Completed', color: green, tip };
+  if (status === 'start_failure') return { label: 'Startup failed', color: red, tip };
+  if (status === 'mid_stream_failure') return { label: 'Mid-stream fail', color: red, tip };
+  if (status === 'abandoned_start') return { label: 'Abandoned start', color: amber, tip };
+  if (status === 'user_stopped') {
+    if (reason.startsWith('ended_stalling')) return { label: 'Quit (stalled)', color: amber, tip };
+    if (reason.startsWith('ended_buffering')) return { label: 'Quit (buffering)', color: amber, tip };
+    if (reason === 'app_backgrounded') return { label: 'Backgrounded', color: neutral, tip };
+    if (reason === 'app_terminated') return { label: 'App killed', color: neutral, tip };
+    if (reason === 'inactive_timeout') return { label: 'Timed out', color: amber, tip };
+    if (reason === 'next_content_selected') return { label: 'Switched', color: neutral, tip };
+    return { label: 'User quit', color: neutral, tip };
+  }
+  if (reason === 'inactive_timeout') return { label: 'Timed out', color: amber, tip };
+  return { label: status.replace(/_/g, ' '), color: neutral, tip };
+}
+
 function flagChips(r: SessionRow): { icon: string; label: string; tip: string; color: string; count: number }[] {
   const out: { icon: string; label: string; tip: string; color: string; count: number }[] = [];
   for (const f of FLAG_DEFS) {
@@ -878,6 +910,7 @@ const COLUMNS = [
   { key: 'content_id',       label: 'Content',    type: 'string' as const,  sortable: true },
   { key: 'play_id',          label: 'Play ID',    type: 'string' as const,  sortable: true },
   { key: 'last_state',       label: 'State',      type: 'string' as const,  sortable: true },
+  { key: 'playback_status',  label: 'Outcome',    type: 'string' as const,  sortable: true },
   { key: 'issues_count',     label: 'Issues',     type: 'number' as const,  sortable: true },
   { key: '__flags',          label: 'Flags',      type: 'string' as const,  sortable: false },
   { key: 'labels_total',     label: 'Labels',     type: 'number' as const,  sortable: true },
@@ -1307,6 +1340,7 @@ const showCustomInputs = computed(() => activeRangeId.value === 'custom');
                     <template v-else>{{ r.play_id || '' }}</template>
                   </td>
                   <td>{{ r.last_state || '' }}</td>
+                  <td><span :style="{ color: endOutcome(r).color, fontWeight: 600 }" :title="endOutcome(r).tip">{{ endOutcome(r).label }}</span></td>
                   <td>
                     <span class="issue-badge" :class="'issue-' + fmtIssuesBadge(r).cls" :title="fmtIssuesBadge(r).tip">{{ fmtIssuesBadge(r).count }}</span>
                   </td>
