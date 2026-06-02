@@ -1577,7 +1577,7 @@ components:
         loop_count_player:   { type: integer, nullable: true, description: 'How many times the player has reported looping the content. Player-reported, may be 0 on platforms that do not count.' }
         loop_count_delta: { type: integer, nullable: true, description: 'Server-derived increment from the previous report.' }
         profile_shift_count: { type: integer, nullable: true, description: 'Number of ABR rendition shifts the player has reported.' }
-        last_event:          { type: string,  nullable: true, description: 'Most recent player-reported lifecycle event (playing, buffering_start, stall_start, etc.).' }
+        last_event:          { type: string,  nullable: true, description: 'Most recent player-reported lifecycle event (playing, buffering_start, stall_start, etc.). The play-terminal event is `play_end` (issue #554); rows minted before the client rename carry the legacy `session_end` and are still classified. NOTE: distinct from the proxy session-lifecycle `session_end` control_event, which is unchanged.' }
         trigger_type:        { type: string,  nullable: true, description: 'What triggered the most recent metrics tick (timer, event, etc.).' }
         state:               { type: string,  nullable: true, description: 'Player state machine label (idle, playing, paused, buffering, ended, error).' }
         waiting_reason:      { type: string,  nullable: true, description: 'AVFoundation reasonForWaitingToPlay (or platform equivalent) — split labels within `state` like `toMinimizeStalls` vs `evaluatingBufferingRate`.' }

@@ -5,7 +5,8 @@ import "testing"
 // Covers terminalFrameForSession (#556) — the pure frame-builder behind
 // the proxy's synthesized terminal session_events frame on inactive
 // timeout. Verifies the playback_status mapping, reason carry, and the
-// dedupe against a client's own session_end.
+// dedupe against a client's own play-terminal event (play_end / legacy
+// session_end, #554).
 func TestTerminalFrameForSession(t *testing.T) {
 	const reason = "inactive_timeout"
 
@@ -18,8 +19,8 @@ func TestTerminalFrameForSession(t *testing.T) {
 		if !ok {
 			t.Fatal("expected a frame")
 		}
-		if got := getString(frame, "player_metrics_last_event"); got != "session_end" {
-			t.Fatalf("last_event = %q, want session_end", got)
+		if got := getString(frame, "player_metrics_last_event"); got != "play_end" {
+			t.Fatalf("last_event = %q, want play_end", got)
 		}
 		if got := getString(frame, "player_metrics_playback_status"); got != "abandoned_start" {
 			t.Fatalf("playback_status = %q, want abandoned_start", got)
@@ -59,17 +60,26 @@ func TestTerminalFrameForSession(t *testing.T) {
 		if got := getString(frame, "player_metrics_playback_reason"); got != "decoder_init" {
 			t.Fatalf("playback_reason = %q, want decoder_init (not overwritten)", got)
 		}
-		if got := getString(frame, "player_metrics_last_event"); got != "session_end" {
-			t.Fatalf("last_event = %q, want session_end", got)
+		if got := getString(frame, "player_metrics_last_event"); got != "play_end" {
+			t.Fatalf("last_event = %q, want play_end", got)
 		}
 	})
 
-	t.Run("client already sent session_end -> dedupe (no frame)", func(t *testing.T) {
+	t.Run("client already sent play_end -> dedupe (no frame)", func(t *testing.T) {
+		if _, ok := terminalFrameForSession(SessionData{
+			"player_metrics_last_event":      "play_end",
+			"player_metrics_playback_status": "completed",
+		}, reason); ok {
+			t.Fatal("expected no frame when client already ended cleanly with play_end")
+		}
+	})
+
+	t.Run("client already sent legacy session_end -> dedupe (no frame)", func(t *testing.T) {
 		if _, ok := terminalFrameForSession(SessionData{
 			"player_metrics_last_event":      "session_end",
 			"player_metrics_playback_status": "completed",
 		}, reason); ok {
-			t.Fatal("expected no frame when client already ended cleanly")
+			t.Fatal("expected no frame when client already ended cleanly with legacy session_end")
 		}
 	})
 
