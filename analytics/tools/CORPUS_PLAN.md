@@ -165,6 +165,27 @@ VOMM is therefore **never worse, but only meaningfully better where the corpus s
 depth** — which our fault/shift corpus mostly does not yet. Hence: ship Layer 1 first
 (cheap, interpretable, what VOMM reduces to here); add Layer 2 as the corpus grows.
 
+### Scoring statistic — what we do NOT use
+
+**Whole-session average NLL is rejected outright — not as a detector, and not even as a
+benchmark.** Reasons:
+- *As a detector:* averaging `−log P(tokenᵢ|context)` over the whole stream re-derives
+  *frequency*, not *ordering* (the thing #508 exists to catch); and the un-averaged sum is
+  dominated by session *length*. Where it "separates" outcomes at all, it's mostly a noisy
+  proxy for fault/stall **counts** you can measure directly.
+- *As a benchmark:* it isn't even a clean ablation vs the VOMM — it changes *two* axes at
+  once (order **and** aggregation), so a VOMM "win" wouldn't attribute to either.
+
+The scoring statistic is **tail/peak surprise** (single most-improbable transition given
+its context, and/or count above a threshold) on **episodes**, not whole sessions. The two
+baselines that *do* earn their keep:
+1. **trivial frequency counters** (`fault_rate`, `stall_count`, `rebuffer_ratio`) — "does
+   ordering beat counting?", the premise of the whole epic;
+2. **order-1 under the same tail/peak metric** (the Layer-1 / back-off leaf) — "does
+   variable-order beat order-1?", a clean one-axis ablation.
+
+This formally supersedes #442's original `avg NLL` per-session output.
+
 ### Fault-taxonomy census — what's actually in the archive (2026-06-01)
 
 Sampled the top-30 fault plays by `net_faults` (all engines) via the read API
