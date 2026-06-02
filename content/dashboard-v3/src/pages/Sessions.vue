@@ -269,20 +269,34 @@ function deriveHealth(r: SessionRow): void {
   // #563 — derived QoE rate metrics, normalised against playing time
   // (Conviva-style). undefined when the denominator is zero so cells
   // show "—". All inputs are cumulative #550 columns on the summary.
+  // Minimum sample before a rate is trustworthy. A couple of events over
+  // a few seconds otherwise normalises to an absurd per-hour/per-minute
+  // value (1 stall over 2s ≈ 1800/hr). Below the floor the cell renders
+  // "—" (insufficient sample) rather than noise. Per-time rates gate on
+  // playing time; the time-ratios gate on their own (engaged-time)
+  // denominator so a stall-heavy SHORT play still reports a real
+  // rebuffer %; the drop ratio gates on a minimum frame count.
+  const RATE_MIN_PLAYING_MS = 30_000; // ≥30s of playback for per-time rates
+  const RATIO_MIN_MS = 30_000;        // ≥30s engaged time for the time ratios
+  const RATIO_MIN_FRAMES = 300;       // ≥~5–10s of frames for the drop ratio
   const playingMs = n('playing_time_ms');
   const stallingMs = n('stalling_time_ms');
   const bufferingMs = n('buffering_time_ms');
   const displayed = n('frames_displayed');
   const playingHrs = playingMs / 3_600_000;
   const playingMin = playingMs / 60_000;
-  r.rebuffer_ratio = (stallingMs + playingMs) > 0 ? stallingMs / (stallingMs + playingMs) : undefined;
-  r.buffering_ratio = (bufferingMs + playingMs) > 0 ? bufferingMs / (bufferingMs + playingMs) : undefined;
-  r.drop_ratio = (drops + displayed) > 0 ? drops / (drops + displayed) : undefined;
-  r.stalls_per_hr = playingHrs > 0 ? stalls / playingHrs : undefined;
+  const rebufDenom = stallingMs + playingMs;
+  const bufDenom = bufferingMs + playingMs;
+  const frameDenom = drops + displayed;
+  const rateOk = playingMs >= RATE_MIN_PLAYING_MS;
+  r.rebuffer_ratio = rebufDenom >= RATIO_MIN_MS ? stallingMs / rebufDenom : undefined;
+  r.buffering_ratio = bufDenom >= RATIO_MIN_MS ? bufferingMs / bufDenom : undefined;
+  r.drop_ratio = frameDenom >= RATIO_MIN_FRAMES ? drops / frameDenom : undefined;
+  r.stalls_per_hr = rateOk ? stalls / playingHrs : undefined;
   r.mean_stall_ms = stalls > 0 ? stallingMs / stalls : undefined;
-  r.shifts_per_min = playingMin > 0 ? n('bitrate_shifts') / playingMin : undefined;
-  r.downshifts_per_min = playingMin > 0 ? downshifts / playingMin : undefined;
-  r.errors_per_hr = playingHrs > 0 ? n('error_count') / playingHrs : undefined;
+  r.shifts_per_min = rateOk ? n('bitrate_shifts') / playingMin : undefined;
+  r.downshifts_per_min = rateOk ? downshifts / playingMin : undefined;
+  r.errors_per_hr = rateOk ? n('error_count') / playingHrs : undefined;
 }
 
 // Normalise one PlaySummary into a SessionRow: aliases v2 field
