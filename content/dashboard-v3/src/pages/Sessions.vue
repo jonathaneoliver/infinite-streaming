@@ -126,8 +126,8 @@ const filters = ref<{
   play_id: string;
   classification: 'all' | 'starred' | 'interesting' | 'other';
   // Test-harness origin filter. 'all' = no constraint, 'only' = keep
-  // plays stamped by the characterization framework (have an
-  // info=run_id_… label), 'hide' = exclude them so manual sessions
+  // plays stamped by the characterization framework (have a
+  // testing=run_id_… label, or legacy info=run_id_… pre-#571), 'hide' = exclude them so manual sessions
   // surface without test-noise. See Characterization.vue for how
   // the framework stamps these labels at the start of each run.
   harness: 'all' | 'only' | 'hide';
@@ -146,25 +146,29 @@ const filters = ref<{
 });
 
 // Test-harness label extraction. The characterization framework
-// stamps each play it runs with:
-//   info=run_id_<utc-compact>   e.g. info=run_id_20260524T070148Z
-//   info=platform_<name>        e.g. info=platform_ipad-sim
-//   info=test_<name>            e.g. info=test_rampup
-// These three label PREFIXES (with their value tail) are how
-// Characterization.vue groups plays into runs; this page lifts the
-// same convention to surface "this play came from the harness" on
-// the picker.
-function findLabelTail(r: SessionRow, prefix: string): string | null {
+// stamps each play it runs with these keys (#571 moved them from the
+// info= prefix to the testing= tier):
+//   testing=run_id_<utc-compact>   e.g. testing=run_id_20260524T070148Z
+//   testing=platform_<name>        e.g. testing=platform_ipad-sim
+//   testing=test_<name>            e.g. testing=test_rampup
+// These keys (with their value tail) are how Characterization.vue groups
+// plays into runs; this page lifts the same convention to surface "this
+// play came from the harness" on the picker. We match the testing= tier
+// first, then fall back to the legacy info= prefix for plays written
+// before #571 (still present within the ≤30-day 'other' TTL).
+function findLabelTail(r: SessionRow, key: string): string | null {
   const pairs = Array.isArray(r.labels) ? r.labels : [];
-  for (const [label] of pairs) {
-    const s = String(label);
-    if (s.startsWith(prefix)) return s.slice(prefix.length);
+  for (const prefix of [`testing=${key}`, `info=${key}`]) {
+    for (const [label] of pairs) {
+      const s = String(label);
+      if (s.startsWith(prefix)) return s.slice(prefix.length);
+    }
   }
   return null;
 }
-function harnessRunId(r: SessionRow): string | null { return findLabelTail(r, 'info=run_id_'); }
-function harnessPlatform(r: SessionRow): string | null { return findLabelTail(r, 'info=platform_'); }
-function harnessTest(r: SessionRow): string | null { return findLabelTail(r, 'info=test_'); }
+function harnessRunId(r: SessionRow): string | null { return findLabelTail(r, 'run_id_'); }
+function harnessPlatform(r: SessionRow): string | null { return findLabelTail(r, 'platform_'); }
+function harnessTest(r: SessionRow): string | null { return findLabelTail(r, 'test_'); }
 function isHarnessRow(r: SessionRow): boolean { return harnessRunId(r) !== null; }
 
 // Pretty-print the UTC compact run_id (20260524T070148Z) as local
@@ -417,14 +421,15 @@ function matches(r: SessionRow): boolean {
 
 // Hierarchical label filter — mirrors the SessionDisplay event-filter
 // accordion. One tier per severity (error → critical → warning →
-// info), each containing the distinct labels seen at that tier with
-// occurrence counts. Click a label chip to toggle inclusion;
+// info → testing), each containing the distinct labels seen at that
+// tier with occurrence counts. Click a label chip to toggle inclusion;
 // click the tier header to toggle ALL labels in that tier. Issue
 // #474 follow-up.
-type Severity = 'error' | 'critical' | 'warning' | 'info';
+type Severity = 'error' | 'critical' | 'warning' | 'info' | 'testing';
 // User-facing ordering: Critical leads (the "🚨 something's actually
-// wrong" tier), then Error (player-error transitions), Warning, Info.
-const SEVERITY_ORDER: Severity[] = ['critical', 'error', 'warning', 'info'];
+// wrong" tier), then Error (player-error transitions), Warning, Info,
+// and finally Testing (test-harness KV metadata, #571 — recessive).
+const SEVERITY_ORDER: Severity[] = ['critical', 'error', 'warning', 'info', 'testing'];
 const SEVERITY_META: Record<Severity, { label: string; bg: string; border: string; color: string }> = {
   // Critical wears red (worst-looking — user-visible playback
   // breakage); Error wears orange. Whole palette pair moves
@@ -434,6 +439,9 @@ const SEVERITY_META: Record<Severity, { label: string; bg: string; border: strin
   critical: { label: 'Critical', bg: '#fee2e2', border: '#fca5a5', color: '#7f1d1d' },
   warning:  { label: 'Warning',  bg: '#fef3c7', border: '#fcd34d', color: '#854d0e' },
   info:     { label: 'Info',     bg: '#f0fdf4', border: '#a7f3d0', color: '#1f2937' },
+  // Testing wears muted slate — recessive test-harness metadata, not
+  // playback signal (#571). Mirrors SessionDisplay.vue.
+  testing:  { label: 'Testing',  bg: '#f1f5f9', border: '#cbd5e1', color: '#475569' },
 };
 
 interface LabelEntry {
@@ -449,7 +457,7 @@ interface LabelTier {
 
 const labelTiers = computed<LabelTier[]>(() => {
   const acc: Record<Severity, Map<string, number>> = {
-    error: new Map(), critical: new Map(), warning: new Map(), info: new Map(),
+    error: new Map(), critical: new Map(), warning: new Map(), info: new Map(), testing: new Map(),
   };
   for (const r of rows.value) {
     const pairs = Array.isArray(r.labels) ? r.labels : [];
@@ -484,7 +492,7 @@ const labelTiers = computed<LabelTier[]>(() => {
 // info collapsed (matches SessionDisplay's expandedTiers initial
 // state — the user usually wants to scan the worst tiers first).
 const expandedLabelTiers = ref<Record<Severity, boolean>>({
-  error: true, critical: true, warning: false, info: false,
+  error: true, critical: true, warning: false, info: false, testing: false,
 });
 function toggleLabelTier(sev: Severity) {
   expandedLabelTiers.value[sev] = !expandedLabelTiers.value[sev];
@@ -836,7 +844,7 @@ interface LabelChip {
   label: string;     // raw `<severity>=<event>` string
   name: string;      // event portion (with the `*` synthMark intact)
   count: number;
-  cls: 'info' | 'warning' | 'critical' | 'error';
+  cls: 'info' | 'warning' | 'critical' | 'error' | 'testing';
 }
 function labelChips(r: SessionRow): LabelChip[] {
   const pairs = Array.isArray(r.labels) ? r.labels : [];
@@ -852,6 +860,7 @@ function labelChips(r: SessionRow): LabelChip[] {
       sev === 'error' ? 'error'
       : sev === 'critical' ? 'critical'
       : sev === 'warning' ? 'warning'
+      : sev === 'testing' ? 'testing'
       : 'info';
     out.push({ label, name, count, cls });
   }
@@ -1143,7 +1152,7 @@ const showCustomInputs = computed(() => activeRangeId.value === 'custom');
               >{{ c.label }}</button>
             </div>
 
-            <div class="class-chip-wrap" title="Filter by test-harness origin (plays stamped with info=run_id_… by the characterization framework)">
+            <div class="class-chip-wrap" title="Filter by test-harness origin (plays stamped with testing=run_id_… by the characterization framework)">
               <span class="ctrl-label-text">Harness:</span>
               <button
                 v-for="c in ([
@@ -1645,6 +1654,7 @@ const showCustomInputs = computed(() => activeRangeId.value === 'custom');
 .label-warning  { background: #fef3c7; color: #854d0e; border-color: #fcd34d; }
 .label-critical { background: #fee2e2; color: #7f1d1d; border-color: #fca5a5; }
 .label-error    { background: #ffedd5; color: #7c2d12; border-color: #fdba74; }
+.label-testing  { background: #f1f5f9; color: #475569; border-color: #cbd5e1; }
 
 /* Hierarchical labels filter — mirrors SessionDisplay's Focus Window
  * event-filter accordion. One row per severity tier with a clickable
