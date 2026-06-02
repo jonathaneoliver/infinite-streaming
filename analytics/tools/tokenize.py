@@ -115,8 +115,30 @@ def classify_row(url):
     return "OTHER", None, None
 
 
-def tokenize(rows):
-    """rows: list of network_requests dicts. Returns a list of token strings."""
+# session_events lifecycle markers (player_metrics.last_event) → cross-stream tokens.
+EVENT_TOKEN_MAP = {
+    "stall_start": "STALL_START", "stall_end": "STALL_END",
+    "buffering_start": "BUF_START", "buffering_end": "BUF_END",
+    "rate_shift_up": "RATE_UP", "rate_shift_down": "RATE_DOWN",
+    "video_first_frame": "FIRST_FRAME", "segment_stall": "SEGMENT_STALL",
+    "timejump": "TIMEJUMP",
+}
+
+
+def event_tokens(event_rows):
+    """[(ts, token)] from session_events lifecycle markers. Heartbeats/unknowns dropped."""
+    out = []
+    for r in event_rows:
+        pm = r.get("player_metrics") or {}
+        tok = EVENT_TOKEN_MAP.get(pm.get("last_event"))
+        if tok:
+            out.append((r.get("ts") or r.get("timestamp") or pm.get("event_time") or "", tok))
+    return out
+
+
+def tokenize(rows, event_rows=None):
+    """rows: network_requests dicts. event_rows (optional): session_events dicts to
+    interleave by timestamp (cross-stream). Returns a list of token strings."""
     rows = [r for r in rows if r.get("url")]
     rows.sort(key=lambda r: r.get("ts") or r.get("timestamp") or "")
 
@@ -153,47 +175,57 @@ def tokenize(rows):
         if rend != prev_rend and reverts and backward:
             probe_rows.add(ridx)  # single-segment excursion at a backward segnum
 
-    tokens = ["<S>"]
+    # ts-tagged emission so session_events can be interleaved by timestamp.
+    seq = []          # (ts, token)
+    state = {"ts": ""}
+    def emit(tok):
+        seq.append((state["ts"], tok))
+
     last_vrend = None
     last_vseg = None
     last_aseg = None
     ramp_emitted = False
 
     for i, r in enumerate(rows):
+        state["ts"] = r.get("ts") or r.get("timestamp") or ""
         kind, rend, seg = classify_row(r["url"])
         if _is_faulted(r):
-            tokens.append(f"FAULT({_surface(kind)},{_fault_class(r)})")
+            emit(f"FAULT({_surface(kind)},{_fault_class(r)})")
             continue
 
         if kind == "V_SEG" and rend in RENDITION_ORDINAL:
             if not ramp_emitted and i <= startup_until and startup_until >= 0:
-                tokens.append("STARTUP_RAMP")
+                emit("STARTUP_RAMP")
                 ramp_emitted = True
             # loop boundary: large backward segnum reset
             if last_vseg is not None and seg is not None and seg < last_vseg - LOOP_BACKWARD_THRESHOLD:
-                tokens.append("LOOP_BOUNDARY")
+                emit("LOOP_BOUNDARY")
             dP = clamp(RENDITION_ORDINAL[rend] - (RENDITION_ORDINAL.get(last_vrend, RENDITION_ORDINAL[rend])))
             dS = clamp((seg - last_vseg) if (last_vseg is not None and seg is not None) else 1)
             if i in probe_rows:
-                tokens.append(f"V_PROBE({dP:+d})")
+                emit(f"V_PROBE({dP:+d})")
             else:
-                tokens.append(f"V_SEG({dP:+d},{dS:+d})")
+                emit(f"V_SEG({dP:+d},{dS:+d})")
                 last_vrend = rend  # only sustained moves update the baseline rendition
             last_vseg = seg
         elif kind == "A_SEG":
             dS = clamp((seg - last_aseg) if (last_aseg is not None and seg is not None) else 1)
-            tokens.append(f"A_SEG(+0,{dS:+d})")
+            emit(f"A_SEG(+0,{dS:+d})")
             last_aseg = seg
         elif kind == "V_PL":
-            tokens.append(f"V_PL({rend})")
+            emit(f"V_PL({rend})")
         elif kind == "A_PL":
-            tokens.append("A_PL")
+            emit("A_PL")
         elif kind == "M_PL":
-            tokens.append("M_PL")
+            emit("M_PL")
         # OTHER (key, init, etc.) intentionally dropped from the baseline alphabet.
 
-    tokens.append("<E>")
-    return tokens
+    # Cross-stream: interleave session_events lifecycle tokens by timestamp. Stable sort
+    # keeps request-token order within equal timestamps.
+    if event_rows:
+        seq.extend(event_tokens(event_rows))
+    seq.sort(key=lambda x: x[0] or "")
+    return ["<S>"] + [t for _, t in seq] + ["<E>"]
 
 
 def episodes(tokens, anchor="FAULT", lead=4, horizon=8):
