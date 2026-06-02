@@ -38,6 +38,10 @@ Three sections, each *anchor → episode → grammar*:
 - **Play-end lead-up** — pre-end grammar bucketed by end-type (incl. `silent` = no
   beacon; live plays censored). Headline: the trouble-then-vanish signal lives in the
   **`silent`** bucket.
+- **Startup** — session-open → first-frame: time-to-first-frame, opening grammar +
+  rendition ramp, startup buffering, outcomes (reached-frame / abandoned / failed).
+  Headline (test-rig): startups mostly open *directly* at the sustained rendition
+  (ramp rare); TTFF dominated by 2–4s; abandon/fail outcomes sparse (#565).
 
 ## Caveats (do not over-read)
 

@@ -204,8 +204,70 @@ def analyze_ends(plays, lead=20, gap=300, per_bucket=80):
     return {"censored": censored, "buckets": out}
 
 
-# Catalog: adding startup / rate-shift later = an entry here, not a new file.
-CONDITIONS = ["faults", "stalls", "play-end"]
+# ---------- condition: STARTUP (session-open → first frame) ----------
+def analyze_startup(plays, per_bucket=80):
+    # Exact over ALL plays (from the record/labels): TTFF, outcome, startup buffering.
+    ttff = collections.Counter()
+    outcome = collections.Counter()
+    buffering = collections.Counter()
+    for p in plays:
+        try:
+            ff = float(p.get("first_frame_s") or 0)
+        except (TypeError, ValueError):
+            ff = 0.0
+        status = (p.get("playback_status") or "").strip()
+        if status == "start_failure":
+            ttff["no first frame (start_failure)"] += 1
+        elif ff <= 0:
+            ttff["no first frame"] += 1
+        elif ff < 2:
+            ttff["<2s (fast)"] += 1
+        elif ff < 4:
+            ttff["2-4s (long)"] += 1
+        else:
+            ttff[">4s (severe)"] += 1
+        if status in ("start_failure", "abandoned_start"):
+            outcome[status] += 1
+        else:
+            outcome["reached_first_frame" if ff > 0 else "no first frame (other)"] += 1
+        lbls = play_labels(p)
+        if any("buffering_severe_startup" in x or "video_startup_severe" in x for x in lbls):
+            buffering["severe"] += 1
+        elif any("buffering_long_startup" in x or "video_startup_long" in x for x in lbls):
+            buffering["long"] += 1
+        elif any("buffering_short_startup" in x for x in lbls):
+            buffering["short"] += 1
+        else:
+            buffering["clean"] += 1
+    # Sampled (bound network pulls): opening ramp + opening grammar up to FIRST_FRAME.
+    ramp = collections.Counter()
+    segs_to_ff = collections.Counter()
+    sampled = has_ramp = 0
+    for p in plays[:per_bucket]:
+        net = pull("network", p["play_id"])
+        if not net:
+            continue
+        srows = seg_rows(net)
+        vseg = [(i, r, s) for i, (t, r, s, st) in enumerate(srows) if st == "200"]
+        if not vseg:
+            continue
+        sampled += 1
+        ramp[rungs(ORD[tk._first_sustained(vseg)] - ORD[vseg[0][1]])] += 1
+        toks = tk.tokenize(net, event_rows=pull("events", p["play_id"]))
+        ffi = toks.index("FIRST_FRAME") if "FIRST_FRAME" in toks else len(toks)
+        prefix = toks[:ffi]
+        if "STARTUP_RAMP" in prefix:
+            has_ramp += 1
+        nseg = sum(1 for t in prefix if t.split("(")[0] in ("V_SEG", "V_PROBE"))
+        segs_to_ff["0" if nseg == 0 else "1-3" if nseg <= 3 else "4-8" if nseg <= 8 else "9+"] += 1
+    return {"plays": len(plays), "sampled": sampled,
+            "has_ramp_pct": (has_ramp / sampled if sampled else 0.0),
+            "ttff": ttff, "outcome": outcome, "buffering": buffering,
+            "ramp": ramp, "segs_to_ff": segs_to_ff}
+
+
+# Catalog: adding rate-shift later = an entry here, not a new file.
+CONDITIONS = ["faults", "stalls", "play-end", "startup"]
 
 
 def query_plays(days):
@@ -231,6 +293,7 @@ def build_report(days=7, engine="AVPlayer", max_plays=200, out="/tmp/vomm_report
     fr = analyze_faults([p["play_id"] for p in fault[:max_plays]])
     st = analyze_stalls([p["play_id"] for p in stall[:max_plays]])
     en = analyze_ends(eng)  # buckets all plays (exact counts); samples network per bucket
+    su = analyze_startup(eng)  # exact TTFF/outcome over all plays; samples network for ramp/grammar
 
     L = []
     L.append(f"# #508 condition report — {engine}, last {days}d")
@@ -261,8 +324,22 @@ def build_report(days=7, engine="AVPlayer", max_plays=200, out="/tmp/vomm_report
         if d["n"] >= 5:
             L.append(f"| {b} | {d['n']} | {d['sampled']} | {d['fault']:.0%} | {d['downshift']:.0%} | {d['stall']:.0%} |")
 
+    L.append(f"\n## Startup  (plays={su['plays']}, sampled={su['sampled']})")
+    L.append("Time-to-first-frame:")
+    L += bars(su["ttff"])[0]
+    L.append(f"\nOpening grammar (start→first-frame): {su['has_ramp_pct']:.0%} contain a STARTUP_RAMP; "
+             "#video segments before first frame:")
+    L += bars(su["segs_to_ff"])[0]
+    L.append("\nStartup rendition ramp (opening → first sustained):")
+    L += bars(su["ramp"])[0]
+    L.append("\nStartup buffering:")
+    L += bars(su["buffering"])[0]
+    L.append("\nStartup outcomes:")
+    L += bars(su["outcome"])[0]
+
     L.append("\n_Caveats: single engine, test-rig-heavy corpus; descriptive (no trained surprise model yet); "
-             "`STALL` in play-end lead-up is 0 until end-analysis pulls events; end-type labels contaminated (see #565)._")
+             "`STALL` in play-end lead-up is 0 until end-analysis pulls events; end-type labels + startup "
+             "outcomes (abandoned_start/start_failure) contaminated/sparse (see #565)._")
 
     with open(out, "w") as f:
         f.write("\n".join(L) + "\n")

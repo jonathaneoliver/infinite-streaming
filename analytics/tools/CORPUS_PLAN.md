@@ -231,7 +231,7 @@ the **outcome** (how the play ended).
 
 | condition | anchor | window | source | structural vs timing | status |
 |---|---|---|---|---|---|
-| startup | `<S>`…`FIRST_FRAME` | lead+horizon | requests + `video_first_frame` | mostly structural | partial |
+| startup | `<S>`…`FIRST_FRAME` | open→first-frame + outcome | requests + `first_frame_s` + labels | timing/outcome-heavy | have (`report.py`) |
 | fault (by kind) | `FAULT(surface,class)` | lead+horizon | requests + fault cols | structural | **have** (7d: video `404`≡`5xx`; surface diverges) |
 | stall | `STALL_START`/`STALL_END` | lead+horizon | `session_events.last_event` | **timing-heavy** (`buffer_depth_s`, stall duration) | needs cross-stream |
 | rate shift | `RATE_SHIFT_UP/DOWN` | lead+horizon | `session_events` | mixed | needs cross-stream |

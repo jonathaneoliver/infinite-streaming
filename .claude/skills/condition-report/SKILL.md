@@ -26,6 +26,8 @@ slow (pulls + caches network/events per play in `/tmp`); re-runs are fast.
 1. **Fault recovery** — `P(reaction | FAULT(surface,class))` + the rendition staircase.
 2. **Stall recovery** — playlist/segment shift after `STALL_START` + the fault trigger.
 3. **Play-end lead-up** — pre-end grammar bucketed by end-type (incl. `silent`).
+4. **Startup** — session-open → first-frame: TTFF, opening grammar + ramp, startup
+   buffering, outcomes (reached-frame / abandoned / failed; outcomes sparse per #565).
 
 ## How to present it — caveats that MUST travel with the numbers
 
