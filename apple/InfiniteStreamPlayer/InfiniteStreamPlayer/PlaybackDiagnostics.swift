@@ -241,6 +241,16 @@ final class PlaybackDiagnostics: ObservableObject {
     @Published var terminalStatus: String? = nil
     @Published var terminalReason: String? = nil
 
+    /// Terminal error captured from the fatal AVFoundation NSError that
+    /// ended the play (#557). Stamped once, alongside markTerminal, onto
+    /// the session_end row's `player_metrics_terminal_error_*` so the
+    /// forwarder's error_classifier can derive a specific failure reason.
+    /// Code 0 + empty domain = "no error captured" (a clean
+    /// completed / user_stopped end). Cleared by resetForFreshPlay.
+    @Published var terminalErrorCode: Int = 0
+    @Published var terminalErrorDomain: String = ""
+    @Published var terminalErrorDetails: String = ""
+
     /// Threshold (seconds) above which a user_stopped row whose state
     /// was buffering / stalled is marked `_long`. Same value across
     /// every client platform — the vocabulary is contract-shaped, not
@@ -261,6 +271,18 @@ final class PlaybackDiagnostics: ObservableObject {
         guard terminalStatus == nil else { return }
         terminalStatus = status
         terminalReason = refineTerminalReason(baseReason: reason, status: status)
+    }
+
+    /// Capture the fatal NSError that ended the play (#557). First call
+    /// wins, mirroring markTerminal, so the first detected error is the
+    /// one stamped on the session_end row. No-op for a zero code +
+    /// empty domain (nothing to record).
+    func markTerminalError(code: Int, domain: String, details: String) {
+        guard terminalErrorCode == 0 && terminalErrorDomain.isEmpty else { return }
+        guard code != 0 || !domain.isEmpty else { return }
+        terminalErrorCode = code
+        terminalErrorDomain = domain
+        terminalErrorDetails = details
     }
 
     /// Returns the playback_reason to stamp on a session_end row,
@@ -519,6 +541,9 @@ final class PlaybackDiagnostics: ObservableObject {
         // terminal state of a play if it already crossed terminal.
         terminalStatus = nil
         terminalReason = nil
+        terminalErrorCode = 0
+        terminalErrorDomain = ""
+        terminalErrorDetails = ""
         // Fresh play → restart the EBVS clock. Nil now so reset()'s
         // nil-coalesce sets it to the new Date() at this fresh play
         // boundary, not the prior play's start.

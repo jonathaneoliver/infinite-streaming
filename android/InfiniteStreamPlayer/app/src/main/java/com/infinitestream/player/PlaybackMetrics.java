@@ -943,6 +943,17 @@ public final class PlaybackMetrics {
                 p.put("player_metrics_error_domain", lastErrorDomain);
                 p.put("player_metrics_error_details", lastErrorDetails);
             }
+            // #557 — on a terminal row, surface the fatal error in the
+            // dedicated terminal_error_* slot too (was always empty
+            // before, so the failure reason was lost on the session_end
+            // row). The forwarder's error_classifier + dashboard tiles
+            // read terminal_error_* specifically; mirror the error_*
+            // capture above, gated on the play having ended.
+            if (terminalStatus != null && (lastErrorCode != 0 || !lastErrorDomain.isEmpty())) {
+                p.put("player_metrics_terminal_error_code", lastErrorCode);
+                p.put("player_metrics_terminal_error_domain", lastErrorDomain);
+                p.put("player_metrics_terminal_error_details", lastErrorDetails);
+            }
 
             // #550 Phase 4 — device / platform / version taxonomy.
             // Stamped on every row (Mux / Conviva pattern); the
