@@ -52,8 +52,9 @@ func TestEventSwitchUnchanged(t *testing.T) {
 		{"buffering_start", nil, nil},
 		// pair-close arms: sticky per-event duration drives the label.
 		// 1.5s, midplay context (no first-frame witnessed) → long_midplay.
-		{"stall_end", func(r *row) { r.StallDurationMs = 1500 }, []string{"warning=*stall_long_midplay"}},
-		{"buffering_end", func(r *row) { r.BufferingDurationMs = 1500 }, []string{"warning=*stall_long_midplay"}},
+		// Prefixed qoe_ in #568 (meaning/severity unchanged).
+		{"stall_end", func(r *row) { r.StallDurationMs = 1500 }, []string{"warning=*qoe_stall_long_midplay"}},
+		{"buffering_end", func(r *row) { r.BufferingDurationMs = 1500 }, []string{"warning=*qoe_stall_long_midplay"}},
 	}
 
 	for _, tc := range cases {
@@ -115,6 +116,37 @@ func TestQoEVSTBoundaries(t *testing.T) {
 		if !hasLabel(got, tc.want) {
 			t.Fatalf("vst=%d: want %q in %v", tc.vst, tc.want, got)
 		}
+	}
+}
+
+// --- Startup: legacy video_startup_* retired (#568) ------------------
+
+func TestStartupLegacyLabelsRetired(t *testing.T) {
+	// A 5s first frame would have tripped the old error=*video_startup_severe
+	// (>4s hardcoded). Post-#568 the video_first_frame arm must emit only its
+	// info=first_frame lifecycle chip — no video_startup_* label.
+	r := minimalRow("video_first_frame")
+	r.VideoFirstFrameTimeS = 5.0
+	got := computeEventLabelsWithState(newLabelState(), r)
+	for _, retired := range []string{
+		SevError + "=" + synthMark + "video_startup_severe",
+		SevWarning + "=" + synthMark + "video_startup_long",
+	} {
+		if hasLabel(got, retired) {
+			t.Fatalf("retired label %q must no longer be produced, got %v", retired, got)
+		}
+	}
+	if !hasLabel(got, "info=first_frame") {
+		t.Fatalf("video_first_frame arm should still emit info=first_frame, got %v", got)
+	}
+
+	// Startup latency is now keyed solely on VideoStartTimeMs (qoe_vst_*),
+	// independent of VideoFirstFrameTimeS: a high first-frame time with no VST
+	// yields no startup-latency label.
+	r2 := &row{Ts: tsBase, PlayerID: "p", PlayID: "x", PlaybackStatus: "in_progress", VideoFirstFrameTimeS: 5.0}
+	got2 := evalQoE(r2)
+	if hasLabel(got2, qoeLabel(SevWarning, "qoe_vst_concerning")) || hasLabel(got2, qoeLabel(SevCritical, "qoe_vst_breach")) {
+		t.Fatalf("VideoFirstFrameTimeS must not drive qoe_vst_*, got %v", got2)
 	}
 }
 
