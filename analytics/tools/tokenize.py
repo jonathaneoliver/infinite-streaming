@@ -56,6 +56,7 @@ Usage:
                                             #  not an artifact of the play boundary)
 """
 import argparse
+import collections
 import json
 import re
 import subprocess
@@ -239,12 +240,22 @@ def tokenize(rows, event_rows=None):
 
 
 def tokenize_rows(rows):
-    """Per-row tokens for the #506 derived-token writer: [(ts, entry_fingerprint, surface,
-    token)] for the network-derived tokens (those with a source-row fingerprint). Markers
-    (STARTUP_RAMP/LOOP_BOUNDARY) carry their triggering row's fingerprint; sentinels and
-    event-derived tokens (fp=None) are excluded. Lookahead (V_PROBE/STARTUP_RAMP) is
-    resolved because batch sees the whole play."""
-    return [(ts, fp, surf, tok) for ts, fp, surf, tok in _token_seq(rows) if fp is not None]
+    """Per-row tokens for the #506 derived-token writer: ONE (ts, entry_fingerprint,
+    surface, token) per source network row, keyed uniquely by its fingerprint. A row can
+    emit multiple sequence tokens (e.g. STARTUP_RAMP/LOOP_BOUNDARY *then* the V_SEG — all
+    sharing the row's fingerprint); those are joined into one combined token string
+    ("STARTUP_RAMP V_SEG(+2,+0)") so the derived row stays unique on
+    (player_id, ts, entry_fingerprint) and the read-path join is 1:1. (tokenize() keeps
+    them as separate sequence tokens for the model — different purpose.) Sentinels and
+    event-derived tokens (fp=None) are excluded; lookahead resolves because batch sees the
+    whole play."""
+    by_row = collections.OrderedDict()  # (ts, fp) -> [surface, [tokens]]
+    for ts, fp, surf, tok in _token_seq(rows):
+        if fp is None:
+            continue
+        slot = by_row.setdefault((ts, fp), [surf, []])
+        slot[1].append(tok)
+    return [(ts, fp, surf, " ".join(toks)) for (ts, fp), (surf, toks) in by_row.items()]
 
 
 def episodes(tokens, anchor="FAULT", lead=4, horizon=8):
