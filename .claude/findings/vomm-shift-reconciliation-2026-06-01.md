@@ -91,8 +91,13 @@ window, so the reinterpretation is **needs-test**.
 - [ ] Tokenize sustained-switch vs re-fetch-excursion as *distinct* tokens (not
       suppression) + `LOOP_BOUNDARY` + `STARTUP_RAMP`; let the surprise model score
       clusters. Done in `analytics/tools/tokenize.py` (prototype).
-- [ ] needs-test: classify backward-jump re-fetch benign (user scrub) vs pathological —
-      requires playhead/seek-control/buffer state (#445 HMM or enriched alphabet).
+- [x] ~~needs-test: classify backward-jump re-fetch benign (user scrub) vs pathological~~
+      **CONFIRMED 2026-06-02: stall recovery, pathological.** On `32afb15f` the three
+      `stall_start` events (16:36:09.5 / 16:36:23.0 / 16:37:03.2, ~1.9s each) align with
+      the three backward-jump 360p re-fetches — each is the player, having stalled,
+      grabbing the needed earlier segment at the cheapest rendition to refill fast, then
+      resuming 2160p. Real rebuffers, not user scrubs. So `V_PROBE` clusters ARE the
+      structural shadow of a stall; the `STALL_START` event is what disambiguates them.
 - [ ] #507: map `fault_type`/`fault_category` → `ABORT/PARTIAL(surface)` token (capture
       exists; token does not). Fault columns ARE accessible via `query network --json`
       (faulted rows) and `raw GET /api/v2/network_requests?faulted_only=true`; the CLI

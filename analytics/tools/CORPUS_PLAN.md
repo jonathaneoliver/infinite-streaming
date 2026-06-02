@@ -211,3 +211,69 @@ Scoped iOS-first (Roku/hls.js deferred):
   set here, not excluded.
 - All sessions tagged by engine + corpus role so clean / shaped / fault / abort are
   queryable and the two models draw from the right slices.
+
+## Condition-anchored analysis — the broader #508 program
+
+The recovery-grammar work above is one instance of a general pattern: characterize
+NORMAL vs ABNORMAL request/event grammar **around a condition**, and ultimately predict
+the **outcome** (how the play ended).
+
+- **Conditions are anchors.** Each condition type is an entry point: window an EPISODE
+  (lead-in context + event + recovery horizon, via `tokenize.episodes`), learn the normal
+  grammar around it, and flag an episode as *abnormal* when it's improbable under it
+  (tail/peak surprise). This is the VOMM entered *per condition* — interpretable
+  ("behaviour around THIS stall / 404 / startup was unusual"), not a whole-session avg-NLL.
+- **Mid-play conditions = features; play-end-type = label.** Faults / stalls /
+  startup-trouble are mid-play predictors; *how the play ended* is the outcome we'd
+  ultimately predict (QoE → churn).
+
+### Condition catalog
+
+| condition | anchor | window | source | structural vs timing | status |
+|---|---|---|---|---|---|
+| startup | `<S>`…`FIRST_FRAME` | lead+horizon | requests + `video_first_frame` | mostly structural | partial |
+| fault (by kind) | `FAULT(surface,class)` | lead+horizon | requests + fault cols | structural | **have** (7d: video `404`≡`5xx`; surface diverges) |
+| stall | `STALL_START`/`STALL_END` | lead+horizon | `session_events.last_event` | **timing-heavy** (`buffer_depth_s`, stall duration) | needs cross-stream |
+| rate shift | `RATE_SHIFT_UP/DOWN` | lead+horizon | `session_events` | mixed | needs cross-stream |
+| **play end** | activity cessation | **lead-only** | beacon ⊕ `last_seen` | contrastive / QoE | building (`end_dist`) |
+
+### Play-end (the outcome layer)
+
+- **Anchor = `play_id` activity cessation**, detected via the `session_end` beacon WHERE
+  PRESENT, else `last_seen` staleness (~5-min gap — the forwarder residency reaper's
+  "unseen" threshold). We never depend on the beacon to *know* a play ended (the silent
+  majority emit none); cessation is structural.
+- **Label = `session_end` status/reason where a beacon landed** — rich and used in full
+  (`completed` / `user_quit` / `ended_buffering_long` / `abandoned_start` /
+  `mid_stream_failure` / `start_failure` / `app_backgrounded` / `app_terminated`) — ELSE
+  **`silent`** (no beacon: crash / network-loss / give-up, cause unknown). BOTH
+  populations are studied; more info is better, and the silent bucket may hide failure
+  modes that never reported anything.
+- **Censor:** a recent-`last_seen` play hasn't ended → still-live → **excluded
+  (right-censored)**, not bucketed as "no end".
+- **Corpus today (7d):** `mid_stream_failure` ~198 (studyable now); the clean / QoE
+  buckets (`user_quit`, `ended_buffering_long`, `completed`) ~0 (the test rig loops/faults
+  and never cleanly exits); large `silent` / `in_progress` population.
+
+### Cross-stream tokenizer (the unlock for non-request conditions)
+
+Stalls / rate-shifts / startup are NOT requests — they live in `session_events`. Interleave
+their lifecycle markers (`STALL_START/END`, `BUFFERING_*`, `RATE_SHIFT_*`, `FIRST_FRAME`)
+into the per-play request token timeline **by timestamp** so every condition becomes an
+anchor. Precedent: #442's `LOOP_BOUNDARY` "from session_events".
+
+### Structural-vs-timing is per-condition
+
+Faults are structural (the downshift is visible in requests). Stalls and exits are
+timing-heavy (buffer depth, durations) — ordering tokens alone are weak there, so they
+need timing features / the HMM (#445). The catalog makes explicit which conditions are
+learnable from ordering and which aren't.
+
+### Gaps
+
+- **Durable `session_end` beacon + terminal-status aggregation** — background/terminate
+  beacons are fire-and-forget (may be swallowed), and the play record currently shows
+  `playback_status=in_progress` for 1015/1015 plays (verify the terminal status even
+  aggregates onto the row). Tracked separately (see issue).
+- **Organic exit corpus** — the test rig generates failure/restart ends, not `user_quit`
+  / `ended_buffering` — needed before the clean/QoE-abandonment buckets have data.
