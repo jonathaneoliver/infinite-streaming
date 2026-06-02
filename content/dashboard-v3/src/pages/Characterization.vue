@@ -98,23 +98,41 @@ function asNumber(v: number | string | null | undefined): number {
   return Number.isFinite(n) ? n : 0;
 }
 
-function findLabel(p: PlayRow, prefix: string): string | null {
-  for (const [label] of p.label_histogram || []) {
-    if (label.startsWith(prefix)) return label.slice(prefix.length);
+// findLabel pulls the tail of a harness label by key (e.g. 'run_id_').
+// Matches the testing= tier first (current, #571), then the legacy info=
+// prefix for plays written before #571 (still present within the ≤30-day
+// 'other' TTL).
+function findLabel(p: PlayRow, key: string): string | null {
+  for (const prefix of [`testing=${key}`, `info=${key}`]) {
+    for (const [label] of p.label_histogram || []) {
+      if (label.startsWith(prefix)) return label.slice(prefix.length);
+    }
   }
   return null;
 }
 
 async function fetchOneTest(name: TestName, hours: number): Promise<PlayRow[]> {
   const from = new Date(Date.now() - hours * 3600 * 1000).toISOString();
-  const qs = new URLSearchParams();
-  qs.append('label_has', `info=test_${name}`);
-  qs.append('from', from);
-  qs.append('limit', '200');
-  const resp = await fetch('/analytics/api/v2/plays?' + qs.toString());
-  if (!resp.ok) throw new Error(`/api/v2/plays ${name}: ${resp.status}`);
-  const data: ApiResponse = await resp.json();
-  return data.items ?? [];
+  // Fetch both the testing= tier (current, #571) and the legacy info=
+  // prefix (pre-#571 rows, within the ≤30-day TTL). A single label_has
+  // can't OR two values, so query each and dedupe by play_id.
+  const fetchByLabel = async (label: string): Promise<PlayRow[]> => {
+    const qs = new URLSearchParams();
+    qs.append('label_has', label);
+    qs.append('from', from);
+    qs.append('limit', '200');
+    const resp = await fetch('/analytics/api/v2/plays?' + qs.toString());
+    if (!resp.ok) throw new Error(`/api/v2/plays ${name}: ${resp.status}`);
+    const data: ApiResponse = await resp.json();
+    return data.items ?? [];
+  };
+  const [current, legacy] = await Promise.all([
+    fetchByLabel(`testing=test_${name}`),
+    fetchByLabel(`info=test_${name}`),
+  ]);
+  const byId = new Map<string, PlayRow>();
+  for (const p of [...current, ...legacy]) byId.set(p.play_id, p);
+  return [...byId.values()];
 }
 
 async function fetchCharacterizationRuns(hours: number): Promise<CharRunRow[]> {
@@ -378,8 +396,8 @@ function isoDurationShort(fromISO: string, toISO: string | null): string {
 const grouped = computed<RunGroup[]>(() => {
   const byRun = new Map<string, RunGroup>();
   for (const p of allPlays.value) {
-    const runID = findLabel(p, 'info=run_id_') ?? '(no-run-id)';
-    const platform = findLabel(p, 'info=platform_') ?? 'unknown';
+    const runID = findLabel(p, 'run_id_') ?? '(no-run-id)';
+    const platform = findLabel(p, 'platform_') ?? 'unknown';
     if (platformFilter.value !== 'all' && platform !== platformFilter.value) continue;
 
     let g = byRun.get(`${runID}|${platform}`);
