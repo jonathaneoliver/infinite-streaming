@@ -401,7 +401,7 @@ const enabledKind = ref<Record<'effect' | 'cause', boolean>>({
 // String tiers, worst-first. Same vocabulary the forwarder writes to
 // session_events.labels[] and network_requests.labels[] so a single
 // filter UI sweeps both. Critical leads (user-visible playback
-// breakage like stall_severe / frozen / restart_auto_recovery); Error
+// breakage like qoe_stall_severe_midplay / frozen / restart_auto_recovery); Error
 // sits next for system-detected error states (player_error).
 type Severity = 'error' | 'critical' | 'warning' | 'info';
 const SEVERITY_ORDER: Severity[] = ['critical', 'error', 'warning', 'info'];

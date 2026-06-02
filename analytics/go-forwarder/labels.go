@@ -258,9 +258,6 @@ func computeEventLabelsWithState(s *labelState, r *row) []string {
 		ps.downshiftTimes = append(ps.downshiftTimes, now) // #553 qoe_downshift_storm window
 	case "video_first_frame":
 		out = []string{SevInfo + "=first_frame"}
-		if l := videoStartupLabel(r.VideoFirstFrameTimeS); l != "" {
-			out = append(out, l)
-		}
 	case "video_start_time":
 		out = []string{SevInfo + "=playback_start"}
 
@@ -378,22 +375,13 @@ func bufferingContext(ps *playLabelState, now time.Time) string {
 	return "midplay"
 }
 
-// videoStartupLabel classifies player-reported time-to-first-frame.
-// Sits alongside the existing `info=first_frame` direct emission so a
-// slow cold-start surfaces both signals on the same row.
-//
-//	ttff > 4s  → error=*video_startup_severe
-//	ttff > 2s  → warning=*video_startup_long
-//	else       → "" (fast startup; only the info=first_frame chip lands)
-func videoStartupLabel(ttffS float32) string {
-	switch {
-	case ttffS > 4.0:
-		return SevError + "=" + synthMark + "video_startup_severe"
-	case ttffS > 2.0:
-		return SevWarning + "=" + synthMark + "video_startup_long"
-	}
-	return ""
-}
+// Startup latency is now classified solely by qoe_vst_* (qoe_labels.go),
+// keyed on VideoStartTimeMs — the industry-standard Video Start Time
+// (playback actually starting), config-driven thresholds. The legacy
+// video_startup_* labels (keyed on VideoFirstFrameTimeS, hardcoded 2s/4s)
+// were retired in #568; they duplicated qoe_vst_* and disagreed on
+// severity. VideoFirstFrameTimeMs is retained — qoe_vsf/qoe_msf still use
+// it as the "did a frame ever render?" discriminator.
 
 func stallLabel(durS float64, ctx string) string {
 	b := durationBucket(durS)
@@ -401,20 +389,20 @@ func stallLabel(durS float64, ctx string) string {
 	case "startup":
 		switch b {
 		case bucketShort:
-			return SevInfo + "=" + synthMark + "stall_short_startup"
+			return SevInfo + "=" + synthMark + "qoe_stall_short_startup"
 		case bucketLong:
-			return SevWarning + "=" + synthMark + "stall_long_startup"
+			return SevWarning + "=" + synthMark + "qoe_stall_long_startup"
 		default:
-			return SevCritical + "=" + synthMark + "stall_severe_startup"
+			return SevCritical + "=" + synthMark + "qoe_stall_severe_startup"
 		}
 	default: // midplay
 		switch b {
 		case bucketShort:
-			return SevInfo + "=" + synthMark + "stall_short_midplay"
+			return SevInfo + "=" + synthMark + "qoe_stall_short_midplay"
 		case bucketLong:
-			return SevWarning + "=" + synthMark + "stall_long_midplay"
+			return SevWarning + "=" + synthMark + "qoe_stall_long_midplay"
 		default:
-			return SevCritical + "=" + synthMark + "stall_severe_midplay"
+			return SevCritical + "=" + synthMark + "qoe_stall_severe_midplay"
 		}
 	}
 }
@@ -428,20 +416,20 @@ func bufferingLabel(durS float64, ctx string) string {
 	case "scrub":
 		switch b {
 		case bucketShort:
-			return SevInfo + "=" + synthMark + "buffering_short_scrub"
+			return SevInfo + "=" + synthMark + "qoe_buffering_short_scrub"
 		case bucketLong:
-			return SevInfo + "=" + synthMark + "buffering_long_scrub"
+			return SevInfo + "=" + synthMark + "qoe_buffering_long_scrub"
 		default:
-			return SevWarning + "=" + synthMark + "buffering_severe_scrub"
+			return SevWarning + "=" + synthMark + "qoe_buffering_severe_scrub"
 		}
 	default: // startup
 		switch b {
 		case bucketShort:
-			return SevInfo + "=" + synthMark + "buffering_short_startup"
+			return SevInfo + "=" + synthMark + "qoe_buffering_short_startup"
 		case bucketLong:
-			return SevWarning + "=" + synthMark + "buffering_long_startup"
+			return SevWarning + "=" + synthMark + "qoe_buffering_long_startup"
 		default:
-			return SevCritical + "=" + synthMark + "buffering_severe_startup"
+			return SevCritical + "=" + synthMark + "qoe_buffering_severe_startup"
 		}
 	}
 }
