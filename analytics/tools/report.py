@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
-"""#508 condition report — one tool, one function, one report.
+"""Streaming report generator (#508).
 
-build_report(days, engine, max_plays, out) -> path
-  Queries a window of plays, selects the per-condition corpora, runs every condition
-  analysis on the shared anchor->episode->grammar machinery, and writes ONE Markdown
-  report. Conditions live in CONDITIONS (a catalog) — adding startup / rate-shift later
-  is a catalog entry, not a new file.
+  python3 analytics/tools/report.py --kind conditions [--days 7] [--engine AVPlayer] [--out f.md]
 
-Replaces the earlier per-condition scripts (recovery_dist / stall_dist / end_dist).
+One umbrella for streaming reports — pick a --kind. Today:
+  conditions  what the player does around playback conditions (faults / stalls /
+              play-ends): anchor -> episode -> grammar, per the CONDITIONS catalog.
+
+Future kinds (throughput, qoe, the trained anomaly scorer, …) are entries in KINDS, not
+new files. NOTE: `vomm` is RESERVED for the trained variable-order scorer (not built
+yet) — this `conditions` report is its DESCRIPTIVE PRECURSOR, not the model.
+
 READ-ONLY (#508): reads the archive via the harness CLI; writes only the report file.
-
-  python3 analytics/tools/condition_dist.py [--days 7] [--engine AVPlayer] [--out report.md]
 """
 import argparse
 import collections
@@ -261,14 +262,21 @@ def build_report(days=7, engine="AVPlayer", max_plays=200, out="/tmp/vomm_report
     return out
 
 
+# Report kinds: name -> builder(days, engine, max_plays, out) -> path. New report types
+# (throughput, qoe, vomm scorer output, …) are entries here, not new files.
+KINDS = {"conditions": build_report}
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--kind", default="conditions", choices=sorted(KINDS), help="report kind (see KINDS)")
     ap.add_argument("--days", type=int, default=7)
     ap.add_argument("--engine", default="AVPlayer")
     ap.add_argument("--max-plays", type=int, default=200)
-    ap.add_argument("--out", default="/tmp/vomm_report.md")
+    ap.add_argument("--out", default=None, help="default /tmp/report-<kind>.md")
     args = ap.parse_args()
-    path = build_report(args.days, args.engine, args.max_plays, args.out)
+    out = args.out or f"/tmp/report-{args.kind}.md"
+    path = KINDS[args.kind](args.days, args.engine, args.max_plays, out)
     print(f"report written: {path}")
     print(open(path).read())
 

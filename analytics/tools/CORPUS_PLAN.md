@@ -235,7 +235,11 @@ the **outcome** (how the play ended).
 | fault (by kind) | `FAULT(surface,class)` | lead+horizon | requests + fault cols | structural | **have** (7d: video `404`≡`5xx`; surface diverges) |
 | stall | `STALL_START`/`STALL_END` | lead+horizon | `session_events.last_event` | **timing-heavy** (`buffer_depth_s`, stall duration) | needs cross-stream |
 | rate shift | `RATE_SHIFT_UP/DOWN` | lead+horizon | `session_events` | mixed | needs cross-stream |
-| **play end** | activity cessation | **lead-only** | beacon ⊕ `last_seen` | contrastive / QoE | building (`end_dist`) |
+| **play end** | activity cessation | **lead-only** | beacon ⊕ `last_seen` | contrastive / QoE | have |
+
+All three are produced by `report.py --kind conditions` (one tool, one report; the
+shared anchor→episode→grammar core + a kind registry — `vomm` reserved for the trained
+scorer). Run: `python3 analytics/tools/report.py --kind conditions --days 7 --out f.md`.
 
 ### Play-end (the outcome layer)
 
