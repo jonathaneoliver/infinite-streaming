@@ -1179,6 +1179,18 @@ final class PlayerViewModel: ObservableObject {
     }
 
     func reload() {
+        // #566 — terminate the OUTGOING play before we rotate play_id and
+        // reset diagnostics below, so it gets an outcome row + QoE labels
+        // instead of dangling `in_progress` forever. status=user_stopped,
+        // reason=reloaded (distinct from a back-tap's user_quit). Built
+        // SYNCHRONOUSLY here — not via the async endSession() — so the
+        // payload snapshots the OLD play_id + final diagnostics ahead of
+        // regeneratePlayID() / resetForFreshPlay(); the captured dict is
+        // immutable, so the later reset can't retroactively blank it.
+        diagnostics.markTerminal(status: "user_stopped", reason: "reloaded")
+        let endPayload = buildMetricsPayload(event: "play_end", at: Date())
+        Task { [weak self] in await self?.sendPlayerMetrics(payload: endPayload) }
+
         Task { [weak self] in
             await self?.requestHARSnapshot(reason: "user_reload", force: true)
         }
