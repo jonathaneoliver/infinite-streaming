@@ -815,14 +815,23 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun reload() {
-        metrics?.onRestart("reload")
+        // #566 — terminate the OUTGOING play first so it gets an outcome
+        // row + QoE labels instead of dangling `in_progress`. sendEvent
+        // snapshots the payload synchronously, so the play_end row carries
+        // the OLD play_id + final state even though the POST is async; the
+        // play_id only rotates later in buildUrlAndLoad(). status=
+        // user_stopped, reason=reloaded (distinct from a back-tap's
+        // user_quit). resetForFreshPlay() then clears the terminal status
+        // so the subsequent restart row reports in_progress (matching iOS).
+        metrics?.endSession("user_stopped", "reloaded")
         // Fresh play boundary: zero the prior accumulators (variant
-        // dwell etc.) BEFORE releasing the old metrics instance, so
-        // a subsequent retry-flow won't inadvertently inherit values
-        // from before the reload. The new PlaybackMetrics built in
-        // bindMetrics() starts with empty priors anyway, but this
+        // dwell etc.) BEFORE the restart marker + releasing the old
+        // metrics instance, so a subsequent retry-flow won't inadvertently
+        // inherit values from before the reload. The new PlaybackMetrics
+        // built in bindMetrics() starts with empty priors anyway, but this
         // guards against a leak if anyone caches a reference.
         metrics?.resetForFreshPlay()
+        metrics?.onRestart("reload")
         metrics?.release()
         metrics = null
         boundPlayerView = null
