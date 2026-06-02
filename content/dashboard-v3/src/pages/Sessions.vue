@@ -882,37 +882,44 @@ const COLUMNS = [
   { key: '__flags',          label: 'Flags',      type: 'string' as const,  sortable: false },
   { key: 'labels_total',     label: 'Labels',     type: 'number' as const,  sortable: true },
   { key: 'health_score',     label: 'Health',     type: 'number' as const,  sortable: true },
-  { key: 'stalls',           label: 'Stalls',     type: 'number' as const,  sortable: true },
-  { key: 'errors_count',     label: 'Errors',     type: 'number' as const,  sortable: true },
+  // Raw counts — superseded for cross-play comparison by the rate/ratio
+  // twins below, so they're demoted to the Detail toggle. Faults has no
+  // rate twin (operator-driven), so it stays a default column.
+  { key: 'stalls',           label: 'Stalls',     type: 'number' as const,  sortable: true, detail: true },
+  { key: 'errors_count',     label: 'Errors',     type: 'number' as const,  sortable: true, detail: true },
   { key: 'faults_count',     label: 'Faults',     type: 'number' as const,  sortable: true },
-  { key: 'downshifts_count', label: 'Downshifts', type: 'number' as const,  sortable: true },
-  { key: 'frames_dropped',   label: 'Drops',      type: 'number' as const,  sortable: true },
+  { key: 'downshifts_count', label: 'Downshifts', type: 'number' as const,  sortable: true, detail: true },
+  { key: 'frames_dropped',   label: 'Drops',      type: 'number' as const,  sortable: true, detail: true },
   { key: 'avg_quality_pct',  label: 'Avg Q%',     type: 'number' as const,  sortable: true },
   { key: 'metric_events',    label: 'Metrics',    type: 'number' as const,  sortable: true },
   { key: 'net_events',       label: 'HAR',        type: 'number' as const,  sortable: true },
-  // #563 — derived rate metrics, hidden until the "Rates" toggle is on.
-  { key: 'rebuffer_ratio',     label: 'Rebuf %',   type: 'number' as const, sortable: true, rate: true },
-  { key: 'stalls_per_hr',      label: 'Stalls/hr', type: 'number' as const, sortable: true, rate: true },
-  { key: 'mean_stall_ms',      label: 'Stall avg', type: 'number' as const, sortable: true, rate: true },
-  { key: 'shifts_per_min',     label: 'Shifts/min', type: 'number' as const, sortable: true, rate: true },
-  { key: 'downshifts_per_min', label: 'Downsh/min', type: 'number' as const, sortable: true, rate: true },
-  { key: 'drop_ratio',         label: 'Drop %',    type: 'number' as const, sortable: true, rate: true },
-  { key: 'errors_per_hr',      label: 'Err/hr',    type: 'number' as const, sortable: true, rate: true },
+  // #563 — derived QoE rates. The high-signal ones are shown by default
+  // (a ratio = time-impact, a frequency, + the reliability/quality
+  // essentials); the niche rates (avg stall duration, total shift churn)
+  // ride the Detail toggle alongside the raw counts they normalise.
+  { key: 'rebuffer_ratio',     label: 'Rebuf %',   type: 'number' as const, sortable: true },
+  { key: 'stalls_per_hr',      label: 'Stalls/hr', type: 'number' as const, sortable: true },
+  { key: 'downshifts_per_min', label: 'Downsh/min', type: 'number' as const, sortable: true },
+  { key: 'drop_ratio',         label: 'Drop %',    type: 'number' as const, sortable: true },
+  { key: 'errors_per_hr',      label: 'Err/hr',    type: 'number' as const, sortable: true },
+  { key: 'mean_stall_ms',      label: 'Stall avg', type: 'number' as const, sortable: true, detail: true },
+  { key: 'shifts_per_min',     label: 'Shifts/min', type: 'number' as const, sortable: true, detail: true },
   { key: '__bundle',         label: '',           type: 'string' as const,  sortable: false },
 ];
 
-// #563 — the rate columns are opt-in (the table is already wide). The
-// toggle persists so an operator who wants rates keeps them.
-const RATES_KEY = 'ismSessionsShowRates';
-const showRates = ref<boolean>((() => {
-  try { return localStorage.getItem(RATES_KEY) === '1'; } catch { return false; }
+// #563 — the high-signal rates are on by default; the "Detail" toggle
+// reveals the raw counts they supersede + the niche rates. Persisted so
+// an operator's choice sticks.
+const DETAIL_KEY = 'ismSessionsShowDetail';
+const showDetail = ref<boolean>((() => {
+  try { return localStorage.getItem(DETAIL_KEY) === '1'; } catch { return false; }
 })());
-watch(showRates, (v) => {
-  try { localStorage.setItem(RATES_KEY, v ? '1' : '0'); } catch { /* ignore */ }
+watch(showDetail, (v) => {
+  try { localStorage.setItem(DETAIL_KEY, v ? '1' : '0'); } catch { /* ignore */ }
 });
-// Header loop iterates this so rate columns appear/disappear with the
-// toggle; the body cells gate on showRates in the same position.
-const visibleColumns = computed(() => COLUMNS.filter((c) => showRates.value || !(c as any).rate));
+// Header loop iterates this so detail columns appear/disappear with the
+// toggle; the body cells gate on showDetail in the same position.
+const visibleColumns = computed(() => COLUMNS.filter((c) => showDetail.value || !(c as any).detail));
 
 function onHeaderClick(col: typeof COLUMNS[number]) {
   if (!col.sortable) return;
@@ -1121,10 +1128,12 @@ const showCustomInputs = computed(() => activeRangeId.value === 'custom');
 
             <button type="button" class="btn btn-secondary" @click="clearFilters">Clear filters</button>
             <span class="match-count">{{ matchCount }}</span>
-            <!-- #563 — opt-in derived rate-metric columns. -->
-            <label class="ctrl-label rates-toggle" title="Show derived QoE rate columns (rebuffer %, stalls/hr, shifts/min, drop %, errors/hr…)">
-              <input type="checkbox" v-model="showRates" />
-              <span class="ctrl-label-text">Rates</span>
+            <!-- #563 — high-signal rates show by default; this reveals the
+                 raw counts they supersede + the niche rates (stall avg,
+                 total shift churn). -->
+            <label class="ctrl-label rates-toggle" title="Show raw counts (stalls, errors, downshifts, drops) and the niche rates (stall avg, shifts/min)">
+              <input type="checkbox" v-model="showDetail" />
+              <span class="ctrl-label-text">Detail</span>
             </label>
           </div>
 
@@ -1318,23 +1327,21 @@ const showCustomInputs = computed(() => activeRangeId.value === 'custom');
                   <td>
                     <span class="health-badge" :class="'issue-' + fmtHealthBadge(r).cls" :title="fmtHealthBadge(r).tip">{{ fmtHealthBadge(r).score }}</span>
                   </td>
-                  <td><span :style="{ color: fmtCount(r.stalls, 1, 5).color, fontWeight: fmtCount(r.stalls, 1, 5).bold ? 600 : 400 }">{{ fmtCount(r.stalls, 1, 5).n }}</span></td>
-                  <td><span :style="{ color: fmtCount(r.errors_count, 1, 1).color, fontWeight: fmtCount(r.errors_count, 1, 1).bold ? 600 : 400 }">{{ fmtCount(r.errors_count, 1, 1).n }}</span></td>
+                  <td v-if="showDetail"><span :style="{ color: fmtCount(r.stalls, 1, 5).color, fontWeight: fmtCount(r.stalls, 1, 5).bold ? 600 : 400 }">{{ fmtCount(r.stalls, 1, 5).n }}</span></td>
+                  <td v-if="showDetail"><span :style="{ color: fmtCount(r.errors_count, 1, 1).color, fontWeight: fmtCount(r.errors_count, 1, 1).bold ? 600 : 400 }">{{ fmtCount(r.errors_count, 1, 1).n }}</span></td>
                   <td><span :style="{ color: fmtCount(r.faults_count, 1, 10).color, fontWeight: fmtCount(r.faults_count, 1, 10).bold ? 600 : 400 }">{{ fmtCount(r.faults_count, 1, 10).n }}</span></td>
-                  <td><span :style="{ color: fmtCount(r.downshifts_count, 1, 5).color, fontWeight: fmtCount(r.downshifts_count, 1, 5).bold ? 600 : 400 }">{{ fmtCount(r.downshifts_count, 1, 5).n }}</span></td>
-                  <td><span :style="{ color: fmtCount(r.frames_dropped, 100, 1000).color, fontWeight: fmtCount(r.frames_dropped, 100, 1000).bold ? 600 : 400 }">{{ fmtCount(r.frames_dropped, 100, 1000).n }}</span></td>
+                  <td v-if="showDetail"><span :style="{ color: fmtCount(r.downshifts_count, 1, 5).color, fontWeight: fmtCount(r.downshifts_count, 1, 5).bold ? 600 : 400 }">{{ fmtCount(r.downshifts_count, 1, 5).n }}</span></td>
+                  <td v-if="showDetail"><span :style="{ color: fmtCount(r.frames_dropped, 100, 1000).color, fontWeight: fmtCount(r.frames_dropped, 100, 1000).bold ? 600 : 400 }">{{ fmtCount(r.frames_dropped, 100, 1000).n }}</span></td>
                   <td><span :style="{ color: fmtPct(r.avg_quality_pct).color }">{{ fmtPct(r.avg_quality_pct).label }}</span></td>
                   <td>{{ r.metric_events || 0 }}</td>
                   <td>{{ r.net_events || 0 }}</td>
-                  <template v-if="showRates">
-                    <td><span :style="{ color: fmtRatioPct(r.rebuffer_ratio, 0.002, 0.004).color }">{{ fmtRatioPct(r.rebuffer_ratio, 0.002, 0.004).label }}</span></td>
-                    <td><span :style="{ color: fmtRate(r.stalls_per_hr, 1, 5).color }">{{ fmtRate(r.stalls_per_hr, 1, 5).label }}</span></td>
-                    <td><span :style="{ color: fmtMsDur(r.mean_stall_ms).color }">{{ fmtMsDur(r.mean_stall_ms).label }}</span></td>
-                    <td><span :style="{ color: fmtRate(r.shifts_per_min, 2, 6).color }">{{ fmtRate(r.shifts_per_min, 2, 6).label }}</span></td>
-                    <td><span :style="{ color: fmtRate(r.downshifts_per_min, 1, 3).color }">{{ fmtRate(r.downshifts_per_min, 1, 3).label }}</span></td>
-                    <td><span :style="{ color: fmtRatioPct(r.drop_ratio, 0.05, 0.2).color }">{{ fmtRatioPct(r.drop_ratio, 0.05, 0.2).label }}</span></td>
-                    <td><span :style="{ color: fmtRate(r.errors_per_hr, 0.5, 2).color }">{{ fmtRate(r.errors_per_hr, 0.5, 2).label }}</span></td>
-                  </template>
+                  <td><span :style="{ color: fmtRatioPct(r.rebuffer_ratio, 0.002, 0.004).color }" :title="'Rebuffering ratio — fraction of engaged time spent stalling'">{{ fmtRatioPct(r.rebuffer_ratio, 0.002, 0.004).label }}</span></td>
+                  <td><span :style="{ color: fmtRate(r.stalls_per_hr, 1, 5).color }" :title="'Stalls per playing-hour'">{{ fmtRate(r.stalls_per_hr, 1, 5).label }}</span></td>
+                  <td><span :style="{ color: fmtRate(r.downshifts_per_min, 1, 3).color }" :title="'ABR downshifts per playing-minute'">{{ fmtRate(r.downshifts_per_min, 1, 3).label }}</span></td>
+                  <td><span :style="{ color: fmtRatioPct(r.drop_ratio, 0.05, 0.2).color }" :title="'Dropped-frame ratio'">{{ fmtRatioPct(r.drop_ratio, 0.05, 0.2).label }}</span></td>
+                  <td><span :style="{ color: fmtRate(r.errors_per_hr, 0.5, 2).color }" :title="'Errors per playing-hour'">{{ fmtRate(r.errors_per_hr, 0.5, 2).label }}</span></td>
+                  <td v-if="showDetail"><span :style="{ color: fmtMsDur(r.mean_stall_ms).color }" :title="'Mean stall duration'">{{ fmtMsDur(r.mean_stall_ms).label }}</span></td>
+                  <td v-if="showDetail"><span :style="{ color: fmtRate(r.shifts_per_min, 2, 6).color }" :title="'Total bitrate shifts per playing-minute'">{{ fmtRate(r.shifts_per_min, 2, 6).label }}</span></td>
                   <td>
                     <a
                       v-if="r.player_id"
