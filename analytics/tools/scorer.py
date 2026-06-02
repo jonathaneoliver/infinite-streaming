@@ -150,6 +150,31 @@ def episodes_for(seqs, anchor, lead, horizon):
     return eps
 
 
+def pct(v, f):
+    return sorted(v)[min(len(v) - 1, int(f * len(v)))] if v else 0.0
+
+
+def kfold_scores(eps, k, max_order, alpha):
+    """Play-level k-fold: score each episode under a VOMM trained on OTHER plays'
+    episodes (out-of-sample — no leakage from the episode's own play). Threshold is
+    calibrated per fold from its training episodes. eps: [(play_id, window)] →
+    ([(rate, argmax, play_id)], mean_threshold)."""
+    fold = lambda pid: int(pid[:8], 16) % k
+    out, thrs = [], []
+    for f in range(k):
+        train_w = [w for pid, w in eps if fold(pid) != f]
+        test = [(pid, w) for pid, w in eps if fold(pid) == f]
+        if not train_w or not test:
+            continue
+        model = train(train_w, max_order=max_order, alpha=alpha)
+        thr = p99([s for w in train_w for s, _, _ in transition_surprises(model, w)])
+        thrs.append(thr)
+        for pid, w in test:
+            r = score(model, w, thr)
+            out.append((r["rate"], r["argmax"], pid))
+    return out, (sum(thrs) / len(thrs) if thrs else 0.0)
+
+
 def run_conditions(plays, args):
     eng_clean, eng_fault = select(plays, args.engine)
     stall = [p["play_id"] for p in plays if p.get("player_tech") == args.engine
@@ -158,34 +183,30 @@ def run_conditions(plays, args):
     corpora = {"all": allids, "fault": eng_fault[:args.cap], "stall": stall[:args.cap]}
     seqcache = {k: xstream_seqs(v) for k, v in corpora.items()}
 
-    print("Per-condition episode surprise (VOMM trained on that condition's episodes; "
-          "in-sample — outliers attenuated but still surface):\n")
+    print(f"Per-condition episode surprise — VOMM(K={args.max_order}), {args.kfold}-fold "
+          "(play-level; each episode scored out-of-sample):\n")
     for c in EPISODE_CONDITIONS:
         eps = episodes_for(seqcache[c["corpus"]], c["anchor"], c["lead"], c["horizon"])
-        windows = [w for _, w in eps]
-        if len(windows) < 8:
-            print(f"## {c['name']:8} — anchor={c['anchor']!r}: only {len(windows)} episodes, skipped\n")
+        if len(eps) < 8 or len({pid for pid, _ in eps}) < args.kfold:
+            print(f"## {c['name']:8} — anchor={c['anchor']!r}: {len(eps)} episodes / "
+                  f"{len({pid for pid, _ in eps})} plays, too few for {args.kfold}-fold; skipped\n")
             continue
-        model = train(windows, max_order=args.max_order, alpha=args.alpha)
-        thr = p99([s for w in windows for s, _, _ in transition_surprises(model, w)])
-        scored = []
-        for pid, w in eps:
-            r = score(model, w, thr)
-            scored.append((r["rate"], r["argmax"], pid))
+        scored, thr = kfold_scores(eps, args.kfold, args.max_order, args.alpha)
         rates = [r for r, _, _ in scored]
         scored.sort(key=lambda x: -x[0])
         nplays = len({pid for pid, _ in eps})
-        print(f"## {c['name']:8}  episodes={len(windows)} from {nplays} plays  "
-              f"(anchor={c['anchor']!r}, lead{c['lead']}/horizon{c['horizon']}, thr={thr:.1f})")
+        print(f"## {c['name']:8}  episodes={len(eps)} from {nplays} plays  "
+              f"(anchor={c['anchor']!r}, lead{c['lead']}/horizon{c['horizon']}, mean-thr={thr:.1f})")
         print(f"   episode surprise-rate p50/p90/max = "
-              f"{median(rates):.0%} / {p99([r for r in rates if r <= p99(rates)]):.0%} / {max(rates):.0%}")
-        print("   most-abnormal episodes:")
+              f"{pct(rates, 0.5):.0%} / {pct(rates, 0.9):.0%} / {max(rates):.0%}")
+        print("   most-abnormal episodes (out-of-sample):")
         for rate, am, pid in scored[:4]:
             print(f"     rate={rate:5.0%} play={pid[:8]} peak: {am}")
         print()
-    print("Reads: a high-surprise episode = behaviour around THAT condition that's unusual "
-          "vs the typical episode for it. Caveat: in-sample scoring + thin/steady clean corpus; "
-          "k-fold + more diverse corpus are the next honesty levers.")
+    print("Reads: a high-surprise episode = behaviour around THAT condition that's unusual vs\n"
+          "the typical episode for it — now scored out-of-sample (k-fold), so outliers aren't\n"
+          "attenuated by training on themselves. Remaining caveat: thin/steady single-engine\n"
+          "clean corpus; the does-ordering-beat-counting test still needs outcome labels.")
 
 
 def main():
@@ -198,6 +219,7 @@ def main():
     ap.add_argument("--alpha", type=float, default=0.5)
     ap.add_argument("--max-fault", type=int, default=60)
     ap.add_argument("--cap", type=int, default=80, help="per-corpus play cap (conditions mode)")
+    ap.add_argument("--kfold", type=int, default=5, help="play-level folds for out-of-sample episode scoring")
     args = ap.parse_args()
 
     plays, frm = rep.query_plays(args.days)
