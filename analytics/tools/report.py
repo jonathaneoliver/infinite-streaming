@@ -230,10 +230,15 @@ def analyze_startup(plays, per_bucket=80):
             outcome[status] += 1
         else:
             outcome["reached_first_frame" if ff > 0 else "no first frame (other)"] += 1
+        # Startup BUFFERING only (latency lives in the TTFF buckets above). Match by the
+        # `buffering_<sev>_startup` suffix so it catches both the legacy `*buffering_*_startup`
+        # and the #568/#570 `*qoe_buffering_*_startup` names. (The old `*video_startup_*`
+        # latency labels were retired → `qoe_vst_*`; intentionally NOT counted here — they're
+        # latency, already covered by time-to-first-frame, and were a conflation.)
         lbls = play_labels(p)
-        if any("buffering_severe_startup" in x or "video_startup_severe" in x for x in lbls):
+        if any("buffering_severe_startup" in x for x in lbls):
             buffering["severe"] += 1
-        elif any("buffering_long_startup" in x or "video_startup_long" in x for x in lbls):
+        elif any("buffering_long_startup" in x for x in lbls):
             buffering["long"] += 1
         elif any("buffering_short_startup" in x for x in lbls):
             buffering["short"] += 1
