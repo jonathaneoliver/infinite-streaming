@@ -122,7 +122,7 @@ Shared modules (`content/shared/`):
 
 ### Analytics sidecar (`analytics/`)
 
-Three ClickHouse tables after issue #474, each carrying a `labels Array(LowCardinality(String))` column with the same `<severity>=<event>` vocab (synthesized entries prefixed `*`, severities `error|critical|warning|info`):
+Three ClickHouse tables after issue #474, each carrying a `labels Array(LowCardinality(String))` column with the same `<severity>=<event>` vocab (synthesized entries prefixed `*`, severities `error|critical|warning|info`, plus the unranked `testing` tier for operator/test-harness KV metadata — #571):
 
 - `session_events` — one row per player metrics POST (was `session_snapshots` pre-#472).
 - `network_requests` — one row per HTTP request the proxy handled.

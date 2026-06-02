@@ -1349,10 +1349,11 @@ Labels are `<severity>=<event>` strings attached to **every row** of `session_ev
 The `*` (synthMark) before `<event>` is the only difference between the two flavours.
 
 **Severities** (in escalating order, used for the dashboard's severity filter):
+- `testing`  — operator/test-harness KV metadata, **not playback signal** (e.g. `testing=run_id_20260530T141942Z`, `testing=test_rampup`, `testing=platform_iphone`). Set by the automated test code via `LabelPlay`; emitted by `kvLabelsFromInfo`. **Unranked** — excluded from `worstSeverity`, so it never tints a row or bumps classification. Groups under its own dashboard tier (#571).
 - `info`     — informational; not a failure (e.g. `info=*pattern_step`)
 - `warning`  — concerning; possibly a failure (e.g. `warning=segment_stall`, `warning=*fault_on`)
 - `error`    — failure (e.g. `error=stall_recovery_timeout`)
-- `critical` — severe failure (e.g. `critical=frozen`, `critical=*stall_severe_startup`)
+- `critical` — severe failure (e.g. `critical=frozen`, `critical=*qoe_stall_severe_startup`)
 
 **Find what labels actually exist** by calling `list_labels(from=..., to=..., like='%...%')`. **DO NOT GUESS** label strings when constructing `find_plays(labels_has=[...])` filters — see [[reference_labelplay_value_encoding]] for why guessed labels silently match zero rows.
 
@@ -1480,7 +1481,7 @@ Pattern for synth labels: they fold a `position bucket` (startup / midplay / scr
 
 ### 5.d Severity precedence
 
-When the dashboard rolls up multiple labels on one play, severity precedence is `critical > error > warning > info`. The dashboard's "worst signal" chip shows the highest-severity label present.
+When the dashboard rolls up multiple labels on one play, severity precedence is `critical > error > warning > info`. The dashboard's "worst signal" chip shows the highest-severity label present. (`testing` is **not** in this precedence — it's test-harness metadata, never the worst chip and never tints a row.)
 
 ---
 
