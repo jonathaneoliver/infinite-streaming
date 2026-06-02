@@ -1380,14 +1380,16 @@ final class PlayerViewModel: ObservableObject {
         }
         // No auto-recovery → this error is terminal. start_failure if
         // we never reached first frame, otherwise mid_stream_failure.
-        markFatalTerminal(message: message)
+        markFatalTerminal(error: error, message: message)
     }
 
     private func handleErrorRetry(reason: String) {
         guard codecRetries < maxCodecRetries, let url = currentURL else {
             // Retry budget exhausted → the play is dead. Distinguish
-            // pre-vs-post-first-frame for the right Phase 2 status.
-            markFatalTerminal(message: reason)
+            // pre-vs-post-first-frame for the right Phase 2 status. No
+            // NSError on this path (retry exhaustion, not a single fatal
+            // error), so only the reason string is carried.
+            markFatalTerminal(error: nil, message: reason)
             return
         }
         codecRetries += 1
@@ -1401,15 +1403,22 @@ final class PlayerViewModel: ObservableObject {
 
     /// Stamp the play as fatally terminated and emit session_end. The
     /// status is `start_failure` when the player never crossed first
-    /// frame, `mid_stream_failure` after. iOS doesn't yet inspect the
-    /// underlying NSError domain/code to populate a specific
-    /// playback_reason — the forwarder error_classifier (4d8265f) will
-    /// pick that up from terminal_error_* in a follow-up; for now we
-    /// stamp the generic "unknown" so dashboards bucket correctly.
-    private func markFatalTerminal(message: String) {
+    /// frame, `mid_stream_failure` after. When a fatal NSError is in
+    /// hand (#557) capture its domain/code/description into the terminal
+    /// error fields so the session_end row carries `terminal_error_*` and
+    /// the forwarder's error_classifier can derive a specific reason.
+    /// The retry-exhaustion path passes error=nil (only a reason string).
+    private func markFatalTerminal(error: Error?, message: String) {
         let status = diagnostics.hasRenderedFirstFrame ? "mid_stream_failure" : "start_failure"
+        if let nsErr = error as NSError? {
+            diagnostics.markTerminalError(
+                code: nsErr.code,
+                domain: nsErr.domain,
+                details: nsErr.localizedDescription
+            )
+        }
         endSession(status: status, reason: "unknown")
-        NSLog("[endSession] fatal status=\(status) message=\(message)")
+        NSLog("[endSession] fatal status=\(status) message=\(message) err=\((error as NSError?).map { "\($0.domain)#\($0.code)" } ?? "none")")
     }
 
     // MARK: - Persistence (UserDefaults)
@@ -2436,6 +2445,13 @@ extension PlayerViewModel {
             "player_metrics_playback_status": diagnostics.terminalStatus ?? "in_progress",
             "player_metrics_playback_reason": diagnostics.terminalReason ?? diagnostics.state,
             "player_metrics_error_count": diagnostics.errorCount,
+            // #557 — fatal error captured at terminal (0 / "" when none).
+            // Lets the forwarder's error_classifier derive a specific
+            // failure reason; previously these were always empty so the
+            // error was lost on iOS failures.
+            "player_metrics_terminal_error_code": diagnostics.terminalErrorCode,
+            "player_metrics_terminal_error_domain": diagnostics.terminalErrorDomain,
+            "player_metrics_terminal_error_details": diagnostics.terminalErrorDetails,
             // stall_stuck: sticky true when AVPlayer transitioned
             // from .waitingToPlay to .paused mid-stall. The player
             // WILL NOT auto-recover; the dashboard / operator needs
