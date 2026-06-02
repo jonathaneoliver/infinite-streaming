@@ -974,6 +974,63 @@ func (a *App) recordSessionEnd(session SessionData, reason string) {
 		source = "harness"
 	}
 	a.emitControlEventForSession(sessionID, source, "session_end", reason)
+
+	// #556 — for a silent death (the player stopped POSTing without a
+	// clean client session_end), synthesize a terminal session_events
+	// frame from the last-known snapshot so the play still gets an
+	// outcome row + QoE outcome labels (vsf/msf/ebvs/tier). Only for
+	// inactive_timeout: operator delete/clear is administrative teardown,
+	// not a play outcome, and a clean client session_end already covers
+	// the happy path (and is deduped below).
+	if reason == "inactive_timeout" {
+		a.synthesizeTerminalSessionEvent(session, reason)
+	}
+}
+
+// synthesizeTerminalSessionEvent publishes one session_events frame
+// stamped as the play's terminal row, derived from the last-known
+// session snapshot. No-op when the client already delivered its own
+// session_end (dedupe on last_event) so we never double-stamp.
+//
+// playback_status: respect a terminal status the client managed to set
+// before going silent; otherwise classify by whether playback ever
+// started — pre-first-frame => abandoned_start (qoe_ebvs), post-first-
+// frame => user_stopped. We deliberately do NOT fabricate a failure
+// (mid_stream_failure): the proxy can't prove one, and a silent
+// disappearance is almost always the user leaving.
+func (a *App) synthesizeTerminalSessionEvent(session SessionData, reason string) {
+	if a == nil {
+		return
+	}
+	if frame, ok := terminalFrameForSession(session, reason); ok {
+		a.emitSessionEvent(frame)
+	}
+}
+
+// terminalFrameForSession derives the synthesized terminal frame from a
+// last-known session snapshot. Pure (no App state) so it's unit-testable.
+// Returns ok=false when no frame should be emitted: a nil session, or
+// the client already delivered its own session_end (dedupe on
+// last_event).
+func terminalFrameForSession(session SessionData, reason string) (SessionData, bool) {
+	if session == nil {
+		return nil, false
+	}
+	if getString(session, "player_metrics_last_event") == "session_end" {
+		return nil, false // client ended cleanly — don't double-stamp
+	}
+	frame := cloneSession(session)
+	frame["player_metrics_last_event"] = "session_end"
+	frame["player_metrics_trigger_type"] = "session_end"
+	if status := getString(session, "player_metrics_playback_status"); status == "" || status == "in_progress" {
+		if getInt(session, "player_metrics_video_first_frame_time_ms") > 0 {
+			frame["player_metrics_playback_status"] = "user_stopped"
+		} else {
+			frame["player_metrics_playback_status"] = "abandoned_start"
+		}
+		frame["player_metrics_playback_reason"] = reason
+	}
+	return frame, true
 }
 
 func (s *NftShapeStep) UnmarshalJSON(data []byte) error {
