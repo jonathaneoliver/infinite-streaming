@@ -49,7 +49,7 @@ Subcommands:
                                   aggregate stats across plays
   events   <play_id> [--limit N] [--label-has L ...] [--label-not L ...]
                                   player events (session_events rows)
-  network  <play_id> [--limit N] [--label-has L ...] [--label-not L ...]
+  network  <play_id> [--limit N] [--faulted-only] [--fault-category C] [--label-has L ...] [--label-not L ...]
                                   per-request HAR rows
   control  <play_id> [--source S] [--event E] [--mode M]
            [--label-has L ...] [--label-not L ...] [--limit N]
@@ -341,11 +341,13 @@ func (a *arrayFlag) Set(v string) error {
 
 func cmdQueryNetwork(client *api.Client, args []string, asJSON bool) error {
 	if len(args) < 1 {
-		return errors.New("usage: harness query network <play_id> [--limit N] [--label-has L ...] [--label-not L ...]")
+		return errors.New("usage: harness query network <play_id> [--limit N] [--faulted-only] [--fault-category C] [--label-has L ...] [--label-not L ...]")
 	}
 	playID := args[0]
 	fs := flag.NewFlagSet("query network", flag.ContinueOnError)
 	limit := fs.Int("limit", 0, "max rows")
+	faultedOnly := fs.Bool("faulted-only", false, "only faulted/aborted rows (filters client-side after --limit; raise --limit to scan more)")
+	faultCategory := fs.String("fault-category", "", "only rows with this fault_category (client_disconnect|http|transfer_timeout|socket|transport|corruption); implies --faulted-only")
 	var labelHas, labelNot arrayFlag
 	fs.Var(&labelHas, "label-has", "row must have this label (repeatable; AND semantics)")
 	fs.Var(&labelNot, "label-not", "row must NOT have this label (repeatable; AND semantics)")
@@ -374,7 +376,64 @@ func cmdQueryNetwork(client *api.Client, args []string, asJSON bool) error {
 	if err != nil {
 		return err
 	}
+	if *faultedOnly || *faultCategory != "" {
+		body, err = filterNetworkFaults(body, *faultCategory)
+		if err != nil {
+			return err
+		}
+	}
 	return printOrJSON(body, asJSON)
+}
+
+// filterNetworkFaults keeps only faulted rows (optionally a single
+// fault_category) in a /api/v2/network_requests envelope. Client-side
+// because the read API's `faulted_only` query param isn't in the generated
+// client spec. Preserves non-`items` envelope fields (e.g. next_cursor).
+func filterNetworkFaults(body []byte, category string) ([]byte, error) {
+	var env map[string]json.RawMessage
+	if err := json.Unmarshal(body, &env); err != nil {
+		return body, nil // shape changed — leave untouched
+	}
+	rawItems, ok := env["items"]
+	if !ok {
+		return body, nil
+	}
+	var items []map[string]any
+	if err := json.Unmarshal(rawItems, &items); err != nil {
+		return body, nil
+	}
+	kept := make([]map[string]any, 0, len(items))
+	for _, it := range items {
+		if !rowFaulted(it) {
+			continue
+		}
+		if category != "" && anyStr(it["fault_category"], "") != category {
+			continue
+		}
+		kept = append(kept, it)
+	}
+	newItems, err := json.Marshal(kept)
+	if err != nil {
+		return nil, err
+	}
+	env["items"] = newItems
+	return json.Marshal(env)
+}
+
+// rowFaulted reports whether a network row carries any fault signal. The
+// read API returns fault_type/fault_category but not always a `faulted`
+// flag, so check all three.
+func rowFaulted(it map[string]any) bool {
+	if anyStr(it["fault_type"], "") != "" {
+		return true
+	}
+	if anyStr(it["fault_category"], "") != "" {
+		return true
+	}
+	if n, ok := anyInt(it["faulted"]); ok && n == 1 {
+		return true
+	}
+	return false
 }
 
 func cmdQueryHeatmap(client *api.Client, args []string, asJSON bool) error {
