@@ -154,7 +154,8 @@ def analyze_stalls(play_ids, window=8.0, lookback=4.0):
             fseg = next((s for s in srows if st <= s[0] <= hi), None)
             if fseg:
                 if ps is not None:
-                    seg_dir["backward (re-fetch)" if fseg[2] <= ps else "forward"] += 1
+                    seg_dir["forward (new segment)" if fseg[2] > ps else
+                            ("same segment (retry)" if fseg[2] == ps else "backward (earlier segment)")] += 1
                 if pr:
                     seg_delta[rungs(ORD[fseg[1]] - ORD[pr])] += 1
             lo = st - timedelta(seconds=lookback)
