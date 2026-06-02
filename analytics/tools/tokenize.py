@@ -50,6 +50,10 @@ Usage:
   tokenize.py --play <uuid>                 # pulls via harness CLI
   tokenize.py --from-file net_<uuid>.json   # pre-pulled `query network --json`
   tokenize.py --play <uuid> --json          # emit token list as JSON
+  tokenize.py --from-file f.json --episodes --anchor FAULT --lead 4 --horizon 8
+                                            # fixed-length windows around each anchor token
+                                            # (episode length becomes a deliberate knob,
+                                            #  not an artifact of the play boundary)
 """
 import argparse
 import json
@@ -192,6 +196,36 @@ def tokenize(rows):
     return tokens
 
 
+def episodes(tokens, anchor="FAULT", lead=4, horizon=8):
+    """Slice fixed-length windows around each anchor token within ONE play's sequence.
+
+    Makes episode length a deliberate knob instead of an artifact of the play boundary
+    (which under fault injection is cut short by restart). Each anchor token whose text
+    starts with `anchor` (a prefix, e.g. "FAULT", "FAULT(video_seg", "V_PROBE") yields a
+    window of [lead tokens before] + the anchor + [horizon tokens after], clipped at the
+    sequence bounds. Windows are per-play (callers tokenize one play at a time) so they
+    never span a <S>/<E> from a different play.
+
+    Per #442: the `lead` is the context the back-off model conditions on; the `horizon`
+    is the bounded outcome attribution. For PREDICTIVE training, condition on `lead`+anchor
+    only and don't leak the `horizon` outcome into the context — both are returned
+    separately so the caller decides.
+    """
+    out = []
+    for i, t in enumerate(tokens):
+        if t.startswith(anchor):
+            lo = max(0, i - lead)
+            hi = min(len(tokens), i + horizon + 1)
+            out.append({
+                "anchor_index": i,
+                "anchor": t,
+                "lead": tokens[lo:i],
+                "horizon": tokens[i + 1:hi],
+                "window": tokens[lo:hi],
+            })
+    return out
+
+
 def _first_sustained(vseg_idx):
     """Rendition that first persists for >= SUSTAIN_MIN consecutive segments."""
     run_rend, run_len = None, 0
@@ -263,11 +297,27 @@ def main():
     src = ap.add_mutually_exclusive_group(required=True)
     src.add_argument("--play", help="play UUID (pulls via harness CLI)")
     src.add_argument("--from-file", help="path to a `query network --json` dump")
-    ap.add_argument("--json", action="store_true", help="emit token list as JSON")
+    ap.add_argument("--json", action="store_true", help="emit as JSON")
+    ap.add_argument("--episodes", action="store_true",
+                    help="emit fixed-length windows around anchor tokens instead of the whole sequence")
+    ap.add_argument("--anchor", default="FAULT",
+                    help="anchor token prefix for --episodes (default FAULT; e.g. 'FAULT(video_seg', 'V_PROBE')")
+    ap.add_argument("--lead", type=int, default=4, help="lead-in context tokens before the anchor (--episodes)")
+    ap.add_argument("--horizon", type=int, default=8, help="outcome-horizon tokens after the anchor (--episodes)")
     args = ap.parse_args()
 
     rows = fetch_network(args.play) if args.play else load_file(args.from_file)
     tokens = tokenize(rows)
+
+    if args.episodes:
+        eps = episodes(tokens, anchor=args.anchor, lead=args.lead, horizon=args.horizon)
+        if args.json:
+            print(json.dumps(eps))
+            return
+        print(f"episodes: {len(eps)}  (anchor={args.anchor!r} lead={args.lead} horizon={args.horizon})")
+        for e in eps[:20]:
+            print(f"  @{e['anchor_index']:<4} {' '.join(e['lead'])}  [[ {e['anchor']} ]]  {' '.join(e['horizon'])}")
+        return
 
     if args.json:
         print(json.dumps(tokens))
