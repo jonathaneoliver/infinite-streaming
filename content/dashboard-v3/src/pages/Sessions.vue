@@ -65,6 +65,17 @@ interface SessionRow {
   is_critical?: boolean;
   issues_breakdown?: Record<string, any>;
   health_breakdown?: Record<string, any>;
+  // #563 — derived QoE rate metrics (read-time, from the #550 residency
+  // accumulators). undefined when there's no playing time to normalise
+  // against, so the cell renders "—" rather than a misleading 0.
+  rebuffer_ratio?: number;   // stalling / (stalling + playing)
+  buffering_ratio?: number;  // buffering / (buffering + playing)
+  drop_ratio?: number;       // dropped / (dropped + displayed)
+  stalls_per_hr?: number;
+  mean_stall_ms?: number;    // stalling_time_ms / stalls
+  shifts_per_min?: number;   // bitrate shifts / playing minute
+  downshifts_per_min?: number;
+  errors_per_hr?: number;
 }
 
 const RANGES = [
@@ -205,7 +216,10 @@ function computeRange(): { since: string; until: string } {
 }
 
 function deriveHealth(r: SessionRow): void {
-  const n = (k: keyof SessionRow) => Number((r as any)[k]) || 0;
+  // Reads any field off the raw PlaySummary (normalisePlay spreads the
+  // whole summary onto the row), so this also reaches the #550
+  // accumulators that aren't in the SessionRow interface.
+  const n = (k: string) => Number((r as any)[k]) || 0;
   const stalls = n('stalls');
   const drops = n('frames_dropped');
   const downshifts = n('downshifts');
@@ -251,6 +265,24 @@ function deriveHealth(r: SessionRow): void {
     stalls: deductStalls, errors: deductErrors,
     faults: deductFaults, drops: deductDrops, downshifts: deductShifts,
   };
+
+  // #563 — derived QoE rate metrics, normalised against playing time
+  // (Conviva-style). undefined when the denominator is zero so cells
+  // show "—". All inputs are cumulative #550 columns on the summary.
+  const playingMs = n('playing_time_ms');
+  const stallingMs = n('stalling_time_ms');
+  const bufferingMs = n('buffering_time_ms');
+  const displayed = n('frames_displayed');
+  const playingHrs = playingMs / 3_600_000;
+  const playingMin = playingMs / 60_000;
+  r.rebuffer_ratio = (stallingMs + playingMs) > 0 ? stallingMs / (stallingMs + playingMs) : undefined;
+  r.buffering_ratio = (bufferingMs + playingMs) > 0 ? bufferingMs / (bufferingMs + playingMs) : undefined;
+  r.drop_ratio = (drops + displayed) > 0 ? drops / (drops + displayed) : undefined;
+  r.stalls_per_hr = playingHrs > 0 ? stalls / playingHrs : undefined;
+  r.mean_stall_ms = stalls > 0 ? stallingMs / stalls : undefined;
+  r.shifts_per_min = playingMin > 0 ? n('bitrate_shifts') / playingMin : undefined;
+  r.downshifts_per_min = playingMin > 0 ? downshifts / playingMin : undefined;
+  r.errors_per_hr = playingHrs > 0 ? n('error_count') / playingHrs : undefined;
 }
 
 // Normalise one PlaySummary into a SessionRow: aliases v2 field
@@ -745,6 +777,33 @@ function fmtPct(v?: number): PctCell {
   return { label: `${n.toFixed(1)}%`, color };
 }
 
+// #563 rate-cell formatters. Unlike fmtPct (quality: higher = better),
+// these are "bad-high" — green when low, amber/red as they rise — and
+// render "—" when the value is undefined (no playing time to normalise).
+function fmtRatioPct(v: number | undefined, warn: number, bad: number): PctCell {
+  if (v === undefined || !Number.isFinite(v)) return { label: '—', color: '#9ca3af' };
+  const pct = v * 100;
+  let color = '#065f46';
+  if (v >= bad) color = '#991b1b';
+  else if (v >= warn) color = '#92400e';
+  return { label: `${pct.toFixed(pct < 10 ? 2 : 1)}%`, color };
+}
+function fmtRate(v: number | undefined, warn: number, bad: number): PctCell {
+  if (v === undefined || !Number.isFinite(v)) return { label: '—', color: '#9ca3af' };
+  let color = '#065f46';
+  if (v >= bad) color = '#991b1b';
+  else if (v >= warn) color = '#92400e';
+  return { label: v.toFixed(1), color };
+}
+function fmtMsDur(v: number | undefined): PctCell {
+  if (v === undefined || !Number.isFinite(v) || v <= 0) return { label: '—', color: '#9ca3af' };
+  const label = v >= 1000 ? `${(v / 1000).toFixed(1)}s` : `${Math.round(v)}ms`;
+  let color = '#065f46';
+  if (v >= 2000) color = '#991b1b';
+  else if (v >= 1000) color = '#92400e';
+  return { label, color };
+}
+
 const FLAG_DEFS = [
   { key: 'user_marked_count' as const,   icon: '🚨', label: '911 / user flag',  color: '#dc2626' },
   { key: 'frozen_count' as const,        icon: '❄️',  label: 'frozen',           color: '#7c3aed' },
@@ -817,8 +876,29 @@ const COLUMNS = [
   { key: 'avg_quality_pct',  label: 'Avg Q%',     type: 'number' as const,  sortable: true },
   { key: 'metric_events',    label: 'Metrics',    type: 'number' as const,  sortable: true },
   { key: 'net_events',       label: 'HAR',        type: 'number' as const,  sortable: true },
+  // #563 — derived rate metrics, hidden until the "Rates" toggle is on.
+  { key: 'rebuffer_ratio',     label: 'Rebuf %',   type: 'number' as const, sortable: true, rate: true },
+  { key: 'stalls_per_hr',      label: 'Stalls/hr', type: 'number' as const, sortable: true, rate: true },
+  { key: 'mean_stall_ms',      label: 'Stall avg', type: 'number' as const, sortable: true, rate: true },
+  { key: 'shifts_per_min',     label: 'Shifts/min', type: 'number' as const, sortable: true, rate: true },
+  { key: 'downshifts_per_min', label: 'Downsh/min', type: 'number' as const, sortable: true, rate: true },
+  { key: 'drop_ratio',         label: 'Drop %',    type: 'number' as const, sortable: true, rate: true },
+  { key: 'errors_per_hr',      label: 'Err/hr',    type: 'number' as const, sortable: true, rate: true },
   { key: '__bundle',         label: '',           type: 'string' as const,  sortable: false },
 ];
+
+// #563 — the rate columns are opt-in (the table is already wide). The
+// toggle persists so an operator who wants rates keeps them.
+const RATES_KEY = 'ismSessionsShowRates';
+const showRates = ref<boolean>((() => {
+  try { return localStorage.getItem(RATES_KEY) === '1'; } catch { return false; }
+})());
+watch(showRates, (v) => {
+  try { localStorage.setItem(RATES_KEY, v ? '1' : '0'); } catch { /* ignore */ }
+});
+// Header loop iterates this so rate columns appear/disappear with the
+// toggle; the body cells gate on showRates in the same position.
+const visibleColumns = computed(() => COLUMNS.filter((c) => showRates.value || !(c as any).rate));
 
 function onHeaderClick(col: typeof COLUMNS[number]) {
   if (!col.sortable) return;
@@ -1027,6 +1107,11 @@ const showCustomInputs = computed(() => activeRangeId.value === 'custom');
 
             <button type="button" class="btn btn-secondary" @click="clearFilters">Clear filters</button>
             <span class="match-count">{{ matchCount }}</span>
+            <!-- #563 — opt-in derived rate-metric columns. -->
+            <label class="ctrl-label rates-toggle" title="Show derived QoE rate columns (rebuffer %, stalls/hr, shifts/min, drop %, errors/hr…)">
+              <input type="checkbox" v-model="showRates" />
+              <span class="ctrl-label-text">Rates</span>
+            </label>
           </div>
 
           <!-- Hierarchical labels filter (issue #474 follow-up).
@@ -1137,7 +1222,7 @@ const showCustomInputs = computed(() => activeRangeId.value === 'custom');
               <thead>
                 <tr>
                   <th
-                    v-for="col in COLUMNS"
+                    v-for="col in visibleColumns"
                     :key="col.key"
                     :class="{ sortable: col.sortable }"
                     :title="col.sortable ? `Sort by ${col.label}` : ''"
@@ -1227,6 +1312,15 @@ const showCustomInputs = computed(() => activeRangeId.value === 'custom');
                   <td><span :style="{ color: fmtPct(r.avg_quality_pct).color }">{{ fmtPct(r.avg_quality_pct).label }}</span></td>
                   <td>{{ r.metric_events || 0 }}</td>
                   <td>{{ r.net_events || 0 }}</td>
+                  <template v-if="showRates">
+                    <td><span :style="{ color: fmtRatioPct(r.rebuffer_ratio, 0.002, 0.004).color }">{{ fmtRatioPct(r.rebuffer_ratio, 0.002, 0.004).label }}</span></td>
+                    <td><span :style="{ color: fmtRate(r.stalls_per_hr, 1, 5).color }">{{ fmtRate(r.stalls_per_hr, 1, 5).label }}</span></td>
+                    <td><span :style="{ color: fmtMsDur(r.mean_stall_ms).color }">{{ fmtMsDur(r.mean_stall_ms).label }}</span></td>
+                    <td><span :style="{ color: fmtRate(r.shifts_per_min, 2, 6).color }">{{ fmtRate(r.shifts_per_min, 2, 6).label }}</span></td>
+                    <td><span :style="{ color: fmtRate(r.downshifts_per_min, 1, 3).color }">{{ fmtRate(r.downshifts_per_min, 1, 3).label }}</span></td>
+                    <td><span :style="{ color: fmtRatioPct(r.drop_ratio, 0.05, 0.2).color }">{{ fmtRatioPct(r.drop_ratio, 0.05, 0.2).label }}</span></td>
+                    <td><span :style="{ color: fmtRate(r.errors_per_hr, 0.5, 2).color }">{{ fmtRate(r.errors_per_hr, 0.5, 2).label }}</span></td>
+                  </template>
                   <td>
                     <a
                       v-if="r.player_id"
