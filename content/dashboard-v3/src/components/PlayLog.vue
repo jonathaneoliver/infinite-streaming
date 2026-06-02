@@ -1257,6 +1257,7 @@ function onRowsWheel(e: WheelEvent) {
 .label-critical { background: #fecaca; color: #7f1d1d; border-color: #fca5a5; }
 .label-warning  { background: #fde68a; color: #854d0e; border-color: #fcd34d; }
 .label-info     { background: #d1fae5; color: #14532d; border-color: #a7f3d0; }
+.label-testing  { background: #e2e8f0; color: #475569; border-color: #cbd5e1; }
 
 .cell {
   white-space: nowrap;

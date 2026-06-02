@@ -37,6 +37,11 @@ const (
 	SevCritical = "critical"
 	SevWarning  = "warning"
 	SevInfo     = "info"
+	// SevTesting tags operator/test-harness KV metadata (run_id, test,
+	// platform, …) so it groups separately from genuine playback signal.
+	// Intentionally NOT ranked by worstSeverity — testing labels must not
+	// tint rows or bump the auto-classification tier. See kvLabelsFromInfo.
+	SevTesting = "testing"
 )
 
 // Synthesized labels carry a `*` prefix on the event portion so the
@@ -649,9 +654,12 @@ func computeControlLabels(r *ctrlRow) []string {
 
 // kvLabelsFromInfo parses a label_changed control_event's `info` JSON
 // (the player's labels map at the moment of change) and renders each
-// pair as one `<sev>=<key>_<value>` label entry. Uses SevInfo because
-// KV labels are operator metadata, not failure signals — they should
-// inherit the existing `info=` chip color in the dashboard.
+// pair as one `<sev>=<key>_<value>` label entry. Uses SevTesting: these
+// KV labels are set by the automated test harness (run_id / test /
+// platform / cycle_id via LabelPlay), so they're test metadata, not
+// playback signal — they group under the dashboard's "Testing" tier
+// rather than drowning real events in Info. testing is unranked in
+// worstSeverity, so these never tint a row or bump classification.
 //
 // Sanitises both key and value to [A-Za-z0-9_-] so the label stays in
 // the strict `<sev>=<event>` grammar.
@@ -670,7 +678,7 @@ func kvLabelsFromInfo(info string) []string {
 		if k == "" || v == "" {
 			continue
 		}
-		out = append(out, SevInfo+"="+k+"_"+v)
+		out = append(out, SevTesting+"="+k+"_"+v)
 	}
 	return out
 }

@@ -622,7 +622,9 @@ components:
         Row-level label inclusion filter. Repeatable; every value
         must be present in the row's `labels[]` (AND-within-includes).
         Format `<severity>=<event>` (with `*` prefix for synthesized
-        labels). Example:
+        labels). Severities: `critical|error|warning|info`, plus the
+        unranked `testing` tier for operator/test-harness KV metadata
+        (e.g. `testing=run_id_...`). Example:
         `?label_has=warning%3Dhttp_4xx&label_has=info%3D%2Apattern_step`.
     LabelNotFilter:
       in: query

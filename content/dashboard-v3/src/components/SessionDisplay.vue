@@ -168,7 +168,7 @@ const sessionEvents = computed<SessionEvent[]>(() => {
       // filter UI treats `*manifest_failure` and `manifest_failure`
       // as the same bucket type.
       if (type.startsWith('*')) type = type.slice(1);
-      if (sev !== 'error' && sev !== 'critical' && sev !== 'warning' && sev !== 'info') continue;
+      if (sev !== 'error' && sev !== 'critical' && sev !== 'warning' && sev !== 'info' && sev !== 'testing') continue;
       out.push({ ts, type, severity: sev, kind });
     }
   }
@@ -403,8 +403,8 @@ const enabledKind = ref<Record<'effect' | 'cause', boolean>>({
 // filter UI sweeps both. Critical leads (user-visible playback
 // breakage like qoe_stall_severe_midplay / frozen / restart_auto_recovery); Error
 // sits next for system-detected error states (player_error).
-type Severity = 'error' | 'critical' | 'warning' | 'info';
-const SEVERITY_ORDER: Severity[] = ['critical', 'error', 'warning', 'info'];
+type Severity = 'error' | 'critical' | 'warning' | 'info' | 'testing';
+const SEVERITY_ORDER: Severity[] = ['critical', 'error', 'warning', 'info', 'testing'];
 const SEVERITY_META: Record<Severity, { label: string; color: string; bg: string; border: string }> = {
   // Critical wears the red palette (worst-looking — user-visible
   // playback breakage); Error wears the orange palette. Swapped
@@ -415,17 +415,21 @@ const SEVERITY_META: Record<Severity, { label: string; color: string; bg: string
   critical: { label: 'Critical', color: '#7f1d1d', bg: '#fee2e2', border: '#fca5a5' },
   warning:  { label: 'Warning',  color: '#854d0e', bg: '#fef3c7', border: '#fcd34d' },
   info:     { label: 'Info',     color: '#1f2937', bg: '#f0fdf4', border: '#a7f3d0' },
+  // Testing wears a muted slate palette (visually recessive — it's
+  // test-harness metadata, not playback signal). Lowest in the order
+  // and hidden by default. See the forwarder's SevTesting (#571).
+  testing:  { label: 'Testing',  color: '#475569', bg: '#f1f5f9', border: '#cbd5e1' },
 };
 
 const expandedTiers = ref<Record<Severity, boolean>>({
-  error: true, critical: true, warning: false, info: false,
+  error: true, critical: true, warning: false, info: false, testing: false,
 });
 function toggleTier(p: Severity) {
   expandedTiers.value[p] = !expandedTiers.value[p];
 }
 
 const visiblePriority = ref<Record<Severity, boolean>>({
-  error: true, critical: true, warning: true, info: false,
+  error: true, critical: true, warning: true, info: false, testing: false,
 });
 function togglePriorityVisibility(p: Severity, e: MouseEvent) {
   e.stopPropagation();
@@ -492,7 +496,7 @@ function eventSeverity(ev: SessionEvent): Severity {
   // Fall back to the legacy numeric `priority` for one release while
   // older forwarder builds + historical rows roll out.
   const sev = (ev as { severity?: string }).severity;
-  if (sev === 'error' || sev === 'critical' || sev === 'warning' || sev === 'info') return sev;
+  if (sev === 'error' || sev === 'critical' || sev === 'warning' || sev === 'info' || sev === 'testing') return sev;
   switch (ev.priority) {
     case 1: return 'error';
     case 2: return 'critical';
@@ -528,7 +532,7 @@ const filteredEvents = computed<AnnotatedEvent[]>(
 );
 
 const tierCounts = computed<Record<Severity, number>>(() => {
-  const c: Record<Severity, number> = { error: 0, critical: 0, warning: 0, info: 0 };
+  const c: Record<Severity, number> = { error: 0, critical: 0, warning: 0, info: 0, testing: 0 };
   for (const ev of kindFilteredEvents.value) c[ev._p]++;
   return c;
 });
@@ -541,7 +545,7 @@ function kindCount(k: 'effect' | 'cause'): number {
 
 const tierTypes = computed<Record<Severity, Array<{ type: string; count: number }>>>(() => {
   const buckets: Record<Severity, Map<string, number>> = {
-    error: new Map(), critical: new Map(), warning: new Map(), info: new Map(),
+    error: new Map(), critical: new Map(), warning: new Map(), info: new Map(), testing: new Map(),
   };
   for (const ev of kindFilteredEvents.value) {
     const t = String(ev.type ?? 'event');

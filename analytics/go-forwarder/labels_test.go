@@ -532,3 +532,33 @@ func assertLabelsEqual(t *testing.T, got, want []string) {
 		t.Fatalf("labels mismatch\n got: %v\nwant: %v", got, want)
 	}
 }
+
+// --- Testing tier: operator/test KV labels (#571) --------------------
+
+func TestKVLabelsUseTestingSeverity(t *testing.T) {
+	got := kvLabelsFromInfo(`{"run_id":"20260530T141942Z","test":"rampup"}`)
+	want := map[string]bool{
+		"testing=run_id_20260530T141942Z": true,
+		"testing=test_rampup":             true,
+	}
+	if len(got) != len(want) {
+		t.Fatalf("want %d testing labels, got %v", len(want), got)
+	}
+	for _, l := range got {
+		if !want[l] {
+			t.Fatalf("operator KV label must be testing= prefixed, got %q in %v", l, got)
+		}
+	}
+}
+
+func TestTestingSeverityUnranked(t *testing.T) {
+	// Testing-only labels register no severity → no row tint, no
+	// classification bump.
+	if sev := worstSeverity([]string{"testing=run_id_x", "testing=test_y"}); sev != "" {
+		t.Fatalf("testing labels must be unranked, got %q", sev)
+	}
+	// A real signal alongside still wins.
+	if sev := worstSeverity([]string{"testing=run_id_x", SevWarning + "=timejump"}); sev != SevWarning {
+		t.Fatalf("real signal must still rank past testing labels, got %q", sev)
+	}
+}
