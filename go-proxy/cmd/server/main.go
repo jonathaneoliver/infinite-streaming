@@ -976,12 +976,12 @@ func (a *App) recordSessionEnd(session SessionData, reason string) {
 	a.emitControlEventForSession(sessionID, source, "session_end", reason)
 
 	// #556 — for a silent death (the player stopped POSTing without a
-	// clean client session_end), synthesize a terminal session_events
-	// frame from the last-known snapshot so the play still gets an
-	// outcome row + QoE outcome labels (vsf/msf/ebvs/tier). Only for
-	// inactive_timeout: operator delete/clear is administrative teardown,
-	// not a play outcome, and a clean client session_end already covers
-	// the happy path (and is deduped below).
+	// clean client play-terminal event), synthesize a terminal
+	// session_events frame from the last-known snapshot so the play still
+	// gets an outcome row + QoE outcome labels (vsf/msf/ebvs/tier). Only
+	// for inactive_timeout: operator delete/clear is administrative
+	// teardown, not a play outcome, and a clean client play_end (or legacy
+	// session_end) already covers the happy path (and is deduped below).
 	if reason == "inactive_timeout" {
 		a.synthesizeTerminalSessionEvent(session, reason)
 	}
@@ -990,7 +990,7 @@ func (a *App) recordSessionEnd(session SessionData, reason string) {
 // synthesizeTerminalSessionEvent publishes one session_events frame
 // stamped as the play's terminal row, derived from the last-known
 // session snapshot. No-op when the client already delivered its own
-// session_end (dedupe on last_event) so we never double-stamp.
+// play-terminal event (dedupe on last_event) so we never double-stamp.
 //
 // playback_status: respect a terminal status the client managed to set
 // before going silent; otherwise classify by whether playback ever
@@ -1010,18 +1010,26 @@ func (a *App) synthesizeTerminalSessionEvent(session SessionData, reason string)
 // terminalFrameForSession derives the synthesized terminal frame from a
 // last-known session snapshot. Pure (no App state) so it's unit-testable.
 // Returns ok=false when no frame should be emitted: a nil session, or
-// the client already delivered its own session_end (dedupe on
+// the client already delivered its own play-terminal event (dedupe on
 // last_event).
+//
+// #554: the play-terminal event is `play_end` (renamed from
+// `session_end`). The dedupe accepts BOTH names so a client that ended
+// cleanly with either is not double-stamped — clients migrate one at a
+// time and historical rows still carry `session_end`. The synthesized
+// frame itself stamps the new canonical `play_end`. (Distinct from the
+// proxy session-lifecycle `session_end` CONTROL event in
+// recordSessionEnd, which is unchanged.)
 func terminalFrameForSession(session SessionData, reason string) (SessionData, bool) {
 	if session == nil {
 		return nil, false
 	}
-	if getString(session, "player_metrics_last_event") == "session_end" {
+	if isPlayTerminalLastEvent(getString(session, "player_metrics_last_event")) {
 		return nil, false // client ended cleanly — don't double-stamp
 	}
 	frame := cloneSession(session)
-	frame["player_metrics_last_event"] = "session_end"
-	frame["player_metrics_trigger_type"] = "session_end"
+	frame["player_metrics_last_event"] = "play_end"
+	frame["player_metrics_trigger_type"] = "play_end"
 	if status := getString(session, "player_metrics_playback_status"); status == "" || status == "in_progress" {
 		if getInt(session, "player_metrics_video_first_frame_time_ms") > 0 {
 			frame["player_metrics_playback_status"] = "user_stopped"
@@ -1031,6 +1039,15 @@ func terminalFrameForSession(session SessionData, reason string) (SessionData, b
 		frame["player_metrics_playback_reason"] = reason
 	}
 	return frame, true
+}
+
+// isPlayTerminalLastEvent reports whether a player_metrics_last_event
+// value marks the play's terminal row. Accepts both the new canonical
+// `play_end` (#554) and the legacy `session_end` so the migration is
+// tolerant in both directions and historical rows keep deduping.
+// Mirrors the forwarder's qoe_labels.go isPlayTerminalEvent.
+func isPlayTerminalLastEvent(lastEvent string) bool {
+	return lastEvent == "play_end" || lastEvent == "session_end"
 }
 
 func (s *NftShapeStep) UnmarshalJSON(data []byte) error {

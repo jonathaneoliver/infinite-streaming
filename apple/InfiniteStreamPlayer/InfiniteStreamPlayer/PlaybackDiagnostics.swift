@@ -172,7 +172,7 @@ final class PlaybackDiagnostics: ObservableObject {
     // human-readable `lastError` / `itemError` strings whenever
     // describeError() runs. Forwarder error_classifier.go maps the
     // (domain, code) tuple to a controlled playback_reason vocab on
-    // session_end rows; the dashboard surfaces them as Error Code /
+    // play_end rows; the dashboard surfaces them as Error Code /
     // Error Domain tiles. Sticky after first observation so a
     // heartbeat after a transient error still carries the most recent
     // error context — cleared on reset() (play boundary).
@@ -232,8 +232,8 @@ final class PlaybackDiagnostics: ObservableObject {
     @Published var stallStuck: Bool = false
 
     /// Terminal status / reason for the play. Nil while in_progress;
-    /// set exactly once at session_end via markTerminal(). Read by
-    /// PlayerViewModel.buildMetricsPayload to stamp the session_end
+    /// set exactly once at play_end via markTerminal(). Read by
+    /// PlayerViewModel.buildMetricsPayload to stamp the play_end
     /// row's `player_metrics_playback_status` / `_playback_reason`.
     /// Cleared by resetForFreshPlay (Reload button); PRESERVED across
     /// retry() because if the play already hit a terminal state it
@@ -243,7 +243,7 @@ final class PlaybackDiagnostics: ObservableObject {
 
     /// Terminal error captured from the fatal AVFoundation NSError that
     /// ended the play (#557). Stamped once, alongside markTerminal, onto
-    /// the session_end row's `player_metrics_terminal_error_*` so the
+    /// the play_end row's `player_metrics_terminal_error_*` so the
     /// forwarder's error_classifier can derive a specific failure reason.
     /// Code 0 + empty domain = "no error captured" (a clean
     /// completed / user_stopped end). Cleared by resetForFreshPlay.
@@ -275,7 +275,7 @@ final class PlaybackDiagnostics: ObservableObject {
 
     /// Capture the fatal NSError that ended the play (#557). First call
     /// wins, mirroring markTerminal, so the first detected error is the
-    /// one stamped on the session_end row. No-op for a zero code +
+    /// one stamped on the play_end row. No-op for a zero code +
     /// empty domain (nothing to record).
     func markTerminalError(code: Int, domain: String, details: String) {
         guard terminalErrorCode == 0 && terminalErrorDomain.isEmpty else { return }
@@ -285,11 +285,11 @@ final class PlaybackDiagnostics: ObservableObject {
         terminalErrorDetails = details
     }
 
-    /// Returns the playback_reason to stamp on a session_end row,
+    /// Returns the playback_reason to stamp on a play_end row,
     /// given a base reason and the current state + sticky durations.
     /// Refines the generic `"user_quit"` into ended_buffering /
     /// ended_stalling (or their `_long` variants) when the player was
-    /// buffering / stalled at the moment iOS emits session_end.
+    /// buffering / stalled at the moment iOS emits play_end.
     /// Operator-explicit reasons (`app_backgrounded`, `app_terminated`,
     /// `next_content_selected`) pass through untouched. Lives on
     /// PlaybackDiagnostics because every input is already here.

@@ -126,7 +126,7 @@ private fun AppRoot() {
         vm.setHudVisible(false)
     }
     BackHandler(enabled = !state.settingsOpen && !state.hudVisible && route == Route.Playback) {
-        // #550 Phase 2 — emit session_end with user_stopped (or
+        // #550 Phase 2 — emit play_end with user_stopped (or
         // abandoned_start if EBVS conditions met) before navigating
         // away. Stamping happens here at the back-press because the
         // route flip + downstream LaunchedEffect tear down the

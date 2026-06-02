@@ -1120,8 +1120,8 @@ final class PlayerViewModel: ObservableObject {
     }
 
     /// Mark the play as terminated with the given Phase 2 status +
-    /// reason and emit a single session_end event so the dashboard /
-    /// CH see the terminal row. Idempotent — only the FIRST call
+    /// reason and emit a single play_end event (#554; was session_end)
+    /// so the dashboard / CH see the terminal row. Idempotent — only the FIRST call
     /// stamps the terminal state (a user_quit followed by a fatal
     /// error a moment later still reads as user_stopped, which matches
     /// reality from the operator's perspective).
@@ -1141,7 +1141,7 @@ final class PlayerViewModel: ObservableObject {
     /// stays user_stopped / user_quit (user changed their mind quickly).
     /// Mirrors the forwarder's default qoe_thresholds.outcomes.ebvs_threshold_ms
     /// (10s); kept as a Swift constant so the client decision happens
-    /// in one place and the row is stamped right at session_end.
+    /// in one place and the row is stamped right at play_end.
     private static let ebvsThresholdSeconds: TimeInterval = 10
 
     /// Convenience for the playback-back-button tap (and tvOS exit
@@ -1163,15 +1163,18 @@ final class PlayerViewModel: ObservableObject {
     func endSession(status: String, reason: String) {
         // No-op on subsequent calls — diagnostics.markTerminal enforces
         // first-call-wins. Even when terminal is already set we still
-        // emit a session_end (the prior emit may have been swallowed
+        // emit a play_end (the prior emit may have been swallowed
         // by background suspension), but the values stay stable.
         let alreadyTerminal = diagnostics.terminalStatus != nil
         diagnostics.markTerminal(status: status, reason: reason)
         if alreadyTerminal {
-            NSLog("[endSession] terminal already=\(diagnostics.terminalStatus ?? "?") — re-emitting session_end for delivery")
+            NSLog("[endSession] terminal already=\(diagnostics.terminalStatus ?? "?") — re-emitting play_end for delivery")
         }
         Task { [weak self] in
-            await self?.sendPlayerMetrics(event: "session_end")
+            // #554: the play-terminal event is `play_end` (renamed from
+            // `session_end`). The forwarder still classifies both names,
+            // so historical rows keep working.
+            await self?.sendPlayerMetrics(event: "play_end")
         }
     }
 
@@ -1252,10 +1255,10 @@ final class PlayerViewModel: ObservableObject {
         }
         // willTerminate fires on hard-quit (swipe-up from app switcher).
         // Synchronous notification — we get a few hundred ms before iOS
-        // reaps us. Mark terminal + fire-and-forget the session_end.
+        // reaps us. Mark terminal + fire-and-forget the play_end.
         // Best-effort: if iOS reaps us mid-flight the row stays
-        // in_progress and the forwarder treats absent session_end as
-        // "user closed without notifying."
+        // in_progress and the forwarder treats an absent play-terminal
+        // event as "user closed without notifying."
         willTerminateObserver = nc.addObserver(
             forName: UIApplication.willTerminateNotification,
             object: nil, queue: .main
@@ -1401,11 +1404,11 @@ final class PlayerViewModel: ObservableObject {
         }
     }
 
-    /// Stamp the play as fatally terminated and emit session_end. The
+    /// Stamp the play as fatally terminated and emit play_end. The
     /// status is `start_failure` when the player never crossed first
     /// frame, `mid_stream_failure` after. When a fatal NSError is in
     /// hand (#557) capture its domain/code/description into the terminal
-    /// error fields so the session_end row carries `terminal_error_*` and
+    /// error fields so the play_end row carries `terminal_error_*` and
     /// the forwarder's error_classifier can derive a specific reason.
     /// The retry-exhaustion path passes error=nil (only a reason string).
     private func markFatalTerminal(error: Error?, message: String) {
@@ -2432,11 +2435,11 @@ extension PlayerViewModel {
             // ── #550 Phase 2: outcome + error ──────────────────────
             // playback_status defaults to 'in_progress' for any
             // non-terminal payload; iOS sets explicit values for
-            // session_end events (completed / user_stopped / failed_*).
+            // play_end events (completed / user_stopped / failed_*).
             // playback_reason mirrors player_state during in_progress;
             // classifier-derived on terminal rows.
             // playback_status / _reason — heartbeats default to
-            // in_progress + the current state. session_end events
+            // in_progress + the current state. play_end events
             // (and any heartbeat after markTerminal fires) pick up
             // the terminal values diagnostics stamped. Once markTerminal
             // has run, EVERY subsequent payload carries the terminal

@@ -147,7 +147,7 @@ public final class PlaybackMetrics {
     private String lastErrorDetails = "";
 
     // #550 Phase 2 — terminal status/reason. Null while in_progress;
-    // set exactly once at session_end via markTerminal(). Preserved
+    // set exactly once at play_end via markTerminal(). Preserved
     // across retry(); cleared on play-boundary reset (loadStream).
     // Read by buildPayload() to stamp every payload AFTER the terminal
     // event with the terminal values (so a late-arriving heartbeat
@@ -931,7 +931,7 @@ public final class PlaybackMetrics {
             // once endSession() runs the sticky terminal value lands
             // on this and every subsequent payload — covers the case
             // where a heartbeat races the activity teardown after the
-            // session_end event fires.
+            // play_end event fires.
             p.put("player_metrics_playback_status",
                 terminalStatus != null ? terminalStatus : "in_progress");
             p.put("player_metrics_playback_reason",
@@ -945,7 +945,7 @@ public final class PlaybackMetrics {
             }
             // #557 — on a terminal row, surface the fatal error in the
             // dedicated terminal_error_* slot too (was always empty
-            // before, so the failure reason was lost on the session_end
+            // before, so the failure reason was lost on the play_end
             // row). The forwarder's error_classifier + dashboard tiles
             // read terminal_error_* specifically; mirror the error_*
             // capture above, gated on the play having ended.
@@ -1156,19 +1156,21 @@ public final class PlaybackMetrics {
             // No per-event "lastBufferingDurationS" yet on Android —
             // approximate via the running buffering bucket since the
             // most recent state transition. Acceptable: dashboards
-            // only see this on session_end so the value is stable.
+            // only see this on play_end so the value is stable.
             long durMs = bufferingTimeMs;  // accumulated buffering this play
             return durMs >= LONG_STATE_THRESHOLD_MS ? "ended_buffering_long" : "ended_buffering";
         }
         return baseReason;
     }
 
-    /** Mark terminal + emit a single session_end event. Subsequent
-     *  payloads automatically pick up the terminal values from
-     *  buildPayload's terminalStatus fallback. */
+    /** Mark terminal + emit a single play_end event (#554; renamed from
+     *  session_end — the forwarder still classifies both names so
+     *  historical rows keep working). Subsequent payloads automatically
+     *  pick up the terminal values from buildPayload's terminalStatus
+     *  fallback. */
     public void endSession(String status, String reason) {
         markTerminal(status, reason);
-        sendEvent("session_end", Collections.<String, Object>emptyMap());
+        sendEvent("play_end", Collections.<String, Object>emptyMap());
     }
 
     /** Back press / system back. Picks EBVS-or-user_quit by whether

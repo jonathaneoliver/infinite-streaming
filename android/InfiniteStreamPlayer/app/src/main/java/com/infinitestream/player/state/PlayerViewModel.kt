@@ -149,7 +149,7 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
      *  route. Picks user_stopped vs abandoned_start based on first-frame
      *  + elapsed-since-play-start (EBVS). Forwards to PlaybackMetrics
      *  which classifies ended_buffering / ended_stalling refinement
-     *  client-side before emitting session_end. */
+     *  client-side before emitting play_end. */
     fun endSessionForUserBack() {
         metrics?.endSessionForUserBack()
     }
@@ -918,7 +918,7 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
                     return
                 }
                 // No auto-recovery → this error is terminal. Phase 2:
-                // metrics emits a session_end with start_failure (no
+                // metrics emits a play_end with start_failure (no
                 // first frame yet) or mid_stream_failure (post-first-
                 // frame), stamping playback_status into CH.
                 metrics?.markFatalTerminal(error.message ?: "")

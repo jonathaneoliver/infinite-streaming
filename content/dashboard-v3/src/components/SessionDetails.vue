@@ -90,7 +90,8 @@ const fields = computed(() => {
   // #550 Phase 2 + Phase 4 fields — pulled from player_metrics where
   // available. iOS is the canonical source for both buckets; external
   // (UA-parsed) players get partial device coverage and "in_progress"
-  // status by default until they emit a terminal session_end.
+  // status by default until they emit a terminal play_end (issue #554;
+  // legacy rows carry session_end).
   const pm: any = (p as any).player_metrics ?? {};
   const playbackStatus = typeof pm.playback_status === 'string' ? pm.playback_status : '';
   const playbackReason = typeof pm.playback_reason === 'string' ? pm.playback_reason : '';
