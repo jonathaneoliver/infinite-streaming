@@ -394,6 +394,16 @@ function createChartInstance(Chart: any): any {
       maintainAspectRatio: false,
       animation: false,
       interaction: { mode: 'nearest', intersect: false },
+      // Decimation (issue: chart render cost). Our datasets are already
+      // pre-parsed {x:number,y:number} sorted ascending by x, so we can
+      // turn off Chart.js parsing and mark them normalized — both
+      // required for the decimation plugin. LTTB reduces each series to
+      // ~`samples` representative points within the visible range (peaks
+      // preserved), so a 16k-point series draws ~1k points instead of
+      // 16k. Cuts redraw time dramatically while keeping the deep history
+      // the doubled caps retain.
+      parsing: false,
+      normalized: true,
       layout: {
         padding: {
           // Reserve room on the right edge for the y2 axis. When no y2
@@ -403,6 +413,11 @@ function createChartInstance(Chart: any): any {
         },
       },
       plugins: {
+        decimation: {
+          enabled: true,
+          algorithm: 'lttb',
+          samples: 1000,
+        },
         legend: {
           position: 'bottom',
           labels: {
