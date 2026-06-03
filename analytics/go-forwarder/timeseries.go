@@ -660,7 +660,7 @@ func buildSamplesQuery(cfg config, sel streamSelection, params timeseriesParams)
 		dtScope = append(dtScope, "ts >= now() - INTERVAL 1 HOUR")
 	}
 	q := fmt.Sprintf(`SELECT %s, token FROM (
-	  SELECT base.*, ifNull(dt.token, '') AS token
+	  SELECT base.*, ifNull(dt.token, '') AS token, ifNull(dt.arr, []) AS dl_arr
 	  FROM (SELECT * FROM %s.%s WHERE %s ORDER BY ts ASC LIMIT %d) base
 	  %s
 	) FORMAT JSONEachRow`,
@@ -677,12 +677,25 @@ func buildSamplesQuery(cfg config, sel streamSelection, params timeseriesParams)
 // the ReplacingMergeTree to the latest score.
 func derivedEventTokenJoinSQL(db, scope string) string {
 	return fmt.Sprintf(`LEFT JOIN (
-	  SELECT player_id, ts, argMax(token, scored_at) AS token
-	  FROM %s.derived_tokens
-	  WHERE surface = 'event' AND %s
-	  GROUP BY player_id, ts
+	  SELECT tok.player_id AS player_id, tok.ts AS ts, tok.token AS token, ifNull(lab.arr, []) AS arr
+	  FROM (
+	    SELECT player_id, ts, argMax(token, scored_at) AS token
+	    FROM %s.derived_tokens
+	    WHERE surface = 'event' AND %s
+	    GROUP BY player_id, ts
+	  ) tok
+	  LEFT JOIN (
+	    SELECT player_id, ts, groupArray(sl) AS arr
+	    FROM (
+	      SELECT player_id, ts, condition,
+	             argMax(concat(severity, '=', label), scored_at) AS sl
+	      FROM %s.derived_labels WHERE surface = 'event' AND %s
+	      GROUP BY player_id, ts, condition
+	    )
+	    GROUP BY player_id, ts
+	  ) lab ON tok.player_id = lab.player_id AND tok.ts = lab.ts
 	) dt ON base.player_id = dt.player_id AND base.ts = dt.ts`,
-		db, scope)
+		db, scope, db, scope)
 }
 
 func buildNetworkQuery(cfg config, sel streamSelection, params timeseriesParams) (string, map[string]string, error) {
@@ -741,7 +754,7 @@ func buildNetworkQuery(cfg config, sel streamSelection, params timeseriesParams)
 		dtScope = append(dtScope, "ts >= now() - INTERVAL 1 HOUR")
 	}
 	q := fmt.Sprintf(`SELECT %s, token FROM (
-	  SELECT base.*, ifNull(dt.token, '') AS token
+	  SELECT base.*, ifNull(dt.token, '') AS token, ifNull(dt.arr, []) AS dl_arr
 	  FROM (SELECT * FROM %s.network_requests WHERE %s ORDER BY ts ASC LIMIT %d) base
 	  %s
 	) FORMAT JSONEachRow`,
@@ -762,14 +775,35 @@ func buildNetworkQuery(cfg config, sel streamSelection, params timeseriesParams)
 // derived_tokens.entry_fingerprint — `entry_fingerprint` for network_requests,
 // `event_fingerprint` for session_events (the batch stores either under
 // entry_fingerprint; surface distinguishes them).
+// A SINGLE join exposing both `token` (derived_tokens) and `arr` (the #506
+// per-row anomaly labels, derived_labels) — kept to one base join on purpose:
+// CH 24.8's analyzer can't resolve `ts` from `base.*` across two base joins,
+// so the label aggregate is folded in as an inner join in its own scope. The
+// label rows for a given (player_id, ts, entry_fingerprint) always have a token
+// row (a label anchors on a tokenised row), so LEFT JOIN labels onto tokens
+// loses nothing.
 func derivedTokenJoinSQL(db, baseFpCol, scope string) string {
 	return fmt.Sprintf(`LEFT JOIN (
-	  SELECT player_id, ts, entry_fingerprint, argMax(token, scored_at) AS token
-	  FROM %s.derived_tokens
-	  WHERE %s
-	  GROUP BY player_id, ts, entry_fingerprint
+	  SELECT tok.player_id AS player_id, tok.ts AS ts, tok.entry_fingerprint AS entry_fingerprint,
+	         tok.token AS token, ifNull(lab.arr, []) AS arr
+	  FROM (
+	    SELECT player_id, ts, entry_fingerprint, argMax(token, scored_at) AS token
+	    FROM %s.derived_tokens
+	    WHERE %s
+	    GROUP BY player_id, ts, entry_fingerprint
+	  ) tok
+	  LEFT JOIN (
+	    SELECT player_id, ts, entry_fingerprint, groupArray(sl) AS arr
+	    FROM (
+	      SELECT player_id, ts, entry_fingerprint, condition,
+	             argMax(concat(severity, '=', label), scored_at) AS sl
+	      FROM %s.derived_labels WHERE %s
+	      GROUP BY player_id, ts, entry_fingerprint, condition
+	    )
+	    GROUP BY player_id, ts, entry_fingerprint
+	  ) lab ON tok.player_id = lab.player_id AND tok.ts = lab.ts AND tok.entry_fingerprint = lab.entry_fingerprint
 	) dt ON base.player_id = dt.player_id AND base.ts = dt.ts AND base.%s = dt.entry_fingerprint`,
-		db, scope, baseFpCol)
+		db, scope, db, scope, baseFpCol)
 }
 
 // buildSelectColumns produces the SELECT projection list. `ts` is
@@ -782,6 +816,12 @@ func buildSelectColumns(cols []string) string {
 		switch c {
 		case "ts":
 			parts = append(parts, "toString(ts) AS ts")
+		case "labels":
+			// #506 — fold the per-row derived anomaly labels (dl_arr, from
+			// derivedLabelJoinSQL) into the row's labels[] so they render as
+			// chips in NetworkLog / PlayLog with no dashboard change. The
+			// surrounding query always exposes dl_arr (ifNull(...,[])).
+			parts = append(parts, "arrayConcat(labels, dl_arr) AS labels")
 		default:
 			parts = append(parts, c)
 		}
