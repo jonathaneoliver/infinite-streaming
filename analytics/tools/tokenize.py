@@ -126,14 +126,44 @@ EVENT_TOKEN_MAP = {
 }
 
 
+def _event_last(r):
+    """last_event for a session_events row — flat CH column or nested player_metrics."""
+    le = r.get("last_event")
+    if le:
+        return le
+    pm = r.get("player_metrics") or {}
+    return pm.get("last_event")
+
+
 def event_tokens(event_rows):
     """[(ts, token)] from session_events lifecycle markers. Heartbeats/unknowns dropped."""
     out = []
     for r in event_rows:
         pm = r.get("player_metrics") or {}
-        tok = EVENT_TOKEN_MAP.get(pm.get("last_event"))
+        tok = EVENT_TOKEN_MAP.get(_event_last(r))
         if tok:
             out.append((r.get("ts") or r.get("timestamp") or pm.get("event_time") or "", tok))
+    return out
+
+
+def tokenize_event_rows(event_rows):
+    """Per-row event tokens for the #506 derived-token writer, keyed by (player_id, ts) —
+    the event-row identity the SSE layer already uses (session_events dedupes by ts; the
+    live table has no event_fingerprint column). ONE (ts, fp, surface, token) per row whose
+    last_event maps to a lifecycle marker (STALL_START / RATE_UP / FIRST_FRAME / …);
+    heartbeats and unrecognised events are skipped (no token → the dashboard shows —). fp=0
+    so these land distinctly from network rows (real nonzero entry_fingerprint) in the
+    shared derived_tokens table; the events read-path join keys on (player_id, ts) +
+    surface='event'."""
+    out = []
+    for r in event_rows:
+        tok = EVENT_TOKEN_MAP.get(_event_last(r))
+        if not tok:
+            continue
+        ts = r.get("ts") or r.get("timestamp") or ""
+        if not ts:
+            continue
+        out.append((ts, 0, "event", tok))
     return out
 
 
