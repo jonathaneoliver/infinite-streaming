@@ -57,6 +57,13 @@ export interface Stream<T> {
   rangeBounds: Ref<{ min: number; max: number } | null>;
   loading: Ref<boolean>;
   error: Ref<string | null>;
+  /** Bumped whenever the cache is RESET (a re-subscribe to a new
+   *  player/play/time window cleared all rows). Forward-only consumers
+   *  (chart/timeline watermark drains) watch this to reset their
+   *  watermark + clear their datasets and re-drain from scratch — needed
+   *  for refetch-on-pan (#587), where re-subscribing to an OLDER window
+   *  would otherwise be missed by a watermark sitting at the live edge. */
+  epoch: Ref<number>;
 }
 
 export interface UseSessionTimeSeriesOpts {
@@ -159,6 +166,12 @@ export function useSessionTimeSeries(
   const controlVersion = ref(0);
   const avmetricsVersion = ref(0);
 
+  // Bumped on every cache RESET (re-subscribe). Shared across all four
+  // streams so forward-only consumers can detect "the cache was wiped
+  // and reloaded with a different window" and re-drain from scratch
+  // (#587 refetch-on-pan).
+  const cacheEpoch = ref(0);
+
   const eventsBounds = ref<{ min: number; max: number } | null>(null);
   const networkBounds = ref<{ min: number; max: number } | null>(null);
   const controlBounds = ref<{ min: number; max: number } | null>(null);
@@ -231,6 +244,9 @@ export function useSessionTimeSeries(
     controlError.value = null;
     avmetricsError.value = null;
     lastEventId = '';
+    // Signal consumers that the cache was wiped (#587) so watermark
+    // drains reset rather than missing the freshly-loaded window.
+    cacheEpoch.value++;
   }
 
   /** Build the SSE URL from current opts + identity refs. */
@@ -506,6 +522,7 @@ export function useSessionTimeSeries(
       rangeBounds: boundsRef,
       loading: loadingRef,
       error: errorRef,
+      epoch: cacheEpoch,
     };
   }
 
@@ -526,9 +543,26 @@ export function useSessionTimeSeries(
   const SOFT_CAP_SAMPLES = 20000;
   const SOFT_CAP_NETWORK = 4000;
   const SOFT_CAP_EVENTS = 20000;
-  function trimToCap<T>(arr: T[], cap: number): boolean {
+  // Trim the oldest rows past `cap` AND advance the stream's
+  // rangeBounds.min to the new oldest ts. The bounds update is
+  // essential for refetch-on-pan (#587): the brush rail's left edge and
+  // the "is this window already cached?" check both read rangeBounds.min,
+  // so leaving it at the pre-trim value made the UI think evicted rows
+  // were still in the cache (panning there showed blank, no refetch).
+  function trimToCap(
+    arr: Record<string, unknown>[],
+    cap: number,
+    boundsRef: Ref<{ min: number; max: number } | null>,
+  ): boolean {
     if (arr.length > cap) {
       arr.splice(0, arr.length - cap);
+      const cur = boundsRef.value;
+      if (cur) {
+        const newMin = tsOf(arr[0]);
+        if (Number.isFinite(newMin) && newMin !== cur.min) {
+          boundsRef.value = { min: newMin, max: cur.max };
+        }
+      }
       return true;
     }
     return false;
@@ -536,10 +570,10 @@ export function useSessionTimeSeries(
   watch(
     [eventsVersion, networkVersion, controlVersion, avmetricsVersion],
     () => {
-      if (trimToCap(eventsArr.value, SOFT_CAP_SAMPLES)) triggerRef(eventsArr);
-      if (trimToCap(networkArr.value, SOFT_CAP_NETWORK)) triggerRef(networkArr);
-      if (trimToCap(controlArr.value, SOFT_CAP_EVENTS)) triggerRef(controlArr);
-      if (trimToCap(avmetricsArr.value, SOFT_CAP_EVENTS)) triggerRef(avmetricsArr);
+      if (trimToCap(eventsArr.value, SOFT_CAP_SAMPLES, eventsBounds)) triggerRef(eventsArr);
+      if (trimToCap(networkArr.value, SOFT_CAP_NETWORK, networkBounds)) triggerRef(networkArr);
+      if (trimToCap(controlArr.value, SOFT_CAP_EVENTS, controlBounds)) triggerRef(controlArr);
+      if (trimToCap(avmetricsArr.value, SOFT_CAP_EVENTS, avmetricsBounds)) triggerRef(avmetricsArr);
     },
   );
 

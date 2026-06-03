@@ -1235,6 +1235,21 @@ watch(
   },
 );
 
+// Cache reset (#587) — the events stream re-subscribed to a different
+// window (refetch-on-pan, or returning to live). Our forward-only
+// watermark would miss the freshly-loaded window (it may be OLDER than
+// what we last drained), so reset and re-drain from scratch.
+watch(
+  () => props.eventsStream.epoch.value,
+  () => {
+    pendingLive.length = 0;
+    lastIngestedMs = -Infinity;
+    ++backfillToken; // abort any in-flight backfill from the prior window
+    for (const arr of dataset) arr.length = 0;
+    void drainNewRows();
+  },
+);
+
 // React to the coordinated visible range. `effectiveRange` collapses
 // the old (version, paused, lastSampleMs) tuple — it changes whenever
 // the range pin shifts (chart pan, brush drag, Live toggle) AND when
