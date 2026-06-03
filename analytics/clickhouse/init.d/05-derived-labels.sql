@@ -15,7 +15,7 @@
 -- The read API surfaces these two ways: (1) per-row — merged into the network/event row's
 -- labels so it chips in NetworkLog / PlayLog; (2) per-play — rolled up by play_id into
 -- label_histogram so sessions.html can filter. label is the `,`/`=`-free filter key
--- (vomm_<condition>_surprise); `score` is the transition's surprise in nats.
+-- (unexpected_<condition>); `score` is the transition's surprise in nats.
 
 CREATE TABLE IF NOT EXISTS infinite_streaming.derived_labels
 (

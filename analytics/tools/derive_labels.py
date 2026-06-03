@@ -16,7 +16,7 @@ surprising under the fault-condition model — only atypical reactions clear the
 
 Reads ClickHouse directly (reuses derive_tokens.py's ch()/fetch_rows()); reuses scorer.py's
 model + tokenize.py's cross-stream tokeniser/episodes. No hand-built reaction taxonomy: the
-tag is the condition (vomm_<condition>_surprise) + a severity from the surprise magnitude.
+tag is the condition (unexpected_<condition>) + a severity from the surprise magnitude.
 
   python3 analytics/tools/derive_labels.py --train-days 7 --score-hours 12 [--dry-run]
 """
@@ -126,7 +126,7 @@ def main():
                     efp, surf = (0, "event") if fp is None else (fp, surface or "net")
                     rows.append({"ts": ts, "player_id": b["pid"], "play_id": play,
                                  "entry_fingerprint": efp, "surface": surf, "condition": cond,
-                                 "label": f"vomm_{cond}_surprise",
+                                 "label": f"unexpected_{cond}",
                                  "severity": severity_for(surprise, thr), "score": round(surprise, 3),
                                  "model_version": args.model_version, "scored_at": scored_at})
                     n += 1
