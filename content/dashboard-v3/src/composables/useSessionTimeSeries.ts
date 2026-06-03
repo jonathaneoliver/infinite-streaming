@@ -519,9 +519,13 @@ export function useSessionTimeSeries(
   // ascending by ts (insertSortedDedup), so the oldest are at the front.
   // Panning past the retained window triggers a fresh range fetch at the
   // upper layer.
-  const SOFT_CAP_SAMPLES = 10000;
-  const SOFT_CAP_NETWORK = 2000;
-  const SOFT_CAP_EVENTS = 10000;
+  // Doubled from the original #582 values to retain a longer focus-window
+  // history (~5.4h at 1 Hz) for 3h+ sessions while #587 (on-demand
+  // refetch of evicted windows) is blocked on server support. Still a
+  // hard memory bound — ~2× the footprint, far below the old unbounded leak.
+  const SOFT_CAP_SAMPLES = 20000;
+  const SOFT_CAP_NETWORK = 4000;
+  const SOFT_CAP_EVENTS = 20000;
   function trimToCap<T>(arr: T[], cap: number): boolean {
     if (arr.length > cap) {
       arr.splice(0, arr.length - cap);

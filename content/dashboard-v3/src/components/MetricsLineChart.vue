@@ -96,11 +96,11 @@ let dataset: Array<Array<{ x: number; y: number }>> = [];
 
 /** Hard cap on points kept per series (issue #582). A pure memory
  *  bound: the oldest points are dropped once a series exceeds this, so a
- *  tab open for hours can't grow the renderer to multiple GB. ~8000
- *  points is well beyond any visible window (>2 h at 1 Hz) so pan-back
- *  stays generous; it's the cache's eviction window, not zoom, that
- *  determines how far back data actually exists. */
-const MAX_POINTS_PER_SERIES = 8000;
+ *  tab open for hours can't grow the renderer to multiple GB. Doubled to
+ *  16000 (~4.4 h at 1 Hz) to match the doubled cache cap so the charts
+ *  cover the same deep history while #587 (refetch) is blocked. It's the
+ *  cache's eviction window, not zoom, that bounds how far back data goes. */
+const MAX_POINTS_PER_SERIES = 16000;
 
 /** Listeners attached to `window` outlive this component's canvas (which
  *  GCs when the chart is destroyed), so they must be removed on unmount
