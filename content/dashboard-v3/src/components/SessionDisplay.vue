@@ -425,6 +425,40 @@ watch(
   { immediate: true },
 );
 
+/* True start of the CURRENT play (#587). The rail's left edge must
+ * anchor to where THIS play_id began, not `current_play.started_at` —
+ * that's a player-level field that goes stale when the play rotates
+ * (a content switch gives a new play_id but leaves started_at pointing
+ * at the prior play, so the rail stretched back hours to a play that
+ * isn't loaded). Query the earliest archived event for the live play_id
+ * instead; re-query whenever the play_id changes. */
+const playStartMs = ref<number | null>(null);
+watch(
+  () => (livePlayer.value?.current_play as { play_id?: string } | null | undefined)?.play_id
+    ?? playIdRef.value ?? null,
+  async (pid) => {
+    playStartMs.value = null;
+    const player = apiPlayerIdRef.value;
+    if (!pid || !player) return;
+    try {
+      const url = `/analytics/api/v2/events?player_id=${encodeURIComponent(player)}`
+        + `&play_id=${encodeURIComponent(pid)}&order=asc&limit=1`;
+      const r = await fetch(url);
+      if (!r.ok) return;
+      const j = await r.json();
+      const ts = j?.items?.[0]?.ts as string | undefined;
+      if (ts) {
+        const ms = Date.parse(ts);
+        // Guard against a race where the play_id changed mid-fetch.
+        const curPid = (livePlayer.value?.current_play as { play_id?: string } | null | undefined)?.play_id
+          ?? playIdRef.value ?? null;
+        if (Number.isFinite(ms) && curPid === pid) playStartMs.value = ms;
+      }
+    } catch { /* network/parse failure → fall back to cache min */ }
+  },
+  { immediate: true },
+);
+
 /** Effective time range for the brush rail. Reads the cached
  *  rangeBounds of the samples stream as the historical span; always
  *  extends `max` with `coord.lastSampleMs` so the rail's right edge
@@ -435,18 +469,17 @@ watch(
 const timeRange = computed<{ min: number; max: number } | null>(() => {
   const ar = timeseries.events.rangeBounds.value;
   const live = coord.state.lastSampleMs || 0;
-  // Extend the rail's LEFT edge to the play's start (#587) so the
+  // Extend the rail's LEFT edge to THIS play's true start (#587) so the
   // operator can drag the focus bar into windows the recency cap has
   // evicted from the cache — panning there fires the refetch watcher
-  // above. Without this the rail only spans the cached window, leaving
-  // evicted history unreachable. Falls back to the cache min when the
-  // start time is unknown.
-  const startStr = (livePlayer.value?.current_play as { started_at?: string } | null | undefined)?.started_at;
-  const playStart = startStr ? Date.parse(startStr) : NaN;
-  const haveStart = Number.isFinite(playStart) && playStart > 0;
+  // above. Anchored to the play_id's earliest event (playStartMs), NOT
+  // the stale player-level current_play.started_at. Falls back to the
+  // cache min when the start is unknown.
+  const playStart = playStartMs.value;
+  const haveStart = playStart != null && Number.isFinite(playStart) && playStart > 0;
   if (!ar && !live && !haveStart) return null;
   let min = ar?.min ?? 0;
-  if (haveStart && (min === 0 || playStart < min)) min = playStart;
+  if (haveStart && (min === 0 || (playStart as number) < min)) min = playStart as number;
   let max = Math.max(ar?.max ?? 0, live);
   if (!min) min = max;
   if (!max) max = min;
@@ -799,6 +832,11 @@ const draftRange = ref<{ min: number; max: number } | null>(null);
  *  gesturing, else the committed coordinated range. */
 const railRange = computed(() => draftRange.value ?? coord.effectiveRange.value);
 const windowSpanMs = computed(() => Math.max(1, railRange.value.max - railRange.value.min));
+/** Is the focus window parked at the live edge? Drives the rail pill —
+ *  it used to be hardcoded "· at end", which lied once the operator
+ *  pinned to (or panned into) a historical window. Reads railRange so it
+ *  tracks the in-flight draft during a drag too. */
+const atLiveEdge = computed(() => coord.isAtLiveEdge(railRange.value.max));
 
 /** Live toggle checked rule — same across every surface. */
 const brushLiveChecked = computed(() => coord.state.range === null);
@@ -1212,11 +1250,11 @@ function skipToEnd() {
           v-if="timeRange"
           class="rail-focus-label"
           :style="{
-            left: ((brushRange.min - scrubMin) / Math.max(1, scrubMax - scrubMin) * 100) + '%',
-            right: ((scrubMax - brushRange.max) / Math.max(1, scrubMax - scrubMin) * 100) + '%',
+            left: Math.max(0, (railRange.min - scrubMin) / Math.max(1, scrubMax - scrubMin) * 100) + '%',
+            right: Math.max(0, (scrubMax - railRange.max) / Math.max(1, scrubMax - scrubMin) * 100) + '%',
           }"
         >
-          <span class="focus-pill">{{ fmtDurShort(windowSpanMs) }} · at end</span>
+          <span class="focus-pill">{{ fmtDurShort(windowSpanMs) }}{{ atLiveEdge ? ' · at end' : ' · ends ' + fmtTime(railRange.max) }}</span>
           <span class="focus-pill subtle">{{ samplesCount.toLocaleString() }} rendered</span>
         </span>
         <span class="rail-edge-label">{{ fmtTime(scrubMax) }}</span>
