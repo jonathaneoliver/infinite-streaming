@@ -847,19 +847,21 @@ function onRailWheel(e: WheelEvent) {
   if (!rail || !r) return;
   // Base the next window on the in-flight draft so successive wheel
   // ticks compound before the debounced commit (#590).
-  // Horizontal scroll → pan the brush. deltaX/railWidth maps directly
-  // to fraction-of-full-data-range so a one-rail-width swipe pans by
-  // the entire visible data span. Unlike the line charts, the brush
-  // is CLAMPED to [r.min, r.max] so it never leaves the rail. See
-  // gh#461.
-  if (!e.altKey && Math.abs(e.deltaX) > Math.abs(e.deltaY)) {
+  // Horizontal pan: trackpad two-finger swipe (deltaX) OR Shift+wheel
+  // (the mouse way to scroll horizontally; magnitude lands on deltaX or
+  // deltaY depending on browser). deltaX/railWidth maps directly to
+  // fraction-of-full-data-range so a one-rail-width swipe pans by the
+  // entire visible data span. The brush is CLAMPED to [r.min, r.max] so
+  // it never leaves the rail. See gh#461.
+  if (!e.altKey && (e.shiftKey || Math.abs(e.deltaX) > Math.abs(e.deltaY))) {
     e.preventDefault();
     e.stopPropagation();
     const widthPx = rail.clientWidth;
     if (widthPx <= 0) return;
     const current = railRange.value;
     const span = current.max - current.min;
-    const dms = (e.deltaX / widthPx) * (r.max - r.min);
+    const delta = Math.abs(e.deltaX) >= Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
+    const dms = (delta / widthPx) * (r.max - r.min);
     let s = current.min + dms;
     let f = current.max + dms;
     if (s < r.min) { s = r.min; f = s + span; }

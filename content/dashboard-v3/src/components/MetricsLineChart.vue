@@ -876,12 +876,13 @@ function installLiveWheelAnchor() {
   c.addEventListener(
     'wheel',
     (e: WheelEvent) => {
-      // Horizontal scroll (trackpad two-finger swipe left/right or
-      // mouse horizontal scroll) → pan the chart by deltaX scaled
-      // against the chart's plot-area width. No Alt required; plain
-      // vertical scroll still falls through to page scroll. See
-      // gh#461.
-      if (!e.altKey && Math.abs(e.deltaX) > Math.abs(e.deltaY)) {
+      // Horizontal pan: trackpad two-finger swipe (deltaX dominant) OR
+      // Shift+wheel (the mouse way to scroll horizontally). Shift+wheel
+      // reports its magnitude on deltaX in some browsers and deltaY in
+      // others, so take whichever axis is larger. No Alt required; plain
+      // vertical scroll still falls through to page scroll. See gh#461.
+      const horizontalPan = !e.altKey && (e.shiftKey || Math.abs(e.deltaX) > Math.abs(e.deltaY));
+      if (horizontalPan) {
         e.preventDefault();
         e.stopPropagation();
         const chartArea = chart?.chartArea;
@@ -889,7 +890,8 @@ function installLiveWheelAnchor() {
         const widthPx = chartArea.right - chartArea.left;
         const current = coord.effectiveRange.value;
         const span = current.max - current.min;
-        const dms = (e.deltaX / widthPx) * span;
+        const delta = Math.abs(e.deltaX) >= Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
+        const dms = (delta / widthPx) * span;
         coord.setRange({ min: current.min + dms, max: current.max + dms });
         return;
       }
@@ -1319,8 +1321,8 @@ onBeforeUnmount(() => {
         >
           {{ liveChecked ? '●' : '○' }} Live
         </button>
-        <span class="hint" title="Hold Alt (Option on Mac) while scrolling or dragging to zoom; right-click-drag to pan">
-          Alt/⌥+scroll/drag · right-drag pan
+        <span class="hint" title="Alt/Option + scroll or drag = zoom; Shift + scroll (or two-finger horizontal) = pan; right-click-drag = pan">
+          Alt/⌥+scroll/drag zoom · Shift+scroll / right-drag pan
         </span>
       </div>
     </div>
