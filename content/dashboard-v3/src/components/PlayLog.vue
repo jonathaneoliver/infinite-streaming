@@ -762,11 +762,27 @@ function sortFields(fields: DisplayedField[], source: Source): DisplayedField[] 
  *  the pinned window when the operator pans back — so the Play Log lines
  *  up with the charts and the Player State timeline instead of always
  *  showing the entire cache. */
-const windowedRows = computed<Row[]>(() => {
+const windowedFull = computed<Row[]>(() => {
   const r = coord.effectiveRange.value;
   if (!r) return allRows.value;
   return allRows.value.filter((row) => row.ts >= r.min && row.ts <= r.max);
 });
+
+/** Max rows actually rendered to the DOM. Each row expands to dozens of
+ *  kv-chip nodes, so rendering a whole 10-minute window (1000+ rows ⇒
+ *  tens of thousands of nodes) made every reactive tick reflow the page
+ *  and tanked responsiveness. Render only the most recent N within the
+ *  window; narrow the focus bar (or pan) to inspect older rows. A proper
+ *  virtualized list is the longer-term fix (see issue). */
+const MAX_RENDER_ROWS = 250;
+const windowedRows = computed<Row[]>(() => {
+  const rows = windowedFull.value;
+  if (rows.length <= MAX_RENDER_ROWS) return rows;
+  // Keep the most recent N by ts (the live tail operators watch).
+  return rows.slice().sort((a, b) => a.ts - b.ts).slice(-MAX_RENDER_ROWS);
+});
+/** True when rows were dropped from the rendered set (shown in the bar). */
+const renderCapped = computed(() => windowedFull.value.length > MAX_RENDER_ROWS);
 
 const rowsWithFields = computed<RowWithFields[]>(() => {
   // Build chronological copy so the diff against the previous
@@ -836,16 +852,16 @@ const sortedRows = computed<RowWithFields[]>(() => {
 });
 
 const counts = computed(() => {
-  // Counts reflect the focus window (issue #586) so the toolbar tallies
-  // match what's actually shown.
+  // Counts reflect the full focus window (issue #586), not the capped
+  // render set, so the toolbar tallies match what's in the window.
   let evt = 0, net = 0, ctl = 0, avm = 0;
-  for (const r of windowedRows.value) {
+  for (const r of windowedFull.value) {
     if (r.source === 'event') evt++;
     else if (r.source === 'network') net++;
     else if (r.source === 'avmetrics') avm++;
     else ctl++;
   }
-  return { evt, net, ctl, avm, total: windowedRows.value.length };
+  return { evt, net, ctl, avm, total: windowedFull.value.length };
 });
 
 /** True when the active player has any AVMetrics rows in the cached
@@ -964,6 +980,7 @@ function onRowsWheel(e: WheelEvent) {
       <label v-if="hasAVMetrics" class="opt" title="iOS 18 AVMetrics raw events (issue #486 spike). Parallel observation stream from AVFoundation — compare side-by-side against today's heartbeat-derived Events."><input type="checkbox" v-model="showAVMetrics" /> AVMetrics ({{ counts.avm }})</label>
       <label class="opt"><input type="checkbox" v-model="showRaw" /> Raw</label>
       <span class="count">{{ counts.total }} row{{ counts.total === 1 ? '' : 's' }}</span>
+      <span v-if="renderCapped" class="count" title="Only the most recent rows are rendered for performance; narrow the focus bar to see older rows">(showing last {{ MAX_RENDER_ROWS }})</span>
       <button
         type="button"
         class="btn live-toggle"
