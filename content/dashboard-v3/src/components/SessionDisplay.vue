@@ -1099,8 +1099,8 @@ function skipToEnd() {
             class="brush-window"
             :class="{ dragging: dragState }"
             :style="{
-              left: ((railRange.min - scrubMin) / Math.max(1, scrubMax - scrubMin) * 100) + '%',
-              right: ((scrubMax - railRange.max) / Math.max(1, scrubMax - scrubMin) * 100) + '%',
+              left: Math.max(0, (railRange.min - scrubMin) / Math.max(1, scrubMax - scrubMin) * 100) + '%',
+              right: Math.max(0, (scrubMax - railRange.max) / Math.max(1, scrubMax - scrubMin) * 100) + '%',
             }"
             @mousedown.stop="onBrushMouseDown($event, 'pan')"
           >
@@ -1479,12 +1479,12 @@ function skipToEnd() {
   height: 30px;
   background: #d1fae5;
   border-radius: 6px;
-  /* Clip the brush window so it can't bleed past the rail edges
-   * (and onto the ⏮/⏭ scrub buttons) when the visible focus range
-   * extends past the data — e.g. a 10-min liveSpan on a fresh
-   * session that only has 1 min of samples puts brushRange.min 9
-   * min before scrubMin, which would be a -X% left value. */
-  overflow: hidden;
+  /* overflow VISIBLE so the brush window can extend above/below the rail
+   * as a taller grab target (those strips are tick-free, so they're a
+   * clean drag zone). Horizontal bleed past the rail edges onto the
+   * ⏮/⏭ buttons is instead prevented by clamping the window's left/right
+   * to ≥0 in the template binding. */
+  overflow: visible;
   cursor: crosshair;
 }
 .brush-rail .brush-tick {
@@ -1536,8 +1536,12 @@ function skipToEnd() {
 
 .brush-window {
   position: absolute;
-  top: 0;
-  bottom: 0;
+  /* Extend above and below the 30px rail so the grab target is taller
+   * than the rail itself — those strips are tick-free, so you can always
+   * grab the window (or its handles) for dragging without landing on a
+   * marker. */
+  top: -9px;
+  bottom: -9px;
   background: rgba(29, 78, 216, 0.18);
   border: 0;
   border-radius: 6px;
@@ -1551,8 +1555,10 @@ function skipToEnd() {
 .brush-window.dragging { cursor: grabbing; }
 .brush-handle {
   position: absolute;
-  top: -1px;
-  bottom: -1px;
+  /* Match the window's vertical extent so the resize grips are equally
+   * tall and easy to grab above/below the rail. */
+  top: -9px;
+  bottom: -9px;
   width: 8px;
   background: #1d4ed8;
   border-radius: 3px;
