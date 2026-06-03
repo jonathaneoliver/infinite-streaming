@@ -278,6 +278,42 @@ services:
       - app_network
     restart: unless-stopped
 
+  # #506 — scheduled anomaly LABEL derivation (the VOMM scorer's verdicts).
+  # Runs analytics/tools/derive_labels.py on a loop: trains per-condition
+  # VOMMs on older plays and scores recent plays OUT-OF-SAMPLE (time split),
+  # writing derived_labels so the surprise outliers are filterable in
+  # sessions.html + session-viewer. Like token-deriver, NOT on the hot path
+  # and bind-mounts the tools dir (model/tokenizer evolve without a rebuild).
+  # The score window must exceed the interval + a play's length so plays that
+  # finished since the last tick get scored; ReplacingMergeTree supersedes.
+  label-deriver:
+    image: python:3.12-slim
+    container_name: infinite-streaming-label-deriver
+    volumes:
+      - ./analytics/tools:/tools:ro
+    environment:
+      - FORWARDER_CLICKHOUSE_URL=http://clickhouse:8123
+      - LABEL_INTERVAL_SECONDS=${LABEL_INTERVAL_SECONDS:-3600}
+      - LABEL_TRAIN_DAYS=${LABEL_TRAIN_DAYS:-7}
+      - LABEL_SCORE_HOURS=${LABEL_SCORE_HOURS:-12}
+      - LABEL_MODEL_VERSION=${LABEL_MODEL_VERSION:-vomm-tok-1}
+    command:
+      - sh
+      - -c
+      - |
+        sleep 25
+        while true; do
+          python3 /tools/derive_labels.py --train-days "$$LABEL_TRAIN_DAYS" --score-hours "$$LABEL_SCORE_HOURS" --model-version "$$LABEL_MODEL_VERSION" \
+            || echo "[label-deriver] run failed (rc=$$?), retrying next tick"
+          sleep "$$LABEL_INTERVAL_SECONDS"
+        done
+    depends_on:
+      clickhouse:
+        condition: service_started
+    networks:
+      - app_network
+    restart: unless-stopped
+
 
 networks:
   app_network:

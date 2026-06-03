@@ -178,6 +178,15 @@ func runPlaysQuery(ctx context.Context, b Backend, clauses []string, params map[
 		  SELECT lowerUTF8(play_id) AS play_id, arrayJoin(labels) AS label
 		  FROM %s.control_events
 		  %s
+		  UNION ALL
+		  -- #506 derived anomaly labels (analytics/tools/derive_labels.py):
+		  -- one row per (play, condition), surfaced as <severity>=<label> so
+		  -- the existing chip renderer + label filter treat them like any
+		  -- other label. DISTINCT collapses ReplacingMergeTree pre-merge
+		  -- dups; the play_id JOIN below bounds this tiny table to the
+		  -- window's plays, so no time WHERE is needed here.
+		  SELECT DISTINCT lowerUTF8(play_id) AS play_id, concat(severity, '=', label) AS label
+		  FROM %s.derived_labels
 		),
 		labels_per_play AS (
 		  SELECT play_id, label, count() AS n
@@ -297,6 +306,7 @@ func runPlaysQuery(ctx context.Context, b Backend, clauses []string, params map[
 		b.Database, b.EventsTable, where,
 		b.Database, netWhere,
 		b.Database, netWhere,
+		b.Database, // #506 derived_labels branch in labels_unioned
 		postWhere(postClauses),
 		limit,
 	)
