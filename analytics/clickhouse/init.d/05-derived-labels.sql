@@ -1,37 +1,38 @@
--- #506 — derived anomaly LABELS (out-of-band batch; NOT written by the live ingest path).
--- The sibling of derived_tokens: where derived_tokens carries the per-row #508 token,
--- derived_labels carries the VOMM scorer's per-(play,condition) SURPRISE verdict. A batch
--- (analytics/tools/derive_labels.py, reusing scorer.py + tokenize.py) trains per-condition
--- VOMMs on older plays and scores recent plays OUT-OF-SAMPLE (time-split), writing one row
--- per (play, condition) whose worst episode is notably more surprising than the typical
--- episode for that condition. The read API unions these into labels[] so sessions.html can
--- filter on them and session-viewer can mark them.
+-- #506 — derived anomaly LABELS, PER ROW (out-of-band batch; NOT the live ingest path).
+-- The VOMM scorer's surprise verdict, anchored on the EXACT row whose token transition was
+-- improbable — so it merges onto that row at read time (like derived_tokens) and shows as a
+-- chip right where the surprise happened, with as many per session as there are surprising
+-- rows. A batch (analytics/tools/derive_labels.py, reusing scorer.py + tokenize.py) trains
+-- per-condition VOMMs on older plays and scores recent plays OUT-OF-SAMPLE (time-split),
+-- emitting one row per above-threshold transition WITHIN a condition episode.
 --
--- Granularity (v1): one row per (player_id, play_id, condition) — a play-level rollup keyed
--- so ReplacingMergeTree(scored_at) supersedes on re-score. `ts` is the play's first ts
--- (STABLE across re-scores so dedup + partition stay put); `peak_at` is the worst episode's
--- anchor ts (for a precise session-viewer marker later).
+-- Keyed like derived_tokens so the read-path joins line up:
+--   * network-row labels → entry_fingerprint = the network_requests row's fingerprint.
+--   * event-row labels    → entry_fingerprint = 0, surface = 'event' (join on player_id, ts).
+-- One row per (player_id, ts, entry_fingerprint, condition); ReplacingMergeTree(scored_at)
+-- supersedes on re-score.
 --
--- label is the filter key — a clean `,`/`=`-free condition tag (vomm_<condition>_surprise);
--- the model's peak transition (full of `,`/`(`/spaces the label vocab forbids) rides in the
--- `peak` String column as detail, NOT as the filter token.
+-- The read API surfaces these two ways: (1) per-row — merged into the network/event row's
+-- labels so it chips in NetworkLog / PlayLog; (2) per-play — rolled up by play_id into
+-- label_histogram so sessions.html can filter. label is the `,`/`=`-free filter key
+-- (vomm_<condition>_surprise); `score` is the transition's surprise in nats.
 
 CREATE TABLE IF NOT EXISTS infinite_streaming.derived_labels
 (
-    ts             DateTime64(3, 'UTC')             CODEC(Delta, ZSTD(1)),
-    player_id      LowCardinality(String)           CODEC(ZSTD(1)),
-    play_id        LowCardinality(String)           CODEC(ZSTD(1)),
-    condition      LowCardinality(String)           CODEC(ZSTD(1)),
-    label          LowCardinality(String)           CODEC(ZSTD(1)),
-    severity       LowCardinality(String)           CODEC(ZSTD(1)),
-    score          Float32                          CODEC(ZSTD(1)),
-    peak           String                           CODEC(ZSTD(1)),
-    peak_at        DateTime64(3, 'UTC')             CODEC(Delta, ZSTD(1)),
-    model_version  LowCardinality(String) DEFAULT '' CODEC(ZSTD(1)),
-    scored_at      DateTime64(3, 'UTC')             CODEC(Delta, ZSTD(1))
+    ts                DateTime64(3, 'UTC')             CODEC(Delta, ZSTD(1)),
+    player_id         LowCardinality(String)           CODEC(ZSTD(1)),
+    play_id           LowCardinality(String)           CODEC(ZSTD(1)),
+    entry_fingerprint UInt64                            CODEC(ZSTD(1)),
+    surface           LowCardinality(String)           CODEC(ZSTD(1)),
+    condition         LowCardinality(String)           CODEC(ZSTD(1)),
+    label             LowCardinality(String)           CODEC(ZSTD(1)),
+    severity          LowCardinality(String)           CODEC(ZSTD(1)),
+    score             Float32                          CODEC(ZSTD(1)),
+    model_version     LowCardinality(String) DEFAULT '' CODEC(ZSTD(1)),
+    scored_at         DateTime64(3, 'UTC')             CODEC(Delta, ZSTD(1))
 )
 ENGINE = ReplacingMergeTree(scored_at)
 PARTITION BY toYYYYMMDD(ts)
-ORDER BY (player_id, play_id, condition)
+ORDER BY (player_id, ts, entry_fingerprint, condition)
 TTL toDateTime(ts) + INTERVAL 90 DAY
 SETTINGS index_granularity = 8192;

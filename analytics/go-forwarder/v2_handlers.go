@@ -390,7 +390,8 @@ func v2NetworkRequestsHandler(w http.ResponseWriter, r *http.Request, cfg config
 	// Three layers: innermost `base` keeps native `ts` for WHERE/ORDER BY
 	// (no toString shadowing — same trap the snapshots handler addresses,
 	// commit 9cfca6f); the middle layer LEFT-JOINs the #506 batch-derived
-	// per-row token; the outer applies the toString projection.
+	// per-row token AND per-row anomaly labels (arrayConcat'd into labels[]
+	// so they chip like any ingest label); the outer applies toString.
 	query := fmt.Sprintf(`
 		SELECT
 		  toString(ts) AS timestamp,
@@ -398,9 +399,10 @@ func v2NetworkRequestsHandler(w http.ResponseWriter, r *http.Request, cfg config
 		  method, url, upstream_url, request_kind, content_type,
 		  status, bytes_in, bytes_out,
 		  ttfb_ms, total_ms, dns_ms, connect_ms, tls_ms, transfer_ms, client_wait_ms,
-		  faulted, fault_type, fault_action, fault_category, labels, token
+		  faulted, fault_type, fault_action, fault_category,
+		  arrayConcat(labels, dl_arr) AS labels, token
 		FROM (
-		  SELECT base.*, ifNull(dt.token, '') AS token
+		  SELECT base.*, ifNull(dt.token, '') AS token, ifNull(dt.arr, []) AS dl_arr
 		  FROM (
 		    SELECT
 		      ts, entry_fingerprint,
