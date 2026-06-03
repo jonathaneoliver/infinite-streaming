@@ -996,7 +996,14 @@ function pushSample(p: PlayerRecord, x: number) {
         d.splice(0, d.length - MAX_POINTS_PER_SERIES);
       }
     }
-    if (coord.state.range === null) {
+    // Live-follow: only glue the viewport to a sample at/after the live
+    // edge (the newest known sample). During the initial backfill the
+    // rows arrive oldest→newest; without this guard each older row would
+    // yank the window back and the focus bar would crawl left→right in
+    // hops (#590). drainNewRows seeds lastSampleMs to the latest cached
+    // ts up front, so backfill rows fail this check and only the true
+    // live edge advances the window.
+    if (coord.state.range === null && x >= coord.state.lastSampleMs) {
       applyViewport({ min: x - DEFAULT_FOCUS_MS, max: x });
     }
     safeChartUpdate();
@@ -1089,6 +1096,15 @@ async function drainNewRows() {
     Number.MAX_SAFE_INTEGER,
   );
   if (!raw.length) return;
+  // Jump the live window to the newest cached sample up front so the
+  // backfill fills in BEHIND the right edge instead of crawling the
+  // window left→right chunk by chunk (#590). Only in live mode; a pinned
+  // (archive/panned) range must stay put. pushSample's live-follow guard
+  // then skips the older backfill rows and only the true edge advances.
+  if (coord.state.range === null) {
+    const latest = props.eventsStream.rangeBounds.value?.max;
+    if (typeof latest === 'number' && Number.isFinite(latest)) coord.noteSample(latest);
+  }
   const myToken = ++drainToken;
   // Chunked iteration with main-thread yields keeps brush + scroll
   // responsive when the initial backfill hits (5–10 k rows).
