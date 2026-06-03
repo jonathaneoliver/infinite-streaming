@@ -422,7 +422,7 @@ func v2NetworkRequestsHandler(w http.ResponseWriter, r *http.Request, cfg config
 		)
 		FORMAT JSONEachRow`,
 		cfg.chDatabase, strings.Join(clauses, " AND "), limit,
-		derivedTokenJoinSQL(cfg.chDatabase, strings.Join(dtScope, " AND ")))
+		derivedTokenJoinSQL(cfg.chDatabase, "entry_fingerprint", strings.Join(dtScope, " AND ")))
 
 	rows, err := queryClickHouseRows(r.Context(), cfg, query, params)
 	if err != nil {
