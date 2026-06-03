@@ -893,7 +893,6 @@ type PlayDetail struct {
 	Classification *PlayDetailClassification `json:"classification,omitempty"`
 	ContentId      *string                   `json:"content_id,omitempty"`
 	Downshifts     *int                      `json:"downshifts,omitempty"`
-	FramesDropped  *int                      `json:"frames_dropped,omitempty"`
 
 	// ErrorEventCount Explicit player_error events.
 	ErrorEventCount *int `json:"error_event_count,omitempty"`
@@ -904,6 +903,7 @@ type PlayDetail struct {
 	// FirstFrameS Time-to-first-frame, seconds.
 	FirstFrameS     *float32 `json:"first_frame_s,omitempty"`
 	FramesDisplayed *int     `json:"frames_displayed,omitempty"`
+	FramesDropped   *int     `json:"frames_dropped,omitempty"`
 
 	// FrozenCount Renderer-frozen events (≠ buffer stalls).
 	FrozenCount *int `json:"frozen_count,omitempty"`
@@ -974,11 +974,14 @@ type PlayDetail struct {
 	SegmentStallCount *int `json:"segment_stall_count,omitempty"`
 
 	// SessionId Per-player numeric session counter ('1', '2', …). Empty when archive predates session_id stamping.
-	SessionId         *string   `json:"session_id,omitempty"`
-	Stalls            *int      `json:"stalls,omitempty"`
-	StartedAt         time.Time `json:"started_at"`
-	TransportFailures *int      `json:"transport_failures,omitempty"`
-	Upshifts          *int      `json:"upshifts,omitempty"`
+	SessionId *string `json:"session_id,omitempty"`
+	Stalls    *int    `json:"stalls,omitempty"`
+
+	// StartTime Client-supplied play start (ISO-8601 UTC), play-scoped — minted by the player with play_id and rotated with it. See PlayRecord.start_time in proxy.yaml. Null when the client didn't send it (web/Roku).
+	StartTime         *time.Time `json:"start_time,omitempty"`
+	StartedAt         time.Time  `json:"started_at"`
+	TransportFailures *int       `json:"transport_failures,omitempty"`
+	Upshifts          *int       `json:"upshifts,omitempty"`
 
 	// UserMarkedCount Operator pressed the 911 button N times.
 	UserMarkedCount *int `json:"user_marked_count,omitempty"`
@@ -1045,7 +1048,6 @@ type PlaySummary struct {
 	Classification *PlaySummaryClassification `json:"classification,omitempty"`
 	ContentId      *string                    `json:"content_id,omitempty"`
 	Downshifts     *int                       `json:"downshifts,omitempty"`
-	FramesDropped  *int                       `json:"frames_dropped,omitempty"`
 
 	// ErrorEventCount Explicit player_error events.
 	ErrorEventCount *int `json:"error_event_count,omitempty"`
@@ -1053,6 +1055,7 @@ type PlaySummary struct {
 	// FirstFrameS Time-to-first-frame, seconds.
 	FirstFrameS     *float32 `json:"first_frame_s,omitempty"`
 	FramesDisplayed *int     `json:"frames_displayed,omitempty"`
+	FramesDropped   *int     `json:"frames_dropped,omitempty"`
 
 	// FrozenCount Renderer-frozen events (≠ buffer stalls).
 	FrozenCount *int `json:"frozen_count,omitempty"`
@@ -1118,11 +1121,14 @@ type PlaySummary struct {
 	SegmentStallCount *int `json:"segment_stall_count,omitempty"`
 
 	// SessionId Per-player numeric session counter ('1', '2', …). Empty when archive predates session_id stamping.
-	SessionId         *string   `json:"session_id,omitempty"`
-	Stalls            *int      `json:"stalls,omitempty"`
-	StartedAt         time.Time `json:"started_at"`
-	TransportFailures *int      `json:"transport_failures,omitempty"`
-	Upshifts          *int      `json:"upshifts,omitempty"`
+	SessionId *string `json:"session_id,omitempty"`
+	Stalls    *int    `json:"stalls,omitempty"`
+
+	// StartTime Client-supplied play start (ISO-8601 UTC), play-scoped — minted by the player with play_id and rotated with it. See PlayRecord.start_time in proxy.yaml. Null when the client didn't send it (web/Roku).
+	StartTime         *time.Time `json:"start_time,omitempty"`
+	StartedAt         time.Time  `json:"started_at"`
+	TransportFailures *int       `json:"transport_failures,omitempty"`
+	Upshifts          *int       `json:"upshifts,omitempty"`
 
 	// UserMarkedCount Operator pressed the 911 button N times.
 	UserMarkedCount *int `json:"user_marked_count,omitempty"`

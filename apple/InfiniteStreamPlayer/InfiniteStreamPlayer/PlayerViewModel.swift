@@ -145,6 +145,15 @@ final class PlayerViewModel: ObservableObject {
     /// - Soak rotation Task firing
     private var currentPlayID: String = UUID().uuidString
 
+    /// `start_time` (#587) — client-supplied, play-scoped play start
+    /// (ISO-8601 UTC). Minted with `currentPlayID` and rotated at the
+    /// SAME boundaries (`regeneratePlayID`); sent as `?start_time=` on
+    /// every request so the proxy / forwarder / dashboard can anchor
+    /// "when THIS play began" to the play, not the connection (the
+    /// server-derived `started_at` is session-scoped and goes stale on
+    /// a play rotation).
+    private var currentStartTime: String = PlayerViewModel.metricsTimestampFormatter.string(from: Date())
+
     /// `attempt_id` (bug #4) — a **monotonically-incrementing
     /// integer**, 1-based, identifying which playback attempt within
     /// this play the current activity belongs to. First playback of
@@ -710,6 +719,7 @@ final class PlayerViewModel: ObservableObject {
         // go-proxy.)
         final = appendPlayID(to: final)
         final = appendAttemptID(to: final)
+        final = appendStartTime(to: final)
         self.currentURL = final
         self.statusText = final.absoluteString
         loadStream(url: final)
@@ -772,10 +782,24 @@ final class PlayerViewModel: ObservableObject {
         return components.url ?? url
     }
 
+    /// Replace any existing `start_time` query item with the current
+    /// `currentStartTime` (#587). Travels alongside play_id on every
+    /// request so the play's start is play-scoped end-to-end.
+    private func appendStartTime(to url: URL) -> URL {
+        guard var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return url }
+        var items = components.queryItems ?? []
+        items.removeAll { $0.name == "start_time" }
+        items.append(URLQueryItem(name: "start_time", value: currentStartTime))
+        components.queryItems = items
+        return components.url ?? url
+    }
+
     /// Mint a fresh `play_id` UUID. Called only at content-selection
     /// boundaries (see currentPlayID doc). NOT called on restart.
     private func regeneratePlayID() {
         currentPlayID = UUID().uuidString
+        // Rotate the play-scoped start with the play_id (#587).
+        currentStartTime = PlayerViewModel.metricsTimestampFormatter.string(from: Date())
     }
 
     /// Replace any existing `attempt_id` query item with the current
@@ -1088,6 +1112,7 @@ final class PlayerViewModel: ObservableObject {
         incrementAttemptID()
         var refreshed = appendPlayID(to: url)
         refreshed = appendAttemptID(to: refreshed)
+        refreshed = appendStartTime(to: refreshed)
         self.currentURL = refreshed
         Task { [weak self] in
             await self?.requestHARSnapshot(reason: "user_retry", force: true)
@@ -2391,6 +2416,7 @@ extension PlayerViewModel {
             // in the body too is belt-and-braces against a delayed event
             // that races a subsequent id rotation. Bug #4 fix.
             "play_id": currentPlayID,
+            "start_time": currentStartTime,
             "attempt_id": currentAttemptID,
             "player_metrics_source": "ios",
             "player_metrics_last_event": event,
@@ -2659,6 +2685,7 @@ extension PlayerViewModel {
         // land with the OLD attempt_id. Bug #4 fix.
         var url = appendPlayID(to: pathURL)
         url = appendAttemptID(to: url)
+        url = appendStartTime(to: url)
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -2766,6 +2793,7 @@ extension PlayerViewModel {
             .appendingPathComponent("avmetrics")
         var url = appendPlayID(to: pathURL)
         url = appendAttemptID(to: url)
+        url = appendStartTime(to: url)
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")

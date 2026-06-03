@@ -198,6 +198,9 @@ type row struct {
 	Revision                 uint64  `json:"revision"`
 	SessionID                string  `json:"session_id"`
 	PlayID                   string  `json:"play_id"`
+	// StartTime — client-supplied, play-scoped play start (ISO-8601 UTC),
+	// rotated with play_id (#587). Empty for clients that don't send it.
+	StartTime                string  `json:"start_time"`
 	AttemptID                uint32  `json:"attempt_id"`
 	PlayerID                 string  `json:"player_id"`
 	GroupID                  string  `json:"group_id"`
@@ -753,6 +756,7 @@ func toRow(ts string, revision uint64, sessionID string, s map[string]interface{
 		Revision:                 revision,
 		SessionID:                sessionID,
 		PlayID:                   playCanonical,
+		StartTime:                getStr(s, "start_time"),
 		// attempt_id is player-supplied and sticky on the session map
 		// at go-proxy:4517-4519 — pull it from the v1 payload (string
 		// form) and parse to uint32 here. 0 (the uint32 zero value)

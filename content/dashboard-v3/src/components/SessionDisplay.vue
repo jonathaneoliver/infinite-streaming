@@ -472,10 +472,13 @@ const timeRange = computed<{ min: number; max: number } | null>(() => {
   // Extend the rail's LEFT edge to THIS play's true start (#587) so the
   // operator can drag the focus bar into windows the recency cap has
   // evicted from the cache — panning there fires the refetch watcher
-  // above. Anchored to the play_id's earliest event (playStartMs), NOT
-  // the stale player-level current_play.started_at. Falls back to the
-  // cache min when the start is unknown.
-  const playStart = playStartMs.value;
+  // above. Prefer the CLIENT-supplied, play-scoped current_play.start_time
+  // (rotates with play_id); fall back to the play_id's earliest archived
+  // event (playStartMs) for non-instrumented clients; then the cache min.
+  // NEVER the stale player-level current_play.started_at.
+  const clientStartStr = (livePlayer.value?.current_play as { start_time?: string | null } | null | undefined)?.start_time;
+  const clientStart = clientStartStr ? Date.parse(clientStartStr) : NaN;
+  const playStart = (Number.isFinite(clientStart) && clientStart > 0) ? clientStart : playStartMs.value;
   const haveStart = playStart != null && Number.isFinite(playStart) && playStart > 0;
   if (!ar && !live && !haveStart) return null;
   let min = ar?.min ?? 0;

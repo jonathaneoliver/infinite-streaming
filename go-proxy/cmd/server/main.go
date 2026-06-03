@@ -2409,6 +2409,12 @@ func (a *App) handlePostSessionMetrics(w http.ResponseWriter, r *http.Request) {
 	if v := strings.TrimSpace(r.URL.Query().Get("attempt_id")); v != "" {
 		metricsOnly["attempt_id"] = v
 	}
+	// Play-scoped client start (#587) — picked up here too so it lands
+	// on long-running iOS sessions between manifest fetches, same as
+	// play_id/attempt_id.
+	if v := strings.TrimSpace(r.URL.Query().Get("start_time")); v != "" {
+		metricsOnly["start_time"] = v
+	}
 	merged, ok := a.saveSessionByIDReturning(id, metricsOnly)
 	// Issue #470: emit one SSE frame per metrics POST. Every POST —
 	// heartbeat or otherwise — flows through so the forwarder writes
@@ -5145,6 +5151,10 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 	// below.
 	playID := strings.TrimSpace(r.URL.Query().Get("play_id"))
 	attemptIDStr := strings.TrimSpace(r.URL.Query().Get("attempt_id"))
+	// Client-supplied, play-scoped start (#587). Rotates with play_id;
+	// the proxy just carries it through to the session map so it reaches
+	// PlayRecord.start_time (live) and the session_events CH column.
+	startTime := strings.TrimSpace(r.URL.Query().Get("start_time"))
 	var attemptID uint32
 	if attemptIDStr != "" {
 		if n, err := strconv.ParseUint(attemptIDStr, 10, 32); err == nil {
@@ -5472,6 +5482,13 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 	// the proxy guessing.
 	if playID != "" {
 		sessionData["play_id"] = playID
+	}
+	// Play-scoped client start (#587). Carried on the session map so
+	// v2translate can project PlayRecord.start_time and the SSE
+	// session_events frame can carry it to ClickHouse. The client
+	// rotates it with play_id, so it always reflects THIS play.
+	if startTime != "" {
+		sessionData["start_time"] = startTime
 	}
 	// Store the raw string so sessionStickyField (a generic
 	// type-asserts-as-string helper) can read it back uniformly

@@ -919,6 +919,7 @@ components:
         content_id:        { type: string }
         # ---- timing ----
         started_at:        { type: string, format: date-time }
+        start_time:        { type: string, format: date-time, nullable: true, description: "Client-supplied play start (ISO-8601 UTC), play-scoped — minted by the player with play_id and rotated with it. See PlayRecord.start_time in proxy.yaml. Null when the client didn't send it (web/Roku)." }
         last_seen_at:      { type: string, format: date-time }
         labels:
           type: object

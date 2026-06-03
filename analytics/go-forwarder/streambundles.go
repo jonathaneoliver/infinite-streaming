@@ -82,6 +82,7 @@ var bundleRegistry = map[string]bundleDef{
 		Columns: []string{
 			"ts",
 			"session_id", "play_id", "player_id",
+			"start_time", // client play start (#587) → rail left edge
 			"event_time",
 			// Bandwidth chart series (server + player side)
 			"video_bitrate_mbps",

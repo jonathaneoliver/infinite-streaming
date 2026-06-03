@@ -1569,6 +1569,19 @@ export interface components {
             labels?: components["schemas"]["Labels"];
             /** Format: date-time */
             started_at: string;
+            /**
+             * Format: date-time
+             * @description **Client-supplied** play start (ISO-8601 UTC), minted by the
+             *     player at the same boundary as `id` (play_id) and re-sent as a
+             *     `?start_time=` query param on every request. Unlike
+             *     `started_at` — which the proxy derives from the SESSION's first
+             *     request and therefore does NOT move when the play_id rotates —
+             *     this is play-scoped: a content switch yields a new play_id AND
+             *     a new start_time. Prefer this for "when did THIS play begin";
+             *     `started_at` is the connection/session start. Null for
+             *     non-instrumented clients (web, Roku) that don't send it.
+             */
+            start_time?: string | null;
             /** Format: date-time */
             ended_at?: string | null;
             manifest?: components["schemas"]["Manifest"];
@@ -1918,13 +1931,25 @@ export interface components {
             video_resolution?: string | null;
             /** @description Player-reported window/display resolution (separate from the active video resolution). */
             display_resolution?: string | null;
+            /** @description WxH of the variant the player is about to fetch — derived iOS-side from indicatedBitrate vs the variant ladder. Empty before the first access-log event. */
+            fetching_resolution?: string | null;
             /** Format: float */
             video_bitrate_mbps?: number | null;
             /**
              * Format: float
-             * @description video_bitrate_mbps as a percentage of the top variant in the active manifest
+             * @description video_bitrate_mbps as a percentage of the top variant in the active manifest (snapshot)
              */
             video_quality_pct?: number | null;
+            /**
+             * Format: float
+             * @description Log-bitrate (Weber-Fechner) quality over the last 60s of watched playback. Formula: log(kbps/min) / log(max/min) per event, clamped to a 0.20 floor, time-weighted by durationWatched. Matches dashboard PlayLog computeQualityPct.
+             */
+            video_quality_60s_pct?: number | null;
+            /**
+             * Format: float
+             * @description Same log-bitrate formula as video_quality_60s_pct but over the lifetime of the play. Computed by iOS from AVPlayerItem.accessLog().
+             */
+            video_quality_avg_pct?: number | null;
             /**
              * Format: float
              * @description Player-computed avgNetworkBitrate.
@@ -2006,8 +2031,21 @@ export interface components {
             trigger_type?: string | null;
             /** @description Player state machine label (idle, playing, paused, buffering, ended, error). */
             state?: string | null;
+            /** @description On state_change events: the player_state before the transition. Empty / null on heartbeat rows. */
+            state_from?: string | null;
+            /** @description On state_change events: the player_state after the transition. Empty / null on heartbeat rows. */
+            state_to?: string | null;
             /** @description AVFoundation reasonForWaitingToPlay (or platform equivalent) — split labels within `state` like `toMinimizeStalls` vs `evaluatingBufferingRate`. */
             waiting_reason?: string | null;
+            /** @description Content title bound at metrics-start. Stamped on every payload so dashboards see "which content was playing" without joining against the upload catalogue. */
+            content_name?: string | null;
+            /** @description On user_marked (911) events: wall-clock ISO-8601 instant the operator pressed the button. Empty on other rows. */
+            user_marked_at?: string | null;
+            /**
+             * Format: float
+             * @description Active variant's nominal frame rate (Hz). Sticky after first observation in the format-change event.
+             */
+            frames_rate?: number | null;
             /** @description Player-encoded PDT (milliseconds since Unix epoch) for the current playhead. Used by the chart engine to compute live offset against the server clock. */
             playhead_wallclock_ms?: number | null;
             /** @description Web-player browser family (e.g. `safari`, `chrome`). Drives native-rendition inference for HLS-on-Safari where bitrate is not directly reported. */
@@ -2049,12 +2087,16 @@ export interface components {
             seeking_count?: number | null;
             /** @description #550 Phase 1: cumulative time at non-1× playback rate (FF / RW). */
             trickplaying_time_ms?: number | null;
+            /** @description JSON-string-encoded map of variant-label → cumulative seconds spent at that variant (e.g. `{"2160p@29857kbps":65.28}`). Preserved across retry()-style restarts. */
+            time_per_variant_s?: string | null;
             /** @description #550 Phase 1: entries into trickplay (rate ∉ {0, ~1}). */
             trickplaying_count?: number | null;
-            /** @description #550 Phase 1: duration of the MOST RECENT stall event (sticky on subsequent heartbeats). Replaces legacy last_stall_time_s. */
+            /** @description #550 Phase 1: duration of the MOST RECENT stall event (sticky on subsequent heartbeats). */
             stall_duration_ms?: number | null;
-            /** @description #550 Phase 1: duration of the MOST RECENT buffer event (sticky). Replaces legacy last_buffering_time_s. */
+            /** @description #550 Phase 1: duration of the MOST RECENT buffer event (sticky). */
             buffering_duration_ms?: number | null;
+            /** @description #550 Phase 1 ext: orthogonal "this stall won't auto-recover" flag. True from the moment AVPlayer transitions stalled → .paused (give-up) until next .playing transition. State stays "stalled" for residency continuity; dashboards key on this flag to surface operator-actionable stalls. */
+            stall_stuck?: boolean | null;
             /** @description #550 Phase 1: TTFF in ms. Conviva/Mux/Bitmovin canonical units. Replaces legacy video_first_frame_time_s. */
             video_first_frame_time_ms?: number | null;
             /** @description #550 Phase 1: alternate startup-time measurement in ms. */
@@ -2089,15 +2131,8 @@ export interface components {
             device_model?: string | null;
             /** @description #550 Phase 4: playback engine: `AVPlayer` / `hls.js` / `shaka` / `native-roku` / `vlc` / `ffmpeg`. */
             player_tech?: string | null;
-            /** @description #550 Phase 4: native (physical-pixel) screen width. */
-            screen_width_px?: number | null;
-            /** @description #550 Phase 4: native screen height. */
-            screen_height_px?: number | null;
-            /**
-             * Format: float
-             * @description #550 Phase 4: native scale (points-to-pixels density).
-             */
-            screen_density?: number | null;
+            /** @description Physical-pixel resolution of the device's current orientation, formatted `"WxH"` to match video_resolution / display_resolution. Swaps integers on iPad rotation; static on Apple TV / orientation-locked clients. Supersedes screen_width_px / screen_height_px / screen_density (dropped 2026-05-30). */
+            device_resolution?: string | null;
         };
         /**
          * @description Read-only server-observed transport telemetry. Sourced from

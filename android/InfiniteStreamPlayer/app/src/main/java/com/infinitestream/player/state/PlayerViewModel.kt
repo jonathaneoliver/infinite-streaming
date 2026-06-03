@@ -63,8 +63,19 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
      */
     private var currentPlayId: String = UUID.randomUUID().toString()
 
+    /**
+     * `start_time` (#587) — client-supplied, play-scoped play start
+     * (ISO-8601 UTC). Minted with `currentPlayId` and rotated at the SAME
+     * boundaries; threaded through every URL as `?start_time=...` so the
+     * play's start is play-scoped end-to-end (the server-derived
+     * `started_at` is session-scoped and goes stale on a play rotation).
+     */
+    private var currentStartTime: String = java.time.Instant.now().toString()
+
     private fun regeneratePlayId() {
         currentPlayId = UUID.randomUUID().toString()
+        // Rotate the play-scoped start with the play_id (#587).
+        currentStartTime = java.time.Instant.now().toString()
     }
 
     /** Rotation Job armed after every successful loadStream and
@@ -83,7 +94,8 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         playIdLastActivityAt = System.currentTimeMillis()
     }
 
-    /** Replace any existing `play_id` query param with `currentPlayId`. */
+    /** Replace any existing `play_id` + `start_time` query params with the
+     *  current play's values (#587 — start_time travels with play_id). */
     private fun withPlayId(url: String): String {
         if (url.isEmpty()) return url
         val (base, query) = url.split("?", limit = 2).let {
@@ -91,7 +103,9 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         }
         val params = if (query.isEmpty()) mutableListOf() else query.split("&").toMutableList()
         params.removeAll { it.startsWith("play_id=") }
+        params.removeAll { it.startsWith("start_time=") }
         params.add("play_id=$currentPlayId")
+        params.add("start_time=$currentStartTime")
         return "$base?${params.joinToString("&")}"
     }
 
@@ -677,7 +691,7 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         // below once the player has been handed off.
         playIdMintedAt = System.currentTimeMillis()
         playIdLastActivityAt = 0L
-        val url = "${server.scheme}://${server.host}:$port/go-live/${s.selectedContent}/$manifest?player_id=$playerId&play_id=$currentPlayId"
+        val url = "${server.scheme}://${server.host}:$port/go-live/${s.selectedContent}/$manifest?player_id=$playerId&play_id=$currentPlayId&start_time=$currentStartTime"
         _state.update { it.copy(currentUrl = url, statusText = url) }
         loadStream(url)
         schedulePlayIdRotation()

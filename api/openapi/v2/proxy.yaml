@@ -1125,6 +1125,20 @@ components:
             Effective labels = player.labels merged with any play-specific
             additions/overrides. Snapshotted onto archive rows at insert.
         started_at:       { type: string, format: date-time }
+        start_time:
+          type: string
+          format: date-time
+          nullable: true
+          description: |
+            **Client-supplied** play start (ISO-8601 UTC), minted by the
+            player at the same boundary as `id` (play_id) and re-sent as a
+            `?start_time=` query param on every request. Unlike
+            `started_at` — which the proxy derives from the SESSION's first
+            request and therefore does NOT move when the play_id rotates —
+            this is play-scoped: a content switch yields a new play_id AND
+            a new start_time. Prefer this for "when did THIS play begin";
+            `started_at` is the connection/session start. Null for
+            non-instrumented clients (web, Roku) that don't send it.
         ended_at:         { type: string, format: date-time, nullable: true }
         manifest: { $ref: '#/components/schemas/Manifest' }
         fault_rules:
