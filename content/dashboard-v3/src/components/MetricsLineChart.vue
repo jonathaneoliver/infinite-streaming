@@ -394,16 +394,6 @@ function createChartInstance(Chart: any): any {
       maintainAspectRatio: false,
       animation: false,
       interaction: { mode: 'nearest', intersect: false },
-      // Decimation (issue: chart render cost). Our datasets are already
-      // pre-parsed {x:number,y:number} sorted ascending by x, so we can
-      // turn off Chart.js parsing and mark them normalized — both
-      // required for the decimation plugin. LTTB reduces each series to
-      // ~`samples` representative points within the visible range (peaks
-      // preserved), so a 16k-point series draws ~1k points instead of
-      // 16k. Cuts redraw time dramatically while keeping the deep history
-      // the doubled caps retain.
-      parsing: false,
-      normalized: true,
       layout: {
         padding: {
           // Reserve room on the right edge for the y2 axis. When no y2
@@ -413,11 +403,6 @@ function createChartInstance(Chart: any): any {
         },
       },
       plugins: {
-        decimation: {
-          enabled: true,
-          algorithm: 'lttb',
-          samples: 1000,
-        },
         legend: {
           position: 'bottom',
           labels: {
@@ -1013,14 +998,13 @@ function pushSample(p: PlayerRecord, x: number) {
         d.splice(0, d.length - MAX_POINTS_PER_SERIES);
       }
     }
-    // Live-follow: only glue the viewport to a sample at/after the live
-    // edge (the newest known sample). During the initial backfill the
-    // rows arrive oldest→newest; without this guard each older row would
-    // yank the window back and the focus bar would crawl left→right in
-    // hops (#590). drainNewRows seeds lastSampleMs to the latest cached
-    // ts up front, so backfill rows fail this check and only the true
-    // live edge advances the window.
-    if (coord.state.range === null && x >= coord.state.lastSampleMs) {
+    // Live-follow: keep the viewport glued to the latest drained sample
+    // so the chart always shows data at its right edge. (The previous
+    // "jump to cache edge" optimization left the live edge blank while
+    // the backfill was still draining behind it — #590 regression. With
+    // the per-chunk watermark the drain converges fast, so following the
+    // drained edge no longer crawls noticeably.)
+    if (coord.state.range === null) {
       applyViewport({ min: x - DEFAULT_FOCUS_MS, max: x });
     }
     safeChartUpdate();
@@ -1113,15 +1097,6 @@ async function drainNewRows() {
     Number.MAX_SAFE_INTEGER,
   );
   if (!raw.length) return;
-  // Jump the live window to the newest cached sample up front so the
-  // backfill fills in BEHIND the right edge instead of crawling the
-  // window left→right chunk by chunk (#590). Only in live mode; a pinned
-  // (archive/panned) range must stay put. pushSample's live-follow guard
-  // then skips the older backfill rows and only the true edge advances.
-  if (coord.state.range === null) {
-    const latest = props.eventsStream.rangeBounds.value?.max;
-    if (typeof latest === 'number' && Number.isFinite(latest)) coord.noteSample(latest);
-  }
   const myToken = ++drainToken;
   // Chunked iteration with main-thread yields keeps brush + scroll
   // responsive when the initial backfill hits (5–10 k rows).
@@ -1151,11 +1126,17 @@ async function drainNewRows() {
       }
       if (x > highWater) highWater = x;
     }
+    // Advance the watermark PER CHUNK so a mid-drain interrupt (a 1 Hz
+    // cache flush bumps drainToken and aborts this loop) doesn't restart
+    // from the beginning. That restart-from-scratch was re-processing the
+    // whole backfill on every flush — ~12 s to catch up on a long
+    // session, during which the live edge stayed blank. Per-chunk
+    // progress makes the drain converge in a couple seconds.
+    lastIngestedMs = highWater;
     if (end < raw.length) {
       await new Promise<void>((r) => setTimeout(r, 0));
     }
   }
-  lastIngestedMs = highWater;
 }
 
 watch(
