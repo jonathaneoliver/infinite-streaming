@@ -76,6 +76,14 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         currentPlayId = UUID.randomUUID().toString()
         // Rotate the play-scoped start with the play_id (#587).
         currentStartTime = java.time.Instant.now().toString()
+        // Fresh play boundary — reset the per-play counters so the new play's
+        // metrics start from zero. Every play_id rotation (content switch,
+        // segment/filter swap, soak rotation, reload) funnels through here.
+        // reload() additionally recreates the metrics instance; this makes the
+        // reuse-the-instance boundaries consistent. retry() keeps play_id
+        // stable and never calls this, so recovery attempts still preserve
+        // counters via snapshotForRestart().
+        metrics?.resetForFreshPlay()
     }
 
     /** Rotation Job armed after every successful loadStream and

@@ -800,6 +800,17 @@ final class PlayerViewModel: ObservableObject {
         currentPlayID = UUID().uuidString
         // Rotate the play-scoped start with the play_id (#587).
         currentStartTime = PlayerViewModel.metricsTimestampFormatter.string(from: Date())
+        // Fresh play boundary — reset the per-play counters so the new play's
+        // metrics start from zero. Previously only reload() did this; the other
+        // boundaries that rotate play_id (content switch, content-filter swap,
+        // soak rotation) all funnel through here, so coupling the reset to the
+        // play_id rotation makes every boundary consistent. retry() does NOT
+        // call this — it keeps play_id stable and preserves counters across the
+        // recovery attempt (snapshotForRestart()).
+        diagnostics.resetForFreshPlay()
+        resetPerVariantForFreshPlay()
+        playerRestarts = 0
+        profileShiftCount = 0
     }
 
     /// Replace any existing `attempt_id` query item with the current
@@ -1229,20 +1240,13 @@ final class PlayerViewModel: ObservableObject {
         // observations and the heartbeat would emit stale data.
         diagnostics.bind(to: newPlayer)
         attachPlayerItemObservers()
-        // Reload = fresh play. Counters start from zero so the new
-        // play's dashboard widgets aren't polluted by the previous
-        // play's totals. Clears both the per-item counters (via
-        // diagnostics.reset()) AND the "prior" accumulators that
-        // snapshotForRestart() populates. retry() does the opposite —
-        // it snapshots so counters carry across recovery attempts.
-        diagnostics.resetForFreshPlay()
-        resetPerVariantForFreshPlay()
-        playerRestarts = 0
-        profileShiftCount = 0
-        // Rotate play_id (new play boundary) AND reset attempt_id
-        // to 1 (fresh play, no recovery attempts yet). retry()
-        // differs — it keeps play_id stable and increments
-        // attempt_id because it's a within-play recovery attempt.
+        // Rotate play_id (new play boundary) AND reset attempt_id to 1 (fresh
+        // play, no recovery attempts yet). regeneratePlayID() now also performs
+        // the full per-play counter reset (resetForFreshPlay etc.) so the new
+        // play's dashboard widgets aren't polluted by the previous play's
+        // totals — every play_id rotation resets, not just reload. retry()
+        // differs — it keeps play_id stable and increments attempt_id because
+        // it's a within-play recovery attempt that must preserve counters.
         regeneratePlayID()
         resetAttemptID()
         let restartPayload = buildMetricsPayload(event: "restart", at: Date(), extra: [
