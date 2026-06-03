@@ -239,6 +239,45 @@ services:
       - app_network
     restart: unless-stopped
 
+  # #506 — scheduled per-row token derivation. Runs analytics/tools/
+  # derive_tokens.py on a loop against ClickHouse, keeping derived_tokens
+  # populated so the NetworkLog / PlayLog token columns stay fresh without
+  # manual runs. NOT on the forwarder's hot ingest path (the delay is a
+  # feature — resolves the tokenizer's lookahead; see #506).
+  #
+  # Bind-mounts the tools dir (no image rebuild when the still-evolving
+  # tokenizer changes — just restart the service). stdlib-only Python, so a
+  # stock slim image needs no pip install. Trailing-window re-scan +
+  # ReplacingMergeTree(scored_at) dedup handles overlap and lateness.
+  token-deriver:
+    image: python:3.12-slim
+    container_name: infinite-streaming-token-deriver
+    volumes:
+      - ./analytics/tools:/tools:ro
+    environment:
+      - FORWARDER_CLICKHOUSE_URL=http://clickhouse:8123
+      - DERIVE_INTERVAL_SECONDS=${DERIVE_INTERVAL_SECONDS:-1800}
+      - DERIVE_WINDOW_HOURS=${DERIVE_WINDOW_HOURS:-6}
+      - DERIVE_MODEL_VERSION=${DERIVE_MODEL_VERSION:-vomm-tok-1}
+    # Initial sleep lets ClickHouse finish init.d (incl. 04-derived.sql)
+    # on a cold start; a failed run just logs and retries next tick.
+    command:
+      - sh
+      - -c
+      - |
+        sleep 20
+        while true; do
+          python3 /tools/derive_tokens.py --hours "$$DERIVE_WINDOW_HOURS" --model-version "$$DERIVE_MODEL_VERSION" \
+            || echo "[token-deriver] run failed (rc=$$?), retrying next tick"
+          sleep "$$DERIVE_INTERVAL_SECONDS"
+        done
+    depends_on:
+      clickhouse:
+        condition: service_started
+    networks:
+      - app_network
+    restart: unless-stopped
+
 
 networks:
   app_network:
