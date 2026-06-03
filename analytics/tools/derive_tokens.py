@@ -85,7 +85,12 @@ def main():
 
     derived = []
     for play, prows in by_play.items():
-        pid = prows[0].get("player_id")
+        # A play has exactly one player, but the FIRST network row is often a
+        # pre-stamp row (the forwarder hasn't resolved session→player yet) with
+        # an empty player_id. Stamping prows[0] would blank the whole play and
+        # break the read-path join (which matches on player_id). Take the first
+        # non-empty player_id instead.
+        pid = next((r.get("player_id") for r in prows if r.get("player_id")), "")
         for ts, fp, surface, token in tk.tokenize_rows(prows):
             derived.append({"ts": ts, "player_id": pid, "play_id": play,
                             "entry_fingerprint": fp, "surface": surface, "token": token,
