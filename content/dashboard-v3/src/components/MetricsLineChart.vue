@@ -93,6 +93,31 @@ const coord = useChartCoordination(toRef(props, 'playerId'));
 
 let chart: any = null;
 let dataset: Array<Array<{ x: number; y: number }>> = [];
+
+/** Hard cap on points kept per series (issue #582). A pure memory
+ *  bound: the oldest points are dropped once a series exceeds this, so a
+ *  tab open for hours can't grow the renderer to multiple GB. ~8000
+ *  points is well beyond any visible window (>2 h at 1 Hz) so pan-back
+ *  stays generous; it's the cache's eviction window, not zoom, that
+ *  determines how far back data actually exists. */
+const MAX_POINTS_PER_SERIES = 8000;
+
+/** Listeners attached to `window` outlive this component's canvas (which
+ *  GCs when the chart is destroyed), so they must be removed on unmount
+ *  or they leak the closures — and the chart/dataset they capture —
+ *  every time a chart is torn down (e.g. switching the active session).
+ *  Issue #582. Canvas-bound listeners GC with the canvas, but routing
+ *  them here too is harmless and keeps teardown complete. */
+const teardownFns: Array<() => void> = [];
+function onGlobal(
+  target: EventTarget,
+  type: string,
+  handler: (e: any) => void,
+  opts?: AddEventListenerOptions | boolean,
+) {
+  target.addEventListener(type, handler as EventListener, opts);
+  teardownFns.push(() => target.removeEventListener(type, handler as EventListener, opts as EventListenerOptions));
+}
 // Watermark of the latest CH row already pushed through the chart.
 // Read by the markers-stream watcher to drain only NEW rows on each
 // version bump (the cache holds the full backfill + live tail).
@@ -793,7 +818,7 @@ function installLeftClickLiveToggle() {
     if (x < area.left || x > area.right || y < area.top || y > area.bottom) return;
     coord.toggleLive();
   });
-  window.addEventListener('blur', () => { downAt = null; });
+  onGlobal(window, 'blur', () => { downAt = null; });
 }
 
 function installContextMenuSuppress() {
@@ -817,7 +842,7 @@ function installRightDragPan() {
     // user is dragging (setRange handles both range + paused mirror).
     coord.setRange({ min: sx.min, max: sx.max });
   });
-  window.addEventListener('mousemove', (e) => {
+  onGlobal(window, 'mousemove', (e: MouseEvent) => {
     if (!dragState || !chart) return;
     const area = chart.chartArea;
     if (!area) return;
@@ -827,10 +852,10 @@ function installRightDragPan() {
     const dv = (dx / widthPx) * span;
     coord.setRange({ min: dragState.startMin - dv, max: dragState.startMax - dv });
   });
-  window.addEventListener('mouseup', (e) => {
+  onGlobal(window, 'mouseup', (e: MouseEvent) => {
     if (e.button === 2) dragState = null;
   });
-  window.addEventListener('blur', () => { dragState = null; });
+  onGlobal(window, 'blur', () => { dragState = null; });
 }
 
 /**
@@ -956,14 +981,21 @@ function pushSample(p: PlayerRecord, x: number) {
     insertByX(data, { x, y: Number(y) });
     mutated = true;
   }
-  // Retention is the time-series cache's job (SOFT_CAP_SAMPLES) —
-  // the chart used to trim at `x - windowMs * 2` to bound memory,
-  // but `windowMs` is the *visible* window, not retention. When the
-  // operator zooms in (focusSpan shrinks → setWindowMs shrinks) the
-  // trim was killing older points the PLAYERSTATE lane still had,
-  // producing a chart-vs-lane time-axis mismatch. Chart.js with
-  // `animation: false` handles tens of thousands of points fine.
+  // Bound per-series history (issue #582). The chart used to keep every
+  // point for the life of the tab ("retention is the cache's job"), but
+  // the cache evicts and the chart did not — so the dataset arrays grew
+  // unbounded, ballooning the renderer to multi-GB and pegging CPU as
+  // each redraw re-rasterized hundreds of thousands of points. Cap each
+  // series to MAX_POINTS_PER_SERIES and drop the oldest (front of the
+  // ascending-by-x array). The cap is a memory bound, independent of the
+  // visible window, so it does NOT reintroduce the zoom-in trimming bug
+  // that the old `x - windowMs*2` trim had (that one shrank with zoom).
   if (mutated) {
+    for (const d of dataset) {
+      if (d.length > MAX_POINTS_PER_SERIES) {
+        d.splice(0, d.length - MAX_POINTS_PER_SERIES);
+      }
+    }
     if (coord.state.range === null) {
       applyViewport({ min: x - DEFAULT_FOCUS_MS, max: x });
     }
@@ -1138,13 +1170,19 @@ watch(
     } catch (err) {
       console.warn('chart viewport apply skipped:', err);
     }
-    // Viewport / pause changes are axis-only updates — render
-    // directly so brush drag feels as smooth as the vis-timeline
-    // events panel. safeChartUpdate's adaptive throttle exists for
-    // data-arrival churn (pushSample / drainNewRows insert many
-    // points per second); applying it here would delay pan response
-    // up to several seconds when a dataset has thousands of points.
-    try { chart.update('none'); } catch (err) { console.warn('chart pan render skipped:', err); }
+    // Interactive viewport changes (brush drag, pan, zoom — i.e. a
+    // pinned range) render directly so they feel as smooth as the
+    // vis-timeline events panel. But in LIVE mode (range === null) this
+    // watcher fires on EVERY sample, because effectiveRange tracks
+    // lastSampleMs — and a direct chart.update() per sample across N
+    // charts is the dominant CPU sink on a long-lived tab (#582). For
+    // the live-edge case, route through the adaptive throttle instead;
+    // the right edge still advances at the metrics emit cadence.
+    if (coord.state.range === null) {
+      safeChartUpdate();
+    } else {
+      try { chart.update('none'); } catch (err) { console.warn('chart pan render skipped:', err); }
+    }
   },
 );
 
@@ -1231,6 +1269,11 @@ function onLiveToggleClick() {
 }
 
 onBeforeUnmount(() => {
+  // Remove window-level listeners so the destroyed chart's closures can
+  // be GC'd (issue #582 — otherwise switching sessions leaks charts).
+  for (const fn of teardownFns) { try { fn(); } catch { /* ignore */ } }
+  teardownFns.length = 0;
+  if (pendingUpdateTimer != null) { clearTimeout(pendingUpdateTimer); pendingUpdateTimer = null; }
   try { chart?.destroy(); } catch { /* ignore */ }
   chart = null;
 });

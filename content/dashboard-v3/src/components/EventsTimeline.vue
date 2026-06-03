@@ -371,6 +371,15 @@ interface StatefulEvent {
 }
 
 const statefulEvents: StatefulEvent[] = [];
+/** Backstop cap on retained stateful events (issue #582). This array was
+ *  appended on every heartbeat and never trimmed within a session, so it
+ *  grew unbounded — and renderStatefulLanes walks + sorts it on each
+ *  render. We normally trim it to the events cache's retained window (so
+ *  the Player State lanes cover the SAME span as the charts on pan-back);
+ *  this count is only a fallback when the cache bounds aren't known yet.
+ *  Set high (well above the cache cap × a few events/heartbeat) so it
+ *  never trims tighter than the cache window. */
+const STATEFUL_EVENTS_CAP = 40000;
 // IDs assigned to coalesced range items so we can replace cleanly on
 // every render. Range items are tagged by the lane key + rendered
 // `range:<key>:<n>` so we can detect & remove them before re-adding.
@@ -976,6 +985,20 @@ async function drainNewRows() {
     }
   }
   lastIngestedMs = highWater;
+  // Bound the stateful-event history (issue #582) WITHOUT trimming
+  // tighter than what the charts show. Trim to the events cache's
+  // retained window (rangeBounds.min) so the Player State lanes fill in
+  // over exactly the same span the charts do when the operator pans the
+  // focus window back. Appended in ascending ts order, so the oldest are
+  // at the front. The fixed cap is only a fallback before bounds exist.
+  const minKeep = props.eventsStream.rangeBounds.value?.min;
+  if (minKeep != null) {
+    let drop = 0;
+    while (drop < statefulEvents.length && statefulEvents[drop].ts < minKeep) drop++;
+    if (drop > 0) statefulEvents.splice(0, drop);
+  } else if (statefulEvents.length > STATEFUL_EVENTS_CAP) {
+    statefulEvents.splice(0, statefulEvents.length - STATEFUL_EVENTS_CAP);
+  }
 }
 
 watch(
