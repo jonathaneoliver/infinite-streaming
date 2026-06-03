@@ -502,10 +502,14 @@ function rowLabels(r: Row): string[] {
   return [];
 }
 
-/** #506 batch-derived per-row token, LEFT-JOINed onto network rows by
- *  the forwarder (analytics/tools/derive_tokens.py + the read-path merge
- *  in v2_handlers.go / timeseries.go). Only network rows carry it;
- *  event / control / avmetric rows return '' (no derived tokens yet). */
+/** #506 batch-derived per-row token, LEFT-JOINed by the forwarder
+ *  (analytics/tools/derive_tokens.py + the read-path merge in
+ *  v2_handlers.go / timeseries.go). Network rows carry segment/playlist
+ *  tokens (V_SEG/A_SEG/V_PL/…, FAULT); session_events rows carry
+ *  lifecycle tokens (STALL_*/RATE_*/BUF_*/FIRST_FRAME). Control and
+ *  avmetric rows return '' by design — the token model has no vocabulary
+ *  for them (the one control signal that matters, fault injection, is
+ *  already a FAULT token on the network request it breaks). */
 function rowToken(r: Row): string {
   const t = r.raw?.token;
   return typeof t === 'string' ? t : '';

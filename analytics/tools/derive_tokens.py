@@ -59,9 +59,15 @@ def ch(ch_url, query, body=None, params=None):
         return resp.read().decode()
 
 
-def fetch_rows(ch_url, days, player, table, cols, order):
-    where = ["ts >= now64(3) - INTERVAL {days:UInt32} DAY"]
-    params = {"days": str(days)}
+def fetch_rows(ch_url, days, hours, player, table, cols, order):
+    # Trailing window: --hours (bounded re-scan for the scheduled sidecar) wins over
+    # --days (ad-hoc backfill). ReplacingMergeTree(scored_at) dedupes the overlap.
+    if hours:
+        where = ["ts >= now64(3) - INTERVAL {hours:UInt32} HOUR"]
+        params = {"hours": str(hours)}
+    else:
+        where = ["ts >= now64(3) - INTERVAL {days:UInt32} DAY"]
+        params = {"days": str(days)}
     if player:
         where.append("player_id = {pid:String}")
         params["pid"] = player
@@ -82,14 +88,16 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--ch-url", default=os.environ.get("FORWARDER_CLICKHOUSE_URL", "http://localhost:8123"))
     ap.add_argument("--days", type=int, default=7)
+    ap.add_argument("--hours", type=int, default=0,
+                    help="trailing window in hours (overrides --days; for the scheduled sidecar)")
     ap.add_argument("--player", default=None, help="limit to one player_id")
     ap.add_argument("--model-version", default="vomm-tok-1")
     ap.add_argument("--dry-run", action="store_true", help="compute + summarise, do NOT insert")
     args = ap.parse_args()
 
-    net_rows = fetch_rows(args.ch_url, args.days, args.player, "network_requests",
+    net_rows = fetch_rows(args.ch_url, args.days, args.hours, args.player, "network_requests",
                           NET_COLS, "player_id, ts, entry_fingerprint")
-    event_rows = fetch_rows(args.ch_url, args.days, args.player, "session_events",
+    event_rows = fetch_rows(args.ch_url, args.days, args.hours, args.player, "session_events",
                             EVENT_COLS, "player_id, ts")
     net_by_play = group_by_play(net_rows)
     ev_by_play = group_by_play(event_rows)
@@ -118,8 +126,9 @@ def main():
                             "entry_fingerprint": fp, "surface": surface, "token": token,
                             "model_version": args.model_version, "scored_at": scored_at})
 
+    window = f"{args.hours}h" if args.hours else f"{args.days}d"
     print(f"#506 derive_tokens — {len(net_rows)} net + {len(event_rows)} event rows / "
-          f"{len(plays)} plays / {args.days}d → {len(derived)} tokens "
+          f"{len(plays)} plays / {window} → {len(derived)} tokens "
           f"(model={args.model_version})")
     kinds = collections.Counter(t["token"].split("(")[0] for t in derived)
     print("token kinds:", dict(kinds.most_common(10)))
