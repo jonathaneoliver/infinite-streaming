@@ -352,6 +352,21 @@ watch(
   { immediate: true },
 );
 
+// Live-edge anchor. `coord.lastSampleMs` is the brush's live-follow
+// target (effectiveRange.max) AND the rail's right edge. It used to be
+// advanced ONLY from inside the charts' drain (pushSample → noteSample),
+// so while the charts backfilled asynchronously the brush sat behind the
+// true live edge — "not locked at live" until the drain caught up. The
+// cache's `rangeBounds.max` is the authoritative newest ts the instant
+// the cache has it, so feed the live edge from there directly. The
+// charts' recent-first drain keeps the visible window populated up to
+// this edge, so the chart's right edge stays in sync without a blank.
+watch(
+  () => timeseries.events.rangeBounds.value?.max,
+  (m) => { if (m != null) coord.noteSample(m); },
+  { immediate: true },
+);
+
 /** Effective time range for the brush rail. Reads the cached
  *  rangeBounds of the samples stream as the historical span; always
  *  extends `max` with `coord.lastSampleMs` so the rail's right edge

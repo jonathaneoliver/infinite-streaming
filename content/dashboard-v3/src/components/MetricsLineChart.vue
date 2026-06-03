@@ -998,13 +998,15 @@ function pushSample(p: PlayerRecord, x: number) {
         d.splice(0, d.length - MAX_POINTS_PER_SERIES);
       }
     }
-    // Live-follow: keep the viewport glued to the latest drained sample
-    // so the chart always shows data at its right edge. (The previous
-    // "jump to cache edge" optimization left the live edge blank while
-    // the backfill was still draining behind it — #590 regression. With
-    // the per-chunk watermark the drain converges fast, so following the
-    // drained edge no longer crawls noticeably.)
-    if (coord.state.range === null) {
+    // Live-follow: advance the viewport ONLY for a genuine live-tail
+    // sample (one at/after the running max). `coord.noteSample(x)` above
+    // already raised `lastSampleMs` to max(prev, x), so a new tail row
+    // has `x === lastSampleMs` and an older backfill row has
+    // `x < lastSampleMs`. Guarding on that stops the recent-first
+    // backfill (older, off-screen rows) from dragging the window
+    // backward — the fix for both the live-edge blank AND the
+    // brush-crawl-across-the-whole-backfill regressions (#590).
+    if (coord.state.range === null && x >= coord.state.lastSampleMs) {
       applyViewport({ min: x - DEFAULT_FOCUS_MS, max: x });
     }
     safeChartUpdate();
@@ -1085,6 +1087,35 @@ function safeChartUpdate() {
  */
 const pendingLive: { p: PlayerRecord; x: number }[] = [];
 let drainToken = 0;
+let backfillToken = 0;
+
+/**
+ * Background fill of the off-screen history that sits OLDER than the
+ * live window, walked newest→oldest so panning back populates the rows
+ * nearest the window first. These all have `x < lastSampleMs`, so
+ * pushSample's guard leaves the viewport parked at the live edge — no
+ * crawl, no blank. Snapshot is bounded to MAX_POINTS_PER_SERIES rows so
+ * we don't burn the main thread inserting points the per-series cap
+ * would immediately trim off the front anyway.
+ */
+async function backfillOlder(myToken: number, ceilMs: number) {
+  if (!chart) return;
+  const older = props.eventsStream.inRange(0, ceilMs - 1);
+  if (!older.length) return;
+  const from = Math.max(0, older.length - MAX_POINTS_PER_SERIES);
+  const CHUNK = 500;
+  for (let end = older.length; end > from; end -= CHUNK) {
+    if (myToken !== backfillToken) return;
+    const start = Math.max(from, end - CHUNK);
+    for (let i = end - 1; i >= start; i--) {
+      const row = older[i];
+      const x = tsOfRow(row);
+      if (!Number.isFinite(x)) continue;
+      pushSample(chRowToPlayerRecord(row), x);
+    }
+    await new Promise<void>((r) => setTimeout(r, 0));
+  }
+}
 
 async function drainNewRows() {
   if (!chart) {
@@ -1092,6 +1123,40 @@ async function drainNewRows() {
     catch (err) { console.warn('chart ensure failed:', err); return; }
   }
   if (!chart) return;
+
+  // INITIAL live-mode backfill — fill the visible window from the newest
+  // rows FIRST (synchronously, so it lands in one repaint with the
+  // viewport already at the live edge), then backfill the older
+  // off-screen rows behind it. Draining strictly oldest→newest instead
+  // (the generic path below) either left the live edge blank until the
+  // drain reached it, or crawled the brush across the whole backfill —
+  // both #590 regressions. Pinned/archive mode (range !== null) keeps
+  // the generic full-window fill, which never moves the viewport.
+  if (lastIngestedMs === -Infinity && coord.state.range === null) {
+    const all = props.eventsStream.inRange(0, Number.MAX_SAFE_INTEGER);
+    if (!all.length) return;
+    const cacheMax = tsOfRow(all[all.length - 1]);
+    if (Number.isFinite(cacheMax)) {
+      const span = coord.state.liveSpan || DEFAULT_FOCUS_MS;
+      const liveStart = cacheMax - span;
+      // Find the contiguous recent tail (ascending-by-x array).
+      let firstRecent = all.length;
+      for (let i = all.length - 1; i >= 0; i--) {
+        const x = tsOfRow(all[i]);
+        if (Number.isFinite(x) && x >= liveStart) firstRecent = i; else break;
+      }
+      for (let i = firstRecent; i < all.length; i++) {
+        const row = all[i];
+        const x = tsOfRow(row);
+        if (!Number.isFinite(x)) continue;
+        pushSample(chRowToPlayerRecord(row), x);
+      }
+      lastIngestedMs = cacheMax;
+      void backfillOlder(++backfillToken, liveStart);
+      return;
+    }
+  }
+
   const raw = props.eventsStream.inRange(
     lastIngestedMs === -Infinity ? 0 : lastIngestedMs + 1,
     Number.MAX_SAFE_INTEGER,
@@ -1164,6 +1229,7 @@ watch(
   () => {
     pendingLive.length = 0;
     lastIngestedMs = -Infinity;
+    ++backfillToken; // abort any in-flight backfill for the old player
     for (const arr of dataset) arr.length = 0;
     safeChartUpdate();
   },
