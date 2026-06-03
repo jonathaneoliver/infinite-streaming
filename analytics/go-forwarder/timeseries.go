@@ -681,11 +681,52 @@ func buildNetworkQuery(cfg config, sel streamSelection, params timeseriesParams)
 		limit = backfillCapNetwork
 	}
 	// Subquery wrap — same DateTime64-vs-String aliasing reason as
-	// buildSamplesQuery above.
+	// buildSamplesQuery above. The middle layer LEFT-JOINs the #506
+	// batch-derived per-row token (analytics/tools/derive_tokens.py); the
+	// outer toString projection then operates on the native `ts`.
 	cols := buildSelectColumns(sel.Columns)
-	q := fmt.Sprintf(`SELECT %s FROM (SELECT * FROM %s.network_requests WHERE %s ORDER BY ts ASC LIMIT %d) FORMAT JSONEachRow`,
-		cols, cfg.chDatabase, strings.Join(clauses, " AND "), limit)
+	dtScope := []string{}
+	if params.playerID != "" {
+		dtScope = append(dtScope, "lowerUTF8(player_id) = lowerUTF8({player:String})")
+	}
+	if params.playID != "" && params.playID != "—" {
+		dtScope = append(dtScope, "lowerUTF8(play_id) = lowerUTF8({play:String})")
+	}
+	if params.from != "" {
+		dtScope = append(dtScope, "ts >= parseDateTime64BestEffort({from:String})")
+	}
+	if params.to != "" {
+		dtScope = append(dtScope, "ts <= parseDateTime64BestEffort({to:String})")
+	}
+	if len(dtScope) == 0 {
+		dtScope = append(dtScope, "ts >= now() - INTERVAL 1 HOUR")
+	}
+	q := fmt.Sprintf(`SELECT %s, token FROM (
+	  SELECT base.*, ifNull(dt.token, '') AS token
+	  FROM (SELECT * FROM %s.network_requests WHERE %s ORDER BY ts ASC LIMIT %d) base
+	  %s
+	) FORMAT JSONEachRow`,
+		cols, cfg.chDatabase, strings.Join(clauses, " AND "), limit,
+		derivedTokenJoinSQL(cfg.chDatabase, strings.Join(dtScope, " AND ")))
 	return q, args, nil
+}
+
+// derivedTokenJoinSQL returns a LEFT JOIN fragment that attaches the #506
+// batch-derived per-row token (analytics/tools/derive_tokens.py, reusing the
+// single tokenizer in analytics/tools/tokenize.py) to a base query aliased
+// `base`, matched by (player_id, ts, entry_fingerprint). derived_tokens is a
+// ReplacingMergeTree, so argMax(token, scored_at) collapses pre-merge
+// duplicates to the latest score. `scope` constrains the build side to the
+// same player/play/time window as the base query (the columns derived_tokens
+// shares) so the join never has to read the whole table.
+func derivedTokenJoinSQL(db, scope string) string {
+	return fmt.Sprintf(`LEFT JOIN (
+	  SELECT player_id, ts, entry_fingerprint, argMax(token, scored_at) AS token
+	  FROM %s.derived_tokens
+	  WHERE %s
+	  GROUP BY player_id, ts, entry_fingerprint
+	) dt ON base.player_id = dt.player_id AND base.ts = dt.ts AND base.entry_fingerprint = dt.entry_fingerprint`,
+		db, scope)
 }
 
 // buildSelectColumns produces the SELECT projection list. `ts` is

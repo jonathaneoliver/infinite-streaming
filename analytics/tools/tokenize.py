@@ -56,6 +56,7 @@ Usage:
                                             #  not an artifact of the play boundary)
 """
 import argparse
+import collections
 import json
 import re
 import subprocess
@@ -136,9 +137,10 @@ def event_tokens(event_rows):
     return out
 
 
-def tokenize(rows, event_rows=None):
-    """rows: network_requests dicts. event_rows (optional): session_events dicts to
-    interleave by timestamp (cross-stream). Returns a list of token strings."""
+def _token_seq(rows, event_rows=None):
+    """Internal: build the ts-sorted token sequence as (ts, entry_fingerprint, surface,
+    token) tuples — fingerprint/surface carried for the #506 per-row derived-token writer;
+    fp is None for event-derived tokens. tokenize()/tokenize_rows() wrap this."""
     rows = [r for r in rows if r.get("url")]
     rows.sort(key=lambda r: r.get("ts") or r.get("timestamp") or "")
 
@@ -175,11 +177,12 @@ def tokenize(rows, event_rows=None):
         if rend != prev_rend and reverts and backward:
             probe_rows.add(ridx)  # single-segment excursion at a backward segnum
 
-    # ts-tagged emission so session_events can be interleaved by timestamp.
-    seq = []          # (ts, token)
-    state = {"ts": ""}
+    # ts-tagged emission (+ source-row entry_fingerprint/surface for the derived-token
+    # writer) so session_events can be interleaved by timestamp.
+    seq = []          # (ts, entry_fingerprint, surface, token)
+    state = {"ts": "", "fp": None, "surface": ""}
     def emit(tok):
-        seq.append((state["ts"], tok))
+        seq.append((state["ts"], state["fp"], state["surface"], tok))
 
     last_vrend = None
     last_vseg = None
@@ -188,7 +191,9 @@ def tokenize(rows, event_rows=None):
 
     for i, r in enumerate(rows):
         state["ts"] = r.get("ts") or r.get("timestamp") or ""
+        state["fp"] = r.get("entry_fingerprint")
         kind, rend, seg = classify_row(r["url"])
+        state["surface"] = _surface(kind)
         if _is_faulted(r):
             emit(f"FAULT({_surface(kind)},{_fault_class(r)})")
             continue
@@ -223,9 +228,34 @@ def tokenize(rows, event_rows=None):
     # Cross-stream: interleave session_events lifecycle tokens by timestamp. Stable sort
     # keeps request-token order within equal timestamps.
     if event_rows:
-        seq.extend(event_tokens(event_rows))
+        seq.extend((ts, None, "", tok) for ts, tok in event_tokens(event_rows))
     seq.sort(key=lambda x: x[0] or "")
-    return ["<S>"] + [t for _, t in seq] + ["<E>"]
+    return seq
+
+
+def tokenize(rows, event_rows=None):
+    """rows: network_requests dicts. event_rows (optional): session_events dicts to
+    interleave by timestamp (cross-stream). Returns a list of token strings."""
+    return ["<S>"] + [tok for _, _, _, tok in _token_seq(rows, event_rows)] + ["<E>"]
+
+
+def tokenize_rows(rows):
+    """Per-row tokens for the #506 derived-token writer: ONE (ts, entry_fingerprint,
+    surface, token) per source network row, keyed uniquely by its fingerprint. A row can
+    emit multiple sequence tokens (e.g. STARTUP_RAMP/LOOP_BOUNDARY *then* the V_SEG — all
+    sharing the row's fingerprint); those are joined into one combined token string
+    ("STARTUP_RAMP V_SEG(+2,+0)") so the derived row stays unique on
+    (player_id, ts, entry_fingerprint) and the read-path join is 1:1. (tokenize() keeps
+    them as separate sequence tokens for the model — different purpose.) Sentinels and
+    event-derived tokens (fp=None) are excluded; lookahead resolves because batch sees the
+    whole play."""
+    by_row = collections.OrderedDict()  # (ts, fp) -> [surface, [tokens]]
+    for ts, fp, surf, tok in _token_seq(rows):
+        if fp is None:
+            continue
+        slot = by_row.setdefault((ts, fp), [surf, []])
+        slot[1].append(tok)
+    return [(ts, fp, surf, " ".join(toks)) for (ts, fp), (surf, toks) in by_row.items()]
 
 
 def episodes(tokens, anchor="FAULT", lead=4, horizon=8):

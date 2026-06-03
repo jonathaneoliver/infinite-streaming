@@ -366,36 +366,63 @@ func v2NetworkRequestsHandler(w http.ResponseWriter, r *http.Request, cfg config
 		clauses = append(clauses, "ts >= now() - INTERVAL 1 HOUR")
 	}
 
-	// Wrap in a sub-select so the outer toString aliases don't shadow
-	// the typed `ts` column referenced by WHERE / ORDER BY (same trap
-	// the snapshots handler addresses; see commit 9cfca6f).
+	// derived_tokens join scope — the player/play/time columns
+	// derived_tokens shares, reusing the same params as the base WHERE so
+	// the join's build side is bounded to this query's window (see
+	// derivedTokenJoinSQL in timeseries.go).
+	dtScope := []string{}
+	if playerID != "" {
+		dtScope = append(dtScope, "lowerUTF8(player_id) = lowerUTF8({pid:String})")
+	}
+	if playID != "" && playID != "—" {
+		dtScope = append(dtScope, "lowerUTF8(play_id) = lowerUTF8({play:String})")
+	}
+	if from != "" {
+		dtScope = append(dtScope, "ts >= parseDateTime64BestEffort({from:String})")
+	}
+	if to != "" {
+		dtScope = append(dtScope, "ts < parseDateTime64BestEffort({to:String})")
+	}
+	if len(dtScope) == 0 {
+		dtScope = append(dtScope, "ts >= now() - INTERVAL 1 HOUR")
+	}
+
+	// Three layers: innermost `base` keeps native `ts` for WHERE/ORDER BY
+	// (no toString shadowing — same trap the snapshots handler addresses,
+	// commit 9cfca6f); the middle layer LEFT-JOINs the #506 batch-derived
+	// per-row token; the outer applies the toString projection.
 	query := fmt.Sprintf(`
 		SELECT
-		  toString(ts_raw) AS timestamp,
+		  toString(ts) AS timestamp,
 		  session_id, player_id, play_id, attempt_id,
 		  method, url, upstream_url, request_kind, content_type,
 		  status, bytes_in, bytes_out,
 		  ttfb_ms, total_ms, dns_ms, connect_ms, tls_ms, transfer_ms, client_wait_ms,
-		  faulted, fault_type, fault_action, fault_category, labels
+		  faulted, fault_type, fault_action, fault_category, labels, token
 		FROM (
-		  SELECT
-		    ts AS ts_raw,
-		    session_id, player_id, play_id, attempt_id,
-		    method, url, upstream_url, request_kind, content_type,
-		    status, bytes_in, bytes_out,
-		    ttfb_ms, total_ms, dns_ms, connect_ms, tls_ms, transfer_ms, client_wait_ms,
-		    faulted, fault_type, fault_action, fault_category, labels
-		  FROM %s.network_requests
-		  WHERE %s
-		  -- DESC so the LIMIT keeps the most recent N rows. ASC
-		  -- caused rare 4xx / faulted rows to be squeezed out by
-		  -- bulk 200s on long sessions; the NetworkLog table sorts
-		  -- client-side so display order is unaffected.
-		  ORDER BY ts DESC
-		  LIMIT %d
+		  SELECT base.*, ifNull(dt.token, '') AS token
+		  FROM (
+		    SELECT
+		      ts, entry_fingerprint,
+		      session_id, player_id, play_id, attempt_id,
+		      method, url, upstream_url, request_kind, content_type,
+		      status, bytes_in, bytes_out,
+		      ttfb_ms, total_ms, dns_ms, connect_ms, tls_ms, transfer_ms, client_wait_ms,
+		      faulted, fault_type, fault_action, fault_category, labels
+		    FROM %s.network_requests
+		    WHERE %s
+		    -- DESC so the LIMIT keeps the most recent N rows. ASC
+		    -- caused rare 4xx / faulted rows to be squeezed out by
+		    -- bulk 200s on long sessions; the NetworkLog table sorts
+		    -- client-side so display order is unaffected.
+		    ORDER BY ts DESC
+		    LIMIT %d
+		  ) base
+		  %s
 		)
 		FORMAT JSONEachRow`,
-		cfg.chDatabase, strings.Join(clauses, " AND "), limit)
+		cfg.chDatabase, strings.Join(clauses, " AND "), limit,
+		derivedTokenJoinSQL(cfg.chDatabase, strings.Join(dtScope, " AND ")))
 
 	rows, err := queryClickHouseRows(r.Context(), cfg, query, params)
 	if err != nil {
@@ -444,6 +471,12 @@ func v2NetworkRequestsHandler(w http.ResponseWriter, r *http.Request, cfg config
 		// mirroring how ts/session_id/player_id are added above.
 		if labels, ok := row["labels"]; ok && labels != nil {
 			item["labels"] = labels
+		}
+		// #506 — the batch-derived per-row token (V_SEG(ΔP,ΔS), V_PROBE,
+		// STARTUP_RAMP, LOOP_BOUNDARY, …), LEFT-JOINed from derived_tokens.
+		// Empty for rows not yet scored by derive_tokens.py.
+		if tok, ok := row["token"].(string); ok && tok != "" {
+			item["token"] = tok
 		}
 		out = append(out, item)
 	}
