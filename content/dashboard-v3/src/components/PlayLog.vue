@@ -502,6 +502,15 @@ function rowLabels(r: Row): string[] {
   return [];
 }
 
+/** #506 batch-derived per-row token, LEFT-JOINed onto network rows by
+ *  the forwarder (analytics/tools/derive_tokens.py + the read-path merge
+ *  in v2_handlers.go / timeseries.go). Only network rows carry it;
+ *  event / control / avmetric rows return '' (no derived tokens yet). */
+function rowToken(r: Row): string {
+  const t = r.raw?.token;
+  return typeof t === 'string' ? t : '';
+}
+
 /** Pull the severity prefix from a label like 'critical=stall_frozen'.
  *  Returns '' for labels that don't follow the schema. */
 function labelSeverity(label: string): string {
@@ -999,6 +1008,7 @@ function onRowsWheel(e: WheelEvent) {
         <div class="cell c-play">play_id</div>
         <div class="cell c-attempt">attempt_id</div>
         <div class="cell c-eventname">event_name</div>
+        <div class="cell c-token" title="#506 batch-derived per-row token (V_SEG(ΔP,ΔS), V_PROBE, …). Network rows only; LEFT-JOINed from derived_tokens by the forwarder.">token</div>
         <div class="cell c-fields">fields</div>
         <div v-if="showRaw" class="cell c-raw">raw</div>
       </div>
@@ -1035,6 +1045,10 @@ function onRowsWheel(e: WheelEvent) {
               :class="`event-name-${r.source}`"
               :title="r.eventName"
             >{{ r.eventName }}</span>
+            <span v-else class="event-name-empty">—</span>
+          </div>
+          <div class="cell c-token" :title="rowToken(r)">
+            <span v-if="rowToken(r)" class="pl-token">{{ rowToken(r) }}</span>
             <span v-else class="event-name-empty">—</span>
           </div>
           <div class="cell c-fields">
@@ -1151,6 +1165,7 @@ function onRowsWheel(e: WheelEvent) {
     var(--c-play, 90px)
     var(--c-attempt, 90px)
     var(--c-eventname, minmax(140px, 280px))
+    var(--c-token, minmax(120px, 0.9fr))
     var(--c-fields, minmax(280px, 4fr));
   gap: 8px;
   padding: 4px 8px;
@@ -1160,6 +1175,22 @@ function onRowsWheel(e: WheelEvent) {
   border-top: 1px solid #f3f4f6;
 }
 .c-flags { text-align: center; font-weight: 700; }
+.c-token { overflow: hidden; }
+.pl-token {
+  display: inline-block;
+  max-width: 100%;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  vertical-align: bottom;
+  font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+  font-size: 10px;
+  color: #3730a3;
+  background: #eef2ff;
+  border: 1px solid #e0e7ff;
+  border-radius: 3px;
+  padding: 0 4px;
+}
 
 /* When the Raw column is toggled on, the row grid grows by one slot
  * and the fields column tightens so the raw cell has room. */
@@ -1173,6 +1204,7 @@ function onRowsWheel(e: WheelEvent) {
     var(--c-play, 90px)
     var(--c-attempt, 90px)
     var(--c-eventname, minmax(140px, 280px))
+    var(--c-token, minmax(120px, 0.9fr))
     var(--c-fields, minmax(200px, 2fr))
     var(--c-raw, minmax(280px, 3fr));
 }
