@@ -757,11 +757,22 @@ function sortFields(fields: DisplayedField[], source: Source): DisplayedField[] 
   });
 }
 
+/** Rows within the coordinated focus window (issue #586). The logs now
+ *  "follow the focus bar": effectiveRange is the live tail when live, or
+ *  the pinned window when the operator pans back — so the Play Log lines
+ *  up with the charts and the Player State timeline instead of always
+ *  showing the entire cache. */
+const windowedRows = computed<Row[]>(() => {
+  const r = coord.effectiveRange.value;
+  if (!r) return allRows.value;
+  return allRows.value.filter((row) => row.ts >= r.min && row.ts <= r.max);
+});
+
 const rowsWithFields = computed<RowWithFields[]>(() => {
   // Build chronological copy so the diff against the previous
   // snapshot is well-defined regardless of the display sort
   // direction the operator picks below.
-  const chrono = allRows.value.slice().sort((a, b) => a.ts - b.ts);
+  const chrono = windowedRows.value.slice().sort((a, b) => a.ts - b.ts);
   const mode = displayMode.value;
   // Only snapshots participate in the diff — every network /
   // event row is unique by construction so a per-row diff is
@@ -825,14 +836,16 @@ const sortedRows = computed<RowWithFields[]>(() => {
 });
 
 const counts = computed(() => {
+  // Counts reflect the focus window (issue #586) so the toolbar tallies
+  // match what's actually shown.
   let evt = 0, net = 0, ctl = 0, avm = 0;
-  for (const r of allRows.value) {
+  for (const r of windowedRows.value) {
     if (r.source === 'event') evt++;
     else if (r.source === 'network') net++;
     else if (r.source === 'avmetrics') avm++;
     else ctl++;
   }
-  return { evt, net, ctl, avm, total: allRows.value.length };
+  return { evt, net, ctl, avm, total: windowedRows.value.length };
 });
 
 /** True when the active player has any AVMetrics rows in the cached
