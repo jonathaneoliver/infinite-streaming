@@ -681,7 +681,7 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         if (wasPlaying) buildUrlAndLoad()
     }
 
-    private fun buildUrlAndLoad() {
+    private fun buildUrlAndLoad(rotatePlayId: Boolean = true) {
         val s = _state.value
         val server = s.activeServer ?: return
         if (s.selectedContent.isEmpty()) return
@@ -692,8 +692,10 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         // stream). Same /go-live route in both cases.
         val port = if (s.localProxy) server.port else server.apiPort
         // Fresh play_id at every loadStream boundary (issue #280) so
-        // go-proxy can scope its network log per play.
-        regeneratePlayId()
+        // go-proxy can scope its network log per play. reload() rotates the
+        // id itself (so play_start carries the new id) and passes false here
+        // to avoid minting a second id the play_start row wouldn't match.
+        if (rotatePlayId) regeneratePlayId()
         // Anchor the age clock for the soak-rotation timer. Every
         // fresh loadStream resets the boundary; the Job is rescheduled
         // below once the player has been handed off.
@@ -788,7 +790,7 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
      * when the player has stalled or surfaced an error and you want the
      * built-in retry kicked off without waiting for it.
      */
-    fun retry() {
+    fun retry(reason: String = "user_retry") {
         val url = _state.value.currentUrl
         if (url.isEmpty()) return
         // #550 retry contract — recovery attempt WITHIN the same play.
@@ -803,8 +805,12 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         // the proxy's network log scopes the new round of requests
         // accordingly.
         metrics?.snapshotForRestart()
-        // User-driven Retry deserves its own HAR — bypass per-player debounce.
-        metrics?.requestHarSnapshot("user_retry", 0, /* force= */ true)
+        // #603 — emit a `restart` event (reason=user_retry) so the mid-play
+        // recovery is observable; onRestart also fires the user-driven HAR.
+        // markRestartPending() makes onPlaybackStarted preserve the play's
+        // video_start_time + fold the re-prepare wait into residency.
+        metrics?.onRestart(reason)
+        metrics?.markRestartPending()
         player.stop()
         player.clearMediaItems()
         loadStream(url)
@@ -841,19 +847,25 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         // row + QoE labels instead of dangling `in_progress`. sendEvent
         // snapshots the payload synchronously, so the play_end row carries
         // the OLD play_id + final state even though the POST is async; the
-        // play_id only rotates later in buildUrlAndLoad(). status=
+        // play_id only rotates on the regeneratePlayId() below. status=
         // user_stopped, reason=reloaded (distinct from a back-tap's
-        // user_quit). resetForFreshPlay() then clears the terminal status
-        // so the subsequent restart row reports in_progress (matching iOS).
+        // user_quit).
         metrics?.endSession("user_stopped", "reloaded")
-        // Fresh play boundary: zero the prior accumulators (variant
-        // dwell etc.) BEFORE the restart marker + releasing the old
-        // metrics instance, so a subsequent retry-flow won't inadvertently
-        // inherit values from before the reload. The new PlaybackMetrics
-        // built in bindMetrics() starts with empty priors anyway, but this
-        // guards against a leak if anyone caches a reference.
-        metrics?.resetForFreshPlay()
-        metrics?.onRestart("reload")
+        // #603 — rotate to the NEW play_id BEFORE emitting play_start so the
+        // play-open boundary carries the new play's id (iOS parity). buildUrlAndLoad
+        // below is told NOT to rotate again so the stream URL uses this same id.
+        // regeneratePlayId() also zeroes the per-play accumulators (variant dwell
+        // etc.) on the still-bound metrics instance — the new PlaybackMetrics built
+        // in bindMetrics() starts empty anyway, but this guards a cached reference.
+        regeneratePlayId()
+        playIdMintedAt = System.currentTimeMillis()
+        playIdLastActivityAt = 0L
+        // #603 — a reload opens a NEW play, so emit play_start (the play-open
+        // boundary, symmetric to play_end), NOT restart. `restart` is reserved
+        // for mid-play recovery (retry / auto-recovery). Emitted on the still-live
+        // metrics instance whose payload reads currentPlayId live → carries the
+        // new id just minted above, with zeroed residency.
+        metrics?.onPlayStart()
         metrics?.release()
         metrics = null
         boundPlayerView = null
@@ -865,7 +877,7 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         attachPlayerListeners()
         applyTrackSelectionParameters()
         _state.update { it.copy(currentUrl = "", playerEpoch = it.playerEpoch + 1) }
-        buildUrlAndLoad()
+        buildUrlAndLoad(rotatePlayId = false)
     }
 
     // -- Metrics binding -----------------------------------------------------
@@ -895,6 +907,14 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
             // instead of staying empty if bindMetrics fired before
             // selectedContent was set.
             { _state.value.selectedContent },
+            // #603 — pin play-scoped ids onto metrics POST URLs (iOS parity).
+            // Read live per emit; PlaybackMetrics captures them synchronously in
+            // buildPayload at fire time, so a play_end at a reload boundary keeps
+            // the OLD play_id even though the POST is async + play_id later rotates.
+            object : PlaybackMetrics.PlayContextProvider {
+                override fun currentPlayId() = currentPlayId
+                override fun currentStartTime() = currentStartTime
+            },
         ).also { it.start() }
     }
 
@@ -933,7 +953,7 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
                     }
                     viewModelScope.launch {
                         kotlinx.coroutines.delay(backoff)
-                        retry()
+                        retry("auto_recovery")
                     }
                     return
                 }
@@ -944,7 +964,7 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
                 if (_state.value.autoRecovery && _state.value.currentUrl.isNotEmpty()) {
                     viewModelScope.launch {
                         kotlinx.coroutines.delay(500)
-                        retry()
+                        retry("auto_recovery")
                     }
                     return
                 }
