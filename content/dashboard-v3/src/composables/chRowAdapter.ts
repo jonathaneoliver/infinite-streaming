@@ -299,6 +299,10 @@ export function chRowToPlayerRecord(
       ? {
           id: row.play_id,
           attempt_id: ctx?.maxAttemptId ?? (num(row.attempt_id) ?? undefined),
+          // Client-supplied play-scoped start (#587); empty string when
+          // the client didn't send it.
+          start_time: (typeof row.start_time === 'string' && row.start_time)
+            ? row.start_time : undefined,
           manifest: masterUrl ? { master_url: masterUrl } : undefined,
         }
       : null,

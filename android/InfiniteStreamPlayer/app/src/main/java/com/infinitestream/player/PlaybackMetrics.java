@@ -1103,8 +1103,17 @@ public final class PlaybackMetrics {
         // variant dwell snapshot happens inside resetResidency()
     }
 
-    /** Called from PlayerViewModel.reload() — fresh play boundary,
-     *  zero priors so the new play_id starts from scratch. */
+    /** Fresh play boundary (#587) — zero ALL per-play state so the new
+     *  play_id starts from scratch. Called from every play_id rotation
+     *  (PlayerViewModel.regeneratePlayId): the Reload button, content
+     *  switch, segment/filter swap, and soak rotation. reload() also
+     *  recreates the PlaybackMetrics instance, but the other boundaries
+     *  reuse this instance, so this must zero the direct "current"
+     *  counters too — otherwise they carry across plays. (onPlaybackStarted(),
+     *  which runs right after on every load, already clears timing / frozen /
+     *  segment-stall / error / stallStartAtMs state.) retry() does NOT rotate
+     *  play_id and never calls this — it preserves counters via
+     *  snapshotForRestart(). */
     public void resetForFreshPlay() {
         priorPlayingTimeMs = 0;
         priorPausingTimeMs = 0;
@@ -1123,6 +1132,29 @@ public final class PlaybackMetrics {
         terminalReason = null;
         playStartAtMsForEBVS = -1;  // resetResidency() will set new
         observedMaxVariantKbps = 0;
+        // Direct counters that accumulate across the app lifetime and would
+        // otherwise leak into the next play (reload got these for free via
+        // instance recreation).
+        framesRenderedTotal.set(0);
+        droppedFramesTotal = 0;
+        profileShiftCount = 0;
+        playerRestarts = 0;
+        stallCount = 0;
+        totalStallTimeS = 0;
+        lastStallDurationS = 0;
+        loopCountPlayer = 0;
+        lastReportedLoopCount = 0;
+        lastBufferingDurationMs = 0;
+        bufferingStartAtMsForDuration = -1;
+        stallStuck = false;
+        buffering = false;
+        nominalFpsCurrent = 0f;
+        errorCount = 0;
+        lastErrorCode = 0;
+        lastErrorDomain = "";
+        lastErrorDetails = "";
+        variantDwellMs.clear();
+        variantLadder.clear();
         resetResidency();
     }
 

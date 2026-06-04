@@ -263,6 +263,31 @@ const toMsRef = computed<number | null>(() => {
   return props.showContext ? props.endMs + CONTEXT_PAD_MS : props.endMs;
 });
 
+/* ─── Refetch-on-pan (#587) ─────────────────────────────────────────
+ * When the operator pins the focus bar to a window OLDER than what's in
+ * the rolling cache (evicted by the #582 recency cap), re-point the SSE
+ * at that window so the panels can show the early part of a long session.
+ * Returning to live (range null) drops the override and re-subscribes to
+ * the live tail. Reuses the existing fromMs/toMs Ref re-subscribe path —
+ * the same mechanism SessionViewer's "show context" uses — so reviewing
+ * history pauses live until the operator clicks Live (or drags back to
+ * the right edge). The cache-reset epoch makes the charts/timeline
+ * re-drain the fetched window instead of missing it behind a stale
+ * watermark. The server treats a `to` >5s in the past as a bounded
+ * archive read (no live tail), so the window loads cleanly. */
+const histFromRef = ref<number | null>(null);
+const histToRef = ref<number | null>(null);
+const HISTORY_PAD_MS = 60 * 1000;
+// Live mode backfills only the recent window (cheap), NOT the whole play
+// — a multi-hour play is 10k+ rows and re-streaming it on every
+// return-to-live left the live edge blank for seconds. Deep history is
+// loaded on demand via the pan-back override below. Refreshed whenever
+// we (re)enter live so "return to live" pulls a fresh recent window.
+const LIVE_BACKFILL_MS = 10 * 60 * 1000;
+const liveFromRef = ref<number | null>(props.followLive ? Date.now() - LIVE_BACKFILL_MS : null);
+const tsFromMs = computed<number | null>(() => histFromRef.value ?? liveFromRef.value ?? fromMsRef.value);
+const tsToMs = computed<number | null>(() => histToRef.value ?? toMsRef.value);
+
 /** Resolved [fromMs, toMs] for the CycleBandsRail. When toMsRef is
  *  null (follow-live), use Date.now() as the upper bound so bands
  *  still render. Rail renders nothing when either bound is missing
@@ -285,8 +310,9 @@ const timeseries = useSessionTimeSeries(
     // streams (useSessionTimeSeries). Issue #474 Milestone C.
     streams: ['events', 'network', 'control', 'avmetrics'],
     bundles: ['charts_minimal', 'lanes_v1', 'panel_v1', 'session_details', 'network'],
-    fromMs: fromMsRef,
-    toMs: toMsRef,
+    // History override (#587) takes precedence over the live window.
+    fromMs: tsFromMs,
+    toMs: tsToMs,
   },
 );
 
@@ -300,6 +326,7 @@ watch(
     if (!b) return;
     if (props.startMs != null) return;   // URL gave us the truth
     if (props.showContext) return;        // wider window, don't anchor on it
+    if (props.followLive) return;         // live mode uses liveFromRef (#587)
     if (!playIdRef.value) return;         // live mode
     if (windowBoundsRef.value !== null) return;
     windowBoundsRef.value = b;
@@ -312,6 +339,37 @@ watch(
 // — and so any earlier reactive code (window watcher, brush clamps)
 // sees a coord instance even though it gets consumed mostly later.
 const coord = useChartCoordination(archivePlayerId);
+
+/* Refetch-on-pan driver (#587). Watches the committed focus range (the
+ * #590 brush debounce means this fires once per gesture, not per
+ * mousemove). Pinning before the cached data fetches that window;
+ * returning to live drops the override. Declared after `coord` to avoid
+ * a TDZ on the watch getter. Live mode only — URL-driven archive views
+ * (props.startMs set) already load their bounded window. */
+watch(
+  () => coord.state.range,
+  (range) => {
+    if (props.startMs != null) return; // URL-driven archive; not live
+    if (!range) {
+      // Back to live — re-subscribe to a FRESH recent window (not the
+      // stale one from when the page first loaded).
+      histFromRef.value = null;
+      histToRef.value = null;
+      if (props.followLive) liveFromRef.value = Date.now() - LIVE_BACKFILL_MS;
+      return;
+    }
+    const bounds = timeseries.events.rangeBounds.value;
+    // Only refetch when the pinned window starts MEANINGFULLY before
+    // what's cached; a window already in the cache needs no server
+    // round-trip. The slop keeps the auto-pin fallback (bounds.min − 5s)
+    // and small drag jitter from triggering a needless re-subscribe.
+    const REFETCH_SLOP_MS = 15 * 1000;
+    if (bounds && range.min < bounds.min - REFETCH_SLOP_MS) {
+      histFromRef.value = range.min - HISTORY_PAD_MS;
+      histToRef.value = range.max + HISTORY_PAD_MS;
+    }
+  },
+);
 
 // Pin the focus-window brush as soon as we know the time bounds.
 //   - URL gave us startMs + endMs (sessions.html click): pin
@@ -367,6 +425,40 @@ watch(
   { immediate: true },
 );
 
+/* True start of the CURRENT play (#587). The rail's left edge must
+ * anchor to where THIS play_id began, not `current_play.started_at` —
+ * that's a player-level field that goes stale when the play rotates
+ * (a content switch gives a new play_id but leaves started_at pointing
+ * at the prior play, so the rail stretched back hours to a play that
+ * isn't loaded). Query the earliest archived event for the live play_id
+ * instead; re-query whenever the play_id changes. */
+const playStartMs = ref<number | null>(null);
+watch(
+  () => (livePlayer.value?.current_play as { play_id?: string } | null | undefined)?.play_id
+    ?? playIdRef.value ?? null,
+  async (pid) => {
+    playStartMs.value = null;
+    const player = apiPlayerIdRef.value;
+    if (!pid || !player) return;
+    try {
+      const url = `/analytics/api/v2/events?player_id=${encodeURIComponent(player)}`
+        + `&play_id=${encodeURIComponent(pid)}&order=asc&limit=1`;
+      const r = await fetch(url);
+      if (!r.ok) return;
+      const j = await r.json();
+      const ts = j?.items?.[0]?.ts as string | undefined;
+      if (ts) {
+        const ms = Date.parse(ts);
+        // Guard against a race where the play_id changed mid-fetch.
+        const curPid = (livePlayer.value?.current_play as { play_id?: string } | null | undefined)?.play_id
+          ?? playIdRef.value ?? null;
+        if (Number.isFinite(ms) && curPid === pid) playStartMs.value = ms;
+      }
+    } catch { /* network/parse failure → fall back to cache min */ }
+  },
+  { immediate: true },
+);
+
 /** Effective time range for the brush rail. Reads the cached
  *  rangeBounds of the samples stream as the historical span; always
  *  extends `max` with `coord.lastSampleMs` so the rail's right edge
@@ -377,10 +469,25 @@ watch(
 const timeRange = computed<{ min: number; max: number } | null>(() => {
   const ar = timeseries.events.rangeBounds.value;
   const live = coord.state.lastSampleMs || 0;
-  if (!ar && !live) return null;
-  if (!ar) return { min: live, max: live };
-  if (!live) return ar;
-  return { min: ar.min, max: Math.max(ar.max, live) };
+  // Extend the rail's LEFT edge to THIS play's true start (#587) so the
+  // operator can drag the focus bar into windows the recency cap has
+  // evicted from the cache — panning there fires the refetch watcher
+  // above. Prefer the CLIENT-supplied, play-scoped current_play.start_time
+  // (rotates with play_id); fall back to the play_id's earliest archived
+  // event (playStartMs) for non-instrumented clients; then the cache min.
+  // NEVER the stale player-level current_play.started_at.
+  const clientStartStr = (livePlayer.value?.current_play as { start_time?: string | null } | null | undefined)?.start_time;
+  const clientStart = clientStartStr ? Date.parse(clientStartStr) : NaN;
+  const playStart = (Number.isFinite(clientStart) && clientStart > 0) ? clientStart : playStartMs.value;
+  const haveStart = playStart != null && Number.isFinite(playStart) && playStart > 0;
+  if (!ar && !live && !haveStart) return null;
+  let min = ar?.min ?? 0;
+  if (haveStart && (min === 0 || (playStart as number) < min)) min = playStart as number;
+  let max = Math.max(ar?.max ?? 0, live);
+  if (!min) min = max;
+  if (!max) max = min;
+  if (!min && !max) return null;
+  return { min, max };
 });
 
 const loading = computed(() => timeseries.events.loading.value);
@@ -728,6 +835,11 @@ const draftRange = ref<{ min: number; max: number } | null>(null);
  *  gesturing, else the committed coordinated range. */
 const railRange = computed(() => draftRange.value ?? coord.effectiveRange.value);
 const windowSpanMs = computed(() => Math.max(1, railRange.value.max - railRange.value.min));
+/** Is the focus window parked at the live edge? Drives the rail pill —
+ *  it used to be hardcoded "· at end", which lied once the operator
+ *  pinned to (or panned into) a historical window. Reads railRange so it
+ *  tracks the in-flight draft during a drag too. */
+const atLiveEdge = computed(() => coord.isAtLiveEdge(railRange.value.max));
 
 /** Live toggle checked rule — same across every surface. */
 const brushLiveChecked = computed(() => coord.state.range === null);
@@ -1141,11 +1253,11 @@ function skipToEnd() {
           v-if="timeRange"
           class="rail-focus-label"
           :style="{
-            left: ((brushRange.min - scrubMin) / Math.max(1, scrubMax - scrubMin) * 100) + '%',
-            right: ((scrubMax - brushRange.max) / Math.max(1, scrubMax - scrubMin) * 100) + '%',
+            left: Math.max(0, (railRange.min - scrubMin) / Math.max(1, scrubMax - scrubMin) * 100) + '%',
+            right: Math.max(0, (scrubMax - railRange.max) / Math.max(1, scrubMax - scrubMin) * 100) + '%',
           }"
         >
-          <span class="focus-pill">{{ fmtDurShort(windowSpanMs) }} · at end</span>
+          <span class="focus-pill">{{ fmtDurShort(windowSpanMs) }}{{ atLiveEdge ? ' · at end' : ' · ends ' + fmtTime(railRange.max) }}</span>
           <span class="focus-pill subtle">{{ samplesCount.toLocaleString() }} rendered</span>
         </span>
         <span class="rail-edge-label">{{ fmtTime(scrubMax) }}</span>

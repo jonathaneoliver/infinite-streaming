@@ -2409,6 +2409,12 @@ func (a *App) handlePostSessionMetrics(w http.ResponseWriter, r *http.Request) {
 	if v := strings.TrimSpace(r.URL.Query().Get("attempt_id")); v != "" {
 		metricsOnly["attempt_id"] = v
 	}
+	// Play-scoped client start (#587) — picked up here too so it lands
+	// on long-running iOS sessions between manifest fetches, same as
+	// play_id/attempt_id.
+	if v := strings.TrimSpace(r.URL.Query().Get("start_time")); v != "" {
+		metricsOnly["start_time"] = v
+	}
 	merged, ok := a.saveSessionByIDReturning(id, metricsOnly)
 	// Issue #470: emit one SSE frame per metrics POST. Every POST —
 	// heartbeat or otherwise — flows through so the forwarder writes
@@ -5145,6 +5151,10 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 	// below.
 	playID := strings.TrimSpace(r.URL.Query().Get("play_id"))
 	attemptIDStr := strings.TrimSpace(r.URL.Query().Get("attempt_id"))
+	// Client-supplied, play-scoped start (#587). Rotates with play_id;
+	// the proxy just carries it through to the session map so it reaches
+	// PlayRecord.start_time (live) and the session_events CH column.
+	startTime := strings.TrimSpace(r.URL.Query().Get("start_time"))
 	var attemptID uint32
 	if attemptIDStr != "" {
 		if n, err := strconv.ParseUint(attemptIDStr, 10, 32); err == nil {
@@ -5472,6 +5482,13 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 	// the proxy guessing.
 	if playID != "" {
 		sessionData["play_id"] = playID
+	}
+	// Play-scoped client start (#587). Carried on the session map so
+	// v2translate can project PlayRecord.start_time and the SSE
+	// session_events frame can carry it to ClickHouse. The client
+	// rotates it with play_id, so it always reflects THIS play.
+	if startTime != "" {
+		sessionData["start_time"] = startTime
 	}
 	// Store the raw string so sessionStickyField (a generic
 	// type-asserts-as-string helper) can read it back uniformly
@@ -7380,6 +7397,19 @@ func (a *App) saveSessionByIDReturning(sessionID string, session SessionData) (S
 					merged["player_metrics_event_time"] = nowStr
 				}
 			}
+			// #587 — play_id rotation resets the proxy-accumulated per-play
+			// counters so the new play measures from zero, mirroring the
+			// clients' own per-play reset. Detected at this single merge
+			// chokepoint (every GET/POST that stamps play_id flows through
+			// here). retry()/auto-recovery bumps attempt_id but keeps play_id
+			// stable, so this does NOT fire on recovery. Fault/shaping config,
+			// session identity/timing, and control state are preserved.
+			prevPlay := getString(s, "play_id")
+			newPlay := getString(session, "play_id")
+			if prevPlay != "" && newPlay != "" && prevPlay != newPlay {
+				resetPlayScopedServerCounters(merged)
+				a.resetServerLoopState(sessionID)
+			}
 			updated[i] = merged
 			found = true
 			break
@@ -7390,6 +7420,51 @@ func (a *App) saveSessionByIDReturning(sessionID string, session SessionData) (S
 		return nil, false
 	}
 	return cloneSession(merged), true
+}
+
+// resetPlayScopedServerCounters zeroes the proxy-ACCUMULATED counters that
+// should restart at a fresh play (#587). Called from saveSessionByIDReturning
+// when the player rotates play_id. Deliberately preserves fault/shaping
+// CONFIG, session identity/timing (session_start_time, origination_*), and
+// control state. The server-side loop-detection in-memory state is reset by
+// the caller via resetServerLoopState.
+//
+// IMPORTANT — what is NOT reset, and why:
+//   - The *_requests_count counters (manifest/master/segments/all) are the
+//     fault-pattern CLOCK: FailureHandler.handleFailureCount compares the
+//     running request count against the count-based *_failure_at /
+//     *_failure_recover_at thresholds to decide when to fire. Zeroing the
+//     count without rewinding those thresholds would suppress faults until
+//     the count climbed back, desyncing operator fault patterns. Left
+//     running so injection behaviour is unchanged across a play rotation.
+//   - transport_fault_*_packets can be the "packets"-units cycle counter for
+//     transport faults (and self-reset each on/off cycle), so they're left
+//     alone too.
+// The fault_count_* family below is purely a write-only reporting tally
+// (bumpFaultCounter only writes; every read is reporting/init/projection),
+// so resetting it does NOT affect fault firing.
+func resetPlayScopedServerCounters(m SessionData) {
+	// Server-side loop counter (in-memory seq state reset separately).
+	m["loop_count_server"] = 0
+	delete(m, "loop_count_server_last_at")
+	// Cumulative byte totals + the rolling-window state behind the Mbps
+	// derivations, so the new play measures throughput from zero. These feed
+	// dashboard display only — no control decision reads them.
+	m["bytes_in_total"] = int64(0)
+	m["bytes_out_total"] = int64(0)
+	m["bytes_in_last"] = int64(0)
+	m["bytes_out_last"] = int64(0)
+	delete(m, "bytes_last_ts")
+	delete(m, "io_samples")
+	delete(m, "active_io_samples")
+	// Fault-injection REPORTING tally — one key per category
+	// (fault_count_total, fault_count_socket_*, fault_count_request_*,
+	// fault_count_transfer_*). Write-only; resetting does not change firing.
+	for k := range m {
+		if strings.HasPrefix(k, "fault_count_") {
+			m[k] = 0
+		}
+	}
 }
 
 // hasDeviceFamilyToken reports whether the given User-Agent string

@@ -18,6 +18,10 @@ CREATE TABLE IF NOT EXISTS infinite_streaming.session_events
     revision              UInt64                      CODEC(DoubleDelta, ZSTD(1)),
     session_id            String                      CODEC(ZSTD(1)),
     play_id               LowCardinality(String)      CODEC(ZSTD(1)),
+    -- start_time: client-supplied, play-scoped play start (ISO-8601 UTC
+    -- string), rotated with play_id (#587). Empty for clients that don't
+    -- send it. Stored as String (raw passthrough) — parse client-side.
+    start_time            String                      CODEC(ZSTD(1)),
     -- attempt_id: player-supplied monotonically-incrementing counter
     -- per playback attempt within a play. 1 on the initial play of
     -- any content, +1 on every `restart` event (user-restart OR
@@ -769,6 +773,7 @@ CREATE TABLE IF NOT EXISTS infinite_streaming.control_events
     ts                       DateTime64(3, 'UTC')   CODEC(Delta, ZSTD(1)),
     player_id                LowCardinality(String) CODEC(ZSTD(1)),
     play_id                  LowCardinality(String) CODEC(ZSTD(1)),
+    start_time               String                 CODEC(ZSTD(1)),
     attempt_id               UInt32                 DEFAULT 0 CODEC(ZSTD(1)),
     session_id               String                 CODEC(ZSTD(1)),
     source                   LowCardinality(String) CODEC(ZSTD(1)),
@@ -809,6 +814,7 @@ CREATE TABLE IF NOT EXISTS infinite_streaming.ios_avmetric_events
     ts                DateTime64(3, 'UTC')          CODEC(Delta, ZSTD(1)),
     player_id         LowCardinality(String)        CODEC(ZSTD(1)),
     play_id           LowCardinality(String)        CODEC(ZSTD(1)),
+    start_time        String                        CODEC(ZSTD(1)),
     attempt_id        UInt32                        DEFAULT 0 CODEC(ZSTD(1)),
     session_id        String                        CODEC(ZSTD(1)),
     event_type        LowCardinality(String)        CODEC(ZSTD(1)),

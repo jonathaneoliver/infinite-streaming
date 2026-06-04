@@ -1047,8 +1047,19 @@ type PlayRecord struct {
 
 	// Shape Play-scoped shape override. Replaces `player.shape` for this
 	// play if set. Auto-cleared on play end.
-	Shape     *Shape    `json:"shape,omitempty"`
-	StartedAt time.Time `json:"started_at"`
+	Shape *Shape `json:"shape,omitempty"`
+
+	// StartTime **Client-supplied** play start (ISO-8601 UTC), minted by the
+	// player at the same boundary as `id` (play_id) and re-sent as a
+	// `?start_time=` query param on every request. Unlike
+	// `started_at` — which the proxy derives from the SESSION's first
+	// request and therefore does NOT move when the play_id rotates —
+	// this is play-scoped: a content switch yields a new play_id AND
+	// a new start_time. Prefer this for "when did THIS play begin";
+	// `started_at` is the connection/session start. Null for
+	// non-instrumented clients (web, Roku) that don't send it.
+	StartTime *time.Time `json:"start_time,omitempty"`
+	StartedAt time.Time  `json:"started_at"`
 }
 
 // PlayStartedEvent defines model for PlayStartedEvent.
@@ -1214,11 +1225,14 @@ type PlayerMetrics struct {
 	// BufferingCount #550 Phase 1: entries into `buffering` state.
 	BufferingCount *int `json:"buffering_count,omitempty"`
 
-	// BufferingDurationMs #550 Phase 1: duration of the MOST RECENT buffer event (sticky). Replaces legacy last_buffering_time_s.
+	// BufferingDurationMs #550 Phase 1: duration of the MOST RECENT buffer event (sticky).
 	BufferingDurationMs *int `json:"buffering_duration_ms,omitempty"`
 
 	// BufferingTimeMs #550 Phase 1: cumulative buffering time (ms).
 	BufferingTimeMs *int `json:"buffering_time_ms,omitempty"`
+
+	// ContentName Content title bound at metrics-start. Stamped on every payload so dashboards see "which content was playing" without joining against the upload catalogue.
+	ContentName *string `json:"content_name,omitempty"`
 
 	// DeviceClass #550 Phase 4: form-factor enum: `phone` / `tablet` / `tv` / `desktop` / `unknown`.
 	DeviceClass *string `json:"device_class,omitempty"`
@@ -1226,14 +1240,11 @@ type PlayerMetrics struct {
 	// DeviceModel #550 Phase 4: hardware model identifier (e.g. iPhone15,3) via sysctl hw.machine.
 	DeviceModel *string `json:"device_model,omitempty"`
 
+	// DeviceResolution Physical-pixel resolution of the device's current orientation, formatted `"WxH"` to match video_resolution / display_resolution. Swaps integers on iPad rotation; static on Apple TV / orientation-locked clients. Supersedes screen_width_px / screen_height_px / screen_density (dropped 2026-05-30).
+	DeviceResolution *string `json:"device_resolution,omitempty"`
+
 	// DisplayResolution Player-reported window/display resolution (separate from the active video resolution).
 	DisplayResolution *string `json:"display_resolution,omitempty"`
-
-	// FetchingResolution WxH of the variant the player is about to fetch — derived iOS-side from indicatedBitrate vs the variant ladder.
-	FetchingResolution *string `json:"fetching_resolution,omitempty"`
-
-	// FramesDropped Player-reported dropped frames count.
-	FramesDropped *int `json:"frames_dropped,omitempty"`
 
 	// Error Most recent player-reported error string.
 	Error *string `json:"error,omitempty"`
@@ -1253,11 +1264,20 @@ type PlayerMetrics struct {
 	// EventTime Player-supplied wallclock for the most recent metrics tick.
 	EventTime *time.Time `json:"event_time,omitempty"`
 
+	// FetchingResolution WxH of the variant the player is about to fetch — derived iOS-side from indicatedBitrate vs the variant ladder. Empty before the first access-log event.
+	FetchingResolution *string `json:"fetching_resolution,omitempty"`
+
 	// FirstFrameTimeS Time-to-first-frame (seconds since play started).
 	FirstFrameTimeS *float32 `json:"first_frame_time_s,omitempty"`
 
 	// FramesDisplayed Player-reported displayed frames count.
 	FramesDisplayed *int `json:"frames_displayed,omitempty"`
+
+	// FramesDropped Player-reported dropped frames count.
+	FramesDropped *int `json:"frames_dropped,omitempty"`
+
+	// FramesRate Active variant's nominal frame rate (Hz). Sticky after first observation in the format-change event.
+	FramesRate *float32 `json:"frames_rate,omitempty"`
 
 	// IdlingCount #550 Phase 1: entries into `idle` state.
 	IdlingCount *int `json:"idling_count,omitempty"`
@@ -1328,10 +1348,6 @@ type PlayerMetrics struct {
 	// ProfileShiftCount Number of ABR rendition shifts the player has reported.
 	ProfileShiftCount *int `json:"profile_shift_count,omitempty"`
 
-	// DeviceResolution Physical-pixel resolution in current orientation, "WxH".
-	// Supersedes screen_width_px / screen_height_px / screen_density.
-	DeviceResolution *string `json:"device_resolution,omitempty"`
-
 	// SeekableEndS Player-reported end of seekable range (seconds).
 	SeekableEndS *float32 `json:"seekable_end_s,omitempty"`
 
@@ -1344,8 +1360,11 @@ type PlayerMetrics struct {
 	// Source Identifier for the metrics source (e.g. avplayer-ios, exoplayer-android).
 	Source *string `json:"source,omitempty"`
 
-	// StallDurationMs #550 Phase 1: duration of the MOST RECENT stall event (sticky on subsequent heartbeats). Replaces legacy last_stall_time_s.
+	// StallDurationMs #550 Phase 1: duration of the MOST RECENT stall event (sticky on subsequent heartbeats).
 	StallDurationMs *int `json:"stall_duration_ms,omitempty"`
+
+	// StallStuck #550 Phase 1 ext: orthogonal "this stall won't auto-recover" flag. True from the moment AVPlayer transitions stalled → .paused (give-up) until next .playing transition. State stays "stalled" for residency continuity; dashboards key on this flag to surface operator-actionable stalls.
+	StallStuck *bool `json:"stall_stuck,omitempty"`
 
 	// StallTimeS Cumulative stall time (seconds).
 	StallTimeS *float32 `json:"stall_time_s,omitempty"`
@@ -1355,17 +1374,16 @@ type PlayerMetrics struct {
 
 	// StallingTimeMs #550 Phase 1: cumulative stalling time (ms). Single canonical pair replacing legacy stall_count/stall_time_s during soft cutover.
 	StallingTimeMs *int `json:"stalling_time_ms,omitempty"`
-
-	// StallStuck #550 Phase 1 ext: orthogonal "this stall won't auto-recover" flag.
-	// True from the moment AVPlayer transitions stalled → .paused (give-up) until
-	// next .playing transition. State stays "stalled" for residency continuity;
-	// dashboards key on this flag to surface operator-actionable stalls.
-	StallStuck *bool `json:"stall_stuck,omitempty"`
-
-	Stalls *int `json:"stalls,omitempty"`
+	Stalls         *int `json:"stalls,omitempty"`
 
 	// State Player state machine label (idle, playing, paused, buffering, ended, error).
 	State *string `json:"state,omitempty"`
+
+	// StateFrom On state_change events: the player_state before the transition. Empty / null on heartbeat rows.
+	StateFrom *string `json:"state_from,omitempty"`
+
+	// StateTo On state_change events: the player_state after the transition. Empty / null on heartbeat rows.
+	StateTo *string `json:"state_to,omitempty"`
 
 	// TerminalErrorCode #550 Phase 2: error code populated ONLY on terminal failure rows. Querying `WHERE terminal_error_code != 0` is SQL-safe — never returns transient codes.
 	TerminalErrorCode *int `json:"terminal_error_code,omitempty"`
@@ -1376,37 +1394,36 @@ type PlayerMetrics struct {
 	// TerminalErrorDomain #550 Phase 2: error domain on terminal failure rows.
 	TerminalErrorDomain *string `json:"terminal_error_domain,omitempty"`
 
+	// TimePerVariantS JSON-string-encoded map of variant-label → cumulative seconds spent at that variant (e.g. `{"2160p@29857kbps":65.28}`). Preserved across retry()-style restarts.
+	TimePerVariantS *string `json:"time_per_variant_s,omitempty"`
+
 	// TrickplayingCount #550 Phase 1: entries into trickplay (rate ∉ {0, ~1}).
 	TrickplayingCount *int `json:"trickplaying_count,omitempty"`
 
 	// TrickplayingTimeMs #550 Phase 1: cumulative time at non-1× playback rate (FF / RW).
 	TrickplayingTimeMs *int `json:"trickplaying_time_ms,omitempty"`
 
-	// TimePerVariantS JSON-string-encoded map of variant-label →
-	// cumulative seconds spent at that variant. Example: `{"2160p@29857kbps":65.28}`.
-	// Preserved across retry()-style restarts so the dashboard sees
-	// continuous totals through automatic recovery.
-	TimePerVariantS *string `json:"time_per_variant_s,omitempty"`
-
 	// TriggerType What triggered the most recent metrics tick (timer, event, etc.).
 	TriggerType *string `json:"trigger_type,omitempty"`
 
 	// TrueOffsetS Wall-clock offset between player position and real time (seconds).
-	TrueOffsetS      *float32 `json:"true_offset_s,omitempty"`
+	TrueOffsetS *float32 `json:"true_offset_s,omitempty"`
+
+	// UserMarkedAt On user_marked (911) events: wall-clock ISO-8601 instant the operator pressed the button. Empty on other rows.
+	UserMarkedAt     *string  `json:"user_marked_at,omitempty"`
 	VideoBitrateMbps *float32 `json:"video_bitrate_mbps,omitempty"`
 
 	// VideoFirstFrameTimeMs #550 Phase 1: TTFF in ms. Conviva/Mux/Bitmovin canonical units. Replaces legacy video_first_frame_time_s.
 	VideoFirstFrameTimeMs *int `json:"video_first_frame_time_ms,omitempty"`
 
-	// VideoQualityPct video_bitrate_mbps as a percentage of the top variant in the active manifest (snapshot)
-	VideoQualityPct *float32 `json:"video_quality_pct,omitempty"`
-
-	// VideoQuality60sPct Time-weighted (bitrate/maxPeak)×100 over the last 60s of watched playback. Computed by iOS from AVPlayerItem.accessLog().
+	// VideoQuality60sPct Log-bitrate (Weber-Fechner) quality over the last 60s of watched playback. Formula: log(kbps/min) / log(max/min) per event, clamped to a 0.20 floor, time-weighted by durationWatched. Matches dashboard PlayLog computeQualityPct.
 	VideoQuality60sPct *float32 `json:"video_quality_60s_pct,omitempty"`
 
-	// VideoQualityAvgPct Time-weighted (bitrate/maxPeak)×100 over the lifetime of the play. Computed by iOS from AVPlayerItem.accessLog().
+	// VideoQualityAvgPct Same log-bitrate formula as video_quality_60s_pct but over the lifetime of the play. Computed by iOS from AVPlayerItem.accessLog().
 	VideoQualityAvgPct *float32 `json:"video_quality_avg_pct,omitempty"`
 
+	// VideoQualityPct video_bitrate_mbps as a percentage of the top variant in the active manifest (snapshot)
+	VideoQualityPct *float32 `json:"video_quality_pct,omitempty"`
 	VideoResolution *string  `json:"video_resolution,omitempty"`
 
 	// VideoStartTimeMs #550 Phase 1: alternate startup-time measurement in ms.
@@ -1417,21 +1434,6 @@ type PlayerMetrics struct {
 
 	// WaitingReason AVFoundation reasonForWaitingToPlay (or platform equivalent) — split labels within `state` like `toMinimizeStalls` vs `evaluatingBufferingRate`.
 	WaitingReason *string `json:"waiting_reason,omitempty"`
-
-	// StateFrom On state_change events: the player_state before the transition.
-	StateFrom *string `json:"state_from,omitempty"`
-
-	// StateTo On state_change events: the player_state after the transition.
-	StateTo *string `json:"state_to,omitempty"`
-
-	// ContentName Content title bound at metrics-start. Stamped on every payload.
-	ContentName *string `json:"content_name,omitempty"`
-
-	// UserMarkedAt On user_marked (911) events: wall-clock ISO-8601 instant the operator pressed the button.
-	UserMarkedAt *string `json:"user_marked_at,omitempty"`
-
-	// FramesRate Active variant's nominal frame rate (Hz). Sticky after first observation.
-	FramesRate *float32 `json:"frames_rate,omitempty"`
 }
 
 // PlayerPatch Mutable subset of `PlayerRecord`. JSON Merge Patch semantics.

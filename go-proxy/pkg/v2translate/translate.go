@@ -564,6 +564,13 @@ func currentPlayFromSession(s map[string]any, playerUUID uuid.UUID) *oapigen.Pla
 	if t, ok := getTime(s, "session_start_time", "first_request_time"); ok {
 		rec.StartedAt = t
 	}
+	// start_time is the CLIENT-supplied, play-scoped start (#587). Unlike
+	// started_at (session_start_time — frozen at the connection's first
+	// request, so stale after a play_id rotation), the player rotates
+	// start_time with play_id, so this reflects when THIS play began.
+	if t, ok := getTime(s, "start_time"); ok {
+		rec.StartTime = &t
+	}
 	// Manifest projection: master_manifest_url is the master playlist
 	// the player loaded; manifest_url is the variant playlist most
 	// recently fetched. Prefer the explicit master, fall back to the

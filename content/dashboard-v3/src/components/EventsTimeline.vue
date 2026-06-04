@@ -1227,25 +1227,32 @@ watch(
 // the old session's lanes instead of accumulating both. Watching
 // playerId (a string prop) keeps this simple; SessionDisplay's
 // useSessionTimeSeries already re-subscribes the SSE stream.
+function resetIngest() {
+  statefulEvents.length = 0;
+  pendingLive.length = 0;
+  pendingLiveAV.length = 0;
+  lastIngestedMs = -Infinity;
+  lastAVIngestedMs = -Infinity;
+  prevStalls = prevDropped = null;
+  prevLoopServer = null;
+  prevControlRev = null;
+  prevError = null;
+  prevPlayId = null;
+  prevFirstFrame = prevVideoStart = null;
+  prevVariantMbps = null;
+  if (itemsDS) {
+    try { itemsDS.clear(); } catch { /* ignore */ }
+  }
+}
+
+watch(() => props.playerId, () => { resetIngest(); });
+
+// Cache reset (#587) — the events stream re-subscribed to a new window
+// (refetch-on-pan / return-to-live). The forward-only watermark would
+// miss the freshly-loaded (possibly older) window, so reset and re-drain.
 watch(
-  () => props.playerId,
-  () => {
-    statefulEvents.length = 0;
-    pendingLive.length = 0;
-    pendingLiveAV.length = 0;
-    lastIngestedMs = -Infinity;
-    lastAVIngestedMs = -Infinity;
-    prevStalls = prevDropped = null;
-    prevLoopServer = null;
-    prevControlRev = null;
-    prevError = null;
-    prevPlayId = null;
-    prevFirstFrame = prevVideoStart = null;
-    prevVariantMbps = null;
-    if (itemsDS) {
-      try { itemsDS.clear(); } catch { /* ignore */ }
-    }
-  },
+  () => props.eventsStream.epoch.value,
+  () => { resetIngest(); void drainNewRows(); },
 );
 
 watch(
