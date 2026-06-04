@@ -794,6 +794,18 @@ final class PlayerViewModel: ObservableObject {
         return components.url ?? url
     }
 
+    /// Set a query item to an explicit value (replacing any existing). Used to
+    /// pin the metrics-URL identity to payload-captured (fire-time) values
+    /// rather than the live current* — see patchSessionMetrics (#603).
+    private func appendQueryItem(_ url: URL, name: String, value: String) -> URL {
+        guard var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return url }
+        var items = components.queryItems ?? []
+        items.removeAll { $0.name == name }
+        items.append(URLQueryItem(name: name, value: value))
+        components.queryItems = items
+        return components.url ?? url
+    }
+
     /// Mint a fresh `play_id` UUID. Called only at content-selection
     /// boundaries (see currentPlayID doc). NOT called on restart.
     private func regeneratePlayID() {
@@ -1249,11 +1261,12 @@ final class PlayerViewModel: ObservableObject {
         // it's a within-play recovery attempt that must preserve counters.
         regeneratePlayID()
         resetAttemptID()
-        let restartPayload = buildMetricsPayload(event: "restart", at: Date(), extra: [
-            "player_metrics_restart_reason": "reload",
-            "player_restarts": playerRestarts
-        ])
-        Task { [weak self] in await self?.sendPlayerMetrics(payload: restartPayload) }
+        // #603 — a reload opens a NEW play, so emit play_start (the play-open
+        // boundary, symmetric to play_end), NOT restart. `restart` is reserved
+        // for mid-session streaming recovery (see the retry / auto-recovery
+        // path). play_start carries the new play_id just minted above.
+        let startPayload = buildMetricsPayload(event: "play_start", at: Date())
+        Task { [weak self] in await self?.sendPlayerMetrics(payload: startPayload) }
         currentURL = nil
         buildURLAndLoad()
     }
@@ -2687,9 +2700,20 @@ extension PlayerViewModel {
         // GETs — meaning an iPad mid-stream that hasn't re-fetched
         // its manifest after a restart would have its `restart` event
         // land with the OLD attempt_id. Bug #4 fix.
-        var url = appendPlayID(to: pathURL)
-        url = appendAttemptID(to: url)
-        url = appendStartTime(to: url)
+        //
+        // #603 — pin the URL identity (play_id / attempt_id / start_time) to the
+        // values captured in the PAYLOAD when the event fired, not the live
+        // current* which may have rotated before this async send runs. go-proxy
+        // buckets the row by the URL play_id, so a delayed play_end at a play
+        // boundary would otherwise land on the NEXT play's id (the leak that
+        // inflated metrics + tripped false QoE labels). Falls back to live
+        // values when a payload omits them.
+        let pinnedPlayID = (payload["play_id"] as? String) ?? currentPlayID
+        let pinnedStart = (payload["start_time"] as? String) ?? currentStartTime
+        let pinnedAttempt = (payload["attempt_id"] as? Int).map(String.init) ?? String(currentAttemptID)
+        var url = appendQueryItem(pathURL, name: "play_id", value: pinnedPlayID)
+        url = appendQueryItem(url, name: "attempt_id", value: pinnedAttempt)
+        url = appendQueryItem(url, name: "start_time", value: pinnedStart)
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
