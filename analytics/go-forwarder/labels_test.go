@@ -42,9 +42,11 @@ func TestEventSwitchUnchanged(t *testing.T) {
 		// critical — user-visible impact
 		{"frozen", nil, []string{"critical=stall_frozen"}},
 		{"user_marked", nil, []string{"critical=user_marked_911"}},
-		// restart splits on trigger_type
+		// restart splits on restart_reason (#603); legacy trigger_type fallback
 		{"restart_reload", func(r *row) { r.LastEvent = "restart"; r.TriggerType = "reload" }, []string{"info=restart_reload"}},
 		{"restart_auto", func(r *row) { r.LastEvent = "restart" }, []string{"critical=restart_auto_recovery"}},
+		{"restart_user_retry", func(r *row) { r.LastEvent = "restart"; r.RestartReason = "user_retry" }, []string{"warning=restart_user_retry"}},
+		{"restart_reason_auto", func(r *row) { r.LastEvent = "restart"; r.RestartReason = "auto_recovery" }, []string{"critical=restart_auto_recovery"}},
 		// error
 		{"error", nil, []string{"error=player_error"}},
 		// pair-open arms emit nothing on the opening row

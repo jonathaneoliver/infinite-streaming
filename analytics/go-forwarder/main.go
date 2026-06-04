@@ -331,6 +331,7 @@ type row struct {
 	EffectiveRateLimitMbps   float32 `json:"effective_rate_limit_mbps"`
 	LastEvent                string  `json:"last_event"`
 	TriggerType              string  `json:"trigger_type"`
+	RestartReason            string  `json:"restart_reason"`
 	EventTime                string  `json:"event_time"`
 	PlayerError              string  `json:"player_error"`
 
@@ -859,6 +860,7 @@ func toRow(ts string, revision uint64, sessionID string, s map[string]interface{
 		EffectiveRateLimitMbps:   getF32(s, "effective_rate_limit_mbps"),
 		LastEvent:                getStr(s, "player_metrics_last_event"),
 		TriggerType:              getStr(s, "player_metrics_trigger_type"),
+		RestartReason:            getStr(s, "player_metrics_restart_reason"),
 		EventTime:                getStr(s, "player_metrics_event_time"),
 		PlayerError:              getStr(s, "player_metrics_error"),
 
