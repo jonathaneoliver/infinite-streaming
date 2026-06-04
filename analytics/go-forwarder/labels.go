@@ -300,9 +300,18 @@ func computeEventLabelsWithState(s *labelState, r *row) []string {
 	// informational; everything else is an involuntary recovery
 	// the operator should see.
 	case "restart":
-		if r.TriggerType == "reload" {
+		// #603 — `restart` is a mid-play recovery (play boundaries are
+		// play_start/play_end). Split on the client's restart_reason:
+		// auto_recovery (player hit a fatal error and recovered itself) is
+		// critical; a manual user_retry is a warning (user perceived a problem
+		// and re-attempted); a legacy reload restart is info. Falls back to
+		// TriggerType=="reload" for older rows that predate restart_reason.
+		switch {
+		case r.RestartReason == "user_retry":
+			out = []string{SevWarning + "=restart_user_retry"}
+		case r.RestartReason == "reload" || r.TriggerType == "reload":
 			out = []string{SevInfo + "=restart_reload"}
-		} else {
+		default: // auto_recovery / unknown
 			out = []string{SevCritical + "=restart_auto_recovery"}
 		}
 
