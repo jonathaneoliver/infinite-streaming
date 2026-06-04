@@ -7397,6 +7397,19 @@ func (a *App) saveSessionByIDReturning(sessionID string, session SessionData) (S
 					merged["player_metrics_event_time"] = nowStr
 				}
 			}
+			// #587 — play_id rotation resets the proxy-accumulated per-play
+			// counters so the new play measures from zero, mirroring the
+			// clients' own per-play reset. Detected at this single merge
+			// chokepoint (every GET/POST that stamps play_id flows through
+			// here). retry()/auto-recovery bumps attempt_id but keeps play_id
+			// stable, so this does NOT fire on recovery. Fault/shaping config,
+			// session identity/timing, and control state are preserved.
+			prevPlay := getString(s, "play_id")
+			newPlay := getString(session, "play_id")
+			if prevPlay != "" && newPlay != "" && prevPlay != newPlay {
+				resetPlayScopedServerCounters(merged)
+				a.resetServerLoopState(sessionID)
+			}
 			updated[i] = merged
 			found = true
 			break
@@ -7407,6 +7420,51 @@ func (a *App) saveSessionByIDReturning(sessionID string, session SessionData) (S
 		return nil, false
 	}
 	return cloneSession(merged), true
+}
+
+// resetPlayScopedServerCounters zeroes the proxy-ACCUMULATED counters that
+// should restart at a fresh play (#587). Called from saveSessionByIDReturning
+// when the player rotates play_id. Deliberately preserves fault/shaping
+// CONFIG, session identity/timing (session_start_time, origination_*), and
+// control state. The server-side loop-detection in-memory state is reset by
+// the caller via resetServerLoopState.
+//
+// IMPORTANT — what is NOT reset, and why:
+//   - The *_requests_count counters (manifest/master/segments/all) are the
+//     fault-pattern CLOCK: FailureHandler.handleFailureCount compares the
+//     running request count against the count-based *_failure_at /
+//     *_failure_recover_at thresholds to decide when to fire. Zeroing the
+//     count without rewinding those thresholds would suppress faults until
+//     the count climbed back, desyncing operator fault patterns. Left
+//     running so injection behaviour is unchanged across a play rotation.
+//   - transport_fault_*_packets can be the "packets"-units cycle counter for
+//     transport faults (and self-reset each on/off cycle), so they're left
+//     alone too.
+// The fault_count_* family below is purely a write-only reporting tally
+// (bumpFaultCounter only writes; every read is reporting/init/projection),
+// so resetting it does NOT affect fault firing.
+func resetPlayScopedServerCounters(m SessionData) {
+	// Server-side loop counter (in-memory seq state reset separately).
+	m["loop_count_server"] = 0
+	delete(m, "loop_count_server_last_at")
+	// Cumulative byte totals + the rolling-window state behind the Mbps
+	// derivations, so the new play measures throughput from zero. These feed
+	// dashboard display only — no control decision reads them.
+	m["bytes_in_total"] = int64(0)
+	m["bytes_out_total"] = int64(0)
+	m["bytes_in_last"] = int64(0)
+	m["bytes_out_last"] = int64(0)
+	delete(m, "bytes_last_ts")
+	delete(m, "io_samples")
+	delete(m, "active_io_samples")
+	// Fault-injection REPORTING tally — one key per category
+	// (fault_count_total, fault_count_socket_*, fault_count_request_*,
+	// fault_count_transfer_*). Write-only; resetting does not change firing.
+	for k := range m {
+		if strings.HasPrefix(k, "fault_count_") {
+			m[k] = 0
+		}
+	}
 }
 
 // hasDeviceFamilyToken reports whether the given User-Agent string
