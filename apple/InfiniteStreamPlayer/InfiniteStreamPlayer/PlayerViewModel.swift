@@ -238,6 +238,12 @@ final class PlayerViewModel: ObservableObject {
     private var videoPlayingTimeSeconds: Double?
     private var firstFrameReported: Bool = false
     private var playingReported: Bool = false
+    // #603 — set by a restart (manual retry / auto-recovery) before it
+    // re-issues loadStream. startPlayback reads it to PRESERVE the play's
+    // startup measurement (video_start_time / first frame) and fold the
+    // re-prepare wait into residency as stalling/buffering, instead of doing
+    // the per-play reset it does for a fresh play. Cleared in startPlayback.
+    private var resumingFromRestart: Bool = false
     private var lastReportedStallCount: Int = 0
     private var lastReportedStallDuration: Double = 0
     private var lastReportedLoopCount: Int = 0
@@ -908,24 +914,34 @@ final class PlayerViewModel: ObservableObject {
             // HOLD-BACK on first ready-to-play. Mirrors testing-session.html.
             scheduleLiveOffsetSeek(reason: "playback started")
         }
-        hasReportedFirstFrame = false
-
-        // Reset per-playback metrics state and emit the `playing` event.
-        // Single `Date()` capture — used as both `playbackStartAt` and
-        // the `playing` event's `at:` stamp so elapsed-since-start in
-        // the `playing` payload is exactly 0 and not skewed by the
-        // few microseconds between two separate `Date()` calls.
-        diagnostics.reset()
         let playingEventAt = Date()
-        playbackStartAt = playingEventAt
-        videoFirstFrameSeconds = nil
-        videoPlayingTimeSeconds = nil
-        firstFrameReported = false
-        playingReported = false
-        lastReportedRenditionMbps = nil
-        lastReportedStallCount = 0
-        lastReportedStallDuration = 0
-        bufferingStartedAt = nil
+        if resumingFromRestart {
+            // #603 — restart (retry / recovery) within the SAME play. Fold the
+            // re-prepare wait (buffering accrued since the retry) into residency
+            // by snapshotting it into `prior` so reset() restores it; leave the
+            // startup measurement (playbackStartAt / video_start_time / first
+            // frame) and the per-emit delta trackers untouched. Because
+            // playingReported / firstFrameReported stay true, markPlayingStarted/
+            // markFirstFrameRendered no-op on resume → no second video_start_time.
+            diagnostics.snapshotForRestart()
+            diagnostics.reset()
+            resumingFromRestart = false
+        } else {
+            hasReportedFirstFrame = false
+            // Reset per-playback metrics state and emit the `playing` event.
+            // playbackStartAt + the `playing` event share one `Date()` so
+            // elapsed-since-start in the payload is exactly 0.
+            diagnostics.reset()
+            playbackStartAt = playingEventAt
+            videoFirstFrameSeconds = nil
+            videoPlayingTimeSeconds = nil
+            firstFrameReported = false
+            playingReported = false
+            lastReportedRenditionMbps = nil
+            lastReportedStallCount = 0
+            lastReportedStallDuration = 0
+            bufferingStartedAt = nil
+        }
         zeroBufferStartedAt = nil
         metricsSessionId = nil
         metricsLastSessionLookup = nil
@@ -1140,6 +1156,15 @@ final class PlayerViewModel: ObservableObject {
         Task { [weak self] in
             await self?.requestHARSnapshot(reason: "user_retry", force: true)
         }
+        // #603 — emit a `restart` event so the mid-play recovery is observable
+        // (it wasn't before; manual retries left no mark on the events lane).
+        // Same play_id, bumped attempt_id; play boundaries are play_start/play_end.
+        let restartPayload = buildMetricsPayload(event: "restart", at: Date(), extra: [
+            "player_metrics_restart_reason": "user_retry",
+            "player_restarts": playerRestarts,
+        ])
+        Task { [weak self] in await self?.sendPlayerMetrics(payload: restartPayload) }
+        resumingFromRestart = true
         loadStream(url: refreshed)
     }
 
@@ -1452,8 +1477,19 @@ final class PlayerViewModel: ObservableObject {
         codecRetries += 1
         let retries = codecRetries
         statusText = "\(reason) — retry \(retries)/\(maxCodecRetries)"
+        // #603 — auto-recovery is also a mid-play restart: emit a `restart`
+        // event (reason=auto_recovery, detail=the trigger) for observability,
+        // same play_id. The re-prepare wait folds into residency via the
+        // resumingFromRestart path in startPlayback.
+        let restartPayload = buildMetricsPayload(event: "restart", at: Date(), extra: [
+            "player_metrics_restart_reason": "auto_recovery",
+            "player_metrics_restart_detail": reason,
+            "player_restarts": playerRestarts,
+        ])
         Task { @MainActor [weak self] in
+            await self?.sendPlayerMetrics(payload: restartPayload)
             try? await Task.sleep(nanoseconds: UInt64(150_000_000 * retries))
+            self?.resumingFromRestart = true
             self?.loadStream(url: url)
         }
     }
