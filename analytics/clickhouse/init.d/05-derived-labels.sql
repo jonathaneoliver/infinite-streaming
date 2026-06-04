@@ -2,8 +2,10 @@
 -- The VOMM scorer's surprise verdict, anchored on the EXACT row whose token transition was
 -- improbable — so it merges onto that row at read time (like derived_tokens) and shows as a
 -- chip right where the surprise happened, with as many per session as there are surprising
--- rows. A batch (analytics/tools/derive_labels.py, reusing scorer.py + tokenize.py) trains
--- per-condition VOMMs on older plays and scores recent plays OUT-OF-SAMPLE (time-split),
+-- rows. analytics/tools/derive_labels.py (reusing scorer.py + tokenize.py) is split (#608):
+-- --mode train (nightly) builds per-condition VOMMs over --train-days and persists them to a
+-- shared artifact (see derived_models); --mode score (fast) loads that artifact and scores
+-- plays whose max_ts post-dates the model's trained_at (OUT-OF-SAMPLE by construction),
 -- emitting one row per above-threshold transition WITHIN a condition episode.
 --
 -- Keyed like derived_tokens so the read-path joins line up:
