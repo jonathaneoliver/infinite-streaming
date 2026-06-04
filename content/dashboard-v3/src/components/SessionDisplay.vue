@@ -352,6 +352,21 @@ watch(
   { immediate: true },
 );
 
+// Live-edge anchor. `coord.lastSampleMs` is the brush's live-follow
+// target (effectiveRange.max) AND the rail's right edge. It used to be
+// advanced ONLY from inside the charts' drain (pushSample → noteSample),
+// so while the charts backfilled asynchronously the brush sat behind the
+// true live edge — "not locked at live" until the drain caught up. The
+// cache's `rangeBounds.max` is the authoritative newest ts the instant
+// the cache has it, so feed the live edge from there directly. The
+// charts' recent-first drain keeps the visible window populated up to
+// this edge, so the chart's right edge stays in sync without a blank.
+watch(
+  () => timeseries.events.rangeBounds.value?.max,
+  (m) => { if (m != null) coord.noteSample(m); },
+  { immediate: true },
+);
+
 /** Effective time range for the brush rail. Reads the cached
  *  rangeBounds of the samples stream as the historical span; always
  *  extends `max` with `coord.lastSampleMs` so the rail's right edge
@@ -700,7 +715,19 @@ const railMarkers = computed(() => {
  *  (default 10 min) without any auto-feedback watcher that could get
  *  stuck. */
 const brushRange = computed(() => coord.effectiveRange.value);
-const windowSpanMs = computed(() => Math.max(1, brushRange.value.max - brushRange.value.min));
+
+/** Draft focus window during an active brush gesture (issue #590). While
+ *  the operator drags/resizes the rail (or wheel-zooms it), the rail
+ *  renders from this draft so it tracks the cursor live — but the
+ *  coordinated range the heavy panels read is NOT updated until the
+ *  gesture settles (mouse-release for drag/resize, ~160 ms quiet for
+ *  wheel). So charts/logs/timeline re-render once on commit instead of
+ *  on every mousemove/wheel tick. */
+const draftRange = ref<{ min: number; max: number } | null>(null);
+/** What the rail visual + focus pill render: the in-flight draft while
+ *  gesturing, else the committed coordinated range. */
+const railRange = computed(() => draftRange.value ?? coord.effectiveRange.value);
+const windowSpanMs = computed(() => Math.max(1, railRange.value.max - railRange.value.min));
 
 /** Live toggle checked rule — same across every surface. */
 const brushLiveChecked = computed(() => coord.state.range === null);
@@ -742,7 +769,11 @@ function onBrushMouseDown(e: MouseEvent, mode: 'pan' | 'resize-left' | 'resize-r
     startStart: start.min,
     startEnd: start.max,
   };
+  // Pin coord once so live-follow stops during the drag, and seed the
+  // draft so the rail tracks the cursor live. onDragMove updates only
+  // the draft; coord (and thus the panels) commits on release (#590).
   coord.setRange({ min: start.min, max: start.max });
+  draftRange.value = { min: start.min, max: start.max };
   window.addEventListener('mousemove', onDragMove);
   window.addEventListener('mouseup', onDragEnd, { once: true });
 }
@@ -770,10 +801,14 @@ function onDragMove(e: MouseEvent) {
     if (f < d.startStart + MIN_WINDOW_MS) f = d.startStart + MIN_WINDOW_MS;
     s = d.startStart;
   }
-  coord.setRange({ min: s, max: f });
+  // Update only the draft during the drag (#590) — the rail moves live,
+  // the panels stay parked at the pinned start until release.
+  draftRange.value = { min: s, max: f };
 }
 function onDragEnd() {
-  const ended = brushRange.value;
+  // Commit the draft (the final dragged window) to coord on release.
+  const ended = draftRange.value ?? brushRange.value;
+  draftRange.value = null;
   dragState.value = null;
   window.removeEventListener('mousemove', onDragMove);
   // BRUSH WIDTH on release becomes the new liveSpan — operator's
@@ -783,10 +818,12 @@ function onDragEnd() {
   // every other chart's live-tracker uses the same width.
   const dropSpan = ended.max - ended.min;
   if (dropSpan > 0) coord.setLiveSpan(dropSpan);
-  // RIGHT EDGE within 2 s of the latest sample → snap to live
-  // (charts AND brush follow the right edge as new samples arrive).
-  // Otherwise leave the range pinned to whatever onDragMove last set.
+  // RIGHT EDGE within 2 s of the latest sample → snap to live (charts
+  // AND brush follow the right edge as new samples arrive). Otherwise
+  // commit the dragged window to coord — onDragMove only moved the
+  // draft, so coord is still parked at the drag's start until here (#590).
   if (coord.isAtLiveEdge(ended.max)) coord.setRange(null);
+  else coord.setRange({ min: ended.min, max: ended.max });
 }
 
 /** Alt+wheel on the brush rail zooms the focus-window duration. Same
@@ -798,35 +835,61 @@ function onDragEnd() {
  *      live, snap to live tracking.
  *
  *  Plain wheel falls through to native page scroll. */
+/** Rail-wheel debounce (#590). Wheel events update only the draft (rail
+ *  moves live); the coordinated range commits ~160 ms after the wheel
+ *  goes quiet, so the heavy panels render once per gesture instead of
+ *  per tick. */
+let railWheelTimer: number | null = null;
+function scheduleRailCommit() {
+  if (railWheelTimer != null) clearTimeout(railWheelTimer);
+  railWheelTimer = window.setTimeout(commitRailDraft, 160);
+}
+function commitRailDraft() {
+  if (railWheelTimer != null) { clearTimeout(railWheelTimer); railWheelTimer = null; }
+  const d = draftRange.value;
+  if (!d) return;
+  draftRange.value = null;
+  const span = d.max - d.min;
+  if (span > 0) coord.setLiveSpan(span);
+  // Right edge at live → follow live with the new span; else pin.
+  if (coord.isAtLiveEdge(d.max)) coord.setRange(null);
+  else coord.setRange({ min: d.min, max: d.max });
+}
+
 function onRailWheel(e: WheelEvent) {
   const rail = railRef.value;
   const r = timeRange.value;
   if (!rail || !r) return;
-  // Horizontal scroll → pan the brush. deltaX/railWidth maps directly
-  // to fraction-of-full-data-range so a one-rail-width swipe pans by
-  // the entire visible data span. Unlike the line charts, the brush
-  // is CLAMPED to [r.min, r.max] so it never leaves the rail. See
-  // gh#461.
-  if (!e.altKey && Math.abs(e.deltaX) > Math.abs(e.deltaY)) {
+  // Base the next window on the in-flight draft so successive wheel
+  // ticks compound before the debounced commit (#590).
+  // Horizontal pan: trackpad two-finger swipe (deltaX) OR Shift+wheel
+  // (the mouse way to scroll horizontally; magnitude lands on deltaX or
+  // deltaY depending on browser). deltaX/railWidth maps directly to
+  // fraction-of-full-data-range so a one-rail-width swipe pans by the
+  // entire visible data span. The brush is CLAMPED to [r.min, r.max] so
+  // it never leaves the rail. See gh#461.
+  if (!e.altKey && (e.shiftKey || Math.abs(e.deltaX) > Math.abs(e.deltaY))) {
     e.preventDefault();
     e.stopPropagation();
     const widthPx = rail.clientWidth;
     if (widthPx <= 0) return;
-    const current = brushRange.value;
+    const current = railRange.value;
     const span = current.max - current.min;
-    const dms = (e.deltaX / widthPx) * (r.max - r.min);
+    const delta = Math.abs(e.deltaX) >= Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
+    const dms = (delta / widthPx) * (r.max - r.min);
     let s = current.min + dms;
     let f = current.max + dms;
     if (s < r.min) { s = r.min; f = s + span; }
     if (f > r.max) { f = r.max; s = f - span; }
-    coord.setRange({ min: s, max: f });
+    draftRange.value = { min: s, max: f };
+    scheduleRailCommit();
     return;
   }
   if (!e.altKey) return;
   e.preventDefault();
   e.stopPropagation();
   const fullSpan = Math.max(1, r.max - r.min);
-  const current = brushRange.value;
+  const current = railRange.value;
   const currentSpan = Math.max(1, current.max - current.min);
   const factor = e.deltaY < 0 ? 0.9 : 1 / 0.9;
   const MIN_SPAN_MS = 1_000;
@@ -834,8 +897,9 @@ function onRailWheel(e: WheelEvent) {
   if (nextSpan === currentSpan) return;
 
   if (coord.isAtLiveEdge(current.max)) {
-    coord.setLiveSpan(nextSpan);
-    coord.setRange(null);
+    // At live: keep the right edge glued to live, grow/shrink leftward.
+    draftRange.value = { min: current.max - nextSpan, max: current.max };
+    scheduleRailCommit();
     return;
   }
   // Mouse-anchored: keep the timestamp under the cursor at the same
@@ -848,12 +912,8 @@ function onRailWheel(e: WheelEvent) {
   let newEnd = newStart + nextSpan;
   if (newStart < r.min) { newStart = r.min; newEnd = newStart + nextSpan; }
   if (newEnd > r.max) { newEnd = r.max; newStart = newEnd - nextSpan; }
-  if (coord.isAtLiveEdge(newEnd)) {
-    coord.setLiveSpan(nextSpan);
-    coord.setRange(null);
-    return;
-  }
-  coord.setRange({ min: newStart, max: newEnd });
+  draftRange.value = { min: newStart, max: newEnd };
+  scheduleRailCommit();
 }
 
 function onRailMouseDown(e: MouseEvent) {
@@ -1056,8 +1116,8 @@ function skipToEnd() {
             class="brush-window"
             :class="{ dragging: dragState }"
             :style="{
-              left: ((brushRange.min - scrubMin) / Math.max(1, scrubMax - scrubMin) * 100) + '%',
-              right: ((scrubMax - brushRange.max) / Math.max(1, scrubMax - scrubMin) * 100) + '%',
+              left: Math.max(0, (railRange.min - scrubMin) / Math.max(1, scrubMax - scrubMin) * 100) + '%',
+              right: Math.max(0, (scrubMax - railRange.max) / Math.max(1, scrubMax - scrubMin) * 100) + '%',
             }"
             @mousedown.stop="onBrushMouseDown($event, 'pan')"
           >
@@ -1436,12 +1496,12 @@ function skipToEnd() {
   height: 30px;
   background: #d1fae5;
   border-radius: 6px;
-  /* Clip the brush window so it can't bleed past the rail edges
-   * (and onto the ⏮/⏭ scrub buttons) when the visible focus range
-   * extends past the data — e.g. a 10-min liveSpan on a fresh
-   * session that only has 1 min of samples puts brushRange.min 9
-   * min before scrubMin, which would be a -X% left value. */
-  overflow: hidden;
+  /* overflow VISIBLE so the brush window can extend above/below the rail
+   * as a taller grab target (those strips are tick-free, so they're a
+   * clean drag zone). Horizontal bleed past the rail edges onto the
+   * ⏮/⏭ buttons is instead prevented by clamping the window's left/right
+   * to ≥0 in the template binding. */
+  overflow: visible;
   cursor: crosshair;
 }
 .brush-rail .brush-tick {
@@ -1493,8 +1553,12 @@ function skipToEnd() {
 
 .brush-window {
   position: absolute;
-  top: 0;
-  bottom: 0;
+  /* Extend above and below the 30px rail so the grab target is taller
+   * than the rail itself — those strips are tick-free, so you can always
+   * grab the window (or its handles) for dragging without landing on a
+   * marker. */
+  top: -9px;
+  bottom: -9px;
   background: rgba(29, 78, 216, 0.18);
   border: 0;
   border-radius: 6px;
@@ -1508,8 +1572,10 @@ function skipToEnd() {
 .brush-window.dragging { cursor: grabbing; }
 .brush-handle {
   position: absolute;
-  top: -1px;
-  bottom: -1px;
+  /* Match the window's vertical extent so the resize grips are equally
+   * tall and easy to grab above/below the rail. */
+  top: -9px;
+  bottom: -9px;
   width: 8px;
   background: #1d4ed8;
   border-radius: 3px;

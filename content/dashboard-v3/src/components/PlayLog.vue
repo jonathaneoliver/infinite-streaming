@@ -671,6 +671,18 @@ function sortValue(r: Row, c: SortCol): number | string {
   }
 }
 
+/** Flatten a row's fields to a single `k=v, k=v` string (#586). Rendered
+ *  as one text node instead of one chip element per field — the dominant
+ *  per-row DOM cost. */
+function fieldsToString(fields: DisplayedField[]): string {
+  let s = '';
+  for (let i = 0; i < fields.length; i++) {
+    if (i) s += ', ';
+    s += fields[i].name + '=' + fields[i].value;
+  }
+  return s;
+}
+
 /** Row + the field list to render. Computed in chronological order
  *  so the "Changed fields" diff against the previous same-source row
  *  is well-defined regardless of the display sort. */
@@ -770,11 +782,38 @@ function sortFields(fields: DisplayedField[], source: Source): DisplayedField[] 
   });
 }
 
+/** Rows within the coordinated focus window (issue #586). The logs now
+ *  "follow the focus bar": effectiveRange is the live tail when live, or
+ *  the pinned window when the operator pans back — so the Play Log lines
+ *  up with the charts and the Player State timeline instead of always
+ *  showing the entire cache. */
+const windowedFull = computed<Row[]>(() => {
+  const r = coord.effectiveRange.value;
+  if (!r) return allRows.value;
+  return allRows.value.filter((row) => row.ts >= r.min && row.ts <= r.max);
+});
+
+/** Max rows actually rendered to the DOM. With fields collapsed to a
+ *  single compact string per row (~8 nodes/row instead of ~100), the
+ *  window can render far more rows cheaply, so this cap is now just a
+ *  safety bound against pathological windows. Narrow the focus bar (or
+ *  pan) to inspect rows beyond it. A virtualized list remains the proper
+ *  long-term fix. */
+const MAX_RENDER_ROWS = 1500;
+const windowedRows = computed<Row[]>(() => {
+  const rows = windowedFull.value;
+  if (rows.length <= MAX_RENDER_ROWS) return rows;
+  // Keep the most recent N by ts (the live tail operators watch).
+  return rows.slice().sort((a, b) => a.ts - b.ts).slice(-MAX_RENDER_ROWS);
+});
+/** True when rows were dropped from the rendered set (shown in the bar). */
+const renderCapped = computed(() => windowedFull.value.length > MAX_RENDER_ROWS);
+
 const rowsWithFields = computed<RowWithFields[]>(() => {
   // Build chronological copy so the diff against the previous
   // snapshot is well-defined regardless of the display sort
   // direction the operator picks below.
-  const chrono = allRows.value.slice().sort((a, b) => a.ts - b.ts);
+  const chrono = windowedRows.value.slice().sort((a, b) => a.ts - b.ts);
   const mode = displayMode.value;
   // Only snapshots participate in the diff — every network /
   // event row is unique by construction so a per-row diff is
@@ -838,14 +877,16 @@ const sortedRows = computed<RowWithFields[]>(() => {
 });
 
 const counts = computed(() => {
+  // Counts reflect the full focus window (issue #586), not the capped
+  // render set, so the toolbar tallies match what's in the window.
   let evt = 0, net = 0, ctl = 0, avm = 0;
-  for (const r of allRows.value) {
+  for (const r of windowedFull.value) {
     if (r.source === 'event') evt++;
     else if (r.source === 'network') net++;
     else if (r.source === 'avmetrics') avm++;
     else ctl++;
   }
-  return { evt, net, ctl, avm, total: allRows.value.length };
+  return { evt, net, ctl, avm, total: windowedFull.value.length };
 });
 
 /** True when the active player has any AVMetrics rows in the cached
@@ -964,6 +1005,7 @@ function onRowsWheel(e: WheelEvent) {
       <label v-if="hasAVMetrics" class="opt" title="iOS 18 AVMetrics raw events (issue #486 spike). Parallel observation stream from AVFoundation — compare side-by-side against today's heartbeat-derived Events."><input type="checkbox" v-model="showAVMetrics" /> AVMetrics ({{ counts.avm }})</label>
       <label class="opt"><input type="checkbox" v-model="showRaw" /> Raw</label>
       <span class="count">{{ counts.total }} row{{ counts.total === 1 ? '' : 's' }}</span>
+      <span v-if="renderCapped" class="count" title="Only the most recent rows are rendered for performance; narrow the focus bar to see older rows">(showing last {{ MAX_RENDER_ROWS }})</span>
       <button
         type="button"
         class="btn live-toggle"
@@ -1057,12 +1099,13 @@ function onRowsWheel(e: WheelEvent) {
           </div>
           <div class="cell c-fields">
             <span v-if="r.fields.length === 0" class="kv-empty">—</span>
-            <span
-              v-for="f in r.fields"
-              :key="f.name"
-              class="kv"
-              :title="f.name + '=' + f.value"
-            ><span class="kv-name">{{ f.name }}</span>=<span class="kv-value">{{ f.value }}</span></span>
+            <!-- Fields rendered as one compact `k=v, k=v` string instead
+                 of one chip element per field (#586). Each chip was 3 DOM
+                 nodes; a dense row had ~30+ fields → ~100 nodes/row. The
+                 single text node keeps PlayLog light enough to render the
+                 whole window. Full per-field detail stays in the Raw
+                 column. -->
+            <span v-else class="kv-compact" :title="fieldsToString(r.fields)">{{ fieldsToString(r.fields) }}</span>
           </div>
           <div v-if="showRaw" class="cell c-raw" :title="rawValueFor(r)">
             <pre class="raw-pre">{{ rawValueFor(r) }}</pre>
@@ -1359,6 +1402,17 @@ function onRowsWheel(e: WheelEvent) {
 .kv-empty {
   color: #9ca3af;
   font-size: 10px;
+}
+/* Compact single-string field rendering (#586) — one text node instead
+ * of N chip elements. Wraps within the column; full value also in title. */
+.kv-compact {
+  font-size: 10px;
+  line-height: 1.5;
+  color: #374151;
+  font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 /* event_name column — dedicated cell after attempt_id. Lifted out

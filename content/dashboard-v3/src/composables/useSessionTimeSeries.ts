@@ -509,41 +509,37 @@ export function useSessionTimeSeries(
     };
   }
 
-  // Periodic eviction guard: if any stream balloons past its soft
-  // cap, drop entries outside the current viewport guardband. The
-  // viewport hint is (samples ∪ network ∪ events) bounds so we
-  // never throw away data the brush is actively showing. Renderers
-  // that pan past the cache trigger a fresh fetch — handled at
-  // the upper layer (TS6).
-  const SOFT_CAP_SAMPLES = 50000;
-  const SOFT_CAP_NETWORK = 5000;
-  const SOFT_CAP_EVENTS = 50000;
+  // Recency cap (issue #582). The previous eviction called
+  // evictOutsideViewport with the streams' OWN merged data bounds —
+  // which keeps `[min − 2·span, max + 2·span]` of the entire cached
+  // range, i.e. it never actually drops anything as the range grows.
+  // So the caches grew unbounded for the life of the tab (a primary
+  // contributor to the 12 GB renderer). Replace with a hard recency
+  // cap: keep only the most recent N rows per stream. Arrays are sorted
+  // ascending by ts (insertSortedDedup), so the oldest are at the front.
+  // Panning past the retained window triggers a fresh range fetch at the
+  // upper layer.
+  // Doubled from the original #582 values to retain a longer focus-window
+  // history (~5.4h at 1 Hz) for 3h+ sessions while #587 (on-demand
+  // refetch of evicted windows) is blocked on server support. Still a
+  // hard memory bound — ~2× the footprint, far below the old unbounded leak.
+  const SOFT_CAP_SAMPLES = 20000;
+  const SOFT_CAP_NETWORK = 4000;
+  const SOFT_CAP_EVENTS = 20000;
+  function trimToCap<T>(arr: T[], cap: number): boolean {
+    if (arr.length > cap) {
+      arr.splice(0, arr.length - cap);
+      return true;
+    }
+    return false;
+  }
   watch(
     [eventsVersion, networkVersion, controlVersion, avmetricsVersion],
     () => {
-      const bounds = mergedBounds(
-        eventsBounds.value,
-        networkBounds.value,
-        controlBounds.value,
-        avmetricsBounds.value,
-      );
-      if (!bounds) return;
-      if (eventsArr.value.length > SOFT_CAP_SAMPLES) {
-        evictOutsideViewport(eventsArr.value, bounds.min, bounds.max, tsOf);
-        triggerRef(eventsArr);
-      }
-      if (networkArr.value.length > SOFT_CAP_NETWORK) {
-        evictOutsideViewport(networkArr.value, bounds.min, bounds.max, tsOf);
-        triggerRef(networkArr);
-      }
-      if (controlArr.value.length > SOFT_CAP_EVENTS) {
-        evictOutsideViewport(controlArr.value, bounds.min, bounds.max, tsOf);
-        triggerRef(controlArr);
-      }
-      if (avmetricsArr.value.length > SOFT_CAP_EVENTS) {
-        evictOutsideViewport(avmetricsArr.value, bounds.min, bounds.max, tsOf);
-        triggerRef(avmetricsArr);
-      }
+      if (trimToCap(eventsArr.value, SOFT_CAP_SAMPLES)) triggerRef(eventsArr);
+      if (trimToCap(networkArr.value, SOFT_CAP_NETWORK)) triggerRef(networkArr);
+      if (trimToCap(controlArr.value, SOFT_CAP_EVENTS)) triggerRef(controlArr);
+      if (trimToCap(avmetricsArr.value, SOFT_CAP_EVENTS)) triggerRef(avmetricsArr);
     },
   );
 

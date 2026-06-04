@@ -93,6 +93,31 @@ const coord = useChartCoordination(toRef(props, 'playerId'));
 
 let chart: any = null;
 let dataset: Array<Array<{ x: number; y: number }>> = [];
+
+/** Hard cap on points kept per series (issue #582). A pure memory
+ *  bound: the oldest points are dropped once a series exceeds this, so a
+ *  tab open for hours can't grow the renderer to multiple GB. Doubled to
+ *  16000 (~4.4 h at 1 Hz) to match the doubled cache cap so the charts
+ *  cover the same deep history while #587 (refetch) is blocked. It's the
+ *  cache's eviction window, not zoom, that bounds how far back data goes. */
+const MAX_POINTS_PER_SERIES = 16000;
+
+/** Listeners attached to `window` outlive this component's canvas (which
+ *  GCs when the chart is destroyed), so they must be removed on unmount
+ *  or they leak the closures — and the chart/dataset they capture —
+ *  every time a chart is torn down (e.g. switching the active session).
+ *  Issue #582. Canvas-bound listeners GC with the canvas, but routing
+ *  them here too is harmless and keeps teardown complete. */
+const teardownFns: Array<() => void> = [];
+function onGlobal(
+  target: EventTarget,
+  type: string,
+  handler: (e: any) => void,
+  opts?: AddEventListenerOptions | boolean,
+) {
+  target.addEventListener(type, handler as EventListener, opts);
+  teardownFns.push(() => target.removeEventListener(type, handler as EventListener, opts as EventListenerOptions));
+}
 // Watermark of the latest CH row already pushed through the chart.
 // Read by the markers-stream watcher to drain only NEW rows on each
 // version bump (the cache holds the full backfill + live tail).
@@ -793,7 +818,7 @@ function installLeftClickLiveToggle() {
     if (x < area.left || x > area.right || y < area.top || y > area.bottom) return;
     coord.toggleLive();
   });
-  window.addEventListener('blur', () => { downAt = null; });
+  onGlobal(window, 'blur', () => { downAt = null; });
 }
 
 function installContextMenuSuppress() {
@@ -817,7 +842,7 @@ function installRightDragPan() {
     // user is dragging (setRange handles both range + paused mirror).
     coord.setRange({ min: sx.min, max: sx.max });
   });
-  window.addEventListener('mousemove', (e) => {
+  onGlobal(window, 'mousemove', (e: MouseEvent) => {
     if (!dragState || !chart) return;
     const area = chart.chartArea;
     if (!area) return;
@@ -827,10 +852,10 @@ function installRightDragPan() {
     const dv = (dx / widthPx) * span;
     coord.setRange({ min: dragState.startMin - dv, max: dragState.startMax - dv });
   });
-  window.addEventListener('mouseup', (e) => {
+  onGlobal(window, 'mouseup', (e: MouseEvent) => {
     if (e.button === 2) dragState = null;
   });
-  window.addEventListener('blur', () => { dragState = null; });
+  onGlobal(window, 'blur', () => { dragState = null; });
 }
 
 /**
@@ -851,12 +876,13 @@ function installLiveWheelAnchor() {
   c.addEventListener(
     'wheel',
     (e: WheelEvent) => {
-      // Horizontal scroll (trackpad two-finger swipe left/right or
-      // mouse horizontal scroll) → pan the chart by deltaX scaled
-      // against the chart's plot-area width. No Alt required; plain
-      // vertical scroll still falls through to page scroll. See
-      // gh#461.
-      if (!e.altKey && Math.abs(e.deltaX) > Math.abs(e.deltaY)) {
+      // Horizontal pan: trackpad two-finger swipe (deltaX dominant) OR
+      // Shift+wheel (the mouse way to scroll horizontally). Shift+wheel
+      // reports its magnitude on deltaX in some browsers and deltaY in
+      // others, so take whichever axis is larger. No Alt required; plain
+      // vertical scroll still falls through to page scroll. See gh#461.
+      const horizontalPan = !e.altKey && (e.shiftKey || Math.abs(e.deltaX) > Math.abs(e.deltaY));
+      if (horizontalPan) {
         e.preventDefault();
         e.stopPropagation();
         const chartArea = chart?.chartArea;
@@ -864,7 +890,8 @@ function installLiveWheelAnchor() {
         const widthPx = chartArea.right - chartArea.left;
         const current = coord.effectiveRange.value;
         const span = current.max - current.min;
-        const dms = (e.deltaX / widthPx) * span;
+        const delta = Math.abs(e.deltaX) >= Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
+        const dms = (delta / widthPx) * span;
         coord.setRange({ min: current.min + dms, max: current.max + dms });
         return;
       }
@@ -956,15 +983,30 @@ function pushSample(p: PlayerRecord, x: number) {
     insertByX(data, { x, y: Number(y) });
     mutated = true;
   }
-  // Retention is the time-series cache's job (SOFT_CAP_SAMPLES) —
-  // the chart used to trim at `x - windowMs * 2` to bound memory,
-  // but `windowMs` is the *visible* window, not retention. When the
-  // operator zooms in (focusSpan shrinks → setWindowMs shrinks) the
-  // trim was killing older points the PLAYERSTATE lane still had,
-  // producing a chart-vs-lane time-axis mismatch. Chart.js with
-  // `animation: false` handles tens of thousands of points fine.
+  // Bound per-series history (issue #582). The chart used to keep every
+  // point for the life of the tab ("retention is the cache's job"), but
+  // the cache evicts and the chart did not — so the dataset arrays grew
+  // unbounded, ballooning the renderer to multi-GB and pegging CPU as
+  // each redraw re-rasterized hundreds of thousands of points. Cap each
+  // series to MAX_POINTS_PER_SERIES and drop the oldest (front of the
+  // ascending-by-x array). The cap is a memory bound, independent of the
+  // visible window, so it does NOT reintroduce the zoom-in trimming bug
+  // that the old `x - windowMs*2` trim had (that one shrank with zoom).
   if (mutated) {
-    if (coord.state.range === null) {
+    for (const d of dataset) {
+      if (d.length > MAX_POINTS_PER_SERIES) {
+        d.splice(0, d.length - MAX_POINTS_PER_SERIES);
+      }
+    }
+    // Live-follow: advance the viewport ONLY for a genuine live-tail
+    // sample (one at/after the running max). `coord.noteSample(x)` above
+    // already raised `lastSampleMs` to max(prev, x), so a new tail row
+    // has `x === lastSampleMs` and an older backfill row has
+    // `x < lastSampleMs`. Guarding on that stops the recent-first
+    // backfill (older, off-screen rows) from dragging the window
+    // backward — the fix for both the live-edge blank AND the
+    // brush-crawl-across-the-whole-backfill regressions (#590).
+    if (coord.state.range === null && x >= coord.state.lastSampleMs) {
       applyViewport({ min: x - DEFAULT_FOCUS_MS, max: x });
     }
     safeChartUpdate();
@@ -1045,6 +1087,35 @@ function safeChartUpdate() {
  */
 const pendingLive: { p: PlayerRecord; x: number }[] = [];
 let drainToken = 0;
+let backfillToken = 0;
+
+/**
+ * Background fill of the off-screen history that sits OLDER than the
+ * live window, walked newest→oldest so panning back populates the rows
+ * nearest the window first. These all have `x < lastSampleMs`, so
+ * pushSample's guard leaves the viewport parked at the live edge — no
+ * crawl, no blank. Snapshot is bounded to MAX_POINTS_PER_SERIES rows so
+ * we don't burn the main thread inserting points the per-series cap
+ * would immediately trim off the front anyway.
+ */
+async function backfillOlder(myToken: number, ceilMs: number) {
+  if (!chart) return;
+  const older = props.eventsStream.inRange(0, ceilMs - 1);
+  if (!older.length) return;
+  const from = Math.max(0, older.length - MAX_POINTS_PER_SERIES);
+  const CHUNK = 500;
+  for (let end = older.length; end > from; end -= CHUNK) {
+    if (myToken !== backfillToken) return;
+    const start = Math.max(from, end - CHUNK);
+    for (let i = end - 1; i >= start; i--) {
+      const row = older[i];
+      const x = tsOfRow(row);
+      if (!Number.isFinite(x)) continue;
+      pushSample(chRowToPlayerRecord(row), x);
+    }
+    await new Promise<void>((r) => setTimeout(r, 0));
+  }
+}
 
 async function drainNewRows() {
   if (!chart) {
@@ -1052,6 +1123,40 @@ async function drainNewRows() {
     catch (err) { console.warn('chart ensure failed:', err); return; }
   }
   if (!chart) return;
+
+  // INITIAL live-mode backfill — fill the visible window from the newest
+  // rows FIRST (synchronously, so it lands in one repaint with the
+  // viewport already at the live edge), then backfill the older
+  // off-screen rows behind it. Draining strictly oldest→newest instead
+  // (the generic path below) either left the live edge blank until the
+  // drain reached it, or crawled the brush across the whole backfill —
+  // both #590 regressions. Pinned/archive mode (range !== null) keeps
+  // the generic full-window fill, which never moves the viewport.
+  if (lastIngestedMs === -Infinity && coord.state.range === null) {
+    const all = props.eventsStream.inRange(0, Number.MAX_SAFE_INTEGER);
+    if (!all.length) return;
+    const cacheMax = tsOfRow(all[all.length - 1]);
+    if (Number.isFinite(cacheMax)) {
+      const span = coord.state.liveSpan || DEFAULT_FOCUS_MS;
+      const liveStart = cacheMax - span;
+      // Find the contiguous recent tail (ascending-by-x array).
+      let firstRecent = all.length;
+      for (let i = all.length - 1; i >= 0; i--) {
+        const x = tsOfRow(all[i]);
+        if (Number.isFinite(x) && x >= liveStart) firstRecent = i; else break;
+      }
+      for (let i = firstRecent; i < all.length; i++) {
+        const row = all[i];
+        const x = tsOfRow(row);
+        if (!Number.isFinite(x)) continue;
+        pushSample(chRowToPlayerRecord(row), x);
+      }
+      lastIngestedMs = cacheMax;
+      void backfillOlder(++backfillToken, liveStart);
+      return;
+    }
+  }
+
   const raw = props.eventsStream.inRange(
     lastIngestedMs === -Infinity ? 0 : lastIngestedMs + 1,
     Number.MAX_SAFE_INTEGER,
@@ -1086,11 +1191,17 @@ async function drainNewRows() {
       }
       if (x > highWater) highWater = x;
     }
+    // Advance the watermark PER CHUNK so a mid-drain interrupt (a 1 Hz
+    // cache flush bumps drainToken and aborts this loop) doesn't restart
+    // from the beginning. That restart-from-scratch was re-processing the
+    // whole backfill on every flush — ~12 s to catch up on a long
+    // session, during which the live edge stayed blank. Per-chunk
+    // progress makes the drain converge in a couple seconds.
+    lastIngestedMs = highWater;
     if (end < raw.length) {
       await new Promise<void>((r) => setTimeout(r, 0));
     }
   }
-  lastIngestedMs = highWater;
 }
 
 watch(
@@ -1118,6 +1229,7 @@ watch(
   () => {
     pendingLive.length = 0;
     lastIngestedMs = -Infinity;
+    ++backfillToken; // abort any in-flight backfill for the old player
     for (const arr of dataset) arr.length = 0;
     safeChartUpdate();
   },
@@ -1138,13 +1250,19 @@ watch(
     } catch (err) {
       console.warn('chart viewport apply skipped:', err);
     }
-    // Viewport / pause changes are axis-only updates — render
-    // directly so brush drag feels as smooth as the vis-timeline
-    // events panel. safeChartUpdate's adaptive throttle exists for
-    // data-arrival churn (pushSample / drainNewRows insert many
-    // points per second); applying it here would delay pan response
-    // up to several seconds when a dataset has thousands of points.
-    try { chart.update('none'); } catch (err) { console.warn('chart pan render skipped:', err); }
+    // Interactive viewport changes (brush drag, pan, zoom — i.e. a
+    // pinned range) render directly so they feel as smooth as the
+    // vis-timeline events panel. But in LIVE mode (range === null) this
+    // watcher fires on EVERY sample, because effectiveRange tracks
+    // lastSampleMs — and a direct chart.update() per sample across N
+    // charts is the dominant CPU sink on a long-lived tab (#582). For
+    // the live-edge case, route through the adaptive throttle instead;
+    // the right edge still advances at the metrics emit cadence.
+    if (coord.state.range === null) {
+      safeChartUpdate();
+    } else {
+      try { chart.update('none'); } catch (err) { console.warn('chart pan render skipped:', err); }
+    }
   },
 );
 
@@ -1231,6 +1349,11 @@ function onLiveToggleClick() {
 }
 
 onBeforeUnmount(() => {
+  // Remove window-level listeners so the destroyed chart's closures can
+  // be GC'd (issue #582 — otherwise switching sessions leaks charts).
+  for (const fn of teardownFns) { try { fn(); } catch { /* ignore */ } }
+  teardownFns.length = 0;
+  if (pendingUpdateTimer != null) { clearTimeout(pendingUpdateTimer); pendingUpdateTimer = null; }
   try { chart?.destroy(); } catch { /* ignore */ }
   chart = null;
 });
@@ -1260,8 +1383,8 @@ onBeforeUnmount(() => {
         >
           {{ liveChecked ? '●' : '○' }} Live
         </button>
-        <span class="hint" title="Hold Alt (Option on Mac) while scrolling or dragging to zoom; right-click-drag to pan">
-          Alt/⌥+scroll/drag · right-drag pan
+        <span class="hint" title="Alt/Option + scroll or drag = zoom; Shift + scroll (or two-finger horizontal) = pan; right-click-drag = pan">
+          Alt/⌥+scroll/drag zoom · Shift+scroll / right-drag pan
         </span>
       </div>
     </div>

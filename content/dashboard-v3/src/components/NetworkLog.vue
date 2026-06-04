@@ -249,7 +249,14 @@ const allRows = computed<Row[]>(() => {
 });
 
 const rows = computed<Row[]>(() => {
+  // Follow the focus bar (issue #586): only rows within the coordinated
+  // visible window, so the Network Log lines up with the charts +
+  // timeline. effectiveRange is the live tail when live, or the pinned
+  // window when the operator pans back. (The summary line below stays a
+  // full-log tally on purpose.)
+  const w = coord.effectiveRange.value;
   return allRows.value.filter((r) => {
+    if (w && (r.ts < w.min || r.ts > w.max)) return false;
     if (faultedOnly.value && !r.entry.faulted) return false;
     if (hideSuccessful.value && isSuccessful(r.entry)) return false;
     return true;
