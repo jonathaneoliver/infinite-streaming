@@ -347,6 +347,85 @@ services:
       - app_network
     restart: unless-stopped
 
+  # #445 — HMM latent-REGIME label derivation, same TRAIN + SCORE split as the VOMM
+  # deriver above, but a different model + label family. The VOMM emits point
+  # unexpected_<condition> surprise; the HMM emits a regime timeline (regime_<STATE>) +
+  # unexpected_regime_transition decoded from a CategoricalHMM. They share NOTHING but the
+  # token alphabet — separate artifact (hmm-models volume), separate model_version
+  # (hmm-tok-1), so their derived_labels rows never collide.
+  #
+  # OPT-IN (profile: hmm) — research-direction work (P3), and unlike the pure-stdlib VOMM
+  # deriver these need hmmlearn/numpy/scipy. The bare python:3.12-slim pip-installs
+  # requirements.txt on start (keeps the bind-mount-no-rebuild workflow; a purpose-built
+  # image is the obvious optimisation if this graduates off P3). Start with:
+  #   docker compose --profile hmm up -d hmm-label-trainer hmm-label-scorer
+
+  # TRAIN (slow): fit the CategoricalHMM over --train-days of plays, persist the gzipped-JSON
+  # artifact + a derived_models manifest row. Bootstraps once on start, then nightly.
+  hmm-label-trainer:
+    image: python:3.12-slim
+    container_name: infinite-streaming-hmm-label-trainer
+    profiles: ["hmm"]
+    volumes:
+      - ./analytics/tools:/tools:ro
+      - hmm-models:/models
+    environment:
+      - FORWARDER_CLICKHOUSE_URL=http://clickhouse:8123
+      - HMM_TRAIN_INTERVAL_SECONDS=${HMM_TRAIN_INTERVAL_SECONDS:-86400}
+      - HMM_TRAIN_DAYS=${HMM_TRAIN_DAYS:-7}
+      - HMM_K=${HMM_K:-5}
+      - HMM_MODEL_PATH=${HMM_MODEL_PATH:-/models/hmm-model.json.gz}
+      - HMM_MODEL_VERSION=${HMM_MODEL_VERSION:-hmm-tok-1}
+    command:
+      - sh
+      - -c
+      - |
+        pip install --no-cache-dir -q -r /tools/requirements.txt || { echo "[hmm-label-trainer] pip install failed"; exit 1; }
+        sleep 30
+        while true; do
+          python3 /tools/hmm_deriver.py --mode train --train-days "$$HMM_TRAIN_DAYS" --k "$$HMM_K" --model-path "$$HMM_MODEL_PATH" --model-version "$$HMM_MODEL_VERSION" \
+            || echo "[hmm-label-trainer] run failed (rc=$$?), retrying next tick"
+          sleep "$$HMM_TRAIN_INTERVAL_SECONDS"
+        done
+    depends_on:
+      clickhouse:
+        condition: service_started
+    networks:
+      - app_network
+    restart: unless-stopped
+
+  # SCORE (fast): load the artifact and Viterbi-decode plays that post-date its trained_at
+  # (out-of-sample), writing derived_labels. Skips gracefully until the trainer's first run.
+  hmm-label-scorer:
+    image: python:3.12-slim
+    container_name: infinite-streaming-hmm-label-scorer
+    profiles: ["hmm"]
+    volumes:
+      - ./analytics/tools:/tools:ro
+      - hmm-models:/models
+    environment:
+      - FORWARDER_CLICKHOUSE_URL=http://clickhouse:8123
+      - HMM_SCORE_INTERVAL_SECONDS=${HMM_SCORE_INTERVAL_SECONDS:-300}
+      - HMM_SCORE_HOURS=${HMM_SCORE_HOURS:-2}
+      - HMM_MODEL_PATH=${HMM_MODEL_PATH:-/models/hmm-model.json.gz}
+    command:
+      - sh
+      - -c
+      - |
+        pip install --no-cache-dir -q -r /tools/requirements.txt || { echo "[hmm-label-scorer] pip install failed"; exit 1; }
+        sleep 40
+        while true; do
+          python3 /tools/hmm_deriver.py --mode score --score-hours "$$HMM_SCORE_HOURS" --model-path "$$HMM_MODEL_PATH" \
+            || echo "[hmm-label-scorer] run failed (rc=$$?), retrying next tick"
+          sleep "$$HMM_SCORE_INTERVAL_SECONDS"
+        done
+    depends_on:
+      clickhouse:
+        condition: service_started
+    networks:
+      - app_network
+    restart: unless-stopped
+
 
 networks:
   app_network:
@@ -356,3 +435,6 @@ volumes:
   # Shared between label-trainer (writes) and label-scorer (reads): the serialized VOMM
   # artifact (#608). Decouples the slow nightly rebuild from the fast scoring loop.
   vomm-models:
+  # Same role for the #445 HMM deriver pair (hmm-label-trainer writes, hmm-label-scorer
+  # reads); kept separate so the two models' artifacts never clobber each other.
+  hmm-models:

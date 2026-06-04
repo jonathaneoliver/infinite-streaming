@@ -1,0 +1,9 @@
+# #445 HMM latent-regime scorer (hmm_model.py / hmm_deriver.py / hmm_scorer.py).
+#
+# The VOMM scorer (scorer.py / tokenize.py / derive_tokens.py / derive_labels.py) is
+# pure-stdlib by design, so its deriver sidecars run a bare python:3.12-slim with no pip
+# step. The HMM needs Baum-Welch + Viterbi, which we get from hmmlearn — so ONLY the HMM
+# sidecars (hmm-label-trainer / hmm-label-scorer) install these. See docker-compose.yml.
+hmmlearn>=0.3.0
+numpy>=1.26
+scikit-learn>=1.3
