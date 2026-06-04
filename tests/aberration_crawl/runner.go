@@ -114,7 +114,11 @@ func runOne(ctx context.Context, ch *CHClient, cat *Catalogue, r Rule, table str
 	case "play":
 		err = runPlay(ctx, ch, r, table, &res)
 	case "sql":
-		res.Skipped = "kind=sql is sketch-only in Phase 2; implemented in Phase 3"
+		if strings.TrimSpace(r.SQL) == "" {
+			res.Skipped = "sql_sketch only — no executable sql yet"
+		} else {
+			err = runSQL(ctx, ch, r, &res)
+		}
 	}
 	if err != nil {
 		res.Err = err.Error()
@@ -310,6 +314,26 @@ FROM (%s) GROUP BY grp`, r.Violation, inner)
 		ex := fmt.Sprintf(`SELECT player_id, play_id, toString(ts) AS ts
 FROM (%s) WHERE _rn > 1 AND (%s) LIMIT 3`, inner, r.Violation)
 		exRows, err := ch.Query(ctx, ex)
+		if err == nil {
+			scanExemplars(exRows, res)
+		}
+	}
+	return nil
+}
+
+func runSQL(ctx context.Context, ch *CHClient, r Rule, res *RuleResult) error {
+	since := r.SinceDate(ArchiveFloor)
+	expand := func(s string) string {
+		s = strings.ReplaceAll(s, "{db}", ch.Database)
+		return strings.ReplaceAll(s, "{since}", since)
+	}
+	rows, err := ch.Query(ctx, expand(r.SQL))
+	if err != nil {
+		return err
+	}
+	scanGroups(rows, res)
+	if res.TotalViolations() > 0 && strings.TrimSpace(r.ExemplarSQL) != "" {
+		exRows, err := ch.Query(ctx, expand(r.ExemplarSQL))
 		if err == nil {
 			scanExemplars(exRows, res)
 		}

@@ -58,8 +58,13 @@ type Rule struct {
 	// kind: play
 	Aggregates map[string]string `yaml:"aggregates"`
 
-	// kind: sql — sketch only; the runner logs and skips.
-	SQLSketch string `yaml:"sql_sketch"`
+	// kind: sql — SQL must return grp, checked, violations; {db} and
+	// {since} placeholders are substituted. ExemplarSQL (optional) must
+	// return player_id, play_id, ts. Rules with only sql_sketch are
+	// logged and skipped.
+	SQL         string `yaml:"sql"`
+	ExemplarSQL string `yaml:"exemplar_sql"`
+	SQLSketch   string `yaml:"sql_sketch"`
 
 	ApplicableSince ApplicableSince `yaml:"applicable_since"`
 	Exclusions      []Exclusion     `yaml:"exclusions"`

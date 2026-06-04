@@ -51,6 +51,7 @@ rules:
     tables: [session_events]
     kind: row
     severity: error
+    mode: assert
     violation: "player_id != lower(player_id) OR play_id != lower(play_id)"
     applicable_since: { date: "2026-05-15", note: "whole retained archive; canonicalV2ID() predates it" }
     source: "data-fields.md §1.a player_id gotcha; memory case_sensitivity_ids"
@@ -60,6 +61,7 @@ rules:
     tables: [network_requests]
     kind: row
     severity: error
+    mode: assert
     violation: "player_id != lower(player_id) OR play_id != lower(play_id)"
     applicable_since: { date: "2026-05-20", note: "DATA-CALIBRATED (Phase 2 census 2026-06-04): 130,330 uppercase play_ids exist 2026-05-15..2026-05-19 02:41 UTC — the pre-canonicalV2ID()-deploy window (fix deployed mid-day 05-19, so the clean floor is 05-20). Clean since." }
     source: "data-fields.md §1.a; memory case_sensitivity_ids"
@@ -68,6 +70,7 @@ rules:
     tables: [control_events]
     kind: row
     severity: error
+    mode: assert
     violation: "player_id != lower(player_id) OR play_id != lower(play_id)"
     applicable_since: { date: "2026-05-20", note: "DATA-CALIBRATED: 211 uppercase rows confined to 2026-05-18 22:16-23:15 UTC (same pre-fix window as network_requests; floor aligned to 05-20 with the network rule)." }
     source: "data-fields.md §1.a; memory case_sensitivity_ids"
@@ -76,6 +79,7 @@ rules:
     tables: [session_events, network_requests, control_events]
     kind: row
     severity: error
+    mode: assert
     violation: >-
       arrayExists(l -> NOT match(l, '^(testing|info|warning|error|critical)=\\*?[^,=]+$'), labels)
     applicable_since: { date: "2026-05-15" }
@@ -132,6 +136,7 @@ rules:
     tables: [session_events]
     kind: row
     severity: error
+    mode: assert
     violation: >-
       terminal_error_code != 0
       AND playback_status NOT IN ('start_failure', 'abandoned_start', 'mid_stream_failure')
@@ -193,13 +198,18 @@ rules:
     violation: "last_event = 'buffering_end' AND buffering_duration_ms = 0"
     applicable_since: { date: "2026-05-29" }
     source: "data-fields.md §1.c buffering_duration_ms"
+    rationale: >-
+      ONGOING low-grade violation (~670 rows / 385 plays through
+      2026-06-04, every day). Hypotheses (needs-test): sub-ms buffering
+      blips rounding to 0 vs. an unset-field path on iOS. Open triage
+      item from the Phase 2 census.
 
   - id: legacy-stall-mirror-count
     tables: [session_events]
     kind: row
     severity: warn
     violation: "stall_count != stalling_count"
-    applicable_since: { date: "2026-05-29", note: "soft-cutover mirror window; retire rule when legacy columns drop" }
+    applicable_since: { date: "2026-05-30", note: "DATA-CALIBRATED: 1,242 mismatches confined to 2026-05-29 00:00-10:57 (2 plays) — pre-#550 clients posting legacy-only during the deploy morning (legacy>0, canonical=0 on every one). Clean since. Retire rule when legacy columns drop." }
     source: "data-fields.md §1.c legacy stall fields — forwarder mirror-writes from canonical"
 
   - id: legacy-stall-mirror-time
@@ -207,7 +217,7 @@ rules:
     kind: row
     severity: warn
     violation: "abs(stall_time_s * 1000 - stalling_time_ms) > 1500"
-    applicable_since: { date: "2026-05-29" }
+    applicable_since: { date: "2026-05-30", note: "DATA-CALIBRATED: same deploy-morning window as legacy-stall-mirror-count." }
     source: "data-fields.md §1.c — same mirror, time variant (1.5s tolerance for float/rounding)"
 
 # ---------------------------------------------------------------------------
@@ -245,6 +255,7 @@ rules:
     tables: [session_events]
     kind: monotonic
     severity: error
+    mode: assert
     fields: [attempt_id]
     where: "attempt_id != 0"
     applicable_since: { date: "2026-05-15" }
@@ -328,6 +339,7 @@ rules:
     tables: [session_events]
     kind: play
     severity: error
+    mode: assert
     aggregates:
       status: "argMax(playback_status, ts)"
       ttff: "max(video_first_frame_time_s)"
@@ -367,6 +379,7 @@ rules:
     tables: [network_requests]
     kind: row
     severity: error
+    mode: assert
     violation: "status > 599 OR (status < 100 AND status != 0)"
     applicable_since: { date: "2026-05-15" }
     source: "data-fields.md §2.b status — HTTP code, 0 = upstream connect failed"
@@ -393,6 +406,7 @@ rules:
     tables: [network_requests]
     kind: row
     severity: error
+    mode: assert
     violation: >-
       dns_ms < 0 OR connect_ms < 0 OR tls_ms < 0 OR ttfb_ms < 0
       OR transfer_ms < 0 OR total_ms < 0 OR client_wait_ms < 0
@@ -419,29 +433,72 @@ rules:
 # ---------------------------------------------------------------------------
 
   - id: play-id-stable-across-mutations
-    tables: [control_events, session_events]
+    tables: [control_events]
     kind: sql
     severity: error
     applicable_since: { date: "2026-05-15", note: "#474 predates the retained archive" }
     source: "data-fields.md §1.a play_id gotcha — does NOT rotate on control mutations (post-#474)"
-    sql_sketch: >-
-      For each control_events row with source='harness' and event IN
-      (shaper_config_change, fault_rule_enabled, fault_rule_disabled,
-      pattern_enabled, pattern_disabled) carrying play_id P for player X:
-      the first session_events row for X with ts in (T, T+30s] must still
-      have play_id = P, unless a content_changed/session_end intervenes.
+    rationale: >-
+      A content_changed racing inside the 30s window can false-positive;
+      acceptable at census, revisit on promotion.
+    sql: |-
+      SELECT 'all' AS grp, count() AS checked,
+        countIf(e.play_id != '' AND e.play_id != m.play_id
+                AND dateDiff('second', m.ts, e.ts) <= 30) AS violations
+      FROM (
+        SELECT player_id, play_id, ts FROM {db}.control_events
+        WHERE ts >= '{since}' AND source = 'harness' AND play_id != ''
+          AND event IN ('shaper_config_change','fault_rule_enabled','fault_rule_disabled',
+                        'pattern_enabled','pattern_disabled','pattern_config_change',
+                        'fault_rule_config_change')
+      ) AS m
+      ASOF LEFT JOIN (
+        SELECT player_id, play_id, ts FROM {db}.session_events WHERE ts >= '{since}'
+      ) AS e ON m.player_id = e.player_id AND m.ts <= e.ts
+    exemplar_sql: |-
+      SELECT m.player_id AS player_id, m.play_id AS play_id, toString(m.ts) AS ts
+      FROM (
+        SELECT player_id, play_id, ts FROM {db}.control_events
+        WHERE ts >= '{since}' AND source = 'harness' AND play_id != ''
+          AND event IN ('shaper_config_change','fault_rule_enabled','fault_rule_disabled',
+                        'pattern_enabled','pattern_disabled','pattern_config_change',
+                        'fault_rule_config_change')
+      ) AS m
+      ASOF LEFT JOIN (
+        SELECT player_id, play_id, ts FROM {db}.session_events WHERE ts >= '{since}'
+      ) AS e ON m.player_id = e.player_id AND m.ts <= e.ts
+      WHERE e.play_id != '' AND e.play_id != m.play_id
+        AND dateDiff('second', m.ts, e.ts) <= 30
+      LIMIT 3
 
   - id: network-within-play-bounds
-    tables: [network_requests, session_events]
+    tables: [network_requests]
     kind: sql
     severity: warn
     applicable_since: { date: "2026-05-15" }
-    source: "data-fields.md §4.b started_at/last_seen_at"
-    sql_sketch: >-
-      network_requests.ts for play P outside
-      [min(session_events.ts) - 30s, max(session_events.ts) + 30s] is a
-      mis-attributed row (play_id stamped on the wrong play). Grace covers
-      pre-first-heartbeat manifest fetches.
+    source: "data-fields.md §4.b started_at/last_seen_at — 30s grace covers pre-first-heartbeat manifest fetches"
+    sql: |-
+      SELECT 'all' AS grp, count() AS checked,
+        countIf(n_ts < t0 - INTERVAL 30 SECOND OR n_ts > t1 + INTERVAL 30 SECOND) AS violations
+      FROM (
+        SELECT n.ts AS n_ts, b.t0 AS t0, b.t1 AS t1
+        FROM {db}.network_requests AS n
+        INNER JOIN (
+          SELECT play_id, min(ts) AS t0, max(ts) AS t1
+          FROM {db}.session_events WHERE ts >= '{since}' GROUP BY play_id
+        ) AS b USING (play_id)
+        WHERE n.ts >= '{since}'
+      )
+    exemplar_sql: |-
+      SELECT n.player_id AS player_id, n.play_id AS play_id, toString(n.ts) AS ts
+      FROM {db}.network_requests AS n
+      INNER JOIN (
+        SELECT play_id, min(ts) AS t0, max(ts) AS t1
+        FROM {db}.session_events WHERE ts >= '{since}' GROUP BY play_id
+      ) AS b USING (play_id)
+      WHERE n.ts >= '{since}'
+        AND (n.ts < b.t0 - INTERVAL 30 SECOND OR n.ts > b.t1 + INTERVAL 30 SECOND)
+      LIMIT 3
 
   - id: qoe-cirr-label-recompute
     tables: [session_events]
@@ -449,12 +506,40 @@ rules:
     severity: warn
     applicable_since: { date: "2026-06-01", note: "#559 qoe labels; thresholds are DEPLOY-TIME config — resolve from the [QoE] startup log before asserting" }
     source: "qoe-metrics.md — CIRR = stalling/(stalling+playing); breach >= 0.004 (default tier)"
-    sql_sketch: >-
-      Per play: recompute CIRR from argMax(stalling_time_ms, ts) and
-      argMax(playing_time_ms, ts); plays with CIRR >= breach threshold and
-      playing_time_ms >= 60s must carry a qoe_cirr_breach label in the play's
-      label histogram, and vice versa. CENSUS ONLY until the Phase 3 seek-
-      exclusion question is settled (stalling may include seek recovery).
+    rationale: >-
+      SEEK-EXCLUSION QUESTION SETTLED (Phase 3, 2026-06-04): stalling_time_ms
+      DOES accrue during seek windows — 74% of stalling-delta rows co-occur
+      with seeking deltas, 70% directly follow one (concentrated in the 35
+      seek-plays). Our CIRR is therefore NOT connection-induced RR; it
+      over-reads on seek-heavy plays vs Conviva convention. Forwarder-side
+      fix would be stalling minus the seek-overlapped portion (or an iOS
+      state-machine change). One-directional check (computed-breach without
+      label) — the reverse direction has edge-trigger timing wrinkles (#599).
+    sql: |-
+      SELECT 'all' AS grp, count() AS checked,
+        countIf(playing >= 60000 AND (stalling + playing) > 0
+                AND stalling / (stalling + playing) >= 0.004
+                AND NOT has_breach) AS violations
+      FROM (
+        SELECT play_id,
+          argMax(stalling_time_ms, ts) AS stalling,
+          argMax(playing_time_ms, ts) AS playing,
+          arrayExists(l -> position(l, 'qoe_cirr_breach') > 0,
+                      groupUniqArrayArray(labels)) AS has_breach
+        FROM {db}.session_events WHERE ts >= '{since}' GROUP BY play_id
+      )
+    exemplar_sql: |-
+      SELECT player_id, play_id, '' AS ts FROM (
+        SELECT play_id, any(player_id) AS player_id,
+          argMax(stalling_time_ms, ts) AS stalling,
+          argMax(playing_time_ms, ts) AS playing,
+          arrayExists(l -> position(l, 'qoe_cirr_breach') > 0,
+                      groupUniqArrayArray(labels)) AS has_breach
+        FROM {db}.session_events WHERE ts >= '{since}' GROUP BY play_id
+      )
+      WHERE playing >= 60000 AND (stalling + playing) > 0
+        AND stalling / (stalling + playing) >= 0.004 AND NOT has_breach
+      LIMIT 3
 
   - id: qoe-vst-label-recompute
     tables: [session_events]
@@ -462,9 +547,26 @@ rules:
     severity: warn
     applicable_since: { date: "2026-06-01", note: "edge-triggered since #599 (2026-06-04) — pre-#599 rows have sticky re-stamped labels; expect duplicates before that date" }
     source: "qoe-metrics.md — VST breach >= 10000ms (default tier)"
-    sql_sketch: >-
-      Per play: max(video_start_time_s) >= 10 implies qoe_vst_breach present;
-      < 5 implies absent (between tiers: concerning band, check qoe_vst_concerning).
+    sql: |-
+      SELECT 'all' AS grp, count() AS checked,
+        countIf(vst_ms >= 10000 AND NOT has_breach) AS violations
+      FROM (
+        SELECT play_id,
+          max(video_start_time_s) * 1000 AS vst_ms,
+          arrayExists(l -> position(l, 'qoe_vst_breach') > 0,
+                      groupUniqArrayArray(labels)) AS has_breach
+        FROM {db}.session_events WHERE ts >= '{since}' GROUP BY play_id
+      )
+    exemplar_sql: |-
+      SELECT player_id, play_id, '' AS ts FROM (
+        SELECT play_id, any(player_id) AS player_id,
+          max(video_start_time_s) * 1000 AS vst_ms,
+          arrayExists(l -> position(l, 'qoe_vst_breach') > 0,
+                      groupUniqArrayArray(labels)) AS has_breach
+        FROM {db}.session_events WHERE ts >= '{since}' GROUP BY play_id
+      )
+      WHERE vst_ms >= 10000 AND NOT has_breach
+      LIMIT 3
 
 # ---------------------------------------------------------------------------
 # F. Documented NON-rules — do not add these as assertions
