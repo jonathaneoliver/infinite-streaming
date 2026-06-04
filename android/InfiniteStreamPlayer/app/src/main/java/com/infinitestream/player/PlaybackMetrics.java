@@ -110,6 +110,12 @@ public final class PlaybackMetrics {
     private Double videoStartTimeSeconds;
     private boolean firstFrameReported;
     private boolean playingReported;
+    // #603 — set by a restart (retry / auto-recovery) before it re-issues
+    // loadStream. onPlaybackStarted reads it to PRESERVE the play's startup
+    // measurement (video_start_time / first frame) and fold the re-prepare
+    // wait into residency, instead of the per-play reset it does for a fresh
+    // play. Mirrors iOS resumingFromRestart. Cleared in onPlaybackStarted.
+    private boolean resumingFromRestart;
 
     // Stall tracking.
     private int stallCount;
@@ -424,11 +430,22 @@ public final class PlaybackMetrics {
 
     /** Called when a new stream starts loading. Resets per-playback state. */
     public void onPlaybackStarted() {
-        playbackStartAtMs = System.currentTimeMillis();
-        videoFirstFrameSeconds = null;
-        videoStartTimeSeconds = null;
-        firstFrameReported = false;
-        playingReported = false;
+        if (resumingFromRestart) {
+            // #603 — restart (retry / auto-recovery) within the SAME play:
+            // PRESERVE the startup measurement (playbackStartAtMs /
+            // video_start_time / first-frame; playingReported stays true so
+            // markPlayingStarted no-ops on resume → no second video_start_time),
+            // and fold the re-prepare gap into residency by snapshotting it
+            // into prior before resetResidency() restores it below.
+            resumingFromRestart = false;
+            snapshotForRestart();
+        } else {
+            playbackStartAtMs = System.currentTimeMillis();
+            videoFirstFrameSeconds = null;
+            videoStartTimeSeconds = null;
+            firstFrameReported = false;
+            playingReported = false;
+        }
         lastReportedBitrateMbps = null;
         stallStartAtMs = -1;
         lastHeartbeatPositionMs = -1;
@@ -670,7 +687,16 @@ public final class PlaybackMetrics {
         sendEvent("user_marked", extra);
     }
 
-    /** Called when user triggers a restart (Restart Playback button, etc). */
+    /** #603 — mark that the next onPlaybackStarted is a restart resume, so it
+     *  preserves the startup measurement + folds the gap into residency rather
+     *  than doing the fresh-play reset. Call before re-issuing loadStream. */
+    public void markRestartPending() {
+        resumingFromRestart = true;
+    }
+
+    /** Called when a mid-play recovery restart happens (manual Retry or
+     *  auto-recovery). Emits a `restart` event (reason = user_retry /
+     *  auto_recovery) — play boundaries are play_start/play_end (#603). */
     public void onRestart(String reason) {
         playerRestarts = Math.max(0, playerRestarts) + 1;
         Map<String, Object> extra = new HashMap<>();
@@ -680,6 +706,14 @@ public final class PlaybackMetrics {
         // User-driven restarts should always produce a HAR — bypass the
         // server-side per-player debounce window.
         requestHarSnapshot(reason, 0, /* force= */ true);
+    }
+
+    /** #603 — play-open boundary (symmetric to play_end), emitted when a NEW
+     *  play begins (e.g. Reload). Distinct from `restart`, which is reserved
+     *  for mid-play recovery. */
+    public void onPlayStart() {
+        sendEvent("play_start", Collections.<String, Object>emptyMap());
+        requestHarSnapshot("play_start", 0, /* force= */ true);
     }
 
     /**
