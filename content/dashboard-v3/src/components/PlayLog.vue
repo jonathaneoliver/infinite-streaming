@@ -506,7 +506,7 @@ function rowLabels(r: Row): string[] {
  *  (analytics/tools/derive_tokens.py + the read-path merge in
  *  v2_handlers.go / timeseries.go). Network rows carry segment/playlist
  *  tokens (V_SEG/A_SEG/V_PL/…, FAULT); session_events rows carry
- *  lifecycle tokens (STALL_*/RATE_*/BUF_*/FIRST_FRAME). Control and
+ *  lifecycle tokens (STALL_*, RATE_*, BUF_*, FIRST_FRAME). Control and
  *  avmetric rows return '' by design — the token model has no vocabulary
  *  for them (the one control signal that matters, fault injection, is
  *  already a FAULT token on the network request it breaks). */
