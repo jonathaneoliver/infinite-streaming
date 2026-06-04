@@ -63,6 +63,15 @@ public final class PlaybackMetrics {
         String currentStreamUrl();
     }
 
+    /** #603 — supplies the play-scoped ids captured at event-fire time so a
+     *  metrics POST carries the SAME play_id on its URL (iOS parity), pinned
+     *  against a play_id rotation that races the async POST (e.g. a play_end
+     *  at a reload boundary that would otherwise bucket onto the next play). */
+    public interface PlayContextProvider {
+        String currentPlayId();
+        String currentStartTime();
+    }
+
     private static final String TAG = "InfiniteStream";
     private static final long HEARTBEAT_INTERVAL_MS = 1000;
     private static final long SESSION_LOOKUP_INTERVAL_MS = 30_000;
@@ -79,6 +88,7 @@ public final class PlaybackMetrics {
     private final BaseUrlProvider baseUrlProvider;
     private final UrlProvider urlProvider;
     private final ContentNameProvider contentNameProvider;
+    private final PlayContextProvider playContextProvider;
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private final ExecutorService networkExecutor = Executors.newSingleThreadExecutor();
     private final SimpleDateFormat iso8601;
@@ -373,7 +383,8 @@ public final class PlaybackMetrics {
                     String playerId,
                     BaseUrlProvider baseUrlProvider,
                     UrlProvider urlProvider,
-                    ContentNameProvider contentNameProvider) {
+                    ContentNameProvider contentNameProvider,
+                    PlayContextProvider playContextProvider) {
         this.player = player;
         this.playerView = playerView;
         this.bandwidthMeter = bandwidthMeter;
@@ -381,6 +392,7 @@ public final class PlaybackMetrics {
         this.baseUrlProvider = baseUrlProvider;
         this.urlProvider = urlProvider;
         this.contentNameProvider = contentNameProvider;
+        this.playContextProvider = playContextProvider;
         this.iso8601 = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.US);
         this.iso8601.setTimeZone(TimeZone.getTimeZone("UTC"));
         // Initialise the start clock at construction so first-frame elapsed
@@ -803,6 +815,11 @@ public final class PlaybackMetrics {
         try {
             String timestamp = iso8601.format(new Date());
             p.put("player_metrics_source", "android");
+            // #603 — pin the play-scoped ids at fire time (iOS parity). patchMetrics
+            // puts these on the POST URL so go-proxy buckets the row by THIS play_id,
+            // not whatever it rotated to by the time the async POST runs.
+            p.put("play_id", playContextProvider.currentPlayId());
+            p.put("start_time", playContextProvider.currentStartTime());
             p.put("player_metrics_last_event", event);
             p.put("player_metrics_trigger_type", event);
             p.put("player_metrics_event_time", timestamp);
@@ -1629,12 +1646,31 @@ public final class PlaybackMetrics {
         return null;
     }
 
+    /** URL-encode and append {@code name=value} to the query builder (skips
+     *  empties). Used to pin metrics-URL identity to payload values. #603. */
+    private static void appendQuery(StringBuilder qs, String name, String value) {
+        if (value == null || value.isEmpty()) return;
+        try {
+            if (qs.length() > 0) qs.append('&');
+            qs.append(name).append('=').append(java.net.URLEncoder.encode(value, "UTF-8"));
+        } catch (java.io.UnsupportedEncodingException ignored) {
+            // UTF-8 is always available; ignore.
+        }
+    }
+
     private void patchMetrics(String sid, JSONObject payload) {
         String base = baseUrlProvider.get();
         if (base == null || base.isEmpty()) return;
         HttpURLConnection conn = null;
         try {
-            URL url = new URL(base + "/api/session/" + sid + "/metrics");
+            // #603 — stamp play_id + start_time on the URL (iOS parity) from the
+            // values the payload captured at fire time, so go-proxy buckets this
+            // row by THIS play, not the one it may have rotated to since.
+            StringBuilder qs = new StringBuilder();
+            appendQuery(qs, "play_id", payload.optString("play_id", ""));
+            appendQuery(qs, "start_time", payload.optString("start_time", ""));
+            URL url = new URL(base + "/api/session/" + sid + "/metrics"
+                + (qs.length() > 0 ? "?" + qs : ""));
             conn = (HttpURLConnection) url.openConnection();
             conn.setConnectTimeout(CONNECT_TIMEOUT_MS);
             conn.setReadTimeout(READ_TIMEOUT_MS);

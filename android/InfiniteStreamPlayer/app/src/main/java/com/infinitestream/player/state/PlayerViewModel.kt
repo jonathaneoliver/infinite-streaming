@@ -895,6 +895,14 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
             // instead of staying empty if bindMetrics fired before
             // selectedContent was set.
             { _state.value.selectedContent },
+            // #603 — pin play-scoped ids onto metrics POST URLs (iOS parity).
+            // Read live per emit; PlaybackMetrics captures them synchronously in
+            // buildPayload at fire time, so a play_end at a reload boundary keeps
+            // the OLD play_id even though the POST is async + play_id later rotates.
+            object : PlaybackMetrics.PlayContextProvider {
+                override fun currentPlayId() = currentPlayId
+                override fun currentStartTime() = currentStartTime
+            },
         ).also { it.start() }
     }
 
