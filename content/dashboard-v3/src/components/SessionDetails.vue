@@ -120,6 +120,11 @@ const fields = computed(() => {
     // fall back to server_received_at_ms (the "last snapshot" signal)
     // so the operator sees actual freshness, not a misleading "—".
     { label: 'Last Request', value: fmtDate(effectiveLastSeenAt(p)) },
+    // Play start (current_play.started_at) — the same anchor the Sessions
+    // picker's "Started" column uses. Distinct from "First Request"
+    // (first_seen_at = first HTTP contact). Sits right before the duration
+    // it anchors.
+    { label: 'Start Time', value: fmtDate(cp?.started_at) },
     { label: 'Session Duration', value: fmtDuration(p.first_seen_at, effectiveLastSeenAt(p)) },
     { label: 'Loops (server)', value: String(p.loop_count_server ?? 0) },
     { label: 'Control Rev', value: p.control_revision ?? '—' },
