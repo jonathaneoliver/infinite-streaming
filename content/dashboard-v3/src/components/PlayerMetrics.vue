@@ -161,7 +161,7 @@ const playerFields = computed(() => {
     { label: 'Display Res', value: fmtStr(m.display_resolution) },
     { label: 'Device Res', value: fmtStr(m.device_resolution) },
     { label: 'First Frame', value: fmtS(m.first_frame_time_s) },
-    { label: 'Video Start', value: fmtS(m.video_start_time_s) },
+    { label: 'Video Start Time', value: fmtS(m.video_start_time_s) },
     { label: 'Video Bitrate', value: fmtMbps(m.video_bitrate_mbps) },
     { label: 'Avg Network', value: fmtMbps(m.avg_network_bitrate_mbps) },
     { label: 'Network Bitrate', value: fmtMbps(m.network_bitrate_mbps) },
