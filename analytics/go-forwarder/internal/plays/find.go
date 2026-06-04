@@ -237,10 +237,15 @@ func runPlaysQuery(ctx context.Context, b Backend, clauses []string, params map[
 		    countIf(last_event = 'error')         AS error_event_count,
 		    any(classification) AS classification,
 		    maxIf(attempt_id, attempt_id > 0)       AS attempt_id_max,
-		    -- #550 Phase 1: residency totals (max because cumulative)
-		    max(playing_time_ms) AS playing_time_ms,
-		    max(buffering_time_ms) AS buffering_time_ms,
-		    max(stalling_time_ms) AS stalling_time_ms,
+		    -- #550 Phase 1: residency totals. argMax(.., ts) = the value at the
+		    -- play's LAST row (its final cumulative total), NOT max(). A stale
+		    -- leading row — e.g. a mis-bucketed prior-play play_end (#603) — carries
+		    -- a huge value at an EARLY ts; max() would let it win and inflate the
+		    -- per-play total + the derived rate columns. Monotonic within a play, so
+		    -- for a clean play argMax(.., ts) == max() anyway.
+		    argMax(playing_time_ms, ts) AS playing_time_ms,
+		    argMax(buffering_time_ms, ts) AS buffering_time_ms,
+		    argMax(stalling_time_ms, ts) AS stalling_time_ms,
 		    -- #550 Phase 2: outcome (argMax on terminal row; in_progress
 		    -- mid-play rows return last value seen, which is what we
 		    -- want for live sessions).

@@ -59,12 +59,17 @@ Player bugs are usually environmental — a network blip, a truncated segment, a
 | Tool / approach | Good at | Why InfiniteStream instead |
 |---|---|---|
 | Public test streams (Apple, DASH-IF, Bitmovin demos) | Quick playback sanity checks | Not deterministic; no failure injection; no looping on your schedule |
+| Live-from-VOD fakers ([mock-hls-server](https://github.com/tjenkinson/mock-hls-server), [hls-loop](https://github.com/jbochi/hls-loop)) | Faking a looping live HLS stream from VOD | HLS-only; no faults, no shaping, no shared-clock LL/2s/6s variants, no dashboard |
 | Production origins (Wowza, AWS Elemental, Unified Streaming) | Serving real viewers | Heavy, costly; not built for faults or side-by-side QA |
 | FFmpeg + nginx-rtmp / nginx-vod (DIY) | Full control of the stack | Days of setup; no shared-clock LL-HLS + LL-DASH; no fault UI |
 | Shaka Streamer | Packaging pipelines | Not a live test server; no looping, no faults, no dashboard |
+| [Eyevinn chaos-stream-proxy](https://github.com/Eyevinn/chaos-stream-proxy) | Streaming-aware corruptions over an *existing* HLS/DASH stream | Proxy only — the origin isn't yours or deterministic; per-URL query-param config, no per-session isolation, no shaping/transport faults, no forensics |
 | toxiproxy, `tc`, Chaos Mesh | Generic network faults | Protocol-agnostic — no awareness of segments, partials, playlists |
 | Charles, mitmproxy | Per-request rewriting | Manual, per-operator; not scripted or repeatable across runs |
 | mediamtx, SRS, OvenMediaEngine | Live ingest and serving | Not looping-VOD focused; not QA-focused; no fault injection |
+| [CTA WAVE DPCTF suite](https://github.com/cta-wave/dpctf-deploy) | Device playback *conformance* (camera-observed) | Complementary — conformance on correct media; says nothing about behavior under failure |
+| Locust-based load testing ([unifiedstreaming/streaming-load-testing](https://github.com/unifiedstreaming/streaming-load-testing)) | Stressing an origin with simulated players | The mirror image — it tests servers with fake players; this tests real players with a controlled server |
+| ABR simulators ([Sabre](https://github.com/UMass-LIDS/sabre), ABRSim) | Offline algorithm evaluation on throughput traces | Simulated player model — can't tell you what a *shipped player binary* actually does |
 
 **Why this is as important as live-feed testing for ABR work:**
 

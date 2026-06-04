@@ -61,6 +61,20 @@ func computeQoEEventLabels(cfg *QoEThresholds, ps *playLabelState, r *row, now t
 	if cfg == nil {
 		cfg = fallbackThresholds
 	}
+	// #603 — leading-terminal defense. A play terminal (play_end/session_end)
+	// arriving as a play_id's FIRST row is the previous play's terminal frame
+	// mis-bucketed onto this play (the client emits play_end carrying the next
+	// play's id at the boundary; there's no play_start marker yet). Its
+	// accumulators + status belong to the prior play, so emit nothing and do
+	// NOT consume the emit-once terminal guard — the real terminal arrives
+	// after the play opens. everOpened is set on the first non-terminal row
+	// (play_start / restart / state_change / …).
+	if isPlayTerminalEvent(r) && !ps.everOpened {
+		return nil
+	}
+	if !isPlayTerminalEvent(r) {
+		ps.everOpened = true
+	}
 	// firstTerminal is true only on the FIRST authoritative terminal row
 	// (last_event == session_end|play_end). The client re-emits the
 	// terminal POST for delivery reliability, so the emit-once guard stops

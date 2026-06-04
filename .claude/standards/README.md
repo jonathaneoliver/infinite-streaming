@@ -49,6 +49,9 @@ Length: one page rendered. If it grows past that, split.
   downshift cascades, what triggers timejump
 - `codec-strings.md` — avc1/hev1/mp4a profile-level-tier, what
   platforms require what, common stripping bugs
+- `qoe-metrics.md` — CIRR/CIRT/VST/EBVS definitions (Conviva
+  provenance, not standards), our label math, the seek-exclusion
+  caveat
 - `invariants.md` — operating manual for the aberration-crawl rule
   catalogue (`tests/aberration_crawl/invariants.yaml`): validity
   windows, census-before-assert, documented NON-rules
