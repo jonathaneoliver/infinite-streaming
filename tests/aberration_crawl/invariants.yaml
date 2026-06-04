@@ -61,7 +61,7 @@ rules:
     kind: row
     severity: error
     violation: "player_id != lower(player_id) OR play_id != lower(play_id)"
-    applicable_since: { date: "2026-05-15" }
+    applicable_since: { date: "2026-05-20", note: "DATA-CALIBRATED (Phase 2 census 2026-06-04): 130,330 uppercase play_ids exist 2026-05-15..2026-05-19 02:41 UTC — the pre-canonicalV2ID()-deploy window (fix deployed mid-day 05-19, so the clean floor is 05-20). Clean since." }
     source: "data-fields.md §1.a; memory case_sensitivity_ids"
 
   - id: ids-lowercase-control
@@ -69,7 +69,7 @@ rules:
     kind: row
     severity: error
     violation: "player_id != lower(player_id) OR play_id != lower(play_id)"
-    applicable_since: { date: "2026-05-15" }
+    applicable_since: { date: "2026-05-20", note: "DATA-CALIBRATED: 211 uppercase rows confined to 2026-05-18 22:16-23:15 UTC (same pre-fix window as network_requests; floor aligned to 05-20 with the network rule)." }
     source: "data-fields.md §1.a; memory case_sensitivity_ids"
 
   - id: label-grammar
@@ -118,24 +118,6 @@ rules:
 # ---------------------------------------------------------------------------
 # B. session_events — row-level field coherence
 # ---------------------------------------------------------------------------
-
-  - id: ttff-le-vst
-    tables: [session_events]
-    kind: row
-    severity: warn
-    violation: >-
-      video_start_time_s > 0 AND video_first_frame_time_s > 0
-      AND video_first_frame_time_s > video_start_time_s
-    applicable_since: { date: "2026-05-15" }
-    source: >-
-      PlayerViewModel.swift markPlayingStarted/markFirstFrameRendered —
-      vst = timeControlStatus==.playing, ttff = isReadyForDisplay;
-      'typical order: first-frame fires before .playing'
-    rationale: >-
-      Direction VERIFIED against iOS source during Phase 1 smoke-test
-      (2026-06-04): data-fields.md had it backwards ('always vst <= ttff'
-      — 45% of archive rows violated). The two signals are independent
-      KVO observables, so inversion is atypical, not impossible: warn.
 
   - id: playback-status-vocab
     tables: [session_events]
@@ -277,6 +259,7 @@ rules:
     kind: sequence
     severity: warn
     lag_cols: [playing_time_ms, buffering_time_ms, stalling_time_ms]
+    columns: [playing_time_ms_delta, buffering_time_ms_delta, stalling_time_ms_delta]
     violation: >-
       (playing_time_ms_delta   != playing_time_ms   - prev_playing_time_ms
        AND playing_time_ms_delta   != playing_time_ms)
@@ -372,9 +355,13 @@ rules:
     kind: vocab
     severity: warn
     field: request_kind
-    allowed: [manifest, segment, init, other]
+    allowed: [master_manifest, manifest, segment, init, other]
     applicable_since: { date: "2026-05-15" }
     source: "data-fields.md §2.b request_kind (closed set)"
+    rationale: >-
+      master_manifest added after the Phase 2 census found 5,163 rows
+      carrying it — the doc's claim that 'manifest' covers both master
+      and variant playlists was stale (master was split out).
 
   - id: status-sane
     tables: [network_requests]
@@ -499,6 +486,14 @@ rules:
 #   matters (data-fields.md §1.b).
 # - playback_rate distinguishing pause vs buffering: FALSE. Documented
 #   ambiguity — must combine with player_state.
+# - video_start_time_s vs video_first_frame_time_s ordering: NO RELIABLE
+#   DIRECTION. Measured per-play over the full archive (2026-06-04):
+#   44% ttff-after-vst / 40% ttff-before-vst / 6% equal (n=1,326 plays
+#   with both > 0). The original doc claim ("always vst <= ttff") AND
+#   the iOS source comment ("typical order: first-frame before .playing")
+#   are BOTH contradicted by data — the two are independent KVO
+#   observables with no ordering contract. Use each on its own terms;
+#   never assert a relationship.
 
 exclusions_global:
   - name: sim-noise-12174

@@ -324,12 +324,13 @@ video_start_time_s
   meaning:     time until AVPlayer's timeControlStatus first flipped to
                .playing — "playing smoothly", the Conviva-style VST
                signal (PlayerViewModel.markPlayingStarted).
-  gotchas:     typically >= video_first_frame_time_s — first frame
-               renders (isReadyForDisplay), THEN playback rate ramps.
-               The two are independent KVO observables, so the order
-               is typical, not guaranteed. (This entry previously
-               claimed the opposite direction; corrected during #607
-               Phase 1 after 45% of archive rows "violated" it.)
+  gotchas:     NO ordering contract vs video_first_frame_time_s. The
+               two are independent KVO observables; measured per-play
+               over the full archive (#607, 2026-06-04): 44% ttff
+               after vst, 40% before, 6% equal (n=1,326). An earlier
+               revision claimed "always vst <= ttff" and the iOS source
+               comment claims first-frame-typically-first — both are
+               contradicted by data. Use each on its own terms.
 ```
 
 ### 1.c Stalls, errors, lifecycle counters
@@ -766,14 +767,16 @@ query_string
 
 ```
 request_kind
-  type:        LowCardinality(String) — 'manifest' | 'segment' | 'init' | 'other'
+  type:        LowCardinality(String) — 'master_manifest' | 'manifest' |
+               'segment' | 'init' | 'other'
   populated:   proxy (heuristic from URL path)
-  meaning:     what KIND of HTTP request this is, semantically. 'manifest'
-               = .m3u8 / .mpd; 'segment' = .m4s / .ts / .mp4; 'init' =
-               init.mp4 / .init.m4s; 'other' = everything else.
-  gotchas:     'manifest' covers BOTH master and variant playlists — use
-               URL pattern matching to distinguish (master usually has
-               `master_` prefix; variant has `playlist_6s_<variant>`).
+  meaning:     what KIND of HTTP request this is, semantically.
+               'master_manifest' = the master playlist; 'manifest' =
+               variant playlists; 'segment' = .m4s / .ts / .mp4; 'init'
+               = init.mp4 / .init.m4s; 'other' = everything else.
+  gotchas:     an earlier revision said 'manifest' covered both master
+               and variant playlists — stale: master_manifest is its
+               own value (5,163 archive rows; #607 Phase 2 census).
 
 status
   type:        UInt16
