@@ -293,15 +293,21 @@ measured_mbps
 
 video_quality_pct
   type:        Float32
-  units:       percent 0–100
-  populated:   forwarder (derived from variant_idx and the manifest's
-               variant ladder)
+  units:       percent 0–100 (nominal; see gotchas)
+  populated:   player-SDK (player_metrics_video_quality_pct — NOT
+               forwarder-derived; verified against the main.go getF32
+               mapping during #607 Phase 1)
   meaning:     position in the variant ladder. 100% = top variant,
-               smaller values = lower variants. Computed at ingest.
+               smaller values = lower variants.
   gotchas:     "3.35%" doesn't mean playback is 3% of full quality
                visually — it means the player is on the lowest of N
                variants where the bottom is mapped to ~floor pct. Read
                as a relative position, not perceptual quality.
+               Top-variant rows routinely read 100.01 (player-side
+               float overshoot; ~70% of archive rows) — treat <=101 as
+               in-range. Values far above 100 (rare; observed up to
+               457) occur on early-play rows before the ladder is
+               known; video_resolution/content_id are empty on them.
 
 video_first_frame_time_s
   type:        Float32
@@ -315,8 +321,15 @@ video_start_time_s
   type:        Float32
   units:       seconds (since playback intent)
   populated:   player-SDK
-  meaning:     time until the player committed to a variant. Always <=
-               video_first_frame_time_s.
+  meaning:     time until AVPlayer's timeControlStatus first flipped to
+               .playing — "playing smoothly", the Conviva-style VST
+               signal (PlayerViewModel.markPlayingStarted).
+  gotchas:     typically >= video_first_frame_time_s — first frame
+               renders (isReadyForDisplay), THEN playback rate ramps.
+               The two are independent KVO observables, so the order
+               is typical, not guaranteed. (This entry previously
+               claimed the opposite direction; corrected during #607
+               Phase 1 after 45% of archive rows "violated" it.)
 ```
 
 ### 1.c Stalls, errors, lifecycle counters
@@ -710,7 +723,7 @@ Read via:
              routing only)
 ```
 
-**Note on `transfer_ms`:** it's NOT the wire-delivery time to the player; it's proxy→upstream. See §2.d for the full gotcha. This is the most-misread field in this table.
+**Note on `transfer_ms`:** it IS the downstream write+flush time to the player (client-perceived receive) — but `dns/connect/tls/ttfb` are upstream-scoped, and `total_ms` is unreliably maintained. See §2.d; this family is the most-misread in the table (including by an earlier revision of this doc).
 
 ### 2.a Identity
 
@@ -840,24 +853,33 @@ transfer_ms
   type:        Float32
   units:       ms
   populated:   proxy
-  meaning:     UPSTREAM transfer time — time between ttfb and the last
-               byte received from upstream.
-  gotchas:     **this is NOT the wire-delivery time to the player.**
-               If the proxy is shaping egress with tc, transfer_ms can
-               be sub-millisecond (upstream is local) while the actual
-               wire delivery takes tens of seconds. To compute the
-               actual wire-delivery time, derive from consecutive `ts`
-               deltas. This was misinterpreted in a 2026-05-25 chat
-               investigation; carrying the lesson forward as a top-tier
-               gotcha.
+  meaning:     DOWNSTREAM write+flush time to the player — the
+               client-perceived `receive` phase, where traffic-shaping
+               backpressure appears (streamToClientMeasured /
+               NetworkLogEntry doc comment in go-proxy main.go).
+  gotchas:     this entry previously claimed transfer_ms was UPSTREAM
+               transfer time and "NOT wire-delivery to the player" —
+               that described pre-2026-02-13 semantics (the field was
+               re-pointed downstream in 9fb686d) and was corrected
+               during #607 Phase 1 source-verification. Under shaping,
+               transfer_ms DOES grow with the cap (e.g. ~103ms segment
+               writes under a 100 Mbps cap on test-dev). dns/connect/
+               tls/ttfb remain UPSTREAM-scoped — the table mixes the
+               two views; read each field's scope individually.
 
 total_ms
   type:        Float32
   units:       ms
   populated:   proxy
-  meaning:     dns + connect + tls + ttfb + transfer — total upstream
-               request time. Same gotcha as transfer_ms: NOT
-               wire-to-player time.
+  meaning:     nominally max(time-to-upstream-headers, ttfb + transfer)
+               — initially set when upstream headers complete, then
+               lifted by mergeTotalTiming() to ttfb_ms + transfer_ms.
+  gotchas:     the lift is NOT applied on every code path: ~26% of
+               archive rows have total_ms ≈ ttfb_ms while transfer_ms
+               is 100x larger (#607 Phase 1 census). Until that's
+               fixed, prefer ttfb_ms + transfer_ms over total_ms for
+               request duration. The old formula documented here
+               (dns+connect+tls+ttfb+transfer) never matched the code.
 
 client_wait_ms
   type:        Float32
@@ -870,7 +892,7 @@ client_wait_ms
                total_ms stays sub-ms.
 ```
 
-**Rule of thumb for "how long did the player wait":** `client_wait_ms` is closest to truth, but for shaped delivery it can still underestimate because the proxy may have started writing to the socket before all bytes are on the wire. The most accurate wire time = (ts of THIS request - ts of NEXT same-variant segment request) under steady fetch cadence.
+**Rule of thumb for "how long did the player wait":** `client_wait_ms` (time to first response byte) + `transfer_ms` (downstream write+flush) covers the request end-to-end from the player's side; the final kernel-buffer flush can still trail the last write, so for exact wire time under heavy shaping use (ts of THIS request - ts of NEXT same-variant segment request) under steady fetch cadence.
 
 ### 2.e Fault injection
 

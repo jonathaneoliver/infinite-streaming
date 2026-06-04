@@ -1,0 +1,513 @@
+# invariants.yaml — machine-checkable behaviour rules for the aberration crawl (#607)
+#
+# Each rule encodes one documented behaviour from the standards library
+# (.claude/standards/data-fields.md, qoe-metrics.md, the label vocabulary)
+# as a predicate the crawler can run against the ClickHouse archive,
+# grouped by the #550 Phase 4 version taxonomy.
+#
+# Runner contract (tests/aberration_crawl, Phase 2):
+#   - Rules run grouped by `groups.by` (version taxonomy). Rows where all
+#     group keys are empty/0 fall into the `unversioned` bucket — reported
+#     separately, never silently merged.
+#   - `mode: census` (default) counts violations, never fails.
+#     `mode: assert` fails the run on any violation (only set after the
+#     rule survives a Phase 3 calibration pass).
+#   - `applicable_since.date` bounds the crawl window per rule. Dates are
+#     test-dev DATA-calibrated where the census confirmed them; merge-date
+#     hints otherwise (note says which). `pending: true` = the producing
+#     change is not yet deployed; rule stays census regardless of mode.
+#   - `exclusions` are row filters applied BEFORE counting; the runner
+#     logs how many rows each exclusion dropped (no silent caps).
+#
+# Rule kinds:
+#   row        violation = boolean SQL over one row (TRUE = violation)
+#   vocab      field + allowed[]; reports distinct unknown values + counts
+#              (inherently census — vocabulary growth is a finding, not a failure)
+#   monotonic  fields[] must be non-decreasing within partition ordered by ts
+#   sequence   violation may reference prev_<col> for cols in lag_cols[]
+#              (lagInFrame within partition ordered by ts)
+#   play       aggregates{} computed per (player_id, play_id); violation
+#              is a boolean over the aggregate names
+#   sql        full custom SELECT; must return group keys + checked + violations
+#              (escape hatch for cross-table rules)
+
+version: 1
+
+defaults:
+  mode: census
+  partition: [player_id, play_id]
+  order: ts
+
+groups:
+  by: [app_version, os_version_major, device_class, player_tech]
+  unversioned_bucket: true
+
+# ---------------------------------------------------------------------------
+# A. Identity & label grammar (all history — version-independent)
+# ---------------------------------------------------------------------------
+
+rules:
+  - id: ids-lowercase-events
+    tables: [session_events]
+    kind: row
+    severity: error
+    violation: "player_id != lower(player_id) OR play_id != lower(play_id)"
+    applicable_since: { date: "2026-05-15", note: "whole retained archive; canonicalV2ID() predates it" }
+    source: "data-fields.md §1.a player_id gotcha; memory case_sensitivity_ids"
+    rationale: "Any uppercase UUID in CH means an ingest path bypassed canonicalV2ID()."
+
+  - id: ids-lowercase-network
+    tables: [network_requests]
+    kind: row
+    severity: error
+    violation: "player_id != lower(player_id) OR play_id != lower(play_id)"
+    applicable_since: { date: "2026-05-15" }
+    source: "data-fields.md §1.a; memory case_sensitivity_ids"
+
+  - id: ids-lowercase-control
+    tables: [control_events]
+    kind: row
+    severity: error
+    violation: "player_id != lower(player_id) OR play_id != lower(play_id)"
+    applicable_since: { date: "2026-05-15" }
+    source: "data-fields.md §1.a; memory case_sensitivity_ids"
+
+  - id: label-grammar
+    tables: [session_events, network_requests, control_events]
+    kind: row
+    severity: error
+    violation: >-
+      arrayExists(l -> NOT match(l, '^(testing|info|warning|error|critical)=\\*?[^,=]+$'), labels)
+    applicable_since: { date: "2026-05-15" }
+    source: "data-fields.md §5 label grammar; reference_labelplay_value_encoding"
+    rationale: "Closed severity set; '*' synthMark optional; no ',' or '=' in the value part."
+
+  - id: control-row-has-synth-label
+    tables: [control_events]
+    kind: row
+    severity: warn
+    violation: "length(labels) = 0 OR NOT arrayExists(l -> position(l, '=*') > 0, labels)"
+    applicable_since: { date: "2026-05-15" }
+    source: "data-fields.md §3.d — every control row gets >=1 label incl. its synth event label"
+    rationale: "label_changed KV expansions are unstarred, but the event's own *-label must be present."
+
+  - id: control-event-vocab
+    tables: [control_events]
+    kind: vocab
+    severity: warn
+    field: event
+    allowed:
+      [fault_on, fault_off, pattern_step, shaper_changed, loop_server,
+       fault_rule_enabled, fault_rule_disabled, fault_rule_config_change,
+       pattern_enabled, pattern_disabled, pattern_config_change,
+       shaper_config_change, timeouts_changed, label_changed,
+       content_changed, session_start, session_end, control_change]
+    applicable_since: { date: "2026-05-15" }
+    source: "data-fields.md §3.b (closed set)"
+    rationale: "New values are findings to document, not necessarily bugs — hence vocab/census."
+
+  - id: control-source-vocab
+    tables: [control_events]
+    kind: vocab
+    severity: warn
+    field: source
+    allowed: [harness, proxy, auto]
+    applicable_since: { date: "2026-05-15" }
+    source: "data-fields.md §3.a"
+
+# ---------------------------------------------------------------------------
+# B. session_events — row-level field coherence
+# ---------------------------------------------------------------------------
+
+  - id: ttff-le-vst
+    tables: [session_events]
+    kind: row
+    severity: warn
+    violation: >-
+      video_start_time_s > 0 AND video_first_frame_time_s > 0
+      AND video_first_frame_time_s > video_start_time_s
+    applicable_since: { date: "2026-05-15" }
+    source: >-
+      PlayerViewModel.swift markPlayingStarted/markFirstFrameRendered —
+      vst = timeControlStatus==.playing, ttff = isReadyForDisplay;
+      'typical order: first-frame fires before .playing'
+    rationale: >-
+      Direction VERIFIED against iOS source during Phase 1 smoke-test
+      (2026-06-04): data-fields.md had it backwards ('always vst <= ttff'
+      — 45% of archive rows violated). The two signals are independent
+      KVO observables, so inversion is atypical, not impossible: warn.
+
+  - id: playback-status-vocab
+    tables: [session_events]
+    kind: vocab
+    severity: error
+    field: playback_status
+    allowed: [in_progress, completed, user_stopped, start_failure, abandoned_start, mid_stream_failure]
+    applicable_since: { date: "2026-05-29", note: "#550 Phase 2 on test-dev (data-calibrated)" }
+    source: "data-fields.md §1.c playback_status (closed enum)"
+
+  - id: terminal-error-implies-failure
+    tables: [session_events]
+    kind: row
+    severity: error
+    violation: >-
+      terminal_error_code != 0
+      AND playback_status NOT IN ('start_failure', 'abandoned_start', 'mid_stream_failure')
+    applicable_since: { date: "2026-06-02", note: "#561/#562 terminal_error population (merge-date hint)" }
+    source: "data-fields.md §1.c terminal_error_code — 'ONLY on terminal failure rows'"
+
+  - id: waiting-reason-implies-buffering
+    tables: [session_events]
+    kind: row
+    severity: warn
+    violation: "waiting_reason != '' AND player_state != 'buffering'"
+    applicable_since: { date: "2026-05-15" }
+    source: "data-fields.md §1.b waiting_reason — 'empty when not buffering'"
+    rationale: "Census first: the doc says reading it outside buffering is meaningless, not that it's cleared."
+
+  - id: quality-pct-range
+    tables: [session_events]
+    kind: row
+    severity: error
+    violation: "video_quality_pct < 0 OR video_quality_pct > 101"
+    applicable_since: { date: "2026-05-15" }
+    source: "data-fields.md §1.b video_quality_pct (percent 0-100)"
+    rationale: >-
+      Tolerance to 101: the player-side ladder math emits 100.01 on ~70%
+      of top-variant rows (975k rows, benign float overshoot — Phase 1
+      smoke-test 2026-06-04). Real violations found: 21 rows up to 457.6,
+      all with empty video_resolution/content_id (early-play, ladder
+      unknown) — kept as violations; they're the exemplar drill-downs.
+
+  - id: version-fields-coherent
+    tables: [session_events]
+    kind: row
+    severity: warn
+    violation: "app_version != '' AND os_version_major = 0"
+    applicable_since: { date: "2026-05-29", note: "#550 Phase 4 on test-dev (data-calibrated, census 2026-06-04)" }
+    source: "Phase 0 census — 23 rows / 5 plays with app_version set but os 0.0"
+    rationale: "DeviceInfo should populate atomically; partial population = plumbing gap."
+
+  - id: nonnegative-gauges
+    tables: [session_events]
+    kind: row
+    severity: error
+    violation: "buffer_depth_s < 0 OR position_s < 0 OR playback_rate < 0"
+    applicable_since: { date: "2026-05-15" }
+    source: "data-fields.md §1.b (units: seconds / ratio; negatives undefined)"
+
+  - id: stall-duration-on-stall-end
+    tables: [session_events]
+    kind: row
+    severity: warn
+    violation: "last_event = 'stall_end' AND stall_duration_ms = 0"
+    applicable_since: { date: "2026-05-29", note: "#550 Phase 1 on test-dev" }
+    source: "data-fields.md §1.c stall_duration_ms — set on the stall_end row, sticky after"
+
+  - id: buffering-duration-on-buffering-end
+    tables: [session_events]
+    kind: row
+    severity: warn
+    violation: "last_event = 'buffering_end' AND buffering_duration_ms = 0"
+    applicable_since: { date: "2026-05-29" }
+    source: "data-fields.md §1.c buffering_duration_ms"
+
+  - id: legacy-stall-mirror-count
+    tables: [session_events]
+    kind: row
+    severity: warn
+    violation: "stall_count != stalling_count"
+    applicable_since: { date: "2026-05-29", note: "soft-cutover mirror window; retire rule when legacy columns drop" }
+    source: "data-fields.md §1.c legacy stall fields — forwarder mirror-writes from canonical"
+
+  - id: legacy-stall-mirror-time
+    tables: [session_events]
+    kind: row
+    severity: warn
+    violation: "abs(stall_time_s * 1000 - stalling_time_ms) > 1500"
+    applicable_since: { date: "2026-05-29" }
+    source: "data-fields.md §1.c — same mirror, time variant (1.5s tolerance for float/rounding)"
+
+# ---------------------------------------------------------------------------
+# C. session_events — sequence / play-level
+# ---------------------------------------------------------------------------
+
+  - id: residency-time-monotonic
+    tables: [session_events]
+    kind: monotonic
+    severity: error
+    fields: [playing_time_ms, pausing_time_ms, buffering_time_ms, stalling_time_ms,
+             idling_time_ms, seeking_time_ms, trickplaying_time_ms]
+    applicable_since: { date: "2026-05-29", note: "#550 Phase 1 on test-dev. STRICT monotonicity only holds post-#605/#606 (play_id fire-time pinning): pre-deploy plays can interleave two clients' accumulator streams under one play_id (#603 family — confirmed live in the 2026-06-03 archive during smoke-testing). Until then violations are mostly known-bug symptoms; stay census." }
+    source: "data-fields.md §1.c — cumulative since play start; resets only at play_id boundary"
+
+  - id: residency-count-monotonic
+    tables: [session_events]
+    kind: monotonic
+    severity: error
+    fields: [playing_count, pausing_count, buffering_count, stalling_count,
+             idling_count, seeking_count, trickplaying_count]
+    applicable_since: { date: "2026-05-29" }
+    source: "data-fields.md §1.c — state-entry counters"
+
+  - id: lifecycle-counters-monotonic
+    tables: [session_events]
+    kind: monotonic
+    severity: error
+    fields: [frames_displayed, frames_dropped, error_count, stall_count,
+             player_restarts, profile_shift_count, loop_count_player]
+    applicable_since: { date: "2026-05-15", note: "frames_*/error_count only meaningful post-2026-05-29" }
+    source: "data-fields.md §1.c — documented monotonic per play"
+
+  - id: attempt-id-monotonic
+    tables: [session_events]
+    kind: monotonic
+    severity: error
+    fields: [attempt_id]
+    where: "attempt_id != 0"
+    applicable_since: { date: "2026-05-15" }
+    exclusions:
+      - name: legacy-zero
+        where: "attempt_id = 0"
+        note: "0 = pre-rename rows / non-iOS clients (documented sentinel)"
+    source: "data-fields.md §1.a attempt_id — monotonic, +1 per restart, resets per play"
+
+  - id: delta-reconciles-cumulative
+    tables: [session_events]
+    kind: sequence
+    severity: warn
+    lag_cols: [playing_time_ms, buffering_time_ms, stalling_time_ms]
+    violation: >-
+      (playing_time_ms_delta   != playing_time_ms   - prev_playing_time_ms
+       AND playing_time_ms_delta   != playing_time_ms)
+      OR (buffering_time_ms_delta != buffering_time_ms - prev_buffering_time_ms
+       AND buffering_time_ms_delta != buffering_time_ms)
+      OR (stalling_time_ms_delta  != stalling_time_ms  - prev_stalling_time_ms
+       AND stalling_time_ms_delta  != stalling_time_ms)
+    applicable_since: { date: "2026-05-29" }
+    source: "data-fields.md §1.c *_delta — forwarder-computed per-row delta of the paired cumulative"
+    rationale: >-
+      Smoke-tested 2026-06-04 over 396k rows: 89% reconcile via lag; 8%
+      have delta = cumulative — the forwarder's reset/first-row semantics
+      (cache miss, or every row of an interleaved #603-family play looks
+      like a reset) — accepted by the second disjunct. 247 rows matched
+      NEITHER form: those are the aberrations this rule keeps catching.
+
+  - id: no-terminal-resurrection
+    tables: [session_events]
+    kind: sequence
+    severity: error
+    lag_cols: [playback_status]
+    violation: "prev_playback_status NOT IN ('', 'in_progress') AND playback_status = 'in_progress'"
+    applicable_since: { date: "2026-05-29" }
+    source: "data-fields.md §1.c playback_status — terminal outcome; a play must not resume after terminal"
+
+  - id: residency-sum-wallclock
+    tables: [session_events]
+    kind: play
+    severity: warn
+    aggregates:
+      residency_ms: >-
+        max(playing_time_ms + pausing_time_ms + buffering_time_ms + stalling_time_ms
+            + idling_time_ms + seeking_time_ms + trickplaying_time_ms)
+      wallclock_ms: "dateDiff('millisecond', min(ts), max(ts))"
+      n_rows: "count()"
+    violation: "n_rows >= 30 AND residency_ms > wallclock_ms * 1.15 + 10000"
+    applicable_since: { date: "2026-05-29" }
+    source: "data-fields.md §1.c — sum across states ~= wall-clock since play start"
+    rationale: >-
+      One-sided: residency exceeding wall-clock is impossible (double-counted state time);
+      residency BELOW wall-clock is legal (gaps before first heartbeat / after last).
+      Short plays (<30 rows) skipped — startup jitter dominates.
+
+  - id: play-end-unique
+    tables: [session_events]
+    kind: play
+    severity: warn
+    aggregates:
+      play_ends: "countIf(last_event = 'play_end')"
+    violation: "play_ends > 1"
+    applicable_since: { date: "2026-06-02", note: "#567 session_end->play_end rename (merge-date hint)" }
+    source: "issue #554/#567 — play_end is the play-terminal event, one per play"
+
+  - id: play-start-unique
+    tables: [session_events]
+    kind: play
+    severity: warn
+    pending: true
+    aggregates:
+      play_starts: "countIf(last_event = 'play_start')"
+    violation: "play_starts != 1"
+    applicable_since: { date: "TBD", note: "#604/#605/#606 not yet merged/deployed; census-only until then" }
+    source: "issue #603 — every play emits exactly one play_start at fire-time"
+
+  - id: ebvs-never-saw-frame
+    tables: [session_events]
+    kind: play
+    severity: error
+    aggregates:
+      status: "argMax(playback_status, ts)"
+      ttff: "max(video_first_frame_time_s)"
+    violation: "status = 'abandoned_start' AND ttff > 0"
+    applicable_since: { date: "2026-05-29" }
+    source: "qoe-metrics.md EBVS — abandoned_start means startup never completed; a TTFF contradicts it"
+
+  - id: loop-count-divergence
+    tables: [session_events]
+    kind: play
+    severity: warn
+    aggregates:
+      lp: "max(loop_count_player)"
+      ls: "max(loop_count_server)"
+    violation: "lp > 0 AND ls > 0 AND abs(toInt64(lp) - toInt64(ls)) > 1"
+    applicable_since: { date: "2026-05-15" }
+    source: "data-fields.md §1.c loop_count_player/server — 'divergence implies a missed restart event'"
+
+# ---------------------------------------------------------------------------
+# D. network_requests — row-level
+# ---------------------------------------------------------------------------
+
+  - id: request-kind-vocab
+    tables: [network_requests]
+    kind: vocab
+    severity: warn
+    field: request_kind
+    allowed: [manifest, segment, init, other]
+    applicable_since: { date: "2026-05-15" }
+    source: "data-fields.md §2.b request_kind (closed set)"
+
+  - id: status-sane
+    tables: [network_requests]
+    kind: row
+    severity: error
+    violation: "status > 599 OR (status < 100 AND status != 0)"
+    applicable_since: { date: "2026-05-15" }
+    source: "data-fields.md §2.b status — HTTP code, 0 = upstream connect failed"
+
+  - id: faulted-fields-coherent
+    tables: [network_requests]
+    kind: row
+    severity: warn
+    violation: >-
+      (faulted = 1 AND (fault_type = '' OR fault_action = ''))
+      OR (faulted = 0 AND fault_type != '')
+    applicable_since: { date: "2026-05-15" }
+    source: "data-fields.md §2.e — fault_type/fault_action populated iff faulted=1"
+
+  - id: get-has-no-body
+    tables: [network_requests]
+    kind: row
+    severity: warn
+    violation: "method = 'GET' AND bytes_in > 0"
+    applicable_since: { date: "2026-05-15" }
+    source: "data-fields.md §2.c bytes_in — 'Always 0 for GET (no request body)'"
+
+  - id: timings-nonnegative
+    tables: [network_requests]
+    kind: row
+    severity: error
+    violation: >-
+      dns_ms < 0 OR connect_ms < 0 OR tls_ms < 0 OR ttfb_ms < 0
+      OR transfer_ms < 0 OR total_ms < 0 OR client_wait_ms < 0
+    applicable_since: { date: "2026-05-15" }
+    source: "data-fields.md §2.d (all millisecond durations)"
+
+  - id: total-ms-composition
+    tables: [network_requests]
+    kind: row
+    severity: warn
+    violation: "total_ms + 5 < ttfb_ms + transfer_ms"
+    applicable_since: { date: "2026-05-15" }
+    source: "go-proxy main.go mergeTotalTiming() — total_ms should be lifted to >= ttfb + transfer"
+    rationale: >-
+      The doc's original formula (dns+connect+tls+ttfb+transfer) never
+      matched the code. Real contract: mergeTotalTiming() lifts total_ms
+      to ttfb+transfer — but ~26% of archive rows show total_ms ~= ttfb
+      with transfer 100x larger, i.e. code paths that skip the merge
+      (Phase 1 census 2026-06-04). Known proxy gap, not a data aberration;
+      rule stays census to track the rate until the proxy is fixed.
+
+# ---------------------------------------------------------------------------
+# E. Cross-table (kind: sql — full custom queries, built in Phase 2)
+# ---------------------------------------------------------------------------
+
+  - id: play-id-stable-across-mutations
+    tables: [control_events, session_events]
+    kind: sql
+    severity: error
+    applicable_since: { date: "2026-05-15", note: "#474 predates the retained archive" }
+    source: "data-fields.md §1.a play_id gotcha — does NOT rotate on control mutations (post-#474)"
+    sql_sketch: >-
+      For each control_events row with source='harness' and event IN
+      (shaper_config_change, fault_rule_enabled, fault_rule_disabled,
+      pattern_enabled, pattern_disabled) carrying play_id P for player X:
+      the first session_events row for X with ts in (T, T+30s] must still
+      have play_id = P, unless a content_changed/session_end intervenes.
+
+  - id: network-within-play-bounds
+    tables: [network_requests, session_events]
+    kind: sql
+    severity: warn
+    applicable_since: { date: "2026-05-15" }
+    source: "data-fields.md §4.b started_at/last_seen_at"
+    sql_sketch: >-
+      network_requests.ts for play P outside
+      [min(session_events.ts) - 30s, max(session_events.ts) + 30s] is a
+      mis-attributed row (play_id stamped on the wrong play). Grace covers
+      pre-first-heartbeat manifest fetches.
+
+  - id: qoe-cirr-label-recompute
+    tables: [session_events]
+    kind: sql
+    severity: warn
+    applicable_since: { date: "2026-06-01", note: "#559 qoe labels; thresholds are DEPLOY-TIME config — resolve from the [QoE] startup log before asserting" }
+    source: "qoe-metrics.md — CIRR = stalling/(stalling+playing); breach >= 0.004 (default tier)"
+    sql_sketch: >-
+      Per play: recompute CIRR from argMax(stalling_time_ms, ts) and
+      argMax(playing_time_ms, ts); plays with CIRR >= breach threshold and
+      playing_time_ms >= 60s must carry a qoe_cirr_breach label in the play's
+      label histogram, and vice versa. CENSUS ONLY until the Phase 3 seek-
+      exclusion question is settled (stalling may include seek recovery).
+
+  - id: qoe-vst-label-recompute
+    tables: [session_events]
+    kind: sql
+    severity: warn
+    applicable_since: { date: "2026-06-01", note: "edge-triggered since #599 (2026-06-04) — pre-#599 rows have sticky re-stamped labels; expect duplicates before that date" }
+    source: "qoe-metrics.md — VST breach >= 10000ms (default tier)"
+    sql_sketch: >-
+      Per play: max(video_start_time_s) >= 10 implies qoe_vst_breach present;
+      < 5 implies absent (between tiers: concerning band, check qoe_vst_concerning).
+
+# ---------------------------------------------------------------------------
+# F. Documented NON-rules — do not add these as assertions
+# ---------------------------------------------------------------------------
+# Kept here so a future session doesn't "helpfully" add them.
+#
+# - network_bitrate_mbps <= cap: FALSE. iOS avg/network bitrate over-reads
+#   2-3x the cap by design (AVPlayer burst measurement). See
+#   reference_ios_avg_bitrate_overreads + avplayer-quirks.md.
+# - video_resolution constant at play start: FALSE. Carries forward from
+#   the previous play for the first 1-2 heartbeats (36-cycle startup
+#   characterization, #512 / 2026-05-25). Resolution-coherence rules must
+#   exclude the first 2 samples of each play.
+# - player_error empty on healthy plays: FALSE on simulators.
+#   CoreMediaErrorDomain -12174 is documented sim-only noise (#145).
+#   Error-field rules must exclude error_code = -12174.
+# - buffer_depth_s > 0 while playing: FALSE. AVPlayer reports transient 0s
+#   during normal transitions; only SUSTAINED 0 across consecutive rows
+#   matters (data-fields.md §1.b).
+# - playback_rate distinguishing pause vs buffering: FALSE. Documented
+#   ambiguity — must combine with player_state.
+
+exclusions_global:
+  - name: sim-noise-12174
+    applies_to: [session_events]
+    where: "error_code = -12174 OR position(player_error, '-12174') > 0"
+    note: "sim-only CoreMedia noise (#145); excluded from error-bearing rules only"
+  - name: first-samples-of-play
+    applies_to: [session_events]
+    note: >-
+      First 2 rows per play_id excluded from resolution/bitrate coherence
+      rules (carry-forward gotcha). Runner implements as row_number() > 2
+      where a rule opts in via exclusion reference.
