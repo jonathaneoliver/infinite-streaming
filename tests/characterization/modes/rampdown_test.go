@@ -3,22 +3,20 @@ package modes
 import (
 	"context"
 	"fmt"
-	"os"
-	"strconv"
-	"strings"
 	"testing"
 	"time"
 
 	"github.com/jonathaneoliver/infinite-streaming/tests/characterization/runner"
 )
 
-// Rampdown — variant-aware ramp_down at multiple margins.
+// Rampdown — variant-aware descending sweep over the shared limit ladder.
 //
-// For each variant in the current play's manifest we apply 6 caps in
-// descending order (×1.50, ×1.25, ×1.10, ×1.05, ×1.00, ×0.95), merged
-// across all variants into one strictly-descending series. Any candidate
-// that would have caused the cap to *increase* vs. the previous step gets
-// dropped (happens on tight ladders where var_low×1.50 > var_high×0.95).
+// The ladder (go-proxy/pkg/ladder via runner.StandardLadderRates) carries
+// both a peak (BANDWIDTH) and an average (AVERAGE-BANDWIDTH) anchor per
+// variant — each ×1.05 — plus geometric fills so no two consecutive caps
+// differ by more than CHAR_LADDER_MAX_STEP (1.15×). We apply them in
+// descending order. Each rung is attributed to the variant a peak-keyed
+// player should sustain at that cap (#551).
 //
 // Each step is held for up to rampdownMaxHold (60 s) but exits early as
 // soon as the buffer has been stable across the last rampdownEarlyExitWindow
@@ -32,44 +30,8 @@ import (
 // above SustainableBufferS (1 s) with zero stalls. Anything below that is
 // where the player starts depleting / stalling.
 
-// Symmetric 9-margin grid around each variant's AVG-bandwidth (TCP
-// overhead is layered separately in runner.TCPOverheadPct, applied
-// inside the CapMbps formula). Negative margins are required for the
-// rampdown tail where we deliberately stall the bottom variant.
-// dropOverlapsWithLowerVariant in sweep.go removes entries whose cap
-// falls inside the next-lower variant's [avg×0.5, avg×1.5] range so we
-// don't test the same operational territory twice.
-//
-// Override with CHAR_RAMPDOWN_MARGINS=50,25,10,5,0 (csv) to run a
-// shorter sweep for fast iteration — e.g. dropping the negative
-// margins cuts the run roughly in half and avoids the deliberate
-// stall-floor exploration on the bottom variant.
-var rampdownMargins = parseRampdownMargins([]int{50, 25, 10, 5, 0, -5, -10, -25, -50})
-
-func parseRampdownMargins(defaults []int) []int {
-	raw := strings.TrimSpace(os.Getenv("CHAR_RAMPDOWN_MARGINS"))
-	if raw == "" {
-		return defaults
-	}
-	var out []int
-	for _, p := range strings.Split(raw, ",") {
-		p = strings.TrimSpace(p)
-		if p == "" {
-			continue
-		}
-		n, err := strconv.Atoi(p)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "CHAR_RAMPDOWN_MARGINS: invalid integer %q — ignoring override, using defaults\n", p)
-			return defaults
-		}
-		out = append(out, n)
-	}
-	if len(out) == 0 {
-		return defaults
-	}
-	fmt.Fprintf(os.Stderr, "CHAR_RAMPDOWN_MARGINS override active: %v\n", out)
-	return out
-}
+// Fill density + headroom are controlled by CHAR_LADDER_MAX_STEP (default
+// 1.15×) and CHAR_LADDER_BUMP_PCT (default 5%) — see runner.StandardLadderRates.
 
 const (
 	rampdownMaxHold         = 60 * time.Second
@@ -137,19 +99,18 @@ func runRampdown(t *testing.T, p runner.Platform) {
 	if err != nil {
 		t.Fatalf("PlayerState: %v", err)
 	}
-	sweep, err := runner.VariantSweep(rec, rampdownMargins)
+	sweep, err := runner.StandardLadderRates(rec)
 	if err != nil {
-		t.Fatalf("VariantSweep: %v", err)
+		t.Fatalf("StandardLadderRates: %v", err)
 	}
-	sweep = dropOverlapsWithLowerVariant(sweep)
 
 	// Pre-sweep dump — every limit gets logged so the operator can sanity
 	// check before the sweep runs.
-	t.Logf("sweep plan: %d steps (margins %v, max-hold %s, early-exit when buffer stable %s)",
-		len(sweep), rampdownMargins, rampdownMaxHold, rampdownEarlyExitWindow)
+	t.Logf("sweep plan: %d rungs (bump %.0f%%, max-step %.2fx, max-hold %s, early-exit when buffer stable %s)",
+		len(sweep), runner.LadderBumpPct(), runner.LadderMaxStep(), rampdownMaxHold, rampdownEarlyExitWindow)
 	for i, v := range sweep {
-		t.Logf("  [%2d] %-10s  %+3d%%  cap=%6.3f Mbps   avg=%.3f peak=%.3f Mbps  (source=%s)",
-			i, v.Resolution, v.MarginPct, v.CapMbps,
+		t.Logf("  [%2d] %-10s  cap=%6.3f Mbps   avg=%.3f peak=%.3f Mbps  (source=%s)",
+			i, v.Resolution, v.CapMbps,
 			float64(v.AvgBps)/1_000_000, float64(v.PeakBps)/1_000_000, v.Source)
 	}
 
@@ -256,8 +217,8 @@ func runRampdown(t *testing.T, p runner.Platform) {
 			continue
 		}
 		upperFailures = append(upperFailures, fmt.Sprintf(
-			"step %d cap=%.3f Mbps %s/%+d%%: stalls=%d min_buf=%.1fs",
-			i+1, st.RateMbps, st.Variant.Resolution, st.Variant.MarginPct,
+			"step %d cap=%.3f Mbps %s/%s: stalls=%d min_buf=%.1fs",
+			i+1, st.RateMbps, st.Variant.Resolution, st.Variant.Source,
 			st.StallsDelta, st.MinBufferS))
 	}
 	if len(upperFailures) > 0 {
@@ -277,9 +238,9 @@ func joinLines(ss []string) string {
 	return out
 }
 
-// unionRungs collapses the per-step VariantSweep slice (one entry per
-// (variant, margin) pair) down to one entry per unique variant — what
-// Finalize's per-rung sample classification needs.
+// unionRungs collapses the limit-ladder slice (multiple rungs per
+// variant: peak/avg anchors + fills) down to one entry per unique
+// variant — what Finalize's per-rung sample classification needs.
 func unionRungs(sweep []runner.VariantRate) []runner.VariantRate {
 	seen := map[string]int{} // resolution → index in out
 	out := []runner.VariantRate{}

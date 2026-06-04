@@ -209,7 +209,7 @@ interface RunCard {
 interface StepRow {
   rate_mbps: number;
   hold_s?: number;
-  variant?: { resolution: string; margin_pct?: number };
+  variant?: { resolution: string; margin_pct?: number; source?: string };
   exit_reason?: string;
   hold_actual_s?: number;
   min_buffer_s?: number;
@@ -361,10 +361,6 @@ async function toggleSteps(runID: string, testName: TestName) {
 function fmtMbps(v: number | undefined): string {
   if (v == null || !Number.isFinite(v)) return '—';
   return v.toFixed(3) + ' Mbps';
-}
-function fmtPct(v: number | undefined): string {
-  if (v == null || !Number.isFinite(v)) return '';
-  return (v >= 0 ? '+' : '') + v + '%';
 }
 function fmtSeconds(v: number | undefined): string {
   if (v == null || !Number.isFinite(v)) return '—';
@@ -912,7 +908,7 @@ function stepWindow(report: ReportBlob, stepIdx: number): { startMs: number; end
                             <tr v-for="(s, i) in expandedSteps.get(charRunKey(g.run_id, t))!.report!.steps!" :key="i">
                               <td>{{ i + 1 }}</td>
                               <td class="mono">{{ s.rate_mbps?.toFixed(3) }}</td>
-                              <td class="mono">{{ s.variant?.resolution ?? '—' }} <span v-if="s.variant?.margin_pct != null" class="muted">{{ fmtPct(s.variant!.margin_pct) }}</span></td>
+                              <td class="mono">{{ s.variant?.resolution ?? '—' }} <span v-if="s.variant?.source" class="muted">{{ s.variant!.source }}</span></td>
                               <td>{{ s.exit_reason ?? '—' }}</td>
                               <td>{{ fmtSeconds(s.hold_actual_s ?? s.hold_s) }}</td>
                               <td>{{ s.min_buffer_s?.toFixed(1) ?? '—' }} / {{ s.max_buffer_s?.toFixed(1) ?? '—' }}</td>
@@ -1099,7 +1095,7 @@ function stepWindow(report: ReportBlob, stepIdx: number): { startMs: number; end
                         <tr v-for="(s, i) in expandedSteps.get(charRunKey(g.run_id, t))!.report!.steps!" :key="i">
                           <td>{{ i + 1 }}</td>
                           <td class="mono">{{ s.rate_mbps?.toFixed(3) }}</td>
-                          <td class="mono">{{ s.variant?.resolution ?? '—' }} <span v-if="s.variant?.margin_pct != null" class="muted">{{ fmtPct(s.variant!.margin_pct) }}</span></td>
+                          <td class="mono">{{ s.variant?.resolution ?? '—' }} <span v-if="s.variant?.source" class="muted">{{ s.variant!.source }}</span></td>
                           <td>{{ s.exit_reason ?? '—' }}</td>
                           <td>{{ fmtSeconds(s.hold_actual_s ?? s.hold_s) }}</td>
                           <td class="mono">

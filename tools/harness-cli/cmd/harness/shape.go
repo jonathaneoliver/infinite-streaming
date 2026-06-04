@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/jonathaneoliver/infinite-streaming/go-proxy/pkg/ladder"
 	"github.com/jonathaneoliver/infinite-streaming/tools/harness-cli/internal/api"
 	"github.com/jonathaneoliver/infinite-streaming/tools/harness-cli/internal/format"
 	"github.com/jonathaneoliver/infinite-streaming/tools/harness-cli/internal/v2gen/proxy"
@@ -22,9 +23,15 @@ Slider mode (any subset; omitted fields are not modified):
 Pattern mode (generates a step list from the player's current variants):
   --pattern NAME     pyramid | ramp_up | ramp_down | square_wave | sliders
   --step-seconds N   per-step duration: 6 | 12 | 18 | 24 (default 12)
-  --margin PCT       headroom above variant rate: 0 | 5 | 10 | 25 | 50 (default 5)
-                     5% covers TCP/IP+TLS+HTTP framing; 0% is a
-                     deliberate-stall footgun
+  --margin PCT       flat headroom above each variant rate: 0|5|10|25|50
+                     (default 5; covers TCP/IP+TLS+HTTP framing; 0 is a
+                     deliberate-stall footgun)
+  --max-step RATIO   fill density: max ratio between consecutive caps before
+                     a geometric fill is inserted (default 1.15). The ladder
+                     carries BOTH a peak (BANDWIDTH) and an average
+                     (AVERAGE-BANDWIDTH) rung per variant, then fills the
+                     gaps — raise --max-step to coarsen + shorten the pattern
+                     (a pyramid over a dense ladder can run ~13 min/cycle)
   --clear-pattern    stop any running pattern (back to slider rate)
   --show-pattern     print current pattern + active step
 
@@ -61,6 +68,7 @@ func cmdShape(client *api.Client, args []string, asJSON bool) error {
 	pattern := fs.String("pattern", "", "pattern template (pyramid|ramp_up|ramp_down|square_wave|sliders)")
 	stepSeconds := fs.Int("step-seconds", 12, "per-step duration: 6|12|18|24")
 	margin := fs.Int("margin", 5, "headroom %% above variant rate: 0|5|10|25|50 (5 covers protocol overhead)")
+	maxStep := fs.Float64("max-step", ladder.DefaultMaxStep, "max ratio between consecutive caps before a geometric fill is inserted (default 1.15; raise to coarsen + shorten the pattern)")
 	clearPattern := fs.Bool("clear-pattern", false, "stop any running pattern")
 	showPattern := fs.Bool("show-pattern", false, "print current pattern, don't modify")
 	clear := fs.Bool("clear", false, "send {shape:null}")
@@ -85,7 +93,7 @@ func cmdShape(client *api.Client, args []string, asJSON bool) error {
 	case *clearPattern:
 		return doClearPattern(client, ctx, pid, asJSON)
 	case *pattern != "":
-		return doPattern(client, ctx, pid, asJSON, *pattern, *stepSeconds, *margin)
+		return doPattern(client, ctx, pid, asJSON, *pattern, *stepSeconds, *margin, *maxStep)
 	}
 
 	if *rate < 0 && *delay < 0 && *loss < 0 {
@@ -306,11 +314,13 @@ func doClearPattern(client *api.Client, ctx context.Context, pid string, asJSON 
 }
 
 // doPattern generates step rates from the player's current manifest
-// variants using the same algorithm the dashboard's NetworkShapingPattern
-// panel runs (see buildSteps in that .vue). Snapshots pre-state for
-// `harness undo` and PATCHes.
+// variants via the shared go-proxy/pkg/ladder builder — the same one the
+// characterization harness uses and the dashboard's NetworkShapingPattern
+// panel mirrors in JS. The ladder carries both a peak and an average
+// anchor per variant, +marginPct flat, with geometric fills to maxStep
+// (#551). Snapshots pre-state for `harness undo` and PATCHes.
 func doPattern(client *api.Client, ctx context.Context, pid string, asJSON bool,
-	tplStr string, stepSecs, marginPct int) error {
+	tplStr string, stepSecs, marginPct int, maxStep float64) error {
 
 	tpl, err := parseTemplate(tplStr)
 	if err != nil {
@@ -335,12 +345,12 @@ func doPattern(client *api.Client, ctx context.Context, pid string, asJSON bool,
 	if err != nil {
 		return err
 	}
-	rates, err := variantRatesMbps(rec, marginPct)
+	rungs, err := variantLadder(rec, float64(marginPct), maxStep)
 	if err != nil {
 		return err
 	}
 
-	steps := buildPatternSteps(tpl, rates, stepSecs)
+	steps := buildPatternSteps(tpl, rungs, stepSecs)
 	if len(steps) == 0 && tpl != proxy.Sliders {
 		return fmt.Errorf("template %q produced an empty step list — does the player have a manifest yet?", tplStr)
 	}
@@ -401,11 +411,12 @@ func parseMarginPct(n int) (proxy.PatternMarginPct, error) {
 	return 0, fmt.Errorf("invalid --margin %d: must be 0|5|10|25|50", n)
 }
 
-// variantRatesMbps pulls the player's manifest variants, applies the
-// margin %, and returns the sorted-ascending Mbps list the buildSteps
-// algorithm consumes. Returns an error when the player has no variants
-// yet (master playlist not fetched).
-func variantRatesMbps(rec *proxy.PlayerRecord, marginPct int) ([]float32, error) {
+// variantLadder pulls the player's manifest variants and builds the
+// shared dual-rung (avg+peak) + geometrically-filled limit ladder via
+// go-proxy/pkg/ladder, descending by cap. bumpPct is the flat headroom
+// (the operator --margin); maxStep is the fill density. Returns an error
+// when the player has no variants yet (master playlist not fetched).
+func variantLadder(rec *proxy.PlayerRecord, bumpPct, maxStep float64) ([]ladder.Rung, error) {
 	if rec == nil || rec.CurrentPlay == nil || rec.CurrentPlay.Manifest == nil || rec.CurrentPlay.Manifest.Variants == nil {
 		return nil, errors.New("player has no manifest variants yet — has it fetched the master playlist?")
 	}
@@ -413,84 +424,36 @@ func variantRatesMbps(rec *proxy.PlayerRecord, marginPct int) ([]float32, error)
 	if len(variants) == 0 {
 		return nil, errors.New("player has no manifest variants yet — has it fetched the master playlist?")
 	}
-	rates := make([]float32, 0, len(variants))
+	lv := make([]ladder.Variant, 0, len(variants))
 	for _, v := range variants {
-		// Prefer AVERAGE-BANDWIDTH when the source playlist provided
-		// it — the variant's long-term sustainable rate, which is the
-		// honest minimum for "this variant should play smoothly."
-		// BANDWIDTH (per HLS spec) is the peak segment rate, which is
-		// 30–40% higher than AVERAGE for typical CBR encoders. Using
-		// the peak gives every step ~35% of unwarranted headroom.
-		bps := float32(v.Bandwidth)
-		if v.AverageBandwidth != nil && *v.AverageBandwidth > 0 {
-			bps = float32(*v.AverageBandwidth)
+		avg := 0
+		if v.AverageBandwidth != nil {
+			avg = *v.AverageBandwidth
 		}
-		// Same shape as dashboard's buildSteps: bps × (1 + margin) / 1000
-		// rounded to 3 dp.
-		mbps := bps * (1 + float32(marginPct)/100) / 1_000_000
-		if mbps > 0 {
-			rates = append(rates, roundFloat32(mbps, 3))
-		}
+		lv = append(lv, ladder.Variant{AvgBps: avg, PeakBps: v.Bandwidth, Resolution: v.Resolution})
 	}
-	if len(rates) == 0 {
+	rungs := ladder.StandardLadder(lv, bumpPct, maxStep)
+	if len(rungs) == 0 {
 		return nil, errors.New("manifest_variants present but all bandwidths zero")
 	}
-	// Sort ascending for the build algorithm.
-	for i := 1; i < len(rates); i++ {
-		for j := i; j > 0 && rates[j-1] > rates[j]; j-- {
-			rates[j-1], rates[j] = rates[j], rates[j-1]
-		}
-	}
-	return rates, nil
+	return rungs, nil
 }
 
-// buildPatternSteps mirrors the dashboard's NetworkShapingPattern.vue
-// `buildSteps` function. Keep in sync — operator workflows expect a
-// CLI-applied pattern to look identical to a UI-applied one.
-func buildPatternSteps(t proxy.PatternTemplate, rates []float32, stepSecs int) []proxy.PatternStep {
-	var seq []float32
-	switch t {
-	case proxy.SquareWave:
-		seq = []float32{rates[0], rates[len(rates)-1]}
-	case proxy.RampUp:
-		seq = append([]float32(nil), rates...)
-	case proxy.RampDown:
-		seq = append([]float32(nil), rates...)
-		reverseFloat32(seq)
-	case proxy.Pyramid:
-		asc := append([]float32(nil), rates...)
-		desc := append([]float32(nil), rates[:len(rates)-1]...)
-		reverseFloat32(desc)
-		seq = append(asc, desc...)
-	default:
-		// sliders / square / unknown — empty step list
-		return nil
-	}
-
+// buildPatternSteps orders the limit ladder into a pattern step list via
+// the shared ladder.BuildPattern (the same logic the dashboard's
+// NetworkShapingPattern.vue mirrors in JS, parity-checked against
+// go-proxy/pkg/ladder's golden vectors).
+func buildPatternSteps(t proxy.PatternTemplate, rungs []ladder.Rung, stepSecs int) []proxy.PatternStep {
+	lsteps := ladder.BuildPattern(string(t), rungs, stepSecs)
 	enabled := true
-	out := make([]proxy.PatternStep, 0, len(seq))
-	for _, r := range seq {
+	out := make([]proxy.PatternStep, 0, len(lsteps))
+	for _, s := range lsteps {
 		e := enabled
 		out = append(out, proxy.PatternStep{
-			RateMbps:        r,
-			DurationSeconds: stepSecs,
+			RateMbps:        float32(s.RateMbps),
+			DurationSeconds: s.DurationSeconds,
 			Enabled:         &e,
 		})
 	}
 	return out
 }
-
-func reverseFloat32(a []float32) {
-	for i, j := 0, len(a)-1; i < j; i, j = i+1, j-1 {
-		a[i], a[j] = a[j], a[i]
-	}
-}
-
-func roundFloat32(v float32, dp int) float32 {
-	m := float32(1)
-	for i := 0; i < dp; i++ {
-		m *= 10
-	}
-	return float32(int(v*m+0.5)) / m
-}
-

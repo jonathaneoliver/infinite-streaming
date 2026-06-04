@@ -92,55 +92,6 @@ func OpenSession(t *testing.T, platform runner.Platform) *runner.Session {
 	return sess
 }
 
-// dropOverlapsWithLowerVariant filters a desc-sorted VariantSweep list:
-// for each variant V (other than the lowest), drop entries whose cap
-// falls inside the next-lower variant V₋₁'s range
-// [V₋₁.avg×0.5, V₋₁.avg×1.5]. The experiment at that cap is more
-// naturally attributed to V₋₁ (the player would settle there) — keeping
-// both adds redundant steps that test the same operational point.
-//
-// On a ladder where adjacent variant avgs are ≥ 2× apart (typical),
-// this drops a variant's −50% and −25% margin entries when their caps
-// fall within the lower rung's range. On tighter ladders more drops
-// happen automatically.
-func dropOverlapsWithLowerVariant(rates []runner.VariantRate) []runner.VariantRate {
-	if len(rates) < 2 {
-		return rates
-	}
-	// Per-resolution avg lookup (an entry's AvgBps is the same for every
-	// margin of that variant, so any entry works).
-	avgByRes := map[string]int{}
-	descRes := []string{}
-	seen := map[string]bool{}
-	for _, r := range rates {
-		if r.AvgBps > 0 {
-			avgByRes[r.Resolution] = r.AvgBps
-		}
-		if !seen[r.Resolution] {
-			seen[r.Resolution] = true
-			descRes = append(descRes, r.Resolution)
-		}
-	}
-	// For each variant (except the lowest), record V₋₁'s range.
-	lowerRange := map[string][2]float64{}
-	for i := 0; i+1 < len(descRes); i++ {
-		v := descRes[i]
-		lower := descRes[i+1]
-		lowerAvg := float64(avgByRes[lower]) / 1_000_000
-		lowerRange[v] = [2]float64{lowerAvg * 0.5, lowerAvg * 1.5}
-	}
-	out := make([]runner.VariantRate, 0, len(rates))
-	for _, r := range rates {
-		if rng, ok := lowerRange[r.Resolution]; ok {
-			if r.CapMbps >= rng[0] && r.CapMbps <= rng[1] {
-				continue // cap is in next-lower variant's range — drop
-			}
-		}
-		out = append(out, r)
-	}
-	return out
-}
-
 // LinearSteps generates a descending series of evenly-spaced rate steps.
 // "smooth" callers use a small step (~10) over a wide range; "shock"
 // callers use 2 steps. count must be ≥ 2 — the slice is undefined otherwise.

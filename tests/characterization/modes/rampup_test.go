@@ -21,19 +21,15 @@ import (
 // to "constrained sweep". For non-Appium launchers we fall back to
 // the legacy warmup-then-sweep path which has a brief cliff at step 1.
 //
-// Why floor + 0% on bottom variant (was +10%): with TCP overhead
-// baked separately into the cap formula (runner.TCPOverheadPct=7),
-// margin=0 already produces "variant_avg × 1.07" — the
-// just-barely-sustainable rate. Lower margins (−5, −10, …, −50) are
-// rampdown territory; higher (+5, +10, +25, +50) are the climb.
-
-var rampupMargins = rampdownMargins
-
+// The ladder is the shared dual-rung (avg+peak) + geometrically-filled
+// limit ladder (runner.StandardLadderRates); rampup walks it ascending
+// from the floor.
+//
 // rampup deliberately skips the bottom variant — testing caps at
 // the bottom variant's range is rampdown's territory ("how low can we
 // go"). Rampup tests "given a constrained start, when does the player
 // climb?" — the floor for that is the second-from-bottom variant's
-// lowest surviving cap (after the dropOverlapsWithLowerVariant prune).
+// lowest surviving cap in the filled ladder.
 //
 // conservativeWarmupCap is the rate cap we apply when bootstrap can't
 // find a previous heartbeating player (typically right after a wedge
@@ -92,11 +88,10 @@ func runRampup(t *testing.T, p runner.Platform) {
 	} else if preRec.CurrentPlay == nil || len(preRec.CurrentPlay.Manifest.Variants) == 0 {
 		t.Logf("pre-launch: no current play / no variants yet (cold-start unavailable)")
 	} else {
-		preDesc, err = runner.VariantSweep(preRec, rampupMargins)
+		preDesc, err = runner.StandardLadderRates(preRec)
 		if err != nil {
-			t.Logf("pre-launch VariantSweep: %v (cold-start unavailable)", err)
+			t.Logf("pre-launch StandardLadderRates: %v (cold-start unavailable)", err)
 		} else {
-			preDesc = dropOverlapsWithLowerVariant(preDesc)
 			preFloor = rampupFloorFrom(preDesc)
 			t.Logf("bootstrap: pre-launch floor = %.3f Mbps (from current player's manifest)", preFloor)
 		}
@@ -259,13 +254,12 @@ func runRampup(t *testing.T, p runner.Platform) {
 	if err != nil {
 		t.Fatalf("PlayerState: %v", err)
 	}
-	desc, err := runner.VariantSweep(rec, rampupMargins)
+	desc, err := runner.StandardLadderRates(rec)
 	if err != nil {
-		t.Fatalf("VariantSweep: %v", err)
+		t.Fatalf("StandardLadderRates: %v", err)
 	}
-	desc = dropOverlapsWithLowerVariant(desc)
 	if len(desc) == 0 {
-		t.Fatal("VariantSweep returned no entries")
+		t.Fatal("StandardLadderRates returned no entries")
 	}
 
 	// --- ascending step list ------------------------------------
@@ -289,11 +283,11 @@ func runRampup(t *testing.T, p runner.Platform) {
 		asc[i], asc[j] = asc[j], asc[i]
 	}
 
-	t.Logf("sweep plan: %d steps ascending from %.3f Mbps (skipping bottom variant — rampdown's territory)",
+	t.Logf("sweep plan: %d rungs ascending from %.3f Mbps (skipping bottom variant — rampdown's territory)",
 		len(asc), floor)
 	for i, v := range asc {
-		t.Logf("  [%2d] %-10s  %+3d%%  cap=%6.3f Mbps   avg=%.3f peak=%.3f Mbps  (source=%s)",
-			i, v.Resolution, v.MarginPct, v.CapMbps,
+		t.Logf("  [%2d] %-10s  cap=%6.3f Mbps   avg=%.3f peak=%.3f Mbps  (source=%s)",
+			i, v.Resolution, v.CapMbps,
 			float64(v.AvgBps)/1_000_000, float64(v.PeakBps)/1_000_000, v.Source)
 	}
 
@@ -378,8 +372,8 @@ func runRampup(t *testing.T, p runner.Platform) {
 			continue
 		}
 		upperFailures = append(upperFailures, fmt.Sprintf(
-			"step %d cap=%.3f Mbps %s/%+d%%: stalls=%d min_buf=%.1fs",
-			i+1, st.RateMbps, st.Variant.Resolution, st.Variant.MarginPct,
+			"step %d cap=%.3f Mbps %s/%s: stalls=%d min_buf=%.1fs",
+			i+1, st.RateMbps, st.Variant.Resolution, st.Variant.Source,
 			st.StallsDelta, st.MinBufferS))
 	}
 	if len(upperFailures) > 0 {
@@ -392,10 +386,9 @@ func runRampup(t *testing.T, p runner.Platform) {
 	_ = preDesc
 }
 
-// rampupFloorFrom returns the lowest cap from a desc-order
-// VariantSweep, skipping the bottom variant entirely (its cap range is
-// rampdown's territory). Floor = the second-from-bottom variant's
-// lowest surviving cap.
+// rampupFloorFrom returns the lowest cap from a desc-order limit ladder,
+// skipping the bottom variant entirely (its cap range is rampdown's
+// territory). Floor = the second-from-bottom variant's lowest cap.
 func rampupFloorFrom(desc []runner.VariantRate) float64 {
 	if len(desc) == 0 {
 		return 0
