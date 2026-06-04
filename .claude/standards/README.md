@@ -52,6 +52,9 @@ Length: one page rendered. If it grows past that, split.
 - `qoe-metrics.md` — CIRR/CIRT/VST/EBVS definitions (Conviva
   provenance, not standards), our label math, the seek-exclusion
   caveat
+- `invariants.md` — operating manual for the aberration-crawl rule
+  catalogue (`tests/aberration_crawl/invariants.yaml`): validity
+  windows, census-before-assert, documented NON-rules
 
 ## When to add a new one
 

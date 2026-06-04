@@ -16,9 +16,9 @@ What the `qoe_*` auto-labels actually measure, where the definitions come from, 
 - **EBVS** — startup still in progress past `ebvs_threshold_ms` (10s) ⇒ terminal outcome `abandoned_start`. Outcome classifier, not a label tier.
 - Stall burst — >3 `stall_start` in 60s ⇒ `qoe_stall_burst` (catches flapping that CIRR averages away).
 
-## ⚠️ Known divergence — seek exclusion (unverified)
+## ⚠️ Known divergence — seek exclusion (CONFIRMED, #607 Phase 3)
 
-The label math uses **raw `stalling_time_ms`**, but #550's seeking semantics put seek-window time into BOTH `buffering_time_ms` AND `seeking_time_ms` (derive connection-induced buffering as `buffering − seeking`). Whether our CIRR is true *connection-induced* RR or plain rebuffer ratio depends on whether the iOS state machine's `stalling` state already excludes seek recovery. **Verify before comparing our numbers to Conviva's tiers in a finding** — if stalling includes seek recovery, our CIRR reads strictly worse than Conviva would report for the same session.
+The label math uses **raw `stalling_time_ms`**, and the archive shows it **does include seek recovery**: 74% of stalling-delta rows co-occur with seeking deltas and 70% directly follow one (full-archive census 2026-06-04; evidence concentrated in the 35 seek-plays, n=9,678 rows). Our CIRR is therefore plain rebuffer ratio inflated by user-induced seek recovery — **strictly worse than Conviva would report for the same session** on seek-heavy plays. Don't compare our `qoe_cirr_*` labels to Conviva tiers on plays with `seeking_count > 0`. Candidate fixes: forwarder subtracts the seek-overlapped stalling portion, or the iOS state machine reclassifies seek-recovery stalls (#550's `buffering − seeking` derivation pattern).
 
 ## Common mistakes
 
