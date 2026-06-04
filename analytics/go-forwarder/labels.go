@@ -121,6 +121,14 @@ type playLabelState struct {
 	// keeps heart-beating re-stamps the label on every subsequent row
 	// ("endless qoe_msf").
 	terminalEmitted bool
+	// #595 — edge-triggering for level/sticky qoe_* labels. qoeActive is
+	// the set of qoe labels that were true on the previous evaluated row.
+	// A label is emitted only on its rising edge (off→on): its first
+	// determination, or a new instance after it cleared. While a condition
+	// stays continuously true it is suppressed (no per-heartbeat repeats).
+	// The terminal row force-emits the still-true set so the summary +
+	// qoe_tier_* reflect end state. nil until first use.
+	qoeActive map[string]struct{}
 	// LRU touch for GC.
 	seen time.Time
 }

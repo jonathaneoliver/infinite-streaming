@@ -61,24 +61,128 @@ func computeQoEEventLabels(cfg *QoEThresholds, ps *playLabelState, r *row, now t
 	if cfg == nil {
 		cfg = fallbackThresholds
 	}
-	var out []string
 	// firstTerminal is true only on the FIRST authoritative terminal row
 	// (last_event == session_end|play_end). The client re-emits the
 	// terminal POST for delivery reliability, so the emit-once guard stops
 	// vsf/msf/ebvs/tier from being stamped on each re-emit.
 	firstTerminal := isPlayTerminalEvent(r) && !ps.terminalEmitted
 
-	// ── Startup ──────────────────────────────────────────────────────
-	// VST (video start time). Breach takes precedence over concerning.
+	// ── Collect every level/sticky qoe condition TRUE on this row ──────
+	// These are emitted edge-triggered below — sticky inputs like
+	// VideoStartTimeMs (set once, then repeated on every heartbeat) must
+	// not re-stamp their label every row. #595.
+	var current []string
+
+	// Startup — VST (video start time). Breach takes precedence.
 	if vst := r.VideoStartTimeMs; vst > 0 {
 		switch {
 		case vst >= cfg.Startup.VSTBreachMs:
-			out = append(out, qoeLabel(SevCritical, "qoe_vst_breach"))
+			current = append(current, qoeLabel(SevCritical, "qoe_vst_breach"))
 		case vst >= cfg.Startup.VSTConcerningMs:
-			out = append(out, qoeLabel(SevWarning, "qoe_vst_concerning"))
+			current = append(current, qoeLabel(SevWarning, "qoe_vst_concerning"))
 		}
 	}
+
+	// Continuity — CIRR (rebuffer ratio) and CIRT (mean interruption).
+	if denom := r.StallingTimeMs + r.PlayingTimeMs; denom > 0 {
+		cirr := float64(r.StallingTimeMs) / float64(denom)
+		switch {
+		case cirr >= cfg.Continuity.CIRRBreach:
+			current = append(current, qoeLabel(SevCritical, "qoe_cirr_breach"))
+		case cirr >= cfg.Continuity.CIRRConcerning:
+			current = append(current, qoeLabel(SevWarning, "qoe_cirr_concerning"))
+		}
+	}
+	if r.StallingCount > 0 {
+		cirt := float64(r.StallingTimeMs) / float64(r.StallingCount)
+		switch {
+		case cirt >= float64(cfg.Continuity.CIRTBreachMs):
+			current = append(current, qoeLabel(SevCritical, "qoe_cirt_breach"))
+		case cirt >= float64(cfg.Continuity.CIRTConcerningMs):
+			current = append(current, qoeLabel(SevWarning, "qoe_cirt_concerning"))
+		}
+	}
+	// Stall burst — > N stall_start within the window. The window slice is
+	// fed by the event switch; trim to the window here before counting.
+	{
+		window := time.Duration(cfg.Continuity.StallBurstWindowS) * time.Second
+		ps.stallBurstTimes = trimBefore(ps.stallBurstTimes, now.Add(-window))
+		if uint32(len(ps.stallBurstTimes)) > cfg.Continuity.StallBurstThreshold {
+			current = append(current, qoeLabel(SevCritical, "qoe_stall_burst"))
+		}
+	}
+
+	// ABR / quality. abr_conservative / ladder_gap and throughput_divergence
+	// only make sense once playback has settled past the startup ramp — a low
+	// rung under high throughput is expected during startup, not a defect — so
+	// gate them behind StartupGraceMs of accumulated playing time (#595).
+	settled := r.PlayingTimeMs >= cfg.ABR.StartupGraceMs
+	if settled {
+		current = append(current, abrBitrateLabels(cfg, r)...)
+	}
+	{
+		window := time.Duration(cfg.ABR.DownshiftStormWindowS) * time.Second
+		ps.downshiftTimes = trimBefore(ps.downshiftTimes, now.Add(-window))
+		if uint32(len(ps.downshiftTimes)) > cfg.ABR.DownshiftStormThreshold {
+			current = append(current, qoeLabel(SevWarning, "qoe_downshift_storm"))
+		}
+	}
+	if l := minVariantStuckLabel(cfg, ps, r, now); l != "" {
+		current = append(current, l)
+	}
+	if l := fpsDipLabel(cfg, r); l != "" {
+		current = append(current, l)
+	}
+	if settled {
+		if l := throughputDivergenceLabel(cfg, ps, r, now); l != "" {
+			current = append(current, l)
+		}
+	}
+
+	// Live.
+	current = append(current, liveOffsetLabels(cfg, r)...)
+
+	// Network (event-row inputs).
+	if l := rateCapBreachLabel(cfg, r); l != "" {
+		current = append(current, l)
+	}
+	if l := cmcdMTPDriftLabel(cfg, r); l != "" {
+		current = append(current, l)
+	}
+
+	// ── Edge-trigger: emit rising edges, re-arm the active set ─────────
+	// A label not in qoeActive is a new occurrence (first determination,
+	// or a recurrence after it cleared) → emit. One already active is the
+	// same instance persisting → suppress. Rebuild qoeActive from `current`
+	// so a condition going false re-arms it for next time. #595.
+	if ps.qoeActive == nil {
+		ps.qoeActive = make(map[string]struct{})
+	}
+	prevActive := ps.qoeActive
+	next := make(map[string]struct{}, len(current))
+	var out []string
+	for _, l := range current {
+		if _, dup := next[l]; dup {
+			continue // de-dup within this row
+		}
+		next[l] = struct{}{}
+		if _, on := prevActive[l]; !on {
+			out = append(out, l)
+		}
+	}
+	ps.qoeActive = next
+
+	// ── Terminal row: summary (current-at-end) + outcome + tier ────────
 	if firstTerminal {
+		// Force-emit the still-true conditions that edge-triggering
+		// suppressed above, so the summary row carries the full
+		// current-at-end set and qoe_tier_* below reads a correct set.
+		for _, l := range current {
+			if _, on := prevActive[l]; on {
+				out = append(out, l)
+			}
+		}
+		// Startup outcome (terminal-only).
 		switch {
 		case r.PlaybackStatus == "abandoned_start":
 			// Exit before video start — a user can simply bail during
@@ -89,75 +193,7 @@ func computeQoEEventLabels(cfg *QoEThresholds, ps *playLabelState, r *row, now t
 		case isFailedStatus(r.PlaybackStatus) && r.VideoFirstFrameTimeMs > 0:
 			out = append(out, qoeLabel(SevError, "qoe_msf"))
 		}
-	}
-
-	// ── Continuity ───────────────────────────────────────────────────
-	// CIRR — rebuffer ratio = stalling / (stalling + playing).
-	if denom := r.StallingTimeMs + r.PlayingTimeMs; denom > 0 {
-		cirr := float64(r.StallingTimeMs) / float64(denom)
-		switch {
-		case cirr >= cfg.Continuity.CIRRBreach:
-			out = append(out, qoeLabel(SevCritical, "qoe_cirr_breach"))
-		case cirr >= cfg.Continuity.CIRRConcerning:
-			out = append(out, qoeLabel(SevWarning, "qoe_cirr_concerning"))
-		}
-	}
-	// CIRT — average interruption duration = stalling_ms / stalling_count.
-	if r.StallingCount > 0 {
-		cirt := float64(r.StallingTimeMs) / float64(r.StallingCount)
-		switch {
-		case cirt >= float64(cfg.Continuity.CIRTBreachMs):
-			out = append(out, qoeLabel(SevCritical, "qoe_cirt_breach"))
-		case cirt >= float64(cfg.Continuity.CIRTConcerningMs):
-			out = append(out, qoeLabel(SevWarning, "qoe_cirt_concerning"))
-		}
-	}
-	// Stall burst — > N stall_start within the window (windowed via the
-	// per-play slice the switch records into; trimmed here).
-	{
-		window := time.Duration(cfg.Continuity.StallBurstWindowS) * time.Second
-		ps.stallBurstTimes = trimBefore(ps.stallBurstTimes, now.Add(-window))
-		if uint32(len(ps.stallBurstTimes)) > cfg.Continuity.StallBurstThreshold {
-			out = append(out, qoeLabel(SevCritical, "qoe_stall_burst"))
-		}
-	}
-
-	// ── ABR / quality ────────────────────────────────────────────────
-	out = append(out, abrBitrateLabels(cfg, r)...)
-	// Downshift storm — > N rate_shift_down within the window.
-	{
-		window := time.Duration(cfg.ABR.DownshiftStormWindowS) * time.Second
-		ps.downshiftTimes = trimBefore(ps.downshiftTimes, now.Add(-window))
-		if uint32(len(ps.downshiftTimes)) > cfg.ABR.DownshiftStormThreshold {
-			out = append(out, qoeLabel(SevWarning, "qoe_downshift_storm"))
-		}
-	}
-	if l := minVariantStuckLabel(cfg, ps, r, now); l != "" {
-		out = append(out, l)
-	}
-	if l := fpsDipLabel(cfg, r); l != "" {
-		out = append(out, l)
-	}
-	if l := throughputDivergenceLabel(cfg, ps, r, now); l != "" {
-		out = append(out, l)
-	}
-
-	// ── Live ─────────────────────────────────────────────────────────
-	out = append(out, liveOffsetLabels(cfg, r)...)
-
-	// ── Network (event-row inputs) ───────────────────────────────────
-	if l := rateCapBreachLabel(cfg, r); l != "" {
-		out = append(out, l)
-	}
-	if l := cmcdMTPDriftLabel(cfg, r); l != "" {
-		out = append(out, l)
-	}
-
-	// ── Session-end aggregate tier (first terminal row only) ─────────
-	// Maps the worst severity among this row's qoe_* labels onto a
-	// single tier chip. Emitted once, on the first terminal row (see
-	// firstTerminal above).
-	if firstTerminal {
+		// Tier from the full terminal-row label set (worst severity).
 		out = append(out, qoeTierLabel(out))
 		ps.terminalEmitted = true
 	}
