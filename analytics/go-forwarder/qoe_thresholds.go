@@ -94,6 +94,12 @@ type QoEThresholds struct {
 		MinVariantStuckS uint32 `json:"min_variant_stuck_s"`
 		// Displayed fps below this fraction of nominal ⇒ qoe_fps_dip.
 		FPSDipRatio float64 `json:"fps_dip_ratio"`
+		// Playing-time (ms) a play must accumulate before qoe_abr_conservative
+		// / qoe_ladder_gap / qoe_throughput_divergence are evaluated. Below
+		// this the player is still in its startup ramp — sitting at a low
+		// rung under high throughput is expected, not a defect — so those
+		// labels are suppressed to avoid startup false positives. #595.
+		StartupGraceMs uint32 `json:"startup_grace_ms"`
 	} `json:"abr"`
 
 	// Live-edge label thresholds (#553). Margins are seconds BEYOND the
@@ -131,7 +137,8 @@ func qoeDefaults() *QoEThresholds {
 	t.ABR.DownshiftStormThreshold = 3
 	t.ABR.DownshiftStormWindowS = 30
 	t.ABR.MinVariantStuckS = 30
-	t.ABR.FPSDipRatio = 0.2 // displayed fps < 80% of nominal
+	t.ABR.FPSDipRatio = 0.2      // displayed fps < 80% of nominal
+	t.ABR.StartupGraceMs = 10000 // suppress abr/throughput labels for the first 10s of playback
 	t.Live.OffsetConcerningMarginS = 3
 	t.Live.OffsetBreachMarginS = 10
 	t.Live.HoldbackDeviationS = 2
@@ -238,6 +245,9 @@ func loadQoEThresholds(path string) *QoEThresholds {
 	if override.ABR.FPSDipRatio != 0 {
 		cfg.ABR.FPSDipRatio = override.ABR.FPSDipRatio
 	}
+	if override.ABR.StartupGraceMs != 0 {
+		cfg.ABR.StartupGraceMs = override.ABR.StartupGraceMs
+	}
 	if override.Live.OffsetConcerningMarginS != 0 {
 		cfg.Live.OffsetConcerningMarginS = override.Live.OffsetConcerningMarginS
 	}
@@ -262,9 +272,9 @@ func logQoEResolved(cfg *QoEThresholds) {
 	log.Printf("[QoE]   network.ttfb_breach_ms=%d transfer_stall_ms=%d rate_cap_breach_factor=%.2f cmcd_mtp_drift_ratio=%.2f",
 		cfg.Network.TTFBBreachMs, cfg.Network.TransferStallMs,
 		cfg.Network.RateCapBreachFactor, cfg.Network.CMCDMTPDriftRatio)
-	log.Printf("[QoE]   abr.bitrate_underutilized_ratio=%.2f abr_headroom_margin=%.2f throughput_divergence_factor=%.2f downshift_storm=%d/%ds min_variant_stuck_s=%d fps_dip_ratio=%.2f",
+	log.Printf("[QoE]   abr.bitrate_underutilized_ratio=%.2f abr_headroom_margin=%.2f throughput_divergence_factor=%.2f downshift_storm=%d/%ds min_variant_stuck_s=%d fps_dip_ratio=%.2f startup_grace_ms=%d",
 		cfg.ABR.BitrateUnderutilizedRatio, cfg.ABR.AbrHeadroomMargin, cfg.ABR.ThroughputDivergenceFactor,
-		cfg.ABR.DownshiftStormThreshold, cfg.ABR.DownshiftStormWindowS, cfg.ABR.MinVariantStuckS, cfg.ABR.FPSDipRatio)
+		cfg.ABR.DownshiftStormThreshold, cfg.ABR.DownshiftStormWindowS, cfg.ABR.MinVariantStuckS, cfg.ABR.FPSDipRatio, cfg.ABR.StartupGraceMs)
 	log.Printf("[QoE]   live.offset_concerning_margin_s=%.1f offset_breach_margin_s=%.1f holdback_deviation_s=%.1f",
 		cfg.Live.OffsetConcerningMarginS, cfg.Live.OffsetBreachMarginS, cfg.Live.HoldbackDeviationS)
 }

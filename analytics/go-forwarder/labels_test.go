@@ -293,6 +293,7 @@ func TestQoEBitrateCauseLabels(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			got := evalQoE(&row{
 				Ts: tsBase, PlayerID: "p", PlayID: "x", PlaybackStatus: "in_progress",
+				PlayingTimeMs:    10000, // past ABR startup grace (#595)
 				VideoBitrateMbps: tc.cur, NetworkBitrateMbps: tc.netbw, AvgNetworkBitrateMbps: tc.avgbw,
 				ManifestVariants: tc.variants,
 			})
@@ -308,7 +309,7 @@ func TestQoEBitrateCauseLabels(t *testing.T) {
 
 func TestQoEBitrateMalformedLadder(t *testing.T) {
 	// Malformed JSON must not panic and must emit no cause label.
-	got := evalQoE(&row{Ts: tsBase, PlayerID: "p", PlayID: "x", PlaybackStatus: "in_progress",
+	got := evalQoE(&row{Ts: tsBase, PlayerID: "p", PlayID: "x", PlaybackStatus: "in_progress", PlayingTimeMs: 10000,
 		VideoBitrateMbps: 1, NetworkBitrateMbps: 10, ManifestVariants: "{not json"})
 	if hasLabel(got, qoeLabel(SevWarning, "qoe_abr_conservative")) || hasLabel(got, qoeLabel(SevInfo, "qoe_ladder_gap")) {
 		t.Fatalf("malformed ladder should emit no cause label: %v", got)
@@ -345,16 +346,41 @@ func TestQoEFPSDip(t *testing.T) {
 func TestQoEThroughputDivergence(t *testing.T) {
 	want := qoeLabel(SevWarning, "qoe_throughput_divergence")
 	// nb matches server peak → no divergence.
-	if got := evalQoE(&row{Ts: tsBase, PlayerID: "p", PlayID: "x", PlaybackStatus: "in_progress", NetworkBitrateMbps: 10, MbpsTransferRate: 10}); hasLabel(got, want) {
+	if got := evalQoE(&row{Ts: tsBase, PlayerID: "p", PlayID: "x", PlaybackStatus: "in_progress", PlayingTimeMs: 10000, NetworkBitrateMbps: 10, MbpsTransferRate: 10}); hasLabel(got, want) {
 		t.Fatalf("matching throughput should not diverge: %v", got)
 	}
 	// nb 5 vs peak 10 → 50% > 15% → diverge.
-	if got := evalQoE(&row{Ts: tsBase, PlayerID: "p", PlayID: "x", PlaybackStatus: "in_progress", NetworkBitrateMbps: 5, MbpsTransferRate: 10}); !hasLabel(got, want) {
+	if got := evalQoE(&row{Ts: tsBase, PlayerID: "p", PlayID: "x", PlaybackStatus: "in_progress", PlayingTimeMs: 10000, NetworkBitrateMbps: 5, MbpsTransferRate: 10}); !hasLabel(got, want) {
 		t.Fatalf("nb 5 vs peak 10 should diverge: %v", got)
 	}
 	// nb 5 vs cap 10 (no server peak) → diverge via limit branch.
-	if got := evalQoE(&row{Ts: tsBase, PlayerID: "p", PlayID: "x", PlaybackStatus: "in_progress", NetworkBitrateMbps: 5, EffectiveRateLimitMbps: 10}); !hasLabel(got, want) {
+	if got := evalQoE(&row{Ts: tsBase, PlayerID: "p", PlayID: "x", PlaybackStatus: "in_progress", PlayingTimeMs: 10000, NetworkBitrateMbps: 5, EffectiveRateLimitMbps: 10}); !hasLabel(got, want) {
 		t.Fatalf("nb 5 vs cap 10 should diverge: %v", got)
+	}
+}
+
+func TestQoEAbrStartupGate(t *testing.T) {
+	// Inputs that trip BOTH qoe_abr_conservative (cur 1 under throughput 10,
+	// next rung 5 fits) and qoe_throughput_divergence (nb 10 vs peak 20). But
+	// during the startup ramp (playing time < grace) both are suppressed (#595).
+	conservative := qoeLabel(SevWarning, "qoe_abr_conservative")
+	divergence := qoeLabel(SevWarning, "qoe_throughput_divergence")
+	ladder := `[{"bandwidth":1000000},{"bandwidth":5000000},{"bandwidth":8000000}]`
+	mk := func(playingMs uint32) *row {
+		return &row{
+			Ts: tsBase, PlayerID: "p", PlayID: "x", PlaybackStatus: "in_progress",
+			PlayingTimeMs: playingMs, VideoBitrateMbps: 1, NetworkBitrateMbps: 10,
+			MbpsTransferRate: 20, ManifestVariants: ladder,
+		}
+	}
+	// 5s in — still ramping → suppressed.
+	if got := evalQoE(mk(5000)); hasLabel(got, conservative) || hasLabel(got, divergence) {
+		t.Fatalf("startup ramp (5s playing) must suppress abr/throughput labels: %v", got)
+	}
+	// 10s in — settled → both fire.
+	got := evalQoE(mk(10000))
+	if !hasLabel(got, conservative) || !hasLabel(got, divergence) {
+		t.Fatalf("settled play (10s) should emit both abr_conservative + throughput_divergence: %v", got)
 	}
 }
 
@@ -560,5 +586,68 @@ func TestTestingSeverityUnranked(t *testing.T) {
 	// A real signal alongside still wins.
 	if sev := worstSeverity([]string{"testing=run_id_x", SevWarning + "=timejump"}); sev != SevWarning {
 		t.Fatalf("real signal must still rank past testing labels, got %q", sev)
+	}
+}
+
+// --- Edge-triggering: rising edge + terminal summary (#595) ----------
+
+func TestQoEStickyEmitsOnceNotEveryRow(t *testing.T) {
+	s := newLabelState()
+	concerning := qoeLabel(SevWarning, "qoe_vst_concerning")
+	mk := func(ts string) *row {
+		return &row{Ts: ts, PlayerID: "p", PlayID: "x", PlaybackStatus: "in_progress", VideoStartTimeMs: 6000}
+	}
+	// Row 1: first determination → emit.
+	if got := computeEventLabelsWithState(s, mk("2026-06-03 00:00:01.000")); !hasLabel(got, concerning) {
+		t.Fatalf("first determination should emit %s: %v", concerning, got)
+	}
+	// Rows 2-3: same sticky VST → suppressed, no per-heartbeat repeat.
+	for _, ts := range []string{"2026-06-03 00:00:02.000", "2026-06-03 00:00:03.000"} {
+		if got := computeEventLabelsWithState(s, mk(ts)); hasLabel(got, concerning) {
+			t.Fatalf("sticky VST must not re-stamp %s on %s: %v", concerning, ts, got)
+		}
+	}
+}
+
+func TestQoEReFiresOnNewInstance(t *testing.T) {
+	s := newLabelState()
+	want := qoeLabel(SevWarning, "qoe_cirr_concerning")
+	// CIRR = stalling/(stalling+playing). 0.002 = concerning threshold.
+	hot := func(ts string) *row {
+		return &row{Ts: ts, PlayerID: "p", PlayID: "x", PlaybackStatus: "in_progress", StallingTimeMs: 1000, PlayingTimeMs: 499000}
+	}
+	cold := func(ts string) *row {
+		return &row{Ts: ts, PlayerID: "p", PlayID: "x", PlaybackStatus: "in_progress", StallingTimeMs: 1, PlayingTimeMs: 10_000_000}
+	}
+	if got := computeEventLabelsWithState(s, hot("2026-06-03 00:00:01.000")); !hasLabel(got, want) {
+		t.Fatalf("rising edge should emit %s: %v", want, got)
+	}
+	if got := computeEventLabelsWithState(s, hot("2026-06-03 00:00:02.000")); hasLabel(got, want) {
+		t.Fatalf("sustained must suppress %s: %v", want, got)
+	}
+	if got := computeEventLabelsWithState(s, cold("2026-06-03 00:00:03.000")); hasLabel(got, want) {
+		t.Fatalf("cleared row must not emit %s: %v", want, got)
+	}
+	// Cleared then true again = a new instance → re-emit.
+	if got := computeEventLabelsWithState(s, hot("2026-06-03 00:00:04.000")); !hasLabel(got, want) {
+		t.Fatalf("recurrence after clearing should re-emit %s: %v", want, got)
+	}
+}
+
+func TestQoETerminalSummaryForcesStillTrue(t *testing.T) {
+	s := newLabelState()
+	concerning := qoeLabel(SevWarning, "qoe_vst_concerning")
+	mk := func(ts, ev, status string) *row {
+		return &row{Ts: ts, PlayerID: "p", PlayID: "x", LastEvent: ev, PlaybackStatus: status, VideoStartTimeMs: 6000}
+	}
+	computeEventLabelsWithState(s, mk("2026-06-03 00:00:01.000", "", "in_progress")) // first determination (emits)
+	computeEventLabelsWithState(s, mk("2026-06-03 00:00:02.000", "", "in_progress")) // sustained (suppressed)
+	// Terminal row: summary must force-emit the still-true VST + the tier.
+	got := computeEventLabelsWithState(s, mk("2026-06-03 00:00:03.000", "session_end", "completed"))
+	if !hasLabel(got, concerning) {
+		t.Fatalf("terminal summary must carry still-true %s: %v", concerning, got)
+	}
+	if !hasLabel(got, qoeLabel(SevWarning, "qoe_tier_acceptable")) {
+		t.Fatalf("tier must reflect the summary (warning → acceptable): %v", got)
 	}
 }
