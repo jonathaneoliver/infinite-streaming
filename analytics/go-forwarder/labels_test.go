@@ -36,6 +36,7 @@ func TestEventSwitchUnchanged(t *testing.T) {
 		{"rate_shift_down", nil, []string{"info=shift_down"}},
 		{"video_first_frame", nil, []string{"info=first_frame"}},
 		{"video_start_time", nil, []string{"info=playback_start"}},
+		{"play_start", nil, []string{"info=play_start"}}, // #603 play-open boundary
 		// warning — degraded but functioning
 		{"timejump", nil, []string{"warning=timejump"}},
 		{"segment_stall", nil, []string{"warning=stall_segment"}},
@@ -86,6 +87,16 @@ func hasLabel(labels []string, want string) bool {
 // thresholds) and returns the labels.
 func evalQoE(r *row) []string {
 	return computeEventLabelsWithState(newLabelState(), r)
+}
+
+// evalTerminal evaluates a terminal row the way it occurs in reality —
+// after the play has opened. A lone terminal on fresh state is treated as
+// a mis-bucketed leak (#603), so unit-testing terminal labels requires an
+// opening (non-terminal) row first.
+func evalTerminal(r *row) []string {
+	s := newLabelState()
+	computeEventLabelsWithState(s, &row{Ts: "2026-06-01 00:00:00.000", PlayerID: r.PlayerID, PlayID: r.PlayID, PlaybackStatus: "in_progress", LastEvent: "play_start"})
+	return computeEventLabelsWithState(s, r)
 }
 
 const tsBase = "2026-06-01 00:00:00.000"
@@ -485,31 +496,31 @@ func TestQoETerminalGateAndTier(t *testing.T) {
 	}
 
 	// session_end clean → premium.
-	if got := evalQoE(&row{Ts: tsBase, PlayerID: "p", PlayID: "x", LastEvent: "session_end", PlaybackStatus: "completed"}); !hasLabel(got, tierPremium) {
+	if got := evalTerminal(&row{Ts: tsBase, PlayerID: "p", PlayID: "x", LastEvent: "session_end", PlaybackStatus: "completed"}); !hasLabel(got, tierPremium) {
 		t.Fatalf("clean terminal → premium: %v", got)
 	}
 	// session_end with a warning (VST concerning) → acceptable.
-	if got := evalQoE(&row{Ts: tsBase, PlayerID: "p", PlayID: "x", LastEvent: "session_end", PlaybackStatus: "completed", VideoStartTimeMs: 6000}); !hasLabel(got, tierAcceptable) {
+	if got := evalTerminal(&row{Ts: tsBase, PlayerID: "p", PlayID: "x", LastEvent: "session_end", PlaybackStatus: "completed", VideoStartTimeMs: 6000}); !hasLabel(got, tierAcceptable) {
 		t.Fatalf("warning terminal → acceptable: %v", got)
 	}
 	// play_end with a critical (VST breach) → unacceptable. Also proves the
 	// {session_end, play_end} terminal-event set both trigger.
-	if got := evalQoE(&row{Ts: tsBase, PlayerID: "p", PlayID: "x", LastEvent: "play_end", PlaybackStatus: "completed", VideoStartTimeMs: 20000}); !hasLabel(got, tierUnacceptable) {
+	if got := evalTerminal(&row{Ts: tsBase, PlayerID: "p", PlayID: "x", LastEvent: "play_end", PlaybackStatus: "completed", VideoStartTimeMs: 20000}); !hasLabel(got, tierUnacceptable) {
 		t.Fatalf("critical terminal (play_end) → unacceptable: %v", got)
 	}
 }
 
 func TestQoETerminalFailureLabels(t *testing.T) {
 	// vsf: failed before first frame.
-	if got := evalQoE(&row{Ts: tsBase, PlayerID: "p", PlayID: "x", LastEvent: "session_end", PlaybackStatus: "start_failure", VideoFirstFrameTimeMs: 0}); !hasLabel(got, qoeLabel(SevError, "qoe_vsf")) {
+	if got := evalTerminal(&row{Ts: tsBase, PlayerID: "p", PlayID: "x", LastEvent: "session_end", PlaybackStatus: "start_failure", VideoFirstFrameTimeMs: 0}); !hasLabel(got, qoeLabel(SevError, "qoe_vsf")) {
 		t.Fatalf("start_failure pre-first-frame → vsf: %v", got)
 	}
 	// msf: failed after first frame.
-	if got := evalQoE(&row{Ts: tsBase, PlayerID: "p", PlayID: "x", LastEvent: "session_end", PlaybackStatus: "mid_stream_failure", VideoFirstFrameTimeMs: 250}); !hasLabel(got, qoeLabel(SevError, "qoe_msf")) {
+	if got := evalTerminal(&row{Ts: tsBase, PlayerID: "p", PlayID: "x", LastEvent: "session_end", PlaybackStatus: "mid_stream_failure", VideoFirstFrameTimeMs: 250}); !hasLabel(got, qoeLabel(SevError, "qoe_msf")) {
 		t.Fatalf("mid_stream_failure post-first-frame → msf: %v", got)
 	}
 	// ebvs: abandoned start — warning (a user can bail during startup).
-	if got := evalQoE(&row{Ts: tsBase, PlayerID: "p", PlayID: "x", LastEvent: "session_end", PlaybackStatus: "abandoned_start"}); !hasLabel(got, qoeLabel(SevWarning, "qoe_ebvs")) {
+	if got := evalTerminal(&row{Ts: tsBase, PlayerID: "p", PlayID: "x", LastEvent: "session_end", PlaybackStatus: "abandoned_start"}); !hasLabel(got, qoeLabel(SevWarning, "qoe_ebvs")) {
 		t.Fatalf("abandoned_start → ebvs: %v", got)
 	}
 	// Negative: a failed status WITHOUT the terminal event → no outcome
@@ -530,6 +541,9 @@ func TestQoETerminalEmitOnce(t *testing.T) {
 	mk := func(ts string) *row {
 		return &row{Ts: ts, PlayerID: "p", PlayID: "x", LastEvent: "session_end", PlaybackStatus: "mid_stream_failure", VideoFirstFrameTimeMs: 250}
 	}
+	// Open the play first — a lone terminal on fresh state is treated as a
+	// mis-bucketed leak (#603).
+	computeEventLabelsWithState(s, &row{Ts: "2026-05-31 23:59:59.000", PlayerID: "p", PlayID: "x", PlaybackStatus: "in_progress", LastEvent: "play_start"})
 	first := computeEventLabelsWithState(s, mk("2026-06-01 00:00:00.000"))
 	if !hasLabel(first, msf) || !hasLabel(first, tier) {
 		t.Fatalf("first terminal row should carry msf + tier: %v", first)
@@ -649,5 +663,34 @@ func TestQoETerminalSummaryForcesStillTrue(t *testing.T) {
 	}
 	if !hasLabel(got, qoeLabel(SevWarning, "qoe_tier_acceptable")) {
 		t.Fatalf("tier must reflect the summary (warning → acceptable): %v", got)
+	}
+}
+
+// --- Leading-terminal defense: mis-bucketed play_end (#603) -----------
+
+func TestQoELeadingTerminalIgnored(t *testing.T) {
+	s := newLabelState()
+	// First row of the play is a play_end carrying the PRIOR play's
+	// accumulators (leaked onto this play_id at the boundary). cirr =
+	// 2.5M/(2.5M+57M) = 0.043 ≫ breach — but it must emit nothing and must
+	// NOT consume the emit-once terminal guard. #603.
+	leak := &row{Ts: "2026-06-04 00:00:01.000", PlayerID: "p", PlayID: "x", LastEvent: "play_end",
+		PlaybackStatus: "completed", StallingTimeMs: 2548457, PlayingTimeMs: 57010232, StallingCount: 1}
+	got := computeEventLabelsWithState(s, leak)
+	for _, bad := range []string{
+		qoeLabel(SevCritical, "qoe_cirr_breach"),
+		qoeLabel(SevCritical, "qoe_cirt_breach"),
+		qoeLabel(SevCritical, "qoe_tier_unacceptable"),
+	} {
+		if hasLabel(got, bad) {
+			t.Fatalf("leading play_end must not emit %s: %v", bad, got)
+		}
+	}
+	// Play opens (restart), then a real clean terminal — should still get a
+	// tier, proving the guard wasn't consumed by the leaked frame.
+	computeEventLabelsWithState(s, &row{Ts: "2026-06-04 00:00:01.100", PlayerID: "p", PlayID: "x", LastEvent: "restart", PlaybackStatus: "in_progress"})
+	end := computeEventLabelsWithState(s, &row{Ts: "2026-06-04 00:05:00.000", PlayerID: "p", PlayID: "x", LastEvent: "play_end", PlaybackStatus: "completed", PlayingTimeMs: 290000})
+	if !hasLabel(end, qoeLabel(SevInfo, "qoe_tier_premium")) {
+		t.Fatalf("real terminal after the play opened should still get a tier: %v", end)
 	}
 }

@@ -121,6 +121,12 @@ type playLabelState struct {
 	// keeps heart-beating re-stamps the label on every subsequent row
 	// ("endless qoe_msf").
 	terminalEmitted bool
+	// #603 — set true once any non-terminal row is seen for this play
+	// (play_start / restart / state_change / …). A play terminal arriving
+	// while this is still false is the PREVIOUS play's play_end mis-bucketed
+	// onto this play_id (no play_start boundary yet) — its accumulators are
+	// the prior play's, so the QoE labeler ignores it.
+	everOpened bool
 	// #595 — edge-triggering for level/sticky qoe_* labels. qoeActive is
 	// the set of qoe labels that were true on the previous evaluated row.
 	// A label is emitted only on its rising edge (off→on): its first
@@ -273,6 +279,10 @@ func computeEventLabelsWithState(s *labelState, r *row) []string {
 		out = []string{SevInfo + "=first_frame"}
 	case "video_start_time":
 		out = []string{SevInfo + "=playback_start"}
+	case "play_start":
+		// #603 — explicit play-open boundary (symmetric to play_end).
+		// Distinct from `restart`, which is mid-session recovery only.
+		out = []string{SevInfo + "=play_start"}
 
 	// warning — degraded but functioning
 	case "timejump":
