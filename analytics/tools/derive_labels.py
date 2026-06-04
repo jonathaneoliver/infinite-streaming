@@ -11,7 +11,7 @@ two operations that used to run together every tick:
                 row per condition to derived_models for observability. This is the only place
                 the expensive sc.train runs.
 
-  --mode score (FAST, ~1 min): load the latest artifact, score recent plays' transitions
+  --mode score (FAST, ~5 min): load the latest artifact, score recent plays' transitions
                 against it, and write one derived_labels row per above-threshold transition,
                 anchored on the EXACT row whose token was improbable. NO training.
 

@@ -281,7 +281,7 @@ services:
   # #506/#608 — anomaly LABEL derivation, SPLIT into train + score (the VOMM scorer's
   # verdicts). The reference model (typical-episode grammar) changes slowly, so it is
   # rebuilt slowly (label-trainer, nightly); scoring against it is cheap, so it runs often
-  # (label-scorer, ~1 min) for low-latency unexpected_<condition> chips. They share the
+  # (label-scorer, ~5 min) for low-latency unexpected_<condition> chips. They share the
   # model artifact through the `vomm-models` volume; both bind-mount the tools dir so the
   # model/tokenizer evolve without a rebuild. Neither is on the hot path.
 
@@ -327,7 +327,7 @@ services:
       - vomm-models:/models
     environment:
       - FORWARDER_CLICKHOUSE_URL=http://clickhouse:8123
-      - LABEL_SCORE_INTERVAL_SECONDS=${LABEL_SCORE_INTERVAL_SECONDS:-60}
+      - LABEL_SCORE_INTERVAL_SECONDS=${LABEL_SCORE_INTERVAL_SECONDS:-300}
       - LABEL_SCORE_HOURS=${LABEL_SCORE_HOURS:-2}
       - LABEL_MODEL_PATH=${LABEL_MODEL_PATH:-/models/labels-model.json.gz}
     command:
