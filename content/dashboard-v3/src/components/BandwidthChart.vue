@@ -17,7 +17,7 @@
  *     - Player Variant             — active video bitrate
  *
  *   Server-side rendition (from server_metrics):
- *     - Server Variant — rendition_mbps the server thinks the client picked
+ *     - Serving Variant — rendition_mbps the server thinks the client picked
  *
  * Y-max is controlled by the panel-level BitrateChartPanelToolbar via
  * the shared chart-coordination state.
@@ -277,13 +277,17 @@ const baseSeries: SeriesSpec[] = [
     accessor: (p: PlayerRecord) => p.player_metrics?.network_bitrate_mbps ?? null,
   },
   {
-    label: 'Player Variant',
+    // video_bitrate_mbps == indicatedBitrate == the variant AVPlayer has
+    // SELECTED to fetch (the ABR pick). It leads the on-screen rung by the
+    // buffer depth — hence "Fetching", paired with "Displayed Variant"
+    // (the decoded/on-screen rung) added in the series computed below.
+    label: 'Fetching Variant',
     color: '#ef4444',
     accessor: (p: PlayerRecord) => p.player_metrics?.video_bitrate_mbps ?? null,
     stepped: true,
   },
   {
-    label: 'Server Variant',
+    label: 'Serving Variant',
     color: '#b45309',
     accessor: (p: PlayerRecord) => p.server_metrics?.rendition_mbps ?? null,
     stepped: true,
@@ -299,12 +303,48 @@ const baseSeries: SeriesSpec[] = [
  *  whole X range; sharing a `groupLegend` collapses them all to a
  *  single legend chip that toggles every line at once.
  *
- *  Defaults: avg ON (the operator's natural mental ABR reference),
- *  peak OFF (clutters the chart for advanced inspection only). */
+ *  Defaults: peak ON (the rate ABR actually keys on — see abr-ladder
+ *  standard), avg OFF (toggle on for the typical-body-bitrate reference). */
 const series = computed<SeriesSpec[]>(() => {
   const out = [...baseSeries];
   const ladder = variants.value;
   if (!ladder.length) return out;
+  // "Displayed Variant": the same value that drives the player-state
+  // "Video Res" line (player_metrics.video_resolution = the DECODED frame
+  // size, presentationSize on iOS / videoWidth×videoHeight on web), plotted
+  // as that variant's published peak BANDWIDTH per sample.
+  //
+  // Matched by NEAREST frame HEIGHT, not exact "WxH": the decoded size
+  // legitimately differs from the manifest RESOLUTION attribute (coded vs
+  // display, e.g. 1080 encoded as 1088 for mod-16; PAR / clean aperture;
+  // packager quirks), so an exact string match would blank the line.
+  // (We deliberately do NOT disambiguate with video_bitrate_mbps — that's
+  // indicatedBitrate, i.e. the variant being FETCHED/selected, which leads
+  // the displayed rung by the buffer; using it here would mislabel during
+  // switches. Same-height variants therefore can't be told apart for the
+  // displayed rung — this project's ladders have one rung per height.)
+  const heightOf = (res?: string | null): number | null => {
+    if (!res) return null;
+    const m = /(\d+)\s*[x×]\s*(\d+)/i.exec(res);
+    return m ? Number(m[2]) : null;
+  };
+  const rungs = ladder
+    .map((v) => ({ h: heightOf(v.resolution), peak: Number(v.bandwidth) / 1_000_000 }))
+    .filter((r) => r.h != null && Number.isFinite(r.peak) && r.peak > 0) as { h: number; peak: number }[];
+  out.push({
+    label: 'Displayed Variant',
+    color: '#a855f7',
+    accessor: (p: PlayerRecord) => {
+      const h = heightOf(p.player_metrics?.video_resolution);
+      if (h == null || !rungs.length) return null;
+      let best = rungs[0];
+      for (const r of rungs) {
+        if (Math.abs(r.h - h) < Math.abs(best.h - h)) best = r;
+      }
+      return best.peak;
+    },
+    stepped: true,
+  });
   // Mute the variant-line color so it doesn't out-shout the live
   // traces. Slate-400 reads at a glance but stays in the background.
   const AVG_COLOR = '#94a3b8';
@@ -319,8 +359,9 @@ const series = computed<SeriesSpec[]>(() => {
         color: AVG_COLOR,
         accessor: () => mbps,
         stepped: false,
-        borderDash: [6, 4],
+        borderDash: [2, 4],
         groupLegend: 'Variant avg bandwidth',
+        hidden: true,
       });
     }
     const peakBw = Number(v.bandwidth);
@@ -332,9 +373,8 @@ const series = computed<SeriesSpec[]>(() => {
         color: PEAK_COLOR,
         accessor: () => mbps,
         stepped: false,
-        borderDash: [2, 4],
+        borderDash: [6, 4],
         groupLegend: 'Variant peak bandwidth',
-        hidden: true,
       });
     }
   }
