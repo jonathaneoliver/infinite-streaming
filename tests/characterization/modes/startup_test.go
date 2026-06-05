@@ -53,36 +53,35 @@ const (
 	startupSamplerPeriod      = 500 * time.Millisecond
 )
 
-// startupCapMarginFraction is the headroom multiplied onto each
-// variant's AVERAGE-BANDWIDTH to derive its "just-pick-this-variant"
-// cap. avg × (1 + headroom) × (1 + TCPOverhead) sits below the next
-// variant's avg, so the player's variant-selection algorithm should
-// land on this rung. Tuned to match what AVPlayer settles on in
-// practice — too low and the player won't pick the intended variant;
-// too high and it overshoots.
-const startupCapMarginFraction = 0.20
-
 // computeStartupCaps derives one cap per video variant from the
-// manifest. Each cap is variant.avg × 1.20 × 1.07 (TCP overhead) —
-// enough headroom that the player picks that variant comfortably,
-// but below the next variant's avg.
+// manifest, anchored on the variant's PEAK (BANDWIDTH) rate (#551 — the
+// audited OSS players all key startup selection on peak). Each cap is
+// variant.peak × (1 + LadderBumpPct) so it sits just above THIS variant's
+// peak and below the next variant's peak (the ladder's ≥1.5× spacing
+// guards that), which is what makes a peak-keyed player land on this rung
+// at cold start.
+//
+// NOTE (#551): re-anchored from AVERAGE-BANDWIDTH × 1.20 × 1.07-TCP to
+// peak × 1.05. The exact bump may need empirical re-tuning on the sim —
+// if a player overshoots/undershoots the intended variant, adjust via
+// CHAR_LADDER_BUMP_PCT.
 //
 // Returns the caps in DESCENDING order (top variant first) so the
 // most interesting case (no-constraint) runs first.
 //
 // Override CHAR_STARTUP_CAPS=30,8,3 to bypass and use a literal list.
 func computeStartupCaps(bws map[string]runner.VariantBandwidth) []float64 {
-	avgs := make([]float64, 0, len(bws))
+	peaks := make([]float64, 0, len(bws))
 	for _, bw := range bws {
-		if bw.AvgMbps > 0 {
-			avgs = append(avgs, bw.AvgMbps)
+		if bw.PeakMbps > 0 {
+			peaks = append(peaks, bw.PeakMbps)
 		}
 	}
-	sort.Sort(sort.Reverse(sort.Float64Slice(avgs)))
-	out := make([]float64, 0, len(avgs))
-	for _, avg := range avgs {
-		cap := avg * (1 + startupCapMarginFraction) * (1 + float64(runner.TCPOverheadPct)/100)
-		out = append(out, math.Round(cap*1000)/1000)
+	sort.Sort(sort.Reverse(sort.Float64Slice(peaks)))
+	f := 1 + runner.LadderBumpPct()/100
+	out := make([]float64, 0, len(peaks))
+	for _, pk := range peaks {
+		out = append(out, math.Round(pk*f*1000)/1000)
 	}
 	return out
 }

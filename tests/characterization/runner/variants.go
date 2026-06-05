@@ -4,104 +4,127 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"os"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
+
+	"github.com/jonathaneoliver/infinite-streaming/go-proxy/pkg/ladder"
 )
 
-// TCPOverheadPct is the framework's per-cap allowance for TCP+IP+TLS+
-// HTTP framing overhead. Applied multiplicatively on top of any test
-// margin so that "margin 0" means "cap = variant_avg × 1.07" — the
-// just-barely-sustainable real-world cap. Empirically the on-wire
-// overhead is 5-8% across the throughput range we test (per-packet TCP
-// headers ≈ 2.7%, TLS framing ≈ 3-5%, HTTP/2 frames ≈ 1-2%); 7% is the
-// midpoint and covers low-rate connection-setup amortization concerns
-// without being wasteful at the top of the ladder.
-const TCPOverheadPct = 7
-
-// VariantRate is one rung of the current play's ladder, with the cap rate
-// the characterization sweep should apply for it: the variant's
-// AVERAGE-BANDWIDTH (preferred — long-term sustainable) or BANDWIDTH (peak
-// per HLS spec) × (1 + marginPct/100) × (1 + TCPOverheadPct/100).
+// VariantRate is one rung of the current play's limit ladder, with the
+// cap rate the characterization sweep applies for it. Since #551 the
+// ladder is built by the shared go-proxy/pkg/ladder package: it carries
+// BOTH a peak (BANDWIDTH) and an average (AVERAGE-BANDWIDTH) anchor per
+// variant, each ×(1+bump) at a flat bump (default 5%), plus geometric
+// fills so no two consecutive caps differ by more than CHAR_LADDER_MAX_STEP.
 //
-// Both AvgBps + PeakBps are recorded for diagnostics — Source tells you
-// which one fed the cap calc. RawBps is kept as an alias of "the one we
-// used" for backward compat with existing report JSON.
-//
-// Why both matter: a cap at avg×1.05 is enough for *sustained* playback
-// at that variant, but the player's per-segment fetch peak can be 30-40%
-// higher than avg for typical CBR. If the cap is below peak, the player
-// can't keep up during peak segments and downshifts — which is exactly
-// the "+5% isn't enough" finding the smooth sweep surfaces on AVPlayer.
+// Each rung is attributed to the manifest variant a PEAK-keyed player
+// should sustain at that cap (the confirmed model: hls.js/ExoPlayer/Shaka
+// all key down-switch on peak; AVPlayer is unknown so we carry both
+// scalars). Resolution/AvgBps/PeakBps therefore describe that expected
+// variant; Source records the rung's provenance ("peak", "avg" or
+// "fill"). RawBps mirrors PeakBps for backward-compat with report JSON
+// and stepOnTarget's expected-bitrate check. MarginPct is retained for
+// the report schema but is 0 under the flat-bump model.
 type VariantRate struct {
 	Resolution string  `json:"resolution"`
 	URL        string  `json:"url"`
-	AvgBps     int     `json:"avg_bps"`     // AVERAGE-BANDWIDTH from the master playlist, 0 if absent
-	PeakBps    int     `json:"peak_bps"`    // BANDWIDTH (per HLS spec — peak segment rate)
-	RawBps     int     `json:"raw_bps"`     // value used for cap calc (avg if present, else peak)
-	Source     string  `json:"source"`      // "average" or "peak" — which one fed RawBps
-	MarginPct  int     `json:"margin_pct"`  // headroom we applied
-	CapMbps    float64 `json:"cap_mbps"`    // RawBps × (1+margin/100) / 1e6
+	AvgBps     int     `json:"avg_bps"`    // expected variant's AVERAGE-BANDWIDTH, 0 if absent
+	PeakBps    int     `json:"peak_bps"`   // expected variant's BANDWIDTH (peak per HLS spec)
+	RawBps     int     `json:"raw_bps"`    // == PeakBps (peak-anchored matching)
+	Source     string  `json:"source"`     // "peak" | "avg" | "fill" — rung provenance
+	MarginPct  int     `json:"margin_pct"` // 0 under the flat-bump ladder
+	CapMbps    float64 `json:"cap_mbps"`   // the rate to shape to for this rung
 }
 
-// VariantRatesDesc reads the bound player's current manifest variants and
-// returns one VariantRate per rung, sorted descending by cap rate. Margin
-// is in percent (5 = 5% headroom). The descending order mirrors the
-// server's `ramp_down` pattern and the dashboard's buildSteps shape.
-//
-// Errors when the player has no manifest variants yet (master playlist
-// hasn't been fetched, or the v2 projection is missing them).
-func VariantRatesDesc(rec *PlayerRecord, marginPct int) ([]VariantRate, error) {
+// LadderBumpPct / LadderMaxStep / LadderTopHeadroomPct read the optional
+// operator overrides, falling back to the shared package defaults (5% flat
+// bump, 1.15× steps, 25% top-headroom start rung).
+func LadderBumpPct() float64 { return envFloat("CHAR_LADDER_BUMP_PCT", ladder.DefaultBumpPct) }
+func LadderMaxStep() float64 { return envFloat("CHAR_LADDER_MAX_STEP", ladder.DefaultMaxStep) }
+func LadderTopHeadroomPct() float64 {
+	return envFloat("CHAR_LADDER_TOP_HEADROOM_PCT", ladder.DefaultTopHeadroomPct)
+}
+
+func envFloat(key string, def float64) float64 {
+	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil && f >= 0 {
+			return f
+		}
+	}
+	return def
+}
+
+// StandardLadderRates builds the dual-rung + geometrically-filled limit
+// ladder for the bound player's current manifest, sorted descending by
+// cap. Every rung (peak/avg anchor or interpolated fill) is attributed to
+// the manifest variant a peak-keyed player should sustain at that cap, so
+// the variant-aware sweep (stepOnTarget / per-variant pass-fail / Finalize)
+// works unchanged. Errors when the master playlist hasn't been fetched.
+func StandardLadderRates(rec *PlayerRecord) ([]VariantRate, error) {
 	if rec == nil || rec.CurrentPlay == nil {
-		return nil, errors.New("variant rates: player has no current play")
+		return nil, errors.New("ladder: player has no current play")
 	}
 	variants := rec.CurrentPlay.Manifest.Variants
 	if len(variants) == 0 {
-		return nil, errors.New("variant rates: manifest has no variants (master playlist not fetched yet?)")
+		return nil, errors.New("ladder: manifest has no variants (master playlist not fetched yet?)")
 	}
-	if marginPct <= -100 {
-		return nil, fmt.Errorf("variant rates: margin %d would zero or invert the cap", marginPct)
-	}
-	rates := make([]VariantRate, 0, len(variants))
+	lv := make([]ladder.Variant, 0, len(variants))
 	for _, v := range variants {
-		bps := v.Bandwidth
-		source := "peak"
-		if v.AverageBandwidth > 0 {
-			bps = v.AverageBandwidth
-			source = "average"
-		}
-		if bps <= 0 {
+		lv = append(lv, ladder.Variant{AvgBps: v.AverageBandwidth, PeakBps: v.Bandwidth, Resolution: v.Resolution})
+	}
+	bump := LadderBumpPct()
+	rungs := ladder.StandardLadder(lv, bump, LadderMaxStep(), LadderTopHeadroomPct())
+	if len(rungs) == 0 {
+		return nil, errors.New("ladder: all variants had zero bandwidth")
+	}
+	// Manifest variants sorted descending by peak, for cap→variant attribution.
+	manifest := make([]struct {
+		res        string
+		url        string
+		avg, peak  int
+		peakCapMbp float64
+	}, 0, len(variants))
+	f := 1 + bump/100
+	for _, v := range variants {
+		if v.Bandwidth <= 0 {
 			continue
 		}
-		// cap = raw × (1 + margin/100) × (1 + TCP_overhead/100) / 1e6
-		// The TCP overhead factor is a framework constant — operators
-		// only pick margin; the framework adds 7% on top so margin=0
-		// produces a just-barely-sustainable cap (i.e. variant_avg
-		// PLUS the on-wire framing tax).
-		cap := float64(bps) *
-			(1 + float64(marginPct)/100) *
-			(1 + float64(TCPOverheadPct)/100) /
-			1_000_000
-		// Round to 3 decimal places — same precision the harness CLI uses
-		// so the dashboard and the framework apply identical numbers.
-		cap = math.Round(cap*1000) / 1000
-		rates = append(rates, VariantRate{
-			Resolution: v.Resolution,
-			URL:        v.URL,
-			AvgBps:     v.AverageBandwidth,
-			PeakBps:    v.Bandwidth,
-			RawBps:     bps,
-			Source:     source,
-			MarginPct:  marginPct,
-			CapMbps:    cap,
+		manifest = append(manifest, struct {
+			res        string
+			url        string
+			avg, peak  int
+			peakCapMbp float64
+		}{v.Resolution, v.URL, v.AverageBandwidth, v.Bandwidth, math.Round(float64(v.Bandwidth)*f/1e6*1000) / 1000})
+	}
+	sort.Slice(manifest, func(i, j int) bool { return manifest[i].peak > manifest[j].peak })
+
+	out := make([]VariantRate, 0, len(rungs))
+	for _, r := range rungs {
+		// Highest variant whose peak cap is still affordable at this rung's
+		// rate is the one a peak-keyed player should sustain; below them all
+		// it's the bottom variant.
+		ev := manifest[len(manifest)-1]
+		for _, m := range manifest {
+			if m.peakCapMbp <= r.Mbps {
+				ev = m
+				break
+			}
+		}
+		out = append(out, VariantRate{
+			Resolution: ev.res,
+			URL:        ev.url,
+			AvgBps:     ev.avg,
+			PeakBps:    ev.peak,
+			RawBps:     ev.peak,
+			Source:     r.Kind,
+			CapMbps:    r.Mbps,
 		})
 	}
-	if len(rates) == 0 {
-		return nil, errors.New("variant rates: all variants had zero bandwidth")
-	}
-	sort.Slice(rates, func(i, j int) bool { return rates[i].CapMbps > rates[j].CapMbps })
-	return rates, nil
+	return out, nil
 }
 
 // StepsFromVariants converts a descending variant-rate list into a Step
@@ -114,50 +137,6 @@ func StepsFromVariants(rates []VariantRate, hold time.Duration) []Step {
 		out = append(out, Step{RateMbps: r.CapMbps, Hold: hold})
 	}
 	return out
-}
-
-// VariantSweep produces a fine-grained descending sweep over every
-// (variant, margin) pair, then prunes any cap that doesn't strictly
-// decrease against the previous emitted cap. Used by the smooth mode to
-// characterize each rung at several headroom levels:
-//
-//	margins := []int{50, 25, 10, 5, 0, -5}
-//	→ +50% (comfortable) … +5% (operational default) … -5% (forced downshift)
-//
-// The "strictly decrease" prune is the safety net the operator asked for:
-// on tight ladders where a high margin on a low rung would overshoot a
-// low margin on the next-higher rung (e.g. var_high×0.95 < var_low×1.50),
-// we drop the offending step so the cap series remains monotonically
-// non-increasing. On the test-dev ladder this never fires because
-// adjacent rungs are ≥2× apart — every candidate survives.
-//
-// Returned slice is the cap series to apply, in order; each VariantRate
-// carries the variant identity + the specific margin used at that step.
-func VariantSweep(rec *PlayerRecord, margins []int) ([]VariantRate, error) {
-	if len(margins) == 0 {
-		return nil, errors.New("variant sweep: no margins supplied")
-	}
-	// Build per-variant candidates at every margin.
-	all := []VariantRate{}
-	for _, m := range margins {
-		rates, err := VariantRatesDesc(rec, m)
-		if err != nil {
-			return nil, err
-		}
-		all = append(all, rates...)
-	}
-	// Sort all candidates descending by cap.
-	sort.Slice(all, func(i, j int) bool { return all[i].CapMbps > all[j].CapMbps })
-	// Walk through, emitting only strict-decreases vs. the last emitted.
-	out := make([]VariantRate, 0, len(all))
-	last := math.Inf(1)
-	for _, c := range all {
-		if c.CapMbps < last {
-			out = append(out, c)
-			last = c.CapMbps
-		}
-	}
-	return out, nil
 }
 
 // VariantBandwidth captures the per-rung bandwidth from the manifest

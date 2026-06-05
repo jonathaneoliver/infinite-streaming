@@ -75,13 +75,12 @@ func runPyramid(t *testing.T, p runner.Platform) {
 	if err != nil {
 		t.Fatalf("PlayerState: %v", err)
 	}
-	desc, err := runner.VariantSweep(rec, rampupMargins)
+	desc, err := runner.StandardLadderRates(rec)
 	if err != nil {
-		t.Fatalf("VariantSweep: %v", err)
+		t.Fatalf("StandardLadderRates: %v", err)
 	}
-	desc = dropOverlapsWithLowerVariant(desc)
 	if len(desc) == 0 {
-		t.Fatal("VariantSweep returned no entries")
+		t.Fatal("StandardLadderRates returned no entries")
 	}
 
 	// Filter by variant identity, not numeric floor — see the long
@@ -116,9 +115,9 @@ func runPyramid(t *testing.T, p runner.Platform) {
 		if i >= len(asc) {
 			phase = "↓"
 		}
-		t.Logf("  [%2d] %s %-10s  %+3d%%  cap=%6.3f Mbps   avg=%.3f peak=%.3f Mbps",
-			i, phase, v.Resolution, v.MarginPct, v.CapMbps,
-			float64(v.AvgBps)/1_000_000, float64(v.PeakBps)/1_000_000)
+		t.Logf("  [%2d] %s %-10s  cap=%6.3f Mbps   avg=%.3f peak=%.3f Mbps  (source=%s)",
+			i, phase, v.Resolution, v.CapMbps,
+			float64(v.AvgBps)/1_000_000, float64(v.PeakBps)/1_000_000, v.Source)
 	}
 
 	steps := make([]runner.Step, len(pyramid))
